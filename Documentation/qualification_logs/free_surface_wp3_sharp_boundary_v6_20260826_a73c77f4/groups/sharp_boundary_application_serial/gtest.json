@@ -1,0 +1,55 @@
+{
+  "tests": 2,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-08-26T09:29:48Z",
+  "time": "6.994s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "ApplicationDriverLevelSetWorkflows",
+      "tests": 2,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-08-26T09:29:48Z",
+      "time": "6.993s",
+      "testsuite": [
+        {
+          "name": "RefreshesMultipleGeneratedCutDomainsIntoOneContext",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Application\/Tests\/Unit\/test_ApplicationDriverLevelSetWorkflows.cpp",
+          "line": 3193,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:29:48Z",
+          "time": "0.004s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "NativeCertifiedManufacturedChannelTracksSharpBoundaryWork",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Application\/Tests\/Unit\/test_ApplicationDriverLevelSetWorkflows.cpp",
+          "line": 3354,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:29:48Z",
+          "time": "6.988s",
+          "classname": "ApplicationDriverLevelSetWorkflows",
+          "native_channel_active_side_count": "2",
+          "native_channel_wet_fraction_count": "11",
+          "native_channel_boundary_role_count": "3",
+          "native_channel_minimum_positive_trace_patch_count": "2",
+          "native_channel_maximum_localized_root_patch_count": "4",
+          "native_channel_maximum_factorized_input_dimension": "15",
+          "native_channel_maximum_trace_support_overlap": "2",
+          "native_channel_maximum_trace_upper_bound": "7.3799510101871197",
+          "native_channel_maximum_trace_ratio": "0.46124693813669504",
+          "native_channel_maximum_measure_error": "4.4408920985006262e-16",
+          "native_channel_maximum_work_error": "1.2500246432404951e-12",
+          "native_channel_maximum_vertex_limit_mismatch": "1.1102230246251565e-16",
+          "native_channel_maximum_active_side_work_difference": "0"
+        }
+      ]
+    }
+  ]
+}

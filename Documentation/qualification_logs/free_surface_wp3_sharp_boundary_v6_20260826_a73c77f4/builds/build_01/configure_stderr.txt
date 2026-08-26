@@ -1,0 +1,26 @@
+CMake Deprecation Warning at /share/software/user/open/vtk/9.4.1/lib64/cmake/vtk-9.4/vtk-use-file-deprecated.cmake:1 (message):
+  The `VTK_USE_FILE` is no longer used starting with 8.90.
+Call Stack (most recent call first):
+  Source/solver/CMakeLists.txt:203 (include)
+
+
+CMake Deprecation Warning at /share/software/user/open/vtk/9.4.1/lib64/cmake/vtk-9.4/vtk-use-file-deprecated.cmake:1 (message):
+  The `VTK_USE_FILE` is no longer used starting with 8.90.
+Call Stack (most recent call first):
+  Source/solver/Mesh/cmake/EnableVTK.cmake:65 (include)
+  Source/solver/Mesh/CMakeLists.txt:181 (include)
+
+
+CMake Warning (dev) at Source/solver/FE/CMakeLists.txt:1707 (find_package):
+  Policy CMP0167 is not set: The FindBoost module is removed.  Run "cmake
+  --help-policy CMP0167" for policy details.  Use the cmake_policy command to
+  set the policy and suppress this warning.
+
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+CMake Warning at Source/solver/Physics/cmake/EnableGTest.cmake:16 (message):
+  Physics: System Google Test not found, will fetch from GitHub
+Call Stack (most recent call first):
+  Source/solver/Physics/CMakeLists.txt:281 (include)
+
+

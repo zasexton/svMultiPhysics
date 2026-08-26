@@ -1,0 +1,47 @@
+Note: Google Test filter = GeneratedActiveBoundaryDomain.HalfWetEdgeUsesAuthoritativeContactAndPartitionsExactly:GeneratedActiveBoundaryDomain.PlanarHalfAndQuarterFacesIntegratePolynomialsForBothSides:GeneratedActiveBoundaryDomain.ObliqueHexFaceIntegratesQuadraticMomentsForBothSides:GeneratedActiveBoundaryDomain.CompletelyDrySideHasExactlyZeroRules:GeneratedActiveBoundaryDomain.WetFractionSweepIntegratesBoundaryPolynomialsForBothPhases:GeneratedActiveBoundaryDomain.CurvedQuadraticParentUsesPointwisePhysicalBoundaryMapping:GeneratedActiveBoundaryDomain.RejectsScalarRootThatDoesNotMatchAuthoritativeContactTrace:GeneratedActiveBoundaryDomain.RejectsBoundaryClippingWithoutAuthoritativeCellPhase:GeneratedActiveBoundaryDomain.CollapsedTinyTetraCutUsesAuthoritativeFullCellBoundaryPhase:GeneratedActiveBoundaryDomain.SnapshotPrunesBoundaryTraceWithoutRetainedParentVolume:FreeSurfaceGeometrySnapshot.AcceptsParallelTetrahedralCutsUnderActiveSideReversal:LevelSetInterfaceBuilder.PublishesAlignedFacetFromRequestedParentSideExactlyOnce:LevelSetInterfaceBuilder.PreservesSmallVolumeFractionsNearVertexAndEdge:LevelSetInterfaceBuilder.PreservesSmallPlanarCornerVolumeUnderSignReversal:LevelSetInterfaceBuilder.PreservesSmallTetrahedralCornerVolumeUnderSignReversal:LevelSetInterfaceBuilder.VolumeQuadratureMatchesConservativeToleranceBandFractions
+[==========] Running 16 tests from 3 test suites.
+[----------] Global test environment set-up.
+[----------] 10 tests from GeneratedActiveBoundaryDomain
+[ RUN      ] GeneratedActiveBoundaryDomain.HalfWetEdgeUsesAuthoritativeContactAndPartitionsExactly
+[       OK ] GeneratedActiveBoundaryDomain.HalfWetEdgeUsesAuthoritativeContactAndPartitionsExactly (0 ms)
+[ RUN      ] GeneratedActiveBoundaryDomain.PlanarHalfAndQuarterFacesIntegratePolynomialsForBothSides
+[       OK ] GeneratedActiveBoundaryDomain.PlanarHalfAndQuarterFacesIntegratePolynomialsForBothSides (0 ms)
+[ RUN      ] GeneratedActiveBoundaryDomain.ObliqueHexFaceIntegratesQuadraticMomentsForBothSides
+[       OK ] GeneratedActiveBoundaryDomain.ObliqueHexFaceIntegratesQuadraticMomentsForBothSides (0 ms)
+[ RUN      ] GeneratedActiveBoundaryDomain.CompletelyDrySideHasExactlyZeroRules
+[       OK ] GeneratedActiveBoundaryDomain.CompletelyDrySideHasExactlyZeroRules (0 ms)
+[ RUN      ] GeneratedActiveBoundaryDomain.RejectsBoundaryClippingWithoutAuthoritativeCellPhase
+[       OK ] GeneratedActiveBoundaryDomain.RejectsBoundaryClippingWithoutAuthoritativeCellPhase (0 ms)
+[ RUN      ] GeneratedActiveBoundaryDomain.RejectsScalarRootThatDoesNotMatchAuthoritativeContactTrace
+[       OK ] GeneratedActiveBoundaryDomain.RejectsScalarRootThatDoesNotMatchAuthoritativeContactTrace (0 ms)
+[ RUN      ] GeneratedActiveBoundaryDomain.CollapsedTinyTetraCutUsesAuthoritativeFullCellBoundaryPhase
+[       OK ] GeneratedActiveBoundaryDomain.CollapsedTinyTetraCutUsesAuthoritativeFullCellBoundaryPhase (0 ms)
+[ RUN      ] GeneratedActiveBoundaryDomain.SnapshotPrunesBoundaryTraceWithoutRetainedParentVolume
+[       OK ] GeneratedActiveBoundaryDomain.SnapshotPrunesBoundaryTraceWithoutRetainedParentVolume (3 ms)
+[ RUN      ] GeneratedActiveBoundaryDomain.WetFractionSweepIntegratesBoundaryPolynomialsForBothPhases
+[       OK ] GeneratedActiveBoundaryDomain.WetFractionSweepIntegratesBoundaryPolynomialsForBothPhases (0 ms)
+[ RUN      ] GeneratedActiveBoundaryDomain.CurvedQuadraticParentUsesPointwisePhysicalBoundaryMapping
+[       OK ] GeneratedActiveBoundaryDomain.CurvedQuadraticParentUsesPointwisePhysicalBoundaryMapping (0 ms)
+[----------] 10 tests from GeneratedActiveBoundaryDomain (5 ms total)
+
+[----------] 1 test from FreeSurfaceGeometrySnapshot
+[ RUN      ] FreeSurfaceGeometrySnapshot.AcceptsParallelTetrahedralCutsUnderActiveSideReversal
+[       OK ] FreeSurfaceGeometrySnapshot.AcceptsParallelTetrahedralCutsUnderActiveSideReversal (8 ms)
+[----------] 1 test from FreeSurfaceGeometrySnapshot (8 ms total)
+
+[----------] 5 tests from LevelSetInterfaceBuilder
+[ RUN      ] LevelSetInterfaceBuilder.PublishesAlignedFacetFromRequestedParentSideExactlyOnce
+[       OK ] LevelSetInterfaceBuilder.PublishesAlignedFacetFromRequestedParentSideExactlyOnce (0 ms)
+[ RUN      ] LevelSetInterfaceBuilder.PreservesSmallVolumeFractionsNearVertexAndEdge
+[       OK ] LevelSetInterfaceBuilder.PreservesSmallVolumeFractionsNearVertexAndEdge (0 ms)
+[ RUN      ] LevelSetInterfaceBuilder.PreservesSmallPlanarCornerVolumeUnderSignReversal
+[       OK ] LevelSetInterfaceBuilder.PreservesSmallPlanarCornerVolumeUnderSignReversal (0 ms)
+[ RUN      ] LevelSetInterfaceBuilder.PreservesSmallTetrahedralCornerVolumeUnderSignReversal
+[       OK ] LevelSetInterfaceBuilder.PreservesSmallTetrahedralCornerVolumeUnderSignReversal (0 ms)
+[ RUN      ] LevelSetInterfaceBuilder.VolumeQuadratureMatchesConservativeToleranceBandFractions
+[       OK ] LevelSetInterfaceBuilder.VolumeQuadratureMatchesConservativeToleranceBandFractions (0 ms)
+[----------] 5 tests from LevelSetInterfaceBuilder (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 16 tests from 3 test suites ran. (15 ms total)
+[  PASSED  ] 16 tests.

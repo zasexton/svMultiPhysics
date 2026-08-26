@@ -1,0 +1,17 @@
+  === assembleOperator TIMING (rank 0, op='velocity') ===
+    Total:               0.000081 s
+    Cell terms:          0.000001 s  (  1.0%)
+    Boundary terms:      0.000000 s  (  0.2%)
+    Other (DG+global):   0.000080 s  ( 98.8%)
+      Interior faces:    0.000002 s  (  2.3%)
+      Interface faces:   0.000077 s  ( 94.2%)
+      Cut volumes:       0.000002 s  (  2.2%)
+      Global terms:      0.000000 s  (  0.1%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000081 /  0.000424 /  0.000766 s
+    Rank min/mean/max cell:      0.000000 /  0.000001 /  0.000001 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000080 /  0.000423 /  0.000765 s
+    Rank min/mean/max cut-vol:   0.000002 /  0.000002 /  0.000002 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='velocity' process_vm_kb=798876 process_rss_kb=136596

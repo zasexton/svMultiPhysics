@@ -1,0 +1,82 @@
+-- The C compiler identification is GNU 12.4.0
+-- The CXX compiler identification is GNU 12.4.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /share/software/user/open/gcc/12.4.0/bin/gcc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /share/software/user/open/gcc/12.4.0/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SimVascular Version: simvascular 2026-08-26
+-- Could NOT find Doxygen (missing: DOXYGEN_EXECUTABLE) 
+-- Found MPI_C: /share/software/user/open/openmpi/4.1.2/lib/libmpi.so (found version "3.1")
+-- Found MPI_CXX: /share/software/user/open/openmpi/4.1.2/lib/libmpi.so (found version "3.1")
+-- Found MPI: TRUE (found version "3.1")
+-- PKG MPI found!
+--     ThreeDSolver Components
+--         liner_solver
+--         solver
+-- Looking for sgemm_
+-- Looking for sgemm_ - not found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE
+-- Looking for sgemm_
+-- Looking for sgemm_ - found
+-- Found BLAS: /share/software/user/open/openblas/0.3.26/lib/libopenblas.so
+-- Looking for cheev_
+-- Looking for cheev_ - found
+-- Found LAPACK: /share/software/user/open/openblas/0.3.26/lib/libopenblas.so;-lm;-ldl
+-- Found X11: /share/software/user/open/x11/7.7/include
+-- Looking for XOpenDisplay in /share/software/user/open/x11/7.7/lib/libX11.so;/share/software/user/open/x11/7.7/lib/libXext.so
+-- Looking for XOpenDisplay in /share/software/user/open/x11/7.7/lib/libX11.so;/share/software/user/open/x11/7.7/lib/libXext.so - found
+-- Looking for gethostbyname
+-- Looking for gethostbyname - found
+-- Looking for connect
+-- Looking for connect - found
+-- Looking for remove
+-- Looking for remove - found
+-- Looking for shmat
+-- Looking for shmat - found
+-- Looking for IceConnectionNumber in ICE
+-- Looking for IceConnectionNumber in ICE - found
+-- Found MPI: TRUE (found version "3.1") found components: C
+-- Found MPI: TRUE (found version "3.1")
+-- MPI found - enabling distributed mesh support
+-- System VTK found (version 9.4.1) - enabling VTK I/O support
+-- Using system VTK libraries: VTK::WrappingTools;VTK::ViewsInfovis;VTK::CommonColor;VTK::ViewsContext2D;VTK::ViewsCore;VTK::loguru;VTK::TestingRendering;VTK::TestingCore;VTK::vtksys;VTK::RenderingLabel;VTK::octree;VTK::RenderingLOD;VTK::RenderingLICOpenGL2;VTK::glad;VTK::RenderingImage;VTK::RenderingContextOpenGL2;VTK::RenderingCellGrid;VTK::fmt;VTK::nlohmannjson;VTK::RenderingVolumeOpenGL2;VTK::IOVeraOut;VTK::hdf5;VTK::IOTecplotTable;VTK::utf8;VTK::IOSegY;VTK::IOParallelXML;VTK::IOPLY;VTK::IOOggTheora;VTK::theora;VTK::ogg;VTK::IONetCDF;VTK::netcdf;VTK::IOMotionFX;VTK::pegtl;VTK::IOParallel;VTK::jsoncpp;VTK::IOMINC;VTK::IOLSDyna;VTK::IOImport;VTK::IOIOSS;VTK::ioss;VTK::cgns;VTK::exodusII;VTK::zlib;VTK::IOHDF;VTK::IOFLUENTCFF;VTK::IOVideo;VTK::IOMovie;VTK::IOFDS;VTK::IOInfovis;VTK::libxml2;VTK::IOExportPDF;VTK::libharu;VTK::png;VTK::IOExportGL2PS;VTK::RenderingGL2PSOpenGL2;VTK::gl2ps;VTK::IOExodus;VTK::IOEngys;VTK::IOEnSight;VTK::IOERF;VTK::IOCityGML;VTK::pugixml;VTK::IOChemistry;VTK::IOCesium3DTiles;VTK::libproj;VTK::IOCONVERGECFD;VTK::IOHDFTools;VTK::IOCGNSReader;VTK::IOAsynchronous;VTK::IOExport;VTK::RenderingVtkJS;VTK::IOGeometry;VTK::RenderingSceneGraph;VTK::IOAMR;VTK::InteractionImage;VTK::InfovisLayout;VTK::ImagingStencil;VTK::ImagingStatistics;VTK::ImagingMorphological;VTK::ImagingMath;VTK::ImagingFourier;VTK::IOSQL;VTK::sqlite;VTK::InteractionWidgets;VTK::RenderingVolume;VTK::RenderingAnnotation;VTK::InteractionStyle;VTK::ImagingHybrid;VTK::ImagingColor;VTK::GeovisCore;VTK::FiltersTopology;VTK::FiltersTensor;VTK::FiltersSelection;VTK::FiltersSMP;VTK::FiltersProgrammable;VTK::FiltersPoints;VTK::FiltersParallelImaging;VTK::FiltersTemporal;VTK::FiltersImaging;VTK::ImagingGeneral;VTK::FiltersGeometryPreview;VTK::FiltersGeneric;VTK::FiltersFlowPaths;VTK::eigen;VTK::FiltersAMR;VTK::FiltersParallel;VTK::FiltersTexture;VTK::FiltersModeling;VTK::ParallelMPI;VTK::mpi;VTK::DomainsChemistryOpenGL2;VTK::RenderingOpenGL2;VTK::RenderingHyperTreeGrid;VTK::RenderingUI;VTK::FiltersHybrid;VTK::DomainsChemistry;VTK::ChartsCore;VTK::InfovisCore;VTK::FiltersExtraction;VTK::ParallelDIY;VTK::diy2;VTK::IOXML;VTK::IOXMLParser;VTK::expat;VTK::ParallelCore;VTK::IOLegacy;VTK::IOCellGrid;VTK::FiltersCellGrid;VTK::token;VTK::IOCore;VTK::lz4;VTK::lzma;VTK::fast_float;VTK::FiltersStatistics;VTK::FiltersHyperTree;VTK::ImagingSources;VTK::IOImage;VTK::DICOMParser;VTK::jpeg;VTK::metaio;VTK::tiff;VTK::RenderingContext2D;VTK::RenderingFreeType;VTK::freetype;VTK::kwiml;VTK::RenderingCore;VTK::FiltersSources;VTK::ImagingCore;VTK::FiltersGeneral;VTK::FiltersVerdict;VTK::verdict;VTK::FiltersGeometry;VTK::CommonComputationalGeometry;VTK::FiltersCore;VTK::FiltersReduction;VTK::CommonExecutionModel;VTK::CommonDataModel;VTK::CommonSystem;VTK::CommonMisc;VTK::exprtk;VTK::CommonTransforms;VTK::CommonMath;VTK::kissfft;VTK::CommonCore;VTK::doubleconversion
+-- System Eigen found (version 3.4.0) - enabling Eigen linear algebra support
+-- Eigen include directory: /home/users/zsexton/svZeroDSolver/include/eigen3
+-- Building svmesh as static library
+-- 
+-- svMultiPhysics Mesh Configuration Summary:
+--   Build type: Release
+--   C++ standard: 17
+--   MPI support: ON
+--   VTK support: ON
+--   Eigen support: ON
+--   Adaptivity: OFF
+--     Use system VTK: ON
+--   Build tests: OFF
+--   Build shared: OFF
+--   Standalone build: OFF
+-- 
+-- FE: Building as part of svMultiPhysics
+-- FE: Configuring MPI support for distributed operations
+-- FE: Using manual MPI configuration via wrapper interrogation (bypassing FindMPI).
+-- FE: Configuring MPI via wrapper interrogation: /share/software/user/open/openmpi/4.1.2/bin/mpicxx
+-- FE: Found MPI executor: /share/software/user/open/openmpi/4.1.2/bin/mpiexec
+-- FE: MPI configuration complete
+-- FE: Auto-detecting LLVM OrcJIT support for Forms
+-- FE: LLVM 4.0.0 is older than required 14.0; Forms OrcJIT support disabled
+-- Found Boost: /share/software/user/open/boost/1.75.0/include (found suitable version "1.75.0", minimum required is "1.71")
+-- FE: OpenMP enabled (version 4.5)
+-- Physics: Building as part of svMultiPhysics
+-- Physics: Configuring Google Test for unit testing
+-- Found Python3: /share/software/user/open/python/3.12.1/bin/python3.12 (found version "3.12.1") found components: Interpreter
+-- Configuring done (12.7s)
+-- Generating done (1.5s)
+-- Build files have been written to: /scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-application

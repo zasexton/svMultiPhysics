@@ -1,0 +1,55 @@
+-- The CXX compiler identification is GNU 12.4.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /share/software/user/open/gcc/12.4.0/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Physics: Building in STANDALONE mode
+-- Found MPI_CXX: /share/software/user/open/openmpi/4.1.2/lib/libmpi.so (found version "3.1")
+-- Found MPI: TRUE (found version "3.1")
+-- MPI found - enabling distributed mesh support
+-- VTK support disabled
+-- System Eigen found (version 3.4.0) - enabling Eigen linear algebra support
+-- Eigen include directory: /share/software/user/open/eigen/3.4.0/include/eigen3
+-- Building svmesh as static library
+-- The C compiler identification is GNU 12.4.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /share/software/user/open/gcc/12.4.0/bin/gcc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- 
+-- svMultiPhysics Mesh Configuration Summary:
+--   Build type: Release
+--   C++ standard: 17
+--   MPI support: ON
+--   VTK support: OFF
+--   Eigen support: ON
+--   Adaptivity: OFF
+--   Build tests: OFF
+--   Build shared: OFF
+--   Standalone build: OFF
+-- 
+-- FE: Building as part of svMultiPhysics
+-- FE: Configuring MPI support for distributed operations
+-- FE: Using manual MPI configuration via wrapper interrogation (bypassing FindMPI).
+-- FE: Configuring MPI via wrapper interrogation: /share/software/user/open/openmpi/4.1.2/bin/mpicxx
+-- FE: Found MPI executor: /share/software/user/open/openmpi/4.1.2/bin/mpiexec
+-- FE: MPI configuration complete
+-- FE: Auto-detecting LLVM OrcJIT support for Forms
+-- FE: LLVM 4.0.0 is older than required 14.0; Forms OrcJIT support disabled
+-- Found Boost: /share/software/user/open/boost/1.90.0/include (found suitable version "1.90.0", minimum required is "1.71")
+-- FE: OpenMP enabled (version 4.5)
+-- Physics: Configuring Google Test for unit testing
+-- Found Python3: /share/software/user/open/python/3.12.1/bin/python3.12 (found version "3.12.1") found components: Interpreter
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Looking for pthread_create in pthreads
+-- Looking for pthread_create in pthreads - not found
+-- Looking for pthread_create in pthread
+-- Looking for pthread_create in pthread - found
+-- Found Threads: TRUE
+-- Physics: svfe is built in-tree; skipping svphysics CMake package export (install svfe separately and rebuild Physics to export).
+-- Configuring done (7.4s)
+-- Generating done (1.5s)
+-- Build files have been written to: /scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-physics

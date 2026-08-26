@@ -1,0 +1,53 @@
+{
+  "tests": 2,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-08-26T09:27:04Z",
+  "time": "0.006s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "LevelSetInterfaceLifecycle",
+      "tests": 1,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-08-26T09:27:04Z",
+      "time": "0.003s",
+      "testsuite": [
+        {
+          "name": "QuadraturePolicyKeyChangesWithBackendOptions",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/FE\/Tests\/Unit\/LevelSet\/test_LevelSetInterfaceLifecycle.cpp",
+          "line": 4029,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:27:04Z",
+          "time": "0.003s",
+          "classname": "LevelSetInterfaceLifecycle"
+        }
+      ]
+    },
+    {
+      "name": "LevelSetRestart",
+      "tests": 1,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-08-26T09:27:04Z",
+      "time": "0s",
+      "testsuite": [
+        {
+          "name": "CapturesFieldAndGeneratedInterfaceRecords",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/FE\/Tests\/Unit\/LevelSet\/test_LevelSetRestart.cpp",
+          "line": 161,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:27:04Z",
+          "time": "0s",
+          "classname": "LevelSetRestart"
+        }
+      ]
+    }
+  ]
+}

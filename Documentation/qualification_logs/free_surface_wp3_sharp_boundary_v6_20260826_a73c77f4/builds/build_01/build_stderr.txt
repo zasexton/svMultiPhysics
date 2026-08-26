@@ -1,0 +1,15 @@
+In file included from /share/software/user/open/gcc/12.4.0/include/c++/12.4.0/bits/stl_algo.h:60,
+                 from /share/software/user/open/gcc/12.4.0/include/c++/12.4.0/algorithm:61,
+                 from /scratch/users/zsexton/wp3-sharp-v6-a73c77f-worktree/Code/Source/solver/FE/Math/MathConstants.h:16,
+                 from /scratch/users/zsexton/wp3-sharp-v6-a73c77f-worktree/Code/Source/solver/FE/Math/Vector.h:14,
+                 from /scratch/users/zsexton/wp3-sharp-v6-a73c77f-worktree/Code/Source/solver/FE/Basis/BasisFunction.h:22,
+                 from /scratch/users/zsexton/wp3-sharp-v6-a73c77f-worktree/Code/Source/solver/FE/Basis/SerendipityBasis.h:21,
+                 from /scratch/users/zsexton/wp3-sharp-v6-a73c77f-worktree/Code/Source/solver/FE/Basis/SerendipityBasis.cpp:8:
+/share/software/user/open/gcc/12.4.0/include/c++/12.4.0/bits/stl_heap.h: In function 'constexpr void std::__adjust_heap(_RandomAccessIterator, _Distance, _Distance, _Tp, _Compare) [with _RandomAccessIterator = __gnu_cxx::__normal_iterator<svmp::FE::math::Vector<double, 3>*, vector<svmp::FE::math::Vector<double, 3> > >; _Distance = long int; _Tp = svmp::FE::math::Vector<double, 3>; _Compare = __gnu_cxx::__ops::_Iter_comp_iter<svmp::FE::basis::{anonymous}::quad_serendipity_nodes(int, std::size_t)::<lambda(const svmp::FE::basis::{anonymous}::Vec3&, const svmp::FE::basis::{anonymous}::Vec3&)> >]':
+/share/software/user/open/gcc/12.4.0/include/c++/12.4.0/bits/stl_heap.h:224:5: note: the ABI for passing parameters with 32-byte alignment has changed in GCC 4.6
+  224 |     __adjust_heap(_RandomAccessIterator __first, _Distance __holeIndex,
+      |     ^~~~~~~~~~~~~
+/scratch/users/zsexton/wp3-sharp-v6-a73c77f-worktree/Code/Source/solver/FE/Spaces/TraceSpace.cpp: In function 'svmp::FE::spaces::{anonymous}::Vec3 svmp::FE::spaces::{anonymous}::normalized_or_throw(Vec3, const char*)':
+/scratch/users/zsexton/wp3-sharp-v6-a73c77f-worktree/Code/Source/solver/FE/Spaces/TraceSpace.cpp:99:6: note: the ABI for passing parameters with 32-byte alignment has changed in GCC 4.6
+   99 | Vec3 normalized_or_throw(Vec3 v, const char* message) {
+      |      ^~~~~~~~~~~~~~~~~~~

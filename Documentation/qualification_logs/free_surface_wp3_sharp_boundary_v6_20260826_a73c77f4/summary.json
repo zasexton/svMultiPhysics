@@ -1,0 +1,150 @@
+{
+  "binary_link_provenance_policy": {
+    "address_and_resident_memory_mib": 1024,
+    "command": "ldd",
+    "launch_mode": "direct_serial",
+    "maximum_qualification_job_memory_fraction": 0.05,
+    "memory_enforcement_method": "RLIMIT_AS_plus_sampled_session_resident_memory",
+    "output_mib": 4,
+    "timeout_seconds": 60,
+    "v4_rejected_address_and_resident_memory_mib": 256
+  },
+  "distinct_test_count": 80,
+  "final_provenance_diagnostics": [],
+  "final_provenance_outcome": "PASS",
+  "fsr16_closed_within_declared_envelope": true,
+  "group_outcomes": {
+    "sharp_boundary_application_serial": "PASS",
+    "sharp_boundary_assembly_serial": "PASS",
+    "sharp_boundary_coupled_outflow_mpi": "PASS",
+    "sharp_boundary_exact_factorized_serial": "PASS",
+    "sharp_boundary_geometry_mpi": "PASS",
+    "sharp_boundary_geometry_serial": "PASS",
+    "sharp_boundary_level_set_serial": "PASS",
+    "sharp_boundary_native_channel_mpi": "PASS",
+    "sharp_boundary_operators_mpi": "PASS",
+    "sharp_boundary_operators_serial": "PASS",
+    "sharp_boundary_systems_serial": "PASS",
+    "sharp_boundary_trace_certificate_mpi": "PASS",
+    "sharp_boundary_trace_certificate_serial": "PASS"
+  },
+  "group_recorded_properties_check_count": 70,
+  "group_recorded_properties_outcome": "PASS",
+  "implementation_source_commit": "a98522eac0162085652e4750e8224193ca6e2742",
+  "matrix_id": "free_surface_wp3_sharp_boundary_closure_v6",
+  "open_outcomes": {
+    "higher_order": "UNSUPPORTED_FAIL_CLOSED",
+    "q0_and_q2_through_q7": "OPEN",
+    "q1": "OPEN",
+    "uniform_cut_conditioning": "OPEN",
+    "wp4_through_wp10": "OPEN",
+    "wp7": "OPEN"
+  },
+  "overall_outcome": "PASS",
+  "q1_closed": false,
+  "qualification_bundle_binding": {
+    "artifacts": [
+      {
+        "git_blob_id": "7cd5bd0d3904ede68378ebfd8f943e0d04f8f1fd",
+        "git_mode": "100644",
+        "git_object_type": "blob",
+        "normalized_sha256": "c73d95d39eaae6415da4cce87bfd09c6b8a4268b6938d246e1cc926050c3ec39",
+        "path": "tests/cases/fluid/free_surface_wp3_sharp_boundary_qualification_matrix_v6.json",
+        "role": "matrix",
+        "sha256": "597bb62a306991f78e87a697693fd485dbd3acf3a93273c289ff514eb5ccf7e5"
+      },
+      {
+        "git_blob_id": "8c98b5fb3759eda8802ec9edf8bdd1866ce4690b",
+        "git_mode": "100755",
+        "git_object_type": "blob",
+        "path": "tests/cases/fluid/run_free_surface_wp3_sharp_boundary_qualification_v6.py",
+        "role": "runner",
+        "sha256": "0a2999e91a369bd2c77e1aa6f214895177fd32485d290f348a04a356e584f4ff"
+      },
+      {
+        "git_blob_id": "5ea049be71e653a24b70f04138290ad3228b178d",
+        "git_mode": "100644",
+        "git_object_type": "blob",
+        "path": "tests/test_free_surface_wp3_sharp_boundary_qualification_runner_v6.py",
+        "role": "focused_test",
+        "sha256": "a922d7c239aa3adab79b4d6c28185a4b02e7f525ac6576bb9d192ca5e2c7ef0d"
+      }
+    ],
+    "authority": "reciprocal_sha256_plus_canonical_bundle_commit_history",
+    "binding_schema_version": 6,
+    "bundle_changed_paths": [
+      "tests/cases/fluid/free_surface_wp3_sharp_boundary_qualification_matrix_v6.json",
+      "tests/cases/fluid/run_free_surface_wp3_sharp_boundary_qualification_v6.py",
+      "tests/test_free_surface_wp3_sharp_boundary_qualification_runner_v6.py"
+    ],
+    "bundle_commit_resolution": "unique_direct_child_of_implementation_source_commit_on_validation_HEAD_ancestry_matching_exact_paths_and_frozen_blobs",
+    "bundle_parent_commit": "a98522eac0162085652e4750e8224193ca6e2742",
+    "focused_test_sha256_from_runner": "a922d7c239aa3adab79b4d6c28185a4b02e7f525ac6576bb9d192ca5e2c7ef0d",
+    "implementation_source_commit": "a98522eac0162085652e4750e8224193ca6e2742",
+    "normalized_matrix_sha256_embedded_in_runner": "c73d95d39eaae6415da4cce87bfd09c6b8a4268b6938d246e1cc926050c3ec39",
+    "qualification_bundle_commit": "a73c77f44ac1741df730dc4102ac938b9b1b6922",
+    "runner_sha256_from_matrix": "0a2999e91a369bd2c77e1aa6f214895177fd32485d290f348a04a356e584f4ff",
+    "validation_head_commit": "a73c77f44ac1741df730dc4102ac938b9b1b6922"
+  },
+  "qualification_disposition": {
+    "on_failure": "KEEP_FSR16_AND_WP3_OPEN",
+    "on_pass": "CLOSE_FSR16_AND_WP3_WITHIN_DECLARED_ENVELOPE",
+    "q1": "OPEN",
+    "wp7": "OPEN"
+  },
+  "qualification_scope": "Closure evidence for FSR-16 and WP-3 sharply clipped exterior boundary operators within the declared one-phase affine C0 P1 and LinearCorner envelope. A passing archive does not close WP-7, Q1, higher-order support, uniform cut conditioning, capillary balance, transport, fitted ALE, or two-phase physics.",
+  "quantitative_evidence_check_count": 85,
+  "quantitative_evidence_outcome": "PASS",
+  "requested_claim": "wp3_fsr16_c0_p1_linearcorner_closure",
+  "source_commit": "a73c77f44ac1741df730dc4102ac938b9b1b6922",
+  "test_discovery_contract": {
+    "direct_binary_keys": [
+      "application",
+      "assembly",
+      "geometry",
+      "level_set",
+      "math",
+      "systems"
+    ],
+    "mpi_single_rank_arguments": [
+      "--oversubscribe",
+      "-n",
+      "1"
+    ],
+    "mpi_single_rank_binary_keys": [
+      "application_mpi",
+      "assembly_mpi",
+      "physics"
+    ],
+    "schema_version": 1,
+    "timeout_seconds": 60
+  },
+  "test_execution_contract": {
+    "direct_binary_keys": [
+      "application",
+      "assembly",
+      "geometry",
+      "level_set",
+      "math",
+      "systems"
+    ],
+    "inherited_scheduler_process_count_policy": "isolate_with_explicit_single_rank_mpi_world",
+    "mpi_single_rank_arguments": [
+      "--oversubscribe",
+      "-n",
+      "1"
+    ],
+    "mpi_single_rank_binary_keys": [
+      "application_mpi",
+      "assembly_mpi",
+      "physics"
+    ],
+    "mpi_single_rank_monitoring": {
+      "launch_mode": "mpi",
+      "required_simultaneous_process_samples": 2
+    },
+    "schema_version": 1
+  },
+  "wp3_closed_within_declared_envelope": true,
+  "wp7_closed": false
+}

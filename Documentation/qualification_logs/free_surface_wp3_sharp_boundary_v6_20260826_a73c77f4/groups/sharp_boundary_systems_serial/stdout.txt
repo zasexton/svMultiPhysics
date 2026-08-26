@@ -1,0 +1,12 @@
+Note: Google Test filter = BoundaryIntegralInput.GeneratedActiveBoundaryValueGradientDryValidationAndHandleIdentity
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from BoundaryIntegralInput
+[ RUN      ] BoundaryIntegralInput.GeneratedActiveBoundaryValueGradientDryValidationAndHandleIdentity
+[09:27:04.584] [INFO] FESystem: sparsity setup diagnostic=constraint_sparsity_setup operator='op' master_bearing_lines=1 serial_base_nnz=16 serial_active_nnz=16 distributed_indexing=none distributed_base_diag_nnz=0 distributed_base_offdiag_nnz=0 distributed_active_diag_nnz=0 distributed_active_offdiag_nnz=0
+[       OK ] BoundaryIntegralInput.GeneratedActiveBoundaryValueGradientDryValidationAndHandleIdentity (11 ms)
+[----------] 1 test from BoundaryIntegralInput (11 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (13 ms total)
+[  PASSED  ] 1 test.

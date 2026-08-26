@@ -1,0 +1,2 @@
+[GaugeRegistry] Auto-enforcing weighted mean-zero constraint for field 0 (family=ScalarConstant, confidence=High, status=ExactNullspace)
+[GaugeRegistry] Applied 1 automatic gauge constraint(s)

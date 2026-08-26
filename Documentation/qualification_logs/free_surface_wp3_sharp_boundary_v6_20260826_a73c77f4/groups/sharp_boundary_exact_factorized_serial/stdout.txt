@@ -1,0 +1,53 @@
+Note: Google Test filter = DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundProvesDiagonalEquality:DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRetainsTinyPositiveMode:DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundExercisesThreeByThreeBareissDivision:DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundExercisesSymmetricPsdPivotSwap:DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsLateIndefinitePivot:DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsSemidefiniteDenominator:DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsIndefiniteNumerator:DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsUnrepresentableUpperBound:DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsDimensionAboveCap:DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsMalformedInputs:DenseLinearAlgebra.ExactFactorizedBoundPreservesPsdLostByEntrywiseRounding:DenseLinearAlgebra.ExactFactorizedBoundKeepsUnroundedSparseTangentSum:DenseLinearAlgebra.ExactFactorizedBoundKeepsUnderflowingAndOverflowingPositiveScales:DenseLinearAlgebra.ExactFactorizedBoundRejectsSingularAndMalformedInputs:DenseLinearAlgebra.ExactFactorizedBoundUsesLinearPositiveScaleMultipliers:DenseLinearAlgebra.ExactFactorizedBoundProvesVacuousZeroDimensionalQuotient
+[==========] Running 16 tests from 1 test suite.
+[----------] Global test environment set-up.
+========================================
+FE Math Module Unit Tests
+========================================
+SIMD Support Detection:
+  AVX: Not supported
+  AVX2: Not supported
+  AVX512: Not supported
+  FMA: Not supported
+========================================
+[----------] 16 tests from DenseLinearAlgebra
+[ RUN      ] DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundProvesDiagonalEquality
+[       OK ] DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundProvesDiagonalEquality (0 ms)
+[ RUN      ] DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRetainsTinyPositiveMode
+[       OK ] DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRetainsTinyPositiveMode (0 ms)
+[ RUN      ] DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundExercisesThreeByThreeBareissDivision
+[       OK ] DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundExercisesThreeByThreeBareissDivision (1 ms)
+[ RUN      ] DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundExercisesSymmetricPsdPivotSwap
+[       OK ] DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundExercisesSymmetricPsdPivotSwap (0 ms)
+[ RUN      ] DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsLateIndefinitePivot
+[       OK ] DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsLateIndefinitePivot (0 ms)
+[ RUN      ] DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsSemidefiniteDenominator
+[       OK ] DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsSemidefiniteDenominator (0 ms)
+[ RUN      ] DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsIndefiniteNumerator
+[       OK ] DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsIndefiniteNumerator (0 ms)
+[ RUN      ] DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsUnrepresentableUpperBound
+[       OK ] DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsUnrepresentableUpperBound (0 ms)
+[ RUN      ] DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsDimensionAboveCap
+[       OK ] DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsDimensionAboveCap (0 ms)
+[ RUN      ] DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsMalformedInputs
+[       OK ] DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsMalformedInputs (0 ms)
+[ RUN      ] DenseLinearAlgebra.ExactFactorizedBoundPreservesPsdLostByEntrywiseRounding
+[       OK ] DenseLinearAlgebra.ExactFactorizedBoundPreservesPsdLostByEntrywiseRounding (0 ms)
+[ RUN      ] DenseLinearAlgebra.ExactFactorizedBoundKeepsUnroundedSparseTangentSum
+[       OK ] DenseLinearAlgebra.ExactFactorizedBoundKeepsUnroundedSparseTangentSum (0 ms)
+[ RUN      ] DenseLinearAlgebra.ExactFactorizedBoundKeepsUnderflowingAndOverflowingPositiveScales
+[       OK ] DenseLinearAlgebra.ExactFactorizedBoundKeepsUnderflowingAndOverflowingPositiveScales (0 ms)
+[ RUN      ] DenseLinearAlgebra.ExactFactorizedBoundRejectsSingularAndMalformedInputs
+[       OK ] DenseLinearAlgebra.ExactFactorizedBoundRejectsSingularAndMalformedInputs (4 ms)
+[ RUN      ] DenseLinearAlgebra.ExactFactorizedBoundUsesLinearPositiveScaleMultipliers
+[       OK ] DenseLinearAlgebra.ExactFactorizedBoundUsesLinearPositiveScaleMultipliers (0 ms)
+[ RUN      ] DenseLinearAlgebra.ExactFactorizedBoundProvesVacuousZeroDimensionalQuotient
+[       OK ] DenseLinearAlgebra.ExactFactorizedBoundProvesVacuousZeroDimensionalQuotient (0 ms)
+[----------] 16 tests from DenseLinearAlgebra (9 ms total)
+
+[----------] Global test environment tear-down
+========================================
+Total test execution time: 9 ms
+========================================
+[==========] 16 tests from 1 test suite ran. (10 ms total)
+[  PASSED  ] 16 tests.

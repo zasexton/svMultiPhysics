@@ -1,0 +1,241 @@
+{
+  "binaries_before_clean": {
+    "assembly": {
+      "exists": false,
+      "is_file": false,
+      "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_assembly",
+      "sha256": null
+    },
+    "assembly_mpi": {
+      "exists": false,
+      "is_file": false,
+      "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_assembly_mpi",
+      "sha256": null
+    },
+    "geometry": {
+      "exists": false,
+      "is_file": false,
+      "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_geometry",
+      "sha256": null
+    },
+    "level_set": {
+      "exists": false,
+      "is_file": false,
+      "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_levelset",
+      "sha256": null
+    },
+    "math": {
+      "exists": false,
+      "is_file": false,
+      "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_math",
+      "sha256": null
+    },
+    "systems": {
+      "exists": false,
+      "is_file": false,
+      "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_systems",
+      "sha256": null
+    }
+  },
+  "binary_keys": [
+    "assembly",
+    "assembly_mpi",
+    "geometry",
+    "level_set",
+    "math",
+    "systems"
+  ],
+  "build": {
+    "all_supplied_binaries_recreated": true,
+    "binaries_after_build": {
+      "assembly": {
+        "executable": true,
+        "exists": true,
+        "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_assembly",
+        "sha256": "3e2b9416fa72123ff0d35a1c9d70da0bf393427ddea60ef5d5de4a9eb710fad2"
+      },
+      "assembly_mpi": {
+        "executable": true,
+        "exists": true,
+        "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_assembly_mpi",
+        "sha256": "dd0de0021b73ce33917a28e1fb796af262cd4104c6c347a166aace41d3bcc5e8"
+      },
+      "geometry": {
+        "executable": true,
+        "exists": true,
+        "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_geometry",
+        "sha256": "a870ddbaafe107846e34fc5d83e9b98feb28ef47c3dace73d321793947161541"
+      },
+      "level_set": {
+        "executable": true,
+        "exists": true,
+        "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_levelset",
+        "sha256": "7f5b849a0708f7d86be75bf83269002b2928c1428dee38ec134dc86e231e127b"
+      },
+      "math": {
+        "executable": true,
+        "exists": true,
+        "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_math",
+        "sha256": "00d5cb5020c33b340367ba030dff07c1ce4b482f1b167524e76f8d9f6f9a713e"
+      },
+      "systems": {
+        "executable": true,
+        "exists": true,
+        "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_systems",
+        "sha256": "321eacaa86dcdde018b74e1cb88684055bc1bc14938e7c4afcf60a7bf0ef5c4a"
+      }
+    },
+    "command": [
+      "/share/software/user/open/cmake/3.31.4/bin/cmake",
+      "--build",
+      "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe",
+      "--parallel",
+      "10",
+      "--target",
+      "test_fe_assembly",
+      "test_fe_assembly_mpi",
+      "test_fe_geometry",
+      "test_fe_levelset",
+      "test_fe_math",
+      "test_fe_systems"
+    ],
+    "elapsed_seconds": 579.8650939315557,
+    "outcome": "PASS",
+    "return_code": 0,
+    "stderr": "builds/build_02/build_stderr.txt",
+    "stderr_sha256": "a63fb62a8c9fb609fd12c3babc6d5b540265c86d2a862f9b92f7c58d3a0eea58",
+    "stdout": "builds/build_02/build_stdout.txt",
+    "stdout_sha256": "5b29f733020d1cbd9d9f283f372e70760477bf248faf68cc2b0c2be30753e653",
+    "termination": null,
+    "timed_out": false
+  },
+  "build_directory": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe",
+  "cache_is_symlink_after_build": false,
+  "cache_path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/CMakeCache.txt",
+  "cache_present_after_build": true,
+  "cache_sha256": "b1dbccf440164ba3fbe6ee02874139027cc1244f85f3ce31f53a4c4b448074cd",
+  "clean": {
+    "all_supplied_binaries_absent": true,
+    "binaries_after_clean": {
+      "assembly": {
+        "exists": false,
+        "is_file": false,
+        "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_assembly"
+      },
+      "assembly_mpi": {
+        "exists": false,
+        "is_file": false,
+        "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_assembly_mpi"
+      },
+      "geometry": {
+        "exists": false,
+        "is_file": false,
+        "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_geometry"
+      },
+      "level_set": {
+        "exists": false,
+        "is_file": false,
+        "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_levelset"
+      },
+      "math": {
+        "exists": false,
+        "is_file": false,
+        "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_math"
+      },
+      "systems": {
+        "exists": false,
+        "is_file": false,
+        "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_systems"
+      }
+    },
+    "cache_is_symlink_after_clean": false,
+    "cache_path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/CMakeCache.txt",
+    "cache_present_after_clean": true,
+    "cmake_home_directory_after_clean": "/scratch/users/zsexton/wp3-sharp-v6-a73c77f-worktree/Code/Source/solver/FE",
+    "cmake_home_matches_after_clean": true,
+    "command": [
+      "/share/software/user/open/cmake/3.31.4/bin/cmake",
+      "--build",
+      "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe",
+      "--target",
+      "clean"
+    ],
+    "elapsed_seconds": 2.4788091834634542,
+    "outcome": "PASS",
+    "return_code": 0,
+    "single_configuration_after_clean": true,
+    "stderr": "builds/build_02/clean_stderr.txt",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdout": "builds/build_02/clean_stdout.txt",
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "termination": null,
+    "timed_out": false
+  },
+  "cmake_home_directory": "/scratch/users/zsexton/wp3-sharp-v6-a73c77f-worktree/Code/Source/solver/FE",
+  "cmake_home_matches": true,
+  "configure": {
+    "cache_is_symlink_after_configure": false,
+    "cache_path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/CMakeCache.txt",
+    "cache_present_after_configure": true,
+    "cmake_home_directory_after_configure": "/scratch/users/zsexton/wp3-sharp-v6-a73c77f-worktree/Code/Source/solver/FE",
+    "cmake_home_matches_after_configure": true,
+    "command": [
+      "/share/software/user/open/cmake/3.31.4/bin/cmake",
+      "--fresh",
+      "-DCMAKE_BUILD_TYPE=Release",
+      "-DBUILD_TESTING=ON",
+      "-DCMAKE_C_COMPILER=/share/software/user/open/gcc/12.4.0/bin/gcc",
+      "-DCMAKE_CXX_COMPILER=/share/software/user/open/gcc/12.4.0/bin/c++",
+      "-DMPI_C_COMPILER=/share/software/user/open/openmpi/4.1.2/bin/mpicc",
+      "-DMPI_CXX_COMPILER=/share/software/user/open/openmpi/4.1.2/bin/mpic++",
+      "-DMPI_LIBRARY:FILEPATH=/share/software/user/open/openmpi/4.1.2/lib/libmpi.so",
+      "-DBoost_INCLUDE_DIR=/share/software/user/open/boost/1.90.0/include",
+      "-DEigen3_DIR=/share/software/user/open/eigen/3.4.0/share/eigen3/cmake",
+      "-DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/scratch/users/zsexton/svMultiPhysics-free-surface-head/build-physics-gcc12/_deps/googletest-src",
+      "-DFE_BUILD_TESTS=ON",
+      "-DFE_USE_SYSTEM_GTEST=OFF",
+      "-DFE_ENABLE_ASSEMBLY=ON",
+      "-DFE_WITH_MESH=ON",
+      "-DFE_ENABLE_MPI=ON",
+      "-DFE_ENABLE_METIS=OFF",
+      "-DFE_ENABLE_PARMETIS=OFF",
+      "-DMESH_ENABLE_MPI=ON",
+      "-DMESH_ENABLE_METIS=ON",
+      "-DMESH_ENABLE_PARMETIS=ON",
+      "-DMESH_ENABLE_VTK=OFF",
+      "-DMESH_ENABLE_EIGEN=ON",
+      "-DUSE_SYSTEM_EIGEN=ON",
+      "-DMESH_BUILD_TESTS=OFF",
+      "-DMESH_BUILD_SHARED=OFF",
+      "-S",
+      "/scratch/users/zsexton/wp3-sharp-v6-a73c77f-worktree/Code/Source/solver/FE",
+      "-B",
+      "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe"
+    ],
+    "elapsed_seconds": 9.859198631718755,
+    "expected_cmake_home": "/scratch/users/zsexton/wp3-sharp-v6-a73c77f-worktree/Code/Source/solver/FE",
+    "outcome": "PASS",
+    "return_code": 0,
+    "single_configuration_after_configure": true,
+    "stderr": "builds/build_02/configure_stderr.txt",
+    "stderr_sha256": "f838663da8c460bb4fb1ce1a8d096c94da87f3b141050d24aa9df1c586ea5281",
+    "stdout": "builds/build_02/configure_stdout.txt",
+    "stdout_sha256": "40b591e268e663431f45d7e70f18081837c19e11ccfd2b8d3c139ce512f54a33",
+    "termination": null,
+    "timed_out": false
+  },
+  "diagnostic": null,
+  "expected_cmake_homes": [
+    "/scratch/users/zsexton/wp3-sharp-v6-a73c77f-worktree/Code/Source/solver/FE"
+  ],
+  "outcome": "PASS",
+  "single_configuration_after_build": true,
+  "targets": [
+    "test_fe_assembly",
+    "test_fe_assembly_mpi",
+    "test_fe_geometry",
+    "test_fe_levelset",
+    "test_fe_math",
+    "test_fe_systems"
+  ]
+}

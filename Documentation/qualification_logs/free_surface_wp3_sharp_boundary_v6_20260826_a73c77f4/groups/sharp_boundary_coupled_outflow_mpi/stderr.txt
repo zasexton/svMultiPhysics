@@ -1,0 +1,56 @@
+  === assembleOperator TIMING (rank 0, op='generated_active_coupled_outflow') ===
+    Total:               0.007162 s
+    Cell terms:          0.006657 s  ( 92.9%)
+    Boundary terms:      0.000002 s  (  0.0%)
+    Other (DG+global):   0.000503 s  (  7.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000501 s  (  7.0%)
+      Cut volumes:       0.000002 s  (  0.0%)
+      Global terms:      0.000000 s  (  0.0%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='generated_active_coupled_outflow') ===
+    Total:               0.007148 s
+    Cell terms:          0.006634 s  ( 92.8%)
+    Boundary terms:      0.000003 s  (  0.0%)
+    Other (DG+global):   0.000512 s  (  7.2%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000509 s  (  7.1%)
+      Cut volumes:       0.000002 s  (  0.0%)
+      Global terms:      0.000000 s  (  0.0%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='generated_active_coupled_outflow' process_vm_kb=682728 process_rss_kb=145708
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='generated_active_coupled_outflow' process_vm_kb=813816 process_rss_kb=145672
+  === assembleOperator TIMING (rank 0, op='generated_active_coupled_outflow') ===
+    Total:               0.006179 s
+    Cell terms:          0.006162 s  ( 99.7%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000017 s  (  0.3%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000016 s  (  0.3%)
+      Cut volumes:       0.000000 s  (  0.0%)
+      Global terms:      0.000000 s  (  0.0%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.006179 /  0.006406 /  0.006634 s
+    Rank min/mean/max cell:      0.006162 /  0.006175 /  0.006187 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000017 /  0.000232 /  0.000447 s
+    Rank min/mean/max cut-vol:   0.000000 /  0.000000 /  0.000000 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='generated_active_coupled_outflow' process_vm_kb=821324 process_rss_kb=153316
+  === assembleOperator TIMING (rank 0, op='generated_active_coupled_outflow') ===
+    Total:               0.006306 s
+    Cell terms:          0.006118 s  ( 97.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000188 s  (  3.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000188 s  (  3.0%)
+      Cut volumes:       0.000000 s  (  0.0%)
+      Global terms:      0.000000 s  (  0.0%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.006306 /  0.006387 /  0.006469 s
+    Rank min/mean/max cell:      0.006118 /  0.006141 /  0.006165 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000188 /  0.000246 /  0.000304 s
+    Rank min/mean/max cut-vol:   0.000000 /  0.000000 /  0.000000 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='generated_active_coupled_outflow' process_vm_kb=828848 process_rss_kb=160708

@@ -1,0 +1,310 @@
+{
+  "tests": 20,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-08-26T09:27:05Z",
+  "time": "154.188s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "NavierStokesLegacyBCs",
+      "tests": 1,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-08-26T09:27:05Z",
+      "time": "0.01s",
+      "testsuite": [
+        {
+          "name": "UnfittedDynamicContactAngleTranslationRoutesLineAndSharpWallGeometry",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_NavierStokesLegacyBCs.cpp",
+          "line": 1756,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:27:05Z",
+          "time": "0.01s",
+          "classname": "NavierStokesLegacyBCs"
+        }
+      ]
+    },
+    {
+      "name": "NavierStokesOutletFactory",
+      "tests": 1,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-08-26T09:27:05Z",
+      "time": "0s",
+      "testsuite": [
+        {
+          "name": "GeneratedActiveBoundaryRoutesEveryCoupledBranch",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_NavierStokesOutletFactory.cpp",
+          "line": 764,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:27:05Z",
+          "time": "0s",
+          "classname": "NavierStokesOutletFactory",
+          "coupled_outflow_generated_trace_variant_count": "3",
+          "coupled_outflow_physical_trace_variant_count": "0",
+          "coupled_outflow_physical_deployment_variant_count": "3"
+        }
+      ]
+    },
+    {
+      "name": "MovingDomainPhysics",
+      "tests": 7,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-08-26T09:27:05Z",
+      "time": "0.02s",
+      "testsuite": [
+        {
+          "name": "NavierStokesUnfittedNaturalBoundaryOperatorsUseSharpActiveTrace",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_MovingDomainPhysics.cpp",
+          "line": 7575,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:27:05Z",
+          "time": "0.002s",
+          "classname": "MovingDomainPhysics",
+          "sharp_natural_operator_variant_count": "3",
+          "sharp_operator_generated_trace_count": "3",
+          "sharp_operator_whole_face_fallback_count": "0"
+        },
+        {
+          "name": "NavierStokesSyntheticGeneratedBoundaryNitscheRequiresAggregationCertificate",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_MovingDomainPhysics.cpp",
+          "line": 7673,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:27:05Z",
+          "time": "0s",
+          "classname": "MovingDomainPhysics",
+          "sharp_weak_nitsche_uncertified_rejection_count": "4"
+        },
+        {
+          "name": "NavierStokesUnfittedBoundaryOperatorsRejectMultipleActiveOwners",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_MovingDomainPhysics.cpp",
+          "line": 7756,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:27:05Z",
+          "time": "0s",
+          "classname": "MovingDomainPhysics",
+          "sharp_ambiguous_active_domain_rejection_count": "1"
+        },
+        {
+          "name": "NavierStokesUnfittedCoupledOutflowVariantsUseSharpActiveTrace",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_MovingDomainPhysics.cpp",
+          "line": 7827,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:27:05Z",
+          "time": "0.012s",
+          "classname": "MovingDomainPhysics",
+          "sharp_coupled_outflow_variant_count": "3",
+          "sharp_coupled_outflow_generated_trace_count": "3",
+          "sharp_coupled_outflow_whole_face_fallback_count": "0",
+          "sharp_coupled_outflow_generated_flow_count": "3"
+        },
+        {
+          "name": "NavierStokesUnfittedCoupledOutflowFamiliesRejectUnsupportedSharpEnvelope",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_MovingDomainPhysics.cpp",
+          "line": 7981,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:27:05Z",
+          "time": "0s",
+          "classname": "MovingDomainPhysics",
+          "sharp_coupled_outflow_envelope_rejection_count": "2"
+        },
+        {
+          "name": "GeneratedBoundaryNitscheTraceRejectsVariableViscosityBeforeMutation",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_MovingDomainPhysics.cpp",
+          "line": 13256,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:27:05Z",
+          "time": "0s",
+          "classname": "MovingDomainPhysics"
+        },
+        {
+          "name": "GeneratedBoundaryNitscheRouteRegistersItsTracePolicy",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_MovingDomainPhysics.cpp",
+          "line": 13354,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:27:05Z",
+          "time": "0.004s",
+          "classname": "MovingDomainPhysics"
+        }
+      ]
+    },
+    {
+      "name": "FreeSurfaceSharpBoundaryOperators",
+      "tests": 11,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-08-26T09:27:05Z",
+      "time": "154.156s",
+      "testsuite": [
+        {
+          "name": "WetFractionSweepMatchesAnalyticOperatorWork",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_SharpBoundaryOperatorMPI.cpp",
+          "line": 3003,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:27:05Z",
+          "time": "2.2s",
+          "classname": "FreeSurfaceSharpBoundaryOperators",
+          "sharp_operator_fraction_case_count": "8",
+          "sharp_operator_family_count": "5",
+          "sharp_operator_active_side_case_count": "2",
+          "sharp_operator_maximum_scaled_force_error": "0.00000000000000000e+00",
+          "sharp_operator_maximum_scaled_flux_error": "6.93889390390722838e-18",
+          "sharp_operator_maximum_scaled_robin_error": "6.93889390390722838e-18",
+          "sharp_operator_maximum_scaled_penalty_error": "6.93889390390722838e-18"
+        },
+        {
+          "name": "PspgBoundaryPressureFluxUsesGeneratedWetWallMeasure",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_SharpBoundaryOperatorMPI.cpp",
+          "line": 3096,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:27:07Z",
+          "time": "16.954s",
+          "classname": "FreeSurfaceSharpBoundaryOperators",
+          "sharp_pspg_pressure_flux_fraction_case_count": "8",
+          "sharp_pspg_pressure_flux_maximum_scaled_work_error": "1.36269896170660598e-16",
+          "sharp_pspg_pressure_flux_maximum_wet_measure_error": "6.81349472925123072e-17"
+        },
+        {
+          "name": "AdditionalPspgBoundaryFormsUseGeneratedWetWallMeasure",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_SharpBoundaryOperatorMPI.cpp",
+          "line": 3162,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:27:24Z",
+          "time": "113.055s",
+          "classname": "FreeSurfaceSharpBoundaryOperators",
+          "sharp_additional_pspg_boundary_family_count": "3",
+          "sharp_additional_pspg_boundary_active_side_count": "2",
+          "sharp_additional_pspg_boundary_fraction_case_count": "8",
+          "sharp_additional_pspg_boundary_nonzero_full_work_count": "6",
+          "sharp_additional_pspg_boundary_dry_rule_count": "0",
+          "sharp_additional_pspg_boundary_maximum_dry_entry_magnitude": "0.00000000000000000e+00",
+          "sharp_additional_pspg_boundary_maximum_scaled_work_error": "1.36269895730784855e-16",
+          "sharp_additional_pspg_boundary_maximum_wet_measure_error": "6.81349472925123072e-17"
+        },
+        {
+          "name": "ActiveSideReversalUsesComplementarySharpSubset",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_SharpBoundaryOperatorMPI.cpp",
+          "line": 3278,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:29:17Z",
+          "time": "0.456s",
+          "classname": "FreeSurfaceSharpBoundaryOperators",
+          "sharp_active_side_case_count": "2",
+          "sharp_active_side_maximum_complement_error": "5.55111512312578270e-17",
+          "sharp_active_side_marker_mismatch_count": "0"
+        },
+        {
+          "name": "CompletelyDryBoundaryProducesExactlyZeroWetRows",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_SharpBoundaryOperatorMPI.cpp",
+          "line": 3377,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:29:18Z",
+          "time": "1.118s",
+          "classname": "FreeSurfaceSharpBoundaryOperators",
+          "sharp_dry_operator_family_count": "5",
+          "sharp_dry_generated_rule_count": "0",
+          "sharp_dry_repeatability_maximum_error": "0.00000000000000000e+00",
+          "sharp_dry_maximum_entry_magnitude": "0.00000000000000000e+00",
+          "sharp_dry_explicit_empty_marker_registration_count": "5",
+          "sharp_dry_whole_face_contribution_count": "0"
+        },
+        {
+          "name": "MissingGeneratedActiveDomainFailsClosed",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_SharpBoundaryOperatorMPI.cpp",
+          "line": 3467,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:29:19Z",
+          "time": "0.039s",
+          "classname": "FreeSurfaceSharpBoundaryOperators",
+          "sharp_missing_domain_rejection_count": "5"
+        },
+        {
+          "name": "HigherOrderSpacesAndImplicitGeometryFailClosed",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_SharpBoundaryOperatorMPI.cpp",
+          "line": 3503,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:29:19Z",
+          "time": "0s",
+          "classname": "FreeSurfaceSharpBoundaryOperators",
+          "sharp_high_order_envelope_rejection_count": "4"
+        },
+        {
+          "name": "StructuredManufacturedChannelTracksDistinctExteriorRoles",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_SharpBoundaryOperatorMPI.cpp",
+          "line": 3627,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:29:19Z",
+          "time": "3.103s",
+          "classname": "FreeSurfaceSharpBoundaryOperators",
+          "sharp_channel_boundary_role_count": "3",
+          "sharp_channel_structured_cell_count": "96",
+          "sharp_channel_crossing_state_count": "9",
+          "sharp_channel_maximum_wet_measure_error": "4.44089209850062616e-16",
+          "sharp_channel_maximum_scaled_force_error": "2.58849812663060300e-16",
+          "sharp_channel_maximum_scaled_flux_error": "2.34967835899504115e-16"
+        },
+        {
+          "name": "StructuredVertexCrossingGlobalWorkJumpConvergesUnderRefinement",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_SharpBoundaryOperatorMPI.cpp",
+          "line": 3744,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:29:22Z",
+          "time": "17.226s",
+          "classname": "FreeSurfaceSharpBoundaryOperators",
+          "sharp_vertex_crossing_refinement_level_count": "4",
+          "sharp_vertex_crossing_strict_decrease_count": "3",
+          "sharp_vertex_crossing_finest_structured_cell_count": "6144",
+          "sharp_vertex_crossing_fine_to_coarse_jump_ratio": "3.12499999999998945e-01"
+        },
+        {
+          "name": "SyntheticNitscheTraceSamplingFailsWithoutAggregationCertificate",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_SharpBoundaryOperatorMPI.cpp",
+          "line": 3840,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:29:39Z",
+          "time": "0s",
+          "classname": "FreeSurfaceSharpBoundaryOperators",
+          "sharp_nitsche_uncertified_registration_rejection_count": "4",
+          "sharp_nitsche_uncertified_registration_case_count": "4"
+        },
+        {
+          "name": "StructuredSyntheticNitscheRouteFailsWithoutAggregationCertificate",
+          "file": "\/scratch\/users\/zsexton\/wp3-sharp-v6-a73c77f-worktree\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_SharpBoundaryOperatorMPI.cpp",
+          "line": 3878,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-26T09:29:39Z",
+          "time": "0s",
+          "classname": "FreeSurfaceSharpBoundaryOperators",
+          "sharp_structured_nitsche_uncertified_registration_rejection_count": "1"
+        }
+      ]
+    }
+  ]
+}

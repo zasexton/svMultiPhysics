@@ -1,0 +1,460 @@
+{
+  "artifact_schema_version": 1,
+  "binaries_after_execution": {
+    "application": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "01a38ffefc74396f89be250fcb1f0403a35d7df353fa98588b17da5953f1a896",
+      "is_file": true,
+      "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-application/bin/test_application",
+      "sha256": "01a38ffefc74396f89be250fcb1f0403a35d7df353fa98588b17da5953f1a896"
+    },
+    "application_mpi": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "791ddefe8c09b6eb32e4a5651c079ad28ddcb7062f3ad6788745406e76ae05b3",
+      "is_file": true,
+      "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-application/bin/test_application_mpi",
+      "sha256": "791ddefe8c09b6eb32e4a5651c079ad28ddcb7062f3ad6788745406e76ae05b3"
+    },
+    "assembly": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "3e2b9416fa72123ff0d35a1c9d70da0bf393427ddea60ef5d5de4a9eb710fad2",
+      "is_file": true,
+      "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_assembly",
+      "sha256": "3e2b9416fa72123ff0d35a1c9d70da0bf393427ddea60ef5d5de4a9eb710fad2"
+    },
+    "assembly_mpi": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "dd0de0021b73ce33917a28e1fb796af262cd4104c6c347a166aace41d3bcc5e8",
+      "is_file": true,
+      "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_assembly_mpi",
+      "sha256": "dd0de0021b73ce33917a28e1fb796af262cd4104c6c347a166aace41d3bcc5e8"
+    },
+    "geometry": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "a870ddbaafe107846e34fc5d83e9b98feb28ef47c3dace73d321793947161541",
+      "is_file": true,
+      "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_geometry",
+      "sha256": "a870ddbaafe107846e34fc5d83e9b98feb28ef47c3dace73d321793947161541"
+    },
+    "level_set": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "7f5b849a0708f7d86be75bf83269002b2928c1428dee38ec134dc86e231e127b",
+      "is_file": true,
+      "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_levelset",
+      "sha256": "7f5b849a0708f7d86be75bf83269002b2928c1428dee38ec134dc86e231e127b"
+    },
+    "math": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "00d5cb5020c33b340367ba030dff07c1ce4b482f1b167524e76f8d9f6f9a713e",
+      "is_file": true,
+      "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_math",
+      "sha256": "00d5cb5020c33b340367ba030dff07c1ce4b482f1b167524e76f8d9f6f9a713e"
+    },
+    "physics": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "1be1aa764b2043d67887226d4b958243e2956e21d16f7d81bcc336ce54f66d84",
+      "is_file": true,
+      "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-physics/test_physics",
+      "sha256": "1be1aa764b2043d67887226d4b958243e2956e21d16f7d81bcc336ce54f66d84"
+    },
+    "systems": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "321eacaa86dcdde018b74e1cb88684055bc1bc14938e7c4afcf60a7bf0ef5c4a",
+      "is_file": true,
+      "path": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/build-fe/test_fe_systems",
+      "sha256": "321eacaa86dcdde018b74e1cb88684055bc1bc14938e7c4afcf60a7bf0ef5c4a"
+    }
+  },
+  "binary_link_provenance_policy": {
+    "address_and_resident_memory_mib": 1024,
+    "command": "ldd",
+    "launch_mode": "direct_serial",
+    "maximum_qualification_job_memory_fraction": 0.05,
+    "memory_enforcement_method": "RLIMIT_AS_plus_sampled_session_resident_memory",
+    "output_mib": 4,
+    "timeout_seconds": 60,
+    "v4_rejected_address_and_resident_memory_mib": 256
+  },
+  "canonical_registry": "/scratch/users/zsexton/wp3-sharp-v6-a73c77f-worktree/tests/cases/fluid/free_surface_wp3_sharp_boundary_qualification_matrix_v6.json",
+  "checks": [
+    {
+      "actual": "a73c77f44ac1741df730dc4102ac938b9b1b6922",
+      "expected": "a73c77f44ac1741df730dc4102ac938b9b1b6922",
+      "metric": "source_commit",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "049206c98eeda5fc9108458d0190101ad610ef91",
+      "expected": "049206c98eeda5fc9108458d0190101ad610ef91",
+      "metric": "source_tree",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "",
+      "expected": "",
+      "metric": "tracked_status",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "unexpected_untracked_path_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "597bb62a306991f78e87a697693fd485dbd3acf3a93273c289ff514eb5ccf7e5",
+      "expected": "597bb62a306991f78e87a697693fd485dbd3acf3a93273c289ff514eb5ccf7e5",
+      "metric": "registry_sha256",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "0a2999e91a369bd2c77e1aa6f214895177fd32485d290f348a04a356e584f4ff",
+      "expected": "0a2999e91a369bd2c77e1aa6f214895177fd32485d290f348a04a356e584f4ff",
+      "metric": "runner_sha256",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:application",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:application",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "01a38ffefc74396f89be250fcb1f0403a35d7df353fa98588b17da5953f1a896",
+      "expected": "01a38ffefc74396f89be250fcb1f0403a35d7df353fa98588b17da5953f1a896",
+      "metric": "binary_sha256:application",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:application_mpi",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:application_mpi",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "791ddefe8c09b6eb32e4a5651c079ad28ddcb7062f3ad6788745406e76ae05b3",
+      "expected": "791ddefe8c09b6eb32e4a5651c079ad28ddcb7062f3ad6788745406e76ae05b3",
+      "metric": "binary_sha256:application_mpi",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:assembly",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:assembly",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "3e2b9416fa72123ff0d35a1c9d70da0bf393427ddea60ef5d5de4a9eb710fad2",
+      "expected": "3e2b9416fa72123ff0d35a1c9d70da0bf393427ddea60ef5d5de4a9eb710fad2",
+      "metric": "binary_sha256:assembly",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:assembly_mpi",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:assembly_mpi",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "dd0de0021b73ce33917a28e1fb796af262cd4104c6c347a166aace41d3bcc5e8",
+      "expected": "dd0de0021b73ce33917a28e1fb796af262cd4104c6c347a166aace41d3bcc5e8",
+      "metric": "binary_sha256:assembly_mpi",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:geometry",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:geometry",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "a870ddbaafe107846e34fc5d83e9b98feb28ef47c3dace73d321793947161541",
+      "expected": "a870ddbaafe107846e34fc5d83e9b98feb28ef47c3dace73d321793947161541",
+      "metric": "binary_sha256:geometry",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:level_set",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:level_set",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "7f5b849a0708f7d86be75bf83269002b2928c1428dee38ec134dc86e231e127b",
+      "expected": "7f5b849a0708f7d86be75bf83269002b2928c1428dee38ec134dc86e231e127b",
+      "metric": "binary_sha256:level_set",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:math",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:math",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "00d5cb5020c33b340367ba030dff07c1ce4b482f1b167524e76f8d9f6f9a713e",
+      "expected": "00d5cb5020c33b340367ba030dff07c1ce4b482f1b167524e76f8d9f6f9a713e",
+      "metric": "binary_sha256:math",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:physics",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:physics",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "1be1aa764b2043d67887226d4b958243e2956e21d16f7d81bcc336ce54f66d84",
+      "expected": "1be1aa764b2043d67887226d4b958243e2956e21d16f7d81bcc336ce54f66d84",
+      "metric": "binary_sha256:physics",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:systems",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:systems",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "321eacaa86dcdde018b74e1cb88684055bc1bc14938e7c4afcf60a7bf0ef5c4a",
+      "expected": "321eacaa86dcdde018b74e1cb88684055bc1bc14938e7c4afcf60a7bf0ef5c4a",
+      "metric": "binary_sha256:systems",
+      "passed": true,
+      "relation": "equal"
+    }
+  ],
+  "diagnostics": [],
+  "implementation_source_commit": "a98522eac0162085652e4750e8224193ca6e2742",
+  "open_outcomes": {
+    "higher_order": "UNSUPPORTED_FAIL_CLOSED",
+    "q0_and_q2_through_q7": "OPEN",
+    "q1": "OPEN",
+    "uniform_cut_conditioning": "OPEN",
+    "wp4_through_wp10": "OPEN",
+    "wp7": "OPEN"
+  },
+  "outcome": "PASS",
+  "qualification_bundle_binding": {
+    "artifacts": [
+      {
+        "git_blob_id": "7cd5bd0d3904ede68378ebfd8f943e0d04f8f1fd",
+        "git_mode": "100644",
+        "git_object_type": "blob",
+        "normalized_sha256": "c73d95d39eaae6415da4cce87bfd09c6b8a4268b6938d246e1cc926050c3ec39",
+        "path": "tests/cases/fluid/free_surface_wp3_sharp_boundary_qualification_matrix_v6.json",
+        "role": "matrix",
+        "sha256": "597bb62a306991f78e87a697693fd485dbd3acf3a93273c289ff514eb5ccf7e5"
+      },
+      {
+        "git_blob_id": "8c98b5fb3759eda8802ec9edf8bdd1866ce4690b",
+        "git_mode": "100755",
+        "git_object_type": "blob",
+        "path": "tests/cases/fluid/run_free_surface_wp3_sharp_boundary_qualification_v6.py",
+        "role": "runner",
+        "sha256": "0a2999e91a369bd2c77e1aa6f214895177fd32485d290f348a04a356e584f4ff"
+      },
+      {
+        "git_blob_id": "5ea049be71e653a24b70f04138290ad3228b178d",
+        "git_mode": "100644",
+        "git_object_type": "blob",
+        "path": "tests/test_free_surface_wp3_sharp_boundary_qualification_runner_v6.py",
+        "role": "focused_test",
+        "sha256": "a922d7c239aa3adab79b4d6c28185a4b02e7f525ac6576bb9d192ca5e2c7ef0d"
+      }
+    ],
+    "authority": "reciprocal_sha256_plus_canonical_bundle_commit_history",
+    "binding_schema_version": 6,
+    "bundle_changed_paths": [
+      "tests/cases/fluid/free_surface_wp3_sharp_boundary_qualification_matrix_v6.json",
+      "tests/cases/fluid/run_free_surface_wp3_sharp_boundary_qualification_v6.py",
+      "tests/test_free_surface_wp3_sharp_boundary_qualification_runner_v6.py"
+    ],
+    "bundle_commit_resolution": "unique_direct_child_of_implementation_source_commit_on_validation_HEAD_ancestry_matching_exact_paths_and_frozen_blobs",
+    "bundle_parent_commit": "a98522eac0162085652e4750e8224193ca6e2742",
+    "focused_test_sha256_from_runner": "a922d7c239aa3adab79b4d6c28185a4b02e7f525ac6576bb9d192ca5e2c7ef0d",
+    "implementation_source_commit": "a98522eac0162085652e4750e8224193ca6e2742",
+    "normalized_matrix_sha256_embedded_in_runner": "c73d95d39eaae6415da4cce87bfd09c6b8a4268b6938d246e1cc926050c3ec39",
+    "qualification_bundle_commit": "a73c77f44ac1741df730dc4102ac938b9b1b6922",
+    "runner_sha256_from_matrix": "0a2999e91a369bd2c77e1aa6f214895177fd32485d290f348a04a356e584f4ff",
+    "validation_head_commit": "a73c77f44ac1741df730dc4102ac938b9b1b6922"
+  },
+  "qualification_disposition": {
+    "on_failure": "KEEP_FSR16_AND_WP3_OPEN",
+    "on_pass": "CLOSE_FSR16_AND_WP3_WITHIN_DECLARED_ENVELOPE",
+    "q1": "OPEN",
+    "wp7": "OPEN"
+  },
+  "qualification_scope": "Closure evidence for FSR-16 and WP-3 sharply clipped exterior boundary operators within the declared one-phase affine C0 P1 and LinearCorner envelope. A passing archive does not close WP-7, Q1, higher-order support, uniform cut conditioning, capillary balance, transport, fitted ALE, or two-phase physics.",
+  "registry_sha256_after_execution": "597bb62a306991f78e87a697693fd485dbd3acf3a93273c289ff514eb5ccf7e5",
+  "registry_sha256_before_execution": "597bb62a306991f78e87a697693fd485dbd3acf3a93273c289ff514eb5ccf7e5",
+  "requested_claim": "wp3_fsr16_c0_p1_linearcorner_closure",
+  "runner_sha256_after_execution": "0a2999e91a369bd2c77e1aa6f214895177fd32485d290f348a04a356e584f4ff",
+  "runner_sha256_before_execution": "0a2999e91a369bd2c77e1aa6f214895177fd32485d290f348a04a356e584f4ff",
+  "source_commit_after_execution": "a73c77f44ac1741df730dc4102ac938b9b1b6922",
+  "source_commit_before_execution": "a73c77f44ac1741df730dc4102ac938b9b1b6922",
+  "source_tree_after_execution": "049206c98eeda5fc9108458d0190101ad610ef91",
+  "source_tree_before_execution": "049206c98eeda5fc9108458d0190101ad610ef91",
+  "test_discovery_contract": {
+    "direct_binary_keys": [
+      "application",
+      "assembly",
+      "geometry",
+      "level_set",
+      "math",
+      "systems"
+    ],
+    "mpi_single_rank_arguments": [
+      "--oversubscribe",
+      "-n",
+      "1"
+    ],
+    "mpi_single_rank_binary_keys": [
+      "application_mpi",
+      "assembly_mpi",
+      "physics"
+    ],
+    "schema_version": 1,
+    "timeout_seconds": 60
+  },
+  "test_execution_contract": {
+    "direct_binary_keys": [
+      "application",
+      "assembly",
+      "geometry",
+      "level_set",
+      "math",
+      "systems"
+    ],
+    "inherited_scheduler_process_count_policy": "isolate_with_explicit_single_rank_mpi_world",
+    "mpi_single_rank_arguments": [
+      "--oversubscribe",
+      "-n",
+      "1"
+    ],
+    "mpi_single_rank_binary_keys": [
+      "application_mpi",
+      "assembly_mpi",
+      "physics"
+    ],
+    "mpi_single_rank_monitoring": {
+      "launch_mode": "mpi",
+      "required_simultaneous_process_samples": 2
+    },
+    "schema_version": 1
+  },
+  "tracked_status_after_execution": "",
+  "untracked_sources_after_execution": {
+    "allowed_output_path_count": 0,
+    "allowed_output_path_list_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "allowed_output_paths": [],
+    "allowed_output_root": "/scratch/users/zsexton/wp3-sharp-v6-qualification-a73c77f/evidence-v6",
+    "ignored_scan_roots": [
+      ".",
+      "Code",
+      "Code/Source/solver/FE",
+      "Code/Source/solver/Physics"
+    ],
+    "ignored_source_path_count": 0,
+    "ordinary_path_count": 0,
+    "path_count": 0,
+    "path_list_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "unexpected_path_count": 0,
+    "unexpected_path_list_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "unexpected_paths": []
+  }
+}
