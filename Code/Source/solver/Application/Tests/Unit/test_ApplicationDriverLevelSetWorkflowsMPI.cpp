@@ -20,6 +20,7 @@
 #include "Mesh/Mesh.h"
 #include "FE/Spaces/H1Space.h"
 #include "Mesh/Fields/MeshFields.h"
+#include "NativeManufacturedChannelMPIHarness.h"
 #include "Parameters.h"
 #include "tinyxml2.h"
 
@@ -38,10 +39,14 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iomanip>
+#include <iostream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -5024,6 +5029,439 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       MPI_MIN,
       MPI_COMM_WORLD);
   EXPECT_EQ(every_rank_reached_after_failed_recovery_phase, 1);
+}
+
+TEST(ApplicationDriverLevelSetWorkflowsMPI,
+     NativeCertifiedManufacturedChannelIsRepartitionIndependent)
+{
+  int rank = 0;
+  int size = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  if (size != 2) {
+    GTEST_SKIP() << "This manufactured-channel fixture requires two ranks.";
+  }
+
+  namespace fixture = native_manufactured_channel_mpi;
+  using ActiveSide = svmp::FE::geometry::CutIntegrationSide;
+  constexpr std::array<const char*, 2> partition_methods{{
+      "block",
+      "metis",
+  }};
+  constexpr std::array<ActiveSide, 2> active_sides{{
+      ActiveSide::Negative,
+      ActiveSide::Positive,
+  }};
+  constexpr std::array<svmp::FE::Real, 11> wet_fractions{{
+      0.0,
+      1.0e-8,
+      1.0e-6,
+      1.0e-4,
+      1.0e-2,
+      0.1,
+      0.25,
+      0.49,
+      0.5,
+      0.51,
+      1.0,
+  }};
+  constexpr std::array<svmp::FE::Real, 3> parent_measures{{
+      fixture::window_height * fixture::channel_depth,
+      fixture::window_height * fixture::channel_depth,
+      fixture::channel_length * fixture::window_height,
+  }};
+  constexpr std::array<svmp::FE::Real, 3> full_work{{
+      fixture::Harness::expectedFullForceWork(),
+      fixture::Harness::expectedFullFluxWork(),
+      fixture::Harness::expectedFullPenaltyWork(),
+  }};
+
+  using SideSamples = std::array<std::vector<fixture::Sample>, 2>;
+  std::array<SideSamples, 2> samples_by_partition;
+  std::array<std::vector<int>, 2> partition_owners;
+  svmp::FE::Real maximum_analytic_measure_error = 0.0;
+  svmp::FE::Real maximum_analytic_work_error = 0.0;
+  svmp::FE::Real maximum_partition_measure_difference = 0.0;
+  svmp::FE::Real maximum_partition_work_difference = 0.0;
+  svmp::FE::Real maximum_side_reversal_work_difference = 0.0;
+  svmp::FE::Real maximum_vertex_limit_mismatch = 0.0;
+  svmp::FE::Real maximum_trace_bound = 0.0;
+  svmp::FE::Real maximum_trace_ratio = 0.0;
+  std::size_t maximum_factorized_input_dimension = 0u;
+  std::size_t maximum_trace_patch_count = 0u;
+  std::size_t maximum_localized_trace_patch_count = 0u;
+  std::size_t maximum_trace_support_overlap = 0u;
+
+  for (std::size_t partition_index = 0u;
+       partition_index < partition_methods.size();
+       ++partition_index) {
+    for (std::size_t side_index = 0u;
+         side_index < active_sides.size();
+         ++side_index) {
+      fixture::Harness harness(
+          active_sides[side_index],
+          /*upper_subdivisions=*/2,
+          partition_methods[partition_index]);
+      if (side_index == 0u) {
+        partition_owners[partition_index] = harness.partitionOwners();
+      } else {
+        EXPECT_EQ(harness.partitionOwners(),
+                  partition_owners[partition_index]);
+      }
+      auto& samples =
+          samples_by_partition[partition_index][side_index];
+      samples.reserve(wet_fractions.size());
+      for (const auto fraction : wet_fractions) {
+        SCOPED_TRACE(::testing::Message()
+                     << "partition_method="
+                     << partition_methods[partition_index]
+                     << " active_side_index=" << side_index
+                     << " wet_fraction=" << fraction);
+        samples.push_back(harness.sample(fraction));
+        const auto& sample = samples.back();
+        EXPECT_EQ(sample.target_wet_fraction, fraction);
+        EXPECT_NE(sample.trace_certificate_digest, 0u);
+        EXPECT_TRUE(sample.trace_revision_match);
+        EXPECT_TRUE(sample.trace_factorized_proof_valid);
+        EXPECT_LE(sample.trace_maximum_factorized_input_dimension,
+                  svmp::FE::math::dense_exact_dyadic_maximum_dimension);
+        EXPECT_LE(sample.trace_grouped_symmetric_ratio,
+                  (1.0 - 0.25) * (1.0 - 0.25));
+        EXPECT_EQ(sample.physical_role_boundary_term_count, 0u);
+        maximum_trace_ratio = std::max(
+            maximum_trace_ratio,
+            sample.trace_grouped_symmetric_ratio);
+        maximum_trace_bound = std::max(
+            maximum_trace_bound,
+            sample.trace_global_conservative_upper_bound);
+        maximum_factorized_input_dimension = std::max(
+            maximum_factorized_input_dimension,
+            sample.trace_maximum_factorized_input_dimension);
+        maximum_trace_patch_count = std::max(
+            maximum_trace_patch_count,
+            sample.trace_patch_count);
+        maximum_localized_trace_patch_count = std::max(
+            maximum_localized_trace_patch_count,
+            sample.trace_localized_support_patch_count);
+        maximum_trace_support_overlap = std::max(
+            maximum_trace_support_overlap,
+            sample.trace_maximum_support_overlap);
+        for (std::size_t role = 0u; role < parent_measures.size(); ++role) {
+          SCOPED_TRACE(::testing::Message() << "boundary_role=" << role);
+          EXPECT_GT(sample.generated_route_term_counts[role], 0u);
+          EXPECT_NEAR(sample.parent_measures[role],
+                      parent_measures[role],
+                      5.0e-11);
+          EXPECT_NEAR(sample.active_measures[role],
+                      fraction * parent_measures[role],
+                      5.0e-11);
+          EXPECT_NEAR(sample.operator_work[role],
+                      fraction * full_work[role],
+                      5.0e-10);
+          maximum_analytic_measure_error = std::max(
+              maximum_analytic_measure_error,
+              std::abs(sample.parent_measures[role] -
+                       parent_measures[role]));
+          maximum_analytic_measure_error = std::max(
+              maximum_analytic_measure_error,
+              std::abs(sample.active_measures[role] -
+                       fraction * parent_measures[role]));
+          maximum_analytic_work_error = std::max(
+              maximum_analytic_work_error,
+              std::abs(sample.operator_work[role] -
+                       fraction * full_work[role]));
+        }
+        if (fraction == 0.0) {
+          EXPECT_EQ(sample.active_rule_counts,
+                    (std::array<std::size_t, 3>{{0u, 0u, 0u}}));
+          EXPECT_EQ(sample.retained_active_rule_counts,
+                    (std::array<std::size_t, 3>{{0u, 0u, 0u}}));
+          EXPECT_EQ(sample.operator_work,
+                    (std::array<svmp::FE::Real, 3>{{0.0, 0.0, 0.0}}));
+          EXPECT_EQ(sample.trace_patch_count, 0u);
+          EXPECT_EQ(sample.trace_boundary_rule_count, 0u);
+        } else {
+          for (std::size_t role = 0u;
+               role < sample.active_rule_counts.size();
+               ++role) {
+            EXPECT_GT(sample.active_rule_counts[role], 0u);
+            EXPECT_LE(sample.retained_active_rule_counts[role],
+                      sample.active_rule_counts[role]);
+          }
+          EXPECT_GT(sample.retained_active_rule_counts[2], 0u);
+          EXPECT_GT(sample.trace_patch_count, 0u);
+          EXPECT_EQ(sample.trace_boundary_rule_count,
+                    sample.retained_active_rule_counts[2]);
+        }
+
+        unsigned long long local_digest =
+            static_cast<unsigned long long>(
+                sample.trace_certificate_digest);
+        unsigned long long minimum_digest = 0u;
+        unsigned long long maximum_digest = 0u;
+        MPI_Allreduce(&local_digest,
+                      &minimum_digest,
+                      1,
+                      MPI_UNSIGNED_LONG_LONG,
+                      MPI_MIN,
+                      MPI_COMM_WORLD);
+        MPI_Allreduce(&local_digest,
+                      &maximum_digest,
+                      1,
+                      MPI_UNSIGNED_LONG_LONG,
+                      MPI_MAX,
+                      MPI_COMM_WORLD);
+        EXPECT_EQ(minimum_digest, maximum_digest);
+      }
+
+      ASSERT_EQ(samples.size(), wet_fractions.size());
+      constexpr std::size_t left_index = 7u;
+      constexpr std::size_t crossing_index = 8u;
+      constexpr std::size_t right_index = 9u;
+      for (std::size_t role = 0u; role < full_work.size(); ++role) {
+        const auto left_limit =
+            samples[left_index].operator_work[role] +
+            0.01 * full_work[role];
+        const auto right_limit =
+            samples[right_index].operator_work[role] -
+            0.01 * full_work[role];
+        const auto crossing =
+            samples[crossing_index].operator_work[role];
+        maximum_vertex_limit_mismatch = std::max(
+            maximum_vertex_limit_mismatch,
+            std::max(std::abs(left_limit - crossing),
+                     std::abs(right_limit - crossing)));
+      }
+    }
+  }
+
+  ASSERT_EQ(partition_owners[0].size(), partition_owners[1].size());
+  EXPECT_NE(partition_owners[0], partition_owners[1]);
+  for (std::size_t partition_index = 0u;
+       partition_index < partition_methods.size();
+       ++partition_index) {
+    const auto& negative = samples_by_partition[partition_index][0];
+    const auto& positive = samples_by_partition[partition_index][1];
+    ASSERT_EQ(negative.size(), positive.size());
+    for (std::size_t sample_index = 0u;
+         sample_index < negative.size();
+         ++sample_index) {
+      for (std::size_t role = 0u; role < full_work.size(); ++role) {
+        maximum_side_reversal_work_difference = std::max(
+            maximum_side_reversal_work_difference,
+            std::abs(negative[sample_index].operator_work[role] -
+                     positive[sample_index].operator_work[role]));
+      }
+    }
+  }
+
+  for (std::size_t side_index = 0u;
+       side_index < active_sides.size();
+       ++side_index) {
+    const auto& block = samples_by_partition[0][side_index];
+    const auto& graph = samples_by_partition[1][side_index];
+    ASSERT_EQ(block.size(), graph.size());
+    for (std::size_t sample_index = 0u;
+         sample_index < block.size();
+         ++sample_index) {
+      SCOPED_TRACE(::testing::Message()
+                   << "partition_comparison_side=" << side_index
+                   << " wet_fraction=" << wet_fractions[sample_index]);
+      EXPECT_EQ(block[sample_index].active_rule_counts,
+                graph[sample_index].active_rule_counts);
+      EXPECT_EQ(block[sample_index].retained_active_rule_counts,
+                graph[sample_index].retained_active_rule_counts);
+      EXPECT_EQ(block[sample_index].active_markers,
+                graph[sample_index].active_markers);
+      EXPECT_EQ(block[sample_index].trace_patch_count,
+                graph[sample_index].trace_patch_count);
+      EXPECT_EQ(block[sample_index].trace_localized_support_patch_count,
+                graph[sample_index].trace_localized_support_patch_count);
+      EXPECT_EQ(block[sample_index].trace_boundary_rule_count,
+                graph[sample_index].trace_boundary_rule_count);
+      EXPECT_EQ(block[sample_index].trace_maximum_support_overlap,
+                graph[sample_index].trace_maximum_support_overlap);
+      EXPECT_EQ(block[sample_index].trace_global_conservative_upper_bound,
+                graph[sample_index].trace_global_conservative_upper_bound);
+      EXPECT_EQ(block[sample_index].trace_grouped_symmetric_ratio,
+                graph[sample_index].trace_grouped_symmetric_ratio);
+      const auto& block_patches =
+          block[sample_index].trace_partition_invariant_patches;
+      const auto& graph_patches =
+          graph[sample_index].trace_partition_invariant_patches;
+      ASSERT_EQ(block_patches.size(), graph_patches.size());
+      for (std::size_t patch_index = 0u;
+           patch_index < block_patches.size();
+           ++patch_index) {
+        SCOPED_TRACE(
+            ::testing::Message() << "trace_patch_index=" << patch_index);
+        const auto& block_patch = block_patches[patch_index];
+        const auto& graph_patch = graph_patches[patch_index];
+        EXPECT_EQ(block_patch.localized_support_patch,
+                  graph_patch.localized_support_patch);
+        EXPECT_EQ(block_patch.root_cell_gid, graph_patch.root_cell_gid);
+        EXPECT_EQ(block_patch.support_cell_gids,
+                  graph_patch.support_cell_gids);
+        EXPECT_EQ(block_patch.boundary_rule_physical_keys,
+                  graph_patch.boundary_rule_physical_keys);
+        EXPECT_EQ(block_patch.boundary_rule_count,
+                  graph_patch.boundary_rule_count);
+        EXPECT_EQ(block_patch.raw_support_dof_count,
+                  graph_patch.raw_support_dof_count);
+        EXPECT_EQ(block_patch.terminal_tangent_dof_count,
+                  graph_patch.terminal_tangent_dof_count);
+        EXPECT_EQ(block_patch.rigid_mode_candidate_count,
+                  graph_patch.rigid_mode_candidate_count);
+        EXPECT_EQ(block_patch.structural_rigid_mode_count,
+                  graph_patch.structural_rigid_mode_count);
+        EXPECT_EQ(block_patch.rigid_mode_constraint_rank,
+                  graph_patch.rigid_mode_constraint_rank);
+        EXPECT_EQ(block_patch.maximum_cell_support_overlap,
+                  graph_patch.maximum_cell_support_overlap);
+        EXPECT_EQ(block_patch.retained_support_physical_volume,
+                  graph_patch.retained_support_physical_volume);
+        EXPECT_EQ(block_patch.generated_boundary_physical_measure,
+                  graph_patch.generated_boundary_physical_measure);
+        EXPECT_EQ(block_patch.directly_proven_upper_bound,
+                  graph_patch.directly_proven_upper_bound);
+        EXPECT_EQ(block_patch.rigid_mode_quotient_status,
+                  graph_patch.rigid_mode_quotient_status);
+        EXPECT_EQ(block_patch.proof_input, graph_patch.proof_input);
+        EXPECT_EQ(block_patch.exact_rigid_factor_action_proven,
+                  graph_patch.exact_rigid_factor_action_proven);
+        EXPECT_EQ(block_patch.denominator_positive_definite_proven,
+                  graph_patch.denominator_positive_definite_proven);
+        EXPECT_EQ(block_patch.numerator_positive_semidefinite_proven,
+                  graph_patch.numerator_positive_semidefinite_proven);
+        EXPECT_EQ(block_patch.upper_inequality_proven,
+                  graph_patch.upper_inequality_proven);
+        EXPECT_EQ(block_patch.exact_factorized_materialization_proven,
+                  graph_patch.exact_factorized_materialization_proven);
+        EXPECT_EQ(block_patch.exact_sparse_map_applied,
+                  graph_patch.exact_sparse_map_applied);
+        EXPECT_EQ(block_patch.exact_common_kernel_proven,
+                  graph_patch.exact_common_kernel_proven);
+        EXPECT_EQ(block_patch.exact_dimension,
+                  graph_patch.exact_dimension);
+        EXPECT_EQ(block_patch.denominator_rank,
+                  graph_patch.denominator_rank);
+        EXPECT_EQ(block_patch.numerator_rank,
+                  graph_patch.numerator_rank);
+        EXPECT_EQ(block_patch.numerator_gram_block_count,
+                  graph_patch.numerator_gram_block_count);
+        EXPECT_EQ(block_patch.denominator_gram_block_count,
+                  graph_patch.denominator_gram_block_count);
+        EXPECT_EQ(block_patch.numerator_gram_row_count,
+                  graph_patch.numerator_gram_row_count);
+        EXPECT_EQ(block_patch.denominator_gram_row_count,
+                  graph_patch.denominator_gram_row_count);
+        EXPECT_EQ(block_patch.numerator_weight_term_count,
+                  graph_patch.numerator_weight_term_count);
+        EXPECT_EQ(block_patch.denominator_weight_term_count,
+                  graph_patch.denominator_weight_term_count);
+        EXPECT_EQ(block_patch.factorized_input_dimension,
+                  graph_patch.factorized_input_dimension);
+        EXPECT_EQ(block_patch.exact_common_kernel_nullity,
+                  graph_patch.exact_common_kernel_nullity);
+      }
+      for (std::size_t role = 0u; role < full_work.size(); ++role) {
+        maximum_partition_measure_difference = std::max(
+            maximum_partition_measure_difference,
+            std::abs(block[sample_index].active_measures[role] -
+                     graph[sample_index].active_measures[role]));
+        maximum_partition_work_difference = std::max(
+            maximum_partition_work_difference,
+            std::abs(block[sample_index].operator_work[role] -
+                     graph[sample_index].operator_work[role]));
+      }
+    }
+  }
+
+  EXPECT_LE(maximum_analytic_measure_error, 5.0e-11);
+  EXPECT_LE(maximum_analytic_work_error, 5.0e-10);
+  EXPECT_LE(maximum_partition_measure_difference, 5.0e-11);
+  EXPECT_LE(maximum_partition_work_difference, 5.0e-10);
+  EXPECT_LE(maximum_side_reversal_work_difference, 5.0e-10);
+  EXPECT_LE(maximum_vertex_limit_mismatch, 5.0e-10);
+  EXPECT_LE(maximum_factorized_input_dimension,
+            svmp::FE::math::dense_exact_dyadic_maximum_dimension);
+
+  if (rank == 0) {
+    const auto record_real = [](const char* name, svmp::FE::Real value) {
+      std::ostringstream text;
+      text << std::setprecision(
+                  std::numeric_limits<svmp::FE::Real>::max_digits10)
+           << value;
+      ::testing::Test::RecordProperty(name, text.str());
+    };
+    ::testing::Test::RecordProperty(
+        "native_channel_mpi_partition_count",
+        static_cast<int>(partition_methods.size()));
+    ::testing::Test::RecordProperty(
+        "native_channel_mpi_active_side_count",
+        static_cast<int>(active_sides.size()));
+    ::testing::Test::RecordProperty(
+        "native_channel_mpi_wet_fraction_count",
+        static_cast<int>(wet_fractions.size()));
+    ::testing::Test::RecordProperty(
+        "native_channel_mpi_overlap_layers",
+        fixture::aggregation_overlap_layers);
+    ::testing::Test::RecordProperty(
+        "native_channel_mpi_maximum_factorized_input_dimension",
+        static_cast<int>(maximum_factorized_input_dimension));
+    record_real(
+        "native_channel_mpi_maximum_trace_bound",
+        maximum_trace_bound);
+    record_real(
+        "native_channel_mpi_maximum_trace_ratio",
+        maximum_trace_ratio);
+    ::testing::Test::RecordProperty(
+        "native_channel_mpi_maximum_trace_patch_count",
+        static_cast<int>(maximum_trace_patch_count));
+    ::testing::Test::RecordProperty(
+        "native_channel_mpi_maximum_localized_trace_patch_count",
+        static_cast<int>(maximum_localized_trace_patch_count));
+    ::testing::Test::RecordProperty(
+        "native_channel_mpi_maximum_trace_support_overlap",
+        static_cast<int>(maximum_trace_support_overlap));
+    record_real(
+        "native_channel_mpi_maximum_partition_measure_difference",
+        maximum_partition_measure_difference);
+    record_real(
+        "native_channel_mpi_maximum_partition_work_difference",
+        maximum_partition_work_difference);
+    record_real(
+        "native_channel_mpi_maximum_side_reversal_work_difference",
+        maximum_side_reversal_work_difference);
+    record_real(
+        "native_channel_mpi_maximum_vertex_limit_mismatch",
+        maximum_vertex_limit_mismatch);
+    std::cout
+        << std::setprecision(
+               std::numeric_limits<svmp::FE::Real>::max_digits10)
+        << "native_channel_mpi_summary partitions="
+        << partition_methods.size()
+        << " active_sides=" << active_sides.size()
+        << " wet_fractions=" << wet_fractions.size()
+        << " overlap_layers=" << fixture::aggregation_overlap_layers
+        << " maximum_trace_bound=" << maximum_trace_bound
+        << " maximum_trace_ratio=" << maximum_trace_ratio
+        << " maximum_factorized_input_dimension="
+        << maximum_factorized_input_dimension
+        << " maximum_trace_patches=" << maximum_trace_patch_count
+        << " maximum_localized_trace_patches="
+        << maximum_localized_trace_patch_count
+        << " maximum_trace_support_overlap="
+        << maximum_trace_support_overlap
+        << " maximum_partition_measure_difference="
+        << maximum_partition_measure_difference
+        << " maximum_partition_work_difference="
+        << maximum_partition_work_difference
+        << " maximum_side_reversal_work_difference="
+        << maximum_side_reversal_work_difference
+        << " maximum_vertex_limit_mismatch="
+        << maximum_vertex_limit_mismatch << '\n';
+  }
 }
 
 int main(int argc, char** argv)

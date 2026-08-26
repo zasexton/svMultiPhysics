@@ -1183,6 +1183,8 @@ cutIntegrationContextPublicationSignature(
             request.keep_degenerate_fragments
                 ? std::uint8_t{1u}
                 : std::uint8_t{0u});
+        mix_byte(static_cast<std::uint8_t>(
+            request.aligned_zero_interface_parent_side));
         mix_byte(
             provenance
                     ->volume_side_filter
@@ -17554,11 +17556,29 @@ void FESystem::refreshGeneratedBoundaryNitscheTraceCertificates(
                     record.policy
                         .minimum_symmetric_energy_ratio);
             if (grouped_ratio > risk_limit) {
-                throw std::runtime_error(
-                    "FESystem: symmetric generated-boundary Nitsche "
-                    "trace-to-penalty ratio exceeds the downward-safe "
-                    "cap for the configured accepted-state energy "
-                    "floor");
+                std::ostringstream message;
+                message
+                    << std::setprecision(
+                           std::numeric_limits<Real>::max_digits10)
+                    << "FESystem: symmetric generated-boundary Nitsche "
+                       "trace-to-penalty ratio exceeds the downward-safe "
+                       "cap for the configured accepted-state energy "
+                       "floor: operator='"
+                    << record.policy.op
+                    << "' grouped_ratio=" << grouped_ratio
+                    << " risk_limit=" << risk_limit
+                    << " route_ratio="
+                    << record.trace_to_penalty_ratio
+                    << " certificate_bound="
+                    << record.certificate
+                           .global_conservative_upper_bound
+                    << " effective_penalty="
+                    << record.effective_penalty_multiplier
+                    << " physical_boundary_marker="
+                    << record.policy.physical_boundary_marker
+                    << " generated_active_boundary_marker="
+                    << record.policy.generated_active_boundary_marker;
+                throw std::runtime_error(message.str());
             }
             record.symmetric_energy_ratio_lower_bound =
                 record.policy.minimum_symmetric_energy_ratio;

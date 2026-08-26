@@ -1626,6 +1626,9 @@ TEST(GeneratedBoundaryAggregateTraceCertificateMPI,
         certificate.certified_patch_count,
         1u);
     EXPECT_EQ(
+        certificate.localized_support_patch_count,
+        0u);
+    EXPECT_EQ(
         certificate.maximum_support_overlap,
         1u);
     EXPECT_EQ(
@@ -1646,7 +1649,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificateMPI,
     const auto& patch =
         certificate.patches.front();
     EXPECT_FALSE(
-        patch.synthetic_full_active_patch);
+        patch.localized_support_patch);
     EXPECT_EQ(patch.canonical_patch_index, 0u);
     EXPECT_EQ(
         patch.root_cell_gid,
@@ -1804,7 +1807,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificateMPI,
         MPI_MAX,
         MPI_COMM_WORLD);
     EXPECT_EQ(minimum_exact_metadata, maximum_exact_metadata);
-    EXPECT_GE(
+    EXPECT_EQ(
         bound.conservative_upper_bound,
         bound.exact_dyadic.directly_proven_upper_bound);
     EXPECT_NEAR(

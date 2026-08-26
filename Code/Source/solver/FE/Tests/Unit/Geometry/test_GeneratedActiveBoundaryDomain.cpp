@@ -735,10 +735,13 @@ interfaces::LevelSetInterfaceDomain fullNegativeCell(int marker)
 interfaces::LevelSetInterfaceDomain linearQuadCutDomain(
     int marker,
     const std::array<FE::Real, 4>& level_set_values,
-    FE::Real tolerance = 1.0e-12)
+    FE::Real tolerance = 1.0e-12,
+    FE::geometry::CutIntegrationSide aligned_parent_side =
+        FE::geometry::CutIntegrationSide::Interface)
 {
     auto request = interfaceRequest(marker);
     request.tolerance = tolerance;
+    request.aligned_zero_interface_parent_side = aligned_parent_side;
     interfaces::LevelSetCellCutInput input;
     input.parent_cell = 0;
     input.element_type = FE::ElementType::Quad4;
@@ -1358,8 +1361,25 @@ TEST(GeneratedActiveBoundaryDomain, CompletelyDrySideHasExactlyZeroRules)
     constexpr int interface_marker = 102;
     constexpr int wall_marker = 8;
     const SingleQuadBoundaryMesh mesh(wall_marker);
-    interfaces::LevelSetInterfaceDomain interface_domain(
-        interfaceRequest(interface_marker));
+    auto source_request = interfaceRequest(interface_marker);
+    interfaces::LevelSetInterfaceDomain interface_domain(source_request);
+    interfaces::LevelSetCellCutInput input;
+    input.parent_cell = 0;
+    input.element_type = FE::ElementType::Quad4;
+    input.node_coordinates.reserve(4u);
+    input.level_set_values.assign(4u, FE::Real{1.0});
+    for (std::size_t node = 0u; node < 4u; ++node) {
+        const auto xi = FE::basis::ReferenceNodeLayout::get_node_coords(
+            FE::ElementType::Quad4, node);
+        input.node_coordinates.push_back({{xi[0], xi[1], xi[2]}});
+    }
+    interfaces::appendLinearLevelSetCellCut2D(interface_domain, input);
+    ASSERT_TRUE(interface_domain.fragments().empty());
+    ASSERT_EQ(interface_domain.volumeRegions().size(), 1u);
+    EXPECT_TRUE(
+        interface_domain.volumeRegions().front().full_cell_equivalent);
+    EXPECT_EQ(interface_domain.volumeRegions().front().side,
+              FE::geometry::CutIntegrationSide::Positive);
     const auto contact_domain =
         interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
             contactRequest(interface_marker, wall_marker),
@@ -1404,6 +1424,34 @@ TEST(GeneratedActiveBoundaryDomain, CompletelyDrySideHasExactlyZeroRules)
                    ::testing::PrintToString(negative.summary().measure));
     RecordProperty("active_boundary_full_measure",
                    ::testing::PrintToString(positive.summary().measure));
+}
+
+TEST(GeneratedActiveBoundaryDomain,
+     RejectsBoundaryClippingWithoutAuthoritativeCellPhase)
+{
+    constexpr int interface_marker = 103;
+    constexpr int wall_marker = 8;
+    const SingleQuadBoundaryMesh mesh(wall_marker);
+    interfaces::LevelSetInterfaceDomain interface_domain(
+        interfaceRequest(interface_marker));
+    const auto contact_domain =
+        interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+            contactRequest(interface_marker, wall_marker),
+            interface_domain,
+            mesh);
+    interfaces::GeneratedActiveBoundaryScalarField field;
+    field.value_at_node = [](FE::GlobalIndex) { return FE::Real{1.0}; };
+
+    EXPECT_THROW(
+        (void)interfaces::buildGeneratedActiveBoundaryDomain(
+            activeRequest(interface_marker,
+                          wall_marker,
+                          FE::geometry::CutIntegrationSide::Positive),
+            interface_domain,
+            contact_domain,
+            mesh,
+            field),
+        std::invalid_argument);
 }
 
 TEST(GeneratedActiveBoundaryDomain,
@@ -1753,6 +1801,317 @@ TEST(GeneratedActiveBoundaryDomain,
             mesh,
             field),
         std::invalid_argument);
+}
+
+TEST(GeneratedActiveBoundaryDomain,
+     CollapsedTinyTetraCutUsesAuthoritativeFullCellBoundaryPhase)
+{
+    constexpr int interface_marker = 104;
+    constexpr int wall_marker = 10;
+    constexpr FE::Real epsilon = FE::Real{1.0e-8};
+    const SingleTetraBoundaryMesh mesh(wall_marker);
+
+    for (const FE::Real phase_sign : {FE::Real{1.0}, FE::Real{-1.0}}) {
+        SCOPED_TRACE(phase_sign);
+        auto request = interfaceRequest(interface_marker);
+        FE::interfaces::LevelSetCellCutInput input;
+        input.parent_cell = 0;
+        input.element_type = FE::ElementType::Tetra4;
+        input.node_coordinates.reserve(4u);
+        for (std::size_t node = 0u; node < 4u; ++node) {
+            const auto xi = FE::basis::ReferenceNodeLayout::get_node_coords(
+                FE::ElementType::Tetra4, node);
+            input.node_coordinates.push_back({{xi[0], xi[1], xi[2]}});
+        }
+        const std::array<FE::Real, 4> values{{
+            -phase_sign * epsilon,
+            phase_sign * (FE::Real{1.0} - epsilon),
+            phase_sign * (FE::Real{1.0} - epsilon),
+            phase_sign * (FE::Real{1.0} - epsilon),
+        }};
+        input.level_set_values.assign(values.begin(), values.end());
+        auto cut = interfaces::cutLinearLevelSetCell3D(request, input);
+        ASSERT_TRUE(cut.supported);
+        EXPECT_TRUE(cut.fragments.empty());
+        ASSERT_EQ(cut.volume_regions.size(), 1u);
+        EXPECT_TRUE(cut.volume_regions.front().full_cell_equivalent);
+        const auto dominant_side =
+            phase_sign > FE::Real{0.0}
+                ? FE::geometry::CutIntegrationSide::Positive
+                : FE::geometry::CutIntegrationSide::Negative;
+        EXPECT_EQ(cut.volume_regions.front().side, dominant_side);
+
+        interfaces::LevelSetInterfaceDomain interface_domain(request);
+        interface_domain.addVolumeRegion(
+            std::move(cut.volume_regions.front()));
+        const auto contact_domain =
+            interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+                contactRequest(interface_marker, wall_marker),
+                interface_domain,
+                mesh);
+        EXPECT_TRUE(contact_domain.empty());
+
+        interfaces::GeneratedActiveBoundaryScalarField field;
+        field.value_at_node = [values](FE::GlobalIndex node) {
+            return values.at(static_cast<std::size_t>(node));
+        };
+        const auto negative = interfaces::buildGeneratedActiveBoundaryDomain(
+            activeRequest(interface_marker,
+                          wall_marker,
+                          FE::geometry::CutIntegrationSide::Negative),
+            interface_domain,
+            contact_domain,
+            mesh,
+            field);
+        const auto positive = interfaces::buildGeneratedActiveBoundaryDomain(
+            activeRequest(interface_marker,
+                          wall_marker,
+                          FE::geometry::CutIntegrationSide::Positive),
+            interface_domain,
+            contact_domain,
+            mesh,
+            field);
+        const auto& dominant =
+            dominant_side == FE::geometry::CutIntegrationSide::Negative
+                ? negative
+                : positive;
+        const auto& collapsed =
+            dominant_side == FE::geometry::CutIntegrationSide::Negative
+                ? positive
+                : negative;
+        ASSERT_EQ(dominant.fragments().size(), 1u);
+        EXPECT_TRUE(dominant.fragments().front().full_face_equivalent);
+        EXPECT_GT(dominant.summary().measure, FE::Real{0.0});
+        EXPECT_EQ(collapsed.summary().measure, FE::Real{0.0});
+        const auto partition =
+            interfaces::validateGeneratedActiveBoundaryPartition(
+                negative,
+                positive,
+                interface_domain,
+                contact_domain,
+                mesh);
+        EXPECT_EQ(partition.max_partition_error, FE::Real{0.0});
+    }
+
+    RecordProperty("collapsed_tiny_tetra_phase_reversal_count", 2);
+}
+
+TEST(GeneratedActiveBoundaryDomain,
+     SnapshotPrunesBoundaryTraceWithoutRetainedParentVolume)
+{
+    constexpr int interface_marker = 106;
+    constexpr int wall_marker = 12;
+    constexpr FE::Real epsilon = FE::Real{1.0e-8};
+    const SingleTetraBoundaryMesh mesh(wall_marker);
+    auto request = interfaceRequest(interface_marker);
+    request.interface_quadrature_order = 1;
+    FE::interfaces::LevelSetCellCutInput input;
+    input.parent_cell = 0;
+    input.element_type = FE::ElementType::Tetra4;
+    input.node_coordinates.reserve(4u);
+    for (std::size_t node = 0u; node < 4u; ++node) {
+        const auto xi = FE::basis::ReferenceNodeLayout::get_node_coords(
+            FE::ElementType::Tetra4, node);
+        input.node_coordinates.push_back({{xi[0], xi[1], xi[2]}});
+    }
+    const std::array<FE::Real, 4> values{{
+        -epsilon,
+        -epsilon,
+        FE::Real{1.0} - epsilon,
+        FE::Real{1.0} - epsilon,
+    }};
+    input.level_set_values.assign(values.begin(), values.end());
+    auto cut = interfaces::cutLinearLevelSetCell3D(request, input);
+    ASSERT_TRUE(cut.supported);
+    ASSERT_EQ(cut.fragments.size(), 1u);
+    ASSERT_EQ(cut.volume_regions.size(), 2u);
+
+    interfaces::LevelSetInterfaceDomain interface_domain(request);
+    for (auto& fragment : cut.fragments) {
+        interface_domain.addFragment(std::move(fragment));
+    }
+    for (auto& region : cut.volume_regions) {
+        interface_domain.addVolumeRegion(std::move(region));
+    }
+    auto contact =
+        interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+            contactRequest(interface_marker, wall_marker),
+            interface_domain,
+            mesh);
+    ASSERT_EQ(contact.summary().active_fragment_count, 1u);
+    interfaces::GeneratedActiveBoundaryScalarField field;
+    field.value_at_node = [values](FE::GlobalIndex node) {
+        return values.at(static_cast<std::size_t>(node));
+    };
+    auto negative = interfaces::buildGeneratedActiveBoundaryDomain(
+        activeRequest(interface_marker,
+                      wall_marker,
+                      FE::geometry::CutIntegrationSide::Negative),
+        interface_domain,
+        contact,
+        mesh,
+        field);
+    auto positive = interfaces::buildGeneratedActiveBoundaryDomain(
+        activeRequest(interface_marker,
+                      wall_marker,
+                      FE::geometry::CutIntegrationSide::Positive),
+        interface_domain,
+        contact,
+        mesh,
+        field);
+    ASSERT_EQ(negative.fragments().size(), 1u);
+    ASSERT_EQ(positive.fragments().size(), 1u);
+    const int negative_marker = negative.marker();
+    const int positive_marker = positive.marker();
+
+    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    scalar.value = [epsilon](FE::GlobalIndex,
+                            const std::array<FE::Real, 3>& point,
+                            const FE::geometry::CutQuadratureProvenance&) {
+        return point[1] + point[2] - epsilon;
+    };
+    scalar.reference_gradient =
+        [](FE::GlobalIndex,
+           const std::array<FE::Real, 3>&,
+           const FE::geometry::CutQuadratureProvenance&) {
+            return std::array<FE::Real, 3>{{0.0, 1.0, 1.0}};
+        };
+    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    policy.minimum_retained_volume_fraction =
+        FE::assembly::CutIntegrationContext::
+            minGeneratedCutVolumeFraction();
+    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+        std::move(interface_domain),
+        {std::move(contact)},
+        {std::move(negative), std::move(positive)},
+        mesh,
+        policy,
+        std::move(scalar),
+        "sharp_boundary_test");
+    ASSERT_TRUE(snapshot);
+    const auto negative_record = std::find_if(
+        snapshot->rules().begin(),
+        snapshot->rules().end(),
+        [](const auto& record) {
+            return record.role == interfaces::
+                                      FreeSurfaceGeometryRuleRole::
+                                          NegativeExteriorBoundary;
+        });
+    ASSERT_NE(negative_record, snapshot->rules().end());
+    EXPECT_EQ(negative_record->retention,
+              interfaces::FreeSurfaceGeometryRetention::PrunedSmallVolume);
+    const auto positive_record = std::find_if(
+        snapshot->rules().begin(),
+        snapshot->rules().end(),
+        [](const auto& record) {
+            return record.role == interfaces::
+                                      FreeSurfaceGeometryRuleRole::
+                                          PositiveExteriorBoundary;
+        });
+    ASSERT_NE(positive_record, snapshot->rules().end());
+    EXPECT_EQ(positive_record->retention,
+              interfaces::FreeSurfaceGeometryRetention::Retained);
+
+    FE::assembly::CutIntegrationContext context;
+    context.addFreeSurfaceGeometrySnapshot(snapshot);
+    EXPECT_TRUE(context.interfaceRulesForMarker(negative_marker).empty());
+    EXPECT_EQ(context.interfaceRulesForMarker(positive_marker).size(), 1u);
+    RecordProperty("pruned_boundary_parent_volume_case_count", 1);
+}
+
+TEST(FreeSurfaceGeometrySnapshot,
+     AcceptsParallelTetrahedralCutsUnderActiveSideReversal)
+{
+    constexpr int interface_marker = 107;
+    constexpr std::array<FE::geometry::CutIntegrationSide, 2>
+        active_sides{{
+            FE::geometry::CutIntegrationSide::Negative,
+            FE::geometry::CutIntegrationSide::Positive,
+        }};
+    constexpr std::array<FE::Real, 3> interface_heights{{
+        FE::Real{1.0e-6}, FE::Real{0.49}, FE::Real{0.5}}};
+    const SingleTetraBoundaryMesh mesh;
+
+    for (const auto active_side : active_sides) {
+        for (const auto interface_height : interface_heights) {
+            SCOPED_TRACE(static_cast<unsigned>(active_side));
+            SCOPED_TRACE(interface_height);
+            auto request = interfaceRequest(interface_marker);
+            request.interface_quadrature_order = 1;
+            request.aligned_zero_interface_parent_side = active_side;
+            interfaces::LevelSetCellCutInput input;
+            input.parent_cell = 0;
+            input.element_type = FE::ElementType::Tetra4;
+            input.node_coordinates.reserve(4u);
+            input.level_set_values.reserve(4u);
+            const FE::Real active_sign =
+                active_side == FE::geometry::CutIntegrationSide::Negative
+                    ? FE::Real{1.0}
+                    : FE::Real{-1.0};
+            for (std::size_t node = 0u; node < 4u; ++node) {
+                const auto xi = FE::basis::ReferenceNodeLayout::get_node_coords(
+                    FE::ElementType::Tetra4, node);
+                input.node_coordinates.push_back(
+                    {{xi[0], xi[1], xi[2]}});
+                input.level_set_values.push_back(
+                    active_sign *
+                    (FE::Real{0.5} * (xi[0] + xi[1] + xi[2]) -
+                     interface_height));
+            }
+            auto cut =
+                interfaces::cutLinearLevelSetCell3D(request, input);
+            ASSERT_TRUE(cut.supported);
+            ASSERT_EQ(cut.fragments.size(), 1u);
+            if (interface_height < FE::Real{0.5}) {
+                ASSERT_EQ(cut.volume_regions.size(), 2u);
+            } else {
+                ASSERT_EQ(cut.volume_regions.size(), 1u);
+                EXPECT_TRUE(cut.volume_regions.front().full_cell_equivalent);
+                EXPECT_EQ(cut.volume_regions.front().side, active_side);
+            }
+
+            interfaces::LevelSetInterfaceDomain interface_domain(request);
+            for (auto& fragment : cut.fragments) {
+                interface_domain.addFragment(std::move(fragment));
+            }
+            for (auto& region : cut.volume_regions) {
+                interface_domain.addVolumeRegion(std::move(region));
+            }
+            interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+            scalar.value =
+                [active_sign, interface_height](
+                    FE::GlobalIndex,
+                    const std::array<FE::Real, 3>& point,
+                    const FE::geometry::CutQuadratureProvenance&) {
+                    return active_sign *
+                           (FE::Real{0.5} *
+                                (point[0] + point[1] + point[2]) -
+                            interface_height);
+                };
+            scalar.reference_gradient =
+                [active_sign](
+                    FE::GlobalIndex,
+                    const std::array<FE::Real, 3>&,
+                    const FE::geometry::CutQuadratureProvenance&) {
+                    return std::array<FE::Real, 3>{{
+                        FE::Real{0.5} * active_sign,
+                        FE::Real{0.5} * active_sign,
+                        FE::Real{0.5} * active_sign,
+                    }};
+                };
+            EXPECT_NO_THROW(
+                (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+                    std::move(interface_domain),
+                    {},
+                    {},
+                    mesh,
+                    snapshotPolicyWithoutBoundary(),
+                    std::move(scalar),
+                    "parallel_tetrahedral_cut"));
+        }
+    }
+
+    RecordProperty("parallel_tetrahedral_active_side_case_count", 6);
 }
 
 TEST(GeneratedActiveBoundaryDomain,
@@ -2729,6 +3088,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     std::uint64_t acceptance_count = 0u;
     std::uint64_t two_sided_cut_acceptance_count = 0u;
     std::uint64_t one_sided_full_cell_acceptance_count = 0u;
+    std::uint64_t one_sided_aligned_cut_acceptance_count = 0u;
     std::uint64_t empty_full_zero_acceptance_count = 0u;
 
     const auto complete_cut = interfaces::buildFreeSurfaceGeometrySnapshot(
@@ -2826,9 +3186,55 @@ TEST(FreeSurfaceGeometrySnapshot,
         }
     }
 
-    EXPECT_EQ(acceptance_count, 7u);
+    constexpr std::array<FE::geometry::CutIntegrationSide, 2>
+        aligned_parent_sides{{
+            FE::geometry::CutIntegrationSide::Negative,
+            FE::geometry::CutIntegrationSide::Positive,
+        }};
+    for (const auto parent_side : aligned_parent_sides) {
+        const FE::Real parent_value =
+            parent_side == FE::geometry::CutIntegrationSide::Negative
+                ? FE::Real{-1.0}
+                : FE::Real{1.0};
+        const std::array<FE::Real, 4> values{{
+            FE::Real{0.0},
+            FE::Real{0.0},
+            parent_value,
+            parent_value,
+        }};
+        auto domain = linearQuadCutDomain(
+            interface_marker,
+            values,
+            FE::Real{1.0e-12},
+            parent_side);
+        ASSERT_EQ(domain.cutCells().size(), 1u);
+        ASSERT_EQ(domain.fragments().size(), 1u);
+        ASSERT_EQ(domain.volumeRegions().size(), 1u);
+        EXPECT_EQ(domain.volumeRegions().front().side, parent_side);
+        EXPECT_NEAR(domain.volumeRegions().front().volume_fraction,
+                    FE::Real{1.0},
+                    FE::Real{1.0e-14});
+        const auto snapshot =
+            interfaces::buildFreeSurfaceGeometrySnapshot(
+                std::move(domain),
+                {},
+                {},
+                mesh,
+                snapshotPolicyWithoutBoundary(),
+                bilinearQuadScalar(values),
+                parent_side ==
+                        FE::geometry::CutIntegrationSide::Negative
+                    ? "aligned_negative_parent_family"
+                    : "aligned_positive_parent_family");
+        ASSERT_TRUE(snapshot);
+        ++acceptance_count;
+        ++one_sided_aligned_cut_acceptance_count;
+    }
+
+    EXPECT_EQ(acceptance_count, 9u);
     EXPECT_EQ(two_sided_cut_acceptance_count, 3u);
     EXPECT_EQ(one_sided_full_cell_acceptance_count, 3u);
+    EXPECT_EQ(one_sided_aligned_cut_acceptance_count, 2u);
     EXPECT_EQ(empty_full_zero_acceptance_count, 1u);
     RecordProperty("authoritative_cut_family_valid_acceptance_count",
                    acceptance_count);
@@ -2836,6 +3242,8 @@ TEST(FreeSurfaceGeometrySnapshot,
                    two_sided_cut_acceptance_count);
     RecordProperty("authoritative_one_sided_full_cell_acceptance_count",
                    one_sided_full_cell_acceptance_count);
+    RecordProperty("authoritative_one_sided_aligned_cut_acceptance_count",
+                   one_sided_aligned_cut_acceptance_count);
     RecordProperty("authoritative_empty_full_zero_acceptance_count",
                    empty_full_zero_acceptance_count);
 }

@@ -68,10 +68,10 @@ struct GeneratedBoundaryAggregateTraceCertificationOptions {
 /**
  * Certificate for one boundary-carrying aggregate support patch.
  *
- * A synthetic patch is a singleton full-active cell that carries generated
- * boundary measure but is not part of an aggregation patch. Existing
- * aggregation patches retain their canonical index. The generalized bound
- * is for
+ * A localized patch is either a singleton full-active boundary cell or a
+ * boundary-parent/aggregate-root support used when the complete canonical
+ * aggregate cannot fit the fixed exact quotient cap. Existing aggregation
+ * patches retain their canonical index. The generalized bound is for
  *
  *   integral_boundary (h_normal / mu) |(2 mu eps(v)) n|^2
  *       <= C_patch
@@ -82,12 +82,14 @@ struct GeneratedBoundaryAggregateTraceCertificationOptions {
  * preserving the quotient while avoiding viscosity-dependent overflow and
  * underflow. Acceptance is controlled by the exact factorized dyadic proof
  * stored in `generalized_bound.exact_dyadic`; formed dense matrices and their
- * floating eigensolver values are diagnostics only.
+ * floating eigensolver values are diagnostics only. Consequently,
+ * `generalized_bound.conservative_upper_bound` is the directly proven exact
+ * dyadic upper bound rather than the gauge-dependent padded floating bound.
  */
 struct GeneratedBoundaryAggregateTracePatchCertificate {
     std::size_t canonical_patch_index{
         std::numeric_limits<std::size_t>::max()};
-    bool synthetic_full_active_patch{false};
+    bool localized_support_patch{false};
     GlobalIndex root_cell_gid{INVALID_GLOBAL_INDEX};
     std::vector<GlobalIndex> support_cell_gids{};
     std::vector<std::uint64_t> boundary_rule_stable_ids{};
@@ -115,7 +117,7 @@ struct GeneratedBoundaryAggregateTracePatchCertificate {
 /**
  * Immutable result of one successful collective certification.
  *
- * Boundary rules are assigned exactly once to a canonical or synthetic
+ * Boundary rules are assigned exactly once to a canonical or localized
  * patch. Because aggregation patches are nonpartitioning, the global bound
  * is the maximum, over active cells, of the outward-rounded sum of the patch
  * bounds whose denominator supports contain that cell. This is generally
@@ -143,6 +145,7 @@ struct GeneratedBoundaryAggregateTraceCertificate {
     std::size_t active_cell_count{0u};
     std::size_t generated_boundary_rule_count{0u};
     std::size_t certified_patch_count{0u};
+    std::size_t localized_support_patch_count{0u};
     std::size_t maximum_support_overlap{0u};
     std::size_t maximum_terminal_tangent_dimension{0u};
     Real retained_active_physical_volume{0.0};

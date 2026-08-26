@@ -15,7 +15,9 @@
 #include "Analysis/GeneratedBoundaryAggregateTraceCertificate.h"
 #include "Assembly/CutIntegrationContext.h"
 #include "Assembly/GlobalSystemView.h"
+#include "Constraints/AffineConstraints.h"
 #include "Constraints/SmallCutAggregationConstraint.h"
+#include "Constraints/SystemConstraint.h"
 #include "Dofs/EntityDofMap.h"
 #include "Forms/BoundaryConditions.h"
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
@@ -55,6 +57,73 @@ constexpr int kActiveBoundaryMarker = 703;
 constexpr std::uint64_t kSourceLayoutRevision = 1u;
 constexpr std::uint64_t kSourceValueRevision = 1u;
 constexpr std::uint64_t kQuadraturePolicyKey = 704u;
+
+class HomogeneousVectorVertexPin final
+    : public constraints::ISystemConstraint {
+public:
+    HomogeneousVectorVertexPin(FieldId field, GlobalIndex local_vertex)
+        : field_(field), local_vertex_(local_vertex)
+    {
+    }
+
+    void apply(
+        const systems::FESystem& system,
+        constraints::AffineConstraints& affine_constraints) override
+    {
+        const auto* entity =
+            system.fieldDofHandler(field_).getEntityDofMap();
+        if (entity == nullptr) {
+            throw std::logic_error(
+                "homogeneous vector pin requires an entity DOF map");
+        }
+        const auto dofs = entity->getVertexDofs(local_vertex_);
+        if (dofs.empty()) {
+            throw std::logic_error(
+                "homogeneous vector pin requires vertex DOFs");
+        }
+        for (const auto dof : dofs) {
+            affine_constraints.addDirichlet(
+                system.fieldDofOffset(field_) + dof,
+                Real{0.0});
+        }
+    }
+
+    bool updateValues(
+        const systems::FESystem&,
+        constraints::AffineConstraints&,
+        double,
+        double) override
+    {
+        return false;
+    }
+
+    [[nodiscard]] bool isTimeDependent() const noexcept override
+    {
+        return false;
+    }
+
+    [[nodiscard]] constraints::ConstraintDependencyDeclaration
+    dependencyDeclaration() const override
+    {
+        auto result =
+            constraints::ISystemConstraint::dependencyDeclaration();
+        result.structural.labels = false;
+        result.structural.ownership = false;
+        return result;
+    }
+
+    [[nodiscard]] systems::SetupStorageRequirements
+    storageRequirements() const noexcept override
+    {
+        systems::SetupStorageRequirements result;
+        result.entity_dof_map = true;
+        return result;
+    }
+
+private:
+    FieldId field_{INVALID_FIELD_ID};
+    GlobalIndex local_vertex_{INVALID_GLOBAL_INDEX};
+};
 
 void installFormBoundTracePolicy(
     systems::FESystem& system,
@@ -389,7 +458,8 @@ fullNegativeSnapshot(
         "aggregate-trace-unit-triangle");
 }
 
-[[nodiscard]] std::shared_ptr<Mesh> rootedCutSquareMesh()
+[[nodiscard]] std::shared_ptr<Mesh> rootedCutSquareMesh(
+    bool label_full_cell_boundary = false)
 {
     auto base = std::make_shared<MeshBase>();
     CellShape cell_shape{};
@@ -429,17 +499,27 @@ fullNegativeSnapshot(
         const auto [vertices, count] =
             base->face_vertices_span(
                 static_cast<index_t>(face));
+        bool has_zero = false;
+        bool has_one = false;
         bool has_two = false;
         bool has_three = false;
         for (std::size_t vertex = 0u;
              vertices != nullptr && vertex < count;
              ++vertex) {
+            has_zero =
+                has_zero || vertices[vertex] == 0;
+            has_one =
+                has_one || vertices[vertex] == 1;
             has_two =
                 has_two || vertices[vertex] == 2;
             has_three =
                 has_three || vertices[vertex] == 3;
         }
-        if (has_two && has_three) {
+        const bool selected =
+            label_full_cell_boundary
+                ? has_zero && has_one
+                : has_two && has_three;
+        if (selected) {
             base->set_boundary_label(
                 static_cast<index_t>(face),
                 kWallMarker);
@@ -448,7 +528,7 @@ fullNegativeSnapshot(
     }
     if (labeled_faces != 1u) {
         throw std::runtime_error(
-            "rooted cut square top boundary face was not found");
+            "rooted cut square selected boundary face was not found");
     }
     return create_mesh(
         std::move(base),
@@ -1414,6 +1494,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
         certificate.generated_boundary_rule_count,
         1u);
     EXPECT_EQ(certificate.certified_patch_count, 1u);
+    EXPECT_EQ(certificate.localized_support_patch_count, 1u);
     EXPECT_EQ(certificate.maximum_support_overlap, 1u);
     EXPECT_EQ(
         certificate.maximum_terminal_tangent_dimension,
@@ -1429,7 +1510,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
 
     ASSERT_EQ(certificate.patches.size(), 1u);
     const auto& patch = certificate.patches.front();
-    EXPECT_TRUE(patch.synthetic_full_active_patch);
+    EXPECT_TRUE(patch.localized_support_patch);
     EXPECT_EQ(
         patch.canonical_patch_index,
         std::numeric_limits<std::size_t>::max());
@@ -1548,6 +1629,24 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
     EXPECT_NO_THROW(
         validateGeneratedBoundaryAggregateTraceCertificateDigest(
             certificate));
+    {
+        auto tampered = certificate;
+        ++tampered.localized_support_patch_count;
+        EXPECT_THROW(
+            validateGeneratedBoundaryAggregateTraceCertificateDigest(
+                tampered),
+            std::runtime_error);
+    }
+    {
+        auto tampered = certificate;
+        tampered.localized_support_patch_count = 0u;
+        tampered.patches.front().localized_support_patch = false;
+        tampered.patches.front().canonical_patch_index = 0u;
+        EXPECT_THROW(
+            validateGeneratedBoundaryAggregateTraceCertificateDigest(
+                tampered),
+            std::runtime_error);
+    }
     const auto expect_exact_metadata_tamper_rejected =
         [&](std::string_view label, auto mutate) {
             SCOPED_TRACE(std::string(label));
@@ -1634,7 +1733,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
             exact.exact_common_kernel_eliminated_coordinates.push_back(0u);
         });
 
-    EXPECT_GE(
+    EXPECT_EQ(
         bound.conservative_upper_bound,
         bound.exact_dyadic.directly_proven_upper_bound);
     EXPECT_NEAR(
@@ -2209,6 +2308,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
         certificate.generated_boundary_rule_count,
         1u);
     EXPECT_EQ(certificate.certified_patch_count, 1u);
+    EXPECT_EQ(certificate.localized_support_patch_count, 0u);
     EXPECT_EQ(certificate.maximum_support_overlap, 1u);
     EXPECT_EQ(
         certificate
@@ -2228,7 +2328,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
     const auto& patch =
         certificate.patches.front();
     EXPECT_FALSE(
-        patch.synthetic_full_active_patch);
+        patch.localized_support_patch);
     EXPECT_EQ(patch.canonical_patch_index, 0u);
     EXPECT_EQ(patch.root_cell_gid, root_cell_gid);
     EXPECT_EQ(
@@ -2336,7 +2436,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
     EXPECT_TRUE(
         bound.exact_dyadic
             .exact_common_kernel_eliminated_coordinates.empty());
-    EXPECT_GE(
+    EXPECT_EQ(
         bound.conservative_upper_bound,
         bound.exact_dyadic.directly_proven_upper_bound);
     EXPECT_NEAR(
@@ -2371,6 +2471,230 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
     EXPECT_EQ(
         repeated.global_conservative_upper_bound,
         certificate.global_conservative_upper_bound);
+}
+
+TEST(GeneratedBoundaryAggregateTraceCertificate,
+     HomogeneousPinnedRowsDoNotBlockCanonicalPreflight)
+{
+    const ScopedEnvironmentVariable slave_all_cut(
+        "SVMP_AGGREGATION_SLAVE_ALL_CUT",
+        "0");
+    const ScopedEnvironmentVariable linear_extension(
+        "SVMP_AGGREGATION_LINEAR_EXTENSION",
+        "0");
+    const ScopedEnvironmentVariable allow_unaggregated(
+        "SVMP_AGGREGATION_ALLOW_UNAGGREGATED",
+        "0");
+    const ScopedEnvironmentVariable maximum_lines(
+        "SVMP_AGGREGATION_MAX_LINES",
+        nullptr);
+
+    auto mesh = rootedCutSquareMesh();
+    auto scalar_space =
+        std::make_shared<spaces::H1Space>(
+            ElementType::Triangle3,
+            /*order=*/1);
+    auto velocity_space =
+        std::make_shared<spaces::ProductSpace>(
+            scalar_space,
+            /*components=*/2);
+
+    systems::FESystem system(mesh);
+    const auto velocity =
+        system.addField(
+            systems::FieldSpec{
+                .name = "velocity",
+                .space = velocity_space,
+                .components = 2});
+    system.addOperator("velocity");
+    system.addSystemConstraint(
+        std::make_unique<
+            constraints::SmallCutAggregationConstraint>(
+            velocity,
+            geometry::CutIntegrationSide::Negative,
+            kInterfaceMarker));
+    system.addSystemConstraint(
+        std::make_unique<HomogeneousVectorVertexPin>(
+            velocity,
+            /*local_vertex=*/1));
+    ASSERT_NO_THROW(system.setup());
+
+    const auto snapshot =
+        rootedCutSnapshot(system.meshAccess());
+    ASSERT_NE(snapshot, nullptr);
+    auto context =
+        std::make_shared<assembly::CutIntegrationContext>();
+    ASSERT_NO_THROW(
+        context->addFreeSurfaceGeometrySnapshot(
+            snapshot,
+            geometry::CutIntegrationSide::Negative));
+    system.setCutIntegrationContext(context);
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+
+    const auto certificate =
+        certifyGeneratedBoundaryAggregateTrace(
+            system,
+            GeneratedBoundaryAggregateTraceCertificationOptions{
+                .field = velocity,
+                .physical_boundary_marker = kWallMarker,
+                .volume_interface_marker = kInterfaceMarker,
+                .generated_active_boundary_marker =
+                    kActiveBoundaryMarker,
+                .dynamic_viscosity = Real{2.5},
+            });
+    EXPECT_EQ(certificate.generated_boundary_rule_count, 1u);
+    EXPECT_EQ(certificate.certified_patch_count, 1u);
+    EXPECT_EQ(certificate.localized_support_patch_count, 0u);
+    ASSERT_EQ(certificate.patches.size(), 1u);
+    const auto& patch = certificate.patches.front();
+    EXPECT_FALSE(patch.localized_support_patch);
+    EXPECT_EQ(patch.canonical_patch_index, 0u);
+    EXPECT_LT(patch.terminal_tangent_dof_count, 6u);
+    EXPECT_TRUE(patch.generalized_bound.exact_dyadic.applied);
+    EXPECT_NO_THROW(
+        validateGeneratedBoundaryAggregateTraceCertificateDigest(
+            certificate));
+}
+
+TEST(GeneratedBoundaryAggregateTraceCertificate,
+     FullActiveBoundaryInAggregateUsesClosedCellPatch)
+{
+    const ScopedEnvironmentVariable slave_all_cut(
+        "SVMP_AGGREGATION_SLAVE_ALL_CUT",
+        "0");
+    const ScopedEnvironmentVariable linear_extension(
+        "SVMP_AGGREGATION_LINEAR_EXTENSION",
+        "0");
+    const ScopedEnvironmentVariable allow_unaggregated(
+        "SVMP_AGGREGATION_ALLOW_UNAGGREGATED",
+        "0");
+    const ScopedEnvironmentVariable maximum_lines(
+        "SVMP_AGGREGATION_MAX_LINES",
+        nullptr);
+
+    auto mesh = rootedCutSquareMesh(
+        /*label_full_cell_boundary=*/true);
+    auto scalar_space =
+        std::make_shared<spaces::H1Space>(
+            ElementType::Triangle3,
+            /*order=*/1);
+    auto velocity_space =
+        std::make_shared<spaces::ProductSpace>(
+            scalar_space,
+            /*components=*/2);
+
+    systems::FESystem system(mesh);
+    const auto velocity =
+        system.addField(
+            systems::FieldSpec{
+                .name = "velocity",
+                .space = velocity_space,
+                .components = 2});
+    system.addOperator("velocity");
+    system.addSystemConstraint(
+        std::make_unique<
+            constraints::SmallCutAggregationConstraint>(
+            velocity,
+            geometry::CutIntegrationSide::Negative,
+            kInterfaceMarker));
+    ASSERT_NO_THROW(system.setup());
+
+    const auto full_cell_gid =
+        system.meshAccess().getCellGlobalId(0);
+    const auto cut_cell_gid =
+        system.meshAccess().getCellGlobalId(1);
+    ASSERT_NE(full_cell_gid, cut_cell_gid);
+    const auto snapshot =
+        rootedCutSnapshot(system.meshAccess());
+    ASSERT_NE(snapshot, nullptr);
+    ASSERT_EQ(snapshot->activeBoundaryDomains().size(), 1u);
+    ASSERT_EQ(
+        snapshot->activeBoundaryDomains().front().fragments().size(),
+        1u);
+    const auto& boundary_fragment =
+        snapshot->activeBoundaryDomains().front().fragments().front();
+    EXPECT_EQ(
+        boundary_fragment.parent_cell_global_id,
+        full_cell_gid);
+
+    auto context =
+        std::make_shared<assembly::CutIntegrationContext>();
+    ASSERT_NO_THROW(
+        context->addFreeSurfaceGeometrySnapshot(
+            snapshot,
+            geometry::CutIntegrationSide::Negative));
+    system.setCutIntegrationContext(context);
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+
+    const auto reports =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(reports.size(), 1u);
+    ASSERT_NE(reports.front(), nullptr);
+    ASSERT_EQ(reports.front()->patches.size(), 1u);
+    EXPECT_TRUE(std::binary_search(
+        reports.front()->patches.front().support_cell_gids.begin(),
+        reports.front()->patches.front().support_cell_gids.end(),
+        full_cell_gid));
+    EXPECT_TRUE(std::binary_search(
+        reports.front()->patches.front().support_cell_gids.begin(),
+        reports.front()->patches.front().support_cell_gids.end(),
+        cut_cell_gid));
+
+    const auto certificate =
+        certifyGeneratedBoundaryAggregateTrace(
+            system,
+            GeneratedBoundaryAggregateTraceCertificationOptions{
+                .field = velocity,
+                .physical_boundary_marker = kWallMarker,
+                .volume_interface_marker = kInterfaceMarker,
+                .generated_active_boundary_marker =
+                    kActiveBoundaryMarker,
+                .dynamic_viscosity = Real{2.5},
+            });
+    EXPECT_EQ(certificate.generated_boundary_rule_count, 1u);
+    EXPECT_EQ(certificate.certified_patch_count, 1u);
+    EXPECT_EQ(certificate.localized_support_patch_count, 1u);
+    EXPECT_EQ(certificate.maximum_support_overlap, 1u);
+    EXPECT_EQ(certificate.maximum_terminal_tangent_dimension, 6u);
+    ASSERT_EQ(certificate.patches.size(), 1u);
+
+    const auto& patch = certificate.patches.front();
+    EXPECT_TRUE(patch.localized_support_patch);
+    EXPECT_EQ(
+        patch.canonical_patch_index,
+        std::numeric_limits<std::size_t>::max());
+    EXPECT_EQ(patch.root_cell_gid, full_cell_gid);
+    EXPECT_EQ(
+        patch.support_cell_gids,
+        (std::vector<GlobalIndex>{full_cell_gid}));
+    EXPECT_EQ(
+        patch.boundary_rule_stable_ids,
+        (std::vector<std::uint64_t>{
+            boundary_fragment.stable_id}));
+    EXPECT_EQ(patch.raw_support_dof_count, 6u);
+    EXPECT_EQ(patch.terminal_tangent_dof_count, 6u);
+    EXPECT_EQ(patch.structural_rigid_mode_count, 3u);
+    EXPECT_NEAR(
+        patch.retained_support_physical_volume,
+        Real{0.5},
+        Real{1.0e-14});
+    EXPECT_NEAR(
+        patch.generated_boundary_physical_measure,
+        Real{1.0},
+        Real{1.0e-14});
+    const auto& exact =
+        patch.generalized_bound.exact_dyadic;
+    EXPECT_TRUE(exact.applied);
+    EXPECT_TRUE(exact.exact_factorized_materialization_proven);
+    EXPECT_TRUE(exact.exact_sparse_map_applied);
+    EXPECT_TRUE(exact.exact_common_kernel_proven);
+    EXPECT_EQ(exact.factorized_input_dimension, 3u);
+    EXPECT_EQ(exact.numerator_gram_block_count, 1u);
+    EXPECT_EQ(exact.denominator_gram_block_count, 1u);
+    EXPECT_NE(exact.factorized_input_digest, 0u);
+    EXPECT_NO_THROW(
+        validateGeneratedBoundaryAggregateTraceCertificateDigest(
+            certificate));
 }
 
 TEST(GeneratedBoundaryAggregateTraceCertificate,

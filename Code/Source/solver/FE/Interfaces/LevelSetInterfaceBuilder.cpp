@@ -900,7 +900,29 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
         for (const auto& point : ordered_cut_points) {
             cut_face.push_back(point.point);
         }
-        clipped_faces.push_back(std::move(cut_face));
+        const bool cut_face_is_existing_parent_face = std::any_of(
+            clipped_faces.begin(),
+            clipped_faces.end(),
+            [&](const std::vector<std::array<Real, 3>>& face) {
+                if (face.size() != cut_face.size()) {
+                    return false;
+                }
+                return std::all_of(
+                    cut_face.begin(),
+                    cut_face.end(),
+                    [&](const std::array<Real, 3>& point) {
+                        return std::any_of(
+                            face.begin(),
+                            face.end(),
+                            [&](const std::array<Real, 3>& existing) {
+                                return nearlySamePoint(
+                                    point, existing, tolerance);
+                            });
+                    });
+            });
+        if (!cut_face_is_existing_parent_face) {
+            clipped_faces.push_back(std::move(cut_face));
+        }
     }
     return clipped_faces;
 }
@@ -1039,22 +1061,41 @@ referenceTetrahedraFromFaces(
     return tetrahedra;
 }
 
-[[nodiscard]] RegionMoments complementMoments(
-    const RegionMoments& parent,
-    const RegionMoments& part)
+struct SideVolumeFractions {
+    Real negative{0.0};
+    Real positive{0.0};
+};
+
+[[nodiscard]] SideVolumeFractions sideVolumeFractions(
+    Real negative_measure,
+    Real positive_measure)
 {
-    RegionMoments complement;
-    complement.measure = parent.measure - part.measure;
-    if (complement.measure <= Real{1.0e-30}) {
-        complement.measure = Real{0.0};
-        complement.centroid = parent.centroid;
-        return complement;
+    if (!std::isfinite(negative_measure) || negative_measure < Real{0.0} ||
+        !std::isfinite(positive_measure) || positive_measure < Real{0.0}) {
+        throw std::runtime_error(
+            "cut-side moment partition contains an invalid measure");
     }
-    const auto parent_moment = scale(parent.centroid, parent.measure);
-    const auto part_moment = scale(part.centroid, part.measure);
-    complement.centroid =
-        scale(sub(parent_moment, part_moment), Real{1.0} / complement.measure);
-    return complement;
+    const Real represented_measure = negative_measure + positive_measure;
+    if (!std::isfinite(represented_measure) ||
+        !(represented_measure > Real{0.0})) {
+        throw std::runtime_error(
+            "cut-side moment partition has no positive represented measure");
+    }
+
+    SideVolumeFractions fractions;
+    // Form the smaller side directly and the larger side by complement.  This
+    // preserves a resolvable sliver under sign reversal without sacrificing
+    // the exact partition-of-unity relation used by downstream consumers.
+    if (negative_measure <= positive_measure) {
+        fractions.negative =
+            clampFraction(negative_measure / represented_measure);
+        fractions.positive = Real{1.0} - fractions.negative;
+    } else {
+        fractions.positive =
+            clampFraction(positive_measure / represented_measure);
+        fractions.negative = Real{1.0} - fractions.positive;
+    }
+    return fractions;
 }
 
 [[nodiscard]] Real parentMeasure3D(
@@ -1159,10 +1200,14 @@ std::uint64_t levelSetParentCornerTopologyKey(
 
     std::uint64_t hash = kTopologyHashOffset;
     constexpr std::uint64_t contract_tag =
-        0x4c53434f524e5231ull; // "LSCORNR1"
+        0x4c53434f524e5232ull; // "LSCORNR2"
     mixTopologyHash(hash, contract_tag);
     mixTopologyHash(hash, static_cast<std::uint64_t>(input.element_type));
     mixTopologyHash(hash, static_cast<std::uint64_t>(count));
+    mixTopologyHash(
+        hash,
+        static_cast<std::uint64_t>(
+            request.aligned_zero_interface_parent_side));
     for (std::size_t i = 0u; i < count; ++i) {
         const Real value = input.level_set_values[i];
         if (!std::isfinite(value)) {
@@ -1322,6 +1367,24 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
     const auto parent_centroid = parent_moments.centroid;
     const auto gradient_normal =
         estimateGradient2D(input.node_coordinates, signed_values, count);
+    std::size_t zero_edge_count = 0u;
+    for (std::size_t i = 0u; i < count; ++i) {
+        const std::size_t j = (i + 1u) % count;
+        if (std::abs(signed_values[i]) <= request.tolerance &&
+            std::abs(signed_values[j]) <= request.tolerance) {
+            ++zero_edge_count;
+        }
+    }
+    const auto aligned_parent_side =
+        request.aligned_zero_interface_parent_side;
+    const bool publish_aligned_zero_edge =
+        zero_count == 2u && zero_edge_count == 1u &&
+        ((aligned_parent_side ==
+              geometry::CutIntegrationSide::Negative &&
+          negative_count > 0u && positive_count == 0u) ||
+         (aligned_parent_side ==
+              geometry::CutIntegrationSide::Positive &&
+          positive_count > 0u && negative_count == 0u));
     const int planar_volume_order =
         implementedPlanarLevelSetCutVolumeExactOrder(
             request.resolvedVolumeQuadratureOrder());
@@ -1375,7 +1438,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
         result.diagnostic = "all corner level-set values are on the requested isovalue";
         return result;
     }
-    if (positive_count == 0u) {
+    if (positive_count == 0u && !publish_aligned_zero_edge) {
         const auto full_quadrature =
             cutSideQuadrature2D(input.node_coordinates,
                                 signed_values,
@@ -1403,7 +1466,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                                                   request.tolerance);
         return result;
     }
-    if (negative_count == 0u) {
+    if (negative_count == 0u && !publish_aligned_zero_edge) {
         const auto full_quadrature =
             cutSideQuadrature2D(input.node_coordinates,
                                 signed_values,
@@ -1541,8 +1604,20 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                          geometry::CutIntegrationSide::Positive,
                          request.tolerance);
     const auto negative_moments = polygonMoments2D(negative_polygon);
-    const auto positive_moments =
-        complementMoments(parent_moments, negative_moments);
+    const auto positive_moments = polygonMoments2D(positive_polygon);
+    const auto side_fractions =
+        publish_aligned_zero_edge
+            ? SideVolumeFractions{
+                  aligned_parent_side ==
+                          geometry::CutIntegrationSide::Negative
+                      ? Real{1.0}
+                      : Real{0.0},
+                  aligned_parent_side ==
+                          geometry::CutIntegrationSide::Positive
+                      ? Real{1.0}
+                      : Real{0.0}}
+            : sideVolumeFractions(
+                  negative_moments.measure, positive_moments.measure);
     auto negative_quadrature = polygonQuadrature2D(
         negative_polygon, request.tolerance, planar_volume_order);
     auto positive_quadrature = polygonQuadrature2D(
@@ -1551,11 +1626,8 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
         negative_polygon, request.tolerance);
     auto positive_reference_subcells = referenceTrianglesFromPolygon(
         positive_polygon, request.tolerance);
-    fragment.negative_volume_fraction =
-        parent_measure > Real{0.0}
-            ? clampFraction(negative_moments.measure / parent_measure)
-            : Real{0.0};
-    fragment.positive_volume_fraction = Real{1.0} - fragment.negative_volume_fraction;
+    fragment.negative_volume_fraction = side_fractions.negative;
+    fragment.positive_volume_fraction = side_fractions.positive;
     normalizeQuadratureWeightsToMeasure(
         negative_quadrature,
         parent_measure * fragment.negative_volume_fraction);
@@ -1606,7 +1678,9 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                          0u,
                          "cut-negative-volume",
                          negative_quadrature,
-                         false,
+                         publish_aligned_zero_edge &&
+                             aligned_parent_side ==
+                                 geometry::CutIntegrationSide::Negative,
                          planar_volume_order,
                          std::move(negative_reference_subcells)));
     appendSideVolumeRegion(
@@ -1624,7 +1698,9 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                          1u,
                          "cut-positive-volume",
                          positive_quadrature,
-                         false,
+                         publish_aligned_zero_edge &&
+                             aligned_parent_side ==
+                                 geometry::CutIntegrationSide::Positive,
                          planar_volume_order,
                          std::move(positive_reference_subcells)));
     result.fragments.push_back(std::move(fragment));
@@ -1672,6 +1748,16 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
     const auto parent_centroid = parent_moments.centroid;
     const auto gradient_normal =
         estimateGradient3D(input.node_coordinates, signed_values, count);
+    const auto aligned_parent_side =
+        request.aligned_zero_interface_parent_side;
+    const bool publish_aligned_zero_face =
+        zero_count == 3u &&
+        ((aligned_parent_side ==
+              geometry::CutIntegrationSide::Negative &&
+          negative_count == 1u && positive_count == 0u) ||
+         (aligned_parent_side ==
+              geometry::CutIntegrationSide::Positive &&
+          positive_count == 1u && negative_count == 0u));
     const auto append_collapsed_full_region =
         [&](CutInterfaceDegeneracy degeneracy, const char* reason) {
             const Real centroid_value =
@@ -1722,7 +1808,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
         result.diagnostic = "all tetrahedron corner level-set values are on the requested isovalue";
         return result;
     }
-    if (positive_count == 0u) {
+    if (positive_count == 0u && !publish_aligned_zero_face) {
         const auto full_faces =
             tetrahedronSideFaces(input.node_coordinates,
                                  signed_values,
@@ -1749,7 +1835,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
             classifyZeroContactTetrahedron(signed_values, request.tolerance);
         return result;
     }
-    if (negative_count == 0u) {
+    if (negative_count == 0u && !publish_aligned_zero_face) {
         const auto full_faces =
             tetrahedronSideFaces(input.node_coordinates,
                                  signed_values,
@@ -1894,7 +1980,20 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
     const auto negative_moments =
         polyhedronMomentsFromFaces(negative_faces, request.tolerance);
     const auto positive_moments =
-        complementMoments(parent_moments, negative_moments);
+        polyhedronMomentsFromFaces(positive_faces, request.tolerance);
+    const auto side_fractions =
+        publish_aligned_zero_face
+            ? SideVolumeFractions{
+                  aligned_parent_side ==
+                          geometry::CutIntegrationSide::Negative
+                      ? Real{1.0}
+                      : Real{0.0},
+                  aligned_parent_side ==
+                          geometry::CutIntegrationSide::Positive
+                      ? Real{1.0}
+                      : Real{0.0}}
+            : sideVolumeFractions(
+                  negative_moments.measure, positive_moments.measure);
     auto negative_quadrature =
         polyhedronQuadratureFromFaces(negative_faces, request.tolerance);
     auto positive_quadrature =
@@ -1911,11 +2010,8 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
             input.node_coordinates,
             signed_values,
             request.tolerance);
-    fragment.negative_volume_fraction =
-        parent_measure > Real{0.0}
-            ? clampFraction(negative_moments.measure / parent_measure)
-            : Real{0.0};
-    fragment.positive_volume_fraction = Real{1.0} - fragment.negative_volume_fraction;
+    fragment.negative_volume_fraction = side_fractions.negative;
+    fragment.positive_volume_fraction = side_fractions.positive;
     normalizeQuadratureWeightsToMeasure(
         negative_quadrature,
         parent_measure * fragment.negative_volume_fraction);
@@ -1962,7 +2058,9 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                          0u,
                          "cut-negative-volume",
                          negative_quadrature,
-                         false,
+                         publish_aligned_zero_face &&
+                             aligned_parent_side ==
+                                 geometry::CutIntegrationSide::Negative,
                          -1,
                          std::move(negative_reference_subcells)));
     appendSideVolumeRegion(
@@ -1980,7 +2078,9 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                          1u,
                          "cut-positive-volume",
                          positive_quadrature,
-                         false,
+                         publish_aligned_zero_face &&
+                             aligned_parent_side ==
+                                 geometry::CutIntegrationSide::Positive,
                          -1,
                          std::move(positive_reference_subcells)));
     result.fragments.push_back(std::move(fragment));

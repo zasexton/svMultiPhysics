@@ -57,6 +57,53 @@ Real vector_error(const std::array<Real, 3>& a, const std::array<Real, 3>& b)
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+Real reference_tetrahedron_measure(
+    const CutInterfaceReferenceSimplex& simplex)
+{
+    if (simplex.vertex_count != 4u) {
+        return 0.0;
+    }
+    const auto& a = simplex.vertices[0];
+    const auto& b = simplex.vertices[1];
+    const auto& c = simplex.vertices[2];
+    const auto& d = simplex.vertices[3];
+    const std::array<Real, 3> ab{{
+        b[0] - a[0], b[1] - a[1], b[2] - a[2]}};
+    const std::array<Real, 3> ac{{
+        c[0] - a[0], c[1] - a[1], c[2] - a[2]}};
+    const std::array<Real, 3> ad{{
+        d[0] - a[0], d[1] - a[1], d[2] - a[2]}};
+    const Real determinant =
+        ab[0] * (ac[1] * ad[2] - ac[2] * ad[1]) -
+        ab[1] * (ac[0] * ad[2] - ac[2] * ad[0]) +
+        ab[2] * (ac[0] * ad[1] - ac[1] * ad[0]);
+    return std::abs(determinant) * simplex.measure_scale / Real{6.0};
+}
+
+Real reference_triangle_measure(
+    const CutInterfaceReferenceSimplex& simplex)
+{
+    if (simplex.vertex_count != 3u) {
+        return 0.0;
+    }
+    const auto& a = simplex.vertices[0];
+    const auto& b = simplex.vertices[1];
+    const auto& c = simplex.vertices[2];
+    const std::array<Real, 3> ab{{
+        b[0] - a[0], b[1] - a[1], b[2] - a[2]}};
+    const std::array<Real, 3> ac{{
+        c[0] - a[0], c[1] - a[1], c[2] - a[2]}};
+    const std::array<Real, 3> product{{
+        ab[1] * ac[2] - ab[2] * ac[1],
+        ab[2] * ac[0] - ab[0] * ac[2],
+        ab[0] * ac[1] - ab[1] * ac[0]}};
+    const Real magnitude = std::sqrt(
+        product[0] * product[0] +
+        product[1] * product[1] +
+        product[2] * product[2]);
+    return Real{0.5} * magnitude * simplex.measure_scale;
+}
+
 Real integrate_volume_weight(const svmp::FE::geometry::CutQuadratureRule& rule)
 {
     Real value = 0.0;
@@ -655,6 +702,94 @@ TEST(LevelSetInterfaceBuilder, ClassifiesCutEdgeCases)
     EXPECT_FALSE(small_fragment_result.diagnostic.empty());
 }
 
+TEST(LevelSetInterfaceBuilder,
+     PublishesAlignedFacetFromRequestedParentSideExactlyOnce)
+{
+    constexpr std::array<geometry::CutIntegrationSide, 2> parent_sides{{
+        geometry::CutIntegrationSide::Negative,
+        geometry::CutIntegrationSide::Positive,
+    }};
+    int marker = 130;
+    for (const auto parent_side : parent_sides) {
+        auto request = make_request(marker++);
+        request.aligned_zero_interface_parent_side = parent_side;
+        const Real parent_value =
+            parent_side == geometry::CutIntegrationSide::Negative
+                ? Real{-1.0}
+                : Real{1.0};
+        const Real other_value = -parent_value;
+
+        LevelSetCellCutInput triangle{
+            .parent_cell = 20,
+            .element_type = ElementType::Triangle3,
+            .node_coordinates = {{{0.0, 0.0, 0.0}},
+                                 {{1.0, 0.0, 0.0}},
+                                 {{0.0, 1.0, 0.0}}},
+            .level_set_values = {0.0, 0.0, parent_value}};
+        const auto triangle_owner =
+            cutLinearLevelSetCell2D(request, triangle);
+        ASSERT_EQ(triangle_owner.fragments.size(), 1u);
+        ASSERT_EQ(triangle_owner.volume_regions.size(), 1u);
+        EXPECT_EQ(triangle_owner.fragments.front().degeneracy,
+                  CutInterfaceDegeneracy::EdgeTouch);
+        EXPECT_NEAR(triangle_owner.fragments.front().measure, 1.0, 1.0e-14);
+        EXPECT_EQ(triangle_owner.volume_regions.front().side, parent_side);
+        EXPECT_TRUE(
+            triangle_owner.volume_regions.front().full_cell_equivalent);
+        EXPECT_NEAR(triangle_owner.volume_regions.front().volume_fraction,
+                    1.0,
+                    1.0e-14);
+        triangle.parent_cell = 21;
+        triangle.level_set_values = {0.0, 0.0, other_value};
+        const auto triangle_other =
+            cutLinearLevelSetCell2D(request, triangle);
+        EXPECT_FALSE(triangle_other.hasActiveFragments());
+        ASSERT_EQ(triangle_other.volume_regions.size(), 1u);
+        EXPECT_NE(triangle_other.volume_regions.front().side, parent_side);
+
+        LevelSetCellCutInput tetrahedron{
+            .parent_cell = 22,
+            .element_type = ElementType::Tetra4,
+            .node_coordinates = {{{0.0, 0.0, 0.0}},
+                                 {{1.0, 0.0, 0.0}},
+                                 {{0.0, 1.0, 0.0}},
+                                 {{0.0, 0.0, 1.0}}},
+            .level_set_values = {0.0, 0.0, 0.0, parent_value}};
+        const auto tetrahedron_owner =
+            cutLinearLevelSetCell3D(request, tetrahedron);
+        ASSERT_EQ(tetrahedron_owner.fragments.size(), 1u);
+        ASSERT_EQ(tetrahedron_owner.volume_regions.size(), 1u);
+        EXPECT_EQ(tetrahedron_owner.fragments.front().degeneracy,
+                  CutInterfaceDegeneracy::EdgeTouch);
+        EXPECT_NEAR(tetrahedron_owner.fragments.front().measure, 0.5, 1.0e-14);
+        EXPECT_EQ(tetrahedron_owner.volume_regions.front().side, parent_side);
+        EXPECT_TRUE(
+            tetrahedron_owner.volume_regions.front().full_cell_equivalent);
+        EXPECT_NEAR(tetrahedron_owner.volume_regions.front().volume_fraction,
+                    1.0,
+                    1.0e-14);
+        EXPECT_NEAR(tetrahedron_owner.volume_regions.front().measure,
+                    1.0 / 6.0,
+                    1.0e-14);
+        Real reference_subcell_measure = 0.0;
+        for (const auto& subcell :
+             tetrahedron_owner.volume_regions.front().reference_subcells) {
+            reference_subcell_measure +=
+                reference_tetrahedron_measure(subcell);
+        }
+        EXPECT_NEAR(reference_subcell_measure, 1.0 / 6.0, 1.0e-14);
+        tetrahedron.parent_cell = 23;
+        tetrahedron.level_set_values = {0.0, 0.0, 0.0, other_value};
+        const auto tetrahedron_other =
+            cutLinearLevelSetCell3D(request, tetrahedron);
+        EXPECT_FALSE(tetrahedron_other.hasActiveFragments());
+        ASSERT_EQ(tetrahedron_other.volume_regions.size(), 1u);
+        EXPECT_NE(tetrahedron_other.volume_regions.front().side, parent_side);
+    }
+
+    RecordProperty("aligned_facet_parent_side_case_count", 4);
+}
+
 TEST(LevelSetInterfaceBuilder, PreservesSmallVolumeFractionsNearVertexAndEdge)
 {
     constexpr Real eps = 1.0e-7;
@@ -718,6 +853,166 @@ TEST(LevelSetInterfaceBuilder, PreservesSmallVolumeFractionsNearVertexAndEdge)
     EXPECT_EQ(rules[0].side, svmp::FE::geometry::CutIntegrationSide::Negative);
     ASSERT_EQ(rules[0].points.size(), 6u);
     EXPECT_NEAR(integrate_volume_weight(rules[0]), t, 1.0e-14);
+}
+
+TEST(LevelSetInterfaceBuilder,
+     PreservesSmallPlanarCornerVolumeUnderSignReversal)
+{
+    constexpr Real cut_ratio = 1.0e-8;
+    constexpr Real expected_small_fraction = cut_ratio * cut_ratio;
+    constexpr Real parent_measure = 0.5;
+    constexpr std::array<geometry::CutIntegrationSide, 2> small_sides{{
+        geometry::CutIntegrationSide::Negative,
+        geometry::CutIntegrationSide::Positive,
+    }};
+
+    for (std::size_t case_index = 0u;
+         case_index < small_sides.size();
+         ++case_index) {
+        const auto small_side = small_sides[case_index];
+        const Real sign =
+            small_side == geometry::CutIntegrationSide::Negative
+                ? Real{-1.0}
+                : Real{1.0};
+        const LevelSetCellCutInput input{
+            .parent_cell = static_cast<MeshIndex>(23u + case_index),
+            .element_type = ElementType::Triangle3,
+            .node_coordinates = {{{0.0, 0.0, 0.0}},
+                                 {{1.0, 0.0, 0.0}},
+                                 {{0.0, 1.0, 0.0}}},
+            .level_set_values = {
+                sign * cut_ratio,
+                sign * (cut_ratio - Real{1.0}),
+                sign * (cut_ratio - Real{1.0})}};
+
+        const auto result =
+            cutLinearLevelSetCell2D(make_request(/*marker=*/132), input);
+        ASSERT_EQ(result.fragments.size(), 1u);
+        ASSERT_EQ(result.volume_regions.size(), 2u)
+            << "small_side=" << static_cast<unsigned>(small_side);
+        const CutInterfaceVolumeRegion* small_region = nullptr;
+        const CutInterfaceVolumeRegion* large_region = nullptr;
+        for (const auto& region : result.volume_regions) {
+            if (region.side == small_side) {
+                small_region = &region;
+            } else {
+                large_region = &region;
+            }
+        }
+        ASSERT_NE(small_region, nullptr);
+        ASSERT_NE(large_region, nullptr);
+        EXPECT_NEAR(small_region->volume_fraction /
+                        expected_small_fraction,
+                    1.0,
+                    1.0e-8);
+        EXPECT_NEAR(small_region->measure /
+                        (parent_measure * expected_small_fraction),
+                    1.0,
+                    1.0e-8);
+        EXPECT_NEAR(small_region->volume_fraction +
+                        large_region->volume_fraction,
+                    1.0,
+                    1.0e-14);
+        ASSERT_FALSE(small_region->quadrature_points.empty());
+        Real quadrature_measure = 0.0;
+        for (const auto& point : small_region->quadrature_points) {
+            quadrature_measure += point.weight;
+        }
+        EXPECT_NEAR(quadrature_measure / small_region->measure,
+                    1.0,
+                    1.0e-12);
+        ASSERT_FALSE(small_region->reference_subcells.empty());
+        Real reference_measure = 0.0;
+        for (const auto& subcell : small_region->reference_subcells) {
+            reference_measure += reference_triangle_measure(subcell);
+        }
+        EXPECT_NEAR(reference_measure / small_region->measure,
+                    1.0,
+                    1.0e-8);
+    }
+}
+
+TEST(LevelSetInterfaceBuilder,
+     PreservesSmallTetrahedralCornerVolumeUnderSignReversal)
+{
+    constexpr Real interface_height = 1.0e-6;
+    constexpr Real parent_height = 0.5;
+    constexpr Real cut_ratio = interface_height / parent_height;
+    constexpr Real expected_small_fraction =
+        cut_ratio * cut_ratio * cut_ratio;
+    constexpr Real parent_measure = 1.0 / 12.0;
+    constexpr std::array<geometry::CutIntegrationSide, 2> small_sides{{
+        geometry::CutIntegrationSide::Negative,
+        geometry::CutIntegrationSide::Positive,
+    }};
+
+    for (std::size_t case_index = 0u;
+         case_index < small_sides.size();
+         ++case_index) {
+        const auto small_side = small_sides[case_index];
+        const Real sign =
+            small_side == geometry::CutIntegrationSide::Negative
+                ? Real{-1.0}
+                : Real{1.0};
+        const LevelSetCellCutInput input{
+            .parent_cell = static_cast<MeshIndex>(25u + case_index),
+            .element_type = ElementType::Tetra4,
+            .node_coordinates = {{{0.0, 0.0, 0.0}},
+                                 {{1.0, parent_height, 0.0}},
+                                 {{0.0, parent_height, 0.0}},
+                                 {{1.0, parent_height, 1.0}}},
+            .level_set_values = {
+                sign * interface_height,
+                sign * (interface_height - parent_height),
+                sign * (interface_height - parent_height),
+                sign * (interface_height - parent_height)}};
+
+        const auto result =
+            cutLinearLevelSetCell3D(make_request(/*marker=*/133), input);
+        ASSERT_EQ(result.fragments.size(), 1u);
+        ASSERT_EQ(result.volume_regions.size(), 2u)
+            << "small_side=" << static_cast<unsigned>(small_side);
+        const CutInterfaceVolumeRegion* small_region = nullptr;
+        const CutInterfaceVolumeRegion* large_region = nullptr;
+        for (const auto& region : result.volume_regions) {
+            if (region.side == small_side) {
+                small_region = &region;
+            } else {
+                large_region = &region;
+            }
+        }
+        ASSERT_NE(small_region, nullptr);
+        ASSERT_NE(large_region, nullptr);
+        EXPECT_GT(small_region->measure, 0.0);
+        EXPECT_NEAR(small_region->volume_fraction /
+                        expected_small_fraction,
+                    1.0,
+                    1.0e-10);
+        EXPECT_NEAR(small_region->measure /
+                        (parent_measure * expected_small_fraction),
+                    1.0,
+                    1.0e-10);
+        EXPECT_NEAR(small_region->volume_fraction +
+                        large_region->volume_fraction,
+                    1.0,
+                    1.0e-14);
+        ASSERT_FALSE(small_region->quadrature_points.empty());
+        Real quadrature_measure = 0.0;
+        for (const auto& point : small_region->quadrature_points) {
+            quadrature_measure += point.weight;
+        }
+        EXPECT_NEAR(quadrature_measure / small_region->measure,
+                    1.0,
+                    1.0e-12);
+        ASSERT_FALSE(small_region->reference_subcells.empty());
+        Real reference_measure = 0.0;
+        for (const auto& subcell : small_region->reference_subcells) {
+            reference_measure += reference_tetrahedron_measure(subcell);
+        }
+        EXPECT_NEAR(reference_measure / small_region->measure,
+                    1.0,
+                    1.0e-10);
+    }
 }
 
 TEST(LevelSetInterfaceBuilder, VolumeQuadratureMatchesConservativeToleranceBandFractions)

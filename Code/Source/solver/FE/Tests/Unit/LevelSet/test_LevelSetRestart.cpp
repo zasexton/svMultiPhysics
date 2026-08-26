@@ -215,6 +215,8 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
     interface_options.implicit_cut_root_coordinate_tolerance = 3.0e-12;
     interface_options.implicit_cut_root_max_iterations = 52;
     interface_options.implicit_cut_max_subdivision_depth = 18;
+    interface_options.aligned_zero_interface_parent_side =
+        FE::geometry::CutIntegrationSide::Positive;
 
     level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
     const auto built = lifecycle.build(system, interface_options, solution);
@@ -242,6 +244,8 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
                      3.0e-12);
     EXPECT_EQ(interface_record.implicit_cut_root_max_iterations, 52);
     EXPECT_EQ(interface_record.implicit_cut_max_subdivision_depth, 18);
+    EXPECT_EQ(interface_record.aligned_zero_interface_parent_side,
+              FE::geometry::CutIntegrationSide::Positive);
     EXPECT_EQ(interface_record.value_revision, built.value_revision);
     EXPECT_EQ(interface_record.mesh_geometry_revision, 7u);
     EXPECT_EQ(interface_record.mesh_topology_revision, 11u);
@@ -301,6 +305,8 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
               interface_options.implicit_cut_root_max_iterations);
     EXPECT_EQ(restored_options.implicit_cut_max_subdivision_depth,
               interface_options.implicit_cut_max_subdivision_depth);
+    EXPECT_EQ(restored_options.aligned_zero_interface_parent_side,
+              interface_options.aligned_zero_interface_parent_side);
 
     level_set::LevelSetGeneratedInterfaceLifecycle restored_lifecycle;
     restored_lifecycle.restoreValueRevision(interface_record.value_revision);

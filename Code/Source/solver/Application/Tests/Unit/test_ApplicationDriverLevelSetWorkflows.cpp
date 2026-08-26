@@ -6,16 +6,19 @@
 #include "../../Core/ApplicationDriver.cpp"
 
 #include "FE/Assembly/AssemblyContext.h"
+#include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Assembly/AssemblyKernel.h"
 #include "FE/Backends/Interfaces/BackendFactory.h"
 #include "FE/Backends/Interfaces/BackendKind.h"
 #include "FE/Interfaces/LevelSetInterfaceBuilder.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
+#include "FE/Spaces/SpaceFactory.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Fields/MeshFields.h"
 #include "Mesh/Mesh.h"
 #include "Parameters.h"
+#include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "tinyxml2.h"
 
 #include <algorithm>
@@ -24,11 +27,14 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -36,6 +42,9 @@
 #include <vector>
 
 namespace {
+
+namespace channel_ns =
+    svmp::Physics::formulations::navier_stokes;
 
 std::shared_ptr<svmp::Mesh> makeWorkflowTriangleMesh()
 {
@@ -360,6 +369,246 @@ std::shared_ptr<svmp::Mesh> makeWorkflowQuadPatch2x2Mesh()
   return svmp::create_mesh(std::move(base));
 }
 
+constexpr int kNativeChannelInterfaceMarker = 27410;
+constexpr int kNativeChannelInletMarker = 27411;
+constexpr int kNativeChannelOutletMarker = 27412;
+constexpr int kNativeChannelSideWallMarker = 27413;
+constexpr int kNativeChannelAnchorMarker = 27414;
+constexpr int kNativeChannelOtherMarker = 27415;
+constexpr svmp::FE::Real kNativeChannelLength = 2.0;
+constexpr svmp::FE::Real kNativeChannelWindowHeight = 1.0;
+constexpr svmp::FE::Real kNativeChannelDepth = 1.0;
+
+std::shared_ptr<svmp::Mesh> makeNativeManufacturedChannelMesh(
+    int upper_subdivisions)
+{
+  if (upper_subdivisions < 2) {
+    throw std::invalid_argument(
+        "native manufactured channel requires at least two upper layers");
+  }
+
+  constexpr int cells_x = 2;
+  constexpr int cells_z = 1;
+  std::vector<svmp::real_t> y_coordinates;
+  y_coordinates.reserve(static_cast<std::size_t>(upper_subdivisions + 4));
+  y_coordinates.push_back(-2.0);
+  y_coordinates.push_back(-1.0);
+  for (int layer = 0; layer <= upper_subdivisions; ++layer) {
+    y_coordinates.push_back(
+        static_cast<svmp::real_t>(layer) /
+        static_cast<svmp::real_t>(upper_subdivisions));
+  }
+  y_coordinates.push_back(2.0);
+
+  const int nodes_x = cells_x + 1;
+  const int nodes_y = static_cast<int>(y_coordinates.size());
+  const int nodes_z = cells_z + 1;
+  const auto vertex_index =
+      [nodes_x, nodes_y](int i, int j, int k) {
+        return static_cast<svmp::index_t>(
+            i + nodes_x * (j + nodes_y * k));
+      };
+
+  std::vector<svmp::real_t> coordinates;
+  coordinates.reserve(
+      static_cast<std::size_t>(nodes_x * nodes_y * nodes_z * 3));
+  for (int k = 0; k < nodes_z; ++k) {
+    for (int j = 0; j < nodes_y; ++j) {
+      for (int i = 0; i < nodes_x; ++i) {
+        coordinates.push_back(
+            kNativeChannelLength *
+            static_cast<svmp::real_t>(i) /
+            static_cast<svmp::real_t>(cells_x));
+        coordinates.push_back(y_coordinates[static_cast<std::size_t>(j)]);
+        coordinates.push_back(
+            kNativeChannelDepth *
+            static_cast<svmp::real_t>(k) /
+            static_cast<svmp::real_t>(cells_z));
+      }
+    }
+  }
+
+  constexpr std::array<std::array<std::size_t, 4>, 6> tetrahedra{{
+      {{0, 1, 2, 6}},
+      {{0, 2, 3, 6}},
+      {{0, 3, 7, 6}},
+      {{0, 7, 4, 6}},
+      {{0, 4, 5, 6}},
+      {{0, 5, 1, 6}},
+  }};
+  constexpr std::array<std::array<std::size_t, 4>, 6>
+      inlet_tetrahedra{{
+          {{1, 0, 3, 7}},
+          {{1, 0, 4, 7}},
+          {{1, 2, 3, 7}},
+          {{1, 2, 6, 7}},
+          {{1, 5, 4, 7}},
+          {{1, 5, 6, 7}},
+      }};
+  std::vector<svmp::offset_t> cell_offsets{0};
+  std::vector<svmp::index_t> cell_vertices;
+  std::vector<svmp::CellShape> cell_shapes;
+  const int cells_y = nodes_y - 1;
+  const auto cell_count = static_cast<std::size_t>(
+      cells_x * cells_y * cells_z *
+      static_cast<int>(tetrahedra.size()));
+  cell_offsets.reserve(cell_count + 1u);
+  cell_vertices.reserve(4u * cell_count);
+  cell_shapes.reserve(cell_count);
+  for (int k = 0; k < cells_z; ++k) {
+    for (int j = 0; j < cells_y; ++j) {
+      for (int i = 0; i < cells_x; ++i) {
+        const std::array<svmp::index_t, 8> nodes{{
+            vertex_index(i, j, k),
+            vertex_index(i + 1, j, k),
+            vertex_index(i + 1, j + 1, k),
+            vertex_index(i, j + 1, k),
+            vertex_index(i, j, k + 1),
+            vertex_index(i + 1, j, k + 1),
+            vertex_index(i + 1, j + 1, k + 1),
+            vertex_index(i, j + 1, k + 1),
+        }};
+        // Mirror the left-half body diagonal so the leading inlet wet strip
+        // is backed by a cut volume whose fraction is linear in strip width.
+        // The right half uses the opposite orientation for the outlet.  Their
+        // shared-face diagonal remains identical, and the side-wall strip is
+        // linear on both halves.  This lets the production pruning policy
+        // remove only higher-order corner remnants at the smallest samples.
+        const auto& cell_tetrahedra =
+            i == 0 ? inlet_tetrahedra : tetrahedra;
+        for (const auto& tetrahedron : cell_tetrahedra) {
+          for (const auto local_vertex : tetrahedron) {
+            cell_vertices.push_back(nodes[local_vertex]);
+          }
+          cell_offsets.push_back(
+              static_cast<svmp::offset_t>(cell_vertices.size()));
+          cell_shapes.push_back(
+              svmp::CellShape{svmp::CellFamily::Tetra, 4, 1});
+        }
+      }
+    }
+  }
+
+  auto base = std::make_shared<svmp::MeshBase>();
+  base->build_from_arrays(
+      /*spatial_dim=*/3,
+      coordinates,
+      cell_offsets,
+      cell_vertices,
+      cell_shapes);
+  base->finalize();
+  base->register_label(
+      "native_channel_inlet",
+      static_cast<svmp::label_t>(kNativeChannelInletMarker));
+  base->register_label(
+      "native_channel_outlet",
+      static_cast<svmp::label_t>(kNativeChannelOutletMarker));
+  base->register_label(
+      "native_channel_side_wall",
+      static_cast<svmp::label_t>(kNativeChannelSideWallMarker));
+  base->register_label(
+      "native_channel_anchor",
+      static_cast<svmp::label_t>(kNativeChannelAnchorMarker));
+  base->register_label(
+      "native_channel_other",
+      static_cast<svmp::label_t>(kNativeChannelOtherMarker));
+
+  constexpr svmp::FE::Real tolerance = 1.0e-12;
+  const auto on_plane = [tolerance](svmp::FE::Real value,
+                                    svmp::FE::Real target) {
+    return std::abs(value - target) <= tolerance;
+  };
+  std::array<std::size_t, 5> marker_counts{};
+  for (const auto face : base->boundary_faces()) {
+    const auto vertices = base->face_vertices(face);
+    if (vertices.size() != 3u) {
+      throw std::runtime_error(
+          "native manufactured channel has a nontriangular boundary face");
+    }
+    bool on_inlet = true;
+    bool on_outlet = true;
+    bool on_side_wall = true;
+    bool on_anchor = true;
+    svmp::FE::Real minimum_y =
+        std::numeric_limits<svmp::FE::Real>::infinity();
+    svmp::FE::Real maximum_y =
+        -std::numeric_limits<svmp::FE::Real>::infinity();
+    for (const auto vertex : vertices) {
+      const auto point = base->get_vertex_coords(vertex);
+      on_inlet = on_inlet && on_plane(point[0], 0.0);
+      on_outlet =
+          on_outlet && on_plane(point[0], kNativeChannelLength);
+      on_side_wall =
+          on_side_wall && on_plane(point[2], kNativeChannelDepth);
+      on_anchor = on_anchor && on_plane(point[1], -2.0);
+      minimum_y = std::min(
+          minimum_y, static_cast<svmp::FE::Real>(point[1]));
+      maximum_y = std::max(
+          maximum_y, static_cast<svmp::FE::Real>(point[1]));
+    }
+    const bool in_measured_window =
+        minimum_y >= -tolerance &&
+        maximum_y <= kNativeChannelWindowHeight + tolerance;
+
+    int marker = kNativeChannelOtherMarker;
+    std::size_t marker_index = 4u;
+    if (on_inlet && in_measured_window) {
+      marker = kNativeChannelInletMarker;
+      marker_index = 0u;
+    } else if (on_outlet && in_measured_window) {
+      marker = kNativeChannelOutletMarker;
+      marker_index = 1u;
+    } else if (on_side_wall && in_measured_window) {
+      marker = kNativeChannelSideWallMarker;
+      marker_index = 2u;
+    } else if (on_anchor) {
+      marker = kNativeChannelAnchorMarker;
+      marker_index = 3u;
+    }
+    base->set_boundary_label(
+        face, static_cast<svmp::label_t>(marker));
+    ++marker_counts[marker_index];
+  }
+
+  const auto expected_end_faces =
+      static_cast<std::size_t>(2 * upper_subdivisions);
+  const auto expected_side_faces =
+      static_cast<std::size_t>(
+          2 * cells_x * upper_subdivisions);
+  const auto expected_anchor_faces =
+      static_cast<std::size_t>(2 * cells_x * cells_z);
+  if (marker_counts[0] != expected_end_faces ||
+      marker_counts[1] != expected_end_faces ||
+      marker_counts[2] != expected_side_faces ||
+      marker_counts[3] != expected_anchor_faces ||
+      marker_counts[4] == 0u) {
+    throw std::runtime_error(
+        "native manufactured channel boundary labeling is incomplete");
+  }
+
+  const auto phi_handle = svmp::MeshFields::attach_field(
+      *base,
+      svmp::EntityKind::Vertex,
+      "phi_native_channel",
+      svmp::FieldScalarType::Float64,
+      1);
+  auto* phi_values =
+      svmp::MeshFields::field_data_as<svmp::real_t>(
+          *base, phi_handle);
+  if (phi_values == nullptr) {
+    throw std::runtime_error(
+        "native manufactured channel level-set field allocation failed");
+  }
+  for (svmp::index_t vertex = 0;
+       vertex < static_cast<svmp::index_t>(base->n_vertices());
+       ++vertex) {
+    phi_values[static_cast<std::size_t>(vertex)] =
+        base->get_vertex_coords(vertex)[1] - 0.5;
+  }
+
+  return svmp::create_mesh(std::move(base));
+}
+
 std::array<svmp::FE::Real, 3> workflowVertexPoint(const svmp::Mesh& mesh,
                                                   std::size_t vertex)
 {
@@ -483,6 +732,509 @@ private:
 
   const char* key_;
   std::optional<std::string> original_{};
+};
+
+struct NativeManufacturedChannelSample {
+  svmp::FE::Real target_wet_fraction{0.0};
+  std::array<svmp::FE::Real, 3> active_measures{};
+  std::array<svmp::FE::Real, 3> parent_measures{};
+  std::array<std::size_t, 3> active_rule_counts{};
+  std::array<std::size_t, 3> retained_active_rule_counts{};
+  std::array<int, 3> active_markers{{-1, -1, -1}};
+  std::array<svmp::FE::Real, 3> operator_work{};
+  std::array<std::size_t, 3> generated_route_term_counts{};
+  std::size_t physical_role_boundary_term_count{0u};
+  std::size_t trace_certificate_count{0u};
+  std::size_t trace_patch_count{0u};
+  std::size_t trace_localized_support_patch_count{0u};
+  std::size_t trace_localized_root_patch_count{0u};
+  std::size_t trace_maximum_factorized_input_dimension{0u};
+  std::size_t trace_boundary_rule_count{0u};
+  std::uint64_t trace_certificate_digest{0u};
+  svmp::FE::Real trace_global_conservative_upper_bound{0.0};
+  svmp::FE::Real trace_maximum_patch_conservative_upper_bound{0.0};
+  svmp::FE::Real trace_to_penalty_ratio{0.0};
+  svmp::FE::Real trace_grouped_symmetric_ratio{0.0};
+  svmp::FE::Real trace_symmetric_energy_floor{0.0};
+  std::size_t trace_maximum_support_overlap{0u};
+  bool trace_revision_match{false};
+  bool trace_factorized_proof_valid{false};
+};
+
+class NativeManufacturedChannelHarness {
+public:
+  using ActiveSide = svmp::FE::geometry::CutIntegrationSide;
+
+  inline static constexpr svmp::FE::Real inlet_traction = 1.25;
+  inline static constexpr svmp::FE::Real outlet_pressure = 1.2;
+  inline static constexpr svmp::FE::Real prescribed_side_velocity = 0.4;
+  inline static constexpr svmp::FE::Real viscosity = 0.02;
+  inline static constexpr svmp::FE::Real nitsche_gamma = 16.0;
+  inline static constexpr svmp::FE::Real side_facet_normal_scale = 2.0 / 3.0;
+
+  NativeManufacturedChannelHarness(ActiveSide active_side,
+                                   int upper_subdivisions)
+      : active_side_(active_side),
+        upper_subdivisions_(upper_subdivisions),
+        mesh_(makeNativeManufacturedChannelMesh(upper_subdivisions)),
+        system_(std::make_unique<svmp::FE::systems::FESystem>(mesh_))
+  {
+    if (active_side_ != ActiveSide::Negative &&
+        active_side_ != ActiveSide::Positive) {
+      throw std::invalid_argument(
+          "native manufactured channel requires a volume active side");
+    }
+
+    auto pressure_space = svmp::FE::spaces::SpaceFactory::create_h1(
+        svmp::FE::ElementType::Tetra4,
+        /*order=*/1);
+    auto velocity_space =
+        svmp::FE::spaces::SpaceFactory::create_vector_h1(
+            svmp::FE::ElementType::Tetra4,
+            /*order=*/1,
+            /*components=*/3);
+    level_set_ = system_->addField(svmp::FE::systems::FieldSpec{
+        .name = "phi_native_channel",
+        .space = pressure_space,
+        .components = 1,
+    });
+
+    channel_ns::IncompressibleNavierStokesVMSOptions options;
+    options.symmetric_nitsche_energy_qualification_scope =
+        channel_ns::SymmetricNitscheEnergyQualificationScope::
+            JointLowLevelPrerequisite;
+    options.velocity_field_name = "u_native_channel";
+    options.pressure_field_name = "p_native_channel";
+    options.density = 1.0;
+    options.viscosity = viscosity;
+    options.enable_convection = false;
+    options.enable_vms = false;
+    options.jit_policy.enable = false;
+    options.velocity_dirichlet.push_back(
+        channel_ns::IncompressibleNavierStokesVMSOptions::
+            VelocityDirichletBC{
+                .boundary_marker = kNativeChannelAnchorMarker,
+                .value = {0.0, 0.0, 0.0},
+            });
+    options.velocity_dirichlet_weak.push_back(
+        channel_ns::IncompressibleNavierStokesVMSOptions::
+            VelocityDirichletBC{
+                .boundary_marker = kNativeChannelSideWallMarker,
+                .value = {0.0, 0.0, prescribed_side_velocity},
+            });
+    options.traction_neumann.push_back(
+        channel_ns::IncompressibleNavierStokesVMSOptions::
+            TractionNeumannBC{
+                .boundary_marker = kNativeChannelInletMarker,
+                .traction = {0.0, inlet_traction, 0.0},
+            });
+    options.pressure_outflow.push_back(
+        channel_ns::IncompressibleNavierStokesVMSOptions::
+            PressureOutflowBC{
+                .boundary_marker = kNativeChannelOutletMarker,
+                .pressure = outlet_pressure,
+                .backflow_beta = 0.0,
+            });
+    options.free_surface.push_back(
+        channel_ns::IncompressibleNavierStokesVMSOptions::
+            FreeSurfaceBoundary{
+                .implementation =
+                    channel_ns::FreeSurfaceImplementation::UnfittedLevelSet,
+                .interface_marker = kNativeChannelInterfaceMarker,
+                .level_set_field_name = "phi_native_channel",
+                .generated_interface_domain_id =
+                    "native_manufactured_channel",
+                .generated_interface_geometry = "LinearCorner",
+                .level_set_isovalue = 0.0,
+                .active_domain =
+                    active_side_ == ActiveSide::Negative
+                        ? channel_ns::FreeSurfaceActiveDomain::LevelSetNegative
+                        : channel_ns::FreeSurfaceActiveDomain::LevelSetPositive,
+                .active_domain_method =
+                    channel_ns::FreeSurfaceActiveDomainMethod::CutVolume,
+                .external_pressure = 0.0,
+                .surface_tension = 0.0,
+                .use_level_set_curvature = false,
+                .cut_cell_stabilization = {
+                    .enabled = false,
+                },
+                .small_cut_aggregation = true,
+            });
+    options.nitsche_gamma = nitsche_gamma;
+    options.nitsche_symmetric = true;
+    options.nitsche_scale_with_p = false;
+
+    channel_ns::IncompressibleNavierStokesVMSModule module(
+        velocity_space, pressure_space, std::move(options));
+    module.registerOn(*system_);
+    system_->setup({});
+    velocity_ = system_->findFieldByName("u_native_channel");
+    pressure_ = system_->findFieldByName("p_native_channel");
+    if (velocity_ == svmp::FE::INVALID_FIELD_ID ||
+        pressure_ == svmp::FE::INVALID_FIELD_ID) {
+      throw std::runtime_error(
+          "native manufactured channel fluid fields are unavailable");
+    }
+
+    solution_.assign(
+        static_cast<std::size_t>(system_->dofHandler().getNumDofs()),
+        0.0);
+    previous_ = solution_;
+    probes_[0] = constantVelocityProbe({0.0, 1.0, 0.0});
+    probes_[1] = constantVelocityProbe({1.0, 0.0, 0.0});
+    probes_[2] = constantVelocityProbe({0.0, 0.0, 1.0});
+
+    const char* active_side_token =
+        active_side_ == ActiveSide::Negative
+            ? "LevelSetNegative"
+            : "LevelSetPositive";
+    const std::string xml =
+        std::string(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="native_channel_free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi_native_channel</Level_set_field_name>
+      <Generated_interface_domain_id>native_manufactured_channel</Generated_interface_domain_id>
+      <Interface_marker>27410</Interface_marker>
+      <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
+      <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
+      <Active_domain>)xml") +
+        active_side_token +
+        R"xml(</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+      <Small_cut_aggregation>true</Small_cut_aggregation>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml";
+    params_ = parseWorkflowParametersXml(xml.c_str());
+
+    sim_.primary_mesh = mesh_;
+    sim_.fe_system = std::move(system_);
+  }
+
+  [[nodiscard]] NativeManufacturedChannelSample sample(
+      svmp::FE::Real wet_fraction)
+  {
+    if (!(wet_fraction >= 0.0) || !(wet_fraction <= 1.0) ||
+        !std::isfinite(wet_fraction)) {
+      throw std::invalid_argument(
+          "native manufactured channel wet fraction is outside [0,1]");
+    }
+    const svmp::FE::Real exterior_offset =
+        0.05 / static_cast<svmp::FE::Real>(upper_subdivisions_);
+    const svmp::FE::Real interface_height =
+        wet_fraction == 0.0
+            ? -exterior_offset
+            : wet_fraction == 1.0
+                  ? kNativeChannelWindowHeight + exterior_offset
+                  : wet_fraction;
+    std::vector<svmp::FE::Real> level_set_vertex_values(
+        mesh_->n_vertices(), 0.0);
+    for (std::size_t vertex = 0; vertex < mesh_->n_vertices(); ++vertex) {
+      const auto y = workflowVertexPoint(*mesh_, vertex)[1];
+      level_set_vertex_values[vertex] =
+          active_side_ == ActiveSide::Negative
+              ? y - interface_height
+              : interface_height - y;
+    }
+    const auto level_set_coefficients = projectWorkflowVertexValues(
+        *sim_.fe_system,
+        level_set_,
+        level_set_vertex_values,
+        1u,
+        "native manufactured channel level set");
+    writeWorkflowFieldSlice(
+        *sim_.fe_system,
+        level_set_,
+        level_set_coefficients,
+        solution_);
+    previous_ = solution_;
+
+    const auto refresh_report =
+        refreshActiveCutIntegrationContextFromSolution(
+            sim_,
+            *params_,
+            solution_,
+            lifecycle_,
+            "native-manufactured-channel-test");
+    if (!refresh_report.refreshed ||
+        refresh_report.value_revision == 0u) {
+      throw std::runtime_error(
+          "native manufactured channel refresh produced no revision");
+    }
+    const auto* context = sim_.fe_system->cutIntegrationContext();
+    if (context == nullptr ||
+        context->freeSurfaceGeometrySnapshots().size() != 1u) {
+      throw std::runtime_error(
+          "native manufactured channel has no unique geometry snapshot");
+    }
+    const auto snapshot =
+        context->freeSurfaceGeometrySnapshots().front();
+    if (!snapshot) {
+      throw std::runtime_error(
+          "native manufactured channel geometry snapshot is null");
+    }
+    if (snapshot->interfaceDomain()
+            .request()
+            .aligned_zero_interface_parent_side != active_side_) {
+      throw std::runtime_error(
+          "native manufactured channel aligned interface parent side is stale");
+    }
+
+    NativeManufacturedChannelSample result;
+    result.target_wet_fraction = wet_fraction;
+    constexpr std::array<int, 3> physical_markers{{
+        kNativeChannelInletMarker,
+        kNativeChannelOutletMarker,
+        kNativeChannelSideWallMarker,
+    }};
+    for (std::size_t role = 0u; role < physical_markers.size(); ++role) {
+      const svmp::FE::interfaces::GeneratedActiveBoundaryDomain*
+          negative = nullptr;
+      const svmp::FE::interfaces::GeneratedActiveBoundaryDomain*
+          positive = nullptr;
+      for (const auto& active : snapshot->activeBoundaryDomains()) {
+        if (active.request().boundary_marker != physical_markers[role]) {
+          continue;
+        }
+        if (active.request().side == ActiveSide::Negative) {
+          negative = &active;
+        } else if (active.request().side == ActiveSide::Positive) {
+          positive = &active;
+        }
+      }
+      if (negative == nullptr || positive == nullptr) {
+        throw std::runtime_error(
+            "native manufactured channel boundary partition is incomplete");
+      }
+      const auto& selected =
+          active_side_ == ActiveSide::Negative ? *negative : *positive;
+      const auto selected_rule_role =
+          active_side_ == ActiveSide::Negative
+              ? svmp::FE::interfaces::
+                    FreeSurfaceGeometryRuleRole::NegativeExteriorBoundary
+              : svmp::FE::interfaces::
+                    FreeSurfaceGeometryRuleRole::PositiveExteriorBoundary;
+      for (const auto& record : snapshot->rules()) {
+        if (record.physical_boundary_marker != physical_markers[role] ||
+            (record.role != svmp::FE::interfaces::
+                                FreeSurfaceGeometryRuleRole::
+                                    NegativeExteriorBoundary &&
+             record.role != svmp::FE::interfaces::
+                                FreeSurfaceGeometryRuleRole::
+                                    PositiveExteriorBoundary)) {
+          continue;
+        }
+        result.parent_measures[role] +=
+            record.physical_rule.physical_measure;
+        if (record.role == selected_rule_role) {
+          result.active_measures[role] +=
+              record.physical_rule.physical_measure;
+        }
+      }
+      result.active_rule_counts[role] =
+          selected.boundaryQuadratureRules().size();
+      result.active_markers[role] = selected.marker();
+      result.retained_active_rule_counts[role] =
+          context->interfaceRulesForMarker(
+              result.active_markers[role]).size();
+    }
+
+    const auto& definition =
+        sim_.fe_system->operatorDefinition("equations");
+    for (const auto& term : definition.boundary) {
+      result.physical_role_boundary_term_count +=
+          static_cast<std::size_t>(
+              std::find(
+                  physical_markers.begin(),
+                  physical_markers.end(),
+                  term.marker) != physical_markers.end());
+    }
+    for (const auto& term : definition.interface_faces) {
+      for (std::size_t role = 0u; role < physical_markers.size(); ++role) {
+        result.generated_route_term_counts[role] +=
+            static_cast<std::size_t>(
+                term.marker == result.active_markers[role]);
+      }
+    }
+
+    const auto trace_records =
+        sim_.fe_system->generatedBoundaryNitscheTraceCertificates();
+    result.trace_certificate_count = trace_records.size();
+    if (trace_records.size() != 1u) {
+      throw std::runtime_error(
+          "native manufactured channel requires one trace certificate");
+    }
+    const auto& trace = trace_records.front();
+    result.trace_patch_count =
+        trace.certificate.certified_patch_count;
+    result.trace_localized_support_patch_count =
+        trace.certificate.localized_support_patch_count;
+    for (const auto& patch : trace.certificate.patches) {
+      result.trace_localized_root_patch_count +=
+          static_cast<std::size_t>(
+              patch.localized_support_patch &&
+              patch.support_cell_gids.size() > 1u);
+      result.trace_maximum_factorized_input_dimension =
+          std::max(
+              result.trace_maximum_factorized_input_dimension,
+              patch.generalized_bound.exact_dyadic
+                  .factorized_input_dimension);
+    }
+    result.trace_boundary_rule_count =
+        trace.certificate.generated_boundary_rule_count;
+    result.trace_certificate_digest =
+        trace.certificate.canonical_certificate_digest;
+    result.trace_global_conservative_upper_bound =
+        trace.certificate.global_conservative_upper_bound;
+    result.trace_maximum_patch_conservative_upper_bound =
+        trace.certificate.maximum_patch_conservative_upper_bound;
+    result.trace_to_penalty_ratio =
+        trace.trace_to_penalty_ratio;
+    result.trace_grouped_symmetric_ratio =
+        trace.grouped_symmetric_trace_to_penalty_ratio;
+    result.trace_symmetric_energy_floor =
+        trace.symmetric_energy_ratio_lower_bound.value_or(0.0);
+    result.trace_maximum_support_overlap =
+        trace.certificate.maximum_support_overlap;
+    result.trace_revision_match =
+        trace.policy.physical_boundary_marker ==
+            kNativeChannelSideWallMarker &&
+        trace.policy.generated_active_boundary_marker ==
+            result.active_markers[2] &&
+        trace.certificate.cut_context_content_revision ==
+            context->contentRevision() &&
+        trace.certificate.free_surface_snapshot_revision ==
+            snapshot->revision().snapshot_revision_key &&
+        trace.certificate.source_value_revision ==
+            refresh_report.value_revision &&
+        trace.aggregation_report != nullptr;
+    result.trace_factorized_proof_valid =
+        trace.certificate.patches.size() ==
+            trace.certificate.certified_patch_count &&
+        result.trace_localized_support_patch_count ==
+            static_cast<std::size_t>(std::count_if(
+                trace.certificate.patches.begin(),
+                trace.certificate.patches.end(),
+                [](const auto& patch) {
+                  return patch.localized_support_patch;
+                })) &&
+        std::all_of(
+            trace.certificate.patches.begin(),
+            trace.certificate.patches.end(),
+            [](const auto& patch) {
+              const auto& exact = patch.generalized_bound.exact_dyadic;
+              return exact.applied &&
+                     exact.denominator_positive_definite_proven &&
+                     exact.numerator_positive_semidefinite_proven &&
+                     exact.upper_inequality_proven &&
+                     exact.proof_input ==
+                         svmp::FE::math::DenseExactDyadicProofInput::
+                             FactorizedBinary64PositiveForm &&
+                     exact.exact_factorized_materialization_proven &&
+                     exact.exact_sparse_map_applied &&
+                     exact.factorized_input_digest != 0u &&
+                     exact.exact_common_kernel_proven;
+            });
+
+    const auto dof_count = sim_.fe_system->dofHandler().getNumDofs();
+    svmp::FE::assembly::DenseVectorView residual(dof_count);
+    residual.zero();
+    svmp::FE::systems::SystemStateView state;
+    state.dt = 1.0;
+    state.u = solution_;
+    state.u_prev = previous_;
+    const svmp::FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context = integrator.buildContext(1, state);
+    state.time_integration = &time_context;
+    svmp::FE::systems::AssemblyRequest request;
+    request.op = "equations";
+    request.want_matrix = false;
+    request.want_vector = true;
+    const auto assembly =
+        sim_.fe_system->assemble(request, state, nullptr, &residual);
+    if (!assembly.success) {
+      throw std::runtime_error(
+          "native manufactured channel assembly failed: " +
+          assembly.error_message);
+    }
+    for (std::size_t role = 0u; role < probes_.size(); ++role) {
+      if (probes_[role].size() !=
+          static_cast<std::size_t>(dof_count)) {
+        throw std::runtime_error(
+            "native manufactured channel probe size is stale");
+      }
+      for (svmp::FE::GlobalIndex row = 0; row < dof_count; ++row) {
+        result.operator_work[role] +=
+            residual[row] *
+            probes_[role][static_cast<std::size_t>(row)];
+      }
+    }
+    return result;
+  }
+
+  [[nodiscard]] static constexpr svmp::FE::Real
+  expectedFullForceWork() noexcept
+  {
+    return -inlet_traction * kNativeChannelWindowHeight *
+           kNativeChannelDepth;
+  }
+
+  [[nodiscard]] static constexpr svmp::FE::Real
+  expectedFullFluxWork() noexcept
+  {
+    return outlet_pressure * kNativeChannelWindowHeight *
+           kNativeChannelDepth;
+  }
+
+  [[nodiscard]] static constexpr svmp::FE::Real
+  expectedFullPenaltyWork() noexcept
+  {
+    return -nitsche_gamma * viscosity / side_facet_normal_scale *
+           prescribed_side_velocity * kNativeChannelLength *
+           kNativeChannelWindowHeight;
+  }
+
+private:
+  [[nodiscard]] std::vector<svmp::FE::Real> constantVelocityProbe(
+      const std::array<svmp::FE::Real, 3>& value) const
+  {
+    std::vector<svmp::FE::Real> vertex_values(
+        3u * mesh_->n_vertices(), 0.0);
+    for (std::size_t vertex = 0; vertex < mesh_->n_vertices(); ++vertex) {
+      for (std::size_t component = 0u; component < value.size(); ++component) {
+        vertex_values[3u * vertex + component] = value[component];
+      }
+    }
+    const auto coefficients = projectWorkflowVertexValues(
+        *system_,
+        velocity_,
+        vertex_values,
+        3u,
+        "native manufactured channel velocity probe");
+    std::vector<svmp::FE::Real> probe(
+        static_cast<std::size_t>(system_->dofHandler().getNumDofs()),
+        0.0);
+    writeWorkflowFieldSlice(*system_, velocity_, coefficients, probe);
+    return probe;
+  }
+
+  ActiveSide active_side_{ActiveSide::Negative};
+  int upper_subdivisions_{2};
+  std::shared_ptr<svmp::Mesh> mesh_{};
+  std::unique_ptr<svmp::FE::systems::FESystem> system_{};
+  svmp::FE::FieldId level_set_{svmp::FE::INVALID_FIELD_ID};
+  svmp::FE::FieldId velocity_{svmp::FE::INVALID_FIELD_ID};
+  svmp::FE::FieldId pressure_{svmp::FE::INVALID_FIELD_ID};
+  std::vector<svmp::FE::Real> solution_{};
+  std::vector<svmp::FE::Real> previous_{};
+  std::array<std::vector<svmp::FE::Real>, 3> probes_{};
+  application::core::SimulationComponents sim_{};
+  std::unique_ptr<Parameters> params_{};
+  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle_{};
 };
 
 class WorkflowNoOpCellKernel final : public svmp::FE::assembly::AssemblyKernel {
@@ -862,7 +1614,15 @@ TEST(ApplicationDriverLevelSetWorkflows,
           live_mesh.coordinateConfigurationKey(),
   };
   EXPECT_TRUE(dynamicContactStageMeshRevisionMatches(captured, live_mesh));
+
+  // This system is bound to reference coordinates. A mutation confined to
+  // the unused current frame must not invalidate its stage provenance.
   mesh->local_mesh().mark_current_geometry_changed();
+  EXPECT_TRUE(dynamicContactStageMeshRevisionMatches(captured, live_mesh));
+
+  // Mutating the coordinate frame selected by MeshAccess must invalidate the
+  // captured stage immediately.
+  mesh->local_mesh().mark_reference_geometry_changed();
   EXPECT_FALSE(dynamicContactStageMeshRevisionMatches(captured, live_mesh));
 #endif
 }
@@ -2559,6 +3319,278 @@ TEST(ApplicationDriverLevelSetWorkflows,
                        702,
                        svmp::FE::geometry::CutIntegrationSide::Positive)
                    .empty());
+#endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     PositiveDryEndpointBuildsCompleteAuthoritativeGeometry)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  using ActiveSide = svmp::FE::geometry::CutIntegrationSide;
+  NativeManufacturedChannelHarness harness(
+      ActiveSide::Positive,
+      /*upper_subdivisions=*/2);
+  const auto sample = harness.sample(0.0);
+  EXPECT_EQ(sample.target_wet_fraction, 0.0);
+  EXPECT_EQ(sample.active_measures,
+            (std::array<svmp::FE::Real, 3>{{0.0, 0.0, 0.0}}));
+  EXPECT_EQ(sample.active_rule_counts,
+            (std::array<std::size_t, 3>{{0u, 0u, 0u}}));
+  EXPECT_EQ(sample.retained_active_rule_counts,
+            (std::array<std::size_t, 3>{{0u, 0u, 0u}}));
+  EXPECT_EQ(sample.operator_work,
+            (std::array<svmp::FE::Real, 3>{{0.0, 0.0, 0.0}}));
+  EXPECT_EQ(sample.trace_certificate_count, 1u);
+  EXPECT_EQ(sample.trace_patch_count, 0u);
+  EXPECT_EQ(sample.trace_boundary_rule_count, 0u);
+  EXPECT_NE(sample.trace_certificate_digest, 0u);
+  EXPECT_TRUE(sample.trace_revision_match);
+  EXPECT_TRUE(sample.trace_factorized_proof_valid);
+#endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     NativeCertifiedManufacturedChannelTracksSharpBoundaryWork)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  using ActiveSide = svmp::FE::geometry::CutIntegrationSide;
+  constexpr std::array<ActiveSide, 2> active_sides{{
+      ActiveSide::Negative,
+      ActiveSide::Positive,
+  }};
+  constexpr std::array<svmp::FE::Real, 11> wet_fractions{{
+      0.0,
+      1.0e-8,
+      1.0e-6,
+      1.0e-4,
+      1.0e-2,
+      0.1,
+      0.25,
+      0.49,
+      0.5,
+      0.51,
+      1.0,
+  }};
+  constexpr std::array<svmp::FE::Real, 3> parent_measures{{
+      kNativeChannelWindowHeight * kNativeChannelDepth,
+      kNativeChannelWindowHeight * kNativeChannelDepth,
+      kNativeChannelLength * kNativeChannelWindowHeight,
+  }};
+  constexpr std::array<svmp::FE::Real, 3> full_work{{
+      NativeManufacturedChannelHarness::expectedFullForceWork(),
+      NativeManufacturedChannelHarness::expectedFullFluxWork(),
+      NativeManufacturedChannelHarness::expectedFullPenaltyWork(),
+  }};
+
+  std::array<std::vector<NativeManufacturedChannelSample>, 2>
+      samples_by_side;
+  svmp::FE::Real maximum_measure_error = 0.0;
+  svmp::FE::Real maximum_work_error = 0.0;
+  svmp::FE::Real maximum_dry_work_magnitude = 0.0;
+  svmp::FE::Real maximum_vertex_limit_mismatch = 0.0;
+  std::size_t minimum_positive_trace_patch_count =
+      std::numeric_limits<std::size_t>::max();
+  std::size_t maximum_localized_root_patch_count = 0u;
+  std::size_t maximum_factorized_input_dimension = 0u;
+  std::size_t maximum_trace_support_overlap = 0u;
+  svmp::FE::Real maximum_trace_upper_bound = 0.0;
+  svmp::FE::Real maximum_trace_ratio = 0.0;
+
+  for (std::size_t side_index = 0u;
+       side_index < active_sides.size();
+       ++side_index) {
+    NativeManufacturedChannelHarness harness(
+        active_sides[side_index],
+        /*upper_subdivisions=*/2);
+    auto& samples = samples_by_side[side_index];
+    samples.reserve(wet_fractions.size());
+    for (const auto fraction : wet_fractions) {
+      SCOPED_TRACE(::testing::Message()
+                   << "active_side_index=" << side_index
+                   << " wet_fraction=" << fraction);
+      samples.push_back(harness.sample(fraction));
+      const auto& sample = samples.back();
+      EXPECT_EQ(sample.target_wet_fraction, fraction);
+      EXPECT_EQ(sample.trace_certificate_count, 1u);
+      EXPECT_NE(sample.trace_certificate_digest, 0u);
+      EXPECT_TRUE(sample.trace_revision_match);
+      EXPECT_TRUE(sample.trace_factorized_proof_valid);
+      EXPECT_LE(
+          sample.trace_maximum_factorized_input_dimension,
+          svmp::FE::math::dense_exact_dyadic_maximum_dimension);
+      maximum_localized_root_patch_count = std::max(
+          maximum_localized_root_patch_count,
+          sample.trace_localized_root_patch_count);
+      maximum_factorized_input_dimension = std::max(
+          maximum_factorized_input_dimension,
+          sample.trace_maximum_factorized_input_dimension);
+      maximum_trace_support_overlap = std::max(
+          maximum_trace_support_overlap,
+          sample.trace_maximum_support_overlap);
+      maximum_trace_upper_bound = std::max(
+          maximum_trace_upper_bound,
+          sample.trace_global_conservative_upper_bound);
+      maximum_trace_ratio = std::max(
+          maximum_trace_ratio,
+          sample.trace_grouped_symmetric_ratio);
+      EXPECT_GE(sample.trace_global_conservative_upper_bound,
+                sample.trace_maximum_patch_conservative_upper_bound);
+      EXPECT_EQ(sample.trace_to_penalty_ratio,
+                sample.trace_grouped_symmetric_ratio);
+      EXPECT_EQ(sample.trace_symmetric_energy_floor, 0.25);
+      EXPECT_LE(sample.trace_grouped_symmetric_ratio,
+                (1.0 - sample.trace_symmetric_energy_floor) *
+                    (1.0 - sample.trace_symmetric_energy_floor));
+      EXPECT_EQ(sample.physical_role_boundary_term_count, 0u);
+      for (std::size_t role = 0u; role < parent_measures.size(); ++role) {
+        SCOPED_TRACE(::testing::Message() << "boundary_role=" << role);
+        EXPECT_GT(sample.generated_route_term_counts[role], 0u);
+        EXPECT_NEAR(sample.parent_measures[role],
+                    parent_measures[role],
+                    5.0e-11);
+        EXPECT_NEAR(sample.active_measures[role],
+                    fraction * parent_measures[role],
+                    5.0e-11);
+        EXPECT_NEAR(sample.operator_work[role],
+                    fraction * full_work[role],
+                    5.0e-10);
+        maximum_measure_error = std::max(
+            maximum_measure_error,
+            std::abs(
+                sample.parent_measures[role] -
+                parent_measures[role]));
+        maximum_measure_error = std::max(
+            maximum_measure_error,
+            std::abs(
+                sample.active_measures[role] -
+                fraction * parent_measures[role]));
+        maximum_work_error = std::max(
+            maximum_work_error,
+            std::abs(
+                sample.operator_work[role] -
+                fraction * full_work[role]));
+      }
+
+      if (fraction == 0.0) {
+        EXPECT_EQ(sample.active_rule_counts,
+                  (std::array<std::size_t, 3>{{0u, 0u, 0u}}));
+        EXPECT_EQ(sample.trace_patch_count, 0u);
+        EXPECT_EQ(sample.trace_boundary_rule_count, 0u);
+        for (const auto value : sample.operator_work) {
+          maximum_dry_work_magnitude = std::max(
+              maximum_dry_work_magnitude, std::abs(value));
+        }
+      } else {
+        for (std::size_t role = 0u;
+             role < sample.active_rule_counts.size();
+             ++role) {
+          EXPECT_GT(sample.active_rule_counts[role], 0u);
+          EXPECT_LE(sample.retained_active_rule_counts[role],
+                    sample.active_rule_counts[role]);
+        }
+        EXPECT_GT(sample.retained_active_rule_counts[2], 0u);
+        EXPECT_GT(sample.trace_patch_count, 0u);
+        EXPECT_EQ(sample.trace_boundary_rule_count,
+                  sample.retained_active_rule_counts[2]);
+        minimum_positive_trace_patch_count = std::min(
+            minimum_positive_trace_patch_count,
+            sample.trace_patch_count);
+      }
+    }
+
+    ASSERT_EQ(samples.size(), wet_fractions.size());
+    constexpr std::size_t left_index = 7u;
+    constexpr std::size_t crossing_index = 8u;
+    constexpr std::size_t right_index = 9u;
+    for (std::size_t role = 0u; role < full_work.size(); ++role) {
+      const auto left_limit =
+          samples[left_index].operator_work[role] +
+          0.01 * full_work[role];
+      const auto right_limit =
+          samples[right_index].operator_work[role] -
+          0.01 * full_work[role];
+      const auto crossing_value =
+          samples[crossing_index].operator_work[role];
+      maximum_vertex_limit_mismatch = std::max(
+          maximum_vertex_limit_mismatch,
+          std::max(std::abs(left_limit - crossing_value),
+                   std::abs(right_limit - crossing_value)));
+    }
+  }
+
+  svmp::FE::Real maximum_active_side_work_difference = 0.0;
+  ASSERT_EQ(samples_by_side[0].size(), samples_by_side[1].size());
+  for (std::size_t sample_index = 0u;
+       sample_index < samples_by_side[0].size();
+       ++sample_index) {
+    for (std::size_t role = 0u; role < full_work.size(); ++role) {
+      maximum_active_side_work_difference = std::max(
+          maximum_active_side_work_difference,
+          std::abs(
+              samples_by_side[0][sample_index].operator_work[role] -
+              samples_by_side[1][sample_index].operator_work[role]));
+    }
+  }
+
+  EXPECT_EQ(maximum_dry_work_magnitude, 0.0);
+  EXPECT_LE(maximum_measure_error, 5.0e-11);
+  EXPECT_LE(maximum_work_error, 5.0e-10);
+  EXPECT_LE(maximum_vertex_limit_mismatch, 5.0e-10);
+  EXPECT_LE(maximum_active_side_work_difference, 5.0e-10);
+  EXPECT_GT(minimum_positive_trace_patch_count, 0u);
+  EXPECT_GT(maximum_localized_root_patch_count, 0u);
+  EXPECT_LE(
+      maximum_factorized_input_dimension,
+      svmp::FE::math::dense_exact_dyadic_maximum_dimension);
+  const auto record_real = [](const char* name, svmp::FE::Real value) {
+    std::ostringstream text;
+    text << std::setprecision(
+                std::numeric_limits<svmp::FE::Real>::max_digits10)
+         << value;
+    ::testing::Test::RecordProperty(name, text.str());
+  };
+  ::testing::Test::RecordProperty(
+      "native_channel_active_side_count",
+      static_cast<int>(active_sides.size()));
+  ::testing::Test::RecordProperty(
+      "native_channel_wet_fraction_count",
+      static_cast<int>(wet_fractions.size()));
+  ::testing::Test::RecordProperty(
+      "native_channel_boundary_role_count", 3);
+  ::testing::Test::RecordProperty(
+      "native_channel_minimum_positive_trace_patch_count",
+      static_cast<int>(minimum_positive_trace_patch_count));
+  ::testing::Test::RecordProperty(
+      "native_channel_maximum_localized_root_patch_count",
+      static_cast<int>(maximum_localized_root_patch_count));
+  ::testing::Test::RecordProperty(
+      "native_channel_maximum_factorized_input_dimension",
+      static_cast<int>(maximum_factorized_input_dimension));
+  ::testing::Test::RecordProperty(
+      "native_channel_maximum_trace_support_overlap",
+      static_cast<int>(maximum_trace_support_overlap));
+  record_real(
+      "native_channel_maximum_trace_upper_bound",
+      maximum_trace_upper_bound);
+  record_real(
+      "native_channel_maximum_trace_ratio",
+      maximum_trace_ratio);
+  record_real(
+      "native_channel_maximum_measure_error",
+      maximum_measure_error);
+  record_real(
+      "native_channel_maximum_work_error",
+      maximum_work_error);
+  record_real(
+      "native_channel_maximum_vertex_limit_mismatch",
+      maximum_vertex_limit_mismatch);
+  record_real(
+      "native_channel_maximum_active_side_work_difference",
+      maximum_active_side_work_difference);
 #endif
 }
 

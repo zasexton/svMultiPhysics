@@ -170,6 +170,13 @@ struct CutInterfaceDomainRequest {
     int achieved_interface_quadrature_order{-1};
     int achieved_volume_quadrature_order{-1};
     bool keep_degenerate_fragments{false};
+    // When the zero set coincides with a complete cell facet, only cells on
+    // this side may publish the positive-measure interface fragment.  The
+    // Interface value preserves the legacy touch-only behavior.  One-sided
+    // unfitted consumers set this to their retained phase so an aligned
+    // interface has exactly one active parent cell.
+    geometry::CutIntegrationSide aligned_zero_interface_parent_side{
+        geometry::CutIntegrationSide::Interface};
 
     [[nodiscard]] int resolvedInterfaceQuadratureOrder() const noexcept {
         return interface_quadrature_order >= 0 ? interface_quadrature_order
@@ -188,7 +195,13 @@ struct CutInterfaceDomainRequest {
                tolerance > Real{0.0} &&
                quadrature_order >= 0 &&
                resolvedInterfaceQuadratureOrder() >= 0 &&
-               resolvedVolumeQuadratureOrder() >= 0;
+               resolvedVolumeQuadratureOrder() >= 0 &&
+               (aligned_zero_interface_parent_side ==
+                    geometry::CutIntegrationSide::Interface ||
+                aligned_zero_interface_parent_side ==
+                    geometry::CutIntegrationSide::Negative ||
+                aligned_zero_interface_parent_side ==
+                    geometry::CutIntegrationSide::Positive);
     }
 };
 

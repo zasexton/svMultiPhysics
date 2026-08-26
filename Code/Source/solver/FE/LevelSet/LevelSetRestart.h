@@ -54,6 +54,8 @@ struct LevelSetGeneratedInterfaceRestartRecord {
     int implicit_cut_max_subdivision_depth{16};
     int affected_cell_neighborhood_layers{0};
     bool keep_degenerate_fragments{false};
+    geometry::CutIntegrationSide aligned_zero_interface_parent_side{
+        geometry::CutIntegrationSide::Interface};
     std::uint64_t value_revision{0};
     std::uint64_t mesh_geometry_revision{0};
     std::uint64_t mesh_topology_revision{0};

@@ -110,6 +110,8 @@ struct LevelSetGeneratedInterfaceOptions {
     int implicit_cut_root_max_iterations{48};
     int implicit_cut_max_subdivision_depth{16};
     bool keep_degenerate_fragments{false};
+    geometry::CutIntegrationSide aligned_zero_interface_parent_side{
+        geometry::CutIntegrationSide::Interface};
     bool allow_corner_linearized_geometry{false};
     bool require_production_qualified_implicit_cut_backend{false};
     int affected_cell_neighborhood_layers{0};

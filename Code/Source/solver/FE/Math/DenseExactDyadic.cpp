@@ -32,7 +32,8 @@ namespace {
 
 using boost::multiprecision::cpp_int;
 
-constexpr std::size_t kMaximumExactDimension = 32u;
+constexpr std::size_t kMaximumExactDimension =
+    dense_exact_dyadic_maximum_dimension;
 constexpr std::size_t kMaximumIntegerBits = 262144u;
 constexpr std::size_t kMaximumLegacyExactUpdates = 2000000u;
 constexpr std::size_t kMaximumExactGramBlocks = 16384u;
@@ -713,7 +714,10 @@ void preflightSparseMapShape(
     DENSE_EXACT_CHECK(
         map.output_dimension <= kMaximumExactDimension,
         std::string(label) +
-            ": exact sparse-map output dimension is outside its cap");
+            ": exact sparse-map output dimension " +
+            std::to_string(map.output_dimension) +
+            " exceeds the fixed cap " +
+            std::to_string(kMaximumExactDimension));
     if (map.output_dimension != 0u) {
         static_cast<void>(checkedSquare(map.output_dimension, label));
     }

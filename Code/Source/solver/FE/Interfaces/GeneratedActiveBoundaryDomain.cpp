@@ -8,6 +8,7 @@
 #include <limits>
 #include <locale>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -408,6 +409,37 @@ contactFragmentsForFace(
     return std::all_of(points.begin(), points.end(), [](const auto& point) {
         return point.value == Real{0.0};
     });
+}
+
+[[nodiscard]] bool hasAuthoritativeInterfaceFragment(
+    const LevelSetInterfaceDomain& domain,
+    MeshIndex cell) noexcept
+{
+    return std::any_of(
+        domain.fragments().begin(),
+        domain.fragments().end(),
+        [cell](const auto& fragment) {
+            return fragment.active() && fragment.parent_cell == cell;
+        });
+}
+
+[[nodiscard]] std::optional<geometry::CutIntegrationSide>
+authoritativeFullCellSide(const LevelSetInterfaceDomain& domain,
+                          MeshIndex cell)
+{
+    std::optional<geometry::CutIntegrationSide> side;
+    for (const auto& region : domain.volumeRegions()) {
+        if (!region.active() || region.parent_cell != cell ||
+            !region.full_cell_equivalent) {
+            continue;
+        }
+        if (side.has_value() && *side != region.side) {
+            throw std::invalid_argument(
+                "sharp active-boundary construction found conflicting authoritative full-cell phases");
+        }
+        side = region.side;
+    }
+    return side;
 }
 
 [[nodiscard]] bool sameRevisionKey(
@@ -864,6 +896,29 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
                 }
                 face_points.push_back(reference_nodes[corner]);
                 signed_face.push_back({reference_nodes[corner], value});
+            }
+            if (!hasAuthoritativeInterfaceFragment(
+                    interface_domain,
+                    static_cast<MeshIndex>(cell))) {
+                const auto full_side = authoritativeFullCellSide(
+                    interface_domain,
+                    static_cast<MeshIndex>(cell));
+                if (!full_side.has_value()) {
+                    throw std::invalid_argument(
+                        "sharp active-boundary construction found neither an authoritative interface fragment nor a full-cell phase");
+                }
+                // A LinearCorner cell whose surface fragment falls below the
+                // source geometry's measure tolerance is represented as one
+                // full dominant-phase volume.  Its exterior trace must inherit
+                // that same represented phase instead of reconstructing a
+                // smaller scalar-field cut that has no authoritative contact.
+                const Real represented_value =
+                    *full_side == geometry::CutIntegrationSide::Negative
+                        ? Real{-1.0}
+                        : Real{1.0};
+                for (auto& point : signed_face) {
+                    point.value = represented_value;
+                }
             }
             if (allZero(signed_face)) {
                 throw std::invalid_argument(

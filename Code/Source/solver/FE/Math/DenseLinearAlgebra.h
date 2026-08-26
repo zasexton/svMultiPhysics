@@ -274,6 +274,9 @@ dense_symmetric_eigenvalue_bounds(
     std::size_t n,
     std::string_view label = "dense symmetric matrix");
 
+/** Fixed output-dimension cap enforced by every exact dyadic backend. */
+inline constexpr std::size_t dense_exact_dyadic_maximum_dimension = 32u;
+
 /**
  * Prove a generalized upper bound on an already-formed SPD quotient.
  *

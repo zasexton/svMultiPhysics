@@ -740,7 +740,9 @@ void addRule(std::vector<FreeSurfaceGeometryRuleRecord>& records,
              std::uint64_t source_topology_key,
              int physical_boundary_marker = -1,
              std::vector<std::uint64_t> source_ids = {},
-             std::int64_t component_id = -1)
+             std::int64_t component_id = -1,
+             std::optional<FreeSurfaceGeometryRetention>
+                 retention_override = std::nullopt)
 {
     if (rule.kind == geometry::CutQuadratureKind::Volume &&
         rule.full_cell_equivalent) {
@@ -798,13 +800,13 @@ void addRule(std::vector<FreeSurfaceGeometryRuleRecord>& records,
             "free-surface rule has invalid physical-boundary provenance");
     }
     record.physical_boundary_marker = physical_boundary_marker;
-    record.retention =
+    record.retention = retention_override.value_or(
         volumeRole(record.role) && !rule.full_cell_equivalent &&
                 std::isfinite(rule.volume_fraction) &&
                 rule.volume_fraction > Real{0.0} &&
                 rule.volume_fraction < policy.minimum_retained_volume_fraction
             ? FreeSurfaceGeometryRetention::PrunedSmallVolume
-            : FreeSurfaceGeometryRetention::Retained;
+            : FreeSurfaceGeometryRetention::Retained);
     record.locally_owned =
         rule.provenance.owner_rank == mesh.parallelRank();
     record.source_fragment_stable_ids = std::move(source_ids);
@@ -2071,15 +2073,45 @@ void requireCompleteAuthoritativeCutFamilies(
     struct ParentVolumeState {
         bool has_negative{false};
         bool has_positive{false};
+        bool has_full_negative{false};
+        bool has_full_positive{false};
+        bool has_aligned_negative_fragment{false};
+        bool has_aligned_positive_fragment{false};
+        std::size_t negative_region_count{0u};
+        std::size_t positive_region_count{0u};
+        std::size_t fragment_count{0u};
     };
 
     std::map<MeshIndex, ParentVolumeState> volume_state_by_parent;
     for (const auto& fragment : interface_domain.fragments()) {
-        if (fragment.active() &&
-            fragment.interface_marker != interface_domain.marker()) {
+        if (!fragment.active()) {
+            continue;
+        }
+        if (fragment.interface_marker != interface_domain.marker()) {
             throw std::invalid_argument(
                 "active authoritative free-surface fragment has the wrong interface marker");
         }
+        auto& state = volume_state_by_parent[fragment.parent_cell];
+        ++state.fragment_count;
+        const Real tolerance = interface_domain.request().tolerance;
+        const bool is_edge_aligned =
+            fragment.degeneracy == CutInterfaceDegeneracy::EdgeTouch;
+        state.has_aligned_negative_fragment =
+            state.has_aligned_negative_fragment ||
+            (is_edge_aligned &&
+             fragment.min_level_set_value < -tolerance &&
+             fragment.max_level_set_value <= tolerance &&
+             std::abs(fragment.negative_volume_fraction - Real{1.0}) <=
+                 tolerance &&
+             std::abs(fragment.positive_volume_fraction) <= tolerance);
+        state.has_aligned_positive_fragment =
+            state.has_aligned_positive_fragment ||
+            (is_edge_aligned &&
+             fragment.max_level_set_value > tolerance &&
+             fragment.min_level_set_value >= -tolerance &&
+             std::abs(fragment.positive_volume_fraction - Real{1.0}) <=
+                 tolerance &&
+             std::abs(fragment.negative_volume_fraction) <= tolerance);
     }
     for (const auto& region : interface_domain.volumeRegions()) {
         if (!region.active()) {
@@ -2090,12 +2122,27 @@ void requireCompleteAuthoritativeCutFamilies(
                 "active authoritative free-surface volume region has the wrong interface marker");
         }
         auto& state = volume_state_by_parent[region.parent_cell];
-        state.has_negative =
-            state.has_negative ||
-            region.side == geometry::CutIntegrationSide::Negative;
-        state.has_positive =
-            state.has_positive ||
-            region.side == geometry::CutIntegrationSide::Positive;
+        const Real measure_tolerance = std::max(
+            interface_domain.request().tolerance,
+            interface_domain.request().tolerance * region.parent_measure);
+        const bool covers_parent =
+            region.full_cell_equivalent &&
+            std::abs(region.volume_fraction - Real{1.0}) <=
+                interface_domain.request().tolerance &&
+            std::abs(region.measure - region.parent_measure) <=
+                measure_tolerance;
+        if (region.side == geometry::CutIntegrationSide::Negative) {
+            state.has_negative = true;
+            state.has_full_negative =
+                state.has_full_negative || covers_parent;
+            ++state.negative_region_count;
+        } else if (region.side ==
+                   geometry::CutIntegrationSide::Positive) {
+            state.has_positive = true;
+            state.has_full_positive =
+                state.has_full_positive || covers_parent;
+            ++state.positive_region_count;
+        }
     }
 
     const auto cut_cells = interface_domain.cutCells();
@@ -2103,10 +2150,57 @@ void requireCompleteAuthoritativeCutFamilies(
                                           cut_cells.end());
     for (const auto parent : cut_cells) {
         const auto found = volume_state_by_parent.find(parent);
-        if (found == volume_state_by_parent.end() ||
-            !found->second.has_negative || !found->second.has_positive) {
+        if (found == volume_state_by_parent.end()) {
             throw std::invalid_argument(
                 "authoritative free-surface cut cell is missing an active negative or positive source volume region");
+        }
+        const auto& state = found->second;
+        const bool has_complete_two_phase_family =
+            state.has_negative && state.has_positive;
+        const auto aligned_parent_side = interface_domain.request()
+                                             .aligned_zero_interface_parent_side;
+        const bool has_complete_aligned_negative_family =
+            aligned_parent_side ==
+                geometry::CutIntegrationSide::Negative &&
+            state.has_negative && !state.has_positive &&
+            state.has_full_negative && state.negative_region_count == 1u &&
+            state.positive_region_count == 0u &&
+            state.fragment_count == 1u &&
+            state.has_aligned_negative_fragment;
+        const bool has_complete_aligned_positive_family =
+            aligned_parent_side ==
+                geometry::CutIntegrationSide::Positive &&
+            state.has_positive && !state.has_negative &&
+            state.has_full_positive && state.positive_region_count == 1u &&
+            state.negative_region_count == 0u &&
+            state.fragment_count == 1u &&
+            state.has_aligned_positive_fragment;
+        if (!has_complete_two_phase_family &&
+            !has_complete_aligned_negative_family &&
+            !has_complete_aligned_positive_family) {
+            throw std::invalid_argument(
+                "authoritative free-surface cut cell is missing an active "
+                "negative or positive source volume region: parent=" +
+                std::to_string(parent) +
+                " negative_regions=" +
+                std::to_string(state.negative_region_count) +
+                " positive_regions=" +
+                std::to_string(state.positive_region_count) +
+                " fragments=" +
+                std::to_string(state.fragment_count) +
+                " full_negative=" +
+                std::to_string(state.has_full_negative ? 1 : 0) +
+                " full_positive=" +
+                std::to_string(state.has_full_positive ? 1 : 0) +
+                " aligned_negative=" +
+                std::to_string(
+                    state.has_aligned_negative_fragment ? 1 : 0) +
+                " aligned_positive=" +
+                std::to_string(
+                    state.has_aligned_positive_fragment ? 1 : 0) +
+                " selected_parent_side=" +
+                std::to_string(static_cast<unsigned>(
+                    aligned_parent_side)));
         }
     }
 
@@ -4240,6 +4334,25 @@ buildFreeSurfaceGeometrySnapshot(
                                         NegativeExteriorBoundary
                                   : FreeSurfaceGeometryRuleRole::
                                         PositiveExteriorBoundary;
+            const auto volume_role =
+                active.request().side ==
+                        geometry::CutIntegrationSide::Negative
+                    ? FreeSurfaceGeometryRuleRole::NegativeVolume
+                    : FreeSurfaceGeometryRuleRole::PositiveVolume;
+            const auto parent_cell_global_id =
+                rule.provenance.parent_entity_global_id;
+            const bool has_retained_parent_volume =
+                std::any_of(
+                    records.begin(),
+                    records.end(),
+                    [&](const auto& record) {
+                        return record.role == volume_role &&
+                               record.retention ==
+                                   FreeSurfaceGeometryRetention::Retained &&
+                               record.reference_rule.provenance
+                                       .parent_entity_global_id ==
+                                   parent_cell_global_id;
+                    });
             const auto stable_id = rule.provenance.cut_topology_revision;
             auto source_ids = sourceIdsForActiveRule(active, stable_id);
             auto moment_certificate =
@@ -4258,7 +4371,10 @@ buildFreeSurfaceGeometrySnapshot(
                         policy.tolerance),
                     active.request().boundary_marker,
                     std::move(source_ids),
-                    componentIdForActiveRule(active, stable_id));
+                    componentIdForActiveRule(active, stable_id),
+                    has_retained_parent_volume
+                        ? FreeSurfaceGeometryRetention::Retained
+                        : FreeSurfaceGeometryRetention::PrunedSmallVolume);
         }
     }
     for (const auto& [boundary, contact] : contact_by_boundary) {

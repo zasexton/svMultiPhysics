@@ -102,6 +102,8 @@ captureLevelSetGeneratedInterfaceRestartRecord(
     record.affected_cell_neighborhood_layers =
         options.affected_cell_neighborhood_layers;
     record.keep_degenerate_fragments = options.keep_degenerate_fragments;
+    record.aligned_zero_interface_parent_side =
+        options.aligned_zero_interface_parent_side;
     record.value_revision = result.value_revision;
     record.mesh_geometry_revision = result.domain.request().mesh_geometry_revision;
     record.mesh_topology_revision = result.domain.request().mesh_topology_revision;
@@ -145,6 +147,8 @@ optionsFromLevelSetGeneratedInterfaceRestartRecord(
     options.affected_cell_neighborhood_layers =
         record.affected_cell_neighborhood_layers;
     options.keep_degenerate_fragments = record.keep_degenerate_fragments;
+    options.aligned_zero_interface_parent_side =
+        record.aligned_zero_interface_parent_side;
     return options;
 }
 
@@ -185,6 +189,17 @@ bool levelSetGeneratedInterfaceRestartRecordMatches(
     }
     if (record.volume_quadrature_order < -1) {
         setDiagnostic(diagnostic, "generated-interface restart volume quadrature order is invalid");
+        return false;
+    }
+    if (record.aligned_zero_interface_parent_side !=
+            geometry::CutIntegrationSide::Interface &&
+        record.aligned_zero_interface_parent_side !=
+            geometry::CutIntegrationSide::Negative &&
+        record.aligned_zero_interface_parent_side !=
+            geometry::CutIntegrationSide::Positive) {
+        setDiagnostic(
+            diagnostic,
+            "generated-interface restart aligned-zero parent side is invalid");
         return false;
     }
     if (!(record.implicit_cut_root_tolerance > 0.0)) {

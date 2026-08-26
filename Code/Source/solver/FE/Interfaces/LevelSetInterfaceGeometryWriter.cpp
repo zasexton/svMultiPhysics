@@ -936,6 +936,9 @@ void writeLevelSetInterfaceQuadratureDebugJson(
         << request.achieved_interface_quadrature_order << ",\n";
     out << "    \"achieved_volume_quadrature_order\": "
         << request.achieved_volume_quadrature_order << ",\n";
+    out << "    \"aligned_zero_interface_parent_side\": \""
+        << sideName(request.aligned_zero_interface_parent_side)
+        << "\",\n";
     out << "    \"source\": {\n";
     out << "      \"kind\": \"" << sourceKindName(request.source.kind) << "\",\n";
     out << "      \"identifier\": ";

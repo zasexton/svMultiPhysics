@@ -1508,7 +1508,42 @@ public:
                     contact);
             }
             for (const auto& active : snapshot->activeBoundaryDomains()) {
-                addGeneratedActiveBoundaryDomain(active);
+                interfaces::GeneratedActiveBoundaryDomain retained_active(
+                    active.request());
+                const bool side_is_imported =
+                    !volume_side_filter.has_value() ||
+                    *volume_side_filter == active.request().side;
+                for (const auto& fragment : active.fragments()) {
+                    const auto role =
+                        active.request().side ==
+                                geometry::CutIntegrationSide::Negative
+                            ? interfaces::FreeSurfaceGeometryRuleRole::
+                                  NegativeExteriorBoundary
+                            : interfaces::FreeSurfaceGeometryRuleRole::
+                                  PositiveExteriorBoundary;
+                    const auto record = std::find_if(
+                        snapshot->rules().begin(),
+                        snapshot->rules().end(),
+                        [&](const auto& candidate) {
+                            return candidate.role == role &&
+                                   candidate.physical_boundary_marker ==
+                                       active.request().boundary_marker &&
+                                   candidate.reference_rule.provenance
+                                           .cut_topology_revision ==
+                                       fragment.stable_id;
+                        });
+                    if (record == snapshot->rules().end()) {
+                        throw std::invalid_argument(
+                            "free-surface active-boundary fragment has no snapshot rule record");
+                    }
+                    if (side_is_imported &&
+                        record->retention == interfaces::
+                                                 FreeSurfaceGeometryRetention::
+                                                     Retained) {
+                        retained_active.addFragment(fragment);
+                    }
+                }
+                addGeneratedActiveBoundaryDomain(retained_active);
             }
             for (std::size_t index = first_volume_rule;
                  index < volume_rules_.size();

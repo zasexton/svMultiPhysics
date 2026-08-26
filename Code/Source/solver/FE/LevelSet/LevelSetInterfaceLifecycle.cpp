@@ -1016,6 +1016,8 @@ appendLinearFullCellFastPath(
     mix(static_cast<std::uint64_t>(options.implicit_cut_root_max_iterations));
     mix(static_cast<std::uint64_t>(options.implicit_cut_max_subdivision_depth));
     mix(options.keep_degenerate_fragments ? 1u : 0u);
+    mix(static_cast<std::uint64_t>(
+        options.aligned_zero_interface_parent_side));
     mix(options.allow_corner_linearized_geometry ? 1u : 0u);
     mix(options.require_production_qualified_implicit_cut_backend ? 1u : 0u);
     mix(static_cast<std::uint64_t>(
@@ -2228,6 +2230,8 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
     request.implicit_cut_max_subdivision_depth =
         options.implicit_cut_max_subdivision_depth;
     request.keep_degenerate_fragments = options.keep_degenerate_fragments;
+    request.aligned_zero_interface_parent_side =
+        options.aligned_zero_interface_parent_side;
     request.required_implicit_cut_backend_qualification =
         options.require_production_qualified_implicit_cut_backend
             ? "ProductionQualified"

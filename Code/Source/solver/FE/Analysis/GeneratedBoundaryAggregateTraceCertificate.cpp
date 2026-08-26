@@ -74,7 +74,7 @@ constexpr std::size_t kMaximumGatheredWords = 16u * 1024u * 1024u;
 // factors rather than entrywise-rounded dense matrices.  The certificate
 // digest independently binds the factorized proof schema and proof source.
 constexpr std::uint64_t kWireVersion = 2u;
-constexpr std::uint64_t kCertificateDigestVersion = 4u;
+constexpr std::uint64_t kCertificateDigestVersion = 5u;
 
 [[noreturn]] void reject(std::string_view diagnostic)
 {
@@ -1953,21 +1953,51 @@ struct LocalData {
             continue;
         }
         for (const auto& fragment : domain.fragments()) {
-            if (fragment.owner_rank != collective.rank) {
+            if (!fragment.active() ||
+                fragment.stable_id == 0u ||
+                fragment.parent_cell_global_id < 0 ||
+                fragment.parent_face_global_id < 0 ||
+                fragment.side != report.active_side) {
+                reject(
+                    "authoritative snapshot has an invalid boundary "
+                    "fragment");
+            }
+            const auto role =
+                report.active_side ==
+                        geometry::CutIntegrationSide::Negative
+                    ? interfaces::FreeSurfaceGeometryRuleRole::
+                          NegativeExteriorBoundary
+                    : interfaces::FreeSurfaceGeometryRuleRole::
+                          PositiveExteriorBoundary;
+            const auto record = std::find_if(
+                selected.snapshot->rules().begin(),
+                selected.snapshot->rules().end(),
+                [&](const auto& candidate) {
+                    return candidate.role == role &&
+                           candidate.physical_boundary_marker ==
+                               options.physical_boundary_marker &&
+                           candidate.reference_rule.provenance
+                                   .cut_topology_revision ==
+                               fragment.stable_id;
+                });
+            if (record == selected.snapshot->rules().end()) {
+                reject(
+                    "authoritative snapshot boundary fragment has no rule "
+                    "record");
+            }
+            if (record->retention != interfaces::
+                                         FreeSurfaceGeometryRetention::
+                                             Retained ||
+                fragment.owner_rank != collective.rank) {
                 continue;
             }
             if (expected_local_boundary_provenance.size() >=
                 kMaximumBoundaryRules) {
                 reject(
-                    "owned snapshot boundary fragments exceed their hard "
-                    "cap");
+                    "owned retained snapshot boundary fragments exceed "
+                    "their hard cap");
             }
-            if (!fragment.active() ||
-                fragment.stable_id == 0u ||
-                fragment.parent_cell_global_id < 0 ||
-                fragment.parent_face_global_id < 0 ||
-                fragment.side != report.active_side ||
-                !expected_local_boundary_provenance
+            if (!expected_local_boundary_provenance
                      .emplace(
                          fragment.stable_id,
                          std::pair{
@@ -1975,8 +2005,8 @@ struct LocalData {
                              fragment.parent_face_global_id})
                      .second) {
                 reject(
-                    "authoritative snapshot has invalid or duplicate "
-                    "owned boundary fragments");
+                    "authoritative snapshot has duplicate owned retained "
+                    "boundary fragments");
             }
         }
     }
@@ -2123,7 +2153,7 @@ struct LocalData {
         expected_local_boundary_provenance) {
         reject(
             "cut context boundary rules do not exactly match the "
-            "owner-filtered authoritative snapshot");
+            "owner-filtered retained authoritative snapshot");
     }
 
     const auto& global_map =
@@ -2346,21 +2376,137 @@ void validateCanonicalData(
 struct WorkPatch {
     std::size_t canonical_patch_index{
         std::numeric_limits<std::size_t>::max()};
-    bool synthetic{false};
+    bool localized_support{false};
     GlobalIndex root_cell_gid{INVALID_GLOBAL_INDEX};
     std::vector<GlobalIndex> support_cell_gids{};
     std::vector<std::uint64_t> boundary_rule_ids{};
 };
 
+struct LocalizedPatchAssignment {
+    GlobalIndex root_cell_gid{INVALID_GLOBAL_INDEX};
+    std::vector<GlobalIndex> support_cell_gids{};
+    std::vector<std::uint64_t> boundary_rule_ids{};
+};
+
+[[nodiscard]] bool hasCellLocalTangentClosure(
+    const CellContribution& cell,
+    const CanonicalData& data)
+{
+    std::set<GlobalIndex> cell_dofs;
+    for (const auto& descriptor : cell.dofs) {
+        if (!cell_dofs.insert(descriptor.dof).second) {
+            return false;
+        }
+    }
+    for (const auto& descriptor : cell.dofs) {
+        const auto row = data.rows.find(descriptor.dof);
+        if (row == data.rows.end() || row->second.entries.empty()) {
+            return false;
+        }
+        for (const auto& entry : row->second.entries) {
+            if (!cell_dofs.contains(entry.master_dof)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] std::size_t terminalTangentDimension(
+    std::span<const GlobalIndex> support_cell_gids,
+    const CanonicalData& data)
+{
+    std::set<GlobalIndex> raw_dofs;
+    for (const auto cell_gid : support_cell_gids) {
+        const auto cell = data.cells.find(cell_gid);
+        if (cell == data.cells.end()) {
+            reject("candidate patch references an unknown support cell");
+        }
+        for (const auto& descriptor : cell->second.dofs) {
+            raw_dofs.insert(descriptor.dof);
+        }
+    }
+    std::set<GlobalIndex> terminal_dofs;
+    for (const auto dof : raw_dofs) {
+        const auto row = data.rows.find(dof);
+        if (row == data.rows.end()) {
+            reject("candidate patch lacks a live tangent row");
+        }
+        for (const auto& entry : row->second.entries) {
+            terminal_dofs.insert(entry.master_dof);
+        }
+    }
+    return terminal_dofs.size();
+}
+
+[[nodiscard]] bool canonicalPatchRequiresLocalizedSupport(
+    const constraints::SmallCutAggregationProlongationPatch& patch,
+    const CanonicalData& data,
+    std::size_t maximum_reduced_dimension)
+{
+    const auto terminal_dimension = terminalTangentDimension(
+        patch.support_cell_gids, data);
+    return terminal_dimension >
+           std::min(
+               maximum_reduced_dimension,
+               math::dense_exact_dyadic_maximum_dimension);
+}
+
+[[nodiscard]] std::vector<GlobalIndex> localizedRootSupport(
+    GlobalIndex parent_cell_gid,
+    const constraints::SmallCutAggregationProlongationPatch& patch,
+    const CanonicalData& data)
+{
+    if (patch.root_cell_gid < 0 ||
+        !data.cells.contains(parent_cell_gid) ||
+        !data.cells.contains(patch.root_cell_gid)) {
+        reject("localized patch lacks its boundary parent or aggregate root");
+    }
+    std::vector<GlobalIndex> support{
+        parent_cell_gid,
+        patch.root_cell_gid};
+    std::sort(support.begin(), support.end());
+    support.erase(std::unique(support.begin(), support.end()), support.end());
+    return support;
+}
+
 [[nodiscard]] std::vector<WorkPatch> assignBoundaryRulesToPatches(
     const CanonicalData& data,
-    const SelectedState& selected)
+    const SelectedState& selected,
+    std::size_t maximum_reduced_dimension)
 {
     const auto& report = *selected.report;
     std::map<std::size_t, std::vector<std::uint64_t>>
         assigned_existing;
-    std::map<GlobalIndex, std::vector<std::uint64_t>>
-        assigned_synthetic;
+    std::map<GlobalIndex, LocalizedPatchAssignment>
+        assigned_localized;
+    const auto assign_localized =
+        [&](GlobalIndex parent_cell_gid,
+            GlobalIndex root_cell_gid,
+            std::vector<GlobalIndex> support_cell_gids,
+            std::uint64_t stable_id) {
+            const auto found = assigned_localized.find(parent_cell_gid);
+            if (found == assigned_localized.end()) {
+                if (assigned_existing.size() +
+                        assigned_localized.size() >=
+                    kMaximumPatches) {
+                    reject("certified patch count exceeds its hard cap");
+                }
+                LocalizedPatchAssignment assignment;
+                assignment.root_cell_gid = root_cell_gid;
+                assignment.support_cell_gids =
+                    std::move(support_cell_gids);
+                assignment.boundary_rule_ids.push_back(stable_id);
+                assigned_localized.emplace(
+                    parent_cell_gid, std::move(assignment));
+                return;
+            }
+            if (found->second.root_cell_gid != root_cell_gid ||
+                found->second.support_cell_gids != support_cell_gids) {
+                reject("localized boundary-parent patch is inconsistent");
+            }
+            found->second.boundary_rule_ids.push_back(stable_id);
+        };
 
     for (const auto& [stable_id, boundary] :
          data.boundaries) {
@@ -2382,15 +2528,54 @@ struct WorkPatch {
                 support_candidates.push_back(index);
             }
         }
+        const auto cell =
+            data.cells.find(boundary.parent_cell_gid);
+        if (cell == data.cells.end()) {
+            reject("boundary rule has no retained parent cell");
+        }
+        // A full active cell provides its own retained volume block.  When
+        // its closed tangent rows also stay inside that cell, its boundary
+        // numerator can be certified against the exact cell-local energy.
+        // A nonlocal master prevents singleton support.  A canonical
+        // aggregate that cannot fit the exact quotient is handled below
+        // by boundary-parent/root support.
+        const bool use_cell_local_patch =
+            cell->second.kind ==
+                constraints::SmallCutAggregationActiveCellKind::
+                    FullActive &&
+            hasCellLocalTangentClosure(cell->second, data);
+        if (use_cell_local_patch) {
+            assign_localized(
+                boundary.parent_cell_gid,
+                boundary.parent_cell_gid,
+                {boundary.parent_cell_gid},
+                stable_id);
+            continue;
+        }
         const auto& candidates =
             member_candidates.empty()
                 ? support_candidates
                 : member_candidates;
         if (!candidates.empty()) {
             const auto index = candidates.front();
+            const auto& patch = report.patches[index];
+            if (canonicalPatchRequiresLocalizedSupport(
+                    patch,
+                    data,
+                    maximum_reduced_dimension)) {
+                assign_localized(
+                    boundary.parent_cell_gid,
+                    patch.root_cell_gid,
+                    localizedRootSupport(
+                        boundary.parent_cell_gid,
+                        patch,
+                        data),
+                    stable_id);
+                continue;
+            }
             if (!assigned_existing.contains(index) &&
                 assigned_existing.size() +
-                        assigned_synthetic.size() >=
+                        assigned_localized.size() >=
                     kMaximumPatches) {
                 reject(
                     "certified patch count exceeds its hard cap");
@@ -2399,11 +2584,6 @@ struct WorkPatch {
             continue;
         }
 
-        const auto cell =
-            data.cells.find(boundary.parent_cell_gid);
-        if (cell == data.cells.end()) {
-            reject("boundary rule has no retained parent cell");
-        }
         if (cell->second.kind !=
             constraints::SmallCutAggregationActiveCellKind::
                 FullActive) {
@@ -2411,22 +2591,17 @@ struct WorkPatch {
                 "cut generated-boundary parent is not covered by an "
                 "aggregation patch");
         }
-        if (!assigned_synthetic.contains(
-                boundary.parent_cell_gid) &&
-            assigned_existing.size() +
-                    assigned_synthetic.size() >=
-                kMaximumPatches) {
-            reject(
-                "certified patch count exceeds its hard cap");
-        }
-        assigned_synthetic[boundary.parent_cell_gid]
-            .push_back(stable_id);
+        assign_localized(
+            boundary.parent_cell_gid,
+            boundary.parent_cell_gid,
+            {boundary.parent_cell_gid},
+            stable_id);
     }
 
     std::vector<WorkPatch> result;
     result.reserve(
         assigned_existing.size() +
-        assigned_synthetic.size());
+        assigned_localized.size());
     for (auto& [index, boundary_ids] :
          assigned_existing) {
         const auto& patch = report.patches[index];
@@ -2445,20 +2620,23 @@ struct WorkPatch {
         }
         result.push_back(WorkPatch{
             .canonical_patch_index = index,
-            .synthetic = false,
+            .localized_support = false,
             .root_cell_gid = patch.root_cell_gid,
             .support_cell_gids = patch.support_cell_gids,
             .boundary_rule_ids = std::move(boundary_ids)});
     }
-    for (auto& [cell_gid, boundary_ids] :
-         assigned_synthetic) {
+    for (auto& [cell_gid, assignment] :
+         assigned_localized) {
+        (void)cell_gid;
         result.push_back(WorkPatch{
             .canonical_patch_index =
                 std::numeric_limits<std::size_t>::max(),
-            .synthetic = true,
-            .root_cell_gid = cell_gid,
-            .support_cell_gids = {cell_gid},
-            .boundary_rule_ids = std::move(boundary_ids)});
+            .localized_support = true,
+            .root_cell_gid = assignment.root_cell_gid,
+            .support_cell_gids =
+                std::move(assignment.support_cell_gids),
+            .boundary_rule_ids =
+                std::move(assignment.boundary_rule_ids)});
     }
 
     std::size_t assigned_count = 0u;
@@ -3612,11 +3790,6 @@ struct PatchPencil {
             reject("certificate patch lacks a live tangent row");
         }
         for (const auto& entry : row->second.entries) {
-            if (!raw_dofs.contains(entry.master_dof)) {
-                reject(
-                    "patch support omits a cell carrying a terminal "
-                    "master");
-            }
             if (!terminal_dofs.contains(
                     entry.master_dof) &&
                 terminal_dofs.size() >=
@@ -4081,8 +4254,8 @@ certifyPatch(
     GeneratedBoundaryAggregateTracePatchCertificate result;
     result.canonical_patch_index =
         patch.canonical_patch_index;
-    result.synthetic_full_active_patch =
-        patch.synthetic;
+    result.localized_support_patch =
+        patch.localized_support;
     result.root_cell_gid =
         patch.root_cell_gid;
     result.support_cell_gids =
@@ -4397,11 +4570,13 @@ certifyPatch(
         bound.quotient_converged =
             exact_positive_rank == 0u;
     }
+    // The floating quotient is diagnostic only. Its Gershgorin padding can
+    // depend on the valid rigid-mode coordinate gauge, even though the
+    // physical pencil and its exact generalized eigenvalue do not. Publish
+    // the authoritative exact dyadic bound so penalty acceptance is invariant
+    // under an algebraic reordering that selects a different gauge.
     bound.conservative_upper_bound =
-        std::max({
-            bound.conservative_upper_bound,
-            bound.largest_quotient_eigenvalue,
-            exact_bound.directly_proven_upper_bound});
+        exact_bound.directly_proven_upper_bound;
     bound.dimension = pencil.terminal_dimension;
     bound.positive_rank = exact_positive_rank;
     bound.nullity =
@@ -4625,6 +4800,9 @@ certifyPatch(
         digest,
         certificate.generated_boundary_rule_count);
     digestMix(digest, certificate.certified_patch_count);
+    digestMix(
+        digest,
+        certificate.localized_support_patch_count);
     digestMix(digest, certificate.maximum_support_overlap);
     digestMix(
         digest,
@@ -4646,7 +4824,7 @@ certifyPatch(
         certificate.patches.size());
     for (const auto& patch : certificate.patches) {
         digestMix(digest, UINT64_C(0x5041544348424547));
-        if (patch.synthetic_full_active_patch) {
+        if (patch.localized_support_patch) {
             digestMix(
                 digest,
                 std::numeric_limits<std::uint64_t>::max());
@@ -4658,7 +4836,7 @@ certifyPatch(
         }
         digestMix(
             digest,
-            patch.synthetic_full_active_patch ? 1u : 0u);
+            patch.localized_support_patch ? 1u : 0u);
         digestMix(
             digest,
             static_cast<std::uint64_t>(
@@ -4726,7 +4904,29 @@ certifyPatch(
 void validateGeneratedBoundaryAggregateTraceCertificateDigest(
     const GeneratedBoundaryAggregateTraceCertificate& certificate)
 {
-    if (certificate.canonical_certificate_digest == 0u ||
+    const auto localized_count = static_cast<std::size_t>(
+        std::count_if(
+            certificate.patches.begin(),
+            certificate.patches.end(),
+            [](const auto& patch) {
+                return patch.localized_support_patch;
+            }));
+    const bool patch_metadata_consistent =
+        certificate.certified_patch_count ==
+            certificate.patches.size() &&
+        certificate.localized_support_patch_count == localized_count &&
+        std::all_of(
+            certificate.patches.begin(),
+            certificate.patches.end(),
+            [](const auto& patch) {
+                const bool has_localized_index =
+                    patch.canonical_patch_index ==
+                    std::numeric_limits<std::size_t>::max();
+                return patch.localized_support_patch ==
+                       has_localized_index;
+            });
+    if (!patch_metadata_consistent ||
+        certificate.canonical_certificate_digest == 0u ||
         certificateDigest(certificate) !=
             certificate.canonical_certificate_digest) {
         reject("canonical certificate digest is absent or stale");
@@ -4845,7 +5045,9 @@ certifyGeneratedBoundaryAggregateTrace(
     try {
         const auto work_patches =
             assignBoundaryRulesToPatches(
-                canonical, selected);
+                canonical,
+                selected,
+                options.maximum_reduced_dimension);
         result.field = options.field;
         result.physical_boundary_marker =
             options.physical_boundary_marker;
@@ -4911,6 +5113,10 @@ certifyGeneratedBoundaryAggregateTrace(
                     canonical,
                     selected.dimension,
                     options.maximum_reduced_dimension));
+            result.localized_support_patch_count +=
+                static_cast<std::size_t>(
+                    result.patches.back()
+                        .localized_support_patch);
             result.maximum_terminal_tangent_dimension =
                 std::max(
                     result.maximum_terminal_tangent_dimension,

@@ -4100,6 +4100,11 @@ TEST(LevelSetInterfaceLifecycle, QuadraturePolicyKeyChangesWithBackendOptions)
     changed_degenerate_policy.keep_degenerate_fragments = true;
     EXPECT_NE(base_key, build_policy_key(changed_degenerate_policy));
 
+    auto changed_aligned_parent = base_options;
+    changed_aligned_parent.aligned_zero_interface_parent_side =
+        FE::geometry::CutIntegrationSide::Negative;
+    EXPECT_NE(base_key, build_policy_key(changed_aligned_parent));
+
     auto changed_corner_policy = base_options;
     changed_corner_policy.allow_corner_linearized_geometry = true;
     EXPECT_NE(base_key, build_policy_key(changed_corner_policy));

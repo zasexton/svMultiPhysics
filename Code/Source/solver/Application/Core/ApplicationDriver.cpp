@@ -17377,6 +17377,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
           request.implicit_cut_max_subdivision_depth;
       options.affected_cell_neighborhood_layers =
           request.affected_cell_neighborhood_layers;
+      options.aligned_zero_interface_parent_side =
+          cutIntegrationSide(request.active_side);
       options.allow_corner_linearized_geometry =
           request.allow_corner_linearized_geometry;
       options.require_production_qualified_implicit_cut_backend =
@@ -18370,6 +18372,9 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << options.implicit_cut_max_subdivision_depth
         << " affected_cell_neighborhood_layers="
         << options.affected_cell_neighborhood_layers
+        << " aligned_zero_interface_parent_side="
+        << cutIntegrationSideName(
+               options.aligned_zero_interface_parent_side)
         << " quadrature_order=" << options.quadrature_order
         << " interface_quadrature_order="
         << options.interface_quadrature_order
