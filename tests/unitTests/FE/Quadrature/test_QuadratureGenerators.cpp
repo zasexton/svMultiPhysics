@@ -486,3 +486,41 @@ TEST(GaussLegendreImplementation, RejectsRequestsOutsideSupportedRange)
             expected_message);
     }
 }
+
+TEST(GaussLobattoImplementation, GeneratesRepresentativeSupportedRules)
+{
+    const std::array<int, 4> point_counts{
+        2, 3, 17, max_gauss_lobatto_points()};
+
+    for (const int num_points : point_counts) {
+        SCOPED_TRACE(
+            ::testing::Message() << "num_points=" << num_points);
+        const QuadratureRule rule =
+            make_gauss_lobatto_rule(num_points);
+
+        expect_common_line_metadata(
+            rule,
+            static_cast<std::size_t>(num_points),
+            2 * num_points - 3);
+        expect_line_rule_invariants(
+            rule,
+            LineEndpointPolicy::Included);
+        expect_advertised_line_exactness(rule);
+    }
+}
+
+TEST(GaussLobattoImplementation, RejectsRequestsOutsideSupportedRange)
+{
+    constexpr std::string_view expected_message =
+        "num_points must be in [2, 128]";
+
+    expect_exception_with_message<InvalidArgumentException>(
+        [] { (void)make_gauss_lobatto_rule(1); },
+        expected_message);
+    expect_exception_with_message<InvalidArgumentException>(
+        [] {
+            (void)make_gauss_lobatto_rule(
+                max_gauss_lobatto_points() + 1);
+        },
+        expected_message);
+}
