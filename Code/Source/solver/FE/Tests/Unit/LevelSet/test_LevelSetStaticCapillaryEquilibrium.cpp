@@ -73,6 +73,23 @@ quadraticCapillaryEvaluation(
     evaluation.surface_wall_energy =
         energy_x * energy_x + energy_y * energy_y;
     evaluation.liquid_volume = x + y;
+    evaluation.pressure_representability_available =
+        purpose == EvaluationPurpose::AcceptanceCertificate;
+    evaluation.pressure_representability_converged =
+        evaluation.pressure_representability_available;
+    evaluation.pressure_representability_residual_norm =
+        evaluation.pressure_representability_available
+            ? residual_norm
+            : std::numeric_limits<FE::Real>::quiet_NaN();
+    evaluation.pressure_representability_relative_distance =
+        evaluation.pressure_representability_available
+            ? residual_norm /
+                  std::max(FE::Real{1.0}, gradient_norm)
+            : std::numeric_limits<FE::Real>::quiet_NaN();
+    evaluation.production_residual_norm =
+        evaluation.pressure_representability_available
+            ? residual_norm
+            : std::numeric_limits<FE::Real>::quiet_NaN();
     evaluation.constant_pressure_kkt_available =
         purpose == EvaluationPurpose::AcceptanceCertificate;
     if (evaluation.constant_pressure_kkt_available) {
@@ -94,6 +111,9 @@ quadraticOptions()
     options.target_liquid_volume = 3.0;
     options.volume_tolerance = 1.0e-10;
     options.projected_gradient_tolerance = 1.0e-7;
+    options.pressure_representability_max_residual_norm = 1.0e-7;
+    options.pressure_representability_max_relative_distance = 1.0e-7;
+    options.physical_equilibrium_max_residual_norm = 1.0e-7;
     options.constant_pressure_kkt_max_residual_norm =
         1.0e-7;
     options.constant_pressure_kkt_max_relative_distance =
@@ -153,6 +173,51 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     EXPECT_EQ(result.constraint_semantics_key, 33u);
     RecordProperty(
         "static_capillary_minimizer_production_force_projected", 0);
+}
+
+TEST(LevelSetStaticCapillaryEquilibrium,
+     GravitationalPotentialCanOwnTheObjectiveWithAConstrainedPressureCertificate)
+{
+    const std::vector<FE::Real> input{2.5, 0.5};
+    const std::array<std::size_t, 2> active{0u, 1u};
+    std::vector<FE::Real> accepted{71.0, 72.0, 73.0};
+
+    const auto result =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            quadraticOptions(),
+            input,
+            active,
+            [](std::span<const FE::Real> coefficients,
+               EvaluationPurpose purpose) {
+                auto evaluation = quadraticCapillaryEvaluation(
+                    coefficients, purpose);
+                evaluation.gravitational_potential_energy =
+                    evaluation.surface_wall_energy;
+                evaluation.surface_wall_energy = FE::Real{0.0};
+                evaluation.constant_pressure_kkt_required = false;
+                evaluation.constant_pressure_kkt_available = false;
+                evaluation.constant_pressure_kkt_residual_norm =
+                    std::numeric_limits<FE::Real>::quiet_NaN();
+                evaluation.constant_pressure_kkt_relative_distance =
+                    std::numeric_limits<FE::Real>::quiet_NaN();
+                return evaluation;
+            },
+            accepted);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    ASSERT_EQ(accepted.size(), 2u);
+    EXPECT_NEAR(accepted[0], 1.0, 1.0e-7);
+    EXPECT_NEAR(accepted[1], 2.0, 1.0e-7);
+    EXPECT_DOUBLE_EQ(result.final_surface_wall_energy, 0.0);
+    EXPECT_NEAR(
+        result.final_gravitational_potential_energy, 0.0, 1.0e-13);
+    EXPECT_NEAR(
+        result.final_physical_potential_energy, 0.0, 1.0e-13);
+    EXPECT_TRUE(result.final_pressure_representability_available);
+    EXPECT_TRUE(result.final_pressure_representability_converged);
+    EXPECT_FALSE(result.final_pressure_representability_breakdown);
+    EXPECT_FALSE(result.final_constant_pressure_kkt_required);
+    EXPECT_FALSE(result.final_constant_pressure_kkt_available);
 }
 
 TEST(LevelSetStaticCapillaryEquilibrium,
@@ -291,6 +356,72 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     EXPECT_EQ(
         result.diagnostic,
         "constant_pressure_kkt_gate_failed_at_parameter_stationary_geometry");
+    EXPECT_EQ(accepted, sentinel);
+}
+
+TEST(LevelSetStaticCapillaryEquilibrium,
+     RejectsAParameterStationaryGeometryThatFailsTheAbsolutePressureRangeGate)
+{
+    const std::vector<FE::Real> input{1.0, 2.0};
+    const std::array<std::size_t, 2> active{0u, 1u};
+    const std::vector<FE::Real> sentinel{45.0, 46.0, 47.0};
+    std::vector<FE::Real> accepted = sentinel;
+
+    const auto result =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            quadraticOptions(),
+            input,
+            active,
+            [](std::span<const FE::Real> coefficients,
+               EvaluationPurpose purpose) {
+                auto evaluation = quadraticCapillaryEvaluation(
+                    coefficients, purpose);
+                evaluation.pressure_representability_residual_norm = 0.25;
+                evaluation.pressure_representability_relative_distance = 0.0;
+                evaluation.production_residual_norm = 0.0;
+                return evaluation;
+            },
+            accepted);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_FALSE(result.converged);
+    EXPECT_FALSE(result.accepted_coefficients_assigned);
+    EXPECT_EQ(
+        result.diagnostic,
+        "pressure_representability_gate_failed_at_parameter_stationary_geometry");
+    EXPECT_EQ(accepted, sentinel);
+}
+
+TEST(LevelSetStaticCapillaryEquilibrium,
+     RejectsAParameterStationaryGeometryThatFailsTheProductionResidualGate)
+{
+    const std::vector<FE::Real> input{1.0, 2.0};
+    const std::array<std::size_t, 2> active{0u, 1u};
+    const std::vector<FE::Real> sentinel{48.0, 49.0, 50.0};
+    std::vector<FE::Real> accepted = sentinel;
+
+    const auto result =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            quadraticOptions(),
+            input,
+            active,
+            [](std::span<const FE::Real> coefficients,
+               EvaluationPurpose purpose) {
+                auto evaluation = quadraticCapillaryEvaluation(
+                    coefficients, purpose);
+                evaluation.pressure_representability_residual_norm = 0.0;
+                evaluation.pressure_representability_relative_distance = 0.0;
+                evaluation.production_residual_norm = 0.25;
+                return evaluation;
+            },
+            accepted);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_FALSE(result.converged);
+    EXPECT_FALSE(result.accepted_coefficients_assigned);
+    EXPECT_EQ(
+        result.diagnostic,
+        "physical_equilibrium_residual_gate_failed_at_parameter_stationary_geometry");
     EXPECT_EQ(accepted, sentinel);
 }
 

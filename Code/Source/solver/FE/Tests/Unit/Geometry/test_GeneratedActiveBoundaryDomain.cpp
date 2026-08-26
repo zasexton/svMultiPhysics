@@ -4635,6 +4635,107 @@ TEST(FreeSurfaceGeometrySnapshot,
 }
 
 TEST(FreeSurfaceGeometrySnapshot,
+     GravitationalPotentialPowerMatchesMaterialTranslationDifference)
+{
+    constexpr int interface_marker = 116;
+    constexpr FE::Real epsilon = FE::Real{1.0e-6};
+    constexpr std::array<FE::Real, 3> translation_velocity{
+        {FE::Real{0.37}, FE::Real{-0.21}, FE::Real{0.0}}};
+    const std::vector<std::array<FE::Real, 3>> base_coordinates{
+        {{0.0, 0.0, 0.0}},
+        {{1.0, 0.0, 0.0}},
+        {{1.0, 1.0, 0.0}},
+        {{0.0, 1.0, 0.0}},
+    };
+    const auto translated_coordinates =
+        [&](FE::Real signed_step) {
+            auto coordinates = base_coordinates;
+            for (auto& point : coordinates) {
+                for (std::size_t component = 0u;
+                     component < point.size();
+                     ++component) {
+                    point[component] +=
+                        signed_step *
+                        translation_velocity[component];
+                }
+            }
+            return coordinates;
+        };
+
+    const SingleQuadBoundaryMesh base_mesh(
+        7, 0, 1, 0, true, FE::ElementType::Quad4,
+        base_coordinates);
+    const SingleQuadBoundaryMesh plus_mesh(
+        7, 0, 1, 0, true, FE::ElementType::Quad4,
+        translated_coordinates(epsilon));
+    const SingleQuadBoundaryMesh minus_mesh(
+        7, 0, 1, 0, true, FE::ElementType::Quad4,
+        translated_coordinates(-epsilon));
+    const auto build_snapshot = [&](const auto& mesh,
+                                    std::string owner) {
+        return interfaces::buildFreeSurfaceGeometrySnapshot(
+            verticalInterfaceWithVolumes(interface_marker),
+            {},
+            {},
+            mesh,
+            snapshotPolicyWithoutBoundary(),
+            verticalScalar(),
+            std::move(owner));
+    };
+    const auto base_snapshot = build_snapshot(base_mesh, "gravity_base");
+    const auto plus_snapshot = build_snapshot(plus_mesh, "gravity_plus");
+    const auto minus_snapshot = build_snapshot(minus_mesh, "gravity_minus");
+
+    interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator velocity;
+    velocity.value =
+        [translation_velocity](FE::GlobalIndex,
+           const std::array<FE::Real, 3>&,
+           const FE::geometry::CutQuadratureProvenance&) {
+            return translation_velocity;
+        };
+
+    for (const auto side : {
+             FE::geometry::CutIntegrationSide::Negative,
+             FE::geometry::CutIntegrationSide::Positive}) {
+        interfaces::FreeSurfaceActiveVolumeEnergyParameters parameters;
+        parameters.liquid_side = side;
+        parameters.density = FE::Real{2.7};
+        parameters.gravitational_acceleration =
+            {{FE::Real{1.4}, FE::Real{-2.3}, FE::Real{0.0}}};
+        parameters.gravitational_reference_point =
+            {{FE::Real{-0.8}, FE::Real{0.45}, FE::Real{0.0}}};
+
+        const auto base =
+            interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
+                *base_snapshot, parameters, velocity);
+        const auto plus =
+            interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
+                *plus_snapshot, parameters, velocity);
+        const auto minus =
+            interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
+                *minus_snapshot, parameters, velocity);
+        const FE::Real central_difference =
+            (plus.gravitational_energy - minus.gravitational_energy) /
+            (FE::Real{2.0} * epsilon);
+
+        EXPECT_GT(base.owned_liquid_volume, FE::Real{0.0});
+        EXPECT_NE(base.gravitational_potential_power, FE::Real{0.0});
+        EXPECT_NEAR(
+            central_difference,
+            base.gravitational_potential_power,
+            FE::Real{2.0e-9});
+        EXPECT_NEAR(
+            plus.owned_liquid_volume,
+            base.owned_liquid_volume,
+            FE::Real{1.0e-14});
+        EXPECT_NEAR(
+            minus.owned_liquid_volume,
+            base.owned_liquid_volume,
+            FE::Real{1.0e-14});
+    }
+}
+
+TEST(FreeSurfaceGeometrySnapshot,
      DiscreteFunctionalExcludesGhostRuleContributions)
 {
     constexpr int interface_marker = 117;

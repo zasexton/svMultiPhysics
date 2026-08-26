@@ -173,13 +173,16 @@ void installMpiWorkflowExactConstantPressureCertificate(
     svmp::FE::FieldId velocity,
     svmp::FE::FieldId pressure)
 {
-  constexpr std::array<const char*, 3> diagnostic_operators{
+  constexpr std::array<const char*, 6> diagnostic_operators{
       "equations_diagnostic_ns_free_surface_pressure_virtual_work",
       "equations_diagnostic_ns_free_surface_surface_energy_virtual_work",
+      "equations_diagnostic_ns_free_surface_gravitational_potential_virtual_work",
+      "equations_diagnostic_ns_free_surface_physical_potential_virtual_work",
+      "equations_diagnostic_ns_free_surface_pressure_representability_load_virtual_work",
       "equations_diagnostic_ns_free_surface_conservative_balance",
   };
-  constexpr std::array<svmp::FE::Real, 3> vector_scales{
-      -2.0, 2.0, 0.0};
+  constexpr std::array<svmp::FE::Real, 6> vector_scales{
+      -2.0, 2.0, 0.0, 2.0, 2.0, 0.0};
   for (std::size_t i = 0u;
        i < diagnostic_operators.size();
        ++i) {
@@ -2129,6 +2132,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                       .gravitational_reference_point =
                           {{0.0, 0.0, 0.0}},
                   },
+          .static_conservative_body_force_complete = true,
           .capillary_balance_method =
               svmp::FE::systems::
                   FreeSurfaceCapillaryBalanceMethod::
@@ -2299,6 +2303,12 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           sim.fe_system->dofPermutation(),
           MPI_COMM_WORLD);
   ASSERT_NE(sim.backend, nullptr);
+  const auto* distributed_equations =
+      sim.fe_system->distributedSparsityIfAvailable("equations");
+  ASSERT_NE(distributed_equations, nullptr);
+  auto backend_layout_matrix =
+      sim.backend->createMatrix(*distributed_equations);
+  ASSERT_NE(backend_layout_matrix, nullptr);
   svmp::FE::backends::SolverOptions linear_options;
   linear_options.method =
       svmp::FE::backends::SolverMethod::GMRES;
@@ -2330,6 +2340,23 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       sim.time_history->uPrev(), previous);
   scatterFeOrderedSolution(
       sim.time_history->uPrev2(), older);
+  const auto owned_rows =
+      sim.time_history->u().ownedGlobalRows();
+  ASSERT_FALSE(owned_rows.empty());
+  EXPECT_LT(owned_rows.size(), solution_size);
+  const auto local_owned_row_count =
+      static_cast<unsigned long long>(owned_rows.size());
+  unsigned long long global_owned_row_count = 0u;
+  ASSERT_EQ(
+      MPI_Allreduce(&local_owned_row_count,
+                    &global_owned_row_count,
+                    1,
+                    MPI_UNSIGNED_LONG_LONG,
+                    MPI_SUM,
+                    MPI_COMM_WORLD),
+      MPI_SUCCESS);
+  EXPECT_EQ(global_owned_row_count,
+            static_cast<unsigned long long>(solution_size));
 
   auto params = parseMpiWorkflowParametersXml(R"xml(
 <svMultiPhysicsFile>
@@ -2369,6 +2396,29 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   ASSERT_TRUE(initial_report.refreshed);
   ASSERT_NE(initial_report.topology_key, 0u);
 
+  const auto expected_pressure_certificate =
+      evaluateStaticCapillaryPressureCertificate(
+          sim,
+          solution,
+          requests.front().static_capillary_equilibrium,
+          /*initialize_compatible_pressure=*/true);
+  ASSERT_TRUE(
+      expected_pressure_certificate.report
+          .static_compatible_pressure_initializer_passed)
+      << expected_pressure_certificate.report
+             .static_compatible_pressure_initializer_reason;
+  const auto& expected_solution =
+      expected_pressure_certificate.certified_solution;
+  ASSERT_EQ(expected_solution.size(), solution.size());
+  svmp::FE::Real maximum_pressure_update = 0.0;
+  for (svmp::FE::GlobalIndex i = 0; i < pressure_count; ++i) {
+    const auto index = static_cast<std::size_t>(pressure_offset + i);
+    maximum_pressure_update =
+        std::max(maximum_pressure_update,
+                 std::abs(expected_solution[index] - solution[index]));
+  }
+  EXPECT_GT(maximum_pressure_update, svmp::FE::Real{0.0});
+
   bool initialized = false;
   ASSERT_NO_THROW(
       initialized =
@@ -2394,29 +2444,35 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   auto expected_previous = previous;
   auto expected_older = older;
   std::copy(
-      solution.begin() +
+      expected_solution.begin() +
           static_cast<std::ptrdiff_t>(phi_offset),
-      solution.begin() +
+      expected_solution.begin() +
           static_cast<std::ptrdiff_t>(
               phi_offset + phi_dofs.getNumDofs()),
       expected_previous.begin() +
           static_cast<std::ptrdiff_t>(phi_offset));
   std::copy(
-      solution.begin() +
+      expected_solution.begin() +
           static_cast<std::ptrdiff_t>(phi_offset),
-      solution.begin() +
+      expected_solution.begin() +
           static_cast<std::ptrdiff_t>(
               phi_offset + phi_dofs.getNumDofs()),
       expected_older.begin() +
           static_cast<std::ptrdiff_t>(phi_offset));
   const auto final_solution =
-      gatherFeOrderedSolution(sim.time_history->u());
-  EXPECT_EQ(final_solution, solution);
+      captureFeOrderedVectorCollectively(
+          sim.time_history->u(),
+          activeFESystemCommunicator(*sim.fe_system));
+  EXPECT_EQ(final_solution, expected_solution);
   EXPECT_EQ(
-      gatherFeOrderedSolution(sim.time_history->uPrev()),
+      captureFeOrderedVectorCollectively(
+          sim.time_history->uPrev(),
+          activeFESystemCommunicator(*sim.fe_system)),
       expected_previous);
   EXPECT_EQ(
-      gatherFeOrderedSolution(sim.time_history->uPrev2()),
+      captureFeOrderedVectorCollectively(
+          sim.time_history->uPrev2(),
+          activeFESystemCommunicator(*sim.fe_system)),
       expected_older);
 
   const auto final_revision =
@@ -2923,9 +2979,13 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
             capturePostacceptMaintenanceVectorCollectively(
                 sim.time_history->u(),
                 activeFESystemCommunicator(*sim.fe_system));
-        const auto certificate =
-            evaluateStaticCapillaryConstantPressureCertificate(
-                sim, certified_solution);
+        const auto pressure_certificate =
+            evaluateStaticCapillaryPressureCertificate(
+                sim,
+                certified_solution,
+                requests.front().static_capillary_equilibrium,
+                /*initialize_compatible_pressure=*/false);
+        const auto& certificate = pressure_certificate.report;
         ASSERT_TRUE(
             certificate
                 .pressure_representability_diagnostic_sampled);

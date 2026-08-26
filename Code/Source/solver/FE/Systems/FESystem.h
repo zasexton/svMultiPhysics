@@ -449,6 +449,13 @@ struct FreeSurfaceDiscreteFunctionalDeclaration {
     interfaces::FreeSurfaceDiscreteFunctionalParameters parameters{};
     std::optional<interfaces::FreeSurfaceActiveVolumeEnergyParameters>
         active_volume_energy_parameters{};
+    /**
+     * The active-volume gravitational acceleration is the complete
+     * velocity-independent body acceleration present in the production
+     * static momentum residual.  Static equilibrium certification fails
+     * closed unless the owning physics module makes this declaration.
+     */
+    bool static_conservative_body_force_complete{false};
     std::optional<
         interfaces::FreeSurfaceActiveVolumeDissipationParameters>
         active_volume_dissipation_parameters{};

@@ -2318,6 +2318,7 @@ void declareFreeSurfaceDiscreteFunctionals(
     FE::FieldId velocity_field,
     FE::Real density,
     const std::array<FE::Real, 3>& gravitational_acceleration,
+    bool static_conservative_body_force_complete,
     FE::Real dynamic_viscosity,
     bool has_constant_dynamic_viscosity)
 {
@@ -2425,6 +2426,8 @@ void declareFreeSurfaceDiscreteFunctionals(
                                   FE::Real{0.0},
                                   FE::Real{0.0}}},
                         },
+                .static_conservative_body_force_complete =
+                    static_conservative_body_force_complete,
                 .active_volume_dissipation_parameters =
                     active_volume_dissipation_parameters,
                 .external_pressure_power_parameters =
@@ -6187,6 +6190,7 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
                               FE::forms::FormExpr* pressure_reference_probe_form = nullptr,
                               FE::forms::FormExpr* tangential_pressure_gradient_probe_form = nullptr,
                               FE::forms::FormExpr* conservative_pressure_form = nullptr,
+                              FE::forms::FormExpr* conservative_external_pressure_form = nullptr,
                               FE::forms::FormExpr* conservative_surface_energy_form = nullptr)
 {
     using namespace FE::forms;
@@ -6315,6 +6319,13 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
                 *conservative_pressure_form =
                     conservative_pressure_form->isValid()
                         ? (*conservative_pressure_form +
+                           interface_pressure_form)
+                        : interface_pressure_form;
+            }
+            if (conservative_external_pressure_form != nullptr) {
+                *conservative_external_pressure_form =
+                    conservative_external_pressure_form->isValid()
+                        ? (*conservative_external_pressure_form +
                            interface_pressure_form)
                         : interface_pressure_form;
             }
@@ -8020,6 +8031,8 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         u_id,
         options_.density,
         options_.body_force,
+        !options_.has_body_force_spacetime &&
+            body_force_field_id == FE::INVALID_FIELD_ID,
         options_.viscosity,
         options_.viscosity_model == nullptr);
 
@@ -8295,12 +8308,16 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     // Body force/source acceleration. The optional field is evaluated as
     // prescribed data, so it contributes to both Galerkin forcing and VMS
     // strong residual without adding unknowns to the system.
-    std::vector<FormExpr> f_comp;
-    f_comp.reserve(static_cast<std::size_t>(dim));
+    std::vector<FormExpr> constant_body_force_components;
+    constant_body_force_components.reserve(static_cast<std::size_t>(dim));
     for (int d = 0; d < dim; ++d) {
-        f_comp.push_back(FormExpr::constant(options_.body_force[static_cast<std::size_t>(d)]));
+        constant_body_force_components.push_back(
+            FormExpr::constant(
+                options_.body_force[static_cast<std::size_t>(d)]));
     }
-    FormExpr f = FormExpr::asVector(std::move(f_comp));
+    const auto constant_body_force =
+        FormExpr::asVector(std::move(constant_body_force_components));
+    FormExpr f = constant_body_force;
     if (options_.has_body_force_spacetime) {
         std::vector<FormExpr> source_comp;
         source_comp.reserve(static_cast<std::size_t>(dim));
@@ -8823,7 +8840,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     FormExpr free_surface_pressure_reference_probe_form;
     FormExpr free_surface_tangential_pressure_gradient_probe_form;
     FormExpr free_surface_conservative_pressure_form;
+    FormExpr free_surface_conservative_external_pressure_form;
     FormExpr free_surface_conservative_surface_energy_form;
+    FormExpr free_surface_conservative_gravitational_potential_form;
     FormExpr level_set_shape_tangent_form;
     const bool conservative_balance_diagnostic_requested =
         freeSurfaceConservativeBalanceDiagnosticEnabled();
@@ -8857,6 +8876,13 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         // Prescribed exterior-pressure work is appended on each free surface.
         free_surface_conservative_pressure_form =
             integrateOnActiveVolume(pressure, active_volume_domain);
+        // This is exactly the constant body-acceleration term appearing in
+        // the production Galerkin momentum residual.  Its sign is the first
+        // variation of -rho int(g dot (x-x_ref)) over the active liquid.
+        free_surface_conservative_gravitational_potential_form =
+            integrateOnActiveVolume(
+                -rho * inner(constant_body_force, v),
+                active_volume_domain);
     } else if (conservative_balance_diagnostic_requested) {
         FE_LOG_WARNING(
             "IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_free_surface_conservative_balance_operators"
@@ -8935,6 +8961,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                 : nullptr,
             conservative_balance_diagnostic_supported
                 ? &free_surface_conservative_pressure_form
+                : nullptr,
+            conservative_balance_diagnostic_supported
+                ? &free_surface_conservative_external_pressure_form
                 : nullptr,
             conservative_balance_diagnostic_supported
                 ? &free_surface_conservative_surface_energy_form
@@ -9275,13 +9304,22 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     if (conservative_balance_diagnostic_supported) {
         FE_THROW_IF(
             !free_surface_conservative_pressure_form.isValid() ||
-                !free_surface_conservative_surface_energy_form.isValid(),
+                !free_surface_conservative_external_pressure_form.isValid() ||
+                !free_surface_conservative_surface_energy_form.isValid() ||
+                !free_surface_conservative_gravitational_potential_form
+                     .isValid(),
             FE::InvalidArgumentException,
-            "IncompressibleNavierStokesVMSModule: requested free-surface conservative-balance diagnostics did not construct both pressure and surface-energy virtual-work forms");
+            "IncompressibleNavierStokesVMSModule: requested free-surface conservative-balance diagnostics did not construct pressure, prescribed exterior-pressure, surface-energy, and gravitational-potential virtual-work forms");
 
+        const auto physical_potential_form =
+            free_surface_conservative_surface_energy_form +
+            free_surface_conservative_gravitational_potential_form;
+        const auto pressure_representability_load_form =
+            free_surface_conservative_external_pressure_form +
+            physical_potential_form;
         const auto conservative_balance_form =
             free_surface_conservative_pressure_form +
-            free_surface_conservative_surface_energy_form;
+            physical_potential_form;
         // This deliberately contains only the pressure/velocity adjoint pair.
         // With pressure = -p*div(v), the two blocks are
         //   -int p div(v)  and  -int q div(u),
@@ -9316,6 +9354,18 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             FreeSurfaceConservativeBalanceDiagnosticOperators::
                 surface_energy_virtual_work,
             free_surface_conservative_surface_energy_form);
+        install_diagnostic(
+            FreeSurfaceConservativeBalanceDiagnosticOperators::
+                gravitational_potential_virtual_work,
+            free_surface_conservative_gravitational_potential_form);
+        install_diagnostic(
+            FreeSurfaceConservativeBalanceDiagnosticOperators::
+                physical_potential_virtual_work,
+            physical_potential_form);
+        install_diagnostic(
+            FreeSurfaceConservativeBalanceDiagnosticOperators::
+                pressure_representability_load_virtual_work,
+            pressure_representability_load_form);
         install_diagnostic(
             FreeSurfaceConservativeBalanceDiagnosticOperators::
                 conservative_balance,
@@ -9356,6 +9406,18 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             std::string(
                 FreeSurfaceConservativeBalanceDiagnosticOperators::
                     surface_energy_virtual_work) +
+            "' gravitational_potential_operator='" +
+            std::string(
+                FreeSurfaceConservativeBalanceDiagnosticOperators::
+                    gravitational_potential_virtual_work) +
+            "' physical_potential_operator='" +
+            std::string(
+                FreeSurfaceConservativeBalanceDiagnosticOperators::
+                    physical_potential_virtual_work) +
+            "' pressure_representability_load_operator='" +
+            std::string(
+                FreeSurfaceConservativeBalanceDiagnosticOperators::
+                    pressure_representability_load_virtual_work) +
             "' balance_operator='" +
             std::string(
                 FreeSurfaceConservativeBalanceDiagnosticOperators::
@@ -9366,8 +9428,10 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                     pressure_representability_pair) +
             "' pressure_terms=active_volume_minus_p_div_v_plus_external_pressure_n_dot_v" +
             " surface_energy_terms=surface_area_variation_plus_young_wall_energy" +
+            " gravitational_potential_terms=active_volume_minus_density_g_dot_v" +
+            " pressure_representability_load_terms=prescribed_external_pressure_plus_surface_energy_plus_gravitational_potential" +
             " excluded_terms=line_friction_and_wetted_wall_navier_dissipation" +
-            " scope=pressure_and_surface_energy_first_variations_only" +
+            " scope=pressure_and_physical_potential_first_variations_only" +
             " total_momentum_equilibrium_claimed=0" +
             " qualification=diagnostic_only_no_time_discrete_energy_claim");
     }

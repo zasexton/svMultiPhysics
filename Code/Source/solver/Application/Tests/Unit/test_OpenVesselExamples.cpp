@@ -108,7 +108,8 @@ fs::path openVesselCaseDir(std::string_view case_name)
          std::string(case_name);
 }
 
-std::shared_ptr<svmp::Mesh> makeTranslatorQuadMesh()
+std::shared_ptr<svmp::Mesh> makeTranslatorQuadMesh(
+    bool register_free_surface_label = true)
 {
   auto base = std::make_shared<svmp::MeshBase>();
 
@@ -146,7 +147,8 @@ std::shared_ptr<svmp::Mesh> makeTranslatorQuadMesh()
   base->register_label("wall_left", 1);
   base->register_label("wall_right", 2);
   base->register_label("wall_bottom", 3);
-  base->register_label("free_surface", 4);
+  base->register_label(
+      register_free_surface_label ? "free_surface" : "wall_top", 4);
 
   return svmp::create_mesh(std::move(base));
 }
@@ -773,7 +775,8 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseBuildsOopInputs)
   auto* root = doc.FirstChildElement("svMultiPhysicsFile");
   ASSERT_NE(root, nullptr);
 
-  auto mesh = makeTranslatorQuadMesh();
+  auto mesh = makeTranslatorQuadMesh(
+      /*register_free_surface_label=*/false);
   const std::map<std::string, std::shared_ptr<svmp::Mesh>> meshes{{"tank", mesh}};
 
   auto level_set_params = equationParametersFromElement(

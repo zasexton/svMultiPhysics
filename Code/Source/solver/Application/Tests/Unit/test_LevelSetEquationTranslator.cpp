@@ -397,7 +397,7 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
       pointwise_contract +
           std::string_view{"\"impermeable_normal_velocity_tolerance\":1e-10"}
               .size(),
-      R"json(,"pointwise_impermeable_velocity_tolerance_explicitly_requested":false,"pointwise_impermeable_velocity_contract":"unsupported_fail_closed_when_explicit"})json");
+      R"json(,"pointwise_impermeable_velocity_tolerance_explicitly_requested":false,"pointwise_impermeable_velocity_contract":"unsupported_fail_closed_when_explicit")json");
   const auto boundary_contract = expected.find(
       "\"boundary_flux_policy\":\"closed_boundary_only\"");
   ASSERT_NE(boundary_contract, std::string::npos);

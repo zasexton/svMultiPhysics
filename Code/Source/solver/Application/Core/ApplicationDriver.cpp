@@ -2850,7 +2850,7 @@ canonicalLevelSetMaintenanceRequestSchedule(
   CanonicalLevelSetMaintenanceSchedule schedule;
   auto& words = schedule.words;
   words.reserve(32u + 224u * requests.size());
-  appendMaintenanceScheduleWord(words, 2u);
+  appendMaintenanceScheduleWord(words, 3u);
   appendMaintenanceScheduleEnum(words, stage);
   appendMaintenanceScheduleSigned(words, completed_step);
   appendMaintenanceScheduleWord(
@@ -3062,6 +3062,18 @@ canonicalLevelSetMaintenanceRequestSchedule(
         words,
         request.static_capillary_equilibrium
             .projected_gradient_tolerance);
+    appendMaintenanceScheduleReal(
+        words,
+        request.static_capillary_equilibrium
+            .pressure_representability_max_residual_norm);
+    appendMaintenanceScheduleReal(
+        words,
+        request.static_capillary_equilibrium
+            .pressure_representability_max_relative_distance);
+    appendMaintenanceScheduleReal(
+        words,
+        request.static_capillary_equilibrium
+            .physical_equilibrium_max_residual_norm);
     appendMaintenanceScheduleReal(
         words,
         request.static_capillary_equilibrium
@@ -6272,6 +6284,30 @@ std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parame
     }
     if (const auto tolerance = first_defined_double_parameter(
             eq_params,
+            {"Static_capillary_pressure_representability_max_residual_norm",
+             "StaticCapillaryPressureRepresentabilityMaxResidualNorm"})) {
+      request.static_capillary_equilibrium
+          .pressure_representability_max_residual_norm =
+          static_cast<svmp::FE::Real>(*tolerance);
+    }
+    if (const auto tolerance = first_defined_double_parameter(
+            eq_params,
+            {"Static_capillary_pressure_representability_max_relative_distance",
+             "StaticCapillaryPressureRepresentabilityMaxRelativeDistance"})) {
+      request.static_capillary_equilibrium
+          .pressure_representability_max_relative_distance =
+          static_cast<svmp::FE::Real>(*tolerance);
+    }
+    if (const auto tolerance = first_defined_double_parameter(
+            eq_params,
+            {"Static_capillary_physical_equilibrium_max_residual_norm",
+             "StaticCapillaryPhysicalEquilibriumMaxResidualNorm"})) {
+      request.static_capillary_equilibrium
+          .physical_equilibrium_max_residual_norm =
+          static_cast<svmp::FE::Real>(*tolerance);
+    }
+    if (const auto tolerance = first_defined_double_parameter(
+            eq_params,
             {"Static_capillary_constant_pressure_kkt_max_residual_norm",
              "StaticCapillaryConstantPressureKktMaxResidualNorm"})) {
       request.static_capillary_equilibrium
@@ -8544,6 +8580,9 @@ std::uint64_t freeSurfaceDiscreteFunctionalDeclarationContentKey(
       mix_real(value);
     }
   }
+  mixCutContextHash(
+      key,
+      declaration.static_conservative_body_force_complete ? 1u : 0u);
   const auto& dissipation =
       declaration.active_volume_dissipation_parameters;
   mixCutContextHash(key, dissipation.has_value() ? 1u : 0u);
@@ -8610,7 +8649,7 @@ evaluateCurrentFreeSurfaceDiscreteFunctionals(
         declaration.active_volume_energy_parameters;
     const auto& active_dissipation =
         declaration.active_volume_dissipation_parameters;
-    const std::array<double, 21> declaration_metadata{
+    const std::array<double, 22> declaration_metadata{
         static_cast<double>(declaration.interface_marker),
         static_cast<double>(declaration.level_set_field),
         static_cast<double>(declaration.velocity_field),
@@ -8645,6 +8684,7 @@ evaluateCurrentFreeSurfaceDiscreteFunctionals(
             ? static_cast<double>(
                   active_energy->gravitational_reference_point[2])
             : 0.0,
+        declaration.static_conservative_body_force_complete ? 1.0 : 0.0,
         active_dissipation.has_value() ? 1.0 : 0.0,
         active_dissipation.has_value()
             ? static_cast<double>(
@@ -12792,6 +12832,11 @@ void assertCollectiveWallAwareRepairResult(
 void assignPostacceptMaintenanceVectorCollectively(
     svmp::FE::backends::GenericVector& solution,
     std::span<const svmp::FE::Real> values,
+    const svmp::MeshComm& comm);
+
+std::vector<svmp::FE::Real>
+captureFeOrderedVectorCollectively(
+    svmp::FE::backends::GenericVector& solution,
     const svmp::MeshComm& comm);
 
 std::vector<svmp::FE::Real>
@@ -19486,7 +19531,7 @@ void requirePostacceptMaintenanceRecoveryPhase(
 }
 
 std::vector<svmp::FE::Real>
-capturePostacceptMaintenanceVectorCollectively(
+captureFeOrderedVectorCollectively(
     svmp::FE::backends::GenericVector& solution,
     const svmp::MeshComm& comm)
 {
@@ -19496,22 +19541,22 @@ capturePostacceptMaintenanceVectorCollectively(
     local_size = solution.size();
     if (local_size < 0) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Postaccept maintenance cannot "
+          "[svMultiPhysics::Application] Collective FE-vector capture cannot "
           "capture a vector with negative global size.");
     }
   } catch (...) {
     local_size_failure = std::current_exception();
   }
-  requirePostacceptMaintenanceRecoveryPhase(
+  requireCollectivePhasePreparation(
       local_size_failure,
       comm,
-      "capture_vector_size_before_consensus");
+      "collective_fe_vector_capture_size_before_consensus");
   const auto global_size = static_cast<std::uint64_t>(local_size);
   const auto [minimum_size, maximum_size] =
       globalMinMaxUint64(global_size, comm);
   if (minimum_size != maximum_size) {
     throw std::runtime_error(
-        "[svMultiPhysics::Application] Postaccept maintenance vector sizes "
+        "[svMultiPhysics::Application] Collective FE-vector sizes "
         "differ across the active FE communicator.");
   }
 
@@ -19533,27 +19578,27 @@ capturePostacceptMaintenanceVectorCollectively(
               return row >= 0 && row < local_size;
             })) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Postaccept maintenance capture "
+          "[svMultiPhysics::Application] Collective FE-vector capture "
           "requires strictly ordered, unique, in-range backend-owned rows.");
     }
     read_view = solution.createGhostedReadView();
     if (!read_view) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Postaccept maintenance capture "
+          "[svMultiPhysics::Application] Collective FE-vector capture "
           "requires an owned-row read view.");
     }
   } catch (...) {
     local_failure = std::current_exception();
   }
-  requirePostacceptMaintenanceRecoveryPhase(
+  requireCollectivePhasePreparation(
       local_failure,
       comm,
-      "capture_vector_prepare_before_owned_reads");
+      "collective_fe_vector_capture_prepare_before_owned_reads");
 
   constexpr std::size_t chunk_capacity = 4096u;
   static_assert(
       sizeof(svmp::FE::Real) == sizeof(std::uint64_t),
-      "Exact postaccept maintenance capture requires a 64-bit FE scalar.");
+      "Exact collective FE-vector capture requires a 64-bit FE scalar.");
   std::array<std::uint64_t, chunk_capacity> local_bits{};
   std::array<std::uint64_t, chunk_capacity> global_bits{};
   std::array<std::uint32_t, chunk_capacity> local_counts{};
@@ -19593,7 +19638,7 @@ capturePostacceptMaintenanceVectorCollectively(
         if (row < static_cast<svmp::FE::GlobalIndex>(chunk_begin) ||
             row >= static_cast<svmp::FE::GlobalIndex>(chunk_end)) {
           throw std::runtime_error(
-              "[svMultiPhysics::Application] Postaccept maintenance owned "
+              "[svMultiPhysics::Application] Collective FE-vector owned "
               "read escaped its fixed global chunk.");
         }
         const auto relative = static_cast<std::size_t>(
@@ -19605,10 +19650,10 @@ capturePostacceptMaintenanceVectorCollectively(
     } catch (...) {
       local_failure = std::current_exception();
     }
-    requirePostacceptMaintenanceRecoveryPhase(
+    requireCollectivePhasePreparation(
         local_failure,
         comm,
-        "capture_vector_owned_read_before_replication");
+        "collective_fe_vector_capture_owned_read_before_replication");
 
 #ifdef MESH_HAS_MPI
     if (comm.is_parallel()) {
@@ -19637,7 +19682,7 @@ capturePostacceptMaintenanceVectorCollectively(
 #else
     if (comm.is_parallel()) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Distributed postaccept maintenance "
+          "[svMultiPhysics::Application] Distributed collective FE-vector "
           "capture requires MPI.");
     }
     std::copy_n(local_counts.begin(), chunk_size, global_counts.begin());
@@ -19649,7 +19694,7 @@ capturePostacceptMaintenanceVectorCollectively(
                 static_cast<std::ptrdiff_t>(chunk_size),
             [](std::uint32_t count) { return count != 1u; })) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Postaccept maintenance capture "
+          "[svMultiPhysics::Application] Collective FE-vector capture "
           "requires exactly one backend owner for every FE row.");
     }
     for (std::size_t i = 0u; i < chunk_size; ++i) {
@@ -19660,10 +19705,18 @@ capturePostacceptMaintenanceVectorCollectively(
   }
   if (owned_cursor != owned_rows.size()) {
     throw std::runtime_error(
-        "[svMultiPhysics::Application] Postaccept maintenance capture did "
+        "[svMultiPhysics::Application] Collective FE-vector capture did "
         "not consume every backend-owned row.");
   }
   return values;
+}
+
+std::vector<svmp::FE::Real>
+capturePostacceptMaintenanceVectorCollectively(
+    svmp::FE::backends::GenericVector& solution,
+    const svmp::MeshComm& comm)
+{
+  return captureFeOrderedVectorCollectively(solution, comm);
 }
 
 void assignPostacceptMaintenanceVectorCollectively(
@@ -23844,25 +23897,34 @@ std::uint64_t collectiveConstraintSemanticsKey(
   return key == 0u ? 1u : key;
 }
 
-svmp::FE::timestepping::NewtonReport
-evaluateStaticCapillaryConstantPressureCertificate(
+struct StaticCapillaryPressureCertificate {
+  svmp::FE::timestepping::NewtonReport report{};
+  std::vector<svmp::FE::Real> certified_solution{};
+};
+
+StaticCapillaryPressureCertificate
+evaluateStaticCapillaryPressureCertificate(
     application::core::SimulationComponents& sim,
-    std::span<const svmp::FE::Real> candidate)
+    std::span<const svmp::FE::Real> candidate,
+    const svmp::FE::level_set::
+        LevelSetStaticCapillaryEquilibriumOptions& certificate_options,
+    bool initialize_compatible_pressure)
 {
   if (!sim.fe_system || !sim.backend || !sim.linear_solver ||
       !sim.time_history) {
     throw std::runtime_error(
-        "[svMultiPhysics::Application] Static capillary KKT certificate requires an FE system, backend, linear solver, and time history.");
+        "[svMultiPhysics::Application] Static capillary pressure certificate requires an FE system, backend, linear solver, and time history.");
   }
   if (candidate.empty() ||
       candidate.size() >
           static_cast<std::size_t>(
               std::numeric_limits<svmp::FE::GlobalIndex>::max())) {
     throw std::runtime_error(
-        "[svMultiPhysics::Application] Static capillary KKT certificate received an invalid candidate layout.");
+        "[svMultiPhysics::Application] Static capillary pressure certificate received an invalid candidate layout.");
   }
 
   auto& system = *sim.fe_system;
+  const auto comm = activeFESystemCommunicator(system);
   const auto auxiliary_state = system.checkpointAuxiliaryState();
   const auto bordered_state = system.borderedCoupling();
   const auto restore_system_state = [&] {
@@ -23882,13 +23944,16 @@ evaluateStaticCapillaryConstantPressureCertificate(
     options.step_tolerance = 0.0;
     options.use_line_search = false;
     options.assemble_both_when_possible = false;
-    options.initial_residual_only_certificate = true;
+    options.initial_residual_only_certificate =
+        !initialize_compatible_pressure;
     options.external_state_fixed_point.enabled = false;
     options.read_static_free_surface_environment_options = false;
-    options.initialize_static_compatible_free_surface_pressure = false;
+    options.initialize_static_compatible_free_surface_pressure =
+        initialize_compatible_pressure;
     options
-        .accepted_static_constant_pressure_kkt_max_relative_distance =
-        std::numeric_limits<double>::max();
+        .accepted_static_pressure_representability_max_relative_distance =
+        static_cast<double>(certificate_options
+                                .pressure_representability_max_relative_distance);
 
     svmp::FE::timestepping::NewtonSolver probe(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
@@ -23928,15 +23993,21 @@ evaluateStaticCapillaryConstantPressureCertificate(
         history.time(),
         history,
         workspace);
+    auto certified_solution =
+        captureFeOrderedVectorCollectively(
+            history.u(), comm);
     restore_system_state();
-    return report;
+    return StaticCapillaryPressureCertificate{
+        .report = std::move(report),
+        .certified_solution = std::move(certified_solution),
+    };
   } catch (...) {
     const auto failure = std::current_exception();
     try {
       restore_system_state();
     } catch (...) {
       std::throw_with_nested(std::runtime_error(
-          "[svMultiPhysics::Application] Static capillary KKT certificate failed and could not restore auxiliary solver state."));
+          "[svMultiPhysics::Application] Static capillary pressure certificate failed and could not restore auxiliary solver state."));
     }
     std::rethrow_exception(failure);
   }
@@ -23945,9 +24016,11 @@ evaluateStaticCapillaryConstantPressureCertificate(
 void zeroHistoryFieldRateSlice(
     const svmp::FE::systems::FESystem& system,
     svmp::FE::FieldId field,
-    svmp::FE::backends::GenericVector& rate)
+    svmp::FE::backends::GenericVector& rate,
+    const svmp::MeshComm& comm)
 {
-  auto values = gatherFeOrderedSolution(rate);
+  auto values = captureFeOrderedVectorCollectively(
+      rate, comm);
   const auto raw_offset = system.fieldDofOffset(field);
   const auto raw_count =
       system.fieldDofHandler(field).getNumDofs();
@@ -24071,6 +24144,7 @@ void stageStaticCapillaryHistoryForPublication(
       static_cast<std::size_t>(raw_field_offset);
   const auto field_count =
       static_cast<std::size_t>(raw_field_count);
+  const auto comm = activeFESystemCommunicator(system);
 
   scatterFeOrderedSolution(history.u(), certified_solution);
   for (int slot = 1; slot <= history.historyDepth(); ++slot) {
@@ -24089,11 +24163,11 @@ void stageStaticCapillaryHistoryForPublication(
   }
   if (history.hasUDotState()) {
     zeroHistoryFieldRateSlice(
-        system, level_set_field, history.uDot());
+        system, level_set_field, history.uDot(), comm);
   }
   if (history.hasUDDotState()) {
     zeroHistoryFieldRateSlice(
-        system, level_set_field, history.uDDot());
+        system, level_set_field, history.uDDot(), comm);
   }
   history.updateGhosts();
 }
@@ -24188,23 +24262,26 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
         "[svMultiPhysics::Application] Static capillary initialization free-surface declaration content differs across the FE communicator.");
   }
 
-  const bool local_unsupported_gravity =
+  const bool local_body_force_contract_incomplete =
       !declaration.active_volume_energy_parameters.has_value() ||
-      !std::all_of(
+      !declaration.static_conservative_body_force_complete;
+  if (globalAnyBool(local_body_force_contract_incomplete, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization requires an active-volume energy declaration whose gravitational acceleration is the complete velocity-independent body acceleration in the production static momentum residual.");
+  }
+  const bool gravitational_acceleration_is_zero =
+      std::all_of(
           declaration.active_volume_energy_parameters
               ->gravitational_acceleration.begin(),
           declaration.active_volume_energy_parameters
               ->gravitational_acceleration.end(),
           [](svmp::FE::Real value) {
-            return std::isfinite(value) &&
-                   value == svmp::FE::Real{0.0};
+            return value == svmp::FE::Real{0.0};
           });
-  if (globalAnyBool(local_unsupported_gravity, comm)) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Static capillary initialization requires exactly zero finite gravitational acceleration in a present active-volume energy declaration because the current discrete minimizer and physical certificate omit gravitational potential and body-force work.");
-  }
 
-  const auto baseline = gatherFeOrderedSolution(history.u());
+  const auto baseline =
+      captureFeOrderedVectorCollectively(
+          history.u(), comm);
   const bool local_velocity_field_declared =
       declaration.velocity_field != svmp::FE::INVALID_FIELD_ID;
   if (globalMinDouble(
@@ -24363,6 +24440,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       std::numeric_limits<double>::quiet_NaN();
   double certified_constant_pressure_volume_multiplier =
       std::numeric_limits<double>::quiet_NaN();
+  bool certified_constant_pressure_multiplier_comparison_available = false;
   const auto evaluator =
       [&](std::span<const svmp::FE::Real> coefficients,
           svmp::FE::level_set::
@@ -24442,11 +24520,14 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
           return evaluation;
         }
 
-        const auto states =
+        auto states =
             evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+        attachAcceptedFreeSurfaceActiveVolumeEnergies(
+            sim, candidate, states);
         const bool local_functional_available =
             states.size() == 1u &&
-            states.front().interface_marker == *marker;
+            states.front().interface_marker == *marker &&
+            states.front().active_volume_energy.has_value();
         if (globalAnyBool(
                 !local_functional_available, comm)) {
           evaluation.diagnostic =
@@ -24457,9 +24538,13 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
         const auto energy =
             state.state.liquid_gas_surface_energy +
             state.state.young_wall_energy;
+        const auto gravitational_energy =
+            state.active_volume_energy->gravitational_energy;
         const auto volume = state.state.owned_liquid_volume;
         const bool local_functional_valid =
             std::isfinite(energy) &&
+            std::isfinite(gravitational_energy) &&
+            std::isfinite(energy + gravitational_energy) &&
             std::isfinite(volume) &&
             volume >= svmp::FE::Real{0.0};
         if (globalAnyBool(
@@ -24481,6 +24566,10 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
                 globalMaxDouble(
                     static_cast<double>(energy), comm) &&
             globalMinDouble(
+                static_cast<double>(gravitational_energy), comm) ==
+                globalMaxDouble(
+                    static_cast<double>(gravitational_energy), comm) &&
+            globalMinDouble(
                 static_cast<double>(volume), comm) ==
                 globalMaxDouble(
                     static_cast<double>(volume), comm);
@@ -24498,6 +24587,8 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
         evaluation.constraint_semantics_key =
             constraint_key;
         evaluation.surface_wall_energy = energy;
+        evaluation.gravitational_potential_energy =
+            gravitational_energy;
         evaluation.liquid_volume = volume;
         evaluation.production_force_projection_applied = false;
         evaluation.diagnostic = "functional_trial_available";
@@ -24506,58 +24597,107 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
             svmp::FE::level_set::
                 LevelSetStaticCapillaryEvaluationPurpose::
                     AcceptanceCertificate) {
-          const auto certificate =
-              evaluateStaticCapillaryConstantPressureCertificate(
-                  sim, candidate);
+          auto certificate =
+              evaluateStaticCapillaryPressureCertificate(
+                  sim,
+                  candidate,
+                  request.static_capillary_equilibrium,
+                  /*initialize_compatible_pressure=*/true);
+          const auto& report = certificate.report;
           const auto post_certificate_constraint_key =
               collectiveConstraintSemanticsKey(system, comm);
           if (post_certificate_constraint_key !=
               constraint_key) {
             evaluation.success = false;
             evaluation.diagnostic =
-                "constant_pressure_certificate_changed_constraint_semantics";
+                "pressure_certificate_changed_constraint_semantics";
+            return evaluation;
+          }
+          const bool local_certified_solution_valid =
+              certificate.certified_solution.size() == candidate.size() &&
+              std::all_of(
+                  certificate.certified_solution.begin(),
+                  certificate.certified_solution.end(),
+                  [](svmp::FE::Real value) {
+                    return std::isfinite(value);
+                  });
+          if (globalAnyBool(
+                  !local_certified_solution_valid, comm)) {
+            evaluation.success = false;
+            evaluation.diagnostic =
+                "pressure_certificate_solution_is_invalid";
             return evaluation;
           }
           if (globalAnyBool(
-                  !std::isfinite(certificate.residual_norm),
+                  !std::isfinite(report.residual_norm),
                   comm)) {
             evaluation.success = false;
             evaluation.diagnostic =
-                "constant_pressure_certificate_production_residual_is_nonfinite";
+                "pressure_certificate_production_residual_is_nonfinite";
+            return evaluation;
+          }
+          if (globalMinDouble(report.residual_norm, comm) !=
+              globalMaxDouble(report.residual_norm, comm)) {
+            evaluation.success = false;
+            evaluation.diagnostic =
+                "pressure_certificate_production_residual_differs_across_communicator";
             return evaluation;
           }
           const bool local_kkt_scalar_invalid =
-              certificate.constant_pressure_kkt_available &&
+              report.constant_pressure_kkt_available &&
               (!std::isfinite(
-                   certificate
+                   report
                        .constant_pressure_kkt_residual_norm) ||
                !std::isfinite(
-                   certificate
+                   report
                        .constant_pressure_kkt_relative_distance) ||
                !std::isfinite(
-                   certificate.constant_pressure_kkt_pressure_jump) ||
+                   report.constant_pressure_kkt_pressure_jump) ||
                !std::isfinite(
-                   certificate
+                   report
                        .constant_pressure_kkt_volume_multiplier));
           if (globalAnyBool(
                   local_kkt_scalar_invalid, comm)) {
             evaluation.success = false;
             evaluation.diagnostic =
-                "constant_pressure_certificate_kkt_scalar_is_nonfinite";
+                "pressure_certificate_constant_kkt_scalar_is_nonfinite";
             return evaluation;
           }
           const bool local_diagnostic_sampled =
-              certificate
+              report
                   .pressure_representability_diagnostic_sampled;
+          const bool local_pressure_available =
+              local_diagnostic_sampled &&
+              report.pressure_representability_available;
+          const bool local_pressure_scalar_invalid =
+              local_pressure_available &&
+              (!std::isfinite(
+                   report.pressure_representability_residual_norm) ||
+               !std::isfinite(
+                   report.pressure_representability_relative_distance));
+          if (globalAnyBool(
+                  local_pressure_scalar_invalid, comm)) {
+            evaluation.success = false;
+            evaluation.diagnostic =
+                "pressure_certificate_representability_scalar_is_nonfinite";
+            return evaluation;
+          }
           const bool local_kkt_available =
               local_diagnostic_sampled &&
-              certificate.constant_pressure_kkt_available;
+              report.constant_pressure_kkt_available;
           const bool diagnostic_sampled_identical =
               globalMinDouble(
                   local_diagnostic_sampled ? 1.0 : 0.0,
                   comm) ==
               globalMaxDouble(
                   local_diagnostic_sampled ? 1.0 : 0.0,
+                  comm);
+          const bool pressure_available_identical =
+              globalMinDouble(
+                  local_pressure_available ? 1.0 : 0.0,
+                  comm) ==
+              globalMaxDouble(
+                  local_pressure_available ? 1.0 : 0.0,
                   comm);
           const bool kkt_available_identical =
               globalMinDouble(
@@ -24566,75 +24706,160 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
               globalMaxDouble(
                   local_kkt_available ? 1.0 : 0.0,
                   comm);
+          const bool pressure_convergence_identical =
+              globalMinDouble(
+                  report.pressure_representability_converged ? 1.0 : 0.0,
+                  comm) ==
+                  globalMaxDouble(
+                      report.pressure_representability_converged ? 1.0 : 0.0,
+                      comm) &&
+              globalMinDouble(
+                  report.pressure_representability_breakdown ? 1.0 : 0.0,
+                  comm) ==
+                  globalMaxDouble(
+                      report.pressure_representability_breakdown ? 1.0 : 0.0,
+                      comm);
+          const bool constant_pressure_trace_flags_identical =
+              globalMinDouble(
+                  report
+                          .constant_pressure_unit_coefficients_represent_constant
+                      ? 1.0
+                      : 0.0,
+                  comm) ==
+                  globalMaxDouble(
+                      report
+                              .constant_pressure_unit_coefficients_represent_constant
+                          ? 1.0
+                          : 0.0,
+                      comm) &&
+              globalMinDouble(
+                  report.constant_pressure_constraints_preserve_constants
+                      ? 1.0
+                      : 0.0,
+                  comm) ==
+                  globalMaxDouble(
+                      report.constant_pressure_constraints_preserve_constants
+                          ? 1.0
+                          : 0.0,
+                      comm);
           if (!diagnostic_sampled_identical ||
-              !kkt_available_identical) {
+              !pressure_available_identical ||
+              !kkt_available_identical ||
+              !pressure_convergence_identical ||
+              !constant_pressure_trace_flags_identical) {
             evaluation.success = false;
             evaluation.diagnostic =
-                "constant_pressure_certificate_availability_differs_across_communicator";
+                "pressure_certificate_availability_differs_across_communicator";
             return evaluation;
+          }
+          if (local_pressure_available) {
+            const bool pressure_scalars_identical =
+                globalMinDouble(
+                    report.pressure_representability_residual_norm,
+                    comm) ==
+                    globalMaxDouble(
+                        report.pressure_representability_residual_norm,
+                        comm) &&
+                globalMinDouble(
+                    report.pressure_representability_relative_distance,
+                    comm) ==
+                    globalMaxDouble(
+                        report.pressure_representability_relative_distance,
+                        comm);
+            if (!pressure_scalars_identical) {
+              evaluation.success = false;
+              evaluation.diagnostic =
+                  "pressure_certificate_representability_scalars_differ_across_communicator";
+              return evaluation;
+            }
           }
           if (local_kkt_available) {
             const bool kkt_scalars_identical =
                 globalMinDouble(
-                    certificate
+                    report
                         .constant_pressure_kkt_residual_norm,
                     comm) ==
                     globalMaxDouble(
-                        certificate
+                        report
                             .constant_pressure_kkt_residual_norm,
                         comm) &&
                 globalMinDouble(
-                    certificate
+                    report
                         .constant_pressure_kkt_relative_distance,
                     comm) ==
                     globalMaxDouble(
-                        certificate
+                        report
                             .constant_pressure_kkt_relative_distance,
                         comm) &&
                 globalMinDouble(
-                    certificate
+                    report
                         .constant_pressure_kkt_pressure_jump,
                     comm) ==
                     globalMaxDouble(
-                        certificate
+                        report
                             .constant_pressure_kkt_pressure_jump,
                         comm) &&
                 globalMinDouble(
-                    certificate
+                    report
                         .constant_pressure_kkt_volume_multiplier,
                     comm) ==
                     globalMaxDouble(
-                        certificate
+                        report
                             .constant_pressure_kkt_volume_multiplier,
                         comm);
             if (!kkt_scalars_identical) {
               evaluation.success = false;
               evaluation.diagnostic =
-                  "constant_pressure_certificate_scalars_differ_across_communicator";
+                  "pressure_certificate_constant_kkt_scalars_differ_across_communicator";
               return evaluation;
             }
           }
+          evaluation.pressure_representability_available =
+              local_pressure_available;
+          evaluation.pressure_representability_converged =
+              local_pressure_available &&
+              report.pressure_representability_converged;
+          evaluation.pressure_representability_breakdown =
+              local_pressure_available &&
+              report.pressure_representability_breakdown;
+          evaluation.pressure_representability_residual_norm =
+              static_cast<svmp::FE::Real>(
+                  report.pressure_representability_residual_norm);
+          evaluation.pressure_representability_relative_distance =
+              static_cast<svmp::FE::Real>(
+                  report.pressure_representability_relative_distance);
+          evaluation.production_residual_norm =
+              static_cast<svmp::FE::Real>(report.residual_norm);
+          evaluation.constant_pressure_kkt_required =
+              gravitational_acceleration_is_zero &&
+              report
+                  .constant_pressure_unit_coefficients_represent_constant &&
+              report.constant_pressure_constraints_preserve_constants;
           evaluation.constant_pressure_kkt_available =
               local_kkt_available;
           evaluation.constant_pressure_kkt_residual_norm =
               static_cast<svmp::FE::Real>(
-                  certificate
+                  report
                       .constant_pressure_kkt_residual_norm);
           evaluation.constant_pressure_kkt_relative_distance =
               static_cast<svmp::FE::Real>(
-                  certificate
+                  report
                       .constant_pressure_kkt_relative_distance);
           evaluation.diagnostic =
-              local_kkt_available
+              local_pressure_available
                   ? "acceptance_certificate_available"
-                  : "acceptance_certificate_kkt_unavailable:" +
-                        certificate.constant_pressure_kkt_reason;
+                  : "acceptance_certificate_pressure_unavailable:" +
+                        report.pressure_representability_reason;
           certified_constant_pressure_jump =
-              certificate.constant_pressure_kkt_pressure_jump;
+              report.constant_pressure_kkt_pressure_jump;
           certified_constant_pressure_volume_multiplier =
-              certificate
+              report
                   .constant_pressure_kkt_volume_multiplier;
-          certified_solution = candidate;
+          certified_constant_pressure_multiplier_comparison_available =
+              local_kkt_available &&
+              evaluation.constant_pressure_kkt_required;
+          certified_solution =
+              std::move(certificate.certified_solution);
         }
         return evaluation;
       };
@@ -24660,9 +24885,11 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       result.accepted_coefficients_assigned &&
       accepted_parameters.size() == field_count &&
       certified_solution.size() == baseline.size() &&
-      std::isfinite(certified_constant_pressure_jump) &&
-      std::isfinite(
-          certified_constant_pressure_volume_multiplier);
+      (!result.final_constant_pressure_kkt_required ||
+       (result.final_constant_pressure_kkt_available &&
+        std::isfinite(certified_constant_pressure_jump) &&
+        std::isfinite(
+            certified_constant_pressure_volume_multiplier)));
   if (globalAnyBool(
           !local_prepublication_result_valid, comm)) {
     transaction.rollback();
@@ -24694,21 +24921,25 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
   }
 
   const auto current_backup =
-      gatherFeOrderedSolution(history.u());
+      captureFeOrderedVectorCollectively(
+          history.u(), comm);
   std::vector<std::vector<svmp::FE::Real>> history_backups;
   history_backups.reserve(
       static_cast<std::size_t>(history.historyDepth()));
   for (int slot = 1; slot <= history.historyDepth(); ++slot) {
     history_backups.push_back(
-        gatherFeOrderedSolution(history.uPrevK(slot)));
+        captureFeOrderedVectorCollectively(
+            history.uPrevK(slot), comm));
   }
   std::optional<std::vector<svmp::FE::Real>> u_dot_backup;
   std::optional<std::vector<svmp::FE::Real>> u_ddot_backup;
   if (history.hasUDotState()) {
-    u_dot_backup = gatherFeOrderedSolution(history.uDot());
+    u_dot_backup = captureFeOrderedVectorCollectively(
+        history.uDot(), comm);
   }
   if (history.hasUDDotState()) {
-    u_ddot_backup = gatherFeOrderedSolution(history.uDDot());
+    u_ddot_backup = captureFeOrderedVectorCollectively(
+        history.uDDot(), comm);
   }
   const auto local_staging_layout_error =
       staticCapillaryHistoryPublicationLayoutError(
@@ -24819,6 +25050,14 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       << result.initial_surface_wall_energy
       << " final_surface_wall_energy="
       << result.final_surface_wall_energy
+      << " initial_gravitational_potential_energy="
+      << result.initial_gravitational_potential_energy
+      << " final_gravitational_potential_energy="
+      << result.final_gravitational_potential_energy
+      << " initial_physical_potential_energy="
+      << result.initial_physical_potential_energy
+      << " final_physical_potential_energy="
+      << result.final_physical_potential_energy
       << " final_volume_error=" << result.final_volume_error
       << " final_projected_gradient_norm="
       << result.final_projected_gradient_norm
@@ -24828,9 +25067,27 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       << certified_constant_pressure_jump
       << " constant_pressure_volume_multiplier="
       << certified_constant_pressure_volume_multiplier
+      << " parameter_to_physical_multiplier_comparison_available="
+      << (certified_constant_pressure_multiplier_comparison_available ? 1 : 0)
       << " parameter_to_physical_multiplier_difference="
-      << (result.final_volume_multiplier -
-          certified_constant_pressure_volume_multiplier)
+      << (certified_constant_pressure_multiplier_comparison_available
+              ? result.final_volume_multiplier -
+                    certified_constant_pressure_volume_multiplier
+              : std::numeric_limits<double>::quiet_NaN())
+      << " pressure_representability_available="
+      << (result.final_pressure_representability_available ? 1 : 0)
+      << " pressure_representability_converged="
+      << (result.final_pressure_representability_converged ? 1 : 0)
+      << " pressure_representability_breakdown="
+      << (result.final_pressure_representability_breakdown ? 1 : 0)
+      << " pressure_representability_residual_norm="
+      << result.final_pressure_representability_residual_norm
+      << " pressure_representability_relative_distance="
+      << result.final_pressure_representability_relative_distance
+      << " production_residual_norm="
+      << result.final_production_residual_norm
+      << " constant_pressure_kkt_required="
+      << (result.final_constant_pressure_kkt_required ? 1 : 0)
       << " constant_pressure_kkt_available="
       << (result.final_constant_pressure_kkt_available ? 1 : 0)
       << " constant_pressure_kkt_residual_norm="
@@ -24842,6 +25099,15 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       << " projected_gradient_tolerance="
       << request.static_capillary_equilibrium
              .projected_gradient_tolerance
+      << " pressure_representability_max_residual_norm="
+      << request.static_capillary_equilibrium
+             .pressure_representability_max_residual_norm
+      << " pressure_representability_max_relative_distance="
+      << request.static_capillary_equilibrium
+             .pressure_representability_max_relative_distance
+      << " physical_equilibrium_max_residual_norm="
+      << request.static_capillary_equilibrium
+             .physical_equilibrium_max_residual_norm
       << " constant_pressure_kkt_max_residual_norm="
       << request.static_capillary_equilibrium
              .constant_pressure_kkt_max_residual_norm

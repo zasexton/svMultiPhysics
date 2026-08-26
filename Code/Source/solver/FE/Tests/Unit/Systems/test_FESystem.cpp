@@ -2024,3 +2024,55 @@ TEST(FESystem, ConstraintSparsityAugmentationAddsMasterCouplings)
     const bool has_with = sys.sparsity("mass").hasEntry(end0, end1);
     EXPECT_TRUE(has_with);
 }
+
+TEST(FESystem,
+     CompleteStaticConservativeBodyForceRequiresActiveVolumeEnergy)
+{
+    auto mesh = build_single_quad_mesh();
+    auto scalar_space =
+        std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    auto velocity_space =
+        std::make_shared<ProductSpace>(scalar_space, /*components=*/2);
+
+    FESystem sys(mesh);
+    const auto phi = sys.addField(
+        FieldSpec{.name = "phi_static_body_force_contract",
+                  .space = scalar_space,
+                  .components = 1});
+    const auto velocity = sys.addField(
+        FieldSpec{.name = "u_static_body_force_contract",
+                  .space = velocity_space,
+                  .components = 2});
+
+    svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration declaration{
+        .interface_marker = 91,
+        .level_set_field = phi,
+        .velocity_field = velocity,
+        .geometry_domain_id = "static_body_force_contract",
+        .parameters =
+            svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters{
+                .liquid_side =
+                    svmp::FE::geometry::CutIntegrationSide::Negative,
+                .surface_tension = 1.0,
+            },
+        .static_conservative_body_force_complete = true,
+        .owner_component = "FESystemTest.StaticBodyForceContract",
+    };
+
+    EXPECT_THROW(
+        sys.declareFreeSurfaceDiscreteFunctional(declaration),
+        svmp::FE::InvalidArgumentException);
+    EXPECT_TRUE(sys.freeSurfaceDiscreteFunctionalDeclarations().empty());
+
+    declaration.active_volume_energy_parameters =
+        svmp::FE::interfaces::FreeSurfaceActiveVolumeEnergyParameters{
+            .liquid_side =
+                svmp::FE::geometry::CutIntegrationSide::Negative,
+            .density = 1.0,
+        };
+    EXPECT_NO_THROW(sys.declareFreeSurfaceDiscreteFunctional(declaration));
+    ASSERT_EQ(sys.freeSurfaceDiscreteFunctionalDeclarations().size(), 1u);
+    EXPECT_TRUE(sys.freeSurfaceDiscreteFunctionalDeclarations()
+                    .front()
+                    .static_conservative_body_force_complete);
+}

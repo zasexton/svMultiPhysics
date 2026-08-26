@@ -264,6 +264,77 @@ std::shared_ptr<svmp::Mesh> makeWorkflowFlatCapillaryFanMesh(int normal_axis)
   return svmp::create_mesh(std::move(base));
 }
 
+std::shared_ptr<svmp::Mesh> makeWorkflowHydrostaticPressureMesh()
+{
+  auto base = std::make_shared<svmp::MeshBase>();
+
+  // Use several wet vertex layers and mildly irregular interior x coordinates
+  // so the fixed-gauge P1 pressure field has more admissible velocity-test
+  // rows than pressure unknowns and no fan-mesh checkerboard mode.  The y rows
+  // remain horizontal so p=rho*g*y is represented exactly.
+  constexpr std::size_t columns = 5u;
+  const std::array<std::array<svmp::real_t, columns>, 5> x_rows{{
+      {{0.0, 0.75, 1.50, 2.25, 3.0}},
+      {{0.0, 0.68, 1.47, 2.29, 3.0}},
+      {{0.0, 0.81, 1.55, 2.18, 3.0}},
+      {{0.0, 0.72, 1.42, 2.33, 3.0}},
+      {{0.0, 0.75, 1.50, 2.25, 3.0}},
+  }};
+  constexpr std::array<svmp::real_t, 5> y_rows{{
+      0.0, 0.2, 0.4, 0.7, 1.0}};
+
+  std::vector<svmp::real_t> x_ref;
+  x_ref.reserve(2u * columns * y_rows.size());
+  for (std::size_t row = 0u; row < y_rows.size(); ++row) {
+    for (std::size_t column = 0u; column < columns; ++column) {
+      x_ref.push_back(x_rows[row][column]);
+      x_ref.push_back(y_rows[row]);
+    }
+  }
+
+  std::vector<svmp::offset_t> cell2vertex_offsets{0};
+  std::vector<svmp::index_t> cell2vertex;
+  std::vector<svmp::CellShape> cell_shapes;
+  svmp::CellShape shape{};
+  shape.family = svmp::CellFamily::Triangle;
+  shape.num_corners = 3;
+  shape.order = 1;
+  for (std::size_t row = 0u; row + 1u < y_rows.size(); ++row) {
+    for (std::size_t column = 0u; column + 1u < columns; ++column) {
+      const auto lower_left =
+          static_cast<svmp::index_t>(row * columns + column);
+      const auto lower_right = lower_left + 1;
+      const auto upper_left = lower_left +
+                              static_cast<svmp::index_t>(columns);
+      const auto upper_right = upper_left + 1;
+      if ((row + column) % 2u == 0u) {
+        cell2vertex.insert(cell2vertex.end(),
+                           {lower_left, lower_right, upper_right,
+                            lower_left, upper_right, upper_left});
+      } else {
+        cell2vertex.insert(cell2vertex.end(),
+                           {lower_left, lower_right, upper_left,
+                            lower_right, upper_right, upper_left});
+      }
+      cell2vertex_offsets.push_back(
+          static_cast<svmp::offset_t>(cell2vertex.size() - 3u));
+      cell2vertex_offsets.push_back(
+          static_cast<svmp::offset_t>(cell2vertex.size()));
+      cell_shapes.push_back(shape);
+      cell_shapes.push_back(shape);
+    }
+  }
+
+  base->build_from_arrays(
+      /*spatial_dim=*/2,
+      x_ref,
+      cell2vertex_offsets,
+      cell2vertex,
+      cell_shapes);
+  base->finalize();
+  return svmp::create_mesh(std::move(base));
+}
+
 std::shared_ptr<svmp::Mesh> makeWorkflowFourQuadStripMesh(
     bool reverse_vertex_numbering = false)
 {
@@ -1391,13 +1462,16 @@ void installWorkflowExactConstantPressureCertificate(
     svmp::FE::FieldId velocity,
     svmp::FE::FieldId pressure)
 {
-  constexpr std::array<const char*, 3> diagnostic_operators{
+  constexpr std::array<const char*, 6> diagnostic_operators{
       "equations_diagnostic_ns_free_surface_pressure_virtual_work",
       "equations_diagnostic_ns_free_surface_surface_energy_virtual_work",
+      "equations_diagnostic_ns_free_surface_gravitational_potential_virtual_work",
+      "equations_diagnostic_ns_free_surface_physical_potential_virtual_work",
+      "equations_diagnostic_ns_free_surface_pressure_representability_load_virtual_work",
       "equations_diagnostic_ns_free_surface_conservative_balance",
   };
-  constexpr std::array<svmp::FE::Real, 3> vector_scales{
-      -2.0, 2.0, 0.0};
+  constexpr std::array<svmp::FE::Real, 6> vector_scales{
+      -2.0, 2.0, 0.0, 2.0, 2.0, 0.0};
   for (std::size_t i = 0u;
        i < diagnostic_operators.size();
        ++i) {
@@ -2661,6 +2735,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Enable_static_capillary_equilibrium_initialization>true</Enable_static_capillary_equilibrium_initialization>
     <Static_capillary_volume_tolerance>2.0e-9</Static_capillary_volume_tolerance>
     <Static_capillary_projected_gradient_tolerance>3.0e-8</Static_capillary_projected_gradient_tolerance>
+    <Static_capillary_pressure_representability_max_residual_norm>3.5e-10</Static_capillary_pressure_representability_max_residual_norm>
+    <Static_capillary_pressure_representability_max_relative_distance>3.75e-9</Static_capillary_pressure_representability_max_relative_distance>
+    <Static_capillary_physical_equilibrium_max_residual_norm>3.875e-10</Static_capillary_physical_equilibrium_max_residual_norm>
     <Static_capillary_constant_pressure_kkt_max_residual_norm>4.0e-10</Static_capillary_constant_pressure_kkt_max_residual_norm>
     <Static_capillary_constant_pressure_kkt_max_relative_distance>5.0e-9</Static_capillary_constant_pressure_kkt_max_relative_distance>
     <Static_capillary_finite_difference_reference_coefficient_scale>0.25</Static_capillary_finite_difference_reference_coefficient_scale>
@@ -2688,6 +2765,12 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_DOUBLE_EQ(options.volume_tolerance, 2.0e-9);
   EXPECT_DOUBLE_EQ(options.projected_gradient_tolerance, 3.0e-8);
   EXPECT_DOUBLE_EQ(
+      options.pressure_representability_max_residual_norm, 3.5e-10);
+  EXPECT_DOUBLE_EQ(
+      options.pressure_representability_max_relative_distance, 3.75e-9);
+  EXPECT_DOUBLE_EQ(
+      options.physical_equilibrium_max_residual_norm, 3.875e-10);
+  EXPECT_DOUBLE_EQ(
       options.constant_pressure_kkt_max_residual_norm, 4.0e-10);
   EXPECT_DOUBLE_EQ(
       options.constant_pressure_kkt_max_relative_distance, 5.0e-9);
@@ -2714,11 +2797,11 @@ TEST(ApplicationDriverLevelSetWorkflows,
           /*completed_step=*/0);
   ASSERT_TRUE(canonical.supported);
   ASSERT_FALSE(canonical.words.empty());
-  EXPECT_EQ(canonical.words.front(), 2u);
+  EXPECT_EQ(canonical.words.front(), 3u);
   auto changed_requests = requests;
   changed_requests.front()
       .static_capillary_equilibrium
-      .constant_pressure_kkt_max_relative_distance *= 2.0;
+      .physical_equilibrium_max_residual_norm *= 2.0;
   const auto changed =
       canonicalLevelSetMaintenanceRequestSchedule(
           changed_requests,
@@ -4394,7 +4477,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
-     StaticCapillaryInitializationRollsBackWhenPhysicalKktIsUnavailable)
+     StaticCapillaryInitializationRollsBackWhenPressureCertificateIsUnavailable)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -4462,6 +4545,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
                             svmp::FE::Real{0.0},
                             svmp::FE::Real{0.0}}},
                   },
+          .static_conservative_body_force_complete = true,
           .capillary_balance_method =
               svmp::FE::systems::
                   FreeSurfaceCapillaryBalanceMethod::
@@ -4618,37 +4702,24 @@ TEST(ApplicationDriverLevelSetWorkflows,
       mesh_phi_data_before,
       mesh_phi_data_before + mesh_phi_count);
 
-  // Exercise the unsupported-gravity preflight on the complete application
-  // transaction, then restore this synthetic declaration so the original KKT
-  // rollback case below retains its exact purpose.
+  // Exercise the incomplete body-force preflight on the complete application
+  // transaction, then restore this synthetic declaration so the original
+  // diagnostic rollback case below retains its exact purpose.
   auto declarations =
       sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   auto& mutable_declaration = const_cast<
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration&>(
       declarations.front());
-  const auto saved_active_volume_energy =
-      mutable_declaration.active_volume_energy_parameters;
-  ASSERT_TRUE(saved_active_volume_energy.has_value());
-  mutable_declaration.active_volume_energy_parameters =
-      svmp::FE::interfaces::FreeSurfaceActiveVolumeEnergyParameters{
-          .liquid_side =
-              svmp::FE::geometry::CutIntegrationSide::Negative,
-          .density = svmp::FE::Real{1.0},
-          .gravitational_acceleration =
-              {{svmp::FE::Real{0.0},
-                svmp::FE::Real{-1.0},
-                svmp::FE::Real{0.0}}},
-          .gravitational_reference_point =
-              {{svmp::FE::Real{0.0},
-                svmp::FE::Real{0.0},
-                svmp::FE::Real{0.0}}},
-      };
-  const auto target_volume_before_gravity_rejection =
+  const bool saved_body_force_contract =
+      mutable_declaration.static_conservative_body_force_complete;
+  ASSERT_TRUE(saved_body_force_contract);
+  mutable_declaration.static_conservative_body_force_complete = false;
+  const auto target_volume_before_body_force_rejection =
       requests.front().static_capillary_equilibrium.target_liquid_volume;
-  const auto functional_history_size_before_gravity_rejection =
+  const auto functional_history_size_before_body_force_rejection =
       sim.fe_system->freeSurfaceDiscreteFunctionalHistory().size();
-  std::string gravity_failure;
+  std::string body_force_failure;
   try {
     (void)initializeDiscreteStaticCapillaryEquilibrium(
         sim,
@@ -4657,21 +4728,21 @@ TEST(ApplicationDriverLevelSetWorkflows,
         lifecycle,
         refresh_cache);
   } catch (const std::runtime_error& error) {
-    gravity_failure = error.what();
+    body_force_failure = error.what();
   }
   EXPECT_NE(
-      gravity_failure.find(
-          "requires exactly zero finite gravitational acceleration"),
+      body_force_failure.find(
+          "requires an active-volume energy declaration whose gravitational acceleration is the complete velocity-independent body acceleration"),
       std::string::npos)
-      << gravity_failure;
+      << body_force_failure;
   EXPECT_FALSE(
       requests.front().static_capillary_equilibrium_initialized);
   EXPECT_DOUBLE_EQ(
       requests.front().static_capillary_equilibrium.target_liquid_volume,
-      target_volume_before_gravity_rejection);
+      target_volume_before_body_force_rejection);
   EXPECT_EQ(
       sim.fe_system->freeSurfaceDiscreteFunctionalHistory().size(),
-      functional_history_size_before_gravity_rejection);
+      functional_history_size_before_body_force_rejection);
   EXPECT_EQ(gatherFeOrderedSolution(sim.time_history->u()), current);
   EXPECT_EQ(gatherFeOrderedSolution(sim.time_history->uPrev()), previous);
   EXPECT_EQ(gatherFeOrderedSolution(sim.time_history->uPrev2()), older);
@@ -4680,16 +4751,16 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(sim.fe_system->cutIntegrationContext(), initial_context);
   EXPECT_EQ(lifecycle.valueRevision(), lifecycle_revision);
   EXPECT_EQ(refresh_cache.topology_key, refresh_cache_before.topology_key);
-  const auto* mesh_phi_data_after_gravity_rejection =
+  const auto* mesh_phi_data_after_body_force_rejection =
       static_cast<const double*>(mesh->field_data(mesh_field));
-  ASSERT_NE(mesh_phi_data_after_gravity_rejection, nullptr);
+  ASSERT_NE(mesh_phi_data_after_body_force_rejection, nullptr);
   EXPECT_EQ(
       std::vector<double>(
-          mesh_phi_data_after_gravity_rejection,
-          mesh_phi_data_after_gravity_rejection + mesh_phi_count),
+          mesh_phi_data_after_body_force_rejection,
+          mesh_phi_data_after_body_force_rejection + mesh_phi_count),
       mesh_phi_before);
-  mutable_declaration.active_volume_energy_parameters =
-      saved_active_volume_energy;
+  mutable_declaration.static_conservative_body_force_complete =
+      saved_body_force_contract;
 
   const auto saved_velocity_field = mutable_declaration.velocity_field;
   const auto expect_velocity_binding_rejection =
@@ -4717,10 +4788,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
             requests.front()
                 .static_capillary_equilibrium
                 .target_liquid_volume,
-            target_volume_before_gravity_rejection);
+            target_volume_before_body_force_rejection);
         EXPECT_EQ(
             sim.fe_system->freeSurfaceDiscreteFunctionalHistory().size(),
-            functional_history_size_before_gravity_rejection);
+            functional_history_size_before_body_force_rejection);
         EXPECT_EQ(gatherFeOrderedSolution(sim.time_history->u()), current);
         EXPECT_EQ(
             gatherFeOrderedSolution(sim.time_history->uPrev()), previous);
@@ -4767,7 +4838,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   }
   EXPECT_NE(
       failure.find(
-          "constant_pressure_kkt_unavailable_at_parameter_stationary_geometry"),
+          "pressure_representability_unavailable_at_parameter_stationary_geometry"),
       std::string::npos)
       << failure;
   EXPECT_FALSE(
@@ -4896,6 +4967,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
                             svmp::FE::Real{0.0},
                             svmp::FE::Real{0.0}}},
                   },
+          .static_conservative_body_force_complete = true,
           .capillary_balance_method =
               svmp::FE::systems::
                   FreeSurfaceCapillaryBalanceMethod::
@@ -5134,6 +5206,33 @@ TEST(ApplicationDriverLevelSetWorkflows,
   scatterFeOrderedSolution(sim.time_history->u(), current);
   sim.time_history->updateGhosts();
 
+  const auto expected_pressure_certificate =
+      evaluateStaticCapillaryPressureCertificate(
+          sim,
+          current,
+          requests.front().static_capillary_equilibrium,
+          /*initialize_compatible_pressure=*/true);
+  ASSERT_TRUE(
+      expected_pressure_certificate.report
+          .static_compatible_pressure_initializer_passed)
+      << expected_pressure_certificate.report
+             .static_compatible_pressure_initializer_reason;
+  const auto& expected_current =
+      expected_pressure_certificate.certified_solution;
+  ASSERT_EQ(expected_current.size(), current.size());
+  const auto pressure_offset = static_cast<std::size_t>(
+      sim.fe_system->fieldDofOffset(pressure));
+  const auto pressure_count = static_cast<std::size_t>(
+      sim.fe_system->fieldDofHandler(pressure).getNumDofs());
+  svmp::FE::Real maximum_pressure_update = 0.0;
+  for (std::size_t i = 0u; i < pressure_count; ++i) {
+    maximum_pressure_update =
+        std::max(maximum_pressure_update,
+                 std::abs(expected_current[pressure_offset + i] -
+                          current[pressure_offset + i]));
+  }
+  EXPECT_GT(maximum_pressure_update, svmp::FE::Real{0.0});
+
   bool initialized = false;
   ASSERT_NO_THROW(
       initialized =
@@ -5166,17 +5265,17 @@ TEST(ApplicationDriverLevelSetWorkflows,
   const auto phi_count = static_cast<std::size_t>(
       sim.fe_system->fieldDofHandler(phi).getNumDofs());
   std::copy(
-      current.begin() +
+      expected_current.begin() +
           static_cast<std::ptrdiff_t>(phi_offset),
-      current.begin() +
+      expected_current.begin() +
           static_cast<std::ptrdiff_t>(
               phi_offset + phi_count),
       expected_previous.begin() +
           static_cast<std::ptrdiff_t>(phi_offset));
   std::copy(
-      current.begin() +
+      expected_current.begin() +
           static_cast<std::ptrdiff_t>(phi_offset),
-      current.begin() +
+      expected_current.begin() +
           static_cast<std::ptrdiff_t>(
               phi_offset + phi_count),
       expected_older.begin() +
@@ -5200,7 +5299,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 
   EXPECT_EQ(
       gatherFeOrderedSolution(sim.time_history->u()),
-      current);
+      expected_current);
   EXPECT_EQ(
       gatherFeOrderedSolution(sim.time_history->uPrev()),
       expected_previous);
@@ -5571,9 +5670,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
 
         const auto certified_solution =
             gatherFeOrderedSolution(sim.time_history->u());
-        const auto certificate =
-            evaluateStaticCapillaryConstantPressureCertificate(
-                sim, certified_solution);
+        const auto pressure_certificate =
+            evaluateStaticCapillaryPressureCertificate(
+                sim,
+                certified_solution,
+                requests.front().static_capillary_equilibrium,
+                /*initialize_compatible_pressure=*/false);
+        const auto& certificate = pressure_certificate.report;
         ASSERT_TRUE(certificate.pressure_representability_diagnostic_sampled);
         ASSERT_TRUE(certificate.constant_pressure_kkt_available)
             << certificate.constant_pressure_kkt_reason;
@@ -5654,6 +5757,528 @@ TEST(ApplicationDriverLevelSetWorkflows,
                  maximum_surface_energy_error);
   RecordProperty("wp4_physical_flat_maximum_phi_update",
                  maximum_phi_update_across_cases);
+#endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     StaticCapillaryInitializationBalancesHydrostaticGravityWithFixedPressureGauge)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  constexpr int interface_marker = 720;
+  constexpr int left_wall_marker = 7201;
+  constexpr int right_wall_marker = 7202;
+  constexpr int lower_anchor_marker = 7203;
+  constexpr int upper_anchor_marker = 7204;
+  constexpr int normal_axis = 1;
+  constexpr int tangent_axis = 0;
+  constexpr svmp::FE::Real normal_offset = 0.5;
+  constexpr svmp::FE::Real density = 1.25;
+  constexpr svmp::FE::Real gravity_magnitude = 0.4;
+  constexpr svmp::FE::Real pi =
+      svmp::FE::Real{3.141592653589793238462643383279502884};
+  constexpr svmp::FE::Real contact_angle = pi / svmp::FE::Real{2.0};
+  WorkflowScopedEnvVar conservative_balance_diagnostic(
+      "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", std::string("1"));
+
+  std::size_t case_count = 0u;
+  svmp::FE::Real maximum_pressure_residual = 0.0;
+  svmp::FE::Real maximum_pressure_relative_distance = 0.0;
+  svmp::FE::Real maximum_exact_field_production_residual = 0.0;
+  svmp::FE::Real maximum_production_residual = 0.0;
+  svmp::FE::Real maximum_initializer_pressure_representative_distance = 0.0;
+  svmp::FE::Real maximum_exact_initializer_pressure_update = 0.0;
+  svmp::FE::Real maximum_gravitational_energy_error = 0.0;
+  svmp::FE::Real maximum_phi_update = 0.0;
+
+  for (const svmp::FE::Real gravity_direction :
+       {svmp::FE::Real{-1.0}, svmp::FE::Real{1.0}}) {
+    const auto gravity = gravity_direction * gravity_magnitude;
+    const auto external_pressure = density * gravity * normal_offset;
+    SCOPED_TRACE(::testing::Message()
+                 << "gravity=" << gravity
+                 << " external_pressure=" << external_pressure);
+    ++case_count;
+
+    auto mesh = makeWorkflowHydrostaticPressureMesh();
+    auto& local_mesh = mesh->local_mesh();
+    std::array<std::size_t, 4> marker_counts{};
+    constexpr svmp::FE::Real coordinate_tolerance = 1.0e-12;
+    for (const auto face : local_mesh.boundary_faces()) {
+      const auto vertices = local_mesh.face_vertices(face);
+      ASSERT_EQ(vertices.size(), 2u);
+      bool on_left_wall = true;
+      bool on_right_wall = true;
+      bool on_lower_anchor = true;
+      bool on_upper_anchor = true;
+      for (const auto vertex : vertices) {
+        const auto point = local_mesh.get_vertex_coords(vertex);
+        on_left_wall =
+            on_left_wall &&
+            std::abs(point[tangent_axis]) <= coordinate_tolerance;
+        on_right_wall =
+            on_right_wall &&
+            std::abs(point[tangent_axis] - svmp::FE::Real{3.0}) <=
+                coordinate_tolerance;
+        on_lower_anchor =
+            on_lower_anchor &&
+            std::abs(point[normal_axis]) <= coordinate_tolerance;
+        on_upper_anchor =
+            on_upper_anchor &&
+            std::abs(point[normal_axis] - svmp::FE::Real{1.0}) <=
+                coordinate_tolerance;
+      }
+      if (on_left_wall) {
+        mesh->set_boundary_label(face, left_wall_marker);
+        ++marker_counts[0];
+      } else if (on_right_wall) {
+        mesh->set_boundary_label(face, right_wall_marker);
+        ++marker_counts[1];
+      } else if (on_lower_anchor) {
+        mesh->set_boundary_label(face, lower_anchor_marker);
+        ++marker_counts[2];
+      } else if (on_upper_anchor) {
+        mesh->set_boundary_label(face, upper_anchor_marker);
+        ++marker_counts[3];
+      } else {
+        FAIL() << "Hydrostatic static-capillary fixture found an unclassified face.";
+      }
+    }
+    EXPECT_EQ(marker_counts[0], 4u);
+    EXPECT_EQ(marker_counts[1], 4u);
+    EXPECT_EQ(marker_counts[2], 4u);
+    EXPECT_EQ(marker_counts[3], 4u);
+
+    const auto mesh_field =
+        svmp::MeshFields::attach_field(local_mesh,
+                                       svmp::EntityKind::Vertex,
+                                       "phi_physical_hydrostatic_fixed_gauge",
+                                       svmp::FieldScalarType::Float64,
+                                       1);
+    auto* mesh_phi = svmp::MeshFields::field_data_as<svmp::real_t>(
+        local_mesh, mesh_field);
+    ASSERT_NE(mesh_phi, nullptr);
+    std::vector<svmp::FE::Real> phi_vertex_values(mesh->n_vertices(), 0.0);
+    for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
+      phi_vertex_values[vertex] =
+          workflowVertexPoint(*mesh, vertex)[normal_axis] - normal_offset;
+      mesh_phi[vertex] = phi_vertex_values[vertex];
+    }
+
+    auto scalar_space = svmp::FE::spaces::SpaceFactory::create_h1(
+        svmp::FE::ElementType::Triangle3,
+        /*order=*/1);
+    auto velocity_space = svmp::FE::spaces::SpaceFactory::create_vector_h1(
+        svmp::FE::ElementType::Triangle3,
+        /*order=*/1,
+        /*components=*/2);
+    auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
+    const auto phi = system->addField(
+        svmp::FE::systems::FieldSpec{
+            .name = "phi_physical_hydrostatic_fixed_gauge",
+            .space = scalar_space,
+            .components = 1});
+
+    channel_ns::IncompressibleNavierStokesVMSOptions options;
+    options.velocity_field_name = "u_physical_hydrostatic_fixed_gauge";
+    options.pressure_field_name = "p_physical_hydrostatic_fixed_gauge";
+    options.density = density;
+    options.viscosity = 0.01;
+    options.body_force[normal_axis] = gravity;
+    options.enable_convection = false;
+    options.enable_vms = false;
+    options.jit_policy.enable = false;
+    options.velocity_dirichlet.push_back(
+        channel_ns::IncompressibleNavierStokesVMSOptions::
+            VelocityDirichletBC{
+                .boundary_marker = lower_anchor_marker,
+                .value = {0.0, 0.0, 0.0},
+            });
+    options.velocity_dirichlet.push_back(
+        channel_ns::IncompressibleNavierStokesVMSOptions::
+            VelocityDirichletBC{
+                .boundary_marker = left_wall_marker,
+                .value = {0.0, 0.0, 0.0},
+                .active_components = {true, false, false},
+            });
+    options.velocity_dirichlet.push_back(
+        channel_ns::IncompressibleNavierStokesVMSOptions::
+            VelocityDirichletBC{
+                .boundary_marker = right_wall_marker,
+                .value = {0.0, 0.0, 0.0},
+                .active_components = {true, false, false},
+            });
+    options.node_pressure_constraints.id_type =
+        channel_ns::IncompressibleNavierStokesVMSOptions::
+            NodePressureConstraintIdType::LocalVertexId;
+    options.node_pressure_constraints.values.push_back(
+        channel_ns::IncompressibleNavierStokesVMSOptions::
+            NodePressureConstraint{
+                .node_id = 0,
+                .pressure = 0.0,
+            });
+
+    using ContactLine = channel_ns::IncompressibleNavierStokesVMSOptions::
+        FreeSurfaceContactLine;
+    auto free_surface =
+        channel_ns::IncompressibleNavierStokesVMSOptions::
+            FreeSurfaceBoundary{
+                .implementation =
+                    channel_ns::FreeSurfaceImplementation::UnfittedLevelSet,
+                .interface_marker = interface_marker,
+                .level_set_field_name =
+                    "phi_physical_hydrostatic_fixed_gauge",
+                .generated_interface_domain_id =
+                    "physical_hydrostatic_fixed_gauge",
+                .generated_interface_geometry = "LinearCorner",
+                .active_domain =
+                    channel_ns::FreeSurfaceActiveDomain::LevelSetNegative,
+                .active_domain_method =
+                    channel_ns::FreeSurfaceActiveDomainMethod::CutVolume,
+                .external_pressure = external_pressure,
+                .surface_tension = 1.0,
+                .surface_tension_form =
+                    channel_ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
+                .curvature = 0.0,
+                .use_level_set_curvature = false,
+                .small_cut_aggregation = false,
+            };
+    free_surface.contact_lines.push_back(
+        ContactLine{.configuration = ContactLine::DynamicRenE{
+                        .wall_boundary_marker = left_wall_marker,
+                        .contact_line_marker = -1,
+                        .equilibrium_contact_angle_radians = contact_angle,
+                        .wall_normal = {-1.0, 0.0, 0.0},
+                        .mobility = 1.0,
+                        .slip_length = 1.0,
+                    }});
+    free_surface.contact_lines.push_back(
+        ContactLine{.configuration = ContactLine::DynamicRenE{
+                        .wall_boundary_marker = right_wall_marker,
+                        .contact_line_marker = -1,
+                        .equilibrium_contact_angle_radians = contact_angle,
+                        .wall_normal = {1.0, 0.0, 0.0},
+                        .mobility = 1.0,
+                        .slip_length = 1.0,
+                    }});
+    options.free_surface.push_back(std::move(free_surface));
+
+    channel_ns::IncompressibleNavierStokesVMSModule module(
+        velocity_space, scalar_space, std::move(options));
+    module.registerOn(*system);
+    const auto velocity = system->findFieldByName(
+        "u_physical_hydrostatic_fixed_gauge");
+    const auto pressure = system->findFieldByName(
+        "p_physical_hydrostatic_fixed_gauge");
+    ASSERT_NE(velocity, svmp::FE::INVALID_FIELD_ID);
+    ASSERT_NE(pressure, svmp::FE::INVALID_FIELD_ID);
+    ASSERT_NO_THROW(system->setup({}));
+
+    const auto phi_coefficients = projectWorkflowVertexValues(
+        *system,
+        phi,
+        phi_vertex_values,
+        /*components=*/1u,
+        "ApplicationDriver hydrostatic fixed-gauge phi");
+    std::vector<svmp::FE::Real> current(
+        static_cast<std::size_t>(system->dofHandler().getNumDofs()), 0.0);
+    writeWorkflowFieldSlice(*system, phi, phi_coefficients, current);
+
+    application::core::SimulationComponents sim;
+    sim.primary_mesh = mesh;
+    sim.fe_system = std::move(system);
+    try {
+      sim.backend = svmp::FE::backends::BackendFactory::create(
+          svmp::FE::backends::BackendKind::FSILS);
+    } catch (const std::exception&) {
+      GTEST_SKIP() << "Requires an available FE vector backend.";
+    }
+    ASSERT_NE(sim.backend, nullptr);
+    svmp::FE::backends::SolverOptions linear_options;
+    linear_options.method = svmp::FE::backends::SolverMethod::GMRES;
+    linear_options.preconditioner =
+        svmp::FE::backends::PreconditionerType::Diagonal;
+    sim.linear_solver = sim.backend->createLinearSolver(linear_options);
+    ASSERT_NE(sim.linear_solver, nullptr);
+    auto allocated_history = svmp::FE::timestepping::TimeHistory::allocate(
+        *sim.backend,
+        sim.fe_system->dofHandler().getNumDofs(),
+        /*history_depth=*/2,
+        /*allocate_second_order_state=*/true);
+    sim.time_history =
+        std::make_unique<svmp::FE::timestepping::TimeHistory>(
+            std::move(allocated_history));
+    sim.time_history->setTime(0.0);
+    sim.time_history->setDt(0.1);
+    sim.time_history->setPrevDt(0.1);
+    scatterFeOrderedSolution(sim.time_history->u(), current);
+    scatterFeOrderedSolution(sim.time_history->uPrev(), current);
+    scatterFeOrderedSolution(sim.time_history->uPrev2(), current);
+    sim.time_history->uDot().zero();
+    sim.time_history->uDDot().zero();
+    sim.time_history->updateGhosts();
+
+    std::ostringstream parameter_xml;
+    parameter_xml << std::setprecision(17) << R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi_physical_hydrostatic_fixed_gauge</Level_set_field_name>
+    <Enable_static_capillary_equilibrium_initialization>true</Enable_static_capillary_equilibrium_initialization>
+    <Static_capillary_volume_tolerance>1.0e-11</Static_capillary_volume_tolerance>
+    <Static_capillary_projected_gradient_tolerance>2.0e-6</Static_capillary_projected_gradient_tolerance>
+    <Static_capillary_pressure_representability_max_residual_norm>2.0e-10</Static_capillary_pressure_representability_max_residual_norm>
+    <Static_capillary_pressure_representability_max_relative_distance>2.0e-10</Static_capillary_pressure_representability_max_relative_distance>
+    <Static_capillary_physical_equilibrium_max_residual_norm>2.0e-10</Static_capillary_physical_equilibrium_max_residual_norm>
+    <Static_capillary_constant_pressure_kkt_max_residual_norm>2.0e-10</Static_capillary_constant_pressure_kkt_max_residual_norm>
+    <Static_capillary_constant_pressure_kkt_max_relative_distance>2.0e-10</Static_capillary_constant_pressure_kkt_max_relative_distance>
+  </Add_equation>
+  <Add_equation type="fluid">
+    <Add_BC name="physical_hydrostatic_fixed_gauge">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi_physical_hydrostatic_fixed_gauge</Level_set_field_name>
+      <Generated_interface_domain_id>physical_hydrostatic_fixed_gauge</Generated_interface_domain_id>
+      <Interface_marker>720</Interface_marker>
+      <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
+      <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
+      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+      <Small_cut_aggregation>false</Small_cut_aggregation>
+      <External_pressure>)xml"
+                  << external_pressure << R"xml(</External_pressure>
+      <Surface_tension>1.0</Surface_tension>
+      <Surface_tension_form>SurfaceStress</Surface_tension_form>
+      <Contact_line_model>DynamicContactAngle</Contact_line_model>
+      <Contact_angle_degrees>90.0</Contact_angle_degrees>
+      <Contact_line_wall_markers>7201;7202</Contact_line_wall_markers>
+      <Contact_line_wall_normals>-1.0 0.0 0.0; 1.0 0.0 0.0</Contact_line_wall_normals>
+      <Contact_line_mobility>1.0</Contact_line_mobility>
+      <Wall_slip_model>Navier</Wall_slip_model>
+      <Wall_slip_length>1.0</Wall_slip_length>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml";
+    const auto parameter_text = parameter_xml.str();
+    auto params = parseWorkflowParametersXml(parameter_text.c_str());
+    auto requests = levelSetMaintenanceRequests(*params);
+    ASSERT_EQ(requests.size(), 1u);
+    ASSERT_TRUE(requests.front().static_capillary_equilibrium_enabled);
+
+    svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    ActiveCutContextRefreshCache refresh_cache;
+    const auto initial_report = refreshActiveCutIntegrationContextCached(
+        sim,
+        *params,
+        sim.time_history->u(),
+        lifecycle,
+        refresh_cache,
+        "application-driver-hydrostatic-fixed-gauge-initial");
+    ASSERT_TRUE(initial_report.refreshed);
+    auto initial_functionals =
+        evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+    ASSERT_EQ(initial_functionals.size(), 1u);
+    attachAcceptedFreeSurfaceActiveVolumeEnergies(
+        sim, current, initial_functionals);
+    ASSERT_TRUE(initial_functionals.front().active_volume_energy.has_value());
+    const auto expected_volume = svmp::FE::Real{3.0} * normal_offset;
+    const auto expected_gravitational_energy =
+        -density * gravity * svmp::FE::Real{1.5} *
+        normal_offset * normal_offset;
+    EXPECT_NEAR(initial_functionals.front().state.owned_liquid_volume,
+                expected_volume,
+                1.0e-13);
+    EXPECT_NEAR(initial_functionals.front().state.liquid_gas_surface_energy,
+                svmp::FE::Real{3.0},
+                1.0e-13);
+    EXPECT_NEAR(initial_functionals.front().state.young_wall_energy,
+                svmp::FE::Real{0.0},
+                1.0e-13);
+    EXPECT_NEAR(
+        initial_functionals.front().active_volume_energy->gravitational_energy,
+        expected_gravitational_energy,
+        2.0e-13);
+
+    std::vector<svmp::FE::Real> expected_pressure_vertex_values(
+        mesh->n_vertices(), 0.0);
+    for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
+      const auto normal_coordinate =
+          workflowVertexPoint(*mesh, vertex)[normal_axis];
+      expected_pressure_vertex_values[vertex] =
+          density * gravity * normal_coordinate;
+    }
+    const auto analytic_pressure_coefficients = projectWorkflowVertexValues(
+        *sim.fe_system,
+        pressure,
+        expected_pressure_vertex_values,
+        /*components=*/1u,
+        "ApplicationDriver hydrostatic fixed-gauge pressure");
+    auto exact_solution = current;
+    writeWorkflowFieldSlice(
+        *sim.fe_system,
+        pressure,
+        analytic_pressure_coefficients,
+        exact_solution);
+    sim.fe_system->updateConstraints(
+        sim.time_history->time(), sim.time_history->dt());
+    sim.fe_system->constraints().distribute(exact_solution);
+    const auto pressure_offset = static_cast<std::size_t>(
+        sim.fe_system->fieldDofOffset(pressure));
+    const auto pressure_count = static_cast<std::size_t>(
+        sim.fe_system->fieldDofHandler(pressure).getNumDofs());
+    const std::vector<svmp::FE::Real> expected_pressure_coefficients(
+        exact_solution.begin() +
+            static_cast<std::ptrdiff_t>(pressure_offset),
+        exact_solution.begin() +
+            static_cast<std::ptrdiff_t>(pressure_offset + pressure_count));
+    const auto exact_pressure_certificate =
+        evaluateStaticCapillaryPressureCertificate(
+            sim,
+            exact_solution,
+            requests.front().static_capillary_equilibrium,
+            /*initialize_compatible_pressure=*/false);
+    const auto& exact_certificate = exact_pressure_certificate.report;
+    ASSERT_TRUE(exact_certificate.pressure_representability_diagnostic_sampled);
+    EXPECT_LE(exact_certificate.residual_norm, 2.0e-12);
+
+    const auto exact_initialized_pressure_certificate =
+        evaluateStaticCapillaryPressureCertificate(
+            sim,
+            exact_solution,
+            requests.front().static_capillary_equilibrium,
+            /*initialize_compatible_pressure=*/true);
+    const auto& exact_initialized_report =
+        exact_initialized_pressure_certificate.report;
+    ASSERT_TRUE(
+        exact_initialized_report.static_compatible_pressure_initializer_applied);
+    ASSERT_TRUE(
+        exact_initialized_report.static_compatible_pressure_initializer_passed);
+    EXPECT_LE(exact_initialized_report.residual_norm, 2.0e-12);
+    ASSERT_EQ(exact_initialized_pressure_certificate.certified_solution.size(),
+              exact_solution.size());
+    svmp::FE::Real exact_initializer_pressure_update = 0.0;
+    for (std::size_t i = 0u; i < pressure_count; ++i) {
+      exact_initializer_pressure_update =
+          std::max(
+              exact_initializer_pressure_update,
+              std::abs(
+                  exact_initialized_pressure_certificate.certified_solution[
+                      pressure_offset + i] -
+                  exact_solution[pressure_offset + i]));
+    }
+    EXPECT_LE(exact_initializer_pressure_update, 2.0e-12);
+    maximum_exact_initializer_pressure_update =
+        std::max(maximum_exact_initializer_pressure_update,
+                 exact_initializer_pressure_update);
+
+    bool initialized = false;
+    ASSERT_NO_THROW(
+        initialized = initializeDiscreteStaticCapillaryEquilibrium(
+            sim, *params, requests, lifecycle, refresh_cache));
+    ASSERT_TRUE(initialized);
+    ASSERT_TRUE(requests.front().static_capillary_equilibrium_initialized);
+
+    const auto certified_solution =
+        gatherFeOrderedSolution(sim.time_history->u());
+    const auto pressure_certificate =
+        evaluateStaticCapillaryPressureCertificate(
+            sim,
+            certified_solution,
+            requests.front().static_capillary_equilibrium,
+            /*initialize_compatible_pressure=*/false);
+    const auto& certificate = pressure_certificate.report;
+    ASSERT_TRUE(certificate.pressure_representability_diagnostic_sampled);
+    ASSERT_TRUE(certificate.pressure_representability_available)
+        << certificate.pressure_representability_reason;
+    EXPECT_TRUE(certificate.pressure_representability_converged);
+    EXPECT_FALSE(certificate.pressure_representability_breakdown);
+    EXPECT_LE(certificate.pressure_representability_residual_norm, 2.0e-10);
+    EXPECT_LE(certificate.pressure_representability_relative_distance,
+              2.0e-10);
+    EXPECT_LE(certificate.residual_norm, 2.0e-10);
+    EXPECT_FALSE(certificate.constant_pressure_constraints_preserve_constants);
+    EXPECT_FALSE(certificate.constant_pressure_kkt_available);
+
+    svmp::FE::Real initializer_pressure_representative_distance = 0.0;
+    for (std::size_t i = 0u; i < expected_pressure_coefficients.size(); ++i) {
+      initializer_pressure_representative_distance =
+          std::max(initializer_pressure_representative_distance,
+                   std::abs(certified_solution[pressure_offset + i] -
+                            expected_pressure_coefficients[i]));
+    }
+    EXPECT_TRUE(std::isfinite(initializer_pressure_representative_distance));
+
+    const auto phi_offset = static_cast<std::size_t>(
+        sim.fe_system->fieldDofOffset(phi));
+    svmp::FE::Real phi_update = 0.0;
+    for (std::size_t i = 0u; i < phi_coefficients.size(); ++i) {
+      phi_update =
+          std::max(phi_update,
+                   std::abs(certified_solution[phi_offset + i] -
+                            current[phi_offset + i]));
+    }
+    EXPECT_LE(phi_update, 2.0e-7);
+
+    auto final_functionals =
+        evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+    ASSERT_EQ(final_functionals.size(), 1u);
+    attachAcceptedFreeSurfaceActiveVolumeEnergies(
+        sim, certified_solution, final_functionals);
+    ASSERT_TRUE(final_functionals.front().active_volume_energy.has_value());
+    const auto gravitational_energy_error = std::abs(
+        final_functionals.front().active_volume_energy->gravitational_energy -
+        expected_gravitational_energy);
+    EXPECT_LE(gravitational_energy_error, 2.0e-10);
+    EXPECT_NEAR(final_functionals.front().state.owned_liquid_volume,
+                expected_volume,
+                1.0e-11);
+
+    maximum_pressure_residual =
+        std::max(maximum_pressure_residual,
+                 static_cast<svmp::FE::Real>(
+                     certificate.pressure_representability_residual_norm));
+    maximum_pressure_relative_distance =
+        std::max(maximum_pressure_relative_distance,
+                 static_cast<svmp::FE::Real>(
+                     certificate.pressure_representability_relative_distance));
+    maximum_exact_field_production_residual =
+        std::max(maximum_exact_field_production_residual,
+                 static_cast<svmp::FE::Real>(exact_certificate.residual_norm));
+    maximum_production_residual =
+        std::max(maximum_production_residual,
+                 static_cast<svmp::FE::Real>(certificate.residual_norm));
+    maximum_initializer_pressure_representative_distance =
+        std::max(maximum_initializer_pressure_representative_distance,
+                 initializer_pressure_representative_distance);
+    maximum_gravitational_energy_error =
+        std::max(maximum_gravitational_energy_error,
+                 gravitational_energy_error);
+    maximum_phi_update = std::max(maximum_phi_update, phi_update);
+  }
+
+  EXPECT_EQ(case_count, 2u);
+  RecordProperty("wp4_hydrostatic_spatial_dimension", 2);
+  RecordProperty("wp4_hydrostatic_gravity_direction_count", 2);
+  RecordProperty("wp4_hydrostatic_fixed_zero_pressure_gauge_case_count",
+                 case_count);
+  RecordProperty("wp4_hydrostatic_matrix_case_count", case_count);
+  RecordProperty("wp4_hydrostatic_pressure_representability_residual_norm",
+                 maximum_pressure_residual);
+  RecordProperty("wp4_hydrostatic_pressure_relative_distance",
+                 maximum_pressure_relative_distance);
+  RecordProperty("wp4_hydrostatic_exact_field_production_residual_norm",
+                 maximum_exact_field_production_residual);
+  RecordProperty("wp4_hydrostatic_production_residual_norm",
+                 maximum_production_residual);
+  RecordProperty(
+      "wp4_hydrostatic_initializer_pressure_representative_distance",
+      maximum_initializer_pressure_representative_distance);
+  RecordProperty("wp4_hydrostatic_exact_initializer_pressure_update",
+                 maximum_exact_initializer_pressure_update);
+  RecordProperty("wp4_hydrostatic_gravitational_energy_error",
+                 maximum_gravitational_energy_error);
+  RecordProperty("wp4_hydrostatic_maximum_phi_update", maximum_phi_update);
 #endif
 }
 

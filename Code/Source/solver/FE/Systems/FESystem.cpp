@@ -8914,6 +8914,8 @@ bool sameFreeSurfaceDiscreteFunctionalDeclaration(
             lhs.parameters, rhs.parameters) ||
         lhs.active_volume_energy_parameters.has_value() !=
             rhs.active_volume_energy_parameters.has_value() ||
+        lhs.static_conservative_body_force_complete !=
+            rhs.static_conservative_body_force_complete ||
         lhs.active_volume_dissipation_parameters.has_value() !=
             rhs.active_volume_dissipation_parameters.has_value() ||
         lhs.external_pressure_power_parameters.has_value() !=
@@ -12272,6 +12274,13 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
             "energy requires the declared liquid side, positive finite "
             "density, and finite gravitational data");
     }
+    FE_THROW_IF(
+        declaration.static_conservative_body_force_complete &&
+            !declaration.active_volume_energy_parameters.has_value(),
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: a complete static "
+        "conservative body-force declaration requires active-volume energy "
+        "parameters");
     if (declaration.active_volume_dissipation_parameters.has_value()) {
         const auto& dissipation =
             *declaration.active_volume_dissipation_parameters;
@@ -12479,6 +12488,8 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
             << (stored.active_volume_energy_parameters.has_value()
                     ? "enabled"
                     : "disabled")
+            << " static_conservative_body_force_complete="
+            << (stored.static_conservative_body_force_complete ? 1 : 0)
             << " active_volume_dissipation="
             << (stored.active_volume_dissipation_parameters.has_value()
                     ? "enabled"
@@ -13703,6 +13714,10 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                                 .endpoint_functional_power_enabled !=
                             free_surface_discrete_functional_declarations_[i]
                                 .endpoint_functional_power_enabled ||
+                        record.declaration
+                                .static_conservative_body_force_complete !=
+                            free_surface_discrete_functional_declarations_[i]
+                                .static_conservative_body_force_complete ||
                         record.declaration.owner_component !=
                             free_surface_discrete_functional_declarations_[i]
                                 .owner_component ||

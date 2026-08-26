@@ -2209,6 +2209,7 @@ void recreatePressureRepresentabilityVectors(
     // refresh observable and prevents an allocator from recycling an old
     // object address while the set is only partially rebuilt.
     auto load = create_vector();
+    auto correction_load = create_vector();
     auto solution = create_vector();
     auto left_basis = create_vector();
     auto right_basis = create_vector();
@@ -2218,6 +2219,8 @@ void recreatePressureRepresentabilityVectors(
     auto normal_residual = create_vector();
 
     workspace.pressure_representability_load = std::move(load);
+    workspace.pressure_representability_correction_load =
+        std::move(correction_load);
     workspace.pressure_representability_solution = std::move(solution);
     workspace.pressure_representability_left_basis =
         std::move(left_basis);
@@ -2323,20 +2326,30 @@ PressureRepresentabilityLsqrResult solvePressureRepresentabilityLsqr(
     const double stationarity_tolerance =
         absolute_stationarity_tolerance +
         1.0e-10 * initial_normal_residual_norm;
+    const double residual_roundoff_floor =
+        100.0 * std::numeric_limits<Real>::epsilon() *
+        std::max(1.0, load_norm);
+    const double normal_roundoff_floor =
+        100.0 * std::numeric_limits<Real>::epsilon() *
+        std::max(1.0, initial_normal_residual_norm);
 
     const auto refresh_relative_metrics = [&]() {
+        // A load that is numerical zero has no meaningful relative scale.
+        // Report zero distance only when its absolute residual is also at the
+        // coefficient-scaled roundoff floor; the independent absolute gate
+        // remains authoritative.
         result.relative_residual =
-            load_norm > 0.0
+            load_norm > residual_roundoff_floor
                 ? result.residual_norm / load_norm
-                : (result.residual_norm <= absolute_stationarity_tolerance
+                : (result.residual_norm <= residual_roundoff_floor
                        ? 0.0
                        : std::numeric_limits<double>::infinity());
         result.relative_normal_residual =
-            initial_normal_residual_norm > 0.0
+            initial_normal_residual_norm > normal_roundoff_floor
                 ? result.normal_residual_norm /
                       initial_normal_residual_norm
                 : (result.normal_residual_norm <=
-                           absolute_stationarity_tolerance
+                           normal_roundoff_floor
                        ? 0.0
                        : std::numeric_limits<double>::infinity());
     };
@@ -11249,6 +11262,7 @@ void NewtonSolver::allocateWorkspace(const systems::FESystem& system,
     workspace.diagnostic_jacobian_scratch.reset();
     workspace.pressure_representability_pair_matrix.reset();
     workspace.pressure_representability_load.reset();
+    workspace.pressure_representability_correction_load.reset();
     workspace.pressure_representability_solution.reset();
     workspace.pressure_representability_left_basis.reset();
     workspace.pressure_representability_right_basis.reset();
@@ -13201,6 +13215,8 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             report.pressure_representability_available = false;
             report.pressure_representability_converged = false;
             report.pressure_representability_breakdown = false;
+            report.pressure_representability_residual_norm =
+                std::numeric_limits<double>::quiet_NaN();
             report.pressure_representability_relative_distance =
                 std::numeric_limits<double>::quiet_NaN();
             report.pressure_representability_reason = "diagnostic_pending";
@@ -13253,11 +13269,12 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             // solution/time-step history, auxiliary state/inputs, user data,
             // or runtime parameter callbacks.  Suppressing a full sample on a
             // partial fingerprint could therefore hide a changed pressure or
-            // surface load and would lose accepted-state provenance.  Only the
+            // pressure-independent load and would lose accepted-state
+            // provenance.  Only the
             // mixed pressure pair/LSQR work below is cached, after the current
-            // constrained surface load has been reassembled and compared
-            // exactly.  The qualification switch forces even that safe cache
-            // off so every pair matrix and LSQR solve is repeated.
+            // constrained pressure-independent load has been reassembled and
+            // compared exactly.  The qualification switch forces even that
+            // safe cache off so every pair matrix and LSQR solve is repeated.
             const bool every_assembly_on_any_rank = anyRank(
                 freeSurfaceConservativeBalanceDiagnosticEveryAssemblyRequested());
             const auto geometry_key =
@@ -13266,11 +13283,14 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             // These tags are installed by the Navier--Stokes formulation only
             // when every effective free surface uses the variational
             // SurfaceStress form.  Keeping the strings here avoids an FE ->
-            // Physics dependency while preserving a strict three-vector plus
+            // Physics dependency while preserving a strict six-vector plus
             // one symmetric-matrix contract for qualification tooling.
-            constexpr std::array<const char*, 3> ops{
+            constexpr std::array<const char*, 6> ops{
                 "equations_diagnostic_ns_free_surface_pressure_virtual_work",
                 "equations_diagnostic_ns_free_surface_surface_energy_virtual_work",
+                "equations_diagnostic_ns_free_surface_gravitational_potential_virtual_work",
+                "equations_diagnostic_ns_free_surface_physical_potential_virtual_work",
+                "equations_diagnostic_ns_free_surface_pressure_representability_load_virtual_work",
                 "equations_diagnostic_ns_free_surface_conservative_balance",
             };
             for (const char* op : ops) {
@@ -13302,7 +13322,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                             << " phase='"
                             << (phase != nullptr ? phase : "unknown") << "'"
                             << " sync_point=" << stateSyncPointName(sync_point)
-                            << " scope=pressure_and_surface_energy_first_variations_only"
+                            << " scope=pressure_and_physical_potential_first_variations_only"
                             << " contract=instantaneous_constrained_velocity_test_virtual_work"
                             << " total_momentum_equilibrium_claimed=0"
                             << " discrete_energy_theorem_claimed=0";
@@ -13320,6 +13340,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             const bool local_representability_workspace_available =
                 workspace.pressure_representability_pair_matrix != nullptr &&
                 workspace.pressure_representability_load != nullptr &&
+                workspace.pressure_representability_correction_load != nullptr &&
                 workspace.pressure_representability_solution != nullptr &&
                 workspace.pressure_representability_left_basis != nullptr &&
                 workspace.pressure_representability_right_basis != nullptr &&
@@ -13334,9 +13355,11 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             if (local_representability_workspace_available) {
                 const auto& pair_matrix =
                     *workspace.pressure_representability_pair_matrix;
-                const std::array<const backends::GenericVector*, 8>
+                const std::array<const backends::GenericVector*, 9>
                     pair_vectors{
                         workspace.pressure_representability_load.get(),
+                        workspace.pressure_representability_correction_load
+                            .get(),
                         workspace.pressure_representability_solution.get(),
                         workspace.pressure_representability_left_basis.get(),
                         workspace.pressure_representability_right_basis.get(),
@@ -13447,7 +13470,8 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                     "exact_load_check_pending";
             }
             if (pressure_representability_cache_candidate) {
-                // Preserve the previous constrained surface load in an LSQR
+                // Preserve the previous constrained physical-potential load
+                // in an LSQR
                 // work vector before the current state reassembles it below.
                 // A geometry key alone is deliberately insufficient: exact
                 // load equality also catches state/parameter dependencies that
@@ -13456,14 +13480,15 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                     *workspace.pressure_representability_load);
             }
 
-            std::array<double, 3> norms{};
+            std::array<double, 6> norms{};
             for (std::size_t i = 0; i < ops.size(); ++i) {
-                // Assemble the surface-energy load directly into its
-                // pair-owned RHS.  Production-layout and pair-layout vectors
-                // may have different ghost sets or FSILS shared orderings, so
+                // Assemble the pressure-independent exterior-pressure plus
+                // physical-potential load directly into its pair-owned RHS.
+                // Production-layout and pair-layout vectors may have
+                // different ghost sets or FSILS shared orderings, so
                 // copyFrom/local-span positional transfer is not a valid map.
                 auto& diagnostic_vector =
-                    i == 1u && representability_storage_usable
+                    i == 4u && representability_storage_usable
                         ? *workspace.pressure_representability_load
                         : residual_scratch;
                 diagnostic_vector.zero();
@@ -13496,7 +13521,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 // virtual-work coefficient norm.
                 zeroVectorEntries(constrained_dofs, diagnostic_vector);
                 norms[i] = diagnostic_vector.norm();
-                if (i == 1u && representability_storage_usable) {
+                if (i == 4u && representability_storage_usable) {
                     diagnostic_vector.updateGhosts();
                 }
             }
@@ -13523,7 +13548,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                     "pair_matrix_vector_layout_mismatch";
             } else {
                 const auto& load_definition =
-                    transient.system().operatorDefinition(ops[1]);
+                    transient.system().operatorDefinition(ops[4]);
                 std::set<FieldId> load_test_fields;
                 const auto collect_test_fields =
                     [&load_test_fields](const auto& terms) {
@@ -13821,29 +13846,29 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                     allRanks);
             }
 
-            const double denominator = norms[0] + norms[1];
+            const double denominator = norms[0] + norms[3];
             const bool normalization_available =
                 std::isfinite(denominator) && denominator > 0.0;
             const double normalized_imbalance =
                 normalization_available
-                    ? norms[2] / denominator
+                    ? norms[5] / denominator
                     : std::numeric_limits<double>::quiet_NaN();
             const bool alignment_available =
-                std::isfinite(norms[0]) && std::isfinite(norms[1]) &&
-                std::isfinite(norms[2]) && norms[0] > 0.0 && norms[1] > 0.0;
+                std::isfinite(norms[0]) && std::isfinite(norms[3]) &&
+                std::isfinite(norms[5]) && norms[0] > 0.0 && norms[3] > 0.0;
             double alignment_cosine = std::numeric_limits<double>::quiet_NaN();
             if (alignment_available) {
                 alignment_cosine =
-                    (norms[2] * norms[2] - norms[0] * norms[0] -
-                     norms[1] * norms[1]) /
-                    (2.0 * norms[0] * norms[1]);
+                    (norms[5] * norms[5] - norms[0] * norms[0] -
+                     norms[3] * norms[3]) /
+                    (2.0 * norms[0] * norms[3]);
                 // Roundoff can place a mathematically valid cosine just
                 // outside the closed interval.
                 alignment_cosine = std::clamp(alignment_cosine, -1.0, 1.0);
             }
             const double magnitude_mismatch =
                 normalization_available
-                    ? std::abs(norms[0] - norms[1]) / denominator
+                    ? std::abs(norms[0] - norms[3]) / denominator
                     : std::numeric_limits<double>::quiet_NaN();
 
             report.pressure_representability_available =
@@ -13854,6 +13879,10 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             report.pressure_representability_breakdown =
                 pressure_representability_available &&
                 pressure_representability.breakdown;
+            report.pressure_representability_residual_norm =
+                pressure_representability_available
+                    ? pressure_representability.residual_norm
+                    : std::numeric_limits<double>::quiet_NaN();
             report.pressure_representability_relative_distance =
                 pressure_representability_available
                     ? pressure_representability.relative_residual
@@ -13896,8 +13925,12 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                     << " sync_point=" << stateSyncPointName(sync_point)
                     << " pressure_virtual_work_norm=" << norms[0]
                     << " surface_energy_virtual_work_norm=" << norms[1]
-                    << " conservative_balance_norm=" << norms[2]
-                    << " normalization=pressure_plus_surface_energy_norms"
+                    << " gravitational_potential_virtual_work_norm=" << norms[2]
+                    << " physical_potential_virtual_work_norm=" << norms[3]
+                    << " pressure_representability_load_virtual_work_norm="
+                    << norms[4]
+                    << " conservative_balance_norm=" << norms[5]
+                    << " normalization=pressure_plus_physical_potential_norms"
                     << " normalized_imbalance=" << normalized_imbalance
                     << " magnitude_mismatch=" << magnitude_mismatch
                     << " alignment_cosine=" << alignment_cosine
@@ -13989,8 +14022,8 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                         << constant_pressure_kkt.reason;
                 }
                 oss << " pressure_representability_norm=constrained_reduced_coefficient_l2"
-                    << " pressure_representability_load=surface_area_variation_plus_young_wall_energy"
-                    << " scope=pressure_and_surface_energy_first_variations_only"
+                    << " pressure_representability_load=prescribed_external_pressure_plus_surface_area_variation_plus_young_wall_energy_plus_gravitational_potential"
+                    << " scope=pressure_and_physical_potential_first_variations_only"
                     << " contract=instantaneous_constrained_velocity_test_virtual_work"
                     << " excludes=line_friction_and_wetted_wall_navier_dissipation"
                     << " total_momentum_equilibrium_claimed=0"
@@ -14538,6 +14571,13 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
         const double threshold =
             *options_
                  .accepted_static_pressure_representability_max_relative_distance;
+        double correction_residual_norm =
+            std::numeric_limits<double>::quiet_NaN();
+        double correction_relative_residual =
+            std::numeric_limits<double>::quiet_NaN();
+        double correction_pressure_norm =
+            std::numeric_limits<double>::quiet_NaN();
+        int correction_iterations = 0;
         const auto log_initializer = [&](bool applied,
                                          bool passed,
                                          std::string_view reason) {
@@ -14564,11 +14604,20 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                     << report.pressure_representability_relative_distance
                     << " pressure_representability_max_relative_distance="
                     << threshold
+                    << " pressure_correction_residual_norm="
+                    << correction_residual_norm
+                    << " pressure_correction_relative_residual="
+                    << correction_relative_residual
+                    << " pressure_correction_norm="
+                    << correction_pressure_norm
+                    << " pressure_correction_iterations="
+                    << correction_iterations
                     << " force_projection_applied=0"
                     << " balanced_force_evidence=0"
                     << " total_momentum_equilibrium_claimed=0"
                     << " production_capillary_operator_changed=0"
                     << " pressure_update=additive"
+                    << " pressure_increment=conservative_balance_residual_correction"
                     << " existing_pressure_baseline_preserved=1"
                     << " committed_history_or_rate_slots_mutated=0"
                     << " scope=one_shot_current_pressure_initial_guess";
@@ -14601,8 +14650,17 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
 
         std::string_view failure_reason;
         const bool local_storage_available =
+            workspace.factory != nullptr &&
+            workspace.pressure_representability_pair_matrix != nullptr &&
+            workspace.pressure_representability_load != nullptr &&
+            workspace.pressure_representability_correction_load != nullptr &&
             workspace.pressure_representability_solution != nullptr &&
+            workspace.pressure_representability_left_basis != nullptr &&
+            workspace.pressure_representability_right_basis != nullptr &&
+            workspace.pressure_representability_direction != nullptr &&
             workspace.pressure_representability_work != nullptr &&
+            workspace.pressure_representability_residual != nullptr &&
+            workspace.pressure_representability_normal_residual != nullptr &&
             pressure_representability_pressure_field.has_value();
         if (!report.pressure_representability_diagnostic_sampled) {
             failure_reason = "diagnostic_not_sampled";
@@ -14651,6 +14709,71 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             *workspace.pressure_representability_work;
         compatible_pressure.updateGhosts();
 
+        // The representability solve above certifies the complete
+        // pressure-independent physical load.  The one-shot initializer is
+        // additive, however, so its increment must use a second LSQR solve for
+        // the balance that remains after applying the pressure already present
+        // at entry.  This avoids counting prescribed exterior or hydrostatic
+        // pressure twice and leaves an already compatible state unchanged.
+        auto& correction_load =
+            *workspace.pressure_representability_correction_load;
+
+        pair_layout_work.copyFrom(history.u());
+        correction_load.copyFrom(pair_layout_work);
+        zeroVectorEntries(pressure_dofs, correction_load);
+        axpy(pair_layout_work, Real{-1.0}, correction_load);
+        pair_layout_work.updateGhosts();
+
+        auto& pair_matrix =
+            *workspace.pressure_representability_pair_matrix;
+        pair_matrix.mult(pair_layout_work, correction_load);
+        correction_load.markModified();
+        axpy(correction_load,
+             Real{1.0},
+             *workspace.pressure_representability_load);
+        zeroVectorEntries(constrained_dofs, correction_load);
+        correction_load.updateGhosts();
+
+        const auto correction_iteration_cap = static_cast<int>(
+            4u * std::min<std::uint64_t>(
+                     static_cast<std::uint64_t>(pressure_count), 250u));
+        const auto correction = solvePressureRepresentabilityLsqr(
+            pair_matrix,
+            correction_load,
+            compatible_pressure,
+            *workspace.pressure_representability_left_basis,
+            *workspace.pressure_representability_right_basis,
+            *workspace.pressure_representability_direction,
+            pair_layout_work,
+            *workspace.pressure_representability_residual,
+            *workspace.pressure_representability_normal_residual,
+            correction_iteration_cap,
+            allRanks);
+        correction_residual_norm = correction.residual_norm;
+        correction_relative_residual = correction.relative_residual;
+        correction_pressure_norm = correction.pressure_norm;
+        correction_iterations = correction.iterations;
+        if (correction.breakdown) {
+            log_initializer(/*applied=*/false,
+                            /*passed=*/false,
+                            "pressure_correction_breakdown");
+            return false;
+        }
+        if (!correction.converged) {
+            log_initializer(/*applied=*/false,
+                            /*passed=*/false,
+                            "pressure_correction_not_stationary");
+            return false;
+        }
+        if (!allRanks(
+                std::isfinite(correction.residual_norm) &&
+                std::isfinite(correction.pressure_norm))) {
+            log_initializer(/*applied=*/false,
+                            /*passed=*/false,
+                            "pressure_correction_nonfinite");
+            return false;
+        }
+
         // A valid mixed-pair LSQR recurrence places the solution entirely in
         // the pressure block.  Check that invariant explicitly before the
         // monolithic state is touched; this prevents an accidentally polluted
@@ -14673,10 +14796,10 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
 
         // Pair and production vectors may have different ghost maps.  Use
         // copyFrom for the authoritative owned-DOF transfer, then add the LSQR
-        // pressure block to the existing current state.  Remove the verified
-        // roundoff-sized non-pressure component before the addition so every
-        // other field remains bitwise unchanged.  Committed history and rate
-        // slots are deliberately not touched.
+        // residual-correction pressure block to the existing current state.
+        // Remove the verified roundoff-sized non-pressure component before
+        // the addition so every other field remains bitwise unchanged.
+        // Committed history and rate slots are deliberately not touched.
         axpy(compatible_pressure, Real{-1.0}, pair_layout_work);
         compatible_pressure.updateGhosts();
         pair_layout_work.copyFrom(history.u());

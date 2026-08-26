@@ -1647,6 +1647,10 @@ struct DynamicContactAngleAssembly {
     std::vector<FE::Real> residual{};
     std::vector<FE::Real> conservative_pressure_residual{};
     std::vector<FE::Real> conservative_surface_energy_residual{};
+    std::vector<FE::Real> conservative_gravitational_potential_residual{};
+    std::vector<FE::Real> conservative_physical_potential_residual{};
+    std::vector<FE::Real>
+        conservative_pressure_representability_load_residual{};
     std::vector<FE::Real> conservative_balance_residual{};
     std::vector<FE::Real> pressure_representability_pair_jacobian{};
     std::vector<FE::Real> jacobian{};
@@ -1677,7 +1681,11 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
     bool reverse_wall_orientation = false,
     std::optional<std::array<FE::Real, 4>> liquid_pressure_nodal_values =
         std::nullopt,
-    bool registration_only = false)
+    bool registration_only = false,
+    std::array<FE::Real, 3> body_force =
+        std::array<FE::Real, 3>{0.0, 0.0, 0.0},
+    bool include_additional_spacetime_body_force = false,
+    bool include_prescribed_body_force_field = false)
 {
     constexpr int interface_marker = 167;
     constexpr int wall_marker = 57;
@@ -1694,6 +1702,14 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
     opts.enable_convection = false;
+    opts.body_force = body_force;
+    if (include_additional_spacetime_body_force) {
+        opts.has_body_force_spacetime = true;
+        opts.body_force_spacetime[0] = FE::Real{0.19};
+    }
+    if (include_prescribed_body_force_field) {
+        opts.body_force_field_name = "dynamic_contact_body_force";
+    }
     if (use_constitutive_viscosity) {
         opts.viscosity_model =
             std::make_shared<materials::fluid::CarreauYasudaViscosity>(
@@ -1934,6 +1950,22 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
             state,
             ns::FreeSurfaceConservativeBalanceDiagnosticOperators::
                 surface_energy_virtual_work);
+        out.conservative_gravitational_potential_residual = residualVector(
+            system,
+            state,
+            ns::FreeSurfaceConservativeBalanceDiagnosticOperators::
+                gravitational_potential_virtual_work);
+        out.conservative_physical_potential_residual = residualVector(
+            system,
+            state,
+            ns::FreeSurfaceConservativeBalanceDiagnosticOperators::
+                physical_potential_virtual_work);
+        out.conservative_pressure_representability_load_residual =
+            residualVector(
+                system,
+                state,
+                ns::FreeSurfaceConservativeBalanceDiagnosticOperators::
+                    pressure_representability_load_virtual_work);
         out.conservative_balance_residual = residualVector(
             system,
             state,
@@ -11765,6 +11797,8 @@ TEST(MovingDomainPhysics,
         assembled.discrete_functional_declarations.front();
     EXPECT_TRUE(
         declaration.active_volume_energy_parameters.has_value());
+    EXPECT_TRUE(
+        declaration.static_conservative_body_force_complete);
     EXPECT_FALSE(
         declaration.active_volume_dissipation_parameters.has_value());
     EXPECT_TRUE(
@@ -11788,7 +11822,10 @@ TEST(MovingDomainPhysics,
                               FE::Real liquid_pressure,
                               ns::FreeSurfaceSurfaceTensionForm form =
                                   ns::FreeSurfaceSurfaceTensionForm::
-                                      SurfaceStress) {
+                                      SurfaceStress,
+                              std::optional<FE::Real>
+                                  external_pressure_override =
+                                      std::nullopt) {
         return assembleDynamicContactAngleCase(
             equilibrium_angle,
             theta,
@@ -11803,7 +11840,7 @@ TEST(MovingDomainPhysics,
             ns::FreeSurfaceActiveDomain::LevelSetNegative,
             form,
             liquid_pressure,
-            external_pressure);
+            external_pressure_override.value_or(external_pressure));
     };
 
     {
@@ -11813,6 +11850,14 @@ TEST(MovingDomainPhysics,
         const auto disabled = assemble(theta, zero_velocity, FE::Real{0.37});
         EXPECT_TRUE(disabled.conservative_pressure_residual.empty());
         EXPECT_TRUE(disabled.conservative_surface_energy_residual.empty());
+        EXPECT_TRUE(
+            disabled.conservative_gravitational_potential_residual.empty());
+        EXPECT_TRUE(
+            disabled.conservative_physical_potential_residual.empty());
+        EXPECT_TRUE(
+            disabled
+                .conservative_pressure_representability_load_residual
+                .empty());
         EXPECT_TRUE(disabled.conservative_balance_residual.empty());
     }
 
@@ -11827,6 +11872,12 @@ TEST(MovingDomainPhysics,
         assemble(theta, zero_velocity, FE::Real{0.53});
     const auto changed_angle =
         assemble(theta + FE::Real{0.12}, zero_velocity, FE::Real{0.37});
+    const auto zero_external_pressure = assemble(
+        theta,
+        zero_velocity,
+        FE::Real{0.37},
+        ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
+        FE::Real{0.0});
     const auto legacy = assemble(
         theta,
         zero_velocity,
@@ -11837,6 +11888,14 @@ TEST(MovingDomainPhysics,
     ASSERT_EQ(stationary.conservative_pressure_residual.size(),
               stationary.conservative_surface_energy_residual.size());
     ASSERT_EQ(stationary.conservative_pressure_residual.size(),
+              stationary.conservative_gravitational_potential_residual.size());
+    ASSERT_EQ(stationary.conservative_pressure_residual.size(),
+              stationary.conservative_physical_potential_residual.size());
+    ASSERT_EQ(
+        stationary.conservative_pressure_residual.size(),
+        stationary
+            .conservative_pressure_representability_load_residual.size());
+    ASSERT_EQ(stationary.conservative_pressure_residual.size(),
               stationary.conservative_balance_residual.size());
     EXPECT_GT(vectorNorm(stationary.conservative_pressure_residual),
               FE::Real{1.0e-12});
@@ -11846,11 +11905,38 @@ TEST(MovingDomainPhysics,
     for (std::size_t dof = 0;
          dof < stationary.conservative_balance_residual.size(); ++dof) {
         EXPECT_NEAR(
-            stationary.conservative_balance_residual[dof],
-            stationary.conservative_pressure_residual[dof] +
-                stationary.conservative_surface_energy_residual[dof],
+            stationary.conservative_physical_potential_residual[dof],
+            stationary.conservative_surface_energy_residual[dof] +
+                stationary.conservative_gravitational_potential_residual[dof],
             FE::Real{2.0e-12})
             << "dof=" << dof;
+        EXPECT_NEAR(
+            stationary.conservative_balance_residual[dof],
+            stationary.conservative_pressure_residual[dof] +
+                stationary.conservative_physical_potential_residual[dof],
+            FE::Real{2.0e-12})
+            << "dof=" << dof;
+        const auto exterior_pressure_virtual_work =
+            stationary.conservative_pressure_residual[dof] -
+            zero_external_pressure.conservative_pressure_residual[dof];
+        EXPECT_NEAR(
+            stationary
+                .conservative_pressure_representability_load_residual[dof],
+            exterior_pressure_virtual_work +
+                stationary.conservative_physical_potential_residual[dof],
+            FE::Real{2.0e-12})
+            << "dof=" << dof;
+        EXPECT_NEAR(
+            zero_external_pressure
+                .conservative_pressure_representability_load_residual[dof],
+            zero_external_pressure
+                .conservative_physical_potential_residual[dof],
+            FE::Real{2.0e-12})
+            << "dof=" << dof;
+        EXPECT_NEAR(
+            stationary.conservative_gravitational_potential_residual[dof],
+            FE::Real{0.0},
+            FE::Real{2.0e-12});
         EXPECT_NEAR(moving.conservative_pressure_residual[dof],
                     stationary.conservative_pressure_residual[dof],
                     FE::Real{2.0e-12});
@@ -11860,6 +11946,12 @@ TEST(MovingDomainPhysics,
         EXPECT_NEAR(changed_pressure.conservative_surface_energy_residual[dof],
                     stationary.conservative_surface_energy_residual[dof],
                     FE::Real{2.0e-12});
+        EXPECT_NEAR(
+            changed_pressure
+                .conservative_pressure_representability_load_residual[dof],
+            stationary
+                .conservative_pressure_representability_load_residual[dof],
+            FE::Real{2.0e-12});
         EXPECT_NEAR(changed_angle.conservative_pressure_residual[dof],
                     stationary.conservative_pressure_residual[dof],
                     FE::Real{2.0e-12});
@@ -11889,7 +11981,145 @@ TEST(MovingDomainPhysics,
 
     EXPECT_TRUE(legacy.conservative_pressure_residual.empty());
     EXPECT_TRUE(legacy.conservative_surface_energy_residual.empty());
+    EXPECT_TRUE(
+        legacy.conservative_gravitational_potential_residual.empty());
+    EXPECT_TRUE(
+        legacy.conservative_physical_potential_residual.empty());
+    EXPECT_TRUE(
+        legacy.conservative_pressure_representability_load_residual.empty());
     EXPECT_TRUE(legacy.conservative_balance_residual.empty());
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesConservativeGravityDiagnosticMatchesProductionBodyForce)
+{
+    ScopedEnvVar diagnostics_enabled(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
+        std::string("1"));
+    constexpr FE::Real theta =
+        FE::Real{1.04719755119659774615421446109316763};
+    constexpr std::array<FE::Real, 4> zero_velocity{
+        FE::Real{0.0}, FE::Real{0.0}, FE::Real{0.0}, FE::Real{0.0}};
+    constexpr std::array<FE::Real, 3> gravity{
+        FE::Real{0.31}, FE::Real{-1.27}, FE::Real{0.44}};
+    const auto assemble = [&](const std::array<FE::Real, 3>& body_force) {
+        return assembleDynamicContactAngleCase(
+            theta,
+            theta,
+            zero_velocity,
+            /*include_dynamic_contact_angle=*/true,
+            /*assemble_jacobian=*/false,
+            std::array<FE::Real, 4>{0.0, 0.0, 0.0, 0.0},
+            std::array<FE::Real, 3>{0.0, 0.0, -1.0},
+            /*level_set_scale=*/1.0,
+            /*level_set_shift=*/0.0,
+            /*velocity_component=*/0,
+            ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
+            /*liquid_pressure=*/FE::Real{0.37},
+            /*external_pressure=*/FE::Real{0.031},
+            /*use_constitutive_viscosity=*/false,
+            /*reverse_wall_orientation=*/false,
+            /*liquid_pressure_nodal_values=*/std::nullopt,
+            /*registration_only=*/false,
+            body_force);
+    };
+
+    const auto zero = assemble({{0.0, 0.0, 0.0}});
+    const auto loaded = assemble(gravity);
+    ASSERT_EQ(loaded.residual.size(), zero.residual.size());
+    ASSERT_EQ(
+        loaded.residual.size(),
+        loaded.conservative_gravitational_potential_residual.size());
+    EXPECT_GT(
+        vectorNorm(loaded.conservative_gravitational_potential_residual),
+        FE::Real{1.0e-10});
+    ASSERT_EQ(loaded.discrete_functional_declarations.size(), 1u);
+    EXPECT_TRUE(loaded.discrete_functional_declarations.front()
+                    .static_conservative_body_force_complete);
+
+    const auto incomplete = assembleDynamicContactAngleCase(
+        theta,
+        theta,
+        zero_velocity,
+        /*include_dynamic_contact_angle=*/true,
+        /*assemble_jacobian=*/false,
+        std::array<FE::Real, 4>{0.0, 0.0, 0.0, 0.0},
+        std::array<FE::Real, 3>{0.0, 0.0, -1.0},
+        /*level_set_scale=*/1.0,
+        /*level_set_shift=*/0.0,
+        /*velocity_component=*/0,
+        ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
+        /*liquid_pressure=*/FE::Real{0.0},
+        /*external_pressure=*/FE::Real{0.0},
+        /*use_constitutive_viscosity=*/false,
+        /*reverse_wall_orientation=*/false,
+        /*liquid_pressure_nodal_values=*/std::nullopt,
+        /*registration_only=*/true,
+        gravity,
+        /*include_additional_spacetime_body_force=*/true);
+    ASSERT_EQ(incomplete.discrete_functional_declarations.size(), 1u);
+    EXPECT_FALSE(incomplete.discrete_functional_declarations.front()
+                     .static_conservative_body_force_complete);
+
+    const auto incomplete_prescribed_field =
+        assembleDynamicContactAngleCase(
+            theta,
+            theta,
+            zero_velocity,
+            /*include_dynamic_contact_angle=*/true,
+            /*assemble_jacobian=*/false,
+            std::array<FE::Real, 4>{0.0, 0.0, 0.0, 0.0},
+            std::array<FE::Real, 3>{0.0, 0.0, -1.0},
+            /*level_set_scale=*/1.0,
+            /*level_set_shift=*/0.0,
+            /*velocity_component=*/0,
+            ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
+            /*liquid_pressure=*/FE::Real{0.0},
+            /*external_pressure=*/FE::Real{0.0},
+            /*use_constitutive_viscosity=*/false,
+            /*reverse_wall_orientation=*/false,
+            /*liquid_pressure_nodal_values=*/std::nullopt,
+            /*registration_only=*/true,
+            gravity,
+            /*include_additional_spacetime_body_force=*/false,
+            /*include_prescribed_body_force_field=*/true);
+    ASSERT_EQ(
+        incomplete_prescribed_field.discrete_functional_declarations.size(),
+        1u);
+    EXPECT_FALSE(
+        incomplete_prescribed_field.discrete_functional_declarations.front()
+            .static_conservative_body_force_complete);
+
+    for (std::size_t dof = 0u; dof < loaded.residual.size(); ++dof) {
+        const auto production_body_force =
+            loaded.residual[dof] - zero.residual[dof];
+        EXPECT_NEAR(
+            production_body_force,
+            loaded.conservative_gravitational_potential_residual[dof],
+            FE::Real{2.0e-12})
+            << "dof=" << dof;
+        EXPECT_NEAR(
+            loaded.conservative_physical_potential_residual[dof],
+            loaded.conservative_surface_energy_residual[dof] +
+                loaded.conservative_gravitational_potential_residual[dof],
+            FE::Real{2.0e-12})
+            << "dof=" << dof;
+        EXPECT_NEAR(
+            loaded.conservative_balance_residual[dof],
+            loaded.conservative_pressure_residual[dof] +
+                loaded.conservative_physical_potential_residual[dof],
+            FE::Real{2.0e-12})
+            << "dof=" << dof;
+        EXPECT_NEAR(
+            loaded.conservative_pressure_representability_load_residual[dof] -
+                zero.conservative_pressure_representability_load_residual[dof],
+            loaded.conservative_gravitational_potential_residual[dof],
+            FE::Real{2.0e-12})
+            << "dof=" << dof;
+    }
 }
 
 TEST(MovingDomainPhysics,

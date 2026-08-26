@@ -20,12 +20,16 @@ namespace svmp::FE::level_set {
 
 /**
  * Options for fixed-topology minimization of the snapshot-owned
- * surface-plus-Young-wall energy at a prescribed liquid volume.
+ * surface, Young-wall, and gravitational potential energy at a prescribed
+ * liquid volume.
  */
 struct LevelSetStaticCapillaryEquilibriumOptions {
     Real target_liquid_volume{0.0};
     Real volume_tolerance{1.0e-10};
     Real projected_gradient_tolerance{1.0e-8};
+    Real pressure_representability_max_residual_norm{1.0e-10};
+    Real pressure_representability_max_relative_distance{1.0e-8};
+    Real physical_equilibrium_max_residual_norm{1.0e-10};
     Real constant_pressure_kkt_max_residual_norm{1.0e-10};
     Real constant_pressure_kkt_max_relative_distance{1.0e-8};
 
@@ -68,7 +72,21 @@ struct LevelSetStaticCapillaryEquilibriumEvaluation {
     std::uint64_t constraint_semantics_key{0u};
     Real surface_wall_energy{
         std::numeric_limits<Real>::quiet_NaN()};
+    Real gravitational_potential_energy{0.0};
     Real liquid_volume{std::numeric_limits<Real>::quiet_NaN()};
+    bool pressure_representability_available{false};
+    bool pressure_representability_converged{false};
+    bool pressure_representability_breakdown{false};
+    Real pressure_representability_residual_norm{
+        std::numeric_limits<Real>::quiet_NaN()};
+    Real pressure_representability_relative_distance{
+        std::numeric_limits<Real>::quiet_NaN()};
+    Real production_residual_norm{
+        std::numeric_limits<Real>::quiet_NaN()};
+    // A free constant pressure trace provides a sharper scalar KKT check for
+    // zero-gravity equilibria. Fixed gauges and hydrostatic pressure fields
+    // use the general constrained pressure-space certificate instead.
+    bool constant_pressure_kkt_required{true};
     bool constant_pressure_kkt_available{false};
     Real constant_pressure_kkt_residual_norm{
         std::numeric_limits<Real>::quiet_NaN()};
@@ -110,6 +128,14 @@ struct LevelSetStaticCapillaryEquilibriumResult {
         std::numeric_limits<Real>::quiet_NaN()};
     Real final_surface_wall_energy{
         std::numeric_limits<Real>::quiet_NaN()};
+    Real initial_gravitational_potential_energy{
+        std::numeric_limits<Real>::quiet_NaN()};
+    Real final_gravitational_potential_energy{
+        std::numeric_limits<Real>::quiet_NaN()};
+    Real initial_physical_potential_energy{
+        std::numeric_limits<Real>::quiet_NaN()};
+    Real final_physical_potential_energy{
+        std::numeric_limits<Real>::quiet_NaN()};
     Real initial_liquid_volume{
         std::numeric_limits<Real>::quiet_NaN()};
     Real final_liquid_volume{
@@ -120,6 +146,16 @@ struct LevelSetStaticCapillaryEquilibriumResult {
         std::numeric_limits<Real>::quiet_NaN()};
     Real final_projected_gradient_norm{
         std::numeric_limits<Real>::quiet_NaN()};
+    bool final_pressure_representability_available{false};
+    bool final_pressure_representability_converged{false};
+    bool final_pressure_representability_breakdown{false};
+    Real final_pressure_representability_residual_norm{
+        std::numeric_limits<Real>::quiet_NaN()};
+    Real final_pressure_representability_relative_distance{
+        std::numeric_limits<Real>::quiet_NaN()};
+    Real final_production_residual_norm{
+        std::numeric_limits<Real>::quiet_NaN()};
+    bool final_constant_pressure_kkt_required{true};
     bool final_constant_pressure_kkt_available{false};
     Real final_constant_pressure_kkt_residual_norm{
         std::numeric_limits<Real>::quiet_NaN()};
@@ -134,8 +170,10 @@ struct LevelSetStaticCapillaryEquilibriumResult {
  * Central differences are evaluated only inside the initial cut-topology and
  * constrained-trace epoch. Each SQP-like step satisfies the linearized volume
  * constraint and descends an l1 volume-merit function. Convergence
- * additionally requires the evaluator's unprojected constant-pressure KKT
- * residual to pass both declared absolute and relative gates.
+ * additionally requires the evaluator's unprojected physical-potential load
+ * to pass the constrained pressure-space and production-residual gates. A
+ * constant-pressure KKT gate is additionally required when the evaluator
+ * declares that the pressure constraints preserve the constant mode.
  *
  * `accepted_coefficients` is assigned only after every convergence gate
  * passes. It is left byte-for-byte unchanged on invalid input, evaluator

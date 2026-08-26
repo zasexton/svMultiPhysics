@@ -48,6 +48,12 @@ void validateOptions(
         !finitePositive(options.volume_tolerance) ||
         !finiteNonnegative(options.projected_gradient_tolerance) ||
         !finiteNonnegative(
+            options.pressure_representability_max_residual_norm) ||
+        !finiteNonnegative(
+            options.pressure_representability_max_relative_distance) ||
+        !finiteNonnegative(
+            options.physical_equilibrium_max_residual_norm) ||
+        !finiteNonnegative(
             options.constant_pressure_kkt_max_residual_norm) ||
         !finiteNonnegative(
             options.constant_pressure_kkt_max_relative_distance) ||
@@ -102,6 +108,13 @@ void validateOptions(
 [[nodiscard]] Real norm(std::span<const Real> values)
 {
     return std::sqrt(std::max(Real{0.0}, dot(values, values)));
+}
+
+[[nodiscard]] Real physicalPotentialEnergy(
+    const LevelSetStaticCapillaryEquilibriumEvaluation& evaluation) noexcept
+{
+    return evaluation.surface_wall_energy +
+           evaluation.gravitational_potential_energy;
 }
 
 } // namespace
@@ -170,9 +183,22 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                 evaluation.cut_topology_key == 0u ||
                 evaluation.constraint_semantics_key == 0u ||
                 !std::isfinite(evaluation.surface_wall_energy) ||
+                !std::isfinite(
+                    evaluation.gravitational_potential_energy) ||
+                !std::isfinite(physicalPotentialEnergy(evaluation)) ||
                 !finiteNonnegative(evaluation.liquid_volume)) {
                 last_evaluation_diagnostic =
                     "candidate_evaluator_returned_invalid_functional_state";
+                return false;
+            }
+            if (evaluation.pressure_representability_available &&
+                (!finiteNonnegative(
+                     evaluation.pressure_representability_residual_norm) ||
+                 !finiteNonnegative(
+                     evaluation
+                         .pressure_representability_relative_distance))) {
+                last_evaluation_diagnostic =
+                    "candidate_evaluator_returned_invalid_pressure_representability_state";
                 return false;
             }
             if (evaluation.constant_pressure_kkt_available &&
@@ -216,6 +242,14 @@ minimizeLevelSetStaticCapillaryEquilibrium(
         current.surface_wall_energy;
     result.final_surface_wall_energy =
         current.surface_wall_energy;
+    result.initial_gravitational_potential_energy =
+        current.gravitational_potential_energy;
+    result.final_gravitational_potential_energy =
+        current.gravitational_potential_energy;
+    result.initial_physical_potential_energy =
+        physicalPotentialEnergy(current);
+    result.final_physical_potential_energy =
+        physicalPotentialEnergy(current);
     result.initial_liquid_volume = current.liquid_volume;
     result.final_liquid_volume = current.liquid_volume;
 
@@ -225,10 +259,28 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                 evaluation.snapshot_revision_key;
             result.final_surface_wall_energy =
                 evaluation.surface_wall_energy;
+            result.final_gravitational_potential_energy =
+                evaluation.gravitational_potential_energy;
+            result.final_physical_potential_energy =
+                physicalPotentialEnergy(evaluation);
             result.final_liquid_volume = evaluation.liquid_volume;
             result.final_volume_error =
                 evaluation.liquid_volume -
                 options.target_liquid_volume;
+            result.final_pressure_representability_available =
+                evaluation.pressure_representability_available;
+            result.final_pressure_representability_converged =
+                evaluation.pressure_representability_converged;
+            result.final_pressure_representability_breakdown =
+                evaluation.pressure_representability_breakdown;
+            result.final_pressure_representability_residual_norm =
+                evaluation.pressure_representability_residual_norm;
+            result.final_pressure_representability_relative_distance =
+                evaluation.pressure_representability_relative_distance;
+            result.final_production_residual_norm =
+                evaluation.production_residual_norm;
+            result.final_constant_pressure_kkt_required =
+                evaluation.constant_pressure_kkt_required;
             result.final_constant_pressure_kkt_available =
                 evaluation.constant_pressure_kkt_available;
             result.final_constant_pressure_kkt_residual_norm =
@@ -301,8 +353,8 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                     const Real denominator =
                         Real{2.0} * difference_step;
                     const Real energy_derivative =
-                        (plus_state.surface_wall_energy -
-                         minus_state.surface_wall_energy) /
+                        (physicalPotentialEnergy(plus_state) -
+                         physicalPotentialEnergy(minus_state)) /
                         denominator;
                     const Real volume_derivative =
                         (plus_state.liquid_volume -
@@ -456,6 +508,8 @@ minimizeLevelSetStaticCapillaryEquilibrium(
             }
             if (certificate.surface_wall_energy !=
                     current.surface_wall_energy ||
+                certificate.gravitational_potential_energy !=
+                    current.gravitational_potential_energy ||
                 certificate.liquid_volume !=
                     current.liquid_volume) {
                 result.diagnostic =
@@ -478,17 +532,49 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                     "acceptance_certificate_volume_gate_failed";
                 return result;
             }
-            const bool constant_pressure_kkt_converged =
-                current.constant_pressure_kkt_available &&
+            const bool pressure_representability_converged =
+                current.pressure_representability_available &&
+                current.pressure_representability_converged &&
+                !current.pressure_representability_breakdown &&
                 finiteNonnegative(
-                    current.constant_pressure_kkt_residual_norm) &&
-                current.constant_pressure_kkt_residual_norm <=
-                    options.constant_pressure_kkt_max_residual_norm &&
-                finiteNonnegative(
-                    current.constant_pressure_kkt_relative_distance) &&
-                current.constant_pressure_kkt_relative_distance <=
+                    current.pressure_representability_residual_norm) &&
+                current.pressure_representability_residual_norm <=
                     options
-                        .constant_pressure_kkt_max_relative_distance;
+                        .pressure_representability_max_residual_norm &&
+                finiteNonnegative(
+                    current
+                        .pressure_representability_relative_distance) &&
+                current.pressure_representability_relative_distance <=
+                    options
+                        .pressure_representability_max_relative_distance;
+            if (!pressure_representability_converged) {
+                result.diagnostic =
+                    current.pressure_representability_available
+                        ? "pressure_representability_gate_failed_at_parameter_stationary_geometry"
+                        : "pressure_representability_unavailable_at_parameter_stationary_geometry";
+                return result;
+            }
+            const bool physical_equilibrium_converged =
+                finiteNonnegative(current.production_residual_norm) &&
+                current.production_residual_norm <=
+                    options.physical_equilibrium_max_residual_norm;
+            if (!physical_equilibrium_converged) {
+                result.diagnostic =
+                    "physical_equilibrium_residual_gate_failed_at_parameter_stationary_geometry";
+                return result;
+            }
+            const bool constant_pressure_kkt_converged =
+                !current.constant_pressure_kkt_required ||
+                (current.constant_pressure_kkt_available &&
+                 finiteNonnegative(
+                     current.constant_pressure_kkt_residual_norm) &&
+                 current.constant_pressure_kkt_residual_norm <=
+                     options.constant_pressure_kkt_max_residual_norm &&
+                 finiteNonnegative(
+                     current.constant_pressure_kkt_relative_distance) &&
+                 current.constant_pressure_kkt_relative_distance <=
+                     options
+                         .constant_pressure_kkt_max_relative_distance);
             if (!constant_pressure_kkt_converged) {
                 result.diagnostic =
                     current.constant_pressure_kkt_available
@@ -589,7 +675,7 @@ minimizeLevelSetStaticCapillaryEquilibrium(
             return result;
         }
         const Real current_merit =
-            current.surface_wall_energy +
+            physicalPotentialEnergy(current) +
             merit_penalty * std::abs(volume_error);
 
         bool step_accepted = false;
@@ -636,7 +722,7 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                     trial_state.liquid_volume -
                     options.target_liquid_volume;
                 const Real trial_merit =
-                    trial_state.surface_wall_energy +
+                    physicalPotentialEnergy(trial_state) +
                     merit_penalty *
                         std::abs(trial_volume_error);
                 const Real armijo_bound =

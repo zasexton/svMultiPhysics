@@ -281,7 +281,7 @@ struct KernelCallCounts {
 };
 
 struct FreeSurfaceConservativeBalanceKernelCounts {
-    std::array<KernelCallCounts, 3> operators{};
+    std::array<KernelCallCounts, 6> operators{};
     KernelCallCounts pressure_representability_pair{};
 };
 
@@ -1745,13 +1745,19 @@ template <typename BuildForm>
     p.sys->addCellKernel("op", p.u_field, p.u_field, kernel);
 
     if (balance_counts != nullptr) {
-        constexpr std::array<const char*, 3> diagnostic_ops{
+        constexpr std::array<const char*, 6> diagnostic_ops{
             "equations_diagnostic_ns_free_surface_pressure_virtual_work",
             "equations_diagnostic_ns_free_surface_surface_energy_virtual_work",
+            "equations_diagnostic_ns_free_surface_gravitational_potential_virtual_work",
+            "equations_diagnostic_ns_free_surface_physical_potential_virtual_work",
+            "equations_diagnostic_ns_free_surface_pressure_representability_load_virtual_work",
             "equations_diagnostic_ns_free_surface_conservative_balance",
         };
-        const std::array<svmp::FE::forms::FormExpr, 3> diagnostic_forms{
+        const std::array<svmp::FE::forms::FormExpr, 6> diagnostic_forms{
             (svmp::FE::forms::FormExpr::constant(2.0) * u * v).dx(),
+            (svmp::FE::forms::FormExpr::constant(-0.5) * u * v).dx(),
+            (svmp::FE::forms::FormExpr::constant(0.0) * u * v).dx(),
+            (svmp::FE::forms::FormExpr::constant(-0.5) * u * v).dx(),
             (svmp::FE::forms::FormExpr::constant(-0.5) * u * v).dx(),
             (svmp::FE::forms::FormExpr::constant(1.5) * u * v).dx(),
         };
@@ -1816,7 +1822,10 @@ makePressureRepresentabilityProblem(
     svmp::FE::Real production_pressure_target = svmp::FE::Real{0.0},
     svmp::FE::Real entry_pressure_baseline = svmp::FE::Real{0.0},
     bool use_native_mesh = false,
-    svmp::FE::Real surface_energy_scale = svmp::FE::Real{1.0})
+    svmp::FE::Real surface_energy_scale = svmp::FE::Real{1.0},
+    svmp::FE::Real gravitational_potential_scale = svmp::FE::Real{0.0},
+    svmp::FE::Real prescribed_external_pressure_scale =
+        svmp::FE::Real{0.0})
 {
     using svmp::FE::forms::FormExpr;
 
@@ -1910,27 +1919,45 @@ makePressureRepresentabilityProblem(
             ((pressure - FormExpr::constant(production_pressure_target)) * q)
                 .dx()));
 
-    constexpr std::array<const char*, 3> vector_ops{
+    constexpr std::array<const char*, 6> vector_ops{
         "equations_diagnostic_ns_free_surface_pressure_virtual_work",
         "equations_diagnostic_ns_free_surface_surface_energy_virtual_work",
+        "equations_diagnostic_ns_free_surface_gravitational_potential_virtual_work",
+        "equations_diagnostic_ns_free_surface_physical_potential_virtual_work",
+        "equations_diagnostic_ns_free_surface_pressure_representability_load_virtual_work",
         "equations_diagnostic_ns_free_surface_conservative_balance",
     };
     // On the unit tetra, a constant P1 field satisfies int(v_i)=1/24.
-    // The finite-precision LSQR regression therefore uses factors 12, 24,
-    // and 36 so its surface-energy load has four unit coefficients.
+    // The finite-precision LSQR regression therefore uses factors 12 and 24
+    // so its physical-potential load has controlled unit-scale coefficients.
     const svmp::FE::Real pressure_scale =
         pressure_pair_diagonal.has_value() ? 12.0 : 0.5;
     const svmp::FE::Real scaled_surface_energy =
         (pressure_pair_diagonal.has_value() ? 24.0 : 2.0) *
         surface_energy_scale;
-    const std::array<svmp::FE::Real, 3> vector_scales{
-        pressure_scale,
+    const svmp::FE::Real scaled_gravitational_potential =
+        (pressure_pair_diagonal.has_value() ? 24.0 : 2.0) *
+        gravitational_potential_scale;
+    const svmp::FE::Real scaled_prescribed_external_pressure =
+        (pressure_pair_diagonal.has_value() ? 24.0 : 2.0) *
+        prescribed_external_pressure_scale;
+    const svmp::FE::Real scaled_physical_potential =
+        scaled_surface_energy + scaled_gravitational_potential;
+    const std::array<svmp::FE::Real, 6> vector_scales{
+        pressure_scale + scaled_prescribed_external_pressure,
         scaled_surface_energy,
-        pressure_scale + scaled_surface_energy};
-    const std::array<FormExpr, 3> vector_forms{
+        scaled_gravitational_potential,
+        scaled_physical_potential,
+        scaled_prescribed_external_pressure + scaled_physical_potential,
+        pressure_scale + scaled_prescribed_external_pressure +
+            scaled_physical_potential};
+    const std::array<FormExpr, 6> vector_forms{
         (FormExpr::constant(vector_scales[0]) * u * v).dx(),
         (FormExpr::constant(vector_scales[1]) * u * v).dx(),
         (FormExpr::constant(vector_scales[2]) * u * v).dx(),
+        (FormExpr::constant(vector_scales[3]) * u * v).dx(),
+        (FormExpr::constant(vector_scales[4]) * u * v).dx(),
+        (FormExpr::constant(vector_scales[5]) * u * v).dx(),
     };
     for (std::size_t i = 0; i < vector_ops.size(); ++i) {
         p.sys->addOperator(vector_ops[i]);
@@ -5656,6 +5683,8 @@ TEST(NewtonSolver,
         std::string::npos);
     EXPECT_NE(telemetry.find("pressure_representability_iteration_cap=4"),
               std::string::npos);
+    EXPECT_NEAR(
+        report.pressure_representability_residual_norm, 0.0, 1.0e-13);
     EXPECT_TRUE(report.constant_pressure_kkt_available);
     EXPECT_TRUE(
         report.constant_pressure_unit_coefficients_represent_constant);
@@ -5682,7 +5711,7 @@ TEST(NewtonSolver,
         telemetry.find("constant_pressure_kkt_force_projection_applied=0"),
         std::string::npos);
     for (const std::string op : {
-             "equations_diagnostic_ns_free_surface_surface_energy_virtual_work",
+             "equations_diagnostic_ns_free_surface_pressure_representability_load_virtual_work",
              "equations_diagnostic_ns_free_surface_pressure_representability_pair"}) {
         const auto op_position = telemetry.find("op='" + op + "'");
         ASSERT_NE(op_position, std::string::npos) << op;
@@ -5692,6 +5721,151 @@ TEST(NewtonSolver,
             std::string::npos)
             << op;
     }
+}
+
+TEST(NewtonSolver,
+     PressureRepresentabilityUsesSurfacePlusGravitationalPotentialLoad)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    auto problem = makePressureRepresentabilityProblem(
+        diagnostic_counts,
+        /*two_cells=*/false,
+        /*pressure_mpc_state=*/{},
+        /*pressure_dirichlet_state=*/{},
+        /*entry_velocity=*/1.0,
+        /*pressure_pair_diagonal=*/std::nullopt,
+        /*track_immutable_mesh_revisions=*/false,
+        /*install_symbolic_cut_volume_pair=*/false,
+        /*production_pressure_target=*/0.0,
+        /*entry_pressure_baseline=*/0.0,
+        /*use_native_mesh=*/false,
+        /*surface_energy_scale=*/1.0,
+        /*gravitational_potential_scale=*/0.5);
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    testing::internal::CaptureStdout();
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    const auto telemetry = testing::internal::GetCapturedStdout();
+
+    EXPECT_TRUE(report.converged);
+    EXPECT_TRUE(report.pressure_representability_available);
+    EXPECT_TRUE(report.pressure_representability_converged);
+    EXPECT_FALSE(report.pressure_representability_breakdown);
+    EXPECT_NEAR(
+        report.pressure_representability_residual_norm, 0.0, 1.0e-13);
+    ASSERT_NE(workspace.pressure_representability_solution, nullptr);
+    const auto pressure_dof =
+        problem.sys->fieldDofOffset(problem.pressure_field);
+    const auto solution =
+        workspace.pressure_representability_solution->localSpan();
+    ASSERT_GE(pressure_dof, 0);
+    ASSERT_LT(static_cast<std::size_t>(pressure_dof), solution.size());
+    EXPECT_NEAR(
+        solution[static_cast<std::size_t>(pressure_dof)], 3.0, 1.0e-12);
+    EXPECT_NEAR(
+        report.constant_pressure_kkt_pressure_jump, 3.0, 1.0e-12);
+    EXPECT_NE(
+        telemetry.find(
+            "pressure_representability_load=prescribed_external_pressure_plus_surface_area_variation_plus_young_wall_energy_plus_gravitational_potential"),
+        std::string::npos);
+    EXPECT_NE(
+        telemetry.find("gravitational_potential_virtual_work_norm="),
+        std::string::npos);
+    EXPECT_NE(
+        telemetry.find("physical_potential_virtual_work_norm="),
+        std::string::npos);
+    EXPECT_NE(
+        telemetry.find(
+            "pressure_representability_load_virtual_work_norm="),
+        std::string::npos);
+}
+
+TEST(NewtonSolver,
+     PressureRepresentabilityIncludesPrescribedExteriorPressureLoad)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    auto problem = makePressureRepresentabilityProblem(
+        diagnostic_counts,
+        /*two_cells=*/false,
+        /*pressure_mpc_state=*/{},
+        /*pressure_dirichlet_state=*/{},
+        /*entry_velocity=*/1.0,
+        /*pressure_pair_diagonal=*/std::nullopt,
+        /*track_immutable_mesh_revisions=*/false,
+        /*install_symbolic_cut_volume_pair=*/false,
+        /*production_pressure_target=*/0.0,
+        /*entry_pressure_baseline=*/0.0,
+        /*use_native_mesh=*/false,
+        /*surface_energy_scale=*/1.0,
+        /*gravitational_potential_scale=*/0.5,
+        /*prescribed_external_pressure_scale=*/0.75);
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+
+    EXPECT_TRUE(report.converged);
+    EXPECT_TRUE(report.pressure_representability_available);
+    EXPECT_TRUE(report.pressure_representability_converged);
+    EXPECT_FALSE(report.pressure_representability_breakdown);
+    EXPECT_NEAR(
+        report.pressure_representability_residual_norm, 0.0, 1.0e-13);
+    ASSERT_NE(workspace.pressure_representability_solution, nullptr);
+    const auto pressure_dof =
+        problem.sys->fieldDofOffset(problem.pressure_field);
+    const auto solution =
+        workspace.pressure_representability_solution->localSpan();
+    ASSERT_GE(pressure_dof, 0);
+    ASSERT_LT(static_cast<std::size_t>(pressure_dof), solution.size());
+    EXPECT_NEAR(
+        solution[static_cast<std::size_t>(pressure_dof)], 4.5, 1.0e-12);
+    EXPECT_NEAR(
+        report.constant_pressure_kkt_pressure_jump, 4.5, 1.0e-12);
 }
 
 TEST(NewtonSolver,
@@ -5798,6 +5972,9 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
     options
+        .accepted_static_pressure_representability_max_relative_distance =
+        1.0e-10;
+    options
         .accepted_static_constant_pressure_kkt_max_relative_distance =
         1.0e-10;
     svmp::FE::timestepping::NewtonSolver newton(options);
@@ -5824,7 +6001,9 @@ TEST(NewtonSolver,
     EXPECT_TRUE(report.constant_pressure_kkt_available);
     EXPECT_TRUE(report.constant_pressure_kkt_distance_gate_applied);
     EXPECT_TRUE(report.constant_pressure_kkt_distance_gate_passed);
-    EXPECT_FALSE(report.pressure_representability_distance_gate_applied);
+    EXPECT_TRUE(report.pressure_representability_distance_gate_applied);
+    EXPECT_TRUE(report.pressure_representability_distance_gate_passed);
+    EXPECT_LE(report.pressure_representability_relative_distance, 1.0e-10);
     EXPECT_LE(report.constant_pressure_kkt_relative_distance, 1.0e-10);
     EXPECT_NEAR(
         report.constant_pressure_kkt_max_relative_distance, 1.0e-10, 0.0);
@@ -5876,6 +6055,9 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
     options
+        .accepted_static_pressure_representability_max_relative_distance =
+        1.0e-10;
+    options
         .accepted_static_constant_pressure_kkt_max_relative_distance =
         1.0e-10;
     svmp::FE::timestepping::NewtonSolver newton(options);
@@ -5892,6 +6074,13 @@ TEST(NewtonSolver,
         workspace);
 
     EXPECT_TRUE(report.converged);
+    EXPECT_TRUE(report.pressure_representability_available);
+    EXPECT_TRUE(report.pressure_representability_converged);
+    EXPECT_TRUE(report.pressure_representability_distance_gate_applied);
+    EXPECT_TRUE(report.pressure_representability_distance_gate_passed);
+    EXPECT_GT(report.pressure_representability_residual_norm, 0.0);
+    EXPECT_LT(report.pressure_representability_residual_norm, 1.0e-14);
+    EXPECT_EQ(report.pressure_representability_relative_distance, 0.0);
     EXPECT_TRUE(report.constant_pressure_kkt_available);
     EXPECT_TRUE(report.constant_pressure_kkt_distance_gate_applied);
     EXPECT_TRUE(report.constant_pressure_kkt_distance_gate_passed);
@@ -6268,6 +6457,64 @@ TEST(NewtonSolver,
 }
 
 TEST(NewtonSolver,
+     PressureRepresentabilityPrimalResidualUsesItsOwnLoadScale)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    constexpr std::array<svmp::FE::Real, 4> singular_values{
+        1.0e16,
+        0.0,
+        0.0,
+        0.0,
+    };
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    auto problem = makePressureRepresentabilityProblem(
+        diagnostic_counts,
+        /*two_cells=*/false,
+        /*pressure_mpc_state=*/{},
+        /*pressure_dirichlet_state=*/{},
+        /*entry_velocity=*/1.0,
+        /*pressure_pair_diagonal=*/singular_values);
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+
+    EXPECT_TRUE(report.converged);
+    EXPECT_TRUE(report.pressure_representability_available);
+    EXPECT_TRUE(report.pressure_representability_converged);
+    EXPECT_FALSE(report.pressure_representability_breakdown);
+    EXPECT_NEAR(
+        report.pressure_representability_residual_norm,
+        std::sqrt(3.0),
+        1.0e-12);
+    EXPECT_NEAR(
+        report.pressure_representability_relative_distance,
+        std::sqrt(3.0) / 2.0,
+        1.0e-12);
+}
+
+TEST(NewtonSolver,
      FreeSurfacePressureRepresentabilityRemovesArtificialConstrainedPressureRow)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
@@ -6619,7 +6866,7 @@ TEST(NewtonSolver,
         /*pressure_pair_diagonal=*/std::nullopt,
         /*track_immutable_mesh_revisions=*/true,
         /*install_symbolic_cut_volume_pair=*/true,
-        /*production_pressure_target=*/6.0,
+        /*production_pressure_target=*/4.0,
         /*entry_pressure_baseline=*/2.0);
 
     svmp::FE::timestepping::NewtonOptions options;
@@ -6700,6 +6947,10 @@ TEST(NewtonSolver,
               std::string::npos);
     EXPECT_NE(telemetry.find("pressure_update=additive"),
               std::string::npos);
+    EXPECT_NE(
+        telemetry.find(
+            "pressure_increment=conservative_balance_residual_correction"),
+        std::string::npos);
     EXPECT_NE(telemetry.find("existing_pressure_baseline_preserved=1"),
               std::string::npos);
     EXPECT_NE(telemetry.find("committed_history_or_rate_slots_mutated=0"),
@@ -6729,7 +6980,7 @@ TEST(NewtonSolver,
         for (svmp::FE::GlobalIndex i = 0; i < pressure_count; ++i) {
             EXPECT_NEAR(
                 values[static_cast<std::size_t>(pressure_begin + i)],
-                6.0,
+                4.0,
                 1.0e-12);
         }
     };
@@ -6904,7 +7155,7 @@ TEST(NewtonSolver,
         /*pressure_pair_diagonal=*/std::nullopt,
         /*track_immutable_mesh_revisions=*/true,
         /*install_symbolic_cut_volume_pair=*/true,
-        /*production_pressure_target=*/6.0,
+        /*production_pressure_target=*/4.0,
         /*entry_pressure_baseline=*/2.0);
     const auto pressure_begin =
         problem.sys->fieldDofOffset(problem.pressure_field);
@@ -7000,7 +7251,7 @@ TEST(NewtonSolver,
             // from the pre-initializer pressure even when that callback threw.
             synchronized_pressure_effect = pressure;
             if (!throw_on_initialized_state ||
-                std::abs(pressure - 6.0) > 1.0e-12) {
+                std::abs(pressure - 4.0) > 1.0e-12) {
                 return;
             }
             auto& auxiliary = problem.sys
@@ -7069,7 +7320,7 @@ TEST(NewtonSolver,
     EXPECT_TRUE(workspace.static_compatible_pressure_initialized);
     EXPECT_EQ(injected_failures, 1);
     EXPECT_EQ(restored_effect_count, 2);
-    EXPECT_NEAR(synchronized_pressure_effect, 6.0, 1.0e-13);
+    EXPECT_NEAR(synchronized_pressure_effect, 4.0, 1.0e-13);
     RecordProperty(
         "static_compatible_pressure_initializer_sync_exception_rollback",
         1);
@@ -7097,7 +7348,7 @@ TEST(NewtonSolver,
         /*pressure_pair_diagonal=*/std::nullopt,
         /*track_immutable_mesh_revisions=*/true,
         /*install_symbolic_cut_volume_pair=*/true,
-        /*production_pressure_target=*/6.0,
+        /*production_pressure_target=*/4.0,
         /*entry_pressure_baseline=*/2.0);
 
     svmp::FE::timestepping::TimeLoopOptions loop_options;
@@ -7175,7 +7426,7 @@ TEST(NewtonSolver,
         EXPECT_NEAR(
             accepted_state[
                 static_cast<std::size_t>(pressure_begin + i)],
-            6.0,
+            4.0,
             1.0e-12);
     }
     RecordProperty(
@@ -7203,8 +7454,8 @@ TEST(NewtonSolver,
         /*pressure_pair_diagonal=*/std::nullopt,
         /*track_immutable_mesh_revisions=*/false,
         /*install_symbolic_cut_volume_pair=*/false,
-        /*production_pressure_target=*/6.0,
-        /*entry_pressure_baseline=*/2.0,
+        /*production_pressure_target=*/2.0,
+        /*entry_pressure_baseline=*/1.0,
         /*use_native_mesh=*/true);
     const auto pressure_begin =
         problem.sys->fieldDofOffset(problem.pressure_field);
@@ -7244,7 +7495,7 @@ TEST(NewtonSolver,
             }
             const double pressure = static_cast<double>(
                 state.u[static_cast<std::size_t>(pressure_begin)]);
-            if (std::abs(pressure - 6.0) <= 1.0e-12) {
+            if (std::abs(pressure - 2.0) <= 1.0e-12) {
                 throw_on_initialized_state = false;
                 throw std::runtime_error(
                     "synthetic initialized-state failure before geometry restoration");
@@ -7516,7 +7767,7 @@ TEST(NewtonSolver,
         /*pressure_pair_diagonal=*/std::nullopt,
         /*track_immutable_mesh_revisions=*/true,
         /*install_symbolic_cut_volume_pair=*/false,
-        /*production_pressure_target=*/5.0,
+        /*production_pressure_target=*/2.0,
         /*entry_pressure_baseline=*/3.0);
 
     svmp::FE::timestepping::NewtonOptions options;
@@ -7843,9 +8094,11 @@ TEST(NewtonSolver,
     newton.allocateWorkspace(
         *problem.sys, *problem.factory, workspace);
     const auto n_dofs = problem.sys->dofHandler().getNumDofs();
-    workspace.pressure_representability_work =
+    // Replacing the initializer's second-load vector with an equal-backend,
+    // wrong-size allocation must be rejected before either pair multiply.
+    workspace.pressure_representability_correction_load =
         problem.factory->createVector(n_dofs + 1);
-    ASSERT_NE(workspace.pressure_representability_work, nullptr);
+    ASSERT_NE(workspace.pressure_representability_correction_load, nullptr);
     problem.history.repack(*problem.factory);
 
     const auto report = newton.solveStep(
@@ -7906,8 +8159,9 @@ TEST(NewtonSolver,
         problem.sys->sparsity(pair_op).computeStats().nnz;
     const auto entry_revision =
         problem.sys->sparsityPatternRevision();
-    const std::array<const void*, 8> old_vectors{
+    const std::array<const void*, 9> old_vectors{
         workspace.pressure_representability_load.get(),
+        workspace.pressure_representability_correction_load.get(),
         workspace.pressure_representability_solution.get(),
         workspace.pressure_representability_left_basis.get(),
         workspace.pressure_representability_right_basis.get(),
@@ -7943,8 +8197,9 @@ TEST(NewtonSolver,
         report.constant_pressure_constraints_preserve_constants);
     EXPECT_TRUE(report.constant_pressure_kkt_available);
 
-    const std::array<const void*, 8> refreshed_vectors{
+    const std::array<const void*, 9> refreshed_vectors{
         workspace.pressure_representability_load.get(),
+        workspace.pressure_representability_correction_load.get(),
         workspace.pressure_representability_solution.get(),
         workspace.pressure_representability_left_basis.get(),
         workspace.pressure_representability_right_basis.get(),

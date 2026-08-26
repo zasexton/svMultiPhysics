@@ -280,17 +280,20 @@ struct NewtonOptions {
         accepted_static_constant_pressure_kkt_max_relative_distance{};
 
     /**
-     * Add the stationary least-squares pressure correction for the assembled
-     * discrete surface/Young load to the initial pressure coefficients once.
+     * Add the stationary least-squares pressure correction for the remaining
+     * conservative-balance residual once.  That residual includes the current
+     * pressure together with the assembled prescribed exterior-pressure,
+     * surface/Young, and gravitational load.
      *
-     * Existing pressure coefficients (for example an imposed external or
-     * hydrostatic baseline) are preserved.  This changes only the current
-     * nonlinear initial guess; committed solution-history and rate slots are
-     * not rewritten.  It is not a force projection or balanced-force
-     * certificate: the production capillary residual is unchanged.  The
+     * Existing pressure coefficients are the baseline for the correction, so
+     * an already compatible external or hydrostatic pressure receives a zero
+     * increment rather than a duplicate pressure field.  This changes only
+     * the current nonlinear initial guess; committed solution-history and
+     * rate slots are not rewritten.  It is not a force projection or
+     * balanced-force certificate: the production residual is unchanged.  The
      * pressure-range distance gate above must also be configured, and the
-     * initial guess fails closed before mutation when the LSQR certificate is
-     * unavailable or outside that gate.
+     * initial guess fails closed before mutation when either the load
+     * certificate or the residual-correction solve is unavailable.
      */
     bool initialize_static_compatible_free_surface_pressure{false};
 };
@@ -312,14 +315,17 @@ struct NewtonReport {
     bool pressure_representability_available{false};
     bool pressure_representability_converged{false};
     bool pressure_representability_breakdown{false};
+    double pressure_representability_residual_norm{
+        std::numeric_limits<double>::quiet_NaN()};
     double pressure_representability_relative_distance{
         std::numeric_limits<double>::quiet_NaN()};
     std::string pressure_representability_reason{"not_sampled"};
     /**
      * One-dimensional equilibrium subproblem for a physical unit pressure
      * trace.  This reports the best constant pressure jump and the residual
-     * left in the assembled surface/Young virtual work.  It never replaces or
-     * projects the production capillary load.
+     * left in the assembled prescribed exterior-pressure plus physical-
+     * potential virtual work.  It never replaces or projects the production
+     * load.
      */
     bool constant_pressure_kkt_available{false};
     bool constant_pressure_unit_coefficients_represent_constant{false};
@@ -357,13 +363,19 @@ struct NewtonWorkspace {
     std::unique_ptr<backends::GenericMatrix> jacobian{};
     std::unique_ptr<backends::GenericMatrix> diagnostic_jacobian_scratch{};
     // Optional free-surface pressure-representability workspace.  The matrix
-    // stores the symmetric [0,G;G^T,0] diagnostic pair; the vectors keep LSQR
-    // entirely in GenericMatrix/GenericVector operations (no backend casts,
-    // normal equations, or globally gathered dense matrices).
+    // stores the symmetric [0,G;G^T,0] diagnostic pair; the vectors keep both
+    // representability and residual-correction LSQR solves entirely in
+    // GenericMatrix/GenericVector operations (no backend casts, normal
+    // equations, or globally gathered dense matrices).
     std::unique_ptr<backends::GenericMatrix>
         pressure_representability_pair_matrix{};
     std::unique_ptr<backends::GenericVector>
         pressure_representability_load{};
+    // Kept in the pressure-pair vector layout so backends whose matrix/vector
+    // compatibility depends on shared layout identity can evaluate the
+    // remaining balance after an existing pressure baseline is applied.
+    std::unique_ptr<backends::GenericVector>
+        pressure_representability_correction_load{};
     std::unique_ptr<backends::GenericVector>
         pressure_representability_solution{};
     std::unique_ptr<backends::GenericVector>

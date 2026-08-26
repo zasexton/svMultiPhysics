@@ -124,15 +124,30 @@ enum class FreeSurfaceSurfaceTensionForm : std::uint8_t {
  * These diagnostic operators are installed only when
  * `SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC` is enabled and the
  * active free-surface configuration uses constant-gamma `SurfaceStress`.
- * Their residual vectors satisfy `conservative_balance = pressure_virtual_work
- * + surface_energy_virtual_work` on the same generated cut/contact rules as
- * the production momentum residual.
+ * Their residual vectors satisfy `physical_potential_virtual_work =
+ * surface_energy_virtual_work + gravitational_potential_virtual_work`,
+ * `pressure_representability_load_virtual_work = prescribed exterior-
+ * pressure virtual work + physical_potential_virtual_work`, and
+ * `conservative_balance = pressure_virtual_work +
+ * physical_potential_virtual_work` on the same generated cut/contact and
+ * active-volume rules as the production momentum residual.  Here
+ * `pressure_virtual_work` contains both the unknown liquid-pressure term and
+ * the prescribed exterior-pressure term, while the representability load
+ * deliberately excludes the unknown pressure.
  */
 struct FreeSurfaceConservativeBalanceDiagnosticOperators {
     inline static constexpr std::string_view pressure_virtual_work{
         "equations_diagnostic_ns_free_surface_pressure_virtual_work"};
     inline static constexpr std::string_view surface_energy_virtual_work{
         "equations_diagnostic_ns_free_surface_surface_energy_virtual_work"};
+    inline static constexpr std::string_view
+        gravitational_potential_virtual_work{
+            "equations_diagnostic_ns_free_surface_gravitational_potential_virtual_work"};
+    inline static constexpr std::string_view physical_potential_virtual_work{
+        "equations_diagnostic_ns_free_surface_physical_potential_virtual_work"};
+    inline static constexpr std::string_view
+        pressure_representability_load_virtual_work{
+            "equations_diagnostic_ns_free_surface_pressure_representability_load_virtual_work"};
     inline static constexpr std::string_view conservative_balance{
         "equations_diagnostic_ns_free_surface_conservative_balance"};
     // Symmetric mixed diagnostic operator
