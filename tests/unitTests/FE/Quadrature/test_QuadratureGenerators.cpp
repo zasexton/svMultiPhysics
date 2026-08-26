@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "FE/Common/FEException.h"
+#include "FE/Quadrature/GaussLobattoQuadrature.h"
 #include "FE/Quadrature/GaussQuadrature.h"
 #include "FE/Quadrature/QuadratureRule.h"
 
@@ -35,6 +36,11 @@ static_assert(max_gauss_legendre_points() == 128);
 static_assert(noexcept(max_gauss_legendre_points()));
 static_assert(
     std::is_same_v<decltype(&make_gauss_legendre_rule),
+                   QuadratureRule (*)(int)>);
+static_assert(max_gauss_lobatto_points() == 128);
+static_assert(noexcept(max_gauss_lobatto_points()));
+static_assert(
+    std::is_same_v<decltype(&make_gauss_lobatto_rule),
                    QuadratureRule (*)(int)>);
 
 enum class LineEndpointPolicy {
