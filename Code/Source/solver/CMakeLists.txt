@@ -170,6 +170,7 @@ set(CSRCS
   SimulationLogger.h
   VtkData.h VtkData.cpp
 
+  active_stress_regazzoni.h active_stress_regazzoni.cpp
   all_fun.h all_fun.cpp
   baf_ini.h baf_ini.cpp
   bf.h bf.cpp
