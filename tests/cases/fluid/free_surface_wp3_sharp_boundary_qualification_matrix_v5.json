@@ -1,0 +1,116 @@
+{
+  "schema_version": 5,
+  "matrix_id": "free_surface_wp3_sharp_boundary_closure_v5",
+  "status": "FROZEN_BEFORE_EXECUTION",
+  "status_reason": "FROZEN_BEFORE_EXECUTION_AFTER_V4_PROVENANCE_LIMIT_REJECTION",
+  "work_package": "WP-3",
+  "findings": [
+    "FSR-16"
+  ],
+  "implementation_source_commit": "64fd010061a9de7cdf4b23c722884fd6c8db940e",
+  "parent_matrix": {
+    "path": "tests/cases/fluid/free_surface_wp3_sharp_boundary_qualification_matrix_v4.json",
+    "sha256": "2152dff9f850453774be1825951c8ff9697409a06bbf413b877128af3cea79c2"
+  },
+  "parent_artifacts": [
+    {
+      "path": "tests/cases/fluid/free_surface_wp3_sharp_boundary_qualification_matrix_v4.json",
+      "role": "rejected_qualification_matrix",
+      "sha256": "2152dff9f850453774be1825951c8ff9697409a06bbf413b877128af3cea79c2"
+    },
+    {
+      "path": "tests/cases/fluid/run_free_surface_wp3_sharp_boundary_qualification_v4.py",
+      "role": "qualification_parent",
+      "sha256": "743900c0ecb654e192be4bbd3b25b15939ca9fe7871e92544a2ecd5f38ed187c"
+    },
+    {
+      "path": "tests/test_free_surface_wp3_sharp_boundary_qualification_runner_v4.py",
+      "role": "rejected_qualification_contract_test",
+      "sha256": "3b8eba001d0aaacfa955b57a585b32502f57549d7adaf51c289dd4a1ef7da61b"
+    },
+    {
+      "path": "tests/cases/fluid/run_free_surface_wp2_geometry_qualification.py",
+      "role": "shared_execution_base",
+      "sha256": "5387dd19618139aeee45bb6f3c77f27fd8b26ce28713d221a866e1eea4662037"
+    },
+    {
+      "path": "tests/cases/fluid/mpi_aware_gtest_discovery.py",
+      "role": "test_discovery_helper",
+      "sha256": "cdf0c84761d8b78989291859d1e073b15822ce98ee011325ca1dc49b2d1a0f3a"
+    }
+  ],
+  "proposed_runner": "tests/cases/fluid/run_free_surface_wp3_sharp_boundary_qualification_v5.py",
+  "focused_contract_test": "tests/test_free_surface_wp3_sharp_boundary_qualification_runner_v5.py",
+  "runner_sha256": "2296b47589d40a57a439d42637ff107f65028d4a78eb7af58257eeccc0aebbcc",
+  "qualification_bundle_binding": {
+    "authority": "reciprocal_sha256_plus_canonical_bundle_commit_history",
+    "matrix_sha256_source": "runner_embedded_normalized_matrix_sha256",
+    "matrix_hash_normalization": "replace_the_unique_runner_sha256_value_with_64_ASCII_zero_digits",
+    "runner_sha256_source": "matrix_runner_sha256",
+    "focused_test_sha256_source": "runner_embedded_focused_test_sha256",
+    "bundle_commit_resolution": "unique_direct_child_of_implementation_source_commit_on_validation_HEAD_ancestry_matching_exact_paths_and_frozen_blobs",
+    "exact_bundle_commit_blobs_required": [
+      "tests/cases/fluid/free_surface_wp3_sharp_boundary_qualification_matrix_v5.json",
+      "tests/cases/fluid/run_free_surface_wp3_sharp_boundary_qualification_v5.py",
+      "tests/test_free_surface_wp3_sharp_boundary_qualification_runner_v5.py"
+    ],
+    "bundle_commit_must_have_exactly_one_parent": true,
+    "bundle_commit_parent_must_equal_implementation_source_commit": true,
+    "bundle_commit_changed_paths_must_equal_exact_bundle_commit_blobs_required": true,
+    "bundle_commit_blobs_must_match_checked_out_frozen_bytes": true,
+    "validation_HEAD_must_descend_from_bundle_commit": true,
+    "execution_HEAD_must_equal_bundle_commit": true
+  },
+  "draft_promotion_contract": {
+    "current_state": "FROZEN_BEFORE_EXECUTION",
+    "source_hashes_frozen": true,
+    "qualification_bundle_hashes_frozen": true,
+    "qualification_evidence_executed": false,
+    "validate_only_allowed": true,
+    "execution_allowed": true,
+    "required_execution_state": "FROZEN_BEFORE_EXECUTION",
+    "promotion_requirements": [
+      "validate every named test against fresh binaries",
+      "freeze the focused contract test hash in the runner",
+      "freeze the normalized matrix hash in the runner",
+      "replace the matrix runner hash sentinel with the final runner digest",
+      "commit exactly the matrix runner and focused contract test as the unique direct child of the implementation source commit"
+    ]
+  },
+  "resource_safeguards": {
+    "scheduler_account": "amarsden",
+    "scheduler_partition": "amarsden",
+    "python_runtime_module": "python/3.12.1",
+    "python_version": "3.12.1",
+    "python_executable": "/share/software/user/open/python/3.12.1/bin/python3",
+    "maximum_concurrent_nodes": 2,
+    "maximum_concurrent_memory_gib": 40,
+    "qualification_job_nodes": 1,
+    "qualification_job_tasks": 10,
+    "qualification_job_cpus_per_task": 1,
+    "qualification_job_memory_gib": 20,
+    "build_parallel": 10,
+    "execution_preflight_mem_available_mib": 12288,
+    "runtime_filesystem_free_floor_mib": 4096,
+    "scratch_root": "/scratch/users/zsexton",
+    "source_root_must_equal_runner_repository_root": true,
+    "source_worktree_must_be_within_scratch_root": true,
+    "source_worktree_requires_detached_head": true,
+    "source_worktree_requires_external_git_common_directory": true,
+    "source_worktree_requires_zero_tracked_untracked_and_ignored_paths": true,
+    "execution_HEAD_must_equal_bundle_commit": true,
+    "cmake_configure_uses_fresh": true,
+    "cmake_configure_rejects_unrecognized_source_homes": true,
+    "cmake_configure_rejects_nonexact_cache_definitions": true,
+    "binary_link_provenance_policy": {
+      "address_and_resident_memory_mib": 1024,
+      "command": "ldd",
+      "launch_mode": "direct_serial",
+      "maximum_qualification_job_memory_fraction": 0.05,
+      "memory_enforcement_method": "RLIMIT_AS_plus_sampled_session_resident_memory",
+      "output_mib": 4,
+      "timeout_seconds": 60,
+      "v4_rejected_address_and_resident_memory_mib": 256
+    }
+  }
+}
