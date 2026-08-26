@@ -164,7 +164,7 @@ A robust finite-element implementation must preserve the relationship between th
 | FSR-13 | Medium | Generality defect | Generated physical phase volume uses one parent-cell scale instead of pointwise geometry mapping. | Distorted/nonaffine and high-order-cell volume diagnostics/correction can disagree with assembly measure. |
 | FSR-14 | Medium | Validation gap | Cut-backend checks do not fully verify root accuracy, normal accuracy, volume-point containment, or phase side. | A backend defect can pass structural validation and contaminate residuals or diagnostics. |
 | FSR-15 | Medium | Coupling risk | Scalar contact reconstruction ignores the supplied interface-domain object and rebuilds roots independently. | Contact and surface rules lack an enforced same-revision/same-parent geometry invariant. |
-| FSR-16 | High | Confirmed method defect | Generic exterior boundary weak forms are not clipped to the active wetted part of a cut face. | Nitsche penalty, traction, Robin, or outflow work can act on fictitious dry boundary and feed wet rows. |
+| FSR-16 | High | Resolved in qualified scope | Supported one-phase affine C0 P1/LinearCorner exterior weak and natural forms are clipped to the generated wetted-face domain; unsupported higher-order routes fail closed. | Closure is limited to the declared envelope; WP-7, Q1, higher-order support, and uniform cut conditioning remain open. |
 | FSR-17 | Medium | Confirmed generality defect | Supplemental high-order curvature samples pair a value at one reference point with a separately averaged physical point. | Curvature least squares receives inconsistent `(x,phi)` data on nonaffine/isoparametric cells. |
 | FSR-18 | Medium | Robustness defect | Colliding algebraic extension bands choose the smaller component ID and use cell-node clique adjacency. | Splash components can receive numbering-dependent extension partitions with broad, non-geometric graph communication. |
 
@@ -285,7 +285,11 @@ Required production guards are:
 
 The multi-component policy also needs correction. When two extension bands collide, production silently selects the smaller connected-component label and records only a collision count. Existing tests intentionally encode that minimum-ID choice. Component numbering is not a physical criterion, so swapping IDs can change the extension partition. Moreover, band adjacency is built as a complete clique among all nodes of a cell rather than from mesh edges or geometric distance. This can transmit information across diagonals and create a wider/non-geometric extension graph. These behaviors are especially risky for colliding droplets, crown fingers, or nearby sheets and motivate FSR-18.
 
-## FSR-16: ordinary exterior boundary forms are not clipped to the wet boundary
+## FSR-16: resolved within the affine P1/LinearCorner envelope
+
+Current disposition, recorded on 2026-08-26: FSR-16 is closed for the supported one-phase affine C0 P1/LinearCorner exterior-boundary route. Traction, Robin, outflow, pressure-flux, symmetric and unsymmetric Nitsche, wall-slip, coupled-outflow, and PSPG boundary work use the generated active boundary; a dry face contributes exactly zero, missing or ambiguous sharp domains are hard errors, and unsupported higher-order selection fails closed. The checksum-bound [V6 qualification record](qualification_logs/free_surface_wp3_sharp_boundary_v6_20260826_a73c77f4/record.md) and [summary](qualification_logs/free_surface_wp3_sharp_boundary_v6_20260826_a73c77f4/summary.json) are the acceptance evidence. This disposition does not close WP-7, Q1, higher-order support, or uniform cut conditioning.
+
+The paragraphs below preserve the defect state reviewed on 2026-07-20 and the rationale for the completed work.
 
 Cut-volume momentum is restricted to the liquid, but generic exterior-boundary operators are still assembled using ordinary full-face measures such as `.ds(marker)`. The generic boundary manager is invoked in
 [`IncompressibleNavierStokesVMSModule.cpp`](../Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.cpp), lines 6813--6832, and weak velocity Nitsche forms in
@@ -992,7 +996,7 @@ A work-package box is checked only after its source changes, required tests, and
 - [x] WP-0: configuration containment and effective-state provenance
 - [x] WP-1: remove physical dry-domain feedback and bound the transport extension
 - [x] WP-2: one authoritative cut/interface/wet-wall/contact geometry snapshot
-- [ ] WP-3: sharply clipped exterior boundary operators
+- [x] WP-3: sharply clipped exterior boundary operators, qualified for the one-phase affine C0 P1/LinearCorner envelope; higher-order selection fails closed
 - [ ] WP-4: balanced capillary pressure, wall energy, and prescribed angle
 - [ ] WP-5: side-wall contact-line dynamics and wall-aware maintenance
 - [ ] WP-6: locally conservative interface transport and maintenance transaction
@@ -1325,6 +1329,14 @@ WP-3 V6 history-integration and closure-review checkpoint recorded on 2026-08-26
 - No formal status changes are taken by this integration record: WP-0 through WP-2 remain complete, while WP-3 through WP-10 and Q0 through Q7 remain open. Resume WP-3 at the final descendant-delta review: compare the 47 hash-bound implementation-source items frozen at the V6 bundle against the current tree, classify every changed item, and confirm that no post-qualification change invalidates a qualified WP-3 production route. Reuse current-tree regression evidence only where it exercises the exact affected route; otherwise run the focused replacement before changing status text.
 - If that review is clean, reconcile the FSR-16 finding row and section, the WP-3 checklist entry, and the traceability row only within the declared one-phase affine C0 P1/LinearCorner envelope. Keep WP-7, Q1, higher-order behavior, uniform conditioning, WP-4 through WP-10, and all other qualification boxes open. The separately recorded two-rank flat-equilibrium work remains WP-4 development evidence and does not receive checklist credit.
 
+WP-3 formal scoped closure recorded on 2026-08-26:
+
+- The accepted V6 archive passes all 13 predeclared groups, 80 distinct tests, 85 quantitative checks, and 70 distributed recorded-property checks. Its 111-entry manifest, independent semantic reconstruction, clean frozen source and build provenance, exact declared test union, execution routes, and scheduler/resource envelope all pass. The matrix disposition explicitly closes FSR-16 and WP-3 only within the one-phase affine C0 P1/LinearCorner exterior-boundary envelope.
+- The final descendant-delta review compared all 47 hash-bound implementation-source items with the current tree: 45 remain byte-identical, and only the serial and distributed Application test sources differ. Their qualified manufactured-channel and multi-domain-refresh test bodies are byte-unchanged; their intervening edits add the separately scoped WP-4 flat-equilibrium fixtures and repair an adjacent maintenance fixture. The only other post-qualification source changes are the WP-4 constant-pressure zero-load normalization and its focused test; no qualified WP-3 production source changed.
+- After rebuilding both Application test targets from the current checkout under the inherited GCC 12/OpenMPI module environment, the exact two-test serial qualification group passed with zero failures in 7.2 seconds and the exact two-rank native-channel group passed on both ranks in 15.0 seconds. The distributed rerun retained two partitions, both active sides, 11 wet fractions, eight overlap layers, exact-proof input dimension 15, maximum trace bound `7.3799510101871197`, maximum trace ratio `0.46124693813669504`, zero partition-measure difference, `2.2204460492503131e-16` maximum partition-work difference, zero side-reversal work difference, and `1.1102230246251565e-16` maximum vertex-limit mismatch. Current-tree records are under `/scratch/users/zsexton/wp3-descendant-review-20260826`.
+- The separate read-only verifier in that scratch directory reports `PASS`: 47 inventory items with exactly the two expected test-source deltas, four expected post-qualification code paths, three byte-identical qualified test bodies, 112 archive files, 111 matching archive hashes, two passing serial tests, one passing test on each of two ranks, and all 14 distributed property gates satisfied. Its transcript is `independent-descendant-validation.txt`.
+- FSR-16 and WP-3 are therefore closed within that declared envelope, and the WP-3 checklist box is checked. Higher-order exterior restriction remains unsupported and fails closed. WP-7, Q1, uniform cut conditioning, WP-4 through WP-10, Q0, and Q2 through Q7 remain open; this closure supplies no credit to those gates.
+
 ### WP-4: balanced capillary pressure, wall energy, and prescribed angle
 
 **Findings addressed:** FSR-03 and FSR-04.
@@ -1539,7 +1551,7 @@ Required qualification progression:
 | FSR-13 | WP-2 | Constant-one equality on affine, warped, and high-order cells | Pointwise volume/mapping comparison |
 | FSR-14 | WP-2 | Rejection of all injected geometry defects, false order claims, and achieved order below the required minimum | Quantitative validator report for every retained rule |
 | FSR-15 | WP-2 | Valid contact-to-source provenance, deterministic remapping, and revision equality | Stable-ID/remapping/revision/ownership ledger |
-| FSR-16 | WP-3 | Exact wet-face moments, zero dry contribution, all operators sharply routed | Boundary-domain quadrature and assembly report |
+| FSR-16 | WP-3, closed in the qualified affine P1/LinearCorner envelope | Exact wet-face moments, zero dry contribution, all supported operators sharply routed | [V6 boundary-domain and assembly record](qualification_logs/free_surface_wp3_sharp_boundary_v6_20260826_a73c77f4/record.md) and [summary](qualification_logs/free_surface_wp3_sharp_boundary_v6_20260826_a73c77f4/summary.json); WP-7, Q1, higher-order support, and uniform conditioning remain open |
 | FSR-17 | WP-2 | Exact `(xi,x,phi)` pairing and restored high-order curvature convergence | Sample provenance and distorted-mesh curvature study |
 | FSR-18 | WP-1 | Edge/geometric graph, label/MPI invariance, bounded collision behavior | Graph/map report under deliberate relabeling |
 
