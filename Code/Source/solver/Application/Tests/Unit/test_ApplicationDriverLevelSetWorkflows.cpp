@@ -212,6 +212,46 @@ std::shared_ptr<svmp::Mesh> makeWorkflowThreeQuadStripMesh()
   return svmp::create_mesh(std::move(base));
 }
 
+std::shared_ptr<svmp::Mesh> makeWorkflowFlatCapillaryFanMesh()
+{
+  auto base = std::make_shared<svmp::MeshBase>();
+
+  // The off-interface interior vertex gives the order-one velocity space an
+  // unconstrained volume-variation direction.  Every triangle has negative
+  // level-set support for phi=y-0.5, so the active pressure space retains an
+  // exact constant while the generated interface remains the horizontal
+  // segment joining the two contact walls.
+  const std::vector<svmp::real_t> x_ref = {
+      0.0, 0.0,
+      3.0, 0.0,
+      3.0, 1.0,
+      0.0, 1.0,
+      1.5, 0.25,
+  };
+  const std::vector<svmp::offset_t> cell2vertex_offsets = {
+      0, 3, 6, 9, 12};
+  const std::vector<svmp::index_t> cell2vertex = {
+      0, 1, 4,
+      1, 2, 4,
+      2, 3, 4,
+      3, 0, 4,
+  };
+
+  svmp::CellShape shape{};
+  shape.family = svmp::CellFamily::Triangle;
+  shape.num_corners = 3;
+  shape.order = 1;
+  base->build_from_arrays(
+      /*spatial_dim=*/2,
+      x_ref,
+      cell2vertex_offsets,
+      cell2vertex,
+      {shape, shape, shape, shape});
+  base->finalize();
+
+  return svmp::create_mesh(std::move(base));
+}
+
 std::shared_ptr<svmp::Mesh> makeWorkflowFourQuadStripMesh(
     bool reverse_vertex_numbering = false)
 {
@@ -5178,6 +5218,405 @@ TEST(ApplicationDriverLevelSetWorkflows,
           requests,
           lifecycle,
           refresh_cache));
+#endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     StaticCapillaryInitializationAcceptsPhysicalFlatSurfaceStressEquilibrium)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  constexpr int interface_marker = 710;
+  constexpr int left_wall_marker = 7101;
+  constexpr int right_wall_marker = 7102;
+  constexpr int lower_anchor_marker = 7103;
+  constexpr int upper_anchor_marker = 7104;
+  constexpr svmp::FE::Real pi =
+      svmp::FE::Real{3.141592653589793238462643383279502884};
+  constexpr svmp::FE::Real contact_angle = pi / svmp::FE::Real{2.0};
+  WorkflowScopedEnvVar conservative_balance_diagnostic(
+      "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
+      std::string("1"));
+
+  auto mesh = makeWorkflowFlatCapillaryFanMesh();
+  auto& local_mesh = mesh->local_mesh();
+  std::array<std::size_t, 4> marker_counts{};
+  constexpr svmp::FE::Real coordinate_tolerance = 1.0e-12;
+  for (const auto face : local_mesh.boundary_faces()) {
+    const auto vertices = local_mesh.face_vertices(face);
+    ASSERT_EQ(vertices.size(), 2u);
+    bool on_left = true;
+    bool on_right = true;
+    bool on_lower = true;
+    bool on_upper = true;
+    for (const auto vertex : vertices) {
+      const auto point = local_mesh.get_vertex_coords(vertex);
+      on_left = on_left &&
+                std::abs(point[0] - svmp::FE::Real{0.0}) <=
+                    coordinate_tolerance;
+      on_right = on_right &&
+                 std::abs(point[0] - svmp::FE::Real{3.0}) <=
+                     coordinate_tolerance;
+      on_lower = on_lower &&
+                 std::abs(point[1] - svmp::FE::Real{0.0}) <=
+                     coordinate_tolerance;
+      on_upper = on_upper &&
+                 std::abs(point[1] - svmp::FE::Real{1.0}) <=
+                     coordinate_tolerance;
+    }
+    if (on_left) {
+      mesh->set_boundary_label(face, left_wall_marker);
+      ++marker_counts[0];
+    } else if (on_right) {
+      mesh->set_boundary_label(face, right_wall_marker);
+      ++marker_counts[1];
+    } else if (on_lower) {
+      mesh->set_boundary_label(face, lower_anchor_marker);
+      ++marker_counts[2];
+    } else if (on_upper) {
+      mesh->set_boundary_label(face, upper_anchor_marker);
+      ++marker_counts[3];
+    } else {
+      FAIL() << "Flat static-capillary fixture found an unclassified face.";
+    }
+  }
+  EXPECT_EQ(marker_counts[0], 1u);
+  EXPECT_EQ(marker_counts[1], 1u);
+  EXPECT_EQ(marker_counts[2], 1u);
+  EXPECT_EQ(marker_counts[3], 1u);
+
+  const auto mesh_field = svmp::MeshFields::attach_field(
+      local_mesh,
+      svmp::EntityKind::Vertex,
+      "phi_physical_flat_static",
+      svmp::FieldScalarType::Float64,
+      1);
+  ASSERT_NE(
+      svmp::MeshFields::field_data_as<svmp::real_t>(
+          local_mesh, mesh_field),
+      nullptr);
+
+  auto scalar_space = svmp::FE::spaces::SpaceFactory::create_h1(
+      svmp::FE::ElementType::Triangle3,
+      /*order=*/1);
+  auto velocity_space =
+      svmp::FE::spaces::SpaceFactory::create_vector_h1(
+          svmp::FE::ElementType::Triangle3,
+          /*order=*/1,
+          /*components=*/2);
+  auto system =
+      std::make_unique<svmp::FE::systems::FESystem>(mesh);
+  const auto phi = system->addField(
+      svmp::FE::systems::FieldSpec{
+          .name = "phi_physical_flat_static",
+          .space = scalar_space,
+          .components = 1});
+
+  channel_ns::IncompressibleNavierStokesVMSOptions options;
+  options.velocity_field_name = "u_physical_flat_static";
+  options.pressure_field_name = "p_physical_flat_static";
+  options.density = 1.0;
+  options.viscosity = 0.01;
+  options.enable_convection = false;
+  options.enable_vms = false;
+  options.jit_policy.enable = false;
+  options.velocity_dirichlet.push_back(
+      channel_ns::IncompressibleNavierStokesVMSOptions::
+          VelocityDirichletBC{
+              .boundary_marker = lower_anchor_marker,
+              .value = {0.0, 0.0, 0.0},
+          });
+  options.velocity_dirichlet.push_back(
+      channel_ns::IncompressibleNavierStokesVMSOptions::
+          VelocityDirichletBC{
+              .boundary_marker = upper_anchor_marker,
+              .value = {0.0, 0.0, 0.0},
+          });
+  options.velocity_dirichlet.push_back(
+      channel_ns::IncompressibleNavierStokesVMSOptions::
+          VelocityDirichletBC{
+              .boundary_marker = left_wall_marker,
+              .value = {0.0, 0.0, 0.0},
+              .active_components = {true, false, false},
+          });
+  options.velocity_dirichlet.push_back(
+      channel_ns::IncompressibleNavierStokesVMSOptions::
+          VelocityDirichletBC{
+              .boundary_marker = right_wall_marker,
+              .value = {0.0, 0.0, 0.0},
+              .active_components = {true, false, false},
+          });
+
+  using ContactLine =
+      channel_ns::IncompressibleNavierStokesVMSOptions::
+          FreeSurfaceContactLine;
+  auto free_surface =
+      channel_ns::IncompressibleNavierStokesVMSOptions::
+          FreeSurfaceBoundary{
+              .implementation =
+                  channel_ns::FreeSurfaceImplementation::UnfittedLevelSet,
+              .interface_marker = interface_marker,
+              .level_set_field_name = "phi_physical_flat_static",
+              .generated_interface_domain_id =
+                  "physical_flat_static_capillary",
+              .generated_interface_geometry = "LinearCorner",
+              .active_domain =
+                  channel_ns::FreeSurfaceActiveDomain::LevelSetNegative,
+              .active_domain_method =
+                  channel_ns::FreeSurfaceActiveDomainMethod::CutVolume,
+              .external_pressure = 0.0,
+              .surface_tension = 1.0,
+              .surface_tension_form =
+                  channel_ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
+              .curvature = 0.0,
+              .use_level_set_curvature = false,
+              .small_cut_aggregation = false,
+          };
+  free_surface.contact_lines.push_back(
+      ContactLine{
+          .configuration = ContactLine::DynamicRenE{
+              .wall_boundary_marker = left_wall_marker,
+              .contact_line_marker = -1,
+              .equilibrium_contact_angle_radians = contact_angle,
+              .wall_normal = {-1.0, 0.0, 0.0},
+              .mobility = 1.0,
+              .slip_length = 1.0,
+          }});
+  free_surface.contact_lines.push_back(
+      ContactLine{
+          .configuration = ContactLine::DynamicRenE{
+              .wall_boundary_marker = right_wall_marker,
+              .contact_line_marker = -1,
+              .equilibrium_contact_angle_radians = contact_angle,
+              .wall_normal = {1.0, 0.0, 0.0},
+              .mobility = 1.0,
+              .slip_length = 1.0,
+          }});
+  options.free_surface.push_back(std::move(free_surface));
+
+  channel_ns::IncompressibleNavierStokesVMSModule module(
+      velocity_space, scalar_space, std::move(options));
+  module.registerOn(*system);
+  ASSERT_NO_THROW(system->setup({}));
+  const auto velocity =
+      system->findFieldByName("u_physical_flat_static");
+  const auto pressure =
+      system->findFieldByName("p_physical_flat_static");
+  ASSERT_NE(velocity, svmp::FE::INVALID_FIELD_ID);
+  ASSERT_NE(pressure, svmp::FE::INVALID_FIELD_ID);
+
+  std::vector<svmp::FE::Real> phi_vertex_values(
+      mesh->n_vertices(), 0.0);
+  for (std::size_t vertex = 0u;
+       vertex < mesh->n_vertices();
+       ++vertex) {
+    phi_vertex_values[vertex] =
+        workflowVertexPoint(*mesh, vertex)[1] -
+        svmp::FE::Real{0.5};
+  }
+  const auto phi_coefficients = projectWorkflowVertexValues(
+      *system,
+      phi,
+      phi_vertex_values,
+      /*components=*/1u,
+      "ApplicationDriver physical flat static-capillary phi");
+  std::vector<svmp::FE::Real> current(
+      static_cast<std::size_t>(
+          system->dofHandler().getNumDofs()),
+      0.0);
+  writeWorkflowFieldSlice(
+      *system, phi, phi_coefficients, current);
+
+  application::core::SimulationComponents sim;
+  sim.primary_mesh = mesh;
+  sim.fe_system = std::move(system);
+  try {
+    sim.backend =
+        svmp::FE::backends::BackendFactory::create(
+            svmp::FE::backends::BackendKind::FSILS);
+  } catch (const std::exception&) {
+    GTEST_SKIP() << "Requires an available FE vector backend.";
+  }
+  ASSERT_NE(sim.backend, nullptr);
+  svmp::FE::backends::SolverOptions linear_options;
+  linear_options.method =
+      svmp::FE::backends::SolverMethod::GMRES;
+  linear_options.preconditioner =
+      svmp::FE::backends::PreconditionerType::Diagonal;
+  sim.linear_solver =
+      sim.backend->createLinearSolver(linear_options);
+  ASSERT_NE(sim.linear_solver, nullptr);
+  auto allocated_history =
+      svmp::FE::timestepping::TimeHistory::allocate(
+          *sim.backend,
+          sim.fe_system->dofHandler().getNumDofs(),
+          /*history_depth=*/2,
+          /*allocate_second_order_state=*/true);
+  sim.time_history =
+      std::make_unique<
+          svmp::FE::timestepping::TimeHistory>(
+          std::move(allocated_history));
+  sim.time_history->setTime(0.0);
+  sim.time_history->setDt(0.1);
+  sim.time_history->setPrevDt(0.1);
+  scatterFeOrderedSolution(sim.time_history->u(), current);
+  scatterFeOrderedSolution(sim.time_history->uPrev(), current);
+  scatterFeOrderedSolution(sim.time_history->uPrev2(), current);
+  sim.time_history->uDot().zero();
+  sim.time_history->uDDot().zero();
+  sim.time_history->updateGhosts();
+
+  auto params = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi_physical_flat_static</Level_set_field_name>
+    <Enable_static_capillary_equilibrium_initialization>true</Enable_static_capillary_equilibrium_initialization>
+    <Static_capillary_volume_tolerance>1.0e-11</Static_capillary_volume_tolerance>
+    <Static_capillary_projected_gradient_tolerance>2.0e-6</Static_capillary_projected_gradient_tolerance>
+    <Static_capillary_constant_pressure_kkt_max_residual_norm>2.0e-10</Static_capillary_constant_pressure_kkt_max_residual_norm>
+    <Static_capillary_constant_pressure_kkt_max_relative_distance>2.0e-10</Static_capillary_constant_pressure_kkt_max_relative_distance>
+  </Add_equation>
+  <Add_equation type="fluid">
+    <Add_BC name="physical_flat_static_capillary">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi_physical_flat_static</Level_set_field_name>
+      <Generated_interface_domain_id>physical_flat_static_capillary</Generated_interface_domain_id>
+      <Interface_marker>710</Interface_marker>
+      <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
+      <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
+      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+      <Small_cut_aggregation>false</Small_cut_aggregation>
+      <Surface_tension>1.0</Surface_tension>
+      <Surface_tension_form>SurfaceStress</Surface_tension_form>
+      <Contact_line_model>DynamicContactAngle</Contact_line_model>
+      <Contact_angle_degrees>90.0</Contact_angle_degrees>
+      <Contact_line_wall_markers>7101;7102</Contact_line_wall_markers>
+      <Contact_line_wall_normals>-1.0 0.0 0.0; 1.0 0.0 0.0</Contact_line_wall_normals>
+      <Contact_line_mobility>1.0</Contact_line_mobility>
+      <Wall_slip_model>Navier</Wall_slip_model>
+      <Wall_slip_length>1.0</Wall_slip_length>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  auto requests = levelSetMaintenanceRequests(*params);
+  ASSERT_EQ(requests.size(), 1u);
+  ASSERT_TRUE(
+      requests.front().static_capillary_equilibrium_enabled);
+
+  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle
+      lifecycle;
+  ActiveCutContextRefreshCache refresh_cache;
+  const auto initial_report =
+      refreshActiveCutIntegrationContextCached(
+          sim,
+          *params,
+          sim.time_history->u(),
+          lifecycle,
+          refresh_cache,
+          "application-driver-physical-flat-static-initial");
+  ASSERT_TRUE(initial_report.refreshed);
+  const auto initial_functionals =
+      evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+  ASSERT_EQ(initial_functionals.size(), 1u);
+  EXPECT_NEAR(
+      initial_functionals.front().state.owned_liquid_volume,
+      svmp::FE::Real{1.5},
+      1.0e-13);
+  EXPECT_NEAR(
+      initial_functionals.front().state.liquid_gas_surface_energy,
+      svmp::FE::Real{3.0},
+      1.0e-13);
+  EXPECT_NEAR(
+      initial_functionals.front().state.young_wall_energy,
+      svmp::FE::Real{0.0},
+      1.0e-13);
+
+  bool initialized = false;
+  ASSERT_NO_THROW(
+      initialized =
+          initializeDiscreteStaticCapillaryEquilibrium(
+              sim,
+              *params,
+              requests,
+              lifecycle,
+              refresh_cache));
+  ASSERT_TRUE(initialized);
+  ASSERT_TRUE(
+      requests.front().static_capillary_equilibrium_initialized);
+
+  const auto certified_solution =
+      gatherFeOrderedSolution(sim.time_history->u());
+  const auto certificate =
+      evaluateStaticCapillaryConstantPressureCertificate(
+          sim, certified_solution);
+  ASSERT_TRUE(
+      certificate.pressure_representability_diagnostic_sampled);
+  ASSERT_TRUE(certificate.constant_pressure_kkt_available)
+      << certificate.constant_pressure_kkt_reason;
+  EXPECT_LE(
+      certificate.constant_pressure_kkt_residual_norm,
+      2.0e-10);
+  EXPECT_LE(
+      certificate.constant_pressure_kkt_relative_distance,
+      2.0e-10);
+  EXPECT_NEAR(
+      certificate.constant_pressure_kkt_pressure_jump,
+      0.0,
+      2.0e-10);
+
+  const auto final_functionals =
+      evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+  ASSERT_EQ(final_functionals.size(), 1u);
+  const auto volume_error = std::abs(
+      final_functionals.front().state.owned_liquid_volume -
+      svmp::FE::Real{1.5});
+  const auto surface_energy_error = std::abs(
+      final_functionals.front().state.liquid_gas_surface_energy -
+      svmp::FE::Real{3.0});
+  EXPECT_LE(volume_error, 1.0e-11);
+  EXPECT_LE(surface_energy_error, 2.0e-10);
+  EXPECT_NEAR(
+      final_functionals.front().state.young_wall_energy,
+      svmp::FE::Real{0.0},
+      1.0e-13);
+
+  const auto phi_offset = static_cast<std::size_t>(
+      sim.fe_system->fieldDofOffset(phi));
+  const auto phi_count = static_cast<std::size_t>(
+      sim.fe_system->fieldDofHandler(phi).getNumDofs());
+  svmp::FE::Real maximum_phi_update = 0.0;
+  for (std::size_t i = 0u; i < phi_count; ++i) {
+    maximum_phi_update = std::max(
+        maximum_phi_update,
+        std::abs(
+            certified_solution[phi_offset + i] -
+            current[phi_offset + i]));
+  }
+  EXPECT_LE(maximum_phi_update, 2.0e-7);
+
+  RecordProperty("wp4_physical_flat_spatial_dimension", 2);
+  RecordProperty("wp4_physical_flat_contact_wall_count", 2);
+  RecordProperty("wp4_physical_flat_active_side_count", 1);
+  RecordProperty(
+      "wp4_physical_flat_constant_pressure_kkt_residual_norm",
+      certificate.constant_pressure_kkt_residual_norm);
+  RecordProperty(
+      "wp4_physical_flat_constant_pressure_kkt_relative_distance",
+      certificate.constant_pressure_kkt_relative_distance);
+  RecordProperty(
+      "wp4_physical_flat_pressure_jump_absolute_error",
+      std::abs(certificate.constant_pressure_kkt_pressure_jump));
+  RecordProperty("wp4_physical_flat_volume_error", volume_error);
+  RecordProperty(
+      "wp4_physical_flat_surface_energy_error",
+      surface_energy_error);
+  RecordProperty(
+      "wp4_physical_flat_maximum_phi_update",
+      maximum_phi_update);
 #endif
 }
 

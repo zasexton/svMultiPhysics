@@ -1815,7 +1815,8 @@ makePressureRepresentabilityProblem(
     bool install_symbolic_cut_volume_pair = false,
     svmp::FE::Real production_pressure_target = svmp::FE::Real{0.0},
     svmp::FE::Real entry_pressure_baseline = svmp::FE::Real{0.0},
-    bool use_native_mesh = false)
+    bool use_native_mesh = false,
+    svmp::FE::Real surface_energy_scale = svmp::FE::Real{1.0})
 {
     using svmp::FE::forms::FormExpr;
 
@@ -1917,10 +1918,15 @@ makePressureRepresentabilityProblem(
     // On the unit tetra, a constant P1 field satisfies int(v_i)=1/24.
     // The finite-precision LSQR regression therefore uses factors 12, 24,
     // and 36 so its surface-energy load has four unit coefficients.
-    const std::array<svmp::FE::Real, 3> vector_scales =
-        pressure_pair_diagonal.has_value()
-            ? std::array<svmp::FE::Real, 3>{12.0, 24.0, 36.0}
-            : std::array<svmp::FE::Real, 3>{0.5, 2.0, 2.5};
+    const svmp::FE::Real pressure_scale =
+        pressure_pair_diagonal.has_value() ? 12.0 : 0.5;
+    const svmp::FE::Real scaled_surface_energy =
+        (pressure_pair_diagonal.has_value() ? 24.0 : 2.0) *
+        surface_energy_scale;
+    const std::array<svmp::FE::Real, 3> vector_scales{
+        pressure_scale,
+        scaled_surface_energy,
+        pressure_scale + scaled_surface_energy};
     const std::array<FormExpr, 3> vector_forms{
         (FormExpr::constant(vector_scales[0]) * u * v).dx(),
         (FormExpr::constant(vector_scales[1]) * u * v).dx(),
@@ -5836,6 +5842,63 @@ TEST(NewtonSolver,
         std::string::npos);
     RecordProperty(
         "constant_pressure_kkt_distance_gate_in_range_accept_count", 1);
+}
+
+TEST(NewtonSolver,
+     AcceptedStaticConstantPressureKktDistanceGateAcceptsRoundoffScaleLoad)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    constexpr std::array<svmp::FE::Real, 4> pressure_pair_diagonal{
+        1.0, 2.0, 3.0, 4.0};
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    auto problem = makePressureRepresentabilityProblem(
+        diagnostic_counts,
+        /*two_cells=*/false,
+        /*pressure_mpc_state=*/{},
+        /*pressure_dirichlet_state=*/{},
+        /*entry_velocity=*/1.0,
+        pressure_pair_diagonal,
+        /*track_immutable_mesh_revisions=*/false,
+        /*install_symbolic_cut_volume_pair=*/false,
+        /*production_pressure_target=*/0.0,
+        /*entry_pressure_baseline=*/0.0,
+        /*use_native_mesh=*/false,
+        /*surface_energy_scale=*/
+            std::numeric_limits<svmp::FE::Real>::epsilon());
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+    options
+        .accepted_static_constant_pressure_kkt_max_relative_distance =
+        1.0e-10;
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+
+    EXPECT_TRUE(report.converged);
+    EXPECT_TRUE(report.constant_pressure_kkt_available);
+    EXPECT_TRUE(report.constant_pressure_kkt_distance_gate_applied);
+    EXPECT_TRUE(report.constant_pressure_kkt_distance_gate_passed);
+    EXPECT_GT(report.constant_pressure_kkt_residual_norm, 0.0);
+    EXPECT_LT(report.constant_pressure_kkt_residual_norm, 1.0e-14);
+    EXPECT_EQ(report.constant_pressure_kkt_relative_distance, 0.0);
+    EXPECT_EQ(report.constant_pressure_kkt_reason, "available");
 }
 
 TEST(NewtonSolver,

@@ -2920,8 +2920,12 @@ struct ConstantPressureKktResult {
     const double roundoff_floor =
         100.0 * std::numeric_limits<Real>::epsilon() *
         std::max({1.0, load_norm, result.direction_norm});
+    // In the zero-load limit, dividing two roundoff-scale norms produces an
+    // order-one ratio even though the absolute KKT residual is numerical
+    // zero.  Preserve the scaled distance only above the coefficient-scale
+    // roundoff floor; the independent absolute gate still bounds the result.
     result.relative_distance =
-        load_norm > 0.0
+        load_norm > roundoff_floor
             ? result.residual_norm / load_norm
             : (result.residual_norm <= roundoff_floor
                    ? 0.0
