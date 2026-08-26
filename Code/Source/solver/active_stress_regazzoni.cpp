@@ -39,6 +39,9 @@ void RegazzoniActiveStress::read_model_specific_parameters(
 
   disable_force_strain_rate_feedback_ =
       params.get_bool("Disable_force_strain_rate_feedback");
+
+  // With the feedback disabled the stretch rate computation can be skipped.
+  needs_fiber_stretch_rate_ = !disable_force_strain_rate_feedback_;
 }
 
 void RegazzoniActiveStress::distribute_model_specific_parameters(
@@ -64,6 +67,7 @@ void RegazzoniActiveStress::distribute_model_specific_parameters(
   cm.bcast(cm_mod, &LB);
   cm.bcast(cm_mod, &a_XB);
   cm.bcast(cm_mod, &disable_force_strain_rate_feedback_);
+  cm.bcast(cm_mod, &needs_fiber_stretch_rate_);
 }
 
 void RegazzoniActiveStress::init_local(Vector<double> &state) const {
