@@ -2241,6 +2241,7 @@ struct PressureRepresentabilityLsqrResult {
         std::numeric_limits<double>::quiet_NaN()};
     double pressure_norm{std::numeric_limits<double>::quiet_NaN()};
     int iterations{0};
+    int normal_residual_refinements{0};
     bool converged{false};
     bool breakdown{false};
 };
@@ -2392,7 +2393,10 @@ PressureRepresentabilityLsqrResult solvePressureRepresentabilityLsqr(
 
     double rho_bar = alpha;
     double phi_bar = load_norm;
-    for (int iteration = 0; iteration < max_iterations; ++iteration) {
+    // Preserve one slot in the fixed cap for a normal-residual-minimizing
+    // refinement if finite-precision LSQR has not reached stationarity.
+    const int lsqr_iteration_limit = std::max(0, max_iterations - 1);
+    for (int iteration = 0; iteration < lsqr_iteration_limit; ++iteration) {
         right_basis.updateGhosts();
         pair.mult(right_basis, work);
         work.markModified();
@@ -2483,6 +2487,54 @@ PressureRepresentabilityLsqrResult solvePressureRepresentabilityLsqr(
         if (exact_recurrence_terminated) {
             result.breakdown = true;
             break;
+        }
+
+    }
+
+    if (!result.converged && !result.breakdown &&
+        result.iterations == lsqr_iteration_limit &&
+        result.iterations < max_iterations) {
+        // With g=G^T(Gp+f), choose the final correction along -g that
+        // minimizes ||g-alpha*G^T*G*g||.  This gives the stationarity metric
+        // one deterministic, matrix-free refinement without increasing the
+        // fixed iteration cap or changing any acceptance tolerance.
+        direction.copyFrom(normal_residual);
+        direction.updateGhosts();
+        pair.mult(direction, work);
+        work.markModified();
+        work.updateGhosts();
+        pair.mult(work, left_basis);
+        left_basis.markModified();
+        const double numerator = work.dot(work);
+        const double denominator = left_basis.dot(left_basis);
+        const bool refinement_finite =
+            vector_is_finite(direction) && vector_is_finite(work) &&
+            vector_is_finite(left_basis) &&
+            finite_nonnegative(numerator) &&
+            finite_nonnegative(denominator) &&
+            all_ranks(numerator > 0.0 && denominator > 0.0);
+        if (!refinement_finite) {
+            result.breakdown = true;
+        } else {
+            const double refinement_scale = numerator / denominator;
+            if (!all_ranks(std::isfinite(refinement_scale) &&
+                           refinement_scale > 0.0)) {
+                result.breakdown = true;
+            } else {
+                axpy(pressure,
+                     static_cast<Real>(-refinement_scale),
+                     direction);
+                ++result.iterations;
+                ++result.normal_residual_refinements;
+                if (!evaluate_fresh_residual()) {
+                    result.breakdown = true;
+                } else {
+                    refresh_relative_metrics();
+                    result.converged = all_ranks(
+                        result.normal_residual_norm <=
+                        stationarity_tolerance);
+                }
+            }
         }
     }
 
@@ -13986,6 +14038,10 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                         << pressure_representability.pressure_norm
                         << " pressure_representability_iterations="
                         << pressure_representability.iterations
+                        << " pressure_representability_normal_residual_"
+                           "refinements="
+                        << pressure_representability
+                               .normal_residual_refinements
                         << " pressure_representability_converged="
                         << (pressure_representability.converged ? 1 : 0)
                         << " pressure_representability_breakdown="

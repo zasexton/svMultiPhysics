@@ -6338,9 +6338,9 @@ TEST(NewtonSolver,
 #endif
     constexpr std::array<svmp::FE::Real, 4> singular_values{
         1.0,
-        0.0464158883361278,
-        0.0021544346900318843,
-        1.0e-4,
+        1.850641438418369e-5,
+        4.214402890007242e-10,
+        1.1288280139454186e-10,
     };
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar enable_balance(
@@ -6444,8 +6444,11 @@ TEST(NewtonSolver,
         telemetry_value("pressure_representability_iteration_cap"), 16.0);
     const double iterations =
         telemetry_value("pressure_representability_iterations");
-    EXPECT_GT(iterations, 4.0);
-    EXPECT_LE(iterations, 16.0);
+    EXPECT_EQ(iterations, 16.0);
+    EXPECT_EQ(
+        telemetry_value(
+            "pressure_representability_normal_residual_refinements"),
+        1.0);
     EXPECT_EQ(
         telemetry_value("pressure_representability_converged"), 1.0);
     EXPECT_EQ(
