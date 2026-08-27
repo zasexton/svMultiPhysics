@@ -507,7 +507,10 @@ makePartitionedFlatCapillaryFanMesh(int normal_axis)
 }
 
 [[nodiscard]] std::shared_ptr<svmp::Mesh>
-makePartitionedHydrostaticPressureMesh(int normal_axis)
+makePartitionedHydrostaticPressureMesh(
+    int normal_axis,
+    bool column_major_cells,
+    bool reverse_vertex_numbering)
 {
   if (normal_axis != 0 && normal_axis != 1) {
     throw std::invalid_argument(
@@ -544,6 +547,21 @@ makePartitionedHydrostaticPressureMesh(int normal_axis)
     }
   }
 
+  const auto vertex_count = coordinates.size() / 2u;
+  if (reverse_vertex_numbering) {
+    std::vector<svmp::real_t> reversed_coordinates(coordinates.size());
+    for (std::size_t old_vertex = 0u;
+         old_vertex < vertex_count;
+         ++old_vertex) {
+      const auto new_vertex = vertex_count - 1u - old_vertex;
+      for (std::size_t component = 0u; component < 2u; ++component) {
+        reversed_coordinates[2u * new_vertex + component] =
+            coordinates[2u * old_vertex + component];
+      }
+    }
+    coordinates = std::move(reversed_coordinates);
+  }
+
   std::vector<svmp::offset_t> offsets{0};
   std::vector<svmp::index_t> connectivity;
   std::vector<svmp::CellShape> shapes;
@@ -551,29 +569,44 @@ makePartitionedHydrostaticPressureMesh(int normal_axis)
   triangle.family = svmp::CellFamily::Triangle;
   triangle.num_corners = 3;
   triangle.order = 1;
-  for (std::size_t row = 0u; row + 1u < y_rows.size(); ++row) {
+  const auto vertex_index = [&](std::size_t row, std::size_t column) {
+    auto vertex = row * columns + column;
+    if (reverse_vertex_numbering) {
+      vertex = vertex_count - 1u - vertex;
+    }
+    return static_cast<svmp::index_t>(vertex);
+  };
+  const auto append_triangle = [&](svmp::index_t first,
+                                   svmp::index_t second,
+                                   svmp::index_t third) {
+    connectivity.insert(connectivity.end(), {first, second, third});
+    offsets.push_back(static_cast<svmp::offset_t>(connectivity.size()));
+    shapes.push_back(triangle);
+  };
+  const auto append_quad = [&](std::size_t row, std::size_t column) {
+    const auto lower_left = vertex_index(row, column);
+    const auto lower_right = vertex_index(row, column + 1u);
+    const auto upper_left = vertex_index(row + 1u, column);
+    const auto upper_right = vertex_index(row + 1u, column + 1u);
+    if ((row + column) % 2u == 0u) {
+      append_triangle(lower_left, lower_right, upper_right);
+      append_triangle(lower_left, upper_right, upper_left);
+    } else {
+      append_triangle(lower_left, lower_right, upper_left);
+      append_triangle(lower_right, upper_right, upper_left);
+    }
+  };
+  if (column_major_cells) {
     for (std::size_t column = 0u; column + 1u < columns; ++column) {
-      const auto lower_left =
-          static_cast<svmp::index_t>(row * columns + column);
-      const auto lower_right = lower_left + 1;
-      const auto upper_left =
-          lower_left + static_cast<svmp::index_t>(columns);
-      const auto upper_right = upper_left + 1;
-      if ((row + column) % 2u == 0u) {
-        connectivity.insert(connectivity.end(),
-                            {lower_left, lower_right, upper_right,
-                             lower_left, upper_right, upper_left});
-      } else {
-        connectivity.insert(connectivity.end(),
-                            {lower_left, lower_right, upper_left,
-                             lower_right, upper_right, upper_left});
+      for (std::size_t row = 0u; row + 1u < y_rows.size(); ++row) {
+        append_quad(row, column);
       }
-      offsets.push_back(
-          static_cast<svmp::offset_t>(connectivity.size() - 3u));
-      offsets.push_back(
-          static_cast<svmp::offset_t>(connectivity.size()));
-      shapes.push_back(triangle);
-      shapes.push_back(triangle);
+    }
+  } else {
+    for (std::size_t row = 0u; row + 1u < y_rows.size(); ++row) {
+      for (std::size_t column = 0u; column + 1u < columns; ++column) {
+        append_quad(row, column);
+      }
     }
   }
 
@@ -3223,6 +3256,9 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       svmp::FE::Real{0.5},
       svmp::FE::Real{0.65},
   };
+  constexpr std::size_t partition_layout_count = 2u;
+  constexpr std::size_t vertex_numbering_count = 2u;
+  constexpr std::size_t normal_axis_count = 2u;
   std::size_t case_count = 0u;
   svmp::FE::Real maximum_pressure_residual = 0.0;
   svmp::FE::Real maximum_pressure_relative_distance = 0.0;
@@ -3235,7 +3271,18 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   svmp::FE::Real maximum_surface_energy_error = 0.0;
   svmp::FE::Real maximum_phi_update = 0.0;
 
-  for (int normal_axis = 0; normal_axis < 2; ++normal_axis) {
+  const auto mesh_variant_count =
+      partition_layout_count * vertex_numbering_count * normal_axis_count;
+  for (std::size_t mesh_variant = 0u;
+       mesh_variant < mesh_variant_count;
+       ++mesh_variant) {
+    const int normal_axis = static_cast<int>(
+        mesh_variant % normal_axis_count);
+    const bool reverse_vertex_numbering =
+        ((mesh_variant / normal_axis_count) % vertex_numbering_count) != 0u;
+    const bool column_major_cells =
+        (mesh_variant /
+         (normal_axis_count * vertex_numbering_count)) != 0u;
     const int tangent_axis = 1 - normal_axis;
     for (const bool positive_side : {false, true}) {
       const auto gauge_normal_coordinate =
@@ -3249,6 +3296,12 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
               (normal_offset - gauge_normal_coordinate);
           SCOPED_TRACE(::testing::Message()
                        << "rank=" << rank
+                       << " cell_order="
+                       << (column_major_cells ? "column-major"
+                                              : "row-major")
+                       << " vertex_numbering="
+                       << (reverse_vertex_numbering ? "reversed"
+                                                    : "forward")
                        << " normal_axis=" << normal_axis
                        << " active_side="
                        << (positive_side ? "positive" : "negative")
@@ -3257,10 +3310,65 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                        << " external_pressure=" << external_pressure);
           ++case_count;
 
-          auto mesh =
-              makePartitionedHydrostaticPressureMesh(normal_axis);
+          auto mesh = makePartitionedHydrostaticPressureMesh(
+              normal_axis,
+              column_major_cells,
+              reverse_vertex_numbering);
           ASSERT_GT(mesh->n_ghost_vertices(), 0u);
           auto& local_mesh = mesh->local_mesh();
+          std::array<int, 2> local_probe_counts{};
+          std::array<int, 2> local_probe_owner_plus_one{};
+          for (std::size_t cell = 0u;
+               cell < mesh->n_cells();
+               ++cell) {
+            const auto local_cell = static_cast<svmp::index_t>(cell);
+            if (mesh->owner_rank_cell(local_cell) != rank) {
+              continue;
+            }
+            const auto center = local_mesh.cell_center(local_cell);
+            const auto logical_tangent_coordinate =
+                normal_axis == 0
+                    ? svmp::FE::Real{3.0} - center[tangent_axis]
+                    : center[tangent_axis];
+            const bool lower_right =
+                logical_tangent_coordinate > svmp::FE::Real{2.25} &&
+                center[normal_axis] < svmp::FE::Real{0.2};
+            const bool upper_left =
+                logical_tangent_coordinate < svmp::FE::Real{0.81} &&
+                center[normal_axis] > svmp::FE::Real{0.7};
+            if (lower_right) {
+              ++local_probe_counts[0];
+              local_probe_owner_plus_one[0] = rank + 1;
+            }
+            if (upper_left) {
+              ++local_probe_counts[1];
+              local_probe_owner_plus_one[1] = rank + 1;
+            }
+          }
+          std::array<int, 2> global_probe_counts{};
+          std::array<int, 2> global_probe_owner_plus_one{};
+          ASSERT_EQ(MPI_Allreduce(local_probe_counts.data(),
+                                  global_probe_counts.data(),
+                                  static_cast<int>(local_probe_counts.size()),
+                                  MPI_INT,
+                                  MPI_SUM,
+                                  MPI_COMM_WORLD),
+                    MPI_SUCCESS);
+          ASSERT_EQ(MPI_Allreduce(
+                        local_probe_owner_plus_one.data(),
+                        global_probe_owner_plus_one.data(),
+                        static_cast<int>(
+                            local_probe_owner_plus_one.size()),
+                        MPI_INT,
+                        MPI_MAX,
+                        MPI_COMM_WORLD),
+                    MPI_SUCCESS);
+          EXPECT_EQ(global_probe_counts,
+                    (std::array<int, 2>{2, 2}));
+          EXPECT_EQ(
+              global_probe_owner_plus_one,
+              (column_major_cells ? std::array<int, 2>{2, 1}
+                                  : std::array<int, 2>{1, 2}));
           std::array<int, 4> local_marker_present{};
           constexpr svmp::FE::Real coordinate_tolerance = 1.0e-12;
           const auto physical_boundary_faces =
@@ -3345,6 +3453,11 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                     MPI_SUCCESS);
           ASSERT_NE(gauge_gid, std::numeric_limits<svmp::gid_t>::max());
           ASSERT_GE(gauge_gid, svmp::gid_t{0});
+          const auto expected_gauge_gid = static_cast<svmp::gid_t>(
+              reverse_vertex_numbering
+                  ? (positive_side ? 0 : 20)
+                  : (positive_side ? 20 : 0));
+          EXPECT_EQ(gauge_gid, expected_gauge_gid);
 
           const auto mesh_field = svmp::MeshFields::attach_field(
               local_mesh,
@@ -4017,9 +4130,12 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
     }
   }
 
-  EXPECT_EQ(case_count, 24u);
+  EXPECT_EQ(case_count, 96u);
   RecordProperty("wp4_hydrostatic_mpi_rank_count", size);
-  RecordProperty("wp4_hydrostatic_mpi_partition_layout_count", 1);
+  RecordProperty("wp4_hydrostatic_mpi_partition_layout_count",
+                 partition_layout_count);
+  RecordProperty("wp4_hydrostatic_mpi_global_vertex_numbering_count",
+                 vertex_numbering_count);
   RecordProperty("wp4_hydrostatic_mpi_spatial_dimension", 2);
   RecordProperty("wp4_hydrostatic_mpi_coordinate_direction_count", 2);
   RecordProperty("wp4_hydrostatic_mpi_wall_orientation_count", 2);
