@@ -161,17 +161,18 @@ void darcy_1d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
   double amd = eq.am / T1;
   double wl = w * T1;
 
-  double Pd = -source;
+  double p_dot = 0.0;
   double Px = 0.0;
 
   for (int a = 0; a < eNoN; a++) {
-    Pd = Pd + N(a) * al(i, a);
+    p_dot = p_dot + N(a) * al(i, a);
     Px = Px + Nx(0, a) * yl(i, a);
   }
 
   for (int a = 0; a < eNoN; a++) {
-    lR(0, a) = lR(0, a) + w * (rho_0 * beta_0 * N(a) * Pd +
-                               (((k * rho_0) / mu) * (Nx(0, a) * Px)));
+    lR(0, a) = lR(0, a) +
+        w * (rho_0 * N(a) * (beta_0 * p_dot - source) +
+             ((k * rho_0) / mu) * Nx(0, a) * Px);
     for (int b = 0; b < eNoN; b++) {
       lK(0, a, b) = lK(0, a, b) + wl * (rho_0 * beta_0 * N(a) * N(b) * amd +
                                        ((((rho_0 * k) / mu) * (Nx(0, a) * Nx(0, b)))));
@@ -216,18 +217,20 @@ void darcy_2d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
   dmsg << "wl: " << wl;
   #endif
 
-  double Pd = -source;
+  double p_dot = 0.0;
   Vector<double> Px(nsd);
 
   for (int a = 0; a < eNoN; a++) {
-    Pd = Pd + N(a)*al(i,a);
+    p_dot = p_dot + N(a)*al(i,a);
     Px(0) = Px(0) + Nx(0,a)*yl(i,a);
     Px(1) = Px(1) + Nx(1,a)*yl(i,a);
   }
 
   for (int a = 0; a < eNoN; a++) {
-    lR(0,a) = lR(0,a) + w*(rho_0*beta_0*N(a)*Pd + (((k*rho_0)/mu)*(Nx(0,a)*Px(0)
-                                                                   + Nx(1,a)*Px(1))));
+    lR(0,a) = lR(0,a) +
+        w * (rho_0 * N(a) * (beta_0 * p_dot - source) +
+             ((k * rho_0) / mu) *
+                 (Nx(0,a) * Px(0) + Nx(1,a) * Px(1)));
     for (int b = 0; b < eNoN; b++) {
       lK(0,a,b) = lK(0,a,b) + wl*(rho_0*beta_0*N(a)*N(b)*amd +
                                   ((((rho_0*k)/mu)*(Nx(0,a)*Nx(0,b) +
@@ -273,19 +276,22 @@ void darcy_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
   dmsg << "wl: " << wl;
   #endif
 
-  double Pd = -source;
+  double p_dot = 0.0;
   Vector<double> Px(nsd);
 
   for (int a = 0; a < eNoN; a++) {
-    Pd = Pd + N(a) * al(i,a);
+    p_dot = p_dot + N(a) * al(i,a);
     Px(0) = Px(0) + Nx(0,a) * yl(i,a);
     Px(1) = Px(1) + Nx(1,a) * yl(i,a);
     Px(2) = Px(2) + Nx(2,a) * yl(i,a);
   }
 
   for (int a = 0; a < eNoN; a++) {
-    lR(0,a) = lR(0, a) + w*(rho_0*beta_0*N(a)*Pd +
-                            ((k*rho_0)/mu)*(Nx(0,a)*Px(0) + Nx(1,a)*Px(1) + Nx(2,a)*Px(2)));
+    lR(0,a) = lR(0, a) +
+        w * (rho_0 * N(a) * (beta_0 * p_dot - source) +
+             ((k * rho_0) / mu) *
+                 (Nx(0,a) * Px(0) + Nx(1,a) * Px(1) +
+                  Nx(2,a) * Px(2)));
     for (int b = 0; b < eNoN; b++) {
       lK(0,a,b) = lK(0,a,b) + wl*(rho_0*beta_0*N(a)*N(b)*amd +
                                   ((k*rho_0)/mu)*(Nx(0,a)*Nx(0,b) + Nx(1,a)*Nx(1,b) +

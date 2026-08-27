@@ -291,6 +291,7 @@ enum class EquationType
   phys_darcy = 213
 };
 
+constexpr auto Equation_darcy = EquationType::phys_darcy;
 constexpr auto Equation_CMM = EquationType::phys_CMM;
 constexpr auto Equation_CEP = EquationType::phys_CEP;
 constexpr auto Equation_fluid = EquationType::phys_fluid;
@@ -419,12 +420,8 @@ enum class PhysicalProperyType
   ctau_C = 14,
   inverse_darcy_permeability = 15,
   permeability = 16,
-  porosity = 17,
-  porosity_pressure = 18,
-  media_compressibility = 19,
-  fluid_compressibility = 20,
-  darcy_fluid_viscosity = 21,
-  density_pressure = 22
+  media_compressibility = 17,
+  darcy_fluid_viscosity = 18
 };
 
 enum class PreconditionerType 

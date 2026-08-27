@@ -2046,12 +2046,8 @@ DomainParameters::DomainParameters() {
   set_parameter("Poisson_ratio", 0.3, !required, poisson_ratio);
   
   set_parameter("Permeability", 0.0, !required, permeability);
-  set_parameter("Porosity", 0.0, !required, porosity);
-  set_parameter("Porosity_pressure", 0.0, !required, porosity_pressure);
   set_parameter("Media_compressibility", 0.0, !required, media_compressibility);
-  set_parameter("Fluid_compressibility", 0.0, !required, fluid_compressibility);
   set_parameter("Darcy_fluid_viscosity", 1.0, !required, darcy_fluid_viscosity);
-  set_parameter("Density_pressure", 0.0, !required, density_pressure);
 
   set_parameter("Relative_tolerance", 1e-4, !required, relative_tolerance);
   set_parameter("Shell_thickness", 0.0, !required, shell_thickness);
