@@ -2266,6 +2266,7 @@ PressureRepresentabilityLsqrResult solvePressureRepresentabilityLsqr(
     backends::GenericVector& residual,
     backends::GenericVector& normal_residual,
     int max_iterations,
+    std::optional<double> requested_max_relative_residual,
     const std::function<bool(bool)>& all_ranks)
 {
     PressureRepresentabilityLsqrResult result;
@@ -2291,6 +2292,21 @@ PressureRepresentabilityLsqrResult solvePressureRepresentabilityLsqr(
 
     const double load_norm = load.norm();
     if (!vector_is_finite(load) || !finite_nonnegative(load_norm)) {
+        result.breakdown = true;
+        return result;
+    }
+    const bool local_relative_target_present =
+        requested_max_relative_residual.has_value();
+    const bool relative_target_present_on_all_ranks =
+        all_ranks(local_relative_target_present);
+    const bool relative_target_absent_on_all_ranks =
+        all_ranks(!local_relative_target_present);
+    if ((!relative_target_present_on_all_ranks &&
+         !relative_target_absent_on_all_ranks) ||
+        (relative_target_present_on_all_ranks &&
+         !all_ranks(
+             std::isfinite(*requested_max_relative_residual) &&
+             *requested_max_relative_residual >= 0.0))) {
         result.breakdown = true;
         return result;
     }
@@ -2358,6 +2374,12 @@ PressureRepresentabilityLsqrResult solvePressureRepresentabilityLsqr(
                        : std::numeric_limits<double>::infinity());
     };
     refresh_relative_metrics();
+    const auto requested_relative_residual_reached = [&]() {
+        return !requested_max_relative_residual.has_value() ||
+               all_ranks(
+                   result.relative_residual <=
+                   *requested_max_relative_residual);
+    };
 
     // If G^T f is already at the scale-aware roundoff floor, p=0 is the
     // least-squares stationarity certificate.  This includes loads wholly in
@@ -2475,7 +2497,7 @@ PressureRepresentabilityLsqrResult solvePressureRepresentabilityLsqr(
         refresh_relative_metrics();
         const bool stationary = all_ranks(
             result.normal_residual_norm <= stationarity_tolerance);
-        if (stationary) {
+        if (stationary && requested_relative_residual_reached()) {
             result.converged = true;
             break;
         }
@@ -2485,7 +2507,8 @@ PressureRepresentabilityLsqrResult solvePressureRepresentabilityLsqr(
         const bool exact_recurrence_terminated =
             all_ranks(alpha == 0.0 || beta == 0.0);
         if (exact_recurrence_terminated) {
-            result.breakdown = true;
+            result.converged = stationary;
+            result.breakdown = !stationary;
             break;
         }
 
@@ -13842,6 +13865,8 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                         *workspace
                              .pressure_representability_normal_residual,
                         pressure_representability_iteration_cap,
+                        options_
+                            .accepted_static_pressure_representability_max_relative_distance,
                         allRanks);
                 pressure_representability_available = true;
                 if (geometry_key.revision_tracking_available &&
@@ -14807,6 +14832,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             *workspace.pressure_representability_residual,
             *workspace.pressure_representability_normal_residual,
             correction_iteration_cap,
+            std::nullopt,
             allRanks);
         correction_residual_norm = correction.residual_norm;
         correction_relative_residual = correction.relative_residual;

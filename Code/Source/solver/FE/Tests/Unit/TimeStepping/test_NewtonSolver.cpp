@@ -6518,6 +6518,81 @@ TEST(NewtonSolver,
 }
 
 TEST(NewtonSolver,
+     AcceptedStaticPressureDistanceUsesRemainingLsqrBudgetAfterStationarity)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    constexpr std::array<svmp::FE::Real, 4> singular_values{
+        1.0,
+        5.050738469675647e-7,
+        1.4124530558050166e-8,
+        4.237480173336682e-10,
+    };
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    auto problem = makePressureRepresentabilityProblem(
+        diagnostic_counts,
+        /*two_cells=*/false,
+        /*pressure_mpc_state=*/{},
+        /*pressure_dirichlet_state=*/{},
+        /*entry_velocity=*/1.0,
+        /*pressure_pair_diagonal=*/singular_values);
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+    options
+        .accepted_static_pressure_representability_max_relative_distance =
+        1.0e-9;
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    const auto stderr_text = testing::internal::GetCapturedStderr();
+    const auto stdout_text = testing::internal::GetCapturedStdout();
+    const auto telemetry = stdout_text + stderr_text;
+
+    EXPECT_TRUE(report.converged);
+    EXPECT_TRUE(report.pressure_representability_converged);
+    EXPECT_FALSE(report.pressure_representability_breakdown);
+    EXPECT_TRUE(report.pressure_representability_distance_gate_applied);
+    EXPECT_TRUE(report.pressure_representability_distance_gate_passed);
+    EXPECT_LE(report.pressure_representability_relative_distance, 1.0e-9);
+
+    const auto iteration_token =
+        std::string{"pressure_representability_iterations="};
+    const auto iteration_position = telemetry.find(iteration_token);
+    ASSERT_NE(iteration_position, std::string::npos);
+    const auto iteration_begin =
+        iteration_position + iteration_token.size();
+    const auto iteration_end =
+        telemetry.find_first_of(" \r\n", iteration_begin);
+    const auto iterations = std::stoi(
+        telemetry.substr(iteration_begin, iteration_end - iteration_begin));
+    // Normal stationarity is first reached at iteration seven for this
+    // ordering, while the primal distance still exceeds the configured gate.
+    EXPECT_GT(iterations, 7);
+    EXPECT_LE(iterations, 16);
+}
+
+TEST(NewtonSolver,
      FreeSurfacePressureRepresentabilityRemovesArtificialConstrainedPressureRow)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
