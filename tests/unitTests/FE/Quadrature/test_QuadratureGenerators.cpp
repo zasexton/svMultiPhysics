@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 
+#include "FE/Basis/NodeOrderingConventions.h"
 #include "FE/Common/FEException.h"
 #include "FE/Quadrature/GaussLobattoQuadrature.h"
 #include "FE/Quadrature/GaussQuadrature.h"
@@ -31,6 +32,10 @@ constexpr double kStructureTolerance = 1.0e-12;
 constexpr double kMomentTolerance = 2.0e-12;
 constexpr double kFixtureTolerance =
     64.0 * std::numeric_limits<double>::epsilon();
+// Basis and Quadrature independently refine computed interior GLL roots, so
+// terminal binary64 rounding can differ; this remains far below node spacing.
+constexpr double kBasisConsistencyTolerance =
+    128.0 * std::numeric_limits<double>::epsilon();
 
 static_assert(max_gauss_legendre_points() == 128);
 static_assert(noexcept(max_gauss_legendre_points()));
@@ -624,5 +629,54 @@ TEST(GaussLobattoImplementation, RejectsRequestsOutsideSupportedRange)
                 (void)make_gauss_lobatto_rule(num_points);
             },
             expected_message);
+    }
+}
+
+TEST(GaussLobattoBasisConsistency, MatchesRepresentativeNodeDistributions)
+{
+    constexpr std::array point_counts{
+        2, 4, 65, max_gauss_lobatto_points()};
+
+    for (const int num_points : point_counts) {
+        SCOPED_TRACE(
+            ::testing::Message() << "num_points=" << num_points);
+        const QuadratureRule rule =
+            make_gauss_lobatto_rule(num_points);
+        ASSERT_EQ(
+            rule.num_points(),
+            static_cast<std::size_t>(num_points));
+
+        for (std::size_t point_index = 0;
+             point_index < rule.num_points();
+             ++point_index) {
+            SCOPED_TRACE(
+                ::testing::Message() << "point index=" << point_index);
+            const double quadrature_coordinate =
+                rule.point(point_index)[0];
+            const double basis_coordinate =
+                svmp::FE::basis::line_coord_pm_one(
+                    static_cast<int>(point_index),
+                    num_points - 1);
+
+            if (point_index == 0u) {
+                EXPECT_EQ(quadrature_coordinate, -1.0);
+                EXPECT_EQ(basis_coordinate, -1.0);
+                EXPECT_EQ(quadrature_coordinate, basis_coordinate);
+            } else if (point_index + 1u == rule.num_points()) {
+                EXPECT_EQ(quadrature_coordinate, 1.0);
+                EXPECT_EQ(basis_coordinate, 1.0);
+                EXPECT_EQ(quadrature_coordinate, basis_coordinate);
+            } else if (num_points % 2 == 1 &&
+                       point_index == rule.num_points() / 2u) {
+                EXPECT_EQ(quadrature_coordinate, 0.0);
+                EXPECT_EQ(basis_coordinate, 0.0);
+                EXPECT_EQ(quadrature_coordinate, basis_coordinate);
+            } else {
+                EXPECT_NEAR(
+                    quadrature_coordinate,
+                    basis_coordinate,
+                    kBasisConsistencyTolerance);
+            }
+        }
     }
 }
