@@ -349,6 +349,147 @@ std::shared_ptr<svmp::Mesh> makeWorkflowHydrostaticPressureMesh(
   return svmp::create_mesh(std::move(base));
 }
 
+std::shared_ptr<svmp::Mesh> makeWorkflowHydrostaticPressureMesh3D(
+    int normal_axis)
+{
+  if (normal_axis < 0 || normal_axis >= 3) {
+    throw std::invalid_argument(
+        "three-dimensional hydrostatic pressure mesh normal axis must be "
+        "zero, one, or two");
+  }
+
+  constexpr std::array<svmp::real_t, 3> first_tangent_coordinates{{
+      0.0, 1.5, 3.0}};
+  constexpr std::array<svmp::real_t, 3> second_tangent_coordinates{{
+      0.0, 1.0, 2.0}};
+  constexpr std::array<svmp::real_t, 5> normal_coordinates{{
+      0.0, 0.2, 0.4, 0.7, 1.0}};
+  constexpr std::array<std::array<std::size_t, 4>, 6> tetrahedra{{
+      {{0, 1, 2, 6}},
+      {{0, 2, 3, 6}},
+      {{0, 3, 7, 6}},
+      {{0, 7, 4, 6}},
+      {{0, 4, 5, 6}},
+      {{0, 5, 1, 6}},
+  }};
+
+  const int first_tangent_axis = (normal_axis + 1) % 3;
+  const int second_tangent_axis = (normal_axis + 2) % 3;
+  const auto vertex_index = [&](std::size_t first_tangent,
+                                std::size_t second_tangent,
+                                std::size_t normal) {
+    return static_cast<svmp::index_t>(
+        first_tangent +
+        first_tangent_coordinates.size() *
+            (second_tangent +
+             second_tangent_coordinates.size() * normal));
+  };
+
+  std::vector<svmp::real_t> coordinates;
+  coordinates.reserve(
+      3u * first_tangent_coordinates.size() *
+      second_tangent_coordinates.size() * normal_coordinates.size());
+  // Keep every exterior wall planar while perturbing the interior tangent
+  // line across normal layers to avoid a tensor-product pressure mode.
+  for (std::size_t normal = 0u;
+       normal < normal_coordinates.size();
+       ++normal) {
+    for (std::size_t second_tangent = 0u;
+         second_tangent < second_tangent_coordinates.size();
+         ++second_tangent) {
+      for (std::size_t first_tangent = 0u;
+           first_tangent < first_tangent_coordinates.size();
+           ++first_tangent) {
+        auto first_tangent_coordinate =
+            first_tangent_coordinates[first_tangent];
+        auto second_tangent_coordinate =
+            second_tangent_coordinates[second_tangent];
+        if (first_tangent > 0u &&
+            first_tangent + 1u < first_tangent_coordinates.size()) {
+          const auto phase = static_cast<int>(
+              (3u * normal + 2u * second_tangent + first_tangent) % 5u) -
+                             2;
+          first_tangent_coordinate +=
+              svmp::real_t{0.035} * static_cast<svmp::real_t>(phase);
+        }
+        if (second_tangent > 0u &&
+            second_tangent + 1u < second_tangent_coordinates.size()) {
+          const auto phase = static_cast<int>(
+              (2u * normal + first_tangent + second_tangent) % 5u) -
+                             2;
+          second_tangent_coordinate +=
+              svmp::real_t{0.04} * static_cast<svmp::real_t>(phase);
+        }
+        std::array<svmp::real_t, 3> point{};
+        point[static_cast<std::size_t>(normal_axis)] =
+            normal_coordinates[normal];
+        point[static_cast<std::size_t>(first_tangent_axis)] =
+            first_tangent_coordinate;
+        point[static_cast<std::size_t>(second_tangent_axis)] =
+            second_tangent_coordinate;
+        coordinates.insert(coordinates.end(), point.begin(), point.end());
+      }
+    }
+  }
+
+  std::vector<svmp::offset_t> cell_offsets{0};
+  std::vector<svmp::index_t> cell_vertices;
+  std::vector<svmp::CellShape> cell_shapes;
+  const auto cell_count =
+      (first_tangent_coordinates.size() - 1u) *
+      (second_tangent_coordinates.size() - 1u) *
+      (normal_coordinates.size() - 1u) * tetrahedra.size();
+  cell_offsets.reserve(cell_count + 1u);
+  cell_vertices.reserve(4u * cell_count);
+  cell_shapes.reserve(cell_count);
+  for (std::size_t normal = 0u;
+       normal + 1u < normal_coordinates.size();
+       ++normal) {
+    for (std::size_t second_tangent = 0u;
+         second_tangent + 1u < second_tangent_coordinates.size();
+         ++second_tangent) {
+      for (std::size_t first_tangent = 0u;
+           first_tangent + 1u < first_tangent_coordinates.size();
+           ++first_tangent) {
+        const std::array<svmp::index_t, 8> nodes{{
+            vertex_index(first_tangent, second_tangent, normal),
+            vertex_index(first_tangent + 1u, second_tangent, normal),
+            vertex_index(
+                first_tangent + 1u, second_tangent + 1u, normal),
+            vertex_index(first_tangent, second_tangent + 1u, normal),
+            vertex_index(first_tangent, second_tangent, normal + 1u),
+            vertex_index(
+                first_tangent + 1u, second_tangent, normal + 1u),
+            vertex_index(first_tangent + 1u,
+                         second_tangent + 1u,
+                         normal + 1u),
+            vertex_index(
+                first_tangent, second_tangent + 1u, normal + 1u),
+        }};
+        for (const auto& tetrahedron : tetrahedra) {
+          for (const auto local_vertex : tetrahedron) {
+            cell_vertices.push_back(nodes[local_vertex]);
+          }
+          cell_offsets.push_back(
+              static_cast<svmp::offset_t>(cell_vertices.size()));
+          cell_shapes.push_back(
+              svmp::CellShape{svmp::CellFamily::Tetra, 4, 1});
+        }
+      }
+    }
+  }
+
+  auto base = std::make_shared<svmp::MeshBase>();
+  base->build_from_arrays(
+      /*spatial_dim=*/3,
+      coordinates,
+      cell_offsets,
+      cell_vertices,
+      cell_shapes);
+  base->finalize();
+  return svmp::create_mesh(std::move(base));
+}
+
 std::shared_ptr<svmp::Mesh> makeWorkflowFourQuadStripMesh(
     bool reverse_vertex_numbering = false)
 {
@@ -5785,6 +5926,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
   constexpr int right_wall_marker = 7202;
   constexpr int lower_anchor_marker = 7203;
   constexpr int upper_anchor_marker = 7204;
+  constexpr int front_wall_marker = 7205;
+  constexpr int back_wall_marker = 7206;
   constexpr svmp::FE::Real density = 1.25;
   constexpr svmp::FE::Real gravity_magnitude = 0.4;
   constexpr svmp::FE::Real pi =
@@ -5794,6 +5937,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", std::string("1"));
 
   struct HydrostaticCase {
+    int spatial_dimension = 2;
     int normal_axis = 0;
     bool positive_side = false;
     svmp::FE::Real normal_offset = 0.0;
@@ -5805,17 +5949,22 @@ TEST(ApplicationDriverLevelSetWorkflows,
       svmp::FE::Real{0.65},
   };
   std::vector<HydrostaticCase> hydrostatic_cases;
-  hydrostatic_cases.reserve(24u);
-  for (int normal_axis = 0; normal_axis < 2; ++normal_axis) {
-    for (const bool positive_side : {false, true}) {
-      for (const auto normal_offset : normal_offsets) {
-        for (const svmp::FE::Real gravity_direction :
-             {svmp::FE::Real{-1.0}, svmp::FE::Real{1.0}}) {
-          hydrostatic_cases.push_back(HydrostaticCase{
-              normal_axis,
-              positive_side,
-              normal_offset,
-              gravity_direction});
+  hydrostatic_cases.reserve(60u);
+  for (const int spatial_dimension : {2, 3}) {
+    for (int normal_axis = 0;
+         normal_axis < spatial_dimension;
+         ++normal_axis) {
+      for (const bool positive_side : {false, true}) {
+        for (const auto normal_offset : normal_offsets) {
+          for (const svmp::FE::Real gravity_direction :
+               {svmp::FE::Real{-1.0}, svmp::FE::Real{1.0}}) {
+            hydrostatic_cases.push_back(HydrostaticCase{
+                spatial_dimension,
+                normal_axis,
+                positive_side,
+                normal_offset,
+                gravity_direction});
+          }
         }
       }
     }
@@ -5829,11 +5978,23 @@ TEST(ApplicationDriverLevelSetWorkflows,
   svmp::FE::Real maximum_initializer_pressure_representative_distance = 0.0;
   svmp::FE::Real maximum_exact_initializer_pressure_update = 0.0;
   svmp::FE::Real maximum_gravitational_energy_error = 0.0;
+  svmp::FE::Real maximum_volume_error = 0.0;
+  svmp::FE::Real maximum_surface_energy_error = 0.0;
   svmp::FE::Real maximum_phi_update = 0.0;
 
   for (const auto& hydrostatic_case : hydrostatic_cases) {
+    const auto spatial_dimension = hydrostatic_case.spatial_dimension;
     const auto normal_axis = hydrostatic_case.normal_axis;
-    const auto tangent_axis = 1 - normal_axis;
+    std::vector<int> tangent_axes;
+    tangent_axes.reserve(static_cast<std::size_t>(spatial_dimension - 1));
+    if (spatial_dimension == 2) {
+      tangent_axes.push_back(1 - normal_axis);
+    } else {
+      tangent_axes.push_back((normal_axis + 1) % 3);
+      tangent_axes.push_back((normal_axis + 2) % 3);
+    }
+    ASSERT_EQ(tangent_axes.size(),
+              static_cast<std::size_t>(spatial_dimension - 1));
     const auto positive_side = hydrostatic_case.positive_side;
     const auto normal_offset = hydrostatic_case.normal_offset;
     const auto gravity_direction = hydrostatic_case.gravity_direction;
@@ -5843,7 +6004,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
     const auto external_pressure =
         density * gravity * (normal_offset - gauge_normal_coordinate);
     SCOPED_TRACE(::testing::Message()
-                 << "normal_axis=" << normal_axis
+                 << "spatial_dimension=" << spatial_dimension
+                 << " normal_axis=" << normal_axis
                  << " active_side="
                  << (positive_side ? "positive" : "negative")
                  << " normal_offset=" << normal_offset
@@ -5851,26 +6013,63 @@ TEST(ApplicationDriverLevelSetWorkflows,
                  << " external_pressure=" << external_pressure);
     ++case_count;
 
-    auto mesh = makeWorkflowHydrostaticPressureMesh(normal_axis);
+    auto mesh = spatial_dimension == 2
+                    ? makeWorkflowHydrostaticPressureMesh(normal_axis)
+                    : makeWorkflowHydrostaticPressureMesh3D(normal_axis);
     auto& local_mesh = mesh->local_mesh();
-    std::array<std::size_t, 4> marker_counts{};
+    struct ContactWall {
+      int marker = -1;
+      int axis = 0;
+      svmp::FE::Real coordinate = 0.0;
+      svmp::FE::Real outward_normal = 0.0;
+    };
+    std::vector<ContactWall> contact_walls{
+        ContactWall{left_wall_marker,
+                    tangent_axes[0],
+                    svmp::FE::Real{0.0},
+                    svmp::FE::Real{-1.0}},
+        ContactWall{right_wall_marker,
+                    tangent_axes[0],
+                    svmp::FE::Real{3.0},
+                    svmp::FE::Real{1.0}},
+    };
+    if (spatial_dimension == 3) {
+      contact_walls.push_back(
+          ContactWall{front_wall_marker,
+                      tangent_axes[1],
+                      svmp::FE::Real{0.0},
+                      svmp::FE::Real{-1.0}});
+      contact_walls.push_back(
+          ContactWall{back_wall_marker,
+                      tangent_axes[1],
+                      svmp::FE::Real{2.0},
+                      svmp::FE::Real{1.0}});
+    }
+    ASSERT_EQ(contact_walls.size(),
+              static_cast<std::size_t>(2 * (spatial_dimension - 1)));
+    const auto expected_contact_wall_face_count =
+        spatial_dimension == 2 ? 4u : 16u;
+    const auto expected_anchor_face_count =
+        spatial_dimension == 2 ? 4u : 8u;
+    std::array<std::size_t, 6> marker_counts{};
     constexpr svmp::FE::Real coordinate_tolerance = 1.0e-12;
     for (const auto face : local_mesh.boundary_faces()) {
       const auto vertices = local_mesh.face_vertices(face);
-      ASSERT_EQ(vertices.size(), 2u);
-      bool on_left_wall = true;
-      bool on_right_wall = true;
+      ASSERT_EQ(vertices.size(), static_cast<std::size_t>(spatial_dimension));
+      std::vector<bool> on_contact_wall(contact_walls.size(), true);
       bool on_lower_anchor = true;
       bool on_upper_anchor = true;
       for (const auto vertex : vertices) {
         const auto point = local_mesh.get_vertex_coords(vertex);
-        on_left_wall =
-            on_left_wall &&
-            std::abs(point[tangent_axis]) <= coordinate_tolerance;
-        on_right_wall =
-            on_right_wall &&
-            std::abs(point[tangent_axis] - svmp::FE::Real{3.0}) <=
-                coordinate_tolerance;
+        for (std::size_t wall = 0u;
+             wall < contact_walls.size();
+             ++wall) {
+          on_contact_wall[wall] =
+              on_contact_wall[wall] &&
+              std::abs(point[contact_walls[wall].axis] -
+                       contact_walls[wall].coordinate) <=
+                  coordinate_tolerance;
+        }
         on_lower_anchor =
             on_lower_anchor &&
             std::abs(point[normal_axis]) <= coordinate_tolerance;
@@ -5879,26 +6078,37 @@ TEST(ApplicationDriverLevelSetWorkflows,
             std::abs(point[normal_axis] - svmp::FE::Real{1.0}) <=
                 coordinate_tolerance;
       }
-      if (on_left_wall) {
-        mesh->set_boundary_label(face, left_wall_marker);
-        ++marker_counts[0];
-      } else if (on_right_wall) {
-        mesh->set_boundary_label(face, right_wall_marker);
-        ++marker_counts[1];
-      } else if (on_lower_anchor) {
+      bool classified = false;
+      for (std::size_t wall = 0u;
+           wall < contact_walls.size();
+           ++wall) {
+        if (on_contact_wall[wall]) {
+          mesh->set_boundary_label(face, contact_walls[wall].marker);
+          ++marker_counts[wall];
+          classified = true;
+          break;
+        }
+      }
+      if (classified) {
+        continue;
+      }
+      if (on_lower_anchor) {
         mesh->set_boundary_label(face, lower_anchor_marker);
-        ++marker_counts[2];
+        ++marker_counts[4];
       } else if (on_upper_anchor) {
         mesh->set_boundary_label(face, upper_anchor_marker);
-        ++marker_counts[3];
+        ++marker_counts[5];
       } else {
         FAIL() << "Hydrostatic static-capillary fixture found an unclassified face.";
       }
     }
-    EXPECT_EQ(marker_counts[0], 4u);
-    EXPECT_EQ(marker_counts[1], 4u);
-    EXPECT_EQ(marker_counts[2], 4u);
-    EXPECT_EQ(marker_counts[3], 4u);
+    for (std::size_t wall = 0u;
+         wall < contact_walls.size();
+         ++wall) {
+      EXPECT_EQ(marker_counts[wall], expected_contact_wall_face_count);
+    }
+    EXPECT_EQ(marker_counts[4], expected_anchor_face_count);
+    EXPECT_EQ(marker_counts[5], expected_anchor_face_count);
 
     std::optional<svmp::FE::GlobalIndex> gauge_vertex_id;
     for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
@@ -5927,13 +6137,15 @@ TEST(ApplicationDriverLevelSetWorkflows,
       mesh_phi[vertex] = phi_vertex_values[vertex];
     }
 
+    const auto element_type =
+        spatial_dimension == 2 ? svmp::FE::ElementType::Triangle3
+                               : svmp::FE::ElementType::Tetra4;
     auto scalar_space = svmp::FE::spaces::SpaceFactory::create_h1(
-        svmp::FE::ElementType::Triangle3,
-        /*order=*/1);
+        element_type, /*order=*/1);
     auto velocity_space = svmp::FE::spaces::SpaceFactory::create_vector_h1(
-        svmp::FE::ElementType::Triangle3,
+        element_type,
         /*order=*/1,
-        /*components=*/2);
+        /*components=*/spatial_dimension);
     auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
     const auto phi = system->addField(
         svmp::FE::systems::FieldSpec{
@@ -5957,24 +6169,17 @@ TEST(ApplicationDriverLevelSetWorkflows,
                                                  : lower_anchor_marker,
                 .value = {0.0, 0.0, 0.0},
             });
-    options.velocity_dirichlet.push_back(
-        channel_ns::IncompressibleNavierStokesVMSOptions::
-            VelocityDirichletBC{
-                .boundary_marker = left_wall_marker,
-                .value = {0.0, 0.0, 0.0},
-                .active_components = {tangent_axis == 0,
-                                      tangent_axis == 1,
-                                      false},
-            });
-    options.velocity_dirichlet.push_back(
-        channel_ns::IncompressibleNavierStokesVMSOptions::
-            VelocityDirichletBC{
-                .boundary_marker = right_wall_marker,
-                .value = {0.0, 0.0, 0.0},
-                .active_components = {tangent_axis == 0,
-                                      tangent_axis == 1,
-                                      false},
-            });
+    for (const auto& wall : contact_walls) {
+      std::array<bool, 3> active_components{};
+      active_components[static_cast<std::size_t>(wall.axis)] = true;
+      options.velocity_dirichlet.push_back(
+          channel_ns::IncompressibleNavierStokesVMSOptions::
+              VelocityDirichletBC{
+                  .boundary_marker = wall.marker,
+                  .value = {0.0, 0.0, 0.0},
+                  .active_components = active_components,
+              });
+    }
     options.node_pressure_constraints.id_type =
         channel_ns::IncompressibleNavierStokesVMSOptions::
             NodePressureConstraintIdType::LocalVertexId;
@@ -6012,30 +6217,18 @@ TEST(ApplicationDriverLevelSetWorkflows,
                 .use_level_set_curvature = false,
                 .small_cut_aggregation = false,
             };
-    free_surface.contact_lines.push_back(
-        ContactLine{.configuration = ContactLine::DynamicRenE{
-                        .wall_boundary_marker = left_wall_marker,
-                        .contact_line_marker = -1,
-                        .equilibrium_contact_angle_radians = contact_angle,
-                        .wall_normal = {
-                            tangent_axis == 0 ? -1.0 : 0.0,
-                            tangent_axis == 1 ? -1.0 : 0.0,
-                            0.0},
-                        .mobility = 1.0,
-                        .slip_length = 1.0,
-                    }});
-    free_surface.contact_lines.push_back(
-        ContactLine{.configuration = ContactLine::DynamicRenE{
-                        .wall_boundary_marker = right_wall_marker,
-                        .contact_line_marker = -1,
-                        .equilibrium_contact_angle_radians = contact_angle,
-                        .wall_normal = {
-                            tangent_axis == 0 ? 1.0 : 0.0,
-                            tangent_axis == 1 ? 1.0 : 0.0,
-                            0.0},
-                        .mobility = 1.0,
-                        .slip_length = 1.0,
-                    }});
+    for (const auto& wall : contact_walls) {
+      ContactLine::DynamicRenE dynamic_contact;
+      dynamic_contact.wall_boundary_marker = wall.marker;
+      dynamic_contact.contact_line_marker = -1;
+      dynamic_contact.equilibrium_contact_angle_radians = contact_angle;
+      dynamic_contact.wall_normal[static_cast<std::size_t>(wall.axis)] =
+          wall.outward_normal;
+      dynamic_contact.mobility = 1.0;
+      dynamic_contact.slip_length = 1.0;
+      free_surface.contact_lines.push_back(
+          ContactLine{.configuration = std::move(dynamic_contact)});
+    }
     options.free_surface.push_back(std::move(free_surface));
 
     channel_ns::IncompressibleNavierStokesVMSModule module(
@@ -6093,6 +6286,23 @@ TEST(ApplicationDriverLevelSetWorkflows,
     sim.time_history->uDDot().zero();
     sim.time_history->updateGhosts();
 
+    std::ostringstream contact_wall_markers;
+    std::ostringstream contact_wall_normals;
+    for (std::size_t wall_index = 0u;
+         wall_index < contact_walls.size();
+         ++wall_index) {
+      if (wall_index != 0u) {
+        contact_wall_markers << ';';
+        contact_wall_normals << "; ";
+      }
+      contact_wall_markers << contact_walls[wall_index].marker;
+      std::array<svmp::FE::Real, 3> wall_normal{};
+      wall_normal[static_cast<std::size_t>(contact_walls[wall_index].axis)] =
+          contact_walls[wall_index].outward_normal;
+      contact_wall_normals << wall_normal[0] << ' ' << wall_normal[1]
+                           << ' ' << wall_normal[2];
+    }
+
     std::ostringstream parameter_xml;
     parameter_xml << std::setprecision(17) << R"xml(
 <svMultiPhysicsFile>
@@ -6127,11 +6337,11 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Surface_tension_form>SurfaceStress</Surface_tension_form>
       <Contact_line_model>DynamicContactAngle</Contact_line_model>
       <Contact_angle_degrees>90.0</Contact_angle_degrees>
-      <Contact_line_wall_markers>7201;7202</Contact_line_wall_markers>
+      <Contact_line_wall_markers>)xml"
+                  << contact_wall_markers.str()
+                  << R"xml(</Contact_line_wall_markers>
       <Contact_line_wall_normals>)xml"
-                  << (tangent_axis == 0
-                          ? "-1.0 0.0 0.0; 1.0 0.0 0.0"
-                          : "0.0 -1.0 0.0; 0.0 1.0 0.0")
+                  << contact_wall_normals.str()
                   << R"xml(</Contact_line_wall_normals>
       <Contact_line_mobility>1.0</Contact_line_mobility>
       <Wall_slip_model>Navier</Wall_slip_model>
@@ -6162,12 +6372,15 @@ TEST(ApplicationDriverLevelSetWorkflows,
     attachAcceptedFreeSurfaceActiveVolumeEnergies(
         sim, current, initial_functionals);
     ASSERT_TRUE(initial_functionals.front().active_volume_energy.has_value());
+    const auto interface_measure = spatial_dimension == 2
+                                       ? svmp::FE::Real{3.0}
+                                       : svmp::FE::Real{6.0};
     const auto expected_volume =
-        svmp::FE::Real{3.0} *
+        interface_measure *
         (positive_side ? svmp::FE::Real{1.0} - normal_offset
                        : normal_offset);
     const auto active_first_moment =
-        svmp::FE::Real{1.5} *
+        svmp::FE::Real{0.5} * interface_measure *
         (positive_side
              ? svmp::FE::Real{1.0} - normal_offset * normal_offset
              : normal_offset * normal_offset);
@@ -6177,7 +6390,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
                 expected_volume,
                 1.0e-13);
     EXPECT_NEAR(initial_functionals.front().state.liquid_gas_surface_energy,
-                svmp::FE::Real{3.0},
+                interface_measure,
                 1.0e-13);
     EXPECT_NEAR(initial_functionals.front().state.young_wall_energy,
                 svmp::FE::Real{0.0},
@@ -6317,10 +6530,18 @@ TEST(ApplicationDriverLevelSetWorkflows,
     const auto gravitational_energy_error = std::abs(
         final_functionals.front().active_volume_energy->gravitational_energy -
         expected_gravitational_energy);
+    const auto volume_error = std::abs(
+        final_functionals.front().state.owned_liquid_volume -
+        expected_volume);
+    const auto surface_energy_error = std::abs(
+        final_functionals.front().state.liquid_gas_surface_energy -
+        interface_measure);
     EXPECT_LE(gravitational_energy_error, 2.0e-10);
-    EXPECT_NEAR(final_functionals.front().state.owned_liquid_volume,
-                expected_volume,
-                1.0e-11);
+    EXPECT_LE(volume_error, 1.0e-11);
+    EXPECT_LE(surface_energy_error, 2.0e-10);
+    EXPECT_NEAR(final_functionals.front().state.young_wall_energy,
+                svmp::FE::Real{0.0},
+                1.0e-13);
 
     maximum_pressure_residual =
         std::max(maximum_pressure_residual,
@@ -6342,16 +6563,24 @@ TEST(ApplicationDriverLevelSetWorkflows,
     maximum_gravitational_energy_error =
         std::max(maximum_gravitational_energy_error,
                  gravitational_energy_error);
+    maximum_volume_error =
+        std::max(maximum_volume_error, volume_error);
+    maximum_surface_energy_error =
+        std::max(maximum_surface_energy_error, surface_energy_error);
     maximum_phi_update = std::max(maximum_phi_update, phi_update);
   }
 
-  EXPECT_EQ(case_count, 24u);
-  RecordProperty("wp4_hydrostatic_spatial_dimension", 2);
-  RecordProperty("wp4_hydrostatic_coordinate_direction_count", 2);
-  RecordProperty("wp4_hydrostatic_wall_orientation_count", 2);
+  EXPECT_EQ(case_count, 60u);
+  RecordProperty("wp4_hydrostatic_spatial_dimension", 3);
+  RecordProperty("wp4_hydrostatic_spatial_dimension_count", 2);
+  RecordProperty("wp4_hydrostatic_coordinate_direction_count", 3);
+  RecordProperty("wp4_hydrostatic_dimension_coordinate_pair_count", 5);
+  RecordProperty("wp4_hydrostatic_wall_orientation_count", 3);
   RecordProperty("wp4_hydrostatic_active_side_count", 2);
   RecordProperty("wp4_hydrostatic_cut_offset_count", normal_offsets.size());
   RecordProperty("wp4_hydrostatic_gravity_direction_count", 2);
+  RecordProperty("wp4_hydrostatic_two_dimensional_case_count", 24);
+  RecordProperty("wp4_hydrostatic_three_dimensional_case_count", 36);
   RecordProperty("wp4_hydrostatic_fixed_zero_pressure_gauge_case_count",
                  case_count);
   RecordProperty("wp4_hydrostatic_matrix_case_count", case_count);
@@ -6370,6 +6599,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
                  maximum_exact_initializer_pressure_update);
   RecordProperty("wp4_hydrostatic_gravitational_energy_error",
                  maximum_gravitational_energy_error);
+  RecordProperty("wp4_hydrostatic_volume_error", maximum_volume_error);
+  RecordProperty("wp4_hydrostatic_surface_energy_error",
+                 maximum_surface_energy_error);
   RecordProperty("wp4_hydrostatic_maximum_phi_update", maximum_phi_update);
 #endif
 }
