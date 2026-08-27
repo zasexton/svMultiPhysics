@@ -24,10 +24,14 @@
 namespace svmp::FE::quadrature {
 namespace {
 
+// Defensively bound supported cosine-seeded Newton refinements for
+// deterministic termination.
 constexpr int kMaximumNewtonIterations = 100;
-// Accommodate rounding in the Legendre recurrence and Newton update.
+// Guard recurrence and Newton-update rounding; exhaustive supported-size
+// sweeps qualify this scale.
 constexpr double kNewtonCorrectionTolerance = 64.0 * std::numeric_limits<double>::epsilon();
-// Allow accumulated rounding across the largest supported rule.
+// Provide conservative O(n epsilon) accumulation headroom, qualified by those
+// sweeps.
 constexpr double kRuleValidationTolerance = 32.0 * static_cast<double>(max_gauss_legendre_points()) *
                                             std::numeric_limits<double>::epsilon();
 
@@ -98,17 +102,6 @@ void require_generation(
     if (!condition) {
         raise_generation_failure(
             num_points, root_index, iteration, diagnostic_value, detail);
-    }
-}
-
-void validate_num_points(int num_points)
-{
-    if (num_points < 1 ||
-        num_points > max_gauss_legendre_points()) {
-        std::ostringstream message;
-        message << "Gauss-Legendre generator: num_points must be in [1, "
-                << max_gauss_legendre_points() << ']';
-        svmp::raise<InvalidArgumentException>(message.str());
     }
 }
 
@@ -197,39 +190,17 @@ std::pair<double, double> generate_root_and_weight(
         "Newton refinement did not converge");
 }
 
-void validate_ordering_and_measure(
-    int num_points,
-    const std::vector<QuadPoint>& points,
-    const std::vector<double>& weights)
-{
-    for (std::size_t point_index = 1;
-         point_index < points.size();
-         ++point_index) {
-        const double spacing =
-            points[point_index][0] - points[point_index - 1u][0];
-        require_generation(
-            spacing > 0.0,
-            num_points, static_cast<int>(point_index), -1, spacing,
-            "generated points are not strictly increasing");
-    }
-
-    const long double weight_sum =
-        std::accumulate(weights.begin(), weights.end(), 0.0L);
-    const long double measure_error =
-        std::abs(weight_sum - 2.0L);
-    require_generation(
-        std::isfinite(weight_sum) &&
-            measure_error <=
-                static_cast<long double>(kRuleValidationTolerance),
-        num_points, -1, -1, static_cast<double>(measure_error),
-        "generated weights do not reproduce the reference measure");
-}
-
 } // namespace
 
 QuadratureRule make_gauss_legendre_rule(int num_points)
 {
-    validate_num_points(num_points);
+    if (num_points < 1 ||
+        num_points > max_gauss_legendre_points()) {
+        std::ostringstream message;
+        message << "Gauss-Legendre generator: num_points must be in [1, "
+                << max_gauss_legendre_points() << ']';
+        svmp::raise<InvalidArgumentException>(message.str());
+    }
 
     const std::size_t point_count =
         static_cast<std::size_t>(num_points);
@@ -256,7 +227,28 @@ QuadratureRule make_gauss_legendre_rule(int num_points)
         weights[right_index] = weight;
     }
 
-    validate_ordering_and_measure(num_points, points, weights);
+    for (std::size_t point_index = 1;
+         point_index < points.size();
+         ++point_index) {
+        const double spacing =
+            points[point_index][0] - points[point_index - 1u][0];
+        require_generation(
+            spacing > 0.0,
+            num_points, static_cast<int>(point_index), -1, spacing,
+            "generated points are not strictly increasing");
+    }
+
+    // Report a failed measure instead of repairing or rescaling the weights.
+    const long double weight_sum =
+        std::accumulate(weights.begin(), weights.end(), 0.0L);
+    const long double measure_error =
+        std::abs(weight_sum - 2.0L);
+    require_generation(
+        std::isfinite(weight_sum) &&
+            measure_error <=
+                static_cast<long double>(kRuleValidationTolerance),
+        num_points, -1, -1, static_cast<double>(measure_error),
+        "generated weights do not reproduce the reference measure");
 
     const int polynomial_exactness = 2 * num_points - 1;
     return QuadratureRule(

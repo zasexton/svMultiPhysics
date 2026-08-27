@@ -24,11 +24,15 @@
 namespace svmp::FE::quadrature {
 namespace {
 
+// Defensively bound supported cosine-seeded Newton refinements for
+// deterministic termination.
 constexpr int kMaximumNewtonIterations = 100;
-// Accommodate rounding in the Legendre recurrence and Newton update.
+// Guard recurrence and Newton-update rounding; exhaustive supported-size
+// sweeps qualify this scale.
 constexpr double kNewtonCorrectionTolerance =
     64.0 * std::numeric_limits<double>::epsilon();
-// Allow accumulated rounding across the largest supported rule.
+// Provide conservative O(n epsilon) accumulation headroom, qualified by those
+// sweeps.
 constexpr double kRuleValidationTolerance =
     32.0 * static_cast<double>(max_gauss_lobatto_points()) *
     std::numeric_limits<double>::epsilon();
@@ -92,24 +96,12 @@ void require_generation(
     }
 }
 
-void validate_num_points(int num_points)
-{
-    if (num_points < 2 ||
-        num_points > max_gauss_lobatto_points()) {
-        std::ostringstream message;
-        message << "Gauss-Lobatto-Legendre generator: "
-                << "num_points must be in [2, "
-                << max_gauss_lobatto_points() << ']';
-        svmp::raise<InvalidArgumentException>(message.str());
-    }
-}
-
 std::pair<double, double> generate_interior_root_and_weight(
     int num_points,
     int polynomial_degree,
     int half_root_index,
     bool is_center,
-    double normalization)
+    double weight_denominator_scale)
 {
     const double num_points_value = static_cast<double>(num_points);
     const double degree_value = static_cast<double>(polynomial_degree);
@@ -225,7 +217,7 @@ std::pair<double, double> generate_interior_root_and_weight(
             "refined root is outside the expected half interval");
 
         const double denominator =
-            normalization * final_polynomial_value *
+            weight_denominator_scale * final_polynomial_value *
             final_polynomial_value;
         require_generation(
             std::isfinite(denominator),
@@ -257,51 +249,18 @@ std::pair<double, double> generate_interior_root_and_weight(
         "Newton refinement did not converge");
 }
 
-void validate_ordering_and_measure(
-    int num_points,
-    const std::vector<QuadPoint>& points,
-    const std::vector<double>& weights)
-{
-    for (std::size_t point_index = 1;
-         point_index < points.size();
-         ++point_index) {
-        const double spacing =
-            points[point_index][0] - points[point_index - 1u][0];
-        require_generation(
-            spacing > 0.0,
-            num_points,
-            static_cast<int>(point_index),
-            -1,
-            spacing,
-            "generated points are not strictly increasing");
-    }
-
-    const long double weight_sum =
-        std::accumulate(weights.begin(), weights.end(), 0.0L);
-    require_generation(
-        std::isfinite(weight_sum),
-        num_points,
-        -1,
-        -1,
-        static_cast<double>(weight_sum),
-        "generated weights produced a non-finite measure");
-
-    const long double measure_error = std::abs(weight_sum - 2.0L);
-    require_generation(
-        measure_error <=
-            static_cast<long double>(kRuleValidationTolerance),
-        num_points,
-        -1,
-        -1,
-        static_cast<double>(measure_error),
-        "generated weights do not reproduce the reference measure");
-}
-
 } // namespace
 
 QuadratureRule make_gauss_lobatto_rule(int num_points)
 {
-    validate_num_points(num_points);
+    if (num_points < 2 ||
+        num_points > max_gauss_lobatto_points()) {
+        std::ostringstream message;
+        message << "Gauss-Lobatto-Legendre generator: "
+                << "num_points must be in [2, "
+                << max_gauss_lobatto_points() << ']';
+        svmp::raise<InvalidArgumentException>(message.str());
+    }
 
     const std::size_t point_count =
         static_cast<std::size_t>(num_points);
@@ -313,18 +272,18 @@ QuadratureRule make_gauss_lobatto_rule(int num_points)
     points.back()[0] = 1.0;
 
     const double num_points_value = static_cast<double>(num_points);
-    const double normalization =
+    const double weight_denominator_scale =
         num_points_value * (num_points_value - 1.0);
     require_generation(
-        std::isfinite(normalization),
-        num_points, -1, -1, normalization,
-        "computed a non-finite weight normalization");
+        std::isfinite(weight_denominator_scale),
+        num_points, -1, -1, weight_denominator_scale,
+        "computed a non-finite weight denominator scale");
     require_generation(
-        normalization > 0.0,
-        num_points, -1, -1, normalization,
-        "computed a non-positive weight normalization");
+        weight_denominator_scale > 0.0,
+        num_points, -1, -1, weight_denominator_scale,
+        "computed a non-positive weight denominator scale");
 
-    const double endpoint_weight = 2.0 / normalization;
+    const double endpoint_weight = 2.0 / weight_denominator_scale;
     require_generation(
         std::isfinite(endpoint_weight),
         num_points, -1, -1, endpoint_weight,
@@ -352,7 +311,7 @@ QuadratureRule make_gauss_lobatto_rule(int num_points)
                 polynomial_degree,
                 half_root_index,
                 left_index == right_index,
-                normalization);
+                weight_denominator_scale);
 
         points[left_index][0] = -root;
         points[right_index][0] = root;
@@ -360,7 +319,40 @@ QuadratureRule make_gauss_lobatto_rule(int num_points)
         weights[right_index] = weight;
     }
 
-    validate_ordering_and_measure(num_points, points, weights);
+    for (std::size_t point_index = 1;
+         point_index < points.size();
+         ++point_index) {
+        const double spacing =
+            points[point_index][0] - points[point_index - 1u][0];
+        require_generation(
+            spacing > 0.0,
+            num_points,
+            static_cast<int>(point_index),
+            -1,
+            spacing,
+            "generated points are not strictly increasing");
+    }
+
+    // Report a failed measure instead of repairing or rescaling the weights.
+    const long double weight_sum =
+        std::accumulate(weights.begin(), weights.end(), 0.0L);
+    require_generation(
+        std::isfinite(weight_sum),
+        num_points,
+        -1,
+        -1,
+        static_cast<double>(weight_sum),
+        "generated weights produced a non-finite measure");
+
+    const long double measure_error = std::abs(weight_sum - 2.0L);
+    require_generation(
+        measure_error <=
+            static_cast<long double>(kRuleValidationTolerance),
+        num_points,
+        -1,
+        -1,
+        static_cast<double>(measure_error),
+        "generated weights do not reproduce the reference measure");
 
     const int polynomial_exactness = 2 * num_points - 3;
     return QuadratureRule(
