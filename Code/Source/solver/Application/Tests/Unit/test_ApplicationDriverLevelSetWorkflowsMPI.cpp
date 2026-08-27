@@ -625,6 +625,180 @@ makePartitionedHydrostaticPressureMesh(
 }
 
 [[nodiscard]] std::shared_ptr<svmp::Mesh>
+makePartitionedHydrostaticPressureMesh3D(
+    int normal_axis,
+    bool tangent_major_cells,
+    bool reverse_vertex_numbering)
+{
+  if (normal_axis < 0 || normal_axis >= 3) {
+    throw std::invalid_argument(
+        "three-dimensional hydrostatic pressure mesh normal axis must be "
+        "zero, one, or two");
+  }
+
+  constexpr std::array<svmp::real_t, 3> first_tangent_coordinates{{
+      0.0, 1.5, 3.0}};
+  constexpr std::array<svmp::real_t, 3> second_tangent_coordinates{{
+      0.0, 1.0, 2.0}};
+  constexpr std::array<svmp::real_t, 5> normal_coordinates{{
+      0.0, 0.2, 0.4, 0.7, 1.0}};
+  constexpr std::array<std::array<std::size_t, 4>, 6> tetrahedra{{
+      {{0, 1, 2, 6}},
+      {{0, 2, 3, 6}},
+      {{0, 3, 7, 6}},
+      {{0, 7, 4, 6}},
+      {{0, 4, 5, 6}},
+      {{0, 5, 1, 6}},
+  }};
+
+  const int first_tangent_axis = (normal_axis + 1) % 3;
+  const int second_tangent_axis = (normal_axis + 2) % 3;
+  const auto unnumbered_vertex_index =
+      [&](std::size_t first_tangent,
+          std::size_t second_tangent,
+          std::size_t normal) {
+        return first_tangent +
+               first_tangent_coordinates.size() *
+                   (second_tangent +
+                    second_tangent_coordinates.size() * normal);
+      };
+  const auto vertex_count =
+      first_tangent_coordinates.size() *
+      second_tangent_coordinates.size() * normal_coordinates.size();
+  const auto vertex_index = [&](std::size_t first_tangent,
+                                std::size_t second_tangent,
+                                std::size_t normal) {
+    auto vertex = unnumbered_vertex_index(
+        first_tangent, second_tangent, normal);
+    if (reverse_vertex_numbering) {
+      vertex = vertex_count - 1u - vertex;
+    }
+    return static_cast<svmp::index_t>(vertex);
+  };
+
+  std::vector<svmp::real_t> coordinates(3u * vertex_count, 0.0);
+  for (std::size_t normal = 0u;
+       normal < normal_coordinates.size();
+       ++normal) {
+    for (std::size_t second_tangent = 0u;
+         second_tangent < second_tangent_coordinates.size();
+         ++second_tangent) {
+      for (std::size_t first_tangent = 0u;
+           first_tangent < first_tangent_coordinates.size();
+           ++first_tangent) {
+        auto first_tangent_coordinate =
+            first_tangent_coordinates[first_tangent];
+        auto second_tangent_coordinate =
+            second_tangent_coordinates[second_tangent];
+        if (first_tangent > 0u &&
+            first_tangent + 1u < first_tangent_coordinates.size()) {
+          const auto phase = static_cast<int>(
+              (3u * normal + 2u * second_tangent + first_tangent) % 5u) -
+                             2;
+          first_tangent_coordinate +=
+              svmp::real_t{0.035} * static_cast<svmp::real_t>(phase);
+        }
+        if (second_tangent > 0u &&
+            second_tangent + 1u < second_tangent_coordinates.size()) {
+          const auto phase = static_cast<int>(
+              (2u * normal + first_tangent + second_tangent) % 5u) -
+                             2;
+          second_tangent_coordinate +=
+              svmp::real_t{0.04} * static_cast<svmp::real_t>(phase);
+        }
+        std::array<svmp::real_t, 3> point{};
+        point[static_cast<std::size_t>(normal_axis)] =
+            normal_coordinates[normal];
+        point[static_cast<std::size_t>(first_tangent_axis)] =
+            first_tangent_coordinate;
+        point[static_cast<std::size_t>(second_tangent_axis)] =
+            second_tangent_coordinate;
+        const auto vertex = static_cast<std::size_t>(
+            vertex_index(first_tangent, second_tangent, normal));
+        for (std::size_t component = 0u; component < 3u; ++component) {
+          coordinates[3u * vertex + component] = point[component];
+        }
+      }
+    }
+  }
+
+  std::vector<svmp::offset_t> offsets{0};
+  std::vector<svmp::index_t> connectivity;
+  std::vector<svmp::CellShape> shapes;
+  const auto append_hexahedron =
+      [&](std::size_t first_tangent,
+          std::size_t second_tangent,
+          std::size_t normal) {
+        const std::array<svmp::index_t, 8> nodes{{
+            vertex_index(first_tangent, second_tangent, normal),
+            vertex_index(first_tangent + 1u, second_tangent, normal),
+            vertex_index(
+                first_tangent + 1u, second_tangent + 1u, normal),
+            vertex_index(first_tangent, second_tangent + 1u, normal),
+            vertex_index(first_tangent, second_tangent, normal + 1u),
+            vertex_index(
+                first_tangent + 1u, second_tangent, normal + 1u),
+            vertex_index(first_tangent + 1u,
+                         second_tangent + 1u,
+                         normal + 1u),
+            vertex_index(
+                first_tangent, second_tangent + 1u, normal + 1u),
+        }};
+        for (const auto& tetrahedron : tetrahedra) {
+          for (const auto local_vertex : tetrahedron) {
+            connectivity.push_back(nodes[local_vertex]);
+          }
+          offsets.push_back(
+              static_cast<svmp::offset_t>(connectivity.size()));
+          shapes.push_back(
+              svmp::CellShape{svmp::CellFamily::Tetra, 4, 1});
+        }
+      };
+  if (tangent_major_cells) {
+    for (std::size_t first_tangent = 0u;
+         first_tangent + 1u < first_tangent_coordinates.size();
+         ++first_tangent) {
+      for (std::size_t second_tangent = 0u;
+           second_tangent + 1u < second_tangent_coordinates.size();
+           ++second_tangent) {
+        for (std::size_t normal = 0u;
+             normal + 1u < normal_coordinates.size();
+             ++normal) {
+          append_hexahedron(first_tangent, second_tangent, normal);
+        }
+      }
+    }
+  } else {
+    for (std::size_t normal = 0u;
+         normal + 1u < normal_coordinates.size();
+         ++normal) {
+      for (std::size_t second_tangent = 0u;
+           second_tangent + 1u < second_tangent_coordinates.size();
+           ++second_tangent) {
+        for (std::size_t first_tangent = 0u;
+             first_tangent + 1u < first_tangent_coordinates.size();
+             ++first_tangent) {
+          append_hexahedron(first_tangent, second_tangent, normal);
+        }
+      }
+    }
+  }
+
+  auto mesh = std::make_shared<svmp::Mesh>(
+      svmp::MeshComm(MPI_COMM_WORLD));
+  mesh->build_from_arrays_global_and_partition(
+      /*spatial_dim=*/3,
+      coordinates,
+      offsets,
+      connectivity,
+      shapes,
+      svmp::PartitionHint::Cells,
+      /*ghost_layers=*/1,
+      {{"partition_method", "block"}});
+  return mesh;
+}
+
+[[nodiscard]] std::shared_ptr<svmp::Mesh>
 makePartitionedQuadStripWithRankDisjointWallMarkers()
 {
   const auto arrays = makeQuadStripArrays();
@@ -3241,6 +3415,8 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   constexpr int second_wall_marker = 7252;
   constexpr int lower_anchor_marker = 7253;
   constexpr int upper_anchor_marker = 7254;
+  constexpr int third_wall_marker = 7255;
+  constexpr int fourth_wall_marker = 7256;
   constexpr svmp::FE::Real density = 1.25;
   constexpr svmp::FE::Real gravity_magnitude = 0.4;
   constexpr svmp::FE::Real pi =
@@ -3259,10 +3435,16 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   constexpr std::size_t partition_layout_count = 2u;
   constexpr std::size_t vertex_numbering_count = 2u;
   constexpr std::size_t normal_axis_count = 2u;
+  constexpr std::size_t three_dimensional_normal_axis_count = 3u;
   constexpr std::size_t dof_ownership_strategy_count = 2u;
   constexpr std::size_t fe_global_numbering_mode_count = 2u;
   std::size_t case_count = 0u;
+  std::size_t two_dimensional_case_count = 0u;
+  std::size_t three_dimensional_case_count = 0u;
   std::size_t owner_contiguous_nonidentity_case_count = 0u;
+  std::size_t
+      three_dimensional_owner_contiguous_nonidentity_case_count = 0u;
+  std::size_t three_dimensional_shared_vertex_case_count = 0u;
   svmp::FE::Real maximum_pressure_residual = 0.0;
   svmp::FE::Real maximum_pressure_relative_distance = 0.0;
   svmp::FE::Real maximum_exact_field_production_residual = 0.0;
@@ -3274,30 +3456,96 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   svmp::FE::Real maximum_surface_energy_error = 0.0;
   svmp::FE::Real maximum_phi_update = 0.0;
 
-  const auto mesh_variant_count =
+  struct HydrostaticMeshVariant {
+    int spatial_dimension = 2;
+    int normal_axis = 0;
+    bool reverse_vertex_numbering = false;
+    bool alternate_cell_order = false;
+    bool highest_rank_dof_ownership = false;
+    bool dense_global_dof_numbering = false;
+  };
+  std::vector<HydrostaticMeshVariant> mesh_variants;
+  const auto two_dimensional_mesh_variant_count =
       partition_layout_count * vertex_numbering_count * normal_axis_count *
       dof_ownership_strategy_count * fe_global_numbering_mode_count;
+  const auto three_dimensional_mesh_variant_count =
+      partition_layout_count * vertex_numbering_count *
+      three_dimensional_normal_axis_count * dof_ownership_strategy_count *
+      fe_global_numbering_mode_count;
+  mesh_variants.reserve(two_dimensional_mesh_variant_count +
+                        three_dimensional_mesh_variant_count);
   for (std::size_t mesh_variant = 0u;
-       mesh_variant < mesh_variant_count;
+       mesh_variant < two_dimensional_mesh_variant_count;
        ++mesh_variant) {
-    const int normal_axis = static_cast<int>(
-        mesh_variant % normal_axis_count);
+    mesh_variants.push_back(HydrostaticMeshVariant{
+        .spatial_dimension = 2,
+        .normal_axis = static_cast<int>(mesh_variant % normal_axis_count),
+        .reverse_vertex_numbering =
+            ((mesh_variant / normal_axis_count) % vertex_numbering_count) !=
+            0u,
+        .alternate_cell_order =
+            ((mesh_variant /
+              (normal_axis_count * vertex_numbering_count)) %
+             partition_layout_count) != 0u,
+        .highest_rank_dof_ownership =
+            ((mesh_variant /
+              (normal_axis_count * vertex_numbering_count *
+               partition_layout_count)) %
+             dof_ownership_strategy_count) != 0u,
+        .dense_global_dof_numbering =
+            (mesh_variant /
+             (normal_axis_count * vertex_numbering_count *
+              partition_layout_count * dof_ownership_strategy_count)) != 0u,
+    });
+  }
+  for (std::size_t mesh_variant = 0u;
+       mesh_variant < three_dimensional_mesh_variant_count;
+       ++mesh_variant) {
+    mesh_variants.push_back(HydrostaticMeshVariant{
+        .spatial_dimension = 3,
+        .normal_axis = static_cast<int>(
+            mesh_variant % three_dimensional_normal_axis_count),
+        .reverse_vertex_numbering =
+            ((mesh_variant / three_dimensional_normal_axis_count) %
+             vertex_numbering_count) != 0u,
+        .alternate_cell_order =
+            ((mesh_variant /
+              (three_dimensional_normal_axis_count *
+               vertex_numbering_count)) %
+             partition_layout_count) != 0u,
+        .highest_rank_dof_ownership =
+            ((mesh_variant /
+              (three_dimensional_normal_axis_count *
+               vertex_numbering_count * partition_layout_count)) %
+             dof_ownership_strategy_count) != 0u,
+        .dense_global_dof_numbering =
+            (mesh_variant /
+             (three_dimensional_normal_axis_count *
+              vertex_numbering_count * partition_layout_count *
+              dof_ownership_strategy_count)) != 0u,
+    });
+  }
+
+  for (const auto& mesh_variant : mesh_variants) {
+    const int spatial_dimension = mesh_variant.spatial_dimension;
+    const int normal_axis = mesh_variant.normal_axis;
     const bool reverse_vertex_numbering =
-        ((mesh_variant / normal_axis_count) % vertex_numbering_count) != 0u;
-    const bool column_major_cells =
-        ((mesh_variant /
-          (normal_axis_count * vertex_numbering_count)) %
-         partition_layout_count) != 0u;
+        mesh_variant.reverse_vertex_numbering;
+    const bool column_major_cells = mesh_variant.alternate_cell_order;
     const bool highest_rank_dof_ownership =
-        ((mesh_variant /
-          (normal_axis_count * vertex_numbering_count *
-           partition_layout_count)) %
-         dof_ownership_strategy_count) != 0u;
+        mesh_variant.highest_rank_dof_ownership;
     const bool dense_global_dof_numbering =
-        (mesh_variant /
-         (normal_axis_count * vertex_numbering_count *
-          partition_layout_count * dof_ownership_strategy_count)) != 0u;
-    const int tangent_axis = 1 - normal_axis;
+        mesh_variant.dense_global_dof_numbering;
+    std::array<int, 2> tangent_axes{};
+    std::size_t tangent_axis_count = 0u;
+    for (int axis = 0; axis < spatial_dimension; ++axis) {
+      if (axis != normal_axis) {
+        tangent_axes[tangent_axis_count++] = axis;
+      }
+    }
+    ASSERT_EQ(tangent_axis_count,
+              static_cast<std::size_t>(spatial_dimension - 1));
+    const int tangent_axis = tangent_axes.front();
     for (const bool positive_side : {false, true}) {
       const auto gauge_normal_coordinate =
           positive_side ? svmp::FE::Real{1.0} : svmp::FE::Real{0.0};
@@ -3310,6 +3558,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
               (normal_offset - gauge_normal_coordinate);
           SCOPED_TRACE(::testing::Message()
                        << "rank=" << rank
+                       << " spatial_dimension=" << spatial_dimension
                        << " cell_order="
                        << (column_major_cells ? "column-major"
                                               : "row-major")
@@ -3329,15 +3578,24 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                        << " gravity=" << gravity
                        << " external_pressure=" << external_pressure);
           ++case_count;
+          if (spatial_dimension == 2) {
+            ++two_dimensional_case_count;
+          } else {
+            ++three_dimensional_case_count;
+          }
 
-          auto mesh = makePartitionedHydrostaticPressureMesh(
-              normal_axis,
-              column_major_cells,
-              reverse_vertex_numbering);
+          auto mesh = spatial_dimension == 2
+                          ? makePartitionedHydrostaticPressureMesh(
+                                normal_axis,
+                                column_major_cells,
+                                reverse_vertex_numbering)
+                          : makePartitionedHydrostaticPressureMesh3D(
+                                normal_axis,
+                                column_major_cells,
+                                reverse_vertex_numbering);
           ASSERT_GT(mesh->n_ghost_vertices(), 0u);
           auto& local_mesh = mesh->local_mesh();
-          std::array<int, 2> local_probe_counts{};
-          std::array<int, 2> local_probe_owner_plus_one{};
+          unsigned long long local_owned_cell_count = 0u;
           for (std::size_t cell = 0u;
                cell < mesh->n_cells();
                ++cell) {
@@ -3345,71 +3603,141 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
             if (mesh->owner_rank_cell(local_cell) != rank) {
               continue;
             }
-            const auto center = local_mesh.cell_center(local_cell);
-            const auto logical_tangent_coordinate =
-                normal_axis == 0
-                    ? svmp::FE::Real{3.0} - center[tangent_axis]
-                    : center[tangent_axis];
-            const bool lower_right =
-                logical_tangent_coordinate > svmp::FE::Real{2.25} &&
-                center[normal_axis] < svmp::FE::Real{0.2};
-            const bool upper_left =
-                logical_tangent_coordinate < svmp::FE::Real{0.81} &&
-                center[normal_axis] > svmp::FE::Real{0.7};
-            if (lower_right) {
-              ++local_probe_counts[0];
-              local_probe_owner_plus_one[0] = rank + 1;
-            }
-            if (upper_left) {
-              ++local_probe_counts[1];
-              local_probe_owner_plus_one[1] = rank + 1;
-            }
+            ++local_owned_cell_count;
           }
-          std::array<int, 2> global_probe_counts{};
-          std::array<int, 2> global_probe_owner_plus_one{};
-          ASSERT_EQ(MPI_Allreduce(local_probe_counts.data(),
-                                  global_probe_counts.data(),
-                                  static_cast<int>(local_probe_counts.size()),
-                                  MPI_INT,
-                                  MPI_SUM,
+          std::array<unsigned long long, 2> owned_cell_counts{};
+          ASSERT_EQ(MPI_Allgather(&local_owned_cell_count,
+                                  1,
+                                  MPI_UNSIGNED_LONG_LONG,
+                                  owned_cell_counts.data(),
+                                  1,
+                                  MPI_UNSIGNED_LONG_LONG,
                                   MPI_COMM_WORLD),
                     MPI_SUCCESS);
-          ASSERT_EQ(MPI_Allreduce(
-                        local_probe_owner_plus_one.data(),
-                        global_probe_owner_plus_one.data(),
-                        static_cast<int>(
-                            local_probe_owner_plus_one.size()),
-                        MPI_INT,
-                        MPI_MAX,
-                        MPI_COMM_WORLD),
-                    MPI_SUCCESS);
-          EXPECT_EQ(global_probe_counts,
-                    (std::array<int, 2>{2, 2}));
-          EXPECT_EQ(
-              global_probe_owner_plus_one,
-              (column_major_cells ? std::array<int, 2>{2, 1}
-                                  : std::array<int, 2>{1, 2}));
-          std::array<int, 4> local_marker_present{};
+          const auto expected_owned_cell_count =
+              spatial_dimension == 2 ? 16u : 48u;
+          EXPECT_EQ(owned_cell_counts[0], expected_owned_cell_count);
+          EXPECT_EQ(owned_cell_counts[1], expected_owned_cell_count);
+
+          if (spatial_dimension == 2) {
+            std::array<int, 2> local_probe_counts{};
+            std::array<int, 2> local_probe_owner_plus_one{};
+            for (std::size_t cell = 0u;
+                 cell < mesh->n_cells();
+                 ++cell) {
+              const auto local_cell = static_cast<svmp::index_t>(cell);
+              if (mesh->owner_rank_cell(local_cell) != rank) {
+                continue;
+              }
+              const auto center = local_mesh.cell_center(local_cell);
+              const auto logical_tangent_coordinate =
+                  normal_axis == 0
+                      ? svmp::FE::Real{3.0} - center[tangent_axis]
+                      : center[tangent_axis];
+              const bool lower_right =
+                  logical_tangent_coordinate > svmp::FE::Real{2.25} &&
+                  center[normal_axis] < svmp::FE::Real{0.2};
+              const bool upper_left =
+                  logical_tangent_coordinate < svmp::FE::Real{0.81} &&
+                  center[normal_axis] > svmp::FE::Real{0.7};
+              if (lower_right) {
+                ++local_probe_counts[0];
+                local_probe_owner_plus_one[0] = rank + 1;
+              }
+              if (upper_left) {
+                ++local_probe_counts[1];
+                local_probe_owner_plus_one[1] = rank + 1;
+              }
+            }
+            std::array<int, 2> global_probe_counts{};
+            std::array<int, 2> global_probe_owner_plus_one{};
+            ASSERT_EQ(
+                MPI_Allreduce(local_probe_counts.data(),
+                              global_probe_counts.data(),
+                              static_cast<int>(local_probe_counts.size()),
+                              MPI_INT,
+                              MPI_SUM,
+                              MPI_COMM_WORLD),
+                MPI_SUCCESS);
+            ASSERT_EQ(
+                MPI_Allreduce(
+                    local_probe_owner_plus_one.data(),
+                    global_probe_owner_plus_one.data(),
+                    static_cast<int>(local_probe_owner_plus_one.size()),
+                    MPI_INT,
+                    MPI_MAX,
+                    MPI_COMM_WORLD),
+                MPI_SUCCESS);
+            EXPECT_EQ(global_probe_counts,
+                      (std::array<int, 2>{2, 2}));
+            EXPECT_EQ(
+                global_probe_owner_plus_one,
+                (column_major_cells ? std::array<int, 2>{2, 1}
+                                    : std::array<int, 2>{1, 2}));
+          }
+
+          struct ContactWall {
+            int marker = -1;
+            int axis = 0;
+            svmp::FE::Real coordinate = 0.0;
+            svmp::FE::Real outward_normal = 0.0;
+          };
+          const std::array<int, 4> wall_markers{{
+              first_wall_marker,
+              second_wall_marker,
+              third_wall_marker,
+              fourth_wall_marker,
+          }};
+          std::vector<ContactWall> contact_walls;
+          contact_walls.reserve(2u * tangent_axis_count);
+          for (std::size_t tangent = 0u;
+               tangent < tangent_axis_count;
+               ++tangent) {
+            const auto axis = tangent_axes[tangent];
+            const auto maximum_coordinate =
+                spatial_dimension == 2 || axis == (normal_axis + 1) % 3
+                    ? svmp::FE::Real{3.0}
+                    : svmp::FE::Real{2.0};
+            contact_walls.push_back(ContactWall{
+                .marker = wall_markers[2u * tangent],
+                .axis = axis,
+                .coordinate = 0.0,
+                .outward_normal = -1.0,
+            });
+            contact_walls.push_back(ContactWall{
+                .marker = wall_markers[2u * tangent + 1u],
+                .axis = axis,
+                .coordinate = maximum_coordinate,
+                .outward_normal = 1.0,
+            });
+          }
+          ASSERT_EQ(contact_walls.size(),
+                    static_cast<std::size_t>(
+                        2 * (spatial_dimension - 1)));
+
+          std::array<int, 6> local_marker_present{};
           constexpr svmp::FE::Real coordinate_tolerance = 1.0e-12;
           const auto physical_boundary_faces =
               svmp::DistributedTopology::global_boundary_faces(
                   *mesh, /*owned_only=*/false);
           for (const auto face : physical_boundary_faces) {
             const auto vertices = local_mesh.face_vertices(face);
-            ASSERT_EQ(vertices.size(), 2u);
-            bool on_first_wall = true;
-            bool on_second_wall = true;
+            ASSERT_EQ(vertices.size(),
+                      static_cast<std::size_t>(spatial_dimension));
+            std::array<bool, 4> on_contact_wall{{true, true, true, true}};
             bool on_lower_anchor = true;
             bool on_upper_anchor = true;
             for (const auto vertex : vertices) {
               const auto point = local_mesh.get_vertex_coords(vertex);
-              on_first_wall =
-                  on_first_wall &&
-                  std::abs(point[tangent_axis]) <= coordinate_tolerance;
-              on_second_wall =
-                  on_second_wall &&
-                  std::abs(point[tangent_axis] - svmp::FE::Real{3.0}) <=
-                      coordinate_tolerance;
+              for (std::size_t wall = 0u;
+                   wall < contact_walls.size();
+                   ++wall) {
+                on_contact_wall[wall] =
+                    on_contact_wall[wall] &&
+                    std::abs(point[contact_walls[wall].axis] -
+                             contact_walls[wall].coordinate) <=
+                        coordinate_tolerance;
+              }
               on_lower_anchor =
                   on_lower_anchor &&
                   std::abs(point[normal_axis]) <= coordinate_tolerance;
@@ -3418,24 +3746,32 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                   std::abs(point[normal_axis] - svmp::FE::Real{1.0}) <=
                       coordinate_tolerance;
             }
-            if (on_first_wall) {
-              mesh->set_boundary_label(face, first_wall_marker);
-              local_marker_present[0] = 1;
-            } else if (on_second_wall) {
-              mesh->set_boundary_label(face, second_wall_marker);
-              local_marker_present[1] = 1;
-            } else if (on_lower_anchor) {
+            bool classified = false;
+            for (std::size_t wall = 0u;
+                 wall < contact_walls.size();
+                 ++wall) {
+              if (on_contact_wall[wall]) {
+                mesh->set_boundary_label(face, contact_walls[wall].marker);
+                local_marker_present[wall] = 1;
+                classified = true;
+                break;
+              }
+            }
+            if (classified) {
+              continue;
+            }
+            if (on_lower_anchor) {
               mesh->set_boundary_label(face, lower_anchor_marker);
-              local_marker_present[2] = 1;
+              local_marker_present[4] = 1;
             } else if (on_upper_anchor) {
               mesh->set_boundary_label(face, upper_anchor_marker);
-              local_marker_present[3] = 1;
+              local_marker_present[5] = 1;
             } else {
               FAIL() << "Distributed hydrostatic fixture found an "
                         "unclassified physical boundary face.";
             }
           }
-          std::array<int, 4> global_marker_present{};
+          std::array<int, 6> global_marker_present{};
           ASSERT_EQ(
               MPI_Allreduce(local_marker_present.data(),
                             global_marker_present.data(),
@@ -3444,12 +3780,118 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                             MPI_MAX,
                             MPI_COMM_WORLD),
               MPI_SUCCESS);
-          for (const auto present : global_marker_present) {
-            EXPECT_EQ(present, 1);
+          for (std::size_t wall = 0u;
+               wall < contact_walls.size();
+               ++wall) {
+            EXPECT_EQ(global_marker_present[wall], 1);
           }
+          EXPECT_EQ(global_marker_present[4], 1);
+          EXPECT_EQ(global_marker_present[5], 1);
+
+          std::array<unsigned long long, 6> local_marker_face_counts{};
+          const auto owned_physical_boundary_faces =
+              svmp::DistributedTopology::global_boundary_faces(
+                  *mesh, /*owned_only=*/true);
+          for (const auto face : owned_physical_boundary_faces) {
+            const auto marker = mesh->boundary_label(face);
+            for (std::size_t wall = 0u;
+                 wall < contact_walls.size();
+                 ++wall) {
+              if (marker == contact_walls[wall].marker) {
+                ++local_marker_face_counts[wall];
+              }
+            }
+            if (marker == lower_anchor_marker) {
+              ++local_marker_face_counts[4];
+            } else if (marker == upper_anchor_marker) {
+              ++local_marker_face_counts[5];
+            }
+          }
+          std::array<unsigned long long, 6> global_marker_face_counts{};
+          ASSERT_EQ(
+              MPI_Allreduce(local_marker_face_counts.data(),
+                            global_marker_face_counts.data(),
+                            static_cast<int>(
+                                local_marker_face_counts.size()),
+                            MPI_UNSIGNED_LONG_LONG,
+                            MPI_SUM,
+                            MPI_COMM_WORLD),
+              MPI_SUCCESS);
+          const auto expected_contact_wall_face_count =
+              spatial_dimension == 2 ? 4u : 16u;
+          const auto expected_anchor_face_count =
+              spatial_dimension == 2 ? 4u : 8u;
+          for (std::size_t wall = 0u;
+               wall < contact_walls.size();
+               ++wall) {
+            EXPECT_EQ(global_marker_face_counts[wall],
+                      expected_contact_wall_face_count);
+          }
+          EXPECT_EQ(global_marker_face_counts[4],
+                    expected_anchor_face_count);
+          EXPECT_EQ(global_marker_face_counts[5],
+                    expected_anchor_face_count);
 
           const auto& vertex_gids = local_mesh.vertex_gids();
           ASSERT_EQ(vertex_gids.size(), mesh->n_vertices());
+          auto local_max_vertex_gid = svmp::gid_t{-1};
+          for (const auto gid : vertex_gids) {
+            local_max_vertex_gid = std::max(local_max_vertex_gid, gid);
+          }
+          svmp::gid_t global_max_vertex_gid = svmp::gid_t{-1};
+          ASSERT_EQ(MPI_Allreduce(&local_max_vertex_gid,
+                                  &global_max_vertex_gid,
+                                  1,
+                                  MPI_INT64_T,
+                                  MPI_MAX,
+                                  MPI_COMM_WORLD),
+                    MPI_SUCCESS);
+          ASSERT_GE(global_max_vertex_gid, svmp::gid_t{0});
+          const auto global_vertex_count =
+              static_cast<std::size_t>(global_max_vertex_gid + 1);
+          std::vector<int> local_owned_cell_vertex_adjacency(
+              global_vertex_count, 0);
+          for (std::size_t cell = 0u; cell < mesh->n_cells(); ++cell) {
+            const auto local_cell = static_cast<svmp::index_t>(cell);
+            if (mesh->owner_rank_cell(local_cell) != rank) {
+              continue;
+            }
+            for (const auto vertex : local_mesh.cell_vertices(local_cell)) {
+              ASSERT_GE(vertex, svmp::index_t{0});
+              ASSERT_LT(static_cast<std::size_t>(vertex),
+                        vertex_gids.size());
+              const auto gid =
+                  vertex_gids[static_cast<std::size_t>(vertex)];
+              ASSERT_GE(gid, svmp::gid_t{0});
+              ASSERT_LT(static_cast<std::size_t>(gid),
+                        global_vertex_count);
+              local_owned_cell_vertex_adjacency[
+                  static_cast<std::size_t>(gid)] = 1;
+            }
+          }
+          std::vector<int> global_owned_cell_vertex_adjacency(
+              global_vertex_count, 0);
+          ASSERT_LE(global_vertex_count,
+                    static_cast<std::size_t>(
+                        std::numeric_limits<int>::max()));
+          ASSERT_EQ(MPI_Allreduce(
+                        local_owned_cell_vertex_adjacency.data(),
+                        global_owned_cell_vertex_adjacency.data(),
+                        static_cast<int>(global_vertex_count),
+                        MPI_INT,
+                        MPI_SUM,
+                        MPI_COMM_WORLD),
+                    MPI_SUCCESS);
+          auto shared_vertex_gid = svmp::gid_t{-1};
+          for (std::size_t gid = 0u;
+               gid < global_owned_cell_vertex_adjacency.size();
+               ++gid) {
+            if (global_owned_cell_vertex_adjacency[gid] == size) {
+              shared_vertex_gid = static_cast<svmp::gid_t>(gid);
+              break;
+            }
+          }
+          ASSERT_GE(shared_vertex_gid, svmp::gid_t{0});
           auto local_gauge_gid = std::numeric_limits<svmp::gid_t>::max();
           for (std::size_t vertex = 0u;
                vertex < mesh->n_vertices();
@@ -3473,10 +3915,12 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                     MPI_SUCCESS);
           ASSERT_NE(gauge_gid, std::numeric_limits<svmp::gid_t>::max());
           ASSERT_GE(gauge_gid, svmp::gid_t{0});
+          const auto upper_gauge_layer_first_gid =
+              spatial_dimension == 2 ? 20 : 36;
           const auto expected_gauge_gid = static_cast<svmp::gid_t>(
               reverse_vertex_numbering
-                  ? (positive_side ? 0 : 20)
-                  : (positive_side ? 20 : 0));
+                  ? (positive_side ? 0 : upper_gauge_layer_first_gid)
+                  : (positive_side ? upper_gauge_layer_first_gid : 0));
           EXPECT_EQ(gauge_gid, expected_gauge_gid);
 
           const auto mesh_field = svmp::MeshFields::attach_field(
@@ -3490,25 +3934,32 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                   local_mesh, mesh_field);
           ASSERT_NE(mesh_phi, nullptr);
           const auto& coordinates = mesh->X_ref();
-          ASSERT_EQ(coordinates.size(), 2u * mesh->n_vertices());
+          ASSERT_EQ(coordinates.size(),
+                    static_cast<std::size_t>(spatial_dimension) *
+                        mesh->n_vertices());
           for (std::size_t vertex = 0u;
                vertex < mesh->n_vertices();
                ++vertex) {
             mesh_phi[vertex] =
-                coordinates[2u * vertex +
+                coordinates[static_cast<std::size_t>(spatial_dimension) *
+                                vertex +
                             static_cast<std::size_t>(normal_axis)] -
                 normal_offset;
           }
 
+          const auto element_type =
+              spatial_dimension == 2
+                  ? svmp::FE::ElementType::Triangle3
+                  : svmp::FE::ElementType::Tetra4;
           auto scalar_space =
               svmp::FE::spaces::SpaceFactory::create_h1(
-                  svmp::FE::ElementType::Triangle3,
+                  element_type,
                   /*order=*/1);
           auto velocity_space =
               svmp::FE::spaces::SpaceFactory::create_vector_h1(
-                  svmp::FE::ElementType::Triangle3,
+                  element_type,
                   /*order=*/1,
-                  /*components=*/2);
+                  /*components=*/spatial_dimension);
           auto system =
               std::make_unique<svmp::FE::systems::FESystem>(mesh);
           const auto phi = system->addField(
@@ -3536,24 +3987,17 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                                         : lower_anchor_marker,
                       .value = {0.0, 0.0, 0.0},
                   });
-          options.velocity_dirichlet.push_back(
-              channel_ns::IncompressibleNavierStokesVMSOptions::
-                  VelocityDirichletBC{
-                      .boundary_marker = first_wall_marker,
-                      .value = {0.0, 0.0, 0.0},
-                      .active_components = {tangent_axis == 0,
-                                            tangent_axis == 1,
-                                            false},
-                  });
-          options.velocity_dirichlet.push_back(
-              channel_ns::IncompressibleNavierStokesVMSOptions::
-                  VelocityDirichletBC{
-                      .boundary_marker = second_wall_marker,
-                      .value = {0.0, 0.0, 0.0},
-                      .active_components = {tangent_axis == 0,
-                                            tangent_axis == 1,
-                                            false},
-                  });
+          for (const auto& wall : contact_walls) {
+            options.velocity_dirichlet.push_back(
+                channel_ns::IncompressibleNavierStokesVMSOptions::
+                    VelocityDirichletBC{
+                        .boundary_marker = wall.marker,
+                        .value = {0.0, 0.0, 0.0},
+                        .active_components = {wall.axis == 0,
+                                              wall.axis == 1,
+                                              wall.axis == 2},
+                    });
+          }
           options.node_pressure_constraints.id_type =
               channel_ns::IncompressibleNavierStokesVMSOptions::
                   NodePressureConstraintIdType::GlobalVertexGid;
@@ -3597,33 +4041,22 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                       .curvature = 0.0,
                       .use_level_set_curvature = false,
                       .small_cut_aggregation = false,
-                  };
-          free_surface.contact_lines.push_back(
-              ContactLine{
-                  .configuration = ContactLine::DynamicRenE{
-                      .wall_boundary_marker = first_wall_marker,
-                      .contact_line_marker = -1,
-                      .equilibrium_contact_angle_radians = contact_angle,
-                      .wall_normal = {
-                          tangent_axis == 0 ? -1.0 : 0.0,
-                          tangent_axis == 1 ? -1.0 : 0.0,
-                          0.0},
-                      .mobility = 1.0,
-                      .slip_length = 1.0,
-                  }});
-          free_surface.contact_lines.push_back(
-              ContactLine{
-                  .configuration = ContactLine::DynamicRenE{
-                      .wall_boundary_marker = second_wall_marker,
-                      .contact_line_marker = -1,
-                      .equilibrium_contact_angle_radians = contact_angle,
-                      .wall_normal = {
-                          tangent_axis == 0 ? 1.0 : 0.0,
-                          tangent_axis == 1 ? 1.0 : 0.0,
-                          0.0},
-                      .mobility = 1.0,
-                      .slip_length = 1.0,
-                  }});
+          };
+          for (const auto& wall : contact_walls) {
+            free_surface.contact_lines.push_back(
+                ContactLine{
+                    .configuration = ContactLine::DynamicRenE{
+                        .wall_boundary_marker = wall.marker,
+                        .contact_line_marker = -1,
+                        .equilibrium_contact_angle_radians = contact_angle,
+                        .wall_normal = {
+                            wall.axis == 0 ? wall.outward_normal : 0.0,
+                            wall.axis == 1 ? wall.outward_normal : 0.0,
+                            wall.axis == 2 ? wall.outward_normal : 0.0},
+                        .mobility = 1.0,
+                        .slip_length = 1.0,
+                    }});
+          }
           options.free_surface.push_back(std::move(free_surface));
 
           channel_ns::IncompressibleNavierStokesVMSModule module(
@@ -3678,14 +4111,15 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           const auto pressure_offset = system->fieldDofOffset(pressure);
           ASSERT_GE(phi_offset, 0);
           ASSERT_GE(pressure_offset, 0);
-          std::size_t shared_center_vertex_count = 0u;
+          std::size_t shared_ownership_probe_vertex_count = 0u;
           unsigned long long local_pressure_numbering_mismatch_count = 0u;
           for (std::size_t vertex = 0u;
                vertex < mesh->n_vertices();
                ++vertex) {
             const auto normal_coordinate =
                 static_cast<svmp::FE::Real>(
-                    coordinates[2u * vertex +
+                    coordinates[static_cast<std::size_t>(spatial_dimension) *
+                                    vertex +
                                 static_cast<std::size_t>(normal_axis)]);
             const auto signed_coordinate =
                 normal_coordinate - normal_offset;
@@ -3718,22 +4152,31 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                 pressure_dof != pressure_vertex_gid) {
               ++local_pressure_numbering_mismatch_count;
             }
-            const auto logical_tangent_coordinate =
-                normal_axis == 0
-                    ? svmp::FE::Real{3.0} -
-                          static_cast<svmp::FE::Real>(
-                              coordinates[2u * vertex +
-                                          static_cast<std::size_t>(
-                                              tangent_axis)])
-                    : static_cast<svmp::FE::Real>(
-                          coordinates[2u * vertex +
-                                      static_cast<std::size_t>(
-                                          tangent_axis)]);
-            if (std::abs(normal_coordinate - svmp::FE::Real{0.4}) <=
-                    coordinate_tolerance &&
-                std::abs(logical_tangent_coordinate -
-                         svmp::FE::Real{1.55}) <= coordinate_tolerance) {
-              ++shared_center_vertex_count;
+            bool is_ownership_probe_vertex =
+                pressure_vertex_gid == shared_vertex_gid;
+            if (spatial_dimension == 2) {
+              const auto logical_tangent_coordinate =
+                  normal_axis == 0
+                      ? svmp::FE::Real{3.0} -
+                            static_cast<svmp::FE::Real>(
+                                coordinates[
+                                    static_cast<std::size_t>(
+                                        spatial_dimension) *
+                                        vertex +
+                                    static_cast<std::size_t>(tangent_axis)])
+                      : static_cast<svmp::FE::Real>(
+                            coordinates[
+                                static_cast<std::size_t>(spatial_dimension) *
+                                    vertex +
+                                static_cast<std::size_t>(tangent_axis)]);
+              is_ownership_probe_vertex =
+                  std::abs(normal_coordinate - svmp::FE::Real{0.4}) <=
+                      coordinate_tolerance &&
+                  std::abs(logical_tangent_coordinate -
+                           svmp::FE::Real{1.55}) <= coordinate_tolerance;
+            }
+            if (is_ownership_probe_vertex) {
+              ++shared_ownership_probe_vertex_count;
               EXPECT_EQ(
                   pressure_dofs.getDofMap().getDofOwner(pressure_dof),
                   highest_rank_dof_ownership ? 1 : 0);
@@ -3747,7 +4190,10 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                   (normal_coordinate - gauge_normal_coordinate);
             }
           }
-          EXPECT_EQ(shared_center_vertex_count, 1u);
+          EXPECT_EQ(shared_ownership_probe_vertex_count, 1u);
+          if (spatial_dimension == 3) {
+            ++three_dimensional_shared_vertex_case_count;
+          }
           unsigned long long pressure_numbering_mismatch_count = 0u;
           ASSERT_EQ(MPI_Allreduce(
                         &local_pressure_numbering_mismatch_count,
@@ -3761,6 +4207,9 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
             EXPECT_EQ(pressure_numbering_mismatch_count, 0u);
           } else if (pressure_numbering_mismatch_count > 0u) {
             ++owner_contiguous_nonidentity_case_count;
+            if (spatial_dimension == 3) {
+              ++three_dimensional_owner_contiguous_nonidentity_case_count;
+            }
           }
           ASSERT_EQ(MPI_Allreduce(local_current.data(),
                                   current.data(),
@@ -3825,7 +4274,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           sim.fe_system = std::move(system);
           sim.backend =
               std::make_unique<svmp::FE::backends::FsilsFactory>(
-                  /*dofs_per_node=*/4,
+                  /*dofs_per_node=*/spatial_dimension + 2,
                   sim.fe_system->dofPermutation(),
                   MPI_COMM_WORLD);
           ASSERT_NE(sim.backend, nullptr);
@@ -3882,6 +4331,25 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           EXPECT_EQ(global_owned_row_count,
                     static_cast<unsigned long long>(solution_size));
 
+          std::ostringstream contact_wall_markers_xml;
+          std::ostringstream contact_wall_normals_xml;
+          for (std::size_t wall_index = 0u;
+               wall_index < contact_walls.size();
+               ++wall_index) {
+            if (wall_index > 0u) {
+              contact_wall_markers_xml << ';';
+              contact_wall_normals_xml << "; ";
+            }
+            const auto& wall = contact_walls[wall_index];
+            contact_wall_markers_xml << wall.marker;
+            for (int component = 0; component < 3; ++component) {
+              if (component > 0) {
+                contact_wall_normals_xml << ' ';
+              }
+              contact_wall_normals_xml
+                  << (component == wall.axis ? wall.outward_normal : 0.0);
+            }
+          }
           std::ostringstream parameter_xml;
           parameter_xml << std::setprecision(17) << R"xml(
 <svMultiPhysicsFile>
@@ -3918,11 +4386,11 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       <Surface_tension_form>SurfaceStress</Surface_tension_form>
       <Contact_line_model>DynamicContactAngle</Contact_line_model>
       <Contact_angle_degrees>90.0</Contact_angle_degrees>
-      <Contact_line_wall_markers>7251;7252</Contact_line_wall_markers>
+      <Contact_line_wall_markers>)xml"
+                        << contact_wall_markers_xml.str()
+                        << R"xml(</Contact_line_wall_markers>
       <Contact_line_wall_normals>)xml"
-                        << (tangent_axis == 0
-                                ? "-1.0 0.0 0.0; 1.0 0.0 0.0"
-                                : "0.0 -1.0 0.0; 0.0 1.0 0.0")
+                        << contact_wall_normals_xml.str()
                         << R"xml(</Contact_line_wall_normals>
       <Contact_line_mobility>1.0</Contact_line_mobility>
       <Wall_slip_model>Navier</Wall_slip_model>
@@ -3959,13 +4427,16 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
               sim, current, initial_functionals);
           ASSERT_TRUE(
               initial_functionals.front().active_volume_energy.has_value());
+          const auto tangent_measure =
+              spatial_dimension == 2 ? svmp::FE::Real{3.0}
+                                     : svmp::FE::Real{6.0};
           const auto expected_volume =
-              svmp::FE::Real{3.0} *
+              tangent_measure *
               (positive_side
                    ? svmp::FE::Real{1.0} - normal_offset
                    : normal_offset);
           const auto active_first_moment =
-              svmp::FE::Real{1.5} *
+              svmp::FE::Real{0.5} * tangent_measure *
               (positive_side
                    ? svmp::FE::Real{1.0} -
                          normal_offset * normal_offset
@@ -3978,7 +4449,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
               1.0e-13);
           EXPECT_NEAR(
               initial_functionals.front().state.liquid_gas_surface_energy,
-              svmp::FE::Real{3.0},
+              tangent_measure,
               1.0e-13);
           EXPECT_NEAR(initial_functionals.front().state.young_wall_energy,
                       svmp::FE::Real{0.0},
@@ -4126,7 +4597,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
               expected_volume);
           const auto surface_energy_error = std::abs(
               final_functionals.front().state.liquid_gas_surface_energy -
-              svmp::FE::Real{3.0});
+              tangent_measure);
           EXPECT_LE(gravitational_energy_error, 2.0e-10);
           EXPECT_LE(volume_error, 1.0e-11);
           EXPECT_LE(surface_energy_error, 2.0e-10);
@@ -4200,8 +4671,16 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
     }
   }
 
-  EXPECT_EQ(case_count, 384u);
-  EXPECT_GT(owner_contiguous_nonidentity_case_count, 0u);
+  EXPECT_EQ(two_dimensional_case_count, 384u);
+  EXPECT_EQ(three_dimensional_case_count, 576u);
+  EXPECT_EQ(case_count, 960u);
+  EXPECT_EQ(owner_contiguous_nonidentity_case_count,
+            case_count / fe_global_numbering_mode_count);
+  EXPECT_EQ(three_dimensional_owner_contiguous_nonidentity_case_count,
+            three_dimensional_case_count /
+                fe_global_numbering_mode_count);
+  EXPECT_EQ(three_dimensional_shared_vertex_case_count,
+            three_dimensional_case_count);
   RecordProperty("wp4_hydrostatic_mpi_rank_count", size);
   RecordProperty("wp4_hydrostatic_mpi_partition_layout_count",
                  partition_layout_count);
@@ -4214,13 +4693,38 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   RecordProperty(
       "wp4_hydrostatic_mpi_owner_contiguous_nonidentity_case_count",
       owner_contiguous_nonidentity_case_count);
-  RecordProperty("wp4_hydrostatic_mpi_spatial_dimension", 2);
-  RecordProperty("wp4_hydrostatic_mpi_coordinate_direction_count", 2);
-  RecordProperty("wp4_hydrostatic_mpi_wall_orientation_count", 2);
+  RecordProperty(
+      "wp4_hydrostatic_mpi_three_dimensional_partition_layout_count",
+      partition_layout_count);
+  RecordProperty(
+      "wp4_hydrostatic_mpi_three_dimensional_global_vertex_numbering_count",
+      vertex_numbering_count);
+  RecordProperty(
+      "wp4_hydrostatic_mpi_three_dimensional_dof_ownership_strategy_count",
+      dof_ownership_strategy_count);
+  RecordProperty(
+      "wp4_hydrostatic_mpi_three_dimensional_fe_global_numbering_mode_count",
+      fe_global_numbering_mode_count);
+  RecordProperty(
+      "wp4_hydrostatic_mpi_three_dimensional_owner_contiguous_nonidentity_"
+      "case_count",
+      three_dimensional_owner_contiguous_nonidentity_case_count);
+  RecordProperty(
+      "wp4_hydrostatic_mpi_three_dimensional_shared_vertex_case_count",
+      three_dimensional_shared_vertex_case_count);
+  RecordProperty("wp4_hydrostatic_mpi_spatial_dimension", 3);
+  RecordProperty("wp4_hydrostatic_mpi_spatial_dimension_count", 2);
+  RecordProperty("wp4_hydrostatic_mpi_coordinate_direction_count", 3);
+  RecordProperty("wp4_hydrostatic_mpi_dimension_coordinate_pair_count", 5);
+  RecordProperty("wp4_hydrostatic_mpi_wall_orientation_count", 3);
   RecordProperty("wp4_hydrostatic_mpi_active_side_count", 2);
   RecordProperty("wp4_hydrostatic_mpi_cut_offset_count",
                  normal_offsets.size());
   RecordProperty("wp4_hydrostatic_mpi_gravity_direction_count", 2);
+  RecordProperty("wp4_hydrostatic_mpi_two_dimensional_case_count",
+                 two_dimensional_case_count);
+  RecordProperty("wp4_hydrostatic_mpi_three_dimensional_case_count",
+                 three_dimensional_case_count);
   RecordProperty("wp4_hydrostatic_mpi_fixed_zero_pressure_gauge_case_count",
                  case_count);
   RecordProperty("wp4_hydrostatic_mpi_matrix_case_count", case_count);
