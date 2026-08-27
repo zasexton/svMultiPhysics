@@ -2323,9 +2323,12 @@ PressureRepresentabilityLsqrResult solvePressureRepresentabilityLsqr(
     const double absolute_stationarity_tolerance =
         100.0 * std::numeric_limits<Real>::epsilon() *
         std::max(1.0, initial_normal_residual_norm);
+    // Keep normal-equation stationarity materially tighter than the primal
+    // representability gates because mixed-pair conditioning can amplify the
+    // remaining normal residual into a larger primal distance.
     const double stationarity_tolerance =
         absolute_stationarity_tolerance +
-        1.0e-10 * initial_normal_residual_norm;
+        1.0e-12 * initial_normal_residual_norm;
     const double residual_roundoff_floor =
         100.0 * std::numeric_limits<Real>::epsilon() *
         std::max(1.0, load_norm);

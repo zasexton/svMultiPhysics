@@ -264,14 +264,20 @@ std::shared_ptr<svmp::Mesh> makeWorkflowFlatCapillaryFanMesh(int normal_axis)
   return svmp::create_mesh(std::move(base));
 }
 
-std::shared_ptr<svmp::Mesh> makeWorkflowHydrostaticPressureMesh()
+std::shared_ptr<svmp::Mesh> makeWorkflowHydrostaticPressureMesh(
+    int normal_axis)
 {
+  if (normal_axis != 0 && normal_axis != 1) {
+    throw std::invalid_argument(
+        "hydrostatic pressure mesh normal axis must be zero or one");
+  }
   auto base = std::make_shared<svmp::MeshBase>();
 
-  // Use several wet vertex layers and mildly irregular interior x coordinates
-  // so the fixed-gauge P1 pressure field has more admissible velocity-test
-  // rows than pressure unknowns and no fan-mesh checkerboard mode.  The y rows
-  // remain horizontal so p=rho*g*y is represented exactly.
+  // Use several active vertex layers and mildly irregular interior tangent
+  // coordinates so the fixed-gauge P1 pressure field has more admissible
+  // velocity-test rows than pressure unknowns and no fan-mesh checkerboard
+  // mode.  The coordinate layers remain aligned with the selected normal so
+  // the hydrostatic pressure field is represented exactly.
   constexpr std::size_t columns = 5u;
   const std::array<std::array<svmp::real_t, columns>, 5> x_rows{{
       {{0.0, 0.75, 1.50, 2.25, 3.0}},
@@ -289,6 +295,14 @@ std::shared_ptr<svmp::Mesh> makeWorkflowHydrostaticPressureMesh()
     for (std::size_t column = 0u; column < columns; ++column) {
       x_ref.push_back(x_rows[row][column]);
       x_ref.push_back(y_rows[row]);
+    }
+  }
+  if (normal_axis == 0) {
+    for (std::size_t vertex = 0u; vertex < x_ref.size() / 2u; ++vertex) {
+      const auto tangent_coordinate = x_ref[2u * vertex];
+      const auto normal_coordinate = x_ref[2u * vertex + 1u];
+      x_ref[2u * vertex] = normal_coordinate;
+      x_ref[2u * vertex + 1u] = 3.0 - tangent_coordinate;
     }
   }
 
@@ -5771,9 +5785,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
   constexpr int right_wall_marker = 7202;
   constexpr int lower_anchor_marker = 7203;
   constexpr int upper_anchor_marker = 7204;
-  constexpr int normal_axis = 1;
-  constexpr int tangent_axis = 0;
-  constexpr svmp::FE::Real normal_offset = 0.5;
   constexpr svmp::FE::Real density = 1.25;
   constexpr svmp::FE::Real gravity_magnitude = 0.4;
   constexpr svmp::FE::Real pi =
@@ -5781,6 +5792,34 @@ TEST(ApplicationDriverLevelSetWorkflows,
   constexpr svmp::FE::Real contact_angle = pi / svmp::FE::Real{2.0};
   WorkflowScopedEnvVar conservative_balance_diagnostic(
       "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", std::string("1"));
+
+  struct HydrostaticCase {
+    int normal_axis = 0;
+    bool positive_side = false;
+    svmp::FE::Real normal_offset = 0.0;
+    svmp::FE::Real gravity_direction = 0.0;
+  };
+  constexpr std::array<svmp::FE::Real, 3> normal_offsets{
+      svmp::FE::Real{0.35},
+      svmp::FE::Real{0.5},
+      svmp::FE::Real{0.65},
+  };
+  std::vector<HydrostaticCase> hydrostatic_cases;
+  hydrostatic_cases.reserve(24u);
+  for (int normal_axis = 0; normal_axis < 2; ++normal_axis) {
+    for (const bool positive_side : {false, true}) {
+      for (const auto normal_offset : normal_offsets) {
+        for (const svmp::FE::Real gravity_direction :
+             {svmp::FE::Real{-1.0}, svmp::FE::Real{1.0}}) {
+          hydrostatic_cases.push_back(HydrostaticCase{
+              normal_axis,
+              positive_side,
+              normal_offset,
+              gravity_direction});
+        }
+      }
+    }
+  }
 
   std::size_t case_count = 0u;
   svmp::FE::Real maximum_pressure_residual = 0.0;
@@ -5792,16 +5831,27 @@ TEST(ApplicationDriverLevelSetWorkflows,
   svmp::FE::Real maximum_gravitational_energy_error = 0.0;
   svmp::FE::Real maximum_phi_update = 0.0;
 
-  for (const svmp::FE::Real gravity_direction :
-       {svmp::FE::Real{-1.0}, svmp::FE::Real{1.0}}) {
+  for (const auto& hydrostatic_case : hydrostatic_cases) {
+    const auto normal_axis = hydrostatic_case.normal_axis;
+    const auto tangent_axis = 1 - normal_axis;
+    const auto positive_side = hydrostatic_case.positive_side;
+    const auto normal_offset = hydrostatic_case.normal_offset;
+    const auto gravity_direction = hydrostatic_case.gravity_direction;
     const auto gravity = gravity_direction * gravity_magnitude;
-    const auto external_pressure = density * gravity * normal_offset;
+    const auto gauge_normal_coordinate =
+        positive_side ? svmp::FE::Real{1.0} : svmp::FE::Real{0.0};
+    const auto external_pressure =
+        density * gravity * (normal_offset - gauge_normal_coordinate);
     SCOPED_TRACE(::testing::Message()
-                 << "gravity=" << gravity
+                 << "normal_axis=" << normal_axis
+                 << " active_side="
+                 << (positive_side ? "positive" : "negative")
+                 << " normal_offset=" << normal_offset
+                 << " gravity=" << gravity
                  << " external_pressure=" << external_pressure);
     ++case_count;
 
-    auto mesh = makeWorkflowHydrostaticPressureMesh();
+    auto mesh = makeWorkflowHydrostaticPressureMesh(normal_axis);
     auto& local_mesh = mesh->local_mesh();
     std::array<std::size_t, 4> marker_counts{};
     constexpr svmp::FE::Real coordinate_tolerance = 1.0e-12;
@@ -5850,6 +5900,17 @@ TEST(ApplicationDriverLevelSetWorkflows,
     EXPECT_EQ(marker_counts[2], 4u);
     EXPECT_EQ(marker_counts[3], 4u);
 
+    std::optional<svmp::FE::GlobalIndex> gauge_vertex_id;
+    for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
+      const auto point = workflowVertexPoint(*mesh, vertex);
+      if (std::abs(point[normal_axis] - gauge_normal_coordinate) <=
+          coordinate_tolerance) {
+        gauge_vertex_id = static_cast<svmp::FE::GlobalIndex>(vertex);
+        break;
+      }
+    }
+    ASSERT_TRUE(gauge_vertex_id.has_value());
+
     const auto mesh_field =
         svmp::MeshFields::attach_field(local_mesh,
                                        svmp::EntityKind::Vertex,
@@ -5892,7 +5953,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
     options.velocity_dirichlet.push_back(
         channel_ns::IncompressibleNavierStokesVMSOptions::
             VelocityDirichletBC{
-                .boundary_marker = lower_anchor_marker,
+                .boundary_marker = positive_side ? upper_anchor_marker
+                                                 : lower_anchor_marker,
                 .value = {0.0, 0.0, 0.0},
             });
     options.velocity_dirichlet.push_back(
@@ -5900,14 +5962,18 @@ TEST(ApplicationDriverLevelSetWorkflows,
             VelocityDirichletBC{
                 .boundary_marker = left_wall_marker,
                 .value = {0.0, 0.0, 0.0},
-                .active_components = {true, false, false},
+                .active_components = {tangent_axis == 0,
+                                      tangent_axis == 1,
+                                      false},
             });
     options.velocity_dirichlet.push_back(
         channel_ns::IncompressibleNavierStokesVMSOptions::
             VelocityDirichletBC{
                 .boundary_marker = right_wall_marker,
                 .value = {0.0, 0.0, 0.0},
-                .active_components = {true, false, false},
+                .active_components = {tangent_axis == 0,
+                                      tangent_axis == 1,
+                                      false},
             });
     options.node_pressure_constraints.id_type =
         channel_ns::IncompressibleNavierStokesVMSOptions::
@@ -5915,7 +5981,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
     options.node_pressure_constraints.values.push_back(
         channel_ns::IncompressibleNavierStokesVMSOptions::
             NodePressureConstraint{
-                .node_id = 0,
+                .node_id = *gauge_vertex_id,
                 .pressure = 0.0,
             });
 
@@ -5933,7 +5999,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
                     "physical_hydrostatic_fixed_gauge",
                 .generated_interface_geometry = "LinearCorner",
                 .active_domain =
-                    channel_ns::FreeSurfaceActiveDomain::LevelSetNegative,
+                    positive_side
+                        ? channel_ns::FreeSurfaceActiveDomain::LevelSetPositive
+                        : channel_ns::FreeSurfaceActiveDomain::LevelSetNegative,
                 .active_domain_method =
                     channel_ns::FreeSurfaceActiveDomainMethod::CutVolume,
                 .external_pressure = external_pressure,
@@ -5949,7 +6017,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
                         .wall_boundary_marker = left_wall_marker,
                         .contact_line_marker = -1,
                         .equilibrium_contact_angle_radians = contact_angle,
-                        .wall_normal = {-1.0, 0.0, 0.0},
+                        .wall_normal = {
+                            tangent_axis == 0 ? -1.0 : 0.0,
+                            tangent_axis == 1 ? -1.0 : 0.0,
+                            0.0},
                         .mobility = 1.0,
                         .slip_length = 1.0,
                     }});
@@ -5958,7 +6029,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
                         .wall_boundary_marker = right_wall_marker,
                         .contact_line_marker = -1,
                         .equilibrium_contact_angle_radians = contact_angle,
-                        .wall_normal = {1.0, 0.0, 0.0},
+                        .wall_normal = {
+                            tangent_axis == 0 ? 1.0 : 0.0,
+                            tangent_axis == 1 ? 1.0 : 0.0,
+                            0.0},
                         .mobility = 1.0,
                         .slip_length = 1.0,
                     }});
@@ -6042,7 +6116,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Interface_marker>720</Interface_marker>
       <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
-      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain>)xml"
+                  << (positive_side ? "LevelSetPositive" : "LevelSetNegative")
+                  << R"xml(</Active_domain>
       <Active_domain_method>CutVolume</Active_domain_method>
       <Small_cut_aggregation>false</Small_cut_aggregation>
       <External_pressure>)xml"
@@ -6052,7 +6128,11 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Contact_line_model>DynamicContactAngle</Contact_line_model>
       <Contact_angle_degrees>90.0</Contact_angle_degrees>
       <Contact_line_wall_markers>7201;7202</Contact_line_wall_markers>
-      <Contact_line_wall_normals>-1.0 0.0 0.0; 1.0 0.0 0.0</Contact_line_wall_normals>
+      <Contact_line_wall_normals>)xml"
+                  << (tangent_axis == 0
+                          ? "-1.0 0.0 0.0; 1.0 0.0 0.0"
+                          : "0.0 -1.0 0.0; 0.0 1.0 0.0")
+                  << R"xml(</Contact_line_wall_normals>
       <Contact_line_mobility>1.0</Contact_line_mobility>
       <Wall_slip_model>Navier</Wall_slip_model>
       <Wall_slip_length>1.0</Wall_slip_length>
@@ -6082,10 +6162,17 @@ TEST(ApplicationDriverLevelSetWorkflows,
     attachAcceptedFreeSurfaceActiveVolumeEnergies(
         sim, current, initial_functionals);
     ASSERT_TRUE(initial_functionals.front().active_volume_energy.has_value());
-    const auto expected_volume = svmp::FE::Real{3.0} * normal_offset;
+    const auto expected_volume =
+        svmp::FE::Real{3.0} *
+        (positive_side ? svmp::FE::Real{1.0} - normal_offset
+                       : normal_offset);
+    const auto active_first_moment =
+        svmp::FE::Real{1.5} *
+        (positive_side
+             ? svmp::FE::Real{1.0} - normal_offset * normal_offset
+             : normal_offset * normal_offset);
     const auto expected_gravitational_energy =
-        -density * gravity * svmp::FE::Real{1.5} *
-        normal_offset * normal_offset;
+        -density * gravity * active_first_moment;
     EXPECT_NEAR(initial_functionals.front().state.owned_liquid_volume,
                 expected_volume,
                 1.0e-13);
@@ -6106,7 +6193,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
       const auto normal_coordinate =
           workflowVertexPoint(*mesh, vertex)[normal_axis];
       expected_pressure_vertex_values[vertex] =
-          density * gravity * normal_coordinate;
+          density * gravity *
+          (normal_coordinate - gauge_normal_coordinate);
     }
     const auto analytic_pressure_coefficients = projectWorkflowVertexValues(
         *sim.fe_system,
@@ -6257,8 +6345,12 @@ TEST(ApplicationDriverLevelSetWorkflows,
     maximum_phi_update = std::max(maximum_phi_update, phi_update);
   }
 
-  EXPECT_EQ(case_count, 2u);
+  EXPECT_EQ(case_count, 24u);
   RecordProperty("wp4_hydrostatic_spatial_dimension", 2);
+  RecordProperty("wp4_hydrostatic_coordinate_direction_count", 2);
+  RecordProperty("wp4_hydrostatic_wall_orientation_count", 2);
+  RecordProperty("wp4_hydrostatic_active_side_count", 2);
+  RecordProperty("wp4_hydrostatic_cut_offset_count", normal_offsets.size());
   RecordProperty("wp4_hydrostatic_gravity_direction_count", 2);
   RecordProperty("wp4_hydrostatic_fixed_zero_pressure_gauge_case_count",
                  case_count);
