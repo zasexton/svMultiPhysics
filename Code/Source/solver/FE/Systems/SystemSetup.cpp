@@ -1865,18 +1865,45 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
         return fail("representative field node count mismatch");
     }
 
-    std::vector<int> node_owner(static_cast<std::size_t>(n_nodes), -1);
+    if (n_nodes > static_cast<GlobalIndex>(std::numeric_limits<int>::max())) {
+        return fail("n_nodes exceeds MPI int count range");
+    }
+    std::vector<int> local_node_owner(static_cast<std::size_t>(n_nodes), -1);
+    std::vector<int> local_node_owned_count(static_cast<std::size_t>(n_nodes), 0);
     for (GlobalIndex node = 0; node < n_nodes; ++node) {
         const GlobalIndex fe0 = field_map.componentToGlobal(rep_field_idx, 0, node);
         if (fe0 < 0 || fe0 >= total_dofs) {
             return fail("representative componentToGlobal(rep_field,0,node) out of range");
         }
 
-        const int owner = dof_handler.getDofMap().getDofOwner(fe0);
-        if (owner < 0 || owner >= world_size) {
+        if (dof_handler.getDofMap().isOwnedDof(fe0)) {
+            local_node_owner[static_cast<std::size_t>(node)] = my_rank;
+            local_node_owned_count[static_cast<std::size_t>(node)] = 1;
+        }
+    }
+
+    std::vector<int> node_owner(static_cast<std::size_t>(n_nodes), -1);
+    std::vector<int> node_owned_count(static_cast<std::size_t>(n_nodes), 0);
+    MPI_Allreduce(local_node_owner.data(),
+                  node_owner.data(),
+                  static_cast<int>(n_nodes),
+                  MPI_INT,
+                  MPI_MAX,
+                  dof_options.mpi_comm);
+    MPI_Allreduce(local_node_owned_count.data(),
+                  node_owned_count.data(),
+                  static_cast<int>(n_nodes),
+                  MPI_INT,
+                  MPI_SUM,
+                  dof_options.mpi_comm);
+    for (GlobalIndex node = 0; node < n_nodes; ++node) {
+        const auto index = static_cast<std::size_t>(node);
+        if (node_owned_count[index] != 1) {
+            return fail("representative dof does not have exactly one owner");
+        }
+        if (node_owner[index] < 0 || node_owner[index] >= world_size) {
             return fail("representative dof owner outside [0,world_size)");
         }
-        node_owner[static_cast<std::size_t>(node)] = owner;
     }
 
     auto decode_node_comp = [&](const dofs::FieldDescriptor& field,

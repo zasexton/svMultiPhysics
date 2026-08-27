@@ -3259,7 +3259,10 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   constexpr std::size_t partition_layout_count = 2u;
   constexpr std::size_t vertex_numbering_count = 2u;
   constexpr std::size_t normal_axis_count = 2u;
+  constexpr std::size_t dof_ownership_strategy_count = 2u;
+  constexpr std::size_t fe_global_numbering_mode_count = 2u;
   std::size_t case_count = 0u;
+  std::size_t owner_contiguous_nonidentity_case_count = 0u;
   svmp::FE::Real maximum_pressure_residual = 0.0;
   svmp::FE::Real maximum_pressure_relative_distance = 0.0;
   svmp::FE::Real maximum_exact_field_production_residual = 0.0;
@@ -3272,7 +3275,8 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   svmp::FE::Real maximum_phi_update = 0.0;
 
   const auto mesh_variant_count =
-      partition_layout_count * vertex_numbering_count * normal_axis_count;
+      partition_layout_count * vertex_numbering_count * normal_axis_count *
+      dof_ownership_strategy_count * fe_global_numbering_mode_count;
   for (std::size_t mesh_variant = 0u;
        mesh_variant < mesh_variant_count;
        ++mesh_variant) {
@@ -3281,8 +3285,18 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
     const bool reverse_vertex_numbering =
         ((mesh_variant / normal_axis_count) % vertex_numbering_count) != 0u;
     const bool column_major_cells =
+        ((mesh_variant /
+          (normal_axis_count * vertex_numbering_count)) %
+         partition_layout_count) != 0u;
+    const bool highest_rank_dof_ownership =
+        ((mesh_variant /
+          (normal_axis_count * vertex_numbering_count *
+           partition_layout_count)) %
+         dof_ownership_strategy_count) != 0u;
+    const bool dense_global_dof_numbering =
         (mesh_variant /
-         (normal_axis_count * vertex_numbering_count)) != 0u;
+         (normal_axis_count * vertex_numbering_count *
+          partition_layout_count * dof_ownership_strategy_count)) != 0u;
     const int tangent_axis = 1 - normal_axis;
     for (const bool positive_side : {false, true}) {
       const auto gauge_normal_coordinate =
@@ -3302,6 +3316,12 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                        << " vertex_numbering="
                        << (reverse_vertex_numbering ? "reversed"
                                                     : "forward")
+                       << " dof_ownership="
+                       << (highest_rank_dof_ownership ? "highest-rank"
+                                                      : "lowest-rank")
+                       << " fe_global_numbering="
+                       << (dense_global_dof_numbering ? "dense-global-ids"
+                                                      : "owner-contiguous")
                        << " normal_axis=" << normal_axis
                        << " active_side="
                        << (positive_side ? "positive" : "negative")
@@ -3623,9 +3643,13 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           setup_options.assembly_options.deterministic = true;
           setup_options.assembly_options.overlap_communication = false;
           setup_options.dof_options.global_numbering =
-              svmp::FE::dofs::GlobalNumberingMode::OwnerContiguous;
+              dense_global_dof_numbering
+                  ? svmp::FE::dofs::GlobalNumberingMode::DenseGlobalIds
+                  : svmp::FE::dofs::GlobalNumberingMode::OwnerContiguous;
           setup_options.dof_options.ownership =
-              svmp::FE::dofs::OwnershipStrategy::LowestRank;
+              highest_rank_dof_ownership
+                  ? svmp::FE::dofs::OwnershipStrategy::HighestRank
+                  : svmp::FE::dofs::OwnershipStrategy::LowestRank;
           setup_options.dof_options.my_rank = rank;
           setup_options.dof_options.world_size = size;
           setup_options.dof_options.mpi_comm = MPI_COMM_WORLD;
@@ -3654,6 +3678,8 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           const auto pressure_offset = system->fieldDofOffset(pressure);
           ASSERT_GE(phi_offset, 0);
           ASSERT_GE(pressure_offset, 0);
+          std::size_t shared_center_vertex_count = 0u;
+          unsigned long long local_pressure_numbering_mismatch_count = 0u;
           for (std::size_t vertex = 0u;
                vertex < mesh->n_vertices();
                ++vertex) {
@@ -3683,6 +3709,35 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
             ASSERT_EQ(pressure_vertex_dofs.size(), 1u);
             const auto pressure_dof = pressure_vertex_dofs.front();
             ASSERT_GE(pressure_dof, 0);
+            const auto pressure_vertex_gid = static_cast<svmp::FE::GlobalIndex>(
+                vertex_gids[vertex]);
+            if (dense_global_dof_numbering) {
+              EXPECT_EQ(pressure_dof, pressure_vertex_gid);
+            }
+            if (pressure_dofs.getDofMap().isOwnedDof(pressure_dof) &&
+                pressure_dof != pressure_vertex_gid) {
+              ++local_pressure_numbering_mismatch_count;
+            }
+            const auto logical_tangent_coordinate =
+                normal_axis == 0
+                    ? svmp::FE::Real{3.0} -
+                          static_cast<svmp::FE::Real>(
+                              coordinates[2u * vertex +
+                                          static_cast<std::size_t>(
+                                              tangent_axis)])
+                    : static_cast<svmp::FE::Real>(
+                          coordinates[2u * vertex +
+                                      static_cast<std::size_t>(
+                                          tangent_axis)]);
+            if (std::abs(normal_coordinate - svmp::FE::Real{0.4}) <=
+                    coordinate_tolerance &&
+                std::abs(logical_tangent_coordinate -
+                         svmp::FE::Real{1.55}) <= coordinate_tolerance) {
+              ++shared_center_vertex_count;
+              EXPECT_EQ(
+                  pressure_dofs.getDofMap().getDofOwner(pressure_dof),
+                  highest_rank_dof_ownership ? 1 : 0);
+            }
             if (pressure_dofs.getDofMap().isOwnedDof(pressure_dof)) {
               const auto index =
                   static_cast<std::size_t>(pressure_offset + pressure_dof);
@@ -3691,6 +3746,21 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                   density * gravity *
                   (normal_coordinate - gauge_normal_coordinate);
             }
+          }
+          EXPECT_EQ(shared_center_vertex_count, 1u);
+          unsigned long long pressure_numbering_mismatch_count = 0u;
+          ASSERT_EQ(MPI_Allreduce(
+                        &local_pressure_numbering_mismatch_count,
+                        &pressure_numbering_mismatch_count,
+                        1,
+                        MPI_UNSIGNED_LONG_LONG,
+                        MPI_SUM,
+                        MPI_COMM_WORLD),
+                    MPI_SUCCESS);
+          if (dense_global_dof_numbering) {
+            EXPECT_EQ(pressure_numbering_mismatch_count, 0u);
+          } else if (pressure_numbering_mismatch_count > 0u) {
+            ++owner_contiguous_nonidentity_case_count;
           }
           ASSERT_EQ(MPI_Allreduce(local_current.data(),
                                   current.data(),
@@ -4130,12 +4200,20 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
     }
   }
 
-  EXPECT_EQ(case_count, 96u);
+  EXPECT_EQ(case_count, 384u);
+  EXPECT_GT(owner_contiguous_nonidentity_case_count, 0u);
   RecordProperty("wp4_hydrostatic_mpi_rank_count", size);
   RecordProperty("wp4_hydrostatic_mpi_partition_layout_count",
                  partition_layout_count);
   RecordProperty("wp4_hydrostatic_mpi_global_vertex_numbering_count",
                  vertex_numbering_count);
+  RecordProperty("wp4_hydrostatic_mpi_dof_ownership_strategy_count",
+                 dof_ownership_strategy_count);
+  RecordProperty("wp4_hydrostatic_mpi_fe_global_numbering_mode_count",
+                 fe_global_numbering_mode_count);
+  RecordProperty(
+      "wp4_hydrostatic_mpi_owner_contiguous_nonidentity_case_count",
+      owner_contiguous_nonidentity_case_count);
   RecordProperty("wp4_hydrostatic_mpi_spatial_dimension", 2);
   RecordProperty("wp4_hydrostatic_mpi_coordinate_direction_count", 2);
   RecordProperty("wp4_hydrostatic_mpi_wall_orientation_count", 2);
