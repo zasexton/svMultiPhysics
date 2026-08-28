@@ -1673,12 +1673,31 @@ def sessile_contact_wall_spec(wall_face: str) -> dict[str, Any]:
             "wall_tangent": (0.0, 1.0, 0.0),
             "effective_direction": "1 0",
         },
+        "wall_right": {
+            "wall_face": "wall_right",
+            "wall_axis": 0,
+            "wall_coordinate": 1.0,
+            "wall_normal": (1.0, 0.0, 0.0),
+            "wall_tangent_axis": 1,
+            "wall_tangent": (0.0, 1.0, 0.0),
+            "effective_direction": "1 0",
+        },
+        "wall_top": {
+            "wall_face": "wall_top",
+            "wall_axis": 1,
+            "wall_coordinate": 1.0,
+            "wall_normal": (0.0, 1.0, 0.0),
+            "wall_tangent_axis": 0,
+            "wall_tangent": (1.0, 0.0, 0.0),
+            "effective_direction": "0 1",
+        },
     }
     try:
         return dict(specs[wall_face])
     except KeyError as exc:
         raise ValueError(
-            "synthetic sessile contact wall must be wall_bottom or wall_left"
+            "synthetic sessile contact wall must be one of wall_bottom, "
+            "wall_left, wall_right, or wall_top"
         ) from exc
 
 
@@ -1776,6 +1795,11 @@ def configure_sessile_solver_xml(case_dir: Path,
          if bc.attrib.get("name") == wall_spec["wall_face"]),
         None,
     )
+    if contact_wall is None and wall_spec["wall_face"] == "wall_top":
+        contact_wall = ET.SubElement(
+            fluid, "Add_BC", {"name": wall_spec["wall_face"]})
+        set_text(contact_wall, "Type", "Dir")
+        set_text(contact_wall, "Value", "0.0")
     if contact_wall is None:
         raise ValueError(
             f"synthetic sessile case is missing {wall_spec['wall_face']}")
@@ -1839,7 +1863,8 @@ def write_sessile2d_case(case_dir: Path,
                          slip_length: float,
                          dynamic: bool,
                          wall_face: str = "wall_bottom",
-                         contact_line_model: str = "dynamic") -> None:
+                         contact_line_model: str = "dynamic",
+                         level_set_positive_scale: float = 1.0) -> None:
     if radius <= 0.0 or surface_tension <= 0.0:
         raise ValueError("sessile radius and surface tension must be positive")
     if mobility <= 0.0 or slip_length <= 0.0:
@@ -1850,6 +1875,9 @@ def write_sessile2d_case(case_dir: Path,
     if dynamic and contact_line_model != "dynamic":
         raise ValueError(
             "moving sessile contact requires the dynamic contact-line model")
+    if (not math.isfinite(level_set_positive_scale) or
+            level_set_positive_scale <= 0.0):
+        raise ValueError("level-set positive scale must be positive and finite")
 
     wall_spec = sessile_contact_wall_spec(wall_face)
     wall_axis = int(wall_spec["wall_axis"])
@@ -1944,6 +1972,7 @@ def write_sessile2d_case(case_dir: Path,
             local_points = points[point_ids, :2]
             phi[point_ids] = (local_points - contact_point) @ outward_normal
             contact_cell_ids.append(cell_id)
+    phi *= level_set_positive_scale
     pressure_jump = surface_tension / initial_radius
     grid.point_data["phi"] = phi
     # Extend the constant liquid pressure across the background cut-element
@@ -1999,9 +2028,12 @@ def write_sessile2d_case(case_dir: Path,
              "synthetic stationary prescribed-angle sessile-drop equilibrium")
         ),
         "representation": "unfitted_level_set",
-        "capillary_geometry": (
-            "sessile_circle_2d" if wall_face == "wall_bottom" else
-            "vertical_wall_attached_circle_2d"),
+        "capillary_geometry": {
+            "wall_bottom": "sessile_circle_2d",
+            "wall_left": "vertical_wall_attached_circle_2d",
+            "wall_right": "vertical_wall_attached_circle_2d",
+            "wall_top": "ceiling_attached_circle_2d",
+        }[wall_face],
         "capillary_radius": initial_radius,
         "initial_active_pressure": pressure_jump,
         # Keep the post-processed kinetic energy on the same physical scale
@@ -2031,6 +2063,7 @@ def write_sessile2d_case(case_dir: Path,
             **({"wall_y": wall_coordinate}
                if wall_axis == 1 else {"wall_x": wall_coordinate}),
             "active_domain": "LevelSetNegative",
+            "level_set_positive_scale": level_set_positive_scale,
             "initial_contact_angle_degrees": initial_angle_degrees,
             "equilibrium_contact_angle_degrees": equilibrium_angle_degrees,
             "contact_angle_perturbation_degrees": (
@@ -11677,9 +11710,11 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                     args.wall_slip_length,
                     dynamic,
                     (args.dynamic_contact_wall
-                     if dynamic else "wall_bottom"),
+                     if dynamic else getattr(
+                         args, "sessile_contact_wall", "wall_bottom")),
                     ("dynamic" if dynamic else
                      getattr(args, "sessile_contact_line_model", "dynamic")),
+                    getattr(args, "level_set_positive_scale", 1.0),
                 )
             else:
                 write_mini_case(run_dir, args.steps, static=(case_name == "static2d"))
@@ -13642,6 +13677,18 @@ def main() -> int:
         default="dynamic",
         help=("contact model for the stationary sessile case; the moving "
               "contact case always uses the dynamic model"),
+    )
+    parser.add_argument(
+        "--sessile-contact-wall",
+        choices=("wall_bottom", "wall_left", "wall_right", "wall_top"),
+        default="wall_bottom",
+        help="wall carrying the stationary synthetic sessile cap",
+    )
+    parser.add_argument(
+        "--level-set-positive-scale",
+        type=float,
+        default=1.0,
+        help="positive multiplier applied to the synthetic level-set field",
     )
     parser.add_argument(
         "--dynamic-contact-wall",

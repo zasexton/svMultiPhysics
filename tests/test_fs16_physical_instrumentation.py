@@ -249,6 +249,117 @@ def test_sessile_circle_postprocessor_resolves_60_90_120_degree_states():
             assert fitted["circle_fit_rmse"] < 7.5e-4
 
 
+def test_stationary_sessile_cap_rotates_to_every_wall_and_is_scale_invariant():
+    runner = _load_runner()
+    wall_contracts = {
+        "wall_bottom": (1, 0.0, (0.0, -1.0, 0.0), "0 1"),
+        "wall_left": (0, 0.0, (-1.0, 0.0, 0.0), "1 0"),
+        "wall_right": (0, 1.0, (1.0, 0.0, 0.0), "1 0"),
+        "wall_top": (1, 1.0, (0.0, 1.0, 0.0), "0 1"),
+    }
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for wall, (axis, coordinate, normal, direction) in wall_contracts.items():
+            states = []
+            for scale in (0.25, 4.0):
+                case_dir = Path(temp_dir) / f"{wall}_{scale}"
+                runner.write_sessile2d_case(
+                    case_dir,
+                    steps=1,
+                    nx=16,
+                    ny=16,
+                    initial_angle_degrees=60.0,
+                    equilibrium_angle_degrees=60.0,
+                    radius=0.3,
+                    surface_tension=1.0,
+                    time_step_size=0.001,
+                    mobility=1.0,
+                    slip_length=0.1,
+                    dynamic=False,
+                    wall_face=wall,
+                    contact_line_model="prescribed",
+                    level_set_positive_scale=scale,
+                )
+
+                benchmark = runner.load_benchmark(case_dir)
+                contact = benchmark["sessile_contact"]
+                assert contact["wall"] == wall
+                assert contact["wall_axis"] == axis
+                assert contact["wall_coordinate"] == coordinate
+                assert tuple(contact["wall_normal"]) == normal
+                assert contact["level_set_positive_scale"] == scale
+
+                root = runner.ET.parse(case_dir / "solver.xml").getroot()
+                fluid = runner.fluid_equation(root)
+                wall_bc = next(
+                    bc for bc in fluid.findall("Add_BC")
+                    if bc.attrib.get("name") == wall
+                )
+                assert wall_bc.findtext("Effective_direction") == direction
+                free_surface = runner.free_surface_bc(root)
+                assert free_surface.findtext("Contact_line_wall_face") == wall
+                assert tuple(float(value) for value in free_surface.findtext(
+                    "Contact_line_wall_normal").split()) == normal
+
+                mesh = runner.pv.read(
+                    case_dir / "mesh/background/mesh-complete.mesh.vtu")
+                points = runner.np.asarray(mesh.points, dtype=float)
+                center = runner.np.asarray(contact["circle_center"][:2])
+                radius = float(contact["circle_radius"])
+                expected_phi = scale * (
+                    runner.np.linalg.norm(points[:, :2] - center, axis=1) -
+                    radius
+                )
+                assert runner.np.allclose(
+                    runner.np.asarray(mesh.point_data["phi"]),
+                    expected_phi,
+                    rtol=0.0,
+                    atol=8.0e-15,
+                )
+                state = runner.sessile_state_metrics(mesh, benchmark)
+                assert state["operator_contact_geometry_available"] is True
+                samples = state["operator_contact_geometry_samples"]
+                assert len(samples) == 2
+                assert all(
+                    abs(float(sample["point"][axis]) - coordinate) < 1.0e-13
+                    for sample in samples
+                )
+                states.append(state)
+
+            for key in (
+                    "operator_dynamic_angle_degrees_mean",
+                    "operator_dynamic_cos_mean",
+                    "operator_young_gap_mean",
+                    "contact_fluid_outward_speed"):
+                assert math.isclose(
+                    float(states[0][key]),
+                    float(states[1][key]),
+                    rel_tol=0.0,
+                    abs_tol=2.0e-12,
+                )
+
+
+@pytest.mark.parametrize("scale", [0.0, -1.0, math.inf, math.nan])
+def test_stationary_sessile_rejects_nonpositive_or_nonfinite_scale(scale):
+    runner = _load_runner()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        with pytest.raises(ValueError, match="positive scale"):
+            runner.write_sessile2d_case(
+                Path(temp_dir) / "invalid_scale",
+                steps=1,
+                nx=8,
+                ny=8,
+                initial_angle_degrees=90.0,
+                equilibrium_angle_degrees=90.0,
+                radius=0.3,
+                surface_tension=1.0,
+                time_step_size=0.001,
+                mobility=1.0,
+                slip_length=0.1,
+                dynamic=False,
+                level_set_positive_scale=scale,
+            )
+
+
 def test_sessile_energy_density_matches_generated_solver_deck():
     runner = _load_runner()
     with tempfile.TemporaryDirectory() as temp_dir:
