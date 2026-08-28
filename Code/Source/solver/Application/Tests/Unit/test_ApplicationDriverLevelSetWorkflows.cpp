@@ -1875,12 +1875,21 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
-     GeneralizedAlphaContactStageMeshProvenanceRejectsLiveMutation)
+     GeneralizedAlphaContactStageMeshProvenanceSeparatesGeneratedState)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
 #else
+  constexpr int contact_wall_marker = 1701;
+  constexpr int unrelated_marker = 2718;
   auto mesh = makeWorkflowTriangleMesh();
+  ASSERT_GE(mesh->local_mesh().boundary_faces().size(), 2u);
+  const auto contact_face =
+      mesh->local_mesh().boundary_faces().front();
+  const auto unrelated_face =
+      mesh->local_mesh().boundary_faces()[1u];
+  mesh->local_mesh().set_boundary_label(
+      contact_face, contact_wall_marker);
   svmp::FE::systems::FESystem system(mesh);
   const auto& live_mesh = system.meshAccess();
   const svmp::FE::timestepping::CandidateStageMeshRevision captured{
@@ -1894,17 +1903,76 @@ TEST(ApplicationDriverLevelSetWorkflows,
       .coordinate_configuration_key =
           live_mesh.coordinateConfigurationKey(),
   };
+  svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration declaration;
+  declaration.parameters.dynamic_contact_coefficients.push_back({
+      .boundary_marker = contact_wall_marker,
+      .equilibrium_contact_angle_radians = svmp::FE::Real{1.0},
+      .mobility = svmp::FE::Real{1.0},
+      .slip_length = svmp::FE::Real{1.0},
+      .dynamic_viscosity = svmp::FE::Real{1.0},
+  });
+  const std::vector<
+      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration>
+      declarations{declaration};
+  DynamicContactFirstOrderGeneralizedAlphaObservation observation{
+      .mesh_revision = captured,
+      .contact_wall_boundary_fingerprint =
+          dynamicContactWallBoundaryFingerprint(
+              live_mesh, declarations),
+  };
   EXPECT_TRUE(dynamicContactStageMeshRevisionMatches(captured, live_mesh));
+  EXPECT_TRUE(dynamicContactStageProvenanceMatches(
+      observation, live_mesh, declarations));
+
+  // Endpoint cut-domain publication owns generated mesh fields and labels.
+  // Those epochs may advance between exact stage capture and reconstruction;
+  // retained FE slices validate their own layout separately.
+  const auto field_layout_revision = live_mesh.fieldLayoutRevision();
+  (void)svmp::MeshFields::attach_field(
+      mesh->local_mesh(),
+      svmp::EntityKind::Vertex,
+      "dynamic_contact_generated_state_probe",
+      svmp::FieldScalarType::Float64,
+      1);
+  EXPECT_GT(live_mesh.fieldLayoutRevision(), field_layout_revision);
+  EXPECT_TRUE(dynamicContactStageMeshRevisionMatches(captured, live_mesh));
+  EXPECT_TRUE(dynamicContactStageProvenanceMatches(
+      observation, live_mesh, declarations));
+
+  const auto label_revision = live_mesh.labelRevision();
+  mesh->local_mesh().set_boundary_label(
+      unrelated_face, unrelated_marker);
+  EXPECT_GT(live_mesh.labelRevision(), label_revision);
+  EXPECT_TRUE(dynamicContactStageMeshRevisionMatches(captured, live_mesh));
+  EXPECT_TRUE(dynamicContactStageProvenanceMatches(
+      observation, live_mesh, declarations));
+
+  // A global label epoch is too coarse to distinguish generated-domain
+  // publication from a physical contact-wall change. The targeted boundary
+  // fingerprint keeps the latter fail-closed.
+  mesh->local_mesh().set_boundary_label(
+      contact_face, unrelated_marker);
+  EXPECT_TRUE(dynamicContactStageMeshRevisionMatches(captured, live_mesh));
+  EXPECT_FALSE(dynamicContactStageProvenanceMatches(
+      observation, live_mesh, declarations));
+  mesh->local_mesh().set_boundary_label(
+      contact_face, contact_wall_marker);
+  EXPECT_TRUE(dynamicContactStageProvenanceMatches(
+      observation, live_mesh, declarations));
 
   // This system is bound to reference coordinates. A mutation confined to
   // the unused current frame must not invalidate its stage provenance.
   mesh->local_mesh().mark_current_geometry_changed();
   EXPECT_TRUE(dynamicContactStageMeshRevisionMatches(captured, live_mesh));
+  EXPECT_TRUE(dynamicContactStageProvenanceMatches(
+      observation, live_mesh, declarations));
 
   // Mutating the coordinate frame selected by MeshAccess must invalidate the
   // captured stage immediately.
   mesh->local_mesh().mark_reference_geometry_changed();
   EXPECT_FALSE(dynamicContactStageMeshRevisionMatches(captured, live_mesh));
+  EXPECT_FALSE(dynamicContactStageProvenanceMatches(
+      observation, live_mesh, declarations));
 #endif
 }
 
@@ -6925,6 +6993,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
   exact_operator_stage_solution[velocity_offset] = svmp::FE::Real{0.35};
   exact_operator_stage_solution[velocity_offset + 1u] =
       svmp::FE::Real{-0.0};
+  const auto contact_stage_declarations =
+      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
   DynamicContactFirstOrderGeneralizedAlphaObservation
       exact_operator_stage_observation{
           .step_index = 2,
@@ -6946,6 +7016,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
               .coordinate_configuration_key =
                   contact_stage_mesh.coordinateConfigurationKey(),
           },
+          .contact_wall_boundary_fingerprint =
+              dynamicContactWallBoundaryFingerprint(
+                  contact_stage_mesh, contact_stage_declarations),
           .provenance = generalized_alpha_provenance,
       };
   auto exact_operator_stage_history =
@@ -6959,7 +7032,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   exact_operator_stage_observation.operator_stage_state =
       captureDynamicContactOperatorStageState(
           *sim.fe_system,
-          sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations(),
+          contact_stage_declarations,
           exact_operator_stage_history.u(),
           activeFESystemCommunicator(*sim.fe_system));
   std::optional<std::size_t> retained_phi_entry;

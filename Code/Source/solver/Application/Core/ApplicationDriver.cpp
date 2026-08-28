@@ -7479,6 +7479,7 @@ struct DynamicContactFirstOrderGeneralizedAlphaObservation {
   svmp::FE::Real state_time{0.0};
   svmp::FE::Real rate_time{0.0};
   svmp::FE::timestepping::CandidateStageMeshRevision mesh_revision{};
+  std::uint64_t contact_wall_boundary_fingerprint{0u};
   svmp::FE::systems::FreeSurfaceFirstOrderGeneralizedAlphaProvenance
       provenance{};
   DynamicContactOperatorStageState operator_stage_state{};
@@ -7488,17 +7489,104 @@ bool dynamicContactStageMeshRevisionMatches(
     const svmp::FE::timestepping::CandidateStageMeshRevision& captured,
     const svmp::FE::assembly::IMeshAccess& live_mesh)
 {
+  // Generalized-alpha retains the exact operator-stage phi/velocity slices,
+  // then the Application deliberately publishes endpoint cut geometry before
+  // reconstructing that stage. Generated-domain publication may attach mesh
+  // fields and rewrite generated labels, so those two global mesh epochs are
+  // expected to advance. The retained slices are checked independently
+  // against the current FE field layout before overlay. The immutable base
+  // mesh and selected coordinate frame must still match exactly.
   return live_mesh.revisionTrackingAvailable() &&
          captured.geometry_revision == live_mesh.geometryRevision() &&
          captured.topology_revision == live_mesh.topologyRevision() &&
          captured.ownership_revision == live_mesh.ownershipRevision() &&
          captured.numbering_revision == live_mesh.numberingRevision() &&
-         captured.field_layout_revision == live_mesh.fieldLayoutRevision() &&
-         captured.label_revision == live_mesh.labelRevision() &&
          captured.active_configuration_epoch ==
              live_mesh.activeConfigurationEpoch() &&
          captured.coordinate_configuration_key ==
              live_mesh.coordinateConfigurationKey();
+}
+
+std::uint64_t dynamicContactWallBoundaryFingerprint(
+    const svmp::FE::assembly::IMeshAccess& mesh,
+    std::span<const svmp::FE::systems::
+                        FreeSurfaceDiscreteFunctionalDeclaration>
+        declarations)
+{
+  std::vector<int> wall_markers;
+  for (const auto& declaration : declarations) {
+    for (const auto& coefficient :
+         declaration.parameters.dynamic_contact_coefficients) {
+      if (coefficient.boundary_marker < 0) {
+        throw std::invalid_argument(
+            "Dynamic-contact wall provenance contains an invalid boundary "
+            "marker.");
+      }
+      wall_markers.push_back(coefficient.boundary_marker);
+    }
+  }
+  std::sort(wall_markers.begin(), wall_markers.end());
+  wall_markers.erase(
+      std::unique(wall_markers.begin(), wall_markers.end()),
+      wall_markers.end());
+  if (wall_markers.empty()) {
+    throw std::invalid_argument(
+        "Dynamic-contact wall provenance requires at least one wall marker.");
+  }
+
+  std::uint64_t fingerprint = kCutContextHashOffset;
+  constexpr std::uint64_t contract_tag =
+      0x44594e57414c4c31ull; // "DYNWALL1"
+  mixCutContextHash(fingerprint, contract_tag);
+  mixCutContextHash(
+      fingerprint, static_cast<std::uint64_t>(wall_markers.size()));
+  for (const auto marker : wall_markers) {
+    std::vector<
+        std::pair<svmp::FE::GlobalIndex, svmp::FE::GlobalIndex>> faces;
+    mesh.forEachBoundaryFace(
+        marker,
+        [&](svmp::FE::GlobalIndex face,
+            svmp::FE::GlobalIndex parent_cell) {
+          if (face < 0 || parent_cell < 0 ||
+              mesh.getBoundaryFaceMarker(face) != marker) {
+            throw std::runtime_error(
+                "Dynamic-contact wall provenance encountered invalid "
+                "boundary incidence.");
+          }
+          // This digest is rank-local. The base numbering/ownership epochs
+          // above make local face and parent identifiers stable across the
+          // generated-domain publication being admitted here.
+          faces.emplace_back(face, parent_cell);
+        });
+    std::sort(faces.begin(), faces.end());
+    mixCutContextHash(
+        fingerprint,
+        static_cast<std::uint64_t>(static_cast<std::int64_t>(marker)));
+    mixCutContextHash(
+        fingerprint, static_cast<std::uint64_t>(faces.size()));
+    for (const auto& [face, parent_cell] : faces) {
+      mixCutContextHash(
+          fingerprint, static_cast<std::uint64_t>(face));
+      mixCutContextHash(
+          fingerprint, static_cast<std::uint64_t>(parent_cell));
+    }
+  }
+  return fingerprint == 0u ? 1u : fingerprint;
+}
+
+bool dynamicContactStageProvenanceMatches(
+    const DynamicContactFirstOrderGeneralizedAlphaObservation& captured,
+    const svmp::FE::assembly::IMeshAccess& live_mesh,
+    std::span<const svmp::FE::systems::
+                        FreeSurfaceDiscreteFunctionalDeclaration>
+        declarations)
+{
+  return captured.contact_wall_boundary_fingerprint != 0u &&
+         dynamicContactStageMeshRevisionMatches(
+             captured.mesh_revision, live_mesh) &&
+         captured.contact_wall_boundary_fingerprint ==
+             dynamicContactWallBoundaryFingerprint(
+                 live_mesh, declarations);
 }
 
 DynamicContactFirstOrderGeneralizedAlphaObservation
@@ -7598,8 +7686,9 @@ std::uint64_t dynamicContactFirstOrderGeneralizedAlphaObservationRevision(
       mix_real(value);
     }
   }
-  // Mesh revision stamps are deliberately excluded: they are rank-local and
-  // are checked against each rank's live mesh instead of compared across ranks.
+  // Mesh revision stamps and contact-wall incidence fingerprints are
+  // deliberately excluded: they are rank-local and are checked against each
+  // rank's live mesh instead of compared across ranks.
   return hash == 0u ? 1u : hash;
 }
 
@@ -20767,11 +20856,14 @@ buildAcceptedFreeSurfaceContactStageCandidate(
               observation.state_time, stage_time) ||
           !contactStageRealValuesMatch(
               observation.provenance.alpha_f, stage_alpha_f) ||
-          !dynamicContactStageMeshRevisionMatches(
-              observation.mesh_revision, sim.fe_system->meshAccess())) {
+          !dynamicContactStageProvenanceMatches(
+              observation,
+              sim.fe_system->meshAccess(),
+              sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations())) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Exact generalized-alpha "
-            "operator-stage snapshot is stale for contact-stage "
+            "operator-stage base-mesh or contact-wall snapshot is stale "
+            "for contact-stage "
             "construction.");
       }
       overlayDynamicContactOperatorStageState(
@@ -26364,13 +26456,14 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         std::exception_ptr local_failure;
         try {
           if (pending_dynamic_contact_generalized_alpha_observation.has_value() &&
-              !dynamicContactStageMeshRevisionMatches(
-                  pending_dynamic_contact_generalized_alpha_observation
-                      ->mesh_revision,
-                  sim.fe_system->meshAccess())) {
+              !dynamicContactStageProvenanceMatches(
+                  *pending_dynamic_contact_generalized_alpha_observation,
+                  sim.fe_system->meshAccess(),
+                  free_surface_declarations)) {
             throw std::logic_error(
-                "Dynamic-contact generalized-alpha candidate-stage mesh "
-                "provenance is stale for the live FE mesh.");
+                "Dynamic-contact generalized-alpha candidate-stage "
+                "base-mesh or contact-wall provenance is stale for the "
+                "live FE mesh.");
           }
           resolved = resolveFreeSurfaceContactStageTemporalCoordinates(
               transient_scheme.scheme,
@@ -26725,6 +26818,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   "Dynamic-contact generalized-alpha provenance has a stale "
                   "candidate-stage mesh revision.");
             }
+            captured->contact_wall_boundary_fingerprint =
+                dynamicContactWallBoundaryFingerprint(
+                    sim.fe_system->meshAccess(),
+                    free_surface_declarations);
             if (dynamic_contact_solve_attempt_index < 0 ||
                 captured->attempt_index !=
                     dynamic_contact_solve_attempt_index) {
