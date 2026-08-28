@@ -6586,9 +6586,9 @@ TEST(NewtonSolver,
         telemetry.find_first_of(" \r\n", iteration_begin);
     const auto iterations = std::stoi(
         telemetry.substr(iteration_begin, iteration_end - iteration_begin));
-    // Normal stationarity is first reached at iteration seven for this
+    // Normal stationarity is first reached at iteration six for this
     // ordering, while the primal distance still exceeds the configured gate.
-    EXPECT_GT(iterations, 7);
+    EXPECT_GT(iterations, 6);
     EXPECT_LE(iterations, 16);
 }
 

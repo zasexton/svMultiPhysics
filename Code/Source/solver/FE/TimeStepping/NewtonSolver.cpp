@@ -2423,9 +2423,18 @@ PressureRepresentabilityLsqrResult solvePressureRepresentabilityLsqr(
         pair.mult(right_basis, work);
         work.markModified();
         axpy(work, static_cast<Real>(-alpha), left_basis);
+        // Correct the component along the immediately preceding basis vector
+        // before normalization.  This local reorthogonalization bounds the
+        // finite-precision drift without retaining the full Krylov basis.
+        const double left_local_projection = work.dot(left_basis);
+        axpy(work,
+             static_cast<Real>(-left_local_projection),
+             left_basis);
         double beta = work.norm();
         bool recurrence_finite =
-            vector_is_finite(work) && finite_nonnegative(beta);
+            vector_is_finite(work) &&
+            all_ranks(std::isfinite(left_local_projection)) &&
+            finite_nonnegative(beta);
         if (!recurrence_finite) {
             result.breakdown = true;
             break;
@@ -2438,9 +2447,17 @@ PressureRepresentabilityLsqrResult solvePressureRepresentabilityLsqr(
             pair.mult(left_basis, work);
             work.markModified();
             axpy(work, static_cast<Real>(-beta), right_basis);
+            // Apply the matching correction on the pressure-space basis.
+            const double right_local_projection =
+                work.dot(right_basis);
+            axpy(work,
+                 static_cast<Real>(-right_local_projection),
+                 right_basis);
             alpha = work.norm();
             recurrence_finite =
-                vector_is_finite(work) && finite_nonnegative(alpha);
+                vector_is_finite(work) &&
+                all_ranks(std::isfinite(right_local_projection)) &&
+                finite_nonnegative(alpha);
             if (!recurrence_finite) {
                 result.breakdown = true;
                 break;
