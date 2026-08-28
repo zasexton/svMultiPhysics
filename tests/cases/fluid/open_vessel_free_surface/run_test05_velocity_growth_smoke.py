@@ -1893,7 +1893,11 @@ def write_sessile2d_case(case_dir: Path,
         mobility,
         slip_length,
         dynamic,
-        1.0 / float(max(nx, ny)),
+        # DynamicContactAngle is assembled on the sharp CutVolume wall and
+        # contact domains.  It has no diffuse active-domain width, so a
+        # nonzero value is an unsupported model rather than a mesh-scale
+        # regularization choice.
+        0.0,
         wall_face,
     )
     predicted_initial_speed = (

@@ -1358,6 +1358,9 @@ def test_fs16_p1_decks_retain_transport_safety_controls():
         assert sessile_free_surface.findtext("Wall_slip_model") == "Navier"
         assert sessile_free_surface.findtext("Contact_line_mobility") == "1"
         assert sessile_free_surface.findtext("Wall_slip_length") == "0.1"
+        assert sessile_free_surface.findtext(
+            "Active_domain_smoothing_width"
+        ) == "0"
         assert sessile_free_surface.find("Contact_angle_penalty") is None
 
         sessile_mesh = runner.pv.read(
