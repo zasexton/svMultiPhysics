@@ -129,11 +129,13 @@ def wetted_axis_wall_measure_2d(dataset: pv.DataSet,
     """
     if wall_axis not in (0, 1):
         raise ValueError("a planar wall axis must be 0 or 1")
-    if not math.isfinite(wall_coordinate) or tolerance < 0.0:
+    if (not math.isfinite(wall_coordinate) or
+            not math.isfinite(tolerance) or tolerance < 0.0):
         raise ValueError("wall coordinate/tolerance is invalid")
     phi = _finite_point_scalar(dataset, level_set_name)
     points = np.asarray(dataset.points, dtype=float)
-    if points.ndim != 2 or points.shape[0] != dataset.n_points:
+    if (points.ndim != 2 or points.shape[0] != dataset.n_points or
+            not np.isfinite(points).all()):
         raise ValueError("saved state has invalid point coordinates")
     wall = np.flatnonzero(
         np.abs(points[:, wall_axis] - wall_coordinate) <= tolerance
@@ -142,15 +144,59 @@ def wetted_axis_wall_measure_2d(dataset: pv.DataSet,
         raise ValueError("saved state does not contain a complete wall trace")
     tangent_axis = 1 - wall_axis
     order = wall[np.argsort(points[wall, tangent_axis], kind="mergesort")]
-    coordinates = points[order, tangent_axis]
-    if np.any(np.diff(coordinates) <= 0.0):
+    ordered_coordinates = points[order, tangent_axis]
+    coordinate_scale = max(
+        1.0,
+        float(np.max(np.abs(ordered_coordinates))),
+        float(np.ptp(ordered_coordinates)),
+    )
+    coordinate_merge_tolerance = (
+        64.0 * np.finfo(float).eps * coordinate_scale
+    )
+
+    # Parallel VTK pieces repeat partition-interface vertices.  Canonicalize
+    # those coincident points before forming the wall trace, but fail closed if
+    # the repeated copies disagree on the saved level-set state.
+    coordinates: list[float] = []
+    level_set_values: list[float] = []
+    begin = 0
+    while begin < order.size:
+        end = begin + 1
+        anchor = float(ordered_coordinates[begin])
+        while (end < order.size and
+               float(ordered_coordinates[end]) - anchor <=
+               coordinate_merge_tolerance):
+            end += 1
+        group = order[begin:end]
+        group_coordinates = points[group, tangent_axis]
+        group_phi = phi[group]
+        phi_scale = max(1.0, float(np.max(np.abs(group_phi))))
+        phi_consistency_tolerance = (
+            256.0 * np.finfo(float).eps * phi_scale
+        )
+        if float(np.ptp(group_phi)) > phi_consistency_tolerance:
+            raise ValueError(
+                "coincident wall vertices carry inconsistent level-set values"
+            )
+        coordinates.append(
+            math.fsum(float(value) for value in group_coordinates) /
+            group.size
+        )
+        level_set_values.append(
+            math.fsum(float(value) for value in group_phi) / group.size
+        )
+        begin = end
+
+    if len(coordinates) < 2 or any(
+            right - left <= coordinate_merge_tolerance
+            for left, right in zip(coordinates, coordinates[1:])):
         raise ValueError("wall trace contains duplicate or unordered vertices")
 
     measure = 0.0
-    for left, right in zip(order[:-1], order[1:]):
-        length = float(abs(points[right, tangent_axis] - points[left, tangent_axis]))
+    for index in range(len(coordinates) - 1):
+        length = coordinates[index + 1] - coordinates[index]
         measure += length * _linear_negative_segment_fraction(
-            float(phi[left]), float(phi[right])
+            level_set_values[index], level_set_values[index + 1]
         )
     if not math.isfinite(measure) or measure < 0.0:
         raise ValueError("wetted wall measure is invalid")

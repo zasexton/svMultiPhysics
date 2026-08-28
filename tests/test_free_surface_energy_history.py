@@ -93,6 +93,50 @@ def test_partial_wetted_wall_trace_uses_linear_crossings():
     assert energy.wetted_axis_wall_measure_2d(grid) == pytest.approx(0.375)
 
 
+def partitioned_wall_grid(shared_phi_left=-1.0, shared_phi_right=-1.0):
+    points = np.asarray([
+        [0.0, 0.0, 0.0],
+        [0.5, 0.0, 0.0],
+        [0.0, 0.5, 0.0],
+        [0.5, 0.5, 0.0],
+        [0.5, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.5, 0.5, 0.0],
+        [1.0, 0.5, 0.0],
+    ])
+    cells = np.asarray([
+        4, 0, 1, 3, 2,
+        4, 4, 5, 7, 6,
+    ])
+    grid = pv.UnstructuredGrid(
+        cells,
+        np.full(2, int(pv.CellType.QUAD), dtype=np.uint8),
+        points,
+    )
+    grid.point_data["phi"] = np.asarray([
+        1.0, shared_phi_left, 1.0, 1.0,
+        shared_phi_right, 3.0, 1.0, 1.0,
+    ])
+    grid.point_data["Velocity"] = np.zeros((8, 3))
+    return grid
+
+
+def test_partition_piece_duplicates_are_canonicalized_on_wall_trace():
+    grid = partitioned_wall_grid()
+    assert energy.wetted_axis_wall_measure_2d(grid) == pytest.approx(0.375)
+
+
+def test_partition_piece_duplicate_state_disagreement_fails_closed():
+    grid = partitioned_wall_grid(
+        shared_phi_left=-1.0,
+        shared_phi_right=-0.5,
+    )
+    with pytest.raises(
+            ValueError,
+            match="coincident wall vertices carry inconsistent"):
+        energy.wetted_axis_wall_measure_2d(grid)
+
+
 def test_young_wall_energy_and_history_summary_contract():
     grid = planar_quad([
         -0.25, -0.25, -0.25,
