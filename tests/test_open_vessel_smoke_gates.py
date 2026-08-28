@@ -352,6 +352,57 @@ def test_solver_configuration_rewrites_only_fluid_krylov_controls():
         )
 
 
+def test_solver_configuration_writes_static_capillary_initializer_controls():
+    smoke = _load_smoke_module()
+    source = (
+        smoke.ROOT
+        / "tests/cases/fluid/open_vessel_free_surface/unfitted_level_set"
+        / "spheric_test05_wet_bed_d18/solver.xml"
+    )
+    with tempfile.TemporaryDirectory() as temp_dir:
+        solver_xml = Path(temp_dir) / "solver.xml"
+        shutil.copy2(source, solver_xml)
+
+        smoke.configure_solver(
+            solver_xml,
+            steps=1,
+            disable_cut_metadata_scale=True,
+            enable_static_capillary_equilibrium_initialization=True,
+            static_capillary_volume_tolerance=1.0e-8,
+            static_capillary_projected_gradient_tolerance=2.0e-7,
+            static_capillary_pressure_representability_max_residual_norm=3.0e-6,
+            static_capillary_pressure_representability_max_relative_distance=4.0e-5,
+            static_capillary_physical_equilibrium_max_residual_norm=5.0e-4,
+            static_capillary_constant_pressure_kkt_max_residual_norm=6.0e-3,
+            static_capillary_constant_pressure_kkt_max_relative_distance=7.0e-2,
+            static_capillary_max_iterations=83,
+        )
+
+        level_set = smoke.level_set_equation(
+            smoke.ET.parse(solver_xml).getroot())
+        assert level_set.findtext(
+            "Enable_static_capillary_equilibrium_initialization") == "true"
+        assert level_set.findtext("Static_capillary_volume_tolerance") == "1e-08"
+        assert level_set.findtext(
+            "Static_capillary_projected_gradient_tolerance") == "2e-07"
+        assert level_set.findtext(
+            "Static_capillary_pressure_representability_max_residual_norm"
+        ) == "3e-06"
+        assert level_set.findtext(
+            "Static_capillary_pressure_representability_max_relative_distance"
+        ) == "4e-05"
+        assert level_set.findtext(
+            "Static_capillary_physical_equilibrium_max_residual_norm"
+        ) == "0.0005"
+        assert level_set.findtext(
+            "Static_capillary_constant_pressure_kkt_max_residual_norm"
+        ) == "0.006"
+        assert float(level_set.findtext(
+            "Static_capillary_constant_pressure_kkt_max_relative_distance"
+        )) == 0.07
+        assert level_set.findtext("Static_capillary_max_iterations") == "83"
+
+
 def test_high_order_motion_gates_default_advection_velocity_diagnostics():
     smoke = _load_smoke_module()
     args = argparse.Namespace(
@@ -1068,11 +1119,12 @@ def test_free_surface_conservative_balance_parser_metrics_and_gate():
         "sync_point=JacobianAndResidualAssembly "
         "pressure_virtual_work_norm=4 "
         "surface_energy_virtual_work_norm=6 "
+        "physical_potential_virtual_work_norm=6 "
         "conservative_balance_norm=1 "
-        "normalization=pressure_plus_surface_energy_norms "
+        "normalization=pressure_plus_physical_potential_norms "
         "normalized_imbalance=0.1 magnitude_mismatch=0.2 "
         "alignment_cosine=-0.9916666666666667 "
-        "scope=pressure_and_surface_energy_first_variations_only "
+        "scope=pressure_and_physical_potential_first_variations_only "
         "contract=instantaneous_constrained_velocity_test_virtual_work "
         "excludes=line_friction_and_wetted_wall_navier_dissipation "
         "total_momentum_equilibrium_claimed=0 "
@@ -1093,7 +1145,8 @@ def test_free_surface_conservative_balance_parser_metrics_and_gate():
         "pressure_representability_breakdown=false "
         "pressure_representability_norm=constrained_reduced_coefficient_l2 "
         "pressure_representability_load="
-        "surface_area_variation_plus_young_wall_energy"
+        "prescribed_external_pressure_plus_surface_area_variation_plus_"
+        "young_wall_energy_plus_gravitational_potential"
     )
     diagnostics = smoke.parse_solver_diagnostics(output)
     metrics = {}
@@ -1144,7 +1197,8 @@ def test_free_surface_pressure_representability_gate_accepts_complete_telemetry(
         "pressure_representability_breakdown": False,
         "pressure_representability_norm": "constrained_reduced_coefficient_l2",
         "pressure_representability_load": (
-            "surface_area_variation_plus_young_wall_energy"
+            "prescribed_external_pressure_plus_surface_area_variation_plus_"
+            "young_wall_energy_plus_gravitational_potential"
         ),
     }
     metrics = {
@@ -1177,7 +1231,8 @@ def _complete_pressure_representability_record():
         "pressure_representability_breakdown": False,
         "pressure_representability_norm": "constrained_reduced_coefficient_l2",
         "pressure_representability_load": (
-            "surface_area_variation_plus_young_wall_energy"
+            "prescribed_external_pressure_plus_surface_area_variation_plus_"
+            "young_wall_energy_plus_gravitational_potential"
         ),
     }
 
@@ -1212,6 +1267,157 @@ def _passing_static_compatible_pressure_initializer_record():
         "force_projection_applied": 0,
         "production_capillary_operator_changed": 0,
     }
+
+
+def _passing_static_capillary_equilibrium_initialization_record():
+    return {
+        "active_coefficients": 22,
+        "target_liquid_volume": 0.136,
+        "initial_physical_potential_energy": 0.4661,
+        "final_physical_potential_energy": 0.4658,
+        "final_volume_error": -1.0e-12,
+        "final_projected_gradient_norm": 9.0e-7,
+        "pressure_representability_available": 1,
+        "pressure_representability_converged": 1,
+        "pressure_representability_breakdown": 0,
+        "pressure_representability_residual_norm": 0.002,
+        "pressure_representability_relative_distance": 0.003,
+        "production_residual_norm": 0.008,
+        "constant_pressure_kkt_required": 0,
+        "constant_pressure_kkt_available": 0,
+        "constant_pressure_kkt_residual_norm": math.nan,
+        "constant_pressure_kkt_relative_distance": math.nan,
+        "iterations": 50,
+        "functional_evaluations": 2387,
+        "acceptance_certificate_evaluations": 1,
+        "topology_change_rejections": 0,
+        "constraint_change_rejections": 0,
+        "production_force_projection_applied": 0,
+        "qualification": "prerequisite_only",
+    }
+
+
+def _static_capillary_equilibrium_gate_args():
+    return argparse.Namespace(
+        initialize_discrete_static_capillary_equilibrium=True,
+        static_capillary_volume_tolerance=1.0e-8,
+        static_capillary_projected_gradient_tolerance=1.0e-6,
+        static_capillary_pressure_representability_max_residual_norm=0.01,
+        static_capillary_pressure_representability_max_relative_distance=0.01,
+        static_capillary_physical_equilibrium_max_residual_norm=0.01,
+        static_capillary_constant_pressure_kkt_max_residual_norm=1.0e-6,
+        static_capillary_constant_pressure_kkt_max_relative_distance=1.0e-6,
+        static_capillary_max_iterations=60,
+        require_static_capillary_balance_qualification="prerequisite_only",
+    )
+
+
+def test_static_capillary_equilibrium_initialization_is_parsed_and_gated():
+    smoke = _load_smoke_module()
+    record = _passing_static_capillary_equilibrium_initialization_record()
+    output = (
+        "Static capillary equilibrium initialized "
+        "diagnostic=static_capillary_equilibrium_initialization "
+        + " ".join(f"{key}={value}" for key, value in record.items())
+    )
+    diagnostics = smoke.parse_solver_diagnostics(output)
+    metrics = {}
+    smoke.add_diagnostic_metrics(metrics, diagnostics)
+
+    assert diagnostics["counts"][
+        "static_capillary_equilibrium_initializations"] == 1
+    assert metrics[
+        "diagnostic_static_capillary_equilibrium_initialization_count"] == 1
+    assert metrics["static_capillary_active_coefficients"] == 22
+    assert metrics["static_capillary_qualification"] == "prerequisite_only"
+    assert smoke.static_capillary_equilibrium_initialization_errors(
+        metrics, _static_capillary_equilibrium_gate_args()) == []
+
+
+def test_static_capillary_equilibrium_initializer_enables_balance_operator(
+        monkeypatch):
+    smoke = _load_smoke_module()
+
+    class GateArgs:
+        initialize_discrete_static_capillary_equilibrium = True
+
+        def __getattr__(self, _name):
+            return None
+
+    monkeypatch.setenv(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "0")
+    env = smoke.solver_environment(GateArgs())
+    assert env[
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC"] == "1"
+
+
+def test_static_capillary_equilibrium_constant_pressure_certificate_is_gated():
+    smoke = _load_smoke_module()
+    record = _passing_static_capillary_equilibrium_initialization_record()
+    record.update({
+        "constant_pressure_kkt_required": 1,
+        "constant_pressure_kkt_available": 1,
+        "constant_pressure_kkt_residual_norm": 3.0e-7,
+        "constant_pressure_kkt_relative_distance": 4.0e-7,
+    })
+    metrics = {
+        "diagnostics": {
+            "static_capillary_equilibrium_initializations": [record],
+        },
+    }
+    args = _static_capillary_equilibrium_gate_args()
+    assert smoke.static_capillary_equilibrium_initialization_errors(
+        metrics, args) == []
+
+    record["constant_pressure_kkt_relative_distance"] = 2.0e-6
+    errors = smoke.static_capillary_equilibrium_initialization_errors(
+        metrics, args)
+    assert any(
+        "constant_pressure_kkt_relative_distance 2e-06 exceeds 1e-06"
+        in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    ("update", "expected"),
+    [
+        ({"final_volume_error": -2.0e-8}, "final_volume_error"),
+        ({"final_physical_potential_energy": 0.47}, "increased physical"),
+        ({"pressure_representability_relative_distance": 0.02},
+         "pressure_representability_relative_distance"),
+        ({"qualification": "qualified"}, "reported qualification"),
+        ({"constant_pressure_kkt_required": 1},
+         "availability disagrees"),
+    ],
+)
+def test_static_capillary_equilibrium_initialization_fails_closed(
+        update, expected):
+    smoke = _load_smoke_module()
+    record = _passing_static_capillary_equilibrium_initialization_record()
+    record.update(update)
+    metrics = {
+        "diagnostics": {
+            "static_capillary_equilibrium_initializations": [record],
+        },
+    }
+    errors = smoke.static_capillary_equilibrium_initialization_errors(
+        metrics, _static_capillary_equilibrium_gate_args())
+    assert errors
+    assert any(expected in error for error in errors)
+
+
+def test_static_capillary_equilibrium_initialization_requires_one_record():
+    smoke = _load_smoke_module()
+    metrics = {
+        "diagnostics": {
+            "static_capillary_equilibrium_initializations": [],
+        },
+    }
+    errors = smoke.static_capillary_equilibrium_initialization_errors(
+        metrics, _static_capillary_equilibrium_gate_args())
+    assert errors == [
+        "discrete static-capillary equilibrium initialization requires "
+        "exactly one diagnostic record (observed 0)"
+    ]
 
 
 def test_static_compatible_pressure_initializer_is_parsed_and_required():
@@ -1409,7 +1615,8 @@ def test_pressure_representability_diagnostic_accepts_stationary_unit_residual_w
         "pressure_representability_breakdown": False,
         "pressure_representability_norm": "constrained_reduced_coefficient_l2",
         "pressure_representability_load": (
-            "surface_area_variation_plus_young_wall_energy"
+            "prescribed_external_pressure_plus_surface_area_variation_plus_"
+            "young_wall_energy_plus_gravitational_potential"
         ),
     }
     metrics = {
@@ -1546,6 +1753,11 @@ def test_sessile_defaults_require_pressure_representability_but_dynamic_do_not()
     )
     assert dynamic.initialize_static_compatible_pressure is False
 
+    discrete_args = argparse.Namespace(**vars(base))
+    discrete_args.initialize_discrete_static_capillary_equilibrium = True
+    discrete = smoke.case_args_for_run("sessile2d", discrete_args)
+    assert discrete.initialize_static_compatible_pressure is False
+
 
 @pytest.mark.parametrize(
     ("update", "expected"),
@@ -1583,7 +1795,8 @@ def test_free_surface_pressure_representability_gate_fails_closed(
         "pressure_representability_breakdown": False,
         "pressure_representability_norm": "constrained_reduced_coefficient_l2",
         "pressure_representability_load": (
-            "surface_area_variation_plus_young_wall_energy"
+            "prescribed_external_pressure_plus_surface_area_variation_plus_"
+            "young_wall_energy_plus_gravitational_potential"
         ),
     }
     record.update(update)

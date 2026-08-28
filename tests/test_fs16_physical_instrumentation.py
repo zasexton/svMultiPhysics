@@ -273,6 +273,55 @@ def test_sessile_energy_density_matches_generated_solver_deck():
         assert benchmark_density == solver_density == 1.0
 
 
+def test_stationary_sessile_case_supports_prescribed_contact_angle_ownership():
+    runner = _load_runner()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        case_dir = Path(temp_dir) / "sessile_prescribed"
+        runner.write_sessile2d_case(
+            case_dir,
+            steps=1,
+            nx=8,
+            ny=8,
+            initial_angle_degrees=60.0,
+            equilibrium_angle_degrees=60.0,
+            radius=0.3,
+            surface_tension=1.0,
+            time_step_size=0.001,
+            mobility=1.0,
+            slip_length=0.1,
+            dynamic=False,
+            contact_line_model="prescribed",
+        )
+
+        root = runner.ET.parse(case_dir / "solver.xml").getroot()
+        free_surface = runner.free_surface_bc(root)
+        level_set = runner.level_set_equation(root)
+        assert free_surface.findtext(
+            "Contact_line_model") == "PrescribedContactAngle"
+        assert level_set.findtext("Enable_bound_preserving_limiter") == "false"
+        assert free_surface.find("Contact_line_mobility") is None
+        assert free_surface.find("Wall_slip_model") is None
+        assert free_surface.find("Wall_slip_length") is None
+
+        benchmark = runner.load_benchmark(case_dir)
+        contact = benchmark["sessile_contact"]
+        assert contact["contact_line_model"] == "PrescribedContactAngle"
+        assert contact["level_set_geometry_owner"] == (
+            "accepted_state_wall_aware_repair")
+        assert contact["momentum_owner"] == "young_wall_energy"
+        assert "mobility" not in contact
+        assert "ren_e_relation" not in contact
+
+        mesh = runner.pv.read(
+            case_dir / "mesh/background/mesh-complete.mesh.vtu")
+        state = runner.sessile_state_metrics(mesh, benchmark)
+        assert state["operator_contact_geometry_available"] is True
+        assert state["operator_contact_geometry_sample_count"] == 2
+        assert state["operator_contact_geometry_source"] == (
+            "LinearCorner_generated_fragment_normal_at_phi_zero_wall_roots")
+        assert "operator_predicted_contact_line_speed" not in state
+
+
 def test_dynamic_sessile_pair_preserves_one_reference_liquid_area():
     runner = _load_runner()
     reference_radius = 0.3

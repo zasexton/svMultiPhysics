@@ -666,6 +666,22 @@ def configure_solver(solver_xml: Path,
                      curvature_projection_smoothing_iterations: int | None = None,
                      curvature_projection_smoothing_relaxation: float | None = None,
                      curvature_projection_smoothing_mode: str | None = None,
+                     enable_static_capillary_equilibrium_initialization:
+                     bool | None = None,
+                     static_capillary_volume_tolerance: float | None = None,
+                     static_capillary_projected_gradient_tolerance:
+                     float | None = None,
+                     static_capillary_pressure_representability_max_residual_norm:
+                     float | None = None,
+                     static_capillary_pressure_representability_max_relative_distance:
+                     float | None = None,
+                     static_capillary_physical_equilibrium_max_residual_norm:
+                     float | None = None,
+                     static_capillary_constant_pressure_kkt_max_residual_norm:
+                     float | None = None,
+                     static_capillary_constant_pressure_kkt_max_relative_distance:
+                     float | None = None,
+                     static_capillary_max_iterations: int | None = None,
                      enable_volume_correction: bool | None = None,
                      volume_correction_cadence_steps: int | None = None,
                      volume_correction_use_initial_volume: bool | None = None,
@@ -917,6 +933,41 @@ def configure_solver(solver_xml: Path,
                 "Curvature_projection_smoothing_mode",
                 curvature_projection_smoothing_mode,
             )
+    if enable_static_capillary_equilibrium_initialization is not None:
+        level_set = level_set_equation(root)
+        set_text(
+            level_set,
+            "Enable_static_capillary_equilibrium_initialization",
+            ("true" if enable_static_capillary_equilibrium_initialization
+             else "false"),
+        )
+    for name, value in (
+            ("Static_capillary_volume_tolerance",
+             static_capillary_volume_tolerance),
+            ("Static_capillary_projected_gradient_tolerance",
+             static_capillary_projected_gradient_tolerance),
+            ("Static_capillary_pressure_representability_max_residual_norm",
+             static_capillary_pressure_representability_max_residual_norm),
+            ("Static_capillary_pressure_representability_max_relative_distance",
+             static_capillary_pressure_representability_max_relative_distance),
+            ("Static_capillary_physical_equilibrium_max_residual_norm",
+             static_capillary_physical_equilibrium_max_residual_norm),
+            ("Static_capillary_constant_pressure_kkt_max_residual_norm",
+             static_capillary_constant_pressure_kkt_max_residual_norm),
+            ("Static_capillary_constant_pressure_kkt_max_relative_distance",
+             static_capillary_constant_pressure_kkt_max_relative_distance),
+    ):
+        if value is not None:
+            level_set = level_set_equation(root)
+            set_text(level_set, name, f"{value:.16g}")
+    if static_capillary_max_iterations is not None:
+        level_set = level_set_equation(root)
+        set_text(
+            level_set,
+            "Static_capillary_max_iterations",
+            str(static_capillary_max_iterations),
+        )
+
     if enable_volume_correction is not None:
         level_set = level_set_equation(root)
         set_text(level_set, "Enable_volume_correction",
@@ -1033,6 +1084,8 @@ def solver_environment(args: argparse.Namespace) -> dict[str, str]:
     )
     initialize_static_compatible_pressure = bool(getattr(
         args, "initialize_static_compatible_pressure", False))
+    initialize_discrete_static_capillary_equilibrium = bool(getattr(
+        args, "initialize_discrete_static_capillary_equilibrium", False))
     if (getattr(args,
                 "enable_free_surface_conservative_balance_diagnostic",
                 False) or
@@ -1047,7 +1100,8 @@ def solver_environment(args: argparse.Namespace) -> dict[str, str]:
                 "max_free_surface_conservative_balance_normalized_imbalance",
                 None) is not None or
             pressure_distance_maximum is not None or
-            initialize_static_compatible_pressure):
+            initialize_static_compatible_pressure or
+            initialize_discrete_static_capillary_equilibrium):
         env[
             "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC"
         ] = "1"
@@ -1648,7 +1702,11 @@ def configure_sessile_solver_xml(case_dir: Path,
                                   slip_length: float,
                                   dynamic: bool,
                                   smoothing_width: float,
-                                  wall_face: str = "wall_bottom") -> None:
+                                  wall_face: str = "wall_bottom",
+                                  contact_line_model: str = "dynamic") -> None:
+    if contact_line_model not in {"dynamic", "prescribed"}:
+        raise ValueError(
+            "sessile contact-line model must be dynamic or prescribed")
     solver_xml = case_dir / "solver.xml"
     tree = ET.parse(solver_xml)
     root = tree.getroot()
@@ -1685,16 +1743,20 @@ def configure_sessile_solver_xml(case_dir: Path,
         element = level_set.find(name)
         if element is not None:
             level_set.remove(element)
-    # Both equilibrium and relaxation probes use the same physical Ren--E
-    # contact-line system.  In the equilibrium probe theta_d == theta_e, so
-    # the predicted contact-line speed is zero; freezing phi with a constant
-    # transport velocity would instead bypass the coupled wetting method.
+    # Keep phi coupled to the solved velocity for both contact models. The
+    # moving probe exercises Ren--E kinematics; the stationary prescribed
+    # probe exercises accepted-state wall repair and Young wall energy.
     constant_velocity = level_set.find("Constant_velocity")
     if constant_velocity is not None:
         level_set.remove(constant_velocity)
     set_text(level_set, "Velocity_source", "coupled_field")
     set_text(level_set, "Velocity_field_name", "Velocity")
     set_text(level_set, "Auto_register_velocity_field", "true")
+    if contact_line_model == "prescribed":
+        # Accepted-state wall repair owns the contact geometry for this model.
+        # The transport limiter would compare that repaired field against the
+        # unrepaired nodal range and reject an otherwise stationary update.
+        set_text(level_set, "Enable_bound_preserving_limiter", "false")
 
     fluid = fluid_equation(root)
     set_text(fluid, "Density", "1.0")
@@ -1716,8 +1778,9 @@ def configure_sessile_solver_xml(case_dir: Path,
     if contact_wall is None:
         raise ValueError(
             f"synthetic sessile case is missing {wall_spec['wall_face']}")
-    # Strongly impose only impermeability.  Tangential velocity is governed by
-    # the Navier wall law required by the coupled dissipative contact-line model.
+    # Strongly impose only impermeability. The dynamic model supplies its
+    # Navier wall law; the stationary prescribed-angle matrix retains the same
+    # free tangential trace so Young wall-energy virtual work remains visible.
     set_text(
         contact_wall, "Effective_direction", wall_spec["effective_direction"])
 
@@ -1729,7 +1792,12 @@ def configure_sessile_solver_xml(case_dir: Path,
     curvature_field = free_surface.find("Curvature_field")
     if curvature_field is not None:
         free_surface.remove(curvature_field)
-    set_text(free_surface, "Contact_line_model", "DynamicContactAngle")
+    set_text(
+        free_surface,
+        "Contact_line_model",
+        ("DynamicContactAngle" if contact_line_model == "dynamic"
+         else "PrescribedContactAngle"),
+    )
     set_text(
         free_surface, "Contact_line_wall_face", wall_spec["wall_face"])
     set_text(
@@ -1741,9 +1809,17 @@ def configure_sessile_solver_xml(case_dir: Path,
              f"{equilibrium_angle_degrees:.16g}")
     set_text(free_surface, "Active_domain_smoothing_width",
              f"{smoothing_width:.16g}")
-    set_text(free_surface, "Contact_line_mobility", f"{mobility:.16g}")
-    set_text(free_surface, "Wall_slip_model", "Navier")
-    set_text(free_surface, "Wall_slip_length", f"{slip_length:.16g}")
+    if contact_line_model == "dynamic":
+        set_text(free_surface, "Contact_line_mobility", f"{mobility:.16g}")
+        set_text(free_surface, "Wall_slip_model", "Navier")
+        set_text(free_surface, "Wall_slip_length", f"{slip_length:.16g}")
+    else:
+        for name in (
+                "Contact_line_mobility", "Wall_slip_model",
+                "Wall_slip_length"):
+            element = free_surface.find(name)
+            if element is not None:
+                free_surface.remove(element)
 
     ET.indent(tree, space="  ")
     tree.write(solver_xml, encoding="utf-8", xml_declaration=True)
@@ -1761,11 +1837,18 @@ def write_sessile2d_case(case_dir: Path,
                          mobility: float,
                          slip_length: float,
                          dynamic: bool,
-                         wall_face: str = "wall_bottom") -> None:
+                         wall_face: str = "wall_bottom",
+                         contact_line_model: str = "dynamic") -> None:
     if radius <= 0.0 or surface_tension <= 0.0:
         raise ValueError("sessile radius and surface tension must be positive")
     if mobility <= 0.0 or slip_length <= 0.0:
         raise ValueError("sessile mobility and slip length must be positive")
+    if contact_line_model not in {"dynamic", "prescribed"}:
+        raise ValueError(
+            "sessile contact-line model must be dynamic or prescribed")
+    if dynamic and contact_line_model != "dynamic":
+        raise ValueError(
+            "moving sessile contact requires the dynamic contact-line model")
 
     wall_spec = sessile_contact_wall_spec(wall_face)
     wall_axis = int(wall_spec["wall_axis"])
@@ -1899,6 +1982,7 @@ def write_sessile2d_case(case_dir: Path,
         # regularization choice.
         0.0,
         wall_face,
+        contact_line_model,
     )
     predicted_initial_speed = (
         mobility * surface_tension *
@@ -1909,7 +1993,9 @@ def write_sessile2d_case(case_dir: Path,
         "benchmark": (
             "synthetic Ren--E dynamic sessile contact-line relaxation"
             if dynamic else
-            "synthetic stationary Ren--E sessile-drop equilibrium"
+            ("synthetic stationary Ren--E sessile-drop equilibrium"
+             if contact_line_model == "dynamic" else
+             "synthetic stationary prescribed-angle sessile-drop equilibrium")
         ),
         "representation": "unfitted_level_set",
         "capillary_geometry": (
@@ -1956,11 +2042,19 @@ def write_sessile2d_case(case_dir: Path,
             "expected_initial_footprint": 2.0 * half_footprint,
             "expected_initial_liquid_area": expected_area,
             "dynamic": dynamic,
-            "contact_line_model": "DynamicContactAngle",
-            "wall_slip_model": "Navier",
-            "mobility": mobility,
-            "line_friction": 1.0 / mobility,
-            "slip_length": slip_length,
+            "contact_line_model": (
+                "DynamicContactAngle" if contact_line_model == "dynamic"
+                else "PrescribedContactAngle"),
+            **({
+                "wall_slip_model": "Navier",
+                "mobility": mobility,
+                "line_friction": 1.0 / mobility,
+                "slip_length": slip_length,
+            } if contact_line_model == "dynamic" else {
+                "level_set_geometry_owner": (
+                    "accepted_state_wall_aware_repair"),
+                "momentum_owner": "young_wall_energy",
+            }),
             "curvature_projection_narrow_band_width": 1.0 / max(nx, ny),
             "discrete_contact_initialization": (
                 "wall-adjacent LinearCorner fragments replaced by exact "
@@ -1970,12 +2064,16 @@ def write_sessile2d_case(case_dir: Path,
                 "Q1 vertices; generated-chord angle error is measured"),
             "discrete_contact_initialization_local_overwrite": dynamic,
             "discrete_contact_initialization_cell_ids": contact_cell_ids,
-            "predicted_initial_contact_line_speed": predicted_initial_speed,
-            "ren_e_relation": "V = mobility*gamma*(cos(theta_e)-cos(theta_d))",
-            "ren_e_direct_observable": (
-                "wall-interpolated solved contact-fluid velocity dot outward "
-                "footprint direction at the phi=0 wall intersections"
-            ),
+            **({
+                "predicted_initial_contact_line_speed":
+                    predicted_initial_speed,
+                "ren_e_relation": (
+                    "V = mobility*gamma*(cos(theta_e)-cos(theta_d))"),
+                "ren_e_direct_observable": (
+                    "wall-interpolated solved contact-fluid velocity dot "
+                    "outward footprint direction at the phi=0 wall "
+                    "intersections"),
+            } if contact_line_model == "dynamic" else {}),
             "geometric_speed_observable": (
                 "accepted-time finite difference of the phi=0 wall footprint; "
                 "reported separately as a transport/kinematic diagnostic"
@@ -3399,6 +3497,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "free_surface_conservative_balances": [],
         "free_surface_pressure_representability_distance_gates": [],
         "free_surface_static_compatible_pressure_initializers": [],
+        "static_capillary_equilibrium_initializations": [],
         "level_set_advection_velocity_updates": [],
         "level_set_volume_corrections": [],
         "level_set_maintenance": [],
@@ -3502,6 +3601,10 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics[
                 "free_surface_static_compatible_pressure_initializers"
             ].append(parse_key_values(line))
+        elif "diagnostic=static_capillary_equilibrium_initialization" in line:
+            diagnostics["static_capillary_equilibrium_initializations"].append(
+                parse_key_values(line)
+            )
         elif "residual block norms" in line:
             diagnostics["residual_block_norms"].append(parse_key_values(line))
         elif "diagnostic=newton_assembly" in line:
@@ -5030,8 +5133,8 @@ def free_surface_conservative_balance_errors(
 
     This is deliberately not an energy-history or time-discrete energy-law
     gate.  It compares, at one synchronized nonlinear state, the constrained
-    velocity-test coefficient vectors for pressure work, surface-energy first
-    variation, and their sum.
+    velocity-test coefficient vectors for pressure work, the declared physical
+    potential first variation, and their sum.
     """
     required = bool(getattr(
         args, "require_free_surface_conservative_balance", False))
@@ -5063,7 +5166,7 @@ def free_surface_conservative_balance_errors(
     errors = []
     expected_contract = "instantaneous_constrained_velocity_test_virtual_work"
     if record.get("scope") != (
-            "pressure_and_surface_energy_first_variations_only"):
+            "pressure_and_physical_potential_first_variations_only"):
         errors.append(
             "free-surface conservative balance has an unexpected physical scope"
         )
@@ -5072,7 +5175,7 @@ def free_surface_conservative_balance_errors(
             "free-surface conservative balance has an unexpected contract "
             f"{record.get('contract')!r}"
         )
-    if record.get("normalization") != "pressure_plus_surface_energy_norms":
+    if record.get("normalization") != "pressure_plus_physical_potential_norms":
         errors.append(
             "free-surface conservative balance has an unexpected normalization"
         )
@@ -5089,7 +5192,7 @@ def free_surface_conservative_balance_errors(
 
     numeric_keys = (
         "pressure_virtual_work_norm",
-        "surface_energy_virtual_work_norm",
+        "physical_potential_virtual_work_norm",
         "conservative_balance_norm",
         "normalized_imbalance",
     )
@@ -5110,7 +5213,7 @@ def free_surface_conservative_balance_errors(
     if all(key in numeric for key in numeric_keys):
         denominator = (
             numeric["pressure_virtual_work_norm"] +
-            numeric["surface_energy_virtual_work_norm"])
+            numeric["physical_potential_virtual_work_norm"])
         if not denominator > 0.0:
             errors.append(
                 "free-surface conservative balance normalization denominator "
@@ -5150,9 +5253,10 @@ def free_surface_pressure_representability_errors(
     """Validate the pressure-space representability diagnostic contract.
 
     The diagnostic solves the constrained reduced pressure-to-velocity pairing
-    problem for the surface-area plus Young-wall-energy load. Telemetry-only
-    callers require finite normal-equation stationarity. A configured maximum
-    additionally requires the solver's accepted-static-state distance gate.
+    problem for the prescribed-pressure, surface-area, Young-wall-energy, and
+    gravitational-potential load. Telemetry-only callers require finite
+    normal-equation stationarity. A configured maximum additionally requires
+    the solver's accepted-static-state distance gate.
     """
     maximum = getattr(
         args,
@@ -5201,7 +5305,8 @@ def free_surface_pressure_representability_errors(
             "constrained_reduced_coefficient_l2"
         ),
         "pressure_representability_load": (
-            "surface_area_variation_plus_young_wall_energy"
+            "prescribed_external_pressure_plus_surface_area_variation_plus_"
+            "young_wall_energy_plus_gravitational_potential"
         ),
     }
     for key, expected in expected_strings.items():
@@ -5444,6 +5549,204 @@ def free_surface_pressure_representability_errors(
             "accepted-static pressure-representability distance gate has "
             f"unexpected reason {gate_record.get('reason')!r}; expected "
             "'within_threshold'"
+        )
+    return errors
+
+
+def static_capillary_equilibrium_initialization_errors(
+        metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
+    if not bool(getattr(
+            args, "initialize_discrete_static_capillary_equilibrium", False)):
+        return []
+
+    diagnostics = metrics.get("diagnostics", {})
+    records = diagnostics.get(
+        "static_capillary_equilibrium_initializations", [])
+    if not isinstance(records, list) or len(records) != 1:
+        count = len(records) if isinstance(records, list) else "malformed"
+        return [
+            "discrete static-capillary equilibrium initialization requires "
+            f"exactly one diagnostic record (observed {count})"
+        ]
+    record = records[0]
+    if not isinstance(record, dict):
+        return [
+            "discrete static-capillary equilibrium initialization diagnostic "
+            "is malformed"
+        ]
+
+    errors: list[str] = []
+    expected_flags = {
+        "pressure_representability_available": 1,
+        "pressure_representability_converged": 1,
+        "pressure_representability_breakdown": 0,
+        "production_force_projection_applied": 0,
+    }
+    for key, expected in expected_flags.items():
+        value = record.get(key)
+        if value not in (expected, bool(expected)):
+            errors.append(
+                "discrete static-capillary initialization has unexpected "
+                f"{key} {value!r}; expected {expected}"
+            )
+
+    constant_pressure_required = record.get("constant_pressure_kkt_required")
+    constant_pressure_available = record.get(
+        "constant_pressure_kkt_available")
+    if constant_pressure_required not in (0, 1, False, True):
+        errors.append(
+            "discrete static-capillary initialization has invalid "
+            "constant_pressure_kkt_required flag"
+        )
+    if constant_pressure_available not in (0, 1, False, True):
+        errors.append(
+            "discrete static-capillary initialization has invalid "
+            "constant_pressure_kkt_available flag"
+        )
+    if bool(constant_pressure_required) != bool(constant_pressure_available):
+        errors.append(
+            "discrete static-capillary initialization constant-pressure "
+            "certificate availability disagrees with whether it was required"
+        )
+
+    for key in ("active_coefficients", "functional_evaluations",
+                "acceptance_certificate_evaluations"):
+        value = record.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            errors.append(
+                "discrete static-capillary initialization has invalid "
+                f"{key} {value!r}"
+            )
+    iterations = record.get("iterations")
+    if (isinstance(iterations, bool) or not isinstance(iterations, int) or
+            iterations < 0):
+        errors.append(
+            "discrete static-capillary initialization has invalid iteration "
+            f"count {iterations!r}"
+        )
+    maximum_iterations = getattr(
+        args, "static_capillary_max_iterations", None)
+    if (isinstance(iterations, int) and
+            isinstance(maximum_iterations, int) and
+            iterations > maximum_iterations):
+        errors.append(
+            "discrete static-capillary initialization iteration count "
+            f"{iterations} exceeds {maximum_iterations}"
+        )
+
+    target_volume = record.get("target_liquid_volume")
+    if (isinstance(target_volume, bool) or
+            not isinstance(target_volume, (int, float)) or
+            not math.isfinite(float(target_volume)) or
+            float(target_volume) <= 0.0):
+        errors.append(
+            "discrete static-capillary initialization target volume is "
+            "unavailable, nonfinite, or nonpositive"
+        )
+
+    for key in (
+            "initial_physical_potential_energy",
+            "final_physical_potential_energy",
+            "final_volume_error",
+            "final_projected_gradient_norm",
+            "pressure_representability_residual_norm",
+            "pressure_representability_relative_distance",
+            "production_residual_norm"):
+        value = record.get(key)
+        if (isinstance(value, bool) or
+                not isinstance(value, (int, float)) or
+                not math.isfinite(float(value))):
+            errors.append(
+                "discrete static-capillary initialization has unavailable "
+                f"or nonfinite {key}"
+            )
+
+    initial_energy = record.get("initial_physical_potential_energy")
+    final_energy = record.get("final_physical_potential_energy")
+    if all(
+            isinstance(value, (int, float)) and not isinstance(value, bool) and
+            math.isfinite(float(value))
+            for value in (initial_energy, final_energy)):
+        energy_scale = max(1.0, abs(float(initial_energy)))
+        if float(final_energy) > (
+                float(initial_energy) + 1.0e-12 * energy_scale):
+            errors.append(
+                "discrete static-capillary initialization increased physical "
+                "potential energy"
+            )
+
+    threshold_checks = (
+        ("final_volume_error", "static_capillary_volume_tolerance", True),
+        ("final_projected_gradient_norm",
+         "static_capillary_projected_gradient_tolerance", False),
+        ("pressure_representability_residual_norm",
+         "static_capillary_pressure_representability_max_residual_norm",
+         False),
+        ("pressure_representability_relative_distance",
+         "static_capillary_pressure_representability_max_relative_distance",
+         False),
+        ("production_residual_norm",
+         "static_capillary_physical_equilibrium_max_residual_norm", False),
+    )
+    for metric_name, argument_name, use_absolute_value in threshold_checks:
+        threshold = getattr(args, argument_name, None)
+        value = record.get(metric_name)
+        if threshold is None:
+            continue
+        if (isinstance(threshold, bool) or
+                not isinstance(threshold, (int, float)) or
+                not math.isfinite(float(threshold)) or
+                float(threshold) < 0.0):
+            errors.append(f"{argument_name} is invalid")
+            continue
+        if (isinstance(value, (int, float)) and
+                not isinstance(value, bool) and math.isfinite(float(value))):
+            compared = abs(float(value)) if use_absolute_value else float(value)
+            if compared > float(threshold):
+                errors.append(
+                    "discrete static-capillary initialization "
+                    f"{metric_name} {compared:.6g} exceeds "
+                    f"{float(threshold):.6g}"
+                )
+
+    if bool(constant_pressure_required):
+        for metric_name, argument_name in (
+                ("constant_pressure_kkt_residual_norm",
+                 "static_capillary_constant_pressure_kkt_max_residual_norm"),
+                ("constant_pressure_kkt_relative_distance",
+                 "static_capillary_constant_pressure_kkt_max_relative_distance")):
+            value = record.get(metric_name)
+            if (isinstance(value, bool) or
+                    not isinstance(value, (int, float)) or
+                    not math.isfinite(float(value)) or float(value) < 0.0):
+                errors.append(
+                    "discrete static-capillary initialization has unavailable, "
+                    f"nonfinite, or negative {metric_name}"
+                )
+                continue
+            threshold = getattr(args, argument_name, None)
+            if threshold is None:
+                continue
+            if (isinstance(threshold, bool) or
+                    not isinstance(threshold, (int, float)) or
+                    not math.isfinite(float(threshold)) or
+                    float(threshold) < 0.0):
+                errors.append(f"{argument_name} is invalid")
+            elif float(value) > float(threshold):
+                errors.append(
+                    "discrete static-capillary initialization "
+                    f"{metric_name} {float(value):.6g} exceeds "
+                    f"{float(threshold):.6g}"
+                )
+
+    required_qualification = getattr(
+        args, "require_static_capillary_balance_qualification", None)
+    if (required_qualification is not None and
+            record.get("qualification") != required_qualification):
+        errors.append(
+            "discrete static-capillary initialization reported qualification "
+            f"{record.get('qualification')!r}; expected "
+            f"{required_qualification!r}"
         )
     return errors
 
@@ -5776,6 +6079,8 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
                      "diagnostic_free_surface_pressure_virtual_work_norm"),
                     ("surface_energy_virtual_work_norm",
                      "diagnostic_free_surface_surface_energy_virtual_work_norm"),
+                    ("physical_potential_virtual_work_norm",
+                     "diagnostic_free_surface_physical_potential_virtual_work_norm"),
                     ("conservative_balance_norm",
                      "diagnostic_free_surface_conservative_balance_norm"),
                     ("normalized_imbalance",
@@ -5809,6 +6114,39 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
             metrics[
                 "latest_free_surface_static_compatible_pressure_initializer"
             ] = compatible_pressure_initializers[-1]
+
+    static_capillary_initializations = diagnostics.get(
+        "static_capillary_equilibrium_initializations", [])
+    if isinstance(static_capillary_initializations, list):
+        metrics[
+            "diagnostic_static_capillary_equilibrium_initialization_count"
+        ] = len(static_capillary_initializations)
+        if static_capillary_initializations:
+            latest_static_capillary = static_capillary_initializations[-1]
+            metrics["latest_static_capillary_equilibrium_initialization"] = (
+                latest_static_capillary)
+            for source in (
+                    "active_coefficients",
+                    "target_liquid_volume",
+                    "initial_physical_potential_energy",
+                    "final_physical_potential_energy",
+                    "final_volume_error",
+                    "final_projected_gradient_norm",
+                    "pressure_representability_residual_norm",
+                    "pressure_representability_relative_distance",
+                    "production_residual_norm",
+                    "constant_pressure_kkt_required",
+                    "constant_pressure_kkt_available",
+                    "constant_pressure_kkt_residual_norm",
+                    "constant_pressure_kkt_relative_distance",
+                    "iterations",
+                    "functional_evaluations",
+                    "topology_change_rejections",
+                    "constraint_change_rejections",
+                    "qualification"):
+                value = latest_static_capillary.get(source)
+                if isinstance(value, (bool, int, float, str)):
+                    metrics[f"static_capillary_{source}"] = value
 
     velocity_range = diagnostic_solution_velocity_range(diagnostics)
     if velocity_range is not None:
@@ -6966,6 +7304,16 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "curvature_projection_smoothing_iterations",
         "curvature_projection_smoothing_relaxation",
         "curvature_projection_smoothing_mode",
+        "sessile_contact_line_model",
+        "static_capillary_volume_tolerance",
+        "static_capillary_projected_gradient_tolerance",
+        "static_capillary_pressure_representability_max_residual_norm",
+        "static_capillary_pressure_representability_max_relative_distance",
+        "static_capillary_physical_equilibrium_max_residual_norm",
+        "static_capillary_constant_pressure_kkt_max_residual_norm",
+        "static_capillary_constant_pressure_kkt_max_relative_distance",
+        "static_capillary_max_iterations",
+        "require_static_capillary_balance_qualification",
         "expect_curvature_projection_smoothing_mode",
         "min_diagnostic_curvature_projection_operator_edges",
         "max_capillary_curvature_relative_error",
@@ -7016,6 +7364,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "enable_newton_assembly_diagnostics",
         "enable_free_surface_conservative_balance_diagnostic",
         "initialize_static_compatible_pressure",
+        "initialize_discrete_static_capillary_equilibrium",
         "newton_line_search_fail_on_no_reduction",
         "disable_cut_stabilization",
         "enable_linear_solve_history",
@@ -7321,6 +7670,8 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
     errors.extend(capillary_stability_errors(metrics, args))
     errors.extend(free_surface_conservative_balance_errors(metrics, args))
     errors.extend(free_surface_pressure_representability_errors(metrics, args))
+    errors.extend(
+        static_capillary_equilibrium_initialization_errors(metrics, args))
     # Output-free runs may be useful for solver diagnostics, but they cannot
     # satisfy an enabled sessile/contact-line qualification gate: every one of
     # those metrics is derived from the saved solved-field history.  Treat the
@@ -8140,7 +8491,7 @@ def add_sessile_contact_fluid_speed(state: dict[str, Any],
 def add_sessile_operator_contact_geometry(state: dict[str, Any],
                                           dataset: pv.DataSet,
                                           benchmark: dict[str, Any]) -> None:
-    """Evaluate the Ren--E state with the generated LinearCorner normal.
+    """Evaluate the contact state with the generated LinearCorner normal.
 
     SurfaceStress and its contact term use the normal carried by the same
     generated interface fragment that supplies ``dI`` and
@@ -8189,11 +8540,23 @@ def add_sessile_operator_contact_geometry(state: dict[str, Any],
         unavailable("unsupported active-domain metadata")
         return
     target_angle = contact.get("equilibrium_contact_angle_degrees")
+    contact_line_model = contact.get("contact_line_model")
     mobility = contact.get("mobility")
     surface_tension = benchmark.get("surface_tension")
-    if not all(isinstance(value, (int, float)) and not isinstance(value, bool)
-               and math.isfinite(float(value))
-               for value in (target_angle, mobility, surface_tension)):
+    if contact_line_model not in {
+            "DynamicContactAngle", "PrescribedContactAngle"}:
+        unavailable("unsupported contact-line model metadata")
+        return
+    if (not isinstance(target_angle, (int, float)) or
+            isinstance(target_angle, bool) or
+            not math.isfinite(float(target_angle))):
+        unavailable("incomplete contact-angle metadata")
+        return
+    dynamic_model = contact_line_model == "DynamicContactAngle"
+    if (dynamic_model and
+            not all(isinstance(value, (int, float)) and
+                    not isinstance(value, bool) and math.isfinite(float(value))
+                    for value in (mobility, surface_tension))):
         unavailable("incomplete Ren--E coefficient metadata")
         return
     target_cos = math.cos(math.radians(float(target_angle)))
@@ -8345,9 +8708,10 @@ def add_sessile_operator_contact_geometry(state: dict[str, Any],
             "generated_fragment_normal": [
                 float(active_normal[0]), float(active_normal[1])],
             "wall_tangential_normal_norm": wall_tangent_norm,
-            "predicted_contact_line_speed": (
-                float(mobility) * float(surface_tension) * young_gap),
         }
+        if dynamic_model:
+            sample["predicted_contact_line_speed"] = (
+                float(mobility) * float(surface_tension) * young_gap)
         if velocity is not None and velocity.shape[1] >= 2 and wall_tangent_norm > 0.0:
             contact_velocity = shape @ velocity[point_ids, :2]
             footprint_direction = wall_tangent / wall_tangent_norm
@@ -8387,8 +8751,10 @@ def add_sessile_operator_contact_geometry(state: dict[str, Any],
     state["operator_wall_tangential_normal_norm_min"] = min(
         float(sample["wall_tangential_normal_norm"])
         for sample in unique_samples)
-    state["operator_predicted_contact_line_speed"] = sample_mean(
-        "predicted_contact_line_speed")
+    if all("predicted_contact_line_speed" in sample
+           for sample in unique_samples):
+        state["operator_predicted_contact_line_speed"] = sample_mean(
+            "predicted_contact_line_speed")
     if all("contact_fluid_speed" in sample for sample in unique_samples):
         state["operator_contact_fluid_speed"] = sample_mean(
             "contact_fluid_speed")
@@ -10399,6 +10765,8 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
     errors.extend(capillary_stability_errors(metrics, args))
     errors.extend(free_surface_conservative_balance_errors(metrics, args))
     errors.extend(free_surface_pressure_representability_errors(metrics, args))
+    errors.extend(
+        static_capillary_equilibrium_initialization_errors(metrics, args))
     errors.extend(sessile_physical_errors(metrics, args))
     errors.extend(fsils_accepted_true_residual_errors(metrics, args))
     errors.extend(fsils_matrix_diag_col_mismatch_errors(metrics, args))
@@ -11010,7 +11378,14 @@ def case_args_for_run(case_name: str,
             # gate.  This changes only the initial pressure coefficients; the
             # production capillary load remains unprojected.
             set_default(
-                case_args, "initialize_static_compatible_pressure", True)
+                case_args,
+                "initialize_static_compatible_pressure",
+                not bool(getattr(
+                    case_args,
+                    "initialize_discrete_static_capillary_equilibrium",
+                    False,
+                )),
+            )
             # Fixed before execution for the n=16/32 FS-16 matrix.  The angle,
             # area, and pressure bounds are intentionally well below an
             # order-one error while allowing P1 interface sampling error.  A
@@ -11152,6 +11527,45 @@ def configure_case_solver_xml(run_dir: Path, args: argparse.Namespace) -> None:
             args.curvature_projection_smoothing_relaxation),
         curvature_projection_smoothing_mode=(
             args.curvature_projection_smoothing_mode),
+        enable_static_capillary_equilibrium_initialization=getattr(
+            args,
+            "initialize_discrete_static_capillary_equilibrium",
+            None,
+        ),
+        static_capillary_volume_tolerance=getattr(
+            args, "static_capillary_volume_tolerance", None),
+        static_capillary_projected_gradient_tolerance=getattr(
+            args,
+            "static_capillary_projected_gradient_tolerance",
+            None,
+        ),
+        static_capillary_pressure_representability_max_residual_norm=getattr(
+            args,
+            "static_capillary_pressure_representability_max_residual_norm",
+            None,
+        ),
+        static_capillary_pressure_representability_max_relative_distance=getattr(
+            args,
+            "static_capillary_pressure_representability_max_relative_distance",
+            None,
+        ),
+        static_capillary_physical_equilibrium_max_residual_norm=getattr(
+            args,
+            "static_capillary_physical_equilibrium_max_residual_norm",
+            None,
+        ),
+        static_capillary_constant_pressure_kkt_max_residual_norm=getattr(
+            args,
+            "static_capillary_constant_pressure_kkt_max_residual_norm",
+            None,
+        ),
+        static_capillary_constant_pressure_kkt_max_relative_distance=getattr(
+            args,
+            "static_capillary_constant_pressure_kkt_max_relative_distance",
+            None,
+        ),
+        static_capillary_max_iterations=getattr(
+            args, "static_capillary_max_iterations", None),
         enable_volume_correction=args.enable_level_set_volume_correction,
         volume_correction_cadence_steps=args.volume_correction_cadence_steps,
         volume_correction_use_initial_volume=(
@@ -11232,6 +11646,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                     dynamic,
                     (args.dynamic_contact_wall
                      if dynamic else "wall_bottom"),
+                    ("dynamic" if dynamic else
+                     getattr(args, "sessile_contact_line_model", "dynamic")),
                 )
             else:
                 write_mini_case(run_dir, args.steps, static=(case_name == "static2d"))
@@ -13189,6 +13605,13 @@ def main() -> int:
     parser.add_argument("--contact-line-mobility", type=float, default=1.0)
     parser.add_argument("--wall-slip-length", type=float, default=0.1)
     parser.add_argument(
+        "--sessile-contact-line-model",
+        choices=("dynamic", "prescribed"),
+        default="dynamic",
+        help=("contact model for the stationary sessile case; the moving "
+              "contact case always uses the dynamic model"),
+    )
+    parser.add_argument(
         "--dynamic-contact-wall",
         choices=("wall_bottom", "wall_left"),
         default="wall_bottom",
@@ -13279,6 +13702,42 @@ def main() -> int:
         help=("once preload the static pressure coefficients from the same "
               "constrained surface-energy/pressure pair used by the required "
               "representability-distance gate"),
+    )
+    parser.add_argument(
+        "--initialize-discrete-static-capillary-equilibrium",
+        action="store_true",
+        default=None,
+        help=("replace the sampled static level set with a fixed-topology, "
+              "fixed-volume stationary point of the declared discrete "
+              "surface, wall, and gravitational potential"),
+    )
+    parser.add_argument("--static-capillary-volume-tolerance", type=float)
+    parser.add_argument(
+        "--static-capillary-projected-gradient-tolerance", type=float)
+    parser.add_argument(
+        "--static-capillary-pressure-representability-max-residual-norm",
+        type=float,
+    )
+    parser.add_argument(
+        "--static-capillary-pressure-representability-max-relative-distance",
+        type=float,
+    )
+    parser.add_argument(
+        "--static-capillary-physical-equilibrium-max-residual-norm",
+        type=float,
+    )
+    parser.add_argument(
+        "--static-capillary-constant-pressure-kkt-max-residual-norm",
+        type=float,
+    )
+    parser.add_argument(
+        "--static-capillary-constant-pressure-kkt-max-relative-distance",
+        type=float,
+    )
+    parser.add_argument("--static-capillary-max-iterations", type=int)
+    parser.add_argument(
+        "--require-static-capillary-balance-qualification",
+        choices=("prerequisite_only", "qualified"),
     )
     parser.add_argument(
         "--max-free-surface-conservative-balance-normalized-imbalance",
