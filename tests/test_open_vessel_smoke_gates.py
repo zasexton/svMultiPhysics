@@ -731,6 +731,39 @@ def test_capillary_benchmark_errors_accept_generic_droplet_radius():
     assert "capillary_projected_curvature_max_abs" not in metrics
 
 
+def test_spatial_capillary_factor_scales_curvature_and_pressure_jump():
+    smoke = _load_smoke_module()
+    args = argparse.Namespace(
+        max_capillary_curvature_relative_error=0.01,
+        max_capillary_pressure_jump_relative_error=0.01,
+        max_capillary_parasitic_capillary_number=0.01,
+    )
+    metrics = {
+        "benchmark": {
+            "capillary_radius": 0.25,
+            "capillary_curvature_factor": 2.0,
+            "initial_active_pressure": 4.0,
+            "viscosity": 0.1,
+        },
+        "surface_tension": 0.5,
+        "capillary_final_pressure_jump": 4.0,
+        "spatial_capillary_final_max_liquid_speed": 0.025,
+        "latest_curvature_projection": {
+            "curvature_field": "kappa_projected",
+            "narrow_band_width": 0.03125,
+            "narrow_band_vertices": 64,
+            "skipped_far_vertices": 96,
+            "max_abs_curvature": 8.0,
+        },
+    }
+
+    assert smoke.capillary_benchmark_errors(metrics, args) == []
+    assert metrics["capillary_expected_curvature"] == 8.0
+    assert metrics["capillary_expected_pressure_jump"] == 4.0
+    assert metrics["capillary_final_parasitic_capillary_number"] == pytest.approx(
+        0.005)
+
+
 def test_capillary_pressure_jump_gate_requires_solved_final_pressure_samples():
     smoke = _load_smoke_module()
     args = argparse.Namespace(
@@ -1757,6 +1790,43 @@ def test_sessile_defaults_require_pressure_representability_but_dynamic_do_not()
     discrete_args.initialize_discrete_static_capillary_equilibrium = True
     discrete = smoke.case_args_for_run("sessile2d", discrete_args)
     assert discrete.initialize_static_compatible_pressure is False
+
+
+def test_spatial_static_defaults_select_dimension_specific_physical_gates():
+    smoke = _load_smoke_module()
+    base = argparse.Namespace(
+        high_order_mpi_production_qualification=False,
+        steps=None,
+        time_step_size=None,
+        timeout_seconds=None,
+        surface_tension=None,
+        require_free_surface_conservative_balance=False,
+        require_free_surface_pressure_representability_diagnostic=False,
+        max_free_surface_pressure_representability_relative_distance=None,
+        initialize_static_compatible_pressure=None,
+    )
+
+    sphere = smoke.case_args_for_run("sphere3d", base)
+    sessile = smoke.case_args_for_run("sessile3d", base)
+
+    assert sphere.max_capillary_pressure_jump_relative_error == 0.15
+    assert sphere.max_capillary_parasitic_capillary_number == 1.0e-2
+    assert getattr(
+        sphere, "max_sessile_contact_angle_error_degrees", None
+    ) is None
+    assert sessile.max_sessile_contact_angle_error_degrees == 5.0
+    assert sessile.max_sessile_liquid_area_relative_error is None
+    assert sessile.max_sessile_liquid_volume_relative_error == 0.05
+    assert sessile.max_sessile_base_radius_relative_error == 0.05
+    assert sessile.max_sessile_apex_height_relative_error == 0.05
+    for configured in (sphere, sessile):
+        assert configured.require_free_surface_energy_history is True
+        assert configured.require_free_surface_conservative_balance is True
+        assert (
+            configured.require_free_surface_pressure_representability_diagnostic
+            is True
+        )
+        assert configured.initialize_static_compatible_pressure is True
 
 
 @pytest.mark.parametrize(

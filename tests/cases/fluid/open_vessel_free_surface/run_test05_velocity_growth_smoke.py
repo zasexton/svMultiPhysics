@@ -37,7 +37,13 @@ from collate_vtk_time_series import collate_time_series
 from free_surface_energy import (
     energy_history_gate_errors,
     free_surface_energy_state_2d,
+    free_surface_energy_state_3d,
     summarize_energy_history,
+)
+from static_capillary_3d import (
+    spatial_capillary_state_metrics,
+    write_sessile_sphere_case,
+    write_sphere_case,
 )
 
 CASES = {
@@ -45,8 +51,10 @@ CASES = {
     "static2d": None,
     "capillaryarc2d": None,
     "droplet2d": None,
+    "sphere3d": None,
     "capillarywave2d": None,
     "sessile2d": None,
+    "sessile3d": None,
     "dynamiccontact2d": None,
     "curvedtet3d": None,
     "open2d": CASE_ROOT,
@@ -62,8 +70,10 @@ CASE_COPY_ENTRIES = {
 CASE_GATE_X = {
     "capillaryarc2d": 0.5,
     "droplet2d": 0.5,
+    "sphere3d": 0.5,
     "capillarywave2d": 0.5,
     "sessile2d": 0.5,
+    "sessile3d": 0.5,
     "dynamiccontact2d": 0.5,
     "mini2d": 0.4,
     "static2d": 0.5,
@@ -4624,6 +4634,7 @@ def capillary_benchmark_errors(metrics: dict[str, Any],
         benchmark = {}
 
     radius = benchmark.get("capillary_radius", benchmark.get("capillary_arc_radius"))
+    curvature_factor = benchmark.get("capillary_curvature_factor", 1.0)
     if args.max_capillary_curvature_relative_error is not None:
         observation = projected_curvature_interface_band_observation(metrics)
         if not isinstance(radius, (int, float)) or float(radius) <= 0.0:
@@ -4635,7 +4646,15 @@ def capillary_benchmark_errors(metrics: dict[str, Any],
             )
         else:
             observed = observation["value"]
-            expected = 1.0 / float(radius)
+            if (not isinstance(curvature_factor, (int, float)) or
+                    isinstance(curvature_factor, bool) or
+                    not math.isfinite(float(curvature_factor)) or
+                    float(curvature_factor) <= 0.0):
+                errors.append(
+                    "capillary curvature gate requires a positive curvature "
+                    "factor")
+                return errors
+            expected = float(curvature_factor) / float(radius)
             relative_error = abs(float(observed) - expected) / max(abs(expected), 1.0e-300)
             metrics["capillary_benchmark_radius"] = float(radius)
             metrics["capillary_expected_curvature"] = expected
@@ -4688,8 +4707,19 @@ def capillary_benchmark_errors(metrics: dict[str, Any],
         else:
             # The level-set convention is phi < 0 in the liquid with the
             # interface normal pointing out of the liquid.  Positive convex
-            # curvature therefore requires p_liquid - p_external = gamma/R.
-            expected_jump = float(surface_tension) / float(radius)
+            # curvature therefore requires p_liquid - p_external = gamma*kappa.
+            if (not isinstance(curvature_factor, (int, float)) or
+                    isinstance(curvature_factor, bool) or
+                    not math.isfinite(float(curvature_factor)) or
+                    float(curvature_factor) <= 0.0):
+                errors.append(
+                    "capillary pressure-jump gate requires a positive "
+                    "curvature factor")
+                return errors
+            expected_jump = (
+                float(curvature_factor) * float(surface_tension) /
+                float(radius)
+            )
             relative_error = (
                 abs(float(observed_jump) - expected_jump) /
                 max(abs(expected_jump), 1.0e-300)
@@ -4702,6 +4732,53 @@ def capillary_benchmark_errors(metrics: dict[str, Any],
                 errors.append(
                     f"capillary pressure-jump relative error {relative_error:.6g} exceeds "
                     f"{args.max_capillary_pressure_jump_relative_error:.6g}"
+                )
+
+    maximum_capillary_number = getattr(
+        args, "max_capillary_parasitic_capillary_number", None)
+    if maximum_capillary_number is not None:
+        if (not isinstance(maximum_capillary_number, (int, float)) or
+                isinstance(maximum_capillary_number, bool) or
+                not math.isfinite(float(maximum_capillary_number)) or
+                float(maximum_capillary_number) < 0.0):
+            errors.append(
+                "maximum capillary number must be finite and nonnegative")
+            return errors
+        viscosity = benchmark.get("viscosity")
+        surface_tension = metrics.get(
+            "surface_tension", benchmark.get("surface_tension"))
+        max_liquid_speed = metrics.get(
+            "spatial_capillary_final_max_liquid_speed")
+        if (not isinstance(viscosity, (int, float)) or
+                isinstance(viscosity, bool) or
+                not math.isfinite(float(viscosity)) or
+                float(viscosity) < 0.0):
+            errors.append(
+                "capillary-number gate requires finite nonnegative viscosity")
+        elif (not isinstance(surface_tension, (int, float)) or
+              isinstance(surface_tension, bool) or
+              not math.isfinite(float(surface_tension)) or
+              float(surface_tension) <= 0.0):
+            errors.append(
+                "capillary-number gate requires positive surface tension")
+        elif (not isinstance(max_liquid_speed, (int, float)) or
+              isinstance(max_liquid_speed, bool) or
+              not math.isfinite(float(max_liquid_speed)) or
+              float(max_liquid_speed) < 0.0):
+            errors.append(
+                "capillary-number gate requires final spatial liquid speed")
+        else:
+            capillary_number = (
+                float(viscosity) * float(max_liquid_speed) /
+                float(surface_tension)
+            )
+            metrics["capillary_final_parasitic_capillary_number"] = (
+                capillary_number)
+            if capillary_number > float(maximum_capillary_number):
+                errors.append(
+                    "capillary parasitic capillary number "
+                    f"{capillary_number:.6g} exceeds "
+                    f"{float(maximum_capillary_number):.6g}"
                 )
     return errors
 
@@ -4919,6 +4996,21 @@ def sessile_physical_errors(metrics: dict[str, Any],
             "sessile liquid-area relative error",
         ),
         (
+            "max_sessile_liquid_volume_relative_error",
+            "sessile_final_liquid_volume_relative_error",
+            "sessile liquid-volume relative error",
+        ),
+        (
+            "max_sessile_base_radius_relative_error",
+            "sessile_final_base_radius_relative_error",
+            "sessile base-radius relative error",
+        ),
+        (
+            "max_sessile_apex_height_relative_error",
+            "sessile_final_apex_height_relative_error",
+            "sessile apex-height relative error",
+        ),
+        (
             "max_sessile_parasitic_capillary_number",
             "sessile_final_parasitic_capillary_number",
             "sessile parasitic capillary number",
@@ -4942,13 +5034,17 @@ def sessile_physical_errors(metrics: dict[str, Any],
                 f"{label} {float(value):.6g} exceeds {float(maximum):.6g}"
             )
 
+    accepted_angle_sources = {
+        "same_state_LinearCorner_generated_fragment_normal_at_phi_zero_wall_roots",
+        "same_state_LinearCorner_generated_triangle_normal_at_phi_zero_wall_edges",
+    }
     if (getattr(args, "max_sessile_contact_angle_error_degrees", None)
             is not None and
-            metrics.get("sessile_final_contact_angle_source") !=
-            "same_state_LinearCorner_generated_fragment_normal_at_phi_zero_wall_roots"):
+            metrics.get("sessile_final_contact_angle_source") not in
+            accepted_angle_sources):
         errors.append(
             "sessile contact angle was not evaluated from the same-state "
-            "LinearCorner generated-fragment normal at both phi=0 wall roots"
+            "LinearCorner generated normal on the phi=0 wall contact"
         )
 
     ren_e_gate_enabled = (
@@ -7352,6 +7448,14 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "min_diagnostic_curvature_projection_operator_edges",
         "max_capillary_curvature_relative_error",
         "max_capillary_pressure_jump_relative_error",
+        "max_capillary_parasitic_capillary_number",
+        "max_sessile_contact_angle_error_degrees",
+        "max_sessile_pressure_jump_relative_error",
+        "max_sessile_liquid_area_relative_error",
+        "max_sessile_liquid_volume_relative_error",
+        "max_sessile_base_radius_relative_error",
+        "max_sessile_apex_height_relative_error",
+        "max_sessile_parasitic_capillary_number",
         "max_capillary_rejected_steps",
         "max_capillary_dt_updates",
         "max_capillary_speed_per_surface_tension",
@@ -7376,6 +7480,14 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "volume_correction_max_iterations",
         "volume_correction_maximum_cumulative_interface_displacement_fraction",
         "mpi_ranks",
+        "synthetic_nx",
+        "synthetic_ny",
+        "synthetic_nz",
+        "contact_angle_degrees",
+        "sessile_radius",
+        "sessile_contact_wall",
+        "sessile_contact_wall_3d",
+        "level_set_positive_scale",
         "mms_nx",
         "mms_ny",
         "max_diagnostic_implicit_cut_fallback_cells",
@@ -9510,22 +9622,37 @@ def add_free_surface_energy_history_metrics(
     equilibrium_angle: float | None = None
     wall_coordinate = 0.0
     wall_axis = 1
+    spatial_dimension = benchmark.get("spatial_dimension", 2)
+    if (not isinstance(spatial_dimension, int) or
+            isinstance(spatial_dimension, bool) or
+            spatial_dimension not in {2, 3}):
+        unavailable("free-surface energy spatial dimension must be 2 or 3")
+        return
     if isinstance(sessile, dict):
         density = benchmark.get("density")
         surface_tension = benchmark.get("surface_tension")
         equilibrium_angle = sessile.get("equilibrium_contact_angle_degrees")
-        try:
-            wall_frame = sessile_contact_wall_frame(sessile)
-        except ValueError as exc:
-            unavailable(str(exc))
-            return
-        wall_coordinate = wall_frame["wall_coordinate"]
-        wall_axis = wall_frame["wall_axis"]
+        if spatial_dimension == 3:
+            wall_coordinate = sessile.get("wall_coordinate")
+            wall_axis = sessile.get("wall_axis")
+        else:
+            try:
+                wall_frame = sessile_contact_wall_frame(sessile)
+            except ValueError as exc:
+                unavailable(str(exc))
+                return
+            wall_coordinate = wall_frame["wall_coordinate"]
+            wall_axis = wall_frame["wall_axis"]
         energy_case = "sessile_contact"
     elif isinstance(wave, dict):
         density = wave.get("density")
         surface_tension = wave.get("surface_tension")
         energy_case = "capillary_wave"
+    elif (spatial_dimension == 3 and
+          benchmark.get("capillary_geometry") == "sphere_3d"):
+        density = benchmark.get("density")
+        surface_tension = benchmark.get("surface_tension")
+        energy_case = "closed_sphere"
     else:
         return
 
@@ -9535,6 +9662,10 @@ def add_free_surface_energy_history_metrics(
                 for value in numeric_parameters) or
             float(density) <= 0.0 or float(surface_tension) <= 0.0):
         unavailable("free-surface energy parameters are unavailable or invalid")
+        return
+    if (not isinstance(wall_axis, int) or isinstance(wall_axis, bool) or
+            wall_axis < 0 or wall_axis >= spatial_dimension):
+        unavailable("free-surface energy wall axis is unavailable or invalid")
         return
     if isinstance(sessile, dict) and (
             not isinstance(equilibrium_angle, (int, float)) or
@@ -9560,7 +9691,11 @@ def add_free_surface_energy_history_metrics(
 
     history: list[dict[str, Any]] = []
     try:
-        initial_energy = free_surface_energy_state_2d(
+        energy_function = (
+            free_surface_energy_state_3d
+            if spatial_dimension == 3 else free_surface_energy_state_2d
+        )
+        initial_energy = energy_function(
             initial,
             density=float(density),
             surface_tension=float(surface_tension),
@@ -9579,7 +9714,7 @@ def add_free_surface_energy_history_metrics(
         })
         for step, path in paths:
             time_value, dt_value = clock[step]
-            state_energy = free_surface_energy_state_2d(
+            state_energy = energy_function(
                 pv.read(path),
                 density=float(density),
                 surface_tension=float(surface_tension),
@@ -9682,11 +9817,16 @@ def add_physical_time_history_metrics(metrics: dict[str, Any],
 
     sessile = benchmark.get("sessile_contact")
     if isinstance(sessile, dict):
-        initial_state = sessile_state_metrics(initial, benchmark)
+        spatial_sessile = benchmark.get("spatial_dimension", 2) == 3
+        state_function = (
+            spatial_capillary_state_metrics
+            if spatial_sessile else sessile_state_metrics
+        )
+        initial_state = state_function(initial, benchmark)
         initial_state.update(stamp(0))
         history = [initial_state]
         for step, path in paths:
-            state = sessile_state_metrics(pv.read(path), benchmark)
+            state = state_function(pv.read(path), benchmark)
             state.update(stamp(step))
             state["path"] = str(path)
             history.append(state)
@@ -9762,18 +9902,24 @@ def add_physical_time_history_metrics(metrics: dict[str, Any],
         target_angle = sessile.get("equilibrium_contact_angle_degrees")
         fitted_observed_angle = final_state.get("contact_angle_degrees")
         if isinstance(fitted_observed_angle, (int, float)):
-            metrics["sessile_final_fitted_circle_contact_angle_degrees"] = float(
+            fitted_shape = "sphere" if spatial_sessile else "circle"
+            metrics[
+                f"sessile_final_fitted_{fitted_shape}_contact_angle_degrees"
+            ] = float(
                 fitted_observed_angle)
             if isinstance(target_angle, (int, float)):
                 metrics[
-                    "sessile_final_fitted_circle_contact_angle_error_degrees"
+                    f"sessile_final_fitted_{fitted_shape}_contact_angle_error_degrees"
                 ] = float(fitted_observed_angle) - float(target_angle)
         operator_observed_angle = final_state.get(
             "operator_dynamic_angle_degrees_mean")
         if (isinstance(target_angle, (int, float)) and
                 isinstance(operator_observed_angle, (int, float))):
             metrics["sessile_final_contact_angle_source"] = (
-                "same_state_LinearCorner_generated_fragment_normal_at_phi_zero_wall_roots")
+                "same_state_LinearCorner_generated_triangle_normal_at_phi_zero_wall_edges"
+                if spatial_sessile else
+                "same_state_LinearCorner_generated_fragment_normal_at_phi_zero_wall_roots"
+            )
             metrics["sessile_final_contact_angle_degrees"] = float(
                 operator_observed_angle)
             metrics["sessile_final_contact_angle_error_degrees"] = (
@@ -9793,6 +9939,38 @@ def add_physical_time_history_metrics(metrics: dict[str, Any],
                 abs(float(observed_area) - float(expected_area)) /
                 max(abs(float(expected_area)), 1.0e-300)
             )
+        expected_volume = sessile.get("expected_initial_liquid_volume")
+        observed_volume = final_state.get("liquid_volume")
+        if (isinstance(expected_volume, (int, float)) and
+                isinstance(observed_volume, (int, float))):
+            metrics["sessile_expected_liquid_volume"] = float(expected_volume)
+            metrics["sessile_final_liquid_volume_error"] = (
+                float(observed_volume) - float(expected_volume)
+            )
+            metrics["sessile_final_liquid_volume_relative_error"] = (
+                abs(float(observed_volume) - float(expected_volume)) /
+                max(abs(float(expected_volume)), 1.0e-300)
+            )
+        for expected_name, observed_name, metric_prefix in (
+                ("expected_initial_base_radius", "base_radius",
+                 "sessile_final_base_radius"),
+                ("expected_initial_apex_height", "apex_height",
+                 "sessile_final_apex_height"),
+                ("expected_initial_liquid_gas_area", "liquid_gas_area",
+                 "sessile_final_liquid_gas_area"),
+                ("expected_initial_contact_line_measure",
+                 "contact_line_measure",
+                 "sessile_final_contact_line_measure")):
+            expected_value = sessile.get(expected_name)
+            observed_value = final_state.get(observed_name)
+            if (isinstance(expected_value, (int, float)) and
+                    isinstance(observed_value, (int, float))):
+                metrics[f"{metric_prefix}_expected"] = float(expected_value)
+                metrics[f"{metric_prefix}_observed"] = float(observed_value)
+                metrics[f"{metric_prefix}_relative_error"] = (
+                    abs(float(observed_value) - float(expected_value)) /
+                    max(abs(float(expected_value)), 1.0e-300)
+                )
         expected_pressure_jump = benchmark.get("initial_active_pressure")
         observed_pressure_jump = final_state.get("pressure_jump")
         if (isinstance(expected_pressure_jump, (int, float)) and
@@ -10502,6 +10680,14 @@ def compute_metrics(case_name: str,
     add_capillary_wave_profile_metrics(metrics, benchmark, initial, output)
     add_projected_curvature_field_metrics(metrics, output)
     add_capillary_output_pressure_metrics(metrics, benchmark, output)
+    if (benchmark.get("spatial_dimension") == 3 and
+            benchmark.get("capillary_geometry") in {
+                "sphere_3d", "sessile_spherical_cap_3d"}):
+        spatial_state = spatial_capillary_state_metrics(output, benchmark)
+        metrics["spatial_capillary_final_state"] = spatial_state
+        for name, value in spatial_state.items():
+            if isinstance(value, (int, float, str, bool)):
+                metrics[f"spatial_capillary_final_{name}"] = value
     if "WetVolumeMeasure" in output.cell_data:
         wet_measures = np.asarray(output.cell_data["WetVolumeMeasure"], dtype=float).reshape(-1)
         if wet_measures.shape[0] == output.n_cells:
@@ -11362,7 +11548,8 @@ def case_args_for_run(case_name: str,
             case_args.linear_solver_type = "ns"
         if not getattr(args, "_explicit_linear_max_iterations", False):
             case_args.linear_max_iterations = 100
-    if case_name in {"sessile2d", "dynamiccontact2d"}:
+    if case_name in {
+            "sessile2d", "sessile3d", "sphere3d", "dynamiccontact2d"}:
         if case_args.steps is None:
             case_args.steps = 10 if case_name == "dynamiccontact2d" else 3
         if case_args.time_step_size is None:
@@ -11421,7 +11608,7 @@ def case_args_for_run(case_name: str,
         # that secondary physical-qualification gate explicit and three orders
         # below the 1e-6 nonlinear absolute tolerance.
         set_default(case_args, "max_fsils_accepted_true_residual_norm", 1.0e-9)
-        if case_name == "sessile2d":
+        if case_name in {"sessile2d", "sessile3d", "sphere3d"}:
             # Require production evidence for the instantaneous conservative
             # pressure/surface-energy split.  The quantitative threshold is a
             # separate opt-in until the refinement matrix calibrates one a
@@ -11456,10 +11643,55 @@ def case_args_for_run(case_name: str,
             # order-one error while allowing P1 interface sampling error.  A
             # capillary number below 1e-2 rejects dynamically meaningful
             # parasitic currents in a nominal equilibrium.
-            set_default(case_args, "max_sessile_contact_angle_error_degrees", 5.0)
-            set_default(case_args, "max_sessile_pressure_jump_relative_error", 0.15)
-            set_default(case_args, "max_sessile_liquid_area_relative_error", 0.05)
-            set_default(case_args, "max_sessile_parasitic_capillary_number", 1.0e-2)
+            if case_name == "sphere3d":
+                set_default(
+                    case_args,
+                    "max_capillary_pressure_jump_relative_error",
+                    0.15,
+                )
+                set_default(
+                    case_args,
+                    "max_capillary_parasitic_capillary_number",
+                    1.0e-2,
+                )
+            else:
+                set_default(
+                    case_args,
+                    "max_sessile_contact_angle_error_degrees",
+                    5.0,
+                )
+                set_default(
+                    case_args,
+                    "max_sessile_pressure_jump_relative_error",
+                    0.15,
+                )
+                set_default(
+                    case_args,
+                    "max_sessile_liquid_area_relative_error",
+                    0.05,
+                )
+                if case_name == "sessile3d":
+                    case_args.max_sessile_liquid_area_relative_error = None
+                    set_default(
+                        case_args,
+                        "max_sessile_liquid_volume_relative_error",
+                        0.05,
+                    )
+                    set_default(
+                        case_args,
+                        "max_sessile_base_radius_relative_error",
+                        0.05,
+                    )
+                    set_default(
+                        case_args,
+                        "max_sessile_apex_height_relative_error",
+                        0.05,
+                    )
+                set_default(
+                    case_args,
+                    "max_sessile_parasitic_capillary_number",
+                    1.0e-2,
+                )
         else:
             set_default(
                 case_args, "initialize_static_compatible_pressure", False)
@@ -11683,6 +11915,21 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 write_capillary_droplet2d_case(
                     run_dir, args.steps, pressure_jump,
                     args.synthetic_nx, args.synthetic_ny)
+            elif case_name == "sphere3d":
+                if not (
+                        args.synthetic_nx == args.synthetic_ny ==
+                        args.synthetic_nz):
+                    raise ValueError(
+                        "sphere3d requires an isotropic synthetic resolution")
+                write_sphere_case(
+                    run_dir,
+                    args.steps,
+                    args.synthetic_nx,
+                    args.sessile_radius,
+                    float(args.surface_tension),
+                    float(args.time_step_size),
+                    args.level_set_positive_scale,
+                )
             elif case_name == "capillarywave2d":
                 surface_tension = (
                     0.5 if args.surface_tension is None else float(args.surface_tension)
@@ -11716,10 +11963,30 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                      getattr(args, "sessile_contact_line_model", "dynamic")),
                     getattr(args, "level_set_positive_scale", 1.0),
                 )
+            elif case_name == "sessile3d":
+                if not (
+                        args.synthetic_nx == args.synthetic_ny ==
+                        args.synthetic_nz):
+                    raise ValueError(
+                        "sessile3d requires an isotropic synthetic resolution")
+                write_sessile_sphere_case(
+                    run_dir,
+                    args.steps,
+                    args.synthetic_nx,
+                    args.contact_angle_degrees,
+                    args.sessile_radius,
+                    float(args.surface_tension),
+                    float(args.time_step_size),
+                    args.sessile_contact_wall_3d,
+                    args.level_set_positive_scale,
+                )
             else:
                 write_mini_case(run_dir, args.steps, static=(case_name == "static2d"))
             if (args.use_high_order_implicit_cuts or
-                    case_name in {"sessile2d", "dynamiccontact2d"}):
+                    case_name in {
+                        "sessile2d", "sessile3d", "dynamiccontact2d",
+                        "sphere3d",
+                    }):
                 configure_case_solver_xml(run_dir, args)
         else:
             run_dir = Path(temp_name) / source.name
@@ -13658,6 +13925,8 @@ def main() -> int:
                         help="x resolution for synthetic sessile/contact-line cases")
     parser.add_argument("--synthetic-ny", type=int, default=16,
                         help="y resolution for synthetic sessile/contact-line cases")
+    parser.add_argument("--synthetic-nz", type=int, default=16,
+                        help="z resolution for synthetic spatial capillary cases")
     parser.add_argument("--contact-angle-degrees", type=float, default=90.0,
                         help="static or dynamic equilibrium contact angle through the liquid")
     parser.add_argument("--dynamic-initial-contact-angle-degrees", type=float,
@@ -13685,6 +13954,15 @@ def main() -> int:
         help="wall carrying the stationary synthetic sessile cap",
     )
     parser.add_argument(
+        "--sessile-contact-wall-3d",
+        choices=(
+            "wall_left", "wall_right", "wall_bottom", "wall_top",
+            "wall_front", "wall_back",
+        ),
+        default="wall_bottom",
+        help="wall carrying the stationary synthetic spherical cap",
+    )
+    parser.add_argument(
         "--level-set-positive-scale",
         type=float,
         default=1.0,
@@ -13701,7 +13979,11 @@ def main() -> int:
     parser.add_argument("--max-sessile-contact-angle-error-degrees", type=float)
     parser.add_argument("--max-sessile-pressure-jump-relative-error", type=float)
     parser.add_argument("--max-sessile-liquid-area-relative-error", type=float)
+    parser.add_argument("--max-sessile-liquid-volume-relative-error", type=float)
+    parser.add_argument("--max-sessile-base-radius-relative-error", type=float)
+    parser.add_argument("--max-sessile-apex-height-relative-error", type=float)
     parser.add_argument("--max-sessile-parasitic-capillary-number", type=float)
+    parser.add_argument("--max-capillary-parasitic-capillary-number", type=float)
     parser.add_argument(
         "--require-ren-e-speed-sign",
         dest="require_ren_e_speed_sign",

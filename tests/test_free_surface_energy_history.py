@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -309,3 +310,82 @@ def test_runner_energy_history_fails_closed_on_missing_accepted_output():
     errors = runner.free_surface_energy_history_errors(metrics, args)
     assert len(errors) == 1
     assert "every accepted step" in errors[0]
+
+
+def test_runner_records_spatial_closed_sphere_energy_history(tmp_path):
+    case_dir = tmp_path / "sphere3d"
+    runner.write_sphere_case(
+        case_dir,
+        steps=1,
+        resolution=6,
+        radius=0.25,
+        surface_tension=1.0,
+        time_step_size=0.001,
+        level_set_positive_scale=1.0,
+    )
+    initial = pv.read(case_dir / "mesh/background/mesh-complete.mesh.vtu")
+    accepted_path = case_dir / "result_001.vtu"
+    initial.save(accepted_path)
+    benchmark = json.loads((case_dir / "benchmark.json").read_text())
+    metrics = {}
+
+    runner.add_free_surface_energy_history_metrics(
+        metrics,
+        benchmark,
+        initial,
+        [(1, accepted_path)],
+        {1: (0.001, 0.001)},
+        [],
+    )
+
+    assert metrics["free_surface_energy_history_available"] is True
+    assert metrics["free_surface_energy_history_case"] == "closed_sphere"
+    assert metrics["free_surface_energy_state_count"] == 2
+    assert metrics[
+        "free_surface_energy_signed_total_energy_change_proxy"
+    ] == pytest.approx(0.0)
+
+
+def test_runner_records_spatial_sessile_history_and_shape_metrics(tmp_path):
+    case_dir = tmp_path / "sessile3d"
+    runner.write_sessile_sphere_case(
+        case_dir,
+        steps=1,
+        resolution=6,
+        contact_angle_degrees=60.0,
+        radius=0.25,
+        surface_tension=1.0,
+        time_step_size=0.001,
+        wall_face="wall_bottom",
+        level_set_positive_scale=1.0,
+    )
+    initial = pv.read(case_dir / "mesh/background/mesh-complete.mesh.vtu")
+    initial.save(case_dir / "result_001.vtu")
+    benchmark = json.loads((case_dir / "benchmark.json").read_text())
+    metrics = {}
+
+    runner.add_physical_time_history_metrics(
+        metrics,
+        case_dir,
+        benchmark,
+        initial,
+        accepted_steps=[{"step": 1, "time": 0.001, "dt": 0.001}],
+    )
+
+    assert metrics["free_surface_energy_history_available"] is True
+    assert metrics["free_surface_energy_history_case"] == "sessile_contact"
+    assert metrics["sessile_final_contact_angle_source"] == (
+        "same_state_LinearCorner_generated_triangle_normal_at_phi_zero_wall_edges"
+    )
+    assert metrics["sessile_final_contact_angle_absolute_error_degrees"] < 8.0
+    assert abs(
+        metrics["sessile_final_fitted_sphere_contact_angle_error_degrees"]
+    ) < 4.0
+    assert "sessile_final_fitted_circle_contact_angle_degrees" not in metrics
+    assert metrics["final_sessile_state"]["liquid_volume"] == pytest.approx(
+        metrics["initial_sessile_state"]["liquid_volume"])
+    for name in (
+            "sessile_final_liquid_volume_relative_error",
+            "sessile_final_base_radius_relative_error",
+            "sessile_final_apex_height_relative_error"):
+        assert math.isfinite(metrics[name])

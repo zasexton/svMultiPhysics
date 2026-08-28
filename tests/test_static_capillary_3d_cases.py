@@ -123,6 +123,7 @@ def test_sessile_sphere_rotates_to_every_wall(tmp_path):
         assert state["operator_contact_geometry_available"] is True
         assert state["operator_dynamic_angle_degrees_mean"] == pytest.approx(
             60.0, abs=8.0)
+        assert state["contact_angle_degrees"] == pytest.approx(60.0, abs=4.0)
         assert state["base_radius"] == pytest.approx(
             contact["expected_initial_base_radius"], rel=0.08)
         assert state["apex_height"] == pytest.approx(

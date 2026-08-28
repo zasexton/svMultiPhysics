@@ -626,6 +626,7 @@ def _pressure_and_speed(dataset: pv.DataSet,
 
 def _contact_metrics(surface: pv.PolyData,
                      fit_center: np.ndarray,
+                     fit_radius: float,
                      contact: dict[str, Any],
                      h: float) -> dict[str, Any]:
     frame = axis_wall_frame(str(contact["wall"]))
@@ -698,7 +699,12 @@ def _contact_metrics(surface: pv.PolyData,
         raise ValueError("contact facets do not provide a generated angle")
     cosine = max(-1.0, min(1.0, weighted_cosine / total_weight))
     angle = math.degrees(math.acos(-cosine))
-    inward_distance = (points - coordinate * np.eye(3)[axis]) @ inward
+    wall_origin = coordinate * np.eye(3)[axis]
+    inward_distance = (points - wall_origin) @ inward
+    center_inward_distance = float(np.dot(
+        fit_center - wall_origin, inward))
+    fitted_cosine = max(
+        -1.0, min(1.0, -center_inward_distance / fit_radius))
     return {
         "base_radius": float(np.mean(tangent_radii)),
         "base_radius_spread": float(np.ptp(tangent_radii)),
@@ -706,6 +712,7 @@ def _contact_metrics(surface: pv.PolyData,
         "contact_line_measure": math.fsum(contact_lengths),
         "operator_dynamic_angle_degrees_mean": angle,
         "operator_dynamic_cos_mean": cosine,
+        "contact_angle_degrees": math.degrees(math.acos(fitted_cosine)),
         "operator_contact_geometry_available": True,
         "operator_contact_geometry_source": (
             "LinearCorner_generated_triangle_normal_at_phi_zero_wall_edges"),
@@ -735,6 +742,7 @@ def spatial_capillary_state_metrics(dataset: pv.DataSet,
             state.update(_contact_metrics(
                 surface,
                 np.asarray(fit["center"], dtype=float),
+                float(fit["radius"]),
                 contact,
                 h,
             ))
