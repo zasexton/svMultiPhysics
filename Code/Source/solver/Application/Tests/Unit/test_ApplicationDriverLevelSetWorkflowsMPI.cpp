@@ -14,6 +14,7 @@
 #include "FE/Backends/Utils/BackendOptions.h"
 #include "FE/Forms/Forms.h"
 #include "FE/Forms/Vocabulary.h"
+#include "FE/Sparsity/DistributedSparsityPattern.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Spaces/ProductSpace.h"
 #include "FE/Systems/FormsInstaller.h"
@@ -2061,7 +2062,8 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
               1.0e-12);
 
   history.u().updateGhosts();
-  const auto solved = gatherFeOrderedSolution(history.u());
+  const auto solved = gatherFeOrderedSolution(
+      history.u(), svmp::MeshComm(MPI_COMM_WORLD));
   std::size_t local_dry_wall_vertices = 0u;
   bool local_far_band_value_checked = false;
   for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
@@ -7128,6 +7130,84 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       (void)collectiveLevelSetMaintenanceAlgebraicRevision(
           rank_local_slice, svmp::MeshComm(MPI_COMM_WORLD)),
       std::runtime_error);
+}
+
+TEST(ApplicationDriverLevelSetWorkflowsMPI,
+     CollectiveFeOrderedGatherReconstructsDisjointOwnedRows)
+{
+  int rank = 0;
+  int size = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  if (size != 2) {
+    GTEST_SKIP() << "This collective gather fixture requires two ranks.";
+  }
+
+  using svmp::FE::GlobalIndex;
+  using svmp::FE::Real;
+  using svmp::FE::sparsity::DistributedSparsityPattern;
+  using svmp::FE::sparsity::IndexRange;
+
+  constexpr GlobalIndex global_size = 4;
+  const IndexRange owned =
+      rank == 0 ? IndexRange{0, 2} : IndexRange{2, 4};
+  DistributedSparsityPattern pattern(
+      owned, owned, global_size, global_size);
+  pattern.ensureDiagonal();
+  if (rank == 0) {
+    pattern.addEntry(1, 2);
+  } else {
+    pattern.addEntry(2, 1);
+  }
+  pattern.finalize();
+  if (rank == 0) {
+    pattern.setGhostRows(
+        std::vector<GlobalIndex>{2},
+        std::vector<GlobalIndex>{0, 2},
+        std::vector<GlobalIndex>{1, 2});
+  } else {
+    pattern.setGhostRows(
+        std::vector<GlobalIndex>{1},
+        std::vector<GlobalIndex>{0, 2},
+        std::vector<GlobalIndex>{1, 2});
+  }
+
+  svmp::FE::backends::FsilsFactory factory(
+      /*dof_per_node=*/1, {}, MPI_COMM_WORLD);
+  auto layout_matrix = factory.createMatrix(pattern);
+  auto vector = factory.createVector(global_size);
+  ASSERT_NE(layout_matrix, nullptr);
+  ASSERT_NE(vector, nullptr);
+
+  const auto owned_rows = vector->ownedGlobalRows();
+  ASSERT_EQ(owned_rows.size(), 2u);
+  std::vector<Real> owned_values;
+  owned_values.reserve(owned_rows.size());
+  for (const auto row : owned_rows) {
+    owned_values.push_back(Real{10.0} + static_cast<Real>(row));
+  }
+  auto view = vector->createAssemblyView();
+  ASSERT_NE(view, nullptr);
+  view->beginAssemblyPhase();
+  view->setVectorEntries(owned_rows, owned_values);
+  view->finalizeAssembly();
+  vector->updateGhosts();
+
+  const auto gathered = gatherFeOrderedSolution(
+      *vector, svmp::MeshComm(MPI_COMM_WORLD));
+  ASSERT_EQ(gathered.size(), 4u);
+  EXPECT_DOUBLE_EQ(gathered[0], 10.0);
+  EXPECT_DOUBLE_EQ(gathered[1], 11.0);
+  EXPECT_DOUBLE_EQ(gathered[2], 12.0);
+  EXPECT_DOUBLE_EQ(gathered[3], 13.0);
+
+  const auto revision =
+      collectiveLevelSetMaintenanceAlgebraicRevision(
+          gathered, svmp::MeshComm(MPI_COMM_WORLD));
+  const auto [minimum_revision, maximum_revision] =
+      globalMinMaxUint64(
+          revision, svmp::MeshComm(MPI_COMM_WORLD));
+  EXPECT_EQ(minimum_revision, maximum_revision);
 }
 
 TEST(ApplicationDriverLevelSetWorkflowsMPI,

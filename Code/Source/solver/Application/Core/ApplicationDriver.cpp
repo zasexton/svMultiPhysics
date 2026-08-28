@@ -6899,6 +6899,14 @@ std::vector<svmp::FE::Real> gatherFeOrderedSolution(
       "[svMultiPhysics::Application] Could not gather FE-ordered state values.");
 }
 
+std::vector<svmp::FE::Real> gatherFeOrderedSolution(
+    svmp::FE::backends::GenericVector& solution,
+    const svmp::MeshComm& comm);
+
+std::vector<svmp::FE::Real> gatherFeOrderedSolution(
+    const svmp::FE::systems::SystemStateView& state,
+    const svmp::MeshComm& comm);
+
 double globalMaxDouble(double local, const svmp::MeshComm& comm);
 std::size_t globalSumSize(std::size_t local, const svmp::MeshComm& comm);
 
@@ -11552,7 +11560,9 @@ void initializeLevelSetMaintenanceTargets(
     return;
   }
 
-  const auto fe_solution = gatherFeOrderedSolution(sim.time_history->u());
+  const auto fe_solution = gatherFeOrderedSolution(
+      sim.time_history->u(),
+      activeFESystemCommunicator(*sim.fe_system));
   for (auto& request : requests) {
     if (!request.volume_correction.enabled ||
         request.volume_target_initialized) {
@@ -11676,8 +11686,11 @@ applyLevelSetBoundPreservingCandidates(
         "requires a positive finite candidate time step.");
   }
 
-  const auto previous_solution = gatherFeOrderedSolution(history.uPrev());
-  const auto raw_candidate = gatherFeOrderedSolution(history.u());
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto previous_solution =
+      gatherFeOrderedSolution(history.uPrev(), comm);
+  const auto raw_candidate =
+      gatherFeOrderedSolution(history.u(), comm);
   auto candidate = raw_candidate;
 
   for (const auto& request : requests) {
@@ -14051,7 +14064,8 @@ bool applyLevelSetMaintenance(
   std::vector<LevelSetVolumeCorrectionMaintenanceEvent>
       staged_volume_corrections;
   bool changed = false;
-  auto fe_solution = gatherFeOrderedSolution(history.u());
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  auto fe_solution = gatherFeOrderedSolution(history.u(), comm);
   const auto accepted_solution_before_maintenance = fe_solution;
   std::set<svmp::FE::FieldId> modified_level_set_fields;
   for (auto& request : staged_requests) {
@@ -19179,7 +19193,11 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContext(
     svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle,
     const char* provenance)
 {
-  const auto fe_solution = gatherFeOrderedSolution(solution);
+  if (!sim.fe_system) {
+    return {};
+  }
+  const auto fe_solution = gatherFeOrderedSolution(
+      solution, activeFESystemCommunicator(*sim.fe_system));
   return refreshActiveCutIntegrationContextFromSolution(
       sim,
       params,
@@ -19257,7 +19275,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCachedFromVector
   std::optional<ActiveCutContextRefreshSignature> signature;
   std::exception_ptr local_gather_failure;
   try {
-    fe_solution = gatherFeOrderedSolution(solution);
+    fe_solution = gatherFeOrderedSolution(solution, comm);
     signature = activeCutContextRefreshSignature(
         sim,
         requests,
@@ -19357,7 +19375,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContext(
   const char* solution_source =
       state.u_vector != nullptr ? "state_vector_fe_ordered"
                                 : "state_span_assumed_fe_ordered";
-  const auto fe_solution = gatherFeOrderedSolution(state);
+  const auto fe_solution = gatherFeOrderedSolution(
+      state, activeFESystemCommunicator(*sim.fe_system));
   return refreshActiveCutIntegrationContextFromSolution(
       sim,
       params,
@@ -19393,7 +19412,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCached(
         provenance,
         solution_source);
   }
-  const auto fe_solution = gatherFeOrderedSolution(state);
+  const auto fe_solution = gatherFeOrderedSolution(
+      state, activeFESystemCommunicator(*sim.fe_system));
   return refreshActiveCutIntegrationContextFromSolutionCached(
       sim,
       params,
@@ -19928,6 +19948,29 @@ capturePostacceptMaintenanceVectorCollectively(
   return captureFeOrderedVectorCollectively(solution, comm);
 }
 
+std::vector<svmp::FE::Real> gatherFeOrderedSolution(
+    svmp::FE::backends::GenericVector& solution,
+    const svmp::MeshComm& comm)
+{
+  return captureFeOrderedVectorCollectively(solution, comm);
+}
+
+std::vector<svmp::FE::Real> gatherFeOrderedSolution(
+    const svmp::FE::systems::SystemStateView& state,
+    const svmp::MeshComm& comm)
+{
+  if (state.u_vector != nullptr) {
+    auto* solution =
+        const_cast<svmp::FE::backends::GenericVector*>(state.u_vector);
+    return gatherFeOrderedSolution(*solution, comm);
+  }
+  if (!state.u.empty()) {
+    return std::vector<svmp::FE::Real>(state.u.begin(), state.u.end());
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] Could not collectively gather FE-ordered state values.");
+}
+
 void assignPostacceptMaintenanceVectorCollectively(
     svmp::FE::backends::GenericVector& solution,
     std::span<const svmp::FE::Real> values,
@@ -20260,7 +20303,8 @@ void zeroConservativePhaseRateSlice(
     svmp::FE::FieldId phase_field,
     svmp::FE::backends::GenericVector& rate)
 {
-  auto values = gatherFeOrderedSolution(rate);
+  auto values = gatherFeOrderedSolution(
+      rate, activeFESystemCommunicator(system));
   const auto offset = static_cast<std::size_t>(
       system.fieldDofOffset(phase_field));
   const auto count = static_cast<std::size_t>(
@@ -20284,6 +20328,7 @@ void initializeConservativePhaseStates(
   }
   auto& system = *sim.fe_system;
   auto& history = *sim.time_history;
+  const auto comm = activeFESystemCommunicator(system);
   for (auto& request : requests) {
     if (!request.conservative_phase.enabled ||
         request.conservative_phase_initialized) {
@@ -20299,14 +20344,15 @@ void initializeConservativePhaseStates(
     }
     const auto phase_field = system.findFieldByName(
         request.conservative_phase.liquid_indicator.field_name);
-    auto current = gatherFeOrderedSolution(history.u());
+    auto current = gatherFeOrderedSolution(history.u(), comm);
     assignConservativePhaseSlice(
         system, phase_field, projection.liquid_indicator, current);
     std::vector<std::vector<svmp::FE::Real>> initialized_history;
     initialized_history.reserve(
         static_cast<std::size_t>(history.historyDepth()));
     for (int k = 1; k <= history.historyDepth(); ++k) {
-      auto previous = gatherFeOrderedSolution(history.uPrevK(k));
+      auto previous =
+          gatherFeOrderedSolution(history.uPrevK(k), comm);
       assignConservativePhaseSlice(
           system, phase_field, projection.liquid_indicator, previous);
       initialized_history.push_back(std::move(previous));
@@ -23010,8 +23056,10 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
   std::vector<std::vector<std::uint8_t>> contact_protected_nodes;
   std::exception_ptr local_candidate_storage_failure;
   try {
-    result.original_solution = gatherFeOrderedSolution(history.u());
-    previous_solution = gatherFeOrderedSolution(history.uPrev());
+    result.original_solution =
+        gatherFeOrderedSolution(history.u(), comm);
+    previous_solution =
+        gatherFeOrderedSolution(history.uPrev(), comm);
     if (result.original_solution.size() != previous_solution.size()) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Conservative phase transport requires equal endpoint and previous FE solution layouts.");
@@ -25909,12 +25957,13 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
           sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations(),
           activeFESystemCommunicator(*sim.fe_system));
   if (steady_free_surface_coverage.has_functional) {
-    const auto steady_solution =
-        gatherFeOrderedSolution(sim.time_history->u());
+    const auto steady_comm =
+        activeFESystemCommunicator(*sim.fe_system);
+    const auto steady_solution = gatherFeOrderedSolution(
+        sim.time_history->u(), steady_comm);
     const auto steady_state_revision =
         collectiveLevelSetMaintenanceAlgebraicRevision(
-            steady_solution,
-            activeFESystemCommunicator(*sim.fe_system));
+            steady_solution, steady_comm);
     const auto steady_contact_stages =
         evaluateAcceptedFreeSurfaceContactStages(
             sim,
@@ -26749,7 +26798,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 "[svMultiPhysics::Application] An initial free-surface functional baseline requires a nonnegative step index.");
           }
           const auto initial_solution =
-              gatherFeOrderedSolution(h.u());
+              gatherFeOrderedSolution(
+                  h.u(), velocity_extension_artifact_comm);
           recordInitialFreeSurfaceDiscreteFunctionalBaseline(
               sim,
               static_cast<std::uint64_t>(h.stepIndex()),
@@ -26766,7 +26816,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         }
         if (acceptedPressureUpdateDiagnosticEnabled()) {
           accepted_pressure_update_previous_solution =
-              gatherFeOrderedSolution(h.u());
+              gatherFeOrderedSolution(
+                  h.u(), velocity_extension_artifact_comm);
         } else {
           accepted_pressure_update_previous_solution.clear();
         }
@@ -27320,7 +27371,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                             accepted_velocity_extension_maps),
                 });
             const auto staged_phase_solution =
-                gatherFeOrderedSolution(h.u());
+                gatherFeOrderedSolution(
+                    h.u(), velocity_extension_artifact_comm);
             staged_phase_functionals =
                 levelSetMaintenanceFunctionalValues(
                     sim,
@@ -27342,7 +27394,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 std::vector<svmp::FE::Real> previous_solution;
                 std::exception_ptr local_state_preparation_failure;
                 try {
-                  previous_solution = gatherFeOrderedSolution(h.uPrev());
+                  previous_solution = gatherFeOrderedSolution(
+                      h.uPrev(), velocity_extension_artifact_comm);
                   const auto expected_size = static_cast<std::size_t>(
                       sim.fe_system->dofHandler().getNumDofs());
                   if (previous_solution.size() != expected_size ||
@@ -27444,7 +27497,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           if (activePressureUpdateRejectOnTriggerEnabled() &&
               acceptedPressureUpdateDiagnosticEnabled() &&
               !accepted_pressure_update_previous_solution.empty()) {
-            const auto current_solution = gatherFeOrderedSolution(h.u());
+            const auto current_solution = gatherFeOrderedSolution(
+                h.u(), velocity_extension_artifact_comm);
             const bool triggered = logAcceptedPressureUpdateDiagnostic(
                 *sim.fe_system,
                 params,
@@ -27555,8 +27609,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             std::vector<svmp::FE::Real> previous_solution;
             std::exception_ptr local_state_preparation_failure;
             try {
-              endpoint_solution = gatherFeOrderedSolution(h.u());
-              previous_solution = gatherFeOrderedSolution(h.uPrev());
+              endpoint_solution = gatherFeOrderedSolution(
+                  h.u(), velocity_extension_artifact_comm);
+              previous_solution = gatherFeOrderedSolution(
+                  h.uPrev(), velocity_extension_artifact_comm);
             } catch (...) {
               local_state_preparation_failure =
                   std::current_exception();
@@ -27750,7 +27806,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               commit_state_words,
               pending_phase_candidate.changed);
           const auto endpoint_solution =
-              gatherFeOrderedSolution(h.u());
+              gatherFeOrderedSolution(
+                  h.u(), velocity_extension_artifact_comm);
           appendMaintenanceScheduleWord(
               commit_state_words,
               levelSetMaintenanceAlgebraicRevision(
@@ -27765,7 +27822,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               commit_state_words, h.historyDepth());
           for (int level = 1; level <= h.historyDepth(); ++level) {
             const auto history_solution =
-                gatherFeOrderedSolution(h.uPrevK(level));
+                gatherFeOrderedSolution(
+                    h.uPrevK(level),
+                    velocity_extension_artifact_comm);
             appendMaintenanceScheduleWord(
                 commit_state_words,
                 levelSetMaintenanceAlgebraicRevision(
@@ -28035,7 +28094,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         velocity_extension_artifact_comm);
     if (has_free_surface_functional) {
       const auto endpoint_solution =
-          gatherFeOrderedSolution(h.u());
+          gatherFeOrderedSolution(
+              h.u(), velocity_extension_artifact_comm);
       pending_pre_maintenance_endpoint_state_revision =
           collectiveLevelSetMaintenanceAlgebraicRevision(
               endpoint_solution,
@@ -28076,7 +28136,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     pending_phase_ledger_transaction_inactive = false;
     if (acceptedPressureUpdateDiagnosticEnabled() &&
         !accepted_pressure_update_previous_solution.empty()) {
-      const auto current_solution = gatherFeOrderedSolution(h.u());
+      const auto current_solution = gatherFeOrderedSolution(
+          h.u(), velocity_extension_artifact_comm);
       logAcceptedPressureUpdateDiagnostic(
           *sim.fe_system,
           params,
@@ -28171,7 +28232,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     std::vector<svmp::FE::Real> pre_maintenance_solution;
     if (maintenance_work_due || volume_maintenance_due) {
       pre_maintenance_solution =
-          gatherFeOrderedSolution(h.u());
+          gatherFeOrderedSolution(
+              h.u(), velocity_extension_artifact_comm);
       pre_maintenance_functionals =
           evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
     }
@@ -28791,7 +28853,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         // validator refresh.  Do not infer equality merely from the absence
         // of an algebraic update.
         const auto unchanged_final_candidate =
-            gatherFeOrderedSolution(h.u());
+            gatherFeOrderedSolution(
+                h.u(), velocity_extension_artifact_comm);
         validate_candidate(
             unchanged_final_candidate,
             std::span<const
@@ -28859,7 +28922,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         appendMaintenanceScheduleBool(
             commit_state_words, level_set_maintenance_changed);
         const auto current_after_maintenance =
-            gatherFeOrderedSolution(h.u());
+            gatherFeOrderedSolution(
+                h.u(), velocity_extension_artifact_comm);
         appendMaintenanceScheduleWord(
             commit_state_words,
             levelSetMaintenanceAlgebraicRevision(
@@ -28885,7 +28949,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                      InvariantFailure);
         for (int level = 1; level <= h.historyDepth(); ++level) {
           const auto history_after_maintenance =
-              gatherFeOrderedSolution(h.uPrevK(level));
+              gatherFeOrderedSolution(
+                  h.uPrevK(level),
+                  velocity_extension_artifact_comm);
           appendMaintenanceScheduleWord(
               commit_state_words,
               levelSetMaintenanceAlgebraicRevision(
@@ -29329,7 +29395,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               level_set_advection_velocity,
               accepted_velocity_extension_maps);
       const auto accepted_state_solution =
-          gatherFeOrderedSolution(h.u());
+          gatherFeOrderedSolution(
+              h.u(), velocity_extension_artifact_comm);
       std::vector<svmp::FE::Real>
           backward_euler_previous_solution;
       if (transient_scheme.scheme ==
@@ -29339,7 +29406,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               "[svMultiPhysics::Application] Backward-Euler free-surface kinetic work requires two accepted-history slots.");
         }
         backward_euler_previous_solution =
-            gatherFeOrderedSolution(h.uPrev2());
+            gatherFeOrderedSolution(
+                h.uPrev2(), velocity_extension_artifact_comm);
       }
       const auto accepted_state_revision =
           collectiveLevelSetMaintenanceAlgebraicRevision(
