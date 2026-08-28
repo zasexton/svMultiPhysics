@@ -187,6 +187,17 @@ void resolve_contact_line_wall_faces(svmp::Physics::ParameterMap& params,
   }
   params["Contact_line_wall_markers"] =
       svmp::Physics::ParameterValue{true, markers.str()};
+
+  // Face names are an application-level convenience.  The physics module
+  // intentionally accepts only resolved marker ids, so remove every face
+  // alias after translating it instead of forwarding both representations.
+  for (const std::string_view key : {
+           "Contact_line_wall_faces", "ContactLineWallFaces",
+           "Contact_line_wall_face", "ContactLineWallFace",
+           "Wall_boundary_faces", "WallBoundaryFaces",
+           "Wall_boundary_face", "WallBoundaryFace"}) {
+    params.erase(std::string(key));
+  }
 }
 
 svmp::Physics::DomainInput snapshot_domain(const DomainParameters& domain)

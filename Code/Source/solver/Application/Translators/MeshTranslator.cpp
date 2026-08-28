@@ -635,6 +635,7 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
         mesh.add_to_set(svmp::EntityKind::Face, set_name, f);
       }
     }
+    mesh.refresh_topology_ownership();
 
     application::core::oopCout()
         << "[svMultiPhysics::Application] MeshTranslator: built boundary-only face topology faces="

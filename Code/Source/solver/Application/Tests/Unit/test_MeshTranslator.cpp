@@ -324,6 +324,9 @@ TEST(MeshTranslatorFaceLabels, FallsBackToGlobalVertexIdsWhenCoordinatesDiffer)
   ASSERT_NE(label, svmp::INVALID_LABEL);
   const auto marked_faces = mesh->base().faces_with_label(label);
   ASSERT_EQ(marked_faces.size(), 1u);
+  EXPECT_TRUE(mesh->is_owned_face(marked_faces.front()));
+  EXPECT_EQ(mesh->owner_rank_face(marked_faces.front()), mesh->rank());
+  EXPECT_EQ(mesh->n_owned_faces(), mesh->n_faces());
   EXPECT_TRUE(mesh->base().has_set(svmp::EntityKind::Face, "marked"));
   EXPECT_EQ(mesh->base().get_set(svmp::EntityKind::Face, "marked").size(), 1u);
 #endif

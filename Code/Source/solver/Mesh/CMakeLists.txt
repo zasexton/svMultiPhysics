@@ -159,8 +159,15 @@ if(MESH_ENABLE_MPI)
         unset(_svmp_mpicxx)
     endif()
 
-	    find_package(MPI)
-		    if(MPI_FOUND)
+    # The mesh implementation uses the C MPI interface through C++ and does
+    # not use the removed MPI-2 C++ bindings.  Some OpenMPI installations
+    # still expose those declarations unless FindMPI is told to skip them;
+    # its probe then links only libmpi and incorrectly rejects a working
+    # installation for missing legacy C++ binding symbols.
+    set(MPI_CXX_SKIP_MPICXX ON CACHE BOOL
+        "Do not probe the removed MPI C++ bindings" FORCE)
+    find_package(MPI COMPONENTS CXX)
+    if(MPI_CXX_FOUND)
 		        message(STATUS "MPI found - enabling distributed mesh support")
 		        include_directories(SYSTEM ${MPI_CXX_INCLUDE_DIRS})
 		        if(NOT MESH_ENABLE_PARMETIS)

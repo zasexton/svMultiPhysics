@@ -501,6 +501,11 @@ public:
 	  bool is_shared_face(index_t i) const { return get_owner(face_owner_, Ownership::Owned, i) == Ownership::Shared; }
 	  rank_t owner_rank_face(index_t i) const { return get_owner_rank(face_owner_rank_, i); }
 
+  bool is_owned_edge(index_t i) const { return get_owner(edge_owner_, Ownership::Owned, i) == Ownership::Owned; }
+  bool is_ghost_edge(index_t i) const { return get_owner(edge_owner_, Ownership::Owned, i) == Ownership::Ghost; }
+  bool is_shared_edge(index_t i) const { return get_owner(edge_owner_, Ownership::Owned, i) == Ownership::Shared; }
+  rank_t owner_rank_edge(index_t i) const { return get_owner_rank(edge_owner_rank_, i); }
+
   // ---- Explicit distributed semantics (Phase 3)
   // Default `n_*()` methods on DistributedMesh refer to the *local* mesh size,
   // which includes ghosts when a ghost layer is present. Use these helpers for
@@ -742,6 +747,22 @@ public:
 	    }
 	    mesh.event_bus().notify(MeshEvent::PartitionChanged);
 	  }
+
+  // Rebuild ownership arrays after callers replace or materialize local
+  // face/edge topology through MeshBase.  Serial entities are all owned by
+  // rank zero, but the arrays must still track the new topology sizes.
+  void refresh_topology_ownership() {
+    auto& mesh = local_mesh();
+    vertex_owner_.assign(mesh.n_vertices(), Ownership::Owned);
+    vertex_owner_rank_.assign(mesh.n_vertices(), 0);
+    cell_owner_.assign(mesh.n_cells(), Ownership::Owned);
+    cell_owner_rank_.assign(mesh.n_cells(), 0);
+    face_owner_.assign(mesh.n_faces(), Ownership::Owned);
+    face_owner_rank_.assign(mesh.n_faces(), 0);
+    edge_owner_.assign(mesh.n_edges(), Ownership::Owned);
+    edge_owner_rank_.assign(mesh.n_edges(), 0);
+    mesh.event_bus().notify(MeshEvent::PartitionChanged);
+  }
 
 	  // Ghosts (no-op in serial stub)
 	  void build_ghost_layer(int) { local_mesh().event_bus().notify(MeshEvent::PartitionChanged); }
@@ -1555,6 +1576,14 @@ public:
   }
 
   void set_ownership(index_t entity_id, EntityKind kind, Ownership ownership, rank_t owner_rank = -1);
+
+  /// Rebuild face/edge ownership after local topology materialization.
+  ///
+  /// MeshBase topology replacement can change entity counts and numbering
+  /// without reconstructing this wrapper.  This collective operation resets
+  /// the derived ownership arrays and re-establishes distributed ownership by
+  /// canonical entity id.
+  void refresh_topology_ownership();
 
   // ---- Ghost layer construction
   void build_ghost_layer(int levels);

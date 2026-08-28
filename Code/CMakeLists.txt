@@ -90,6 +90,13 @@ include(SimVascularInternals)
 
 #-----------------------------------------------------------------------------
 # Externals
+# The solver uses the C MPI API from C++ and does not use the removed MPI-2
+# C++ bindings.  Tell FindMPI this before the first external lookup so a
+# modern libmpi installation is not rejected for omitting libmpi_cxx.
+if(SV_USE_MPI)
+  set(MPI_CXX_SKIP_MPICXX ON CACHE BOOL
+    "Do not probe the removed MPI C++ bindings" FORCE)
+endif()
 include(SimVascularExternals)
 #-----------------------------------------------------------------------------
 

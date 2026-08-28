@@ -309,6 +309,15 @@ simvascular_add_executable(${SV_MULTIPHYSICS_EXE}
   INSTALL_COMP CoreExecutables
   INSTALL_DESTINATION ${SV_INSTALL_RUNTIME_DIR})
 
+# The executable dispatches into the modern application stack from main.cpp.
+# Its public interfaces use C++20 language features, so the dispatch target
+# must use the same language contract as the linked Application/Physics/FE
+# libraries instead of inheriting the legacy directory default above.
+set_target_properties(${SV_MULTIPHYSICS_EXE} PROPERTIES
+  CXX_STANDARD 20
+  CXX_STANDARD_REQUIRED ON
+  CXX_EXTENSIONS OFF)
+
 #------------------------------------------------------------------------------
 # New OOP solver stack (Mesh/FE/Physics/Application)
 #

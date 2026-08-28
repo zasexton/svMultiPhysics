@@ -875,6 +875,13 @@ TEST(EquationTranslatorFreeSurface, BuildInputResolvesUnfittedContactLineWallFac
   EXPECT_EQ(bc.params.at("Contact_line_wall_markers").value, "11;12");
   EXPECT_EQ(bc.params.at("Contact_line_wall_normals").value,
             "-1.0 0.0 0.0; 1.0 0.0 0.0");
+  for (const std::string_view key : {
+           "Contact_line_wall_faces", "ContactLineWallFaces",
+           "Contact_line_wall_face", "ContactLineWallFace",
+           "Wall_boundary_faces", "WallBoundaryFaces",
+           "Wall_boundary_face", "WallBoundaryFace"}) {
+    EXPECT_EQ(bc.params.count(std::string(key)), 0u);
+  }
 }
 
 TEST(EquationTranslatorFreeSurface, BuildInputRejectsContactLineFacesAndMarkersTogether)

@@ -2629,7 +2629,8 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     if (mesh_) {
         opts.dof_options.topology_completion = dofs::TopologyCompletion::RequireComplete;
         const auto& req = setup_storage_plan_.requirements;
-        auto& mesh_base = const_cast<svmp::Mesh&>(*mesh_).base();
+        auto& mutable_mesh = const_cast<svmp::Mesh&>(*mesh_);
+        auto& mesh_base = mutable_mesh.base();
 
         MeshFinalizeOptions mesh_storage{};
         mesh_storage.edge_storage = req.edge_topology;
@@ -2663,6 +2664,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             }
             mesh_base.finalize(mesh_storage);
         }
+        mutable_mesh.refresh_topology_ownership();
     }
 #endif
 

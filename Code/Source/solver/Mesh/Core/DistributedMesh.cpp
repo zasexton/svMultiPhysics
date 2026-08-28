@@ -2253,6 +2253,49 @@ rank_t DistributedMesh::owner_rank_edge(index_t i) const {
     return edge_owner_rank_[i];
 }
 
+void DistributedMesh::refresh_topology_ownership() {
+    if (!local_mesh_) {
+        return;
+    }
+
+    // Vertex and cell topology is unchanged by codimension-one completion;
+    // retain its established ownership.  Face and edge numbering can be
+    // replaced completely, so their prior entries cannot be reused.
+    face_owner_.assign(local_mesh_->n_faces(), Ownership::Owned);
+    face_owner_rank_.assign(local_mesh_->n_faces(), my_rank_);
+    edge_owner_.assign(local_mesh_->n_edges(), Ownership::Owned);
+    edge_owner_rank_.assign(local_mesh_->n_edges(), my_rank_);
+
+    // Mark copies supported only by ghost cells before the global entity-id
+    // consensus.  This prevents a lower-ranked ghost copy from becoming the
+    // canonical owner during shared-entity discovery.
+    for (index_t face = 0;
+         face < static_cast<index_t>(local_mesh_->n_faces());
+         ++face) {
+        const auto cells = local_mesh_->face_cells(face);
+        bool has_cell = false;
+        bool has_non_ghost_cell = false;
+        for (const auto cell : cells) {
+            if (cell < 0 ||
+                static_cast<std::size_t>(cell) >= cell_owner_.size()) {
+                continue;
+            }
+            has_cell = true;
+            has_non_ghost_cell =
+                has_non_ghost_cell ||
+                cell_owner_[static_cast<std::size_t>(cell)] !=
+                    Ownership::Ghost;
+        }
+        if (has_cell && !has_non_ghost_cell) {
+            face_owner_[static_cast<std::size_t>(face)] = Ownership::Ghost;
+        }
+    }
+
+    invalidate_exchange_patterns_();
+    gather_shared_entities();
+    local_mesh_->event_bus().notify(MeshEvent::PartitionChanged);
+}
+
 void DistributedMesh::set_ownership(index_t entity_id, EntityKind kind,
                                    Ownership ownership, rank_t owner_rank) {
     switch (kind) {
