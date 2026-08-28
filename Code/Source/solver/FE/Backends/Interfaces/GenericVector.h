@@ -91,6 +91,44 @@ public:
     [[nodiscard]] virtual std::vector<GlobalIndex> ownedGlobalRows() const = 0;
 };
 
+/**
+ * @brief Copy values on a prevalidated common owned-row layout.
+ *
+ * This transfer is intentionally expressed in public global numbering.  It is
+ * therefore valid when source and destination use different overlap maps, as
+ * long as the caller has verified that their locally owned rows are identical.
+ * Only owned entries are inserted; call updateGhosts() afterward when the
+ * destination's overlap values are needed.
+ *
+ * Distributed callers must invoke this function on every participating rank
+ * whenever the destination assembly view has collective finalization.
+ */
+inline void copyOwnedEntriesBetweenLayouts(
+    GenericVector& destination,
+    GenericVector& source,
+    std::span<const GlobalIndex> common_owned_rows)
+{
+    FE_THROW_IF(destination.size() != source.size(),
+                InvalidArgumentException,
+                "copyOwnedEntriesBetweenLayouts: global size mismatch");
+
+    auto source_view = source.createGhostedReadView();
+    auto destination_view = destination.createAssemblyView();
+    FE_CHECK_NOT_NULL(source_view.get(),
+                      "copyOwnedEntriesBetweenLayouts source view");
+    FE_CHECK_NOT_NULL(destination_view.get(),
+                      "copyOwnedEntriesBetweenLayouts destination view");
+
+    std::vector<Real> values(common_owned_rows.size(), Real{0.0});
+    source_view->getVectorEntries(common_owned_rows, values);
+
+    destination.zero();
+    destination_view->beginAssemblyPhase();
+    destination_view->setVectorEntries(common_owned_rows, values);
+    destination_view->finalizeAssembly();
+    destination.markModified();
+}
+
 } // namespace backends
 } // namespace FE
 } // namespace svmp

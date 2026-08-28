@@ -168,7 +168,118 @@ makeTwoRankReinitializationPattern(int rank, bool add_interface_coupling)
     return pattern;
 }
 
+svmp::FE::sparsity::DistributedSparsityPattern
+makeTwoRankTransferPattern(int rank, bool wide_rank_zero_overlap)
+{
+    using svmp::FE::sparsity::DistributedSparsityPattern;
+    using svmp::FE::sparsity::IndexRange;
+
+    constexpr GlobalIndex n_global = 4;
+    const IndexRange owned =
+        rank == 0 ? IndexRange{0, 2} : IndexRange{2, 4};
+    DistributedSparsityPattern pattern(
+        owned, owned, n_global, n_global);
+
+    pattern.ensureDiagonal();
+    if (rank == 0) {
+        pattern.addEntry(1, 2);
+        if (wide_rank_zero_overlap) {
+            pattern.addEntry(0, 3);
+        }
+    } else {
+        pattern.addEntry(2, 1);
+    }
+    pattern.finalize();
+
+    if (rank == 0) {
+        if (wide_rank_zero_overlap) {
+            pattern.setGhostRows(
+                std::vector<GlobalIndex>{2, 3},
+                std::vector<GlobalIndex>{0, 2, 4},
+                std::vector<GlobalIndex>{1, 2, 0, 3});
+        } else {
+            pattern.setGhostRows(
+                std::vector<GlobalIndex>{2},
+                std::vector<GlobalIndex>{0, 2},
+                std::vector<GlobalIndex>{1, 2});
+        }
+    } else {
+        pattern.setGhostRows(
+            std::vector<GlobalIndex>{1},
+            std::vector<GlobalIndex>{0, 2},
+            std::vector<GlobalIndex>{1, 2});
+    }
+    return pattern;
+}
+
 } // namespace
+
+TEST(FsilsBackendMPI, OwnedTransferSupportsDifferentRankLocalOverlaps)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    FsilsFactory factory(/*dof_per_node=*/1);
+    auto wide_matrix = factory.createMatrix(
+        makeTwoRankTransferPattern(rank, /*wide_rank_zero_overlap=*/true));
+    auto wide = factory.createVector(/*size=*/4);
+    auto narrow_matrix = factory.createMatrix(
+        makeTwoRankTransferPattern(rank, /*wide_rank_zero_overlap=*/false));
+    auto narrow = factory.createVector(/*size=*/4);
+    ASSERT_NE(wide_matrix, nullptr);
+    ASSERT_NE(narrow_matrix, nullptr);
+    ASSERT_NE(wide, nullptr);
+    ASSERT_NE(narrow, nullptr);
+
+    const auto wide_owned = wide->ownedGlobalRows();
+    const auto narrow_owned = narrow->ownedGlobalRows();
+    ASSERT_EQ(wide_owned, narrow_owned);
+
+    const auto set_owned_values = [](GenericVector& vector,
+                                     std::span<const GlobalIndex> rows,
+                                     Real offset) {
+        std::vector<Real> values;
+        values.reserve(rows.size());
+        for (const auto row : rows) {
+            values.push_back(offset + static_cast<Real>(row));
+        }
+        vector.zero();
+        auto view = vector.createAssemblyView();
+        ASSERT_NE(view, nullptr);
+        view->beginAssemblyPhase();
+        view->setVectorEntries(rows, values);
+        view->finalizeAssembly();
+        vector.updateGhosts();
+    };
+
+    set_owned_values(*wide, wide_owned, Real{10.0});
+    copyOwnedEntriesBetweenLayouts(*narrow, *wide, narrow_owned);
+    narrow->updateGhosts();
+    auto narrow_view = narrow->createGhostedReadView();
+    ASSERT_NE(narrow_view, nullptr);
+    if (rank == 0) {
+        EXPECT_NEAR(narrow_view->getVectorEntry(2), Real{12.0}, 1e-14);
+    } else {
+        EXPECT_NEAR(narrow_view->getVectorEntry(1), Real{11.0}, 1e-14);
+    }
+
+    set_owned_values(*narrow, narrow_owned, Real{20.0});
+    copyOwnedEntriesBetweenLayouts(*wide, *narrow, wide_owned);
+    wide->updateGhosts();
+    auto wide_view = wide->createGhostedReadView();
+    ASSERT_NE(wide_view, nullptr);
+    if (rank == 0) {
+        EXPECT_NEAR(wide_view->getVectorEntry(2), Real{22.0}, 1e-14);
+        EXPECT_NEAR(wide_view->getVectorEntry(3), Real{23.0}, 1e-14);
+    } else {
+        EXPECT_NEAR(wide_view->getVectorEntry(1), Real{21.0}, 1e-14);
+    }
+}
 
 TEST(FsilsBackendMPI, LegacyBcastAndNormMatchIndependentAllreduce)
 {

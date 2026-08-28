@@ -14676,7 +14676,13 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             std::numeric_limits<double>::quiet_NaN();
         double correction_relative_residual =
             std::numeric_limits<double>::quiet_NaN();
+        double correction_normal_residual_norm =
+            std::numeric_limits<double>::quiet_NaN();
         double correction_pressure_norm =
+            std::numeric_limits<double>::quiet_NaN();
+        double correction_residual_equivalence_norm =
+            std::numeric_limits<double>::quiet_NaN();
+        double correction_normal_residual_equivalence_norm =
             std::numeric_limits<double>::quiet_NaN();
         int correction_iterations = 0;
         const auto log_initializer = [&](bool applied,
@@ -14709,10 +14715,18 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                     << correction_residual_norm
                     << " pressure_correction_relative_residual="
                     << correction_relative_residual
+                    << " pressure_correction_normal_residual_norm="
+                    << correction_normal_residual_norm
                     << " pressure_correction_norm="
                     << correction_pressure_norm
                     << " pressure_correction_iterations="
                     << correction_iterations
+                    << " pressure_correction_method="
+                       "translated_certified_total_pressure"
+                    << " pressure_correction_residual_equivalence_norm="
+                    << correction_residual_equivalence_norm
+                    << " pressure_correction_normal_residual_equivalence_norm="
+                    << correction_normal_residual_equivalence_norm
                     << " force_projection_applied=0"
                     << " balanced_force_evidence=0"
                     << " total_momentum_equilibrium_claimed=0"
@@ -14810,16 +14824,38 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             *workspace.pressure_representability_work;
         compatible_pressure.updateGhosts();
 
-        // The representability solve above certifies the complete
-        // pressure-independent physical load.  The one-shot initializer is
-        // additive, however, so its increment must use a second LSQR solve for
-        // the balance that remains after applying the pressure already present
-        // at entry.  This avoids counting prescribed exterior or hydrostatic
-        // pressure twice and leaves an already compatible state unchanged.
+        const auto transfer_owned_entries =
+            [&](backends::GenericVector& destination,
+                backends::GenericVector& source) {
+                const auto destination_owned =
+                    destination.ownedGlobalRows();
+                const auto source_owned = source.ownedGlobalRows();
+                const bool local_layout_compatible =
+                    destination.size() == source.size() &&
+                    destination_owned == source_owned;
+                FE_THROW_IF(
+                    !allRanks(local_layout_compatible),
+                    systems::InvalidStateException,
+                    "NewtonSolver: static compatible pressure initializer cannot transfer between vectors with different owned-row layouts");
+                backends::copyOwnedEntriesBetweenLayouts(
+                    destination, source, destination_owned);
+            };
+
+        // The representability solve above certifies the total pressure for
+        // the complete pressure-independent physical load.  Translate that
+        // total into an additive increment by subtracting the pressure already
+        // present at entry.  Linearity then gives
+        //
+        //   G (p_compatible - p_entry) + (G p_entry + f)
+        //       = G p_compatible + f.
+        //
+        // Verify both sides with fresh pair actions before touching the
+        // production state.  This retains the additive update contract without
+        // repeating the same least-squares solve for a shifted right-hand side.
         auto& correction_load =
             *workspace.pressure_representability_correction_load;
 
-        pair_layout_work.copyFrom(history.u());
+        transfer_owned_entries(pair_layout_work, history.u());
         correction_load.copyFrom(pair_layout_work);
         zeroVectorEntries(pressure_dofs, correction_load);
         axpy(pair_layout_work, Real{-1.0}, correction_load);
@@ -14835,44 +14871,90 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
         zeroVectorEntries(constrained_dofs, correction_load);
         correction_load.updateGhosts();
 
-        const auto correction_iteration_cap = static_cast<int>(
-            4u * std::min<std::uint64_t>(
-                     static_cast<std::uint64_t>(pressure_count), 250u));
-        const auto correction = solvePressureRepresentabilityLsqr(
-            pair_matrix,
-            correction_load,
-            compatible_pressure,
-            *workspace.pressure_representability_left_basis,
-            *workspace.pressure_representability_right_basis,
-            *workspace.pressure_representability_direction,
-            pair_layout_work,
-            *workspace.pressure_representability_residual,
-            *workspace.pressure_representability_normal_residual,
-            correction_iteration_cap,
-            std::nullopt,
-            allRanks);
-        correction_residual_norm = correction.residual_norm;
-        correction_relative_residual = correction.relative_residual;
-        correction_pressure_norm = correction.pressure_norm;
-        correction_iterations = correction.iterations;
-        if (correction.breakdown) {
-            log_initializer(/*applied=*/false,
-                            /*passed=*/false,
-                            "pressure_correction_breakdown");
-            return false;
-        }
-        if (!correction.converged) {
-            log_initializer(/*applied=*/false,
-                            /*passed=*/false,
-                            "pressure_correction_not_stationary");
-            return false;
-        }
-        if (!allRanks(
-                std::isfinite(correction.residual_norm) &&
-                std::isfinite(correction.pressure_norm))) {
+        axpy(compatible_pressure, Real{-1.0}, pair_layout_work);
+        compatible_pressure.updateGhosts();
+
+        auto& candidate_residual =
+            *workspace.pressure_representability_left_basis;
+        pair_matrix.mult(compatible_pressure, candidate_residual);
+        candidate_residual.markModified();
+        axpy(candidate_residual, Real{1.0}, correction_load);
+        candidate_residual.updateGhosts();
+        correction_residual_norm = candidate_residual.norm();
+        correction_pressure_norm = compatible_pressure.norm();
+
+        auto& candidate_normal_residual =
+            *workspace.pressure_representability_right_basis;
+        pair_matrix.mult(candidate_residual, candidate_normal_residual);
+        candidate_normal_residual.markModified();
+        correction_normal_residual_norm =
+            candidate_normal_residual.norm();
+
+        const double correction_load_norm = correction_load.norm();
+        const double correction_relative_roundoff_floor =
+            100.0 * std::numeric_limits<Real>::epsilon() *
+            std::max(1.0, correction_load_norm);
+        correction_relative_residual =
+            correction_load_norm > correction_relative_roundoff_floor
+                ? correction_residual_norm / correction_load_norm
+                : (correction_residual_norm <=
+                           correction_relative_roundoff_floor
+                       ? 0.0
+                       : std::numeric_limits<double>::infinity());
+
+        const double reference_residual_norm =
+            workspace.pressure_representability_residual->norm();
+        const double reference_normal_residual_norm =
+            workspace.pressure_representability_normal_residual->norm();
+        axpy(candidate_residual,
+             Real{-1.0},
+             *workspace.pressure_representability_residual);
+        axpy(candidate_normal_residual,
+             Real{-1.0},
+             *workspace.pressure_representability_normal_residual);
+        correction_residual_equivalence_norm =
+            candidate_residual.norm();
+        correction_normal_residual_equivalence_norm =
+            candidate_normal_residual.norm();
+
+        const double equivalence_factor =
+            1000.0 * std::numeric_limits<Real>::epsilon();
+        const double residual_equivalence_tolerance =
+            equivalence_factor *
+            std::max({1.0,
+                      correction_load_norm,
+                      correction_residual_norm,
+                      reference_residual_norm});
+        const double normal_residual_equivalence_tolerance =
+            equivalence_factor *
+            std::max({1.0,
+                      correction_normal_residual_norm,
+                      reference_normal_residual_norm});
+        const bool correction_finite = allRanks(
+            std::isfinite(correction_load_norm) &&
+            std::isfinite(correction_residual_norm) &&
+            std::isfinite(correction_relative_residual) &&
+            std::isfinite(correction_normal_residual_norm) &&
+            std::isfinite(correction_pressure_norm) &&
+            std::isfinite(reference_residual_norm) &&
+            std::isfinite(reference_normal_residual_norm) &&
+            std::isfinite(correction_residual_equivalence_norm) &&
+            std::isfinite(
+                correction_normal_residual_equivalence_norm));
+        if (!correction_finite) {
             log_initializer(/*applied=*/false,
                             /*passed=*/false,
                             "pressure_correction_nonfinite");
+            return false;
+        }
+        if (!allRanks(
+                correction_residual_equivalence_norm <=
+                    residual_equivalence_tolerance &&
+                correction_normal_residual_equivalence_norm <=
+                    normal_residual_equivalence_tolerance)) {
+            log_initializer(/*applied=*/false,
+                            /*passed=*/false,
+                            "pressure_correction_translation_mismatch");
             return false;
         }
 
@@ -14896,17 +14978,18 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             return false;
         }
 
-        // Pair and production vectors may have different ghost maps.  Use
-        // copyFrom for the authoritative owned-DOF transfer, then add the LSQR
-        // residual-correction pressure block to the existing current state.
+        // Pair and production vectors may have different ghost maps.  Transfer
+        // their common authoritative owned rows in public numbering, then add
+        // the verified translated pressure-correction block to the existing
+        // current state.
         // Remove the verified roundoff-sized non-pressure component before
         // the addition so every other field remains bitwise unchanged.
         // Committed history and rate slots are deliberately not touched.
         axpy(compatible_pressure, Real{-1.0}, pair_layout_work);
         compatible_pressure.updateGhosts();
-        pair_layout_work.copyFrom(history.u());
+        transfer_owned_entries(pair_layout_work, history.u());
         axpy(pair_layout_work, Real{1.0}, compatible_pressure);
-        history.u().copyFrom(pair_layout_work);
+        transfer_owned_entries(history.u(), pair_layout_work);
         history.u().updateGhosts();
 
         // Let derived state observe the initial pressure guess before the first

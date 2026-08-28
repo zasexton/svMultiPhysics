@@ -7029,6 +7029,19 @@ TEST(NewtonSolver,
         telemetry.find(
             "pressure_increment=conservative_balance_residual_correction"),
         std::string::npos);
+    EXPECT_NE(
+        telemetry.find(
+            "pressure_correction_method=translated_certified_total_pressure"),
+        std::string::npos);
+    EXPECT_NE(telemetry.find("pressure_correction_iterations=0"),
+              std::string::npos);
+    EXPECT_NE(
+        telemetry.find("pressure_correction_residual_equivalence_norm="),
+        std::string::npos);
+    EXPECT_NE(
+        telemetry.find(
+            "pressure_correction_normal_residual_equivalence_norm="),
+        std::string::npos);
     EXPECT_NE(telemetry.find("existing_pressure_baseline_preserved=1"),
               std::string::npos);
     EXPECT_NE(telemetry.find("committed_history_or_rate_slots_mutated=0"),
