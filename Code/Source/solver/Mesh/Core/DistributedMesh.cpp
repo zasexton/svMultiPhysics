@@ -2258,6 +2258,28 @@ void DistributedMesh::refresh_topology_ownership() {
         return;
     }
 
+    std::vector<index_t> explicit_ghost_vertices;
+    explicit_ghost_vertices.reserve(vertex_owner_.size());
+    for (index_t vertex = 0;
+         vertex < static_cast<index_t>(vertex_owner_.size());
+         ++vertex) {
+        if (vertex_owner_[static_cast<std::size_t>(vertex)] ==
+            Ownership::Ghost) {
+            explicit_ghost_vertices.push_back(vertex);
+        }
+    }
+
+    std::vector<index_t> explicit_ghost_cells;
+    explicit_ghost_cells.reserve(cell_owner_.size());
+    for (index_t cell = 0;
+         cell < static_cast<index_t>(cell_owner_.size());
+         ++cell) {
+        if (cell_owner_[static_cast<std::size_t>(cell)] ==
+            Ownership::Ghost) {
+            explicit_ghost_cells.push_back(cell);
+        }
+    }
+
     // Vertex and cell topology is unchanged by codimension-one completion;
     // retain its established ownership.  Face and edge numbering can be
     // replaced completely, so their prior entries cannot be reused.
@@ -2265,6 +2287,9 @@ void DistributedMesh::refresh_topology_ownership() {
     face_owner_rank_.assign(local_mesh_->n_faces(), my_rank_);
     edge_owner_.assign(local_mesh_->n_edges(), Ownership::Owned);
     edge_owner_rank_.assign(local_mesh_->n_edges(), my_rank_);
+
+    std::vector<index_t> explicit_ghost_faces;
+    explicit_ghost_faces.reserve(local_mesh_->n_faces());
 
     // Mark copies supported only by ghost cells before the global entity-id
     // consensus.  This prevents a lower-ranked ghost copy from becoming the
@@ -2275,24 +2300,124 @@ void DistributedMesh::refresh_topology_ownership() {
         const auto cells = local_mesh_->face_cells(face);
         bool has_cell = false;
         bool has_non_ghost_cell = false;
+        rank_t ghost_owner_rank = -1;
         for (const auto cell : cells) {
             if (cell < 0 ||
                 static_cast<std::size_t>(cell) >= cell_owner_.size()) {
                 continue;
             }
             has_cell = true;
-            has_non_ghost_cell =
-                has_non_ghost_cell ||
-                cell_owner_[static_cast<std::size_t>(cell)] !=
-                    Ownership::Ghost;
+            if (cell_owner_[static_cast<std::size_t>(cell)] !=
+                Ownership::Ghost) {
+                has_non_ghost_cell = true;
+            } else if (static_cast<std::size_t>(cell) <
+                       cell_owner_rank_.size()) {
+                const auto owner =
+                    cell_owner_rank_[static_cast<std::size_t>(cell)];
+                if (owner >= 0) {
+                    ghost_owner_rank = ghost_owner_rank < 0
+                                           ? owner
+                                           : std::min(ghost_owner_rank, owner);
+                }
+            }
         }
         if (has_cell && !has_non_ghost_cell) {
             face_owner_[static_cast<std::size_t>(face)] = Ownership::Ghost;
+            face_owner_rank_[static_cast<std::size_t>(face)] =
+                ghost_owner_rank;
+            explicit_ghost_faces.push_back(face);
+        }
+    }
+
+    std::vector<index_t> explicit_ghost_edges;
+    explicit_ghost_edges.reserve(local_mesh_->n_edges());
+    if (local_mesh_->n_edges() > 0 && !local_mesh_->edge2vertex().empty()) {
+        std::vector<offset_t> edge2cell_offsets;
+        std::vector<index_t> edge2cell;
+        MeshTopology::build_edge2cell(*local_mesh_,
+                                      local_mesh_->edge2vertex(),
+                                      edge2cell_offsets,
+                                      edge2cell);
+
+        for (index_t edge = 0;
+             edge < static_cast<index_t>(local_mesh_->n_edges());
+             ++edge) {
+            const auto start =
+                edge2cell_offsets[static_cast<std::size_t>(edge)];
+            const auto end =
+                edge2cell_offsets[static_cast<std::size_t>(edge + 1)];
+            bool has_cell = false;
+            bool has_non_ghost_cell = false;
+            rank_t ghost_owner_rank = -1;
+            for (auto offset = start; offset < end; ++offset) {
+                const auto cell = edge2cell[static_cast<std::size_t>(offset)];
+                if (cell < 0 ||
+                    static_cast<std::size_t>(cell) >= cell_owner_.size()) {
+                    continue;
+                }
+                has_cell = true;
+                if (cell_owner_[static_cast<std::size_t>(cell)] !=
+                    Ownership::Ghost) {
+                    has_non_ghost_cell = true;
+                } else if (static_cast<std::size_t>(cell) <
+                           cell_owner_rank_.size()) {
+                    const auto owner =
+                        cell_owner_rank_[static_cast<std::size_t>(cell)];
+                    if (owner >= 0) {
+                        ghost_owner_rank = ghost_owner_rank < 0
+                                               ? owner
+                                               : std::min(ghost_owner_rank,
+                                                          owner);
+                    }
+                }
+            }
+            if (has_cell && !has_non_ghost_cell) {
+                edge_owner_[static_cast<std::size_t>(edge)] =
+                    Ownership::Ghost;
+                edge_owner_rank_[static_cast<std::size_t>(edge)] =
+                    ghost_owner_rank;
+                explicit_ghost_edges.push_back(edge);
+            }
         }
     }
 
     invalidate_exchange_patterns_();
     gather_shared_entities();
+
+    // Shared-entity discovery determines canonical owner ranks, but an
+    // imported halo copy must remain a ghost even though its global identity
+    // is also present on the owning rank.
+    for (const auto vertex : explicit_ghost_vertices) {
+        vertex_owner_[static_cast<std::size_t>(vertex)] = Ownership::Ghost;
+    }
+    for (const auto cell : explicit_ghost_cells) {
+        cell_owner_[static_cast<std::size_t>(cell)] = Ownership::Ghost;
+    }
+    for (const auto face : explicit_ghost_faces) {
+        face_owner_[static_cast<std::size_t>(face)] = Ownership::Ghost;
+    }
+    for (const auto edge : explicit_ghost_edges) {
+        edge_owner_[static_cast<std::size_t>(edge)] = Ownership::Ghost;
+    }
+
+    ghost_cells_.clear();
+    ghost_vertices_.clear();
+    ghost_faces_.clear();
+    ghost_edges_.clear();
+    ghost_vertices_.insert(explicit_ghost_vertices.begin(),
+                           explicit_ghost_vertices.end());
+    for (const auto cell : explicit_ghost_cells) {
+        ghost_cells_.insert(cell);
+        const auto [vertices, count] = local_mesh_->cell_vertices_span(cell);
+        for (std::size_t i = 0; i < count; ++i) {
+            ghost_vertices_.insert(vertices[i]);
+        }
+    }
+    ghost_faces_.insert(explicit_ghost_faces.begin(),
+                        explicit_ghost_faces.end());
+    ghost_edges_.insert(explicit_ghost_edges.begin(),
+                        explicit_ghost_edges.end());
+
     local_mesh_->event_bus().notify(MeshEvent::PartitionChanged);
 }
 

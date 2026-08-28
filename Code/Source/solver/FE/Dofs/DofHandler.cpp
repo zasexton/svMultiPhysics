@@ -527,6 +527,114 @@ static void mpi_allreduce_max_u8_no_collectives(MPI_Comm comm,
     }
 }
 
+static void complete_symmetric_neighbor_graph(MPI_Comm comm,
+                                              int my_rank,
+                                              int world_size,
+                                              bool no_global_collectives,
+                                              std::vector<int>& neighbors,
+                                              int tag_base) {
+    std::uint8_t invalid_neighbor = 0u;
+    for (const int rank : neighbors) {
+        if (rank < 0 || rank >= world_size) {
+            invalid_neighbor = 1u;
+        }
+    }
+
+    if (no_global_collectives) {
+        mpi_allreduce_max_u8_no_collectives(
+            comm, my_rank, world_size, &invalid_neighbor, 1, tag_base + 0);
+    } else {
+        fe_mpi_check(MPI_Allreduce(MPI_IN_PLACE,
+                                   &invalid_neighbor,
+                                   1,
+                                   MPI_UNSIGNED_CHAR,
+                                   MPI_MAX,
+                                   comm),
+                     "MPI_Allreduce (invalid neighbor) in complete_symmetric_neighbor_graph");
+    }
+    if (invalid_neighbor != 0u) {
+        throw FEException("DofHandler::distributeDofs: neighbor rank out of range");
+    }
+
+    neighbors.erase(std::remove(neighbors.begin(), neighbors.end(), my_rank),
+                    neighbors.end());
+    std::sort(neighbors.begin(), neighbors.end());
+    neighbors.erase(std::unique(neighbors.begin(), neighbors.end()),
+                    neighbors.end());
+
+    std::uint8_t communicator_has_neighbor = neighbors.empty() ? 0u : 1u;
+    if (no_global_collectives) {
+        mpi_allreduce_max_u8_no_collectives(
+            comm, my_rank, world_size, &communicator_has_neighbor, 1, tag_base + 1);
+    } else {
+        fe_mpi_check(MPI_Allreduce(MPI_IN_PLACE,
+                                   &communicator_has_neighbor,
+                                   1,
+                                   MPI_UNSIGNED_CHAR,
+                                   MPI_MAX,
+                                   comm),
+                     "MPI_Allreduce (neighbor presence) in complete_symmetric_neighbor_graph");
+    }
+
+    if (communicator_has_neighbor == 0u) {
+        neighbors.reserve(static_cast<std::size_t>(std::max(0, world_size - 1)));
+        for (int rank = 0; rank < world_size; ++rank) {
+            if (rank != my_rank) {
+                neighbors.push_back(rank);
+            }
+        }
+        return;
+    }
+
+    std::vector<std::uint8_t> advertised(static_cast<std::size_t>(world_size), 0u);
+    std::vector<std::uint8_t> incoming(static_cast<std::size_t>(world_size), 0u);
+    for (const int rank : neighbors) {
+        advertised[static_cast<std::size_t>(rank)] = 1u;
+    }
+
+    if (no_global_collectives) {
+        for (int step = 1; step < world_size; ++step) {
+            const int destination = (my_rank + step) % world_size;
+            const int source = (my_rank - step + world_size) % world_size;
+            const std::uint8_t send_value =
+                advertised[static_cast<std::size_t>(destination)];
+            std::uint8_t receive_value = 0u;
+            fe_mpi_check(MPI_Sendrecv(&send_value,
+                                      1,
+                                      MPI_UNSIGNED_CHAR,
+                                      destination,
+                                      tag_base + 2,
+                                      &receive_value,
+                                      1,
+                                      MPI_UNSIGNED_CHAR,
+                                      source,
+                                      tag_base + 2,
+                                      comm,
+                                      MPI_STATUS_IGNORE),
+                         "MPI_Sendrecv in complete_symmetric_neighbor_graph");
+            incoming[static_cast<std::size_t>(source)] = receive_value;
+        }
+    } else {
+        fe_mpi_check(MPI_Alltoall(advertised.data(),
+                                  1,
+                                  MPI_UNSIGNED_CHAR,
+                                  incoming.data(),
+                                  1,
+                                  MPI_UNSIGNED_CHAR,
+                                  comm),
+                     "MPI_Alltoall in complete_symmetric_neighbor_graph");
+    }
+
+    for (int rank = 0; rank < world_size; ++rank) {
+        if (rank != my_rank && incoming[static_cast<std::size_t>(rank)] != 0u) {
+            neighbors.push_back(rank);
+        }
+    }
+    std::sort(neighbors.begin(), neighbors.end());
+    neighbors.erase(std::unique(neighbors.begin(), neighbors.end()),
+                    neighbors.end());
+}
+
 struct HllSketch {
     static constexpr int p = 12;
     static constexpr std::size_t m = (1u << p);
@@ -4086,6 +4194,23 @@ void DofHandler::distributeDofs(const MeshTopologyInfo& topology,
                             : space.value_dimension()));
         dof_map_.setMyRank(my_rank_);
         ++dof_state_revision_;
+        neighbor_ranks_.assign(topology.neighbor_ranks.begin(),
+                               topology.neighbor_ranks.end());
+        for (const int rank : topology.cell_owner_ranks) {
+            if (rank >= 0 && rank != my_rank_) {
+                neighbor_ranks_.push_back(rank);
+            }
+        }
+#if FE_HAS_MPI
+        if (world_size_ > 1) {
+            complete_symmetric_neighbor_graph(mpi_comm_,
+                                              my_rank_,
+                                              world_size_,
+                                              no_global_collectives_,
+                                              neighbor_ranks_,
+                                              /*tag_base=*/40740);
+        }
+#endif
         const auto view = MeshTopologyView::from(topology);
         return distributeVariableOrderDofs(view, space, options);
     }
@@ -4289,22 +4414,20 @@ void DofHandler::distributeDofsCore(const MeshTopologyView& topology,
     if (world_size_ > 1) {
         if (!topo->neighbor_ranks.empty()) {
             neighbor_ranks_.assign(topo->neighbor_ranks.begin(), topo->neighbor_ranks.end());
-        } else if (!topo->cell_owner_ranks.empty()) {
-            std::unordered_set<int> nbrs;
-            nbrs.reserve(topo->cell_owner_ranks.size());
-            for (int r : topo->cell_owner_ranks) {
-                if (r >= 0 && r != my_rank_) {
-                    nbrs.insert(r);
-                }
-            }
-            neighbor_ranks_.assign(nbrs.begin(), nbrs.end());
         }
-        // Normalize: remove self, sort, deduplicate.
-        neighbor_ranks_.erase(std::remove(neighbor_ranks_.begin(), neighbor_ranks_.end(), my_rank_),
-                              neighbor_ranks_.end());
-        std::sort(neighbor_ranks_.begin(), neighbor_ranks_.end());
-        neighbor_ranks_.erase(std::unique(neighbor_ranks_.begin(), neighbor_ranks_.end()),
-                              neighbor_ranks_.end());
+        for (const int rank : topo->cell_owner_ranks) {
+            if (rank >= 0 && rank != my_rank_) {
+                neighbor_ranks_.push_back(rank);
+            }
+        }
+#if FE_HAS_MPI
+        complete_symmetric_neighbor_graph(mpi_comm_,
+                                          my_rank_,
+                                          world_size_,
+                                          no_global_collectives_,
+                                          neighbor_ranks_,
+                                          /*tag_base=*/40740);
+#endif
     }
 
     if (world_size_ > 1) {
@@ -5589,22 +5712,7 @@ void DofHandler::distributeVariableOrderDofsParallel(const MeshTopologyView& top
         }
     }
 
-    std::vector<int> neighbors = neighbor_ranks_;
-    if (!topo->cell_owner_ranks.empty()) {
-        for (int r : topo->cell_owner_ranks) {
-            if (r >= 0 && r != my_rank_) {
-                neighbors.push_back(r);
-            }
-        }
-    }
-    std::sort(neighbors.begin(), neighbors.end());
-    neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
-    if (neighbors.empty()) {
-        neighbors.reserve(static_cast<std::size_t>(std::max(0, world_size_ - 1)));
-        for (int r = 0; r < world_size_; ++r) {
-            if (r != my_rank_) neighbors.push_back(r);
-        }
-    }
+    const auto& neighbors = neighbor_ranks_;
 
     std::vector<int> rank_to_order_storage;
     std::span<const int> rank_to_order;
@@ -6942,26 +7050,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 	        }
 	    };
 
-	    std::vector<int> neighbors = neighbor_ranks_;
-	    if (!topology.cell_owner_ranks.empty()) {
-	        for (int r : topology.cell_owner_ranks) {
-	            if (r >= 0 && r != my_rank_) {
-	                neighbors.push_back(r);
-	            }
-	        }
-	    }
-	    std::sort(neighbors.begin(), neighbors.end());
-	    neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
-	    if (neighbors.empty()) {
-	        // Fallback for mesh-independent distributed workflows that do not provide
-	        // neighbor information: communicate with all ranks (correct but not scalable).
-	        neighbors.reserve(static_cast<std::size_t>(std::max(0, world_size_ - 1)));
-	        for (int r = 0; r < world_size_; ++r) {
-	            if (r != my_rank_) {
-	                neighbors.push_back(r);
-	            }
-	        }
-	    }
+	    const auto& neighbors = neighbor_ranks_;
 
 	    std::vector<int> rank_to_order_storage;
 	    std::span<const int> rank_to_order;
@@ -8150,24 +8239,7 @@ void DofHandler::distributeDGDofsParallel(const MeshTopologyView& topology,
 	    std::vector<gid_t> cell_global_id;
 	    gid_t n_global_cells = 0;
 
-	    std::vector<int> neighbors = neighbor_ranks_;
-	    if (!topology.cell_owner_ranks.empty()) {
-	        for (int r : topology.cell_owner_ranks) {
-	            if (r >= 0 && r != my_rank_) {
-	                neighbors.push_back(r);
-	            }
-	        }
-	    }
-	    std::sort(neighbors.begin(), neighbors.end());
-	    neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
-	    if (neighbors.empty()) {
-	        neighbors.reserve(static_cast<std::size_t>(std::max(0, world_size_ - 1)));
-	        for (int r = 0; r < world_size_; ++r) {
-	            if (r != my_rank_) {
-	                neighbors.push_back(r);
-	            }
-	        }
-	    }
+	    const auto& neighbors = neighbor_ranks_;
 
 	    std::vector<int> rank_to_order_storage;
 	    std::span<const int> rank_to_order;

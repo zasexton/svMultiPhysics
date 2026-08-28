@@ -1226,6 +1226,73 @@ TEST(DofHandlerMPI, DistributedCG_P2_FourRank_MultiNeighborGhostSync) {
     }
 }
 
+TEST(DofHandlerMPI, FourRankAsymmetricAdvertisementsAreClosedBeforeNeighborExchange) {
+    const MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size != 4) {
+        GTEST_SKIP() << "Requires 4 MPI ranks";
+    }
+
+    MeshTopologyInfo topo = makeFourRankTriangleP2(rank, /*gid_cell=*/150 + rank);
+    switch (rank) {
+        case 0:
+            topo.neighbor_ranks = {1, 2, 3};
+            break;
+        case 1:
+            topo.neighbor_ranks = {2, 3};
+            break;
+        case 2:
+            topo.neighbor_ranks = {3};
+            break;
+        case 3:
+            topo.neighbor_ranks.clear();
+            break;
+        default:
+            FAIL() << "Unexpected rank";
+    }
+
+    const auto layout =
+        DofLayoutInfo::Lagrange(/*order=*/2, /*dim=*/2, /*num_verts_per_cell=*/3);
+
+    for (const bool no_global_collectives : {false, true}) {
+        DofDistributionOptions opts;
+        opts.my_rank = rank;
+        opts.world_size = size;
+        opts.mpi_comm = comm;
+        opts.ownership = OwnershipStrategy::HighestRank;
+        opts.no_global_collectives = no_global_collectives;
+        opts.validate_parallel = true;
+
+        DofHandler dh;
+        dh.distributeDofs(topo, layout, opts);
+        dh.finalize();
+
+        EXPECT_EQ(dh.getNumDofs(), 15);
+        dh.buildScatterContexts();
+
+        const auto owned = dh.getPartition().locallyOwned().toVector();
+        std::vector<double> owned_values;
+        owned_values.reserve(owned.size());
+        for (const auto dof : owned) {
+            owned_values.push_back(static_cast<double>(1000 * rank) +
+                                   static_cast<double>(dof));
+        }
+
+        const auto ghost_dofs = dh.getGhostDofs();
+        std::vector<double> ghost_values(ghost_dofs.size(), -1.0);
+        dh.syncGhostValuesMPI(owned_values, ghost_values);
+
+        for (std::size_t i = 0; i < ghost_dofs.size(); ++i) {
+            const auto dof = ghost_dofs[i];
+            const int owner = dh.getDofMap().getDofOwner(dof);
+            const double expected = static_cast<double>(1000 * owner) +
+                                    static_cast<double>(dof);
+            EXPECT_DOUBLE_EQ(ghost_values[i], expected);
+        }
+    }
+}
+
 TEST(DofHandlerMPI, DistributedCG_P2_FourRank_NoGlobalCollectives_GhostSync) {
     const MPI_Comm comm = MPI_COMM_WORLD;
     const int rank = mpiRank(comm);

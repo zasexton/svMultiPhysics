@@ -236,6 +236,16 @@ static void test_exchange_ghost_coordinates_after_global_partition(int rank, int
   ASSERT_EQ(mesh.n_vertices(), expected_local_vertices);
   ASSERT_EQ(mesh.n_ghost_cells(), expected_ghost_cells);
   ASSERT_EQ(mesh.n_ghost_vertices(), expected_ghost_cells * 4u);
+  const auto expected_ghost_faces = mesh.n_ghost_faces();
+  const auto expected_ghost_edges = mesh.n_ghost_edges();
+  ASSERT(expected_ghost_faces > 0u);
+  ASSERT(expected_ghost_edges > 0u);
+
+  mesh.refresh_topology_ownership();
+  ASSERT_EQ(mesh.n_ghost_cells(), expected_ghost_cells);
+  ASSERT_EQ(mesh.n_ghost_vertices(), expected_ghost_cells * 4u);
+  ASSERT_EQ(mesh.n_ghost_faces(), expected_ghost_faces);
+  ASSERT_EQ(mesh.n_ghost_edges(), expected_ghost_edges);
 
   ASSERT_EQ(mesh.dim(), 3);
   mesh.set_current_coords(mesh.X_ref());

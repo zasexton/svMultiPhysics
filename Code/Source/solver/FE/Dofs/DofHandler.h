@@ -203,7 +203,8 @@ struct MeshTopologyInfo {
     // If empty, DofHandler will attempt to infer neighbors from cell_owner_ranks
     // (requires ghost cells to be present). Providing this explicitly is
     // recommended for correctness when partitions share entities only via
-    // vertices/edges (not faces).
+    // vertices/edges (not faces). DofHandler completes one-sided advertisements
+    // to a symmetric communication graph before the first neighbor exchange.
     std::vector<int> neighbor_ranks;
 
     // Helper to get cell vertices
