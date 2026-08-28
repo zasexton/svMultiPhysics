@@ -67,6 +67,19 @@ def interface_measure_2d(dataset: pv.DataSet,
     return measure
 
 
+def interface_measure_3d(dataset: pv.DataSet,
+                         level_set_name: str = "phi") -> float:
+    """Return the area of the saved linearized zero isosurface."""
+    _finite_point_scalar(dataset, level_set_name)
+    contour = dataset.contour(isosurfaces=[0.0], scalars=level_set_name)
+    if contour.n_cells == 0 or contour.n_points == 0:
+        raise ValueError("saved level set has no zero isosurface")
+    measure = _sum_cell_measure(contour, "Area")
+    if not math.isfinite(measure) or measure <= 0.0:
+        raise ValueError("saved zero isosurface has nonpositive area")
+    return measure
+
+
 def liquid_kinetic_energy_proxy_2d(dataset: pv.DataSet,
                                    density: float,
                                    level_set_name: str = "phi",
@@ -99,6 +112,19 @@ def liquid_kinetic_energy_proxy_2d(dataset: pv.DataSet,
     if values.size != 1 or not np.isfinite(values[0]) or values[0] < 0.0:
         raise ValueError("integrated kinetic-energy proxy is invalid")
     return float(values[0])
+
+
+def liquid_kinetic_energy_proxy_3d(dataset: pv.DataSet,
+                                   density: float,
+                                   level_set_name: str = "phi",
+                                   velocity_name: str = "Velocity") -> float:
+    """Integrate the saved-output kinetic-energy proxy over a 3-D liquid."""
+    return liquid_kinetic_energy_proxy_2d(
+        dataset,
+        density,
+        level_set_name,
+        velocity_name,
+    )
 
 
 def _linear_negative_segment_fraction(phi0: float, phi1: float) -> float:
@@ -203,6 +229,56 @@ def wetted_axis_wall_measure_2d(dataset: pv.DataSet,
     return measure
 
 
+def wetted_axis_wall_measure_3d(dataset: pv.DataSet,
+                                wall_axis: int = 1,
+                                wall_coordinate: float = 0.0,
+                                level_set_name: str = "phi",
+                                tolerance: float = 1.0e-12) -> float:
+    """Measure ``phi <= 0`` on an axis-aligned exterior surface."""
+    if wall_axis not in (0, 1, 2):
+        raise ValueError("a spatial wall axis must be 0, 1, or 2")
+    if (not math.isfinite(wall_coordinate) or
+            not math.isfinite(tolerance) or tolerance < 0.0):
+        raise ValueError("wall coordinate/tolerance is invalid")
+    _finite_point_scalar(dataset, level_set_name)
+    surface = dataset.extract_surface()
+    if surface.n_cells == 0 or surface.n_points == 0:
+        raise ValueError("saved state has no exterior surface")
+    points = np.asarray(surface.points, dtype=float)
+    if (points.shape != (surface.n_points, 3) or
+            not np.isfinite(points).all()):
+        raise ValueError("saved exterior surface has invalid coordinates")
+
+    wall_cells: list[int] = []
+    for cell_id in range(surface.n_cells):
+        point_ids = np.asarray(
+            surface.get_cell(cell_id).point_ids, dtype=np.int64)
+        if (point_ids.size >= 3 and np.all(
+                np.abs(points[point_ids, wall_axis] - wall_coordinate) <=
+                tolerance)):
+            wall_cells.append(cell_id)
+    if not wall_cells:
+        raise ValueError("saved state does not contain the requested wall")
+    wall = surface.extract_cells(np.asarray(wall_cells, dtype=np.int64))
+    wall_phi = _finite_point_scalar(wall, level_set_name)
+    if np.all(wall_phi > 0.0):
+        return 0.0
+    if np.all(wall_phi <= 0.0):
+        measure = _sum_cell_measure(wall, "Area")
+    else:
+        wet = wall.clip_scalar(
+            scalars=level_set_name,
+            value=0.0,
+            invert=True,
+        )
+        if wet.n_cells == 0:
+            return 0.0
+        measure = _sum_cell_measure(wet, "Area")
+    if not math.isfinite(measure) or measure < 0.0:
+        raise ValueError("wetted wall area is invalid")
+    return measure
+
+
 def free_surface_energy_state_2d(
         dataset: pv.DataSet,
         *,
@@ -257,6 +333,64 @@ def free_surface_energy_state_2d(
             "output_linearization_for_tensor_product_q1"
         ),
         "wall_energy_contract": "saved_piecewise_linear_wall_trace_young_relation",
+    }
+
+
+def free_surface_energy_state_3d(
+        dataset: pv.DataSet,
+        *,
+        density: float,
+        surface_tension: float,
+        equilibrium_contact_angle_degrees: float | None = None,
+        wall_axis: int = 1,
+        wall_coordinate: float = 0.0,
+        level_set_name: str = "phi",
+        velocity_name: str = "Velocity",
+) -> dict[str, Any]:
+    """Compute the 3-D output-space capillary energy components."""
+    if not math.isfinite(surface_tension) or surface_tension <= 0.0:
+        raise ValueError("surface tension must be finite and positive")
+    interface_measure = interface_measure_3d(dataset, level_set_name)
+    kinetic = liquid_kinetic_energy_proxy_3d(
+        dataset, density, level_set_name, velocity_name
+    )
+    wall_measure = 0.0
+    wall_energy = 0.0
+    if equilibrium_contact_angle_degrees is not None:
+        theta = math.radians(equilibrium_contact_angle_degrees)
+        if not math.isfinite(theta) or not (0.0 < theta < math.pi):
+            raise ValueError(
+                "equilibrium contact angle must lie strictly in (0, 180)")
+        wall_measure = wetted_axis_wall_measure_3d(
+            dataset,
+            wall_axis,
+            wall_coordinate,
+            level_set_name,
+        )
+        wall_energy = -surface_tension * math.cos(theta) * wall_measure
+    interface_energy = surface_tension * interface_measure
+    total = kinetic + interface_energy + wall_energy
+    if not all(math.isfinite(value) for value in (
+            kinetic, interface_measure, interface_energy,
+            wall_measure, wall_energy, total)):
+        raise ValueError("free-surface energy state is non-finite")
+    return {
+        "kinetic_energy_proxy": kinetic,
+        "interface_measure": interface_measure,
+        "interface_energy": interface_energy,
+        "wetted_wall_measure": wall_measure,
+        "young_wall_energy": wall_energy,
+        "total_energy_proxy": total,
+        "kinetic_energy_contract": (
+            "vertex_squared_velocity_linearly_interpolated_and_integrated_"
+            "on_vtk_phi_nonpositive_clip"
+        ),
+        "surface_energy_contract": (
+            "saved_piecewise_linear_zero_isosurface_exact_for_simplex_p1"
+        ),
+        "wall_energy_contract": (
+            "saved_piecewise_linear_axis_wall_area_young_relation"
+        ),
     }
 
 

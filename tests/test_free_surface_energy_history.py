@@ -59,6 +59,19 @@ def planar_quad(phi, velocity=None):
     return grid
 
 
+def spatial_cube(phi_function, velocity=(0.0, 0.0, 0.0)):
+    grid = pv.ImageData(
+        dimensions=(3, 3, 3),
+        spacing=(0.5, 0.5, 0.5),
+        origin=(0.0, 0.0, 0.0),
+    ).cast_to_unstructured_grid()
+    points = np.asarray(grid.points, dtype=float)
+    grid.point_data["phi"] = np.asarray(phi_function(points), dtype=float)
+    grid.point_data["Velocity"] = np.tile(
+        np.asarray(velocity, dtype=float), (grid.n_points, 1))
+    return grid
+
+
 def test_planar_interface_wall_measure_and_constant_kinetic_energy():
     grid = planar_quad(grid_phi := [
         -0.25, -0.25, -0.25,
@@ -70,6 +83,37 @@ def test_planar_interface_wall_measure_and_constant_kinetic_energy():
     assert energy.wetted_axis_wall_measure_2d(grid) == pytest.approx(1.0)
     # Liquid area is 0.25, so 1/2*rho*u^2*A = 1 for rho=2, u=2.
     assert energy.liquid_kinetic_energy_proxy_2d(grid, 2.0) == pytest.approx(1.0)
+
+
+def test_spatial_interface_wall_area_and_constant_kinetic_energy():
+    grid = spatial_cube(
+        lambda points: points[:, 2] - 0.25,
+        velocity=(2.0, 0.0, 0.0),
+    )
+    assert energy.interface_measure_3d(grid) == pytest.approx(1.0)
+    assert energy.wetted_axis_wall_measure_3d(
+        grid, wall_axis=2, wall_coordinate=0.0) == pytest.approx(1.0)
+    assert energy.liquid_kinetic_energy_proxy_3d(
+        grid, 2.0) == pytest.approx(1.0)
+
+    state = energy.free_surface_energy_state_3d(
+        grid,
+        density=2.0,
+        surface_tension=2.0,
+        equilibrium_contact_angle_degrees=60.0,
+        wall_axis=2,
+        wall_coordinate=0.0,
+    )
+    assert state["interface_energy"] == pytest.approx(2.0)
+    assert state["young_wall_energy"] == pytest.approx(-1.0)
+    assert state["kinetic_energy_proxy"] == pytest.approx(1.0)
+    assert state["total_energy_proxy"] == pytest.approx(2.0)
+
+
+def test_spatial_partial_wetted_wall_uses_linear_surface_clip():
+    grid = spatial_cube(lambda points: points[:, 0] - 0.25)
+    assert energy.wetted_axis_wall_measure_3d(
+        grid, wall_axis=2, wall_coordinate=0.0) == pytest.approx(0.25)
 
 
 def test_partial_wetted_wall_trace_uses_linear_crossings():
