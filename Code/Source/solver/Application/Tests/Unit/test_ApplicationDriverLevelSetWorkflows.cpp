@@ -2881,6 +2881,26 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
+     StaticCapillaryActiveSupportUnionDeduplicatesAndRejectsInvalidIndices)
+{
+  const auto gathered = communicatorWideIndexUnion(
+      {3u, 1u, 3u, 2u},
+      /*upper_bound=*/4u,
+      svmp::MeshComm::self(),
+      "static-capillary serial test support");
+  EXPECT_EQ(
+      gathered,
+      (std::vector<std::size_t>{1u, 2u, 3u}));
+  EXPECT_THROW(
+      (void)communicatorWideIndexUnion(
+          {4u},
+          /*upper_bound=*/4u,
+          svmp::MeshComm::self(),
+          "static-capillary serial invalid support"),
+      std::runtime_error);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
      ParsesAndCanonicalizesStaticCapillaryInitializationControls)
 {
   auto params = parseWorkflowParametersXml(R"xml(

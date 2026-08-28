@@ -1661,6 +1661,126 @@ std::vector<int> communicatorWideBoundaryMarkers(
 #endif
 }
 
+std::vector<std::size_t> communicatorWideIndexUnion(
+    std::vector<std::size_t> local_indices,
+    std::size_t upper_bound,
+    const svmp::MeshComm& comm,
+    std::string_view purpose)
+{
+  std::sort(local_indices.begin(), local_indices.end());
+  local_indices.erase(
+      std::unique(local_indices.begin(), local_indices.end()),
+      local_indices.end());
+  bool index_out_of_range =
+      !local_indices.empty() && local_indices.back() >= upper_bound;
+#ifdef MESH_HAS_MPI
+  if (comm.is_parallel()) {
+    const int local_invalid = index_out_of_range ? 1 : 0;
+    int any_invalid = 0;
+    MPI_Allreduce(&local_invalid,
+                  &any_invalid,
+                  1,
+                  MPI_INT,
+                  MPI_MAX,
+                  comm.native());
+    index_out_of_range = any_invalid != 0;
+  }
+#endif
+  if (index_out_of_range) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] " + std::string(purpose) +
+        " contains an out-of-range local index.");
+  }
+
+#ifdef MESH_HAS_MPI
+  if (comm.is_parallel()) {
+    const int local_count_overflow =
+        local_indices.size() >
+                static_cast<std::size_t>(std::numeric_limits<int>::max())
+            ? 1
+            : 0;
+    int any_count_overflow = 0;
+    MPI_Allreduce(&local_count_overflow,
+                  &any_count_overflow,
+                  1,
+                  MPI_INT,
+                  MPI_MAX,
+                  comm.native());
+    if (any_count_overflow != 0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] " + std::string(purpose) +
+          " exceeds MPI local-count limits.");
+    }
+
+    std::vector<std::uint64_t> local_values;
+    local_values.reserve(local_indices.size());
+    for (const auto index : local_indices) {
+      local_values.push_back(static_cast<std::uint64_t>(index));
+    }
+
+    const int local_count = static_cast<int>(local_values.size());
+    std::vector<int> counts(static_cast<std::size_t>(comm.size()), 0);
+    MPI_Allgather(&local_count,
+                  1,
+                  MPI_INT,
+                  counts.data(),
+                  1,
+                  MPI_INT,
+                  comm.native());
+
+    std::vector<int> displacements(counts.size(), 0);
+    int total_count = 0;
+    for (std::size_t rank = 0u; rank < counts.size(); ++rank) {
+      if (counts[rank] < 0 ||
+          counts[rank] > std::numeric_limits<int>::max() - total_count) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] " + std::string(purpose) +
+            " exceeds MPI aggregate-count limits.");
+      }
+      displacements[rank] = total_count;
+      total_count += counts[rank];
+    }
+
+    std::vector<std::uint64_t> gathered(
+        static_cast<std::size_t>(total_count), 0u);
+#ifdef MPI_UINT64_T
+    const MPI_Datatype index_type = MPI_UINT64_T;
+#else
+    const MPI_Datatype index_type = MPI_UNSIGNED_LONG_LONG;
+#endif
+    MPI_Allgatherv(local_values.empty() ? nullptr : local_values.data(),
+                   local_count,
+                   index_type,
+                   gathered.empty() ? nullptr : gathered.data(),
+                   counts.data(),
+                   displacements.data(),
+                   index_type,
+                   comm.native());
+
+    local_indices.clear();
+    local_indices.reserve(gathered.size());
+    for (const auto value : gathered) {
+      if (value >= static_cast<std::uint64_t>(upper_bound) ||
+          value >
+              static_cast<std::uint64_t>(
+                  std::numeric_limits<std::size_t>::max())) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] " + std::string(purpose) +
+            " contains an out-of-range communicator index.");
+      }
+      local_indices.push_back(static_cast<std::size_t>(value));
+    }
+    std::sort(local_indices.begin(), local_indices.end());
+    local_indices.erase(
+        std::unique(local_indices.begin(), local_indices.end()),
+        local_indices.end());
+  }
+#else
+  (void)comm;
+#endif
+  return local_indices;
+}
+
 svmp::FE::interfaces::FreeSurfaceGeometryOwnershipCollective
 snapshotOwnershipCollective(
     const svmp::MeshComm& comm)
@@ -24423,11 +24543,77 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
               field_offset + field_count));
   (void)collectiveLevelSetMaintenanceAlgebraicRevision(
       parameters, comm);
-  std::vector<std::size_t> active_parameters(field_count);
-  std::iota(
-      active_parameters.begin(),
-      active_parameters.end(),
-      std::size_t{0u});
+
+  const auto [minimum_field_count, maximum_field_count] =
+      globalMinMaxUint64(
+          static_cast<std::uint64_t>(field_count), comm);
+  if (minimum_field_count != maximum_field_count) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization level-set coefficient count differs across the FE communicator.");
+  }
+
+  // Inside the fixed cut-topology epoch, the surface, wall, gravity, and
+  // liquid-volume functionals depend only on the level-set trace of the cut
+  // cells.  Keeping coefficients outside that exact support fixed removes
+  // null search directions and makes the finite-difference cost scale with
+  // the interface rather than with the background volume.
+  std::vector<std::size_t> local_active_parameters;
+  bool local_active_support_invalid = false;
+  try {
+    const auto* cut_context = system.cutIntegrationContext();
+    if (cut_context == nullptr ||
+        !cut_context->hasFreeSurfaceGeometrySnapshotForMarker(*marker)) {
+      local_active_support_invalid = true;
+    } else {
+      const auto bound_revision =
+          cut_context->freeSurfaceGeometrySnapshotRevisionForMarker(
+              *marker);
+      const auto& snapshots =
+          cut_context->freeSurfaceGeometrySnapshots();
+      const auto snapshot = std::find_if(
+          snapshots.begin(), snapshots.end(),
+          [&](const auto& candidate) {
+            return candidate != nullptr &&
+                   candidate->revision().interface_marker == *marker &&
+                   candidate->revision().snapshot_revision_key ==
+                       bound_revision;
+          });
+      if (snapshot == snapshots.end()) {
+        local_active_support_invalid = true;
+      } else {
+        const auto& field_dofs =
+            system.fieldDofHandler(level_set_field);
+        for (const auto cell :
+             (*snapshot)->interfaceDomain().cutCells()) {
+          for (const auto dof : field_dofs.getCellDofs(cell)) {
+            if (dof < 0 ||
+                static_cast<std::uint64_t>(dof) >=
+                    static_cast<std::uint64_t>(field_count)) {
+              local_active_support_invalid = true;
+              continue;
+            }
+            local_active_parameters.push_back(
+                static_cast<std::size_t>(dof));
+          }
+        }
+      }
+    }
+  } catch (...) {
+    local_active_support_invalid = true;
+  }
+  if (globalAnyBool(local_active_support_invalid, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization could not resolve the authoritative cut-cell level-set support on every FE communicator rank.");
+  }
+  auto active_parameters = communicatorWideIndexUnion(
+      std::move(local_active_parameters),
+      field_count,
+      comm,
+      "Static capillary active level-set support");
+  if (active_parameters.empty()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization authoritative interface has no active level-set coefficients.");
+  }
 
   LevelSetMaintenanceGeometryTransaction transaction(
       sim, lifecycle, refresh_cache, active_requests);
@@ -24893,9 +25079,29 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
   if (globalAnyBool(
           !local_prepublication_result_valid, comm)) {
     transaction.rollback();
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Static capillary initialization failed before publication: " +
-        result.diagnostic);
+    std::ostringstream message;
+    message
+        << "[svMultiPhysics::Application] Static capillary initialization failed before publication: "
+        << result.diagnostic
+        << " active_coefficients=" << active_parameters.size()
+        << " iterations=" << result.iterations
+        << " functional_evaluations=" << result.functional_evaluations
+        << " finite_difference_step_shrinks="
+        << result.finite_difference_step_shrinks
+        << " line_search_rejections=" << result.line_search_rejections
+        << " topology_change_rejections="
+        << result.topology_change_rejections
+        << " constraint_change_rejections="
+        << result.constraint_change_rejections
+        << " final_projected_gradient_norm="
+        << std::setprecision(17)
+        << result.final_projected_gradient_norm
+        << " final_volume_error=" << result.final_volume_error
+        << " initial_physical_potential_energy="
+        << result.initial_physical_potential_energy
+        << " final_physical_potential_energy="
+        << result.final_physical_potential_energy;
+    throw std::runtime_error(message.str());
   }
 
   (void)collectiveLevelSetMaintenanceAlgebraicRevision(
@@ -25044,6 +25250,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       << " diagnostic=static_capillary_equilibrium_initialization"
       << " field='" << request.level_set_field_name << "'"
       << " marker=" << *marker
+      << " active_coefficients=" << active_parameters.size()
       << " target_liquid_volume="
       << request.static_capillary_equilibrium.target_liquid_volume
       << " initial_surface_wall_energy="

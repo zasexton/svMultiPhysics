@@ -1341,6 +1341,37 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
 }
 
 TEST(ApplicationDriverLevelSetWorkflowsMPI,
+     StaticCapillaryActiveSupportUnionIsCollectiveAndBounded)
+{
+  int rank = 0;
+  int world_size = 1;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+  ASSERT_EQ(world_size, 2);
+
+  const svmp::MeshComm comm(MPI_COMM_WORLD);
+  const auto gathered = communicatorWideIndexUnion(
+      {std::size_t{2}, static_cast<std::size_t>(rank), std::size_t{2}},
+      /*upper_bound=*/4u,
+      comm,
+      "static-capillary MPI test support");
+  EXPECT_EQ(
+      gathered,
+      (std::vector<std::size_t>{0u, 1u, 2u}));
+
+  const std::vector<std::size_t> invalid =
+      rank == 1 ? std::vector<std::size_t>{4u}
+                : std::vector<std::size_t>{0u};
+  EXPECT_THROW(
+      (void)communicatorWideIndexUnion(
+          invalid,
+          /*upper_bound=*/4u,
+          comm,
+          "static-capillary MPI invalid support"),
+      std::runtime_error);
+}
+
+TEST(ApplicationDriverLevelSetWorkflowsMPI,
      TraceSupportMaskPromotesRemotelyDiscoveredOwnerSourceRows)
 {
   int rank = 0;
