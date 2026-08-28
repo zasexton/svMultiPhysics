@@ -87,6 +87,7 @@ HIGH_ORDER_CAPILLARY_BALANCE_CASES = ("capillaryarc2d",)
 HIGH_ORDER_CAPILLARY_DROPLET_EQUILIBRIUM_CASES = ("droplet2d",)
 HIGH_ORDER_CAPILLARY_WAVE_CASES = ("capillarywave2d",)
 HIGH_ORDER_VOLUME_CORRECTED_MOTION_CASES = ("sloshing2d",)
+QUALIFICATION_REPORT_SCHEMA_VERSION = 2
 HIGH_ORDER_SYNTHETIC_CASES = {
     "capillaryarc2d",
     "capillarywave2d",
@@ -11240,17 +11241,48 @@ def time_loop_convergence_errors(metrics: dict[str, Any],
     return errors
 
 
+def compact_qualification_probe(probe: dict[str, Any]) -> dict[str, Any]:
+    compact = {
+        key: value
+        for key, value in probe.items()
+        if key != "diagnostics"
+    }
+    diagnostics = probe.get("diagnostics")
+    if not isinstance(diagnostics, dict):
+        return compact
+
+    evidence: dict[str, Any] = {
+        "full_records_embedded": False,
+        "retention_requires_preserve_run_dir": True,
+    }
+    counts = diagnostics.get("counts")
+    if isinstance(counts, dict):
+        evidence["record_counts"] = dict(counts)
+    run_dir = probe.get("run_dir")
+    if isinstance(run_dir, str) and run_dir:
+        evidence["solver_log_path"] = str(Path(run_dir) / "solver_run.log")
+    compact["diagnostic_evidence"] = evidence
+    return compact
+
+
+def qualification_payload(solver: Path,
+                          probes: list[dict[str, Any]],
+                          complete: bool) -> dict[str, Any]:
+    return {
+        "schema_version": QUALIFICATION_REPORT_SCHEMA_VERSION,
+        "solver": str(solver),
+        "complete": complete,
+        "probes": [compact_qualification_probe(probe) for probe in probes],
+    }
+
+
 def write_qualification_log(path: Path | None,
                             solver: Path,
                             probes: list[dict[str, Any]],
                             complete: bool) -> None:
     if path is None:
         return
-    payload = {
-        "solver": str(solver),
-        "complete": complete,
-        "probes": probes,
-    }
+    payload = qualification_payload(solver, probes, complete)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8")
@@ -14059,7 +14091,11 @@ def main() -> int:
         write_qualification_log(args.qualification_log, solver, report, complete=False)
         raise RuntimeError(format_failure_exception(failure, args.qualification_log))
     write_qualification_log(args.qualification_log, solver, report, complete=True)
-    print(json.dumps({"solver": str(solver), "probes": report}, indent=2, sort_keys=True))
+    print(json.dumps(
+        qualification_payload(solver, report, complete=True),
+        indent=2,
+        sort_keys=True,
+    ))
     return 0
 
 

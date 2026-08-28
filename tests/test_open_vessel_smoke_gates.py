@@ -2787,3 +2787,50 @@ def test_fsils_duplicate_diag_gate_fails_closed_for_legacy_parser_record():
         "FSILS prepared-matrix duplicate diagonal entries diagnostics are unavailable",
         "FSILS prepared-matrix rows with duplicate diagonals diagnostics are unavailable",
     ]
+
+
+def test_qualification_log_uses_compact_diagnostic_evidence(tmp_path):
+    smoke = _load_smoke_module()
+    run_dir = tmp_path / "preserved_run"
+    diagnostics = {
+        "counts": {
+            "cut_volume_assemblies": 240,
+            "free_surface_conservative_balances": 120,
+        },
+        "cut_volume_assemblies": [
+            {"payload": "x" * 4096},
+            {"payload": "y" * 4096},
+        ],
+    }
+    probe = {
+        "case": "sessile2d",
+        "run_dir": str(run_dir),
+        "passed": True,
+        "diagnostics": diagnostics,
+        "diagnostic_free_surface_conservative_balance_count": 120,
+    }
+    output = tmp_path / "qualification.json"
+
+    smoke.write_qualification_log(
+        output,
+        tmp_path / "solver",
+        [probe],
+        complete=True,
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    serialized_probe = payload["probes"][0]
+    assert payload["schema_version"] == 2
+    assert payload["complete"] is True
+    assert "diagnostics" not in serialized_probe
+    assert serialized_probe[
+        "diagnostic_free_surface_conservative_balance_count"
+    ] == 120
+    assert serialized_probe["diagnostic_evidence"] == {
+        "full_records_embedded": False,
+        "record_counts": diagnostics["counts"],
+        "retention_requires_preserve_run_dir": True,
+        "solver_log_path": str(run_dir / "solver_run.log"),
+    }
+    assert probe["diagnostics"] is diagnostics
+    assert output.stat().st_size < 4096
