@@ -19,9 +19,9 @@
 namespace svmp::FE::level_set {
 
 /**
- * Options for fixed-topology minimization of the snapshot-owned
- * surface, Young-wall, and gravitational potential energy at a prescribed
- * liquid volume.
+ * Options for piecewise-smooth minimization of the snapshot-owned surface,
+ * Young-wall, and gravitational potential energy at a prescribed liquid
+ * volume.
  */
 struct LevelSetStaticCapillaryEquilibriumOptions {
     Real target_liquid_volume{0.0};
@@ -43,6 +43,10 @@ struct LevelSetStaticCapillaryEquilibriumOptions {
 
     int max_iterations{50};
     int max_line_search_iterations{20};
+    // Exact functional derivatives may opt into a bounded sequence of cut
+    // topology epochs. Difference gradients always remain in one epoch.
+    bool allow_topology_epoch_transitions{false};
+    int max_topology_epoch_transitions{8};
     Real projected_gradient_inverse_stiffness{1.0};
     Real tangent_trust_radius{0.05};
     Real maximum_coefficient_update_linf{0.25};
@@ -136,6 +140,7 @@ struct LevelSetStaticCapillaryEquilibriumResult {
     std::size_t derivative_resolution_step_acceptances{0u};
     std::size_t line_search_rejections{0u};
     std::size_t topology_change_rejections{0u};
+    std::size_t topology_epoch_transitions{0u};
     std::size_t constraint_change_rejections{0u};
     std::size_t limited_memory_updates{0u};
     std::size_t limited_memory_resets{0u};
@@ -187,10 +192,13 @@ struct LevelSetStaticCapillaryEquilibriumResult {
 };
 
 /**
- * Minimize a fixed-topology discrete capillary functional.
+ * Minimize a piecewise-smooth discrete capillary functional.
  *
  * Roundoff-balanced fourth-order differences are evaluated only inside the
- * initial cut-topology and constrained-trace epoch. Each SQP-like step uses a
+ * current cut-topology and constrained-trace epoch. With exact derivatives,
+ * an explicit option permits strictly merit-decreasing transitions into a
+ * bounded number of new epochs. Each transition is reproduced before it is
+ * accepted and discards all secant history. Each SQP-like step uses a
  * safeguarded limited-memory tangent inverse Hessian, satisfies the linearized
  * volume constraint, and descends an l1 volume-merit function. Convergence
  * additionally requires the evaluator's unprojected physical-potential load
@@ -200,7 +208,8 @@ struct LevelSetStaticCapillaryEquilibriumResult {
  *
  * `accepted_coefficients` is assigned only after every convergence gate
  * passes. It is left byte-for-byte unchanged on invalid input, evaluator
- * failure, topology rejection, line-search failure, or nonconvergence.
+ * failure, disallowed topology change, line-search failure, or
+ * nonconvergence.
  */
 [[nodiscard]] LevelSetStaticCapillaryEquilibriumResult
 minimizeLevelSetStaticCapillaryEquilibrium(

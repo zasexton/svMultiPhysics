@@ -5,6 +5,7 @@
 #include <cmath>
 #include <deque>
 #include <exception>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -66,6 +67,7 @@ void validateOptions(
         options.finite_difference_max_shrinks < 0 ||
         options.max_iterations <= 0 ||
         options.max_line_search_iterations <= 0 ||
+        options.max_topology_epoch_transitions < 0 ||
         !finitePositive(
             options.projected_gradient_inverse_stiffness) ||
         !finitePositive(options.tangent_trust_radius) ||
@@ -260,17 +262,17 @@ minimizeLevelSetStaticCapillaryEquilibrium(
         return result;
     }
 
-    const std::uint64_t fixed_topology_key =
+    std::uint64_t topology_epoch_key =
         current.cut_topology_key;
-    const std::uint64_t fixed_constraint_semantics_key =
+    std::uint64_t constraint_epoch_key =
         current.constraint_semantics_key;
     result.initial_snapshot_revision_key =
         current.snapshot_revision_key;
     result.final_snapshot_revision_key =
         current.snapshot_revision_key;
-    result.cut_topology_key = fixed_topology_key;
+    result.cut_topology_key = topology_epoch_key;
     result.constraint_semantics_key =
-        fixed_constraint_semantics_key;
+        constraint_epoch_key;
     result.initial_surface_wall_energy =
         current.surface_wall_energy;
     result.final_surface_wall_energy =
@@ -435,14 +437,14 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                         std::all_of(states.begin(), states.end(),
                                     [&](const auto& state) {
                                         return state.cut_topology_key ==
-                                               fixed_topology_key;
+                                               topology_epoch_key;
                                     });
                     const bool constraints_preserved =
                         all_available &&
                         std::all_of(states.begin(), states.end(),
                                     [&](const auto& state) {
                                         return state.constraint_semantics_key ==
-                                               fixed_constraint_semantics_key;
+                                               constraint_epoch_key;
                                     });
                     if (topology_preserved && constraints_preserved) {
                         const std::array<Real, 4> energies{
@@ -682,14 +684,14 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                 return result;
             }
             if (certificate.cut_topology_key !=
-                fixed_topology_key) {
+                topology_epoch_key) {
                 ++result.topology_change_rejections;
                 result.diagnostic =
                     "acceptance_certificate_cut_topology_changed";
                 return result;
             }
             if (certificate.constraint_semantics_key !=
-                fixed_constraint_semantics_key) {
+                constraint_epoch_key) {
                 ++result.constraint_change_rejections;
                 result.diagnostic =
                     "acceptance_certificate_constraint_semantics_changed";
@@ -1005,9 +1007,17 @@ minimizeLevelSetStaticCapillaryEquilibrium(
             physicalPotentialEnergy(current) +
             merit_penalty * std::abs(volume_error);
 
+        struct TopologyTransitionTrial {
+            Real alpha{0.0};
+            std::vector<Real> coefficients{};
+            LevelSetStaticCapillaryEquilibriumEvaluation evaluation{};
+        };
         bool step_accepted = false;
+        bool accepted_topology_transition = false;
         std::vector<Real> accepted_trial;
         LevelSetStaticCapillaryEquilibriumEvaluation accepted_state;
+        std::optional<TopologyTransitionTrial>
+            deferred_topology_transition;
         for (int line_search_iteration = 0;
              line_search_iteration <
              options.max_line_search_iterations;
@@ -1031,20 +1041,7 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                     "production_force_projection_is_forbidden";
                 return result;
             }
-            if (trial_available &&
-                trial_state.cut_topology_key !=
-                    fixed_topology_key) {
-                ++result.topology_change_rejections;
-                last_evaluation_diagnostic =
-                    "candidate_cut_topology_changed";
-            } else if (
-                trial_available &&
-                trial_state.constraint_semantics_key !=
-                    fixed_constraint_semantics_key) {
-                ++result.constraint_change_rejections;
-                last_evaluation_diagnostic =
-                    "candidate_constraint_semantics_changed";
-            } else if (trial_available) {
+            if (trial_available) {
                 const Real trial_volume_error =
                     trial_state.liquid_volume -
                     options.target_liquid_volume;
@@ -1056,50 +1053,90 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                     current_merit -
                     options.armijo_fraction * alpha *
                         predicted_merit_decrease;
-                Real trial_projected_gradient_norm =
-                    std::numeric_limits<Real>::quiet_NaN();
-                const bool trial_exact_gradient_available =
-                    current.functional_derivatives_available &&
-                    exactProjectedGradientNorm(
-                        trial_state,
-                        trial_projected_gradient_norm);
-                const Real merit_resolution =
-                    Real{16.0} *
-                    std::numeric_limits<Real>::epsilon() *
-                    std::max({
-                        Real{1.0},
-                        std::abs(current_merit),
-                        std::abs(trial_merit)});
-                const bool derivative_resolution_step =
-                    trial_exact_gradient_available &&
-                    std::isfinite(trial_merit) &&
-                    trial_merit > armijo_bound &&
-                    alpha * predicted_merit_decrease <=
-                        merit_resolution &&
-                    trial_merit <=
-                        current_merit + merit_resolution &&
-                    std::abs(trial_volume_error) <=
-                        std::max(
-                            std::abs(volume_error),
-                            options.volume_tolerance) &&
-                    trial_projected_gradient_norm <
-                        projected_gradient_norm;
-                if (std::isfinite(trial_merit) &&
-                    (trial_merit <= armijo_bound ||
-                     derivative_resolution_step)) {
-                    accepted_trial = std::move(trial);
-                    accepted_state = std::move(trial_state);
-                    step_accepted = true;
-                    if (derivative_resolution_step) {
-                        ++result
-                              .derivative_resolution_step_acceptances;
+                const bool topology_changed =
+                    trial_state.cut_topology_key !=
+                    topology_epoch_key;
+                const bool constraints_changed =
+                    trial_state.constraint_semantics_key !=
+                    constraint_epoch_key;
+                if (topology_changed) {
+                    ++result.topology_change_rejections;
+                    const bool transition_limit_available =
+                        result.topology_epoch_transitions <
+                        static_cast<std::size_t>(
+                            options.max_topology_epoch_transitions);
+                    if (options.allow_topology_epoch_transitions &&
+                        transition_limit_available &&
+                        current.functional_derivatives_available &&
+                        trial_state.functional_derivatives_available &&
+                        std::isfinite(trial_merit) &&
+                        trial_merit <= armijo_bound) {
+                        deferred_topology_transition =
+                            TopologyTransitionTrial{
+                                alpha,
+                                std::move(trial),
+                                std::move(trial_state)};
+                        last_evaluation_diagnostic =
+                            "candidate_cut_topology_transition_deferred";
+                    } else if (
+                        options.allow_topology_epoch_transitions &&
+                        !transition_limit_available) {
+                        last_evaluation_diagnostic =
+                            "candidate_cut_topology_transition_limit_reached";
+                    } else {
+                        last_evaluation_diagnostic =
+                            "candidate_cut_topology_changed";
                     }
-                    break;
+                } else if (constraints_changed) {
+                    ++result.constraint_change_rejections;
+                    last_evaluation_diagnostic =
+                        "candidate_constraint_semantics_changed";
+                } else {
+                    Real trial_projected_gradient_norm =
+                        std::numeric_limits<Real>::quiet_NaN();
+                    const bool trial_exact_gradient_available =
+                        current.functional_derivatives_available &&
+                        exactProjectedGradientNorm(
+                            trial_state,
+                            trial_projected_gradient_norm);
+                    const Real merit_resolution =
+                        Real{16.0} *
+                        std::numeric_limits<Real>::epsilon() *
+                        std::max({
+                            Real{1.0},
+                            std::abs(current_merit),
+                            std::abs(trial_merit)});
+                    const bool derivative_resolution_step =
+                        trial_exact_gradient_available &&
+                        std::isfinite(trial_merit) &&
+                        trial_merit > armijo_bound &&
+                        alpha * predicted_merit_decrease <=
+                            merit_resolution &&
+                        trial_merit <=
+                            current_merit + merit_resolution &&
+                        std::abs(trial_volume_error) <=
+                            std::max(
+                                std::abs(volume_error),
+                                options.volume_tolerance) &&
+                        trial_projected_gradient_norm <
+                            projected_gradient_norm;
+                    if (std::isfinite(trial_merit) &&
+                        (trial_merit <= armijo_bound ||
+                         derivative_resolution_step)) {
+                        accepted_trial = std::move(trial);
+                        accepted_state = std::move(trial_state);
+                        step_accepted = true;
+                        if (derivative_resolution_step) {
+                            ++result
+                                  .derivative_resolution_step_acceptances;
+                        }
+                        break;
+                    }
+                    last_evaluation_diagnostic =
+                        std::isfinite(trial_merit)
+                            ? "candidate_capillary_merit_decrease_insufficient"
+                            : "candidate_capillary_merit_is_nonfinite";
                 }
-                last_evaluation_diagnostic =
-                    std::isfinite(trial_merit)
-                        ? "candidate_capillary_merit_decrease_insufficient"
-                        : "candidate_capillary_merit_is_nonfinite";
             }
 
             ++result.line_search_rejections;
@@ -1112,31 +1149,103 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                 ++result.projected_gradient_fallbacks;
                 continue;
             }
-            if (pending_acceptance_gate_diagnostic.empty()) {
-                result.diagnostic =
-                    "fixed_topology_capillary_merit_line_search_failed:" +
-                    last_evaluation_diagnostic;
+            if (deferred_topology_transition.has_value()) {
+                LevelSetStaticCapillaryEquilibriumEvaluation
+                    reproduced_state;
+                if (!evaluate(
+                        deferred_topology_transition->coefficients,
+                        LevelSetStaticCapillaryEvaluationPurpose::
+                            FunctionalTrial,
+                        reproduced_state)) {
+                    result.diagnostic =
+                        "topology_transition_reproduction_failed:" +
+                        last_evaluation_diagnostic;
+                    return result;
+                }
+                const auto& deferred_state =
+                    deferred_topology_transition->evaluation;
+                const Real reproduced_volume_error =
+                    reproduced_state.liquid_volume -
+                    options.target_liquid_volume;
+                const Real reproduced_merit =
+                    physicalPotentialEnergy(reproduced_state) +
+                    merit_penalty *
+                        std::abs(reproduced_volume_error);
+                const Real reproduced_armijo_bound =
+                    current_merit -
+                    options.armijo_fraction *
+                        deferred_topology_transition->alpha *
+                        predicted_merit_decrease;
+                const bool transition_reproduced =
+                    reproduced_state.functional_derivatives_available &&
+                    reproduced_state.cut_topology_key !=
+                        topology_epoch_key &&
+                    reproduced_state.cut_topology_key ==
+                        deferred_state.cut_topology_key &&
+                    reproduced_state.constraint_semantics_key ==
+                        deferred_state.constraint_semantics_key &&
+                    reproduced_state.surface_wall_energy ==
+                        deferred_state.surface_wall_energy &&
+                    reproduced_state.gravitational_potential_energy ==
+                        deferred_state.gravitational_potential_energy &&
+                    reproduced_state.liquid_volume ==
+                        deferred_state.liquid_volume &&
+                    std::isfinite(reproduced_merit) &&
+                    reproduced_merit <= reproduced_armijo_bound;
+                if (!transition_reproduced) {
+                    result.diagnostic =
+                        "topology_transition_not_reproducible";
+                    return result;
+                }
+                alpha = deferred_topology_transition->alpha;
+                accepted_trial = std::move(
+                    deferred_topology_transition->coefficients);
+                accepted_state = std::move(reproduced_state);
+                accepted_topology_transition = true;
+                step_accepted = true;
             } else {
-                result.diagnostic =
-                    "acceptance_certificate_refinement_failed:" +
-                    pending_acceptance_gate_diagnostic + ":" +
-                    last_evaluation_diagnostic;
+                if (pending_acceptance_gate_diagnostic.empty()) {
+                    result.diagnostic =
+                        (options.allow_topology_epoch_transitions
+                             ? "capillary_merit_line_search_failed:"
+                             : "fixed_topology_capillary_merit_line_search_failed:") +
+                        last_evaluation_diagnostic;
+                } else {
+                    result.diagnostic =
+                        "acceptance_certificate_refinement_failed:" +
+                        pending_acceptance_gate_diagnostic + ":" +
+                        last_evaluation_diagnostic;
+                }
+                return result;
             }
-            return result;
         }
 
         coefficients = std::move(accepted_trial);
         current = std::move(accepted_state);
-        previous_active_coefficients.resize(active_indices.size());
-        for (std::size_t i = 0u;
-             i < active_indices.size();
-             ++i) {
-            previous_active_coefficients[i] =
-                coefficients[active_indices[i]] -
-                alpha * direction[i];
+        if (accepted_topology_transition) {
+            topology_epoch_key = current.cut_topology_key;
+            constraint_epoch_key =
+                current.constraint_semantics_key;
+            result.cut_topology_key = topology_epoch_key;
+            result.constraint_semantics_key =
+                constraint_epoch_key;
+            limited_memory.clear();
+            previous_active_coefficients.clear();
+            previous_projected_gradient.clear();
+            pending_limited_memory_update = false;
+            ++result.topology_epoch_transitions;
+        } else {
+            previous_active_coefficients.resize(active_indices.size());
+            for (std::size_t i = 0u;
+                 i < active_indices.size();
+                 ++i) {
+                previous_active_coefficients[i] =
+                    coefficients[active_indices[i]] -
+                    alpha * direction[i];
+            }
+            previous_projected_gradient = projected_gradient;
+            pending_limited_memory_update = true;
         }
-        previous_projected_gradient = projected_gradient;
-        pending_limited_memory_update = true;
         ++result.iterations;
         updateFinalEvaluation(current);
     }

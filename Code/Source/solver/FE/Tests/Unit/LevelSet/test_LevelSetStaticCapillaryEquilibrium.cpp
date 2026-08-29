@@ -471,6 +471,82 @@ TEST(LevelSetStaticCapillaryEquilibrium,
 }
 
 TEST(LevelSetStaticCapillaryEquilibrium,
+     ExactDerivativesAdvanceAcrossABoundedTopologyEpoch)
+{
+    const std::vector<FE::Real> input{0.8, 2.2};
+    const std::array<std::size_t, 2> active{0u, 1u};
+    std::vector<FE::Real> accepted{19.0, 20.0, 21.0};
+    auto options = quadraticOptions();
+    options.allow_topology_epoch_transitions = true;
+    options.max_topology_epoch_transitions = 2;
+    options.max_iterations = 120;
+
+    const auto result =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            options,
+            input,
+            active,
+            [](std::span<const FE::Real> coefficients,
+               EvaluationPurpose purpose) {
+                return quadraticCapillaryEvaluation(
+                    coefficients,
+                    purpose,
+                    /*topology_barrier=*/true,
+                    /*constraint_barrier=*/false,
+                    /*provide_functional_derivatives=*/true);
+            },
+            accepted);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    ASSERT_EQ(accepted.size(), 2u);
+    EXPECT_NEAR(accepted[0], 1.0, 1.0e-7);
+    EXPECT_NEAR(accepted[1], 2.0, 1.0e-7);
+    EXPECT_EQ(result.topology_epoch_transitions, 1u);
+    EXPECT_GT(result.topology_change_rejections, 0u);
+    EXPECT_EQ(result.cut_topology_key, 11u);
+    EXPECT_EQ(result.constraint_semantics_key, 33u);
+}
+
+TEST(LevelSetStaticCapillaryEquilibrium,
+     TopologyEpochPermissionDoesNotAdmitConstraintOnlyChanges)
+{
+    const std::vector<FE::Real> input{0.8, 2.2};
+    const std::array<std::size_t, 2> active{0u, 1u};
+    const std::vector<FE::Real> sentinel{23.0, 24.0, 25.0};
+    std::vector<FE::Real> accepted = sentinel;
+    auto options = quadraticOptions();
+    options.allow_topology_epoch_transitions = true;
+    options.max_topology_epoch_transitions = 2;
+    options.max_iterations = 120;
+
+    const auto result =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            options,
+            input,
+            active,
+            [](std::span<const FE::Real> coefficients,
+               EvaluationPurpose purpose) {
+                return quadraticCapillaryEvaluation(
+                    coefficients,
+                    purpose,
+                    /*topology_barrier=*/false,
+                    /*constraint_barrier=*/true,
+                    /*provide_functional_derivatives=*/true);
+            },
+            accepted);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(accepted, sentinel);
+    EXPECT_EQ(result.topology_epoch_transitions, 0u);
+    EXPECT_EQ(result.topology_change_rejections, 0u);
+    EXPECT_GT(result.constraint_change_rejections, 0u);
+    EXPECT_NE(
+        result.diagnostic.find(
+            "candidate_constraint_semantics_changed"),
+        std::string::npos);
+}
+
+TEST(LevelSetStaticCapillaryEquilibrium,
      BacktracksAcrossConstraintChangingTrialsWithoutPublishingThem)
 {
     const std::vector<FE::Real> input{2.5, 0.5};
@@ -906,6 +982,22 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     EXPECT_THROW(
         (void)level_set::minimizeLevelSetStaticCapillaryEquilibrium(
             zero_volume_options,
+            input,
+            valid_active,
+            [](std::span<const FE::Real> coefficients,
+               EvaluationPurpose purpose) {
+                return quadraticCapillaryEvaluation(
+                    coefficients, purpose);
+            },
+            accepted),
+        std::invalid_argument);
+    EXPECT_EQ(accepted, sentinel);
+
+    auto invalid_epoch_options = quadraticOptions();
+    invalid_epoch_options.max_topology_epoch_transitions = -1;
+    EXPECT_THROW(
+        (void)level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            invalid_epoch_options,
             input,
             valid_active,
             [](std::span<const FE::Real> coefficients,

@@ -24985,6 +24985,9 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
           [](svmp::FE::Real value) {
             return value == svmp::FE::Real{0.0};
           });
+  const bool exact_functional_derivatives_requested =
+      uses_kinematic_area_gradient_traction &&
+      gravitational_acceleration_is_zero;
 
   const auto baseline =
       captureFeOrderedVectorCollectively(
@@ -25139,58 +25142,65 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
         "[svMultiPhysics::Application] Static capillary initialization level-set coefficient count differs across the FE communicator.");
   }
 
-  // Inside the fixed cut-topology epoch, the surface, wall, gravity, and
-  // liquid-volume functionals depend only on the level-set trace of the cut
-  // cells.  Keeping coefficients outside that exact support fixed removes
-  // null search directions and makes the finite-difference cost scale with
-  // the interface rather than with the background volume.
+  // Exact total-energy derivatives are supplied in field order and remain
+  // available as the cut support migrates between bounded topology epochs.
+  // Difference gradients stay in the initial epoch and therefore retain the
+  // smaller authoritative cut-cell support.
   std::vector<std::size_t> local_active_parameters;
   bool local_active_support_invalid = false;
-  try {
-    const auto* cut_context = system.cutIntegrationContext();
-    if (cut_context == nullptr ||
-        !cut_context->hasFreeSurfaceGeometrySnapshotForMarker(*marker)) {
-      local_active_support_invalid = true;
-    } else {
-      const auto bound_revision =
-          cut_context->freeSurfaceGeometrySnapshotRevisionForMarker(
-              *marker);
-      const auto& snapshots =
-          cut_context->freeSurfaceGeometrySnapshots();
-      const auto snapshot = std::find_if(
-          snapshots.begin(), snapshots.end(),
-          [&](const auto& candidate) {
-            return candidate != nullptr &&
-                   candidate->revision().interface_marker == *marker &&
-                   candidate->revision().snapshot_revision_key ==
-                       bound_revision;
-          });
-      if (snapshot == snapshots.end()) {
+  if (exact_functional_derivatives_requested) {
+    local_active_parameters.resize(field_count);
+    std::iota(
+        local_active_parameters.begin(),
+        local_active_parameters.end(),
+        std::size_t{0u});
+  } else {
+    try {
+      const auto* cut_context = system.cutIntegrationContext();
+      if (cut_context == nullptr ||
+          !cut_context->hasFreeSurfaceGeometrySnapshotForMarker(*marker)) {
         local_active_support_invalid = true;
       } else {
-        const auto& field_dofs =
-            system.fieldDofHandler(level_set_field);
-        for (const auto cell :
-             (*snapshot)->interfaceDomain().cutCells()) {
-          for (const auto dof : field_dofs.getCellDofs(cell)) {
-            if (dof < 0 ||
-                static_cast<std::uint64_t>(dof) >=
-                    static_cast<std::uint64_t>(field_count)) {
-              local_active_support_invalid = true;
-              continue;
+        const auto bound_revision =
+            cut_context->freeSurfaceGeometrySnapshotRevisionForMarker(
+                *marker);
+        const auto& snapshots =
+            cut_context->freeSurfaceGeometrySnapshots();
+        const auto snapshot = std::find_if(
+            snapshots.begin(), snapshots.end(),
+            [&](const auto& candidate) {
+              return candidate != nullptr &&
+                     candidate->revision().interface_marker == *marker &&
+                     candidate->revision().snapshot_revision_key ==
+                         bound_revision;
+            });
+        if (snapshot == snapshots.end()) {
+          local_active_support_invalid = true;
+        } else {
+          const auto& field_dofs =
+              system.fieldDofHandler(level_set_field);
+          for (const auto cell :
+               (*snapshot)->interfaceDomain().cutCells()) {
+            for (const auto dof : field_dofs.getCellDofs(cell)) {
+              if (dof < 0 ||
+                  static_cast<std::uint64_t>(dof) >=
+                      static_cast<std::uint64_t>(field_count)) {
+                local_active_support_invalid = true;
+                continue;
+              }
+              local_active_parameters.push_back(
+                  static_cast<std::size_t>(dof));
             }
-            local_active_parameters.push_back(
-                static_cast<std::size_t>(dof));
           }
         }
       }
+    } catch (...) {
+      local_active_support_invalid = true;
     }
-  } catch (...) {
-    local_active_support_invalid = true;
   }
   if (globalAnyBool(local_active_support_invalid, comm)) {
     throw std::runtime_error(
-        "[svMultiPhysics::Application] Static capillary initialization could not resolve the authoritative cut-cell level-set support on every FE communicator rank.");
+        "[svMultiPhysics::Application] Static capillary initialization could not resolve its active level-set support on every FE communicator rank.");
   }
   auto active_parameters = communicatorWideIndexUnion(
       std::move(local_active_parameters),
@@ -25221,6 +25231,10 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       std::isfinite(history.dt()) && history.dt() > 0.0
           ? history.dt()
           : 1.0;
+  auto minimization_options =
+      request.static_capillary_equilibrium;
+  minimization_options.allow_topology_epoch_transitions =
+      exact_functional_derivatives_requested;
   std::vector<svmp::FE::Real> certified_solution;
   double certified_constant_pressure_jump =
       std::numeric_limits<double>::quiet_NaN();
@@ -25308,9 +25322,6 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
 
         std::vector<svmp::FE::Real> physical_potential_derivative;
         std::vector<svmp::FE::Real> liquid_volume_derivative;
-        const bool exact_functional_derivatives_requested =
-            uses_kinematic_area_gradient_traction &&
-            gravitational_acceleration_is_zero;
         if (exact_functional_derivatives_requested) {
           svmp::FE::systems::SystemStateView derivative_state;
           derivative_state.time = history.time();
@@ -25861,7 +25872,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
     result =
         svmp::FE::level_set::
             minimizeLevelSetStaticCapillaryEquilibrium(
-                request.static_capillary_equilibrium,
+                minimization_options,
                 parameters,
                 active_parameters,
                 evaluator,
@@ -25910,6 +25921,8 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
         << " line_search_rejections=" << result.line_search_rejections
         << " topology_change_rejections="
         << result.topology_change_rejections
+        << " topology_epoch_transitions="
+        << result.topology_epoch_transitions
         << " constraint_change_rejections="
         << result.constraint_change_rejections
         << " limited_memory_updates="
@@ -26187,6 +26200,8 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       << result.line_search_rejections
       << " topology_change_rejections="
       << result.topology_change_rejections
+      << " topology_epoch_transitions="
+      << result.topology_epoch_transitions
       << " constraint_change_rejections="
       << result.constraint_change_rejections
       << " limited_memory_updates="
