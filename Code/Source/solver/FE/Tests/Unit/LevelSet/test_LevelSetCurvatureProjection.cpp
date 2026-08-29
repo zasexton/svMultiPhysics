@@ -332,11 +332,21 @@ private:
 
 class SimplexMeshAccess final : public FE::assembly::IMeshAccess {
 public:
+    struct BoundaryFace {
+        FE::GlobalIndex parent_cell{FE::GlobalIndex{-1}};
+        FE::LocalIndex local_face{FE::INVALID_LOCAL_INDEX};
+        int marker{-1};
+    };
+
     SimplexMeshAccess(
         int dimension,
         std::vector<std::array<FE::Real, 3>> nodes,
-        std::vector<std::array<FE::GlobalIndex, 4>> cells)
-        : dimension_(dimension), nodes_(std::move(nodes)), cells_(std::move(cells))
+        std::vector<std::array<FE::GlobalIndex, 4>> cells,
+        std::vector<BoundaryFace> boundary_faces = {})
+        : dimension_(dimension),
+          nodes_(std::move(nodes)),
+          cells_(std::move(cells)),
+          boundary_faces_(std::move(boundary_faces))
     {
         if (dimension_ != 2 && dimension_ != 3) {
             throw std::invalid_argument("simplex test mesh dimension must be two or three");
@@ -351,7 +361,10 @@ public:
     {
         return numCells();
     }
-    [[nodiscard]] FE::GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] FE::GlobalIndex numBoundaryFaces() const override
+    {
+        return static_cast<FE::GlobalIndex>(boundary_faces_.size());
+    }
     [[nodiscard]] FE::GlobalIndex numInteriorFaces() const override { return 0; }
     [[nodiscard]] FE::GlobalIndex numVertices() const override
     {
@@ -400,14 +413,20 @@ public:
         }
     }
 
-    [[nodiscard]] FE::LocalIndex getLocalFaceIndex(FE::GlobalIndex,
-                                                    FE::GlobalIndex) const override
+    [[nodiscard]] FE::LocalIndex getLocalFaceIndex(
+        FE::GlobalIndex face,
+        FE::GlobalIndex cell) const override
     {
-        return 0;
+        const auto& boundary_face =
+            boundary_faces_.at(static_cast<std::size_t>(face));
+        return boundary_face.parent_cell == cell
+            ? boundary_face.local_face
+            : FE::INVALID_LOCAL_INDEX;
     }
-    [[nodiscard]] int getBoundaryFaceMarker(FE::GlobalIndex) const override
+    [[nodiscard]] int getBoundaryFaceMarker(
+        FE::GlobalIndex face) const override
     {
-        return -1;
+        return boundary_faces_.at(static_cast<std::size_t>(face)).marker;
     }
     [[nodiscard]] std::pair<FE::GlobalIndex, FE::GlobalIndex>
     getInteriorFaceCells(FE::GlobalIndex) const override
@@ -426,9 +445,17 @@ public:
         forEachCell(std::move(callback));
     }
     void forEachBoundaryFace(
-        int,
-        std::function<void(FE::GlobalIndex, FE::GlobalIndex)>) const override
+        int marker,
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex)> callback)
+        const override
     {
+        for (std::size_t face = 0; face < boundary_faces_.size(); ++face) {
+            const auto& boundary_face = boundary_faces_[face];
+            if (marker < 0 || boundary_face.marker == marker) {
+                callback(static_cast<FE::GlobalIndex>(face),
+                         boundary_face.parent_cell);
+            }
+        }
     }
     void forEachInteriorFace(
         std::function<void(FE::GlobalIndex, FE::GlobalIndex, FE::GlobalIndex)>)
@@ -449,6 +476,7 @@ private:
     int dimension_{0};
     std::vector<std::array<FE::Real, 3>> nodes_{};
     std::vector<std::array<FE::GlobalIndex, 4>> cells_{};
+    std::vector<BoundaryFace> boundary_faces_{};
 };
 
 SimplexMeshAccess makeStructuredTriangleMesh(int subdivisions,
@@ -472,18 +500,43 @@ SimplexMeshAccess makeStructuredTriangleMesh(int subdivisions,
         return static_cast<FE::GlobalIndex>(j * (subdivisions + 1) + i);
     };
     std::vector<std::array<FE::GlobalIndex, 4>> cells;
+    std::vector<SimplexMeshAccess::BoundaryFace> boundary_faces;
     cells.reserve(static_cast<std::size_t>(2 * subdivisions * subdivisions));
+    boundary_faces.reserve(static_cast<std::size_t>(4 * subdivisions));
     for (int j = 0; j < subdivisions; ++j) {
         for (int i = 0; i < subdivisions; ++i) {
             const auto v0 = vertex(i, j);
             const auto v1 = vertex(i + 1, j);
             const auto v2 = vertex(i + 1, j + 1);
             const auto v3 = vertex(i, j + 1);
+            const auto lower_cell =
+                static_cast<FE::GlobalIndex>(cells.size());
             cells.push_back({{v0, v1, v2, FE::GlobalIndex{-1}}});
+            const auto upper_cell =
+                static_cast<FE::GlobalIndex>(cells.size());
             cells.push_back({{v0, v2, v3, FE::GlobalIndex{-1}}});
+            if (j == 0) {
+                boundary_faces.push_back(
+                    {lower_cell, FE::LocalIndex{0}, 1});
+            }
+            if (i + 1 == subdivisions) {
+                boundary_faces.push_back(
+                    {lower_cell, FE::LocalIndex{1}, 2});
+            }
+            if (j + 1 == subdivisions) {
+                boundary_faces.push_back(
+                    {upper_cell, FE::LocalIndex{1}, 3});
+            }
+            if (i == 0) {
+                boundary_faces.push_back(
+                    {upper_cell, FE::LocalIndex{2}, 4});
+            }
         }
     }
-    return SimplexMeshAccess(2, std::move(nodes), std::move(cells));
+    return SimplexMeshAccess(2,
+                             std::move(nodes),
+                             std::move(cells),
+                             std::move(boundary_faces));
 }
 
 SimplexMeshAccess makeStructuredTetrahedronMesh(int subdivisions,
@@ -624,6 +677,181 @@ KinematicCurvatureEvaluation evaluateKinematicCurvature(
                 .kinematic_area_gradient_mass_weighted_rms_deviation +
         weighted_mean_error * weighted_mean_error);
     return evaluation;
+}
+
+KinematicCurvatureEvaluation evaluateSessileKinematicCurvature(
+    SimplexMeshAccess& mesh,
+    FE::Real radius,
+    FE::Real contact_angle,
+    FE::Real wall_coordinate,
+    bool include_young_wall,
+    FE::Real signed_level_set_scale = FE::Real{1.0},
+    FE::Real filter_coefficient = FE::Real{1.0})
+{
+    const std::array<FE::Real, 3> center{{
+        FE::Real{0.0},
+        wall_coordinate - radius * std::cos(contact_angle),
+        FE::Real{0.0}}};
+    std::vector<FE::Real> phi(
+        static_cast<std::size_t>(mesh.numVertices()), FE::Real{0.0});
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        const auto point = mesh.getNodeCoordinates(vertex);
+        phi[static_cast<std::size_t>(vertex)] =
+            signed_level_set_scale *
+            (std::hypot(point[0] - center[0], point[1] - center[1]) -
+             radius);
+    }
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.recovery_mode =
+        level_set::LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
+    options.kinematic_area_gradient_filter_coefficient = filter_coefficient;
+    options.kinematic_area_gradient_negative_liquid_side =
+        signed_level_set_scale > FE::Real{0.0};
+    if (include_young_wall) {
+        options.kinematic_area_gradient_young_walls.push_back(
+            {1, contact_angle});
+    }
+
+    KinematicCurvatureEvaluation evaluation;
+    evaluation.result = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, options, evaluation.curvature);
+    const FE::Real orientation =
+        signed_level_set_scale > FE::Real{0.0} ? FE::Real{1.0}
+                                                : FE::Real{-1.0};
+    const FE::Real exact = orientation / radius;
+    for (const auto value : evaluation.curvature) {
+        if (value == FE::Real{0.0}) {
+            continue;
+        }
+        const FE::Real error = std::abs(value - exact);
+        evaluation.mean_absolute_error += error;
+        evaluation.root_mean_square_error += error * error;
+        evaluation.maximum_absolute_error =
+            std::max(evaluation.maximum_absolute_error, error);
+        evaluation.mean_curvature += value;
+        ++evaluation.samples;
+    }
+    if (evaluation.samples > 0u) {
+        const FE::Real denominator =
+            static_cast<FE::Real>(evaluation.samples);
+        evaluation.mean_absolute_error /= denominator;
+        evaluation.root_mean_square_error =
+            std::sqrt(evaluation.root_mean_square_error / denominator);
+        evaluation.mean_curvature /= denominator;
+    }
+    const FE::Real weighted_mean_error =
+        evaluation.result
+            .kinematic_area_gradient_mass_weighted_mean_curvature -
+        exact;
+    evaluation.mass_weighted_root_mean_square_error = std::sqrt(
+        evaluation.result
+                .kinematic_area_gradient_mass_weighted_rms_deviation *
+            evaluation.result
+                .kinematic_area_gradient_mass_weighted_rms_deviation +
+        weighted_mean_error * weighted_mean_error);
+    return evaluation;
+}
+
+FE::Real directSessileDiscreteEnergy(
+    const SimplexMeshAccess& mesh,
+    const std::vector<FE::Real>& phi,
+    FE::Real level_set_offset,
+    FE::Real contact_angle,
+    bool negative_liquid_side)
+{
+    FE::Real interface_measure{0.0};
+    mesh.forEachCell([&](FE::GlobalIndex cell) {
+        std::vector<FE::GlobalIndex> nodes;
+        mesh.getCellNodes(cell, nodes);
+        if (nodes.size() != 3u) {
+            throw std::runtime_error(
+                "sessile discrete-energy check requires triangles");
+        }
+        std::array<FE::Real, 3> values{};
+        for (std::size_t corner = 0; corner < nodes.size(); ++corner) {
+            values[corner] =
+                phi[static_cast<std::size_t>(nodes[corner])] +
+                level_set_offset;
+            if (values[corner] == FE::Real{0.0}) {
+                throw std::runtime_error(
+                    "sessile discrete-energy check encountered an isovalue vertex");
+            }
+        }
+        std::array<std::array<FE::Real, 3>, 2> intersections{};
+        std::size_t intersection_count{0u};
+        constexpr std::array<std::array<std::size_t, 2>, 3> edges{{
+            {{0u, 1u}}, {{1u, 2u}}, {{2u, 0u}}}};
+        for (const auto& edge : edges) {
+            const auto a = edge[0];
+            const auto b = edge[1];
+            if ((values[a] < FE::Real{0.0}) ==
+                (values[b] < FE::Real{0.0})) {
+                continue;
+            }
+            if (intersection_count >= intersections.size()) {
+                throw std::runtime_error(
+                    "sessile discrete-energy check found invalid cut topology");
+            }
+            const FE::Real fraction = values[a] / (values[a] - values[b]);
+            const auto x_a = mesh.getNodeCoordinates(nodes[a]);
+            const auto x_b = mesh.getNodeCoordinates(nodes[b]);
+            for (std::size_t component = 0; component < 3u; ++component) {
+                intersections[intersection_count][component] =
+                    x_a[component] +
+                    fraction * (x_b[component] - x_a[component]);
+            }
+            ++intersection_count;
+        }
+        if (intersection_count == 2u) {
+            interface_measure += std::hypot(
+                intersections[1][0] - intersections[0][0],
+                intersections[1][1] - intersections[0][1]);
+        } else if (intersection_count != 0u) {
+            throw std::runtime_error(
+                "sessile discrete-energy check found an incomplete cut");
+        }
+    });
+
+    FE::Real wetted_measure{0.0};
+    mesh.forEachBoundaryFace(
+        1,
+        [&](FE::GlobalIndex face, FE::GlobalIndex cell) {
+            std::vector<FE::GlobalIndex> nodes;
+            mesh.getCellNodes(cell, nodes);
+            constexpr std::array<std::array<std::size_t, 2>, 3> faces{{
+                {{0u, 1u}}, {{1u, 2u}}, {{2u, 0u}}}};
+            const auto local_face =
+                static_cast<std::size_t>(mesh.getLocalFaceIndex(face, cell));
+            if (local_face >= faces.size()) {
+                throw std::runtime_error(
+                    "sessile discrete-energy check found an invalid boundary face");
+            }
+            const auto node0 = nodes[faces[local_face][0]];
+            const auto node1 = nodes[faces[local_face][1]];
+            const FE::Real value0 =
+                phi[static_cast<std::size_t>(node0)] + level_set_offset;
+            const FE::Real value1 =
+                phi[static_cast<std::size_t>(node1)] + level_set_offset;
+            const bool inside0 = negative_liquid_side
+                ? value0 < FE::Real{0.0}
+                : value0 > FE::Real{0.0};
+            const bool inside1 = negative_liquid_side
+                ? value1 < FE::Real{0.0}
+                : value1 > FE::Real{0.0};
+            const auto x0 = mesh.getNodeCoordinates(node0);
+            const auto x1 = mesh.getNodeCoordinates(node1);
+            const FE::Real length =
+                std::hypot(x1[0] - x0[0], x1[1] - x0[1]);
+            if (inside0 == inside1) {
+                wetted_measure += inside0 ? length : FE::Real{0.0};
+                return;
+            }
+            const FE::Real fraction = value0 / (value0 - value1);
+            wetted_measure +=
+                length * (inside0 ? fraction : FE::Real{1.0} - fraction);
+        });
+    return interface_measure - std::cos(contact_angle) * wetted_measure;
 }
 
 FE::Real curvatureGraphTotalVariation(
@@ -2176,6 +2404,68 @@ TEST(LevelSetCurvatureProjection,
 }
 
 TEST(LevelSetCurvatureProjection,
+     RejectsInvalidKinematicAreaGradientYoungWalls)
+{
+    auto mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/12, FE::Real{-0.70}, FE::Real{0.70});
+    std::vector<FE::Real> phi(
+        static_cast<std::size_t>(mesh.numVertices()), FE::Real{0.0});
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        const auto point = mesh.getNodeCoordinates(vertex);
+        phi[static_cast<std::size_t>(vertex)] =
+            std::hypot(point[0], point[1]) - FE::Real{0.347};
+    }
+    const FE::Real pi = std::acos(FE::Real{-1.0});
+    std::vector<FE::Real> curvature;
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.kinematic_area_gradient_young_walls.push_back(
+        {1, FE::Real{0.5} * pi});
+    EXPECT_THROW((void)level_set::projectLevelSetMeanCurvatureToVertices(
+                     mesh, phi, options, curvature),
+                 std::invalid_argument);
+
+    options.recovery_mode =
+        level_set::LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
+    options.kinematic_area_gradient_young_walls.front().boundary_marker = -1;
+    EXPECT_THROW((void)level_set::projectLevelSetMeanCurvatureToVertices(
+                     mesh, phi, options, curvature),
+                 std::invalid_argument);
+
+    options.kinematic_area_gradient_young_walls.front().boundary_marker = 1;
+    options.kinematic_area_gradient_young_walls.front()
+        .equilibrium_contact_angle_radians = FE::Real{0.0};
+    EXPECT_THROW((void)level_set::projectLevelSetMeanCurvatureToVertices(
+                     mesh, phi, options, curvature),
+                 std::invalid_argument);
+    options.kinematic_area_gradient_young_walls.front()
+        .equilibrium_contact_angle_radians = pi;
+    EXPECT_THROW((void)level_set::projectLevelSetMeanCurvatureToVertices(
+                     mesh, phi, options, curvature),
+                 std::invalid_argument);
+    options.kinematic_area_gradient_young_walls.front()
+        .equilibrium_contact_angle_radians =
+        std::numeric_limits<FE::Real>::infinity();
+    EXPECT_THROW((void)level_set::projectLevelSetMeanCurvatureToVertices(
+                     mesh, phi, options, curvature),
+                 std::invalid_argument);
+
+    options.kinematic_area_gradient_young_walls = {
+        {1, FE::Real{0.4} * pi}, {1, FE::Real{0.6} * pi}};
+    EXPECT_THROW((void)level_set::projectLevelSetMeanCurvatureToVertices(
+                     mesh, phi, options, curvature),
+                 std::invalid_argument);
+
+    options.kinematic_area_gradient_young_walls = {
+        {99, FE::Real{0.5} * pi}};
+    const auto missing_marker =
+        level_set::projectLevelSetMeanCurvatureToVertices(
+            mesh, phi, options, curvature);
+    EXPECT_FALSE(missing_marker.success);
+    EXPECT_NE(missing_marker.diagnostic.find("no owned boundary faces"),
+              std::string::npos);
+}
+
+TEST(LevelSetCurvatureProjection,
      RejectsPostSmoothingOfKinematicAreaGradientRecovery)
 {
     auto mesh = makeStructuredTriangleMesh(
@@ -2893,6 +3183,243 @@ TEST(LevelSetCurvatureProjection,
             evaluations[index - 1u]
                 .result.kinematic_area_gradient_mass_weighted_rms_deviation);
     }
+}
+
+TEST(LevelSetCurvatureProjection,
+     KinematicAreaGradientYoungWallRecoversSessileCircularCaps)
+{
+    const FE::Real pi = std::acos(FE::Real{-1.0});
+    constexpr FE::Real radius{0.347};
+    constexpr FE::Real wall_coordinate{-0.70};
+    constexpr std::array<int, 3> levels{{32, 64, 128}};
+    const std::array<FE::Real, 2> contact_angles{{
+        pi / FE::Real{3.0}, FE::Real{2.0} * pi / FE::Real{3.0}}};
+    for (std::size_t angle_index = 0;
+         angle_index < contact_angles.size();
+         ++angle_index) {
+        std::array<FE::Real, levels.size()> young_errors{};
+        std::array<FE::Real, levels.size()> surface_only_errors{};
+        for (std::size_t level = 0; level < levels.size(); ++level) {
+            auto mesh = makeStructuredTriangleMesh(
+                levels[level], wall_coordinate, FE::Real{0.70});
+            const auto young = evaluateSessileKinematicCurvature(
+                mesh,
+                radius,
+                contact_angles[angle_index],
+                wall_coordinate,
+                true);
+            const auto surface_only = evaluateSessileKinematicCurvature(
+                mesh,
+                radius,
+                contact_angles[angle_index],
+                wall_coordinate,
+                false);
+            ASSERT_TRUE(young.result.success) << young.result.diagnostic;
+            ASSERT_TRUE(surface_only.result.success)
+                << surface_only.result.diagnostic;
+            EXPECT_EQ(young.result.kinematic_area_gradient_young_wall_count,
+                      1u);
+            EXPECT_EQ(
+                young.result
+                    .kinematic_area_gradient_young_wall_boundary_faces,
+                static_cast<std::size_t>(levels[level]));
+            EXPECT_EQ(
+                young.result.kinematic_area_gradient_young_wall_cut_faces,
+                2u);
+            EXPECT_EQ(
+                young.result
+                    .kinematic_area_gradient_young_wall_measure_evaluations,
+                24u);
+            EXPECT_GT(
+                young.result
+                    .kinematic_area_gradient_surface_gradient_norm,
+                FE::Real{0.0});
+            EXPECT_GT(
+                young.result
+                    .kinematic_area_gradient_young_wall_gradient_norm,
+                FE::Real{0.0});
+            EXPECT_GT(
+                young.result
+                    .kinematic_area_gradient_total_energy_gradient_norm,
+                FE::Real{0.0});
+            EXPECT_LT(
+                young.result
+                    .kinematic_area_gradient_max_relative_regularized_identity_residual,
+                FE::Real{1.0e-7});
+            young_errors[level] =
+                young.mass_weighted_root_mean_square_error;
+            surface_only_errors[level] =
+                surface_only.mass_weighted_root_mean_square_error;
+            const std::string prefix = angle_index == 0u
+                ? "kinematic_young_sessile_60"
+                : "kinematic_young_sessile_120";
+            RecordProperty(
+                prefix + "_rms_error_n" +
+                    std::to_string(levels[level]),
+                young_errors[level]);
+            RecordProperty(
+                prefix + "_surface_only_rms_error_n" +
+                    std::to_string(levels[level]),
+                surface_only_errors[level]);
+        }
+        const FE::Real order_0 =
+            std::log(young_errors[0] / young_errors[1]) /
+            std::log(FE::Real{2.0});
+        const FE::Real order_1 =
+            std::log(young_errors[1] / young_errors[2]) /
+            std::log(FE::Real{2.0});
+        const std::string prefix = angle_index == 0u
+            ? "kinematic_young_sessile_60"
+            : "kinematic_young_sessile_120";
+        RecordProperty(prefix + "_order_32_64", order_0);
+        RecordProperty(prefix + "_order_64_128", order_1);
+        EXPECT_LT(young_errors[1], young_errors[0]);
+        EXPECT_LT(young_errors[2], young_errors[1]);
+        EXPECT_LT(young_errors[2], FE::Real{0.025});
+        EXPECT_LT(young_errors[2],
+                  FE::Real{0.01} * surface_only_errors[2]);
+        EXPECT_GT(order_0, FE::Real{0.60});
+        EXPECT_GT(order_1, FE::Real{0.75});
+    }
+}
+
+TEST(LevelSetCurvatureProjection,
+     KinematicAreaGradientYoungWallIsNeutralAtRightAngle)
+{
+    const FE::Real pi = std::acos(FE::Real{-1.0});
+    constexpr FE::Real wall_coordinate{-0.70};
+    auto mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/48, wall_coordinate, FE::Real{0.70});
+    const auto young = evaluateSessileKinematicCurvature(
+        mesh,
+        FE::Real{0.347},
+        FE::Real{0.5} * pi,
+        wall_coordinate,
+        true);
+    const auto surface_only = evaluateSessileKinematicCurvature(
+        mesh,
+        FE::Real{0.347},
+        FE::Real{0.5} * pi,
+        wall_coordinate,
+        false);
+    ASSERT_TRUE(young.result.success) << young.result.diagnostic;
+    ASSERT_TRUE(surface_only.result.success)
+        << surface_only.result.diagnostic;
+    EXPECT_EQ(young.result.kinematic_area_gradient_young_wall_count, 1u);
+    EXPECT_EQ(
+        young.result.kinematic_area_gradient_young_wall_boundary_faces,
+        48u);
+    EXPECT_EQ(young.result.kinematic_area_gradient_young_wall_cut_faces, 2u);
+    EXPECT_EQ(
+        young.result.kinematic_area_gradient_young_wall_measure_evaluations,
+        0u);
+    EXPECT_DOUBLE_EQ(
+        young.result.kinematic_area_gradient_young_wall_gradient_norm,
+        FE::Real{0.0});
+    EXPECT_DOUBLE_EQ(
+        young.result.kinematic_area_gradient_total_energy_gradient_norm,
+        young.result.kinematic_area_gradient_surface_gradient_norm);
+    EXPECT_DOUBLE_EQ(maxAbsDifference(young.curvature,
+                                     surface_only.curvature),
+                     FE::Real{0.0});
+}
+
+TEST(LevelSetCurvatureProjection,
+     KinematicAreaGradientYoungWallRespectsLevelSetOrientation)
+{
+    const FE::Real pi = std::acos(FE::Real{-1.0});
+    constexpr FE::Real wall_coordinate{-0.70};
+    auto mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/64, wall_coordinate, FE::Real{0.70});
+    const auto positive = evaluateSessileKinematicCurvature(
+        mesh,
+        FE::Real{0.347},
+        FE::Real{0.41} * pi,
+        wall_coordinate,
+        true,
+        FE::Real{1.0});
+    const auto negative = evaluateSessileKinematicCurvature(
+        mesh,
+        FE::Real{0.347},
+        FE::Real{0.41} * pi,
+        wall_coordinate,
+        true,
+        FE::Real{-2.75});
+    ASSERT_TRUE(positive.result.success) << positive.result.diagnostic;
+    ASSERT_TRUE(negative.result.success) << negative.result.diagnostic;
+    ASSERT_EQ(positive.curvature.size(), negative.curvature.size());
+    FE::Real maximum_orientation_sum{0.0};
+    for (std::size_t vertex = 0; vertex < positive.curvature.size();
+         ++vertex) {
+        maximum_orientation_sum = std::max(
+            maximum_orientation_sum,
+            std::abs(positive.curvature[vertex] +
+                     negative.curvature[vertex]));
+    }
+    RecordProperty("kinematic_young_max_orientation_sum",
+                   maximum_orientation_sum);
+    EXPECT_LT(maximum_orientation_sum, FE::Real{2.0e-6});
+    EXPECT_EQ(
+        positive.result.kinematic_area_gradient_young_wall_cut_faces,
+        negative.result.kinematic_area_gradient_young_wall_cut_faces);
+}
+
+TEST(LevelSetCurvatureProjection,
+     KinematicAreaGradientYoungWallMatchesTotalEnergyDerivative)
+{
+    const FE::Real pi = std::acos(FE::Real{-1.0});
+    constexpr FE::Real wall_coordinate{-0.70};
+    constexpr FE::Real radius{0.347};
+    const FE::Real contact_angle = FE::Real{67.0} * pi / FE::Real{180.0};
+    const FE::Real center_y =
+        wall_coordinate - radius * std::cos(contact_angle);
+    auto mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/64, wall_coordinate, FE::Real{0.70});
+    std::vector<FE::Real> phi(
+        static_cast<std::size_t>(mesh.numVertices()), FE::Real{0.0});
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        const auto point = mesh.getNodeCoordinates(vertex);
+        phi[static_cast<std::size_t>(vertex)] =
+            std::hypot(point[0], point[1] - center_y) - radius;
+    }
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.recovery_mode =
+        level_set::LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
+    options.kinematic_area_gradient_filter_coefficient = FE::Real{0.0};
+    options.kinematic_area_gradient_negative_liquid_side = true;
+    options.kinematic_area_gradient_young_walls.push_back(
+        {1, contact_angle});
+    std::vector<FE::Real> curvature;
+    const auto result = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, options, curvature);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+
+    constexpr FE::Real step{2.0e-5};
+    const FE::Real energy_m2 = directSessileDiscreteEnergy(
+        mesh, phi, FE::Real{-2.0} * step, contact_angle, true);
+    const FE::Real energy_m1 = directSessileDiscreteEnergy(
+        mesh, phi, -step, contact_angle, true);
+    const FE::Real energy_p1 = directSessileDiscreteEnergy(
+        mesh, phi, step, contact_angle, true);
+    const FE::Real energy_p2 = directSessileDiscreteEnergy(
+        mesh, phi, FE::Real{2.0} * step, contact_angle, true);
+    const FE::Real finite_difference =
+        (energy_m2 - FE::Real{8.0} * energy_m1 +
+         FE::Real{8.0} * energy_p1 - energy_p2) /
+        (FE::Real{12.0} * step);
+    const FE::Real assembled_derivative =
+        -result.kinematic_area_gradient_kinematic_mass *
+        result.kinematic_area_gradient_mass_weighted_mean_curvature;
+    const FE::Real relative_difference =
+        std::abs(finite_difference - assembled_derivative) /
+        std::max(std::abs(finite_difference), FE::Real{1.0});
+    RecordProperty("kinematic_young_energy_fd_derivative",
+                   finite_difference);
+    RecordProperty("kinematic_young_energy_assembled_derivative",
+                   assembled_derivative);
+    RecordProperty("kinematic_young_energy_relative_difference",
+                   relative_difference);
+    EXPECT_LT(relative_difference, FE::Real{2.0e-5});
 }
 
 TEST(LevelSetCurvatureProjection,

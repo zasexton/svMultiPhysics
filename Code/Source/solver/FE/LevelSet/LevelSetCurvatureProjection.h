@@ -42,6 +42,11 @@ parseLevelSetCurvatureRecoveryMode(std::string_view value);
 [[nodiscard]] LevelSetCurvatureSmoothingMode
 parseLevelSetCurvatureSmoothingMode(std::string_view value);
 
+struct LevelSetKinematicAreaGradientYoungWall {
+    int boundary_marker{-1};
+    Real equilibrium_contact_angle_radians{0.0};
+};
+
 struct LevelSetCurvatureProjectionOptions {
     Real isovalue{0.0};
     Real gradient_tolerance{1.0e-10};
@@ -62,6 +67,9 @@ struct LevelSetCurvatureProjectionOptions {
     // graph-edge length and R_Gamma is the equal-measure circle/sphere radius.
     // It is ignored by the other recovery modes; zero disables regularization.
     Real kinematic_area_gradient_filter_coefficient{1.0};
+    bool kinematic_area_gradient_negative_liquid_side{true};
+    std::vector<LevelSetKinematicAreaGradientYoungWall>
+        kinematic_area_gradient_young_walls{};
     Real narrow_band_width{0.0};
     int smoothing_iterations{0};
     Real smoothing_relaxation{0.25};
@@ -103,6 +111,10 @@ struct LevelSetCurvatureProjectionResult {
     std::size_t kinematic_area_gradient_measure_evaluations{0};
     std::size_t kinematic_area_gradient_tie_break_vertices{0};
     std::size_t kinematic_area_gradient_linear_iterations{0};
+    std::size_t kinematic_area_gradient_young_wall_count{0};
+    std::size_t kinematic_area_gradient_young_wall_boundary_faces{0};
+    std::size_t kinematic_area_gradient_young_wall_cut_faces{0};
+    std::size_t kinematic_area_gradient_young_wall_measure_evaluations{0};
     std::size_t kinematic_area_gradient_components{0};
     Real kinematic_area_gradient_interface_measure{0.0};
     Real kinematic_area_gradient_kinematic_mass{0.0};
@@ -117,6 +129,9 @@ struct LevelSetCurvatureProjectionResult {
     Real kinematic_area_gradient_max_filter_radius{0.0};
     Real kinematic_area_gradient_max_tie_break_value{0.0};
     int kinematic_area_gradient_tie_break_sign{0};
+    Real kinematic_area_gradient_surface_gradient_norm{0.0};
+    Real kinematic_area_gradient_young_wall_gradient_norm{0.0};
+    Real kinematic_area_gradient_total_energy_gradient_norm{0.0};
     Real kinematic_area_gradient_max_relative_fd_disagreement{0.0};
     Real kinematic_area_gradient_max_regularized_identity_residual{0.0};
     Real kinematic_area_gradient_max_relative_regularized_identity_residual{

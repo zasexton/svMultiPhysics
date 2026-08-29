@@ -1026,6 +1026,151 @@ struct SimplexAffineGeometry {
     return measure;
 }
 
+[[nodiscard]] bool simplexBoundaryFaceCorners(
+    ElementType type,
+    LocalIndex local_face,
+    std::array<std::size_t, 3>& corners,
+    std::size_t& corner_count) noexcept
+{
+    corners = {};
+    corner_count = 0u;
+    const int face = static_cast<int>(local_face);
+    if (type == ElementType::Triangle3) {
+        constexpr std::array<std::array<std::size_t, 2>, 3> faces{{
+            {{0u, 1u}},
+            {{1u, 2u}},
+            {{2u, 0u}},
+        }};
+        if (face < 0 || face >= static_cast<int>(faces.size())) {
+            return false;
+        }
+        corners[0] = faces[static_cast<std::size_t>(face)][0];
+        corners[1] = faces[static_cast<std::size_t>(face)][1];
+        corner_count = 2u;
+        return true;
+    }
+    if (type == ElementType::Tetra4) {
+        constexpr std::array<std::array<std::size_t, 3>, 4> faces{{
+            {{0u, 2u, 1u}},
+            {{0u, 1u, 3u}},
+            {{1u, 2u, 3u}},
+            {{2u, 0u, 3u}},
+        }};
+        if (face < 0 || face >= static_cast<int>(faces.size())) {
+            return false;
+        }
+        corners = faces[static_cast<std::size_t>(face)];
+        corner_count = 3u;
+        return true;
+    }
+    return false;
+}
+
+[[nodiscard]] Real activeBoundaryMeasure(
+    std::span<const std::array<Real, 3>> coordinates,
+    std::span<const Real> signed_values,
+    bool negative_side,
+    bool& success) noexcept
+{
+    success = false;
+    if (coordinates.size() != signed_values.size() ||
+        (coordinates.size() != 2u && coordinates.size() != 3u)) {
+        return Real{0.0};
+    }
+    const auto inside = [negative_side](Real value) noexcept {
+        return negative_side ? value <= Real{0.0} : value >= Real{0.0};
+    };
+    if (coordinates.size() == 2u) {
+        const Real length = norm(subtract(coordinates[1], coordinates[0]));
+        if (!(length > Real{0.0}) || !std::isfinite(length)) {
+            return Real{0.0};
+        }
+        const bool inside0 = inside(signed_values[0]);
+        const bool inside1 = inside(signed_values[1]);
+        success = true;
+        if (inside0 == inside1) {
+            return inside0 ? length : Real{0.0};
+        }
+        const Real denominator = signed_values[0] - signed_values[1];
+        if (!(std::abs(denominator) >
+              std::numeric_limits<Real>::min()) ||
+            !std::isfinite(denominator)) {
+            success = false;
+            return Real{0.0};
+        }
+        const Real fraction = signed_values[0] / denominator;
+        if (!std::isfinite(fraction) || fraction < Real{0.0} ||
+            fraction > Real{1.0}) {
+            success = false;
+            return Real{0.0};
+        }
+        return length * (inside0 ? fraction : Real{1.0} - fraction);
+    }
+
+    struct SignedBoundaryPoint {
+        std::array<Real, 3> coordinate{};
+        Real value{0.0};
+    };
+    std::vector<SignedBoundaryPoint> polygon;
+    polygon.reserve(4u);
+    for (std::size_t vertex = 0; vertex < coordinates.size(); ++vertex) {
+        polygon.push_back({coordinates[vertex], signed_values[vertex]});
+    }
+    std::vector<SignedBoundaryPoint> clipped;
+    clipped.reserve(4u);
+    for (std::size_t edge = 0; edge < polygon.size(); ++edge) {
+        const auto& a = polygon[edge];
+        const auto& b = polygon[(edge + 1u) % polygon.size()];
+        const bool inside_a = inside(a.value);
+        const bool inside_b = inside(b.value);
+        if (inside_a) {
+            clipped.push_back(a);
+        }
+        if (inside_a == inside_b) {
+            continue;
+        }
+        const Real denominator = a.value - b.value;
+        if (!(std::abs(denominator) >
+              std::numeric_limits<Real>::min()) ||
+            !std::isfinite(denominator)) {
+            return Real{0.0};
+        }
+        const Real fraction = a.value / denominator;
+        if (!std::isfinite(fraction) || fraction < Real{0.0} ||
+            fraction > Real{1.0}) {
+            return Real{0.0};
+        }
+        clipped.push_back({{
+                               a.coordinate[0] +
+                                   fraction *
+                                       (b.coordinate[0] - a.coordinate[0]),
+                               a.coordinate[1] +
+                                   fraction *
+                                       (b.coordinate[1] - a.coordinate[1]),
+                               a.coordinate[2] +
+                                   fraction *
+                                       (b.coordinate[2] - a.coordinate[2]),
+                           },
+                           Real{0.0}});
+    }
+    if (clipped.size() < 3u) {
+        success = true;
+        return Real{0.0};
+    }
+    Real area{0.0};
+    const auto& origin = clipped.front().coordinate;
+    for (std::size_t triangle = 1u;
+         triangle + 1u < clipped.size();
+         ++triangle) {
+        area += Real{0.5} *
+                norm(cross(subtract(clipped[triangle].coordinate, origin),
+                           subtract(clipped[triangle + 1u].coordinate,
+                                    origin)));
+    }
+    success = std::isfinite(area) && area >= Real{0.0};
+    return area;
+}
+
 [[nodiscard]] bool accumulateKinematicAreaMass(
     const interfaces::LevelSetCellCutResult& cut,
     const SimplexAffineGeometry& geometry,
@@ -1247,6 +1392,7 @@ struct SimplexAffineGeometry {
     active_vertices.assign(n_vertices, 0u);
     fitted.assign(n_vertices, 0u);
     std::vector<Real> area_gradient(n_vertices, Real{0.0});
+    std::vector<Real> young_wall_gradient(n_vertices, Real{0.0});
     std::vector<Real> lumped_kinematic_mass(n_vertices, Real{0.0});
     std::vector<Real> lumped_interface_measure(n_vertices, Real{0.0});
     std::vector<std::map<std::size_t, Real>> kinematic_mass(n_vertices);
@@ -1548,6 +1694,191 @@ struct SimplexAffineGeometry {
             "kinematic-area-gradient curvature recovery found no strict cut cells";
         return false;
     }
+
+    result.kinematic_area_gradient_young_wall_count =
+        options.kinematic_area_gradient_young_walls.size();
+    for (const auto& wall :
+         options.kinematic_area_gradient_young_walls) {
+        const Real raw_coefficient =
+            -std::cos(wall.equilibrium_contact_angle_radians);
+        const Real coefficient =
+            std::abs(raw_coefficient) <=
+                    Real{64.0} * std::numeric_limits<Real>::epsilon()
+                ? Real{0.0}
+                : raw_coefficient;
+        std::size_t wall_boundary_faces{0u};
+        mesh.forEachBoundaryFace(
+            wall.boundary_marker,
+            [&](GlobalIndex face, GlobalIndex cell) {
+                if (!failure.empty()) {
+                    return;
+                }
+                if (!mesh.isOwnedCell(cell)) {
+                    failure =
+                        "kinematic-area-gradient Young wall recovery found a nonowned boundary parent cell";
+                    return;
+                }
+                ++wall_boundary_faces;
+                ++result
+                      .kinematic_area_gradient_young_wall_boundary_faces;
+                const auto type = mesh.getCellType(cell);
+                std::array<std::size_t, 3> face_corners{};
+                std::size_t face_corner_count{0u};
+                if (!simplexBoundaryFaceCorners(
+                        type,
+                        mesh.getLocalFaceIndex(face, cell),
+                        face_corners,
+                        face_corner_count) ||
+                    face_corner_count !=
+                        static_cast<std::size_t>(dimension)) {
+                    failure =
+                        "kinematic-area-gradient Young wall recovery requires an affine simplex boundary face";
+                    return;
+                }
+                std::vector<GlobalIndex> nodes;
+                mesh.getCellNodes(cell, nodes);
+                std::array<std::array<Real, 3>, 3> coordinates{};
+                std::array<Real, 3> signed_values{};
+                Real face_value_scale{0.0};
+                bool has_negative = false;
+                bool has_positive = false;
+                for (std::size_t local = 0; local < face_corner_count;
+                     ++local) {
+                    const auto corner = face_corners[local];
+                    if (corner >= nodes.size() || nodes[corner] < 0 ||
+                        static_cast<std::size_t>(nodes[corner]) >=
+                            n_vertices) {
+                        failure =
+                            "kinematic-area-gradient Young wall recovery found invalid boundary connectivity";
+                        return;
+                    }
+                    const auto node =
+                        static_cast<std::size_t>(nodes[corner]);
+                    coordinates[local] = mesh.getNodeCoordinates(
+                        static_cast<GlobalIndex>(node));
+                    signed_values[local] =
+                        working_level_set_values[node] - options.isovalue;
+                    face_value_scale = std::max(
+                        face_value_scale,
+                        std::abs(signed_values[local]));
+                    has_negative = has_negative ||
+                                   signed_values[local] <
+                                       -cut_request.tolerance;
+                    has_positive = has_positive ||
+                                   signed_values[local] >
+                                       cut_request.tolerance;
+                }
+                if (!has_negative || !has_positive) {
+                    return;
+                }
+                ++result.kinematic_area_gradient_young_wall_cut_faces;
+                if (coefficient == Real{0.0}) {
+                    return;
+                }
+
+                const Real nominal_step =
+                    std::pow(std::numeric_limits<Real>::epsilon(),
+                             Real{0.2}) *
+                    face_value_scale;
+                for (std::size_t local = 0; local < face_corner_count;
+                     ++local) {
+                    const Real margin = std::abs(signed_values[local]);
+                    const Real step =
+                        std::min(nominal_step, Real{0.20} * margin);
+                    if (!(step >
+                          Real{512.0} *
+                              std::numeric_limits<Real>::epsilon() *
+                              face_value_scale) ||
+                        !std::isfinite(step)) {
+                        failure =
+                            "kinematic-area-gradient Young wall recovery could not choose a topology-preserving derivative step";
+                        return;
+                    }
+                    std::array<Real, 6> measures{};
+                    const std::array<Real, 6> offsets{{
+                        Real{-2.0},
+                        Real{-1.0},
+                        Real{-0.5},
+                        Real{0.5},
+                        Real{1.0},
+                        Real{2.0}}};
+                    for (std::size_t sample = 0;
+                         sample < offsets.size();
+                         ++sample) {
+                        auto perturbed_values = signed_values;
+                        perturbed_values[local] +=
+                            offsets[sample] * step;
+                        bool measure_success = false;
+                        measures[sample] = activeBoundaryMeasure(
+                            std::span<const std::array<Real, 3>>(
+                                coordinates.data(), face_corner_count),
+                            std::span<const Real>(
+                                perturbed_values.data(),
+                                face_corner_count),
+                            options
+                                .kinematic_area_gradient_negative_liquid_side,
+                            measure_success);
+                        ++result
+                              .kinematic_area_gradient_young_wall_measure_evaluations;
+                        if (!measure_success ||
+                            !(measures[sample] > Real{0.0})) {
+                            failure =
+                                "kinematic-area-gradient Young wall derivative left the fixed contact topology";
+                            return;
+                        }
+                    }
+                    const Real fourth_order_full =
+                        (measures[0] - Real{8.0} * measures[1] +
+                         Real{8.0} * measures[4] - measures[5]) /
+                        (Real{12.0} * step);
+                    const Real fourth_order_half =
+                        (measures[1] - Real{8.0} * measures[2] +
+                         Real{8.0} * measures[3] - measures[4]) /
+                        (Real{6.0} * step);
+                    const Real richardson =
+                        (Real{16.0} * fourth_order_half -
+                         fourth_order_full) /
+                        Real{15.0};
+                    if (!std::isfinite(richardson)) {
+                        failure =
+                            "kinematic-area-gradient Young wall recovery produced a nonfinite derivative";
+                        return;
+                    }
+                    const auto node = static_cast<std::size_t>(
+                        nodes[face_corners[local]]);
+                    young_wall_gradient[node] +=
+                        coefficient * richardson;
+                }
+            });
+        if (!failure.empty()) {
+            result.diagnostic = std::move(failure);
+            return false;
+        }
+        if (wall_boundary_faces == 0u) {
+            result.diagnostic =
+                "kinematic-area-gradient Young wall marker has no owned boundary faces";
+            return false;
+        }
+    }
+
+    Real surface_gradient_norm2{0.0};
+    Real young_wall_gradient_norm2{0.0};
+    Real total_gradient_norm2{0.0};
+    for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
+        surface_gradient_norm2 +=
+            area_gradient[vertex] * area_gradient[vertex];
+        young_wall_gradient_norm2 +=
+            young_wall_gradient[vertex] * young_wall_gradient[vertex];
+        area_gradient[vertex] += young_wall_gradient[vertex];
+        total_gradient_norm2 +=
+            area_gradient[vertex] * area_gradient[vertex];
+    }
+    result.kinematic_area_gradient_surface_gradient_norm =
+        std::sqrt(surface_gradient_norm2);
+    result.kinematic_area_gradient_young_wall_gradient_norm =
+        std::sqrt(young_wall_gradient_norm2);
+    result.kinematic_area_gradient_total_energy_gradient_norm =
+        std::sqrt(total_gradient_norm2);
 
     std::vector<Real> rhs(n_vertices, Real{0.0});
     std::vector<std::size_t> active_degree(n_vertices, 0u);
@@ -2645,6 +2976,33 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
         default:
             throw std::invalid_argument(
                 "level-set curvature projection received an unknown recovery mode");
+    }
+    if (!options.kinematic_area_gradient_young_walls.empty() &&
+        options.recovery_mode !=
+            LevelSetCurvatureRecoveryMode::KinematicAreaGradient) {
+        throw std::invalid_argument(
+            "kinematic-area-gradient Young walls require kinematic-area-gradient curvature recovery");
+    }
+    const Real pi = std::acos(Real{-1.0});
+    for (std::size_t wall_index = 0;
+         wall_index < options.kinematic_area_gradient_young_walls.size();
+         ++wall_index) {
+        const auto& wall =
+            options.kinematic_area_gradient_young_walls[wall_index];
+        if (wall.boundary_marker < 0 ||
+            !(wall.equilibrium_contact_angle_radians > Real{0.0}) ||
+            !(wall.equilibrium_contact_angle_radians < pi) ||
+            !std::isfinite(wall.equilibrium_contact_angle_radians)) {
+            throw std::invalid_argument(
+                "kinematic-area-gradient Young walls require a nonnegative boundary marker and a finite contact angle strictly between zero and pi radians");
+        }
+        for (std::size_t previous = 0; previous < wall_index; ++previous) {
+            if (options.kinematic_area_gradient_young_walls[previous]
+                    .boundary_marker == wall.boundary_marker) {
+                throw std::invalid_argument(
+                    "kinematic-area-gradient Young wall boundary markers must be unique");
+            }
+        }
     }
     if (options.recovery_mode ==
             LevelSetCurvatureRecoveryMode::KinematicAreaGradient &&
