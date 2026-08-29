@@ -712,6 +712,8 @@ def configure_solver(solver_xml: Path,
                      int | None = None,
                      static_capillary_limited_memory_curvature_tolerance:
                      float | None = None,
+                     enable_reinitialization: bool | None = None,
+                     reinitialization_cadence_steps: int | None = None,
                      enable_volume_correction: bool | None = None,
                      volume_correction_cadence_steps: int | None = None,
                      volume_correction_use_initial_volume: bool | None = None,
@@ -1152,6 +1154,25 @@ def configure_solver(solver_xml: Path,
             "Static_capillary_limited_memory_history_size",
             str(static_capillary_limited_memory_history_size),
         )
+
+    if (enable_reinitialization is not None and
+            not isinstance(enable_reinitialization, bool)):
+        raise ValueError(
+            "level-set reinitialization enable control must be boolean")
+    if (reinitialization_cadence_steps is not None and
+            (isinstance(reinitialization_cadence_steps, bool) or
+             not isinstance(reinitialization_cadence_steps, int) or
+             reinitialization_cadence_steps <= 0)):
+        raise ValueError(
+            "level-set reinitialization cadence must be a positive integer")
+    if enable_reinitialization is not None:
+        level_set = level_set_equation(root)
+        set_text(level_set, "Enable_reinitialization",
+                 "true" if enable_reinitialization else "false")
+    if reinitialization_cadence_steps is not None:
+        level_set = level_set_equation(root)
+        set_text(level_set, "Reinitialization_cadence_steps",
+                 str(reinitialization_cadence_steps))
 
     if enable_volume_correction is not None:
         level_set = level_set_equation(root)
@@ -7896,6 +7917,8 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "static_capillary_max_topology_epoch_transitions",
         "static_capillary_limited_memory_history_size",
         "static_capillary_limited_memory_curvature_tolerance",
+        "enable_level_set_reinitialization",
+        "reinitialization_cadence_steps",
         "require_static_capillary_balance_qualification",
         "expect_curvature_projection_smoothing_mode",
         "expect_curvature_projection_recovery_mode",
@@ -12534,6 +12557,10 @@ def configure_case_solver_xml(run_dir: Path, args: argparse.Namespace) -> None:
             "static_capillary_limited_memory_curvature_tolerance",
             None,
         ),
+        enable_reinitialization=getattr(
+            args, "enable_level_set_reinitialization", None),
+        reinitialization_cadence_steps=getattr(
+            args, "reinitialization_cadence_steps", None),
         enable_volume_correction=args.enable_level_set_volume_correction,
         volume_correction_cadence_steps=args.volume_correction_cadence_steps,
         volume_correction_use_initial_volume=(
@@ -14880,6 +14907,18 @@ def main() -> int:
         "--static-capillary-limited-memory-curvature-tolerance",
         type=float,
     )
+    parser.add_argument(
+        "--enable-level-set-reinitialization",
+        dest="enable_level_set_reinitialization",
+        action="store_true",
+        default=None,
+    )
+    parser.add_argument(
+        "--disable-level-set-reinitialization",
+        dest="enable_level_set_reinitialization",
+        action="store_false",
+    )
+    parser.add_argument("--reinitialization-cadence-steps", type=int)
     parser.add_argument(
         "--require-static-capillary-balance-qualification",
         choices=("prerequisite_only", "qualified"),

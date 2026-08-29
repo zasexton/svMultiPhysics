@@ -2134,6 +2134,60 @@ def test_kinematic_area_gradient_traction_rejects_incompatible_projection_contro
         configure(curvature_projection_smoothing_iterations=1)
 
 
+def test_reinitialization_controls_are_explicit_and_fail_closed():
+    runner = _load_runner()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        case_dir = Path(temp_dir) / "droplet2d"
+        runner.write_capillary_droplet2d_case(
+            case_dir,
+            steps=4,
+            pressure_jump=2.0,
+            nx=8,
+            ny=8,
+        )
+        solver_xml = case_dir / "solver.xml"
+        runner.configure_solver(
+            solver_xml,
+            steps=4,
+            enable_reinitialization=True,
+            reinitialization_cadence_steps=2,
+        )
+        level_set = runner.level_set_equation(
+            runner.ET.parse(solver_xml).getroot())
+        assert level_set.findtext("Enable_reinitialization") == "true"
+        assert level_set.findtext("Reinitialization_cadence_steps") == "2"
+
+        with pytest.raises(ValueError, match="cadence must be a positive integer"):
+            runner.configure_solver(
+                solver_xml,
+                steps=4,
+                enable_reinitialization=True,
+                reinitialization_cadence_steps=0,
+            )
+        with pytest.raises(ValueError, match="enable control must be boolean"):
+            runner.configure_solver(
+                solver_xml,
+                steps=4,
+                enable_reinitialization="true",
+            )
+
+        controls = {}
+
+        class ControlArguments:
+            enable_level_set_reinitialization = False
+            reinitialization_cadence_steps = 3
+
+            def __getattr__(self, _name):
+                return None
+
+        runner.add_solver_control_overrides(
+            controls,
+            ControlArguments(),
+        )
+        assert controls["enable_level_set_reinitialization"] is False
+        assert controls["reinitialization_cadence_steps"] == 3
+
+
 def test_projected_curvature_recovery_diagnostics_are_aggregated_and_gated():
     runner = _load_runner()
     diagnostics = runner.parse_solver_diagnostics(
