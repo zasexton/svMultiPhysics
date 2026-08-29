@@ -1908,6 +1908,7 @@ def test_kinematic_area_gradient_traction_configuration_is_explicit_and_unfilter
             curvature_projection_recovery_mode="kinematic_area_gradient",
             curvature_projection_kinematic_area_gradient_filter_coefficient=0.0,
             curvature_projection_smoothing_iterations=0,
+            cut_cell_pressure_stabilization_policy="incremental",
             static_capillary_finite_difference_relative_step=2.0e-5,
             static_capillary_limited_memory_history_size=6,
             static_capillary_limited_memory_curvature_tolerance=3.0e-11,
@@ -1921,6 +1922,8 @@ def test_kinematic_area_gradient_traction_configuration_is_explicit_and_unfilter
         assert free_surface.findtext(
             "Curvature_field") == "kappa_area_gradient"
         assert free_surface.findtext("Use_level_set_curvature") == "false"
+        assert free_surface.findtext(
+            "Cut_cell_pressure_stabilization_policy") == "Incremental"
         assert level_set.findtext(
             "Curvature_projection_recovery_mode") == "kinematic_area_gradient"
         assert level_set.findtext(
@@ -1965,6 +1968,8 @@ def test_static_capillary_minimizer_configuration_rejects_invalid_controls():
         configure(static_capillary_limited_memory_history_size=True)
     with pytest.raises(ValueError, match="curvature tolerance must be positive"):
         configure(static_capillary_limited_memory_curvature_tolerance=0.0)
+    with pytest.raises(ValueError, match="pressure stabilization policy"):
+        configure(cut_cell_pressure_stabilization_policy="unsupported")
 
 
 def test_kinematic_area_gradient_static_initialization_requires_exact_derivatives():
@@ -2242,6 +2247,7 @@ def test_sessile_case_uses_monolithic_fsils_gmres_linear_budget():
         == 0.0
     )
     assert area_gradient.curvature_projection_smoothing_iterations == 0
+    assert area_gradient.cut_cell_pressure_stabilization_policy == "incremental"
     assert area_gradient.require_curvature_projection_diagnostics is True
     assert area_gradient.require_curvature_projection_newton_freshness is True
     assert area_gradient.require_free_surface_conservative_balance is True
@@ -2256,6 +2262,10 @@ def test_sessile_case_uses_monolithic_fsils_gmres_linear_budget():
     assert droplet_area_gradient.curvature_projection_recovery_mode == (
         "kinematic_area_gradient")
     assert droplet_area_gradient.curvature_projection_smoothing_iterations == 0
+    assert (
+        droplet_area_gradient.cut_cell_pressure_stabilization_policy ==
+        "incremental"
+    )
     assert droplet_area_gradient.require_curvature_projection_diagnostics is True
     assert droplet_area_gradient.require_curvature_projection_newton_freshness is True
 
@@ -2312,6 +2322,14 @@ def test_sessile_case_uses_monolithic_fsils_gmres_linear_budget():
     assert overridden.linear_algebra_backend == "fsils"
     assert overridden.linear_preconditioner == "fsils"
     assert overridden.linear_krylov_space_dimension == 17
+
+    area_gradient_args.cut_cell_pressure_stabilization_policy = "enabled"
+    absolute_pressure_penalty = runner.case_args_for_run(
+        "sphere3d", area_gradient_args)
+    assert (
+        absolute_pressure_penalty.cut_cell_pressure_stabilization_policy ==
+        "enabled"
+    )
 
     # Qualification JSON copies this parsed control record verbatim under
     # solver_controls.linear_solver, including the actual method selected by

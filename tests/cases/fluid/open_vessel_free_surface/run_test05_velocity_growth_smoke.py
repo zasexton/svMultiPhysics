@@ -669,6 +669,7 @@ def configure_solver(solver_xml: Path,
                      volume_quadrature_order: int | None = None,
                      cut_cell_velocity_gradient_penalty: float | None = None,
                      cut_cell_pressure_gradient_penalty: float | None = None,
+                     cut_cell_pressure_stabilization_policy: str | None = None,
                      active_domain: str = "LevelSetNegative",
                      surface_tension: float | None = None,
                      capillary_force_form: str = "surface_stress",
@@ -879,6 +880,26 @@ def configure_solver(solver_xml: Path,
             free_surface,
             "Cut_cell_pressure_gradient_penalty",
             f"{cut_cell_pressure_gradient_penalty:.16g}",
+        )
+    pressure_stabilization_policy_names = {
+        "enabled": "Enabled",
+        "incremental": "Incremental",
+        "disabled": "Disabled",
+        "disabled_for_refreshed_frozen_high_order":
+            "DisabledForRefreshedFrozenHighOrder",
+    }
+    if cut_cell_pressure_stabilization_policy is not None:
+        if (cut_cell_pressure_stabilization_policy not in
+                pressure_stabilization_policy_names):
+            raise ValueError(
+                "cut-cell pressure stabilization policy must be enabled, "
+                "incremental, disabled, or "
+                "disabled_for_refreshed_frozen_high_order")
+        set_text(
+            free_surface,
+            "Cut_cell_pressure_stabilization_policy",
+            pressure_stabilization_policy_names[
+                cut_cell_pressure_stabilization_policy],
         )
     capillary_force_form_names = {
         "surface_stress": "SurfaceStress",
@@ -7794,6 +7815,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "surface_tension",
         "level_set_active_domain",
         "capillary_force_form",
+        "cut_cell_pressure_stabilization_policy",
         "prescribed_capillary_curvature",
         "wet_extension_advection_velocity_method",
         "projected_curvature_field",
@@ -12010,6 +12032,11 @@ def case_args_for_run(case_name: str,
             "curvature_projection_smoothing_iterations",
             0,
         )
+        set_default(
+            case_args,
+            "cut_cell_pressure_stabilization_policy",
+            "incremental",
+        )
         if (case_args.curvature_projection_recovery_mode !=
                 "kinematic_area_gradient"):
             raise ValueError(
@@ -12356,6 +12383,8 @@ def configure_case_solver_xml(run_dir: Path, args: argparse.Namespace) -> None:
         volume_quadrature_order=args.volume_quadrature_order,
         cut_cell_velocity_gradient_penalty=args.cut_cell_velocity_gradient_penalty,
         cut_cell_pressure_gradient_penalty=args.cut_cell_pressure_gradient_penalty,
+        cut_cell_pressure_stabilization_policy=getattr(
+            args, "cut_cell_pressure_stabilization_policy", None),
         active_domain=getattr(
             args, "level_set_active_domain", "LevelSetNegative"),
         surface_tension=args.surface_tension,
@@ -14914,6 +14943,17 @@ def main() -> int:
     parser.add_argument("--trace-level-set-advection-velocity", action="store_true")
     parser.add_argument("--cut-cell-velocity-gradient-penalty", type=float)
     parser.add_argument("--cut-cell-pressure-gradient-penalty", type=float)
+    parser.add_argument(
+        "--cut-cell-pressure-stabilization-policy",
+        choices=(
+            "enabled",
+            "incremental",
+            "disabled",
+            "disabled_for_refreshed_frozen_high_order",
+        ),
+        help=("cut-adjacent pressure ghost-penalty state; the area-gradient "
+              "pair defaults to incremental pressure stabilization"),
+    )
     parser.add_argument("--surface-tension", type=float)
     parser.add_argument(
         "--capillary-force-form",
