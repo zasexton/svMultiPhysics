@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import numpy as np
 import pyvista as pv
@@ -19,6 +19,33 @@ BOX_WALLS = (
     "wall_front",
     "wall_back",
 )
+
+ACTIVE_DOMAINS = ("LevelSetNegative", "LevelSetPositive")
+
+
+def normalized_active_domain(active_domain: str) -> str:
+    """Return the canonical level-set side used as the liquid domain."""
+    if active_domain not in ACTIVE_DOMAINS:
+        raise ValueError(
+            "spatial capillary active domain must be LevelSetNegative or "
+            "LevelSetPositive")
+    return active_domain
+
+
+def oriented_level_set(signed_distance: np.ndarray,
+                       active_domain: str,
+                       positive_scale: float) -> np.ndarray:
+    """Orient one signed-distance field so its declared side is liquid."""
+    active_domain = normalized_active_domain(active_domain)
+    orientation = 1.0 if active_domain == "LevelSetNegative" else -1.0
+    return orientation * positive_scale * signed_distance
+
+
+def active_signed_level_set(values: np.ndarray,
+                            active_domain: str) -> np.ndarray:
+    """Map either liquid-side convention to negative-in-liquid values."""
+    active_domain = normalized_active_domain(active_domain)
+    return values if active_domain == "LevelSetNegative" else -values
 
 
 def axis_wall_frame(wall_face: str) -> dict[str, Any]:
@@ -216,9 +243,11 @@ def _write_solver_xml(case_dir: Path,
                       steps: int,
                       time_step_size: float,
                       surface_tension: float,
-                      contact: dict[str, Any] | None) -> None:
+                      contact: dict[str, Any] | None,
+                      active_domain: str = "LevelSetNegative") -> None:
     if steps < 1 or not math.isfinite(time_step_size) or time_step_size <= 0.0:
         raise ValueError("spatial capillary time controls are invalid")
+    active_domain = normalized_active_domain(active_domain)
     face_blocks = "\n".join(
         f"""  <Add_face name=\"{wall}\">
     <Face_file_path>mesh/background/mesh-surfaces/{wall}.vtu</Face_file_path>
@@ -338,7 +367,7 @@ def _write_solver_xml(case_dir: Path,
     <Generated_interface_domain_id>static_capillary_surface_3d</Generated_interface_domain_id>
     <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
     <Level_set_isovalue>0.0</Level_set_isovalue>
-    <Active_domain>LevelSetNegative</Active_domain>
+    <Active_domain>{active_domain}</Active_domain>
     <Active_domain_method>CutVolume</Active_domain_method>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>{surface_tension:.16g}</Surface_tension>
@@ -355,8 +384,10 @@ def _write_solver_xml(case_dir: Path,
 
 
 def _nearest_liquid_node(grid: pv.UnstructuredGrid,
-                         target: np.ndarray) -> int:
-    phi = np.asarray(grid.point_data["phi"], dtype=float)
+                         target: np.ndarray,
+                         active_domain: str = "LevelSetNegative") -> int:
+    phi = active_signed_level_set(
+        np.asarray(grid.point_data["phi"], dtype=float), active_domain)
     liquid = np.flatnonzero(phi < 0.0)
     if liquid.size == 0:
         raise ValueError("spatial capillary mesh has no liquid vertex")
@@ -387,13 +418,17 @@ def _write_case_metadata(case_dir: Path,
     )
 
 
-def write_sphere_case(case_dir: Path,
-                      steps: int,
-                      resolution: int,
-                      radius: float,
-                      surface_tension: float,
-                      time_step_size: float,
-                      level_set_positive_scale: float = 1.0) -> None:
+def write_sphere_case(
+        case_dir: Path,
+        steps: int,
+        resolution: int,
+        radius: float,
+        surface_tension: float,
+        time_step_size: float,
+        level_set_positive_scale: float = 1.0,
+        active_domain: str = "LevelSetNegative",
+        center_offset: Sequence[float] = (0.0, 0.0, 0.0),
+) -> None:
     """Write a centered closed-sphere equilibrium case."""
     if (not math.isfinite(level_set_positive_scale) or
             level_set_positive_scale <= 0.0):
@@ -402,21 +437,31 @@ def write_sphere_case(case_dir: Path,
         raise ValueError("sphere radius must be positive and finite")
     if not math.isfinite(surface_tension) or surface_tension <= 0.0:
         raise ValueError("surface tension must be positive and finite")
+    active_domain = normalized_active_domain(active_domain)
+    center_offset = np.asarray(center_offset, dtype=float).reshape(-1)
+    if center_offset.shape != (3,) or not np.isfinite(center_offset).all():
+        raise ValueError("sphere center offset must contain three finite values")
     case_dir.mkdir(parents=True, exist_ok=True)
-    center = np.asarray([0.5, 0.5, 0.5], dtype=float)
+    center = np.asarray([0.5, 0.5, 0.5], dtype=float) + center_offset
+    if np.any(center - radius <= 0.0) or np.any(center + radius >= 1.0):
+        raise ValueError(
+            "closed sphere must remain strictly inside the unit cube")
     pressure_jump = 2.0 * surface_tension / radius
     grid = write_tetrahedral_box(
         case_dir,
         resolution,
         resolution,
         resolution,
-        lambda points: level_set_positive_scale * (
-            np.linalg.norm(points - center, axis=1) - radius),
+        lambda points: oriented_level_set(
+            np.linalg.norm(points - center, axis=1) - radius,
+            active_domain,
+            level_set_positive_scale),
         pressure_jump,
     )
     _write_solver_xml(
-        case_dir, steps, time_step_size, surface_tension, contact=None)
-    gauge_node = _nearest_liquid_node(grid, center)
+        case_dir, steps, time_step_size, surface_tension, contact=None,
+        active_domain=active_domain)
+    gauge_node = _nearest_liquid_node(grid, center, active_domain)
     _write_case_metadata(case_dir, {
         "benchmark": "synthetic zero-gravity closed spherical equilibrium",
         "representation": "unfitted_level_set",
@@ -425,6 +470,8 @@ def write_sphere_case(case_dir: Path,
         "capillary_radius": radius,
         "capillary_curvature_factor": 2.0,
         "sphere_center": center.tolist(),
+        "sphere_center_offset": center_offset.tolist(),
+        "active_domain": active_domain,
         "initial_active_pressure": pressure_jump,
         "density": 1.0,
         "viscosity": 0.1,
@@ -454,6 +501,8 @@ def write_sessile_sphere_case(
         time_step_size: float,
         wall_face: str,
         level_set_positive_scale: float = 1.0,
+        active_domain: str = "LevelSetNegative",
+        tangent_center_offset: Sequence[float] = (0.0, 0.0),
 ) -> None:
     """Write a prescribed-angle spherical cap on a unit-cube wall."""
     if (not math.isfinite(level_set_positive_scale) or
@@ -461,6 +510,13 @@ def write_sessile_sphere_case(
         raise ValueError("level-set positive scale must be positive and finite")
     if not math.isfinite(surface_tension) or surface_tension <= 0.0:
         raise ValueError("surface tension must be positive and finite")
+    active_domain = normalized_active_domain(active_domain)
+    tangent_center_offset = np.asarray(
+        tangent_center_offset, dtype=float).reshape(-1)
+    if (tangent_center_offset.shape != (2,) or
+            not np.isfinite(tangent_center_offset).all()):
+        raise ValueError(
+            "sessile tangent-center offset must contain two finite values")
     frame = axis_wall_frame(wall_face)
     geometry = spherical_cap_geometry(contact_angle_degrees, radius)
     axis = int(frame["wall_axis"])
@@ -468,8 +524,16 @@ def write_sessile_sphere_case(
     normal = np.asarray(frame["wall_normal"], dtype=float)
     inward = -normal
     center = np.full(3, 0.5, dtype=float)
+    tangent_axes = tuple(int(value) for value in frame["wall_tangent_axes"])
+    center[np.asarray(tangent_axes, dtype=int)] += tangent_center_offset
     center[axis] = (
         coordinate + geometry["center_inward_distance"] * inward[axis])
+    for tangent_axis in tangent_axes:
+        if (center[tangent_axis] - geometry["base_radius"] <= 0.0 or
+                center[tangent_axis] + geometry["base_radius"] >= 1.0):
+            raise ValueError(
+                "sessile spherical-cap contact line must remain strictly "
+                "inside the selected wall")
     pressure_jump = 2.0 * surface_tension / radius
     case_dir.mkdir(parents=True, exist_ok=True)
     grid = write_tetrahedral_box(
@@ -477,8 +541,10 @@ def write_sessile_sphere_case(
         resolution,
         resolution,
         resolution,
-        lambda points: level_set_positive_scale * (
-            np.linalg.norm(points - center, axis=1) - radius),
+        lambda points: oriented_level_set(
+            np.linalg.norm(points - center, axis=1) - radius,
+            active_domain,
+            level_set_positive_scale),
         pressure_jump,
     )
     contact = {
@@ -490,12 +556,13 @@ def write_sessile_sphere_case(
         "equilibrium_contact_angle_degrees": contact_angle_degrees,
     }
     _write_solver_xml(
-        case_dir, steps, time_step_size, surface_tension, contact=contact)
-    apex = np.asarray(center, dtype=float)
+        case_dir, steps, time_step_size, surface_tension, contact=contact,
+        active_domain=active_domain)
+    apex = np.asarray(center, dtype=float).copy()
     apex += radius * inward
-    gauge_target = np.asarray(center, dtype=float)
+    gauge_target = np.asarray(center, dtype=float).copy()
     gauge_target[axis] = 0.5 * (coordinate + apex[axis])
-    gauge_node = _nearest_liquid_node(grid, gauge_target)
+    gauge_node = _nearest_liquid_node(grid, gauge_target, active_domain)
     _write_case_metadata(case_dir, {
         "benchmark": "synthetic prescribed-angle sessile spherical equilibrium",
         "representation": "unfitted_level_set",
@@ -508,6 +575,8 @@ def write_sessile_sphere_case(
         "viscosity": 0.1,
         "surface_tension": surface_tension,
         "level_set_positive_scale": level_set_positive_scale,
+        "active_domain": active_domain,
+        "tangent_center_offset": tangent_center_offset.tolist(),
         "mesh_resolution": {
             "nx": resolution,
             "ny": resolution,
@@ -516,7 +585,7 @@ def write_sessile_sphere_case(
         },
         "sessile_contact": {
             **contact,
-            "active_domain": "LevelSetNegative",
+            "active_domain": active_domain,
             "circle_center": center.tolist(),
             "circle_radius": radius,
             "level_set_positive_scale": level_set_positive_scale,
@@ -586,8 +655,14 @@ def _surface_area(surface: pv.PolyData) -> float:
     return area
 
 
-def _liquid_volume(dataset: pv.DataSet) -> float:
-    liquid = dataset.clip_scalar(scalars="phi", value=0.0, invert=True)
+def _liquid_volume(dataset: pv.DataSet,
+                   active_domain: str = "LevelSetNegative") -> float:
+    active_domain = normalized_active_domain(active_domain)
+    liquid = dataset.clip_scalar(
+        scalars="phi",
+        value=0.0,
+        invert=(active_domain == "LevelSetNegative"),
+    )
     if liquid.n_cells == 0:
         raise ValueError("saved spatial state has no clipped liquid")
     sized = liquid.compute_cell_sizes(volume=True)
@@ -598,8 +673,13 @@ def _liquid_volume(dataset: pv.DataSet) -> float:
 
 
 def _pressure_and_speed(dataset: pv.DataSet,
-                        h: float) -> dict[str, Any]:
-    phi = np.asarray(dataset.point_data["phi"], dtype=float).reshape(-1)
+                        h: float,
+                        active_domain: str = "LevelSetNegative",
+                        ) -> dict[str, Any]:
+    phi = active_signed_level_set(
+        np.asarray(dataset.point_data["phi"], dtype=float).reshape(-1),
+        active_domain,
+    )
     result: dict[str, Any] = {}
     band = 0.5 * h
     liquid = phi < -band
@@ -727,6 +807,13 @@ def spatial_capillary_state_metrics(dataset: pv.DataSet,
         points = np.asarray(surface.points, dtype=float)
         fit = _fit_sphere(points)
         h = float(benchmark["mesh_resolution"]["h"])
+        contact = benchmark.get("sessile_contact")
+        active_domain = benchmark.get("active_domain")
+        if active_domain is None and isinstance(contact, dict):
+            active_domain = contact.get("active_domain")
+        if active_domain is None:
+            active_domain = "LevelSetNegative"
+        active_domain = normalized_active_domain(str(active_domain))
         state: dict[str, Any] = {
             "available": True,
             "fitted_sphere_center": fit["center"],
@@ -734,10 +821,10 @@ def spatial_capillary_state_metrics(dataset: pv.DataSet,
             "fitted_sphere_rmse": fit["rmse"],
             "fitted_sphere_max_absolute_error": fit["max_absolute_error"],
             "liquid_gas_area": _surface_area(surface),
-            "liquid_volume": _liquid_volume(dataset),
+            "liquid_volume": _liquid_volume(dataset, active_domain),
+            "active_domain": active_domain,
         }
-        state.update(_pressure_and_speed(dataset, h))
-        contact = benchmark.get("sessile_contact")
+        state.update(_pressure_and_speed(dataset, h, active_domain))
         if isinstance(contact, dict):
             state.update(_contact_metrics(
                 surface,
