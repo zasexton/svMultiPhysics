@@ -1833,6 +1833,7 @@ namespace {
     case FreeSurfaceSurfaceTensionForm::CurvatureTraction:
         return false;
     case FreeSurfaceSurfaceTensionForm::GeneratedCurvatureTraction:
+    case FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction:
         return false;
     case FreeSurfaceSurfaceTensionForm::SurfaceStress:
         return true;
@@ -1847,10 +1848,18 @@ namespace {
            FreeSurfaceSurfaceTensionForm::GeneratedCurvatureTraction;
 }
 
+[[nodiscard]] bool usesKinematicAreaGradientTraction(
+    const FreeSurfaceBoundary& bc) noexcept
+{
+    return bc.surface_tension_form ==
+           FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction;
+}
+
 [[nodiscard]] bool usesGeneratedInterfaceNormal(
     const FreeSurfaceBoundary& bc) noexcept
 {
-    return usesSurfaceStress(bc) || usesGeneratedCurvatureTraction(bc);
+    return usesSurfaceStress(bc) || usesGeneratedCurvatureTraction(bc) ||
+           usesKinematicAreaGradientTraction(bc);
 }
 
 [[nodiscard]] const char* surfaceTensionFormName(
@@ -1864,6 +1873,8 @@ namespace {
         return "CurvatureTraction";
     case FreeSurfaceSurfaceTensionForm::GeneratedCurvatureTraction:
         return "GeneratedCurvatureTraction";
+    case FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction:
+        return "KinematicAreaGradientTraction";
     case FreeSurfaceSurfaceTensionForm::SurfaceStress:
         return "SurfaceStress";
     }
@@ -2296,6 +2307,7 @@ void validateGeneratedFreeSurfaceMarkerUniqueness(
     return isUnfittedLevelSet(boundary) &&
            boundary.active_domain != FreeSurfaceActiveDomain::None &&
            (usesSurfaceStress(boundary) ||
+            usesKinematicAreaGradientTraction(boundary) ||
             hasWallAwareContactLaw(boundary));
 }
 
@@ -2426,10 +2438,21 @@ void declareFreeSurfaceDiscreteFunctionals(
                         .external_pressure = *external_pressure,
                     };
         }
+        FE::FieldId curvature_field = FE::INVALID_FIELD_ID;
+        if (usesKinematicAreaGradientTraction(bc)) {
+            curvature_field =
+                system.findFieldByName(bc.curvature_field_name);
+            if (curvature_field == FE::INVALID_FIELD_ID) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction could not resolve curvature field '" +
+                    bc.curvature_field_name + "'");
+            }
+        }
         system.declareFreeSurfaceDiscreteFunctional(
             FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
                 .interface_marker = bc.interface_marker,
                 .level_set_field = resolveLevelSetFieldId(bc, system),
+                .curvature_field = curvature_field,
                 .velocity_field = velocity_field,
                 .geometry_domain_id = bc.generated_interface_domain_id,
                 .parameters = std::move(parameters),
@@ -2459,15 +2482,20 @@ void declareFreeSurfaceDiscreteFunctionals(
                 .external_pressure_power_parameters =
                     external_pressure_power_parameters,
                 .endpoint_functional_power_enabled =
-                    usesSurfaceStress(bc),
+                    usesSurfaceStress(bc) ||
+                    usesKinematicAreaGradientTraction(bc),
                 .capillary_balance_method =
                     usesSurfaceStress(bc)
                         ? FE::systems::FreeSurfaceCapillaryBalanceMethod::
                               DiscreteEnergyVolumeStationarity
+                        : usesKinematicAreaGradientTraction(bc)
+                        ? FE::systems::FreeSurfaceCapillaryBalanceMethod::
+                              KinematicAreaGradientEnergyTraction
                         : FE::systems::FreeSurfaceCapillaryBalanceMethod::
                               Unselected,
                 .capillary_balance_qualification =
-                    usesSurfaceStress(bc)
+                    (usesSurfaceStress(bc) ||
+                     usesKinematicAreaGradientTraction(bc))
                         ? FE::systems::
                               FreeSurfaceCapillaryBalanceQualification::
                                   PrerequisiteOnly
@@ -3846,6 +3874,9 @@ void validateDynamicContactWallEssentialBC(
     if (usesSurfaceStress(bc)) {
         return "variational_surface_stress_generated_geometry";
     }
+    if (usesKinematicAreaGradientTraction(bc)) {
+        return "kinematic_area_gradient_total_surface_young_energy_field";
+    }
     if (usesGeneratedCurvatureTraction(bc)) {
         if (!bc.curvature_field_name.empty()) {
             return "curvature_field_generated_interface_normal_signed";
@@ -3884,6 +3915,9 @@ void validateDynamicContactWallEssentialBC(
         return isUnfittedLevelSet(bc)
                    ? "generated_geometry_refreshed_frozen"
                    : "fitted_geometry_surface_variation";
+    }
+    if (usesKinematicAreaGradientTraction(bc)) {
+        return "kinematic_area_gradient_field_picard_generated_geometry_frozen";
     }
     if (usesGeneratedCurvatureTraction(bc)) {
         if (!bc.curvature_field_name.empty()) {
@@ -3968,6 +4002,8 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
              FreeSurfaceSurfaceTensionForm::CurvatureTraction ||
          bc.surface_tension_form ==
              FreeSurfaceSurfaceTensionForm::GeneratedCurvatureTraction ||
+         bc.surface_tension_form ==
+             FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction ||
          bc.surface_tension_form ==
              FreeSurfaceSurfaceTensionForm::SurfaceStress);
     if (!supported_boundary_policies) {
@@ -4068,6 +4104,64 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: unfitted level-set free surfaces use Eulerian level-set transport for kinematics; mesh-kinematic Penalty/Nitsche enforcement would constrain u.n and freeze the interface and is therefore unsupported");
         }
+        if (usesKinematicAreaGradientTraction(bc)) {
+            if (bc.active_domain_method !=
+                    FreeSurfaceActiveDomainMethod::CutVolume ||
+                normalizedFreeSurfaceOptionToken(
+                    bc.generated_interface_geometry) != "linearcorner") {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction requires CutVolume and Generated_interface_geometry=LinearCorner");
+            }
+            if (!isRefreshedFrozenGeometryTangent(bc)) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction requires Geometry_tangent_policy=RefreshedFrozenQuadrature");
+            }
+            if (bc.curvature_field_name.empty() ||
+                bc.use_level_set_curvature) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction requires a prescribed projected Curvature_field_name and Use_level_set_curvature=false");
+            }
+            const auto phi_id = resolveLevelSetFieldId(bc, system);
+            const auto kappa_id =
+                system.findFieldByName(bc.curvature_field_name);
+            if (kappa_id == FE::INVALID_FIELD_ID) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction references unknown curvature field '" +
+                    bc.curvature_field_name + "'");
+            }
+            if (kappa_id == phi_id) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction requires distinct level-set and curvature fields");
+            }
+            const auto& phi_record = system.fieldRecord(phi_id);
+            const auto& kappa_record = system.fieldRecord(kappa_id);
+            const bool supported_simplex =
+                (dim == 2 && phi_record.space &&
+                 phi_record.space->element_type() ==
+                     FE::ElementType::Triangle3) ||
+                (dim == 3 && phi_record.space &&
+                 phi_record.space->element_type() ==
+                     FE::ElementType::Tetra4);
+            if (!phi_record.space || !kappa_record.space ||
+                phi_record.components != 1 ||
+                kappa_record.components != 1 ||
+                phi_record.space->value_dimension() != 1 ||
+                kappa_record.space->value_dimension() != 1 ||
+                phi_record.space->polynomial_order() != 1 ||
+                phi_record.space->continuity() != FE::Continuity::C0 ||
+                !supported_simplex ||
+                !spacesCompatible(*phi_record.space,
+                                  *kappa_record.space)) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction requires matching scalar affine C0 P1 Triangle3 or Tetra4 level-set and curvature spaces");
+            }
+            if (kappa_record.source_kind !=
+                    FE::systems::FieldSourceKind::PrescribedData ||
+                system.fieldParticipatesInUnknownVector(kappa_id)) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction curvature must be a prescribed maintenance field, not an unknown or supplied scalar");
+            }
+        }
         const bool has_surface_stress_residual =
             usesSurfaceStress(bc) &&
             (!FE::forms::bc::isZeroConstantScalarValue(
@@ -4099,6 +4193,17 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             !unfittedLevelSetShapeTangentsDisabled()) {
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: GeneratedCurvatureTraction currently requires refreshed-frozen generated geometry; the experimental unfitted level-set shape-tangent switch does not contain generated-normal and point-location derivatives");
+        }
+        const bool has_kinematic_area_gradient_traction_residual =
+            usesKinematicAreaGradientTraction(bc) &&
+            (!FE::forms::bc::isZeroConstantScalarValue(
+                 bc.external_pressure) ||
+             !FE::forms::bc::isZeroConstantScalarValue(
+                 bc.surface_tension));
+        if (has_kinematic_area_gradient_traction_residual &&
+            !unfittedLevelSetShapeTangentsDisabled()) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction requires refreshed-frozen generated geometry; differentiated generated-normal, point-location, and recovered-field derivatives are not installed");
         }
         if (!usesSurfaceStress(bc) &&
             !FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension) &&
@@ -4132,6 +4237,10 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
         if (usesGeneratedCurvatureTraction(bc)) {
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: GeneratedCurvatureTraction is available only for unfitted level-set free surfaces; use Automatic/CurvatureTraction for fitted boundaries");
+        }
+        if (usesKinematicAreaGradientTraction(bc)) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction is available only for unfitted level-set free surfaces; use Automatic/CurvatureTraction for fitted boundaries");
         }
         if (bc.boundary_marker < 0) {
             throw std::invalid_argument(
@@ -4861,7 +4970,10 @@ void logUnfittedContactLineMeasure(
            "angle uses generated interface-boundary intersection geometry"
         << " diagnostic=unfitted_prescribed_contact_geometry"
         << " level_set_geometry_owner=accepted_state_wall_aware_repair"
-        << " momentum_owner=young_wall_energy"
+        << " momentum_owner="
+        << (usesKinematicAreaGradientTraction(bc)
+                ? "total_energy_gradient_traction"
+                : "young_wall_energy")
         << " literal_codimension_two_level_set_residual=retired"
         << " interface_marker=" << bc.interface_marker
         << " wall_boundary_marker=" << contactLineWallBoundaryMarker(contact_line)
@@ -5314,6 +5426,23 @@ void applyDynamicContactAngleResidual(
         if (contactLineKind(contact_line) ==
                 ContactLineKind::PrescribedAngle &&
             !FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension)) {
+            if (usesKinematicAreaGradientTraction(bc)) {
+                const int contact_marker =
+                    generatedUnfittedContactLineMarker(
+                        contact_line, bc, system);
+                system.registerGeneratedEmbeddedInterfaceMarker(
+                    contact_marker);
+                FE_LOG_INFO(
+                    std::string("IncompressibleNavierStokesVMSModule: equilibrium Young wall force is owned by the kinematic-area-gradient traction") +
+                    " interface_marker=" +
+                    std::to_string(bc.interface_marker) +
+                    " contact_marker=" +
+                    std::to_string(contact_marker) +
+                    " surface_tension_form=KinematicAreaGradientTraction" +
+                    " separate_equilibrium_line_force=omitted" +
+                    " diagnostic=navier_stokes_total_energy_traction_wall_ownership");
+                continue;
+            }
             // Accepted-state wall-aware repair enforces the geometric angle,
             // while the momentum equation still needs the solid--liquid/
             // solid--gas wall force.  SurfaceStress already supplies the
@@ -5417,11 +5546,14 @@ void applyDynamicContactAngleResidual(
         // gamma*P:grad(v), so the separate wall term is only
         // -gamma*cos(theta_e).  Keeping young_gap there double-counts the
         // dynamic-angle force.
-        const auto contact_force = usesSurfaceStress(bc)
-            ? (line_friction * contact_velocity -
-               gamma * equilibrium_cosine)
-            : (line_friction * contact_velocity -
-               gamma * (equilibrium_cosine + dot(n, wall_n)));
+        const auto contact_force =
+            usesKinematicAreaGradientTraction(bc)
+                ? line_friction * contact_velocity
+                : usesSurfaceStress(bc)
+                      ? (line_friction * contact_velocity -
+                         gamma * equilibrium_cosine)
+                      : (line_friction * contact_velocity -
+                         gamma * (equilibrium_cosine + dot(n, wall_n)));
         const int contact_marker = generatedUnfittedContactLineMarker(
             contact_line,
             bc,
@@ -5515,9 +5647,11 @@ void applyDynamicContactAngleResidual(
             " law=xi_Vcl_equals_gamma_cos_thetae_minus_cos_thetad" +
             " surface_tension_form=" + surfaceTensionFormName(bc) +
             " contact_force_discretization=" +
-            (usesSurfaceStress(bc)
-                 ? "surface_conormal_plus_equilibrium_wall_energy"
-                 : "explicit_dynamic_angle_gap") +
+            (usesKinematicAreaGradientTraction(bc)
+                 ? "total_energy_traction_plus_line_friction"
+                 : usesSurfaceStress(bc)
+                       ? "surface_conormal_plus_equilibrium_wall_energy"
+                       : "explicit_dynamic_angle_gap") +
             " active_wall_marker=" +
             std::to_string(active_wall_marker) +
             " wetted_wall_domain=sharp_generated_active_boundary" +
@@ -6231,7 +6365,10 @@ void registerFreeSurfacePrescribedAngleGeometry(
                 std::to_string(bc.interface_marker) +
                 " contact_marker=" + std::to_string(contact_marker) +
                 " level_set_geometry_owner=accepted_state_wall_aware_repair"
-                " momentum_owner=young_wall_energy"
+                " momentum_owner=" +
+                std::string(usesKinematicAreaGradientTraction(bc)
+                                ? "total_energy_gradient_traction"
+                                : "young_wall_energy") +
                 " literal_codimension_two_level_set_residual=retired"
                 " diagnostic=navier_stokes_prescribed_contact_geometry");
             continue;
@@ -6450,6 +6587,54 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
                     " static_geometry_stationarity_required=1" +
                     " diagnostic=free_surface_variational_surface_stress");
             }
+        } else if (usesKinematicAreaGradientTraction(bc)) {
+            const auto pressure_integrand = p_ext * inner(n, v);
+            const auto interface_pressure_form = integrateOnFreeSurface(
+                pressure_integrand, bc, ale_enabled);
+            momentum_form = momentum_form + interface_pressure_form;
+            if (conservative_pressure_form != nullptr) {
+                *conservative_pressure_form =
+                    conservative_pressure_form->isValid()
+                        ? (*conservative_pressure_form +
+                           interface_pressure_form)
+                        : interface_pressure_form;
+            }
+            if (conservative_external_pressure_form != nullptr) {
+                *conservative_external_pressure_form =
+                    conservative_external_pressure_form->isValid()
+                        ? (*conservative_external_pressure_form +
+                           interface_pressure_form)
+                        : interface_pressure_form;
+            }
+            if (!bc::isZeroConstantScalarValue(bc.surface_tension)) {
+                const auto capillary_integrand =
+                    gamma * curvature * inner(n, v);
+                const auto total_energy_gradient_form =
+                    integrateOnFreeSurface(
+                        capillary_integrand, bc, ale_enabled);
+                momentum_form =
+                    momentum_form + total_energy_gradient_form;
+                if (conservative_surface_energy_form != nullptr) {
+                    *conservative_surface_energy_form =
+                        conservative_surface_energy_form->isValid()
+                            ? (*conservative_surface_energy_form +
+                               total_energy_gradient_form)
+                            : total_energy_gradient_form;
+                }
+            }
+            FE_LOG_INFO(
+                std::string("IncompressibleNavierStokesVMSModule: installed total discrete-energy-gradient traction") +
+                " marker=" +
+                std::to_string(freeSurfaceMarker(bc)) +
+                " surface_tension_form=KinematicAreaGradientTraction" +
+                " normal_source=integration_rule_geometry" +
+                " curvature_source=" +
+                freeSurfaceCurvaturePolicyName(bc) +
+                " capillary_balance_method=kinematic_area_gradient_energy_traction" +
+                " capillary_balance_qualification=prerequisite_only" +
+                " equilibrium_line_force_owner=traction" +
+                " force_projection_applied=0" +
+                " diagnostic=free_surface_total_energy_gradient_traction");
         } else {
             const auto traction_scalar = -p_ext - gamma * curvature;
             const auto traction = traction_scalar * n;
@@ -7357,6 +7542,9 @@ tangentialPolicyProvenance(
         case FreeSurfaceSurfaceTensionForm::GeneratedCurvatureTraction:
             out << "\"GeneratedCurvatureTraction\"";
             break;
+        case FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction:
+            out << "\"KinematicAreaGradientTraction\"";
+            break;
         case FreeSurfaceSurfaceTensionForm::SurfaceStress:
             out << "\"SurfaceStress\"";
             break;
@@ -7368,6 +7556,16 @@ tangentialPolicyProvenance(
                 << "\"experimental_candidate\""
                 << ",\"surface_tension_normal_source\":"
                 << "\"generated_interface_rule_geometry\"";
+        }
+        if (usesKinematicAreaGradientTraction(boundary)) {
+            out << ",\"surface_tension_form_qualification\":"
+                << "\"prerequisite_only\""
+                << ",\"surface_tension_normal_source\":"
+                << "\"generated_interface_rule_geometry\""
+                << ",\"surface_tension_curvature_source\":"
+                << "\"kinematic_area_gradient_total_surface_young_energy\""
+                << ",\"equilibrium_young_force_owner\":"
+                << "\"total_energy_gradient_traction\"";
         }
         if (boundary.implementation ==
             FreeSurfaceImplementation::FittedALE) {
@@ -7392,6 +7590,10 @@ tangentialPolicyProvenance(
                 << "\"value\":\"GeneratedCurvatureTraction\","
                 << "\"reason_code\":"
                 << "\"generated_curvature_traction_unfitted_only\""
+                << "},{\"feature\":\"surface_tension_form\","
+                << "\"value\":\"KinematicAreaGradientTraction\","
+                << "\"reason_code\":"
+                << "\"kinematic_area_gradient_traction_unfitted_only\""
                 << "},{\"feature\":\"contact_line_model\","
                 << "\"value\":\"PrescribedAngle\","
                 << "\"reason_code\":"
@@ -7921,6 +8123,16 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             }
         }
         effective_free_surfaces.push_back(std::move(effective_bc));
+    }
+    const bool has_kinematic_area_gradient_traction =
+        std::any_of(
+            effective_free_surfaces.begin(),
+            effective_free_surfaces.end(),
+            usesKinematicAreaGradientTraction);
+    if (has_kinematic_area_gradient_traction &&
+        !isSupportedGeneratedBoundaryTraceSpace(*velocity_space_, dim)) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule::registerOn: KinematicAreaGradientTraction requires an affine P1 Product H1 velocity space on Triangle3 or Tetra4 cells");
     }
     validateGeneratedFreeSurfaceMarkerUniqueness(
         effective_free_surfaces, system);

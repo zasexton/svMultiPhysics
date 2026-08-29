@@ -1739,6 +1739,12 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
             .use_level_set_curvature = false,
             .small_cut_aggregation = false,
         };
+    if (surface_tension_form ==
+        ns::FreeSurfaceSurfaceTensionForm::
+            KinematicAreaGradientTraction) {
+        free_surface.curvature_field_name =
+            "kappa_dynamic_contact_total_energy";
+    }
     if (include_dynamic_contact_angle) {
         const std::array<FE::Real, 3> configured_wall_normal =
             reverse_wall_orientation
@@ -1759,6 +1765,18 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
         .space = p_space,
         .components = 1,
     });
+    FE::FieldId kappa = FE::INVALID_FIELD_ID;
+    if (surface_tension_form ==
+        ns::FreeSurfaceSurfaceTensionForm::
+            KinematicAreaGradientTraction) {
+        kappa = system.addField(FE::systems::FieldSpec{
+            .name = "kappa_dynamic_contact_total_energy",
+            .space = p_space,
+            .components = 1,
+            .source_kind =
+                FE::systems::FieldSourceKind::PrescribedData,
+        });
+    }
     system.addOperator("equations");
     const auto phi_state =
         FE::forms::StateField(phi, *p_space, "phi_dynamic_owner");
@@ -1846,6 +1864,10 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
         retained_volume_side,
         active_boundary_measure));
     system.setup({}, makeSingleTetraSetupInputs());
+    if (kappa != FE::INVALID_FIELD_ID) {
+        system.setPrescribedFieldCoefficients(
+            kappa, constantScalarTetraCoefficients(FE::Real{0.0}));
+    }
 
     DynamicContactAngleAssembly out;
     out.total_dofs = system.dofHandler().getNumDofs();
@@ -2080,6 +2102,11 @@ std::vector<FE::Real> unfittedContactAngleResidualVector(
             .surface_tension_form = surface_tension_form,
             .use_level_set_curvature = false,
         };
+    if (surface_tension_form ==
+        ns::FreeSurfaceSurfaceTensionForm::
+            KinematicAreaGradientTraction) {
+        free_surface.curvature_field_name = "kappa_total_energy";
+    }
     if (include_contact_angle) {
         free_surface.contact_lines.push_back(prescribedContactLine(
             wall_marker,
@@ -2094,6 +2121,18 @@ std::vector<FE::Real> unfittedContactAngleResidualVector(
         .space = p_space,
         .components = 1,
     });
+    FE::FieldId kappa = FE::INVALID_FIELD_ID;
+    if (surface_tension_form ==
+        ns::FreeSurfaceSurfaceTensionForm::
+            KinematicAreaGradientTraction) {
+        kappa = system.addField(FE::systems::FieldSpec{
+            .name = "kappa_total_energy",
+            .space = p_space,
+            .components = 1,
+            .source_kind =
+                FE::systems::FieldSourceKind::PrescribedData,
+        });
+    }
     system.addOperator("equations");
     if (include_transient_owner) {
         const auto phi_state =
@@ -2131,6 +2170,10 @@ std::vector<FE::Real> unfittedContactAngleResidualVector(
         outward_wall_normal,
         generated_interface_normal.value_or(level_set_gradient)));
     system.setup({}, makeSingleTetraSetupInputs());
+    if (kappa != FE::INVALID_FIELD_ID) {
+        system.setPrescribedFieldCoefficients(
+            kappa, constantScalarTetraCoefficients(FE::Real{0.0}));
+    }
 
     std::vector<FE::Real> solution(
         static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
@@ -4757,6 +4800,10 @@ TEST(MovingDomainPhysics,
         "\"value\":\"GeneratedCurvatureTraction\","
         "\"reason_code\":"
         "\"generated_curvature_traction_unfitted_only\""
+        "},{\"feature\":\"surface_tension_form\","
+        "\"value\":\"KinematicAreaGradientTraction\","
+        "\"reason_code\":"
+        "\"kinematic_area_gradient_traction_unfitted_only\""
         "},{\"feature\":\"contact_line_model\","
         "\"value\":\"PrescribedAngle\","
         "\"reason_code\":"
@@ -7710,6 +7757,48 @@ TEST(MovingDomainPhysics,
 }
 
 TEST(MovingDomainPhysics,
+     NavierStokesFittedKinematicAreaGradientTractionFailsClosed)
+{
+    constexpr int marker = 218;
+    const auto mesh =
+        std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_ale = true;
+    opts.mesh_velocity_source =
+        ns::ALEMeshVelocitySource::CoupledDisplacement;
+    opts.auto_register_mesh_displacement_field = true;
+    opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation = ns::FreeSurfaceImplementation::FittedALE,
+            .boundary_marker = marker,
+            .surface_tension = 0.072,
+            .surface_tension_form = ns::FreeSurfaceSurfaceTensionForm::
+                KinematicAreaGradientTraction,
+        });
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(
+        u_space, p_space, std::move(opts));
+    try {
+        module.registerOn(system);
+        FAIL() << "fitted KinematicAreaGradientTraction must fail closed";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(
+            std::string(error.what()).find(
+                "KinematicAreaGradientTraction is available only for "
+                "unfitted level-set free surfaces"),
+            std::string::npos)
+            << error.what();
+    }
+    EXPECT_EQ(system.fieldMap().numFields(), 0u);
+    EXPECT_TRUE(system.formulationRecords().empty());
+    EXPECT_FALSE(system.hasOperator("equations"));
+    EXPECT_FALSE(module.effectiveConfigurationArtifact().has_value());
+}
+
+TEST(MovingDomainPhysics,
      NavierStokesGeneratedCurvatureTractionReportsCandidateProvenance)
 {
     constexpr int interface_marker = 217;
@@ -7771,6 +7860,254 @@ TEST(MovingDomainPhysics,
               std::string::npos);
     EXPECT_NE(log_output.find("qualification=Experimental"),
               std::string::npos);
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesKinematicAreaGradientTractionDeclaresExclusiveEnergyOwner)
+{
+    constexpr int interface_marker = 219;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+    opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation =
+                ns::FreeSurfaceImplementation::UnfittedLevelSet,
+            .interface_marker = interface_marker,
+            .level_set_field_name = "phi_total_energy_traction",
+            .active_domain =
+                ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            .external_pressure = 0.25,
+            .surface_tension = 0.072,
+            .surface_tension_form = ns::FreeSurfaceSurfaceTensionForm::
+                KinematicAreaGradientTraction,
+            .curvature_field_name = "kappa_total_energy_traction",
+            .use_level_set_curvature = false,
+        });
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi_total_energy_traction",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+    const auto kappa = system.addField(FE::systems::FieldSpec{
+        .name = "kappa_total_energy_traction",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+    ns::IncompressibleNavierStokesVMSModule module(
+        u_space, p_space, std::move(opts));
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    ASSERT_NO_THROW(module.registerOn(system));
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
+
+    const auto declarations =
+        system.freeSurfaceDiscreteFunctionalDeclarations();
+    ASSERT_EQ(declarations.size(), 1u);
+    EXPECT_EQ(declarations.front().interface_marker, interface_marker);
+    EXPECT_EQ(declarations.front().level_set_field, phi);
+    EXPECT_EQ(declarations.front().curvature_field, kappa);
+    EXPECT_TRUE(declarations.front().endpoint_functional_power_enabled);
+    EXPECT_EQ(
+        declarations.front().capillary_balance_method,
+        FE::systems::FreeSurfaceCapillaryBalanceMethod::
+            KinematicAreaGradientEnergyTraction);
+    EXPECT_EQ(
+        declarations.front().capillary_balance_qualification,
+        FE::systems::FreeSurfaceCapillaryBalanceQualification::
+            PrerequisiteOnly);
+
+    const auto artifact = module.effectiveConfigurationArtifact();
+    ASSERT_TRUE(artifact.has_value());
+    EXPECT_NE(
+        artifact->json.find(
+            "\"surface_tension_form_effective\":"
+            "\"KinematicAreaGradientTraction\""),
+        std::string::npos);
+    EXPECT_NE(
+        artifact->json.find(
+            "\"equilibrium_young_force_owner\":"
+            "\"total_energy_gradient_traction\""),
+        std::string::npos);
+    EXPECT_NE(
+        log_output.find(
+            "diagnostic=free_surface_total_energy_gradient_traction"),
+        std::string::npos);
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesKinematicAreaGradientTractionRejectsAmbiguousCurvatureSources)
+{
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    const auto register_with =
+        [&](bool name_curvature_field,
+            bool use_raw_curvature,
+            FE::systems::FieldSourceKind curvature_source) {
+            auto opts = baseNavierStokesOptions();
+            opts.free_surface.push_back(
+                ns::IncompressibleNavierStokesVMSOptions::
+                    FreeSurfaceBoundary{
+                        .implementation = ns::FreeSurfaceImplementation::
+                            UnfittedLevelSet,
+                        .interface_marker = 220,
+                        .level_set_field_name = "phi_total_energy_guard",
+                        .active_domain = ns::FreeSurfaceActiveDomain::
+                            LevelSetNegative,
+                        .surface_tension = 0.072,
+                        .surface_tension_form = ns::
+                            FreeSurfaceSurfaceTensionForm::
+                                KinematicAreaGradientTraction,
+                        .curvature_field_name =
+                            name_curvature_field
+                                ? "kappa_total_energy_guard"
+                                : "",
+                        .use_level_set_curvature = use_raw_curvature,
+                    });
+            FE::systems::FESystem system(mesh);
+            system.addField(FE::systems::FieldSpec{
+                .name = "phi_total_energy_guard",
+                .space = p_space,
+                .components = 1,
+                .source_kind =
+                    FE::systems::FieldSourceKind::PrescribedData,
+            });
+            if (name_curvature_field) {
+                system.addField(FE::systems::FieldSpec{
+                    .name = "kappa_total_energy_guard",
+                    .space = p_space,
+                    .components = 1,
+                    .source_kind = curvature_source,
+                });
+            }
+            ns::IncompressibleNavierStokesVMSModule module(
+                u_space, p_space, std::move(opts));
+            module.registerOn(system);
+        };
+
+    EXPECT_THROW(
+        register_with(
+            false,
+            false,
+            FE::systems::FieldSourceKind::PrescribedData),
+        std::invalid_argument);
+    EXPECT_THROW(
+        register_with(
+            true,
+            true,
+            FE::systems::FieldSourceKind::PrescribedData),
+        std::invalid_argument);
+    EXPECT_THROW(
+        register_with(
+            true,
+            false,
+            FE::systems::FieldSourceKind::Unknown),
+        std::invalid_argument);
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesKinematicAreaGradientTractionRejectsAliasedFieldsBeforeMutation)
+{
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation =
+                ns::FreeSurfaceImplementation::UnfittedLevelSet,
+            .interface_marker = 221,
+            .level_set_field_name = "phi_aliased_total_energy_guard",
+            .active_domain =
+                ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            .surface_tension = 0.072,
+            .surface_tension_form = ns::FreeSurfaceSurfaceTensionForm::
+                KinematicAreaGradientTraction,
+            .curvature_field_name = "phi_aliased_total_energy_guard",
+            .use_level_set_curvature = false,
+        });
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi_aliased_total_energy_guard",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+    const auto field_count = system.fieldMap().numFields();
+    ns::IncompressibleNavierStokesVMSModule module(
+        u_space, p_space, std::move(opts));
+    EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    EXPECT_EQ(system.fieldMap().numFields(), field_count);
+    EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
+    EXPECT_TRUE(system.formulationRecords().empty());
+    EXPECT_TRUE(
+        system.freeSurfaceDiscreteFunctionalDeclarations().empty());
+    EXPECT_FALSE(system.hasOperator("equations"));
+    EXPECT_FALSE(module.effectiveConfigurationArtifact().has_value());
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesKinematicAreaGradientTractionRejectsQuadraticVelocityBeforeMutation)
+{
+    const auto mesh = makeMesh();
+    auto u_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1,
+        mesh,
+        /*order=*/2,
+        /*components=*/3);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation =
+                ns::FreeSurfaceImplementation::UnfittedLevelSet,
+            .interface_marker = 222,
+            .level_set_field_name = "phi_quadratic_velocity_guard",
+            .active_domain =
+                ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            .surface_tension = 0.072,
+            .surface_tension_form = ns::FreeSurfaceSurfaceTensionForm::
+                KinematicAreaGradientTraction,
+            .curvature_field_name =
+                "kappa_quadratic_velocity_guard",
+            .use_level_set_curvature = false,
+        });
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi_quadratic_velocity_guard",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+    system.addField(FE::systems::FieldSpec{
+        .name = "kappa_quadratic_velocity_guard",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+    const auto field_count = system.fieldMap().numFields();
+    ns::IncompressibleNavierStokesVMSModule module(
+        u_space, p_space, std::move(opts));
+    EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    EXPECT_EQ(system.fieldMap().numFields(), field_count);
+    EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
+    EXPECT_TRUE(system.formulationRecords().empty());
+    EXPECT_TRUE(
+        system.freeSurfaceDiscreteFunctionalDeclarations().empty());
+    EXPECT_FALSE(system.hasOperator("equations"));
+    EXPECT_FALSE(module.effectiveConfigurationArtifact().has_value());
 }
 
 TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsNitscheKinematics)
@@ -11342,6 +11679,10 @@ TEST(MovingDomainPhysics,
         "\"value\":\"GeneratedCurvatureTraction\","
         "\"reason_code\":"
         "\"generated_curvature_traction_unfitted_only\""
+        "},{\"feature\":\"surface_tension_form\","
+        "\"value\":\"KinematicAreaGradientTraction\","
+        "\"reason_code\":"
+        "\"kinematic_area_gradient_traction_unfitted_only\""
         "},{\"feature\":\"contact_line_model\","
         "\"value\":\"PrescribedAngle\","
         "\"reason_code\":"
@@ -11722,6 +12063,126 @@ TEST(MovingDomainPhysics,
             << "the contact gap must change with generated geometry even "
                "when the Q1 gradient satisfies the angle";
     }
+}
+
+TEST(MovingDomainPhysics,
+     KinematicAreaGradientTractionOwnsPrescribedYoungWallForce)
+{
+    constexpr FE::Real theta = FE::Real{1.0471975511965977462};
+    constexpr FE::Real gamma = FE::Real{0.8};
+    constexpr std::array<FE::Real, 3> wall_normal{0.0, 0.0, 1.0};
+    constexpr std::array<FE::Real, 3> generated_normal{
+        FE::Real{0.86602540378443864676}, FE::Real{0.0}, FE::Real{-0.5}};
+    constexpr std::array<FE::Real, 3> level_set_gradient{
+        FE::Real{1.0}, FE::Real{0.0}, FE::Real{0.0}};
+    constexpr auto form =
+        ns::FreeSurfaceSurfaceTensionForm::
+            KinematicAreaGradientTraction;
+
+    for (const auto active_domain : {
+             ns::FreeSurfaceActiveDomain::LevelSetNegative,
+             ns::FreeSurfaceActiveDomain::LevelSetPositive}) {
+        const auto configured = unfittedContactAngleResidualVector(
+            active_domain,
+            theta,
+            level_set_gradient,
+            wall_normal,
+            nullptr,
+            /*include_contact_angle=*/true,
+            /*include_transient_owner=*/true,
+            generated_normal,
+            gamma,
+            form);
+        const auto no_contact = unfittedContactAngleResidualVector(
+            active_domain,
+            theta,
+            level_set_gradient,
+            wall_normal,
+            nullptr,
+            /*include_contact_angle=*/false,
+            /*include_transient_owner=*/true,
+            generated_normal,
+            gamma,
+            form);
+        ASSERT_EQ(configured.size(), no_contact.size());
+        for (std::size_t index = 0u; index < configured.size(); ++index) {
+            EXPECT_NEAR(
+                configured[index], no_contact[index], FE::Real{2.0e-11})
+                << "the total-energy curvature field already owns the "
+                   "equilibrium Young wall variation";
+        }
+    }
+}
+
+TEST(MovingDomainPhysics,
+     KinematicAreaGradientTractionRetainsOnlyPositiveContactDissipation)
+{
+    constexpr FE::Real equilibrium_angle =
+        FE::Real{1.0471975511965977462};
+    constexpr FE::Real dynamic_angle = FE::Real{0.82};
+    constexpr auto form =
+        ns::FreeSurfaceSurfaceTensionForm::
+            KinematicAreaGradientTraction;
+    const auto assemble = [&](const std::array<FE::Real, 4>& velocity,
+                              bool include_contact) {
+        return assembleDynamicContactAngleCase(
+            equilibrium_angle,
+            dynamic_angle,
+            velocity,
+            include_contact,
+            /*assemble_jacobian=*/false,
+            /*level_set_nodal_perturbation=*/{},
+            /*generated_boundary_normal=*/{0.0, 0.0, -1.0},
+            /*level_set_scale=*/1.0,
+            /*level_set_shift=*/0.0,
+            /*velocity_component=*/0,
+            ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            form);
+    };
+
+    constexpr std::array<FE::Real, 4> zero_velocity{
+        FE::Real{0.0}, FE::Real{0.0}, FE::Real{0.0}, FE::Real{0.0}};
+    const auto zero_contact = assemble(zero_velocity, true);
+    const auto zero_baseline = assemble(zero_velocity, false);
+    ASSERT_EQ(zero_contact.residual.size(), zero_baseline.residual.size());
+    for (std::size_t row = 0u; row < zero_contact.residual.size(); ++row) {
+        EXPECT_NEAR(zero_contact.residual[row],
+                    zero_baseline.residual[row],
+                    FE::Real{2.0e-11})
+            << "the traction-owned Young variation must not be assembled "
+               "again as a dynamic-angle gap";
+    }
+
+    constexpr std::array<FE::Real, 4> moving_velocity{
+        FE::Real{0.3}, FE::Real{0.25}, FE::Real{0.2}, FE::Real{0.15}};
+    const auto moving_contact = assemble(moving_velocity, true);
+    const auto moving_baseline = assemble(moving_velocity, false);
+    ASSERT_EQ(moving_contact.residual.size(),
+              moving_baseline.residual.size());
+    FE::Real dissipative_power = FE::Real{0.0};
+    FE::Real added_residual_norm2 = FE::Real{0.0};
+    for (FE::GlobalIndex local_row = 0;
+         local_row < moving_contact.velocity_dofs;
+         ++local_row) {
+        const auto row = static_cast<std::size_t>(
+            moving_contact.velocity_offset + local_row);
+        const auto added = moving_contact.residual[row] -
+                           moving_baseline.residual[row];
+        added_residual_norm2 += added * added;
+        dissipative_power += moving_contact.solution[row] * added;
+    }
+    EXPECT_GT(std::sqrt(added_residual_norm2), FE::Real{1.0e-10});
+    EXPECT_GT(dissipative_power, FE::Real{0.0});
+    ASSERT_EQ(moving_contact.discrete_functional_declarations.size(), 1u);
+    const auto& declaration =
+        moving_contact.discrete_functional_declarations.front();
+    EXPECT_EQ(declaration.parameters.young_wall_coefficients.size(), 1u);
+    EXPECT_EQ(declaration.parameters.dynamic_contact_coefficients.size(),
+              1u);
+    EXPECT_EQ(
+        declaration.capillary_balance_method,
+        FE::systems::FreeSurfaceCapillaryBalanceMethod::
+            KinematicAreaGradientEnergyTraction);
 }
 
 TEST(MovingDomainPhysics,

@@ -2555,6 +2555,11 @@ parse_free_surface_surface_tension_form(std::string_view raw,
       token == "generatednormalcurvaturetraction") {
     return FreeSurfaceSurfaceTensionForm::GeneratedCurvatureTraction;
   }
+  if (token == "kinematicareagradienttraction" ||
+      token == "totalenergygradienttraction" ||
+      token == "discreteenergygradienttraction") {
+    return FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction;
+  }
   if (token == "surfacestress" || token == "surfaceenergy" ||
       token == "laplacebeltrami" || token == "variational") {
     return FreeSurfaceSurfaceTensionForm::SurfaceStress;
@@ -2562,7 +2567,7 @@ parse_free_surface_surface_tension_form(std::string_view raw,
   throw std::runtime_error(
       "[svMultiPhysics::Physics] " + std::string(context) +
       " must be one of Automatic, CurvatureTraction, "
-      "GeneratedCurvatureTraction, or SurfaceStress.");
+      "GeneratedCurvatureTraction, KinematicAreaGradientTraction, or SurfaceStress.");
 }
 
 svmp::Physics::formulations::navier_stokes::FreeSurfaceNormalKinematicPolicy
@@ -3905,6 +3910,11 @@ void validate_fitted_surface_contact_capability(
         FreeSurfaceSurfaceTensionForm::GeneratedCurvatureTraction) {
       throw std::invalid_argument(
           "IncompressibleNavierStokesVMSModule: GeneratedCurvatureTraction is available only for unfitted level-set free surfaces; use Automatic/CurvatureTraction for fitted boundaries");
+    }
+    if (boundary.surface_tension_form ==
+        FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction) {
+      throw std::invalid_argument(
+          "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction is available only for unfitted level-set free surfaces; use Automatic/CurvatureTraction for fitted boundaries");
     }
     for (const auto& contact_line : boundary.contact_lines) {
       if (std::holds_alternative<ContactLine::PrescribedAngle>(

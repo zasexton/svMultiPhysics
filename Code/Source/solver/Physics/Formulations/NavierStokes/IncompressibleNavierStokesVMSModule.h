@@ -114,12 +114,17 @@ enum class FreeSurfacePressureStabilizationPolicy : std::uint8_t {
  * GeneratedCurvatureTraction is an unfitted-only candidate that evaluates a
  * supplied or projected curvature against the normal carried by the same
  * generated-interface rule as the surface measure.
+ * KinematicAreaGradientTraction is an unfitted-only total-energy route.  Its
+ * prescribed curvature represents the variation of liquid--gas area and all
+ * declared Young wetted-wall energies, so no separate equilibrium line force
+ * is assembled.
  */
 enum class FreeSurfaceSurfaceTensionForm : std::uint8_t {
     Automatic,
     CurvatureTraction,
     SurfaceStress,
-    GeneratedCurvatureTraction
+    GeneratedCurvatureTraction,
+    KinematicAreaGradientTraction
 };
 
 /**

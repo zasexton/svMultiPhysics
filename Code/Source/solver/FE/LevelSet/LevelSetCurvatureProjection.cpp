@@ -2080,6 +2080,7 @@ struct SimplexAffineGeometry {
     const std::vector<std::map<std::size_t, Real>>& matrix,
     std::span<const Real> rhs,
     std::span<const Real> null_direction,
+    bool use_diagonal_preconditioner,
     std::vector<Real>& solution,
     std::size_t& iterations,
     Real& relative_residual) noexcept
@@ -2127,6 +2128,10 @@ struct SimplexAffineGeometry {
     };
     const auto precondition = [&](std::span<const Real> input,
                                   std::vector<Real>& output) noexcept {
+        if (!use_diagonal_preconditioner) {
+            std::copy(input.begin(), input.end(), output.begin());
+            return;
+        }
         for (std::size_t row = 0; row < matrix.size(); ++row) {
             const auto diagonal = matrix[row].find(row);
             output[row] =
@@ -2721,13 +2726,7 @@ struct SimplexAffineGeometry {
     }
 
     std::vector<Real> solved_curvature(n_vertices, Real{0.0});
-    std::vector<std::map<std::size_t, Real>> regularized_mass(n_vertices);
-    for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
-        if (lumped_kinematic_mass[vertex] > Real{0.0}) {
-            regularized_mass[vertex][vertex] =
-                lumped_kinematic_mass[vertex];
-        }
-    }
+    auto regularized_mass = kinematic_mass;
     struct FilterComponent {
         Real interface_measure{0.0};
         Real edge_length2_sum{0.0};
@@ -2926,22 +2925,16 @@ struct SimplexAffineGeometry {
             }
         }
     }
-    if (options.kinematic_area_gradient_filter_coefficient == Real{0.0}) {
-        for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
-            if (lumped_kinematic_mass[vertex] > Real{0.0}) {
-                solved_curvature[vertex] =
-                    rhs[vertex] / lumped_kinematic_mass[vertex];
-            }
-        }
-    } else if (!solveKinematicAreaMassSystem(
-                   regularized_mass,
-                   std::span<const Real>(rhs.data(), rhs.size()),
-                   std::span<const Real>{},
-                   solved_curvature,
-                   result.kinematic_area_gradient_linear_iterations,
-                   result.kinematic_area_gradient_relative_linear_residual)) {
+    if (!solveKinematicAreaMassSystem(
+            regularized_mass,
+            std::span<const Real>(rhs.data(), rhs.size()),
+            std::span<const Real>{},
+            options.kinematic_area_gradient_filter_coefficient > Real{0.0},
+            solved_curvature,
+            result.kinematic_area_gradient_linear_iterations,
+            result.kinematic_area_gradient_relative_linear_residual)) {
         result.diagnostic =
-            "kinematic-area-gradient curvature recovery could not solve its regularized interface system";
+            "kinematic-area-gradient curvature recovery could not solve its consistent interface system";
         return false;
     }
 
@@ -2962,8 +2955,10 @@ struct SimplexAffineGeometry {
             lumped_kinematic_mass[vertex];
         mass_weighted_curvature +=
             lumped_kinematic_mass[vertex] * kappa;
-        mass_weighted_curvature_squared +=
-            lumped_kinematic_mass[vertex] * kappa * kappa;
+        for (const auto& [column, value] : kinematic_mass[vertex]) {
+            mass_weighted_curvature_squared +=
+                kappa * value * solved_curvature[column];
+        }
         active_vertices[vertex] = 1u;
         fitted[vertex] = 1u;
         ++result.fitted_vertices;

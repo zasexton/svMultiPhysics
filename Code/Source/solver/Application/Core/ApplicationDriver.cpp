@@ -8803,6 +8803,7 @@ std::uint64_t freeSurfaceDiscreteFunctionalDeclarationContentKey(
 
   mix_signed(declaration.interface_marker);
   mix_signed(declaration.level_set_field);
+  mix_signed(declaration.curvature_field);
   mix_signed(declaration.velocity_field);
   mixCutContextHash(key, declaration.geometry_domain_id);
   mix_signed(declaration.parameters.liquid_side);
@@ -8912,9 +8913,10 @@ evaluateCurrentFreeSurfaceDiscreteFunctionals(
         declaration.active_volume_energy_parameters;
     const auto& active_dissipation =
         declaration.active_volume_dissipation_parameters;
-    const std::array<double, 22> declaration_metadata{
+    const std::array<double, 23> declaration_metadata{
         static_cast<double>(declaration.interface_marker),
         static_cast<double>(declaration.level_set_field),
+        static_cast<double>(declaration.curvature_field),
         static_cast<double>(declaration.velocity_field),
         static_cast<double>(declaration.parameters.liquid_side),
         static_cast<double>(declaration.parameters.surface_tension),
@@ -12579,6 +12581,8 @@ resolveLevelSetWallAwareMaintenanceContext(
     mix_declaration_value(static_cast<std::uint64_t>(
         static_cast<std::int64_t>(declaration.level_set_field)));
     mix_declaration_value(static_cast<std::uint64_t>(
+        static_cast<std::int64_t>(declaration.curvature_field)));
+    mix_declaration_value(static_cast<std::uint64_t>(
         static_cast<std::int64_t>(declaration.interface_marker)));
     mix_declaration_value(static_cast<std::uint64_t>(
         declaration.parameters.liquid_side));
@@ -15436,6 +15440,178 @@ std::optional<int> generatedCutContextMarkerForMaintenance(
   const auto& cut_request = *request.volume_cut_request;
   return application::core::resolvedActiveCutVolumeInterfaceMarker(
       system, cut_request);
+}
+
+void bindKinematicAreaGradientTractionMaintenance(
+    svmp::FE::systems::FESystem& system,
+    std::vector<LevelSetMaintenanceRequest>& requests)
+{
+  const auto declarations =
+      system.freeSurfaceDiscreteFunctionalDeclarations();
+  const auto comm = activeFESystemCommunicator(system);
+  const auto [minimum_declaration_count, maximum_declaration_count] =
+      globalMinMaxUint64(
+          static_cast<std::uint64_t>(declarations.size()), comm);
+  if (minimum_declaration_count != maximum_declaration_count) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Total-energy curvature declarations differ across the FE communicator.");
+  }
+  for (const auto& declaration : declarations) {
+    const auto key =
+        freeSurfaceDiscreteFunctionalDeclarationContentKey(declaration);
+    const auto [minimum_key, maximum_key] =
+        globalMinMaxUint64(key, comm);
+    if (minimum_key != maximum_key) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Total-energy curvature declaration content differs across the FE communicator.");
+    }
+  }
+
+  std::vector<unsigned char> matched(declarations.size(), 0u);
+  for (auto& request : requests) {
+    if (request.curvature_projection.recovery_mode !=
+        svmp::FE::level_set::LevelSetCurvatureRecoveryMode::
+            KinematicAreaGradient) {
+      continue;
+    }
+    const auto level_set_field =
+        system.findFieldByName(request.level_set_field_name);
+    const auto curvature_field =
+        system.findFieldByName(request.curvature_field_name);
+    std::vector<std::size_t> candidates;
+    for (std::size_t index = 0u; index < declarations.size(); ++index) {
+      const auto& declaration = declarations[index];
+      if (declaration.capillary_balance_method ==
+              svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
+                  KinematicAreaGradientEnergyTraction &&
+          declaration.level_set_field == level_set_field &&
+          declaration.curvature_field == curvature_field) {
+        candidates.push_back(index);
+      }
+    }
+    if (candidates.empty()) {
+      continue;
+    }
+    if (candidates.size() != 1u) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Kinematic-area-gradient recovery requires exactly one matching total-energy traction declaration.");
+    }
+    if (!request.curvature_projection_enabled ||
+        request.curvature_field_name.empty() ||
+        !request.volume_cut_request.has_value()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Kinematic-area-gradient recovery requires enabled curvature maintenance, a target field, and an authoritative active cut-volume request.");
+    }
+    if (request.curvature_projection
+            .kinematic_area_gradient_filter_coefficient != 0.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Total-energy traction requires Curvature_projection_kinematic_area_gradient_filter_coefficient=0 so the recovered curvature is the exact consistent-mass representation of the discrete functional derivative.");
+    }
+    const auto marker =
+        generatedCutContextMarkerForMaintenance(system, request);
+    if (level_set_field == svmp::FE::INVALID_FIELD_ID ||
+        curvature_field == svmp::FE::INVALID_FIELD_ID ||
+        !marker.has_value()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Kinematic-area-gradient recovery could not resolve its level-set field, curvature field, or authoritative interface marker.");
+    }
+    const auto declaration_index = candidates.front();
+    const auto& declaration = declarations[declaration_index];
+    const auto& cut_request = *request.volume_cut_request;
+    if (declaration.interface_marker != *marker ||
+        declaration.capillary_balance_qualification !=
+            svmp::FE::systems::FreeSurfaceCapillaryBalanceQualification::
+                PrerequisiteOnly ||
+        !declaration.endpoint_functional_power_enabled ||
+        declaration.curvature_field != curvature_field ||
+        declaration.geometry_domain_id != cut_request.domain_id ||
+        request.level_set_field_name !=
+            cut_request.level_set_field_name ||
+        request.isovalue != cut_request.isovalue ||
+        declaration.parameters.liquid_side !=
+            cutIntegrationSide(cut_request.active_side) ||
+        cut_request.geometry_mode !=
+            svmp::FE::level_set::GeneratedInterfaceGeometryMode::
+                LinearCorner ||
+        cut_request.geometry_tangent_policy !=
+            svmp::FE::level_set::GeometryTangentPolicy::
+                RefreshedFrozenQuadrature) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Kinematic-area-gradient recovery is not bound to the same prerequisite-only endpoint total-energy traction, level-set isovalue, curvature field, domain, liquid side, and frozen LinearCorner geometry.");
+    }
+    if (matched[declaration_index] != 0u) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] More than one curvature-maintenance request targets the same total-energy traction declaration.");
+    }
+
+    std::vector<svmp::FE::level_set::
+                    LevelSetKinematicAreaGradientYoungWall>
+        young_walls;
+    young_walls.reserve(
+        declaration.parameters.young_wall_coefficients.size());
+    for (const auto& coefficient :
+         declaration.parameters.young_wall_coefficients) {
+      young_walls.push_back(
+          {.boundary_marker = coefficient.boundary_marker,
+           .equilibrium_contact_angle_radians =
+               coefficient.equilibrium_contact_angle_radians});
+    }
+    std::sort(
+        young_walls.begin(),
+        young_walls.end(),
+        [](const auto& lhs, const auto& rhs) {
+          return lhs.boundary_marker < rhs.boundary_marker;
+        });
+    for (std::size_t index = 0u; index < young_walls.size(); ++index) {
+      if (young_walls[index].boundary_marker < 0 ||
+          !std::isfinite(
+              young_walls[index]
+                  .equilibrium_contact_angle_radians) ||
+          (index > 0u &&
+           young_walls[index - 1u].boundary_marker ==
+               young_walls[index].boundary_marker)) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Total-energy traction declares an invalid or duplicate Young wall coefficient.");
+      }
+    }
+    const auto& configured_walls =
+        request.curvature_projection
+            .kinematic_area_gradient_young_walls;
+    if (!configured_walls.empty()) {
+      const bool same = configured_walls.size() == young_walls.size() &&
+          std::equal(
+              configured_walls.begin(),
+              configured_walls.end(),
+              young_walls.begin(),
+              [](const auto& lhs, const auto& rhs) {
+                return lhs.boundary_marker == rhs.boundary_marker &&
+                       lhs.equilibrium_contact_angle_radians ==
+                           rhs.equilibrium_contact_angle_radians;
+              });
+      if (!same) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Curvature maintenance cannot override the Young-wall list owned by the total-energy traction declaration.");
+      }
+    }
+    request.curvature_projection
+        .kinematic_area_gradient_negative_liquid_side =
+        declaration.parameters.liquid_side ==
+        svmp::FE::geometry::CutIntegrationSide::Negative;
+    request.curvature_projection
+        .kinematic_area_gradient_young_walls =
+        std::move(young_walls);
+    matched[declaration_index] = 1u;
+  }
+
+  for (std::size_t index = 0u; index < declarations.size(); ++index) {
+    if (declarations[index].capillary_balance_method ==
+            svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
+                KinematicAreaGradientEnergyTraction &&
+        matched[index] == 0u) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] A total-energy traction declaration has no unique kinematic-area-gradient curvature-maintenance owner.");
+    }
+  }
 }
 
 struct CurvatureProjectionSnapshotIdentity {
@@ -25899,6 +26075,13 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       LevelSetMaintenanceScheduleStage::SteadyInitialization,
       sim.time_history->stepIndex(),
       activeFESystemCommunicator(*sim.fe_system));
+  bindKinematicAreaGradientTractionMaintenance(
+      *sim.fe_system, level_set_maintenance);
+  requireCollectiveLevelSetMaintenanceRequestSchedule(
+      level_set_maintenance,
+      LevelSetMaintenanceScheduleStage::SteadyInitialization,
+      sim.time_history->stepIndex(),
+      activeFESystemCommunicator(*sim.fe_system));
   const auto steady_level_set_advection_velocity =
       levelSetAdvectionVelocityRequests(params);
   applyCoupledLevelSetFieldResidualCriteria(
@@ -26360,6 +26543,13 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   auto bdf1 = std::make_shared<const svmp::FE::systems::BDFIntegrator>(1);
   svmp::FE::systems::TransientSystem transient(*sim.fe_system, std::move(bdf1));
   auto level_set_maintenance = levelSetMaintenanceRequests(params);
+  requireCollectiveLevelSetMaintenanceRequestSchedule(
+      level_set_maintenance,
+      LevelSetMaintenanceScheduleStage::TransientInitialization,
+      sim.time_history->stepIndex(),
+      activeFESystemCommunicator(*sim.fe_system));
+  bindKinematicAreaGradientTractionMaintenance(
+      *sim.fe_system, level_set_maintenance);
   requireCollectiveLevelSetMaintenanceRequestSchedule(
       level_set_maintenance,
       LevelSetMaintenanceScheduleStage::TransientInitialization,

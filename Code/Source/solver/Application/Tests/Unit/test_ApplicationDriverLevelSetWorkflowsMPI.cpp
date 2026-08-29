@@ -7133,6 +7133,265 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
 }
 
 TEST(ApplicationDriverLevelSetWorkflowsMPI,
+     KinematicAreaGradientTractionDispatchesCollectiveCurvatureRecovery)
+{
+  int rank = 0;
+  int size = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  if (size != 2) {
+    GTEST_SKIP() << "This collective curvature fixture requires two ranks.";
+  }
+
+  constexpr int interface_marker = 733;
+  auto mesh = makePartitionedHydrostaticPressureMesh(
+      /*normal_axis=*/1,
+      /*column_major_cells=*/false,
+      /*reverse_vertex_numbering=*/false);
+  auto scalar_space = svmp::FE::spaces::SpaceFactory::create_h1(
+      svmp::FE::ElementType::Triangle3, /*order=*/1);
+  auto velocity_space =
+      std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_space, 2);
+  auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
+  const auto phi = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "phi_total_energy_collective",
+      .space = scalar_space,
+      .components = 1,
+      .source_kind =
+          svmp::FE::systems::FieldSourceKind::PrescribedData,
+  });
+  const auto kappa = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "kappa_total_energy_collective",
+      .space = scalar_space,
+      .components = 1,
+      .source_kind =
+          svmp::FE::systems::FieldSourceKind::PrescribedData,
+  });
+  const auto velocity = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "velocity_total_energy_collective",
+      .space = velocity_space,
+      .components = 2,
+  });
+
+  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters
+      functional_parameters;
+  functional_parameters.liquid_side =
+      svmp::FE::geometry::CutIntegrationSide::Negative;
+  functional_parameters.surface_tension = 0.5;
+  system->declareFreeSurfaceDiscreteFunctional(
+      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+          .interface_marker = interface_marker,
+          .level_set_field = phi,
+          .curvature_field = kappa,
+          .velocity_field = velocity,
+          .geometry_domain_id = "total_energy_collective",
+          .parameters = functional_parameters,
+          .endpoint_functional_power_enabled = true,
+          .capillary_balance_method = svmp::FE::systems::
+              FreeSurfaceCapillaryBalanceMethod::
+                  KinematicAreaGradientEnergyTraction,
+          .capillary_balance_qualification = svmp::FE::systems::
+              FreeSurfaceCapillaryBalanceQualification::PrerequisiteOnly,
+          .owner_component =
+              "ApplicationDriverLevelSetWorkflowsMPI.TotalEnergyTraction",
+      });
+  ASSERT_NO_THROW(system->setup({}));
+
+  constexpr svmp::FE::Real center_x = 1.5;
+  constexpr svmp::FE::Real center_y = 0.5;
+  constexpr svmp::FE::Real radius = 0.42;
+  std::vector<svmp::FE::Real> phi_vertex_values(
+      mesh->n_vertices(), svmp::FE::Real{0.0});
+  const auto& local_mesh = mesh->local_mesh();
+  for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
+    const auto point = local_mesh.get_vertex_coords(
+        static_cast<svmp::index_t>(vertex));
+    phi_vertex_values[vertex] =
+        std::hypot(point[0] - center_x, point[1] - center_y) - radius;
+  }
+  ASSERT_NO_THROW(setScalarPrescribedVertexFieldFromValues(
+      *system,
+      *mesh,
+      phi,
+      std::span<const svmp::FE::Real>(phi_vertex_values.data(),
+                                      phi_vertex_values.size()),
+      "Collective total-energy curvature fixture"));
+
+  LevelSetMaintenanceRequest request;
+  request.level_set_field_name = "phi_total_energy_collective";
+  request.curvature_projection_enabled = true;
+  request.curvature_field_name = "kappa_total_energy_collective";
+  request.curvature_projection.recovery_mode =
+      svmp::FE::level_set::LevelSetCurvatureRecoveryMode::
+          KinematicAreaGradient;
+  request.curvature_projection
+      .kinematic_area_gradient_filter_coefficient = 0.0;
+  request.volume_cut_request = application::core::ActiveCutVolumeRequest{
+      .level_set_field_name = "phi_total_energy_collective",
+      .domain_id = "total_energy_collective",
+      .requested_interface_marker = interface_marker,
+      .active_side = application::core::LevelSetActiveSide::Negative,
+  };
+  std::vector<LevelSetMaintenanceRequest> requests{request};
+  ASSERT_NO_THROW(bindKinematicAreaGradientTractionMaintenance(
+      *system, requests));
+  ASSERT_TRUE(requests.front()
+                  .curvature_projection
+                  .kinematic_area_gradient_negative_liquid_side);
+  EXPECT_TRUE(requests.front()
+                  .curvature_projection
+                  .kinematic_area_gradient_young_walls.empty());
+
+  application::core::SimulationComponents sim;
+  sim.primary_mesh = mesh;
+  sim.fe_system = std::move(system);
+  svmp::FE::systems::SystemStateView state{};
+  CurvatureProjectionCache curvature_cache;
+  ASSERT_EQ(projectLevelSetCurvatureFieldsFromState(
+                sim,
+                state,
+                {},
+                requests,
+                /*step=*/0,
+                "collective_total_energy_traction",
+                /*honor_cadence=*/false,
+                &curvature_cache),
+            1u);
+  ASSERT_EQ(curvature_cache.entries.size(), 1u);
+  const auto& result =
+      curvature_cache.entries.begin()->second.last_result;
+  ASSERT_TRUE(result.success) << result.diagnostic;
+  EXPECT_TRUE(result.kinematic_area_gradient_collective_replication);
+  EXPECT_EQ(result.kinematic_area_gradient_parallel_size, 2);
+  EXPECT_EQ(result.kinematic_area_gradient_gathered_owned_cells, 32u);
+  EXPECT_GT(result.kinematic_area_gradient_cut_cells, 0u);
+  EXPECT_GT(result.kinematic_area_gradient_operator_vertices, 0u);
+  EXPECT_TRUE(std::isfinite(
+      result.kinematic_area_gradient_mass_weighted_mean_curvature));
+  EXPECT_TRUE(std::isfinite(
+      result.kinematic_area_gradient_mass_weighted_rms_deviation));
+
+  const auto projected = evaluateVertexField(
+      *sim.fe_system,
+      *mesh,
+      kappa,
+      state,
+      1u,
+      "checking collective total-energy curvature");
+  ASSERT_EQ(projected.size(), mesh->n_vertices());
+  ASSERT_EQ(projected,
+            curvature_cache.entries.begin()
+                ->second.last_curvature_vertex_values);
+  const auto& vertex_gids = local_mesh.vertex_gids();
+  ASSERT_EQ(vertex_gids.size(), mesh->n_vertices());
+  auto local_max_gid = svmp::gid_t{-1};
+  for (const auto gid : vertex_gids) {
+    local_max_gid = std::max(local_max_gid, gid);
+  }
+  svmp::gid_t global_max_gid = svmp::gid_t{-1};
+  ASSERT_EQ(MPI_Allreduce(&local_max_gid,
+                          &global_max_gid,
+                          1,
+                          MPI_INT64_T,
+                          MPI_MAX,
+                          MPI_COMM_WORLD),
+            MPI_SUCCESS);
+  ASSERT_GE(global_max_gid, svmp::gid_t{0});
+  const auto global_vertex_count =
+      static_cast<std::size_t>(global_max_gid + 1);
+  std::vector<double> owned_curvature(global_vertex_count, 0.0);
+  std::vector<int> owned_counts(global_vertex_count, 0);
+  for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
+    if (mesh->owner_rank_vertex(static_cast<svmp::index_t>(vertex)) !=
+        rank) {
+      continue;
+    }
+    const auto gid = vertex_gids[vertex];
+    ASSERT_GE(gid, svmp::gid_t{0});
+    ASSERT_LT(static_cast<std::size_t>(gid), global_vertex_count);
+    owned_curvature[static_cast<std::size_t>(gid)] = projected[vertex];
+    owned_counts[static_cast<std::size_t>(gid)] = 1;
+  }
+  std::vector<double> global_curvature(global_vertex_count, 0.0);
+  std::vector<int> global_counts(global_vertex_count, 0);
+  ASSERT_EQ(MPI_Allreduce(owned_curvature.data(),
+                          global_curvature.data(),
+                          static_cast<int>(global_vertex_count),
+                          MPI_DOUBLE,
+                          MPI_SUM,
+                          MPI_COMM_WORLD),
+            MPI_SUCCESS);
+  ASSERT_EQ(MPI_Allreduce(owned_counts.data(),
+                          global_counts.data(),
+                          static_cast<int>(global_vertex_count),
+                          MPI_INT,
+                          MPI_SUM,
+                          MPI_COMM_WORLD),
+            MPI_SUCCESS);
+  svmp::FE::Real maximum_absolute_curvature = 0.0;
+  svmp::FE::Real curvature_checksum = 0.0;
+  for (std::size_t vertex = 0u; vertex < global_vertex_count; ++vertex) {
+    EXPECT_EQ(global_counts[vertex], 1);
+    EXPECT_TRUE(std::isfinite(global_curvature[vertex]));
+    maximum_absolute_curvature = std::max(
+        maximum_absolute_curvature,
+        std::abs(global_curvature[vertex]));
+    curvature_checksum += static_cast<svmp::FE::Real>(vertex + 1u) *
+                          global_curvature[vertex];
+  }
+  EXPECT_GT(maximum_absolute_curvature, svmp::FE::Real{0.0});
+
+  svmp::FE::Real minimum_checksum = 0.0;
+  svmp::FE::Real maximum_checksum = 0.0;
+  ASSERT_EQ(MPI_Allreduce(&curvature_checksum,
+                          &minimum_checksum,
+                          1,
+                          MPI_DOUBLE,
+                          MPI_MIN,
+                          MPI_COMM_WORLD),
+            MPI_SUCCESS);
+  ASSERT_EQ(MPI_Allreduce(&curvature_checksum,
+                          &maximum_checksum,
+                          1,
+                          MPI_DOUBLE,
+                          MPI_MAX,
+                          MPI_COMM_WORLD),
+            MPI_SUCCESS);
+  EXPECT_DOUBLE_EQ(minimum_checksum, maximum_checksum);
+
+  const auto prescribed_revision =
+      sim.fe_system->prescribedFieldRevision(kappa);
+  std::uint64_t minimum_revision = 0u;
+  std::uint64_t maximum_revision = 0u;
+  ASSERT_EQ(MPI_Allreduce(&prescribed_revision,
+                          &minimum_revision,
+                          1,
+                          MPI_UINT64_T,
+                          MPI_MIN,
+                          MPI_COMM_WORLD),
+            MPI_SUCCESS);
+  ASSERT_EQ(MPI_Allreduce(&prescribed_revision,
+                          &maximum_revision,
+                          1,
+                          MPI_UINT64_T,
+                          MPI_MAX,
+                          MPI_COMM_WORLD),
+            MPI_SUCCESS);
+  EXPECT_GT(minimum_revision, 0u);
+  EXPECT_EQ(minimum_revision, maximum_revision);
+
+  RecordProperty("wp4_total_energy_collective_rank_count", size);
+  RecordProperty("wp4_total_energy_collective_owned_cell_count",
+                 result.kinematic_area_gradient_gathered_owned_cells);
+  RecordProperty("wp4_total_energy_collective_cut_cell_count",
+                 result.kinematic_area_gradient_cut_cells);
+  RecordProperty("wp4_total_energy_collective_max_abs_curvature",
+                 maximum_absolute_curvature);
+  RecordProperty("wp4_total_energy_collective_curvature_checksum",
+                 curvature_checksum);
+}
+
+TEST(ApplicationDriverLevelSetWorkflowsMPI,
      CollectiveFeOrderedGatherReconstructsDisjointOwnedRows)
 {
   int rank = 0;

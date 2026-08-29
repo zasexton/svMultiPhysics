@@ -3111,6 +3111,215 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
+     KinematicAreaGradientMaintenanceBindsTotalEnergyDeclaration)
+{
+  constexpr int interface_marker = 731;
+  auto mesh = makeWorkflowTriangleMesh();
+  auto scalar_space = svmp::FE::spaces::SpaceFactory::create_h1(
+      svmp::FE::ElementType::Triangle3, /*order=*/1);
+  auto velocity_space =
+      std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_space, 2);
+  svmp::FE::systems::FESystem system(mesh);
+  const auto phi = system.addField(svmp::FE::systems::FieldSpec{
+      .name = "phi_total_energy_binding",
+      .space = scalar_space,
+      .components = 1,
+      .source_kind =
+          svmp::FE::systems::FieldSourceKind::PrescribedData,
+  });
+  const auto kappa = system.addField(svmp::FE::systems::FieldSpec{
+      .name = "kappa_total_energy_binding",
+      .space = scalar_space,
+      .components = 1,
+      .source_kind =
+          svmp::FE::systems::FieldSourceKind::PrescribedData,
+  });
+  const auto velocity = system.addField(svmp::FE::systems::FieldSpec{
+      .name = "velocity_total_energy_binding",
+      .space = velocity_space,
+      .components = 2,
+  });
+  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters
+      functional_parameters;
+  functional_parameters.liquid_side =
+      svmp::FE::geometry::CutIntegrationSide::Positive;
+  functional_parameters.surface_tension = 0.5;
+  functional_parameters.young_wall_coefficients = {
+      {.boundary_marker = 19,
+       .equilibrium_contact_angle_radians = 2.1},
+      {.boundary_marker = 7,
+       .equilibrium_contact_angle_radians = 0.9},
+  };
+  system.declareFreeSurfaceDiscreteFunctional(
+      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+          .interface_marker = interface_marker,
+          .level_set_field = phi,
+          .curvature_field = kappa,
+          .velocity_field = velocity,
+          .geometry_domain_id = "total_energy_binding",
+          .parameters = functional_parameters,
+          .endpoint_functional_power_enabled = true,
+          .capillary_balance_method = svmp::FE::systems::
+              FreeSurfaceCapillaryBalanceMethod::
+                  KinematicAreaGradientEnergyTraction,
+          .capillary_balance_qualification = svmp::FE::systems::
+              FreeSurfaceCapillaryBalanceQualification::PrerequisiteOnly,
+          .owner_component = "total_energy_binding_test",
+      });
+
+  LevelSetMaintenanceRequest request;
+  request.level_set_field_name = "phi_total_energy_binding";
+  request.curvature_projection_enabled = true;
+  request.curvature_field_name = "kappa_total_energy_binding";
+  request.curvature_projection.recovery_mode =
+      svmp::FE::level_set::LevelSetCurvatureRecoveryMode::
+          KinematicAreaGradient;
+  request.curvature_projection
+      .kinematic_area_gradient_filter_coefficient = 0.0;
+  request.volume_cut_request = application::core::ActiveCutVolumeRequest{
+      .level_set_field_name = "phi_total_energy_binding",
+      .domain_id = "total_energy_binding",
+      .requested_interface_marker = interface_marker,
+      .active_side = application::core::LevelSetActiveSide::Positive,
+  };
+  std::vector<LevelSetMaintenanceRequest> requests{request};
+  ASSERT_NO_THROW(bindKinematicAreaGradientTractionMaintenance(
+      system, requests));
+  ASSERT_EQ(requests.size(), 1u);
+  const auto& options = requests.front().curvature_projection;
+  EXPECT_FALSE(options.kinematic_area_gradient_negative_liquid_side);
+  ASSERT_EQ(options.kinematic_area_gradient_young_walls.size(), 2u);
+  EXPECT_EQ(
+      options.kinematic_area_gradient_young_walls[0].boundary_marker,
+      7);
+  EXPECT_DOUBLE_EQ(
+      options.kinematic_area_gradient_young_walls[0]
+          .equilibrium_contact_angle_radians,
+      0.9);
+  EXPECT_EQ(
+      options.kinematic_area_gradient_young_walls[1].boundary_marker,
+      19);
+  EXPECT_DOUBLE_EQ(
+      options.kinematic_area_gradient_young_walls[1]
+          .equilibrium_contact_angle_radians,
+      2.1);
+
+  const auto canonical = canonicalLevelSetMaintenanceRequestSchedule(
+      requests,
+      LevelSetMaintenanceScheduleStage::TransientInitialization,
+      /*completed_step=*/0);
+  ASSERT_TRUE(canonical.supported);
+  auto changed = requests;
+  changed.front()
+      .curvature_projection
+      .kinematic_area_gradient_young_walls[0]
+      .equilibrium_contact_angle_radians += 0.1;
+  const auto changed_canonical =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          changed,
+          LevelSetMaintenanceScheduleStage::TransientInitialization,
+          /*completed_step=*/0);
+  EXPECT_NE(canonical.words, changed_canonical.words);
+
+  auto conflicting = requests;
+  conflicting.front()
+      .curvature_projection
+      .kinematic_area_gradient_young_walls[0]
+      .equilibrium_contact_angle_radians += 0.25;
+  EXPECT_THROW(
+      bindKinematicAreaGradientTractionMaintenance(system, conflicting),
+      std::runtime_error);
+  auto mismatched_isovalue = requests;
+  mismatched_isovalue.front().isovalue = 0.125;
+  EXPECT_THROW(
+      bindKinematicAreaGradientTractionMaintenance(
+          system, mismatched_isovalue),
+      std::runtime_error);
+  auto mismatched_geometry_policy = requests;
+  mismatched_geometry_policy.front()
+      .volume_cut_request->geometry_tangent_policy =
+      svmp::FE::level_set::GeometryTangentPolicy::
+          DifferentiatedQuadrature;
+  EXPECT_THROW(
+      bindKinematicAreaGradientTractionMaintenance(
+          system, mismatched_geometry_policy),
+      std::runtime_error);
+  auto filtered_recovery = requests;
+  filtered_recovery.front()
+      .curvature_projection
+      .kinematic_area_gradient_filter_coefficient = 0.25;
+  EXPECT_THROW(
+      bindKinematicAreaGradientTractionMaintenance(
+          system, filtered_recovery),
+      std::runtime_error);
+  auto wrong_recovery = requests;
+  wrong_recovery.front().curvature_projection.recovery_mode =
+      svmp::FE::level_set::LevelSetCurvatureRecoveryMode::
+          GeneratedInterfacePatch;
+  EXPECT_THROW(
+      bindKinematicAreaGradientTractionMaintenance(
+          system, wrong_recovery),
+      std::runtime_error);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     StandaloneKinematicAreaGradientDiagnosticRetainsFilterConfiguration)
+{
+  auto mesh = makeWorkflowTriangleMesh();
+  auto scalar_space = svmp::FE::spaces::SpaceFactory::create_h1(
+      svmp::FE::ElementType::Triangle3, /*order=*/1);
+  svmp::FE::systems::FESystem system(mesh);
+  system.addField(svmp::FE::systems::FieldSpec{
+      .name = "phi_standalone_area_gradient",
+      .space = scalar_space,
+      .components = 1,
+      .source_kind =
+          svmp::FE::systems::FieldSourceKind::PrescribedData,
+  });
+  system.addField(svmp::FE::systems::FieldSpec{
+      .name = "kappa_standalone_area_gradient",
+      .space = scalar_space,
+      .components = 1,
+      .source_kind =
+          svmp::FE::systems::FieldSourceKind::PrescribedData,
+  });
+
+  LevelSetMaintenanceRequest request;
+  request.level_set_field_name = "phi_standalone_area_gradient";
+  request.curvature_projection_enabled = true;
+  request.curvature_field_name = "kappa_standalone_area_gradient";
+  request.curvature_projection.recovery_mode =
+      svmp::FE::level_set::LevelSetCurvatureRecoveryMode::
+          KinematicAreaGradient;
+  request.curvature_projection
+      .kinematic_area_gradient_filter_coefficient = 0.5;
+  request.curvature_projection
+      .kinematic_area_gradient_negative_liquid_side = false;
+  request.curvature_projection.kinematic_area_gradient_young_walls = {
+      {.boundary_marker = 17,
+       .equilibrium_contact_angle_radians = 1.2},
+  };
+  std::vector<LevelSetMaintenanceRequest> requests{request};
+
+  ASSERT_NO_THROW(bindKinematicAreaGradientTractionMaintenance(
+      system, requests));
+  ASSERT_EQ(requests.size(), 1u);
+  const auto& options = requests.front().curvature_projection;
+  EXPECT_DOUBLE_EQ(
+      options.kinematic_area_gradient_filter_coefficient, 0.5);
+  EXPECT_FALSE(options.kinematic_area_gradient_negative_liquid_side);
+  ASSERT_EQ(options.kinematic_area_gradient_young_walls.size(), 1u);
+  EXPECT_EQ(
+      options.kinematic_area_gradient_young_walls.front().boundary_marker,
+      17);
+  EXPECT_DOUBLE_EQ(
+      options.kinematic_area_gradient_young_walls.front()
+          .equilibrium_contact_angle_radians,
+      1.2);
+  EXPECT_FALSE(requests.front().volume_cut_request.has_value());
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
      UncoupledNewtonControlsRetainPrimaryEquationCompatibility)
 {
   auto params = parseWorkflowParametersXml(R"xml(

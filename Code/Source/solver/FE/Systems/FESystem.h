@@ -430,7 +430,9 @@ struct MeshTangentialBoundaryPolicyHistoryRecord {
 enum class FreeSurfaceCapillaryBalanceMethod : std::uint8_t {
     Unselected,
     /** Snapshot energy variation plus a fixed-volume stationary geometry. */
-    DiscreteEnergyVolumeStationarity
+    DiscreteEnergyVolumeStationarity,
+    /** Total surface-plus-Young-wall energy gradient represented as traction. */
+    KinematicAreaGradientEnergyTraction
 };
 
 /** Evidence boundary for the selected capillary-balance construction. */
@@ -444,6 +446,8 @@ enum class FreeSurfaceCapillaryBalanceQualification : std::uint8_t {
 struct FreeSurfaceDiscreteFunctionalDeclaration {
     int interface_marker{-1};
     FieldId level_set_field{INVALID_FIELD_ID};
+    /** Prescribed curvature carrying the selected total energy gradient. */
+    FieldId curvature_field{INVALID_FIELD_ID};
     FieldId velocity_field{INVALID_FIELD_ID};
     std::string geometry_domain_id{};
     interfaces::FreeSurfaceDiscreteFunctionalParameters parameters{};

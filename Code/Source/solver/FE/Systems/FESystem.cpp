@@ -8908,6 +8908,7 @@ bool sameFreeSurfaceDiscreteFunctionalDeclaration(
 {
     if (lhs.interface_marker != rhs.interface_marker ||
         lhs.level_set_field != rhs.level_set_field ||
+        lhs.curvature_field != rhs.curvature_field ||
         lhs.velocity_field != rhs.velocity_field ||
         lhs.geometry_domain_id != rhs.geometry_domain_id ||
         !sameFreeSurfaceFunctionalParameters(
@@ -12191,10 +12192,17 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
         InvalidArgumentException,
         "FESystem::declareFreeSurfaceDiscreteFunctional: owner component "
         "must be nonempty");
-    const bool capillary_method_selected =
+    const bool capillary_method_stationarity =
         declaration.capillary_balance_method ==
         FreeSurfaceCapillaryBalanceMethod::
             DiscreteEnergyVolumeStationarity;
+    const bool capillary_method_kinematic_traction =
+        declaration.capillary_balance_method ==
+        FreeSurfaceCapillaryBalanceMethod::
+            KinematicAreaGradientEnergyTraction;
+    const bool capillary_method_selected =
+        capillary_method_stationarity ||
+        capillary_method_kinematic_traction;
     const bool capillary_method_unselected =
         declaration.capillary_balance_method ==
         FreeSurfaceCapillaryBalanceMethod::Unselected;
@@ -12236,6 +12244,87 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
         InvalidArgumentException,
         "FESystem::declareFreeSurfaceDiscreteFunctional: endpoint "
         "functional power requires the discrete-energy capillary method");
+    FE_THROW_IF(
+        capillary_method_kinematic_traction &&
+            !declaration.endpoint_functional_power_enabled,
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: the "
+        "kinematic-area-gradient traction method requires endpoint "
+        "functional-power accounting");
+    FE_THROW_IF(
+        capillary_method_kinematic_traction &&
+            !field_registry_.has(declaration.curvature_field),
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: the kinematic-area-gradient traction method requires a declared curvature field");
+    FE_THROW_IF(
+        capillary_method_kinematic_traction &&
+            declaration.curvature_field == declaration.level_set_field,
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: the kinematic-area-gradient traction level-set and curvature fields must be distinct");
+    FE_THROW_IF(
+        !capillary_method_kinematic_traction &&
+            declaration.curvature_field != INVALID_FIELD_ID,
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: a curvature field is valid only for the kinematic-area-gradient traction method");
+    if (capillary_method_kinematic_traction) {
+        const auto& curvature =
+            field_registry_.get(declaration.curvature_field);
+        FE_THROW_IF(
+            curvature.scope != FieldScope::VolumeCell ||
+                curvature.space == nullptr || curvature.components != 1 ||
+                curvature.space->value_dimension() != 1 ||
+                curvature.source_kind != FieldSourceKind::PrescribedData,
+            InvalidArgumentException,
+            "FESystem::declareFreeSurfaceDiscreteFunctional: the kinematic-area-gradient traction curvature must be a prescribed scalar volume field");
+        const int dimension = mesh_access_ ? mesh_access_->dimension() : 0;
+        const bool supported_simplex =
+            (dimension == 2 && level_set.space->element_type() ==
+                                   ElementType::Triangle3) ||
+            (dimension == 3 && level_set.space->element_type() ==
+                                   ElementType::Tetra4);
+        FE_THROW_IF(
+            !supported_simplex ||
+                level_set.space->polynomial_order() != 1 ||
+                level_set.space->continuity() != Continuity::C0 ||
+                curvature.space->space_type() !=
+                    level_set.space->space_type() ||
+                curvature.space->field_type() != FieldType::Scalar ||
+                curvature.space->topological_dimension() !=
+                    level_set.space->topological_dimension() ||
+                curvature.space->polynomial_order() != 1 ||
+                curvature.space->continuity() != Continuity::C0 ||
+                curvature.space->element_type() !=
+                    level_set.space->element_type() ||
+                curvature.space->dofs_per_element() !=
+                    level_set.space->dofs_per_element(),
+            InvalidArgumentException,
+            "FESystem::declareFreeSurfaceDiscreteFunctional: the kinematic-area-gradient traction requires matching scalar affine C0 P1 Triangle3 or Tetra4 level-set and curvature spaces");
+        FE_THROW_IF(
+            !field_registry_.has(declaration.velocity_field),
+            InvalidArgumentException,
+            "FESystem::declareFreeSurfaceDiscreteFunctional: the kinematic-area-gradient traction requires a registered velocity field");
+        const auto& velocity =
+            field_registry_.get(declaration.velocity_field);
+        FE_THROW_IF(
+            velocity.scope != FieldScope::VolumeCell ||
+                velocity.source_kind != FieldSourceKind::Unknown ||
+                velocity.space == nullptr ||
+                velocity.space->space_type() != spaces::SpaceType::Product ||
+                velocity.space->field_type() != FieldType::Vector ||
+                velocity.space->value_dimension() != dimension ||
+                velocity.components != dimension ||
+                velocity.space->topological_dimension() !=
+                    level_set.space->topological_dimension() ||
+                velocity.space->polynomial_order() != 1 ||
+                velocity.space->continuity() != Continuity::C0 ||
+                velocity.space->element_type() !=
+                    level_set.space->element_type() ||
+                velocity.space->dofs_per_element() !=
+                    level_set.space->dofs_per_element() *
+                        static_cast<std::size_t>(dimension),
+            InvalidArgumentException,
+            "FESystem::declareFreeSurfaceDiscreteFunctional: the kinematic-area-gradient traction requires a velocity field built from the same affine C0 P1 simplex scalar basis as the level-set and curvature fields");
+    }
     auto& parameters = declaration.parameters;
     FE_THROW_IF(
         parameters.liquid_side != geometry::CutIntegrationSide::Negative &&
@@ -12471,6 +12560,7 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
             << " diagnostic=free_surface_discrete_functional_declaration"
             << " interface_marker=" << stored.interface_marker
             << " level_set_field=" << stored.level_set_field
+            << " curvature_field=" << stored.curvature_field
             << " velocity_field=" << stored.velocity_field
             << " geometry_domain_id='" << stored.geometry_domain_id << "'"
             << " liquid_side="
@@ -12507,7 +12597,11 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
                         FreeSurfaceCapillaryBalanceMethod::
                             DiscreteEnergyVolumeStationarity
                     ? "discrete_energy_volume_stationarity"
-                    : "unselected")
+                    : stored.capillary_balance_method ==
+                              FreeSurfaceCapillaryBalanceMethod::
+                                  KinematicAreaGradientEnergyTraction
+                          ? "kinematic_area_gradient_energy_traction"
+                          : "unselected")
             << " capillary_balance_qualification="
             << (stored.capillary_balance_qualification ==
                         FreeSurfaceCapillaryBalanceQualification::Qualified
@@ -13697,6 +13791,9 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                         record.declaration.level_set_field !=
                             free_surface_discrete_functional_declarations_[i]
                                 .level_set_field ||
+                        record.declaration.curvature_field !=
+                            free_surface_discrete_functional_declarations_[i]
+                                .curvature_field ||
                         record.declaration.velocity_field !=
                             free_surface_discrete_functional_declarations_[i]
                                 .velocity_field ||
@@ -13883,13 +13980,18 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 << extension_map_revision.value_or(0u)
                 << " interface_marker=" << declaration.interface_marker
                 << " level_set_field=" << declaration.level_set_field
+                << " curvature_field=" << declaration.curvature_field
                 << " velocity_field=" << declaration.velocity_field
                 << " capillary_balance_method="
                 << (declaration.capillary_balance_method ==
                             FreeSurfaceCapillaryBalanceMethod::
                                 DiscreteEnergyVolumeStationarity
                         ? "discrete_energy_volume_stationarity"
-                        : "unselected")
+                        : declaration.capillary_balance_method ==
+                                  FreeSurfaceCapillaryBalanceMethod::
+                                      KinematicAreaGradientEnergyTraction
+                              ? "kinematic_area_gradient_energy_traction"
+                              : "unselected")
                 << " capillary_balance_qualification="
                 << (declaration.capillary_balance_qualification ==
                             FreeSurfaceCapillaryBalanceQualification::Qualified

@@ -2076,3 +2076,139 @@ TEST(FESystem,
                     .front()
                     .static_conservative_body_force_complete);
 }
+
+TEST(FESystem,
+     KinematicAreaGradientTractionRequiresPrescribedCurvatureAndPowerLedger)
+{
+    auto mesh = build_single_tetra_mesh();
+    auto scalar_space =
+        std::make_shared<H1Space>(ElementType::Tetra4, /*order=*/1);
+    auto velocity_space =
+        std::make_shared<ProductSpace>(scalar_space, /*components=*/3);
+    auto quadratic_scalar_space =
+        std::make_shared<H1Space>(ElementType::Tetra4, /*order=*/2);
+    auto quadratic_velocity_space =
+        std::make_shared<ProductSpace>(quadratic_scalar_space,
+                                       /*components=*/3);
+
+    FESystem sys(mesh);
+    const auto phi = sys.addField(
+        FieldSpec{.name = "phi_total_energy_contract",
+                  .space = scalar_space,
+                  .components = 1});
+    const auto prescribed_phi = sys.addField(
+        FieldSpec{.name = "phi_prescribed_total_energy_contract",
+                  .space = scalar_space,
+                  .components = 1,
+                  .source_kind = FieldSourceKind::PrescribedData});
+    const auto prescribed_curvature = sys.addField(
+        FieldSpec{.name = "kappa_total_energy_contract",
+                  .space = scalar_space,
+                  .components = 1,
+                  .source_kind = FieldSourceKind::PrescribedData});
+    const auto unknown_curvature = sys.addField(
+        FieldSpec{.name = "kappa_unknown_total_energy_contract",
+                  .space = scalar_space,
+                  .components = 1});
+    const auto incompatible_curvature = sys.addField(
+        FieldSpec{.name = "kappa_incompatible_total_energy_contract",
+                  .space = quadratic_scalar_space,
+                  .components = 1,
+                  .source_kind = FieldSourceKind::PrescribedData});
+    const auto velocity = sys.addField(
+        FieldSpec{.name = "u_total_energy_contract",
+                  .space = velocity_space,
+                  .components = 3});
+    const auto prescribed_velocity = sys.addField(
+        FieldSpec{.name = "u_prescribed_total_energy_contract",
+                  .space = velocity_space,
+                  .components = 3,
+                  .source_kind = FieldSourceKind::PrescribedData});
+    const auto incompatible_velocity = sys.addField(
+        FieldSpec{.name = "u_incompatible_total_energy_contract",
+                  .space = quadratic_velocity_space,
+                  .components = 3});
+
+    svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration declaration{
+        .interface_marker = 92,
+        .level_set_field = phi,
+        .curvature_field = prescribed_curvature,
+        .velocity_field = velocity,
+        .geometry_domain_id = "total_energy_contract",
+        .parameters =
+            svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters{
+                .liquid_side =
+                    svmp::FE::geometry::CutIntegrationSide::Negative,
+                .surface_tension = 1.0,
+            },
+        .endpoint_functional_power_enabled = true,
+        .capillary_balance_method =
+            svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
+                KinematicAreaGradientEnergyTraction,
+        .capillary_balance_qualification =
+            svmp::FE::systems::FreeSurfaceCapillaryBalanceQualification::
+                PrerequisiteOnly,
+        .owner_component = "FESystemTest.TotalEnergyTractionContract",
+    };
+
+    auto missing_power = declaration;
+    missing_power.endpoint_functional_power_enabled = false;
+    EXPECT_THROW(
+        sys.declareFreeSurfaceDiscreteFunctional(missing_power),
+        svmp::FE::InvalidArgumentException);
+
+    auto aliased_level_set_and_curvature = declaration;
+    aliased_level_set_and_curvature.level_set_field = prescribed_phi;
+    aliased_level_set_and_curvature.curvature_field = prescribed_phi;
+    EXPECT_THROW(
+        sys.declareFreeSurfaceDiscreteFunctional(
+            aliased_level_set_and_curvature),
+        svmp::FE::InvalidArgumentException);
+
+    auto unknown_source = declaration;
+    unknown_source.curvature_field = unknown_curvature;
+    EXPECT_THROW(
+        sys.declareFreeSurfaceDiscreteFunctional(unknown_source),
+        svmp::FE::InvalidArgumentException);
+
+    auto incompatible_curvature_space = declaration;
+    incompatible_curvature_space.curvature_field = incompatible_curvature;
+    EXPECT_THROW(
+        sys.declareFreeSurfaceDiscreteFunctional(
+            incompatible_curvature_space),
+        svmp::FE::InvalidArgumentException);
+
+    auto incompatible_velocity_space = declaration;
+    incompatible_velocity_space.velocity_field = incompatible_velocity;
+    EXPECT_THROW(
+        sys.declareFreeSurfaceDiscreteFunctional(
+            incompatible_velocity_space),
+        svmp::FE::InvalidArgumentException);
+
+    auto prescribed_velocity_source = declaration;
+    prescribed_velocity_source.velocity_field = prescribed_velocity;
+    EXPECT_THROW(
+        sys.declareFreeSurfaceDiscreteFunctional(
+            prescribed_velocity_source),
+        svmp::FE::InvalidArgumentException);
+
+    auto stationarity_with_curvature = declaration;
+    stationarity_with_curvature.capillary_balance_method =
+        svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
+            DiscreteEnergyVolumeStationarity;
+    EXPECT_THROW(
+        sys.declareFreeSurfaceDiscreteFunctional(
+            stationarity_with_curvature),
+        svmp::FE::InvalidArgumentException);
+
+    ASSERT_NO_THROW(
+        sys.declareFreeSurfaceDiscreteFunctional(declaration));
+    ASSERT_EQ(sys.freeSurfaceDiscreteFunctionalDeclarations().size(), 1u);
+    EXPECT_EQ(sys.freeSurfaceDiscreteFunctionalDeclarations()
+                  .front()
+                  .curvature_field,
+              prescribed_curvature);
+    EXPECT_TRUE(sys.freeSurfaceDiscreteFunctionalDeclarations()
+                    .front()
+                    .endpoint_functional_power_enabled);
+}
