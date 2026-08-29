@@ -3055,7 +3055,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
-     ParsesAndCanonicalizesCurvatureRecoveryMode)
+     ParsesAndCanonicalizesCurvatureRecoveryControls)
 {
   auto params = parseWorkflowParametersXml(R"xml(
 <svMultiPhysicsFile>
@@ -3065,6 +3065,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Curvature_field_name>kappa_projected</Curvature_field_name>
     <Curvature_projection_supplemental_sample_weight>0.125</Curvature_projection_supplemental_sample_weight>
     <Curvature_projection_recovery_mode>generated_interface_patch</Curvature_projection_recovery_mode>
+    <Curvature_projection_kinematic_area_gradient_filter_coefficient>0.75</Curvature_projection_kinematic_area_gradient_filter_coefficient>
   </Add_equation>
 </svMultiPhysicsFile>
 )xml");
@@ -3080,6 +3081,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
       request.curvature_projection.recovery_mode,
       svmp::FE::level_set::LevelSetCurvatureRecoveryMode::
           GeneratedInterfacePatch);
+  EXPECT_DOUBLE_EQ(
+      request.curvature_projection
+          .kinematic_area_gradient_filter_coefficient,
+      0.75);
 
   const auto canonical = canonicalLevelSetMaintenanceRequestSchedule(
       requests,
@@ -3094,6 +3099,15 @@ TEST(ApplicationDriverLevelSetWorkflows,
       LevelSetMaintenanceScheduleStage::TransientInitialization,
       /*completed_step=*/0);
   EXPECT_NE(canonical.words, changed.words);
+  changed_requests = requests;
+  changed_requests.front()
+      .curvature_projection
+      .kinematic_area_gradient_filter_coefficient = 0.5;
+  const auto changed_filter = canonicalLevelSetMaintenanceRequestSchedule(
+      changed_requests,
+      LevelSetMaintenanceScheduleStage::TransientInitialization,
+      /*completed_step=*/0);
+  EXPECT_NE(canonical.words, changed_filter.words);
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,

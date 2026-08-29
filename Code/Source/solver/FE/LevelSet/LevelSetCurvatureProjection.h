@@ -17,6 +17,10 @@
 #include <string_view>
 #include <vector>
 
+namespace svmp::FE::systems {
+class FESystem;
+}
+
 namespace svmp::FE::level_set {
 
 enum class LevelSetCurvatureSmoothingMode : std::uint8_t {
@@ -115,6 +119,10 @@ struct LevelSetCurvatureProjectionResult {
     std::size_t kinematic_area_gradient_young_wall_boundary_faces{0};
     std::size_t kinematic_area_gradient_young_wall_cut_faces{0};
     std::size_t kinematic_area_gradient_young_wall_measure_evaluations{0};
+    bool kinematic_area_gradient_collective_replication{false};
+    int kinematic_area_gradient_parallel_size{1};
+    std::size_t kinematic_area_gradient_gathered_owned_cells{0};
+    std::size_t kinematic_area_gradient_gathered_owned_boundary_faces{0};
     std::size_t kinematic_area_gradient_components{0};
     Real kinematic_area_gradient_interface_measure{0.0};
     Real kinematic_area_gradient_kinematic_mass{0.0};
@@ -243,6 +251,31 @@ projectLevelSetMeanCurvatureToVertices(
 [[nodiscard]] LevelSetCurvatureProjectionResult
 projectLevelSetMeanCurvatureToVertices(
     const assembly::IMeshAccess& mesh,
+    std::span<const Real> level_set_vertex_values,
+    std::span<const LevelSetCurvatureProjectionSample> supplemental_samples,
+    const LevelSetCurvatureProjectionOptions& options,
+    std::vector<Real>& curvature_vertex_values,
+    LevelSetCurvatureProjectionWorkspace& workspace);
+
+/**
+ * Collectively recover curvature on a distributed P1 field. Owned simplex
+ * cells and exterior faces are canonicalized by field DOF and global entity
+ * identity, the geometric operator is solved identically on every rank, and
+ * the result is mapped back to locally visible mesh vertices.
+ */
+[[nodiscard]] LevelSetCurvatureProjectionResult
+projectLevelSetMeanCurvatureToVertices(
+    const systems::FESystem& system,
+    FieldId level_set_field,
+    std::span<const Real> level_set_vertex_values,
+    std::span<const LevelSetCurvatureProjectionSample> supplemental_samples,
+    const LevelSetCurvatureProjectionOptions& options,
+    std::vector<Real>& curvature_vertex_values);
+
+[[nodiscard]] LevelSetCurvatureProjectionResult
+projectLevelSetMeanCurvatureToVertices(
+    const systems::FESystem& system,
+    FieldId level_set_field,
     std::span<const Real> level_set_vertex_values,
     std::span<const LevelSetCurvatureProjectionSample> supplemental_samples,
     const LevelSetCurvatureProjectionOptions& options,

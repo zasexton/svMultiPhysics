@@ -3286,6 +3286,26 @@ canonicalLevelSetMaintenanceRequestSchedule(
         words, request.curvature_projection.recovery_mode);
     appendMaintenanceScheduleReal(
         words,
+        request.curvature_projection
+            .kinematic_area_gradient_filter_coefficient);
+    appendMaintenanceScheduleBool(
+        words,
+        request.curvature_projection
+            .kinematic_area_gradient_negative_liquid_side);
+    appendMaintenanceScheduleSigned(
+        words,
+        static_cast<std::int64_t>(
+            request.curvature_projection
+                .kinematic_area_gradient_young_walls.size()));
+    for (const auto& wall :
+         request.curvature_projection
+             .kinematic_area_gradient_young_walls) {
+      appendMaintenanceScheduleSigned(words, wall.boundary_marker);
+      appendMaintenanceScheduleReal(
+          words, wall.equilibrium_contact_angle_radians);
+    }
+    appendMaintenanceScheduleReal(
+        words,
         request.curvature_projection.narrow_band_width);
     appendMaintenanceScheduleSigned(
         words,
@@ -6645,6 +6665,17 @@ std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parame
                  "ProjectedCurvatureRecoveryMode"})) {
       request.curvature_projection.recovery_mode =
           svmp::FE::level_set::parseLevelSetCurvatureRecoveryMode(*mode);
+    }
+    if (const auto coefficient =
+            first_defined_double_parameter(
+                eq_params,
+                {"Curvature_projection_kinematic_area_gradient_filter_coefficient",
+                 "CurvatureProjectionKinematicAreaGradientFilterCoefficient",
+                 "Projected_curvature_kinematic_area_gradient_filter_coefficient",
+                 "ProjectedCurvatureKinematicAreaGradientFilterCoefficient"})) {
+      request.curvature_projection
+          .kinematic_area_gradient_filter_coefficient =
+          static_cast<svmp::FE::Real>(*coefficient);
     }
     if (const auto width =
             first_defined_double_parameter(
@@ -15285,6 +15316,49 @@ void mixCurvatureSignatureReal(std::uint64_t& seed,
   mixCurvatureSignature(seed, realBitsForSignature(value));
 }
 
+void mixCurvatureProjectionOptionsSignature(
+    std::uint64_t& seed,
+    const svmp::FE::level_set::LevelSetCurvatureProjectionOptions& options)
+    noexcept
+{
+  mixCurvatureSignatureReal(seed, options.isovalue);
+  mixCurvatureSignatureReal(seed, options.gradient_tolerance);
+  mixCurvatureSignatureReal(seed, options.normal_equation_tolerance);
+  mixCurvatureSignatureReal(seed, options.max_normalized_fit_residual);
+  mixCurvatureSignature(
+      seed, static_cast<std::uint64_t>(options.max_neighbor_rings));
+  mixCurvatureSignature(
+      seed,
+      static_cast<std::uint64_t>(options.max_neighbor_fallback_vertices));
+  mixCurvatureSignature(
+      seed,
+      static_cast<std::uint64_t>(options.max_zero_fallback_vertices));
+  mixCurvatureSignatureReal(seed, options.supplemental_sample_weight);
+  mixCurvatureSignature(
+      seed, static_cast<std::uint64_t>(options.recovery_mode));
+  mixCurvatureSignatureReal(
+      seed, options.kinematic_area_gradient_filter_coefficient);
+  mixCurvatureSignature(
+      seed,
+      options.kinematic_area_gradient_negative_liquid_side ? 1u : 0u);
+  mixCurvatureSignature(
+      seed,
+      static_cast<std::uint64_t>(
+          options.kinematic_area_gradient_young_walls.size()));
+  for (const auto& wall : options.kinematic_area_gradient_young_walls) {
+    mixCurvatureSignature(
+        seed, static_cast<std::uint64_t>(wall.boundary_marker));
+    mixCurvatureSignatureReal(
+        seed, wall.equilibrium_contact_angle_radians);
+  }
+  mixCurvatureSignatureReal(seed, options.narrow_band_width);
+  mixCurvatureSignature(
+      seed, static_cast<std::uint64_t>(options.smoothing_iterations));
+  mixCurvatureSignatureReal(seed, options.smoothing_relaxation);
+  mixCurvatureSignature(
+      seed, static_cast<std::uint64_t>(options.smoothing_mode));
+}
+
 std::string curvatureProjectionCacheKey(
     const LevelSetMaintenanceRequest& request)
 {
@@ -15557,30 +15631,7 @@ std::uint64_t curvatureProjectionInputSignature(
   mixCurvatureSignature(seed,
                         static_cast<std::uint64_t>(
                             request.curvature_projection_cadence_steps));
-  mixCurvatureSignatureReal(seed, options.isovalue);
-  mixCurvatureSignatureReal(seed, options.gradient_tolerance);
-  mixCurvatureSignatureReal(seed, options.normal_equation_tolerance);
-  mixCurvatureSignatureReal(seed, options.max_normalized_fit_residual);
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            options.max_neighbor_rings));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            options.max_neighbor_fallback_vertices));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            options.max_zero_fallback_vertices));
-  mixCurvatureSignatureReal(seed, options.supplemental_sample_weight);
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(options.recovery_mode));
-  mixCurvatureSignatureReal(seed, options.narrow_band_width);
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            options.smoothing_iterations));
-  mixCurvatureSignatureReal(seed, options.smoothing_relaxation);
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            options.smoothing_mode));
+  mixCurvatureProjectionOptionsSignature(seed, options);
   mixCurvatureSignature(seed, cut_context_signature);
   mixCurvatureSignature(seed, static_cast<std::uint64_t>(mesh_vertices));
   mixCurvatureSignature(seed, static_cast<std::uint64_t>(mesh_cells));
@@ -15691,30 +15742,7 @@ std::optional<std::uint64_t> curvatureProjectionFastInputSignature(
   mixCurvatureSignature(seed,
                         static_cast<std::uint64_t>(
                             request.curvature_projection_cadence_steps));
-  mixCurvatureSignatureReal(seed, options.isovalue);
-  mixCurvatureSignatureReal(seed, options.gradient_tolerance);
-  mixCurvatureSignatureReal(seed, options.normal_equation_tolerance);
-  mixCurvatureSignatureReal(seed, options.max_normalized_fit_residual);
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            options.max_neighbor_rings));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            options.max_neighbor_fallback_vertices));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            options.max_zero_fallback_vertices));
-  mixCurvatureSignatureReal(seed, options.supplemental_sample_weight);
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(options.recovery_mode));
-  mixCurvatureSignatureReal(seed, options.narrow_band_width);
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            options.smoothing_iterations));
-  mixCurvatureSignatureReal(seed, options.smoothing_relaxation);
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            options.smoothing_mode));
+  mixCurvatureProjectionOptionsSignature(seed, options);
   mixCurvatureSignature(seed, cut_context_signature);
   mixCurvatureSignature(seed, static_cast<std::uint64_t>(mesh_vertices));
   mixCurvatureSignature(seed, static_cast<std::uint64_t>(mesh_cells));
@@ -15788,6 +15816,65 @@ void logLevelSetCurvatureProjectionDiagnostic(
       << result.generated_interface_patch_fitted_vertices
       << " generated_interface_patch_expanded_vertices="
       << result.generated_interface_patch_expanded_vertices
+      << " kinematic_area_gradient_collective_replication="
+      << (result.kinematic_area_gradient_collective_replication ? 1 : 0)
+      << " kinematic_area_gradient_parallel_size="
+      << result.kinematic_area_gradient_parallel_size
+      << " kinematic_area_gradient_gathered_owned_cells="
+      << result.kinematic_area_gradient_gathered_owned_cells
+      << " kinematic_area_gradient_gathered_owned_boundary_faces="
+      << result.kinematic_area_gradient_gathered_owned_boundary_faces
+      << " kinematic_area_gradient_cut_cells="
+      << result.kinematic_area_gradient_cut_cells
+      << " kinematic_area_gradient_operator_vertices="
+      << result.kinematic_area_gradient_operator_vertices
+      << " kinematic_area_gradient_operator_nonzeros="
+      << result.kinematic_area_gradient_operator_nonzeros
+      << " kinematic_area_gradient_measure_evaluations="
+      << result.kinematic_area_gradient_measure_evaluations
+      << " kinematic_area_gradient_young_wall_count="
+      << result.kinematic_area_gradient_young_wall_count
+      << " kinematic_area_gradient_young_wall_boundary_faces="
+      << result.kinematic_area_gradient_young_wall_boundary_faces
+      << " kinematic_area_gradient_young_wall_cut_faces="
+      << result.kinematic_area_gradient_young_wall_cut_faces
+      << " kinematic_area_gradient_young_wall_measure_evaluations="
+      << result.kinematic_area_gradient_young_wall_measure_evaluations
+      << " kinematic_area_gradient_components="
+      << result.kinematic_area_gradient_components
+      << " kinematic_area_gradient_interface_measure="
+      << result.kinematic_area_gradient_interface_measure
+      << " kinematic_area_gradient_kinematic_mass="
+      << result.kinematic_area_gradient_kinematic_mass
+      << " kinematic_area_gradient_mass_weighted_mean_curvature="
+      << result.kinematic_area_gradient_mass_weighted_mean_curvature
+      << " kinematic_area_gradient_mass_weighted_rms_deviation="
+      << result.kinematic_area_gradient_mass_weighted_rms_deviation
+      << " kinematic_area_gradient_filter_coefficient="
+      << result.kinematic_area_gradient_filter_coefficient
+      << " kinematic_area_gradient_min_filter_radius_cells="
+      << result.kinematic_area_gradient_min_filter_radius_cells
+      << " kinematic_area_gradient_max_filter_radius_cells="
+      << result.kinematic_area_gradient_max_filter_radius_cells
+      << " kinematic_area_gradient_tie_break_vertices="
+      << result.kinematic_area_gradient_tie_break_vertices
+      << " kinematic_area_gradient_max_tie_break_value="
+      << result.kinematic_area_gradient_max_tie_break_value
+      << " kinematic_area_gradient_surface_gradient_norm="
+      << result.kinematic_area_gradient_surface_gradient_norm
+      << " kinematic_area_gradient_young_wall_gradient_norm="
+      << result.kinematic_area_gradient_young_wall_gradient_norm
+      << " kinematic_area_gradient_total_energy_gradient_norm="
+      << result.kinematic_area_gradient_total_energy_gradient_norm
+      << " kinematic_area_gradient_max_relative_fd_disagreement="
+      << result.kinematic_area_gradient_max_relative_fd_disagreement
+      << " kinematic_area_gradient_linear_iterations="
+      << result.kinematic_area_gradient_linear_iterations
+      << " kinematic_area_gradient_relative_linear_residual="
+      << result.kinematic_area_gradient_relative_linear_residual
+      << " kinematic_area_gradient_max_relative_regularized_identity_residual="
+      << result
+             .kinematic_area_gradient_max_relative_regularized_identity_residual
       << " narrow_band_width=" << result.narrow_band_width
       << " narrow_band_vertices=" << result.narrow_band_vertices
       << " skipped_far_vertices=" << result.skipped_far_vertices
@@ -16134,21 +16221,40 @@ std::size_t projectLevelSetCurvatureFieldsFromState(
           << std::endl;
     }
 
-    auto result =
-        cache_entry != nullptr
-            ? svmp::FE::level_set::projectLevelSetMeanCurvatureToVertices(
-                  system.meshAccess(),
-                  phi,
-                  supplemental_samples,
-                  options,
-                  curvature,
-                  cache_entry->workspace)
-            : svmp::FE::level_set::projectLevelSetMeanCurvatureToVertices(
-                  system.meshAccess(),
-                  phi,
-                  supplemental_samples,
-                  options,
-                  curvature);
+    const bool collective_kinematic_area_gradient =
+        options.recovery_mode == svmp::FE::level_set::
+            LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
+    auto result = cache_entry != nullptr
+        ? (collective_kinematic_area_gradient
+               ? svmp::FE::level_set::projectLevelSetMeanCurvatureToVertices(
+                     system,
+                     phi_field,
+                     phi,
+                     supplemental_samples,
+                     options,
+                     curvature,
+                     cache_entry->workspace)
+               : svmp::FE::level_set::projectLevelSetMeanCurvatureToVertices(
+                     system.meshAccess(),
+                     phi,
+                     supplemental_samples,
+                     options,
+                     curvature,
+                     cache_entry->workspace))
+        : (collective_kinematic_area_gradient
+               ? svmp::FE::level_set::projectLevelSetMeanCurvatureToVertices(
+                     system,
+                     phi_field,
+                     phi,
+                     supplemental_samples,
+                     options,
+                     curvature)
+               : svmp::FE::level_set::projectLevelSetMeanCurvatureToVertices(
+                     system.meshAccess(),
+                     phi,
+                     supplemental_samples,
+                     options,
+                     curvature));
     if (snapshot_identity.free_surface_snapshot_revision_key != 0u) {
       if (result.free_surface_snapshot_revision_key == 0u ||
           result.free_surface_snapshot_revision_key !=

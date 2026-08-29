@@ -1,6 +1,13 @@
 #include "LevelSet/LevelSetCurvatureProjection.h"
 
+#include "Dofs/EntityDofMap.h"
 #include "Interfaces/LevelSetInterfaceBuilder.h"
+#include "Spaces/FunctionSpace.h"
+#include "Systems/FESystem.h"
+
+#if FE_HAS_MPI
+#include <mpi.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -12,9 +19,11 @@
 #include <map>
 #include <numeric>
 #include <queue>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 
 namespace svmp::FE::level_set {
 namespace {
@@ -115,6 +124,811 @@ LevelSetCurvatureRecoveryMode parseLevelSetCurvatureRecoveryMode(
 }
 
 namespace {
+
+struct KinematicProjectionCollectiveContext {
+    int rank{0};
+    int size{1};
+    bool active{false};
+#if FE_HAS_MPI
+    MPI_Comm communicator{MPI_COMM_NULL};
+#endif
+};
+
+struct PackedKinematicCell {
+    std::int64_t global_cell{-1};
+    std::int32_t element_type{0};
+    std::int32_t corner_count{0};
+    std::array<std::int64_t, 4> global_nodes{{-1, -1, -1, -1}};
+    std::array<std::array<Real, 3>, 4> coordinates{};
+    std::array<Real, 4> level_set_values{};
+};
+
+struct PackedKinematicBoundaryFace {
+    std::int64_t global_face{-1};
+    std::int64_t global_parent_cell{-1};
+    std::uint32_t local_face{INVALID_LOCAL_INDEX};
+    std::int32_t marker{-1};
+};
+
+static_assert(std::is_trivially_copyable_v<PackedKinematicCell>);
+static_assert(std::is_trivially_copyable_v<PackedKinematicBoundaryFace>);
+
+struct ReplicatedKinematicCell {
+    GlobalIndex global_id{-1};
+    ElementType type{ElementType::Triangle3};
+    std::array<GlobalIndex, 4> nodes{{-1, -1, -1, -1}};
+    std::size_t corner_count{0u};
+};
+
+struct ReplicatedKinematicBoundaryFace {
+    GlobalIndex global_id{-1};
+    GlobalIndex parent_cell{-1};
+    LocalIndex local_face{INVALID_LOCAL_INDEX};
+    int marker{-1};
+};
+
+class ReplicatedKinematicMeshAccess final
+    : public assembly::IMeshAccess {
+public:
+    ReplicatedKinematicMeshAccess(
+        int dimension,
+        std::vector<std::array<Real, 3>> coordinates,
+        std::vector<ReplicatedKinematicCell> cells,
+        std::vector<ReplicatedKinematicBoundaryFace> boundary_faces)
+        : dimension_(dimension),
+          coordinates_(std::move(coordinates)),
+          cells_(std::move(cells)),
+          boundary_faces_(std::move(boundary_faces))
+    {
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override
+    {
+        return static_cast<GlobalIndex>(cells_.size());
+    }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override
+    {
+        return numCells();
+    }
+    [[nodiscard]] GlobalIndex numVertices() const override
+    {
+        return static_cast<GlobalIndex>(coordinates_.size());
+    }
+    [[nodiscard]] GlobalIndex numOwnedVertices() const override
+    {
+        return numVertices();
+    }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override
+    {
+        return static_cast<GlobalIndex>(boundary_faces_.size());
+    }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return dimension_; }
+    [[nodiscard]] bool cellIdsAreDense() const override { return true; }
+    [[nodiscard]] bool globalEntityIdsAvailable() const override
+    {
+        return true;
+    }
+    [[nodiscard]] GlobalIndex getCellGlobalId(
+        GlobalIndex cell) const override
+    {
+        return cells_.at(static_cast<std::size_t>(cell)).global_id;
+    }
+    [[nodiscard]] GlobalIndex getBoundaryFaceGlobalId(
+        GlobalIndex face) const override
+    {
+        return boundary_faces_.at(static_cast<std::size_t>(face)).global_id;
+    }
+    [[nodiscard]] bool isOwnedCell(GlobalIndex cell) const override
+    {
+        return cell >= 0 && cell < numCells();
+    }
+    [[nodiscard]] ElementType getCellType(GlobalIndex cell) const override
+    {
+        return cells_.at(static_cast<std::size_t>(cell)).type;
+    }
+    void getCellNodes(GlobalIndex cell,
+                      std::vector<GlobalIndex>& nodes) const override
+    {
+        const auto& record = cells_.at(static_cast<std::size_t>(cell));
+        nodes.assign(
+            record.nodes.begin(),
+            record.nodes.begin() +
+                static_cast<std::ptrdiff_t>(record.corner_count));
+    }
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(
+        GlobalIndex node) const override
+    {
+        return coordinates_.at(static_cast<std::size_t>(node));
+    }
+    void getCellCoordinates(
+        GlobalIndex cell,
+        std::vector<std::array<Real, 3>>& coordinates) const override
+    {
+        std::vector<GlobalIndex> nodes;
+        getCellNodes(cell, nodes);
+        coordinates.clear();
+        coordinates.reserve(nodes.size());
+        for (const auto node : nodes) {
+            coordinates.push_back(getNodeCoordinates(node));
+        }
+    }
+    [[nodiscard]] LocalIndex getLocalFaceIndex(
+        GlobalIndex face, GlobalIndex cell) const override
+    {
+        const auto& record =
+            boundary_faces_.at(static_cast<std::size_t>(face));
+        return record.parent_cell == cell ? record.local_face
+                                          : INVALID_LOCAL_INDEX;
+    }
+    [[nodiscard]] int getBoundaryFaceMarker(
+        GlobalIndex face) const override
+    {
+        return boundary_faces_.at(static_cast<std::size_t>(face)).marker;
+    }
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex>
+    getInteriorFaceCells(GlobalIndex) const override
+    {
+        return {-1, -1};
+    }
+    void forEachCell(
+        std::function<void(GlobalIndex)> callback) const override
+    {
+        for (GlobalIndex cell = 0; cell < numCells(); ++cell) {
+            callback(cell);
+        }
+    }
+    void forEachOwnedCell(
+        std::function<void(GlobalIndex)> callback) const override
+    {
+        forEachCell(std::move(callback));
+    }
+    void forEachBoundaryFace(
+        int marker,
+        std::function<void(GlobalIndex, GlobalIndex)> callback)
+        const override
+    {
+        for (std::size_t face = 0; face < boundary_faces_.size(); ++face) {
+            const auto& record = boundary_faces_[face];
+            if (marker < 0 || marker == record.marker) {
+                callback(static_cast<GlobalIndex>(face),
+                         record.parent_cell);
+            }
+        }
+    }
+    void forEachInteriorFace(
+        std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)>)
+        const override
+    {
+    }
+
+private:
+    int dimension_{0};
+    std::vector<std::array<Real, 3>> coordinates_{};
+    std::vector<ReplicatedKinematicCell> cells_{};
+    std::vector<ReplicatedKinematicBoundaryFace> boundary_faces_{};
+};
+
+struct ReplicatedKinematicProjectionInput {
+    bool success{false};
+    std::vector<Real> level_set_values{};
+    std::vector<std::size_t> local_vertex_to_global_dof{};
+    std::vector<ReplicatedKinematicCell> cells{};
+    std::vector<std::array<Real, 3>> coordinates{};
+    std::vector<ReplicatedKinematicBoundaryFace> boundary_faces{};
+    std::map<GlobalIndex, GlobalIndex> global_cell_to_replicated_cell{};
+    std::string diagnostic{};
+};
+
+void mixKinematicProjectionSignature(
+    std::uint64_t& signature, std::uint64_t value) noexcept
+{
+    signature ^= value + 0x9e3779b97f4a7c15ull +
+                 (signature << 6u) + (signature >> 2u);
+}
+
+void mixKinematicProjectionReal(
+    std::uint64_t& signature, Real value) noexcept
+{
+    std::uint64_t bits{0u};
+    static_assert(sizeof(value) <= sizeof(bits));
+    std::memcpy(&bits, &value, sizeof(value));
+    mixKinematicProjectionSignature(signature, bits);
+}
+
+[[nodiscard]] std::uint64_t kinematicProjectionOptionsSignature(
+    const LevelSetCurvatureProjectionOptions& options) noexcept
+{
+    std::uint64_t signature{1469598103934665603ull};
+    mixKinematicProjectionReal(signature, options.isovalue);
+    mixKinematicProjectionReal(signature, options.gradient_tolerance);
+    mixKinematicProjectionReal(signature,
+                               options.normal_equation_tolerance);
+    mixKinematicProjectionReal(signature,
+                               options.max_normalized_fit_residual);
+    mixKinematicProjectionSignature(
+        signature, static_cast<std::uint64_t>(options.max_neighbor_rings));
+    mixKinematicProjectionSignature(
+        signature,
+        static_cast<std::uint64_t>(options.max_neighbor_fallback_vertices));
+    mixKinematicProjectionSignature(
+        signature,
+        static_cast<std::uint64_t>(options.max_zero_fallback_vertices));
+    mixKinematicProjectionReal(signature,
+                               options.supplemental_sample_weight);
+    mixKinematicProjectionSignature(
+        signature, static_cast<std::uint64_t>(options.recovery_mode));
+    mixKinematicProjectionReal(
+        signature, options.kinematic_area_gradient_filter_coefficient);
+    mixKinematicProjectionSignature(
+        signature,
+        options.kinematic_area_gradient_negative_liquid_side ? 1u : 0u);
+    mixKinematicProjectionSignature(
+        signature,
+        static_cast<std::uint64_t>(
+            options.kinematic_area_gradient_young_walls.size()));
+    for (const auto& wall :
+         options.kinematic_area_gradient_young_walls) {
+        mixKinematicProjectionSignature(
+            signature,
+            static_cast<std::uint64_t>(wall.boundary_marker));
+        mixKinematicProjectionReal(
+            signature, wall.equilibrium_contact_angle_radians);
+    }
+    mixKinematicProjectionReal(signature, options.narrow_band_width);
+    mixKinematicProjectionSignature(
+        signature,
+        static_cast<std::uint64_t>(options.smoothing_iterations));
+    mixKinematicProjectionReal(signature, options.smoothing_relaxation);
+    mixKinematicProjectionSignature(
+        signature, static_cast<std::uint64_t>(options.smoothing_mode));
+    return signature;
+}
+
+#if FE_HAS_MPI
+[[nodiscard]] MPI_Datatype kinematicMpiSigned64Type() noexcept
+{
+#ifdef MPI_INT64_T
+    return MPI_INT64_T;
+#else
+    if constexpr (std::is_same_v<std::int64_t, long>) {
+        return MPI_LONG;
+    }
+    return MPI_LONG_LONG;
+#endif
+}
+
+[[nodiscard]] MPI_Datatype kinematicMpiUnsigned64Type() noexcept
+{
+#ifdef MPI_UINT64_T
+    return MPI_UINT64_T;
+#else
+    if constexpr (std::is_same_v<std::uint64_t, unsigned long>) {
+        return MPI_UNSIGNED_LONG;
+    }
+    return MPI_UNSIGNED_LONG_LONG;
+#endif
+}
+#endif
+
+[[nodiscard]] bool nearlyEqualKinematicInput(Real lhs, Real rhs) noexcept
+{
+    if (!std::isfinite(lhs) || !std::isfinite(rhs)) {
+        return false;
+    }
+    const Real scale =
+        std::max({Real{1.0}, std::abs(lhs), std::abs(rhs)});
+    return std::abs(lhs - rhs) <=
+           Real{256.0} * std::numeric_limits<Real>::epsilon() * scale;
+}
+
+[[nodiscard]] bool synchronizeKinematicProjectionFailure(
+    const KinematicProjectionCollectiveContext& context,
+    bool local_success,
+    const std::string& local_diagnostic,
+    std::string& collective_diagnostic)
+{
+#if FE_HAS_MPI
+    if (context.active) {
+        const int local_failed_rank =
+            local_success ? context.size : context.rank;
+        int first_failed_rank = context.size;
+        MPI_Allreduce(&local_failed_rank, &first_failed_rank, 1,
+                      MPI_INT, MPI_MIN, context.communicator);
+        if (first_failed_rank < context.size) {
+            constexpr int maximum_diagnostic_bytes = 4096;
+            int length = context.rank == first_failed_rank
+                ? static_cast<int>(std::min<std::size_t>(
+                      local_diagnostic.size(),
+                      static_cast<std::size_t>(
+                          maximum_diagnostic_bytes - 1)))
+                : 0;
+            MPI_Bcast(&length, 1, MPI_INT, first_failed_rank,
+                      context.communicator);
+            collective_diagnostic.assign(
+                static_cast<std::size_t>(length), '\0');
+            if (context.rank == first_failed_rank && length > 0) {
+                std::copy_n(local_diagnostic.begin(), length,
+                            collective_diagnostic.begin());
+            }
+            if (length > 0) {
+                MPI_Bcast(collective_diagnostic.data(), length,
+                          MPI_CHAR, first_failed_rank,
+                          context.communicator);
+            }
+            collective_diagnostic =
+                "collective kinematic-area-gradient input failed on rank " +
+                std::to_string(first_failed_rank) + ": " +
+                collective_diagnostic;
+            return false;
+        }
+    }
+#else
+    (void)context;
+#endif
+    if (!local_success) {
+        collective_diagnostic = local_diagnostic;
+        return false;
+    }
+    return true;
+}
+
+template <typename Packed>
+[[nodiscard]] bool allGatherKinematicRecords(
+    const KinematicProjectionCollectiveContext& context,
+    std::span<const Packed> local,
+    std::vector<Packed>& gathered,
+    std::string& diagnostic)
+{
+    static_assert(std::is_trivially_copyable_v<Packed>);
+#if FE_HAS_MPI
+    if (context.active) {
+        const auto local_bytes_size = local.size_bytes();
+        const bool local_payload_valid =
+            local_bytes_size <= static_cast<std::size_t>(
+                                    std::numeric_limits<int>::max());
+        const std::string local_payload_diagnostic = local_payload_valid
+            ? std::string{}
+            : "kinematic-area-gradient local gather payload exceeds the MPI count range";
+        if (!synchronizeKinematicProjectionFailure(
+                context, local_payload_valid,
+                local_payload_diagnostic, diagnostic)) {
+            return false;
+        }
+        const int local_bytes = static_cast<int>(local_bytes_size);
+        std::vector<int> counts(static_cast<std::size_t>(context.size), 0);
+        MPI_Allgather(&local_bytes, 1, MPI_INT,
+                      counts.data(), 1, MPI_INT,
+                      context.communicator);
+        std::vector<int> displacements(
+            static_cast<std::size_t>(context.size), 0);
+        std::size_t total_bytes{0u};
+        for (int rank = 0; rank < context.size; ++rank) {
+            if (counts[static_cast<std::size_t>(rank)] < 0 ||
+                total_bytes >
+                    static_cast<std::size_t>(
+                        std::numeric_limits<int>::max())) {
+                diagnostic =
+                    "kinematic-area-gradient collective gather payload exceeds the MPI displacement range";
+                return false;
+            }
+            displacements[static_cast<std::size_t>(rank)] =
+                static_cast<int>(total_bytes);
+            total_bytes += static_cast<std::size_t>(
+                counts[static_cast<std::size_t>(rank)]);
+        }
+        if (total_bytes % sizeof(Packed) != 0u ||
+            total_bytes > static_cast<std::size_t>(
+                              std::numeric_limits<int>::max())) {
+            diagnostic =
+                "kinematic-area-gradient collective gather payload has an invalid size";
+            return false;
+        }
+        gathered.resize(total_bytes / sizeof(Packed));
+        const int status = MPI_Allgatherv(
+            local.empty() ? nullptr : local.data(),
+            local_bytes,
+            MPI_BYTE,
+            gathered.empty() ? nullptr : gathered.data(),
+            counts.data(),
+            displacements.data(),
+            MPI_BYTE,
+            context.communicator);
+        if (status != MPI_SUCCESS) {
+            diagnostic =
+                "kinematic-area-gradient collective gather failed";
+            return false;
+        }
+        return true;
+    }
+#else
+    (void)context;
+#endif
+    gathered.assign(local.begin(), local.end());
+    return true;
+}
+
+[[nodiscard]] ReplicatedKinematicProjectionInput
+buildReplicatedKinematicProjectionInput(
+    const systems::FESystem& system,
+    FieldId level_set_field,
+    std::span<const Real> local_level_set_values,
+    KinematicProjectionCollectiveContext& context)
+{
+    ReplicatedKinematicProjectionInput result;
+    const auto& mesh = system.meshAccess();
+    context.rank = mesh.parallelRank();
+    context.size = mesh.parallelSize();
+    if (context.rank < 0 || context.size < 1 ||
+        context.rank >= context.size) {
+        result.diagnostic =
+            "kinematic-area-gradient collective projection received invalid mesh rank metadata";
+        return result;
+    }
+    const auto& dofs = system.fieldDofHandler(level_set_field);
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (context.size > 1) {
+        if (initialized == 0 || finalized != 0 ||
+            dofs.mpiComm() == MPI_COMM_NULL) {
+            result.diagnostic =
+                "kinematic-area-gradient collective projection requires an active field communicator";
+            return result;
+        }
+        int communicator_rank = 0;
+        int communicator_size = 1;
+        MPI_Comm_rank(dofs.mpiComm(), &communicator_rank);
+        MPI_Comm_size(dofs.mpiComm(), &communicator_size);
+        if (communicator_rank != context.rank ||
+            communicator_size != context.size) {
+            result.diagnostic =
+                "kinematic-area-gradient collective projection mesh and field communicators disagree";
+            return result;
+        }
+        context.active = true;
+        context.communicator = dofs.mpiComm();
+    }
+#else
+    if (context.size > 1) {
+        result.diagnostic =
+            "kinematic-area-gradient collective projection cannot use a multi-rank mesh without MPI support";
+        return result;
+    }
+#endif
+
+    bool local_success = true;
+    std::string local_diagnostic;
+    std::vector<PackedKinematicCell> local_cells;
+    std::vector<PackedKinematicBoundaryFace> local_boundary_faces;
+    GlobalIndex global_dof_count{0};
+    std::uint64_t dof_layout_revision{0u};
+    try {
+        const auto& field = system.fieldRecord(level_set_field);
+        if (!field.space || field.components != 1 ||
+            field.space->space_type() != spaces::SpaceType::H1 ||
+            field.space->field_type() != FieldType::Scalar ||
+            field.space->continuity() != Continuity::C0 ||
+            field.space->value_dimension() != 1 ||
+            field.space->is_variable_order() ||
+            field.space->polynomial_order() != 1) {
+            throw std::invalid_argument(
+                "kinematic-area-gradient collective projection requires a fixed-order scalar P1 H1 field");
+        }
+        if (!mesh.globalEntityIdsAvailable()) {
+            throw std::invalid_argument(
+                "kinematic-area-gradient collective projection requires global cell and boundary-face identities");
+        }
+        if (mesh.numVertices() < 0 ||
+            local_level_set_values.size() !=
+                static_cast<std::size_t>(mesh.numVertices())) {
+            throw std::invalid_argument(
+                "kinematic-area-gradient collective projection requires one local value per visible mesh vertex");
+        }
+        global_dof_count = dofs.getNumDofs();
+        if (global_dof_count <= 0) {
+            throw std::invalid_argument(
+                "kinematic-area-gradient collective projection requires a nonempty global field layout");
+        }
+        dof_layout_revision = dofs.dofLayoutRevision();
+        const auto* entity_map = dofs.getEntityDofMap();
+        if (entity_map == nullptr) {
+            throw std::invalid_argument(
+                "kinematic-area-gradient collective projection requires vertex-to-DOF metadata");
+        }
+        result.local_vertex_to_global_dof.resize(
+            static_cast<std::size_t>(mesh.numVertices()));
+        for (GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+            const auto vertex_dofs = entity_map->getVertexDofs(vertex);
+            if (vertex_dofs.size() != 1u || vertex_dofs.front() < 0 ||
+                vertex_dofs.front() >= global_dof_count) {
+                throw std::invalid_argument(
+                    "kinematic-area-gradient collective projection requires one valid scalar field DOF per visible vertex");
+            }
+            result.local_vertex_to_global_dof[
+                static_cast<std::size_t>(vertex)] =
+                static_cast<std::size_t>(vertex_dofs.front());
+        }
+
+        mesh.forEachOwnedCell([&](GlobalIndex cell) {
+            const auto type = mesh.getCellType(cell);
+            const int dimension = mesh.dimension();
+            const bool supported =
+                (dimension == 2 && type == ElementType::Triangle3) ||
+                (dimension == 3 && type == ElementType::Tetra4);
+            if (!supported || mesh.getCellGeometryOrder(cell) != 1 ||
+                field.space->polynomial_order(cell) != 1) {
+                throw std::invalid_argument(
+                    "kinematic-area-gradient collective projection requires affine P1 Triangle3 or Tetra4 cells");
+            }
+            std::vector<GlobalIndex> nodes;
+            mesh.getCellNodes(cell, nodes);
+            const auto corner_count =
+                static_cast<std::size_t>(dimension + 1);
+            if (nodes.size() != corner_count) {
+                throw std::invalid_argument(
+                    "kinematic-area-gradient collective projection found incomplete simplex connectivity");
+            }
+            PackedKinematicCell packed;
+            packed.global_cell = static_cast<std::int64_t>(
+                mesh.getCellGlobalId(cell));
+            packed.element_type = static_cast<std::int32_t>(type);
+            packed.corner_count = static_cast<std::int32_t>(corner_count);
+            for (std::size_t corner = 0; corner < corner_count; ++corner) {
+                const auto node = nodes[corner];
+                if (node < 0 || node >= mesh.numVertices()) {
+                    throw std::invalid_argument(
+                        "kinematic-area-gradient collective projection found a cell vertex outside the local mesh layout");
+                }
+                const auto global_node =
+                    result.local_vertex_to_global_dof[
+                        static_cast<std::size_t>(node)];
+                packed.global_nodes[corner] =
+                    static_cast<std::int64_t>(global_node);
+                packed.coordinates[corner] =
+                    mesh.getNodeCoordinates(node);
+                packed.level_set_values[corner] =
+                    local_level_set_values[
+                        static_cast<std::size_t>(node)];
+                if (!std::isfinite(packed.coordinates[corner][0]) ||
+                    !std::isfinite(packed.coordinates[corner][1]) ||
+                    !std::isfinite(packed.coordinates[corner][2]) ||
+                    !std::isfinite(packed.level_set_values[corner])) {
+                    throw std::invalid_argument(
+                        "kinematic-area-gradient collective projection found nonfinite cell data");
+                }
+            }
+            local_cells.push_back(packed);
+        });
+
+        mesh.forEachBoundaryFace(
+            -1,
+            [&](GlobalIndex face, GlobalIndex parent_cell) {
+                if (!mesh.isOwnedCell(parent_cell) ||
+                    mesh.getCellOwnerRank(parent_cell) != context.rank ||
+                    mesh.getBoundaryFaceOwnerRank(face, parent_cell) !=
+                        context.rank) {
+                    throw std::invalid_argument(
+                        "kinematic-area-gradient collective projection requires each emitted boundary face to be owned with its parent cell");
+                }
+                PackedKinematicBoundaryFace packed;
+                packed.global_face = static_cast<std::int64_t>(
+                    mesh.getBoundaryFaceGlobalId(face));
+                packed.global_parent_cell = static_cast<std::int64_t>(
+                    mesh.getCellGlobalId(parent_cell));
+                packed.local_face =
+                    mesh.getLocalFaceIndex(face, parent_cell);
+                packed.marker = static_cast<std::int32_t>(
+                    mesh.getBoundaryFaceMarker(face));
+                if (packed.local_face == INVALID_LOCAL_INDEX) {
+                    throw std::invalid_argument(
+                        "kinematic-area-gradient collective projection found an invalid boundary local-face index");
+                }
+                local_boundary_faces.push_back(packed);
+            });
+    } catch (const std::exception& exception) {
+        local_success = false;
+        local_diagnostic = exception.what();
+    }
+    if (!synchronizeKinematicProjectionFailure(
+            context, local_success, local_diagnostic,
+            result.diagnostic)) {
+        return result;
+    }
+
+    int minimum_dimension = mesh.dimension();
+    int maximum_dimension = mesh.dimension();
+    GlobalIndex minimum_dof_count = global_dof_count;
+    GlobalIndex maximum_dof_count = global_dof_count;
+    std::uint64_t minimum_layout_revision = dof_layout_revision;
+    std::uint64_t maximum_layout_revision = dof_layout_revision;
+#if FE_HAS_MPI
+    if (context.active) {
+        MPI_Allreduce(MPI_IN_PLACE, &minimum_dimension, 1,
+                      MPI_INT, MPI_MIN, context.communicator);
+        MPI_Allreduce(MPI_IN_PLACE, &maximum_dimension, 1,
+                      MPI_INT, MPI_MAX, context.communicator);
+        MPI_Allreduce(MPI_IN_PLACE, &minimum_dof_count, 1,
+                      kinematicMpiSigned64Type(), MPI_MIN,
+                      context.communicator);
+        MPI_Allreduce(MPI_IN_PLACE, &maximum_dof_count, 1,
+                      kinematicMpiSigned64Type(), MPI_MAX,
+                      context.communicator);
+        MPI_Allreduce(MPI_IN_PLACE, &minimum_layout_revision, 1,
+                      kinematicMpiUnsigned64Type(), MPI_MIN,
+                      context.communicator);
+        MPI_Allreduce(MPI_IN_PLACE, &maximum_layout_revision, 1,
+                      kinematicMpiUnsigned64Type(), MPI_MAX,
+                      context.communicator);
+    }
+#endif
+    if (minimum_dimension != maximum_dimension ||
+        minimum_dof_count != maximum_dof_count ||
+        minimum_layout_revision != maximum_layout_revision) {
+        result.diagnostic =
+            "kinematic-area-gradient collective projection requires identical dimension, global field size, and field-layout revision on every rank";
+        return result;
+    }
+
+    std::vector<PackedKinematicCell> gathered_cells;
+    if (!allGatherKinematicRecords(
+            context,
+            std::span<const PackedKinematicCell>(
+                local_cells.data(), local_cells.size()),
+            gathered_cells,
+            result.diagnostic)) {
+        return result;
+    }
+    std::vector<PackedKinematicBoundaryFace> gathered_boundary_faces;
+    if (!allGatherKinematicRecords(
+            context,
+            std::span<const PackedKinematicBoundaryFace>(
+                local_boundary_faces.data(),
+                local_boundary_faces.size()),
+            gathered_boundary_faces,
+            result.diagnostic)) {
+        return result;
+    }
+
+    try {
+        std::sort(gathered_cells.begin(), gathered_cells.end(),
+                  [](const auto& lhs, const auto& rhs) {
+                      return lhs.global_cell < rhs.global_cell;
+                  });
+        if (gathered_cells.empty()) {
+            throw std::invalid_argument(
+                "kinematic-area-gradient collective projection gathered no owned cells");
+        }
+        result.level_set_values.assign(
+            static_cast<std::size_t>(minimum_dof_count), Real{0.0});
+        result.coordinates.assign(
+            static_cast<std::size_t>(minimum_dof_count),
+            std::array<Real, 3>{});
+        std::vector<unsigned char> node_seen(
+            static_cast<std::size_t>(minimum_dof_count), 0u);
+        result.cells.reserve(gathered_cells.size());
+        for (std::size_t cell_index = 0;
+             cell_index < gathered_cells.size();
+             ++cell_index) {
+            const auto& packed = gathered_cells[cell_index];
+            if (cell_index > 0u &&
+                packed.global_cell ==
+                    gathered_cells[cell_index - 1u].global_cell) {
+                throw std::invalid_argument(
+                    "kinematic-area-gradient collective projection gathered duplicate owned cell identities");
+            }
+            const auto type = static_cast<ElementType>(packed.element_type);
+            const std::size_t expected_corners =
+                minimum_dimension == 2 ? 3u : 4u;
+            if (packed.global_cell < 0 ||
+                packed.corner_count !=
+                    static_cast<std::int32_t>(expected_corners) ||
+                (minimum_dimension == 2 &&
+                 type != ElementType::Triangle3) ||
+                (minimum_dimension == 3 &&
+                 type != ElementType::Tetra4)) {
+                throw std::invalid_argument(
+                    "kinematic-area-gradient collective projection gathered an invalid simplex cell record");
+            }
+            ReplicatedKinematicCell cell;
+            cell.global_id =
+                static_cast<GlobalIndex>(packed.global_cell);
+            cell.type = type;
+            cell.corner_count = expected_corners;
+            for (std::size_t corner = 0;
+                 corner < expected_corners;
+                 ++corner) {
+                const auto global_node = packed.global_nodes[corner];
+                if (global_node < 0 ||
+                    global_node >= minimum_dof_count) {
+                    throw std::invalid_argument(
+                        "kinematic-area-gradient collective projection gathered a node outside the global field layout");
+                }
+                const auto node = static_cast<std::size_t>(global_node);
+                cell.nodes[corner] =
+                    static_cast<GlobalIndex>(global_node);
+                if (node_seen[node] == 0u) {
+                    result.coordinates[node] =
+                        packed.coordinates[corner];
+                    result.level_set_values[node] =
+                        packed.level_set_values[corner];
+                    node_seen[node] = 1u;
+                } else {
+                    for (std::size_t component = 0;
+                         component < 3u;
+                         ++component) {
+                        if (!nearlyEqualKinematicInput(
+                                result.coordinates[node][component],
+                                packed.coordinates[corner][component])) {
+                            throw std::invalid_argument(
+                                "kinematic-area-gradient collective projection found inconsistent shared-node coordinates");
+                        }
+                    }
+                    if (!nearlyEqualKinematicInput(
+                            result.level_set_values[node],
+                            packed.level_set_values[corner])) {
+                        throw std::invalid_argument(
+                            "kinematic-area-gradient collective projection found inconsistent shared-node values");
+                    }
+                }
+            }
+            result.global_cell_to_replicated_cell.emplace(
+                cell.global_id,
+                static_cast<GlobalIndex>(result.cells.size()));
+            result.cells.push_back(cell);
+        }
+        if (std::find(node_seen.begin(), node_seen.end(),
+                      static_cast<unsigned char>(0u)) != node_seen.end()) {
+            throw std::invalid_argument(
+                "kinematic-area-gradient collective projection found a global field DOF outside every owned cell");
+        }
+
+        std::sort(gathered_boundary_faces.begin(),
+                  gathered_boundary_faces.end(),
+                  [](const auto& lhs, const auto& rhs) {
+                      return lhs.global_face < rhs.global_face;
+                  });
+        result.boundary_faces.reserve(gathered_boundary_faces.size());
+        for (std::size_t face_index = 0;
+             face_index < gathered_boundary_faces.size();
+             ++face_index) {
+            const auto& packed = gathered_boundary_faces[face_index];
+            if (face_index > 0u &&
+                packed.global_face ==
+                    gathered_boundary_faces[face_index - 1u].global_face) {
+                throw std::invalid_argument(
+                    "kinematic-area-gradient collective projection gathered duplicate owned boundary-face identities");
+            }
+            const auto parent = result.global_cell_to_replicated_cell.find(
+                static_cast<GlobalIndex>(packed.global_parent_cell));
+            if (packed.global_face < 0 ||
+                parent == result.global_cell_to_replicated_cell.end() ||
+                packed.local_face == INVALID_LOCAL_INDEX) {
+                throw std::invalid_argument(
+                    "kinematic-area-gradient collective projection gathered an invalid boundary-face record");
+            }
+            result.boundary_faces.push_back({
+                static_cast<GlobalIndex>(packed.global_face),
+                parent->second,
+                static_cast<LocalIndex>(packed.local_face),
+                static_cast<int>(packed.marker)});
+        }
+    } catch (const std::exception& exception) {
+        local_success = false;
+        local_diagnostic = exception.what();
+    }
+    if (!synchronizeKinematicProjectionFailure(
+            context, local_success, local_diagnostic,
+            result.diagnostic)) {
+        return result;
+    }
+    result.success = true;
+    return result;
+}
 
 [[nodiscard]] Real dot(const std::array<Real, 3>& a,
                        const std::array<Real, 3>& b) noexcept
@@ -3452,6 +4266,274 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
     }
     result.success = true;
     return result;
+}
+
+namespace {
+
+LevelSetCurvatureProjectionResult
+projectKinematicAreaGradientCollectively(
+    const systems::FESystem& system,
+    FieldId level_set_field,
+    std::span<const Real> level_set_vertex_values,
+    std::span<const LevelSetCurvatureProjectionSample> supplemental_samples,
+    const LevelSetCurvatureProjectionOptions& options,
+    std::vector<Real>& curvature_vertex_values,
+    LevelSetCurvatureProjectionWorkspace* workspace)
+{
+    const auto& local_mesh = system.meshAccess();
+    if (local_mesh.parallelSize() <= 1) {
+        return workspace != nullptr
+            ? projectLevelSetMeanCurvatureToVertices(
+                  local_mesh,
+                  level_set_vertex_values,
+                  supplemental_samples,
+                  options,
+                  curvature_vertex_values,
+                  *workspace)
+            : projectLevelSetMeanCurvatureToVertices(
+                  local_mesh,
+                  level_set_vertex_values,
+                  supplemental_samples,
+                  options,
+                  curvature_vertex_values);
+    }
+
+    LevelSetCurvatureProjectionResult failure_result;
+    failure_result.vertices = level_set_vertex_values.size();
+    failure_result.recovery_mode = options.recovery_mode;
+    failure_result.kinematic_area_gradient_parallel_size =
+        local_mesh.parallelSize();
+    curvature_vertex_values.assign(
+        level_set_vertex_values.size(), Real{0.0});
+
+    KinematicProjectionCollectiveContext context;
+    auto replicated = buildReplicatedKinematicProjectionInput(
+        system, level_set_field, level_set_vertex_values, context);
+    failure_result.kinematic_area_gradient_parallel_size = context.size;
+    if (!replicated.success) {
+        failure_result.diagnostic = std::move(replicated.diagnostic);
+        return failure_result;
+    }
+
+    const auto local_options_signature =
+        kinematicProjectionOptionsSignature(options);
+    auto minimum_options_signature = local_options_signature;
+    auto maximum_options_signature = local_options_signature;
+    SupplementalSampleRevisionIdentity local_sample_revision;
+    bool local_revision_success = true;
+    std::string local_revision_diagnostic;
+    try {
+        local_sample_revision =
+            supplementalSampleRevisionIdentity(supplemental_samples);
+    } catch (const std::exception& exception) {
+        local_revision_success = false;
+        local_revision_diagnostic = exception.what();
+    }
+    if (!synchronizeKinematicProjectionFailure(
+            context, local_revision_success,
+            local_revision_diagnostic, failure_result.diagnostic)) {
+        return failure_result;
+    }
+    auto minimum_snapshot_revision =
+        local_sample_revision.free_surface_snapshot_revision_key == 0u
+            ? std::numeric_limits<std::uint64_t>::max()
+            : local_sample_revision.free_surface_snapshot_revision_key;
+    auto maximum_snapshot_revision =
+        local_sample_revision.free_surface_snapshot_revision_key;
+    auto minimum_source_revision =
+        local_sample_revision.source_value_revision == 0u
+            ? std::numeric_limits<std::uint64_t>::max()
+            : local_sample_revision.source_value_revision;
+    auto maximum_source_revision =
+        local_sample_revision.source_value_revision;
+    int any_revisioned_samples =
+        local_sample_revision.free_surface_snapshot_revision_key != 0u
+            ? 1
+            : 0;
+    int any_unrevisioned_samples =
+        !supplemental_samples.empty() &&
+                local_sample_revision.free_surface_snapshot_revision_key == 0u
+            ? 1
+            : 0;
+    std::uint64_t global_sample_count = supplemental_samples.size();
+    std::uint64_t global_geometry_sample_count =
+        static_cast<std::uint64_t>(std::count_if(
+            supplemental_samples.begin(),
+            supplemental_samples.end(),
+            [](const auto& sample) {
+                return sample.generated_interface_geometry;
+            }));
+#if FE_HAS_MPI
+    if (context.active) {
+        MPI_Allreduce(MPI_IN_PLACE, &minimum_options_signature, 1,
+                      kinematicMpiUnsigned64Type(), MPI_MIN,
+                      context.communicator);
+        MPI_Allreduce(MPI_IN_PLACE, &maximum_options_signature, 1,
+                      kinematicMpiUnsigned64Type(), MPI_MAX,
+                      context.communicator);
+        MPI_Allreduce(MPI_IN_PLACE, &minimum_snapshot_revision, 1,
+                      kinematicMpiUnsigned64Type(), MPI_MIN,
+                      context.communicator);
+        MPI_Allreduce(MPI_IN_PLACE, &maximum_snapshot_revision, 1,
+                      kinematicMpiUnsigned64Type(), MPI_MAX,
+                      context.communicator);
+        MPI_Allreduce(MPI_IN_PLACE, &minimum_source_revision, 1,
+                      kinematicMpiUnsigned64Type(), MPI_MIN,
+                      context.communicator);
+        MPI_Allreduce(MPI_IN_PLACE, &maximum_source_revision, 1,
+                      kinematicMpiUnsigned64Type(), MPI_MAX,
+                      context.communicator);
+        MPI_Allreduce(MPI_IN_PLACE, &any_revisioned_samples, 1,
+                      MPI_INT, MPI_MAX, context.communicator);
+        MPI_Allreduce(MPI_IN_PLACE, &any_unrevisioned_samples, 1,
+                      MPI_INT, MPI_MAX, context.communicator);
+        MPI_Allreduce(MPI_IN_PLACE, &global_sample_count, 1,
+                      kinematicMpiUnsigned64Type(), MPI_SUM,
+                      context.communicator);
+        MPI_Allreduce(MPI_IN_PLACE, &global_geometry_sample_count, 1,
+                      kinematicMpiUnsigned64Type(), MPI_SUM,
+                      context.communicator);
+    }
+#endif
+    if (minimum_options_signature != maximum_options_signature) {
+        failure_result.diagnostic =
+            "kinematic-area-gradient collective projection requires identical options on every rank";
+        return failure_result;
+    }
+    if (any_revisioned_samples != 0 &&
+        (any_unrevisioned_samples != 0 ||
+         minimum_snapshot_revision != maximum_snapshot_revision ||
+         minimum_source_revision != maximum_source_revision)) {
+        failure_result.diagnostic =
+            "kinematic-area-gradient collective projection requires one complete supplemental-sample revision identity";
+        return failure_result;
+    }
+    if (any_revisioned_samples == 0) {
+        minimum_snapshot_revision = 0u;
+        minimum_source_revision = 0u;
+    }
+
+    std::vector<LevelSetCurvatureProjectionSample> translated_samples(
+        supplemental_samples.begin(), supplemental_samples.end());
+    for (auto& sample : translated_samples) {
+        if (sample.parent_cell < 0 ||
+            sample.parent_cell >= local_mesh.numCells()) {
+            sample.parent_cell = static_cast<MeshIndex>(-1);
+            continue;
+        }
+        const auto global_cell =
+            local_mesh.getCellGlobalId(sample.parent_cell);
+        const auto translated =
+            replicated.global_cell_to_replicated_cell.find(global_cell);
+        sample.parent_cell = translated ==
+                                     replicated
+                                         .global_cell_to_replicated_cell.end()
+            ? static_cast<MeshIndex>(-1)
+            : static_cast<MeshIndex>(translated->second);
+    }
+
+    const auto gathered_cell_count = replicated.cells.size();
+    const auto gathered_boundary_face_count =
+        replicated.boundary_faces.size();
+    ReplicatedKinematicMeshAccess replicated_mesh(
+        local_mesh.dimension(),
+        std::move(replicated.coordinates),
+        std::move(replicated.cells),
+        std::move(replicated.boundary_faces));
+    std::vector<Real> global_curvature;
+    auto projection = workspace != nullptr
+        ? projectLevelSetMeanCurvatureToVertices(
+              replicated_mesh,
+              std::span<const Real>(replicated.level_set_values.data(),
+                                    replicated.level_set_values.size()),
+              std::span<const LevelSetCurvatureProjectionSample>(
+                  translated_samples.data(), translated_samples.size()),
+              options,
+              global_curvature,
+              *workspace)
+        : projectLevelSetMeanCurvatureToVertices(
+              replicated_mesh,
+              std::span<const Real>(replicated.level_set_values.data(),
+                                    replicated.level_set_values.size()),
+              std::span<const LevelSetCurvatureProjectionSample>(
+                  translated_samples.data(), translated_samples.size()),
+              options,
+              global_curvature);
+    projection.free_surface_snapshot_revision_key =
+        minimum_snapshot_revision;
+    projection.source_value_revision = minimum_source_revision;
+    projection.supplemental_samples =
+        static_cast<std::size_t>(global_sample_count);
+    projection.generated_interface_geometry_samples =
+        static_cast<std::size_t>(global_geometry_sample_count);
+    projection.kinematic_area_gradient_collective_replication = true;
+    projection.kinematic_area_gradient_parallel_size = context.size;
+    projection.kinematic_area_gradient_gathered_owned_cells =
+        gathered_cell_count;
+    projection
+        .kinematic_area_gradient_gathered_owned_boundary_faces =
+        gathered_boundary_face_count;
+    if (!projection.success) {
+        curvature_vertex_values.assign(
+            level_set_vertex_values.size(), Real{0.0});
+        return projection;
+    }
+    if (global_curvature.size() != replicated.level_set_values.size()) {
+        projection.success = false;
+        projection.diagnostic =
+            "kinematic-area-gradient collective projection produced an invalid global curvature layout";
+        curvature_vertex_values.assign(
+            level_set_vertex_values.size(), Real{0.0});
+        return projection;
+    }
+    curvature_vertex_values.resize(
+        replicated.local_vertex_to_global_dof.size());
+    for (std::size_t local_vertex = 0;
+         local_vertex < replicated.local_vertex_to_global_dof.size();
+         ++local_vertex) {
+        curvature_vertex_values[local_vertex] = global_curvature[
+            replicated.local_vertex_to_global_dof[local_vertex]];
+    }
+    return projection;
+}
+
+} // namespace
+
+LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
+    const systems::FESystem& system,
+    FieldId level_set_field,
+    std::span<const Real> level_set_vertex_values,
+    std::span<const LevelSetCurvatureProjectionSample> supplemental_samples,
+    const LevelSetCurvatureProjectionOptions& options,
+    std::vector<Real>& curvature_vertex_values)
+{
+    return projectKinematicAreaGradientCollectively(
+        system,
+        level_set_field,
+        level_set_vertex_values,
+        supplemental_samples,
+        options,
+        curvature_vertex_values,
+        nullptr);
+}
+
+LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
+    const systems::FESystem& system,
+    FieldId level_set_field,
+    std::span<const Real> level_set_vertex_values,
+    std::span<const LevelSetCurvatureProjectionSample> supplemental_samples,
+    const LevelSetCurvatureProjectionOptions& options,
+    std::vector<Real>& curvature_vertex_values,
+    LevelSetCurvatureProjectionWorkspace& workspace)
+{
+    return projectKinematicAreaGradientCollectively(
+        system,
+        level_set_field,
+        level_set_vertex_values,
+        supplemental_samples,
+        options,
+        curvature_vertex_values,
+        &workspace);
 }
 
 } // namespace svmp::FE::level_set
