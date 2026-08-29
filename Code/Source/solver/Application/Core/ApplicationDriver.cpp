@@ -3225,6 +3225,10 @@ canonicalLevelSetMaintenanceRequestSchedule(
         words,
         request.static_capillary_equilibrium
             .max_line_search_iterations);
+    appendMaintenanceScheduleSigned(
+        words,
+        request.static_capillary_equilibrium
+            .max_topology_epoch_transitions);
     appendMaintenanceScheduleReal(
         words,
         request.static_capillary_equilibrium
@@ -6516,6 +6520,13 @@ std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parame
              "StaticCapillaryMaxLineSearchIterations"})) {
       request.static_capillary_equilibrium
           .max_line_search_iterations = *iterations;
+    }
+    if (const auto transitions = first_defined_int_parameter(
+            eq_params,
+            {"Static_capillary_max_topology_epoch_transitions",
+             "StaticCapillaryMaxTopologyEpochTransitions"})) {
+      request.static_capillary_equilibrium
+          .max_topology_epoch_transitions = *transitions;
     }
     if (const auto inverse_stiffness =
             first_defined_double_parameter(
@@ -25923,6 +25934,8 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
         << result.topology_change_rejections
         << " topology_epoch_transitions="
         << result.topology_epoch_transitions
+        << " max_topology_epoch_transitions="
+        << minimization_options.max_topology_epoch_transitions
         << " constraint_change_rejections="
         << result.constraint_change_rejections
         << " limited_memory_updates="
@@ -26202,6 +26215,8 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       << result.topology_change_rejections
       << " topology_epoch_transitions="
       << result.topology_epoch_transitions
+      << " max_topology_epoch_transitions="
+      << minimization_options.max_topology_epoch_transitions
       << " constraint_change_rejections="
       << result.constraint_change_rejections
       << " limited_memory_updates="

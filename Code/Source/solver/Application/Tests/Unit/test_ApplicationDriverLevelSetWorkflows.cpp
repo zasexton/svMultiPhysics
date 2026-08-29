@@ -2989,6 +2989,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Static_capillary_finite_difference_max_shrinks>8</Static_capillary_finite_difference_max_shrinks>
     <Static_capillary_max_iterations>9</Static_capillary_max_iterations>
     <Static_capillary_max_line_search_iterations>10</Static_capillary_max_line_search_iterations>
+    <Static_capillary_max_topology_epoch_transitions>11</Static_capillary_max_topology_epoch_transitions>
     <Static_capillary_projected_gradient_inverse_stiffness>0.75</Static_capillary_projected_gradient_inverse_stiffness>
     <Static_capillary_tangent_trust_radius>0.125</Static_capillary_tangent_trust_radius>
     <Static_capillary_maximum_coefficient_update_linf>0.375</Static_capillary_maximum_coefficient_update_linf>
@@ -3026,6 +3027,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(options.finite_difference_max_shrinks, 8);
   EXPECT_EQ(options.max_iterations, 9);
   EXPECT_EQ(options.max_line_search_iterations, 10);
+  EXPECT_EQ(options.max_topology_epoch_transitions, 11);
   EXPECT_DOUBLE_EQ(
       options.projected_gradient_inverse_stiffness, 0.75);
   EXPECT_DOUBLE_EQ(options.tangent_trust_radius, 0.125);

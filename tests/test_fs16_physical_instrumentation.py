@@ -1912,6 +1912,7 @@ def test_kinematic_area_gradient_traction_configuration_is_explicit_and_unfilter
             static_capillary_finite_difference_relative_step=2.0e-5,
             static_capillary_limited_memory_history_size=6,
             static_capillary_limited_memory_curvature_tolerance=3.0e-11,
+            static_capillary_max_topology_epoch_transitions=24,
         )
 
         root = runner.ET.parse(solver).getroot()
@@ -1937,6 +1938,8 @@ def test_kinematic_area_gradient_traction_configuration_is_explicit_and_unfilter
             "Static_capillary_limited_memory_history_size") == "6"
         assert level_set.findtext(
             "Static_capillary_limited_memory_curvature_tolerance") == "3e-11"
+        assert level_set.findtext(
+            "Static_capillary_max_topology_epoch_transitions") == "24"
 
 
 def test_static_capillary_minimizer_configuration_rejects_invalid_controls():
@@ -1968,6 +1971,12 @@ def test_static_capillary_minimizer_configuration_rejects_invalid_controls():
         configure(static_capillary_limited_memory_history_size=True)
     with pytest.raises(ValueError, match="curvature tolerance must be positive"):
         configure(static_capillary_limited_memory_curvature_tolerance=0.0)
+    with pytest.raises(ValueError, match="topology epoch transitions"):
+        configure(static_capillary_max_topology_epoch_transitions=-1)
+    with pytest.raises(ValueError, match="topology epoch transitions"):
+        configure(static_capillary_max_topology_epoch_transitions=2.5)
+    with pytest.raises(ValueError, match="topology epoch transitions"):
+        configure(static_capillary_max_topology_epoch_transitions=True)
     with pytest.raises(ValueError, match="pressure stabilization policy"):
         configure(cut_cell_pressure_stabilization_policy="unsupported")
 
@@ -1981,6 +1990,8 @@ def test_kinematic_area_gradient_static_initialization_requires_exact_derivative
         "finite_difference_fourth_order_components": 0,
         "analytic_derivative_evaluations": 135,
         "derivative_resolution_step_acceptances": 17,
+        "topology_epoch_transitions": 3,
+        "max_topology_epoch_transitions": 24,
         "iterations": 134,
         "target_liquid_volume": 0.141,
         "initial_physical_potential_energy": 0.471,
@@ -2002,6 +2013,7 @@ def test_kinematic_area_gradient_static_initialization_requires_exact_derivative
         initialize_discrete_static_capillary_equilibrium=True,
         capillary_force_form="kinematic_area_gradient_traction",
         static_capillary_max_iterations=200,
+        static_capillary_max_topology_epoch_transitions=24,
     )
 
     metrics = {
@@ -2019,6 +2031,8 @@ def test_kinematic_area_gradient_static_initialization_requires_exact_derivative
         "static_capillary_finite_difference_fourth_order_components"] == 0
     assert extracted[
         "static_capillary_derivative_resolution_step_acceptances"] == 17
+    assert extracted["static_capillary_topology_epoch_transitions"] == 3
+    assert extracted["static_capillary_max_topology_epoch_transitions"] == 24
 
     missing_exact = dict(record, analytic_derivative_evaluations=0)
     metrics["diagnostics"][

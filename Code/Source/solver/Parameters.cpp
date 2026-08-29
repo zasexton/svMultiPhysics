@@ -396,6 +396,8 @@ bool is_oop_equation_extension_parameter(const std::string& name)
     "StaticCapillaryMaxIterations",
     "Static_capillary_max_line_search_iterations",
     "StaticCapillaryMaxLineSearchIterations",
+    "Static_capillary_max_topology_epoch_transitions",
+    "StaticCapillaryMaxTopologyEpochTransitions",
     "Static_capillary_projected_gradient_inverse_stiffness",
     "StaticCapillaryProjectedGradientInverseStiffness",
     "Static_capillary_tangent_trust_radius",

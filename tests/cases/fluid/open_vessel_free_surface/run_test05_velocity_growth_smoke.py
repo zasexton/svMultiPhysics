@@ -706,6 +706,8 @@ def configure_solver(solver_xml: Path,
                      static_capillary_finite_difference_relative_step:
                      float | None = None,
                      static_capillary_max_iterations: int | None = None,
+                     static_capillary_max_topology_epoch_transitions:
+                     int | None = None,
                      static_capillary_limited_memory_history_size:
                      int | None = None,
                      static_capillary_limited_memory_curvature_tolerance:
@@ -1090,6 +1092,15 @@ def configure_solver(solver_xml: Path,
         raise ValueError(
             "static capillary limited-memory history size must be "
             "a nonnegative integer")
+    if (static_capillary_max_topology_epoch_transitions is not None and
+            (not isinstance(
+                static_capillary_max_topology_epoch_transitions, int) or
+             isinstance(
+                 static_capillary_max_topology_epoch_transitions, bool) or
+             static_capillary_max_topology_epoch_transitions < 0)):
+        raise ValueError(
+            "static capillary maximum topology epoch transitions must be "
+            "a nonnegative integer")
     if (static_capillary_limited_memory_curvature_tolerance is not None and
             (not math.isfinite(
                 static_capillary_limited_memory_curvature_tolerance) or
@@ -1126,6 +1137,13 @@ def configure_solver(solver_xml: Path,
             level_set,
             "Static_capillary_max_iterations",
             str(static_capillary_max_iterations),
+        )
+    if static_capillary_max_topology_epoch_transitions is not None:
+        level_set = level_set_equation(root)
+        set_text(
+            level_set,
+            "Static_capillary_max_topology_epoch_transitions",
+            str(static_capillary_max_topology_epoch_transitions),
         )
     if static_capillary_limited_memory_history_size is not None:
         level_set = level_set_equation(root)
@@ -6134,6 +6152,39 @@ def static_capillary_equilibrium_initialization_errors(
             "discrete static-capillary initialization iteration count "
             f"{iterations} exceeds {maximum_iterations}"
         )
+    topology_transitions = record.get("topology_epoch_transitions")
+    reported_topology_limit = record.get(
+        "max_topology_epoch_transitions")
+    requested_topology_limit = getattr(
+        args, "static_capillary_max_topology_epoch_transitions", None)
+    if (isinstance(topology_transitions, bool) or
+            not isinstance(topology_transitions, int) or
+            topology_transitions < 0):
+        errors.append(
+            "discrete static-capillary initialization has invalid topology "
+            f"epoch transition count {topology_transitions!r}"
+        )
+    if (isinstance(reported_topology_limit, bool) or
+            not isinstance(reported_topology_limit, int) or
+            reported_topology_limit < 0):
+        errors.append(
+            "discrete static-capillary initialization has invalid maximum "
+            f"topology epoch transitions {reported_topology_limit!r}"
+        )
+    elif (isinstance(topology_transitions, int) and
+          topology_transitions > reported_topology_limit):
+        errors.append(
+            "discrete static-capillary initialization topology epoch "
+            f"transition count {topology_transitions} exceeds reported "
+            f"limit {reported_topology_limit}"
+        )
+    if (requested_topology_limit is not None and
+            reported_topology_limit != requested_topology_limit):
+        errors.append(
+            "discrete static-capillary initialization reported maximum "
+            f"topology epoch transitions {reported_topology_limit!r}; "
+            f"expected {requested_topology_limit}"
+        )
 
     target_volume = record.get("target_liquid_volume")
     if (isinstance(target_volume, bool) or
@@ -6646,6 +6697,8 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
                     "analytic_derivative_evaluations",
                     "derivative_resolution_step_acceptances",
                     "topology_change_rejections",
+                    "topology_epoch_transitions",
+                    "max_topology_epoch_transitions",
                     "constraint_change_rejections",
                     "qualification"):
                 value = latest_static_capillary.get(source)
@@ -7840,6 +7893,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "static_capillary_constant_pressure_kkt_max_relative_distance",
         "static_capillary_finite_difference_relative_step",
         "static_capillary_max_iterations",
+        "static_capillary_max_topology_epoch_transitions",
         "static_capillary_limited_memory_history_size",
         "static_capillary_limited_memory_curvature_tolerance",
         "require_static_capillary_balance_qualification",
@@ -12465,6 +12519,11 @@ def configure_case_solver_xml(run_dir: Path, args: argparse.Namespace) -> None:
         ),
         static_capillary_max_iterations=getattr(
             args, "static_capillary_max_iterations", None),
+        static_capillary_max_topology_epoch_transitions=getattr(
+            args,
+            "static_capillary_max_topology_epoch_transitions",
+            None,
+        ),
         static_capillary_limited_memory_history_size=getattr(
             args,
             "static_capillary_limited_memory_history_size",
@@ -14811,6 +14870,8 @@ def main() -> int:
         type=float,
     )
     parser.add_argument("--static-capillary-max-iterations", type=int)
+    parser.add_argument(
+        "--static-capillary-max-topology-epoch-transitions", type=int)
     parser.add_argument(
         "--static-capillary-limited-memory-history-size",
         type=int,
