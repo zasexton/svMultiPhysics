@@ -295,6 +295,9 @@ minimizeLevelSetStaticCapillaryEquilibrium(
     std::vector<Real> previous_active_coefficients;
     std::vector<Real> previous_projected_gradient;
     bool pending_limited_memory_update = false;
+    Real effective_projected_gradient_tolerance =
+        options.projected_gradient_tolerance;
+    std::string pending_acceptance_gate_diagnostic;
 
     const auto exactProjectedGradientNorm =
         [&](const LevelSetStaticCapillaryEquilibriumEvaluation& evaluation,
@@ -661,7 +664,7 @@ minimizeLevelSetStaticCapillaryEquilibrium(
             std::abs(volume_error) <= options.volume_tolerance;
         const bool parameter_gradient_converged =
             projected_gradient_norm <=
-            options.projected_gradient_tolerance;
+            effective_projected_gradient_tolerance;
         if (volume_converged &&
             parameter_gradient_converged) {
             LevelSetStaticCapillaryEquilibriumEvaluation
@@ -718,69 +721,128 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                     "acceptance_certificate_volume_gate_failed";
                 return result;
             }
-            const bool pressure_representability_converged =
-                current.pressure_representability_available &&
-                current.pressure_representability_converged &&
-                !current.pressure_representability_breakdown &&
-                finiteNonnegative(
-                    current.pressure_representability_residual_norm) &&
-                current.pressure_representability_residual_norm <=
-                    options
-                        .pressure_representability_max_residual_norm &&
-                finiteNonnegative(
-                    current
-                        .pressure_representability_relative_distance) &&
-                current.pressure_representability_relative_distance <=
-                    options
-                        .pressure_representability_max_relative_distance;
-            if (!pressure_representability_converged) {
+            if (!current.pressure_representability_available) {
                 result.diagnostic =
-                    current.pressure_representability_available
-                        ? "pressure_representability_gate_failed_at_parameter_stationary_geometry"
-                        : "pressure_representability_unavailable_at_parameter_stationary_geometry";
+                    "pressure_representability_unavailable_at_parameter_stationary_geometry";
                 return result;
             }
-            const bool physical_equilibrium_converged =
-                finiteNonnegative(current.production_residual_norm) &&
-                current.production_residual_norm <=
-                    options.physical_equilibrium_max_residual_norm;
-            if (!physical_equilibrium_converged) {
+            if (!current.pressure_representability_converged ||
+                current.pressure_representability_breakdown) {
+                result.diagnostic =
+                    "pressure_representability_gate_failed_at_parameter_stationary_geometry";
+                return result;
+            }
+            if (!finiteNonnegative(current.production_residual_norm)) {
                 result.diagnostic =
                     "physical_equilibrium_residual_gate_failed_at_parameter_stationary_geometry";
                 return result;
             }
-            const bool constant_pressure_kkt_converged =
-                !current.constant_pressure_kkt_required ||
-                (current.constant_pressure_kkt_available &&
-                 finiteNonnegative(
-                     current.constant_pressure_kkt_residual_norm) &&
-                 current.constant_pressure_kkt_residual_norm <=
-                     options.constant_pressure_kkt_max_residual_norm &&
-                 finiteNonnegative(
-                     current.constant_pressure_kkt_relative_distance) &&
-                 current.constant_pressure_kkt_relative_distance <=
-                     options
-                         .constant_pressure_kkt_max_relative_distance);
-            if (!constant_pressure_kkt_converged) {
+            if (current.constant_pressure_kkt_required &&
+                !current.constant_pressure_kkt_available) {
                 result.diagnostic =
-                    current.constant_pressure_kkt_available
-                        ? "constant_pressure_kkt_gate_failed_at_parameter_stationary_geometry"
-                        : "constant_pressure_kkt_unavailable_at_parameter_stationary_geometry";
+                    "constant_pressure_kkt_unavailable_at_parameter_stationary_geometry";
                 return result;
             }
 
-            std::vector<Real> committed = coefficients;
-            accepted_coefficients.swap(committed);
-            result.success = true;
-            result.converged = true;
-            result.accepted_coefficients_assigned = true;
-            result.diagnostic =
-                "fixed_volume_discrete_capillary_equilibrium_converged";
-            return result;
+            Real tightening_factor = Real{0.1};
+            std::string failed_gate_diagnostic;
+            const auto accountForFailedGate =
+                [&](Real value,
+                    Real limit,
+                    const char* diagnostic) {
+                    if (value <= limit) {
+                        return;
+                    }
+                    if (failed_gate_diagnostic.empty()) {
+                        failed_gate_diagnostic = diagnostic;
+                    }
+                    // Predict the parameter tolerance from the observed gate
+                    // ratio, retain a factor-of-two margin, and always request
+                    // at least one order of magnitude of additional descent.
+                    const Real gate_factor =
+                        limit > Real{0.0}
+                            ? Real{0.5} * limit / value
+                            : Real{0.0};
+                    tightening_factor =
+                        std::min(tightening_factor, gate_factor);
+                };
+            accountForFailedGate(
+                current.pressure_representability_residual_norm,
+                options.pressure_representability_max_residual_norm,
+                "pressure_representability_gate_failed_at_parameter_stationary_geometry");
+            accountForFailedGate(
+                current.pressure_representability_relative_distance,
+                options.pressure_representability_max_relative_distance,
+                "pressure_representability_gate_failed_at_parameter_stationary_geometry");
+            accountForFailedGate(
+                current.production_residual_norm,
+                options.physical_equilibrium_max_residual_norm,
+                "physical_equilibrium_residual_gate_failed_at_parameter_stationary_geometry");
+            if (current.constant_pressure_kkt_required) {
+                accountForFailedGate(
+                    current.constant_pressure_kkt_residual_norm,
+                    options.constant_pressure_kkt_max_residual_norm,
+                    "constant_pressure_kkt_gate_failed_at_parameter_stationary_geometry");
+                accountForFailedGate(
+                    current.constant_pressure_kkt_relative_distance,
+                    options.constant_pressure_kkt_max_relative_distance,
+                    "constant_pressure_kkt_gate_failed_at_parameter_stationary_geometry");
+            }
+
+            if (!failed_gate_diagnostic.empty()) {
+                // A difference gradient cannot reliably distinguish further
+                // descent from stencil and subtraction error at this point.
+                if (!current.functional_derivatives_available) {
+                    result.diagnostic = failed_gate_diagnostic;
+                    return result;
+                }
+                if (result.iterations >= options.max_iterations) {
+                    result.diagnostic = failed_gate_diagnostic;
+                    return result;
+                }
+                const Real stationarity_scale =
+                    norm(energy_gradient) +
+                    std::abs(volume_multiplier) * norm(volume_gradient);
+                const Real numerical_stationarity_floor =
+                    Real{64.0} *
+                    std::numeric_limits<Real>::epsilon() *
+                    stationarity_scale;
+                const Real requested_tolerance =
+                    std::max(
+                        numerical_stationarity_floor,
+                        projected_gradient_norm * tightening_factor);
+                if (!(projected_gradient_norm >
+                      numerical_stationarity_floor) ||
+                    !(requested_tolerance < projected_gradient_norm)) {
+                    result.diagnostic = failed_gate_diagnostic;
+                    return result;
+                }
+                effective_projected_gradient_tolerance =
+                    std::min(
+                        effective_projected_gradient_tolerance,
+                        requested_tolerance);
+                pending_acceptance_gate_diagnostic =
+                    failed_gate_diagnostic;
+            } else {
+                std::vector<Real> committed = coefficients;
+                accepted_coefficients.swap(committed);
+                result.success = true;
+                result.converged = true;
+                result.accepted_coefficients_assigned = true;
+                result.diagnostic =
+                    "fixed_volume_discrete_capillary_equilibrium_converged";
+                return result;
+            }
         }
         if (result.iterations >= options.max_iterations) {
-            result.diagnostic =
-                "static_capillary_equilibrium_iteration_limit_reached";
+            if (pending_acceptance_gate_diagnostic.empty()) {
+                result.diagnostic =
+                    "static_capillary_equilibrium_iteration_limit_reached";
+            } else {
+                result.diagnostic =
+                    "acceptance_certificate_refinement_iteration_limit_reached:" +
+                    pending_acceptance_gate_diagnostic;
+            }
             return result;
         }
 
@@ -1050,9 +1112,16 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                 ++result.projected_gradient_fallbacks;
                 continue;
             }
-            result.diagnostic =
-                "fixed_topology_capillary_merit_line_search_failed:" +
-                last_evaluation_diagnostic;
+            if (pending_acceptance_gate_diagnostic.empty()) {
+                result.diagnostic =
+                    "fixed_topology_capillary_merit_line_search_failed:" +
+                    last_evaluation_diagnostic;
+            } else {
+                result.diagnostic =
+                    "acceptance_certificate_refinement_failed:" +
+                    pending_acceptance_gate_diagnostic + ":" +
+                    last_evaluation_diagnostic;
+            }
             return result;
         }
 

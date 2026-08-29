@@ -224,6 +224,48 @@ TEST(LevelSetStaticCapillaryEquilibrium,
 }
 
 TEST(LevelSetStaticCapillaryEquilibrium,
+     RefinesParameterStationarityUntilThePhysicalCertificatePasses)
+{
+    const std::vector<FE::Real> input{1.05, 1.95};
+    const std::array<std::size_t, 2> active{0u, 1u};
+    std::vector<FE::Real> accepted;
+    auto options = quadraticOptions();
+    options.projected_gradient_tolerance = 0.2;
+    options.pressure_representability_max_residual_norm = 1.0e-6;
+    options.pressure_representability_max_relative_distance = 1.0e-6;
+    options.physical_equilibrium_max_residual_norm = 1.0e-6;
+    options.constant_pressure_kkt_max_residual_norm = 1.0e-6;
+    options.constant_pressure_kkt_max_relative_distance = 1.0e-6;
+    options.projected_gradient_inverse_stiffness = 0.25;
+    options.limited_memory_history_size = 0;
+
+    const auto result =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            options,
+            input,
+            active,
+            [](std::span<const FE::Real> coefficients,
+               EvaluationPurpose purpose) {
+                return quadraticCapillaryEvaluation(
+                    coefficients,
+                    purpose,
+                    /*topology_barrier=*/false,
+                    /*constraint_barrier=*/false,
+                    /*provide_functional_derivatives=*/true);
+            },
+            accepted);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    ASSERT_EQ(accepted.size(), 2u);
+    EXPECT_NEAR(accepted[0], 1.0, 1.0e-6);
+    EXPECT_NEAR(accepted[1], 2.0, 1.0e-6);
+    EXPECT_GT(result.iterations, 0);
+    EXPECT_EQ(result.acceptance_certificate_evaluations, 2u);
+    EXPECT_LE(result.final_projected_gradient_norm, 1.0e-6);
+    EXPECT_LE(result.final_production_residual_norm, 1.0e-6);
+}
+
+TEST(LevelSetStaticCapillaryEquilibrium,
      ZeroLimitedMemoryHistoryRetainsTheSafeguardedGradientRoute)
 {
     const std::vector<FE::Real> input{2.5, 0.5};
