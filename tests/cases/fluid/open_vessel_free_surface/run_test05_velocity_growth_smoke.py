@@ -18,7 +18,7 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 import pyvista as pv
@@ -41,6 +41,9 @@ from free_surface_energy import (
     summarize_energy_history,
 )
 from static_capillary_3d import (
+    active_signed_level_set,
+    normalized_active_domain,
+    oriented_level_set,
     spatial_capillary_state_metrics,
     write_sessile_sphere_case,
     write_sphere_case,
@@ -666,6 +669,7 @@ def configure_solver(solver_xml: Path,
                      volume_quadrature_order: int | None = None,
                      cut_cell_velocity_gradient_penalty: float | None = None,
                      cut_cell_pressure_gradient_penalty: float | None = None,
+                     active_domain: str = "LevelSetNegative",
                      surface_tension: float | None = None,
                      capillary_force_form: str = "surface_stress",
                      prescribed_capillary_curvature: float | None = None,
@@ -819,7 +823,8 @@ def configure_solver(solver_xml: Path,
 
     free_surface = free_surface_bc(root)
     require_text(free_surface, "Implementation", "UnfittedLevelSet")
-    require_text(free_surface, "Active_domain", "LevelSetNegative")
+    active_domain = normalized_active_domain(active_domain)
+    require_text(free_surface, "Active_domain", active_domain)
     require_text(free_surface, "Active_domain_method", "CutVolume")
     if disable_cut_metadata_scale:
         set_text(free_surface, "Use_cut_metadata_scale", "false")
@@ -1728,6 +1733,19 @@ def remove_synthetic_pressure_pin(case_dir: Path) -> None:
     tree.write(solver_xml, encoding="utf-8", xml_declaration=True)
 
 
+def set_case_active_domain(case_dir: Path, active_domain: str) -> None:
+    """Set the liquid-side declaration in one generated synthetic case."""
+    solver_xml = case_dir / "solver.xml"
+    tree = ET.parse(solver_xml)
+    set_text(
+        free_surface_bc(tree.getroot()),
+        "Active_domain",
+        normalized_active_domain(active_domain),
+    )
+    ET.indent(tree, space="  ")
+    tree.write(solver_xml, encoding="utf-8", xml_declaration=True)
+
+
 def configure_capillary_wave_wall_boundary_contract(case_dir: Path) -> None:
     """Install the impermeable-slip walls assumed by linear wave theory."""
     solver_xml = case_dir / "solver.xml"
@@ -1877,7 +1895,9 @@ def configure_sessile_solver_xml(case_dir: Path,
                                   dynamic: bool,
                                   smoothing_width: float,
                                   wall_face: str = "wall_bottom",
-                                  contact_line_model: str = "dynamic") -> None:
+                                  contact_line_model: str = "dynamic",
+                                  active_domain: str = "LevelSetNegative",
+                                  ) -> None:
     if contact_line_model not in {"dynamic", "prescribed"}:
         raise ValueError(
             "sessile contact-line model must be dynamic or prescribed")
@@ -1966,6 +1986,11 @@ def configure_sessile_solver_xml(case_dir: Path,
         contact_wall, "Effective_direction", wall_spec["effective_direction"])
 
     free_surface = free_surface_bc(root)
+    set_text(
+        free_surface,
+        "Active_domain",
+        normalized_active_domain(active_domain),
+    )
     set_text(free_surface, "Generated_interface_geometry", "LinearCorner")
     set_text(free_surface, "Enable_velocity_extension", "false")
     set_text(free_surface, "Surface_tension", f"{surface_tension:.16g}")
@@ -2023,6 +2048,8 @@ def write_sessile2d_case(case_dir: Path,
                          level_set_positive_scale: float = 1.0,
                          initialize_discrete_static_contact_geometry: bool = False,
                          simplex_mesh: bool = False,
+                         active_domain: str = "LevelSetNegative",
+                         tangent_center_offset: float = 0.0,
                          ) -> None:
     if radius <= 0.0 or surface_tension <= 0.0:
         raise ValueError("sessile radius and surface tension must be positive")
@@ -2041,6 +2068,9 @@ def write_sessile2d_case(case_dir: Path,
     if (not math.isfinite(level_set_positive_scale) or
             level_set_positive_scale <= 0.0):
         raise ValueError("level-set positive scale must be positive and finite")
+    active_domain = normalized_active_domain(active_domain)
+    if not math.isfinite(tangent_center_offset):
+        raise ValueError("sessile tangent-center offset must be finite")
 
     wall_spec = sessile_contact_wall_spec(wall_face)
     wall_axis = int(wall_spec["wall_axis"])
@@ -2076,9 +2106,13 @@ def write_sessile2d_case(case_dir: Path,
                         abs_tol=1.0e-15):
         raise RuntimeError("fixed-area sessile construction is inconsistent")
     center = np.zeros(2, dtype=float)
-    center[tangent_axis] = 0.5
+    center[tangent_axis] = 0.5 + tangent_center_offset
     center[wall_axis] = (
         wall_coordinate + center_inward_distance * wall_inward[wall_axis])
+    if (center[tangent_axis] - half_footprint <= 0.0 or
+            center[tangent_axis] + half_footprint >= 1.0):
+        raise ValueError(
+            "sessile contact points must remain strictly inside the wall")
     phi = np.linalg.norm(points[:, :2] - center, axis=1) - initial_radius
     # A circle sampled at Q1 vertices does not, in general, give the
     # LinearCorner fragment in the wall-adjacent cut cell the analytic circle
@@ -2099,8 +2133,8 @@ def write_sessile2d_case(case_dir: Path,
     if dynamic or initialize_discrete_static_contact_geometry:
         tangent_angle = math.radians(initial_angle_degrees)
         for side, contact_coordinate in (
-                (-1.0, 0.5 - half_footprint),
-                (1.0, 0.5 + half_footprint)):
+                (-1.0, center[tangent_axis] - half_footprint),
+                (1.0, center[tangent_axis] + half_footprint)):
             candidates: list[tuple[float, int, np.ndarray]] = []
             for cell_id in range(grid.n_cells):
                 cell = grid.get_cell(cell_id)
@@ -2143,7 +2177,8 @@ def write_sessile2d_case(case_dir: Path,
             local_points = points[point_ids, :2]
             phi[point_ids] = (local_points - contact_point) @ outward_normal
             contact_cell_ids.append(cell_id)
-    phi *= level_set_positive_scale
+    phi = oriented_level_set(
+        phi, active_domain, level_set_positive_scale)
     pressure_jump = surface_tension / initial_radius
     grid.point_data["phi"] = phi
     # Extend the constant liquid pressure across the background cut-element
@@ -2157,12 +2192,16 @@ def write_sessile2d_case(case_dir: Path,
     apex_coordinate = center[wall_axis] + (
         initial_radius * wall_inward[wall_axis])
     gauge_point = np.zeros(3, dtype=float)
-    gauge_point[tangent_axis] = 0.5
+    gauge_point[tangent_axis] = center[tangent_axis]
     gauge_point[wall_axis] = (
         wall_coordinate +
         max(0.25 * (apex_coordinate - wall_coordinate), 1.0e-8) *
         wall_inward[wall_axis])
-    gauge_node = nearest_negative_level_set_node(points, phi, gauge_point)
+    gauge_node = nearest_negative_level_set_node(
+        points,
+        active_signed_level_set(phi, active_domain),
+        gauge_point,
+    )
     (case_dir / "pressure_gauge.csv").write_text(
         f"node_id,pressure\n{gauge_node},{pressure_jump:.16g}\n",
         encoding="utf-8",
@@ -2184,6 +2223,7 @@ def write_sessile2d_case(case_dir: Path,
         0.0,
         wall_face,
         contact_line_model,
+        active_domain,
     )
     predicted_initial_speed = (
         mobility * surface_tension *
@@ -2206,6 +2246,8 @@ def write_sessile2d_case(case_dir: Path,
             "wall_top": "ceiling_attached_circle_2d",
         }[wall_face],
         "capillary_radius": initial_radius,
+        "active_domain": active_domain,
+        "tangent_center_offset": tangent_center_offset,
         "initial_active_pressure": pressure_jump,
         # Keep the post-processed kinetic energy on the same physical scale
         # as the generated solver deck above.  Reusing the dimensional
@@ -2239,7 +2281,7 @@ def write_sessile2d_case(case_dir: Path,
             ),
             **({"wall_y": wall_coordinate}
                if wall_axis == 1 else {"wall_x": wall_coordinate}),
-            "active_domain": "LevelSetNegative",
+            "active_domain": active_domain,
             "level_set_positive_scale": level_set_positive_scale,
             "initial_contact_angle_degrees": initial_angle_degrees,
             "equilibrium_contact_angle_degrees": equilibrium_angle_degrees,
@@ -2323,16 +2365,21 @@ def write_capillary_arc2d_case(case_dir: Path,
                                pressure_jump: float = 0.0,
                                nx: int = 8,
                                ny: int = 8,
-                               simplex_mesh: bool = False) -> None:
+                               simplex_mesh: bool = False,
+                               active_domain: str = "LevelSetNegative",
+                               ) -> None:
+    active_domain = normalized_active_domain(active_domain)
     write_mini_case(
         case_dir, steps, static=True, nx=nx, ny=ny,
         simplex_mesh=simplex_mesh)
     remove_synthetic_pressure_pin(case_dir)
+    set_case_active_domain(case_dir, active_domain)
 
     mesh_path = case_dir / "mesh/background/mesh-complete.mesh.vtu"
     grid = pv.read(mesh_path)
     points = np.asarray(grid.points, dtype=float)
-    phi = capillary_arc2d_phi(points)
+    phi = oriented_level_set(
+        capillary_arc2d_phi(points), active_domain, 1.0)
     grid.point_data["phi"] = phi
     # Pressure DOFs whose vertices have phi>0 can still have active liquid
     # support in a cut cell and are intentionally retained by the production
@@ -2346,13 +2393,18 @@ def write_capillary_arc2d_case(case_dir: Path,
     grid.save(mesh_path)
 
     gauge_point = np.array([0.5, 0.0, 0.0], dtype=float)
-    gauge_node = int(np.argmin(np.linalg.norm(points - gauge_point, axis=1)))
+    gauge_node = nearest_negative_level_set_node(
+        points,
+        active_signed_level_set(phi, active_domain),
+        gauge_point,
+    )
     (case_dir / "pressure_gauge.csv").write_text(
         f"node_id,pressure\n{gauge_node},{pressure_jump:.16g}\n",
         encoding="utf-8")
     benchmark = {
         "benchmark": "synthetic zero-gravity capillary arc smoke",
         "representation": "unfitted_level_set",
+        "active_domain": active_domain,
         "capillary_arc_radius": CAPILLARY_ARC_RADIUS,
         "initial_active_pressure": pressure_jump,
         "initial_pressure_extension": (
@@ -2399,16 +2451,38 @@ def write_capillary_droplet2d_case(case_dir: Path,
                                    pressure_jump: float = 0.0,
                                    nx: int = 8,
                                    ny: int = 8,
-                                   simplex_mesh: bool = False) -> None:
+                                   simplex_mesh: bool = False,
+                                   active_domain: str = "LevelSetNegative",
+                                   center_offset: Sequence[float] = (0.0, 0.0),
+                                   ) -> None:
+    active_domain = normalized_active_domain(active_domain)
+    center_offset = np.asarray(center_offset, dtype=float).reshape(-1)
+    if center_offset.shape != (2,) or not np.isfinite(center_offset).all():
+        raise ValueError(
+            "capillary droplet center offset must contain two finite values")
+    center = np.asarray([
+        CAPILLARY_DROPLET_CENTER_X,
+        CAPILLARY_DROPLET_CENTER_Y,
+    ], dtype=float) + center_offset
+    if (np.any(center - CAPILLARY_DROPLET_RADIUS <= 0.0) or
+            np.any(center + CAPILLARY_DROPLET_RADIUS >= 1.0)):
+        raise ValueError(
+            "closed capillary droplet must remain strictly inside the tank")
     write_mini_case(
         case_dir, steps, static=True, nx=nx, ny=ny,
         simplex_mesh=simplex_mesh)
     remove_synthetic_pressure_pin(case_dir)
+    set_case_active_domain(case_dir, active_domain)
 
     mesh_path = case_dir / "mesh/background/mesh-complete.mesh.vtu"
     grid = pv.read(mesh_path)
     points = np.asarray(grid.points, dtype=float)
-    phi = capillary_droplet2d_phi(points)
+    phi = oriented_level_set(
+        np.linalg.norm(points[:, :2] - center, axis=1) -
+        CAPILLARY_DROPLET_RADIUS,
+        active_domain,
+        1.0,
+    )
     grid.point_data["phi"] = phi
     # CutVolume retains pressure basis functions whose vertices may lie on the
     # inactive side of a cut cell.  Preload the constant liquid jump on the
@@ -2419,20 +2493,23 @@ def write_capillary_droplet2d_case(case_dir: Path,
     grid.point_data["Velocity"] = np.zeros((points.shape[0], 3), dtype=float)
     grid.save(mesh_path)
 
-    gauge_point = np.array([
-        CAPILLARY_DROPLET_CENTER_X,
-        CAPILLARY_DROPLET_CENTER_Y,
-        0.0,
-    ], dtype=float)
-    gauge_node = int(np.argmin(np.linalg.norm(points - gauge_point, axis=1)))
+    gauge_point = np.array([center[0], center[1], 0.0], dtype=float)
+    gauge_node = nearest_negative_level_set_node(
+        points,
+        active_signed_level_set(phi, active_domain),
+        gauge_point,
+    )
     (case_dir / "pressure_gauge.csv").write_text(
         f"node_id,pressure\n{gauge_node},{pressure_jump:.16g}\n",
         encoding="utf-8")
     benchmark = {
         "benchmark": "synthetic zero-gravity capillary droplet equilibrium smoke",
         "representation": "unfitted_level_set",
+        "active_domain": active_domain,
         "capillary_geometry": "droplet2d",
         "capillary_radius": CAPILLARY_DROPLET_RADIUS,
+        "circle_center": center.tolist(),
+        "circle_center_offset": center_offset.tolist(),
         "initial_active_pressure": pressure_jump,
         "initial_pressure_extension": (
             "constant gamma/R on background support; inactive pressure DOFs "
@@ -3967,6 +4044,17 @@ def load_benchmark(case_dir: Path) -> dict[str, Any]:
     return json.loads(benchmark_path.read_text(encoding="utf-8"))
 
 
+def benchmark_active_domain(benchmark: dict[str, Any]) -> str:
+    """Return the declared liquid side, retaining the historical default."""
+    active_domain = benchmark.get("active_domain")
+    contact = benchmark.get("sessile_contact")
+    if active_domain is None and isinstance(contact, dict):
+        active_domain = contact.get("active_domain")
+    if active_domain is None:
+        active_domain = "LevelSetNegative"
+    return normalized_active_domain(str(active_domain))
+
+
 def latest_component_record(diagnostics: dict[str, Any],
                             label: str) -> list[dict[str, Any]]:
     for record in reversed(diagnostics.get("vector_component_norms", [])):
@@ -4637,10 +4725,12 @@ def curvature_projection_errors(metrics: dict[str, Any],
                 "curvature projection smoothing mode "
                 f"{observed or 'unavailable'} does not include {expected}"
             )
-    if args.expect_curvature_projection_recovery_mode is not None:
+    expected_recovery_mode = getattr(
+        args, "expect_curvature_projection_recovery_mode", None)
+    if expected_recovery_mode is not None:
         counts = metrics.get(
             "diagnostic_curvature_projection_recovery_mode_counts")
-        expected = args.expect_curvature_projection_recovery_mode
+        expected = expected_recovery_mode
         if not isinstance(counts, dict) or not counts:
             errors.append("curvature projection recovery-mode diagnostics are unavailable")
         elif expected not in counts:
@@ -4661,7 +4751,7 @@ def curvature_projection_errors(metrics: dict[str, Any],
             "generated interface patch fitted vertices",
         ),
     ):
-        minimum = getattr(args, argument)
+        minimum = getattr(args, argument, None)
         if minimum is None:
             continue
         value = metrics.get(metric)
@@ -7702,6 +7792,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "interface_quadrature_order",
         "volume_quadrature_order",
         "surface_tension",
+        "level_set_active_domain",
         "capillary_force_form",
         "prescribed_capillary_curvature",
         "wet_extension_advection_velocity_method",
@@ -7777,6 +7868,10 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "sessile_contact_wall",
         "sessile_contact_wall_3d",
         "level_set_positive_scale",
+        "capillary_droplet_center_offset",
+        "capillary_sphere_center_offset",
+        "sessile_tangent_center_offset",
+        "sessile_tangent_center_offset_3d",
         "mms_nx",
         "mms_ny",
         "max_diagnostic_implicit_cut_fallback_cells",
@@ -9493,7 +9588,12 @@ def sessile_state_metrics(dataset: pv.DataSet,
     add_sessile_operator_contact_geometry(state, dataset, benchmark)
 
     if "phi" in dataset.point_data:
-        phi = np.asarray(dataset.point_data["phi"], dtype=float).reshape(-1)
+        active_domain = benchmark_active_domain(benchmark)
+        phi = active_signed_level_set(
+            np.asarray(dataset.point_data["phi"], dtype=float).reshape(-1),
+            active_domain,
+        )
+        state["active_domain"] = active_domain
         finite_phi = np.isfinite(phi)
         h = benchmark.get("mesh_resolution", {}).get("h", 0.0)
         band = 0.5 * float(h) if isinstance(h, (int, float)) else 0.0
@@ -9577,7 +9677,11 @@ def add_capillary_output_pressure_metrics(metrics: dict[str, Any],
         return
     if "phi" not in output.point_data or "Pressure" not in output.point_data:
         return
-    phi = np.asarray(output.point_data["phi"], dtype=float).reshape(-1)
+    active_domain = benchmark_active_domain(benchmark)
+    phi = active_signed_level_set(
+        np.asarray(output.point_data["phi"], dtype=float).reshape(-1),
+        active_domain,
+    )
     pressure = np.asarray(output.point_data["Pressure"], dtype=float).reshape(-1)
     if phi.shape[0] != pressure.shape[0]:
         return
@@ -9981,6 +10085,12 @@ def add_free_surface_energy_history_metrics(
     else:
         return
 
+    try:
+        active_domain = benchmark_active_domain(benchmark)
+    except ValueError as exc:
+        unavailable(str(exc))
+        return
+
     numeric_parameters = (density, surface_tension, wall_coordinate)
     if (not all(isinstance(value, (int, float)) and
                 not isinstance(value, bool) and math.isfinite(float(value))
@@ -10029,6 +10139,7 @@ def add_free_surface_energy_history_metrics(
                 float(equilibrium_angle)),
             wall_axis=int(wall_axis),
             wall_coordinate=float(wall_coordinate),
+            active_domain=active_domain,
         )
         history.append({
             **initial_energy,
@@ -10048,6 +10159,7 @@ def add_free_surface_energy_history_metrics(
                     float(equilibrium_angle)),
                 wall_axis=int(wall_axis),
                 wall_coordinate=float(wall_coordinate),
+                active_domain=active_domain,
             )
             history.append({
                 **state_energy,
@@ -10937,7 +11049,9 @@ def compute_metrics(case_name: str,
     output_index = result_indices_by_initial_gid(initial, output)
 
     points = np.asarray(initial.points, dtype=float)
-    phi0 = point_array(initial, "phi").astype(float)
+    active_domain = benchmark_active_domain(benchmark)
+    phi0 = active_signed_level_set(
+        point_array(initial, "phi").astype(float), active_domain)
     velocity = point_array(output, "Velocity").astype(float)[output_index]
     speed = np.linalg.norm(velocity, axis=1)
 
@@ -10967,6 +11081,7 @@ def compute_metrics(case_name: str,
         "wet_nodes": int(np.count_nonzero(wet0)),
         "gate_nodes": int(np.count_nonzero(gate_region)),
         "front_nodes": int(np.count_nonzero(front_region)),
+        "active_domain": active_domain,
     }
     if case_name == "capillarywave2d":
         metrics.update(capillary_wave_boundary_contract_metrics(case_dir))
@@ -12241,6 +12356,8 @@ def configure_case_solver_xml(run_dir: Path, args: argparse.Namespace) -> None:
         volume_quadrature_order=args.volume_quadrature_order,
         cut_cell_velocity_gradient_penalty=args.cut_cell_velocity_gradient_penalty,
         cut_cell_pressure_gradient_penalty=args.cut_cell_pressure_gradient_penalty,
+        active_domain=getattr(
+            args, "level_set_active_domain", "LevelSetNegative"),
         surface_tension=args.surface_tension,
         capillary_force_form=getattr(
             args, "capillary_force_form", "surface_stress"),
@@ -12345,6 +12462,21 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
     source = CASES[case_name]
     if source is not None and not source.exists():
         raise FileNotFoundError(source)
+    active_domain = normalized_active_domain(getattr(
+        args, "level_set_active_domain", "LevelSetNegative"))
+    active_side_cases = {
+        "capillaryarc2d",
+        "droplet2d",
+        "sphere3d",
+        "sessile2d",
+        "sessile3d",
+        "dynamiccontact2d",
+    }
+    if (active_domain != "LevelSetNegative" and
+            case_name not in active_side_cases):
+        raise ValueError(
+            "the positive liquid-side option is available only for supported "
+            "synthetic static capillary cases")
 
     temp_context = None
     if args.preserve_run_dir:
@@ -12376,7 +12508,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 write_capillary_arc2d_case(
                     run_dir, args.steps, pressure_jump,
                     args.synthetic_nx, args.synthetic_ny,
-                    uses_kinematic_area_gradient_traction)
+                    uses_kinematic_area_gradient_traction,
+                    active_domain)
             elif case_name == "droplet2d":
                 pressure_jump = 0.0
                 if getattr(args, "high_order_capillary_droplet_equilibrium_smoke", False):
@@ -12386,7 +12519,13 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 write_capillary_droplet2d_case(
                     run_dir, args.steps, pressure_jump,
                     args.synthetic_nx, args.synthetic_ny,
-                    uses_kinematic_area_gradient_traction)
+                    uses_kinematic_area_gradient_traction,
+                    active_domain,
+                    getattr(
+                        args,
+                        "capillary_droplet_center_offset",
+                        (0.0, 0.0),
+                    ))
             elif case_name == "sphere3d":
                 if not (
                         args.synthetic_nx == args.synthetic_ny ==
@@ -12401,6 +12540,12 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                     float(args.surface_tension),
                     float(args.time_step_size),
                     args.level_set_positive_scale,
+                    active_domain,
+                    getattr(
+                        args,
+                        "capillary_sphere_center_offset",
+                        (0.0, 0.0, 0.0),
+                    ),
                 )
             elif case_name == "capillarywave2d":
                 surface_tension = (
@@ -12441,6 +12586,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                         False,
                     ),
                     uses_kinematic_area_gradient_traction,
+                    active_domain,
+                    getattr(args, "sessile_tangent_center_offset", 0.0),
                 )
             elif case_name == "sessile3d":
                 if not (
@@ -12458,6 +12605,12 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                     float(args.time_step_size),
                     args.sessile_contact_wall_3d,
                     args.level_set_positive_scale,
+                    active_domain,
+                    getattr(
+                        args,
+                        "sessile_tangent_center_offset_3d",
+                        (0.0, 0.0),
+                    ),
                 )
             else:
                 write_mini_case(
@@ -14452,6 +14605,43 @@ def main() -> int:
         type=float,
         default=1.0,
         help="positive multiplier applied to the synthetic level-set field",
+    )
+    parser.add_argument(
+        "--level-set-active-domain",
+        choices=("LevelSetNegative", "LevelSetPositive"),
+        default="LevelSetNegative",
+        help="declared liquid side for supported synthetic level-set cases",
+    )
+    parser.add_argument(
+        "--capillary-droplet-center-offset",
+        type=float,
+        nargs=2,
+        default=(0.0, 0.0),
+        metavar=("DX", "DY"),
+        help="translation of the synthetic two-dimensional closed droplet",
+    )
+    parser.add_argument(
+        "--capillary-sphere-center-offset",
+        type=float,
+        nargs=3,
+        default=(0.0, 0.0, 0.0),
+        metavar=("DX", "DY", "DZ"),
+        help="translation of the synthetic three-dimensional closed sphere",
+    )
+    parser.add_argument(
+        "--sessile-tangent-center-offset",
+        type=float,
+        default=0.0,
+        help="wall-tangent translation of the synthetic two-dimensional cap",
+    )
+    parser.add_argument(
+        "--sessile-tangent-center-offset-3d",
+        type=float,
+        nargs=2,
+        default=(0.0, 0.0),
+        metavar=("DA", "DB"),
+        help=("translations along the ordered tangent axes of the selected "
+              "three-dimensional wall"),
     )
     parser.add_argument(
         "--initialize-discrete-static-contact-geometry",

@@ -111,6 +111,72 @@ def test_spatial_interface_wall_area_and_constant_kinetic_energy():
     assert state["total_energy_proxy"] == pytest.approx(2.0)
 
 
+def test_energy_states_are_invariant_to_declared_active_side():
+    planar_negative = planar_quad([
+        -0.25, -0.25, -0.25,
+        0.25, 0.25, 0.25,
+        0.75, 0.75, 0.75,
+    ], velocity=np.tile([2.0, 0.0, 0.0], (9, 1)))
+    planar_positive = planar_negative.copy(deep=True)
+    planar_positive.point_data["phi"] *= -1.0
+    planar_states = (
+        energy.free_surface_energy_state_2d(
+            planar_negative,
+            density=2.0,
+            surface_tension=2.0,
+            equilibrium_contact_angle_degrees=60.0,
+            active_domain="LevelSetNegative",
+        ),
+        energy.free_surface_energy_state_2d(
+            planar_positive,
+            density=2.0,
+            surface_tension=2.0,
+            equilibrium_contact_angle_degrees=60.0,
+            active_domain="LevelSetPositive",
+        ),
+    )
+
+    spatial_negative = spatial_cube(
+        lambda points: points[:, 2] - 0.25,
+        velocity=(2.0, 0.0, 0.0),
+    )
+    spatial_positive = spatial_negative.copy(deep=True)
+    spatial_positive.point_data["phi"] *= -1.0
+    spatial_states = (
+        energy.free_surface_energy_state_3d(
+            spatial_negative,
+            density=2.0,
+            surface_tension=2.0,
+            equilibrium_contact_angle_degrees=60.0,
+            wall_axis=2,
+            wall_coordinate=0.0,
+            active_domain="LevelSetNegative",
+        ),
+        energy.free_surface_energy_state_3d(
+            spatial_positive,
+            density=2.0,
+            surface_tension=2.0,
+            equilibrium_contact_angle_degrees=60.0,
+            wall_axis=2,
+            wall_coordinate=0.0,
+            active_domain="LevelSetPositive",
+        ),
+    )
+
+    for states in (planar_states, spatial_states):
+        assert states[0]["active_domain"] == "LevelSetNegative"
+        assert states[1]["active_domain"] == "LevelSetPositive"
+        for metric in (
+                "kinetic_energy_proxy",
+                "interface_measure",
+                "interface_energy",
+                "wetted_wall_measure",
+                "young_wall_energy",
+                "total_energy_proxy"):
+            assert float(states[0][metric]) == pytest.approx(
+                float(states[1][metric]), abs=1.0e-12)
+
+
 def test_spatial_partial_wetted_wall_uses_linear_surface_clip():
     grid = spatial_cube(lambda points: points[:, 0] - 0.25)
     assert energy.wetted_axis_wall_measure_3d(

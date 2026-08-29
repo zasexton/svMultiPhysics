@@ -377,6 +377,129 @@ def test_stationary_sessile_cap_rotates_to_every_wall_and_is_scale_invariant():
                 )
 
 
+def test_stationary_sessile_active_side_and_tangent_offset_are_invariant():
+    runner = _load_runner()
+    offset = 0.05
+    grids = []
+    states = []
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for label, active_domain in (
+                ("negative", "LevelSetNegative"),
+                ("positive", "LevelSetPositive")):
+            case_dir = Path(temp_dir) / label
+            runner.write_sessile2d_case(
+                case_dir,
+                steps=1,
+                nx=16,
+                ny=16,
+                initial_angle_degrees=60.0,
+                equilibrium_angle_degrees=60.0,
+                radius=0.3,
+                surface_tension=1.0,
+                time_step_size=0.001,
+                mobility=1.0,
+                slip_length=0.1,
+                dynamic=False,
+                wall_face="wall_left",
+                contact_line_model="prescribed",
+                active_domain=active_domain,
+                tangent_center_offset=offset,
+            )
+            benchmark = runner.load_benchmark(case_dir)
+            contact = benchmark["sessile_contact"]
+            grid = runner.pv.read(
+                case_dir / "mesh/background/mesh-complete.mesh.vtu")
+            phi = runner.np.asarray(grid.point_data["phi"], dtype=float)
+            gauge_node = int(benchmark["pressure_gauge"]["node_id"])
+
+            assert benchmark["active_domain"] == active_domain
+            assert benchmark["tangent_center_offset"] == offset
+            assert contact["active_domain"] == active_domain
+            assert contact["circle_center"][1] == pytest.approx(0.5 + offset)
+            assert runner.active_signed_level_set(
+                phi, active_domain)[gauge_node] < 0.0
+            root = runner.ET.parse(case_dir / "solver.xml").getroot()
+            assert runner.free_surface_bc(root).findtext(
+                "Active_domain") == active_domain
+            runner.configure_solver(
+                case_dir / "solver.xml",
+                steps=1,
+                active_domain=active_domain,
+            )
+
+            state = runner.sessile_state_metrics(grid, benchmark)
+            assert state["available"] is True
+            assert state["active_domain"] == active_domain
+            grids.append(grid)
+            states.append(state)
+
+    assert runner.np.allclose(
+        grids[0].point_data["phi"], -grids[1].point_data["phi"])
+    for metric in (
+            "circle_radius",
+            "circle_fit_rmse",
+            "contact_angle_degrees",
+            "operator_dynamic_angle_degrees_mean",
+            "operator_dynamic_cos_mean",
+            "max_liquid_speed"):
+        assert float(states[0][metric]) == pytest.approx(
+            float(states[1][metric]), abs=1.0e-8)
+
+
+def test_closed_droplet_active_side_and_center_offset_are_invariant():
+    runner = _load_runner()
+    offset = (0.04, -0.03)
+    grids = []
+    metrics = []
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for label, active_domain in (
+                ("negative", "LevelSetNegative"),
+                ("positive", "LevelSetPositive")):
+            case_dir = Path(temp_dir) / label
+            runner.write_capillary_droplet2d_case(
+                case_dir,
+                steps=1,
+                pressure_jump=2.0,
+                nx=12,
+                ny=12,
+                simplex_mesh=True,
+                active_domain=active_domain,
+                center_offset=offset,
+            )
+            benchmark = runner.load_benchmark(case_dir)
+            mesh_path = (
+                case_dir / "mesh/background/mesh-complete.mesh.vtu")
+            grid = runner.pv.read(mesh_path)
+            phi = runner.np.asarray(grid.point_data["phi"], dtype=float)
+            gauge_node = int(benchmark["pressure_gauge"]["node_id"])
+
+            assert benchmark["active_domain"] == active_domain
+            assert benchmark["circle_center_offset"] == pytest.approx(offset)
+            assert benchmark["circle_center"] == pytest.approx(
+                (0.54, 0.47))
+            assert runner.active_signed_level_set(
+                phi, active_domain)[gauge_node] < 0.0
+            root = runner.ET.parse(case_dir / "solver.xml").getroot()
+            assert runner.free_surface_bc(root).findtext(
+                "Active_domain") == active_domain
+            state = runner.compute_metrics(
+                "droplet2d", case_dir, mesh_path)
+            assert state["active_domain"] == active_domain
+            grids.append(grid)
+            metrics.append(state)
+
+    assert runner.np.allclose(
+        grids[0].point_data["phi"], -grids[1].point_data["phi"])
+    for metric in (
+            "wet_nodes",
+            "max_speed",
+            "wet_mean_speed",
+            "interface_peak_height",
+            "interface_front_x"):
+        assert float(metrics[0][metric]) == pytest.approx(
+            float(metrics[1][metric]), abs=1.0e-7)
+
+
 @pytest.mark.parametrize("scale", [0.0, -1.0, math.inf, math.nan])
 def test_stationary_sessile_rejects_nonpositive_or_nonfinite_scale(scale):
     runner = _load_runner()

@@ -21,6 +21,21 @@ import pyvista as pv
 
 
 KINETIC_DENSITY_FIELD = "__free_surface_kinetic_energy_density_proxy"
+ACTIVE_DOMAINS = ("LevelSetNegative", "LevelSetPositive")
+
+
+def _normalized_active_domain(active_domain: str) -> str:
+    if active_domain not in ACTIVE_DOMAINS:
+        raise ValueError(
+            "free-surface active domain must be LevelSetNegative or "
+            "LevelSetPositive")
+    return active_domain
+
+
+def _active_signed_values(values: np.ndarray,
+                          active_domain: str) -> np.ndarray:
+    active_domain = _normalized_active_domain(active_domain)
+    return values if active_domain == "LevelSetNegative" else -values
 
 
 def _finite_point_scalar(dataset: pv.DataSet, name: str) -> np.ndarray:
@@ -83,10 +98,13 @@ def interface_measure_3d(dataset: pv.DataSet,
 def liquid_kinetic_energy_proxy_2d(dataset: pv.DataSet,
                                    density: float,
                                    level_set_name: str = "phi",
-                                   velocity_name: str = "Velocity") -> float:
+                                   velocity_name: str = "Velocity",
+                                   active_domain: str = "LevelSetNegative",
+                                   ) -> float:
     """Integrate a saved-output interpolation proxy for liquid kinetic energy."""
     if not math.isfinite(density) or density <= 0.0:
         raise ValueError("density must be finite and positive")
+    active_domain = _normalized_active_domain(active_domain)
     _finite_point_scalar(dataset, level_set_name)
     velocity = _finite_point_vector(dataset, velocity_name)
 
@@ -94,12 +112,12 @@ def liquid_kinetic_energy_proxy_2d(dataset: pv.DataSet,
     work.point_data[KINETIC_DENSITY_FIELD] = (
         0.5 * density * np.sum(velocity * velocity, axis=1)
     )
-    # PyVista/VTK's scalar clip with invert=True retains phi <= 0.  Check the
-    # resulting domain instead of silently accepting an empty or wrong side.
+    # Select the declared liquid side and check the resulting domain instead
+    # of silently accepting an empty or complementary phase.
     liquid = work.clip_scalar(
         scalars=level_set_name,
         value=0.0,
-        invert=True,
+        invert=(active_domain == "LevelSetNegative"),
     )
     if liquid.n_cells == 0:
         raise ValueError("saved level set has no clipped liquid cells")
@@ -117,13 +135,16 @@ def liquid_kinetic_energy_proxy_2d(dataset: pv.DataSet,
 def liquid_kinetic_energy_proxy_3d(dataset: pv.DataSet,
                                    density: float,
                                    level_set_name: str = "phi",
-                                   velocity_name: str = "Velocity") -> float:
+                                   velocity_name: str = "Velocity",
+                                   active_domain: str = "LevelSetNegative",
+                                   ) -> float:
     """Integrate the saved-output kinetic-energy proxy over a 3-D liquid."""
     return liquid_kinetic_energy_proxy_2d(
         dataset,
         density,
         level_set_name,
         velocity_name,
+        active_domain,
     )
 
 
@@ -145,8 +166,10 @@ def wetted_axis_wall_measure_2d(dataset: pv.DataSet,
                                 wall_axis: int = 1,
                                 wall_coordinate: float = 0.0,
                                 level_set_name: str = "phi",
-                                tolerance: float = 1.0e-12) -> float:
-    """Measure ``phi <= 0`` on a complete axis-aligned planar wall trace.
+                                tolerance: float = 1.0e-12,
+                                active_domain: str = "LevelSetNegative",
+                                ) -> float:
+    """Measure the declared liquid side on an axis-aligned planar wall.
 
     The saved synthetic qualification meshes are structured along the wall.
     Consecutive unique wall vertices therefore define its complete P1 trace.
@@ -158,7 +181,8 @@ def wetted_axis_wall_measure_2d(dataset: pv.DataSet,
     if (not math.isfinite(wall_coordinate) or
             not math.isfinite(tolerance) or tolerance < 0.0):
         raise ValueError("wall coordinate/tolerance is invalid")
-    phi = _finite_point_scalar(dataset, level_set_name)
+    phi = _active_signed_values(
+        _finite_point_scalar(dataset, level_set_name), active_domain)
     points = np.asarray(dataset.points, dtype=float)
     if (points.ndim != 2 or points.shape[0] != dataset.n_points or
             not np.isfinite(points).all()):
@@ -233,8 +257,10 @@ def wetted_axis_wall_measure_3d(dataset: pv.DataSet,
                                 wall_axis: int = 1,
                                 wall_coordinate: float = 0.0,
                                 level_set_name: str = "phi",
-                                tolerance: float = 1.0e-12) -> float:
-    """Measure ``phi <= 0`` on an axis-aligned exterior surface."""
+                                tolerance: float = 1.0e-12,
+                                active_domain: str = "LevelSetNegative",
+                                ) -> float:
+    """Measure the declared liquid side on an axis-aligned exterior wall."""
     if wall_axis not in (0, 1, 2):
         raise ValueError("a spatial wall axis must be 0, 1, or 2")
     if (not math.isfinite(wall_coordinate) or
@@ -260,7 +286,12 @@ def wetted_axis_wall_measure_3d(dataset: pv.DataSet,
     if not wall_cells:
         raise ValueError("saved state does not contain the requested wall")
     wall = surface.extract_cells(np.asarray(wall_cells, dtype=np.int64))
-    wall_phi = _finite_point_scalar(wall, level_set_name)
+    active_domain = _normalized_active_domain(active_domain)
+    wall_phi = _active_signed_values(
+        _finite_point_scalar(wall, level_set_name), active_domain)
+    if active_domain == "LevelSetPositive":
+        wall = wall.copy(deep=True)
+        wall.point_data[level_set_name] = wall_phi
     if np.all(wall_phi > 0.0):
         return 0.0
     if np.all(wall_phi <= 0.0):
@@ -289,13 +320,14 @@ def free_surface_energy_state_2d(
         wall_coordinate: float = 0.0,
         level_set_name: str = "phi",
         velocity_name: str = "Velocity",
+        active_domain: str = "LevelSetNegative",
 ) -> dict[str, Any]:
     """Compute kinetic, interface, Young-wall, and total energy components."""
     if not math.isfinite(surface_tension) or surface_tension <= 0.0:
         raise ValueError("surface tension must be finite and positive")
     interface_measure = interface_measure_2d(dataset, level_set_name)
     kinetic = liquid_kinetic_energy_proxy_2d(
-        dataset, density, level_set_name, velocity_name
+        dataset, density, level_set_name, velocity_name, active_domain
     )
     wall_measure = 0.0
     wall_energy = 0.0
@@ -308,6 +340,7 @@ def free_surface_energy_state_2d(
             wall_axis,
             wall_coordinate,
             level_set_name,
+            active_domain=active_domain,
         )
         # Young's relation gives gamma_SL - gamma_SG = -gamma*cos(theta_e).
         wall_energy = -surface_tension * math.cos(theta) * wall_measure
@@ -324,9 +357,10 @@ def free_surface_energy_state_2d(
         "wetted_wall_measure": wall_measure,
         "young_wall_energy": wall_energy,
         "total_energy_proxy": total,
+        "active_domain": _normalized_active_domain(active_domain),
         "kinetic_energy_contract": (
             "vertex_squared_velocity_linearly_interpolated_and_integrated_"
-            "on_vtk_phi_nonpositive_clip"
+            "on_vtk_declared_liquid_side_clip"
         ),
         "surface_energy_contract": (
             "saved_piecewise_linear_zero_contour_exact_for_simplex_p1_"
@@ -346,13 +380,14 @@ def free_surface_energy_state_3d(
         wall_coordinate: float = 0.0,
         level_set_name: str = "phi",
         velocity_name: str = "Velocity",
+        active_domain: str = "LevelSetNegative",
 ) -> dict[str, Any]:
     """Compute the 3-D output-space capillary energy components."""
     if not math.isfinite(surface_tension) or surface_tension <= 0.0:
         raise ValueError("surface tension must be finite and positive")
     interface_measure = interface_measure_3d(dataset, level_set_name)
     kinetic = liquid_kinetic_energy_proxy_3d(
-        dataset, density, level_set_name, velocity_name
+        dataset, density, level_set_name, velocity_name, active_domain
     )
     wall_measure = 0.0
     wall_energy = 0.0
@@ -366,6 +401,7 @@ def free_surface_energy_state_3d(
             wall_axis,
             wall_coordinate,
             level_set_name,
+            active_domain=active_domain,
         )
         wall_energy = -surface_tension * math.cos(theta) * wall_measure
     interface_energy = surface_tension * interface_measure
@@ -381,9 +417,10 @@ def free_surface_energy_state_3d(
         "wetted_wall_measure": wall_measure,
         "young_wall_energy": wall_energy,
         "total_energy_proxy": total,
+        "active_domain": _normalized_active_domain(active_domain),
         "kinetic_energy_contract": (
             "vertex_squared_velocity_linearly_interpolated_and_integrated_"
-            "on_vtk_phi_nonpositive_clip"
+            "on_vtk_declared_liquid_side_clip"
         ),
         "surface_energy_contract": (
             "saved_piecewise_linear_zero_isosurface_exact_for_simplex_p1"
