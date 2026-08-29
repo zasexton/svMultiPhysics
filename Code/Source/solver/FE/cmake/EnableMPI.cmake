@@ -177,7 +177,11 @@ if(FE_ENABLE_MPI)
             if(TARGET ${test_name})
                 add_test(
                     NAME ${test_name}_mpi_${num_procs}
-                    COMMAND ${MPIEXEC_EXECUTABLE} -np ${num_procs} $<TARGET_FILE:${test_name}>
+                    COMMAND ${MPIEXEC_EXECUTABLE}
+                            -np ${num_procs}
+                            ${MPIEXEC_PREFLAGS}
+                            $<TARGET_FILE:${test_name}>
+                            ${MPIEXEC_POSTFLAGS}
                 )
                 set_tests_properties(${test_name}_mpi_${num_procs} PROPERTIES
                     TIMEOUT 120
