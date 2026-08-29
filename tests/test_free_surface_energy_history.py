@@ -412,6 +412,39 @@ def test_runner_records_spatial_closed_sphere_energy_history(tmp_path):
     ] == pytest.approx(0.0)
 
 
+def test_runner_records_planar_closed_circle_energy_history(tmp_path):
+    case_dir = tmp_path / "droplet2d"
+    runner.write_capillary_droplet2d_case(
+        case_dir,
+        steps=1,
+        nx=8,
+        ny=8,
+        simplex_mesh=True,
+        surface_tension=0.75,
+    )
+    initial = pv.read(case_dir / "mesh/background/mesh-complete.mesh.vtu")
+    accepted_path = case_dir / "result_001.vtu"
+    initial.save(accepted_path)
+    benchmark = json.loads((case_dir / "benchmark.json").read_text())
+    metrics = {}
+
+    runner.add_free_surface_energy_history_metrics(
+        metrics,
+        benchmark,
+        initial,
+        [(1, accepted_path)],
+        {1: (0.001, 0.001)},
+        [],
+    )
+
+    assert metrics["free_surface_energy_history_available"] is True
+    assert metrics["free_surface_energy_history_case"] == "closed_circle"
+    assert metrics["free_surface_energy_state_count"] == 2
+    assert metrics[
+        "free_surface_energy_signed_total_energy_change_proxy"
+    ] == pytest.approx(0.0)
+
+
 def test_runner_records_spatial_sessile_history_and_shape_metrics(tmp_path):
     case_dir = tmp_path / "sessile3d"
     runner.write_sessile_sphere_case(

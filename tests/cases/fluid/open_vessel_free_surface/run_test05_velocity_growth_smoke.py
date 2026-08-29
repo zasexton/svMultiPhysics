@@ -2514,12 +2514,16 @@ def write_capillary_droplet2d_case(case_dir: Path,
                                    simplex_mesh: bool = False,
                                    active_domain: str = "LevelSetNegative",
                                    center_offset: Sequence[float] = (0.0, 0.0),
+                                   surface_tension: float | None = None,
                                    ) -> None:
     active_domain = normalized_active_domain(active_domain)
     center_offset = np.asarray(center_offset, dtype=float).reshape(-1)
     if center_offset.shape != (2,) or not np.isfinite(center_offset).all():
         raise ValueError(
             "capillary droplet center offset must contain two finite values")
+    if (surface_tension is not None and
+            (not math.isfinite(surface_tension) or surface_tension <= 0.0)):
+        raise ValueError("capillary droplet surface tension must be positive")
     center = np.asarray([
         CAPILLARY_DROPLET_CENTER_X,
         CAPILLARY_DROPLET_CENTER_Y,
@@ -2566,6 +2570,8 @@ def write_capillary_droplet2d_case(case_dir: Path,
         "benchmark": "synthetic zero-gravity capillary droplet equilibrium smoke",
         "representation": "unfitted_level_set",
         "active_domain": active_domain,
+        "spatial_dimension": 2,
+        "density": 1.0,
         "capillary_geometry": "droplet2d",
         "capillary_radius": CAPILLARY_DROPLET_RADIUS,
         "circle_center": center.tolist(),
@@ -2597,6 +2603,8 @@ def write_capillary_droplet2d_case(case_dir: Path,
             "A positive gamma/R liquid pressure jump exercises a static Young--Laplace equilibrium.",
         ],
     }
+    if surface_tension is not None:
+        benchmark["surface_tension"] = float(surface_tension)
     (case_dir / "benchmark.json").write_text(
         json.dumps(benchmark, indent=2, sort_keys=True) + "\n",
         encoding="utf-8")
@@ -10177,6 +10185,11 @@ def add_free_surface_energy_history_metrics(
         density = wave.get("density")
         surface_tension = wave.get("surface_tension")
         energy_case = "capillary_wave"
+    elif (spatial_dimension == 2 and
+          benchmark.get("capillary_geometry") == "droplet2d"):
+        density = benchmark.get("density")
+        surface_tension = benchmark.get("surface_tension")
+        energy_case = "closed_circle"
     elif (spatial_dimension == 3 and
           benchmark.get("capillary_geometry") == "sphere_3d"):
         density = benchmark.get("density")
@@ -12674,7 +12687,10 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                         args,
                         "capillary_droplet_center_offset",
                         (0.0, 0.0),
-                    ))
+                    ),
+                    surface_tension=(
+                        None if args.surface_tension is None else
+                        float(args.surface_tension)))
             elif case_name == "sphere3d":
                 if not (
                         args.synthetic_nx == args.synthetic_ny ==
