@@ -8,6 +8,7 @@
 #include "post.h"
 #include "utils.h"
 #include <math.h>
+#include <vector>
 
 namespace cep_ion {
 
@@ -131,6 +132,7 @@ void cep_integ(Simulation *simulation, const int iEq, const int iDof,
 #endif
 
   auto &cm = com_mod.cm;
+  int nsd = com_mod.nsd;
   int tnNo = com_mod.tnNo;
   double dt = com_mod.dt;
   double time = com_mod.time;
@@ -164,12 +166,26 @@ void cep_integ(Simulation *simulation, const int iEq, const int iDof,
     Vector<double> sA(tnNo);
     Array<double> sF(nXion, tnNo);
     Vector<double> sY(tnNo);
+    Vector<double> x(nsd);
+
+    std::vector<Vector<double>> local_X;
+    std::vector<Vector<double>> local_Xg;
+    local_X.reserve(eq.nDmn);
+    local_Xg.reserve(eq.nDmn);
+    for (int iDmn = 0; iDmn < eq.nDmn; ++iDmn) {
+      local_X.emplace_back(eq.dmn[iDmn].cep.nX);
+      local_Xg.emplace_back(eq.dmn[iDmn].cep.nG);
+    }
 
     cep_mod.calcium = 0.0;
 
     for (int Ac = 0; Ac < tnNo; Ac++) {
       if (!all_fun::is_domain(com_mod, eq, Ac, Equation_CEP)) {
         continue;
+      }
+
+      for (int i = 0; i < nsd; ++i) {
+        x(i) = com_mod.x(i, Ac);
       }
 
       for (int iDmn = 0; iDmn < eq.nDmn; iDmn++) {
@@ -189,19 +205,17 @@ void cep_integ(Simulation *simulation, const int iEq, const int iDof,
         dmsg << "nG: " << nG;
 #endif
 
-        auto Xl = Xion.rows(0, nX - 1, Ac);
-
-        // [NOTE] nG can be 0.
-        Vector<double> Xgl;
-        if (nG != 0) {
-          Xgl.resize(nG);
-          for (int i = 0; i < nG; i++) {
-            Xgl(i) = Xion(i + nX, Ac);
-          }
+        auto &Xl = local_X[iDmn];
+        auto &Xgl = local_Xg[iDmn];
+        for (int i = 0; i < nX; ++i) {
+          Xl(i) = Xion(i, Ac);
+        }
+        for (int i = 0; i < nG; ++i) {
+          Xgl(i) = Xion(i + nX, Ac);
         }
 
         cep_integ_l(cep_mod, dmn.cep, Xl, Xgl, time - dt, I4f(Ac), dt,
-                    com_mod.x.col(Ac));
+                    x);
         cep_mod.calcium[Ac] += Xl[dmn.cep.ionic_model->get_calcium_index()];
 
         sA(Ac) = sA(Ac) + 1.0;
@@ -225,7 +239,9 @@ void cep_integ(Simulation *simulation, const int iEq, const int iDof,
 
     for (int Ac = 0; Ac < tnNo; Ac++) {
       if (!utils::is_zero(sA(Ac))) {
-        Xion.set_col(Ac, sF.col(Ac) / sA(Ac));
+        for (int i = 0; i < nXion; ++i) {
+          Xion(i, Ac) = sF(i, Ac) / sA(Ac);
+        }
         cep_mod.calcium[Ac] = cep_mod.calcium[Ac] / sA(Ac);
       }
     }
