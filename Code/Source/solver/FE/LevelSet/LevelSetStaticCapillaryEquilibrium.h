@@ -37,7 +37,7 @@ struct LevelSetStaticCapillaryEquilibriumOptions {
     // multiplied by the larger of this reference scale and the coefficient
     // magnitude. The inverse stiffness has units coefficient^2 / energy.
     Real finite_difference_reference_coefficient_scale{1.0};
-    Real finite_difference_relative_step{1.0e-6};
+    Real finite_difference_relative_step{1.0e-5};
     Real minimum_finite_difference_step{1.0e-12};
     int finite_difference_max_shrinks{12};
 
@@ -48,6 +48,11 @@ struct LevelSetStaticCapillaryEquilibriumOptions {
     Real maximum_coefficient_update_linf{0.25};
     Real line_search_shrink{0.5};
     Real armijo_fraction{1.0e-4};
+    // Limited-memory inverse-Hessian updates accelerate the tangent solve
+    // without assembling a dense shape Hessian. A zero history size selects
+    // the safeguarded projected-gradient direction alone.
+    int limited_memory_history_size{8};
+    Real limited_memory_curvature_tolerance{1.0e-12};
     // Energy per unit volume. The iteration also raises this value above the
     // current multiplier magnitude so the l1 volume merit has a descent step.
     Real minimum_volume_merit_penalty{1.0};
@@ -74,6 +79,12 @@ struct LevelSetStaticCapillaryEquilibriumEvaluation {
         std::numeric_limits<Real>::quiet_NaN()};
     Real gravitational_potential_energy{0.0};
     Real liquid_volume{std::numeric_limits<Real>::quiet_NaN()};
+    // Optional exact derivatives in the evaluator's coefficient order. When
+    // present, both arrays must cover every supplied coefficient; the
+    // minimizer then avoids finite-difference trial geometry entirely.
+    bool functional_derivatives_available{false};
+    std::vector<Real> physical_potential_derivative{};
+    std::vector<Real> liquid_volume_derivative{};
     bool pressure_representability_available{false};
     bool pressure_representability_converged{false};
     bool pressure_representability_breakdown{false};
@@ -116,9 +127,20 @@ struct LevelSetStaticCapillaryEquilibriumResult {
     std::size_t functional_evaluations{0u};
     std::size_t acceptance_certificate_evaluations{0u};
     std::size_t finite_difference_step_shrinks{0u};
+    std::size_t finite_difference_fourth_order_components{0u};
+    Real minimum_finite_difference_step_used{0.0};
+    Real maximum_finite_difference_step_used{0.0};
+    Real maximum_energy_derivative_relative_correction{0.0};
+    Real maximum_volume_derivative_relative_correction{0.0};
+    std::size_t analytic_derivative_evaluations{0u};
+    std::size_t derivative_resolution_step_acceptances{0u};
     std::size_t line_search_rejections{0u};
     std::size_t topology_change_rejections{0u};
     std::size_t constraint_change_rejections{0u};
+    std::size_t limited_memory_updates{0u};
+    std::size_t limited_memory_resets{0u};
+    std::size_t limited_memory_peak_history{0u};
+    std::size_t projected_gradient_fallbacks{0u};
 
     std::uint64_t initial_snapshot_revision_key{0u};
     std::uint64_t final_snapshot_revision_key{0u};
@@ -167,9 +189,10 @@ struct LevelSetStaticCapillaryEquilibriumResult {
 /**
  * Minimize a fixed-topology discrete capillary functional.
  *
- * Central differences are evaluated only inside the initial cut-topology and
- * constrained-trace epoch. Each SQP-like step satisfies the linearized volume
- * constraint and descends an l1 volume-merit function. Convergence
+ * Roundoff-balanced fourth-order differences are evaluated only inside the
+ * initial cut-topology and constrained-trace epoch. Each SQP-like step uses a
+ * safeguarded limited-memory tangent inverse Hessian, satisfies the linearized
+ * volume constraint, and descends an l1 volume-merit function. Convergence
  * additionally requires the evaluator's unprojected physical-potential load
  * to pass the constrained pressure-space and production-residual gates. A
  * constant-pressure KKT gate is additionally required when the evaluator

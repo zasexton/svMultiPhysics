@@ -3253,6 +3253,18 @@ void accumulateDifferentiatedTriangleMeasure(
         std::sqrt(young_wall_gradient_norm2);
     result.kinematic_area_gradient_total_energy_gradient_norm =
         std::sqrt(total_gradient_norm2);
+    result.kinematic_area_gradient_total_energy_derivative =
+        area_gradient;
+    result.kinematic_area_gradient_liquid_volume_derivative.resize(
+        n_vertices, Real{0.0});
+    const Real liquid_volume_sign =
+        options.kinematic_area_gradient_negative_liquid_side
+            ? Real{-1.0}
+            : Real{1.0};
+    for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
+        result.kinematic_area_gradient_liquid_volume_derivative[vertex] =
+            liquid_volume_sign * lumped_kinematic_mass[vertex];
+    }
 
     std::vector<Real> rhs(n_vertices, Real{0.0});
     std::vector<std::size_t> active_degree(n_vertices, 0u);
@@ -4843,7 +4855,7 @@ projectKinematicAreaGradientCollectively(
 {
     const auto& local_mesh = system.meshAccess();
     if (local_mesh.parallelSize() <= 1) {
-        return workspace != nullptr
+        auto projection = workspace != nullptr
             ? projectLevelSetMeanCurvatureToVertices(
                   local_mesh,
                   level_set_vertex_values,
@@ -4857,6 +4869,81 @@ projectKinematicAreaGradientCollectively(
                   supplemental_samples,
                   options,
                   curvature_vertex_values);
+        if (!projection.success) {
+            return projection;
+        }
+        const auto raw_vertex_count = local_mesh.numVertices();
+        const auto& dofs = system.fieldDofHandler(level_set_field);
+        const auto raw_dof_count = dofs.getNumDofs();
+        if (raw_vertex_count < 0 || raw_dof_count <= 0) {
+            projection.success = false;
+            projection.diagnostic =
+                "kinematic-area-gradient projection found an invalid mesh or field size";
+            return projection;
+        }
+        const auto vertex_count =
+            static_cast<std::size_t>(raw_vertex_count);
+        const auto dof_count =
+            static_cast<std::size_t>(raw_dof_count);
+        const auto* entity_map = dofs.getEntityDofMap();
+        if (entity_map == nullptr ||
+            projection
+                    .kinematic_area_gradient_total_energy_derivative.size() !=
+                vertex_count ||
+            projection
+                    .kinematic_area_gradient_liquid_volume_derivative.size() !=
+                vertex_count) {
+            projection.success = false;
+            projection.diagnostic =
+                "kinematic-area-gradient projection could not map functional derivatives to field DOFs";
+            return projection;
+        }
+        std::vector<Real> energy_derivative(dof_count, Real{0.0});
+        std::vector<Real> volume_derivative(dof_count, Real{0.0});
+        std::vector<unsigned char> assigned(dof_count, 0u);
+        for (GlobalIndex vertex = 0;
+             vertex < local_mesh.numVertices();
+             ++vertex) {
+            const auto vertex_dofs = entity_map->getVertexDofs(vertex);
+            if (vertex_dofs.size() != 1u ||
+                vertex_dofs.front() < 0 ||
+                static_cast<std::size_t>(vertex_dofs.front()) >= dof_count) {
+                projection.success = false;
+                projection.diagnostic =
+                    "kinematic-area-gradient projection found an invalid scalar vertex-to-DOF map";
+                return projection;
+            }
+            const auto dof =
+                static_cast<std::size_t>(vertex_dofs.front());
+            if (assigned[dof] != 0u) {
+                projection.success = false;
+                projection.diagnostic =
+                    "kinematic-area-gradient projection found duplicate scalar vertex DOF ownership";
+                return projection;
+            }
+            assigned[dof] = 1u;
+            const auto local = static_cast<std::size_t>(vertex);
+            energy_derivative[dof] =
+                projection
+                    .kinematic_area_gradient_total_energy_derivative[local];
+            volume_derivative[dof] =
+                projection
+                    .kinematic_area_gradient_liquid_volume_derivative[local];
+        }
+        if (std::find(assigned.begin(), assigned.end(), 0u) !=
+            assigned.end()) {
+            projection.success = false;
+            projection.diagnostic =
+                "kinematic-area-gradient projection did not cover every scalar field DOF";
+            return projection;
+        }
+        projection.kinematic_area_gradient_total_energy_derivative =
+            std::move(energy_derivative);
+        projection.kinematic_area_gradient_liquid_volume_derivative =
+            std::move(volume_derivative);
+        projection
+            .kinematic_area_gradient_derivatives_global_dof_order = true;
+        return projection;
     }
 
     LevelSetCurvatureProjectionResult failure_result;
@@ -5047,6 +5134,20 @@ projectKinematicAreaGradientCollectively(
             level_set_vertex_values.size(), Real{0.0});
         return projection;
     }
+    if (projection
+                .kinematic_area_gradient_total_energy_derivative.size() !=
+            replicated.level_set_values.size() ||
+        projection
+                .kinematic_area_gradient_liquid_volume_derivative.size() !=
+            replicated.level_set_values.size()) {
+        projection.success = false;
+        projection.diagnostic =
+            "kinematic-area-gradient collective projection produced an invalid global functional-derivative layout";
+        curvature_vertex_values.assign(
+            level_set_vertex_values.size(), Real{0.0});
+        return projection;
+    }
+    projection.kinematic_area_gradient_derivatives_global_dof_order = true;
     curvature_vertex_values.resize(
         replicated.local_vertex_to_global_dof.size());
     for (std::size_t local_vertex = 0;

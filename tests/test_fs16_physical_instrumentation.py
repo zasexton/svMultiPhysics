@@ -1764,6 +1764,234 @@ def test_projected_curvature_configuration_exposes_recovery_controls():
         assert free_surface.findtext("Curvature_field") == "kappa_projected"
 
 
+def test_kinematic_area_gradient_traction_configuration_is_explicit_and_unfiltered():
+    runner = _load_runner()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        case_dir = Path(temp_dir) / "droplet2d"
+        runner.write_capillary_droplet2d_case(
+            case_dir,
+            steps=1,
+            pressure_jump=2.0,
+            nx=8,
+            ny=8,
+        )
+        solver = case_dir / "solver.xml"
+        runner.configure_solver(
+            solver,
+            steps=1,
+            surface_tension=0.5,
+            capillary_force_form="kinematic_area_gradient_traction",
+            projected_curvature_field="kappa_area_gradient",
+            curvature_projection_recovery_mode="kinematic_area_gradient",
+            curvature_projection_kinematic_area_gradient_filter_coefficient=0.0,
+            curvature_projection_smoothing_iterations=0,
+            static_capillary_finite_difference_relative_step=2.0e-5,
+            static_capillary_limited_memory_history_size=6,
+            static_capillary_limited_memory_curvature_tolerance=3.0e-11,
+        )
+
+        root = runner.ET.parse(solver).getroot()
+        level_set = runner.level_set_equation(root)
+        free_surface = runner.free_surface_bc(root)
+        assert free_surface.findtext(
+            "Surface_tension_form") == "KinematicAreaGradientTraction"
+        assert free_surface.findtext(
+            "Curvature_field") == "kappa_area_gradient"
+        assert free_surface.findtext("Use_level_set_curvature") == "false"
+        assert level_set.findtext(
+            "Curvature_projection_recovery_mode") == "kinematic_area_gradient"
+        assert level_set.findtext(
+            "Curvature_projection_kinematic_area_gradient_filter_coefficient"
+        ) == "0"
+        assert level_set.findtext(
+            "Curvature_projection_smoothing_iterations") == "0"
+        assert level_set.findtext(
+            "Static_capillary_finite_difference_relative_step") == "2e-05"
+        assert level_set.findtext(
+            "Static_capillary_limited_memory_history_size") == "6"
+        assert level_set.findtext(
+            "Static_capillary_limited_memory_curvature_tolerance") == "3e-11"
+
+
+def test_static_capillary_minimizer_configuration_rejects_invalid_controls():
+    runner = _load_runner()
+
+    def configure(**options):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = Path(temp_dir) / "droplet2d"
+            runner.write_capillary_droplet2d_case(
+                case_dir,
+                steps=1,
+                pressure_jump=2.0,
+                nx=8,
+                ny=8,
+            )
+            runner.configure_solver(
+                case_dir / "solver.xml",
+                steps=1,
+                **options,
+            )
+
+    with pytest.raises(ValueError, match="relative step must be positive"):
+        configure(static_capillary_finite_difference_relative_step=0.0)
+    with pytest.raises(ValueError, match="history size must be a nonnegative integer"):
+        configure(static_capillary_limited_memory_history_size=-1)
+    with pytest.raises(ValueError, match="history size must be a nonnegative integer"):
+        configure(static_capillary_limited_memory_history_size=2.5)
+    with pytest.raises(ValueError, match="history size must be a nonnegative integer"):
+        configure(static_capillary_limited_memory_history_size=True)
+    with pytest.raises(ValueError, match="curvature tolerance must be positive"):
+        configure(static_capillary_limited_memory_curvature_tolerance=0.0)
+
+
+def test_kinematic_area_gradient_static_initialization_requires_exact_derivatives():
+    runner = _load_runner()
+    record = {
+        "active_coefficients": 81,
+        "functional_evaluations": 326,
+        "acceptance_certificate_evaluations": 1,
+        "finite_difference_fourth_order_components": 0,
+        "analytic_derivative_evaluations": 135,
+        "derivative_resolution_step_acceptances": 17,
+        "iterations": 134,
+        "target_liquid_volume": 0.141,
+        "initial_physical_potential_energy": 0.471,
+        "final_physical_potential_energy": 0.470,
+        "final_volume_error": -2.8e-17,
+        "final_projected_gradient_norm": 8.1e-12,
+        "pressure_representability_available": 1,
+        "pressure_representability_converged": 1,
+        "pressure_representability_breakdown": 0,
+        "pressure_representability_residual_norm": 1.4e-11,
+        "pressure_representability_relative_distance": 1.8e-11,
+        "production_force_projection_applied": 0,
+        "production_residual_norm": 2.4e-11,
+        "constant_pressure_kkt_required": 0,
+        "constant_pressure_kkt_available": 0,
+        "qualification": "prerequisite_only",
+    }
+    args = runner.argparse.Namespace(
+        initialize_discrete_static_capillary_equilibrium=True,
+        capillary_force_form="kinematic_area_gradient_traction",
+        static_capillary_max_iterations=200,
+    )
+
+    metrics = {
+        "diagnostics": {
+            "static_capillary_equilibrium_initializations": [record],
+        },
+    }
+    assert runner.static_capillary_equilibrium_initialization_errors(
+        metrics, args) == []
+
+    extracted = {}
+    runner.add_diagnostic_metrics(extracted, metrics["diagnostics"])
+    assert extracted["static_capillary_analytic_derivative_evaluations"] == 135
+    assert extracted[
+        "static_capillary_finite_difference_fourth_order_components"] == 0
+    assert extracted[
+        "static_capillary_derivative_resolution_step_acceptances"] == 17
+
+    missing_exact = dict(record, analytic_derivative_evaluations=0)
+    metrics["diagnostics"][
+        "static_capillary_equilibrium_initializations"] = [missing_exact]
+    errors = runner.static_capillary_equilibrium_initialization_errors(
+        metrics, args)
+    assert any("did not use exact functional derivatives" in error
+               for error in errors)
+
+    used_differences = dict(
+        record, finite_difference_fourth_order_components=1)
+    metrics["diagnostics"][
+        "static_capillary_equilibrium_initializations"] = [used_differences]
+    errors = runner.static_capillary_equilibrium_initialization_errors(
+        metrics, args)
+    assert any("used finite-difference derivative components" in error
+               for error in errors)
+
+
+def test_kinematic_area_gradient_sessile_mesh_uses_affine_triangles():
+    runner = _load_runner()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        case_dir = Path(temp_dir) / "sessile2d"
+        runner.write_sessile2d_case(
+            case_dir,
+            steps=1,
+            nx=8,
+            ny=8,
+            initial_angle_degrees=90.0,
+            equilibrium_angle_degrees=90.0,
+            radius=0.3,
+            surface_tension=0.5,
+            time_step_size=1.0e-3,
+            mobility=1.0,
+            slip_length=0.1,
+            dynamic=False,
+            contact_line_model="prescribed",
+            simplex_mesh=True,
+        )
+
+        mesh = runner.pv.read(
+            case_dir / "mesh/background/mesh-complete.mesh.vtu")
+        assert mesh.n_cells == 2 * 8 * 8
+        assert runner.np.all(
+            runner.np.asarray(mesh.celltypes) == runner.pv.CellType.TRIANGLE)
+        assert runner.np.array_equal(
+            runner.np.asarray(mesh.cell_data["GlobalElementID"]),
+            runner.np.arange(mesh.n_cells),
+        )
+        mesh_record = runner.load_benchmark(case_dir)["mesh_resolution"]
+        assert mesh_record["cell_type"] == "Triangle3"
+        assert mesh_record["cell_count"] == mesh.n_cells
+        state = runner.sessile_state_metrics(
+            mesh, runner.load_benchmark(case_dir))
+        assert state["operator_contact_geometry_available"] is True
+        assert state["operator_contact_geometry_sample_count"] == 2
+        assert {
+            sample["cell_type"]
+            for sample in state["operator_contact_geometry_samples"]
+        } == {"Triangle3"}
+
+
+def test_kinematic_area_gradient_traction_rejects_incompatible_projection_controls():
+    runner = _load_runner()
+
+    def configure(**overrides):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = Path(temp_dir) / "droplet2d"
+            runner.write_capillary_droplet2d_case(
+                case_dir,
+                steps=1,
+                pressure_jump=2.0,
+                nx=8,
+                ny=8,
+            )
+            options = {
+                "steps": 1,
+                "surface_tension": 0.5,
+                "capillary_force_form": "kinematic_area_gradient_traction",
+                "projected_curvature_field": "kappa_area_gradient",
+                "curvature_projection_recovery_mode":
+                    "kinematic_area_gradient",
+                "curvature_projection_kinematic_area_gradient_filter_coefficient":
+                    0.0,
+                "curvature_projection_smoothing_iterations": 0,
+            }
+            options.update(overrides)
+            runner.configure_solver(case_dir / "solver.xml", **options)
+
+    with pytest.raises(ValueError, match="explicit projected curvature field"):
+        configure(projected_curvature_field=None)
+    with pytest.raises(ValueError, match="requires the kinematic_area_gradient"):
+        configure(curvature_projection_recovery_mode="level_set_quadratic")
+    with pytest.raises(ValueError, match="explicit zero"):
+        configure(
+            curvature_projection_kinematic_area_gradient_filter_coefficient=0.25
+        )
+    with pytest.raises(ValueError, match="does not admit separate"):
+        configure(curvature_projection_smoothing_iterations=1)
+
+
 def test_projected_curvature_recovery_diagnostics_are_aggregated_and_gated():
     runner = _load_runner()
     diagnostics = runner.parse_solver_diagnostics(
@@ -1875,6 +2103,45 @@ def test_sessile_case_uses_monolithic_fsils_gmres_linear_budget():
     assert configured.linear_krylov_space_dimension == 50
     assert configured.linear_relative_tolerance == 1.0e-8
     assert configured.linear_absolute_tolerance == 1.0e-10
+
+    area_gradient_args = runner.argparse.Namespace(**vars(args))
+    area_gradient_args.capillary_force_form = (
+        "kinematic_area_gradient_traction")
+    area_gradient_args.projected_curvature_field = "kappa_area_gradient"
+    area_gradient_args.initialize_discrete_static_capillary_equilibrium = True
+    area_gradient = runner.case_args_for_run(
+        "sessile2d", area_gradient_args)
+    assert area_gradient.curvature_projection_recovery_mode == (
+        "kinematic_area_gradient")
+    assert (
+        area_gradient
+        .curvature_projection_kinematic_area_gradient_filter_coefficient
+        == 0.0
+    )
+    assert area_gradient.curvature_projection_smoothing_iterations == 0
+    assert area_gradient.require_curvature_projection_diagnostics is True
+    assert area_gradient.require_curvature_projection_newton_freshness is True
+    assert area_gradient.require_free_surface_conservative_balance is True
+    assert (
+        area_gradient.require_free_surface_pressure_representability_diagnostic
+        is True
+    )
+    assert area_gradient.initialize_static_compatible_pressure is False
+
+    droplet_area_gradient = runner.case_args_for_run(
+        "droplet2d", area_gradient_args)
+    assert droplet_area_gradient.curvature_projection_recovery_mode == (
+        "kinematic_area_gradient")
+    assert droplet_area_gradient.curvature_projection_smoothing_iterations == 0
+    assert droplet_area_gradient.require_curvature_projection_diagnostics is True
+    assert droplet_area_gradient.require_curvature_projection_newton_freshness is True
+
+    high_order_area_gradient_args = runner.argparse.Namespace(
+        **vars(area_gradient_args))
+    high_order_area_gradient_args.use_high_order_implicit_cuts = True
+    with pytest.raises(ValueError, match="affine P1 simplex mesh"):
+        runner.case_args_for_run(
+            "droplet2d", high_order_area_gradient_args)
 
     candidate_args = runner.argparse.Namespace(**vars(args))
     candidate_args.capillary_force_form = "generated_curvature_traction"

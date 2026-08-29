@@ -510,6 +510,30 @@ TEST(LevelSetCurvatureProjectionMPI,
         << distributed_result.diagnostic;
     ASSERT_TRUE(serial_result.success) << serial_result.diagnostic;
     EXPECT_TRUE(distributed_result
+                    .kinematic_area_gradient_derivatives_global_dof_order);
+    EXPECT_TRUE(serial_result
+                    .kinematic_area_gradient_derivatives_global_dof_order);
+    ASSERT_EQ(
+        distributed_result
+            .kinematic_area_gradient_total_energy_derivative.size(),
+        serial_result
+            .kinematic_area_gradient_total_energy_derivative.size());
+    ASSERT_EQ(
+        distributed_result
+            .kinematic_area_gradient_liquid_volume_derivative.size(),
+        serial_result
+            .kinematic_area_gradient_liquid_volume_derivative.size());
+    EXPECT_EQ(
+        distributed_result
+            .kinematic_area_gradient_total_energy_derivative,
+        serial_result
+            .kinematic_area_gradient_total_energy_derivative);
+    EXPECT_EQ(
+        distributed_result
+            .kinematic_area_gradient_liquid_volume_derivative,
+        serial_result
+            .kinematic_area_gradient_liquid_volume_derivative);
+    EXPECT_TRUE(distributed_result
                     .kinematic_area_gradient_collective_replication);
     EXPECT_EQ(distributed_result.kinematic_area_gradient_parallel_size, 2);
     EXPECT_EQ(

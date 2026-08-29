@@ -677,6 +677,8 @@ def configure_solver(solver_xml: Path,
                      curvature_projection_max_zero_fallback_vertices: int | None = None,
                      curvature_projection_supplemental_sample_weight: float | None = None,
                      curvature_projection_recovery_mode: str | None = None,
+                     curvature_projection_kinematic_area_gradient_filter_coefficient:
+                     float | None = None,
                      curvature_projection_narrow_band_width: float | None = None,
                      curvature_projection_smoothing_iterations: int | None = None,
                      curvature_projection_smoothing_relaxation: float | None = None,
@@ -696,7 +698,13 @@ def configure_solver(solver_xml: Path,
                      float | None = None,
                      static_capillary_constant_pressure_kkt_max_relative_distance:
                      float | None = None,
+                     static_capillary_finite_difference_relative_step:
+                     float | None = None,
                      static_capillary_max_iterations: int | None = None,
+                     static_capillary_limited_memory_history_size:
+                     int | None = None,
+                     static_capillary_limited_memory_curvature_tolerance:
+                     float | None = None,
                      enable_volume_correction: bool | None = None,
                      volume_correction_cadence_steps: int | None = None,
                      volume_correction_use_initial_volume: bool | None = None,
@@ -870,11 +878,13 @@ def configure_solver(solver_xml: Path,
     capillary_force_form_names = {
         "surface_stress": "SurfaceStress",
         "generated_curvature_traction": "GeneratedCurvatureTraction",
+        "kinematic_area_gradient_traction": "KinematicAreaGradientTraction",
     }
     if capillary_force_form not in capillary_force_form_names:
         raise ValueError(
-            "capillary force form must be surface_stress or "
-            "generated_curvature_traction")
+            "capillary force form must be surface_stress, "
+            "generated_curvature_traction, or "
+            "kinematic_area_gradient_traction")
     if prescribed_capillary_curvature is not None:
         if (not math.isfinite(prescribed_capillary_curvature) or
                 prescribed_capillary_curvature <= 0.0):
@@ -914,11 +924,32 @@ def configure_solver(solver_xml: Path,
         raise ValueError(
             "generated curvature traction requires exactly one curvature "
             "source, not both a field and a prescribed scalar")
+    if (capillary_force_form == "kinematic_area_gradient_traction" and
+            surface_tension is not None and surface_tension > 0.0):
+        if not projected_curvature_field:
+            raise ValueError(
+                "kinematic area-gradient traction requires an explicit "
+                "projected curvature field")
+        if curvature_projection_recovery_mode != "kinematic_area_gradient":
+            raise ValueError(
+                "kinematic area-gradient traction requires the "
+                "kinematic_area_gradient recovery mode")
+        if curvature_projection_kinematic_area_gradient_filter_coefficient != 0.0:
+            raise ValueError(
+                "kinematic area-gradient traction requires an explicit zero "
+                "area-gradient filter coefficient")
+        if curvature_projection_smoothing_iterations not in (None, 0):
+            raise ValueError(
+                "kinematic area-gradient traction does not admit separate "
+                "post-projection smoothing")
     if projected_curvature_field:
         level_set = level_set_equation(root)
         set_text(level_set, "Enable_curvature_projection", "true")
         set_text(level_set, "Projected_curvature_field", projected_curvature_field)
-        if (capillary_force_form == "generated_curvature_traction" or
+        if (capillary_force_form in {
+                "generated_curvature_traction",
+                "kinematic_area_gradient_traction",
+        } or
                 not (surface_tension is not None and surface_tension > 0.0)):
             set_text(free_surface, "Curvature_field", projected_curvature_field)
             set_text(free_surface, "Use_level_set_curvature", "false")
@@ -961,6 +992,13 @@ def configure_solver(solver_xml: Path,
                 level_set,
                 "Curvature_projection_recovery_mode",
                 curvature_projection_recovery_mode,
+            )
+        if (curvature_projection_kinematic_area_gradient_filter_coefficient
+                is not None):
+            set_text(
+                level_set,
+                "Curvature_projection_kinematic_area_gradient_filter_coefficient",
+                f"{curvature_projection_kinematic_area_gradient_filter_coefficient:.16g}",
             )
         if curvature_projection_narrow_band_width is not None:
             set_text(
@@ -1011,6 +1049,28 @@ def configure_solver(solver_xml: Path,
             ("true" if enable_static_capillary_equilibrium_initialization
              else "false"),
         )
+    if (static_capillary_finite_difference_relative_step is not None and
+            (not math.isfinite(
+                static_capillary_finite_difference_relative_step) or
+             static_capillary_finite_difference_relative_step <= 0.0)):
+        raise ValueError(
+            "static capillary finite-difference relative step must be "
+            "positive and finite")
+    if (static_capillary_limited_memory_history_size is not None and
+            (not isinstance(
+                static_capillary_limited_memory_history_size, int) or
+             isinstance(static_capillary_limited_memory_history_size, bool) or
+             static_capillary_limited_memory_history_size < 0)):
+        raise ValueError(
+            "static capillary limited-memory history size must be "
+            "a nonnegative integer")
+    if (static_capillary_limited_memory_curvature_tolerance is not None and
+            (not math.isfinite(
+                static_capillary_limited_memory_curvature_tolerance) or
+             static_capillary_limited_memory_curvature_tolerance <= 0.0)):
+        raise ValueError(
+            "static capillary limited-memory curvature tolerance must be "
+            "positive and finite")
     for name, value in (
             ("Static_capillary_volume_tolerance",
              static_capillary_volume_tolerance),
@@ -1026,6 +1086,10 @@ def configure_solver(solver_xml: Path,
              static_capillary_constant_pressure_kkt_max_residual_norm),
             ("Static_capillary_constant_pressure_kkt_max_relative_distance",
              static_capillary_constant_pressure_kkt_max_relative_distance),
+            ("Static_capillary_finite_difference_relative_step",
+             static_capillary_finite_difference_relative_step),
+            ("Static_capillary_limited_memory_curvature_tolerance",
+             static_capillary_limited_memory_curvature_tolerance),
     ):
         if value is not None:
             level_set = level_set_equation(root)
@@ -1036,6 +1100,13 @@ def configure_solver(solver_xml: Path,
             level_set,
             "Static_capillary_max_iterations",
             str(static_capillary_max_iterations),
+        )
+    if static_capillary_limited_memory_history_size is not None:
+        level_set = level_set_equation(root)
+        set_text(
+            level_set,
+            "Static_capillary_limited_memory_history_size",
+            str(static_capillary_limited_memory_history_size),
         )
 
     if enable_volume_correction is not None:
@@ -1393,7 +1464,8 @@ def write_boundary(path: Path,
 def write_mini_mesh(case_dir: Path,
                     static: bool = False,
                     nx: int = 8,
-                    ny: int = 8) -> tuple[int, float]:
+                    ny: int = 8,
+                    simplex_mesh: bool = False) -> tuple[int, float]:
     if nx < 2 or ny < 2:
         raise ValueError("synthetic mesh resolution must be at least 2 by 2")
     tank_height = 1.0
@@ -1408,18 +1480,29 @@ def write_mini_mesh(case_dir: Path,
     ys = np.linspace(0.0, tank_height, ny + 1)
     points = np.array([[x, y, 0.0] for y in ys for x in xs], dtype=float)
 
-    cells = []
+    cells: list[int] = []
     for j in range(ny):
         for i in range(nx):
             lower_left = j * (nx + 1) + i
-            cells.extend([
-                4,
-                lower_left,
-                lower_left + 1,
-                lower_left + nx + 2,
-                lower_left + nx + 1,
-            ])
-    cell_types = np.full(nx * ny, pv.CellType.QUAD, dtype=np.uint8)
+            lower_right = lower_left + 1
+            upper_right = lower_left + nx + 2
+            upper_left = lower_left + nx + 1
+            if simplex_mesh:
+                cells.extend([
+                    3, lower_left, lower_right, upper_right,
+                    3, lower_left, upper_right, upper_left,
+                ])
+            else:
+                cells.extend([
+                    4,
+                    lower_left,
+                    lower_right,
+                    upper_right,
+                    upper_left,
+                ])
+    cell_count = (2 if simplex_mesh else 1) * nx * ny
+    cell_type = pv.CellType.TRIANGLE if simplex_mesh else pv.CellType.QUAD
+    cell_types = np.full(cell_count, cell_type, dtype=np.uint8)
     grid = pv.UnstructuredGrid(np.asarray(cells, dtype=np.int64), cell_types, points)
 
     x = points[:, 0]
@@ -1437,7 +1520,7 @@ def write_mini_mesh(case_dir: Path,
     grid.point_data["phi"] = phi
     grid.point_data["Pressure"] = pressure
     grid.point_data["Velocity"] = np.zeros((points.shape[0], 3), dtype=float)
-    grid.cell_data["GlobalElementID"] = np.arange(nx * ny, dtype=np.int64)
+    grid.cell_data["GlobalElementID"] = np.arange(cell_count, dtype=np.int64)
 
     mesh_dir = case_dir / "mesh/background"
     surface_dir = mesh_dir / "mesh-surfaces"
@@ -1625,9 +1708,11 @@ def write_mini_case(case_dir: Path,
                     steps: int,
                     static: bool = False,
                     nx: int = 8,
-                    ny: int = 8) -> None:
+                    ny: int = 8,
+                    simplex_mesh: bool = False) -> None:
     case_dir.mkdir(parents=True)
-    gauge_node, gauge_pressure = write_mini_mesh(case_dir, static, nx, ny)
+    gauge_node, gauge_pressure = write_mini_mesh(
+        case_dir, static, nx, ny, simplex_mesh)
     write_mini_solver_xml(case_dir, steps, gauge_node, gauge_pressure, static)
 
 
@@ -1936,7 +2021,8 @@ def write_sessile2d_case(case_dir: Path,
                          wall_face: str = "wall_bottom",
                          contact_line_model: str = "dynamic",
                          level_set_positive_scale: float = 1.0,
-                         initialize_discrete_static_contact_geometry: bool = False
+                         initialize_discrete_static_contact_geometry: bool = False,
+                         simplex_mesh: bool = False,
                          ) -> None:
     if radius <= 0.0 or surface_tension <= 0.0:
         raise ValueError("sessile radius and surface tension must be positive")
@@ -1964,7 +2050,14 @@ def write_sessile2d_case(case_dir: Path,
     wall_tangent = np.asarray(wall_spec["wall_tangent"][:2], dtype=float)
     wall_inward = -wall_normal
 
-    write_mini_case(case_dir, steps, static=True, nx=nx, ny=ny)
+    write_mini_case(
+        case_dir,
+        steps,
+        static=True,
+        nx=nx,
+        ny=ny,
+        simplex_mesh=simplex_mesh,
+    )
     mesh_path = case_dir / "mesh/background/mesh-complete.mesh.vtu"
     grid = pv.read(mesh_path)
     points = np.asarray(grid.points, dtype=float)
@@ -2012,7 +2105,7 @@ def write_sessile2d_case(case_dir: Path,
             for cell_id in range(grid.n_cells):
                 cell = grid.get_cell(cell_id)
                 point_ids = np.asarray(cell.point_ids, dtype=int)
-                if point_ids.size != 4:
+                if point_ids.size not in (3, 4):
                     continue
                 cell_points = points[point_ids, :2]
                 wall_vertices = np.isclose(
@@ -2125,7 +2218,13 @@ def write_sessile2d_case(case_dir: Path,
             "constant gamma/R on background support; inactive pressure DOFs "
             "are removed by active-side constraints"
         ),
-        "mesh_resolution": {"nx": nx, "ny": ny, "h": 1.0 / max(nx, ny)},
+        "mesh_resolution": {
+            "nx": nx,
+            "ny": ny,
+            "h": 1.0 / max(nx, ny),
+            "cell_type": "Triangle3" if simplex_mesh else "Quad4",
+            "cell_count": int(grid.n_cells),
+        },
         "sessile_contact": {
             "wall": wall_face,
             "wall_axis": wall_axis,
@@ -2174,7 +2273,7 @@ def write_sessile2d_case(case_dir: Path,
                 if (dynamic or
                     initialize_discrete_static_contact_geometry) else
                 "unmodified analytic circular-cap signed distance sampled at "
-                "Q1 vertices; generated-chord angle error is measured"),
+                "affine mesh vertices; generated-chord angle error is measured"),
             "discrete_contact_initialization_local_overwrite": (
                 dynamic or initialize_discrete_static_contact_geometry),
             "discrete_static_contact_initialization": (
@@ -2223,8 +2322,11 @@ def write_capillary_arc2d_case(case_dir: Path,
                                steps: int,
                                pressure_jump: float = 0.0,
                                nx: int = 8,
-                               ny: int = 8) -> None:
-    write_mini_case(case_dir, steps, static=True, nx=nx, ny=ny)
+                               ny: int = 8,
+                               simplex_mesh: bool = False) -> None:
+    write_mini_case(
+        case_dir, steps, static=True, nx=nx, ny=ny,
+        simplex_mesh=simplex_mesh)
     remove_synthetic_pressure_pin(case_dir)
 
     mesh_path = case_dir / "mesh/background/mesh-complete.mesh.vtu"
@@ -2257,7 +2359,13 @@ def write_capillary_arc2d_case(case_dir: Path,
             "constant gamma/R on background support; inactive pressure DOFs "
             "are removed by active-side constraints"
         ),
-        "mesh_resolution": {"nx": nx, "ny": ny, "h": 1.0 / max(nx, ny)},
+        "mesh_resolution": {
+            "nx": nx,
+            "ny": ny,
+            "h": 1.0 / max(nx, ny),
+            "cell_type": "Triangle3" if simplex_mesh else "Quad4",
+            "cell_count": int(grid.n_cells),
+        },
         "dimensions_m": {
             "tank_length": 1.0,
             "tank_height": 1.0,
@@ -2290,8 +2398,11 @@ def write_capillary_droplet2d_case(case_dir: Path,
                                    steps: int,
                                    pressure_jump: float = 0.0,
                                    nx: int = 8,
-                                   ny: int = 8) -> None:
-    write_mini_case(case_dir, steps, static=True, nx=nx, ny=ny)
+                                   ny: int = 8,
+                                   simplex_mesh: bool = False) -> None:
+    write_mini_case(
+        case_dir, steps, static=True, nx=nx, ny=ny,
+        simplex_mesh=simplex_mesh)
     remove_synthetic_pressure_pin(case_dir)
 
     mesh_path = case_dir / "mesh/background/mesh-complete.mesh.vtu"
@@ -2326,7 +2437,13 @@ def write_capillary_droplet2d_case(case_dir: Path,
         "initial_pressure_extension": (
             "constant gamma/R on background support; inactive pressure DOFs "
             "are removed by active-side constraints"),
-        "mesh_resolution": {"nx": nx, "ny": ny, "h": 1.0 / max(nx, ny)},
+        "mesh_resolution": {
+            "nx": nx,
+            "ny": ny,
+            "h": 1.0 / max(nx, ny),
+            "cell_type": "Triangle3" if simplex_mesh else "Quad4",
+            "cell_count": int(grid.n_cells),
+        },
         "dimensions_m": {
             "tank_length": 1.0,
             "tank_height": 1.0,
@@ -2447,8 +2564,11 @@ def write_capillary_wave2d_case(case_dir: Path,
                                 surface_tension: float,
                                 time_step_size: float | None,
                                 nx: int = 8,
-                                ny: int = 8) -> None:
-    write_mini_case(case_dir, steps, static=True, nx=nx, ny=ny)
+                                ny: int = 8,
+                                simplex_mesh: bool = False) -> None:
+    write_mini_case(
+        case_dir, steps, static=True, nx=nx, ny=ny,
+        simplex_mesh=simplex_mesh)
     remove_synthetic_pressure_pin(case_dir)
     configure_capillary_wave_wall_boundary_contract(case_dir)
 
@@ -2493,7 +2613,13 @@ def write_capillary_wave2d_case(case_dir: Path,
             "omega": omega,
             "final_time_s": final_time,
         },
-        "mesh_resolution": {"nx": nx, "ny": ny, "h": 1.0 / max(nx, ny)},
+        "mesh_resolution": {
+            "nx": nx,
+            "ny": ny,
+            "h": 1.0 / max(nx, ny),
+            "cell_type": "Triangle3" if simplex_mesh else "Quad4",
+            "cell_count": int(grid.n_cells),
+        },
         "boundary_contract": {
             "wall_left": "impermeable normal-only; vertical tangential motion free",
             "wall_right": "impermeable normal-only; vertical tangential motion free",
@@ -5853,6 +5979,34 @@ def static_capillary_equilibrium_initialization_errors(
                 "discrete static-capillary initialization has invalid "
                 f"{key} {value!r}"
             )
+    for key in (
+            "finite_difference_fourth_order_components",
+            "analytic_derivative_evaluations",
+            "derivative_resolution_step_acceptances"):
+        value = record.get(key)
+        if (isinstance(value, bool) or not isinstance(value, int) or
+                value < 0):
+            errors.append(
+                "discrete static-capillary initialization has invalid "
+                f"{key} {value!r}"
+            )
+    if getattr(args, "capillary_force_form", None) == (
+            "kinematic_area_gradient_traction"):
+        analytic_evaluations = record.get("analytic_derivative_evaluations")
+        difference_components = record.get(
+            "finite_difference_fourth_order_components")
+        if (isinstance(analytic_evaluations, bool) or
+                not isinstance(analytic_evaluations, int) or
+                analytic_evaluations <= 0):
+            errors.append(
+                "kinematic area-gradient static initialization did not use "
+                "exact functional derivatives"
+            )
+        if difference_components != 0:
+            errors.append(
+                "kinematic area-gradient static initialization unexpectedly "
+                "used finite-difference derivative components"
+            )
     iterations = record.get("iterations")
     if (isinstance(iterations, bool) or not isinstance(iterations, int) or
             iterations < 0):
@@ -6377,6 +6531,9 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
                     "constant_pressure_kkt_relative_distance",
                     "iterations",
                     "functional_evaluations",
+                    "finite_difference_fourth_order_components",
+                    "analytic_derivative_evaluations",
+                    "derivative_resolution_step_acceptances",
                     "topology_change_rejections",
                     "constraint_change_rejections",
                     "qualification"):
@@ -7555,6 +7712,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "curvature_projection_max_zero_fallback_vertices",
         "curvature_projection_supplemental_sample_weight",
         "curvature_projection_recovery_mode",
+        "curvature_projection_kinematic_area_gradient_filter_coefficient",
         "curvature_projection_narrow_band_width",
         "curvature_projection_smoothing_iterations",
         "curvature_projection_smoothing_relaxation",
@@ -7567,7 +7725,10 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "static_capillary_physical_equilibrium_max_residual_norm",
         "static_capillary_constant_pressure_kkt_max_residual_norm",
         "static_capillary_constant_pressure_kkt_max_relative_distance",
+        "static_capillary_finite_difference_relative_step",
         "static_capillary_max_iterations",
+        "static_capillary_limited_memory_history_size",
+        "static_capillary_limited_memory_curvature_tolerance",
         "require_static_capillary_balance_qualification",
         "expect_curvature_projection_smoothing_mode",
         "expect_curvature_projection_recovery_mode",
@@ -8841,22 +9002,31 @@ def add_sessile_operator_contact_geometry(state: dict[str, Any],
         return
     target_cos = math.cos(math.radians(float(target_angle)))
 
-    reference_nodes = np.asarray([
+    quad_reference_nodes = np.asarray([
         [-1.0, -1.0],
         [1.0, -1.0],
         [1.0, 1.0],
         [-1.0, 1.0],
     ])
-    reference_edges = ((0, 1), (1, 2), (2, 3), (3, 0))
-    reference_edge_set = {tuple(sorted(edge)) for edge in reference_edges}
+    quad_reference_edges = ((0, 1), (1, 2), (2, 3), (3, 0))
+    quad_reference_edge_set = {
+        tuple(sorted(edge)) for edge in quad_reference_edges}
+    triangle_reference_edges = ((0, 1), (1, 2), (2, 0))
     spacing = coordinate_min_spacing(points)
     wall_tolerance = max(1.0e-12, 1.0e-8 * (spacing or 1.0))
     samples: list[dict[str, Any]] = []
     for cell_id in range(dataset.n_cells):
         cell = dataset.get_cell(cell_id)
         point_ids = np.asarray(cell.point_ids, dtype=int)
-        if point_ids.size != 4:
+        cell_type = int(dataset.celltypes[cell_id])
+        is_triangle = (
+            cell_type == int(pv.CellType.TRIANGLE) and point_ids.size == 3)
+        is_quad = (
+            cell_type == int(pv.CellType.QUAD) and point_ids.size == 4)
+        if not (is_triangle or is_quad):
             continue
+        reference_edges = (
+            triangle_reference_edges if is_triangle else quad_reference_edges)
         cell_points = points[point_ids, :2]
         cell_phi = phi[point_ids]
         if not (np.isfinite(cell_points).all() and np.isfinite(cell_phi).all()):
@@ -8867,7 +9037,8 @@ def add_sessile_operator_contact_geometry(state: dict[str, Any],
         if wall_local.size != 2:
             continue
         a, b = (int(wall_local[0]), int(wall_local[1]))
-        if tuple(sorted((a, b))) not in reference_edge_set:
+        if (is_quad and
+                tuple(sorted((a, b))) not in quad_reference_edge_set):
             continue
         phi_a = float(cell_phi[a])
         phi_b = float(cell_phi[b])
@@ -8883,34 +9054,50 @@ def add_sessile_operator_contact_geometry(state: dict[str, Any],
         if edge_t < -1.0e-12 or edge_t > 1.0 + 1.0e-12:
             continue
         edge_t = min(1.0, max(0.0, edge_t))
-        parent = ((1.0 - edge_t) * reference_nodes[a] +
-                  edge_t * reference_nodes[b])
-        xi, eta = float(parent[0]), float(parent[1])
-        shape = 0.25 * np.asarray([
-            (1.0 - xi) * (1.0 - eta),
-            (1.0 + xi) * (1.0 - eta),
-            (1.0 + xi) * (1.0 + eta),
-            (1.0 - xi) * (1.0 + eta),
-        ])
-        shape_gradient = 0.25 * np.asarray([
-            [-(1.0 - eta), -(1.0 - xi)],
-            [1.0 - eta, -(1.0 + xi)],
-            [1.0 + eta, 1.0 + xi],
-            [-(1.0 + eta), 1.0 - xi],
-        ])
-        jacobian = cell_points.T @ shape_gradient
-        try:
-            physical_gradient = np.linalg.solve(
-                jacobian.T, shape_gradient.T @ cell_phi)
-        except np.linalg.LinAlgError:
-            continue
+        if is_triangle:
+            shape = np.zeros(3, dtype=float)
+            shape[a] = 1.0 - edge_t
+            shape[b] = edge_t
+            parent_coordinate = [float(shape[1]), float(shape[2])]
+            affine_design = np.column_stack((
+                cell_points[:, 0], cell_points[:, 1], np.ones(3)))
+            try:
+                affine_coefficients = np.linalg.solve(
+                    affine_design, cell_phi)
+            except np.linalg.LinAlgError:
+                continue
+            physical_gradient = np.asarray(
+                affine_coefficients[:2], dtype=float)
+        else:
+            parent = ((1.0 - edge_t) * quad_reference_nodes[a] +
+                      edge_t * quad_reference_nodes[b])
+            xi, eta = float(parent[0]), float(parent[1])
+            parent_coordinate = [xi, eta]
+            shape = 0.25 * np.asarray([
+                (1.0 - xi) * (1.0 - eta),
+                (1.0 + xi) * (1.0 - eta),
+                (1.0 + xi) * (1.0 + eta),
+                (1.0 - xi) * (1.0 + eta),
+            ])
+            shape_gradient = 0.25 * np.asarray([
+                [-(1.0 - eta), -(1.0 - xi)],
+                [1.0 - eta, -(1.0 + xi)],
+                [1.0 + eta, 1.0 + xi],
+                [-(1.0 + eta), 1.0 - xi],
+            ])
+            jacobian = cell_points.T @ shape_gradient
+            try:
+                physical_gradient = np.linalg.solve(
+                    jacobian.T, shape_gradient.T @ cell_phi)
+            except np.linalg.LinAlgError:
+                continue
         gradient_norm = float(np.linalg.norm(physical_gradient))
         safe_gradient_norm = math.sqrt(gradient_norm * gradient_norm + 1.0e-24)
         if not safe_gradient_norm > 0.0:
             continue
-        q1_active_normal = physical_gradient / safe_gradient_norm
+        element_active_normal = physical_gradient / safe_gradient_norm
         if active_domain == "LevelSetPositive":
-            q1_active_normal = -q1_active_normal
+            element_active_normal = -element_active_normal
 
         # Reproduce cutLinearLevelSetCell2D: collect unique edge roots, take
         # the farthest pair as the fragment, form its chord normal, and orient
@@ -8953,7 +9140,10 @@ def add_sessile_operator_contact_geometry(state: dict[str, Any],
         fragment_normal = np.asarray([tangent[1], -tangent[0]], dtype=float)
         fragment_normal /= float(np.linalg.norm(fragment_normal))
         affine_design = np.column_stack((
-            cell_points[:, 0], cell_points[:, 1], np.ones(4)))
+            cell_points[:, 0],
+            cell_points[:, 1],
+            np.ones(point_ids.size),
+        ))
         affine_coefficients, *_ = np.linalg.lstsq(
             affine_design, cell_phi, rcond=None)
         affine_gradient = np.asarray(affine_coefficients[:2], dtype=float)
@@ -8971,12 +9161,13 @@ def add_sessile_operator_contact_geometry(state: dict[str, Any],
         young_gap = target_cos - dynamic_cos
         wall_tangent = active_normal - normal_dot_wall * wall_normal
         wall_tangent_norm = float(np.linalg.norm(wall_tangent))
-        q1_dynamic_cos = -float(np.dot(q1_active_normal, wall_normal))
+        q1_dynamic_cos = -float(np.dot(element_active_normal, wall_normal))
         root = shape @ cell_points
         sample: dict[str, Any] = {
             "cell_id": cell_id,
+            "cell_type": "Triangle3" if is_triangle else "Quad4",
             "point": [float(root[0]), float(root[1])],
-            "parent_coordinate": [xi, eta],
+            "parent_coordinate": parent_coordinate,
             "dynamic_cos": dynamic_cos,
             "dynamic_angle_degrees": math.degrees(math.acos(
                 min(1.0, max(-1.0, dynamic_cos)))),
@@ -11676,6 +11867,66 @@ def format_failure_exception(failure: dict[str, Any],
 def case_args_for_run(case_name: str,
                       args: argparse.Namespace) -> argparse.Namespace:
     case_args = argparse.Namespace(**vars(args))
+    kinematic_area_gradient_traction = (
+        getattr(case_args, "capillary_force_form", "surface_stress") ==
+        "kinematic_area_gradient_traction"
+    )
+    if kinematic_area_gradient_traction:
+        if getattr(case_args, "use_high_order_implicit_cuts", False):
+            raise ValueError(
+                "kinematic area-gradient traction requires an affine P1 "
+                "simplex mesh")
+        if not getattr(case_args, "projected_curvature_field", None):
+            raise ValueError(
+                "kinematic area-gradient traction requires an explicit "
+                "projected curvature field")
+        set_default(
+            case_args,
+            "curvature_projection_recovery_mode",
+            "kinematic_area_gradient",
+        )
+        set_default(
+            case_args,
+            "curvature_projection_kinematic_area_gradient_filter_coefficient",
+            0.0,
+        )
+        set_default(
+            case_args,
+            "curvature_projection_smoothing_iterations",
+            0,
+        )
+        if (case_args.curvature_projection_recovery_mode !=
+                "kinematic_area_gradient"):
+            raise ValueError(
+                "kinematic area-gradient traction requires the "
+                "kinematic_area_gradient recovery mode")
+        if (case_args
+                .curvature_projection_kinematic_area_gradient_filter_coefficient
+                != 0.0):
+            raise ValueError(
+                "kinematic area-gradient traction requires a zero "
+                "area-gradient filter coefficient")
+        if case_args.curvature_projection_smoothing_iterations != 0:
+            raise ValueError(
+                "kinematic area-gradient traction does not admit "
+                "separate post-projection smoothing")
+        case_args.require_curvature_projection_diagnostics = True
+        case_args.require_curvature_projection_newton_freshness = True
+        set_default(
+            case_args,
+            "expect_curvature_projection_recovery_mode",
+            "kinematic_area_gradient",
+        )
+        set_default(
+            case_args,
+            "min_diagnostic_curvature_projection_count",
+            1,
+        )
+        set_default(
+            case_args,
+            "max_diagnostic_curvature_projection_zero_fallback_vertices",
+            0,
+        )
     if (getattr(
             case_args,
             "initialize_discrete_static_contact_geometry",
@@ -12009,6 +12260,13 @@ def configure_case_solver_xml(run_dir: Path, args: argparse.Namespace) -> None:
             args.curvature_projection_supplemental_sample_weight),
         curvature_projection_recovery_mode=(
             args.curvature_projection_recovery_mode),
+        curvature_projection_kinematic_area_gradient_filter_coefficient=(
+            getattr(
+                args,
+                "curvature_projection_kinematic_area_gradient_filter_coefficient",
+                None,
+            )
+        ),
         curvature_projection_narrow_band_width=(
             args.curvature_projection_narrow_band_width),
         curvature_projection_smoothing_iterations=(
@@ -12054,8 +12312,23 @@ def configure_case_solver_xml(run_dir: Path, args: argparse.Namespace) -> None:
             "static_capillary_constant_pressure_kkt_max_relative_distance",
             None,
         ),
+        static_capillary_finite_difference_relative_step=getattr(
+            args,
+            "static_capillary_finite_difference_relative_step",
+            None,
+        ),
         static_capillary_max_iterations=getattr(
             args, "static_capillary_max_iterations", None),
+        static_capillary_limited_memory_history_size=getattr(
+            args,
+            "static_capillary_limited_memory_history_size",
+            None,
+        ),
+        static_capillary_limited_memory_curvature_tolerance=getattr(
+            args,
+            "static_capillary_limited_memory_curvature_tolerance",
+            None,
+        ),
         enable_volume_correction=args.enable_level_set_volume_correction,
         volume_correction_cadence_steps=args.volume_correction_cadence_steps,
         volume_correction_use_initial_volume=(
@@ -12089,6 +12362,10 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
 
     try:
         run_dir = Path(temp_name) / case_name
+        uses_kinematic_area_gradient_traction = (
+            getattr(args, "capillary_force_form", "surface_stress") ==
+            "kinematic_area_gradient_traction"
+        )
         if source is None:
             if case_name == "curvedtet3d":
                 write_curved_tet3d_case(run_dir, args.steps)
@@ -12098,7 +12375,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                     pressure_jump = float(args.surface_tension) / CAPILLARY_ARC_RADIUS
                 write_capillary_arc2d_case(
                     run_dir, args.steps, pressure_jump,
-                    args.synthetic_nx, args.synthetic_ny)
+                    args.synthetic_nx, args.synthetic_ny,
+                    uses_kinematic_area_gradient_traction)
             elif case_name == "droplet2d":
                 pressure_jump = 0.0
                 if getattr(args, "high_order_capillary_droplet_equilibrium_smoke", False):
@@ -12107,7 +12385,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                     )
                 write_capillary_droplet2d_case(
                     run_dir, args.steps, pressure_jump,
-                    args.synthetic_nx, args.synthetic_ny)
+                    args.synthetic_nx, args.synthetic_ny,
+                    uses_kinematic_area_gradient_traction)
             elif case_name == "sphere3d":
                 if not (
                         args.synthetic_nx == args.synthetic_ny ==
@@ -12129,7 +12408,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 )
                 write_capillary_wave2d_case(
                     run_dir, args.steps, surface_tension, args.time_step_size,
-                    args.synthetic_nx, args.synthetic_ny)
+                    args.synthetic_nx, args.synthetic_ny,
+                    uses_kinematic_area_gradient_traction)
             elif case_name in {"sessile2d", "dynamiccontact2d"}:
                 dynamic = case_name == "dynamiccontact2d"
                 initial_angle = (
@@ -12160,6 +12440,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                         "initialize_discrete_static_contact_geometry",
                         False,
                     ),
+                    uses_kinematic_area_gradient_traction,
                 )
             elif case_name == "sessile3d":
                 if not (
@@ -12179,8 +12460,14 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                     args.level_set_positive_scale,
                 )
             else:
-                write_mini_case(run_dir, args.steps, static=(case_name == "static2d"))
+                write_mini_case(
+                    run_dir,
+                    args.steps,
+                    static=(case_name == "static2d"),
+                    simplex_mesh=uses_kinematic_area_gradient_traction,
+                )
             if (args.use_high_order_implicit_cuts or
+                    uses_kinematic_area_gradient_traction or
                     case_name in {
                         "sessile2d", "sessile3d", "dynamiccontact2d",
                         "sphere3d",
@@ -14300,7 +14587,19 @@ def main() -> int:
         "--static-capillary-constant-pressure-kkt-max-relative-distance",
         type=float,
     )
+    parser.add_argument(
+        "--static-capillary-finite-difference-relative-step",
+        type=float,
+    )
     parser.add_argument("--static-capillary-max-iterations", type=int)
+    parser.add_argument(
+        "--static-capillary-limited-memory-history-size",
+        type=int,
+    )
+    parser.add_argument(
+        "--static-capillary-limited-memory-curvature-tolerance",
+        type=float,
+    )
     parser.add_argument(
         "--require-static-capillary-balance-qualification",
         choices=("prerequisite_only", "qualified"),
@@ -14428,10 +14727,15 @@ def main() -> int:
     parser.add_argument("--surface-tension", type=float)
     parser.add_argument(
         "--capillary-force-form",
-        choices=("surface_stress", "generated_curvature_traction"),
+        choices=(
+            "surface_stress",
+            "generated_curvature_traction",
+            "kinematic_area_gradient_traction",
+        ),
         default="surface_stress",
         help=("surface force discretization; generated curvature traction "
-              "is an explicit unfitted candidate"),
+              "and kinematic area-gradient traction are explicit unfitted "
+              "candidates"),
     )
     parser.add_argument(
         "--prescribed-capillary-curvature",
@@ -14447,7 +14751,15 @@ def main() -> int:
     parser.add_argument("--curvature-projection-supplemental-sample-weight", type=float)
     parser.add_argument(
         "--curvature-projection-recovery-mode",
-        choices=("level_set_quadratic", "generated_interface_patch"),
+        choices=(
+            "level_set_quadratic",
+            "generated_interface_patch",
+            "kinematic_area_gradient",
+        ),
+    )
+    parser.add_argument(
+        "--curvature-projection-kinematic-area-gradient-filter-coefficient",
+        type=float,
     )
     parser.add_argument("--curvature-projection-narrow-band-width", type=float)
     parser.add_argument("--curvature-projection-smoothing-iterations", type=int)
@@ -14459,7 +14771,11 @@ def main() -> int:
     parser.add_argument("--expect-curvature-projection-smoothing-mode")
     parser.add_argument(
         "--expect-curvature-projection-recovery-mode",
-        choices=("level_set_quadratic", "generated_interface_patch"),
+        choices=(
+            "level_set_quadratic",
+            "generated_interface_patch",
+            "kinematic_area_gradient",
+        ),
     )
     parser.add_argument("--min-diagnostic-curvature-projection-operator-edges", type=int)
     parser.add_argument(

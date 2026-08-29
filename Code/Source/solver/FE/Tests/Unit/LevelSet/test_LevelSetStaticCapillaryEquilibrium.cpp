@@ -36,7 +36,8 @@ quadraticCapillaryEvaluation(
     std::span<const FE::Real> coefficients,
     EvaluationPurpose purpose,
     bool topology_barrier = false,
-    bool constraint_barrier = false)
+    bool constraint_barrier = false,
+    bool provide_functional_derivatives = false)
 {
     level_set::LevelSetStaticCapillaryEquilibriumEvaluation evaluation;
     if (coefficients.size() != 2u) {
@@ -73,6 +74,14 @@ quadraticCapillaryEvaluation(
     evaluation.surface_wall_energy =
         energy_x * energy_x + energy_y * energy_y;
     evaluation.liquid_volume = x + y;
+    evaluation.functional_derivatives_available =
+        provide_functional_derivatives;
+    if (provide_functional_derivatives) {
+        evaluation.physical_potential_derivative = {
+            gradient_x, gradient_y};
+        evaluation.liquid_volume_derivative = {
+            FE::Real{1.0}, FE::Real{1.0}};
+    }
     evaluation.pressure_representability_available =
         purpose == EvaluationPurpose::AcceptanceCertificate;
     evaluation.pressure_representability_converged =
@@ -169,10 +178,175 @@ TEST(LevelSetStaticCapillaryEquilibrium,
         1.0e-7);
     EXPECT_GT(result.functional_evaluations, 1u);
     EXPECT_EQ(result.acceptance_certificate_evaluations, 1u);
+    EXPECT_GT(result.limited_memory_updates, 0u);
+    EXPECT_GT(result.limited_memory_peak_history, 0u);
+    EXPECT_LE(
+        result.limited_memory_peak_history,
+        static_cast<std::size_t>(
+            quadraticOptions().limited_memory_history_size));
     EXPECT_EQ(result.cut_topology_key, 11u);
     EXPECT_EQ(result.constraint_semantics_key, 33u);
     RecordProperty(
         "static_capillary_minimizer_production_force_projected", 0);
+}
+
+TEST(LevelSetStaticCapillaryEquilibrium,
+     UsesSuppliedFunctionalDerivativesWithoutDifferenceTrials)
+{
+    const std::vector<FE::Real> input{2.5, 0.5};
+    const std::array<std::size_t, 2> active{0u, 1u};
+    std::vector<FE::Real> accepted;
+
+    const auto result =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            quadraticOptions(),
+            input,
+            active,
+            [](std::span<const FE::Real> coefficients,
+               EvaluationPurpose purpose) {
+                return quadraticCapillaryEvaluation(
+                    coefficients,
+                    purpose,
+                    /*topology_barrier=*/false,
+                    /*constraint_barrier=*/false,
+                    /*provide_functional_derivatives=*/true);
+            },
+            accepted);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    ASSERT_EQ(accepted.size(), 2u);
+    EXPECT_NEAR(accepted[0], 1.0, 1.0e-7);
+    EXPECT_NEAR(accepted[1], 2.0, 1.0e-7);
+    EXPECT_GT(result.analytic_derivative_evaluations, 0u);
+    EXPECT_EQ(result.finite_difference_fourth_order_components, 0u);
+    EXPECT_DOUBLE_EQ(result.minimum_finite_difference_step_used, 0.0);
+    EXPECT_DOUBLE_EQ(result.maximum_finite_difference_step_used, 0.0);
+}
+
+TEST(LevelSetStaticCapillaryEquilibrium,
+     ZeroLimitedMemoryHistoryRetainsTheSafeguardedGradientRoute)
+{
+    const std::vector<FE::Real> input{2.5, 0.5};
+    const std::array<std::size_t, 2> active{0u, 1u};
+    std::vector<FE::Real> accepted;
+    auto options = quadraticOptions();
+    options.limited_memory_history_size = 0;
+
+    const auto result =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            options,
+            input,
+            active,
+            [](std::span<const FE::Real> coefficients,
+               EvaluationPurpose purpose) {
+                return quadraticCapillaryEvaluation(
+                    coefficients, purpose);
+            },
+            accepted);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    ASSERT_EQ(accepted.size(), 2u);
+    EXPECT_NEAR(accepted[0], 1.0, 1.0e-7);
+    EXPECT_NEAR(accepted[1], 2.0, 1.0e-7);
+    EXPECT_EQ(result.limited_memory_updates, 0u);
+    EXPECT_EQ(result.limited_memory_peak_history, 0u);
+}
+
+TEST(LevelSetStaticCapillaryEquilibrium,
+     ExactDerivativesResolveRoundoffScaleMeritDecrease)
+{
+    const std::vector<FE::Real> input{2.5, 0.5};
+    const std::array<std::size_t, 2> active{0u, 1u};
+    std::vector<FE::Real> accepted;
+    constexpr FE::Real energy_scale{1.0e-16};
+    auto options = quadraticOptions();
+    options.projected_gradient_tolerance = 1.0e-20;
+    options.projected_gradient_inverse_stiffness =
+        FE::Real{0.5} / energy_scale;
+    options.tangent_trust_radius = 4.0;
+    options.maximum_coefficient_update_linf = 4.0;
+    options.limited_memory_history_size = 0;
+    options.max_iterations = 4;
+
+    const auto result =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            options,
+            input,
+            active,
+            [](std::span<const FE::Real> coefficients,
+               EvaluationPurpose purpose) {
+                auto evaluation = quadraticCapillaryEvaluation(
+                    coefficients,
+                    purpose,
+                    /*topology_barrier=*/false,
+                    /*constraint_barrier=*/false,
+                    /*provide_functional_derivatives=*/true);
+                evaluation.surface_wall_energy =
+                    coefficients[0] < FE::Real{2.0}
+                        ? std::nextafter(
+                              FE::Real{1.0},
+                              std::numeric_limits<FE::Real>::infinity())
+                        : FE::Real{1.0};
+                for (auto& derivative :
+                     evaluation.physical_potential_derivative) {
+                    derivative *= energy_scale;
+                }
+                if (evaluation.pressure_representability_available) {
+                    evaluation.pressure_representability_residual_norm *=
+                        energy_scale;
+                    evaluation.pressure_representability_relative_distance *=
+                        energy_scale;
+                    evaluation.production_residual_norm *= energy_scale;
+                    evaluation.constant_pressure_kkt_residual_norm *=
+                        energy_scale;
+                    evaluation.constant_pressure_kkt_relative_distance *=
+                        energy_scale;
+                }
+                return evaluation;
+            },
+            accepted);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    ASSERT_EQ(accepted.size(), 2u);
+    EXPECT_NEAR(accepted[0], 1.0, 1.0e-14);
+    EXPECT_NEAR(accepted[1], 2.0, 1.0e-14);
+    EXPECT_GT(result.derivative_resolution_step_acceptances, 0u);
+    EXPECT_GT(result.analytic_derivative_evaluations, 0u);
+    EXPECT_EQ(result.finite_difference_fourth_order_components, 0u);
+}
+
+TEST(LevelSetStaticCapillaryEquilibrium,
+     RejectsMalformedExactDerivativesBeforeChangingOutput)
+{
+    const std::vector<FE::Real> input{2.5, 0.5};
+    const std::array<std::size_t, 2> active{0u, 1u};
+    const std::vector<FE::Real> sentinel{41.0, 42.0, 43.0};
+    std::vector<FE::Real> accepted = sentinel;
+
+    const auto result =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            quadraticOptions(),
+            input,
+            active,
+            [](std::span<const FE::Real> coefficients,
+               EvaluationPurpose purpose) {
+                auto evaluation = quadraticCapillaryEvaluation(
+                    coefficients,
+                    purpose,
+                    /*topology_barrier=*/false,
+                    /*constraint_barrier=*/false,
+                    /*provide_functional_derivatives=*/true);
+                evaluation.liquid_volume_derivative.pop_back();
+                return evaluation;
+            },
+            accepted);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(accepted, sentinel);
+    EXPECT_NE(
+        result.diagnostic.find(
+            "candidate_evaluator_returned_invalid_functional_derivatives"),
+        std::string::npos);
 }
 
 TEST(LevelSetStaticCapillaryEquilibrium,
@@ -624,7 +798,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     EXPECT_EQ(accepted, sentinel);
     EXPECT_NE(
         result.diagnostic.find(
-            "fixed_topology_central_difference_unavailable"),
+            "fixed_topology_functional_derivative_unavailable"),
         std::string::npos);
     EXPECT_NE(
         result.diagnostic.find(

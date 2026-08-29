@@ -1,7 +1,9 @@
 #include "LevelSet/LevelSetStaticCapillaryEquilibrium.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <deque>
 #include <exception>
 #include <stdexcept>
 #include <utility>
@@ -72,6 +74,9 @@ void validateOptions(
         !(options.line_search_shrink < Real{1.0}) ||
         !finitePositive(options.armijo_fraction) ||
         !(options.armijo_fraction < Real{1.0}) ||
+        options.limited_memory_history_size < 0 ||
+        !finitePositive(
+            options.limited_memory_curvature_tolerance) ||
         !finitePositive(options.minimum_volume_merit_penalty)) {
         throw std::invalid_argument(
             "static capillary equilibrium minimization received invalid tolerances or iteration controls");
@@ -108,6 +113,17 @@ void validateOptions(
 [[nodiscard]] Real norm(std::span<const Real> values)
 {
     return std::sqrt(std::max(Real{0.0}, dot(values, values)));
+}
+
+void projectOrthogonalTo(
+    std::span<Real> values,
+    std::span<const Real> normal,
+    Real normal_squared)
+{
+    const Real normal_component = dot(values, normal) / normal_squared;
+    for (std::size_t i = 0u; i < values.size(); ++i) {
+        values[i] -= normal_component * normal[i];
+    }
 }
 
 [[nodiscard]] Real physicalPotentialEnergy(
@@ -191,6 +207,23 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                     "candidate_evaluator_returned_invalid_functional_state";
                 return false;
             }
+            if (evaluation.functional_derivatives_available &&
+                (evaluation.physical_potential_derivative.size() !=
+                     candidate.size() ||
+                 evaluation.liquid_volume_derivative.size() !=
+                     candidate.size() ||
+                 !std::all_of(
+                     evaluation.physical_potential_derivative.begin(),
+                     evaluation.physical_potential_derivative.end(),
+                     [](Real value) { return std::isfinite(value); }) ||
+                 !std::all_of(
+                     evaluation.liquid_volume_derivative.begin(),
+                     evaluation.liquid_volume_derivative.end(),
+                     [](Real value) { return std::isfinite(value); }))) {
+                last_evaluation_diagnostic =
+                    "candidate_evaluator_returned_invalid_functional_derivatives";
+                return false;
+            }
             if (evaluation.pressure_representability_available &&
                 (!finiteNonnegative(
                      evaluation.pressure_representability_residual_norm) ||
@@ -253,6 +286,51 @@ minimizeLevelSetStaticCapillaryEquilibrium(
     result.initial_liquid_volume = current.liquid_volume;
     result.final_liquid_volume = current.liquid_volume;
 
+    struct LimitedMemoryCorrection {
+        std::vector<Real> parameter_step{};
+        std::vector<Real> gradient_step{};
+        Real inverse_curvature{0.0};
+    };
+    std::deque<LimitedMemoryCorrection> limited_memory;
+    std::vector<Real> previous_active_coefficients;
+    std::vector<Real> previous_projected_gradient;
+    bool pending_limited_memory_update = false;
+
+    const auto exactProjectedGradientNorm =
+        [&](const LevelSetStaticCapillaryEquilibriumEvaluation& evaluation,
+            Real& projected_norm) {
+            if (!evaluation.functional_derivatives_available) {
+                return false;
+            }
+            std::vector<Real> energy(active_indices.size(), Real{0.0});
+            std::vector<Real> volume(active_indices.size(), Real{0.0});
+            for (std::size_t local = 0u;
+                 local < active_indices.size();
+                 ++local) {
+                const auto index = active_indices[local];
+                energy[local] =
+                    evaluation.physical_potential_derivative[index];
+                volume[local] =
+                    evaluation.liquid_volume_derivative[index];
+            }
+            const Real volume_squared = dot(volume, volume);
+            if (!finitePositive(volume_squared)) {
+                return false;
+            }
+            const Real multiplier =
+                -dot(energy, volume) / volume_squared;
+            if (!std::isfinite(multiplier)) {
+                return false;
+            }
+            for (std::size_t local = 0u;
+                 local < energy.size();
+                 ++local) {
+                energy[local] += multiplier * volume[local];
+            }
+            projected_norm = norm(energy);
+            return finiteNonnegative(projected_norm);
+        };
+
     const auto updateFinalEvaluation =
         [&](const LevelSetStaticCapillaryEquilibriumEvaluation& evaluation) {
             result.final_snapshot_revision_key =
@@ -291,140 +369,196 @@ minimizeLevelSetStaticCapillaryEquilibrium(
     updateFinalEvaluation(current);
 
     for (;;) {
-        std::vector<Real> energy_gradient(
-            active_indices.size(), Real{0.0});
-        std::vector<Real> volume_gradient(
-            active_indices.size(), Real{0.0});
+        std::vector<Real> energy_gradient(active_indices.size(), Real{0.0});
+        std::vector<Real> volume_gradient(active_indices.size(), Real{0.0});
         bool gradient_available = true;
-        for (std::size_t local = 0u;
-             local < active_indices.size();
-             ++local) {
-            const auto index = active_indices[local];
-            Real difference_step = std::max(
-                options.minimum_finite_difference_step,
-                options.finite_difference_relative_step *
-                    std::max(
-                        options
-                            .finite_difference_reference_coefficient_scale,
-                        std::abs(coefficients[index])));
-            bool component_available = false;
-            for (int attempt = 0;
-                 attempt <= options.finite_difference_max_shrinks;
-                 ++attempt) {
-                std::vector<Real> plus = coefficients;
-                std::vector<Real> minus = coefficients;
-                plus[index] += difference_step;
-                minus[index] -= difference_step;
-
-                LevelSetStaticCapillaryEquilibriumEvaluation plus_state;
-                LevelSetStaticCapillaryEquilibriumEvaluation minus_state;
-                const bool plus_available = evaluate(
-                    plus,
-                    LevelSetStaticCapillaryEvaluationPurpose::
-                        FunctionalTrial,
-                    plus_state);
-                const std::string plus_diagnostic =
-                    last_evaluation_diagnostic;
-                const bool minus_available = evaluate(
-                    minus,
-                    LevelSetStaticCapillaryEvaluationPurpose::
-                        FunctionalTrial,
-                    minus_state);
-                const std::string minus_diagnostic =
-                    last_evaluation_diagnostic;
-                if (forbidden_projection_seen) {
-                    result.diagnostic =
-                        "production_force_projection_is_forbidden";
-                    return result;
-                }
-                const bool topology_preserved =
-                    plus_available && minus_available &&
-                    plus_state.cut_topology_key ==
-                        fixed_topology_key &&
-                    minus_state.cut_topology_key ==
-                        fixed_topology_key;
-                const bool constraints_preserved =
-                    plus_available && minus_available &&
-                    plus_state.constraint_semantics_key ==
-                        fixed_constraint_semantics_key &&
-                    minus_state.constraint_semantics_key ==
-                        fixed_constraint_semantics_key;
-                if (topology_preserved && constraints_preserved) {
-                    const Real denominator =
-                        Real{2.0} * difference_step;
-                    const Real energy_derivative =
-                        (physicalPotentialEnergy(plus_state) -
-                         physicalPotentialEnergy(minus_state)) /
-                        denominator;
-                    const Real volume_derivative =
-                        (plus_state.liquid_volume -
-                         minus_state.liquid_volume) /
-                        denominator;
-                    if (std::isfinite(energy_derivative) &&
-                        std::isfinite(volume_derivative)) {
-                        energy_gradient[local] = energy_derivative;
-                        volume_gradient[local] = volume_derivative;
-                        component_available = true;
-                        break;
-                    }
-                    last_evaluation_diagnostic =
-                        "candidate_central_difference_is_nonfinite";
-                } else if (
-                    (plus_available &&
-                     plus_state.cut_topology_key !=
-                         fixed_topology_key) ||
-                    (minus_available &&
-                     minus_state.cut_topology_key !=
-                         fixed_topology_key)) {
-                    ++result.topology_change_rejections;
-                    last_evaluation_diagnostic =
-                        "candidate_cut_topology_changed";
-                } else if (
-                    (plus_available &&
-                     plus_state.constraint_semantics_key !=
-                         fixed_constraint_semantics_key) ||
-                    (minus_available &&
-                     minus_state.constraint_semantics_key !=
-                         fixed_constraint_semantics_key)) {
-                    ++result.constraint_change_rejections;
-                    last_evaluation_diagnostic =
-                        "candidate_constraint_semantics_changed";
-                } else if (!plus_available && !minus_available) {
-                    last_evaluation_diagnostic =
-                        "candidate_plus_failed:" +
-                        plus_diagnostic +
-                        ",candidate_minus_failed:" +
-                        minus_diagnostic;
-                } else if (!plus_available) {
-                    last_evaluation_diagnostic =
-                        "candidate_plus_failed:" +
-                        plus_diagnostic;
-                } else if (!minus_available) {
-                    last_evaluation_diagnostic =
-                        "candidate_minus_failed:" +
-                        minus_diagnostic;
-                }
-
-                if (attempt <
-                    options.finite_difference_max_shrinks) {
-                    const Real smaller_step = std::max(
-                        options.minimum_finite_difference_step,
-                        difference_step * Real{0.5});
-                    if (smaller_step == difference_step) {
-                        break;
-                    }
-                    difference_step = smaller_step;
-                    ++result.finite_difference_step_shrinks;
-                }
+        if (current.functional_derivatives_available) {
+            for (std::size_t local = 0u; local < active_indices.size();
+                 ++local) {
+                const auto index = active_indices[local];
+                energy_gradient[local] =
+                    current.physical_potential_derivative[index];
+                volume_gradient[local] =
+                    current.liquid_volume_derivative[index];
             }
-            if (!component_available) {
-                gradient_available = false;
-                break;
+            ++result.analytic_derivative_evaluations;
+        } else {
+            for (std::size_t local = 0u; local < active_indices.size();
+                 ++local) {
+                const auto index = active_indices[local];
+                const Real coefficient_scale = std::max(
+                    options.finite_difference_reference_coefficient_scale,
+                    std::abs(coefficients[index]));
+                // The fourth-order stencil permits a larger, less
+                // subtraction-sensitive configured step than the former
+                // two-point formula. Topology checks below shrink it
+                // deterministically when the nominal stencil is too wide.
+                Real difference_step =
+                    std::max(options.minimum_finite_difference_step,
+                             options.finite_difference_relative_step *
+                                 coefficient_scale);
+                bool component_available = false;
+                for (int attempt = 0;
+                     attempt <= options.finite_difference_max_shrinks;
+                     ++attempt) {
+                    constexpr std::array<Real, 4> offsets{
+                        {Real{-2.0}, Real{-1.0}, Real{1.0}, Real{2.0}}};
+                    std::array<LevelSetStaticCapillaryEquilibriumEvaluation,
+                               offsets.size()>
+                        states;
+                    std::array<bool, offsets.size()> available{};
+                    std::array<std::string, offsets.size()> diagnostics;
+                    for (std::size_t sample = 0u; sample < offsets.size();
+                         ++sample) {
+                        std::vector<Real> perturbed = coefficients;
+                        perturbed[index] += offsets[sample] * difference_step;
+                        available[sample] =
+                            evaluate(perturbed,
+                                     LevelSetStaticCapillaryEvaluationPurpose::
+                                         FunctionalTrial,
+                                     states[sample]);
+                        diagnostics[sample] = last_evaluation_diagnostic;
+                    }
+                    if (forbidden_projection_seen) {
+                        result.diagnostic =
+                            "production_force_projection_is_forbidden";
+                        return result;
+                    }
+                    const bool all_available =
+                        std::all_of(available.begin(), available.end(),
+                                    [](bool value) { return value; });
+                    const bool topology_preserved =
+                        all_available &&
+                        std::all_of(states.begin(), states.end(),
+                                    [&](const auto& state) {
+                                        return state.cut_topology_key ==
+                                               fixed_topology_key;
+                                    });
+                    const bool constraints_preserved =
+                        all_available &&
+                        std::all_of(states.begin(), states.end(),
+                                    [&](const auto& state) {
+                                        return state.constraint_semantics_key ==
+                                               fixed_constraint_semantics_key;
+                                    });
+                    if (topology_preserved && constraints_preserved) {
+                        const std::array<Real, 4> energies{
+                            {physicalPotentialEnergy(states[0]),
+                             physicalPotentialEnergy(states[1]),
+                             physicalPotentialEnergy(states[2]),
+                             physicalPotentialEnergy(states[3])}};
+                        const std::array<Real, 4> volumes{
+                            {states[0].liquid_volume, states[1].liquid_volume,
+                             states[2].liquid_volume, states[3].liquid_volume}};
+                        const auto fourth_order_derivative =
+                            [&](const std::array<Real, 4>& values) {
+                                return (values[0] - Real{8.0} * values[1] +
+                                        Real{8.0} * values[2] - values[3]) /
+                                       (Real{12.0} * difference_step);
+                            };
+                        const auto second_order_derivative =
+                            [&](const std::array<Real, 4>& values) {
+                                return (values[2] - values[1]) /
+                                       (Real{2.0} * difference_step);
+                            };
+                        const Real energy_derivative =
+                            fourth_order_derivative(energies);
+                        const Real volume_derivative =
+                            fourth_order_derivative(volumes);
+                        if (std::isfinite(energy_derivative) &&
+                            std::isfinite(volume_derivative)) {
+                            const Real second_order_energy =
+                                second_order_derivative(energies);
+                            const Real second_order_volume =
+                                second_order_derivative(volumes);
+                            const auto relative_correction =
+                                [](Real high_order, Real low_order) {
+                                    return std::abs(high_order - low_order) /
+                                           std::max({Real{1.0},
+                                                     std::abs(high_order),
+                                                     std::abs(low_order)});
+                                };
+                            energy_gradient[local] = energy_derivative;
+                            volume_gradient[local] = volume_derivative;
+                            if (result
+                                    .finite_difference_fourth_order_components ==
+                                0u) {
+                                result.minimum_finite_difference_step_used =
+                                    difference_step;
+                            } else {
+                                result.minimum_finite_difference_step_used =
+                                    std::min(
+                                        result
+                                            .minimum_finite_difference_step_used,
+                                        difference_step);
+                            }
+                            ++result.finite_difference_fourth_order_components;
+                            result.maximum_finite_difference_step_used =
+                                std::max(
+                                    result.maximum_finite_difference_step_used,
+                                    difference_step);
+                            result
+                                .maximum_energy_derivative_relative_correction =
+                                std::max(
+                                    result
+                                        .maximum_energy_derivative_relative_correction,
+                                    relative_correction(energy_derivative,
+                                                        second_order_energy));
+                            result
+                                .maximum_volume_derivative_relative_correction =
+                                std::max(
+                                    result
+                                        .maximum_volume_derivative_relative_correction,
+                                    relative_correction(volume_derivative,
+                                                        second_order_volume));
+                            component_available = true;
+                            break;
+                        }
+                        last_evaluation_diagnostic =
+                            "candidate_fourth_order_difference_is_nonfinite";
+                    } else if (all_available && !topology_preserved) {
+                        ++result.topology_change_rejections;
+                        last_evaluation_diagnostic =
+                            "candidate_cut_topology_changed";
+                    } else if (all_available && !constraints_preserved) {
+                        ++result.constraint_change_rejections;
+                        last_evaluation_diagnostic =
+                            "candidate_constraint_semantics_changed";
+                    } else {
+                        last_evaluation_diagnostic =
+                            "candidate_stencil_sample_failed";
+                        for (std::size_t sample = 0u; sample < available.size();
+                             ++sample) {
+                            if (!available[sample]) {
+                                last_evaluation_diagnostic +=
+                                    ":offset=" +
+                                    std::to_string(offsets[sample]) + ":" +
+                                    diagnostics[sample];
+                                break;
+                            }
+                        }
+                    }
+
+                    if (attempt < options.finite_difference_max_shrinks) {
+                        const Real smaller_step =
+                            std::max(options.minimum_finite_difference_step,
+                                     difference_step * Real{0.5});
+                        if (smaller_step == difference_step) {
+                            break;
+                        }
+                        difference_step = smaller_step;
+                        ++result.finite_difference_step_shrinks;
+                    }
+                }
+                if (!component_available) {
+                    gradient_available = false;
+                    break;
+                }
             }
         }
         if (!gradient_available) {
             result.diagnostic =
-                "fixed_topology_central_difference_unavailable:" +
+                "fixed_topology_functional_derivative_unavailable:" +
                 last_evaluation_diagnostic;
             return result;
         }
@@ -433,25 +567,19 @@ minimizeLevelSetStaticCapillaryEquilibrium(
             dot(volume_gradient, volume_gradient);
         if (!std::isfinite(volume_gradient_squared) ||
             !(volume_gradient_squared > Real{0.0})) {
-            result.diagnostic =
-                "liquid_volume_gradient_is_zero_or_nonfinite";
+            result.diagnostic = "liquid_volume_gradient_is_zero_or_nonfinite";
             return result;
         }
-        const Real energy_volume_cross =
-            dot(energy_gradient, volume_gradient);
+        const Real energy_volume_cross = dot(energy_gradient, volume_gradient);
         const Real volume_multiplier =
             -energy_volume_cross / volume_gradient_squared;
         if (!std::isfinite(volume_multiplier)) {
-            result.diagnostic =
-                "volume_multiplier_is_nonfinite";
+            result.diagnostic = "volume_multiplier_is_nonfinite";
             return result;
         }
 
-        std::vector<Real> projected_gradient(
-            active_indices.size(), Real{0.0});
-        for (std::size_t i = 0u;
-             i < active_indices.size();
-             ++i) {
+        std::vector<Real> projected_gradient(active_indices.size(), Real{0.0});
+        for (std::size_t i = 0u; i < active_indices.size(); ++i) {
             projected_gradient[i] =
                 energy_gradient[i] +
                 volume_multiplier * volume_gradient[i];
@@ -463,6 +591,64 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                 "projected_energy_gradient_is_nonfinite";
             return result;
         }
+
+        if (pending_limited_memory_update &&
+            options.limited_memory_history_size > 0) {
+            std::vector<Real> parameter_step(
+                active_indices.size(), Real{0.0});
+            std::vector<Real> gradient_step(
+                active_indices.size(), Real{0.0});
+            for (std::size_t i = 0u;
+                 i < active_indices.size();
+                 ++i) {
+                parameter_step[i] =
+                    coefficients[active_indices[i]] -
+                    previous_active_coefficients[i];
+                gradient_step[i] =
+                    projected_gradient[i] -
+                    previous_projected_gradient[i];
+            }
+            // Both secant vectors must lie in the current linearized volume
+            // tangent space. This keeps the inverse-Hessian action from
+            // introducing a multiplier component when that tangent rotates.
+            projectOrthogonalTo(
+                parameter_step,
+                volume_gradient,
+                volume_gradient_squared);
+            projectOrthogonalTo(
+                gradient_step,
+                volume_gradient,
+                volume_gradient_squared);
+            const Real step_norm = norm(parameter_step);
+            const Real gradient_step_norm = norm(gradient_step);
+            const Real curvature = dot(
+                parameter_step, gradient_step);
+            const Real curvature_floor =
+                options.limited_memory_curvature_tolerance *
+                step_norm * gradient_step_norm;
+            if (finitePositive(step_norm) &&
+                finitePositive(gradient_step_norm) &&
+                std::isfinite(curvature) &&
+                curvature > curvature_floor) {
+                if (limited_memory.size() ==
+                    static_cast<std::size_t>(
+                        options.limited_memory_history_size)) {
+                    limited_memory.pop_front();
+                }
+                limited_memory.push_back({
+                    std::move(parameter_step),
+                    std::move(gradient_step),
+                    Real{1.0} / curvature});
+                ++result.limited_memory_updates;
+                result.limited_memory_peak_history = std::max(
+                    result.limited_memory_peak_history,
+                    limited_memory.size());
+            } else if (!limited_memory.empty()) {
+                limited_memory.clear();
+                ++result.limited_memory_resets;
+            }
+        }
+        pending_limited_memory_update = false;
 
         updateFinalEvaluation(current);
         result.final_volume_multiplier = volume_multiplier;
@@ -598,32 +784,111 @@ minimizeLevelSetStaticCapillaryEquilibrium(
             return result;
         }
 
-        const Real unconstrained_tangent_step =
-            options.projected_gradient_inverse_stiffness *
-            projected_gradient_norm;
-        if (!finiteNonnegative(unconstrained_tangent_step)) {
+        std::vector<Real> tangent_direction = projected_gradient;
+        bool used_limited_memory = !limited_memory.empty();
+        if (used_limited_memory) {
+            std::vector<Real> alpha(limited_memory.size(), Real{0.0});
+            for (std::size_t reverse = limited_memory.size();
+                 reverse > 0u;
+                 --reverse) {
+                const std::size_t i = reverse - 1u;
+                const auto& correction = limited_memory[i];
+                alpha[i] = correction.inverse_curvature * dot(
+                    correction.parameter_step, tangent_direction);
+                for (std::size_t j = 0u;
+                     j < tangent_direction.size();
+                     ++j) {
+                    tangent_direction[j] -=
+                        alpha[i] * correction.gradient_step[j];
+                }
+            }
+            const auto& newest = limited_memory.back();
+            const Real newest_gradient_squared = dot(
+                newest.gradient_step, newest.gradient_step);
+            Real initial_inverse_scale =
+                newest_gradient_squared > Real{0.0}
+                    ? dot(
+                          newest.parameter_step,
+                          newest.gradient_step) /
+                          newest_gradient_squared
+                    : options.projected_gradient_inverse_stiffness;
+            const Real configured_scale =
+                options.projected_gradient_inverse_stiffness;
+            initial_inverse_scale = std::clamp(
+                initial_inverse_scale,
+                configured_scale * Real{1.0e-6},
+                configured_scale * Real{1.0e6});
+            for (Real& value : tangent_direction) {
+                value *= initial_inverse_scale;
+            }
+            for (std::size_t i = 0u;
+                 i < limited_memory.size();
+                 ++i) {
+                const auto& correction = limited_memory[i];
+                const Real beta = correction.inverse_curvature * dot(
+                    correction.gradient_step, tangent_direction);
+                for (std::size_t j = 0u;
+                     j < tangent_direction.size();
+                     ++j) {
+                    tangent_direction[j] +=
+                        correction.parameter_step[j] *
+                        (alpha[i] - beta);
+                }
+            }
+        } else {
+            for (Real& value : tangent_direction) {
+                value *=
+                    options.projected_gradient_inverse_stiffness;
+            }
+        }
+        for (Real& value : tangent_direction) {
+            value = -value;
+        }
+        projectOrthogonalTo(
+            tangent_direction,
+            volume_gradient,
+            volume_gradient_squared);
+        Real tangent_direction_norm = norm(tangent_direction);
+        const Real descent_floor =
+            std::numeric_limits<Real>::epsilon() *
+            projected_gradient_norm * tangent_direction_norm;
+        if (!finitePositive(tangent_direction_norm) ||
+            !(dot(projected_gradient, tangent_direction) <
+              -descent_floor)) {
+            tangent_direction = projected_gradient;
+            for (Real& value : tangent_direction) {
+                value *=
+                    -options.projected_gradient_inverse_stiffness;
+            }
+            tangent_direction_norm = norm(tangent_direction);
+            limited_memory.clear();
+            ++result.limited_memory_resets;
+            ++result.projected_gradient_fallbacks;
+        }
+        if (!finitePositive(tangent_direction_norm)) {
             result.diagnostic =
                 "static_capillary_equilibrium_tangent_step_is_nonfinite";
             return result;
         }
-        const Real tangent_step =
-            std::min(
-                options.tangent_trust_radius,
-                unconstrained_tangent_step);
+        if (tangent_direction_norm >
+            options.tangent_trust_radius) {
+            const Real scale =
+                options.tangent_trust_radius /
+                tangent_direction_norm;
+            for (Real& value : tangent_direction) {
+                value *= scale;
+            }
+        }
         std::vector<Real> direction(
             active_indices.size(), Real{0.0});
         for (std::size_t i = 0u;
              i < active_indices.size();
              ++i) {
-            const Real tangent =
-                projected_gradient_norm > Real{0.0}
-                    ? -tangent_step * projected_gradient[i] /
-                          projected_gradient_norm
-                    : Real{0.0};
             const Real volume_correction =
                 -volume_error * volume_gradient[i] /
                 volume_gradient_squared;
-            direction[i] = tangent + volume_correction;
+            direction[i] =
+                tangent_direction[i] + volume_correction;
         }
         Real direction_linf = Real{0.0};
         for (const Real value : direction) {
@@ -729,11 +994,44 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                     current_merit -
                     options.armijo_fraction * alpha *
                         predicted_merit_decrease;
+                Real trial_projected_gradient_norm =
+                    std::numeric_limits<Real>::quiet_NaN();
+                const bool trial_exact_gradient_available =
+                    current.functional_derivatives_available &&
+                    exactProjectedGradientNorm(
+                        trial_state,
+                        trial_projected_gradient_norm);
+                const Real merit_resolution =
+                    Real{16.0} *
+                    std::numeric_limits<Real>::epsilon() *
+                    std::max({
+                        Real{1.0},
+                        std::abs(current_merit),
+                        std::abs(trial_merit)});
+                const bool derivative_resolution_step =
+                    trial_exact_gradient_available &&
+                    std::isfinite(trial_merit) &&
+                    trial_merit > armijo_bound &&
+                    alpha * predicted_merit_decrease <=
+                        merit_resolution &&
+                    trial_merit <=
+                        current_merit + merit_resolution &&
+                    std::abs(trial_volume_error) <=
+                        std::max(
+                            std::abs(volume_error),
+                            options.volume_tolerance) &&
+                    trial_projected_gradient_norm <
+                        projected_gradient_norm;
                 if (std::isfinite(trial_merit) &&
-                    trial_merit <= armijo_bound) {
+                    (trial_merit <= armijo_bound ||
+                     derivative_resolution_step)) {
                     accepted_trial = std::move(trial);
                     accepted_state = std::move(trial_state);
                     step_accepted = true;
+                    if (derivative_resolution_step) {
+                        ++result
+                              .derivative_resolution_step_acceptances;
+                    }
                     break;
                 }
                 last_evaluation_diagnostic =
@@ -746,6 +1044,12 @@ minimizeLevelSetStaticCapillaryEquilibrium(
             alpha *= options.line_search_shrink;
         }
         if (!step_accepted) {
+            if (used_limited_memory) {
+                limited_memory.clear();
+                ++result.limited_memory_resets;
+                ++result.projected_gradient_fallbacks;
+                continue;
+            }
             result.diagnostic =
                 "fixed_topology_capillary_merit_line_search_failed:" +
                 last_evaluation_diagnostic;
@@ -754,6 +1058,16 @@ minimizeLevelSetStaticCapillaryEquilibrium(
 
         coefficients = std::move(accepted_trial);
         current = std::move(accepted_state);
+        previous_active_coefficients.resize(active_indices.size());
+        for (std::size_t i = 0u;
+             i < active_indices.size();
+             ++i) {
+            previous_active_coefficients[i] =
+                coefficients[active_indices[i]] -
+                alpha * direction[i];
+        }
+        previous_projected_gradient = projected_gradient;
+        pending_limited_memory_update = true;
         ++result.iterations;
         updateFinalEvaluation(current);
     }

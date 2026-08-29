@@ -2994,6 +2994,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Static_capillary_maximum_coefficient_update_linf>0.375</Static_capillary_maximum_coefficient_update_linf>
     <Static_capillary_line_search_shrink>0.4</Static_capillary_line_search_shrink>
     <Static_capillary_armijo_fraction>2.0e-4</Static_capillary_armijo_fraction>
+    <Static_capillary_limited_memory_history_size>6</Static_capillary_limited_memory_history_size>
+    <Static_capillary_limited_memory_curvature_tolerance>1.25e-11</Static_capillary_limited_memory_curvature_tolerance>
     <Static_capillary_minimum_volume_merit_penalty>2.5</Static_capillary_minimum_volume_merit_penalty>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -3030,6 +3032,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_DOUBLE_EQ(options.maximum_coefficient_update_linf, 0.375);
   EXPECT_DOUBLE_EQ(options.line_search_shrink, 0.4);
   EXPECT_DOUBLE_EQ(options.armijo_fraction, 2.0e-4);
+  EXPECT_EQ(options.limited_memory_history_size, 6);
+  EXPECT_DOUBLE_EQ(options.limited_memory_curvature_tolerance, 1.25e-11);
   EXPECT_DOUBLE_EQ(options.minimum_volume_merit_penalty, 2.5);
 
   const auto canonical =
@@ -3052,6 +3056,28 @@ TEST(ApplicationDriverLevelSetWorkflows,
               TransientInitialization,
           /*completed_step=*/0);
   EXPECT_NE(canonical.words, changed.words);
+  changed_requests = requests;
+  ++changed_requests.front()
+        .static_capillary_equilibrium
+        .limited_memory_history_size;
+  const auto changed_history =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          changed_requests,
+          LevelSetMaintenanceScheduleStage::
+              TransientInitialization,
+          /*completed_step=*/0);
+  EXPECT_NE(canonical.words, changed_history.words);
+  changed_requests = requests;
+  changed_requests.front()
+      .static_capillary_equilibrium
+      .limited_memory_curvature_tolerance *= 2.0;
+  const auto changed_curvature_tolerance =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          changed_requests,
+          LevelSetMaintenanceScheduleStage::
+              TransientInitialization,
+          /*completed_step=*/0);
+  EXPECT_NE(canonical.words, changed_curvature_tolerance.words);
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,

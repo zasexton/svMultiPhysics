@@ -141,6 +141,12 @@ struct LevelSetCurvatureProjectionResult {
     Real kinematic_area_gradient_surface_gradient_norm{0.0};
     Real kinematic_area_gradient_young_wall_gradient_norm{0.0};
     Real kinematic_area_gradient_total_energy_gradient_norm{0.0};
+    // Derivatives of A_lg - sum cos(theta_w) A_sl,w and liquid volume.
+    // Mesh-access overloads use visible-vertex order. FESystem overloads use
+    // the field's global scalar-DOF order and set the flag below.
+    std::vector<Real> kinematic_area_gradient_total_energy_derivative{};
+    std::vector<Real> kinematic_area_gradient_liquid_volume_derivative{};
+    bool kinematic_area_gradient_derivatives_global_dof_order{false};
     Real kinematic_area_gradient_max_relative_fd_disagreement{0.0};
     Real kinematic_area_gradient_max_regularized_identity_residual{0.0};
     Real kinematic_area_gradient_max_relative_regularized_identity_residual{

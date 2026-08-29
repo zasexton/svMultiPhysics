@@ -863,6 +863,95 @@ FE::Real directSessileDiscreteEnergy(
     return interface_measure - std::cos(contact_angle) * wetted_measure;
 }
 
+FE::Real directSimplexLiquidVolume(
+    const SimplexMeshAccess& mesh,
+    const std::vector<FE::Real>& phi,
+    FE::Real level_set_offset,
+    bool negative_liquid_side,
+    std::span<const FE::Real> direction)
+{
+    if (direction.size() != phi.size()) {
+        throw std::runtime_error(
+            "simplex liquid-volume direction has the wrong size");
+    }
+    const auto triangle_area = [](
+        const std::array<FE::Real, 3>& a,
+        const std::array<FE::Real, 3>& b,
+        const std::array<FE::Real, 3>& c) {
+        return FE::Real{0.5} * std::abs(
+            (b[0] - a[0]) * (c[1] - a[1]) -
+            (b[1] - a[1]) * (c[0] - a[0]));
+    };
+    FE::Real volume{0.0};
+    mesh.forEachCell([&](FE::GlobalIndex cell) {
+        std::vector<FE::GlobalIndex> nodes;
+        mesh.getCellNodes(cell, nodes);
+        if (nodes.size() != 3u) {
+            throw std::runtime_error(
+                "simplex liquid-volume check requires triangles");
+        }
+        std::array<FE::Real, 3> values{};
+        std::array<std::array<FE::Real, 3>, 3> points{};
+        std::array<std::size_t, 3> inside{};
+        std::array<std::size_t, 3> outside{};
+        std::size_t inside_count{0u};
+        std::size_t outside_count{0u};
+        for (std::size_t corner = 0u; corner < 3u; ++corner) {
+            const auto vertex = static_cast<std::size_t>(nodes[corner]);
+            values[corner] =
+                phi[vertex] + level_set_offset * direction[vertex];
+            points[corner] = mesh.getNodeCoordinates(nodes[corner]);
+            if (values[corner] == FE::Real{0.0}) {
+                throw std::runtime_error(
+                    "simplex liquid-volume check encountered an isovalue vertex");
+            }
+            const bool is_inside = negative_liquid_side
+                ? values[corner] < FE::Real{0.0}
+                : values[corner] > FE::Real{0.0};
+            if (is_inside) {
+                inside[inside_count++] = corner;
+            } else {
+                outside[outside_count++] = corner;
+            }
+        }
+        const FE::Real cell_area =
+            triangle_area(points[0], points[1], points[2]);
+        if (inside_count == 0u) {
+            return;
+        }
+        if (inside_count == 3u) {
+            volume += cell_area;
+            return;
+        }
+        const auto root = [&](std::size_t a, std::size_t b) {
+            const FE::Real fraction =
+                values[a] / (values[a] - values[b]);
+            std::array<FE::Real, 3> point{};
+            for (std::size_t component = 0u; component < 3u; ++component) {
+                point[component] =
+                    points[a][component] +
+                    fraction *
+                        (points[b][component] - points[a][component]);
+            }
+            return point;
+        };
+        if (inside_count == 1u) {
+            const auto vertex = inside[0];
+            volume += triangle_area(
+                points[vertex],
+                root(vertex, outside[0]),
+                root(vertex, outside[1]));
+            return;
+        }
+        const auto vertex = outside[0];
+        volume += cell_area - triangle_area(
+            points[vertex],
+            root(vertex, inside[0]),
+            root(vertex, inside[1]));
+    });
+    return volume;
+}
+
 FE::Real consistentKinematicCurvatureDirectionalDerivative(
     const SimplexMeshAccess& mesh,
     const std::vector<FE::Real>& phi,
@@ -3667,18 +3756,76 @@ TEST(LevelSetCurvatureProjection,
         (energy_m2 - FE::Real{8.0} * energy_m1 +
          FE::Real{8.0} * energy_p1 - energy_p2) /
         (FE::Real{12.0} * step);
+    const FE::Real volume_m2 = directSimplexLiquidVolume(
+        mesh, phi, FE::Real{-2.0} * step, true, direction);
+    const FE::Real volume_m1 = directSimplexLiquidVolume(
+        mesh, phi, -step, true, direction);
+    const FE::Real volume_p1 = directSimplexLiquidVolume(
+        mesh, phi, step, true, direction);
+    const FE::Real volume_p2 = directSimplexLiquidVolume(
+        mesh, phi, FE::Real{2.0} * step, true, direction);
+    const FE::Real volume_finite_difference =
+        (volume_m2 - FE::Real{8.0} * volume_m1 +
+         FE::Real{8.0} * volume_p1 - volume_p2) /
+        (FE::Real{12.0} * step);
     const FE::Real mass_action =
         consistentKinematicCurvatureDirectionalDerivative(
             mesh, phi, curvature, direction);
+    ASSERT_EQ(
+        result.kinematic_area_gradient_total_energy_derivative.size(),
+        direction.size());
+    ASSERT_EQ(
+        result.kinematic_area_gradient_liquid_volume_derivative.size(),
+        direction.size());
+    EXPECT_FALSE(
+        result.kinematic_area_gradient_derivatives_global_dof_order);
+    FE::Real derivative_action{0.0};
+    FE::Real volume_derivative_action{0.0};
+    FE::Real direction_l1{0.0};
+    for (std::size_t vertex = 0u; vertex < direction.size(); ++vertex) {
+        derivative_action +=
+            result
+                .kinematic_area_gradient_total_energy_derivative[vertex] *
+            direction[vertex];
+        volume_derivative_action +=
+            result
+                .kinematic_area_gradient_liquid_volume_derivative[vertex] *
+            direction[vertex];
+        direction_l1 += std::abs(direction[vertex]);
+    }
     const FE::Real relative_difference =
-        std::abs(finite_difference - mass_action) /
+        std::abs(finite_difference - derivative_action) /
         std::max(std::abs(finite_difference), FE::Real{1.0});
     RecordProperty("kinematic_arbitrary_energy_fd_derivative",
                    finite_difference);
     RecordProperty("kinematic_arbitrary_energy_mass_action", mass_action);
+    RecordProperty(
+        "kinematic_arbitrary_energy_derivative_action",
+        derivative_action);
+    RecordProperty(
+        "kinematic_arbitrary_volume_fd_derivative",
+        volume_finite_difference);
+    RecordProperty(
+        "kinematic_arbitrary_volume_derivative_action",
+        volume_derivative_action);
     RecordProperty("kinematic_arbitrary_energy_relative_difference",
                    relative_difference);
     EXPECT_LT(relative_difference, FE::Real{1.0e-8});
+    const FE::Real identity_action_tolerance =
+        direction_l1 *
+            result
+                .kinematic_area_gradient_max_regularized_identity_residual +
+        FE::Real{64.0} * std::numeric_limits<FE::Real>::epsilon() *
+            std::max(FE::Real{1.0}, std::abs(mass_action));
+    EXPECT_NEAR(
+        derivative_action,
+        mass_action,
+        identity_action_tolerance);
+    EXPECT_NEAR(
+        volume_derivative_action,
+        volume_finite_difference,
+        FE::Real{1.0e-8} *
+            std::max(FE::Real{1.0}, std::abs(volume_finite_difference)));
     EXPECT_LT(
         result
             .kinematic_area_gradient_max_relative_regularized_identity_residual,

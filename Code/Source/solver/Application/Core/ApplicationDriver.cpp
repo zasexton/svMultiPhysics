@@ -3242,6 +3242,14 @@ canonicalLevelSetMaintenanceRequestSchedule(
     appendMaintenanceScheduleReal(
         words,
         request.static_capillary_equilibrium.armijo_fraction);
+    appendMaintenanceScheduleSigned(
+        words,
+        request.static_capillary_equilibrium
+            .limited_memory_history_size);
+    appendMaintenanceScheduleReal(
+        words,
+        request.static_capillary_equilibrium
+            .limited_memory_curvature_tolerance);
     appendMaintenanceScheduleReal(
         words,
         request.static_capillary_equilibrium
@@ -6547,6 +6555,21 @@ std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parame
              "StaticCapillaryArmijoFraction"})) {
       request.static_capillary_equilibrium.armijo_fraction =
           static_cast<svmp::FE::Real>(*fraction);
+    }
+    if (const auto history_size = first_defined_int_parameter(
+            eq_params,
+            {"Static_capillary_limited_memory_history_size",
+             "StaticCapillaryLimitedMemoryHistorySize"})) {
+      request.static_capillary_equilibrium
+          .limited_memory_history_size = *history_size;
+    }
+    if (const auto tolerance = first_defined_double_parameter(
+            eq_params,
+            {"Static_capillary_limited_memory_curvature_tolerance",
+             "StaticCapillaryLimitedMemoryCurvatureTolerance"})) {
+      request.static_capillary_equilibrium
+          .limited_memory_curvature_tolerance =
+          static_cast<svmp::FE::Real>(*tolerance);
     }
     if (const auto penalty = first_defined_double_parameter(
             eq_params,
@@ -24842,8 +24865,8 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
   if (enabled_count == 0u) {
     return false;
   }
-  if (enabled_count != 1u || !sim.fe_system || !sim.time_history ||
-      !sim.backend || !sim.linear_solver) {
+  if (enabled_count != 1u || !sim.fe_system || !sim.primary_mesh ||
+      !sim.time_history || !sim.backend || !sim.linear_solver) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Static capillary initialization currently requires exactly one enabled level-set request and a complete FE solve context.");
   }
@@ -25283,6 +25306,175 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
           return evaluation;
         }
 
+        std::vector<svmp::FE::Real> physical_potential_derivative;
+        std::vector<svmp::FE::Real> liquid_volume_derivative;
+        const bool exact_functional_derivatives_requested =
+            uses_kinematic_area_gradient_traction &&
+            gravitational_acceleration_is_zero;
+        if (exact_functional_derivatives_requested) {
+          svmp::FE::systems::SystemStateView derivative_state;
+          derivative_state.time = history.time();
+          derivative_state.dt = constraint_dt;
+          derivative_state.effective_dt = constraint_dt;
+          derivative_state.dt_prev = history.dtPrev();
+          derivative_state.u = candidate;
+          const auto phi_values = evaluateVertexField(
+              system,
+              *sim.primary_mesh,
+              level_set_field,
+              derivative_state,
+              1u,
+              "differentiating the static capillary functional");
+          std::vector<svmp::FE::Real> trial_curvature;
+          const std::vector<
+              svmp::FE::level_set::LevelSetCurvatureProjectionSample>
+              no_supplemental_samples;
+          const auto derivative_projection =
+              svmp::FE::level_set::
+                  projectLevelSetMeanCurvatureToVertices(
+                      system,
+                      level_set_field,
+                      phi_values,
+                      no_supplemental_samples,
+                      request.curvature_projection,
+                      trial_curvature);
+          const bool local_derivative_projection_valid =
+              derivative_projection.success &&
+              derivative_projection
+                  .kinematic_area_gradient_derivatives_global_dof_order &&
+              derivative_projection
+                      .kinematic_area_gradient_total_energy_derivative.size() ==
+                  field_count &&
+              derivative_projection
+                      .kinematic_area_gradient_liquid_volume_derivative.size() ==
+                  field_count;
+          if (globalAnyBool(
+                  !local_derivative_projection_valid, comm)) {
+            evaluation.diagnostic =
+                "candidate_exact_functional_derivative_projection_failed:" +
+                derivative_projection.diagnostic;
+            return evaluation;
+          }
+
+          std::vector<svmp::FE::Real> full_energy_derivative(
+              candidate.size(), svmp::FE::Real{0.0});
+          std::vector<svmp::FE::Real> full_volume_derivative(
+              candidate.size(), svmp::FE::Real{0.0});
+          const auto surface_tension =
+              declaration.parameters.surface_tension;
+          for (std::size_t dof = 0u; dof < field_count; ++dof) {
+            full_energy_derivative[field_offset + dof] =
+                surface_tension *
+                derivative_projection
+                    .kinematic_area_gradient_total_energy_derivative[dof];
+            full_volume_derivative[field_offset + dof] =
+                derivative_projection
+                    .kinematic_area_gradient_liquid_volume_derivative[dof];
+          }
+
+          bool local_constraint_transpose_invalid = false;
+          for (const auto slave :
+               system.constraints().getConstrainedDofs()) {
+            if (slave < 0 ||
+                static_cast<std::size_t>(slave) >= candidate.size()) {
+              local_constraint_transpose_invalid = true;
+              continue;
+            }
+            const auto constraint =
+                system.constraints().getConstraint(slave);
+            if (!constraint.has_value()) {
+              local_constraint_transpose_invalid = true;
+              continue;
+            }
+            const auto slave_index =
+                static_cast<std::size_t>(slave);
+            const auto energy_slave =
+                full_energy_derivative[slave_index];
+            const auto volume_slave =
+                full_volume_derivative[slave_index];
+            full_energy_derivative[slave_index] = 0.0;
+            full_volume_derivative[slave_index] = 0.0;
+            for (const auto& entry : constraint->entries) {
+              if (entry.master_dof < 0 ||
+                  static_cast<std::size_t>(entry.master_dof) >=
+                      candidate.size() ||
+                  system.constraints().isConstrained(entry.master_dof) ||
+                  !std::isfinite(entry.weight)) {
+                local_constraint_transpose_invalid = true;
+                continue;
+              }
+              const auto master =
+                  static_cast<std::size_t>(entry.master_dof);
+              full_energy_derivative[master] +=
+                  entry.weight * energy_slave;
+              full_volume_derivative[master] +=
+                  entry.weight * volume_slave;
+            }
+          }
+          const bool cross_field_derivative =
+              std::any_of(
+                  full_energy_derivative.begin(),
+                  full_energy_derivative.begin() +
+                      static_cast<std::ptrdiff_t>(field_offset),
+                  [](svmp::FE::Real value) {
+                    return value != svmp::FE::Real{0.0};
+                  }) ||
+              std::any_of(
+                  full_energy_derivative.begin() +
+                      static_cast<std::ptrdiff_t>(field_offset + field_count),
+                  full_energy_derivative.end(),
+                  [](svmp::FE::Real value) {
+                    return value != svmp::FE::Real{0.0};
+                  }) ||
+              std::any_of(
+                  full_volume_derivative.begin(),
+                  full_volume_derivative.begin() +
+                      static_cast<std::ptrdiff_t>(field_offset),
+                  [](svmp::FE::Real value) {
+                    return value != svmp::FE::Real{0.0};
+                  }) ||
+              std::any_of(
+                  full_volume_derivative.begin() +
+                      static_cast<std::ptrdiff_t>(field_offset + field_count),
+                  full_volume_derivative.end(),
+                  [](svmp::FE::Real value) {
+                    return value != svmp::FE::Real{0.0};
+                  });
+          local_constraint_transpose_invalid =
+              local_constraint_transpose_invalid ||
+              cross_field_derivative ||
+              !std::all_of(
+                  full_energy_derivative.begin(),
+                  full_energy_derivative.end(),
+                  [](svmp::FE::Real value) {
+                    return std::isfinite(value);
+                  }) ||
+              !std::all_of(
+                  full_volume_derivative.begin(),
+                  full_volume_derivative.end(),
+                  [](svmp::FE::Real value) {
+                    return std::isfinite(value);
+                  });
+          if (globalAnyBool(
+                  local_constraint_transpose_invalid, comm)) {
+            evaluation.diagnostic =
+                "candidate_exact_functional_derivative_constraint_transpose_failed";
+            return evaluation;
+          }
+          physical_potential_derivative.assign(
+              full_energy_derivative.begin() +
+                  static_cast<std::ptrdiff_t>(field_offset),
+              full_energy_derivative.begin() +
+                  static_cast<std::ptrdiff_t>(
+                      field_offset + field_count));
+          liquid_volume_derivative.assign(
+              full_volume_derivative.begin() +
+                  static_cast<std::ptrdiff_t>(field_offset),
+              full_volume_derivative.begin() +
+                  static_cast<std::ptrdiff_t>(
+                      field_offset + field_count));
+        }
+
         if (purpose ==
                 svmp::FE::level_set::
                     LevelSetStaticCapillaryEvaluationPurpose::
@@ -25383,6 +25575,12 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
         evaluation.gravitational_potential_energy =
             gravitational_energy;
         evaluation.liquid_volume = volume;
+        evaluation.functional_derivatives_available =
+            exact_functional_derivatives_requested;
+        evaluation.physical_potential_derivative =
+            std::move(physical_potential_derivative);
+        evaluation.liquid_volume_derivative =
+            std::move(liquid_volume_derivative);
         evaluation.production_force_projection_applied = false;
         evaluation.diagnostic = "functional_trial_available";
 
@@ -25695,11 +25893,33 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
         << " functional_evaluations=" << result.functional_evaluations
         << " finite_difference_step_shrinks="
         << result.finite_difference_step_shrinks
+        << " finite_difference_fourth_order_components="
+        << result.finite_difference_fourth_order_components
+        << " minimum_finite_difference_step_used="
+        << result.minimum_finite_difference_step_used
+        << " maximum_finite_difference_step_used="
+        << result.maximum_finite_difference_step_used
+        << " maximum_energy_derivative_relative_correction="
+        << result.maximum_energy_derivative_relative_correction
+        << " maximum_volume_derivative_relative_correction="
+        << result.maximum_volume_derivative_relative_correction
+        << " analytic_derivative_evaluations="
+        << result.analytic_derivative_evaluations
+        << " derivative_resolution_step_acceptances="
+        << result.derivative_resolution_step_acceptances
         << " line_search_rejections=" << result.line_search_rejections
         << " topology_change_rejections="
         << result.topology_change_rejections
         << " constraint_change_rejections="
         << result.constraint_change_rejections
+        << " limited_memory_updates="
+        << result.limited_memory_updates
+        << " limited_memory_resets="
+        << result.limited_memory_resets
+        << " limited_memory_peak_history="
+        << result.limited_memory_peak_history
+        << " projected_gradient_fallbacks="
+        << result.projected_gradient_fallbacks
         << " final_projected_gradient_norm="
         << std::setprecision(17)
         << result.final_projected_gradient_norm
@@ -25928,6 +26148,12 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       << " constant_pressure_kkt_max_relative_distance="
       << request.static_capillary_equilibrium
              .constant_pressure_kkt_max_relative_distance
+      << " limited_memory_history_size="
+      << request.static_capillary_equilibrium
+             .limited_memory_history_size
+      << " limited_memory_curvature_tolerance="
+      << request.static_capillary_equilibrium
+             .limited_memory_curvature_tolerance
       << " initial_snapshot_revision_key="
       << result.initial_snapshot_revision_key
       << " final_snapshot_revision_key="
@@ -25941,10 +26167,36 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       << result.functional_evaluations
       << " acceptance_certificate_evaluations="
       << result.acceptance_certificate_evaluations
+      << " finite_difference_step_shrinks="
+      << result.finite_difference_step_shrinks
+      << " finite_difference_fourth_order_components="
+      << result.finite_difference_fourth_order_components
+      << " minimum_finite_difference_step_used="
+      << result.minimum_finite_difference_step_used
+      << " maximum_finite_difference_step_used="
+      << result.maximum_finite_difference_step_used
+      << " maximum_energy_derivative_relative_correction="
+      << result.maximum_energy_derivative_relative_correction
+      << " maximum_volume_derivative_relative_correction="
+      << result.maximum_volume_derivative_relative_correction
+      << " analytic_derivative_evaluations="
+      << result.analytic_derivative_evaluations
+      << " derivative_resolution_step_acceptances="
+      << result.derivative_resolution_step_acceptances
+      << " line_search_rejections="
+      << result.line_search_rejections
       << " topology_change_rejections="
       << result.topology_change_rejections
       << " constraint_change_rejections="
       << result.constraint_change_rejections
+      << " limited_memory_updates="
+      << result.limited_memory_updates
+      << " limited_memory_resets="
+      << result.limited_memory_resets
+      << " limited_memory_peak_history="
+      << result.limited_memory_peak_history
+      << " projected_gradient_fallbacks="
+      << result.projected_gradient_fallbacks
       << " production_force_projection_applied=0"
       << " qualification=prerequisite_only"
       << std::endl;
