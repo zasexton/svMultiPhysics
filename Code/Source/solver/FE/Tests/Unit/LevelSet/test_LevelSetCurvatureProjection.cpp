@@ -419,6 +419,11 @@ struct CurvatureStudyResult {
     std::size_t generated_geometry_samples{0u};
     std::size_t generated_patch_fitted_vertices{0u};
     std::size_t generated_patch_expanded_vertices{0u};
+    std::size_t narrow_band_vertices{0u};
+    std::size_t fallback_vertices{0u};
+    std::size_t zero_fallback_vertices{0u};
+    std::size_t insufficient_stencil_vertices{0u};
+    std::size_t singular_stencil_vertices{0u};
     FE::Real max_fit_residual{0.0};
     FE::Real max_interpolation_defect{0.0};
 };
@@ -613,6 +618,255 @@ makeSphereInterfacePointCloudSamples(int subdivisions,
         });
     }
     return samples;
+}
+
+std::vector<level_set::LevelSetCurvatureProjectionSample>
+makeGeneratedSphereFacetSamples(const FE::assembly::IMeshAccess& mesh,
+                                FE::Real radius)
+{
+    // Match the LinearCorner SayeHyperrectangle box decomposition and its
+    // order-one polygon-centroid interface rule.
+    constexpr std::array<std::array<std::size_t, 4>, 6> tetrahedra{{
+        {{0u, 1u, 2u, 6u}},
+        {{0u, 2u, 3u, 6u}},
+        {{0u, 3u, 7u, 6u}},
+        {{0u, 7u, 4u, 6u}},
+        {{0u, 4u, 5u, 6u}},
+        {{0u, 5u, 1u, 6u}},
+    }};
+    constexpr std::array<std::array<std::size_t, 2>, 6> tetrahedron_edges{{
+        {{0u, 1u}}, {{0u, 2u}}, {{0u, 3u}},
+        {{1u, 2u}}, {{1u, 3u}}, {{2u, 3u}},
+    }};
+    constexpr FE::Real duplicate_tolerance2 = FE::Real{1.0e-28};
+
+    const auto subtract = [](const auto& a, const auto& b) {
+        return std::array<FE::Real, 3>{{
+            a[0] - b[0], a[1] - b[1], a[2] - b[2]}};
+    };
+    const auto dot = [](const auto& a, const auto& b) {
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    };
+    const auto cross = [](const auto& a, const auto& b) {
+        return std::array<FE::Real, 3>{{
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0]}};
+    };
+    const auto norm = [&](const auto& value) {
+        return std::sqrt(dot(value, value));
+    };
+
+    std::vector<level_set::LevelSetCurvatureProjectionSample> samples;
+    std::vector<FE::GlobalIndex> nodes;
+    mesh.forEachCell([&](FE::GlobalIndex cell) {
+        mesh.getCellNodes(cell, nodes);
+        if (nodes.size() != 8u) {
+            throw std::runtime_error(
+                "generated sphere facets expect hexahedral cells");
+        }
+        std::array<std::array<FE::Real, 3>, 8> coordinates{};
+        std::array<FE::Real, 8> values{};
+        for (std::size_t node = 0u; node < nodes.size(); ++node) {
+            coordinates[node] = mesh.getNodeCoordinates(nodes[node]);
+            values[node] =
+                norm(coordinates[node]) - radius;
+        }
+
+        for (const auto& tetrahedron : tetrahedra) {
+            std::vector<std::array<FE::Real, 3>> intersections;
+            intersections.reserve(4u);
+            const auto append_intersection = [&](const auto& point) {
+                const bool duplicate = std::any_of(
+                    intersections.begin(), intersections.end(),
+                    [&](const auto& existing) {
+                        const auto delta = subtract(existing, point);
+                        return dot(delta, delta) <= duplicate_tolerance2;
+                    });
+                if (!duplicate) {
+                    intersections.push_back(point);
+                }
+            };
+            for (const auto& edge : tetrahedron_edges) {
+                const auto local_a = tetrahedron[edge[0]];
+                const auto local_b = tetrahedron[edge[1]];
+                const FE::Real value_a = values[local_a];
+                const FE::Real value_b = values[local_b];
+                if ((value_a < FE::Real{0.0}) ==
+                    (value_b < FE::Real{0.0})) {
+                    continue;
+                }
+                const FE::Real fraction = value_a / (value_a - value_b);
+                std::array<FE::Real, 3> point{};
+                for (std::size_t component = 0u;
+                     component < point.size();
+                     ++component) {
+                    point[component] =
+                        coordinates[local_a][component] +
+                        fraction *
+                            (coordinates[local_b][component] -
+                             coordinates[local_a][component]);
+                }
+                append_intersection(point);
+            }
+            if (intersections.size() < 3u) {
+                continue;
+            }
+            if (intersections.size() > 4u) {
+                throw std::runtime_error(
+                    "generated sphere facet has an invalid intersection polygon");
+            }
+
+            std::array<FE::Real, 3> centroid{};
+            for (const auto& point : intersections) {
+                for (std::size_t component = 0u;
+                     component < centroid.size();
+                     ++component) {
+                    centroid[component] += point[component];
+                }
+            }
+            for (auto& component : centroid) {
+                component /= static_cast<FE::Real>(intersections.size());
+            }
+            auto normal = cross(subtract(intersections[1], intersections[0]),
+                                subtract(intersections[2], intersections[0]));
+            const FE::Real normal_norm = norm(normal);
+            if (!(normal_norm > FE::Real{0.0})) {
+                throw std::runtime_error(
+                    "generated sphere facet is degenerate");
+            }
+            for (auto& component : normal) {
+                component /= normal_norm;
+            }
+            const std::array<FE::Real, 3> axis =
+                std::abs(normal[0]) <= std::abs(normal[1]) &&
+                        std::abs(normal[0]) <= std::abs(normal[2])
+                    ? std::array<FE::Real, 3>{{1.0, 0.0, 0.0}}
+                    : (std::abs(normal[1]) <= std::abs(normal[2])
+                           ? std::array<FE::Real, 3>{{0.0, 1.0, 0.0}}
+                           : std::array<FE::Real, 3>{{0.0, 0.0, 1.0}});
+            auto tangent0 = cross(axis, normal);
+            const FE::Real tangent0_norm = norm(tangent0);
+            for (auto& component : tangent0) {
+                component /= tangent0_norm;
+            }
+            const auto tangent1 = cross(normal, tangent0);
+            std::sort(
+                intersections.begin(), intersections.end(),
+                [&](const auto& lhs, const auto& rhs) {
+                    const auto lhs_delta = subtract(lhs, centroid);
+                    const auto rhs_delta = subtract(rhs, centroid);
+                    const FE::Real lhs_angle =
+                        std::atan2(dot(lhs_delta, tangent1),
+                                   dot(lhs_delta, tangent0));
+                    const FE::Real rhs_angle =
+                        std::atan2(dot(rhs_delta, tangent1),
+                                   dot(rhs_delta, tangent0));
+                    return lhs_angle < rhs_angle;
+                });
+
+            std::array<FE::Real, 3> polygon_centroid{};
+            FE::Real polygon_area = FE::Real{0.0};
+            for (std::size_t triangle = 1u;
+                 triangle + 1u < intersections.size();
+                 ++triangle) {
+                const auto triangle_cross = cross(
+                    subtract(intersections[triangle], intersections[0]),
+                    subtract(intersections[triangle + 1u], intersections[0]));
+                const FE::Real area = FE::Real{0.5} * norm(triangle_cross);
+                std::array<FE::Real, 3> triangle_centroid{};
+                for (std::size_t component = 0u;
+                     component < triangle_centroid.size();
+                     ++component) {
+                    triangle_centroid[component] =
+                        (intersections[0][component] +
+                         intersections[triangle][component] +
+                         intersections[triangle + 1u][component]) /
+                        FE::Real{3.0};
+                    polygon_centroid[component] +=
+                        area * triangle_centroid[component];
+                }
+                polygon_area += area;
+            }
+            if (!(polygon_area > FE::Real{0.0})) {
+                throw std::runtime_error(
+                    "generated sphere facet has zero polygon area");
+            }
+            for (auto& component : polygon_centroid) {
+                component /= polygon_area;
+            }
+            samples.push_back(
+                level_set::LevelSetCurvatureProjectionSample{
+                    .parent_cell = static_cast<FE::MeshIndex>(cell),
+                    .coordinate = polygon_centroid,
+                    .value = FE::Real{0.0},
+                    .generated_interface_geometry = true,
+                });
+        }
+    });
+    return samples;
+}
+
+CurvatureStudyResult generatedSphereFacetPatchCurvatureError(int subdivisions)
+{
+    constexpr FE::Real extent = FE::Real{0.8};
+    constexpr FE::Real radius = FE::Real{0.24};
+    const FE::Real h = extent / static_cast<FE::Real>(subdivisions);
+    StructuredHexMeshAccess mesh(
+        subdivisions, subdivisions, subdivisions, h);
+    std::vector<FE::Real> phi(static_cast<std::size_t>(mesh.numVertices()));
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        const auto x = mesh.getNodeCoordinates(vertex);
+        phi[static_cast<std::size_t>(vertex)] =
+            std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]) -
+            radius;
+    }
+    const auto samples = makeGeneratedSphereFacetSamples(mesh, radius);
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.recovery_mode =
+        level_set::LevelSetCurvatureRecoveryMode::GeneratedInterfacePatch;
+    options.max_neighbor_rings = 2;
+    options.narrow_band_width = FE::Real{1.5} * h;
+    std::vector<FE::Real> curvature;
+    const auto projection = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, samples, options, curvature);
+    if (!projection.success) {
+        throw std::runtime_error(projection.diagnostic);
+    }
+
+    CurvatureStudyResult study;
+    study.supplemental_samples = projection.supplemental_samples;
+    study.generated_geometry_samples =
+        projection.generated_interface_geometry_samples;
+    study.generated_patch_fitted_vertices =
+        projection.generated_interface_patch_fitted_vertices;
+    study.generated_patch_expanded_vertices =
+        projection.generated_interface_patch_expanded_vertices;
+    study.narrow_band_vertices = projection.narrow_band_vertices;
+    study.fallback_vertices = projection.fallback_vertices;
+    study.zero_fallback_vertices = projection.zero_fallback_vertices;
+    study.insufficient_stencil_vertices =
+        projection.insufficient_stencil_vertices;
+    study.singular_stencil_vertices = projection.singular_stencil_vertices;
+    study.max_fit_residual = projection.max_normalized_fit_residual;
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        const auto index = static_cast<std::size_t>(vertex);
+        if (std::abs(phi[index]) > h) {
+            continue;
+        }
+        const FE::Real error =
+            std::abs(curvature[index] - FE::Real{2.0} / radius);
+        study.mean_error += error;
+        study.max_error = std::max(study.max_error, error);
+        ++study.error_samples;
+    }
+    if (study.error_samples == 0u) {
+        throw std::runtime_error(
+            "generated sphere facet study has no interface-band vertices");
+    }
+    study.mean_error /= static_cast<FE::Real>(study.error_samples);
+    return study;
 }
 
 CurvatureStudyResult spherePointCloudPatchCurvatureError(int subdivisions)
@@ -1133,6 +1387,55 @@ TEST(LevelSetCurvatureProjection,
     EXPECT_GT(order, FE::Real{1.5});
     EXPECT_LT(fine.mean_error,
               FE::Real{0.10} * FE::Real{2.0} / FE::Real{0.24});
+}
+
+TEST(LevelSetCurvatureProjection,
+     GeneratedSphereFacetPatchCurvatureImprovesWithRefinement)
+{
+    const auto coarse = generatedSphereFacetPatchCurvatureError(8);
+    const auto fine = generatedSphereFacetPatchCurvatureError(16);
+    const FE::Real order =
+        observedOrder(coarse.mean_error, fine.mean_error);
+
+    RecordProperty("generated_sphere_facet_patch_mean_error_N8",
+                   ::testing::PrintToString(coarse.mean_error));
+    RecordProperty("generated_sphere_facet_patch_mean_error_N16",
+                   ::testing::PrintToString(fine.mean_error));
+    RecordProperty("generated_sphere_facet_patch_max_error_N16",
+                   ::testing::PrintToString(fine.max_error));
+    RecordProperty("generated_sphere_facet_patch_order_8_to_16",
+                   ::testing::PrintToString(order));
+    RecordProperty("generated_sphere_facet_patch_samples_N8",
+                   coarse.supplemental_samples);
+    RecordProperty("generated_sphere_facet_patch_samples_N16",
+                   fine.supplemental_samples);
+    RecordProperty("generated_sphere_facet_patch_band_vertices_N16",
+                   fine.narrow_band_vertices);
+    RecordProperty("generated_sphere_facet_patch_fitted_vertices_N16",
+                   fine.generated_patch_fitted_vertices);
+    RecordProperty("generated_sphere_facet_patch_expanded_vertices_N16",
+                   fine.generated_patch_expanded_vertices);
+    RecordProperty("generated_sphere_facet_patch_max_fit_residual_N16",
+                   ::testing::PrintToString(fine.max_fit_residual));
+
+    EXPECT_EQ(coarse.supplemental_samples, 516u);
+    EXPECT_EQ(fine.supplemental_samples, 1920u);
+    EXPECT_EQ(coarse.generated_geometry_samples, coarse.supplemental_samples);
+    EXPECT_GT(coarse.generated_patch_fitted_vertices, 0u);
+    EXPECT_GT(fine.supplemental_samples, coarse.supplemental_samples);
+    EXPECT_EQ(fine.generated_patch_fitted_vertices,
+              fine.narrow_band_vertices);
+    EXPECT_EQ(fine.fallback_vertices, 0u);
+    EXPECT_EQ(fine.zero_fallback_vertices, 0u);
+    EXPECT_EQ(fine.insufficient_stencil_vertices, 0u);
+    EXPECT_EQ(fine.singular_stencil_vertices, 0u);
+    EXPECT_LT(fine.max_fit_residual, FE::Real{0.10});
+    EXPECT_LT(fine.mean_error, coarse.mean_error);
+    EXPECT_GT(order, FE::Real{1.5});
+    EXPECT_LT(fine.mean_error,
+              FE::Real{0.10} * FE::Real{2.0} / FE::Real{0.24});
+    EXPECT_LT(fine.max_error,
+              FE::Real{0.15} * FE::Real{2.0} / FE::Real{0.24});
 }
 
 TEST(LevelSetCurvatureProjection,
