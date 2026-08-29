@@ -212,12 +212,14 @@ void IonicModel::integ_rk(const unsigned int zone_id, Vector<double> &X,
   update_g(zone_id, 0.5 * dt, X, Xgr);
 
   // Second RK stage.
-  Xrk = X + 0.5 * dt * frk1;
+  Xrk = X;
+  Xrk.add(0.5 * dt, frk1);
   const Vector<double> frk2 =
       getf(zone_id, Xrk, Xgr, I_stim_scaled, I_sac_scaled);
 
   // Third RK stage.
-  Xrk = X + 0.5 * dt * frk2;
+  Xrk = X;
+  Xrk.add(0.5 * dt, frk2);
   const Vector<double> frk3 =
       getf(zone_id, Xrk, Xgr, I_stim_scaled, I_sac_scaled);
 
@@ -226,11 +228,15 @@ void IonicModel::integ_rk(const unsigned int zone_id, Vector<double> &X,
   update_g(zone_id, dt, X, Xgr);
 
   // Fourth RK stage.
-  Xrk = X + dt * frk3;
+  Xrk = X;
+  Xrk.add(dt, frk3);
   const Vector<double> frk4 =
       getf(zone_id, Xrk, Xgr, I_stim_scaled, I_sac_scaled);
 
-  X = X + dt / 6.0 * (frk1 + 2.0 * (frk2 + frk3) + frk4);
+  for (unsigned int i = 0; i < nX; ++i) {
+    X(i) += dt / 6.0 *
+            (frk1(i) + 2.0 * (frk2(i) + frk3(i)) + frk4(i));
+  }
   Xg = Xgr;
 
   // Bring the potential variable back to dimensional units.
