@@ -111,11 +111,15 @@ enum class FreeSurfacePressureStabilizationPolicy : std::uint8_t {
  * energy, and retains CurvatureTraction for fitted ALE boundaries for
  * backwards compatibility.  CurvatureTraction remains available explicitly
  * for verification and legacy supplied-curvature data.
+ * GeneratedCurvatureTraction is an unfitted-only candidate that evaluates a
+ * supplied or projected curvature against the normal carried by the same
+ * generated-interface rule as the surface measure.
  */
 enum class FreeSurfaceSurfaceTensionForm : std::uint8_t {
     Automatic,
     CurvatureTraction,
-    SurfaceStress
+    SurfaceStress,
+    GeneratedCurvatureTraction
 };
 
 /**

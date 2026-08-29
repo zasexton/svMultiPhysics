@@ -374,9 +374,12 @@ fs::path writeWetExtensionOrderRegressionXml(const fs::path& case_dir,
     auto& free_surface =
         mutableChildWithAttribute(fluid, "Add_BC", "name", "free_surface");
     setOrAppendText(doc, free_surface, "Implementation", "FittedALE");
-    if (fitted_exclusion == "SurfaceStress") {
-      setOrAppendText(
-          doc, free_surface, "Surface_tension_form", "SurfaceStress");
+    if (fitted_exclusion == "SurfaceStress" ||
+        fitted_exclusion == "GeneratedCurvatureTraction") {
+      setOrAppendText(doc,
+                      free_surface,
+                      "Surface_tension_form",
+                      std::string(fitted_exclusion).c_str());
     } else if (fitted_exclusion == "PrescribedAngle" ||
                fitted_exclusion == "DynamicRenE") {
       setOrAppendText(doc,
@@ -1025,6 +1028,8 @@ TEST(OpenVesselExamples,
   const auto case_dir = openVesselCaseDir("unfitted_level_set");
   const std::vector<std::pair<std::string_view, std::string_view>> exclusions{
       {"SurfaceStress", "fitted-ALE SurfaceStress is not yet qualified"},
+      {"GeneratedCurvatureTraction",
+       "GeneratedCurvatureTraction is available only for unfitted"},
       {"PrescribedAngle", "prescribed fitted contact angles are unsupported"},
       {"DynamicRenE", "supported only for sharp unfitted level-set"},
   };

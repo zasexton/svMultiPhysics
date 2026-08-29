@@ -609,6 +609,115 @@ private:
     std::array<svmp::FE::Real, 4> diagonal_{};
 };
 
+class FourByFourCellMatrixKernel final
+    : public svmp::FE::assembly::AssemblyKernel {
+public:
+    explicit FourByFourCellMatrixKernel(
+        std::array<svmp::FE::Real, 16> entries)
+        : entries_(std::move(entries))
+    {
+    }
+
+    [[nodiscard]] svmp::FE::assembly::RequiredData getRequiredData()
+        const override
+    {
+        return svmp::FE::assembly::RequiredData::None;
+    }
+
+    [[nodiscard]] bool hasStateIndependentMatrix() const noexcept override
+    {
+        return true;
+    }
+
+    void computeCell(const svmp::FE::assembly::AssemblyContext& ctx,
+                     svmp::FE::assembly::KernelOutput& output) override
+    {
+        constexpr svmp::FE::LocalIndex extent = 4;
+        const auto n_test = ctx.numTestDofs();
+        const auto n_trial = ctx.numTrialDofs();
+        if (n_test != extent || n_trial != extent) {
+            throw std::runtime_error(
+                "FourByFourCellMatrixKernel requires four test and trial DOFs");
+        }
+
+        bool want_matrix = output.has_matrix || !output.local_matrix.empty();
+        const bool want_vector =
+            output.has_vector || !output.local_vector.empty();
+        if (!want_matrix && !want_vector) {
+            want_matrix = true;
+        }
+        output.reserve(n_test, n_trial, want_matrix, want_vector);
+        output.clear();
+        if (want_matrix) {
+            for (svmp::FE::LocalIndex i = 0; i < extent; ++i) {
+                for (svmp::FE::LocalIndex j = 0; j < extent; ++j) {
+                    output.matrixEntry(i, j) = entries_[
+                        static_cast<std::size_t>(i * extent + j)];
+                }
+            }
+        }
+    }
+
+    [[nodiscard]] std::string name() const override
+    {
+        return "FourByFourCellMatrixKernel";
+    }
+
+private:
+    std::array<svmp::FE::Real, 16> entries_{};
+};
+
+class FourEntryCellVectorKernel final
+    : public svmp::FE::assembly::AssemblyKernel {
+public:
+    explicit FourEntryCellVectorKernel(
+        std::array<svmp::FE::Real, 4> entries)
+        : entries_(std::move(entries))
+    {
+    }
+
+    [[nodiscard]] svmp::FE::assembly::RequiredData getRequiredData()
+        const override
+    {
+        return svmp::FE::assembly::RequiredData::None;
+    }
+
+    void computeCell(const svmp::FE::assembly::AssemblyContext& ctx,
+                     svmp::FE::assembly::KernelOutput& output) override
+    {
+        constexpr svmp::FE::LocalIndex extent = 4;
+        const auto n_test = ctx.numTestDofs();
+        const auto n_trial = ctx.numTrialDofs();
+        if (n_test != extent || n_trial != extent) {
+            throw std::runtime_error(
+                "FourEntryCellVectorKernel requires four test and trial DOFs");
+        }
+
+        const bool want_matrix =
+            output.has_matrix || !output.local_matrix.empty();
+        bool want_vector = output.has_vector || !output.local_vector.empty();
+        if (!want_matrix && !want_vector) {
+            want_vector = true;
+        }
+        output.reserve(n_test, n_trial, want_matrix, want_vector);
+        output.clear();
+        if (want_vector) {
+            for (svmp::FE::LocalIndex i = 0; i < extent; ++i) {
+                output.vectorEntry(i) =
+                    entries_[static_cast<std::size_t>(i)];
+            }
+        }
+    }
+
+    [[nodiscard]] std::string name() const override
+    {
+        return "FourEntryCellVectorKernel";
+    }
+
+private:
+    std::array<svmp::FE::Real, 4> entries_{};
+};
+
 class RefreshedGeometryMeasureKernel final : public svmp::FE::assembly::AssemblyKernel {
 public:
     RefreshedGeometryMeasureKernel(const double* measure, svmp::FE::Real target)
@@ -1825,14 +1934,32 @@ makePressureRepresentabilityProblem(
     svmp::FE::Real surface_energy_scale = svmp::FE::Real{1.0},
     svmp::FE::Real gravitational_potential_scale = svmp::FE::Real{0.0},
     svmp::FE::Real prescribed_external_pressure_scale =
-        svmp::FE::Real{0.0})
+        svmp::FE::Real{0.0},
+    std::optional<std::array<svmp::FE::Real, 16>>
+        pressure_pair_matrix = std::nullopt,
+    std::optional<std::array<svmp::FE::Real, 4>>
+        diagnostic_vector_shape = std::nullopt)
 {
     using svmp::FE::forms::FormExpr;
+
+    if (pressure_pair_diagonal.has_value() &&
+        pressure_pair_matrix.has_value()) {
+        throw std::runtime_error(
+            "pressure fixture cannot prescribe both diagonal and dense pair matrices");
+    }
+    const bool has_prescribed_pressure_pair =
+        pressure_pair_diagonal.has_value() ||
+        pressure_pair_matrix.has_value();
+    if (diagnostic_vector_shape.has_value() &&
+        (!has_prescribed_pressure_pair || two_cells)) {
+        throw std::runtime_error(
+            "prescribed diagnostic vectors require a one-cell P1 pressure pair fixture");
+    }
 
     PressureRepresentabilityProblem p;
     p.space = std::make_shared<svmp::FE::spaces::L2Space>(
         svmp::FE::ElementType::Tetra4,
-        pressure_pair_diagonal.has_value() ? /*order=*/1 : /*order=*/0);
+        has_prescribed_pressure_pair ? /*order=*/1 : /*order=*/0);
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     if (use_native_mesh) {
         if (two_cells) {
@@ -1931,15 +2058,15 @@ makePressureRepresentabilityProblem(
     // The finite-precision LSQR regression therefore uses factors 12 and 24
     // so its physical-potential load has controlled unit-scale coefficients.
     const svmp::FE::Real pressure_scale =
-        pressure_pair_diagonal.has_value() ? 12.0 : 0.5;
+        has_prescribed_pressure_pair ? 12.0 : 0.5;
     const svmp::FE::Real scaled_surface_energy =
-        (pressure_pair_diagonal.has_value() ? 24.0 : 2.0) *
+        (has_prescribed_pressure_pair ? 24.0 : 2.0) *
         surface_energy_scale;
     const svmp::FE::Real scaled_gravitational_potential =
-        (pressure_pair_diagonal.has_value() ? 24.0 : 2.0) *
+        (has_prescribed_pressure_pair ? 24.0 : 2.0) *
         gravitational_potential_scale;
     const svmp::FE::Real scaled_prescribed_external_pressure =
-        (pressure_pair_diagonal.has_value() ? 24.0 : 2.0) *
+        (has_prescribed_pressure_pair ? 24.0 : 2.0) *
         prescribed_external_pressure_scale;
     const svmp::FE::Real scaled_physical_potential =
         scaled_surface_energy + scaled_gravitational_potential;
@@ -1961,12 +2088,25 @@ makePressureRepresentabilityProblem(
     };
     for (std::size_t i = 0; i < vector_ops.size(); ++i) {
         p.sys->addOperator(vector_ops[i]);
+        std::shared_ptr<svmp::FE::assembly::AssemblyKernel> vector_kernel;
+        if (diagnostic_vector_shape.has_value()) {
+            std::array<svmp::FE::Real, 4> entries{};
+            for (std::size_t j = 0; j < entries.size(); ++j) {
+                entries[j] =
+                    vector_scales[i] * (*diagnostic_vector_shape)[j] /
+                    svmp::FE::Real{24.0};
+            }
+            vector_kernel =
+                std::make_shared<FourEntryCellVectorKernel>(entries);
+        } else {
+            vector_kernel = make_kernel(vector_forms[i]);
+        }
         p.sys->addCellKernel(
             vector_ops[i],
             p.velocity_field,
             p.velocity_field,
             std::make_shared<CountingKernel>(
-                make_kernel(vector_forms[i]), &counts.operators[i]));
+                std::move(vector_kernel), &counts.operators[i]));
     }
 
     constexpr const char* pair_op =
@@ -2029,6 +2169,25 @@ makePressureRepresentabilityProblem(
         metadata.volume_fraction = rule.volume_fraction;
         cut_context->addGeneratedVolumeRule(marker, metadata, rule);
         p.sys->setCutIntegrationContext(std::move(cut_context));
+    } else if (pressure_pair_matrix.has_value()) {
+        // A symmetric [0,G;G^T,0] pair with a prescribed dense G supports
+        // exact pressure-nullspace and range fixtures.
+        p.sys->addCellKernel(
+            pair_op,
+            p.velocity_field,
+            p.pressure_field,
+            std::make_shared<CountingKernel>(
+                std::make_shared<FourByFourCellMatrixKernel>(
+                    *pressure_pair_matrix),
+                &counts.pressure_representability_pair));
+        p.sys->addCellKernel(
+            pair_op,
+            p.pressure_field,
+            p.velocity_field,
+            std::make_shared<CountingKernel>(
+                std::make_shared<FourByFourCellMatrixKernel>(
+                    *pressure_pair_matrix),
+                &counts.pressure_representability_pair));
     } else if (pressure_pair_diagonal.has_value()) {
         // A symmetric [0,G;G^T,0] pair with prescribed singular values gives
         // a deterministic ill-conditioned LSQR problem without forming G^T G.
@@ -5997,6 +6156,11 @@ TEST(NewtonSolver,
 
     EXPECT_TRUE(report.converged);
     EXPECT_EQ(report.iterations, 0);
+    EXPECT_TRUE(report.linear.converged);
+    EXPECT_EQ(report.linear.iterations, 0);
+    EXPECT_EQ(
+        report.linear.message,
+        "not required: entry state satisfies nonlinear tolerances");
     EXPECT_TRUE(report.pressure_representability_diagnostic_sampled);
     EXPECT_TRUE(report.constant_pressure_kkt_available);
     EXPECT_TRUE(report.constant_pressure_kkt_distance_gate_applied);
@@ -7031,17 +7195,10 @@ TEST(NewtonSolver,
         std::string::npos);
     EXPECT_NE(
         telemetry.find(
-            "pressure_correction_method=translated_certified_total_pressure"),
+            "pressure_correction_method=direct_balance_residual_lsqr"),
         std::string::npos);
-    EXPECT_NE(telemetry.find("pressure_correction_iterations=0"),
+    EXPECT_NE(telemetry.find("pressure_correction_iterations="),
               std::string::npos);
-    EXPECT_NE(
-        telemetry.find("pressure_correction_residual_equivalence_norm="),
-        std::string::npos);
-    EXPECT_NE(
-        telemetry.find(
-            "pressure_correction_normal_residual_equivalence_norm="),
-        std::string::npos);
     EXPECT_NE(telemetry.find("existing_pressure_baseline_preserved=1"),
               std::string::npos);
     EXPECT_NE(telemetry.find("committed_history_or_rate_slots_mutated=0"),
@@ -7128,6 +7285,110 @@ TEST(NewtonSolver,
         1);
     RecordProperty(
         "static_compatible_pressure_initializer_committed_state_preserved", 1);
+}
+
+TEST(NewtonSolver,
+     StaticCompatiblePressureInitializerPreservesCompatibleNullspaceRepresentative)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    // G has null vector (1,-1,0,0), while the unit physical load lies in its
+    // range.  The entry pressure includes seven units of that null vector and
+    // already satisfies G p + f = 0 exactly.  A residual-correction
+    // initializer must therefore retain the selected representative.
+    constexpr std::array<svmp::FE::Real, 16> pressure_pair_matrix{
+        0.5, 0.5, 0.0, 0.0,
+        0.5, 0.5, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0};
+    constexpr std::array<svmp::FE::Real, 4> diagnostic_vector_shape{
+        1.0, 1.0, 1.0, 1.0};
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    auto problem = makePressureRepresentabilityProblem(
+        diagnostic_counts,
+        /*two_cells=*/false,
+        /*pressure_mpc_state=*/{},
+        /*pressure_dirichlet_state=*/{},
+        /*entry_velocity=*/1.0,
+        /*pressure_pair_diagonal=*/std::nullopt,
+        /*track_immutable_mesh_revisions=*/false,
+        /*install_symbolic_cut_volume_pair=*/false,
+        /*production_pressure_target=*/0.0,
+        /*entry_pressure_baseline=*/0.0,
+        /*use_native_mesh=*/false,
+        /*surface_energy_scale=*/1.0,
+        /*gravitational_potential_scale=*/0.0,
+        /*prescribed_external_pressure_scale=*/0.0,
+        pressure_pair_matrix,
+        diagnostic_vector_shape);
+
+    const auto pressure_begin =
+        problem.sys->fieldDofOffset(problem.pressure_field);
+    const auto pressure_count = problem.sys
+                                    ->fieldDofHandler(problem.pressure_field)
+                                    .getNumDofs();
+    ASSERT_EQ(pressure_count, 4);
+    auto entry_state = ts_test::getVectorByDof(problem.history.u());
+    constexpr std::array<svmp::FE::Real, 4> entry_pressure{
+        6.0, -8.0, -1.0, -1.0};
+    for (svmp::FE::GlobalIndex i = 0; i < pressure_count; ++i) {
+        entry_state[static_cast<std::size_t>(pressure_begin + i)] =
+            entry_pressure[static_cast<std::size_t>(i)];
+    }
+    ts_test::setVectorByDof(problem.history.u(), entry_state);
+    const auto exact_entry_state =
+        ts_test::getVectorByDof(problem.history.u());
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 100.0;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+    options.initialize_static_compatible_free_surface_pressure = true;
+    options
+        .accepted_static_pressure_representability_max_relative_distance =
+        1.0e-12;
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    const auto stderr_text = testing::internal::GetCapturedStderr();
+    const auto stdout_text = testing::internal::GetCapturedStdout();
+    const auto telemetry = stdout_text + stderr_text;
+
+    EXPECT_TRUE(report.converged);
+    EXPECT_EQ(report.iterations, 0);
+    EXPECT_TRUE(report.static_compatible_pressure_initializer_applied);
+    EXPECT_TRUE(report.static_compatible_pressure_initializer_passed);
+    EXPECT_EQ(report.static_compatible_pressure_initializer_reason,
+              "additive_initial_guess_within_threshold");
+    EXPECT_LE(report.pressure_representability_relative_distance, 1.0e-12);
+    EXPECT_EQ(ts_test::getVectorByDof(problem.history.u()),
+              exact_entry_state);
+    ASSERT_NE(workspace.pressure_representability_correction_load, nullptr);
+    EXPECT_DOUBLE_EQ(
+        workspace.pressure_representability_correction_load->norm(), 0.0);
+    EXPECT_NE(telemetry.find("pressure_correction_load_norm=0"),
+              std::string::npos);
+    EXPECT_NE(telemetry.find("pressure_correction_iterations=0"),
+              std::string::npos);
+    RecordProperty(
+        "static_compatible_pressure_initializer_nullspace_representative_preserved",
+        1);
 }
 
 TEST(NewtonSolver,

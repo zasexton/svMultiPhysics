@@ -249,6 +249,45 @@ def test_sessile_circle_postprocessor_resolves_60_90_120_degree_states():
             assert fitted["circle_fit_rmse"] < 7.5e-4
 
 
+def test_sessile_manufactured_contact_initialization_sets_discrete_angle():
+    runner = _load_runner()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        case_dir = Path(temp_dir) / "manufactured_contact"
+        runner.write_sessile2d_case(
+            case_dir,
+            steps=1,
+            nx=8,
+            ny=8,
+            initial_angle_degrees=60.0,
+            equilibrium_angle_degrees=60.0,
+            radius=0.3,
+            surface_tension=1.0,
+            time_step_size=0.001,
+            mobility=1.0,
+            slip_length=0.1,
+            dynamic=False,
+            contact_line_model="prescribed",
+            initialize_discrete_static_contact_geometry=True,
+        )
+
+        benchmark = runner.load_benchmark(case_dir)
+        contact = benchmark["sessile_contact"]
+        assert contact["discrete_contact_initialization_local_overwrite"] is True
+        assert contact["discrete_static_contact_initialization"] is True
+        assert len(contact["discrete_contact_initialization_cell_ids"]) == 2
+
+        mesh = runner.pv.read(
+            case_dir / "mesh/background/mesh-complete.mesh.vtu")
+        state = runner.sessile_state_metrics(mesh, benchmark)
+        assert state["operator_contact_geometry_available"] is True
+        assert math.isclose(
+            state["operator_dynamic_angle_degrees_mean"],
+            60.0,
+            rel_tol=0.0,
+            abs_tol=2.0e-12,
+        )
+
+
 def test_stationary_sessile_cap_rotates_to_every_wall_and_is_scale_invariant():
     runner = _load_runner()
     wall_contracts = {
@@ -1665,6 +1704,64 @@ def test_surface_stress_droplet_omits_curvature_traction_state_by_default():
         assert free_surface.find("Curvature_field") is None
 
 
+def test_generated_curvature_traction_configuration_is_explicit():
+    runner = _load_runner()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        case_dir = Path(temp_dir) / "droplet2d"
+        runner.write_capillary_droplet2d_case(
+            case_dir,
+            steps=1,
+            pressure_jump=2.0,
+            nx=8,
+            ny=8,
+        )
+        solver = case_dir / "solver.xml"
+        runner.configure_solver(
+            solver,
+            steps=1,
+            surface_tension=0.5,
+            capillary_force_form="generated_curvature_traction",
+            prescribed_capillary_curvature=4.0,
+        )
+        root = runner.ET.parse(solver).getroot()
+        free_surface = runner.free_surface_bc(root)
+        assert free_surface.findtext(
+            "Surface_tension_form") == "GeneratedCurvatureTraction"
+        assert free_surface.findtext("Curvature") == "4"
+        assert free_surface.findtext("Use_level_set_curvature") == "false"
+        assert free_surface.find("Curvature_field") is None
+
+
+def test_generated_curvature_traction_requires_one_curvature_source():
+    runner = _load_runner()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        case_dir = Path(temp_dir) / "droplet2d"
+        runner.write_capillary_droplet2d_case(
+            case_dir,
+            steps=1,
+            pressure_jump=2.0,
+            nx=8,
+            ny=8,
+        )
+        solver = case_dir / "solver.xml"
+        with pytest.raises(ValueError, match="requires either"):
+            runner.configure_solver(
+                solver,
+                steps=1,
+                surface_tension=0.5,
+                capillary_force_form="generated_curvature_traction",
+            )
+        with pytest.raises(ValueError, match="exactly one curvature source"):
+            runner.configure_solver(
+                solver,
+                steps=1,
+                surface_tension=0.5,
+                capillary_force_form="generated_curvature_traction",
+                prescribed_capillary_curvature=4.0,
+                projected_curvature_field="kappa_projected",
+            )
+
+
 def test_sessile_case_uses_monolithic_fsils_gmres_linear_budget():
     runner = _load_runner()
     args = runner.argparse.Namespace(
@@ -1698,6 +1795,41 @@ def test_sessile_case_uses_monolithic_fsils_gmres_linear_budget():
     assert configured.linear_krylov_space_dimension == 50
     assert configured.linear_relative_tolerance == 1.0e-8
     assert configured.linear_absolute_tolerance == 1.0e-10
+
+    candidate_args = runner.argparse.Namespace(**vars(args))
+    candidate_args.capillary_force_form = "generated_curvature_traction"
+    candidate_args.prescribed_capillary_curvature = 1.0 / 0.3
+    candidate_args.initialize_discrete_static_capillary_equilibrium = None
+    candidate = runner.case_args_for_run("sessile2d", candidate_args)
+    assert candidate.require_free_surface_conservative_balance is False
+    assert (
+        candidate.require_free_surface_pressure_representability_diagnostic
+        is False
+    )
+    assert candidate.initialize_static_compatible_pressure is False
+    assert (
+        candidate.max_free_surface_pressure_representability_relative_distance
+        is None
+    )
+
+    candidate_args.initialize_discrete_static_capillary_equilibrium = True
+    with pytest.raises(ValueError, match="surface-energy initialization"):
+        runner.case_args_for_run("sessile2d", candidate_args)
+
+    candidate_args.initialize_discrete_static_capillary_equilibrium = None
+    candidate_args.require_free_surface_conservative_balance = True
+    with pytest.raises(ValueError, match="conservative-balance controls"):
+        runner.case_args_for_run("sessile2d", candidate_args)
+
+    candidate_args.require_free_surface_conservative_balance = False
+    candidate_args.max_free_surface_pressure_representability_relative_distance = 0.1
+    with pytest.raises(ValueError, match="pressure-representability controls"):
+        runner.case_args_for_run("sessile2d", candidate_args)
+
+    candidate_args.max_free_surface_pressure_representability_relative_distance = None
+    candidate_args.initialize_discrete_static_contact_geometry = True
+    with pytest.raises(ValueError, match="stationary two-dimensional sessile"):
+        runner.case_args_for_run("sphere3d", candidate_args)
 
     # These controls are defaults, not a hard gate: diagnostic runs may
     # still request the legacy BlockSchur route explicitly.

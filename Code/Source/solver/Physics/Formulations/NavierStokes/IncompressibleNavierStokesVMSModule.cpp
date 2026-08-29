@@ -1832,16 +1832,42 @@ namespace {
         return isUnfittedLevelSet(bc);
     case FreeSurfaceSurfaceTensionForm::CurvatureTraction:
         return false;
+    case FreeSurfaceSurfaceTensionForm::GeneratedCurvatureTraction:
+        return false;
     case FreeSurfaceSurfaceTensionForm::SurfaceStress:
         return true;
     }
     return false;
 }
 
+[[nodiscard]] bool usesGeneratedCurvatureTraction(
+    const FreeSurfaceBoundary& bc) noexcept
+{
+    return bc.surface_tension_form ==
+           FreeSurfaceSurfaceTensionForm::GeneratedCurvatureTraction;
+}
+
+[[nodiscard]] bool usesGeneratedInterfaceNormal(
+    const FreeSurfaceBoundary& bc) noexcept
+{
+    return usesSurfaceStress(bc) || usesGeneratedCurvatureTraction(bc);
+}
+
 [[nodiscard]] const char* surfaceTensionFormName(
     const FreeSurfaceBoundary& bc) noexcept
 {
-    return usesSurfaceStress(bc) ? "SurfaceStress" : "CurvatureTraction";
+    switch (bc.surface_tension_form) {
+    case FreeSurfaceSurfaceTensionForm::Automatic:
+        return isUnfittedLevelSet(bc) ? "SurfaceStress"
+                                      : "CurvatureTraction";
+    case FreeSurfaceSurfaceTensionForm::CurvatureTraction:
+        return "CurvatureTraction";
+    case FreeSurfaceSurfaceTensionForm::GeneratedCurvatureTraction:
+        return "GeneratedCurvatureTraction";
+    case FreeSurfaceSurfaceTensionForm::SurfaceStress:
+        return "SurfaceStress";
+    }
+    return "Unsupported";
 }
 
 [[nodiscard]] bool surfaceStressActive(
@@ -3208,7 +3234,7 @@ void logDynamicContactOperatorAngle(
             " wall_boundary_marker=" +
             std::to_string(contactLineWallBoundaryMarker(contact_line)) +
             " normal_source=" +
-            std::string(usesSurfaceStress(bc)
+            std::string(usesGeneratedInterfaceNormal(bc)
                             ? "generated_interface_rule_geometry"
                             : "unitNormalFromLevelSet_Q1") +
             " evaluation_location=generated_contact_root");
@@ -3390,11 +3416,11 @@ void logDynamicContactOperatorAngle(
                 }
                 std::array<FE::Real, 3> physical_gradient;
                 try {
-                    if (usesSurfaceStress(bc)) {
+                    if (usesGeneratedInterfaceNormal(bc)) {
                         // StandardAssembler maps FormExpr::normal() as a
                         // reference covector. Reproduce that exact generated
                         // geometry here so the diagnostic observes the same
-                        // normal as the surface-stress/contact residual.
+                        // normal as the generated-geometry contact residual.
                         physical_gradient = physicalContactCovector(
                             mesh_access,
                             *rule,
@@ -3590,7 +3616,7 @@ void logDynamicContactOperatorAngle(
         << " contact_line_marker=" << contact_marker
         << " wall_boundary_marker=" << contactLineWallBoundaryMarker(contact_line)
         << " normal_source="
-        << (usesSurfaceStress(bc)
+        << (usesGeneratedInterfaceNormal(bc)
                 ? "generated_interface_rule_geometry"
                 : "unitNormalFromLevelSet_Q1")
         << " state_source=synchronized_native_vertex_field"
@@ -3820,6 +3846,15 @@ void validateDynamicContactWallEssentialBC(
     if (usesSurfaceStress(bc)) {
         return "variational_surface_stress_generated_geometry";
     }
+    if (usesGeneratedCurvatureTraction(bc)) {
+        if (!bc.curvature_field_name.empty()) {
+            return "curvature_field_generated_interface_normal_signed";
+        }
+        if (bc.use_level_set_curvature) {
+            return "raw_level_set_curvature_generated_interface_normal_guarded";
+        }
+        return "supplied_scalar_generated_interface_normal_signed";
+    }
     if (isUnfittedLevelSet(bc)) {
         if (!bc.curvature_field_name.empty()) {
             return "curvature_field_level_set_normal_signed";
@@ -3849,6 +3884,18 @@ void validateDynamicContactWallEssentialBC(
         return isUnfittedLevelSet(bc)
                    ? "generated_geometry_refreshed_frozen"
                    : "fitted_geometry_surface_variation";
+    }
+    if (usesGeneratedCurvatureTraction(bc)) {
+        if (!bc.curvature_field_name.empty()) {
+            const auto kappa_id = system.findFieldByName(
+                bc.curvature_field_name);
+            if (kappa_id != FE::INVALID_FIELD_ID &&
+                system.fieldParticipatesInUnknownVector(kappa_id)) {
+                return "curvature_field_trial_coupled_generated_geometry_frozen";
+            }
+            return "curvature_field_picard_generated_geometry_frozen";
+        }
+        return "generated_geometry_refreshed_frozen_curvature_picard";
     }
     if (!bc.curvature_field_name.empty()) {
         const auto kappa_id = system.findFieldByName(bc.curvature_field_name);
@@ -3919,6 +3966,8 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
              FreeSurfaceSurfaceTensionForm::Automatic ||
          bc.surface_tension_form ==
              FreeSurfaceSurfaceTensionForm::CurvatureTraction ||
+         bc.surface_tension_form ==
+             FreeSurfaceSurfaceTensionForm::GeneratedCurvatureTraction ||
          bc.surface_tension_form ==
              FreeSurfaceSurfaceTensionForm::SurfaceStress);
     if (!supported_boundary_policies) {
@@ -4035,6 +4084,22 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: SurfaceStress currently requires refreshed-frozen generated geometry; the experimental unfitted level-set shape-tangent switch does not yet contain the complete projector-normal and point-location derivative and is therefore rejected");
         }
+        const bool has_generated_curvature_traction_residual =
+            usesGeneratedCurvatureTraction(bc) &&
+            (!FE::forms::bc::isZeroConstantScalarValue(
+                 bc.external_pressure) ||
+             !FE::forms::bc::isZeroConstantScalarValue(
+                 bc.surface_tension));
+        if (has_generated_curvature_traction_residual &&
+            !isRefreshedFrozenGeometryTangent(bc)) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: GeneratedCurvatureTraction currently requires Geometry_tangent_policy=RefreshedFrozenQuadrature because generated-normal and point-location derivatives are not installed");
+        }
+        if (has_generated_curvature_traction_residual &&
+            !unfittedLevelSetShapeTangentsDisabled()) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: GeneratedCurvatureTraction currently requires refreshed-frozen generated geometry; the experimental unfitted level-set shape-tangent switch does not contain generated-normal and point-location derivatives");
+        }
         if (!usesSurfaceStress(bc) &&
             !FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension) &&
             bc.use_level_set_curvature &&
@@ -4063,6 +4128,10 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
         if (usesSurfaceStress(bc)) {
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: fitted-ALE SurfaceStress is not yet qualified for current-frame test-function gradients; use Automatic/CurvatureTraction for fitted boundaries");
+        }
+        if (usesGeneratedCurvatureTraction(bc)) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: GeneratedCurvatureTraction is available only for unfitted level-set free surfaces; use Automatic/CurvatureTraction for fitted boundaries");
         }
         if (bc.boundary_marker < 0) {
             throw std::invalid_argument(
@@ -5259,7 +5328,7 @@ void applyDynamicContactAngleResidual(
                 phi_id,
                 *phi_record.space,
                 bc.level_set_field_name);
-            const auto n = usesSurfaceStress(bc)
+            const auto n = usesGeneratedInterfaceNormal(bc)
                                ? generatedInterfaceOutwardNormal(bc)
                                : unfittedInterfaceNormal(bc, phi);
             const auto wall_n = wallNormalExpression(contact_line, dim);
@@ -5315,10 +5384,10 @@ void applyDynamicContactAngleResidual(
             phi_id,
             *phi_record.space,
             bc.level_set_field_name);
-        // SurfaceStress must take its contact geometry from the same mapped
-        // generated rule as the surface measure.  The legacy curvature form
-        // retains its Q1-gradient normal and full Ren--E angle gap.
-        const auto n = usesSurfaceStress(bc)
+        // Generated-geometry forms take contact geometry from the same mapped
+        // rule as the surface measure.  The legacy curvature form retains its
+        // Q1-gradient normal and full Ren--E angle gap.
+        const auto n = usesGeneratedInterfaceNormal(bc)
                            ? generatedInterfaceOutwardNormal(bc)
                            : unfittedInterfaceNormal(bc, phi);
         const auto wall_n = wallNormalExpression(contact_line, dim);
@@ -5898,9 +5967,9 @@ void appendUnfittedKinematicPointLocationShapeTangent(
         return false;
     }
     // The legacy curvature-traction contact law depends explicitly on
-    // n(phi).  SurfaceStress instead consumes refreshed-frozen interface,
-    // contact, and sharp wall geometry from the authoritative cut snapshot;
-    // it must not advertise a nonexistent inner-Newton field tangent.
+    // n(phi).  Generated-geometry forms instead consume refreshed-frozen
+    // interface, contact, and sharp wall geometry from the authoritative cut
+    // snapshot; they must not advertise a nonexistent inner-Newton tangent.
     const bool has_dynamic_contact = std::any_of(
             bc.contact_lines.begin(),
             bc.contact_lines.end(),
@@ -5908,7 +5977,7 @@ void appendUnfittedKinematicPointLocationShapeTangent(
                 return contactLineKind(contact_line) ==
                        ContactLineKind::DynamicRenE;
             });
-    if (has_dynamic_contact && !usesSurfaceStress(bc)) {
+    if (has_dynamic_contact && !usesGeneratedInterfaceNormal(bc)) {
         return true;
     }
     if (unfittedLevelSetShapeTangentsDisabled()) {
@@ -6280,7 +6349,7 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
     }
 
     const auto phi = freeSurfaceLevelSet(bc, system);
-    const auto n = usesSurfaceStress(bc)
+    const auto n = usesGeneratedInterfaceNormal(bc)
         ? (useFittedCurrentGeometry(bc, ale_enabled)
                ? currentNormal()
                : generatedInterfaceOutwardNormal(bc))
@@ -6401,6 +6470,18 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
                 v,
                 bc,
                 system);
+            if (usesGeneratedCurvatureTraction(bc)) {
+                FE_LOG_INFO(
+                    std::string("IncompressibleNavierStokesVMSModule: installed generated-geometry curvature traction") +
+                    " marker=" + std::to_string(freeSurfaceMarker(bc)) +
+                    " surface_tension_form=GeneratedCurvatureTraction" +
+                    " normal_source=integration_rule_geometry" +
+                    " curvature_source=" +
+                    freeSurfaceCurvaturePolicyName(bc) +
+                    " force_projection_applied=0" +
+                    " qualification=Experimental" +
+                    " diagnostic=free_surface_generated_curvature_traction");
+            }
         }
     }
 
@@ -7273,12 +7354,21 @@ tangentialPolicyProvenance(
         case FreeSurfaceSurfaceTensionForm::CurvatureTraction:
             out << "\"CurvatureTraction\"";
             break;
+        case FreeSurfaceSurfaceTensionForm::GeneratedCurvatureTraction:
+            out << "\"GeneratedCurvatureTraction\"";
+            break;
         case FreeSurfaceSurfaceTensionForm::SurfaceStress:
             out << "\"SurfaceStress\"";
             break;
         }
         out << ",\"surface_tension_form_effective\":"
             << jsonString(surfaceTensionFormName(boundary));
+        if (usesGeneratedCurvatureTraction(boundary)) {
+            out << ",\"surface_tension_form_qualification\":"
+                << "\"experimental_candidate\""
+                << ",\"surface_tension_normal_source\":"
+                << "\"generated_interface_rule_geometry\"";
+        }
         if (boundary.implementation ==
             FreeSurfaceImplementation::FittedALE) {
             out << ",\"fitted_surface_contact_capability\":{"
@@ -7298,6 +7388,10 @@ tangentialPolicyProvenance(
                 << "\"value\":\"SurfaceStress\","
                 << "\"reason_code\":"
                 << "\"fitted_surface_stress_current_frame_gradient_unqualified\""
+                << "},{\"feature\":\"surface_tension_form\","
+                << "\"value\":\"GeneratedCurvatureTraction\","
+                << "\"reason_code\":"
+                << "\"generated_curvature_traction_unfitted_only\""
                 << "},{\"feature\":\"contact_line_model\","
                 << "\"value\":\"PrescribedAngle\","
                 << "\"reason_code\":"

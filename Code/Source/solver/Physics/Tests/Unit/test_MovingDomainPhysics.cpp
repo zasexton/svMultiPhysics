@@ -3446,6 +3446,70 @@ TEST(MovingDomainPhysics,
 }
 
 TEST(MovingDomainPhysics,
+     GeneratedCurvatureTractionUsesGeneratedInterfaceNormal)
+{
+    constexpr FE::Real gamma = FE::Real{0.072};
+    constexpr FE::Real curvature = FE::Real{2.5};
+    constexpr std::array<FE::Real, 3> x_normal{1.0, 0.0, 0.0};
+    constexpr std::array<FE::Real, 3> z_normal{0.0, 0.0, 1.0};
+    constexpr auto form =
+        ns::FreeSurfaceSurfaceTensionForm::GeneratedCurvatureTraction;
+
+    const auto generated_x_live_z = unfittedFreeSurfaceResidualVector(
+        /*external_pressure=*/0.0,
+        gamma,
+        curvature,
+        ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        form,
+        x_normal,
+        z_normal);
+    const auto generated_x_live_x = unfittedFreeSurfaceResidualVector(
+        /*external_pressure=*/0.0,
+        gamma,
+        curvature,
+        ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        form,
+        x_normal,
+        x_normal);
+    const auto generated_z_live_z = unfittedFreeSurfaceResidualVector(
+        /*external_pressure=*/0.0,
+        gamma,
+        curvature,
+        ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        form,
+        z_normal,
+        z_normal);
+
+    ASSERT_EQ(generated_x_live_z.size(), generated_x_live_x.size());
+    ASSERT_EQ(generated_x_live_z.size(), generated_z_live_z.size());
+    FE::Real changed_geometry_norm2 = FE::Real{0.0};
+    for (std::size_t i = 0; i < generated_x_live_z.size(); ++i) {
+        EXPECT_NEAR(generated_x_live_z[i], generated_x_live_x[i], 1.0e-12)
+            << "traction must be independent of the separately evaluated "
+               "Q1 level-set gradient";
+        const auto difference =
+            generated_x_live_z[i] - generated_z_live_z[i];
+        changed_geometry_norm2 += difference * difference;
+    }
+    EXPECT_GT(std::sqrt(changed_geometry_norm2), FE::Real{1.0e-12})
+        << "traction must follow the generated interface normal";
+
+    const auto positive_active = unfittedFreeSurfaceResidualVector(
+        /*external_pressure=*/0.0,
+        gamma,
+        curvature,
+        ns::FreeSurfaceActiveDomain::LevelSetPositive,
+        form,
+        x_normal,
+        z_normal);
+    ASSERT_EQ(generated_x_live_z.size(), positive_active.size());
+    for (std::size_t i = 0; i < generated_x_live_z.size(); ++i) {
+        EXPECT_NEAR(generated_x_live_z[i], positive_active[i], 1.0e-12)
+            << "directed normal and signed curvature must flip together";
+    }
+}
+
+TEST(MovingDomainPhysics,
      UnfittedPressureOnlySurfaceStressUsesGeneratedInterfaceNormal)
 {
     constexpr FE::Real external_pressure = FE::Real{0.031};
@@ -4689,6 +4753,10 @@ TEST(MovingDomainPhysics,
         "\"value\":\"SurfaceStress\","
         "\"reason_code\":"
         "\"fitted_surface_stress_current_frame_gradient_unqualified\""
+        "},{\"feature\":\"surface_tension_form\","
+        "\"value\":\"GeneratedCurvatureTraction\","
+        "\"reason_code\":"
+        "\"generated_curvature_traction_unfitted_only\""
         "},{\"feature\":\"contact_line_model\","
         "\"value\":\"PrescribedAngle\","
         "\"reason_code\":"
@@ -7496,6 +7564,62 @@ TEST(MovingDomainPhysics,
                  std::invalid_argument);
 }
 
+TEST(MovingDomainPhysics,
+     NavierStokesGeneratedCurvatureTractionRejectsUnsupportedGeometryTangentPolicies)
+{
+    constexpr int interface_marker = 218;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+
+    const auto register_with = [&](std::string tangent_policy,
+                                   bool enable_experimental_tangents) {
+        ScopedEnvVar enable_shape_tangents(
+            "SVMP_ENABLE_UNFITTED_LEVEL_SET_SHAPE_TANGENTS",
+            enable_experimental_tangents
+                ? std::optional<std::string>("1")
+                : std::nullopt);
+        ScopedEnvVar disable_shape_tangents(
+            "SVMP_DISABLE_UNFITTED_LEVEL_SET_SHAPE_TANGENTS",
+            enable_experimental_tangents
+                ? std::nullopt
+                : std::optional<std::string>("1"));
+        auto opts = baseNavierStokesOptions();
+        opts.free_surface.push_back(
+            ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+                .implementation =
+                    ns::FreeSurfaceImplementation::UnfittedLevelSet,
+                .interface_marker = interface_marker,
+                .level_set_field_name =
+                    "phi_generated_curvature_traction_tangent",
+                .geometry_tangent_policy = std::move(tangent_policy),
+                .active_domain =
+                    ns::FreeSurfaceActiveDomain::LevelSetNegative,
+                .surface_tension = 0.072,
+                .surface_tension_form = ns::FreeSurfaceSurfaceTensionForm::
+                    GeneratedCurvatureTraction,
+                .curvature = 2.5,
+                .use_level_set_curvature = false,
+            });
+        FE::systems::FESystem system(mesh);
+        system.addField(FE::systems::FieldSpec{
+            .name = "phi_generated_curvature_traction_tangent",
+            .space = p_space,
+            .components = 1,
+            .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+        });
+        ns::IncompressibleNavierStokesVMSModule module(
+            u_space, p_space, std::move(opts));
+        module.registerOn(system);
+    };
+
+    EXPECT_NO_THROW(register_with("RefreshedFrozenQuadrature", false));
+    EXPECT_THROW(register_with("DifferentiatedQuadrature", false),
+                 std::invalid_argument);
+    EXPECT_THROW(register_with("RefreshedFrozenQuadrature", true),
+                 std::invalid_argument);
+}
+
 TEST(MovingDomainPhysics, NavierStokesFittedSurfaceStressFailsClosed)
 {
     constexpr int marker = 215;
@@ -7541,6 +7665,112 @@ TEST(MovingDomainPhysics, NavierStokesFittedSurfaceStressFailsClosed)
     EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
     EXPECT_FALSE(system.hasOperator("equations"));
     EXPECT_FALSE(module.effectiveConfigurationArtifact().has_value());
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesFittedGeneratedCurvatureTractionFailsClosed)
+{
+    constexpr int marker = 216;
+    const auto mesh =
+        std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_ale = true;
+    opts.mesh_velocity_source =
+        ns::ALEMeshVelocitySource::CoupledDisplacement;
+    opts.auto_register_mesh_displacement_field = true;
+    opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation = ns::FreeSurfaceImplementation::FittedALE,
+            .boundary_marker = marker,
+            .surface_tension = 0.072,
+            .surface_tension_form = ns::FreeSurfaceSurfaceTensionForm::
+                GeneratedCurvatureTraction,
+        });
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(
+        u_space, p_space, std::move(opts));
+    try {
+        module.registerOn(system);
+        FAIL() << "fitted GeneratedCurvatureTraction must fail closed";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(
+            std::string(error.what()).find(
+                "GeneratedCurvatureTraction is available only for unfitted "
+                "level-set free surfaces"),
+            std::string::npos)
+            << error.what();
+    }
+    EXPECT_EQ(system.fieldMap().numFields(), 0u);
+    EXPECT_TRUE(system.formulationRecords().empty());
+    EXPECT_FALSE(system.hasOperator("equations"));
+    EXPECT_FALSE(module.effectiveConfigurationArtifact().has_value());
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesGeneratedCurvatureTractionReportsCandidateProvenance)
+{
+    constexpr int interface_marker = 217;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+    opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation =
+                ns::FreeSurfaceImplementation::UnfittedLevelSet,
+            .interface_marker = interface_marker,
+            .level_set_field_name = "phi_generated_curvature_traction",
+            .active_domain =
+                ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            .surface_tension = 0.072,
+            .surface_tension_form = ns::FreeSurfaceSurfaceTensionForm::
+                GeneratedCurvatureTraction,
+            .curvature = 2.5,
+            .use_level_set_curvature = false,
+        });
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi_generated_curvature_traction",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+    ns::IncompressibleNavierStokesVMSModule module(
+        u_space, p_space, std::move(opts));
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    ASSERT_NO_THROW(module.registerOn(system));
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
+
+    const auto artifact = module.effectiveConfigurationArtifact();
+    ASSERT_TRUE(artifact.has_value());
+    EXPECT_NE(artifact->json.find(
+                  "\"surface_tension_form_requested\":"
+                  "\"GeneratedCurvatureTraction\""),
+              std::string::npos);
+    EXPECT_NE(artifact->json.find(
+                  "\"surface_tension_form_effective\":"
+                  "\"GeneratedCurvatureTraction\""),
+              std::string::npos);
+    EXPECT_NE(artifact->json.find(
+                  "\"surface_tension_form_qualification\":"
+                  "\"experimental_candidate\""),
+              std::string::npos);
+    EXPECT_NE(artifact->json.find(
+                  "\"surface_tension_normal_source\":"
+                  "\"generated_interface_rule_geometry\""),
+              std::string::npos);
+    EXPECT_NE(log_output.find(
+                  "diagnostic=free_surface_generated_curvature_traction"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("qualification=Experimental"),
+              std::string::npos);
 }
 
 TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsNitscheKinematics)
@@ -11108,6 +11338,10 @@ TEST(MovingDomainPhysics,
         "\"value\":\"SurfaceStress\","
         "\"reason_code\":"
         "\"fitted_surface_stress_current_frame_gradient_unqualified\""
+        "},{\"feature\":\"surface_tension_form\","
+        "\"value\":\"GeneratedCurvatureTraction\","
+        "\"reason_code\":"
+        "\"generated_curvature_traction_unfitted_only\""
         "},{\"feature\":\"contact_line_model\","
         "\"value\":\"PrescribedAngle\","
         "\"reason_code\":"
@@ -11397,6 +11631,96 @@ TEST(MovingDomainPhysics,
                     2.0e-11)
             << "Young wall energy belongs to momentum, while prescribed "
                "level-set geometry is maintained by accepted-state repair";
+    }
+}
+
+TEST(MovingDomainPhysics,
+     GeneratedCurvatureTractionContactGapUsesGeneratedNormal)
+{
+    constexpr FE::Real theta = FE::Real{1.0471975511965977462};
+    constexpr FE::Real gamma = FE::Real{0.8};
+    constexpr std::array<FE::Real, 3> wall_normal{0.0, 0.0, 1.0};
+    constexpr std::array<FE::Real, 3> target_outward_normal{
+        FE::Real{0.86602540378443864676}, FE::Real{0.0}, FE::Real{-0.5}};
+    constexpr std::array<FE::Real, 3> wrong_outward_normal{
+        FE::Real{1.0}, FE::Real{0.0}, FE::Real{0.0}};
+    constexpr auto form =
+        ns::FreeSurfaceSurfaceTensionForm::GeneratedCurvatureTraction;
+
+    const auto signed_raw_normal = [](std::array<FE::Real, 3> outward,
+                                      ns::FreeSurfaceActiveDomain side) {
+        if (side == ns::FreeSurfaceActiveDomain::LevelSetPositive) {
+            for (auto& component : outward) {
+                component = -component;
+            }
+        }
+        return outward;
+    };
+
+    for (const auto active_domain : {
+             ns::FreeSurfaceActiveDomain::LevelSetNegative,
+             ns::FreeSurfaceActiveDomain::LevelSetPositive}) {
+        const auto generated_target = unfittedContactAngleResidualVector(
+            active_domain,
+            theta,
+            signed_raw_normal(wrong_outward_normal, active_domain),
+            wall_normal,
+            nullptr,
+            /*include_contact_angle=*/true,
+            /*include_transient_owner=*/true,
+            signed_raw_normal(target_outward_normal, active_domain),
+            gamma,
+            form);
+        const auto no_contact = unfittedContactAngleResidualVector(
+            active_domain,
+            theta,
+            signed_raw_normal(wrong_outward_normal, active_domain),
+            wall_normal,
+            nullptr,
+            /*include_contact_angle=*/false,
+            /*include_transient_owner=*/true,
+            signed_raw_normal(target_outward_normal, active_domain),
+            gamma,
+            form);
+        ASSERT_EQ(generated_target.size(), no_contact.size());
+        for (std::size_t i = 0; i < generated_target.size(); ++i) {
+            EXPECT_NEAR(generated_target[i], no_contact[i], 2.0e-11)
+                << "the explicit angle gap must vanish when generated "
+                   "geometry satisfies the prescribed angle";
+        }
+
+        const auto generated_wrong = unfittedContactAngleResidualVector(
+            active_domain,
+            theta,
+            signed_raw_normal(target_outward_normal, active_domain),
+            wall_normal,
+            nullptr,
+            /*include_contact_angle=*/true,
+            /*include_transient_owner=*/true,
+            signed_raw_normal(wrong_outward_normal, active_domain),
+            gamma,
+            form);
+        const auto wrong_no_contact = unfittedContactAngleResidualVector(
+            active_domain,
+            theta,
+            signed_raw_normal(target_outward_normal, active_domain),
+            wall_normal,
+            nullptr,
+            /*include_contact_angle=*/false,
+            /*include_transient_owner=*/true,
+            signed_raw_normal(wrong_outward_normal, active_domain),
+            gamma,
+            form);
+        ASSERT_EQ(generated_wrong.size(), wrong_no_contact.size());
+        FE::Real contact_gap_norm2 = FE::Real{0.0};
+        for (std::size_t i = 0; i < generated_wrong.size(); ++i) {
+            const auto difference =
+                generated_wrong[i] - wrong_no_contact[i];
+            contact_gap_norm2 += difference * difference;
+        }
+        EXPECT_GT(std::sqrt(contact_gap_norm2), FE::Real{1.0e-10})
+            << "the contact gap must change with generated geometry even "
+               "when the Q1 gradient satisfies the angle";
     }
 }
 
