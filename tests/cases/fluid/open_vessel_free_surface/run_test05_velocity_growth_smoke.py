@@ -7996,6 +7996,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "initialize_discrete_static_capillary_equilibrium",
         "initialize_discrete_static_contact_geometry",
         "newton_line_search_fail_on_no_reduction",
+        "defer_static_physical_gates_to_matrix",
         "disable_cut_stabilization",
         "enable_linear_solve_history",
         "enable_linear_solve_component_norms",
@@ -12081,6 +12082,13 @@ def format_failure_exception(failure: dict[str, Any],
 def case_args_for_run(case_name: str,
                       args: argparse.Namespace) -> argparse.Namespace:
     case_args = argparse.Namespace(**vars(args))
+    if (getattr(case_args, "defer_static_physical_gates_to_matrix", False) and
+            case_name not in {
+                "capillaryarc2d", "droplet2d", "sphere3d",
+                "sessile2d", "sessile3d",
+            }):
+        raise ValueError(
+            "matrix-owned static physical gates require a static capillary case")
     kinematic_area_gradient_traction = (
         getattr(case_args, "capillary_force_form", "surface_stress") ==
         "kinematic_area_gradient_traction"
@@ -12293,12 +12301,38 @@ def case_args_for_run(case_name: str,
                         False,
                     )),
                 )
+            defer_physical_gates = bool(getattr(
+                case_args, "defer_static_physical_gates_to_matrix", False))
+            physical_gate_names = (
+                "max_capillary_pressure_jump_relative_error",
+                "max_capillary_parasitic_capillary_number",
+                "max_sessile_contact_angle_error_degrees",
+                "max_sessile_pressure_jump_relative_error",
+                "max_sessile_liquid_area_relative_error",
+                "max_sessile_liquid_volume_relative_error",
+                "max_sessile_base_radius_relative_error",
+                "max_sessile_apex_height_relative_error",
+                "max_sessile_parasitic_capillary_number",
+            )
+            if defer_physical_gates:
+                explicit_gates = [
+                    name for name in physical_gate_names
+                    if getattr(case_args, name, None) is not None
+                ]
+                if explicit_gates:
+                    raise ValueError(
+                        "matrix-owned static physical gates conflict with "
+                        "per-run thresholds: " + ", ".join(explicit_gates))
+                for name in physical_gate_names:
+                    setattr(case_args, name, None)
             # Fixed before execution for the n=16/32 FS-16 matrix.  The angle,
             # area, and pressure bounds are intentionally well below an
             # order-one error while allowing P1 interface sampling error.  A
             # capillary number below 1e-2 rejects dynamically meaningful
             # parasitic currents in a nominal equilibrium.
-            if case_name == "sphere3d":
+            if defer_physical_gates:
+                pass
+            elif case_name == "sphere3d":
                 set_default(
                     case_args,
                     "max_capillary_pressure_jump_relative_error",
@@ -14781,6 +14815,12 @@ def main() -> int:
     parser.add_argument("--max-sessile-apex-height-relative-error", type=float)
     parser.add_argument("--max-sessile-parasitic-capillary-number", type=float)
     parser.add_argument("--max-capillary-parasitic-capillary-number", type=float)
+    parser.add_argument(
+        "--defer-static-physical-gates-to-matrix",
+        action="store_true",
+        help=("leave static shape, pressure, angle, and parasitic-current "
+              "acceptance to a predeclared matrix-level convergence gate"),
+    )
     parser.add_argument(
         "--require-ren-e-speed-sign",
         dest="require_ren_e_speed_sign",

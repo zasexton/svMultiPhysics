@@ -2325,6 +2325,19 @@ def test_sessile_case_uses_monolithic_fsils_gmres_linear_budget():
     )
     assert area_gradient.initialize_static_compatible_pressure is False
 
+    matrix_args = runner.argparse.Namespace(**vars(area_gradient_args))
+    matrix_args.defer_static_physical_gates_to_matrix = True
+    matrix_owned = runner.case_args_for_run("sphere3d", matrix_args)
+    assert matrix_owned.max_capillary_pressure_jump_relative_error is None
+    assert matrix_owned.max_capillary_parasitic_capillary_number is None
+
+    conflicting_matrix_args = runner.argparse.Namespace(**vars(matrix_args))
+    conflicting_matrix_args.max_capillary_pressure_jump_relative_error = 0.01
+    with pytest.raises(ValueError, match="conflict with per-run thresholds"):
+        runner.case_args_for_run("sphere3d", conflicting_matrix_args)
+    with pytest.raises(ValueError, match="require a static capillary case"):
+        runner.case_args_for_run("dynamiccontact2d", matrix_args)
+
     droplet_area_gradient = runner.case_args_for_run(
         "droplet2d", area_gradient_args)
     assert droplet_area_gradient.curvature_projection_recovery_mode == (
