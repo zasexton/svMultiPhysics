@@ -12668,6 +12668,12 @@ TEST(MovingDomainPhysics,
         zero_velocity,
         FE::Real{0.37},
         ns::FreeSurfaceSurfaceTensionForm::CurvatureTraction);
+    const auto area_gradient = assemble(
+        theta,
+        zero_velocity,
+        FE::Real{0.37},
+        ns::FreeSurfaceSurfaceTensionForm::
+            KinematicAreaGradientTraction);
 
     ASSERT_FALSE(stationary.conservative_pressure_residual.empty());
     ASSERT_EQ(stationary.conservative_pressure_residual.size(),
@@ -12773,6 +12779,42 @@ TEST(MovingDomainPhysics,
     EXPECT_TRUE(
         legacy.conservative_pressure_representability_load_residual.empty());
     EXPECT_TRUE(legacy.conservative_balance_residual.empty());
+
+    ASSERT_FALSE(
+        area_gradient.conservative_pressure_residual.empty());
+    ASSERT_EQ(
+        area_gradient.conservative_pressure_residual.size(),
+        area_gradient.conservative_surface_energy_residual.size());
+    ASSERT_EQ(
+        area_gradient.conservative_pressure_residual.size(),
+        area_gradient.conservative_gravitational_potential_residual.size());
+    ASSERT_EQ(
+        area_gradient.conservative_pressure_residual.size(),
+        area_gradient.conservative_physical_potential_residual.size());
+    ASSERT_EQ(
+        area_gradient.conservative_pressure_residual.size(),
+        area_gradient
+            .conservative_pressure_representability_load_residual.size());
+    ASSERT_EQ(
+        area_gradient.conservative_pressure_residual.size(),
+        area_gradient.conservative_balance_residual.size());
+    EXPECT_FALSE(
+        area_gradient.pressure_representability_pair_jacobian.empty());
+    for (std::size_t dof = 0u;
+         dof < area_gradient.conservative_pressure_residual.size();
+         ++dof) {
+        EXPECT_NEAR(
+            area_gradient.conservative_physical_potential_residual[dof],
+            area_gradient.conservative_surface_energy_residual[dof] +
+                area_gradient
+                    .conservative_gravitational_potential_residual[dof],
+            FE::Real{2.0e-12});
+        EXPECT_NEAR(
+            area_gradient.conservative_balance_residual[dof],
+            area_gradient.conservative_pressure_residual[dof] +
+                area_gradient.conservative_physical_potential_residual[dof],
+            FE::Real{2.0e-12});
+    }
 }
 
 TEST(MovingDomainPhysics,

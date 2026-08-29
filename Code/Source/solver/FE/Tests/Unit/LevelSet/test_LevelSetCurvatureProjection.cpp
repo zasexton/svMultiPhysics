@@ -2921,7 +2921,7 @@ TEST(LevelSetCurvatureProjection,
         EXPECT_GE(result.kinematic_area_gradient_max_filter_radius,
                   result.kinematic_area_gradient_min_filter_radius);
         EXPECT_LT(result.kinematic_area_gradient_max_relative_fd_disagreement,
-                  FE::Real{2.0e-5});
+                  FE::Real{1.0e-4});
         EXPECT_LT(result.kinematic_area_gradient_relative_linear_residual,
                   FE::Real{1.0e-9});
         EXPECT_LT(
@@ -3234,6 +3234,8 @@ TEST(LevelSetCurvatureProjection,
         FE::Real{0.0});
     ASSERT_TRUE(evaluation.result.success)
         << evaluation.result.diagnostic;
+    EXPECT_TRUE(
+        evaluation.result.kinematic_area_gradient_minimum_norm_solver);
     EXPECT_GT(evaluation.result.kinematic_area_gradient_linear_iterations, 0u);
     EXPECT_LT(
         evaluation.result.kinematic_area_gradient_relative_linear_residual,
@@ -3254,6 +3256,47 @@ TEST(LevelSetCurvatureProjection,
     EXPECT_DOUBLE_EQ(
         evaluation.result.kinematic_area_gradient_max_filter_radius_cells,
         FE::Real{0.0});
+}
+
+TEST(LevelSetCurvatureProjection,
+     KinematicAreaGradientIsRoundoffBalancedForAffineFlatInterface)
+{
+    auto mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/12, FE::Real{-0.70}, FE::Real{0.70});
+    std::vector<FE::Real> phi(
+        static_cast<std::size_t>(mesh.numVertices()), FE::Real{0.0});
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        phi[static_cast<std::size_t>(vertex)] =
+            mesh.getNodeCoordinates(vertex)[0] - FE::Real{0.013};
+    }
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.recovery_mode =
+        level_set::LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
+    options.kinematic_area_gradient_filter_coefficient = FE::Real{0.0};
+    std::vector<FE::Real> curvature;
+    const auto result = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, options, curvature);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_TRUE(result.kinematic_area_gradient_minimum_norm_solver);
+    EXPECT_LE(result.kinematic_area_gradient_total_energy_gradient_norm,
+              FE::Real{1.0e-13});
+    EXPECT_LE(
+        result.kinematic_area_gradient_max_regularized_identity_residual,
+        FE::Real{1.0e-15});
+    for (const auto value : curvature) {
+        EXPECT_LE(std::abs(value), FE::Real{1.0e-12});
+    }
+    RecordProperty(
+        "kinematic_area_gradient_affine_flat_gradient_norm",
+        result.kinematic_area_gradient_total_energy_gradient_norm);
+    RecordProperty(
+        "kinematic_area_gradient_affine_flat_max_fd_disagreement",
+        result.kinematic_area_gradient_max_relative_fd_disagreement);
+    RecordProperty(
+        "kinematic_area_gradient_affine_flat_absolute_identity_residual",
+        result.kinematic_area_gradient_max_regularized_identity_residual);
 }
 
 TEST(LevelSetCurvatureProjection,

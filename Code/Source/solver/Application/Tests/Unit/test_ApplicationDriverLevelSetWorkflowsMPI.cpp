@@ -2849,6 +2849,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       svmp::FE::Real{0.65},
   };
   std::size_t case_count = 0u;
+  std::size_t area_gradient_case_count = 0u;
   svmp::FE::Real maximum_kkt_residual = 0.0;
   svmp::FE::Real maximum_kkt_relative_distance = 0.0;
   svmp::FE::Real maximum_pressure_jump_error = 0.0;
@@ -2867,6 +2868,35 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                      << (positive_side ? "positive" : "negative")
                      << " normal_offset=" << normal_offset);
         ++case_count;
+
+        const bool run_area_gradient_case =
+            normal_axis == 0 && !positive_side &&
+            normal_offset == svmp::FE::Real{0.5};
+        const std::array<
+            channel_ns::FreeSurfaceSurfaceTensionForm, 2>
+            surface_tension_forms{{
+                channel_ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
+                channel_ns::FreeSurfaceSurfaceTensionForm::
+                    KinematicAreaGradientTraction,
+            }};
+        const std::size_t surface_tension_form_count =
+            run_area_gradient_case ? 2u : 1u;
+        for (std::size_t surface_tension_form_index = 0u;
+             surface_tension_form_index < surface_tension_form_count;
+             ++surface_tension_form_index) {
+          const auto surface_tension_form =
+              surface_tension_forms[surface_tension_form_index];
+          const bool uses_area_gradient_traction =
+              surface_tension_form ==
+              channel_ns::FreeSurfaceSurfaceTensionForm::
+                  KinematicAreaGradientTraction;
+          area_gradient_case_count +=
+              uses_area_gradient_traction ? 1u : 0u;
+          SCOPED_TRACE(::testing::Message()
+                       << "surface_tension_form="
+                       << (uses_area_gradient_traction
+                               ? "KinematicAreaGradientTraction"
+                               : "SurfaceStress"));
 
         auto mesh =
             makePartitionedFlatCapillaryFanMesh(normal_axis);
@@ -2960,6 +2990,17 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                 .name = "phi_physical_flat_mpi",
                 .space = scalar_space,
                 .components = 1});
+        svmp::FE::FieldId kappa = svmp::FE::INVALID_FIELD_ID;
+        if (uses_area_gradient_traction) {
+          kappa = system->addField(
+              svmp::FE::systems::FieldSpec{
+                  .name = "kappa_physical_flat_mpi",
+                  .space = scalar_space,
+                  .components = 1,
+                  .source_kind = svmp::FE::systems::
+                      FieldSourceKind::PrescribedData,
+              });
+        }
 
         channel_ns::IncompressibleNavierStokesVMSOptions options;
         options.velocity_field_name = "u_physical_flat_mpi";
@@ -3026,10 +3067,12 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                             CutVolume,
                     .external_pressure = 0.0,
                     .surface_tension = 1.0,
-                    .surface_tension_form =
-                        channel_ns::FreeSurfaceSurfaceTensionForm::
-                            SurfaceStress,
+                    .surface_tension_form = surface_tension_form,
                     .curvature = 0.0,
+                    .curvature_field_name =
+                        uses_area_gradient_traction
+                            ? "kappa_physical_flat_mpi"
+                            : "",
                     .use_level_set_curvature = false,
                     .small_cut_aggregation = false,
                 };
@@ -3083,6 +3126,18 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
         setup_options.retain_serial_sparsity = false;
         ASSERT_NO_THROW(system->setup(setup_options));
         ASSERT_TRUE(system->dofPermutation());
+        std::vector<svmp::FE::Real> curvature_sentinel;
+        std::uint64_t curvature_revision_before = 0u;
+        if (uses_area_gradient_traction) {
+          const auto curvature_count = static_cast<std::size_t>(
+              system->fieldDofHandler(kappa).getNumDofs());
+          curvature_sentinel.assign(
+              curvature_count, svmp::FE::Real{8.0});
+          system->setPrescribedFieldCoefficients(
+              kappa, curvature_sentinel);
+          curvature_revision_before =
+              system->prescribedFieldRevision(kappa);
+        }
 
         const auto velocity =
             system->findFieldByName("u_physical_flat_mpi");
@@ -3210,6 +3265,24 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
             tangent_axis == 0
                 ? "-1.0 0.0 0.0; 1.0 0.0 0.0"
                 : "0.0 -1.0 0.0; 0.0 1.0 0.0";
+        const std::string level_set_curvature_parameters =
+            uses_area_gradient_traction
+                ? R"xml(
+    <Enable_curvature_projection>true</Enable_curvature_projection>
+    <Curvature_field_name>kappa_physical_flat_mpi</Curvature_field_name>
+    <Curvature_projection_recovery_mode>KinematicAreaGradient</Curvature_projection_recovery_mode>
+    <Curvature_projection_kinematic_area_gradient_filter_coefficient>0.0</Curvature_projection_kinematic_area_gradient_filter_coefficient>)xml"
+                : std::string{};
+        const char* surface_tension_form_name =
+            uses_area_gradient_traction
+                ? "KinematicAreaGradientTraction"
+                : "SurfaceStress";
+        const std::string traction_curvature_parameters =
+            uses_area_gradient_traction
+                ? R"xml(
+      <Curvature_field_name>kappa_physical_flat_mpi</Curvature_field_name>
+      <Use_level_set_curvature>false</Use_level_set_curvature>)xml"
+                : std::string{};
         const std::string parameter_xml =
             std::string(R"xml(
 <svMultiPhysicsFile>
@@ -3219,7 +3292,8 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
     <Static_capillary_volume_tolerance>1.0e-11</Static_capillary_volume_tolerance>
     <Static_capillary_projected_gradient_tolerance>2.0e-6</Static_capillary_projected_gradient_tolerance>
     <Static_capillary_constant_pressure_kkt_max_residual_norm>2.0e-10</Static_capillary_constant_pressure_kkt_max_residual_norm>
-    <Static_capillary_constant_pressure_kkt_max_relative_distance>2.0e-10</Static_capillary_constant_pressure_kkt_max_relative_distance>
+    <Static_capillary_constant_pressure_kkt_max_relative_distance>2.0e-10</Static_capillary_constant_pressure_kkt_max_relative_distance>)xml") +
+            level_set_curvature_parameters + R"xml(
   </Add_equation>
   <Add_equation type="fluid">
     <Add_BC name="physical_flat_capillary_mpi">
@@ -3230,12 +3304,14 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       <Interface_marker>724</Interface_marker>
       <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
-      <Active_domain>)xml") + active_domain_name +
+      <Active_domain>)xml" + active_domain_name +
             R"xml(</Active_domain>
       <Active_domain_method>CutVolume</Active_domain_method>
       <Small_cut_aggregation>false</Small_cut_aggregation>
       <Surface_tension>1.0</Surface_tension>
-      <Surface_tension_form>SurfaceStress</Surface_tension_form>
+      <Surface_tension_form>)xml" + surface_tension_form_name +
+            R"xml(</Surface_tension_form>)xml" +
+            traction_curvature_parameters + R"xml(
       <Contact_line_model>DynamicContactAngle</Contact_line_model>
       <Contact_angle_degrees>90.0</Contact_angle_degrees>
       <Contact_line_wall_markers>7241;7242</Contact_line_wall_markers>
@@ -3254,6 +3330,15 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
         ASSERT_EQ(requests.size(), 1u);
         ASSERT_TRUE(
             requests.front().static_capillary_equilibrium_enabled);
+        EXPECT_EQ(
+            requests.front().curvature_projection_enabled,
+            uses_area_gradient_traction);
+        if (uses_area_gradient_traction) {
+          EXPECT_EQ(
+              requests.front().curvature_projection.recovery_mode,
+              svmp::FE::level_set::LevelSetCurvatureRecoveryMode::
+                  KinematicAreaGradient);
+        }
 
         svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle
             lifecycle;
@@ -3300,6 +3385,34 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
         ASSERT_TRUE(
             requests.front()
                 .static_capillary_equilibrium_initialized);
+        if (uses_area_gradient_traction) {
+          const auto projected_curvature =
+              sim.fe_system->prescribedFieldCoefficients(kappa);
+          ASSERT_EQ(
+              projected_curvature.size(),
+              curvature_sentinel.size());
+          EXPECT_TRUE(std::all_of(
+              projected_curvature.begin(),
+              projected_curvature.end(),
+              [](svmp::FE::Real value) {
+                return std::isfinite(value);
+              }));
+          EXPECT_TRUE(std::all_of(
+              projected_curvature.begin(),
+              projected_curvature.end(),
+              [](svmp::FE::Real value) {
+                return std::abs(value) <=
+                       svmp::FE::Real{1.0e-12};
+              }));
+          EXPECT_NE(
+              std::vector<svmp::FE::Real>(
+                  projected_curvature.begin(),
+                  projected_curvature.end()),
+              curvature_sentinel);
+          EXPECT_GT(
+              sim.fe_system->prescribedFieldRevision(kappa),
+              curvature_revision_before);
+        }
 
         const auto certified_solution =
             capturePostacceptMaintenanceVectorCollectively(
@@ -3398,11 +3511,13 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
         maximum_phi_update_across_cases = std::max(
             maximum_phi_update_across_cases,
             maximum_phi_update);
+        }
       }
     }
   }
 
   EXPECT_EQ(case_count, 12u);
+  EXPECT_EQ(area_gradient_case_count, 1u);
   RecordProperty("wp4_physical_flat_mpi_rank_count", size);
   RecordProperty("wp4_physical_flat_mpi_partition_layout_count", 1);
   RecordProperty(
@@ -3414,6 +3529,8 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   RecordProperty("wp4_physical_flat_mpi_cut_offset_count", 3);
   RecordProperty("wp4_physical_flat_mpi_matrix_case_count",
                  case_count);
+  RecordProperty("wp4_area_gradient_static_mpi_case_count",
+                 area_gradient_case_count);
   RecordProperty(
       "wp4_physical_flat_mpi_constant_pressure_kkt_residual_norm",
       maximum_kkt_residual);

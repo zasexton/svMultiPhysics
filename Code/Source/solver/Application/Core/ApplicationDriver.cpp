@@ -16046,8 +16046,12 @@ void logLevelSetCurvatureProjectionDiagnostic(
       << result.kinematic_area_gradient_max_relative_fd_disagreement
       << " kinematic_area_gradient_linear_iterations="
       << result.kinematic_area_gradient_linear_iterations
+      << " kinematic_area_gradient_minimum_norm_solver="
+      << (result.kinematic_area_gradient_minimum_norm_solver ? 1 : 0)
       << " kinematic_area_gradient_relative_linear_residual="
       << result.kinematic_area_gradient_relative_linear_residual
+      << " kinematic_area_gradient_max_regularized_identity_residual="
+      << result.kinematic_area_gradient_max_regularized_identity_residual
       << " kinematic_area_gradient_max_relative_regularized_identity_residual="
       << result
              .kinematic_area_gradient_max_relative_regularized_identity_residual
@@ -19742,13 +19746,75 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCached(
       solution_source);
 }
 
+struct PrescribedFieldCoefficientCheckpoint {
+  struct Field {
+    svmp::FE::FieldId id{svmp::FE::INVALID_FIELD_ID};
+    bool had_coefficients{false};
+    std::vector<svmp::FE::Real> coefficients{};
+  };
+
+  std::vector<Field> fields{};
+};
+
+PrescribedFieldCoefficientCheckpoint
+capturePrescribedFieldCoefficients(
+    const svmp::FE::systems::FESystem& system,
+    std::span<const svmp::FE::FieldId> fields)
+{
+  PrescribedFieldCoefficientCheckpoint checkpoint;
+  std::set<svmp::FE::FieldId> visited;
+  for (const auto field : fields) {
+    if (field == svmp::FE::INVALID_FIELD_ID ||
+        !visited.insert(field).second) {
+      if (field == svmp::FE::INVALID_FIELD_ID) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Cannot checkpoint an invalid prescribed field.");
+      }
+      continue;
+    }
+    const auto& record = system.fieldRecord(field);
+    if (record.source_kind !=
+        svmp::FE::systems::FieldSourceKind::PrescribedData) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Geometry transaction field '" +
+          record.name + "' is not prescribed data.");
+    }
+    const auto coefficients =
+        system.prescribedFieldCoefficients(field);
+    PrescribedFieldCoefficientCheckpoint::Field saved;
+    saved.id = field;
+    saved.had_coefficients = !coefficients.empty();
+    saved.coefficients.assign(
+        coefficients.begin(), coefficients.end());
+    checkpoint.fields.push_back(std::move(saved));
+  }
+  return checkpoint;
+}
+
+void restorePrescribedFieldCoefficients(
+    svmp::FE::systems::FESystem& system,
+    const PrescribedFieldCoefficientCheckpoint& checkpoint)
+{
+  for (const auto& field : checkpoint.fields) {
+    if (field.had_coefficients) {
+      system.setPrescribedFieldCoefficients(
+          field.id,
+          std::span<const svmp::FE::Real>(
+              field.coefficients.data(), field.coefficients.size()));
+    } else {
+      system.clearPrescribedFieldCoefficients(field.id);
+    }
+  }
+}
+
 class LevelSetMaintenanceGeometryTransaction {
 public:
   LevelSetMaintenanceGeometryTransaction(
       application::core::SimulationComponents& sim,
       svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle,
       ActiveCutContextRefreshCache& refresh_cache,
-      const std::vector<ActiveCutVolumeRequest>& requests)
+      const std::vector<ActiveCutVolumeRequest>& requests,
+      std::span<const svmp::FE::FieldId> prescribed_fields = {})
       : sim_(sim),
         lifecycle_(lifecycle),
         refresh_cache_(refresh_cache)
@@ -19763,6 +19829,9 @@ public:
       refresh_cache_backup_ = refresh_cache;
       mesh_field_checkpoint_ =
           captureActiveLevelSetMeshFields(sim, requests);
+      prescribed_field_checkpoint_ =
+          capturePrescribedFieldCoefficients(
+              *sim_.fe_system, prescribed_fields);
     } catch (...) {
       local_checkpoint_failure = std::current_exception();
     }
@@ -19935,6 +20004,7 @@ public:
     }
     std::exception_ptr first_failure;
     bool mesh_fields_restored = false;
+    bool prescribed_fields_restored = false;
     bool refresh_cache_restored = false;
     const auto attempt = [&](auto&& action) {
       try {
@@ -19957,13 +20027,18 @@ public:
         lifecycle_transaction_active_ = false;
       });
     }
-    // Transactional context callbacks can update the mesh fields and refresh
-    // cache while restoring their own state.  Restore those dependent
-    // checkpoints last on every attempt, including a retry after one of the
-    // upstream rollback operations failed.
+    // Transactional context callbacks can update mesh and prescribed fields
+    // while restoring their own state. Restore those dependent checkpoints
+    // after the context and lifecycle on every attempt, including a retry
+    // after one of the upstream rollback operations failed.
     attempt([&] {
       restoreActiveLevelSetMeshFields(sim_, mesh_field_checkpoint_);
       mesh_fields_restored = true;
+    });
+    attempt([&] {
+      restorePrescribedFieldCoefficients(
+          *sim_.fe_system, prescribed_field_checkpoint_);
+      prescribed_fields_restored = true;
     });
     attempt([&] {
       refresh_cache_ = refresh_cache_backup_;
@@ -19973,6 +20048,7 @@ public:
         system_transaction_active_ ||
         lifecycle_transaction_active_ ||
         !mesh_fields_restored ||
+        !prescribed_fields_restored ||
         !refresh_cache_restored;
     if (first_failure) {
       std::rethrow_exception(first_failure);
@@ -19985,6 +20061,7 @@ private:
   ActiveCutContextRefreshCache& refresh_cache_;
   ActiveCutContextRefreshCache refresh_cache_backup_{};
   ActiveLevelSetMeshFieldCheckpoint mesh_field_checkpoint_{};
+  PrescribedFieldCoefficientCheckpoint prescribed_field_checkpoint_{};
   bool lifecycle_transaction_active_{false};
   bool system_transaction_active_{false};
   bool publication_started_{false};
@@ -24788,6 +24865,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
   }
 
   auto& system = *sim.fe_system;
+  bindKinematicAreaGradientTractionMaintenance(system, requests);
   auto& history = *sim.time_history;
   const auto comm = activeFESystemCommunicator(system);
   const auto level_set_field =
@@ -24817,17 +24895,45 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
               request.volume_cut_request->active_side) &&
       declarations.front().parameters.surface_tension >
           svmp::FE::Real{0.0} &&
-      declarations.front().capillary_balance_method ==
-          svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
-              DiscreteEnergyVolumeStationarity &&
+      (declarations.front().capillary_balance_method ==
+           svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
+               DiscreteEnergyVolumeStationarity ||
+       declarations.front().capillary_balance_method ==
+           svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
+               KinematicAreaGradientEnergyTraction) &&
       declarations.front().capillary_balance_qualification ==
           svmp::FE::systems::FreeSurfaceCapillaryBalanceQualification::
               PrerequisiteOnly;
   if (globalAnyBool(!local_declaration_matches, comm)) {
     throw std::runtime_error(
-        "[svMultiPhysics::Application] Static capillary initialization requires one matching positive-tension, active-side-consistent, prerequisite-only discrete-energy free-surface declaration.");
+        "[svMultiPhysics::Application] Static capillary initialization requires one matching positive-tension, active-side-consistent, prerequisite-only discrete-energy or kinematic-area-gradient free-surface declaration.");
   }
   const auto& declaration = declarations.front();
+  const bool uses_kinematic_area_gradient_traction =
+      declaration.capillary_balance_method ==
+      svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
+          KinematicAreaGradientEnergyTraction;
+  bool local_curvature_maintenance_matches =
+      !uses_kinematic_area_gradient_traction;
+  if (uses_kinematic_area_gradient_traction) {
+    const auto curvature_field =
+        system.findFieldByName(request.curvature_field_name);
+    local_curvature_maintenance_matches =
+        request.curvature_projection_enabled &&
+        request.curvature_projection.recovery_mode ==
+            svmp::FE::level_set::LevelSetCurvatureRecoveryMode::
+                KinematicAreaGradient &&
+        request.curvature_projection
+                .kinematic_area_gradient_filter_coefficient ==
+            svmp::FE::Real{0.0} &&
+        curvature_field != svmp::FE::INVALID_FIELD_ID &&
+        curvature_field == declaration.curvature_field;
+  }
+  if (globalAnyBool(
+          !local_curvature_maintenance_matches, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary kinematic-area-gradient traction requires one enabled, zero-filter curvature projection bound to the declaration's prescribed curvature field.");
+  }
 
   const auto declaration_content_key =
       freeSurfaceDiscreteFunctionalDeclarationContentKey(declaration);
@@ -25073,8 +25179,21 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
         "[svMultiPhysics::Application] Static capillary initialization authoritative interface has no active level-set coefficients.");
   }
 
+  std::vector<svmp::FE::FieldId> transaction_prescribed_fields;
+  std::vector<LevelSetMaintenanceRequest> acceptance_curvature_requests;
+  if (uses_kinematic_area_gradient_traction) {
+    transaction_prescribed_fields.push_back(
+        declaration.curvature_field);
+    acceptance_curvature_requests.push_back(request);
+  }
   LevelSetMaintenanceGeometryTransaction transaction(
-      sim, lifecycle, refresh_cache, active_requests);
+      sim,
+      lifecycle,
+      refresh_cache,
+      active_requests,
+      std::span<const svmp::FE::FieldId>(
+          transaction_prescribed_fields.data(),
+          transaction_prescribed_fields.size()));
   const double constraint_dt =
       std::isfinite(history.dt()) && history.dt() > 0.0
           ? history.dt()
@@ -25162,6 +25281,36 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
           evaluation.diagnostic =
               "candidate_constraint_geometry_fixed_point_failed";
           return evaluation;
+        }
+
+        if (purpose ==
+                svmp::FE::level_set::
+                    LevelSetStaticCapillaryEvaluationPurpose::
+                        AcceptanceCertificate &&
+            uses_kinematic_area_gradient_traction) {
+          svmp::FE::systems::SystemStateView candidate_state;
+          candidate_state.time = history.time();
+          candidate_state.dt = constraint_dt;
+          candidate_state.effective_dt = constraint_dt;
+          candidate_state.dt_prev = history.dtPrev();
+          candidate_state.u = candidate;
+          CurvatureProjectionCache acceptance_curvature_cache;
+          const auto projected_fields =
+              projectLevelSetCurvatureFieldsFromState(
+                  sim,
+                  candidate_state,
+                  refresh_report.evaluated_state_source_revisions,
+                  acceptance_curvature_requests,
+                  history.stepIndex(),
+                  "static_capillary_acceptance_certificate",
+                  /*honor_cadence=*/false,
+                  &acceptance_curvature_cache,
+                  /*reuse_cached_on_projection_failure=*/false);
+          if (projected_fields != 1u) {
+            evaluation.diagnostic =
+                "accepted_kinematic_area_gradient_curvature_projection_count_mismatch";
+            return evaluation;
+          }
         }
 
         auto states =

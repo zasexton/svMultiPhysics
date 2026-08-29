@@ -115,6 +115,7 @@ struct LevelSetCurvatureProjectionResult {
     std::size_t kinematic_area_gradient_measure_evaluations{0};
     std::size_t kinematic_area_gradient_tie_break_vertices{0};
     std::size_t kinematic_area_gradient_linear_iterations{0};
+    bool kinematic_area_gradient_minimum_norm_solver{false};
     std::size_t kinematic_area_gradient_young_wall_count{0};
     std::size_t kinematic_area_gradient_young_wall_boundary_faces{0};
     std::size_t kinematic_area_gradient_young_wall_cut_faces{0};

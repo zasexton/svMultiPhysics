@@ -1840,6 +1840,241 @@ struct SimplexAffineGeometry {
     return measure;
 }
 
+struct DifferentiatedInterfacePoint {
+    std::array<Real, 3> point{};
+    std::array<std::array<Real, 3>, 4> derivative{};
+};
+
+[[nodiscard]] bool makeDifferentiatedInterfaceEdgeRoot(
+    std::span<const std::array<Real, 3>> coordinates,
+    std::span<const Real> signed_values,
+    std::size_t first,
+    std::size_t second,
+    DifferentiatedInterfacePoint& root) noexcept
+{
+    if (first >= coordinates.size() || second >= coordinates.size() ||
+        first >= signed_values.size() || second >= signed_values.size()) {
+        return false;
+    }
+    const Real first_value = signed_values[first];
+    const Real second_value = signed_values[second];
+    if (!((first_value < Real{0.0} && second_value > Real{0.0}) ||
+          (first_value > Real{0.0} && second_value < Real{0.0}))) {
+        return false;
+    }
+    const Real denominator = first_value - second_value;
+    const Real denominator_squared = denominator * denominator;
+    if (!(denominator_squared > Real{0.0}) ||
+        !std::isfinite(denominator_squared)) {
+        return false;
+    }
+    const Real fraction = first_value / denominator;
+    if (!(fraction > Real{0.0} && fraction < Real{1.0}) ||
+        !std::isfinite(fraction)) {
+        return false;
+    }
+
+    root = {};
+    const auto edge = subtract(coordinates[second], coordinates[first]);
+    const Real first_factor = -second_value / denominator_squared;
+    const Real second_factor = first_value / denominator_squared;
+    for (std::size_t component = 0u; component < 3u; ++component) {
+        root.point[component] =
+            coordinates[first][component] + fraction * edge[component];
+        root.derivative[first][component] =
+            first_factor * edge[component];
+        root.derivative[second][component] =
+            second_factor * edge[component];
+    }
+    return std::all_of(
+        root.point.begin(), root.point.end(),
+        [](Real value) { return std::isfinite(value); });
+}
+
+void accumulateDifferentiatedSegmentMeasure(
+    const DifferentiatedInterfacePoint& first,
+    const DifferentiatedInterfacePoint& second,
+    std::size_t coefficient_count,
+    std::span<Real> gradient,
+    Real scale = Real{1.0}) noexcept
+{
+    const auto tangent = subtract(second.point, first.point);
+    const Real length = norm(tangent);
+    if (!(length > Real{0.0}) || !std::isfinite(length)) {
+        std::fill(gradient.begin(), gradient.end(),
+                  std::numeric_limits<Real>::quiet_NaN());
+        return;
+    }
+    for (std::size_t coefficient = 0u;
+         coefficient < coefficient_count;
+         ++coefficient) {
+        const auto derivative = subtract(
+            second.derivative[coefficient],
+            first.derivative[coefficient]);
+        gradient[coefficient] +=
+            scale * dot(tangent, derivative) / length;
+    }
+}
+
+void accumulateDifferentiatedTriangleMeasure(
+    const DifferentiatedInterfacePoint& first,
+    const DifferentiatedInterfacePoint& second,
+    const DifferentiatedInterfacePoint& third,
+    std::size_t coefficient_count,
+    std::span<Real> gradient,
+    Real scale = Real{1.0}) noexcept
+{
+    const auto edge0 = subtract(second.point, first.point);
+    const auto edge1 = subtract(third.point, first.point);
+    const auto area_vector = cross(edge0, edge1);
+    const Real doubled_area = norm(area_vector);
+    if (!(doubled_area > Real{0.0}) || !std::isfinite(doubled_area)) {
+        std::fill(gradient.begin(), gradient.end(),
+                  std::numeric_limits<Real>::quiet_NaN());
+        return;
+    }
+    for (std::size_t coefficient = 0u;
+         coefficient < coefficient_count;
+         ++coefficient) {
+        const auto edge0_derivative = subtract(
+            second.derivative[coefficient],
+            first.derivative[coefficient]);
+        const auto edge1_derivative = subtract(
+            third.derivative[coefficient],
+            first.derivative[coefficient]);
+        const auto area_vector_derivative =
+            cross(edge0_derivative, edge1);
+        const auto second_term = cross(edge0, edge1_derivative);
+        const std::array<Real, 3> combined{{
+            area_vector_derivative[0] + second_term[0],
+            area_vector_derivative[1] + second_term[1],
+            area_vector_derivative[2] + second_term[2]}};
+        gradient[coefficient] +=
+            scale * Real{0.5} * dot(area_vector, combined) /
+            doubled_area;
+    }
+}
+
+[[nodiscard]] bool differentiateSimplexInterfaceMeasure(
+    const interfaces::LevelSetCellCutInput& input,
+    Real isovalue,
+    const interfaces::LevelSetCellCutResult& cut,
+    int dimension,
+    std::span<Real> gradient) noexcept
+{
+    const auto corner_count = static_cast<std::size_t>(dimension + 1);
+    if ((dimension != 2 && dimension != 3) ||
+        input.node_coordinates.size() < corner_count ||
+        input.level_set_values.size() < corner_count ||
+        gradient.size() < corner_count) {
+        return false;
+    }
+    std::fill(gradient.begin(), gradient.end(), Real{0.0});
+    std::array<Real, 4> signed_values{};
+    for (std::size_t corner = 0u; corner < corner_count; ++corner) {
+        signed_values[corner] = input.level_set_values[corner] - isovalue;
+    }
+
+    constexpr std::array<std::array<std::size_t, 2>, 6> edges{{
+        {{0u, 1u}}, {{1u, 2u}}, {{2u, 0u}},
+        {{0u, 2u}}, {{0u, 3u}}, {{1u, 3u}}}};
+    const std::array<std::array<std::size_t, 2>, 6> tetrahedron_edges{{
+        {{0u, 1u}}, {{0u, 2u}}, {{0u, 3u}},
+        {{1u, 2u}}, {{1u, 3u}}, {{2u, 3u}}}};
+    const auto& active_edges = dimension == 2 ? edges : tetrahedron_edges;
+    const std::size_t edge_count = dimension == 2 ? 3u : 6u;
+    std::vector<DifferentiatedInterfacePoint> roots;
+    roots.reserve(edge_count);
+    for (std::size_t edge = 0u; edge < edge_count; ++edge) {
+        const auto first = active_edges[edge][0];
+        const auto second = active_edges[edge][1];
+        if (!((signed_values[first] < Real{0.0} &&
+               signed_values[second] > Real{0.0}) ||
+              (signed_values[first] > Real{0.0} &&
+               signed_values[second] < Real{0.0}))) {
+            continue;
+        }
+        DifferentiatedInterfacePoint root;
+        if (!makeDifferentiatedInterfaceEdgeRoot(
+                std::span<const std::array<Real, 3>>(
+                    input.node_coordinates.data(), corner_count),
+                std::span<const Real>(signed_values.data(), corner_count),
+                first, second, root)) {
+            return false;
+        }
+        roots.push_back(root);
+    }
+
+    std::size_t active_fragment_count{0u};
+    for (const auto& fragment : cut.fragments) {
+        if (!fragment.active()) {
+            continue;
+        }
+        ++active_fragment_count;
+        if ((dimension == 2 && fragment.vertices.size() != 2u) ||
+            (dimension == 3 &&
+             (fragment.vertices.size() < 3u ||
+              fragment.vertices.size() > 4u)) ||
+            fragment.vertices.size() != roots.size()) {
+            return false;
+        }
+        std::vector<DifferentiatedInterfacePoint> ordered_roots;
+        ordered_roots.reserve(fragment.vertices.size());
+        std::vector<unsigned char> used(roots.size(), 0u);
+        for (const auto& vertex : fragment.vertices) {
+            std::size_t best = roots.size();
+            Real best_distance = std::numeric_limits<Real>::infinity();
+            for (std::size_t candidate = 0u;
+                 candidate < roots.size();
+                 ++candidate) {
+                if (used[candidate] != 0u) {
+                    continue;
+                }
+                const Real distance =
+                    norm(subtract(vertex.point, roots[candidate].point));
+                if (distance < best_distance) {
+                    best = candidate;
+                    best_distance = distance;
+                }
+            }
+            Real coordinate_scale{1.0};
+            for (const auto value : vertex.point) {
+                coordinate_scale =
+                    std::max(coordinate_scale, std::abs(value));
+            }
+            if (best >= roots.size() ||
+                best_distance >
+                    Real{4096.0} *
+                        std::numeric_limits<Real>::epsilon() *
+                        coordinate_scale) {
+                return false;
+            }
+            used[best] = 1u;
+            ordered_roots.push_back(roots[best]);
+        }
+
+        if (dimension == 2) {
+            accumulateDifferentiatedSegmentMeasure(
+                ordered_roots[0], ordered_roots[1], corner_count,
+                gradient);
+        } else {
+            for (std::size_t triangle = 1u;
+                 triangle + 1u < ordered_roots.size();
+                 ++triangle) {
+                accumulateDifferentiatedTriangleMeasure(
+                    ordered_roots[0], ordered_roots[triangle],
+                    ordered_roots[triangle + 1u], corner_count,
+                    gradient);
+            }
+        }
+    }
+    return active_fragment_count == 1u &&
+           std::all_of(
+               gradient.begin(),
+               gradient.begin() + static_cast<std::ptrdiff_t>(corner_count),
+               [](Real value) { return std::isfinite(value); });
+}
+
 [[nodiscard]] bool simplexBoundaryFaceCorners(
     ElementType type,
     LocalIndex local_face,
@@ -1983,6 +2218,97 @@ struct SimplexAffineGeometry {
     }
     success = std::isfinite(area) && area >= Real{0.0};
     return area;
+}
+
+[[nodiscard]] bool differentiateActiveBoundaryMeasure(
+    std::span<const std::array<Real, 3>> coordinates,
+    std::span<const Real> signed_values,
+    bool negative_side,
+    std::span<Real> gradient) noexcept
+{
+    const auto count = coordinates.size();
+    if (signed_values.size() != count || gradient.size() < count ||
+        (count != 2u && count != 3u)) {
+        return false;
+    }
+    std::fill(gradient.begin(), gradient.end(), Real{0.0});
+    const auto inside = [negative_side](Real value) noexcept {
+        return negative_side ? value < Real{0.0} : value > Real{0.0};
+    };
+    std::array<std::size_t, 3> inside_vertices{};
+    std::array<std::size_t, 3> outside_vertices{};
+    std::size_t inside_count{0u};
+    std::size_t outside_count{0u};
+    for (std::size_t vertex = 0u; vertex < count; ++vertex) {
+        if (signed_values[vertex] == Real{0.0}) {
+            return false;
+        }
+        if (inside(signed_values[vertex])) {
+            inside_vertices[inside_count++] = vertex;
+        } else {
+            outside_vertices[outside_count++] = vertex;
+        }
+    }
+    if (inside_count == 0u || outside_count == 0u) {
+        return false;
+    }
+
+    if (count == 2u) {
+        DifferentiatedInterfacePoint root;
+        if (!makeDifferentiatedInterfaceEdgeRoot(
+                coordinates, signed_values, 0u, 1u, root)) {
+            return false;
+        }
+        DifferentiatedInterfacePoint first;
+        first.point = coordinates[0];
+        DifferentiatedInterfacePoint second;
+        second.point = coordinates[1];
+        if (inside(signed_values[0])) {
+            accumulateDifferentiatedSegmentMeasure(
+                first, root, count, gradient);
+        } else {
+            accumulateDifferentiatedSegmentMeasure(
+                root, second, count, gradient);
+        }
+    } else if (inside_count == 1u) {
+        const auto inside_vertex = inside_vertices[0];
+        DifferentiatedInterfacePoint fixed;
+        fixed.point = coordinates[inside_vertex];
+        DifferentiatedInterfacePoint root0;
+        DifferentiatedInterfacePoint root1;
+        if (!makeDifferentiatedInterfaceEdgeRoot(
+                coordinates, signed_values, inside_vertex,
+                outside_vertices[0], root0) ||
+            !makeDifferentiatedInterfaceEdgeRoot(
+                coordinates, signed_values, inside_vertex,
+                outside_vertices[1], root1)) {
+            return false;
+        }
+        accumulateDifferentiatedTriangleMeasure(
+            fixed, root0, root1, count, gradient);
+    } else if (inside_count == 2u && outside_count == 1u) {
+        const auto outside_vertex = outside_vertices[0];
+        DifferentiatedInterfacePoint fixed;
+        fixed.point = coordinates[outside_vertex];
+        DifferentiatedInterfacePoint root0;
+        DifferentiatedInterfacePoint root1;
+        if (!makeDifferentiatedInterfaceEdgeRoot(
+                coordinates, signed_values, outside_vertex,
+                inside_vertices[0], root0) ||
+            !makeDifferentiatedInterfaceEdgeRoot(
+                coordinates, signed_values, outside_vertex,
+                inside_vertices[1], root1)) {
+            return false;
+        }
+        accumulateDifferentiatedTriangleMeasure(
+            fixed, root0, root1, count, gradient, Real{-1.0});
+    } else {
+        return false;
+    }
+    return std::all_of(
+        gradient.begin(),
+        gradient.begin() + static_cast<std::ptrdiff_t>(count),
+        [](Real value) { return std::isfinite(value); });
 }
 
 [[nodiscard]] bool accumulateKinematicAreaMass(
@@ -2197,6 +2523,187 @@ struct SimplexAffineGeometry {
     return false;
 }
 
+[[nodiscard]] bool solveKinematicAreaMassMinimumNorm(
+    const std::vector<std::map<std::size_t, Real>>& matrix,
+    std::span<const Real> rhs,
+    std::vector<Real>& solution,
+    std::size_t& iterations,
+    Real& relative_residual) noexcept
+{
+    const auto n = rhs.size();
+    if (matrix.size() != n) {
+        return false;
+    }
+    solution.assign(n, Real{0.0});
+    iterations = 0u;
+    relative_residual = std::numeric_limits<Real>::infinity();
+
+    const auto dot_product = [](std::span<const Real> a,
+                                std::span<const Real> b) noexcept {
+        Real value{0.0};
+        for (std::size_t i = 0u; i < a.size(); ++i) {
+            value += a[i] * b[i];
+        }
+        return value;
+    };
+    const auto vector_norm = [&](std::span<const Real> values) noexcept {
+        const Real norm2 = dot_product(values, values);
+        return norm2 >= Real{0.0} && std::isfinite(norm2)
+            ? std::sqrt(norm2)
+            : std::numeric_limits<Real>::infinity();
+    };
+    const auto apply = [&](std::span<const Real> x,
+                           std::vector<Real>& y) noexcept {
+        std::fill(y.begin(), y.end(), Real{0.0});
+        for (std::size_t row = 0u; row < matrix.size(); ++row) {
+            for (const auto& [column, value] : matrix[row]) {
+                if (column < x.size()) {
+                    y[row] += value * x[column];
+                }
+            }
+        }
+    };
+
+    const Real rhs_norm = vector_norm(rhs);
+    if (!std::isfinite(rhs_norm)) {
+        return false;
+    }
+    if (rhs_norm == Real{0.0}) {
+        relative_residual = Real{0.0};
+        return true;
+    }
+
+    std::vector<Real> u(rhs.begin(), rhs.end());
+    for (auto& value : u) {
+        value /= rhs_norm;
+    }
+    std::vector<Real> v(n, Real{0.0});
+    apply(u, v);
+    Real alpha = vector_norm(v);
+    if (!std::isfinite(alpha)) {
+        return false;
+    }
+    const Real initial_normal_residual = alpha * rhs_norm;
+    if (alpha == Real{0.0}) {
+        relative_residual = Real{1.0};
+        return true;
+    }
+    for (auto& value : v) {
+        value /= alpha;
+    }
+
+    std::vector<Real> w = v;
+    std::vector<Real> next_u(n, Real{0.0});
+    std::vector<Real> next_v(n, Real{0.0});
+    std::vector<Real> applied(n, Real{0.0});
+    std::vector<Real> residual(n, Real{0.0});
+    std::vector<Real> normal_residual(n, Real{0.0});
+    Real rho_bar = alpha;
+    Real phi_bar = rhs_norm;
+    constexpr Real tolerance{5.0e-13};
+
+    const auto converged = [&]() noexcept {
+        apply(solution, applied);
+        for (std::size_t i = 0u; i < n; ++i) {
+            residual[i] = rhs[i] - applied[i];
+        }
+        const Real residual_norm = vector_norm(residual);
+        if (!std::isfinite(residual_norm)) {
+            return false;
+        }
+        relative_residual = residual_norm / rhs_norm;
+        apply(residual, normal_residual);
+        const Real normal_norm = vector_norm(normal_residual);
+        if (!std::isfinite(relative_residual) ||
+            !std::isfinite(normal_norm)) {
+            return false;
+        }
+        const Real relative_normal_residual =
+            initial_normal_residual > Real{0.0}
+                ? normal_norm / initial_normal_residual
+                : normal_norm;
+        return relative_residual <= tolerance ||
+               relative_normal_residual <= tolerance;
+    };
+
+    const std::size_t max_iterations =
+        std::max<std::size_t>(200u, 20u * std::max<std::size_t>(1u, n));
+    for (std::size_t iteration = 0u;
+         iteration < max_iterations;
+         ++iteration) {
+        apply(v, next_u);
+        for (std::size_t i = 0u; i < n; ++i) {
+            next_u[i] -= alpha * u[i];
+        }
+        const Real beta = vector_norm(next_u);
+        if (!std::isfinite(beta)) {
+            return false;
+        }
+        if (beta > Real{0.0}) {
+            for (auto& value : next_u) {
+                value /= beta;
+            }
+        } else {
+            std::fill(next_u.begin(), next_u.end(), Real{0.0});
+        }
+
+        apply(next_u, next_v);
+        for (std::size_t i = 0u; i < n; ++i) {
+            next_v[i] -= beta * v[i];
+        }
+        const Real next_alpha = vector_norm(next_v);
+        if (!std::isfinite(next_alpha)) {
+            return false;
+        }
+        if (next_alpha > Real{0.0}) {
+            for (auto& value : next_v) {
+                value /= next_alpha;
+            }
+        } else {
+            std::fill(next_v.begin(), next_v.end(), Real{0.0});
+        }
+
+        const Real rho = std::hypot(rho_bar, beta);
+        if (!(rho > Real{0.0}) || !std::isfinite(rho)) {
+            return converged();
+        }
+        const Real cosine = rho_bar / rho;
+        const Real sine = beta / rho;
+        const Real theta = sine * next_alpha;
+        rho_bar = -cosine * next_alpha;
+        const Real phi = cosine * phi_bar;
+        phi_bar = sine * phi_bar;
+        const Real solution_scale = phi / rho;
+        const Real direction_scale = theta / rho;
+        for (std::size_t i = 0u; i < n; ++i) {
+            solution[i] += solution_scale * w[i];
+            w[i] = next_v[i] - direction_scale * w[i];
+        }
+        iterations = iteration + 1u;
+        u.swap(next_u);
+        v.swap(next_v);
+        alpha = next_alpha;
+
+        const Real estimated_relative_residual =
+            std::abs(phi_bar) / rhs_norm;
+        const Real estimated_normal_residual =
+            alpha * std::abs(sine * phi);
+        const Real estimated_relative_normal_residual =
+            initial_normal_residual > Real{0.0}
+                ? estimated_normal_residual /
+                      initial_normal_residual
+                : estimated_normal_residual;
+        if (estimated_relative_residual <= tolerance ||
+            estimated_relative_normal_residual <= tolerance ||
+            alpha == Real{0.0} || beta == Real{0.0}) {
+            if (converged()) {
+                return true;
+            }
+        }
+    }
+    return converged();
+}
+
 [[nodiscard]] bool recoverKinematicAreaGradientCurvature(
     const assembly::IMeshAccess& mesh,
     std::span<const Real> level_set_vertex_values,
@@ -2407,10 +2914,21 @@ struct SimplexAffineGeometry {
             return;
         }
 
-        const Real nominal_step =
-            std::pow(std::numeric_limits<Real>::epsilon(), Real{0.2}) *
-            cell_value_scale;
+        // Richardson extrapolation cancels the fourth-order term in the
+        // centered stencil, leaving a sixth-order truncation error.  Balance
+        // that error against floating-point subtraction error with h~eps^(1/7).
         std::array<Real, 4> local_gradient{};
+        if (!differentiateSimplexInterfaceMeasure(
+                input, options.isovalue, baseline_cut, dimension,
+                std::span<Real>(local_gradient.data(), corner_count))) {
+            failure =
+                "kinematic-area-gradient curvature recovery could not differentiate the fixed simplex cut";
+            return;
+        }
+
+        const Real nominal_step =
+            std::pow(std::numeric_limits<Real>::epsilon(), Real{1.0 / 7.0}) *
+            cell_value_scale;
         for (std::size_t i = 0; i < corner_count; ++i) {
             const Real margin =
                 std::abs(input.level_set_values[i] - options.isovalue);
@@ -2467,19 +2985,19 @@ struct SimplexAffineGeometry {
                 return;
             }
             const Real derivative_scale = std::max(
-                std::abs(richardson),
+                std::abs(local_gradient[i]),
                 baseline_cut.fragments.front().measure /
                     std::max(cell_value_scale,
                              std::numeric_limits<Real>::min()));
-            const Real disagreement =
-                std::abs(fourth_order_half - fourth_order_full) /
+            const Real disagreement = std::max(
+                std::abs(fourth_order_half - fourth_order_full),
+                std::abs(richardson - local_gradient[i])) /
                 std::max(derivative_scale,
                          std::numeric_limits<Real>::min());
             result.kinematic_area_gradient_max_relative_fd_disagreement =
                 std::max(
                     result.kinematic_area_gradient_max_relative_fd_disagreement,
                     disagreement);
-            local_gradient[i] = richardson;
         }
 
         for (std::size_t i = 0; i < corner_count; ++i) {
@@ -2595,9 +3113,24 @@ struct SimplexAffineGeometry {
                     return;
                 }
 
+                std::array<Real, 3> local_wall_gradient{};
+                if (!differentiateActiveBoundaryMeasure(
+                        std::span<const std::array<Real, 3>>(
+                            coordinates.data(), face_corner_count),
+                        std::span<const Real>(
+                            signed_values.data(), face_corner_count),
+                        options
+                            .kinematic_area_gradient_negative_liquid_side,
+                        std::span<Real>(local_wall_gradient.data(),
+                                        face_corner_count))) {
+                    failure =
+                        "kinematic-area-gradient Young wall recovery could not differentiate the fixed contact topology";
+                    return;
+                }
+
                 const Real nominal_step =
                     std::pow(std::numeric_limits<Real>::epsilon(),
-                             Real{0.2}) *
+                             Real{1.0 / 7.0}) *
                     face_value_scale;
                 for (std::size_t local = 0; local < face_corner_count;
                      ++local) {
@@ -2663,10 +3196,32 @@ struct SimplexAffineGeometry {
                             "kinematic-area-gradient Young wall recovery produced a nonfinite derivative";
                         return;
                     }
+                    Real measure_scale{0.0};
+                    for (const auto measure : measures) {
+                        measure_scale =
+                            std::max(measure_scale, std::abs(measure));
+                    }
+                    const Real derivative_scale = std::max(
+                        std::abs(local_wall_gradient[local]),
+                        measure_scale /
+                            std::max(face_value_scale,
+                                     std::numeric_limits<Real>::min()));
+                    const Real disagreement = std::max(
+                        std::abs(fourth_order_half - fourth_order_full),
+                        std::abs(richardson -
+                                 local_wall_gradient[local])) /
+                        std::max(derivative_scale,
+                                 std::numeric_limits<Real>::min());
+                    result
+                        .kinematic_area_gradient_max_relative_fd_disagreement =
+                        std::max(
+                            result
+                                .kinematic_area_gradient_max_relative_fd_disagreement,
+                            disagreement);
                     const auto node = static_cast<std::size_t>(
                         nodes[face_corners[local]]);
                     young_wall_gradient[node] +=
-                        coefficient * richardson;
+                        coefficient * local_wall_gradient[local];
                 }
             });
         if (!failure.empty()) {
@@ -2925,14 +3480,25 @@ struct SimplexAffineGeometry {
             }
         }
     }
-    if (!solveKinematicAreaMassSystem(
-            regularized_mass,
-            std::span<const Real>(rhs.data(), rhs.size()),
-            std::span<const Real>{},
-            options.kinematic_area_gradient_filter_coefficient > Real{0.0},
-            solved_curvature,
-            result.kinematic_area_gradient_linear_iterations,
-            result.kinematic_area_gradient_relative_linear_residual)) {
+    result.kinematic_area_gradient_minimum_norm_solver =
+        options.kinematic_area_gradient_filter_coefficient == Real{0.0};
+    const bool mass_system_solved =
+        result.kinematic_area_gradient_minimum_norm_solver
+        ? solveKinematicAreaMassMinimumNorm(
+              regularized_mass,
+              std::span<const Real>(rhs.data(), rhs.size()),
+              solved_curvature,
+              result.kinematic_area_gradient_linear_iterations,
+              result.kinematic_area_gradient_relative_linear_residual)
+        : solveKinematicAreaMassSystem(
+              regularized_mass,
+              std::span<const Real>(rhs.data(), rhs.size()),
+              std::span<const Real>{},
+              /*use_diagonal_preconditioner=*/true,
+              solved_curvature,
+              result.kinematic_area_gradient_linear_iterations,
+              result.kinematic_area_gradient_relative_linear_residual);
+    if (!mass_system_solved) {
         result.diagnostic =
             "kinematic-area-gradient curvature recovery could not solve its consistent interface system";
         return false;

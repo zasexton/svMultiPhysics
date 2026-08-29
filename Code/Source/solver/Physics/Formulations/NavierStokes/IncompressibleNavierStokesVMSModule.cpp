@@ -9157,26 +9157,28 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             effective_free_surfaces.begin(),
             effective_free_surfaces.end(),
             [](const FreeSurfaceBoundary& bc) {
-                return usesSurfaceStress(bc) &&
+                return (usesSurfaceStress(bc) ||
+                        usesKinematicAreaGradientTraction(bc)) &&
                        FE::forms::bc::isConstantScalarValue(
                            bc.surface_tension) &&
                        !FE::forms::bc::isZeroConstantScalarValue(
                            bc.surface_tension);
             });
-    const bool conservative_balance_all_surface_stress =
+    const bool conservative_balance_all_discrete_energy_tractions =
         !effective_free_surfaces.empty() &&
         std::all_of(
             effective_free_surfaces.begin(),
             effective_free_surfaces.end(),
             [](const FreeSurfaceBoundary& bc) {
-                return usesSurfaceStress(bc) &&
+                return (usesSurfaceStress(bc) ||
+                        usesKinematicAreaGradientTraction(bc)) &&
                        FE::forms::bc::isConstantScalarValue(
                            bc.surface_tension);
             });
     const bool conservative_balance_diagnostic_supported =
         conservative_balance_diagnostic_requested &&
         conservative_balance_has_surface_energy &&
-        conservative_balance_all_surface_stress;
+        conservative_balance_all_discrete_energy_tractions;
     if (conservative_balance_diagnostic_supported) {
         // The pressure part is the weak pressure work on the active liquid.
         // Prescribed exterior-pressure work is appended on each free surface.
@@ -9193,7 +9195,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         FE_LOG_WARNING(
             "IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_free_surface_conservative_balance_operators"
             " status=skipped"
-            " reason=requires_all_free_surfaces_surface_stress_and_nonzero_constant_surface_tension");
+            " reason=requires_all_free_surfaces_discrete_energy_traction_and_nonzero_constant_surface_tension");
     }
     appendCutVolumeShapeTangentForm(
         level_set_shape_tangent_form,
