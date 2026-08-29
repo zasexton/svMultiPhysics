@@ -27,6 +27,7 @@ enum class LevelSetCurvatureSmoothingMode : std::uint8_t {
 enum class LevelSetCurvatureRecoveryMode : std::uint8_t {
     LevelSetQuadratic = 0,
     GeneratedInterfacePatch = 1,
+    KinematicAreaGradient = 2,
 };
 
 [[nodiscard]] const char* levelSetCurvatureRecoveryModeName(
@@ -56,6 +57,11 @@ struct LevelSetCurvatureProjectionOptions {
     Real supplemental_sample_weight{1.0};
     LevelSetCurvatureRecoveryMode recovery_mode{
         LevelSetCurvatureRecoveryMode::LevelSetQuadratic};
+    // Dimensionless coefficient c_l for the component-wise Helmholtz radius
+    // ell_h = c_l sqrt(h_Gamma R_Gamma), where h_Gamma is the mean active
+    // graph-edge length and R_Gamma is the equal-measure circle/sphere radius.
+    // It is ignored by the other recovery modes; zero disables regularization.
+    Real kinematic_area_gradient_filter_coefficient{1.0};
     Real narrow_band_width{0.0};
     int smoothing_iterations{0};
     Real smoothing_relaxation{0.25};
@@ -91,6 +97,31 @@ struct LevelSetCurvatureProjectionResult {
         LevelSetCurvatureRecoveryMode::LevelSetQuadratic};
     std::size_t generated_interface_patch_fitted_vertices{0};
     std::size_t generated_interface_patch_expanded_vertices{0};
+    std::size_t kinematic_area_gradient_cut_cells{0};
+    std::size_t kinematic_area_gradient_operator_vertices{0};
+    std::size_t kinematic_area_gradient_operator_nonzeros{0};
+    std::size_t kinematic_area_gradient_measure_evaluations{0};
+    std::size_t kinematic_area_gradient_tie_break_vertices{0};
+    std::size_t kinematic_area_gradient_linear_iterations{0};
+    std::size_t kinematic_area_gradient_components{0};
+    Real kinematic_area_gradient_interface_measure{0.0};
+    Real kinematic_area_gradient_kinematic_mass{0.0};
+    Real kinematic_area_gradient_mass_weighted_mean_curvature{0.0};
+    Real kinematic_area_gradient_mass_weighted_rms_deviation{0.0};
+    Real kinematic_area_gradient_filter_coefficient{0.0};
+    Real kinematic_area_gradient_min_characteristic_radius{0.0};
+    Real kinematic_area_gradient_max_characteristic_radius{0.0};
+    Real kinematic_area_gradient_min_filter_radius_cells{0.0};
+    Real kinematic_area_gradient_max_filter_radius_cells{0.0};
+    Real kinematic_area_gradient_min_filter_radius{0.0};
+    Real kinematic_area_gradient_max_filter_radius{0.0};
+    Real kinematic_area_gradient_max_tie_break_value{0.0};
+    int kinematic_area_gradient_tie_break_sign{0};
+    Real kinematic_area_gradient_max_relative_fd_disagreement{0.0};
+    Real kinematic_area_gradient_max_regularized_identity_residual{0.0};
+    Real kinematic_area_gradient_max_relative_regularized_identity_residual{
+        0.0};
+    Real kinematic_area_gradient_relative_linear_residual{0.0};
     Real narrow_band_width{0.0};
     std::size_t narrow_band_vertices{0};
     std::size_t skipped_far_vertices{0};

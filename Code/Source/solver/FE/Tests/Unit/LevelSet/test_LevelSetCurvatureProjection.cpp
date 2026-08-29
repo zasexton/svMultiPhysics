@@ -330,6 +330,302 @@ private:
     std::vector<std::array<FE::Real, 3>> nodes_{};
 };
 
+class SimplexMeshAccess final : public FE::assembly::IMeshAccess {
+public:
+    SimplexMeshAccess(
+        int dimension,
+        std::vector<std::array<FE::Real, 3>> nodes,
+        std::vector<std::array<FE::GlobalIndex, 4>> cells)
+        : dimension_(dimension), nodes_(std::move(nodes)), cells_(std::move(cells))
+    {
+        if (dimension_ != 2 && dimension_ != 3) {
+            throw std::invalid_argument("simplex test mesh dimension must be two or three");
+        }
+    }
+
+    [[nodiscard]] FE::GlobalIndex numCells() const override
+    {
+        return static_cast<FE::GlobalIndex>(cells_.size());
+    }
+    [[nodiscard]] FE::GlobalIndex numOwnedCells() const override
+    {
+        return numCells();
+    }
+    [[nodiscard]] FE::GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] FE::GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] FE::GlobalIndex numVertices() const override
+    {
+        return static_cast<FE::GlobalIndex>(nodes_.size());
+    }
+    [[nodiscard]] int dimension() const override { return dimension_; }
+    [[nodiscard]] bool revisionTrackingAvailable() const override { return true; }
+    [[nodiscard]] std::uint64_t geometryRevision() const override { return 1u; }
+    [[nodiscard]] std::uint64_t topologyRevision() const override { return 1u; }
+    [[nodiscard]] std::uint64_t ownershipRevision() const override { return 1u; }
+    [[nodiscard]] std::uint64_t numberingRevision() const override { return 1u; }
+    [[nodiscard]] std::uint64_t coordinateConfigurationKey() const override
+    {
+        return 1u;
+    }
+    [[nodiscard]] bool isOwnedCell(FE::GlobalIndex) const override { return true; }
+    [[nodiscard]] FE::ElementType getCellType(FE::GlobalIndex) const override
+    {
+        return dimension_ == 2 ? FE::ElementType::Triangle3
+                               : FE::ElementType::Tetra4;
+    }
+
+    void getCellNodes(FE::GlobalIndex cell,
+                      std::vector<FE::GlobalIndex>& nodes) const override
+    {
+        const auto& simplex = cells_.at(static_cast<std::size_t>(cell));
+        nodes.assign(simplex.begin(),
+                     simplex.begin() + static_cast<std::ptrdiff_t>(dimension_ + 1));
+    }
+
+    [[nodiscard]] std::array<FE::Real, 3> getNodeCoordinates(
+        FE::GlobalIndex node) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node));
+    }
+
+    void getCellCoordinates(
+        FE::GlobalIndex cell,
+        std::vector<std::array<FE::Real, 3>>& coordinates) const override
+    {
+        std::vector<FE::GlobalIndex> nodes;
+        getCellNodes(cell, nodes);
+        coordinates.clear();
+        for (const auto node : nodes) {
+            coordinates.push_back(getNodeCoordinates(node));
+        }
+    }
+
+    [[nodiscard]] FE::LocalIndex getLocalFaceIndex(FE::GlobalIndex,
+                                                    FE::GlobalIndex) const override
+    {
+        return 0;
+    }
+    [[nodiscard]] int getBoundaryFaceMarker(FE::GlobalIndex) const override
+    {
+        return -1;
+    }
+    [[nodiscard]] std::pair<FE::GlobalIndex, FE::GlobalIndex>
+    getInteriorFaceCells(FE::GlobalIndex) const override
+    {
+        return {0, 0};
+    }
+    void forEachCell(std::function<void(FE::GlobalIndex)> callback) const override
+    {
+        for (FE::GlobalIndex cell = 0; cell < numCells(); ++cell) {
+            callback(cell);
+        }
+    }
+    void forEachOwnedCell(
+        std::function<void(FE::GlobalIndex)> callback) const override
+    {
+        forEachCell(std::move(callback));
+    }
+    void forEachBoundaryFace(
+        int,
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex)>) const override
+    {
+    }
+    void forEachInteriorFace(
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex, FE::GlobalIndex)>)
+        const override
+    {
+    }
+
+    void transformCoordinates(
+        const std::function<std::array<FE::Real, 3>(
+            const std::array<FE::Real, 3>&)>& transform)
+    {
+        for (auto& node : nodes_) {
+            node = transform(node);
+        }
+    }
+
+private:
+    int dimension_{0};
+    std::vector<std::array<FE::Real, 3>> nodes_{};
+    std::vector<std::array<FE::GlobalIndex, 4>> cells_{};
+};
+
+SimplexMeshAccess makeStructuredTriangleMesh(int subdivisions,
+                                             FE::Real minimum,
+                                             FE::Real maximum)
+{
+    const FE::Real h =
+        (maximum - minimum) / static_cast<FE::Real>(subdivisions);
+    std::vector<std::array<FE::Real, 3>> nodes;
+    nodes.reserve(static_cast<std::size_t>((subdivisions + 1) *
+                                           (subdivisions + 1)));
+    for (int j = 0; j <= subdivisions; ++j) {
+        for (int i = 0; i <= subdivisions; ++i) {
+            nodes.push_back({{
+                minimum + static_cast<FE::Real>(i) * h,
+                minimum + static_cast<FE::Real>(j) * h,
+                FE::Real{0.0}}});
+        }
+    }
+    const auto vertex = [subdivisions](int i, int j) {
+        return static_cast<FE::GlobalIndex>(j * (subdivisions + 1) + i);
+    };
+    std::vector<std::array<FE::GlobalIndex, 4>> cells;
+    cells.reserve(static_cast<std::size_t>(2 * subdivisions * subdivisions));
+    for (int j = 0; j < subdivisions; ++j) {
+        for (int i = 0; i < subdivisions; ++i) {
+            const auto v0 = vertex(i, j);
+            const auto v1 = vertex(i + 1, j);
+            const auto v2 = vertex(i + 1, j + 1);
+            const auto v3 = vertex(i, j + 1);
+            cells.push_back({{v0, v1, v2, FE::GlobalIndex{-1}}});
+            cells.push_back({{v0, v2, v3, FE::GlobalIndex{-1}}});
+        }
+    }
+    return SimplexMeshAccess(2, std::move(nodes), std::move(cells));
+}
+
+SimplexMeshAccess makeStructuredTetrahedronMesh(int subdivisions,
+                                                FE::Real minimum,
+                                                FE::Real maximum)
+{
+    const FE::Real h =
+        (maximum - minimum) / static_cast<FE::Real>(subdivisions);
+    std::vector<std::array<FE::Real, 3>> nodes;
+    const auto side = static_cast<std::size_t>(subdivisions + 1);
+    nodes.reserve(side * side * side);
+    for (int k = 0; k <= subdivisions; ++k) {
+        for (int j = 0; j <= subdivisions; ++j) {
+            for (int i = 0; i <= subdivisions; ++i) {
+                nodes.push_back({{
+                    minimum + static_cast<FE::Real>(i) * h,
+                    minimum + static_cast<FE::Real>(j) * h,
+                    minimum + static_cast<FE::Real>(k) * h}});
+            }
+        }
+    }
+    const auto vertex = [subdivisions](int i, int j, int k) {
+        return static_cast<FE::GlobalIndex>(
+            (k * (subdivisions + 1) + j) * (subdivisions + 1) + i);
+    };
+    constexpr std::array<std::array<std::size_t, 4>, 6> tetrahedra{{
+        {{0u, 1u, 2u, 6u}},
+        {{0u, 2u, 3u, 6u}},
+        {{0u, 3u, 7u, 6u}},
+        {{0u, 7u, 4u, 6u}},
+        {{0u, 4u, 5u, 6u}},
+        {{0u, 5u, 1u, 6u}},
+    }};
+    std::vector<std::array<FE::GlobalIndex, 4>> cells;
+    cells.reserve(static_cast<std::size_t>(
+        6 * subdivisions * subdivisions * subdivisions));
+    for (int k = 0; k < subdivisions; ++k) {
+        for (int j = 0; j < subdivisions; ++j) {
+            for (int i = 0; i < subdivisions; ++i) {
+                const std::array<FE::GlobalIndex, 8> box{{
+                    vertex(i, j, k),
+                    vertex(i + 1, j, k),
+                    vertex(i + 1, j + 1, k),
+                    vertex(i, j + 1, k),
+                    vertex(i, j, k + 1),
+                    vertex(i + 1, j, k + 1),
+                    vertex(i + 1, j + 1, k + 1),
+                    vertex(i, j + 1, k + 1),
+                }};
+                for (const auto& tetrahedron : tetrahedra) {
+                    cells.push_back({{
+                        box[tetrahedron[0]],
+                        box[tetrahedron[1]],
+                        box[tetrahedron[2]],
+                        box[tetrahedron[3]],
+                    }});
+                }
+            }
+        }
+    }
+    return SimplexMeshAccess(3, std::move(nodes), std::move(cells));
+}
+
+struct KinematicCurvatureEvaluation {
+    level_set::LevelSetCurvatureProjectionResult result{};
+    std::vector<FE::Real> curvature{};
+    FE::Real mean_absolute_error{0.0};
+    FE::Real root_mean_square_error{0.0};
+    FE::Real maximum_absolute_error{0.0};
+    FE::Real mean_curvature{0.0};
+    FE::Real mass_weighted_root_mean_square_error{0.0};
+    std::size_t samples{0u};
+};
+
+KinematicCurvatureEvaluation evaluateKinematicCurvature(
+    SimplexMeshAccess& mesh,
+    FE::Real radius,
+    const std::array<FE::Real, 3>& center,
+    FE::Real signed_level_set_scale = FE::Real{1.0},
+    FE::Real filter_coefficient = FE::Real{1.0})
+{
+    std::vector<FE::Real> phi(
+        static_cast<std::size_t>(mesh.numVertices()), FE::Real{0.0});
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        const auto point = mesh.getNodeCoordinates(vertex);
+        FE::Real distance2{0.0};
+        for (int component = 0; component < mesh.dimension(); ++component) {
+            const FE::Real delta =
+                point[static_cast<std::size_t>(component)] -
+                center[static_cast<std::size_t>(component)];
+            distance2 += delta * delta;
+        }
+        phi[static_cast<std::size_t>(vertex)] =
+            signed_level_set_scale * (std::sqrt(distance2) - radius);
+    }
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.recovery_mode =
+        level_set::LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
+    options.kinematic_area_gradient_filter_coefficient = filter_coefficient;
+    KinematicCurvatureEvaluation evaluation;
+    evaluation.result = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, options, evaluation.curvature);
+
+    const FE::Real orientation =
+        signed_level_set_scale > FE::Real{0.0} ? FE::Real{1.0}
+                                                : FE::Real{-1.0};
+    const FE::Real exact =
+        orientation * static_cast<FE::Real>(mesh.dimension() - 1) / radius;
+    for (const auto value : evaluation.curvature) {
+        if (value == FE::Real{0.0}) {
+            continue;
+        }
+        const FE::Real error = std::abs(value - exact);
+        evaluation.mean_absolute_error += error;
+        evaluation.root_mean_square_error += error * error;
+        evaluation.maximum_absolute_error =
+            std::max(evaluation.maximum_absolute_error, error);
+        evaluation.mean_curvature += value;
+        ++evaluation.samples;
+    }
+    if (evaluation.samples > 0u) {
+        const FE::Real denominator =
+            static_cast<FE::Real>(evaluation.samples);
+        evaluation.mean_absolute_error /= denominator;
+        evaluation.root_mean_square_error =
+            std::sqrt(evaluation.root_mean_square_error / denominator);
+        evaluation.mean_curvature /= denominator;
+    }
+    const FE::Real weighted_mean_error =
+        evaluation.result
+            .kinematic_area_gradient_mass_weighted_mean_curvature -
+        exact;
+    evaluation.mass_weighted_root_mean_square_error = std::sqrt(
+        evaluation.result
+                .kinematic_area_gradient_mass_weighted_rms_deviation *
+            evaluation.result
+                .kinematic_area_gradient_mass_weighted_rms_deviation +
+        weighted_mean_error * weighted_mean_error);
+    return evaluation;
+}
+
 FE::Real curvatureGraphTotalVariation(
     const FE::assembly::IMeshAccess& mesh,
     const std::vector<FE::Real>& values)
@@ -1858,6 +2154,50 @@ TEST(LevelSetCurvatureProjection, RejectsNegativeNarrowBandWidth)
                  std::invalid_argument);
 }
 
+TEST(LevelSetCurvatureProjection,
+     RejectsInvalidKinematicAreaGradientFilterCoefficient)
+{
+    StructuredQuadMeshAccess mesh(/*nx=*/2, /*ny=*/2, /*h=*/1.0);
+    std::vector<FE::Real> phi(static_cast<std::size_t>(mesh.numVertices()),
+                              FE::Real{0.0});
+    std::vector<FE::Real> curvature;
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.kinematic_area_gradient_filter_coefficient = FE::Real{-1.0};
+    EXPECT_THROW((void)level_set::projectLevelSetMeanCurvatureToVertices(
+                     mesh, phi, options, curvature),
+                 std::invalid_argument);
+
+    options.kinematic_area_gradient_filter_coefficient =
+        std::numeric_limits<FE::Real>::infinity();
+    EXPECT_THROW((void)level_set::projectLevelSetMeanCurvatureToVertices(
+                     mesh, phi, options, curvature),
+                 std::invalid_argument);
+}
+
+TEST(LevelSetCurvatureProjection,
+     RejectsPostSmoothingOfKinematicAreaGradientRecovery)
+{
+    auto mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/8, FE::Real{-0.70}, FE::Real{0.70});
+    std::vector<FE::Real> phi(
+        static_cast<std::size_t>(mesh.numVertices()), FE::Real{0.0});
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        const auto point = mesh.getNodeCoordinates(vertex);
+        phi[static_cast<std::size_t>(vertex)] =
+            std::hypot(point[0], point[1]) - FE::Real{0.35};
+    }
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.recovery_mode =
+        level_set::LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
+    options.smoothing_iterations = 1;
+    std::vector<FE::Real> curvature;
+    EXPECT_THROW((void)level_set::projectLevelSetMeanCurvatureToVertices(
+                     mesh, phi, options, curvature),
+                 std::invalid_argument);
+}
+
 TEST(LevelSetCurvatureProjection, RejectsInvalidLeastSquaresTolerances)
 {
     StructuredQuadMeshAccess mesh(/*nx=*/6, /*ny=*/6, /*h=*/0.1);
@@ -2114,9 +2454,445 @@ TEST(LevelSetCurvatureProjection,
                      level_set::LevelSetCurvatureRecoveryMode::
                          GeneratedInterfacePatch),
                  "generated_interface_patch");
+    EXPECT_EQ(level_set::parseLevelSetCurvatureRecoveryMode(
+                  "kinematic-area-gradient"),
+              level_set::LevelSetCurvatureRecoveryMode::
+                  KinematicAreaGradient);
+    EXPECT_STREQ(level_set::levelSetCurvatureRecoveryModeName(
+                     level_set::LevelSetCurvatureRecoveryMode::
+                         KinematicAreaGradient),
+                 "kinematic_area_gradient");
     EXPECT_THROW((void)level_set::parseLevelSetCurvatureRecoveryMode(
                      "unsupported"),
                  std::invalid_argument);
+}
+
+TEST(LevelSetCurvatureProjection,
+     KinematicAreaGradientRecoversCircleAndSphereOnSimplexMeshes)
+{
+    const auto check_contract = [](const auto& mesh,
+                                   const auto& evaluation) {
+        const auto& result = evaluation.result;
+        EXPECT_TRUE(result.success) << result.diagnostic;
+        EXPECT_EQ(evaluation.samples, result.fitted_vertices);
+        EXPECT_EQ(result.kinematic_area_gradient_operator_vertices,
+                  result.fitted_vertices);
+        EXPECT_GT(result.kinematic_area_gradient_cut_cells, 0u);
+        EXPECT_EQ(result.kinematic_area_gradient_measure_evaluations,
+                  static_cast<std::size_t>(6 * (mesh.dimension() + 1)) *
+                      result.kinematic_area_gradient_cut_cells);
+        EXPECT_GT(result.kinematic_area_gradient_linear_iterations, 0u);
+        EXPECT_EQ(result.kinematic_area_gradient_components, 1u);
+        EXPECT_GT(result.kinematic_area_gradient_interface_measure,
+                  FE::Real{0.0});
+        EXPECT_DOUBLE_EQ(
+            result.kinematic_area_gradient_filter_coefficient,
+            FE::Real{1.0});
+        EXPECT_GT(
+            result.kinematic_area_gradient_min_characteristic_radius,
+            FE::Real{0.0});
+        EXPECT_GT(result.kinematic_area_gradient_min_filter_radius_cells,
+                  FE::Real{0.0});
+        EXPECT_GE(result.kinematic_area_gradient_max_filter_radius_cells,
+                  result.kinematic_area_gradient_min_filter_radius_cells);
+        EXPECT_GT(result.kinematic_area_gradient_min_filter_radius,
+                  FE::Real{0.0});
+        EXPECT_GE(result.kinematic_area_gradient_max_filter_radius,
+                  result.kinematic_area_gradient_min_filter_radius);
+        EXPECT_LT(result.kinematic_area_gradient_max_relative_fd_disagreement,
+                  FE::Real{2.0e-5});
+        EXPECT_LT(result.kinematic_area_gradient_relative_linear_residual,
+                  FE::Real{1.0e-9});
+        EXPECT_LT(
+            result
+                .kinematic_area_gradient_max_relative_regularized_identity_residual,
+            FE::Real{1.0e-7});
+    };
+
+    auto circle_mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/24, FE::Real{-0.70}, FE::Real{0.70});
+    const auto circle = evaluateKinematicCurvature(
+        circle_mesh,
+        FE::Real{0.437},
+        {{FE::Real{0.013}, FE::Real{-0.021}, FE::Real{0.0}}});
+    auto sphere_mesh = makeStructuredTetrahedronMesh(
+        /*subdivisions=*/10, FE::Real{-0.65}, FE::Real{0.65});
+    const auto sphere = evaluateKinematicCurvature(
+        sphere_mesh,
+        FE::Real{0.391},
+        {{FE::Real{0.017}, FE::Real{-0.011}, FE::Real{0.009}}});
+
+    check_contract(circle_mesh, circle);
+    check_contract(sphere_mesh, sphere);
+    RecordProperty("kinematic_area_gradient_circle_mean_error",
+                   circle.mean_absolute_error);
+    RecordProperty("kinematic_area_gradient_circle_max_error",
+                   circle.maximum_absolute_error);
+    RecordProperty("kinematic_area_gradient_circle_mean_value",
+                   circle.mean_curvature);
+    RecordProperty("kinematic_area_gradient_sphere_mean_error",
+                   sphere.mean_absolute_error);
+    RecordProperty("kinematic_area_gradient_sphere_max_error",
+                   sphere.maximum_absolute_error);
+    RecordProperty("kinematic_area_gradient_sphere_mean_value",
+                   sphere.mean_curvature);
+    EXPECT_LT(circle.mean_absolute_error, FE::Real{0.20});
+    EXPECT_LT(circle.maximum_absolute_error, FE::Real{0.90});
+    EXPECT_LT(sphere.mean_absolute_error, FE::Real{0.45});
+    EXPECT_LT(sphere.maximum_absolute_error, FE::Real{1.70});
+}
+
+TEST(LevelSetCurvatureProjection,
+     KinematicAreaGradientCurvatureConvergesUnderSimplexRefinement)
+{
+    std::array<FE::Real, 4> circle_errors{};
+    constexpr std::array<int, 4> circle_levels{{12, 24, 48, 96}};
+    for (std::size_t level = 0; level < circle_levels.size(); ++level) {
+        auto mesh = makeStructuredTriangleMesh(
+            circle_levels[level], FE::Real{-0.70}, FE::Real{0.70});
+        const auto evaluation = evaluateKinematicCurvature(
+            mesh,
+            FE::Real{0.437},
+            {{FE::Real{0.013}, FE::Real{-0.021}, FE::Real{0.0}}});
+        ASSERT_TRUE(evaluation.result.success)
+            << evaluation.result.diagnostic;
+        circle_errors[level] =
+            evaluation.mass_weighted_root_mean_square_error;
+    }
+
+    std::array<FE::Real, 3> sphere_errors{};
+    constexpr std::array<int, 3> sphere_levels{{6, 10, 14}};
+    for (std::size_t level = 0; level < sphere_levels.size(); ++level) {
+        auto mesh = makeStructuredTetrahedronMesh(
+            sphere_levels[level], FE::Real{-0.65}, FE::Real{0.65});
+        const auto evaluation = evaluateKinematicCurvature(
+            mesh,
+            FE::Real{0.391},
+            {{FE::Real{0.017}, FE::Real{-0.011}, FE::Real{0.009}}});
+        ASSERT_TRUE(evaluation.result.success)
+            << evaluation.result.diagnostic;
+        sphere_errors[level] =
+            evaluation.mass_weighted_root_mean_square_error;
+    }
+
+    const auto order = [](FE::Real coarse_error,
+                          FE::Real fine_error,
+                          int coarse_subdivisions,
+                          int fine_subdivisions) {
+        return std::log(coarse_error / fine_error) /
+               std::log(static_cast<FE::Real>(fine_subdivisions) /
+                        static_cast<FE::Real>(coarse_subdivisions));
+    };
+    const FE::Real circle_order_0 = order(
+        circle_errors[0], circle_errors[1], circle_levels[0], circle_levels[1]);
+    const FE::Real circle_order_1 = order(
+        circle_errors[1], circle_errors[2], circle_levels[1], circle_levels[2]);
+    const FE::Real circle_order_2 = order(
+        circle_errors[2], circle_errors[3], circle_levels[2], circle_levels[3]);
+    const FE::Real sphere_order_0 = order(
+        sphere_errors[0], sphere_errors[1], sphere_levels[0], sphere_levels[1]);
+    const FE::Real sphere_order_1 = order(
+        sphere_errors[1], sphere_errors[2], sphere_levels[1], sphere_levels[2]);
+
+    RecordProperty("kinematic_area_gradient_circle_rms_error_n12",
+                   circle_errors[0]);
+    RecordProperty("kinematic_area_gradient_circle_rms_error_n24",
+                   circle_errors[1]);
+    RecordProperty("kinematic_area_gradient_circle_rms_error_n48",
+                   circle_errors[2]);
+    RecordProperty("kinematic_area_gradient_circle_rms_error_n96",
+                   circle_errors[3]);
+    RecordProperty("kinematic_area_gradient_circle_order_12_24",
+                   circle_order_0);
+    RecordProperty("kinematic_area_gradient_circle_order_24_48",
+                   circle_order_1);
+    RecordProperty("kinematic_area_gradient_circle_order_48_96",
+                   circle_order_2);
+    RecordProperty("kinematic_area_gradient_sphere_rms_error_n6",
+                   sphere_errors[0]);
+    RecordProperty("kinematic_area_gradient_sphere_rms_error_n10",
+                   sphere_errors[1]);
+    RecordProperty("kinematic_area_gradient_sphere_rms_error_n14",
+                   sphere_errors[2]);
+    RecordProperty("kinematic_area_gradient_sphere_order_6_10",
+                   sphere_order_0);
+    RecordProperty("kinematic_area_gradient_sphere_order_10_14",
+                   sphere_order_1);
+
+    EXPECT_GT(circle_order_0, FE::Real{0.50});
+    EXPECT_GT(circle_order_1, FE::Real{0.20});
+    EXPECT_GT(circle_order_2, FE::Real{0.50});
+    EXPECT_GT(sphere_order_0, FE::Real{0.35});
+    EXPECT_GT(sphere_order_1, FE::Real{0.35});
+}
+
+TEST(LevelSetCurvatureProjection,
+     KinematicAreaGradientCurvatureRespectsOrientationScaleAndRigidMotion)
+{
+    constexpr FE::Real radius{0.437};
+    constexpr std::array<FE::Real, 3> center{{0.013, -0.021, 0.0}};
+    auto base_mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/20, FE::Real{-0.70}, FE::Real{0.70});
+    const auto base =
+        evaluateKinematicCurvature(base_mesh, radius, center);
+    const auto phi_scaled = evaluateKinematicCurvature(
+        base_mesh, radius, center, FE::Real{7.25});
+    const auto orientation_reversed = evaluateKinematicCurvature(
+        base_mesh, radius, center, FE::Real{-3.40});
+
+    constexpr FE::Real angle{0.47};
+    const FE::Real cosine = std::cos(angle);
+    const FE::Real sine = std::sin(angle);
+    constexpr std::array<FE::Real, 3> shift{{0.31, -0.27, 0.0}};
+    const auto rigid_transform = [&](const std::array<FE::Real, 3>& point) {
+        return std::array<FE::Real, 3>{{
+            cosine * point[0] - sine * point[1] + shift[0],
+            sine * point[0] + cosine * point[1] + shift[1],
+            point[2]}};
+    };
+    auto rigid_mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/20, FE::Real{-0.70}, FE::Real{0.70});
+    rigid_mesh.transformCoordinates(rigid_transform);
+    const auto rigid = evaluateKinematicCurvature(
+        rigid_mesh, radius, rigid_transform(center));
+
+    constexpr FE::Real physical_scale{2.30};
+    const auto scale_transform = [](const std::array<FE::Real, 3>& point) {
+        return std::array<FE::Real, 3>{{
+            physical_scale * point[0],
+            physical_scale * point[1],
+            physical_scale * point[2]}};
+    };
+    auto physical_scale_mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/20, FE::Real{-0.70}, FE::Real{0.70});
+    physical_scale_mesh.transformCoordinates(scale_transform);
+    const auto physically_scaled = evaluateKinematicCurvature(
+        physical_scale_mesh,
+        physical_scale * radius,
+        scale_transform(center));
+
+    ASSERT_TRUE(base.result.success) << base.result.diagnostic;
+    ASSERT_TRUE(phi_scaled.result.success) << phi_scaled.result.diagnostic;
+    ASSERT_TRUE(orientation_reversed.result.success)
+        << orientation_reversed.result.diagnostic;
+    ASSERT_TRUE(rigid.result.success) << rigid.result.diagnostic;
+    ASSERT_TRUE(physically_scaled.result.success)
+        << physically_scaled.result.diagnostic;
+    ASSERT_EQ(phi_scaled.curvature.size(), base.curvature.size());
+    ASSERT_EQ(orientation_reversed.curvature.size(), base.curvature.size());
+    ASSERT_EQ(rigid.curvature.size(), base.curvature.size());
+    ASSERT_EQ(physically_scaled.curvature.size(), base.curvature.size());
+
+    FE::Real maximum_phi_scale_difference{0.0};
+    FE::Real maximum_orientation_sum{0.0};
+    FE::Real maximum_rigid_difference{0.0};
+    FE::Real maximum_physical_scale_difference{0.0};
+    for (std::size_t vertex = 0; vertex < base.curvature.size(); ++vertex) {
+        maximum_phi_scale_difference = std::max(
+            maximum_phi_scale_difference,
+            std::abs(phi_scaled.curvature[vertex] -
+                     base.curvature[vertex]));
+        maximum_orientation_sum = std::max(
+            maximum_orientation_sum,
+            std::abs(orientation_reversed.curvature[vertex] +
+                     base.curvature[vertex]));
+        maximum_rigid_difference = std::max(
+            maximum_rigid_difference,
+            std::abs(rigid.curvature[vertex] - base.curvature[vertex]));
+        maximum_physical_scale_difference = std::max(
+            maximum_physical_scale_difference,
+            std::abs(physical_scale * physically_scaled.curvature[vertex] -
+                     base.curvature[vertex]));
+    }
+
+    RecordProperty("kinematic_area_gradient_max_phi_scale_difference",
+                   maximum_phi_scale_difference);
+    RecordProperty("kinematic_area_gradient_max_orientation_sum",
+                   maximum_orientation_sum);
+    RecordProperty("kinematic_area_gradient_max_rigid_difference",
+                   maximum_rigid_difference);
+    RecordProperty("kinematic_area_gradient_max_physical_scale_difference",
+                   maximum_physical_scale_difference);
+    EXPECT_LT(maximum_phi_scale_difference, FE::Real{2.0e-6});
+    EXPECT_LT(maximum_orientation_sum, FE::Real{2.0e-6});
+    EXPECT_LT(maximum_rigid_difference, FE::Real{2.0e-6});
+    EXPECT_LT(maximum_physical_scale_difference, FE::Real{2.0e-6});
+    EXPECT_NEAR(
+        physically_scaled.result.kinematic_area_gradient_max_filter_radius,
+        physical_scale *
+            base.result.kinematic_area_gradient_max_filter_radius,
+        FE::Real{1.0e-13});
+}
+
+TEST(LevelSetCurvatureProjection,
+     KinematicAreaGradientUsesIndependentDisconnectedComponentScales)
+{
+    auto mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/48, FE::Real{-1.20}, FE::Real{1.20});
+    constexpr std::array<FE::Real, 3> center0{{-0.547, 0.031, 0.0}};
+    constexpr std::array<FE::Real, 3> center1{{0.503, -0.043, 0.0}};
+    constexpr FE::Real radius0{0.283};
+    constexpr FE::Real radius1{0.193};
+    std::vector<FE::Real> phi(
+        static_cast<std::size_t>(mesh.numVertices()), FE::Real{0.0});
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        const auto point = mesh.getNodeCoordinates(vertex);
+        const auto distance = [&](const std::array<FE::Real, 3>& center) {
+            const FE::Real dx = point[0] - center[0];
+            const FE::Real dy = point[1] - center[1];
+            return std::sqrt(dx * dx + dy * dy);
+        };
+        phi[static_cast<std::size_t>(vertex)] =
+            std::min(distance(center0) - radius0,
+                     distance(center1) - radius1);
+    }
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.recovery_mode =
+        level_set::LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
+    std::vector<FE::Real> curvature;
+    const auto result = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, options, curvature);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    ASSERT_EQ(result.kinematic_area_gradient_components, 2u);
+
+    std::array<FE::Real, 2> mean_errors{};
+    std::array<std::size_t, 2> samples{};
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        const FE::Real value = curvature[static_cast<std::size_t>(vertex)];
+        if (value == FE::Real{0.0}) {
+            continue;
+        }
+        const auto point = mesh.getNodeCoordinates(vertex);
+        const FE::Real d0 = std::hypot(point[0] - center0[0],
+                                      point[1] - center0[1]);
+        const FE::Real d1 = std::hypot(point[0] - center1[0],
+                                      point[1] - center1[1]);
+        const std::size_t component =
+            std::abs(d0 - radius0) <= std::abs(d1 - radius1) ? 0u : 1u;
+        const FE::Real exact =
+            component == 0u ? FE::Real{1.0} / radius0
+                            : FE::Real{1.0} / radius1;
+        mean_errors[component] += std::abs(value - exact);
+        ++samples[component];
+    }
+    ASSERT_GT(samples[0], 0u);
+    ASSERT_GT(samples[1], 0u);
+    mean_errors[0] /= static_cast<FE::Real>(samples[0]);
+    mean_errors[1] /= static_cast<FE::Real>(samples[1]);
+
+    const FE::Real expected_measure =
+        FE::Real{2.0} * std::acos(FE::Real{-1.0}) * (radius0 + radius1);
+    RecordProperty("kinematic_area_gradient_two_component_error_large",
+                   mean_errors[0]);
+    RecordProperty("kinematic_area_gradient_two_component_error_small",
+                   mean_errors[1]);
+    EXPECT_NEAR(result.kinematic_area_gradient_interface_measure,
+                expected_measure,
+                FE::Real{0.015} * expected_measure);
+    EXPECT_NEAR(result.kinematic_area_gradient_min_characteristic_radius,
+                radius1,
+                FE::Real{0.015} * radius1);
+    EXPECT_NEAR(result.kinematic_area_gradient_max_characteristic_radius,
+                radius0,
+                FE::Real{0.015} * radius0);
+    EXPECT_LT(mean_errors[0], FE::Real{0.30});
+    EXPECT_LT(mean_errors[1], FE::Real{0.50});
+}
+
+TEST(LevelSetCurvatureProjection,
+     KinematicAreaGradientCanDisableRegularizationExplicitly)
+{
+    auto mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/16, FE::Real{-0.70}, FE::Real{0.70});
+    const auto evaluation = evaluateKinematicCurvature(
+        mesh,
+        FE::Real{0.437},
+        {{FE::Real{0.013}, FE::Real{-0.021}, FE::Real{0.0}}},
+        FE::Real{1.0},
+        FE::Real{0.0});
+    ASSERT_TRUE(evaluation.result.success)
+        << evaluation.result.diagnostic;
+    EXPECT_EQ(evaluation.result.kinematic_area_gradient_linear_iterations, 0u);
+    EXPECT_DOUBLE_EQ(
+        evaluation.result.kinematic_area_gradient_min_filter_radius,
+        FE::Real{0.0});
+    EXPECT_DOUBLE_EQ(
+        evaluation.result.kinematic_area_gradient_max_filter_radius,
+        FE::Real{0.0});
+    EXPECT_DOUBLE_EQ(
+        evaluation.result.kinematic_area_gradient_min_filter_radius_cells,
+        FE::Real{0.0});
+    EXPECT_DOUBLE_EQ(
+        evaluation.result.kinematic_area_gradient_max_filter_radius_cells,
+        FE::Real{0.0});
+}
+
+TEST(LevelSetCurvatureProjection,
+     KinematicAreaGradientRecordsAndResolvesExactVertexCrossings)
+{
+    auto mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/20, FE::Real{-0.70}, FE::Real{0.70});
+    constexpr FE::Real radius{0.35};
+    const auto evaluation = evaluateKinematicCurvature(
+        mesh,
+        radius,
+        {{FE::Real{0.0}, FE::Real{0.0}, FE::Real{0.0}}});
+    ASSERT_TRUE(evaluation.result.success)
+        << evaluation.result.diagnostic;
+    EXPECT_GT(
+        evaluation.result.kinematic_area_gradient_tie_break_vertices,
+        0u);
+    EXPECT_NE(evaluation.result.kinematic_area_gradient_tie_break_sign, 0);
+    EXPECT_GT(evaluation.result.kinematic_area_gradient_max_tie_break_value,
+              FE::Real{0.0});
+    EXPECT_EQ(evaluation.result.kinematic_area_gradient_components, 1u);
+    EXPECT_NEAR(
+        evaluation.result.kinematic_area_gradient_max_characteristic_radius,
+        radius,
+        FE::Real{0.02} * radius);
+    EXPECT_LT(evaluation.mean_absolute_error, FE::Real{0.30});
+    EXPECT_LT(evaluation.maximum_absolute_error, FE::Real{1.20});
+}
+
+TEST(LevelSetCurvatureProjection,
+     KinematicAreaGradientRegularizationPreservesMeanAndReducesVariation)
+{
+    auto mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/20, FE::Real{-0.70}, FE::Real{0.70});
+    constexpr FE::Real radius{0.437};
+    constexpr std::array<FE::Real, 3> center{{0.013, -0.021, 0.0}};
+    constexpr std::array<FE::Real, 4> coefficients{{0.0, 0.5, 1.0, 2.0}};
+    std::array<KinematicCurvatureEvaluation, coefficients.size()>
+        evaluations{};
+    for (std::size_t index = 0; index < coefficients.size(); ++index) {
+        evaluations[index] = evaluateKinematicCurvature(
+            mesh,
+            radius,
+            center,
+            FE::Real{1.0},
+            coefficients[index]);
+        ASSERT_TRUE(evaluations[index].result.success)
+            << evaluations[index].result.diagnostic;
+    }
+
+    const FE::Real reference_mean =
+        evaluations.front()
+            .result.kinematic_area_gradient_mass_weighted_mean_curvature;
+    for (const auto& evaluation : evaluations) {
+        EXPECT_NEAR(
+            evaluation.result
+                .kinematic_area_gradient_mass_weighted_mean_curvature,
+            reference_mean,
+            FE::Real{2.0e-8});
+    }
+    for (std::size_t index = 1; index < evaluations.size(); ++index) {
+        EXPECT_LT(
+            evaluations[index]
+                .result.kinematic_area_gradient_mass_weighted_rms_deviation,
+            evaluations[index - 1u]
+                .result.kinematic_area_gradient_mass_weighted_rms_deviation);
+    }
 }
 
 TEST(LevelSetCurvatureProjection,

@@ -1,5 +1,7 @@
 #include "LevelSet/LevelSetCurvatureProjection.h"
 
+#include "Interfaces/LevelSetInterfaceBuilder.h"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -7,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <queue>
 #include <span>
@@ -82,6 +85,8 @@ const char* levelSetCurvatureRecoveryModeName(
             return "level_set_quadratic";
         case LevelSetCurvatureRecoveryMode::GeneratedInterfacePatch:
             return "generated_interface_patch";
+        case LevelSetCurvatureRecoveryMode::KinematicAreaGradient:
+            return "kinematic_area_gradient";
     }
     return "unknown";
 }
@@ -99,9 +104,14 @@ LevelSetCurvatureRecoveryMode parseLevelSetCurvatureRecoveryMode(
         token == "generatedinterfacepatch") {
         return LevelSetCurvatureRecoveryMode::GeneratedInterfacePatch;
     }
+    if (token == "areagradient" || token == "kinematicarea" ||
+        token == "kinematicareagradient" ||
+        token == "discreteareagradient") {
+        return LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
+    }
     throw std::invalid_argument(
         "level-set curvature recovery mode '" + std::string(value) +
-        "' must be level_set_quadratic or generated_interface_patch");
+        "' must be level_set_quadratic, generated_interface_patch, or kinematic_area_gradient");
 }
 
 namespace {
@@ -810,6 +820,1058 @@ struct WeightedNeighbor {
     return {{a[1] * b[2] - a[2] * b[1],
              a[2] * b[0] - a[0] * b[2],
              a[0] * b[1] - a[1] * b[0]}};
+}
+
+struct SimplexAffineGeometry {
+    int dimension{0};
+    std::size_t corner_count{0u};
+    std::array<Real, 3> origin{};
+    std::array<std::array<Real, 3>, 3> edges{};
+    std::array<std::array<Real, 3>, 3> inverse_gram{};
+    Real gradient_norm{0.0};
+};
+
+[[nodiscard]] bool invertSimplexGram(
+    std::array<std::array<Real, 3>, 3> matrix,
+    int dimension,
+    std::array<std::array<Real, 3>, 3>& inverse) noexcept
+{
+    inverse = {};
+    if (dimension == 2) {
+        const Real determinant =
+            matrix[0][0] * matrix[1][1] -
+            matrix[0][1] * matrix[1][0];
+        const Real scale = std::max(
+            std::abs(matrix[0][0] * matrix[1][1]),
+            std::abs(matrix[0][1] * matrix[1][0]));
+        if (!(std::abs(determinant) >
+              Real{128.0} * std::numeric_limits<Real>::epsilon() *
+                  std::max(scale, std::numeric_limits<Real>::min())) ||
+            !std::isfinite(determinant)) {
+            return false;
+        }
+        inverse[0][0] = matrix[1][1] / determinant;
+        inverse[0][1] = -matrix[0][1] / determinant;
+        inverse[1][0] = -matrix[1][0] / determinant;
+        inverse[1][1] = matrix[0][0] / determinant;
+        return true;
+    }
+    if (dimension != 3) {
+        return false;
+    }
+
+    const Real determinant =
+        matrix[0][0] *
+            (matrix[1][1] * matrix[2][2] -
+             matrix[1][2] * matrix[2][1]) -
+        matrix[0][1] *
+            (matrix[1][0] * matrix[2][2] -
+             matrix[1][2] * matrix[2][0]) +
+        matrix[0][2] *
+            (matrix[1][0] * matrix[2][1] -
+             matrix[1][1] * matrix[2][0]);
+    Real scale{0.0};
+    for (int i = 0; i < 3; ++i) {
+        scale = std::max(
+            scale,
+            std::abs(matrix[0][static_cast<std::size_t>(i)]) *
+                std::max(
+                    std::abs(matrix[1][(static_cast<std::size_t>(i) + 1u) % 3u] *
+                             matrix[2][(static_cast<std::size_t>(i) + 2u) % 3u]),
+                    std::abs(matrix[1][(static_cast<std::size_t>(i) + 2u) % 3u] *
+                             matrix[2][(static_cast<std::size_t>(i) + 1u) % 3u])));
+    }
+    if (!(std::abs(determinant) >
+          Real{256.0} * std::numeric_limits<Real>::epsilon() *
+              std::max(scale, std::numeric_limits<Real>::min())) ||
+        !std::isfinite(determinant)) {
+        return false;
+    }
+
+    inverse[0][0] =
+        (matrix[1][1] * matrix[2][2] -
+         matrix[1][2] * matrix[2][1]) /
+        determinant;
+    inverse[0][1] =
+        (matrix[0][2] * matrix[2][1] -
+         matrix[0][1] * matrix[2][2]) /
+        determinant;
+    inverse[0][2] =
+        (matrix[0][1] * matrix[1][2] -
+         matrix[0][2] * matrix[1][1]) /
+        determinant;
+    inverse[1][0] =
+        (matrix[1][2] * matrix[2][0] -
+         matrix[1][0] * matrix[2][2]) /
+        determinant;
+    inverse[1][1] =
+        (matrix[0][0] * matrix[2][2] -
+         matrix[0][2] * matrix[2][0]) /
+        determinant;
+    inverse[1][2] =
+        (matrix[0][2] * matrix[1][0] -
+         matrix[0][0] * matrix[1][2]) /
+        determinant;
+    inverse[2][0] =
+        (matrix[1][0] * matrix[2][1] -
+         matrix[1][1] * matrix[2][0]) /
+        determinant;
+    inverse[2][1] =
+        (matrix[0][1] * matrix[2][0] -
+         matrix[0][0] * matrix[2][1]) /
+        determinant;
+    inverse[2][2] =
+        (matrix[0][0] * matrix[1][1] -
+         matrix[0][1] * matrix[1][0]) /
+        determinant;
+    return true;
+}
+
+[[nodiscard]] bool makeSimplexAffineGeometry(
+    std::span<const std::array<Real, 3>> coordinates,
+    std::span<const Real> values,
+    int dimension,
+    SimplexAffineGeometry& geometry) noexcept
+{
+    const auto corner_count = static_cast<std::size_t>(dimension + 1);
+    if ((dimension != 2 && dimension != 3) ||
+        coordinates.size() < corner_count || values.size() < corner_count) {
+        return false;
+    }
+    geometry = {};
+    geometry.dimension = dimension;
+    geometry.corner_count = corner_count;
+    geometry.origin = coordinates.front();
+    std::array<std::array<Real, 3>, 3> gram{};
+    for (int i = 0; i < dimension; ++i) {
+        geometry.edges[static_cast<std::size_t>(i)] =
+            subtract(coordinates[static_cast<std::size_t>(i + 1)],
+                     geometry.origin);
+        for (int j = 0; j < dimension; ++j) {
+            gram[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] =
+                dot(geometry.edges[static_cast<std::size_t>(i)],
+                    subtract(coordinates[static_cast<std::size_t>(j + 1)],
+                             geometry.origin));
+        }
+    }
+    if (!invertSimplexGram(gram, dimension, geometry.inverse_gram)) {
+        return false;
+    }
+
+    std::array<Real, 3> gradient{};
+    for (int edge = 0; edge < dimension; ++edge) {
+        Real coefficient{0.0};
+        for (int value = 0; value < dimension; ++value) {
+            coefficient +=
+                (values[static_cast<std::size_t>(value + 1)] - values[0]) *
+                geometry.inverse_gram[static_cast<std::size_t>(value)]
+                                     [static_cast<std::size_t>(edge)];
+        }
+        for (int component = 0; component < 3; ++component) {
+            gradient[static_cast<std::size_t>(component)] +=
+                coefficient *
+                geometry.edges[static_cast<std::size_t>(edge)]
+                              [static_cast<std::size_t>(component)];
+        }
+    }
+    geometry.gradient_norm = norm(gradient);
+    return geometry.gradient_norm > Real{0.0} &&
+           std::isfinite(geometry.gradient_norm);
+}
+
+[[nodiscard]] bool simplexShapeValues(
+    const SimplexAffineGeometry& geometry,
+    const std::array<Real, 3>& point,
+    std::array<Real, 4>& shape) noexcept
+{
+    shape = {};
+    const auto displacement = subtract(point, geometry.origin);
+    Real sum{0.0};
+    for (int i = 0; i < geometry.dimension; ++i) {
+        Real value{0.0};
+        for (int j = 0; j < geometry.dimension; ++j) {
+            value +=
+                geometry.inverse_gram[static_cast<std::size_t>(i)]
+                                     [static_cast<std::size_t>(j)] *
+                dot(geometry.edges[static_cast<std::size_t>(j)],
+                    displacement);
+        }
+        shape[static_cast<std::size_t>(i + 1)] = value;
+        sum += value;
+    }
+    shape[0] = Real{1.0} - sum;
+    return std::all_of(
+        shape.begin(),
+        shape.begin() + static_cast<std::ptrdiff_t>(geometry.corner_count),
+        [](Real value) { return std::isfinite(value); });
+}
+
+[[nodiscard]] Real activeInterfaceMeasure(
+    const interfaces::CutInterfaceDomainRequest& request,
+    const interfaces::LevelSetCellCutInput& input,
+    int dimension,
+    bool& success)
+{
+    const auto cut = dimension == 2
+        ? interfaces::cutLinearLevelSetCell2D(request, input)
+        : interfaces::cutLinearLevelSetCell3D(request, input);
+    success = cut.supported;
+    Real measure{0.0};
+    for (const auto& fragment : cut.fragments) {
+        if (fragment.active()) {
+            measure += fragment.measure;
+        }
+    }
+    success = success && std::isfinite(measure) && measure >= Real{0.0};
+    return measure;
+}
+
+[[nodiscard]] bool accumulateKinematicAreaMass(
+    const interfaces::LevelSetCellCutResult& cut,
+    const SimplexAffineGeometry& geometry,
+    std::span<Real> local_mass,
+    std::array<std::array<Real, 4>, 4>& local_matrix) noexcept
+{
+    if (local_mass.size() < geometry.corner_count) {
+        return false;
+    }
+    for (const auto& fragment : cut.fragments) {
+        if (!fragment.active()) {
+            continue;
+        }
+        if (geometry.dimension == 2) {
+            if (fragment.vertices.size() != 2u) {
+                return false;
+            }
+            const auto& a = fragment.vertices[0].point;
+            const auto& b = fragment.vertices[1].point;
+            const Real length = norm(subtract(b, a));
+            std::array<Real, 4> shape_a{};
+            std::array<Real, 4> shape_b{};
+            if (!(length > Real{0.0}) || !std::isfinite(length) ||
+                !simplexShapeValues(geometry, a, shape_a) ||
+                !simplexShapeValues(geometry, b, shape_b)) {
+                return false;
+            }
+            for (std::size_t i = 0; i < geometry.corner_count; ++i) {
+                local_mass[i] +=
+                    length * (shape_a[i] + shape_b[i]) /
+                    (Real{2.0} * geometry.gradient_norm);
+                for (std::size_t j = 0; j < geometry.corner_count; ++j) {
+                    local_matrix[i][j] +=
+                        length *
+                        (Real{2.0} * shape_a[i] * shape_a[j] +
+                         shape_a[i] * shape_b[j] +
+                         shape_b[i] * shape_a[j] +
+                         Real{2.0} * shape_b[i] * shape_b[j]) /
+                        (Real{6.0} * geometry.gradient_norm);
+                }
+            }
+            continue;
+        }
+
+        if (fragment.vertices.size() < 3u) {
+            return false;
+        }
+        const auto& a = fragment.vertices.front().point;
+        for (std::size_t triangle = 1u;
+             triangle + 1u < fragment.vertices.size();
+             ++triangle) {
+            const auto& b = fragment.vertices[triangle].point;
+            const auto& c = fragment.vertices[triangle + 1u].point;
+            const Real area =
+                Real{0.5} * norm(cross(subtract(b, a), subtract(c, a)));
+            std::array<Real, 4> shape_a{};
+            std::array<Real, 4> shape_b{};
+            std::array<Real, 4> shape_c{};
+            if (!(area > Real{0.0}) || !std::isfinite(area) ||
+                !simplexShapeValues(geometry, a, shape_a) ||
+                !simplexShapeValues(geometry, b, shape_b) ||
+                !simplexShapeValues(geometry, c, shape_c)) {
+                return false;
+            }
+            for (std::size_t i = 0; i < geometry.corner_count; ++i) {
+                local_mass[i] +=
+                    area * (shape_a[i] + shape_b[i] + shape_c[i]) /
+                    (Real{3.0} * geometry.gradient_norm);
+                for (std::size_t j = 0; j < geometry.corner_count; ++j) {
+                    const Real diagonal =
+                        Real{2.0} *
+                        (shape_a[i] * shape_a[j] +
+                         shape_b[i] * shape_b[j] +
+                         shape_c[i] * shape_c[j]);
+                    const Real cross_terms =
+                        shape_a[i] * shape_b[j] +
+                        shape_b[i] * shape_a[j] +
+                        shape_a[i] * shape_c[j] +
+                        shape_c[i] * shape_a[j] +
+                        shape_b[i] * shape_c[j] +
+                        shape_c[i] * shape_b[j];
+                    local_matrix[i][j] +=
+                        area * (diagonal + cross_terms) /
+                        (Real{12.0} * geometry.gradient_norm);
+                }
+            }
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool solveKinematicAreaMassSystem(
+    const std::vector<std::map<std::size_t, Real>>& matrix,
+    std::span<const Real> rhs,
+    std::span<const Real> null_direction,
+    std::vector<Real>& solution,
+    std::size_t& iterations,
+    Real& relative_residual) noexcept
+{
+    const auto n = rhs.size();
+    solution.assign(n, Real{0.0});
+    std::vector<Real> residual(rhs.begin(), rhs.end());
+    std::vector<Real> preconditioned(n, Real{0.0});
+    std::vector<Real> direction(n, Real{0.0});
+    std::vector<Real> applied(n, Real{0.0});
+
+    const auto dot_product = [](std::span<const Real> a,
+                                std::span<const Real> b) noexcept {
+        Real value{0.0};
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            value += a[i] * b[i];
+        }
+        return value;
+    };
+    const auto project_null = [&](std::vector<Real>& vector) noexcept {
+        if (null_direction.size() != vector.size()) {
+            return;
+        }
+        const Real denominator =
+            dot_product(null_direction, null_direction);
+        if (!(denominator > Real{0.0}) || !std::isfinite(denominator)) {
+            return;
+        }
+        const Real coefficient =
+            dot_product(vector, null_direction) / denominator;
+        for (std::size_t i = 0; i < vector.size(); ++i) {
+            vector[i] -= coefficient * null_direction[i];
+        }
+    };
+    const auto apply = [&](std::span<const Real> x,
+                           std::vector<Real>& y) noexcept {
+        std::fill(y.begin(), y.end(), Real{0.0});
+        for (std::size_t row = 0; row < matrix.size(); ++row) {
+            for (const auto& [column, value] : matrix[row]) {
+                if (column < x.size()) {
+                    y[row] += value * x[column];
+                }
+            }
+        }
+    };
+    const auto precondition = [&](std::span<const Real> input,
+                                  std::vector<Real>& output) noexcept {
+        for (std::size_t row = 0; row < matrix.size(); ++row) {
+            const auto diagonal = matrix[row].find(row);
+            output[row] =
+                diagonal != matrix[row].end() && diagonal->second > Real{0.0}
+                    ? input[row] / diagonal->second
+                    : Real{0.0};
+        }
+    };
+
+    project_null(residual);
+    const Real rhs_norm =
+        std::sqrt(std::max(dot_product(residual, residual), Real{0.0}));
+    if (!(rhs_norm > Real{0.0}) || !std::isfinite(rhs_norm)) {
+        relative_residual = Real{0.0};
+        return std::isfinite(rhs_norm);
+    }
+    precondition(residual, preconditioned);
+    project_null(preconditioned);
+    direction = preconditioned;
+    Real rz = dot_product(residual, preconditioned);
+    if (!(rz > Real{0.0}) || !std::isfinite(rz)) {
+        return false;
+    }
+
+    const std::size_t max_iterations =
+        std::max<std::size_t>(200u, 20u * std::max<std::size_t>(1u, n));
+    const Real tolerance = Real{1.0e-10};
+    for (std::size_t iteration = 0; iteration < max_iterations; ++iteration) {
+        apply(direction, applied);
+        const Real p_ap = dot_product(direction, applied);
+        if (!(p_ap > Real{0.0}) || !std::isfinite(p_ap)) {
+            return false;
+        }
+        const Real alpha = rz / p_ap;
+        for (std::size_t i = 0; i < n; ++i) {
+            solution[i] += alpha * direction[i];
+            residual[i] -= alpha * applied[i];
+        }
+        project_null(residual);
+        const Real residual_norm = std::sqrt(
+            std::max(dot_product(residual, residual), Real{0.0}));
+        iterations = iteration + 1u;
+        relative_residual = residual_norm / rhs_norm;
+        if (!std::isfinite(relative_residual)) {
+            return false;
+        }
+        if (relative_residual <= tolerance) {
+            return true;
+        }
+        precondition(residual, preconditioned);
+        project_null(preconditioned);
+        const Real next_rz = dot_product(residual, preconditioned);
+        if (!(next_rz > Real{0.0}) || !std::isfinite(next_rz)) {
+            return false;
+        }
+        const Real beta = next_rz / rz;
+        for (std::size_t i = 0; i < n; ++i) {
+            direction[i] = preconditioned[i] + beta * direction[i];
+        }
+        project_null(direction);
+        rz = next_rz;
+    }
+    return false;
+}
+
+[[nodiscard]] bool recoverKinematicAreaGradientCurvature(
+    const assembly::IMeshAccess& mesh,
+    std::span<const Real> level_set_vertex_values,
+    const LevelSetCurvatureProjectionOptions& options,
+    std::vector<Real>& curvature,
+    std::vector<unsigned char>& active_vertices,
+    std::vector<unsigned char>& fitted,
+    LevelSetCurvatureProjectionResult& result)
+{
+    const int dimension = mesh.dimension();
+    const auto n_vertices = curvature.size();
+    active_vertices.assign(n_vertices, 0u);
+    fitted.assign(n_vertices, 0u);
+    std::vector<Real> area_gradient(n_vertices, Real{0.0});
+    std::vector<Real> lumped_kinematic_mass(n_vertices, Real{0.0});
+    std::vector<Real> lumped_interface_measure(n_vertices, Real{0.0});
+    std::vector<std::map<std::size_t, Real>> kinematic_mass(n_vertices);
+    std::string failure;
+
+    Real global_value_scale{0.0};
+    for (const auto value : level_set_vertex_values) {
+        global_value_scale =
+            std::max(global_value_scale, std::abs(value - options.isovalue));
+    }
+    if (!(global_value_scale > Real{0.0}) ||
+        !std::isfinite(global_value_scale)) {
+        result.diagnostic =
+            "kinematic-area-gradient curvature recovery requires a nonconstant finite level-set field";
+        return false;
+    }
+
+    const Real zero_tolerance =
+        Real{512.0} * std::numeric_limits<Real>::epsilon() *
+        global_value_scale;
+    std::size_t negative_vertices{0u};
+    std::size_t positive_vertices{0u};
+    Real signed_value_sum{0.0};
+    std::vector<Real> tie_break_scales(n_vertices, Real{0.0});
+    for (const auto value : level_set_vertex_values) {
+        const Real signed_value = value - options.isovalue;
+        signed_value_sum += signed_value;
+        negative_vertices += signed_value < -zero_tolerance ? 1u : 0u;
+        positive_vertices += signed_value > zero_tolerance ? 1u : 0u;
+    }
+    mesh.forEachCell([&](GlobalIndex cell) {
+        std::vector<GlobalIndex> nodes;
+        mesh.getCellNodes(cell, nodes);
+        Real cell_scale{0.0};
+        for (const auto node : nodes) {
+            if (node < 0 || static_cast<std::size_t>(node) >= n_vertices) {
+                continue;
+            }
+            cell_scale = std::max(
+                cell_scale,
+                std::abs(level_set_vertex_values[
+                             static_cast<std::size_t>(node)] -
+                         options.isovalue));
+        }
+        for (const auto node : nodes) {
+            if (node < 0 || static_cast<std::size_t>(node) >= n_vertices) {
+                continue;
+            }
+            const auto index = static_cast<std::size_t>(node);
+            if (std::abs(level_set_vertex_values[index] - options.isovalue) <=
+                zero_tolerance) {
+                tie_break_scales[index] =
+                    std::max(tie_break_scales[index], cell_scale);
+            }
+        }
+    });
+    int tie_break_sign = 1;
+    if (negative_vertices > positive_vertices ||
+        (negative_vertices == positive_vertices &&
+         signed_value_sum < Real{0.0})) {
+        tie_break_sign = -1;
+    }
+    std::vector<Real> working_level_set_values(
+        level_set_vertex_values.begin(), level_set_vertex_values.end());
+    const Real tie_break_factor =
+        std::pow(std::numeric_limits<Real>::epsilon(), Real{0.25});
+    for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
+        if (tie_break_scales[vertex] == Real{0.0}) {
+            continue;
+        }
+        const Real tie_break_value =
+            tie_break_factor * tie_break_scales[vertex];
+        if (!(tie_break_value > zero_tolerance) ||
+            !std::isfinite(tie_break_value)) {
+            result.diagnostic =
+                "kinematic-area-gradient curvature recovery could not resolve an isovalue vertex";
+            return false;
+        }
+        working_level_set_values[vertex] =
+            options.isovalue +
+            static_cast<Real>(tie_break_sign) * tie_break_value;
+        ++result.kinematic_area_gradient_tie_break_vertices;
+        result.kinematic_area_gradient_max_tie_break_value = std::max(
+            result.kinematic_area_gradient_max_tie_break_value,
+            tie_break_value);
+    }
+    if (result.kinematic_area_gradient_tie_break_vertices > 0u) {
+        result.kinematic_area_gradient_tie_break_sign = tie_break_sign;
+    }
+
+    interfaces::CutInterfaceDomainRequest cut_request;
+    cut_request.source = interfaces::LevelSetInterfaceSource::fromEvaluator(
+        "kinematic-area-gradient-local-measure");
+    cut_request.interface_marker = 1;
+    cut_request.isovalue = options.isovalue;
+    cut_request.tolerance =
+        Real{64.0} * std::numeric_limits<Real>::epsilon() *
+        global_value_scale;
+    cut_request.quadrature_order = 1;
+    cut_request.frame = geometry::CutGeometryFrame::Current;
+    cut_request.implicit_geometry_mode = "LinearCorner";
+    cut_request.implicit_quadrature_backend = "LinearCorner";
+
+    mesh.forEachCell([&](GlobalIndex cell) {
+        if (!failure.empty()) {
+            return;
+        }
+        if (!mesh.isOwnedCell(cell)) {
+            failure =
+                "kinematic-area-gradient curvature recovery is not yet available on meshes with nonowned cells";
+            return;
+        }
+        const auto type = mesh.getCellType(cell);
+        const bool supported =
+            (dimension == 2 && type == ElementType::Triangle3) ||
+            (dimension == 3 && type == ElementType::Tetra4);
+        if (!supported) {
+            failure =
+                "kinematic-area-gradient curvature recovery requires affine Triangle3 or Tetra4 cells";
+            return;
+        }
+
+        std::vector<GlobalIndex> nodes;
+        mesh.getCellNodes(cell, nodes);
+        const auto corner_count = static_cast<std::size_t>(dimension + 1);
+        if (nodes.size() < corner_count) {
+            failure =
+                "kinematic-area-gradient curvature recovery found incomplete simplex connectivity";
+            return;
+        }
+
+        interfaces::LevelSetCellCutInput input;
+        input.parent_cell = cell;
+        input.element_type = type;
+        input.node_coordinates.reserve(corner_count);
+        input.level_set_values.reserve(corner_count);
+        bool has_negative = false;
+        bool has_positive = false;
+        Real cell_value_scale{0.0};
+        for (std::size_t i = 0; i < corner_count; ++i) {
+            const auto node = nodes[i];
+            if (node < 0 || static_cast<std::size_t>(node) >= n_vertices) {
+                failure =
+                    "kinematic-area-gradient curvature recovery found invalid simplex connectivity";
+                return;
+            }
+            input.node_coordinates.push_back(mesh.getNodeCoordinates(node));
+            const Real value =
+                working_level_set_values[static_cast<std::size_t>(node)];
+            input.level_set_values.push_back(value);
+            const Real signed_value = value - options.isovalue;
+            cell_value_scale =
+                std::max(cell_value_scale, std::abs(signed_value));
+            has_negative = has_negative || signed_value < -cut_request.tolerance;
+            has_positive = has_positive || signed_value > cut_request.tolerance;
+        }
+        if (!has_negative || !has_positive) {
+            return;
+        }
+
+        SimplexAffineGeometry simplex;
+        if (!makeSimplexAffineGeometry(
+                std::span<const std::array<Real, 3>>(
+                    input.node_coordinates.data(),
+                    input.node_coordinates.size()),
+                std::span<const Real>(input.level_set_values.data(),
+                                      input.level_set_values.size()),
+                dimension,
+                simplex) ||
+            !(simplex.gradient_norm > options.gradient_tolerance)) {
+            failure =
+                "kinematic-area-gradient curvature recovery found a degenerate simplex or level-set gradient";
+            return;
+        }
+
+        const auto baseline_cut = dimension == 2
+            ? interfaces::cutLinearLevelSetCell2D(cut_request, input)
+            : interfaces::cutLinearLevelSetCell3D(cut_request, input);
+        if (!baseline_cut.supported || !baseline_cut.hasActiveFragments()) {
+            failure =
+                "kinematic-area-gradient curvature recovery could not reproduce a strict simplex cut";
+            return;
+        }
+        std::array<Real, 4> local_mass{};
+        std::array<std::array<Real, 4>, 4> local_matrix{};
+        if (!accumulateKinematicAreaMass(
+                baseline_cut,
+                simplex,
+                std::span<Real>(local_mass.data(), corner_count),
+                local_matrix)) {
+            failure =
+                "kinematic-area-gradient curvature recovery could not assemble its local kinematic mass";
+            return;
+        }
+
+        const Real nominal_step =
+            std::pow(std::numeric_limits<Real>::epsilon(), Real{0.2}) *
+            cell_value_scale;
+        std::array<Real, 4> local_gradient{};
+        for (std::size_t i = 0; i < corner_count; ++i) {
+            const Real margin =
+                std::abs(input.level_set_values[i] - options.isovalue);
+            const Real smooth_margin_floor =
+                Real{512.0} * std::numeric_limits<Real>::epsilon() *
+                cell_value_scale;
+            const Real step =
+                std::min(nominal_step, Real{0.20} * margin);
+            if (!(step >
+                  smooth_margin_floor) ||
+                !std::isfinite(step)) {
+                failure =
+                    "kinematic-area-gradient curvature recovery could not choose a finite derivative step";
+                return;
+            }
+
+            std::array<Real, 6> measures{};
+            const std::array<Real, 6> offsets{{
+                Real{-2.0},
+                Real{-1.0},
+                Real{-0.5},
+                Real{0.5},
+                Real{1.0},
+                Real{2.0}}};
+            for (std::size_t sample = 0; sample < offsets.size(); ++sample) {
+                auto perturbed = input;
+                perturbed.level_set_values[i] += offsets[sample] * step;
+                bool measure_success = false;
+                measures[sample] = activeInterfaceMeasure(
+                    cut_request, perturbed, dimension, measure_success);
+                ++result.kinematic_area_gradient_measure_evaluations;
+                if (!measure_success || !(measures[sample] > Real{0.0})) {
+                    failure =
+                        "kinematic-area-gradient curvature recovery derivative left the fixed cut topology";
+                    return;
+                }
+            }
+            const Real fourth_order_full =
+                (measures[0] - Real{8.0} * measures[1] +
+                 Real{8.0} * measures[4] - measures[5]) /
+                (Real{12.0} * step);
+            const Real fourth_order_half =
+                (measures[1] - Real{8.0} * measures[2] +
+                 Real{8.0} * measures[3] - measures[4]) /
+                (Real{6.0} * step);
+            const Real richardson =
+                (Real{16.0} * fourth_order_half - fourth_order_full) /
+                Real{15.0};
+            if (!std::isfinite(fourth_order_full) ||
+                !std::isfinite(fourth_order_half) ||
+                !std::isfinite(richardson)) {
+                failure =
+                    "kinematic-area-gradient curvature recovery produced a nonfinite local derivative";
+                return;
+            }
+            const Real derivative_scale = std::max(
+                std::abs(richardson),
+                baseline_cut.fragments.front().measure /
+                    std::max(cell_value_scale,
+                             std::numeric_limits<Real>::min()));
+            const Real disagreement =
+                std::abs(fourth_order_half - fourth_order_full) /
+                std::max(derivative_scale,
+                         std::numeric_limits<Real>::min());
+            result.kinematic_area_gradient_max_relative_fd_disagreement =
+                std::max(
+                    result.kinematic_area_gradient_max_relative_fd_disagreement,
+                    disagreement);
+            local_gradient[i] = richardson;
+        }
+
+        for (std::size_t i = 0; i < corner_count; ++i) {
+            const auto index = static_cast<std::size_t>(nodes[i]);
+            if (!(local_mass[i] > Real{0.0}) ||
+                !std::isfinite(local_mass[i])) {
+                failure =
+                    "kinematic-area-gradient curvature recovery produced a nonpositive local kinematic mass";
+                return;
+            }
+            area_gradient[index] += local_gradient[i];
+            lumped_kinematic_mass[index] += local_mass[i];
+            lumped_interface_measure[index] +=
+                local_mass[i] * simplex.gradient_norm;
+            for (std::size_t j = 0; j < corner_count; ++j) {
+                const auto column = static_cast<std::size_t>(nodes[j]);
+                if (local_matrix[i][j] != Real{0.0}) {
+                    kinematic_mass[index][column] += local_matrix[i][j];
+                }
+            }
+        }
+        ++result.kinematic_area_gradient_cut_cells;
+    });
+
+    if (!failure.empty()) {
+        result.diagnostic = std::move(failure);
+        return false;
+    }
+    if (result.kinematic_area_gradient_cut_cells == 0u) {
+        result.diagnostic =
+            "kinematic-area-gradient curvature recovery found no strict cut cells";
+        return false;
+    }
+
+    std::vector<Real> rhs(n_vertices, Real{0.0});
+    std::vector<std::size_t> active_degree(n_vertices, 0u);
+    for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
+        const Real mass = lumped_kinematic_mass[vertex];
+        if (mass == Real{0.0}) {
+            continue;
+        }
+        if (!(mass > Real{0.0}) || !std::isfinite(mass) ||
+            !std::isfinite(area_gradient[vertex])) {
+            result.diagnostic =
+                "kinematic-area-gradient curvature recovery produced an invalid assembled operator row";
+            return false;
+        }
+        rhs[vertex] = -area_gradient[vertex];
+        ++result.kinematic_area_gradient_operator_vertices;
+        result.kinematic_area_gradient_operator_nonzeros +=
+            kinematic_mass[vertex].size();
+        for (const auto& [column, value] : kinematic_mass[vertex]) {
+            if (column != vertex && value != Real{0.0} &&
+                column < n_vertices &&
+                lumped_kinematic_mass[column] > Real{0.0}) {
+                ++active_degree[vertex];
+            }
+        }
+    }
+
+    std::vector<Real> solved_curvature(n_vertices, Real{0.0});
+    std::vector<std::map<std::size_t, Real>> regularized_mass(n_vertices);
+    for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
+        if (lumped_kinematic_mass[vertex] > Real{0.0}) {
+            regularized_mass[vertex][vertex] =
+                lumped_kinematic_mass[vertex];
+        }
+    }
+    struct FilterComponent {
+        Real interface_measure{0.0};
+        Real edge_length2_sum{0.0};
+        std::size_t edge_count{0u};
+        Real characteristic_radius{0.0};
+        Real mean_edge_length{0.0};
+        Real filter_radius{0.0};
+        Real filter_strength{0.0};
+    };
+    const auto no_component = std::numeric_limits<std::size_t>::max();
+    std::vector<std::size_t> component_ids(n_vertices, no_component);
+    std::vector<FilterComponent> components;
+    std::queue<std::size_t> pending_vertices;
+    for (std::size_t seed = 0; seed < n_vertices; ++seed) {
+        if (lumped_kinematic_mass[seed] == Real{0.0} ||
+            component_ids[seed] != no_component) {
+            continue;
+        }
+        const auto component = components.size();
+        components.emplace_back();
+        component_ids[seed] = component;
+        pending_vertices.push(seed);
+        while (!pending_vertices.empty()) {
+            const auto vertex = pending_vertices.front();
+            pending_vertices.pop();
+            const Real measure = lumped_interface_measure[vertex];
+            if (!(measure > Real{0.0}) || !std::isfinite(measure)) {
+                result.diagnostic =
+                    "kinematic-area-gradient curvature recovery produced an invalid component measure";
+                return false;
+            }
+            components[component].interface_measure += measure;
+            for (const auto& [column, value] : kinematic_mass[vertex]) {
+                if (value == Real{0.0} || column == vertex ||
+                    column >= n_vertices ||
+                    lumped_kinematic_mass[column] == Real{0.0}) {
+                    continue;
+                }
+                if (component_ids[column] == no_component) {
+                    component_ids[column] = component;
+                    pending_vertices.push(column);
+                } else if (component_ids[column] != component) {
+                    result.diagnostic =
+                        "kinematic-area-gradient curvature recovery found inconsistent component connectivity";
+                    return false;
+                }
+            }
+        }
+    }
+    if (components.empty()) {
+        result.diagnostic =
+            "kinematic-area-gradient curvature recovery found no active interface components";
+        return false;
+    }
+
+    for (std::size_t row = 0; row < n_vertices; ++row) {
+        if (lumped_kinematic_mass[row] == Real{0.0}) {
+            continue;
+        }
+        const auto component = component_ids[row];
+        if (component >= components.size()) {
+            result.diagnostic =
+                "kinematic-area-gradient curvature recovery found an unassigned active vertex";
+            return false;
+        }
+        const auto x =
+            mesh.getNodeCoordinates(static_cast<GlobalIndex>(row));
+        for (const auto& [column, value] : kinematic_mass[row]) {
+            if (value == Real{0.0} || column <= row ||
+                column >= n_vertices ||
+                lumped_kinematic_mass[column] == Real{0.0}) {
+                continue;
+            }
+            if (component_ids[column] != component) {
+                result.diagnostic =
+                    "kinematic-area-gradient curvature recovery found a cross-component operator edge";
+                return false;
+            }
+            const auto y =
+                mesh.getNodeCoordinates(static_cast<GlobalIndex>(column));
+            const Real edge_length2 =
+                dot(subtract(y, x), subtract(y, x));
+            if (!(edge_length2 > Real{0.0}) ||
+                !std::isfinite(edge_length2)) {
+                result.diagnostic =
+                    "kinematic-area-gradient curvature recovery found an invalid active edge";
+                return false;
+            }
+            components[component].edge_length2_sum += edge_length2;
+            ++components[component].edge_count;
+        }
+    }
+
+    const Real pi = std::acos(Real{-1.0});
+    result.kinematic_area_gradient_components = components.size();
+    result.kinematic_area_gradient_filter_coefficient =
+        options.kinematic_area_gradient_filter_coefficient;
+    result.kinematic_area_gradient_min_characteristic_radius =
+        std::numeric_limits<Real>::infinity();
+    result.kinematic_area_gradient_min_filter_radius_cells =
+        std::numeric_limits<Real>::infinity();
+    result.kinematic_area_gradient_min_filter_radius =
+        std::numeric_limits<Real>::infinity();
+    for (auto& component : components) {
+        if (component.edge_count == 0u ||
+            !(component.interface_measure > Real{0.0}) ||
+            !std::isfinite(component.interface_measure)) {
+            result.diagnostic =
+                "kinematic-area-gradient curvature recovery found an invalid interface component";
+            return false;
+        }
+        component.mean_edge_length = std::sqrt(
+            component.edge_length2_sum /
+            static_cast<Real>(component.edge_count));
+        component.characteristic_radius = dimension == 2
+            ? component.interface_measure / (Real{2.0} * pi)
+            : std::sqrt(component.interface_measure / (Real{4.0} * pi));
+        component.filter_radius =
+            options.kinematic_area_gradient_filter_coefficient *
+            std::sqrt(component.mean_edge_length *
+                      component.characteristic_radius);
+        component.filter_strength =
+            component.filter_radius * component.filter_radius;
+        if (!(component.mean_edge_length > Real{0.0}) ||
+            !(component.characteristic_radius > Real{0.0}) ||
+            !std::isfinite(component.mean_edge_length) ||
+            !std::isfinite(component.characteristic_radius) ||
+            !std::isfinite(component.filter_radius)) {
+            result.diagnostic =
+                "kinematic-area-gradient curvature recovery produced an invalid component filter scale";
+            return false;
+        }
+        const Real filter_radius_cells =
+            component.filter_radius / component.mean_edge_length;
+        result.kinematic_area_gradient_interface_measure +=
+            component.interface_measure;
+        result.kinematic_area_gradient_min_characteristic_radius = std::min(
+            result.kinematic_area_gradient_min_characteristic_radius,
+            component.characteristic_radius);
+        result.kinematic_area_gradient_max_characteristic_radius = std::max(
+            result.kinematic_area_gradient_max_characteristic_radius,
+            component.characteristic_radius);
+        result.kinematic_area_gradient_min_filter_radius_cells = std::min(
+            result.kinematic_area_gradient_min_filter_radius_cells,
+            filter_radius_cells);
+        result.kinematic_area_gradient_max_filter_radius_cells = std::max(
+            result.kinematic_area_gradient_max_filter_radius_cells,
+            filter_radius_cells);
+        result.kinematic_area_gradient_min_filter_radius = std::min(
+            result.kinematic_area_gradient_min_filter_radius,
+            component.filter_radius);
+        result.kinematic_area_gradient_max_filter_radius = std::max(
+            result.kinematic_area_gradient_max_filter_radius,
+            component.filter_radius);
+    }
+
+    if (options.kinematic_area_gradient_filter_coefficient > Real{0.0}) {
+        for (std::size_t row = 0; row < n_vertices; ++row) {
+            if (lumped_kinematic_mass[row] == Real{0.0}) {
+                continue;
+            }
+            const auto x =
+                mesh.getNodeCoordinates(static_cast<GlobalIndex>(row));
+            for (const auto& [column, value] : kinematic_mass[row]) {
+                if (value == Real{0.0} || column <= row ||
+                    column >= n_vertices ||
+                    lumped_kinematic_mass[column] == Real{0.0}) {
+                    continue;
+                }
+                const auto y =
+                    mesh.getNodeCoordinates(static_cast<GlobalIndex>(column));
+                const Real edge_length2 =
+                    dot(subtract(y, x), subtract(y, x));
+                const Real row_share =
+                    lumped_kinematic_mass[row] /
+                    static_cast<Real>(std::max<std::size_t>(
+                        1u, active_degree[row]));
+                const Real column_share =
+                    lumped_kinematic_mass[column] /
+                    static_cast<Real>(std::max<std::size_t>(
+                        1u, active_degree[column]));
+                const Real weight =
+                    Real{0.5} * (row_share + column_share) /
+                    edge_length2;
+                if (!(weight > Real{0.0}) || !std::isfinite(weight)) {
+                    result.diagnostic =
+                        "kinematic-area-gradient curvature recovery produced an invalid filter weight";
+                    return false;
+                }
+                const Real filter_strength =
+                    components[component_ids[row]].filter_strength;
+                regularized_mass[row][row] += filter_strength * weight;
+                regularized_mass[column][column] += filter_strength * weight;
+                regularized_mass[row][column] -= filter_strength * weight;
+                regularized_mass[column][row] -= filter_strength * weight;
+            }
+        }
+    }
+    if (options.kinematic_area_gradient_filter_coefficient == Real{0.0}) {
+        for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
+            if (lumped_kinematic_mass[vertex] > Real{0.0}) {
+                solved_curvature[vertex] =
+                    rhs[vertex] / lumped_kinematic_mass[vertex];
+            }
+        }
+    } else if (!solveKinematicAreaMassSystem(
+                   regularized_mass,
+                   std::span<const Real>(rhs.data(), rhs.size()),
+                   std::span<const Real>{},
+                   solved_curvature,
+                   result.kinematic_area_gradient_linear_iterations,
+                   result.kinematic_area_gradient_relative_linear_residual)) {
+        result.diagnostic =
+            "kinematic-area-gradient curvature recovery could not solve its regularized interface system";
+        return false;
+    }
+
+    Real mass_weighted_curvature{0.0};
+    Real mass_weighted_curvature_squared{0.0};
+    for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
+        if (lumped_kinematic_mass[vertex] == Real{0.0}) {
+            continue;
+        }
+        const Real kappa = solved_curvature[vertex];
+        if (!std::isfinite(kappa)) {
+            result.diagnostic =
+                "kinematic-area-gradient curvature recovery produced nonfinite curvature";
+            return false;
+        }
+        curvature[vertex] = kappa;
+        result.kinematic_area_gradient_kinematic_mass +=
+            lumped_kinematic_mass[vertex];
+        mass_weighted_curvature +=
+            lumped_kinematic_mass[vertex] * kappa;
+        mass_weighted_curvature_squared +=
+            lumped_kinematic_mass[vertex] * kappa * kappa;
+        active_vertices[vertex] = 1u;
+        fitted[vertex] = 1u;
+        ++result.fitted_vertices;
+        Real applied{0.0};
+        Real identity_scale = std::abs(area_gradient[vertex]);
+        for (const auto& [column, value] : regularized_mass[vertex]) {
+            applied += value * solved_curvature[column];
+            identity_scale += std::abs(value * solved_curvature[column]);
+        }
+        const Real identity_residual =
+            std::abs(area_gradient[vertex] + applied);
+        result.kinematic_area_gradient_max_regularized_identity_residual =
+            std::max(
+                result.kinematic_area_gradient_max_regularized_identity_residual,
+                identity_residual);
+        result
+            .kinematic_area_gradient_max_relative_regularized_identity_residual =
+            std::max(
+                result
+                    .kinematic_area_gradient_max_relative_regularized_identity_residual,
+                identity_residual /
+                    std::max(identity_scale,
+                             std::numeric_limits<Real>::min()));
+    }
+    if (!(result.kinematic_area_gradient_kinematic_mass > Real{0.0}) ||
+        !std::isfinite(result.kinematic_area_gradient_kinematic_mass)) {
+        result.diagnostic =
+            "kinematic-area-gradient curvature recovery produced an invalid global kinematic mass";
+        return false;
+    }
+    result.kinematic_area_gradient_mass_weighted_mean_curvature =
+        mass_weighted_curvature /
+        result.kinematic_area_gradient_kinematic_mass;
+    const Real mass_weighted_second_moment =
+        mass_weighted_curvature_squared /
+        result.kinematic_area_gradient_kinematic_mass;
+    result.kinematic_area_gradient_mass_weighted_rms_deviation = std::sqrt(
+        std::max(
+            mass_weighted_second_moment -
+                result.kinematic_area_gradient_mass_weighted_mean_curvature *
+                    result.kinematic_area_gradient_mass_weighted_mean_curvature,
+            Real{0.0}));
+    if (!std::isfinite(
+            result.kinematic_area_gradient_mass_weighted_mean_curvature) ||
+        !std::isfinite(
+            result.kinematic_area_gradient_mass_weighted_rms_deviation)) {
+        result.diagnostic =
+            "kinematic-area-gradient curvature recovery produced invalid weighted statistics";
+        return false;
+    }
+    result.narrow_band_vertices = result.fitted_vertices;
+    result.skipped_far_vertices = n_vertices - result.fitted_vertices;
+    return result.fitted_vertices > 0u;
 }
 
 [[nodiscard]] bool recoverGeneratedInterfacePatchCurvature(
@@ -1537,6 +2599,9 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
         !std::isfinite(options.max_normalized_fit_residual) ||
         !(options.supplemental_sample_weight > Real{0.0}) ||
         !std::isfinite(options.supplemental_sample_weight) ||
+        options.kinematic_area_gradient_filter_coefficient < Real{0.0} ||
+        !std::isfinite(
+            options.kinematic_area_gradient_filter_coefficient) ||
         options.narrow_band_width < Real{0.0} ||
         !std::isfinite(options.narrow_band_width) ||
         options.smoothing_iterations < 0 ||
@@ -1544,7 +2609,7 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
         options.smoothing_relaxation > Real{1.0} ||
         !std::isfinite(options.smoothing_relaxation)) {
         throw std::invalid_argument(
-            "level-set curvature projection requires a finite positive gradient tolerance, a finite relative rank tolerance in (0,1), a nonnegative residual limit, a positive supplemental sample weight, a nonnegative narrow-band width, nonnegative smoothing iterations, and smoothing relaxation in [0,1]");
+            "level-set curvature projection requires a finite positive gradient tolerance, a finite relative rank tolerance in (0,1), a nonnegative residual limit, a positive supplemental sample weight, a finite nonnegative kinematic-area-gradient filter coefficient, a nonnegative narrow-band width, nonnegative smoothing iterations, and smoothing relaxation in [0,1]");
     }
     for (const auto value : level_set_vertex_values) {
         if (!std::isfinite(value)) {
@@ -1575,10 +2640,17 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
     switch (options.recovery_mode) {
         case LevelSetCurvatureRecoveryMode::LevelSetQuadratic:
         case LevelSetCurvatureRecoveryMode::GeneratedInterfacePatch:
+        case LevelSetCurvatureRecoveryMode::KinematicAreaGradient:
             break;
         default:
             throw std::invalid_argument(
                 "level-set curvature projection received an unknown recovery mode");
+    }
+    if (options.recovery_mode ==
+            LevelSetCurvatureRecoveryMode::KinematicAreaGradient &&
+        options.smoothing_iterations != 0) {
+        throw std::invalid_argument(
+            "kinematic-area-gradient curvature recovery owns its regularization and cannot be combined with post-projection smoothing");
     }
     if (workspace != nullptr) {
         workspace->free_surface_snapshot_revision_key =
@@ -1632,6 +2704,17 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
     result.skipped_far_vertices = n_vertices - result.narrow_band_vertices;
     std::vector<unsigned char> fitted(n_vertices, 0u);
 
+    if (options.recovery_mode ==
+        LevelSetCurvatureRecoveryMode::KinematicAreaGradient) {
+        (void)recoverKinematicAreaGradientCurvature(
+            mesh,
+            level_set_vertex_values,
+            options,
+            curvature_vertex_values,
+            active_vertices,
+            fitted,
+            result);
+    } else {
     for (GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
         if (active_vertices[static_cast<std::size_t>(vertex)] == 0u) {
             continue;
@@ -1927,8 +3010,12 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
             ++result.zero_fallback_vertices;
         }
     }
+    }
 
     if (result.fitted_vertices == 0u) {
+        if (!result.diagnostic.empty()) {
+            return result;
+        }
         result.diagnostic = result.narrow_band_vertices == 0u
             ? "level-set curvature projection found no vertices in the requested narrow band"
             : result.fit_residual_failure_vertices > 0u
