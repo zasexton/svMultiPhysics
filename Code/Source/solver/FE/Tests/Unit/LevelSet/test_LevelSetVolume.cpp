@@ -935,7 +935,9 @@ TEST(LevelSetVolume,
                 0.0,
                 1.0e-12);
 
-    FE::systems::FESystem assembly_system(mesh);
+    auto assembly_mesh = buildSingleCellMesh(
+        /*spatial_dim=*/2, coordinates, svmp::CellFamily::Quad);
+    FE::systems::FESystem assembly_system(assembly_mesh);
     const auto constant_field = assembly_system.addField(
         FE::systems::FieldSpec{
             .name = "constant_one",
