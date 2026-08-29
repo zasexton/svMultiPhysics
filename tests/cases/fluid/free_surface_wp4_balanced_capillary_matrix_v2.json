@@ -1,0 +1,1022 @@
+{
+  "schema_version": 2,
+  "matrix_id": "free_surface_wp4_balanced_capillary_v2",
+  "status": "FROZEN_BEFORE_EXECUTION",
+  "work_package": "WP-4",
+  "findings": [
+    "FSR-03",
+    "FSR-04"
+  ],
+  "qualification_scope": "One-phase unfitted affine C0 P1/LinearCorner static capillary equilibrium and prescribed-angle qualification.",
+  "model_envelope": {
+    "phase_model": "one_phase_incompressible_liquid",
+    "exterior_model": "prescribed_traction_without_exterior_fluid_dynamics",
+    "mesh_and_geometry": "affine_simplex_c0_p1_linearcorner",
+    "capillary_force": "kinematic_area_gradient_energy_traction",
+    "pressure_stabilization": "incremental_cut_pressure_penalty",
+    "force_projection_applied": false,
+    "higher_order_claimed": false,
+    "two_phase_claimed": false,
+    "gas_sensitive_claimed": false
+  },
+  "closure_policy": {
+    "requested_claim": "wp4_q2_one_phase_affine_closure",
+    "requires_every_exact_group": true,
+    "requires_every_required_case": true,
+    "requires_every_convergence_sequence": true,
+    "requires_conditional_level_when_requested": true,
+    "worst_offset_controls_disposition": true,
+    "failed_and_inconclusive_runs_are_retained": true
+  },
+  "required_report_metrics": [
+    "kinetic_energy_proxy",
+    "liquid_volume_relative_error"
+  ],
+  "resources": {
+    "partition": "amarsden",
+    "maximum_concurrent_nodes": 3,
+    "maximum_total_memory_mib": 40960,
+    "nodes_per_case": 1,
+    "tasks_per_case": 1,
+    "threads_per_task": 1,
+    "memory_mib_per_case": 10240,
+    "wall_time_seconds_per_case": 14400,
+    "output_mib_per_case": 4096
+  },
+  "refinement": {
+    "spatial_levels_cells_per_radius": [
+      8,
+      16,
+      32
+    ],
+    "conditional_spatial_level_cells_per_radius": 64,
+    "uniform_resolution_rule": "ceil(coarsest_cells_per_radius/radius) multiplied by the refinement-level ratio",
+    "reported_mesh_coordinate": "radius_over_interface_mesh_spacing",
+    "uniform_ratio": 2.0,
+    "ratio_relative_tolerance": 1e-10,
+    "safety_factor": 1.25,
+    "minimum_observed_order": 0.8,
+    "nonmonotone_three_level_disposition": "ADDITIONAL_LEVEL_REQUIRED",
+    "nonasymptotic_four_level_disposition": "FAIL"
+  },
+  "gates": {
+    "exact_flat_scaled_residual_factor": 256.0,
+    "solved_flat_nonlinear_tolerance_factor": 1.0,
+    "static_initializer": {
+      "volume_tolerance": 1e-10,
+      "projected_gradient_tolerance": 1e-10,
+      "pressure_representability_max_residual_norm": 1e-8,
+      "pressure_representability_max_relative_distance": 1e-8,
+      "physical_equilibrium_max_residual_norm": 1e-8,
+      "constant_pressure_kkt_max_residual_norm": 1e-8,
+      "constant_pressure_kkt_max_relative_distance": 1e-8,
+      "maximum_iterations": 1200,
+      "maximum_topology_epoch_transitions": 64
+    },
+    "finest_level": {
+      "pressure_jump_relative_error": 0.01,
+      "contact_angle_absolute_error_degrees": 1.0,
+      "base_radius_relative_error": 0.01,
+      "apex_height_relative_error": 0.01,
+      "liquid_volume_relative_error": 0.01,
+      "parasitic_capillary_number": 1e-6,
+      "kinetic_energy_proxy": 1e-12
+    },
+    "convergence": {
+      "pressure_jump_relative_error": {
+        "reference": 0.0,
+        "normalization": 1.0,
+        "finest_error_limit": 0.01,
+        "finest_gci_limit": 0.01
+      },
+      "pressure_space_relative_distance": {
+        "reference": 0.0,
+        "normalization": 1.0,
+        "finest_error_limit": 1e-8,
+        "finest_gci_limit": 1e-8
+      },
+      "conservative_balance_normalized_imbalance": {
+        "reference": 0.0,
+        "normalization": 1.0,
+        "finest_error_limit": 1e-8,
+        "finest_gci_limit": 1e-8
+      },
+      "contact_angle_absolute_error_degrees": {
+        "reference": 0.0,
+        "normalization": 1.0,
+        "finest_error_limit": 1.0,
+        "finest_gci_limit": 1.0
+      },
+      "base_radius_relative_error": {
+        "reference": 0.0,
+        "normalization": 1.0,
+        "finest_error_limit": 0.01,
+        "finest_gci_limit": 0.01
+      },
+      "apex_height_relative_error": {
+        "reference": 0.0,
+        "normalization": 1.0,
+        "finest_error_limit": 0.01,
+        "finest_gci_limit": 0.01
+      },
+      "liquid_volume_relative_error": {
+        "reference": 0.0,
+        "normalization": 1.0,
+        "finest_error_limit": 0.01,
+        "finest_gci_limit": 0.01
+      },
+      "parasitic_capillary_number": {
+        "reference": 0.0,
+        "normalization": 1.0,
+        "finest_error_limit": 1e-6,
+        "finest_gci_limit": 1e-6
+      }
+    },
+    "energy_variation": {
+      "analytic_derivatives_required": true,
+      "finite_difference_components": 0,
+      "maximum_relative_directional_derivative_error": 2e-7
+    },
+    "invariance": {
+      "phi_scale": {
+        "pressure_jump_relative_error": {"maximum_value": 0.01, "maximum_spread": 1e-10},
+        "pressure_space_relative_distance": {"maximum_value": 1e-8, "maximum_spread": 1e-10},
+        "conservative_balance_normalized_imbalance": {"maximum_value": 1e-8, "maximum_spread": 1e-10},
+        "contact_angle_absolute_error_degrees": {"maximum_value": 1.0, "maximum_spread": 1e-8},
+        "base_radius_relative_error": {"maximum_value": 0.01, "maximum_spread": 1e-10},
+        "apex_height_relative_error": {"maximum_value": 0.01, "maximum_spread": 1e-10},
+        "parasitic_capillary_number": {"maximum_value": 1e-6, "maximum_spread": 1e-10},
+        "liquid_volume_relative_error": {"maximum_value": 0.01, "maximum_spread": 1e-10},
+        "kinetic_energy_proxy": {"maximum_value": 1e-12, "maximum_spread": 1e-12}
+      },
+      "physical_scale": {
+        "pressure_jump_relative_error": {"maximum_value": 0.01, "maximum_spread": 0.01},
+        "pressure_space_relative_distance": {"maximum_value": 1e-8, "maximum_spread": 1e-8},
+        "conservative_balance_normalized_imbalance": {"maximum_value": 1e-8, "maximum_spread": 1e-8},
+        "contact_angle_absolute_error_degrees": {"maximum_value": 1.0, "maximum_spread": 1.0},
+        "base_radius_relative_error": {"maximum_value": 0.01, "maximum_spread": 0.01},
+        "apex_height_relative_error": {"maximum_value": 0.01, "maximum_spread": 0.01},
+        "parasitic_capillary_number": {"maximum_value": 1e-6, "maximum_spread": 1e-6},
+        "liquid_volume_relative_error": {"maximum_value": 0.01, "maximum_spread": 0.01},
+        "kinetic_energy_proxy": {"maximum_value": 1e-12, "maximum_spread": 1e-12}
+      }
+    }
+  },
+  "exact_groups": [
+    {
+      "id": "serial_flat_and_hydrostatic",
+      "binary": "application",
+      "mpi_ranks": 1,
+      "tests": [
+        "ApplicationDriverLevelSetWorkflows.StaticCapillaryInitializationAcceptsPhysicalFlatSurfaceStressEquilibrium",
+        "ApplicationDriverLevelSetWorkflows.StaticCapillaryInitializationProjectsAcceptedAreaGradientCurvature",
+        "ApplicationDriverLevelSetWorkflows.StaticCapillaryInitializationBalancesHydrostaticGravityWithFixedPressureGauge"
+      ],
+      "required_matrix_case_count": 60,
+      "require_identical_rank_properties": false,
+      "property_gates": {
+        "ApplicationDriverLevelSetWorkflows.StaticCapillaryInitializationAcceptsPhysicalFlatSurfaceStressEquilibrium": [
+          {"property": "wp4_physical_flat_spatial_dimension", "comparison": "equal", "expected": 2},
+          {"property": "wp4_physical_flat_contact_wall_count", "comparison": "equal", "expected": 2},
+          {"property": "wp4_physical_flat_coordinate_direction_count", "comparison": "equal", "expected": 2},
+          {"property": "wp4_physical_flat_wall_orientation_count", "comparison": "equal", "expected": 2},
+          {"property": "wp4_physical_flat_active_side_count", "comparison": "equal", "expected": 2},
+          {"property": "wp4_physical_flat_cut_offset_count", "comparison": "equal", "expected": 3},
+          {"property": "wp4_physical_flat_matrix_case_count", "comparison": "equal", "expected": 12},
+          {"property": "wp4_physical_flat_zero_gravity_case_count", "comparison": "equal", "expected": 12},
+          {"property": "wp4_physical_flat_free_pressure_gauge_case_count", "comparison": "equal", "expected": 12},
+          {"property": "wp4_physical_flat_mpi_rank_count", "comparison": "equal", "expected": 1},
+          {"property": "wp4_physical_flat_constant_pressure_kkt_residual_norm", "comparison": "scaled_roundoff", "scale": 1.0},
+          {"property": "wp4_physical_flat_constant_pressure_kkt_relative_distance", "comparison": "scaled_roundoff", "scale": 1.0},
+          {"property": "wp4_physical_flat_pressure_jump_absolute_error", "comparison": "scaled_roundoff", "scale": 1.0},
+          {"property": "wp4_physical_flat_volume_error", "comparison": "scaled_roundoff", "scale": 2.0},
+          {"property": "wp4_physical_flat_surface_energy_error", "comparison": "scaled_roundoff", "scale": 3.0},
+          {"property": "wp4_physical_flat_maximum_phi_update", "comparison": "scaled_roundoff", "scale": 1.0}
+        ],
+        "ApplicationDriverLevelSetWorkflows.StaticCapillaryInitializationProjectsAcceptedAreaGradientCurvature": [
+          {"property": "wp4_area_gradient_static_spatial_dimension", "comparison": "equal", "expected": 2},
+          {"property": "wp4_area_gradient_static_mpi_rank_count", "comparison": "equal", "expected": 1},
+          {"property": "wp4_area_gradient_static_maximum_curvature", "comparison": "at_most", "expected": 1e-12},
+          {"property": "wp4_area_gradient_static_constant_pressure_kkt_residual_norm", "comparison": "at_most", "expected": 2e-10},
+          {"property": "wp4_area_gradient_static_constant_pressure_kkt_relative_distance", "comparison": "at_most", "expected": 2e-10}
+        ],
+        "ApplicationDriverLevelSetWorkflows.StaticCapillaryInitializationBalancesHydrostaticGravityWithFixedPressureGauge": [
+          {"property": "wp4_hydrostatic_spatial_dimension_count", "comparison": "equal", "expected": 2},
+          {"property": "wp4_hydrostatic_coordinate_direction_count", "comparison": "equal", "expected": 3},
+          {"property": "wp4_hydrostatic_dimension_coordinate_pair_count", "comparison": "equal", "expected": 5},
+          {"property": "wp4_hydrostatic_wall_orientation_count", "comparison": "equal", "expected": 3},
+          {"property": "wp4_hydrostatic_active_side_count", "comparison": "equal", "expected": 2},
+          {"property": "wp4_hydrostatic_cut_offset_count", "comparison": "equal", "expected": 3},
+          {"property": "wp4_hydrostatic_gravity_direction_count", "comparison": "equal", "expected": 2},
+          {"property": "wp4_hydrostatic_two_dimensional_case_count", "comparison": "equal", "expected": 24},
+          {"property": "wp4_hydrostatic_three_dimensional_case_count", "comparison": "equal", "expected": 36},
+          {"property": "wp4_hydrostatic_fixed_zero_pressure_gauge_case_count", "comparison": "equal", "expected": 60},
+          {"property": "wp4_hydrostatic_matrix_case_count", "comparison": "equal", "expected": 60},
+          {"property": "wp4_hydrostatic_pressure_representability_residual_norm", "comparison": "at_most", "expected": 2e-10},
+          {"property": "wp4_hydrostatic_pressure_relative_distance", "comparison": "at_most", "expected": 2e-10},
+          {"property": "wp4_hydrostatic_exact_field_production_residual_norm", "comparison": "at_most", "expected": 2e-12},
+          {"property": "wp4_hydrostatic_production_residual_norm", "comparison": "at_most", "expected": 2e-10},
+          {"property": "wp4_hydrostatic_initializer_pressure_representative_distance", "comparison": "finite"},
+          {"property": "wp4_hydrostatic_exact_initializer_pressure_update", "comparison": "at_most", "expected": 2e-12},
+          {"property": "wp4_hydrostatic_gravitational_energy_error", "comparison": "at_most", "expected": 2e-10},
+          {"property": "wp4_hydrostatic_volume_error", "comparison": "at_most", "expected": 1e-11},
+          {"property": "wp4_hydrostatic_surface_energy_error", "comparison": "at_most", "expected": 2e-10},
+          {"property": "wp4_hydrostatic_maximum_phi_update", "comparison": "at_most", "expected": 2e-7}
+        ]
+      }
+    },
+    {
+      "id": "distributed_flat_and_hydrostatic",
+      "binary": "application_mpi",
+      "mpi_ranks": 2,
+      "tests": [
+        "ApplicationDriverLevelSetWorkflowsMPI.PhysicalFlatCapillaryEquilibriumMatchesAcrossTwoRankPartition",
+        "ApplicationDriverLevelSetWorkflowsMPI.HydrostaticGravityWithFixedPressureGaugeMatchesAcrossTwoRankPartition",
+        "ApplicationDriverLevelSetWorkflowsMPI.KinematicAreaGradientTractionDispatchesCollectiveCurvatureRecovery"
+      ],
+      "required_matrix_case_count": 960,
+      "require_identical_rank_properties": true,
+      "property_gates": {
+        "ApplicationDriverLevelSetWorkflowsMPI.PhysicalFlatCapillaryEquilibriumMatchesAcrossTwoRankPartition": [
+          {"property": "wp4_physical_flat_mpi_rank_count", "comparison": "equal", "expected": 2},
+          {"property": "wp4_physical_flat_mpi_partition_layout_count", "comparison": "equal", "expected": 1},
+          {"property": "wp4_physical_flat_mpi_coordinate_direction_count", "comparison": "equal", "expected": 2},
+          {"property": "wp4_physical_flat_mpi_wall_orientation_count", "comparison": "equal", "expected": 2},
+          {"property": "wp4_physical_flat_mpi_active_side_count", "comparison": "equal", "expected": 2},
+          {"property": "wp4_physical_flat_mpi_cut_offset_count", "comparison": "equal", "expected": 3},
+          {"property": "wp4_physical_flat_mpi_matrix_case_count", "comparison": "equal", "expected": 12},
+          {"property": "wp4_area_gradient_static_mpi_case_count", "comparison": "equal", "expected": 1},
+          {"property": "wp4_physical_flat_mpi_constant_pressure_kkt_residual_norm", "comparison": "scaled_roundoff", "scale": 1.0},
+          {"property": "wp4_physical_flat_mpi_constant_pressure_kkt_relative_distance", "comparison": "scaled_roundoff", "scale": 1.0},
+          {"property": "wp4_physical_flat_mpi_pressure_jump_absolute_error", "comparison": "scaled_roundoff", "scale": 1.0},
+          {"property": "wp4_physical_flat_mpi_volume_error", "comparison": "scaled_roundoff", "scale": 2.0},
+          {"property": "wp4_physical_flat_mpi_surface_energy_error", "comparison": "scaled_roundoff", "scale": 3.0},
+          {"property": "wp4_physical_flat_mpi_maximum_phi_update", "comparison": "scaled_roundoff", "scale": 1.0}
+        ],
+        "ApplicationDriverLevelSetWorkflowsMPI.HydrostaticGravityWithFixedPressureGaugeMatchesAcrossTwoRankPartition": [
+          {"property": "wp4_hydrostatic_mpi_rank_count", "comparison": "equal", "expected": 2},
+          {"property": "wp4_hydrostatic_mpi_partition_layout_count", "comparison": "equal", "expected": 2},
+          {"property": "wp4_hydrostatic_mpi_global_vertex_numbering_count", "comparison": "equal", "expected": 2},
+          {"property": "wp4_hydrostatic_mpi_dof_ownership_strategy_count", "comparison": "equal", "expected": 2},
+          {"property": "wp4_hydrostatic_mpi_fe_global_numbering_mode_count", "comparison": "equal", "expected": 2},
+          {"property": "wp4_hydrostatic_mpi_owner_contiguous_nonidentity_case_count", "comparison": "equal", "expected": 480},
+          {"property": "wp4_hydrostatic_mpi_three_dimensional_owner_contiguous_nonidentity_case_count", "comparison": "equal", "expected": 288},
+          {"property": "wp4_hydrostatic_mpi_three_dimensional_shared_vertex_case_count", "comparison": "equal", "expected": 576},
+          {"property": "wp4_hydrostatic_mpi_spatial_dimension_count", "comparison": "equal", "expected": 2},
+          {"property": "wp4_hydrostatic_mpi_coordinate_direction_count", "comparison": "equal", "expected": 3},
+          {"property": "wp4_hydrostatic_mpi_dimension_coordinate_pair_count", "comparison": "equal", "expected": 5},
+          {"property": "wp4_hydrostatic_mpi_wall_orientation_count", "comparison": "equal", "expected": 3},
+          {"property": "wp4_hydrostatic_mpi_active_side_count", "comparison": "equal", "expected": 2},
+          {"property": "wp4_hydrostatic_mpi_cut_offset_count", "comparison": "equal", "expected": 3},
+          {"property": "wp4_hydrostatic_mpi_gravity_direction_count", "comparison": "equal", "expected": 2},
+          {"property": "wp4_hydrostatic_mpi_two_dimensional_case_count", "comparison": "equal", "expected": 384},
+          {"property": "wp4_hydrostatic_mpi_three_dimensional_case_count", "comparison": "equal", "expected": 576},
+          {"property": "wp4_hydrostatic_mpi_fixed_zero_pressure_gauge_case_count", "comparison": "equal", "expected": 960},
+          {"property": "wp4_hydrostatic_mpi_matrix_case_count", "comparison": "equal", "expected": 960},
+          {"property": "wp4_hydrostatic_mpi_pressure_representability_residual_norm", "comparison": "at_most", "expected": 2e-10},
+          {"property": "wp4_hydrostatic_mpi_pressure_relative_distance", "comparison": "at_most", "expected": 2e-10},
+          {"property": "wp4_hydrostatic_mpi_exact_field_production_residual_norm", "comparison": "at_most", "expected": 2e-12},
+          {"property": "wp4_hydrostatic_mpi_production_residual_norm", "comparison": "at_most", "expected": 2e-10},
+          {"property": "wp4_hydrostatic_mpi_initializer_pressure_representative_distance", "comparison": "finite"},
+          {"property": "wp4_hydrostatic_mpi_exact_initializer_pressure_update", "comparison": "at_most", "expected": 2e-12},
+          {"property": "wp4_hydrostatic_mpi_gravitational_energy_error", "comparison": "at_most", "expected": 2e-10},
+          {"property": "wp4_hydrostatic_mpi_volume_error", "comparison": "at_most", "expected": 1e-11},
+          {"property": "wp4_hydrostatic_mpi_surface_energy_error", "comparison": "at_most", "expected": 2e-10},
+          {"property": "wp4_hydrostatic_mpi_maximum_phi_update", "comparison": "at_most", "expected": 2e-7}
+        ],
+        "ApplicationDriverLevelSetWorkflowsMPI.KinematicAreaGradientTractionDispatchesCollectiveCurvatureRecovery": [
+          {"property": "wp4_total_energy_collective_rank_count", "comparison": "equal", "expected": 2},
+          {"property": "wp4_total_energy_collective_owned_cell_count", "comparison": "equal", "expected": 32},
+          {"property": "wp4_total_energy_collective_cut_cell_count", "comparison": "at_least", "expected": 1},
+          {"property": "wp4_total_energy_collective_max_abs_curvature", "comparison": "at_least", "expected": 0},
+          {"property": "wp4_total_energy_collective_curvature_checksum", "comparison": "finite"}
+        ]
+      }
+    },
+    {
+      "id": "surface_wall_volume_derivatives",
+      "binary": "geometry",
+      "mpi_ranks": 1,
+      "tests": [
+        "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+        "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesThreeDimensionalCentralDifference"
+      ],
+      "required_matrix_case_count": 0,
+      "require_identical_rank_properties": false,
+      "property_gates": {
+        "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference": [
+          {"property": "functional_first_variation_fd_case_count", "comparison": "equal", "expected": 2},
+          {"property": "functional_surface_area_fd_max_relative_error", "comparison": "at_most", "expected": 2e-7},
+          {"property": "functional_surface_energy_fd_max_relative_error", "comparison": "at_most", "expected": 2e-7},
+          {"property": "functional_wetted_wall_area_fd_max_relative_error", "comparison": "at_most", "expected": 2e-7},
+          {"property": "functional_young_wall_fd_max_relative_error", "comparison": "at_most", "expected": 2e-7},
+          {"property": "functional_volume_fd_max_relative_error", "comparison": "at_most", "expected": 2e-7},
+          {"property": "functional_volume_potential_fd_max_relative_error", "comparison": "at_most", "expected": 2e-7},
+          {"property": "functional_total_fd_max_relative_error", "comparison": "at_most", "expected": 2e-7}
+        ],
+        "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesThreeDimensionalCentralDifference": [
+          {"property": "functional_first_variation_3d_spatial_dimension", "comparison": "equal", "expected": 3},
+          {"property": "functional_first_variation_3d_fd_case_count", "comparison": "equal", "expected": 2},
+          {"property": "functional_first_variation_3d_fd_max_relative_error", "comparison": "at_most", "expected": 5e-7}
+        ]
+      }
+    },
+    {
+      "id": "area_gradient_geometry_and_energy",
+      "binary": "level_set",
+      "mpi_ranks": 1,
+      "tests": [
+        "LevelSetCurvatureProjection.KinematicAreaGradientRecoversCircleAndSphereOnSimplexMeshes",
+        "LevelSetCurvatureProjection.KinematicAreaGradientCurvatureConvergesUnderSimplexRefinement",
+        "LevelSetCurvatureProjection.KinematicAreaGradientCurvatureRespectsOrientationScaleAndRigidMotion",
+        "LevelSetCurvatureProjection.KinematicAreaGradientIsRoundoffBalancedForAffineFlatInterface",
+        "LevelSetCurvatureProjection.KinematicAreaGradientYoungWallRecoversSessileCircularCaps",
+        "LevelSetCurvatureProjection.KinematicAreaGradientYoungWallIsNeutralAtRightAngle",
+        "LevelSetCurvatureProjection.KinematicAreaGradientYoungWallRespectsLevelSetOrientation",
+        "LevelSetCurvatureProjection.KinematicAreaGradientYoungWallMatchesTotalEnergyDerivative",
+        "LevelSetCurvatureProjection.KinematicAreaGradientUnfilteredFieldMatchesArbitraryEnergyDirection"
+      ],
+      "required_matrix_case_count": 0,
+      "require_identical_rank_properties": false,
+      "property_gates": {
+        "LevelSetCurvatureProjection.KinematicAreaGradientRecoversCircleAndSphereOnSimplexMeshes": [
+          {"property": "kinematic_area_gradient_circle_mean_error", "comparison": "at_most", "expected": 0.2},
+          {"property": "kinematic_area_gradient_circle_max_error", "comparison": "at_most", "expected": 0.9},
+          {"property": "kinematic_area_gradient_sphere_mean_error", "comparison": "at_most", "expected": 0.45},
+          {"property": "kinematic_area_gradient_sphere_max_error", "comparison": "at_most", "expected": 1.7}
+        ],
+        "LevelSetCurvatureProjection.KinematicAreaGradientCurvatureConvergesUnderSimplexRefinement": [
+          {"property": "kinematic_area_gradient_circle_order_12_24", "comparison": "at_least", "expected": 0.5},
+          {"property": "kinematic_area_gradient_circle_order_24_48", "comparison": "at_least", "expected": 0.2},
+          {"property": "kinematic_area_gradient_circle_order_48_96", "comparison": "at_least", "expected": 0.5},
+          {"property": "kinematic_area_gradient_sphere_order_6_10", "comparison": "at_least", "expected": 0.35},
+          {"property": "kinematic_area_gradient_sphere_order_10_14", "comparison": "at_least", "expected": 0.35}
+        ],
+        "LevelSetCurvatureProjection.KinematicAreaGradientCurvatureRespectsOrientationScaleAndRigidMotion": [
+          {"property": "kinematic_area_gradient_max_phi_scale_difference", "comparison": "at_most", "expected": 2e-6},
+          {"property": "kinematic_area_gradient_max_orientation_sum", "comparison": "at_most", "expected": 2e-6},
+          {"property": "kinematic_area_gradient_max_rigid_difference", "comparison": "at_most", "expected": 2e-6},
+          {"property": "kinematic_area_gradient_max_physical_scale_difference", "comparison": "at_most", "expected": 2e-6}
+        ],
+        "LevelSetCurvatureProjection.KinematicAreaGradientIsRoundoffBalancedForAffineFlatInterface": [
+          {"property": "kinematic_area_gradient_affine_flat_gradient_norm", "comparison": "scaled_roundoff", "scale": 2.0},
+          {"property": "kinematic_area_gradient_affine_flat_max_fd_disagreement", "comparison": "finite"},
+          {"property": "kinematic_area_gradient_affine_flat_absolute_identity_residual", "comparison": "scaled_roundoff", "scale": 1.0}
+        ],
+        "LevelSetCurvatureProjection.KinematicAreaGradientYoungWallRecoversSessileCircularCaps": [
+          {"property": "kinematic_young_sessile_60_rms_error_n128", "comparison": "at_most", "expected": 0.025},
+          {"property": "kinematic_young_sessile_60_order_32_128", "comparison": "at_least", "expected": 0.5},
+          {"property": "kinematic_young_sessile_120_rms_error_n128", "comparison": "at_most", "expected": 0.025},
+          {"property": "kinematic_young_sessile_120_order_32_128", "comparison": "at_least", "expected": 0.5}
+        ],
+        "LevelSetCurvatureProjection.KinematicAreaGradientYoungWallIsNeutralAtRightAngle": [
+          {"property": "kinematic_young_neutral_max_curvature_difference", "comparison": "equal", "expected": 0},
+          {"property": "kinematic_young_neutral_wall_measure_evaluation_count", "comparison": "equal", "expected": 0}
+        ],
+        "LevelSetCurvatureProjection.KinematicAreaGradientYoungWallRespectsLevelSetOrientation": [
+          {"property": "kinematic_young_max_orientation_sum", "comparison": "at_most", "expected": 2e-6}
+        ],
+        "LevelSetCurvatureProjection.KinematicAreaGradientYoungWallMatchesTotalEnergyDerivative": [
+          {"property": "kinematic_young_energy_relative_difference", "comparison": "at_most", "expected": 2e-5}
+        ],
+        "LevelSetCurvatureProjection.KinematicAreaGradientUnfilteredFieldMatchesArbitraryEnergyDirection": [
+          {"property": "kinematic_arbitrary_energy_fd_derivative", "comparison": "finite"},
+          {"property": "kinematic_arbitrary_energy_mass_action", "comparison": "finite"},
+          {"property": "kinematic_arbitrary_energy_derivative_action", "comparison": "finite"},
+          {"property": "kinematic_arbitrary_volume_fd_derivative", "comparison": "finite"},
+          {"property": "kinematic_arbitrary_volume_derivative_action", "comparison": "finite"},
+          {"property": "kinematic_arbitrary_energy_relative_difference", "comparison": "at_most", "expected": 1e-8}
+        ]
+      }
+    },
+    {
+      "id": "distributed_area_gradient_geometry",
+      "binary": "level_set_mpi",
+      "mpi_ranks": 2,
+      "tests": [
+        "LevelSetCurvatureProjectionMPI.MatchesSerialAcrossOwnershipAndLocalNumberingPermutations",
+        "LevelSetCurvatureProjectionMPI.RejectsRankAsymmetricRecoveryOptionsCollectively",
+        "LevelSetCurvatureProjectionMPI.RejectsRankAsymmetricSharedLevelSetValuesCollectively"
+      ],
+      "required_matrix_case_count": 0,
+      "require_identical_rank_properties": true,
+      "property_gates": {
+        "LevelSetCurvatureProjectionMPI.MatchesSerialAcrossOwnershipAndLocalNumberingPermutations": [
+          {"property": "kinematic_collective_sessile_60_rms_error_n32", "comparison": "at_most", "expected": 0.08},
+          {"property": "kinematic_collective_max_serial_difference", "comparison": "equal", "expected": 0}
+        ],
+        "LevelSetCurvatureProjectionMPI.RejectsRankAsymmetricRecoveryOptionsCollectively": [
+          {"property": "kinematic_collective_asymmetric_option_rejection_count", "comparison": "equal", "expected": 1},
+          {"property": "kinematic_collective_asymmetric_option_diagnostic_length", "comparison": "at_least", "expected": 1}
+        ],
+        "LevelSetCurvatureProjectionMPI.RejectsRankAsymmetricSharedLevelSetValuesCollectively": [
+          {"property": "kinematic_collective_asymmetric_level_set_rejection_count", "comparison": "equal", "expected": 1},
+          {"property": "kinematic_collective_asymmetric_level_set_diagnostic_length", "comparison": "at_least", "expected": 1}
+        ]
+      }
+    }
+  ],
+  "common_runner_arguments": [
+    "--surface-tension",
+    "1.0",
+    "--capillary-force-form",
+    "kinematic_area_gradient_traction",
+    "--projected-curvature-field",
+    "kappa_area_gradient",
+    "--cut-cell-pressure-stabilization-policy",
+    "incremental",
+    "--sessile-contact-line-model",
+    "prescribed",
+    "--require-free-surface-conservative-balance",
+    "--require-free-surface-pressure-representability-diagnostic",
+    "--max-free-surface-pressure-representability-relative-distance",
+    "1e-8",
+    "--defer-static-physical-gates-to-matrix",
+    "--static-capillary-volume-tolerance",
+    "1e-10",
+    "--static-capillary-projected-gradient-tolerance",
+    "1e-10",
+    "--static-capillary-pressure-representability-max-residual-norm",
+    "1e-8",
+    "--static-capillary-pressure-representability-max-relative-distance",
+    "1e-8",
+    "--static-capillary-physical-equilibrium-max-residual-norm",
+    "1e-8",
+    "--static-capillary-constant-pressure-kkt-max-residual-norm",
+    "1e-8",
+    "--static-capillary-constant-pressure-kkt-max-relative-distance",
+    "1e-8",
+    "--static-capillary-max-iterations",
+    "1200",
+    "--static-capillary-max-topology-epoch-transitions",
+    "64",
+    "--enable-physical-history-instrumentation",
+    "--require-free-surface-energy-history",
+    "--preserve-run-dir"
+  ],
+  "literature_adaptations": [
+    {
+      "id": "gross_reusken_planar_force",
+      "source": {
+        "authors": "Groß and Reusken",
+        "year": 2007,
+        "doi": "10.1137/060667530"
+      },
+      "published_target": "planar zero-curvature force and pressure compatibility",
+      "adapted_evidence_group": "area_gradient_geometry_and_energy",
+      "adapted_test": "LevelSetCurvatureProjection.KinematicAreaGradientIsRoundoffBalancedForAffineFlatInterface",
+      "mapping": "The one-phase affine unfitted test retains the planar zero-area-gradient target and pressure-range balance diagnostic.",
+      "limitations": [
+        "This is not a curved capillary-arc surrogate.",
+        "The original two-phase and enriched-pressure ingredients are not reproduced."
+      ]
+    },
+    {
+      "id": "gross_reusken_spherical_force",
+      "source": {
+        "authors": "Groß and Reusken",
+        "year": 2007,
+        "doi": "10.1137/060667530"
+      },
+      "published_parameters": {
+        "radius": 0.6666666666666666,
+        "surface_tension": 1.0,
+        "pressure_jump": 3.0
+      },
+      "adapted_study": "gross_reusken_sphere_one_phase_adaptation",
+      "adapted_parameters": {
+        "radius": 0.3,
+        "surface_tension": 0.45,
+        "pressure_jump": 3.0
+      },
+      "scale_mapping": {
+        "length_scale": 0.45,
+        "surface_tension_scale": 0.45,
+        "pressure_scale": 1.0
+      },
+      "limitations": [
+        "The adaptation is one-phase with prescribed exterior traction.",
+        "The original two-phase and enriched-pressure ingredients are not reproduced."
+      ]
+    },
+    {
+      "id": "reusken_stationary_sessile",
+      "source": {
+        "authors": "Reusken, Xu, and Zhang",
+        "year": 2017,
+        "doi": "10.1002/fld.4349"
+      },
+      "published_parameters": {
+        "cube_side": 0.5,
+        "radius": 0.1,
+        "contact_angle_degrees": 60,
+        "surface_tension": 0.5,
+        "density": 1.0,
+        "viscosity": 1.0,
+        "pressure_jump": 10.0
+      },
+      "adapted_study": "reusken_sessile_one_phase_adaptation",
+      "adapted_parameters": {
+        "cube_side": 1.0,
+        "radius": 0.2,
+        "contact_angle_degrees": 60,
+        "surface_tension": 1.0,
+        "density": 1.0,
+        "viscosity": 0.1,
+        "pressure_jump": 10.0
+      },
+      "scale_mapping": {
+        "length_scale": 2.0,
+        "surface_tension_scale": 2.0,
+        "pressure_scale": 1.0
+      },
+      "limitations": [
+        "This is a one-phase equilibrium and shape comparison, not the published two-phase transient model.",
+        "The adapted viscosity and prescribed-angle wall model differ from the published wall-friction configuration.",
+        "Dynamic spreading and line-dissipation comparisons are deferred to WP-5."
+      ]
+    },
+    {
+      "id": "reusken_spreading_end_states",
+      "source": {
+        "authors": "Reusken, Xu, and Zhang",
+        "year": 2017,
+        "doi": "10.1002/fld.4349"
+      },
+      "published_transition": {
+        "initial_contact_angle_degrees": 90,
+        "equilibrium_contact_angle_degrees": [30, 60, 120]
+      },
+      "adapted_study": "reusken_spreading_end_states_one_phase_adaptation",
+      "mapping": "Only the volume-matched one-phase equilibrium end states are compared in WP-4.",
+      "limitations": [
+        "No dynamic trajectory, line friction, or wall-slip agreement is claimed in WP-4.",
+        "The spreading and contracting transients are deferred to WP-5."
+      ]
+    }
+  ],
+  "studies": [
+    {
+      "id": "closed_circle_sampled_analytic",
+      "case": "droplet2d",
+      "dimension": 2,
+      "radius": 0.2,
+      "initialization": "sampled_analytic",
+      "refinement_axis": "resolution",
+      "steps": 1,
+      "time_step": 0.001,
+      "axes": {
+        "active_domain": ["LevelSetNegative", "LevelSetPositive"],
+        "offset_h": [[0.0, 0.0], [0.23, -0.31], [-0.37, 0.19]]
+      },
+      "metrics": [
+        "pressure_jump_relative_error",
+        "pressure_space_relative_distance",
+        "conservative_balance_normalized_imbalance",
+        "parasitic_capillary_number"
+      ]
+    },
+    {
+      "id": "closed_circle_discrete_minimizer",
+      "case": "droplet2d",
+      "dimension": 2,
+      "radius": 0.2,
+      "initialization": "discrete_energy_minimized",
+      "refinement_axis": "resolution",
+      "steps": 1,
+      "time_step": 0.001,
+      "axes": {
+        "active_domain": ["LevelSetNegative", "LevelSetPositive"],
+        "offset_h": [[0.0, 0.0], [0.23, -0.31], [-0.37, 0.19]]
+      },
+      "metrics": [
+        "pressure_jump_relative_error",
+        "pressure_space_relative_distance",
+        "conservative_balance_normalized_imbalance",
+        "parasitic_capillary_number"
+      ]
+    },
+    {
+      "id": "closed_sphere_sampled_analytic",
+      "case": "sphere3d",
+      "dimension": 3,
+      "radius": 0.45,
+      "arguments": ["--sessile-radius", "0.45"],
+      "initialization": "sampled_analytic",
+      "refinement_axis": "resolution",
+      "steps": 1,
+      "time_step": 0.001,
+      "axes": {
+        "active_domain": ["LevelSetNegative", "LevelSetPositive"],
+        "offset_h": [[0.0, 0.0, 0.0], [0.23, -0.31, 0.17], [-0.37, 0.19, -0.29]]
+      },
+      "metrics": [
+        "pressure_jump_relative_error",
+        "pressure_space_relative_distance",
+        "conservative_balance_normalized_imbalance",
+        "parasitic_capillary_number"
+      ]
+    },
+    {
+      "id": "closed_sphere_discrete_minimizer",
+      "case": "sphere3d",
+      "dimension": 3,
+      "radius": 0.45,
+      "arguments": ["--sessile-radius", "0.45"],
+      "initialization": "discrete_energy_minimized",
+      "refinement_axis": "resolution",
+      "steps": 1,
+      "time_step": 0.001,
+      "axes": {
+        "active_domain": ["LevelSetNegative", "LevelSetPositive"],
+        "offset_h": [[0.0, 0.0, 0.0], [0.23, -0.31, 0.17], [-0.37, 0.19, -0.29]]
+      },
+      "metrics": [
+        "pressure_jump_relative_error",
+        "pressure_space_relative_distance",
+        "conservative_balance_normalized_imbalance",
+        "parasitic_capillary_number"
+      ]
+    },
+    {
+      "id": "sessile_caps_2d_sampled_analytic",
+      "case": "sessile2d",
+      "dimension": 2,
+      "radius": 0.45,
+      "arguments": ["--sessile-radius", "0.45"],
+      "initialization": "sampled_analytic",
+      "refinement_axis": "resolution",
+      "steps": 1,
+      "time_step": 0.001,
+      "axes": {
+        "contact_angle": [30, 60, 90, 120, 150],
+        "wall": ["wall_bottom", "wall_left", "wall_right", "wall_top"],
+        "active_domain": ["LevelSetNegative", "LevelSetPositive"],
+        "offset_h": [0.0, 0.23, -0.37]
+      },
+      "metrics": [
+        "pressure_jump_relative_error",
+        "pressure_space_relative_distance",
+        "conservative_balance_normalized_imbalance",
+        "contact_angle_absolute_error_degrees",
+        "base_radius_relative_error",
+        "apex_height_relative_error",
+        "parasitic_capillary_number"
+      ]
+    },
+    {
+      "id": "sessile_caps_2d_discrete_minimizer",
+      "case": "sessile2d",
+      "dimension": 2,
+      "radius": 0.45,
+      "arguments": ["--sessile-radius", "0.45"],
+      "initialization": "discrete_energy_minimized",
+      "refinement_axis": "resolution",
+      "steps": 1,
+      "time_step": 0.001,
+      "axes": {
+        "contact_angle": [30, 60, 90, 120, 150],
+        "wall": ["wall_bottom", "wall_left", "wall_right", "wall_top"],
+        "active_domain": ["LevelSetNegative", "LevelSetPositive"],
+        "offset_h": [0.0, 0.23, -0.37]
+      },
+      "metrics": [
+        "pressure_jump_relative_error",
+        "pressure_space_relative_distance",
+        "conservative_balance_normalized_imbalance",
+        "contact_angle_absolute_error_degrees",
+        "base_radius_relative_error",
+        "apex_height_relative_error",
+        "parasitic_capillary_number"
+      ]
+    },
+    {
+      "id": "sessile_caps_3d_sampled_analytic",
+      "case": "sessile3d",
+      "dimension": 3,
+      "radius": 0.45,
+      "arguments": ["--sessile-radius", "0.45"],
+      "initialization": "sampled_analytic",
+      "refinement_axis": "resolution",
+      "steps": 1,
+      "time_step": 0.001,
+      "axes": {
+        "contact_angle": [30, 60, 90, 120, 150],
+        "wall": ["wall_left", "wall_right", "wall_bottom", "wall_top", "wall_front", "wall_back"],
+        "active_domain": ["LevelSetNegative", "LevelSetPositive"],
+        "offset_h": [[0.0, 0.0], [0.23, -0.31]]
+      },
+      "metrics": [
+        "pressure_jump_relative_error",
+        "pressure_space_relative_distance",
+        "conservative_balance_normalized_imbalance",
+        "contact_angle_absolute_error_degrees",
+        "base_radius_relative_error",
+        "apex_height_relative_error",
+        "parasitic_capillary_number"
+      ]
+    },
+    {
+      "id": "sessile_caps_3d_discrete_minimizer",
+      "case": "sessile3d",
+      "dimension": 3,
+      "radius": 0.45,
+      "arguments": ["--sessile-radius", "0.45"],
+      "initialization": "discrete_energy_minimized",
+      "refinement_axis": "resolution",
+      "steps": 1,
+      "time_step": 0.001,
+      "axes": {
+        "contact_angle": [30, 60, 90, 120, 150],
+        "wall": ["wall_left", "wall_right", "wall_bottom", "wall_top", "wall_front", "wall_back"],
+        "active_domain": ["LevelSetNegative", "LevelSetPositive"],
+        "offset_h": [[0.0, 0.0], [0.23, -0.31]]
+      },
+      "metrics": [
+        "pressure_jump_relative_error",
+        "pressure_space_relative_distance",
+        "conservative_balance_normalized_imbalance",
+        "contact_angle_absolute_error_degrees",
+        "base_radius_relative_error",
+        "apex_height_relative_error",
+        "parasitic_capillary_number"
+      ]
+    },
+    {
+      "id": "prescribed_angle_phi_scale_2d",
+      "case": "sessile2d",
+      "dimension": 2,
+      "radius": 0.45,
+      "arguments": ["--sessile-radius", "0.45"],
+      "initialization": "sampled_analytic",
+      "refinement_axis": "phi_scale",
+      "refinement_levels": [0.25, 1.0, 4.0],
+      "resolution": 32,
+      "steps": 1,
+      "time_step": 0.001,
+      "axes": {
+        "contact_angle": [30, 60, 90, 120, 150],
+        "wall": ["wall_bottom", "wall_left", "wall_right", "wall_top"],
+        "active_domain": ["LevelSetNegative", "LevelSetPositive"]
+      },
+      "metrics": [
+        "pressure_jump_relative_error",
+        "pressure_space_relative_distance",
+        "conservative_balance_normalized_imbalance",
+        "contact_angle_absolute_error_degrees",
+        "base_radius_relative_error",
+        "apex_height_relative_error",
+        "parasitic_capillary_number"
+      ]
+    },
+    {
+      "id": "prescribed_angle_phi_scale_3d",
+      "case": "sessile3d",
+      "dimension": 3,
+      "radius": 0.45,
+      "arguments": ["--sessile-radius", "0.45"],
+      "initialization": "sampled_analytic",
+      "refinement_axis": "phi_scale",
+      "refinement_levels": [0.25, 1.0, 4.0],
+      "resolution": 32,
+      "steps": 1,
+      "time_step": 0.001,
+      "axes": {
+        "contact_angle": [30, 60, 90, 120, 150],
+        "wall": ["wall_left", "wall_right", "wall_bottom", "wall_top", "wall_front", "wall_back"],
+        "active_domain": ["LevelSetNegative", "LevelSetPositive"]
+      },
+      "metrics": [
+        "pressure_jump_relative_error",
+        "pressure_space_relative_distance",
+        "conservative_balance_normalized_imbalance",
+        "contact_angle_absolute_error_degrees",
+        "base_radius_relative_error",
+        "apex_height_relative_error",
+        "parasitic_capillary_number"
+      ]
+    },
+    {
+      "id": "dimensional_scaling_2d",
+      "case": "sessile2d",
+      "dimension": 2,
+      "initialization": "sampled_analytic",
+      "refinement_axis": "physical_scale",
+      "refinement_levels": [
+        {"label": "scale_0p5", "radius": 0.2, "surface_tension": 0.5},
+        {"label": "scale_0p75", "radius": 0.3, "surface_tension": 0.75},
+        {"label": "scale_1", "radius": 0.4, "surface_tension": 1.0}
+      ],
+      "cells_per_radius": 8,
+      "steps": 1,
+      "time_step": 0.001,
+      "axes": {
+        "contact_angle": [60, 120],
+        "wall": ["wall_bottom", "wall_left"],
+        "active_domain": ["LevelSetNegative", "LevelSetPositive"]
+      },
+      "metrics": [
+        "pressure_jump_relative_error",
+        "pressure_space_relative_distance",
+        "conservative_balance_normalized_imbalance",
+        "contact_angle_absolute_error_degrees",
+        "base_radius_relative_error",
+        "apex_height_relative_error",
+        "parasitic_capillary_number"
+      ]
+    },
+    {
+      "id": "dimensional_scaling_3d",
+      "case": "sessile3d",
+      "dimension": 3,
+      "initialization": "sampled_analytic",
+      "refinement_axis": "physical_scale",
+      "refinement_levels": [
+        {"label": "scale_0p5", "radius": 0.2, "surface_tension": 0.5},
+        {"label": "scale_0p75", "radius": 0.3, "surface_tension": 0.75},
+        {"label": "scale_1", "radius": 0.4, "surface_tension": 1.0}
+      ],
+      "cells_per_radius": 8,
+      "steps": 1,
+      "time_step": 0.001,
+      "axes": {
+        "contact_angle": [60, 120],
+        "wall": ["wall_bottom", "wall_left", "wall_front"],
+        "active_domain": ["LevelSetNegative", "LevelSetPositive"]
+      },
+      "metrics": [
+        "pressure_jump_relative_error",
+        "pressure_space_relative_distance",
+        "conservative_balance_normalized_imbalance",
+        "contact_angle_absolute_error_degrees",
+        "base_radius_relative_error",
+        "apex_height_relative_error",
+        "parasitic_capillary_number"
+      ]
+    },
+    {
+      "id": "independent_time_step_2d",
+      "case": "sessile2d",
+      "dimension": 2,
+      "radius": 0.45,
+      "arguments": ["--sessile-radius", "0.45"],
+      "initialization": "discrete_energy_minimized",
+      "refinement_axis": "time_step",
+      "refinement_levels": [0.004, 0.002, 0.001],
+      "resolution": 32,
+      "steps": 1,
+      "axes": {
+        "contact_angle": [60, 120],
+        "wall": ["wall_bottom", "wall_left"],
+        "active_domain": ["LevelSetNegative", "LevelSetPositive"],
+        "offset_h": [0.23]
+      },
+      "metrics": [
+        "pressure_jump_relative_error",
+        "contact_angle_absolute_error_degrees",
+        "parasitic_capillary_number"
+      ]
+    },
+    {
+      "id": "independent_time_step_3d",
+      "case": "sessile3d",
+      "dimension": 3,
+      "radius": 0.45,
+      "arguments": ["--sessile-radius", "0.45"],
+      "initialization": "discrete_energy_minimized",
+      "refinement_axis": "time_step",
+      "refinement_levels": [0.004, 0.002, 0.001],
+      "resolution": 32,
+      "steps": 1,
+      "axes": {
+        "contact_angle": [60, 120],
+        "wall": ["wall_bottom", "wall_left", "wall_front"],
+        "active_domain": ["LevelSetNegative", "LevelSetPositive"],
+        "offset_h": [[0.23, -0.31]]
+      },
+      "metrics": [
+        "pressure_jump_relative_error",
+        "contact_angle_absolute_error_degrees",
+        "parasitic_capillary_number"
+      ]
+    },
+    {
+      "id": "reinitialization_cadence_2d",
+      "case": "sessile2d",
+      "dimension": 2,
+      "radius": 0.45,
+      "arguments": ["--sessile-radius", "0.45"],
+      "initialization": "sampled_analytic",
+      "refinement_axis": "reinitialization_cadence",
+      "refinement_levels": [4, 2, 1],
+      "resolution": 32,
+      "steps": 4,
+      "time_step": 0.001,
+      "axes": {
+        "contact_angle": [30, 60, 90, 120, 150],
+        "wall": ["wall_bottom", "wall_left", "wall_right", "wall_top"],
+        "active_domain": ["LevelSetNegative", "LevelSetPositive"]
+      },
+      "metrics": [
+        "contact_angle_absolute_error_degrees",
+        "base_radius_relative_error",
+        "apex_height_relative_error"
+      ]
+    },
+    {
+      "id": "reinitialization_cadence_3d",
+      "case": "sessile3d",
+      "dimension": 3,
+      "radius": 0.45,
+      "arguments": ["--sessile-radius", "0.45"],
+      "initialization": "sampled_analytic",
+      "refinement_axis": "reinitialization_cadence",
+      "refinement_levels": [4, 2, 1],
+      "resolution": 32,
+      "steps": 4,
+      "time_step": 0.001,
+      "axes": {
+        "contact_angle": [30, 60, 90, 120, 150],
+        "wall": ["wall_left", "wall_right", "wall_bottom", "wall_top", "wall_front", "wall_back"],
+        "active_domain": ["LevelSetNegative", "LevelSetPositive"]
+      },
+      "metrics": [
+        "contact_angle_absolute_error_degrees",
+        "base_radius_relative_error",
+        "apex_height_relative_error"
+      ]
+    },
+    {
+      "id": "gross_reusken_sphere_one_phase_adaptation",
+      "case": "sphere3d",
+      "dimension": 3,
+      "radius": 0.3,
+      "initialization": "discrete_energy_minimized",
+      "refinement_axis": "resolution",
+      "steps": 1,
+      "time_step": 0.001,
+      "arguments": ["--sessile-radius", "0.3", "--surface-tension", "0.45"],
+      "axes": {
+        "active_domain": ["LevelSetNegative", "LevelSetPositive"],
+        "offset_h": [[0.0, 0.0, 0.0], [0.23, -0.31, 0.17]]
+      },
+      "literature_adaptation": "gross_reusken_spherical_force",
+      "metrics": [
+        "pressure_jump_relative_error",
+        "pressure_space_relative_distance",
+        "conservative_balance_normalized_imbalance",
+        "parasitic_capillary_number"
+      ]
+    },
+    {
+      "id": "reusken_sessile_one_phase_adaptation",
+      "case": "sessile3d",
+      "dimension": 3,
+      "radius": 0.2,
+      "initialization": "discrete_energy_minimized",
+      "refinement_axis": "resolution",
+      "steps": 1,
+      "time_step": 0.001,
+      "arguments": ["--sessile-radius", "0.2", "--surface-tension", "1.0"],
+      "axes": {
+        "contact_angle": [60],
+        "wall": ["wall_bottom", "wall_left", "wall_front"],
+        "active_domain": ["LevelSetNegative", "LevelSetPositive"],
+        "offset_h": [[0.0, 0.0], [0.23, -0.31]]
+      },
+      "literature_adaptation": "reusken_stationary_sessile",
+      "metrics": [
+        "pressure_jump_relative_error",
+        "contact_angle_absolute_error_degrees",
+        "base_radius_relative_error",
+        "apex_height_relative_error",
+        "parasitic_capillary_number"
+      ]
+    },
+    {
+      "id": "reusken_spreading_end_states_one_phase_adaptation",
+      "case": "sessile2d",
+      "dimension": 2,
+      "radius": 0.45,
+      "arguments": ["--sessile-radius", "0.45"],
+      "initialization": "discrete_energy_minimized",
+      "refinement_axis": "resolution",
+      "steps": 1,
+      "time_step": 0.001,
+      "axes": {
+        "contact_angle": [30, 60, 120],
+        "wall": ["wall_bottom", "wall_left"],
+        "active_domain": ["LevelSetNegative", "LevelSetPositive"],
+        "offset_h": [0.0, 0.23]
+      },
+      "literature_adaptation": "reusken_spreading_end_states",
+      "metrics": [
+        "pressure_jump_relative_error",
+        "contact_angle_absolute_error_degrees",
+        "base_radius_relative_error",
+        "apex_height_relative_error",
+        "parasitic_capillary_number"
+      ]
+    }
+  ]
+}

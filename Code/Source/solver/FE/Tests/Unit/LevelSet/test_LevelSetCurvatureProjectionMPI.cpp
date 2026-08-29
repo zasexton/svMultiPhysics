@@ -644,6 +644,10 @@ TEST(LevelSetCurvatureProjectionMPI,
     MPI_Allreduce(MPI_IN_PLACE, &maximum_length, 1,
                   MPI_INT, MPI_MAX, MPI_COMM_WORLD);
     EXPECT_EQ(minimum_length, maximum_length);
+    RecordProperty("kinematic_collective_asymmetric_option_rejection_count",
+                   1);
+    RecordProperty("kinematic_collective_asymmetric_option_diagnostic_length",
+                   diagnostic_length);
 }
 
 TEST(LevelSetCurvatureProjectionMPI,
@@ -702,6 +706,11 @@ TEST(LevelSetCurvatureProjectionMPI,
     MPI_Allreduce(MPI_IN_PLACE, &maximum_length, 1,
                   MPI_INT, MPI_MAX, MPI_COMM_WORLD);
     EXPECT_EQ(minimum_length, maximum_length);
+    RecordProperty(
+        "kinematic_collective_asymmetric_level_set_rejection_count", 1);
+    RecordProperty(
+        "kinematic_collective_asymmetric_level_set_diagnostic_length",
+        diagnostic_length);
 }
 
 } // namespace

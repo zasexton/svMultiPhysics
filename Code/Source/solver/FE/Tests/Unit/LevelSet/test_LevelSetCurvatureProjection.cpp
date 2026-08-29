@@ -3594,9 +3594,14 @@ TEST(LevelSetCurvatureProjection,
     EXPECT_DOUBLE_EQ(
         young.result.kinematic_area_gradient_total_energy_gradient_norm,
         young.result.kinematic_area_gradient_surface_gradient_norm);
-    EXPECT_DOUBLE_EQ(maxAbsDifference(young.curvature,
-                                     surface_only.curvature),
-                     FE::Real{0.0});
+    const FE::Real maximum_curvature_difference =
+        maxAbsDifference(young.curvature, surface_only.curvature);
+    EXPECT_DOUBLE_EQ(maximum_curvature_difference, FE::Real{0.0});
+    RecordProperty("kinematic_young_neutral_max_curvature_difference",
+                   maximum_curvature_difference);
+    RecordProperty(
+        "kinematic_young_neutral_wall_measure_evaluation_count",
+        young.result.kinematic_area_gradient_young_wall_measure_evaluations);
 }
 
 TEST(LevelSetCurvatureProjection,
