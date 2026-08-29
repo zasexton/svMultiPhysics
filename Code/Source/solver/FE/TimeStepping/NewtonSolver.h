@@ -315,6 +315,7 @@ struct NewtonReport {
     bool pressure_representability_available{false};
     bool pressure_representability_converged{false};
     bool pressure_representability_breakdown{false};
+    FieldId pressure_representability_pressure_field{INVALID_FIELD_ID};
     double pressure_representability_residual_norm{
         std::numeric_limits<double>::quiet_NaN()};
     double pressure_representability_relative_distance{

@@ -7175,6 +7175,8 @@ TEST(NewtonSolver,
     EXPECT_TRUE(report.static_compatible_pressure_initializer_passed);
     EXPECT_EQ(report.static_compatible_pressure_initializer_reason,
               "additive_initial_guess_within_threshold");
+    EXPECT_EQ(report.pressure_representability_pressure_field,
+              problem.pressure_field);
     EXPECT_TRUE(workspace.static_compatible_pressure_initialized);
     EXPECT_LE(report.pressure_representability_relative_distance, 1.0e-10);
     EXPECT_NE(

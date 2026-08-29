@@ -24735,28 +24735,35 @@ void zeroHistoryFieldRateSlice(
 std::string staticCapillaryHistoryPublicationTargetLayoutError(
     const svmp::FE::systems::FESystem& system,
     svmp::FE::FieldId level_set_field,
+    svmp::FE::FieldId pressure_field,
     std::span<const svmp::FE::Real> certified_solution,
     const svmp::FE::timestepping::TimeHistory& history)
 {
-  const auto raw_field_offset =
-      system.fieldDofOffset(level_set_field);
-  const auto raw_field_count =
-      system.fieldDofHandler(level_set_field).getNumDofs();
-  if (raw_field_offset < 0 || raw_field_count <= 0 ||
+  if (level_set_field == svmp::FE::INVALID_FIELD_ID ||
+      pressure_field == svmp::FE::INVALID_FIELD_ID ||
+      level_set_field == pressure_field ||
       history.historyDepth() < 0 ||
       certified_solution.size() !=
           static_cast<std::size_t>(history.u().size())) {
     return "[svMultiPhysics::Application] Static capillary publication received an invalid solution or field layout.";
   }
 
-  const auto field_offset =
-      static_cast<std::size_t>(raw_field_offset);
-  const auto field_count =
-      static_cast<std::size_t>(raw_field_count);
-  if (field_offset > certified_solution.size() ||
-      field_count >
-          certified_solution.size() - field_offset) {
-    return "[svMultiPhysics::Application] Static capillary publication level-set slice exceeds the FE layout.";
+  for (const auto field : {level_set_field, pressure_field}) {
+    const auto raw_field_offset = system.fieldDofOffset(field);
+    const auto raw_field_count =
+        system.fieldDofHandler(field).getNumDofs();
+    if (raw_field_offset < 0 || raw_field_count <= 0) {
+      return "[svMultiPhysics::Application] Static capillary publication received an invalid stationary-field layout.";
+    }
+    const auto field_offset =
+        static_cast<std::size_t>(raw_field_offset);
+    const auto field_count =
+        static_cast<std::size_t>(raw_field_count);
+    if (field_offset > certified_solution.size() ||
+        field_count >
+            certified_solution.size() - field_offset) {
+      return "[svMultiPhysics::Application] Static capillary publication stationary-field slice exceeds the FE layout.";
+    }
   }
 
   for (int slot = 1; slot <= history.historyDepth(); ++slot) {
@@ -24780,6 +24787,7 @@ std::string staticCapillaryHistoryPublicationTargetLayoutError(
 std::string staticCapillaryHistoryPublicationLayoutError(
     const svmp::FE::systems::FESystem& system,
     svmp::FE::FieldId level_set_field,
+    svmp::FE::FieldId pressure_field,
     std::span<const svmp::FE::Real> certified_solution,
     std::span<const std::vector<svmp::FE::Real>>
         preserved_history,
@@ -24789,6 +24797,7 @@ std::string staticCapillaryHistoryPublicationLayoutError(
       staticCapillaryHistoryPublicationTargetLayoutError(
           system,
           level_set_field,
+          pressure_field,
           certified_solution,
           history);
   if (!target_error.empty()) {
@@ -24809,6 +24818,7 @@ std::string staticCapillaryHistoryPublicationLayoutError(
 void stageStaticCapillaryHistoryForPublication(
     const svmp::FE::systems::FESystem& system,
     svmp::FE::FieldId level_set_field,
+    svmp::FE::FieldId pressure_field,
     std::span<const svmp::FE::Real> certified_solution,
     std::span<const std::vector<svmp::FE::Real>>
         preserved_history,
@@ -24818,6 +24828,7 @@ void stageStaticCapillaryHistoryForPublication(
       staticCapillaryHistoryPublicationLayoutError(
           system,
           level_set_field,
+          pressure_field,
           certified_solution,
           preserved_history,
           history);
@@ -24825,38 +24836,40 @@ void stageStaticCapillaryHistoryForPublication(
     throw std::runtime_error(layout_error);
   }
 
-  const auto raw_field_offset =
-      system.fieldDofOffset(level_set_field);
-  const auto raw_field_count =
-      system.fieldDofHandler(level_set_field).getNumDofs();
-  const auto field_offset =
-      static_cast<std::size_t>(raw_field_offset);
-  const auto field_count =
-      static_cast<std::size_t>(raw_field_count);
   const auto comm = activeFESystemCommunicator(system);
 
   scatterFeOrderedSolution(history.u(), certified_solution);
   for (int slot = 1; slot <= history.historyDepth(); ++slot) {
     auto accepted_history = preserved_history[
         static_cast<std::size_t>(slot - 1)];
-    std::copy(
-        certified_solution.begin() +
-            static_cast<std::ptrdiff_t>(field_offset),
-        certified_solution.begin() +
-            static_cast<std::ptrdiff_t>(
-                field_offset + field_count),
-        accepted_history.begin() +
-            static_cast<std::ptrdiff_t>(field_offset));
+    for (const auto field : {level_set_field, pressure_field}) {
+      const auto field_offset = static_cast<std::size_t>(
+          system.fieldDofOffset(field));
+      const auto field_count = static_cast<std::size_t>(
+          system.fieldDofHandler(field).getNumDofs());
+      std::copy(
+          certified_solution.begin() +
+              static_cast<std::ptrdiff_t>(field_offset),
+          certified_solution.begin() +
+              static_cast<std::ptrdiff_t>(
+                  field_offset + field_count),
+          accepted_history.begin() +
+              static_cast<std::ptrdiff_t>(field_offset));
+    }
     scatterFeOrderedSolution(
         history.uPrevK(slot), accepted_history);
   }
   if (history.hasUDotState()) {
-    zeroHistoryFieldRateSlice(
-        system, level_set_field, history.uDot(), comm);
+    for (const auto field : {level_set_field, pressure_field}) {
+      zeroHistoryFieldRateSlice(
+          system, field, history.uDot(), comm);
+    }
   }
   if (history.hasUDDotState()) {
-    zeroHistoryFieldRateSlice(
-        system, level_set_field, history.uDDot(), comm);
+    for (const auto field : {level_set_field, pressure_field}) {
+      zeroHistoryFieldRateSlice(
+          system, field, history.uDDot(), comm);
+    }
   }
   history.updateGhosts();
 }
@@ -25247,6 +25260,8 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
   minimization_options.allow_topology_epoch_transitions =
       exact_functional_derivatives_requested;
   std::vector<svmp::FE::Real> certified_solution;
+  svmp::FE::FieldId certified_pressure_field{
+      svmp::FE::INVALID_FIELD_ID};
   double certified_constant_pressure_jump =
       std::numeric_limits<double>::quiet_NaN();
   double certified_constant_pressure_volume_multiplier =
@@ -25682,6 +25697,18 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
           const bool local_pressure_available =
               local_diagnostic_sampled &&
               report.pressure_representability_available;
+          const bool local_pressure_field_invalid =
+              local_pressure_available &&
+              (report.pressure_representability_pressure_field ==
+                   svmp::FE::INVALID_FIELD_ID ||
+               report.pressure_representability_pressure_field ==
+                   level_set_field);
+          if (globalAnyBool(local_pressure_field_invalid, comm)) {
+            evaluation.success = false;
+            evaluation.diagnostic =
+                "pressure_certificate_field_is_invalid";
+            return evaluation;
+          }
           const bool local_pressure_scalar_invalid =
               local_pressure_available &&
               (!std::isfinite(
@@ -25711,6 +25738,15 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
                   comm) ==
               globalMaxDouble(
                   local_pressure_available ? 1.0 : 0.0,
+                  comm);
+          const bool pressure_field_identical =
+              globalMinDouble(
+                  static_cast<double>(
+                      report.pressure_representability_pressure_field),
+                  comm) ==
+              globalMaxDouble(
+                  static_cast<double>(
+                      report.pressure_representability_pressure_field),
                   comm);
           const bool kkt_available_identical =
               globalMinDouble(
@@ -25757,6 +25793,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
                       comm);
           if (!diagnostic_sampled_identical ||
               !pressure_available_identical ||
+              !pressure_field_identical ||
               !kkt_available_identical ||
               !pressure_convergence_identical ||
               !constant_pressure_trace_flags_identical) {
@@ -25871,6 +25908,8 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
           certified_constant_pressure_multiplier_comparison_available =
               local_kkt_available &&
               evaluation.constant_pressure_kkt_required;
+          certified_pressure_field =
+              report.pressure_representability_pressure_field;
           certified_solution =
               std::move(certificate.certified_solution);
         }
@@ -25898,6 +25937,8 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       result.accepted_coefficients_assigned &&
       accepted_parameters.size() == field_count &&
       certified_solution.size() == baseline.size() &&
+      certified_pressure_field != svmp::FE::INVALID_FIELD_ID &&
+      certified_pressure_field != level_set_field &&
       (!result.final_constant_pressure_kkt_required ||
        (result.final_constant_pressure_kkt_available &&
         std::isfinite(certified_constant_pressure_jump) &&
@@ -25967,6 +26008,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       staticCapillaryHistoryPublicationTargetLayoutError(
           system,
           level_set_field,
+          certified_pressure_field,
           certified_solution,
           history);
   if (globalAnyBool(
@@ -26004,6 +26046,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       staticCapillaryHistoryPublicationLayoutError(
           system,
           level_set_field,
+          certified_pressure_field,
           certified_solution,
           history_backups,
           history);
@@ -26040,6 +26083,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
     stageStaticCapillaryHistoryForPublication(
         system,
         level_set_field,
+        certified_pressure_field,
         certified_solution,
         history_backups,
         history);

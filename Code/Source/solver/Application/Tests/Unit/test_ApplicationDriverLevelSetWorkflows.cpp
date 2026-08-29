@@ -4979,7 +4979,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
-     StaticCapillaryHistoryStagingPreservesUnrelatedHistoryAndRates)
+     StaticCapillaryHistoryStagingSynchronizesStationaryFieldsOnly)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -4992,6 +4992,11 @@ TEST(ApplicationDriverLevelSetWorkflows,
   const auto phi = system.addField(
       svmp::FE::systems::FieldSpec{
           .name = "phi",
+          .space = scalar_space,
+          .components = 1});
+  const auto pressure = system.addField(
+      svmp::FE::systems::FieldSpec{
+          .name = "Pressure",
           .space = scalar_space,
           .components = 1});
   const auto passive = system.addField(
@@ -5023,18 +5028,30 @@ TEST(ApplicationDriverLevelSetWorkflows,
       system.fieldDofOffset(phi));
   const auto phi_count = static_cast<std::size_t>(
       system.fieldDofHandler(phi).getNumDofs());
+  const auto pressure_offset = static_cast<std::size_t>(
+      system.fieldDofOffset(pressure));
+  const auto pressure_count = static_cast<std::size_t>(
+      system.fieldDofHandler(pressure).getNumDofs());
   const auto passive_offset = static_cast<std::size_t>(
       system.fieldDofOffset(passive));
   const auto passive_count = static_cast<std::size_t>(
       system.fieldDofHandler(passive).getNumDofs());
   const auto make_state =
       [&](svmp::FE::Real phi_base,
+          svmp::FE::Real pressure_base,
           svmp::FE::Real passive_base) {
         std::vector<svmp::FE::Real> values(
             solution_size, 0.0);
         for (std::size_t i = 0u; i < phi_count; ++i) {
           values[phi_offset + i] =
               phi_base + static_cast<svmp::FE::Real>(i);
+        }
+        for (std::size_t i = 0u;
+             i < pressure_count;
+             ++i) {
+          values[pressure_offset + i] =
+              pressure_base +
+              static_cast<svmp::FE::Real>(i);
         }
         for (std::size_t i = 0u;
              i < passive_count;
@@ -5046,12 +5063,12 @@ TEST(ApplicationDriverLevelSetWorkflows,
         return values;
       };
 
-  const auto current = make_state(1.0, 10.0);
-  const auto previous = make_state(4.0, 20.0);
-  const auto older = make_state(7.0, 30.0);
-  const auto certified = make_state(40.0, 50.0);
-  const auto rate = make_state(3.0, 60.0);
-  const auto acceleration = make_state(6.0, 70.0);
+  const auto current = make_state(1.0, 10.0, 100.0);
+  const auto previous = make_state(4.0, 20.0, 200.0);
+  const auto older = make_state(7.0, 30.0, 300.0);
+  const auto certified = make_state(40.0, 50.0, 500.0);
+  const auto rate = make_state(3.0, 60.0, 600.0);
+  const auto acceleration = make_state(6.0, 70.0, 700.0);
   scatterFeOrderedSolution(history.u(), current);
   scatterFeOrderedSolution(history.uPrev(), previous);
   scatterFeOrderedSolution(history.uPrev2(), older);
@@ -5066,6 +5083,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       stageStaticCapillaryHistoryForPublication(
           system,
           phi,
+          pressure,
           certified,
           invalid_preserved_history,
           history),
@@ -5090,6 +5108,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       stageStaticCapillaryHistoryForPublication(
           system,
           phi,
+          pressure,
           certified,
           preserved_history,
           history));
@@ -5112,6 +5131,22 @@ TEST(ApplicationDriverLevelSetWorkflows,
               phi_offset + phi_count),
       expected_older.begin() +
           static_cast<std::ptrdiff_t>(phi_offset));
+  std::copy(
+      certified.begin() +
+          static_cast<std::ptrdiff_t>(pressure_offset),
+      certified.begin() +
+          static_cast<std::ptrdiff_t>(
+              pressure_offset + pressure_count),
+      expected_previous.begin() +
+          static_cast<std::ptrdiff_t>(pressure_offset));
+  std::copy(
+      certified.begin() +
+          static_cast<std::ptrdiff_t>(pressure_offset),
+      certified.begin() +
+          static_cast<std::ptrdiff_t>(
+              pressure_offset + pressure_count),
+      expected_older.begin() +
+          static_cast<std::ptrdiff_t>(pressure_offset));
   auto expected_rate = rate;
   auto expected_acceleration = acceleration;
   std::fill(
@@ -5127,6 +5162,20 @@ TEST(ApplicationDriverLevelSetWorkflows,
       expected_acceleration.begin() +
           static_cast<std::ptrdiff_t>(
               phi_offset + phi_count),
+      0.0);
+  std::fill(
+      expected_rate.begin() +
+          static_cast<std::ptrdiff_t>(pressure_offset),
+      expected_rate.begin() +
+          static_cast<std::ptrdiff_t>(
+              pressure_offset + pressure_count),
+      0.0);
+  std::fill(
+      expected_acceleration.begin() +
+          static_cast<std::ptrdiff_t>(pressure_offset),
+      expected_acceleration.begin() +
+          static_cast<std::ptrdiff_t>(
+              pressure_offset + pressure_count),
       0.0);
 
   EXPECT_EQ(
@@ -5951,6 +6000,22 @@ TEST(ApplicationDriverLevelSetWorkflows,
               phi_offset + phi_count),
       expected_older.begin() +
           static_cast<std::ptrdiff_t>(phi_offset));
+  std::copy(
+      expected_current.begin() +
+          static_cast<std::ptrdiff_t>(pressure_offset),
+      expected_current.begin() +
+          static_cast<std::ptrdiff_t>(
+              pressure_offset + pressure_count),
+      expected_previous.begin() +
+          static_cast<std::ptrdiff_t>(pressure_offset));
+  std::copy(
+      expected_current.begin() +
+          static_cast<std::ptrdiff_t>(pressure_offset),
+      expected_current.begin() +
+          static_cast<std::ptrdiff_t>(
+              pressure_offset + pressure_count),
+      expected_older.begin() +
+          static_cast<std::ptrdiff_t>(pressure_offset));
   auto expected_rate = rate;
   auto expected_acceleration = acceleration;
   std::fill(
@@ -5966,6 +6031,20 @@ TEST(ApplicationDriverLevelSetWorkflows,
       expected_acceleration.begin() +
           static_cast<std::ptrdiff_t>(
               phi_offset + phi_count),
+      0.0);
+  std::fill(
+      expected_rate.begin() +
+          static_cast<std::ptrdiff_t>(pressure_offset),
+      expected_rate.begin() +
+          static_cast<std::ptrdiff_t>(
+              pressure_offset + pressure_count),
+      0.0);
+  std::fill(
+      expected_acceleration.begin() +
+          static_cast<std::ptrdiff_t>(pressure_offset),
+      expected_acceleration.begin() +
+          static_cast<std::ptrdiff_t>(
+              pressure_offset + pressure_count),
       0.0);
 
   EXPECT_EQ(

@@ -13696,6 +13696,8 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 } else {
                     pressure_representability_pressure_field =
                         *pressure_field;
+                    report.pressure_representability_pressure_field =
+                        *pressure_field;
                 }
             }
 
