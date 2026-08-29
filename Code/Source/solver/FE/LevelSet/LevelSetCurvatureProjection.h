@@ -24,6 +24,17 @@ enum class LevelSetCurvatureSmoothingMode : std::uint8_t {
     MassStiffnessOperator = 1,
 };
 
+enum class LevelSetCurvatureRecoveryMode : std::uint8_t {
+    LevelSetQuadratic = 0,
+    GeneratedInterfacePatch = 1,
+};
+
+[[nodiscard]] const char* levelSetCurvatureRecoveryModeName(
+    LevelSetCurvatureRecoveryMode mode) noexcept;
+
+[[nodiscard]] LevelSetCurvatureRecoveryMode
+parseLevelSetCurvatureRecoveryMode(std::string_view value);
+
 [[nodiscard]] const char* levelSetCurvatureSmoothingModeName(
     LevelSetCurvatureSmoothingMode mode) noexcept;
 
@@ -43,6 +54,8 @@ struct LevelSetCurvatureProjectionOptions {
     int max_neighbor_fallback_vertices{-1};
     int max_zero_fallback_vertices{-1};
     Real supplemental_sample_weight{1.0};
+    LevelSetCurvatureRecoveryMode recovery_mode{
+        LevelSetCurvatureRecoveryMode::LevelSetQuadratic};
     Real narrow_band_width{0.0};
     int smoothing_iterations{0};
     Real smoothing_relaxation{0.25};
@@ -57,6 +70,10 @@ struct LevelSetCurvatureProjectionSample {
     std::uint64_t free_surface_snapshot_revision_key{0};
     std::uint64_t source_value_revision{0};
     std::uint64_t cut_topology_revision{0};
+    // Generated interface samples anchor the active band and provide the
+    // geometric point cloud for GeneratedInterfacePatch recovery. Field-value
+    // samples instead augment the level-set polynomial fit.
+    bool generated_interface_geometry{false};
 };
 
 struct LevelSetCurvatureProjectionResult {
@@ -66,9 +83,14 @@ struct LevelSetCurvatureProjectionResult {
     std::uint64_t cut_rule_signature{0};
     std::size_t vertices{0};
     std::size_t supplemental_samples{0};
+    std::size_t generated_interface_geometry_samples{0};
     std::size_t supplemental_sample_rows{0};
     std::size_t vertices_with_supplemental_samples{0};
     Real supplemental_sample_weight{1.0};
+    LevelSetCurvatureRecoveryMode recovery_mode{
+        LevelSetCurvatureRecoveryMode::LevelSetQuadratic};
+    std::size_t generated_interface_patch_fitted_vertices{0};
+    std::size_t generated_interface_patch_expanded_vertices{0};
     Real narrow_band_width{0.0};
     std::size_t narrow_band_vertices{0};
     std::size_t skipped_far_vertices{0};

@@ -1732,6 +1732,86 @@ def test_generated_curvature_traction_configuration_is_explicit():
         assert free_surface.find("Curvature_field") is None
 
 
+def test_projected_curvature_configuration_exposes_recovery_controls():
+    runner = _load_runner()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        case_dir = Path(temp_dir) / "droplet2d"
+        runner.write_capillary_droplet2d_case(
+            case_dir,
+            steps=1,
+            pressure_jump=2.0,
+            nx=8,
+            ny=8,
+        )
+        solver = case_dir / "solver.xml"
+        runner.configure_solver(
+            solver,
+            steps=1,
+            surface_tension=0.5,
+            capillary_force_form="generated_curvature_traction",
+            projected_curvature_field="kappa_projected",
+            curvature_projection_supplemental_sample_weight=0.125,
+            curvature_projection_recovery_mode="generated_interface_patch",
+        )
+
+        root = runner.ET.parse(solver).getroot()
+        level_set = runner.level_set_equation(root)
+        free_surface = runner.free_surface_bc(root)
+        assert level_set.findtext(
+            "Curvature_projection_supplemental_sample_weight") == "0.125"
+        assert level_set.findtext(
+            "Curvature_projection_recovery_mode") == "generated_interface_patch"
+        assert free_surface.findtext("Curvature_field") == "kappa_projected"
+
+
+def test_projected_curvature_recovery_diagnostics_are_aggregated_and_gated():
+    runner = _load_runner()
+    diagnostics = runner.parse_solver_diagnostics(
+        "[svMultiPhysics::Application] Level-set curvature projected "
+        "field='phi' curvature_field='kappa_projected' reason=initial "
+        "cache=miss cut_signature_cache=miss recovery_mode=generated_interface_patch "
+        "generated_interface_geometry_samples=12 "
+        "generated_interface_patch_fitted_vertices=7 "
+        "generated_interface_patch_expanded_vertices=2 fitted_vertices=7"
+    )
+    metrics = {}
+    runner.add_diagnostic_metrics(metrics, diagnostics)
+
+    assert metrics[
+        "diagnostic_curvature_projection_recovery_mode_counts"
+    ] == {"generated_interface_patch": 1}
+    assert metrics[
+        "diagnostic_curvature_projection_max_interface_geometry_samples"
+    ] == 12
+    assert metrics[
+        "diagnostic_curvature_projection_max_interface_patch_fitted_vertices"
+    ] == 7
+    assert metrics[
+        "diagnostic_curvature_projection_max_interface_patch_expanded_vertices"
+    ] == 2
+
+    class OptionalArguments:
+        def __getattr__(self, _name):
+            return None
+
+    args = OptionalArguments()
+    args.require_curvature_projection_diagnostics = True
+    args.expect_curvature_projection_recovery_mode = (
+        "generated_interface_patch"
+    )
+    args.min_diagnostic_curvature_projection_interface_geometry_samples = 12
+    args.min_diagnostic_curvature_projection_interface_patch_fitted_vertices = 7
+    assert runner.curvature_projection_errors(metrics, args) == []
+
+    args.expect_curvature_projection_recovery_mode = "level_set_quadratic"
+    args.min_diagnostic_curvature_projection_interface_geometry_samples = 13
+    args.min_diagnostic_curvature_projection_interface_patch_fitted_vertices = 8
+    errors = runner.curvature_projection_errors(metrics, args)
+    assert any("does not include level_set_quadratic" in error for error in errors)
+    assert any("geometry samples 12 is below 13" in error for error in errors)
+    assert any("fitted vertices 7 is below 8" in error for error in errors)
+
+
 def test_generated_curvature_traction_requires_one_curvature_source():
     runner = _load_runner()
     with tempfile.TemporaryDirectory() as temp_dir:

@@ -16,7 +16,7 @@
 namespace svmp::FE::level_set {
 namespace {
 
-[[nodiscard]] std::string normalizedSmoothingToken(std::string_view value)
+[[nodiscard]] std::string normalizedCurvatureToken(std::string_view value)
 {
     std::string token(value);
     token.erase(token.begin(),
@@ -57,7 +57,7 @@ const char* levelSetCurvatureSmoothingModeName(
 LevelSetCurvatureSmoothingMode parseLevelSetCurvatureSmoothingMode(
     std::string_view value)
 {
-    const auto token = normalizedSmoothingToken(value);
+    const auto token = normalizedCurvatureToken(value);
     if (token.empty() || token == "local" || token == "graph" ||
         token == "localgraph") {
         return LevelSetCurvatureSmoothingMode::LocalGraph;
@@ -72,6 +72,36 @@ LevelSetCurvatureSmoothingMode parseLevelSetCurvatureSmoothingMode(
         "level-set curvature projection smoothing mode '" +
         std::string(value) +
         "' must be local_graph or mass_stiffness_operator");
+}
+
+const char* levelSetCurvatureRecoveryModeName(
+    LevelSetCurvatureRecoveryMode mode) noexcept
+{
+    switch (mode) {
+        case LevelSetCurvatureRecoveryMode::LevelSetQuadratic:
+            return "level_set_quadratic";
+        case LevelSetCurvatureRecoveryMode::GeneratedInterfacePatch:
+            return "generated_interface_patch";
+    }
+    return "unknown";
+}
+
+LevelSetCurvatureRecoveryMode parseLevelSetCurvatureRecoveryMode(
+    std::string_view value)
+{
+    const auto token = normalizedCurvatureToken(value);
+    if (token.empty() || token == "levelset" ||
+        token == "levelsetquadratic" || token == "quadratic") {
+        return LevelSetCurvatureRecoveryMode::LevelSetQuadratic;
+    }
+    if (token == "interface" || token == "interfacepatch" ||
+        token == "generatedinterface" ||
+        token == "generatedinterfacepatch") {
+        return LevelSetCurvatureRecoveryMode::GeneratedInterfacePatch;
+    }
+    throw std::invalid_argument(
+        "level-set curvature recovery mode '" + std::string(value) +
+        "' must be level_set_quadratic or generated_interface_patch");
 }
 
 namespace {
@@ -472,6 +502,7 @@ void mixSignature(std::uint64_t& seed, std::uint64_t value) noexcept
         mixSignature(seed, sample.free_surface_snapshot_revision_key);
         mixSignature(seed, sample.source_value_revision);
         mixSignature(seed, sample.cut_topology_revision);
+        mixSignature(seed, sample.generated_interface_geometry ? 1u : 0u);
         if (sample.parent_cell < static_cast<MeshIndex>(0)) {
             for (const auto coordinate : sample.coordinate) {
                 mixSignature(seed, realBitsForSignature(coordinate));
@@ -779,6 +810,175 @@ struct WeightedNeighbor {
     return {{a[1] * b[2] - a[2] * b[1],
              a[2] * b[0] - a[0] * b[2],
              a[0] * b[1] - a[1] * b[0]}};
+}
+
+[[nodiscard]] bool recoverGeneratedInterfacePatchCurvature(
+    const std::array<Real, 3>& center,
+    const std::array<Real, 3>& level_set_gradient,
+    int dim,
+    std::span<const std::size_t> sample_indices,
+    std::span<const LevelSetCurvatureProjectionSample> samples,
+    Real relative_rank_tolerance,
+    Real gradient_tolerance,
+    Real& curvature,
+    FitResidualMetrics& residual,
+    std::size_t& geometry_sample_count)
+{
+    geometry_sample_count = 0u;
+    const Real gradient_norm = norm(level_set_gradient);
+    if (!(gradient_norm > gradient_tolerance) ||
+        !std::isfinite(gradient_norm)) {
+        return false;
+    }
+    std::array<Real, 3> normal{
+        level_set_gradient[0] / gradient_norm,
+        level_set_gradient[1] / gradient_norm,
+        dim == 2 ? Real{0.0}
+                 : level_set_gradient[2] / gradient_norm,
+    };
+
+    std::array<Real, 3> tangent0{};
+    std::array<Real, 3> tangent1{};
+    if (dim == 2) {
+        tangent0 = {{-normal[1], normal[0], Real{0.0}}};
+    } else {
+        const std::array<Real, 3> axis =
+            std::abs(normal[0]) <= std::abs(normal[1]) &&
+                    std::abs(normal[0]) <= std::abs(normal[2])
+                ? std::array<Real, 3>{{Real{1.0}, Real{0.0}, Real{0.0}}}
+                : (std::abs(normal[1]) <= std::abs(normal[2])
+                       ? std::array<Real, 3>{{Real{0.0}, Real{1.0}, Real{0.0}}}
+                       : std::array<Real, 3>{{Real{0.0}, Real{0.0}, Real{1.0}}});
+        tangent0 = cross(axis, normal);
+        const Real tangent0_norm = norm(tangent0);
+        if (!(tangent0_norm > gradient_tolerance) ||
+            !std::isfinite(tangent0_norm)) {
+            return false;
+        }
+        for (auto& value : tangent0) {
+            value /= tangent0_norm;
+        }
+        tangent1 = cross(normal, tangent0);
+    }
+
+    struct PatchPoint {
+        Real u{0.0};
+        Real v{0.0};
+        Real w{0.0};
+    };
+    std::vector<PatchPoint> points;
+    points.reserve(sample_indices.size());
+    for (const auto sample_index : sample_indices) {
+        if (sample_index >= samples.size() ||
+            !samples[sample_index].generated_interface_geometry) {
+            continue;
+        }
+        const auto displacement =
+            subtract(samples[sample_index].coordinate, center);
+        const PatchPoint point{
+            dot(displacement, tangent0),
+            dim == 2 ? Real{0.0} : dot(displacement, tangent1),
+            dot(displacement, normal),
+        };
+        if (!std::isfinite(point.u) || !std::isfinite(point.v) ||
+            !std::isfinite(point.w)) {
+            continue;
+        }
+        points.push_back(point);
+    }
+    geometry_sample_count = points.size();
+    const std::size_t coefficient_count = dim == 2 ? 3u : 6u;
+    if (points.size() < coefficient_count) {
+        return false;
+    }
+
+    Real scale_u = Real{0.0};
+    Real scale_v = dim == 2 ? Real{1.0} : Real{0.0};
+    for (const auto& point : points) {
+        scale_u = std::max(scale_u, std::abs(point.u));
+        if (dim == 3) {
+            scale_v = std::max(scale_v, std::abs(point.v));
+        }
+    }
+    if (!(scale_u > gradient_tolerance) || !std::isfinite(scale_u) ||
+        !(scale_v > gradient_tolerance) || !std::isfinite(scale_v)) {
+        return false;
+    }
+
+    std::vector<FitObservation> observations;
+    observations.reserve(points.size());
+    // A five-to-one decay at half the normalized patch radius limits the
+    // truncation bias from outer generated segments while retaining their
+    // rank information in the quadratic curve fit.
+    constexpr Real generated_curve_patch_distance_decay = Real{16.0};
+    for (const auto& point : points) {
+        const Real u = point.u / scale_u;
+        const Real v = dim == 2 ? Real{0.0} : point.v / scale_v;
+        FitObservation observation;
+        observation.row[0] = Real{1.0};
+        observation.row[1] = u;
+        if (dim == 2) {
+            observation.row[2] = u * u;
+        } else {
+            observation.row[2] = v;
+            observation.row[3] = u * u;
+            observation.row[4] = u * v;
+            observation.row[5] = v * v;
+        }
+        observation.rhs = point.w;
+        observation.weight = Real{1.0};
+        if (dim == 2) {
+            observation.weight =
+                Real{1.0} /
+                (Real{1.0} +
+                 generated_curve_patch_distance_decay * u * u);
+        }
+        observations.push_back(observation);
+    }
+
+    std::array<Real, 9> coefficients{};
+    if (!solveWeightedLeastSquares(
+            observations,
+            coefficient_count,
+            relative_rank_tolerance,
+            coefficients)) {
+        return false;
+    }
+    residual = computeFitResidualMetrics(
+        observations,
+        coefficients,
+        coefficient_count,
+        gradient_tolerance * std::max(scale_u, scale_v));
+    if (!std::isfinite(residual.rms) ||
+        !std::isfinite(residual.normalized)) {
+        return false;
+    }
+
+    if (dim == 2) {
+        const Real slope = coefficients[1] / scale_u;
+        const Real second =
+            Real{2.0} * coefficients[2] / (scale_u * scale_u);
+        const Real denominator =
+            std::pow(Real{1.0} + slope * slope, Real{1.5});
+        curvature = -second / denominator;
+        return std::isfinite(curvature);
+    }
+
+    const Real slope_u = coefficients[1] / scale_u;
+    const Real slope_v = coefficients[2] / scale_v;
+    const Real second_uu =
+        Real{2.0} * coefficients[3] / (scale_u * scale_u);
+    const Real second_uv = coefficients[4] / (scale_u * scale_v);
+    const Real second_vv =
+        Real{2.0} * coefficients[5] / (scale_v * scale_v);
+    const Real slope_norm2 = slope_u * slope_u + slope_v * slope_v;
+    const Real numerator =
+        (Real{1.0} + slope_v * slope_v) * second_uu -
+        Real{2.0} * slope_u * slope_v * second_uv +
+        (Real{1.0} + slope_u * slope_u) * second_vv;
+    curvature =
+        -numerator / std::pow(Real{1.0} + slope_norm2, Real{1.5});
+    return std::isfinite(curvature);
 }
 
 [[nodiscard]] Real tripleProduct(const std::array<Real, 3>& a,
@@ -1361,9 +1561,25 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
     result.source_value_revision = sample_revision.source_value_revision;
     result.vertices = n_vertices;
     result.supplemental_samples = supplemental_samples.size();
+    result.generated_interface_geometry_samples =
+        static_cast<std::size_t>(std::count_if(
+            supplemental_samples.begin(),
+            supplemental_samples.end(),
+            [](const LevelSetCurvatureProjectionSample& sample) {
+                return sample.generated_interface_geometry;
+            }));
     result.supplemental_sample_weight = options.supplemental_sample_weight;
+    result.recovery_mode = options.recovery_mode;
     result.narrow_band_width = options.narrow_band_width;
     result.smoothing_mode = options.smoothing_mode;
+    switch (options.recovery_mode) {
+        case LevelSetCurvatureRecoveryMode::LevelSetQuadratic:
+        case LevelSetCurvatureRecoveryMode::GeneratedInterfacePatch:
+            break;
+        default:
+            throw std::invalid_argument(
+                "level-set curvature projection received an unknown recovery mode");
+    }
     if (workspace != nullptr) {
         workspace->free_surface_snapshot_revision_key =
             sample_revision.free_surface_snapshot_revision_key;
@@ -1373,6 +1589,13 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
     curvature_vertex_values.assign(n_vertices, Real{0.0});
     if (n_vertices == 0u) {
         result.diagnostic = "level-set curvature projection received an empty mesh";
+        return result;
+    }
+    if (options.recovery_mode ==
+            LevelSetCurvatureRecoveryMode::GeneratedInterfacePatch &&
+        result.generated_interface_geometry_samples == 0u) {
+        result.diagnostic =
+            "generated-interface-patch curvature recovery requires generated interface geometry samples";
         return result;
     }
 
@@ -1465,6 +1688,11 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
                 throw std::invalid_argument(
                     "level-set curvature projection received a non-finite supplemental sample");
             }
+            if (options.recovery_mode ==
+                    LevelSetCurvatureRecoveryMode::GeneratedInterfacePatch &&
+                sample.generated_interface_geometry) {
+                continue;
+            }
             std::array<Real, 3> dx{
                 sample.coordinate[0] - center[0],
                 sample.coordinate[1] - center[1],
@@ -1513,7 +1741,7 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
             ++result.singular_stencil_vertices;
             continue;
         }
-        const auto residual = computeFitResidualMetrics(
+        auto residual = computeFitResidualMetrics(
             std::span<const FitObservation>(observations.data(),
                                             observations.size()),
             normalized_coefficients,
@@ -1524,19 +1752,112 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
             ++result.singular_stencil_vertices;
             continue;
         }
-        if (options.max_normalized_fit_residual > Real{0.0} &&
+        if (options.recovery_mode ==
+                LevelSetCurvatureRecoveryMode::LevelSetQuadratic &&
+            options.max_normalized_fit_residual > Real{0.0} &&
             residual.normalized > options.max_normalized_fit_residual) {
             ++result.fit_residual_failure_vertices;
             continue;
         }
-
         auto coefficients = normalized_coefficients;
         dimensionalizeFitCoefficients(coefficients, coordinate_scales, dim);
-        bool small_gradient = false;
-        const Real kappa = curvatureFromFit(
-            coefficients, dim, options.gradient_tolerance, small_gradient);
-        if (small_gradient) {
-            ++result.small_gradient_vertices;
+        Real kappa = Real{0.0};
+        if (options.recovery_mode ==
+            LevelSetCurvatureRecoveryMode::GeneratedInterfacePatch) {
+            const std::array<Real, 3> level_set_gradient{{
+                coefficients[0],
+                coefficients[1],
+                dim == 2 ? Real{0.0} : coefficients[2],
+            }};
+            const Real gradient_norm = norm(level_set_gradient);
+            if (!(gradient_norm > options.gradient_tolerance) ||
+                !std::isfinite(gradient_norm)) {
+                ++result.small_gradient_vertices;
+                continue;
+            }
+            FitResidualMetrics patch_residual{};
+            std::size_t geometry_sample_count = 0u;
+            std::vector<std::size_t> local_patch_sample_indices;
+            if (dim == 2) {
+                // Curve patches need samples from several generated segments.
+                // The distance-weighted configured stencil retains those
+                // segments without giving its outer points equal influence.
+                local_patch_sample_indices = sample_indices;
+            } else {
+                // Surface quadrature normally supplies several non-collinear
+                // points per cut cell.  Prefer the immediate one-ring patch,
+                // then retry the configured wider stencil when needed.
+                local_patch_sample_indices =
+                    sample_adjacency[static_cast<std::size_t>(vertex)];
+                for (const auto neighbor :
+                     adjacency[static_cast<std::size_t>(vertex)]) {
+                    const auto& neighbor_samples =
+                        sample_adjacency[static_cast<std::size_t>(neighbor)];
+                    local_patch_sample_indices.insert(
+                        local_patch_sample_indices.end(),
+                        neighbor_samples.begin(),
+                        neighbor_samples.end());
+                }
+            }
+            std::sort(local_patch_sample_indices.begin(),
+                      local_patch_sample_indices.end());
+            local_patch_sample_indices.erase(
+                std::unique(local_patch_sample_indices.begin(),
+                            local_patch_sample_indices.end()),
+                local_patch_sample_indices.end());
+            bool recovered_patch = recoverGeneratedInterfacePatchCurvature(
+                    center,
+                    level_set_gradient,
+                    dim,
+                    std::span<const std::size_t>(
+                        local_patch_sample_indices.data(),
+                        local_patch_sample_indices.size()),
+                    supplemental_samples,
+                    options.normal_equation_tolerance,
+                    options.gradient_tolerance,
+                    kappa,
+                    patch_residual,
+                    geometry_sample_count);
+            if (!recovered_patch &&
+                local_patch_sample_indices != sample_indices) {
+                recovered_patch = recoverGeneratedInterfacePatchCurvature(
+                    center,
+                    level_set_gradient,
+                    dim,
+                    std::span<const std::size_t>(sample_indices.data(),
+                                                 sample_indices.size()),
+                    supplemental_samples,
+                    options.normal_equation_tolerance,
+                    options.gradient_tolerance,
+                    kappa,
+                    patch_residual,
+                    geometry_sample_count);
+                if (recovered_patch) {
+                    ++result.generated_interface_patch_expanded_vertices;
+                }
+            }
+            if (!recovered_patch) {
+                const std::size_t patch_fit_size = dim == 2 ? 3u : 6u;
+                if (geometry_sample_count < patch_fit_size) {
+                    ++result.insufficient_stencil_vertices;
+                } else {
+                    ++result.singular_stencil_vertices;
+                }
+                continue;
+            }
+            residual = patch_residual;
+        } else {
+            bool small_gradient = false;
+            kappa = curvatureFromFit(
+                coefficients, dim, options.gradient_tolerance, small_gradient);
+            if (small_gradient) {
+                ++result.small_gradient_vertices;
+                continue;
+            }
+        }
+        if (options.max_normalized_fit_residual > Real{0.0} &&
+            residual.normalized > options.max_normalized_fit_residual) {
+            ++result.fit_residual_failure_vertices;
             continue;
         }
         if (!std::isfinite(kappa)) {
@@ -1546,6 +1867,10 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
         curvature_vertex_values[static_cast<std::size_t>(vertex)] = kappa;
         fitted[static_cast<std::size_t>(vertex)] = 1u;
         ++result.fitted_vertices;
+        if (options.recovery_mode ==
+            LevelSetCurvatureRecoveryMode::GeneratedInterfacePatch) {
+            ++result.generated_interface_patch_fitted_vertices;
+        }
         result.mean_fit_rms_residual += residual.rms;
         result.mean_normalized_fit_residual += residual.normalized;
         result.max_fit_rms_residual =

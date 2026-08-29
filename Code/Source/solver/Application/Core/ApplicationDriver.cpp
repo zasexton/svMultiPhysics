@@ -3282,6 +3282,8 @@ canonicalLevelSetMaintenanceRequestSchedule(
         words,
         request.curvature_projection
             .supplemental_sample_weight);
+    appendMaintenanceScheduleEnum(
+        words, request.curvature_projection.recovery_mode);
     appendMaintenanceScheduleReal(
         words,
         request.curvature_projection.narrow_band_width);
@@ -6634,6 +6636,16 @@ std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parame
       request.curvature_projection.supplemental_sample_weight =
           static_cast<svmp::FE::Real>(*weight);
     }
+    if (const auto mode =
+            first_defined_parameter(
+                eq_params,
+                {"Curvature_projection_recovery_mode",
+                 "CurvatureProjectionRecoveryMode",
+                 "Projected_curvature_recovery_mode",
+                 "ProjectedCurvatureRecoveryMode"})) {
+      request.curvature_projection.recovery_mode =
+          svmp::FE::level_set::parseLevelSetCurvatureRecoveryMode(*mode);
+    }
     if (const auto width =
             first_defined_double_parameter(
                 eq_params,
@@ -6823,6 +6835,9 @@ void logLevelSetMaintenanceCoverageDiagnostics(
                .maximum_cumulative_interface_displacement_fraction
         << " curvature_projection_cadence="
         << request.curvature_projection_cadence_steps
+        << " curvature_projection_recovery_mode="
+        << svmp::FE::level_set::levelSetCurvatureRecoveryModeName(
+               request.curvature_projection.recovery_mode)
         << std::endl;
   }
 
@@ -15048,7 +15063,8 @@ collectLevelSetCurvatureSupplementalSamples(
           svmp::FE::Real value,
           std::uint64_t snapshot_revision_key = 0u,
           std::uint64_t source_value_revision = 0u,
-          std::uint64_t cut_topology_revision = 0u) {
+          std::uint64_t cut_topology_revision = 0u,
+          bool generated_interface_geometry = false) {
         if (authoritative_snapshot_revision_key != 0u) {
           if (snapshot_revision_key !=
                   authoritative_snapshot_revision_key ||
@@ -15079,7 +15095,9 @@ collectLevelSetCurvatureSupplementalSamples(
         constexpr svmp::FE::Real duplicate_value_tol =
             svmp::FE::Real{1.0e-12};
         for (const auto& existing : samples) {
-          if (existing.parent_cell != parent_cell) {
+          if (existing.parent_cell != parent_cell ||
+              existing.generated_interface_geometry !=
+                  generated_interface_geometry) {
             continue;
           }
           const auto dx = existing.coordinate[0] - coordinate[0];
@@ -15107,7 +15125,9 @@ collectLevelSetCurvatureSupplementalSamples(
                 .value = value,
                 .free_surface_snapshot_revision_key = snapshot_revision_key,
                 .source_value_revision = source_value_revision,
-                .cut_topology_revision = cut_topology_revision});
+                .cut_topology_revision = cut_topology_revision,
+                .generated_interface_geometry =
+                    generated_interface_geometry});
       };
 
   if (interface_marker.has_value()) {
@@ -15160,7 +15180,8 @@ collectLevelSetCurvatureSupplementalSamples(
               isovalue,
               rule->provenance.free_surface_snapshot_revision_key,
               rule->provenance.source_value_revision,
-              rule->provenance.cut_topology_revision);
+              rule->provenance.cut_topology_revision,
+              /*generated_interface_geometry=*/true);
         }
       }
     }
@@ -15550,6 +15571,8 @@ std::uint64_t curvatureProjectionInputSignature(
                         static_cast<std::uint64_t>(
                             options.max_zero_fallback_vertices));
   mixCurvatureSignatureReal(seed, options.supplemental_sample_weight);
+  mixCurvatureSignature(seed,
+                        static_cast<std::uint64_t>(options.recovery_mode));
   mixCurvatureSignatureReal(seed, options.narrow_band_width);
   mixCurvatureSignature(seed,
                         static_cast<std::uint64_t>(
@@ -15582,6 +15605,8 @@ std::uint64_t curvatureProjectionInputSignature(
         seed, sample.free_surface_snapshot_revision_key);
     mixCurvatureSignature(seed, sample.source_value_revision);
     mixCurvatureSignature(seed, sample.cut_topology_revision);
+    mixCurvatureSignature(seed,
+                          sample.generated_interface_geometry ? 1u : 0u);
     for (const auto coordinate : sample.coordinate) {
       mixCurvatureSignatureReal(seed, coordinate);
     }
@@ -15680,6 +15705,8 @@ std::optional<std::uint64_t> curvatureProjectionFastInputSignature(
                         static_cast<std::uint64_t>(
                             options.max_zero_fallback_vertices));
   mixCurvatureSignatureReal(seed, options.supplemental_sample_weight);
+  mixCurvatureSignature(seed,
+                        static_cast<std::uint64_t>(options.recovery_mode));
   mixCurvatureSignatureReal(seed, options.narrow_band_width);
   mixCurvatureSignature(seed,
                         static_cast<std::uint64_t>(
@@ -15748,10 +15775,19 @@ void logLevelSetCurvatureProjectionDiagnostic(
       << " cut_signature_cache_misses=" << cut_signature_cache_misses
       << " fitted_vertices=" << result.fitted_vertices
       << " supplemental_samples=" << result.supplemental_samples
+      << " generated_interface_geometry_samples="
+      << result.generated_interface_geometry_samples
       << " supplemental_sample_rows=" << result.supplemental_sample_rows
       << " vertices_with_supplemental_samples="
       << result.vertices_with_supplemental_samples
       << " supplemental_sample_weight=" << result.supplemental_sample_weight
+      << " recovery_mode="
+      << svmp::FE::level_set::levelSetCurvatureRecoveryModeName(
+             result.recovery_mode)
+      << " generated_interface_patch_fitted_vertices="
+      << result.generated_interface_patch_fitted_vertices
+      << " generated_interface_patch_expanded_vertices="
+      << result.generated_interface_patch_expanded_vertices
       << " narrow_band_width=" << result.narrow_band_width
       << " narrow_band_vertices=" << result.narrow_band_vertices
       << " skipped_far_vertices=" << result.skipped_far_vertices

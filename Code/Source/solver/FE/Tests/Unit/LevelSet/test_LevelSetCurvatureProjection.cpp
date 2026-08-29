@@ -99,6 +99,19 @@ public:
         ++geometry_revision_;
     }
 
+    void rotate(FE::Real angle)
+    {
+        const FE::Real cosine = std::cos(angle);
+        const FE::Real sine = std::sin(angle);
+        for (auto& node : nodes_) {
+            const FE::Real x = node[0];
+            const FE::Real y = node[1];
+            node[0] = cosine * x - sine * y;
+            node[1] = sine * x + cosine * y;
+        }
+        ++geometry_revision_;
+    }
+
     void getCellNodes(FE::GlobalIndex cell_id,
                       std::vector<FE::GlobalIndex>& nodes) const override
     {
@@ -398,6 +411,267 @@ FE::Real circleCurvatureMeanError(int nx, FE::Real h, FE::Real radius)
     return error_sum / static_cast<FE::Real>(samples);
 }
 
+struct CurvatureStudyResult {
+    FE::Real mean_error{0.0};
+    FE::Real max_error{0.0};
+    std::size_t error_samples{0u};
+    std::size_t supplemental_samples{0u};
+    std::size_t generated_geometry_samples{0u};
+    std::size_t generated_patch_fitted_vertices{0u};
+    std::size_t generated_patch_expanded_vertices{0u};
+    FE::Real max_fit_residual{0.0};
+    FE::Real max_interpolation_defect{0.0};
+};
+
+std::vector<level_set::LevelSetCurvatureProjectionSample>
+makeGeneratedCircleInterfaceSamples(const FE::assembly::IMeshAccess& mesh,
+                                    FE::Real radius,
+                                    const std::array<FE::Real, 3>& center)
+{
+    std::vector<level_set::LevelSetCurvatureProjectionSample> samples;
+    std::vector<FE::GlobalIndex> nodes;
+    constexpr std::array<std::array<std::size_t, 2>, 4> edges{{
+        {{0u, 1u}}, {{1u, 2u}}, {{2u, 3u}}, {{3u, 0u}},
+    }};
+    constexpr std::array<FE::Real, 2> segment_coordinates{{
+        FE::Real{0.21132486540518713},
+        FE::Real{0.78867513459481287},
+    }};
+    mesh.forEachCell([&](FE::GlobalIndex cell) {
+        mesh.getCellNodes(cell, nodes);
+        if (nodes.size() != 4u) {
+            throw std::runtime_error(
+                "generated circle interface expects quadrilateral cells");
+        }
+        std::vector<std::array<FE::Real, 3>> intersections;
+        for (const auto& edge : edges) {
+            const auto x0 = mesh.getNodeCoordinates(nodes[edge[0]]);
+            const auto x1 = mesh.getNodeCoordinates(nodes[edge[1]]);
+            const FE::Real phi0 =
+                std::hypot(x0[0] - center[0], x0[1] - center[1]) -
+                radius;
+            const FE::Real phi1 =
+                std::hypot(x1[0] - center[0], x1[1] - center[1]) -
+                radius;
+            if (phi0 * phi1 >= FE::Real{0.0}) {
+                continue;
+            }
+            const FE::Real t = phi0 / (phi0 - phi1);
+            intersections.push_back({{
+                x0[0] + t * (x1[0] - x0[0]),
+                x0[1] + t * (x1[1] - x0[1]),
+                FE::Real{0.0},
+            }});
+        }
+        if (intersections.empty()) {
+            return;
+        }
+        if (intersections.size() != 2u) {
+            throw std::runtime_error(
+                "generated circle interface produced an ambiguous cut cell");
+        }
+        for (const auto t : segment_coordinates) {
+            std::array<FE::Real, 3> point{};
+            for (std::size_t d = 0; d < point.size(); ++d) {
+                point[d] = (FE::Real{1.0} - t) * intersections[0][d] +
+                           t * intersections[1][d];
+            }
+            samples.push_back(
+                level_set::LevelSetCurvatureProjectionSample{
+                    .parent_cell = static_cast<FE::MeshIndex>(cell),
+                    .coordinate = point,
+                    .value = FE::Real{0.0},
+                    .generated_interface_geometry = true,
+                });
+        }
+    });
+    return samples;
+}
+
+CurvatureStudyResult generatedCirclePatchCurvatureError(
+    int subdivisions,
+    std::array<FE::Real, 3> center = {},
+    FE::Real phi_scale = FE::Real{1.0},
+    FE::Real rigid_rotation = FE::Real{0.0},
+    std::array<FE::Real, 3> rigid_translation = {})
+{
+    constexpr FE::Real extent = FE::Real{0.8};
+    constexpr FE::Real radius = FE::Real{0.24};
+    const FE::Real h = extent / static_cast<FE::Real>(subdivisions);
+    StructuredQuadMeshAccess mesh(subdivisions, subdivisions, h);
+    const FE::Real cosine = std::cos(rigid_rotation);
+    const FE::Real sine = std::sin(rigid_rotation);
+    center = {{
+        cosine * center[0] - sine * center[1] + rigid_translation[0],
+        sine * center[0] + cosine * center[1] + rigid_translation[1],
+        rigid_translation[2],
+    }};
+    mesh.rotate(rigid_rotation);
+    mesh.translate(rigid_translation[0], rigid_translation[1]);
+    std::vector<FE::Real> phi(static_cast<std::size_t>(mesh.numVertices()));
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        const auto x = mesh.getNodeCoordinates(vertex);
+        phi[static_cast<std::size_t>(vertex)] =
+            phi_scale *
+            (std::hypot(x[0] - center[0], x[1] - center[1]) - radius);
+    }
+    const auto samples =
+        makeGeneratedCircleInterfaceSamples(mesh, radius, center);
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.recovery_mode =
+        level_set::LevelSetCurvatureRecoveryMode::GeneratedInterfacePatch;
+    options.max_neighbor_rings = 2;
+    options.narrow_band_width =
+        std::abs(phi_scale) * FE::Real{1.5} * h;
+    std::vector<FE::Real> curvature;
+    const auto projection = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, samples, options, curvature);
+    if (!projection.success) {
+        throw std::runtime_error(projection.diagnostic);
+    }
+
+    CurvatureStudyResult study;
+    study.supplemental_samples = projection.supplemental_samples;
+    study.generated_geometry_samples =
+        projection.generated_interface_geometry_samples;
+    study.generated_patch_fitted_vertices =
+        projection.generated_interface_patch_fitted_vertices;
+    study.generated_patch_expanded_vertices =
+        projection.generated_interface_patch_expanded_vertices;
+    study.max_fit_residual = projection.max_normalized_fit_residual;
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        const auto index = static_cast<std::size_t>(vertex);
+        if (std::abs(phi[index]) > std::abs(phi_scale) * h) {
+            continue;
+        }
+        const FE::Real expected_curvature =
+            std::copysign(FE::Real{1.0} / radius, phi_scale);
+        const FE::Real error =
+            std::abs(curvature[index] - expected_curvature);
+        study.mean_error += error;
+        study.max_error = std::max(study.max_error, error);
+        ++study.error_samples;
+    }
+    if (study.error_samples == 0u) {
+        throw std::runtime_error(
+            "generated circle patch study has no interface-band vertices");
+    }
+    study.mean_error /= static_cast<FE::Real>(study.error_samples);
+    return study;
+}
+
+std::vector<level_set::LevelSetCurvatureProjectionSample>
+makeSphereInterfacePointCloudSamples(int subdivisions,
+                                     FE::Real h,
+                                     FE::Real radius)
+{
+    // Exact points isolate the three-dimensional graph-fit formula from the
+    // separate approximation error of a particular generated-surface backend.
+    constexpr FE::Real pi =
+        FE::Real{3.141592653589793238462643383279502884};
+    const std::size_t sample_count =
+        static_cast<std::size_t>(24 * subdivisions * subdivisions);
+    const FE::Real minimum_coordinate =
+        -FE::Real{0.5} * static_cast<FE::Real>(subdivisions) * h;
+    const FE::Real golden_angle =
+        pi * (FE::Real{3.0} - std::sqrt(FE::Real{5.0}));
+    std::vector<level_set::LevelSetCurvatureProjectionSample> samples;
+    samples.reserve(sample_count);
+    for (std::size_t sample = 0; sample < sample_count; ++sample) {
+        const FE::Real z =
+            FE::Real{1.0} -
+            FE::Real{2.0} *
+                (static_cast<FE::Real>(sample) + FE::Real{0.5}) /
+                static_cast<FE::Real>(sample_count);
+        const FE::Real radial =
+            std::sqrt(std::max(FE::Real{0.0}, FE::Real{1.0} - z * z));
+        const FE::Real theta =
+            golden_angle * static_cast<FE::Real>(sample);
+        const std::array<FE::Real, 3> point{{
+            radius * radial * std::cos(theta),
+            radius * radial * std::sin(theta),
+            radius * z,
+        }};
+        std::array<int, 3> cell_coordinate{};
+        for (std::size_t d = 0; d < cell_coordinate.size(); ++d) {
+            cell_coordinate[d] = std::clamp(
+                static_cast<int>(
+                    std::floor((point[d] - minimum_coordinate) / h)),
+                0,
+                subdivisions - 1);
+        }
+        const FE::MeshIndex parent_cell = static_cast<FE::MeshIndex>(
+            (cell_coordinate[2] * subdivisions + cell_coordinate[1]) *
+                subdivisions +
+            cell_coordinate[0]);
+        samples.push_back(level_set::LevelSetCurvatureProjectionSample{
+            .parent_cell = parent_cell,
+            .coordinate = point,
+            .value = FE::Real{0.0},
+            .generated_interface_geometry = true,
+        });
+    }
+    return samples;
+}
+
+CurvatureStudyResult spherePointCloudPatchCurvatureError(int subdivisions)
+{
+    constexpr FE::Real extent = FE::Real{0.8};
+    constexpr FE::Real radius = FE::Real{0.24};
+    const FE::Real h = extent / static_cast<FE::Real>(subdivisions);
+    StructuredHexMeshAccess mesh(
+        subdivisions, subdivisions, subdivisions, h);
+    std::vector<FE::Real> phi(static_cast<std::size_t>(mesh.numVertices()));
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        const auto x = mesh.getNodeCoordinates(vertex);
+        phi[static_cast<std::size_t>(vertex)] =
+            std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]) -
+            radius;
+    }
+    const auto samples =
+        makeSphereInterfacePointCloudSamples(subdivisions, h, radius);
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.recovery_mode =
+        level_set::LevelSetCurvatureRecoveryMode::GeneratedInterfacePatch;
+    options.max_neighbor_rings = 2;
+    options.narrow_band_width = FE::Real{1.5} * h;
+    std::vector<FE::Real> curvature;
+    const auto projection = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, samples, options, curvature);
+    if (!projection.success) {
+        throw std::runtime_error(projection.diagnostic);
+    }
+
+    CurvatureStudyResult study;
+    study.supplemental_samples = projection.supplemental_samples;
+    study.generated_geometry_samples =
+        projection.generated_interface_geometry_samples;
+    study.generated_patch_fitted_vertices =
+        projection.generated_interface_patch_fitted_vertices;
+    study.generated_patch_expanded_vertices =
+        projection.generated_interface_patch_expanded_vertices;
+    study.max_fit_residual = projection.max_normalized_fit_residual;
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        const auto index = static_cast<std::size_t>(vertex);
+        if (std::abs(phi[index]) > h) {
+            continue;
+        }
+        const FE::Real error =
+            std::abs(curvature[index] - FE::Real{2.0} / radius);
+        study.mean_error += error;
+        study.max_error = std::max(study.max_error, error);
+        ++study.error_samples;
+    }
+    if (study.error_samples == 0u) {
+        throw std::runtime_error(
+            "sphere point-cloud patch study has no interface-band vertices");
+    }
+    study.mean_error /= static_cast<FE::Real>(study.error_samples);
+    return study;
+}
+
 template <typename ValueFunction>
 std::vector<level_set::LevelSetCurvatureProjectionSample>
 makeQ3InteriorSamples(const FE::assembly::IMeshAccess& mesh,
@@ -524,15 +798,6 @@ makeQ3InteriorSamples(const FE::assembly::IMeshAccess& mesh,
     });
     return samples;
 }
-
-struct CurvatureStudyResult {
-    FE::Real mean_error{0.0};
-    FE::Real max_error{0.0};
-    std::size_t error_samples{0u};
-    std::size_t supplemental_samples{0u};
-    FE::Real max_fit_residual{0.0};
-    FE::Real max_interpolation_defect{0.0};
-};
 
 CurvatureStudyResult staticDropQ3CurvatureError(int subdivisions)
 {
@@ -799,6 +1064,124 @@ TEST(LevelSetCurvatureProjection, CircleCurvatureErrorImprovesWithRefinement)
 }
 
 TEST(LevelSetCurvatureProjection,
+     GeneratedCircleInterfacePatchCurvatureImprovesWithRefinement)
+{
+    const auto very_coarse = generatedCirclePatchCurvatureError(8);
+    const auto coarse = generatedCirclePatchCurvatureError(16);
+    const auto medium = generatedCirclePatchCurvatureError(32);
+    const auto fine = generatedCirclePatchCurvatureError(64);
+    const FE::Real coarse_order =
+        observedOrder(coarse.mean_error, medium.mean_error);
+    const FE::Real fine_order =
+        observedOrder(medium.mean_error, fine.mean_error);
+
+    RecordProperty("generated_circle_patch_mean_error_N8",
+                   ::testing::PrintToString(very_coarse.mean_error));
+    RecordProperty("generated_circle_patch_mean_error_N16",
+                   ::testing::PrintToString(coarse.mean_error));
+    RecordProperty("generated_circle_patch_mean_error_N32",
+                   ::testing::PrintToString(medium.mean_error));
+    RecordProperty("generated_circle_patch_mean_error_N64",
+                   ::testing::PrintToString(fine.mean_error));
+    RecordProperty("generated_circle_patch_max_error_N64",
+                   ::testing::PrintToString(fine.max_error));
+    RecordProperty("generated_circle_patch_order_16_to_32",
+                   ::testing::PrintToString(coarse_order));
+    RecordProperty("generated_circle_patch_order_32_to_64",
+                   ::testing::PrintToString(fine_order));
+
+    EXPECT_GT(very_coarse.supplemental_samples, 0u);
+    EXPECT_GT(coarse.supplemental_samples, 0u);
+    EXPECT_EQ(coarse.generated_geometry_samples, coarse.supplemental_samples);
+    EXPECT_GT(coarse.generated_patch_fitted_vertices, 0u);
+    EXPECT_EQ(coarse.generated_patch_expanded_vertices, 0u);
+    EXPECT_GT(coarse.supplemental_samples,
+              very_coarse.supplemental_samples);
+    EXPECT_GT(medium.supplemental_samples, coarse.supplemental_samples);
+    EXPECT_GT(fine.supplemental_samples, medium.supplemental_samples);
+    EXPECT_LT(coarse.mean_error, very_coarse.mean_error);
+    EXPECT_LT(medium.mean_error, coarse.mean_error);
+    EXPECT_LT(fine.mean_error, medium.mean_error);
+    EXPECT_GT(coarse_order, FE::Real{1.5});
+    EXPECT_GT(fine_order, FE::Real{1.5});
+    EXPECT_LT(fine.mean_error, FE::Real{0.05});
+    EXPECT_LT(fine.max_error, FE::Real{0.10});
+}
+
+TEST(LevelSetCurvatureProjection,
+     SpherePointCloudPatchCurvatureImprovesWithRefinement)
+{
+    const auto coarse = spherePointCloudPatchCurvatureError(8);
+    const auto fine = spherePointCloudPatchCurvatureError(16);
+    const FE::Real order =
+        observedOrder(coarse.mean_error, fine.mean_error);
+
+    RecordProperty("sphere_point_cloud_patch_mean_error_N8",
+                   ::testing::PrintToString(coarse.mean_error));
+    RecordProperty("sphere_point_cloud_patch_mean_error_N16",
+                   ::testing::PrintToString(fine.mean_error));
+    RecordProperty("sphere_point_cloud_patch_max_error_N16",
+                   ::testing::PrintToString(fine.max_error));
+    RecordProperty("sphere_point_cloud_patch_order_8_to_16",
+                   ::testing::PrintToString(order));
+
+    EXPECT_GT(coarse.supplemental_samples, 0u);
+    EXPECT_EQ(coarse.generated_geometry_samples, coarse.supplemental_samples);
+    EXPECT_GT(coarse.generated_patch_fitted_vertices, 0u);
+    EXPECT_GT(fine.supplemental_samples, coarse.supplemental_samples);
+    EXPECT_LT(fine.mean_error, coarse.mean_error);
+    EXPECT_GT(order, FE::Real{1.5});
+    EXPECT_LT(fine.mean_error,
+              FE::Real{0.10} * FE::Real{2.0} / FE::Real{0.24});
+}
+
+TEST(LevelSetCurvatureProjection,
+     GeneratedCircleInterfacePatchIsRigidMotionScaleAndSignInvariant)
+{
+    constexpr int subdivisions = 32;
+    constexpr FE::Real h = FE::Real{0.8} / subdivisions;
+    const std::array<FE::Real, 3> center{{
+        FE::Real{0.31} * h,
+        -FE::Real{0.27} * h,
+        FE::Real{0.0},
+    }};
+    const auto baseline =
+        generatedCirclePatchCurvatureError(subdivisions, center);
+    const auto scaled = generatedCirclePatchCurvatureError(
+        subdivisions, center, FE::Real{8.0});
+    const auto reversed = generatedCirclePatchCurvatureError(
+        subdivisions, center, -FE::Real{0.125});
+    const auto transformed = generatedCirclePatchCurvatureError(
+        subdivisions,
+        center,
+        FE::Real{1.0},
+        FE::Real{0.37},
+        {{FE::Real{1.75}, -FE::Real{0.85}, FE::Real{0.0}}});
+
+    RecordProperty("generated_circle_patch_offset_mean_error_N32",
+                   ::testing::PrintToString(baseline.mean_error));
+    EXPECT_LT(baseline.mean_error, FE::Real{0.20});
+    EXPECT_EQ(scaled.supplemental_samples, baseline.supplemental_samples);
+    EXPECT_EQ(reversed.supplemental_samples, baseline.supplemental_samples);
+    EXPECT_EQ(transformed.supplemental_samples,
+              baseline.supplemental_samples);
+    EXPECT_NEAR(scaled.mean_error, baseline.mean_error, FE::Real{1.0e-12});
+    EXPECT_NEAR(reversed.mean_error,
+                baseline.mean_error,
+                FE::Real{1.0e-12});
+    EXPECT_NEAR(transformed.mean_error,
+                baseline.mean_error,
+                FE::Real{1.0e-8});
+    EXPECT_NEAR(scaled.max_error, baseline.max_error, FE::Real{1.0e-12});
+    EXPECT_NEAR(reversed.max_error,
+                baseline.max_error,
+                FE::Real{1.0e-12});
+    EXPECT_NEAR(transformed.max_error,
+                baseline.max_error,
+                FE::Real{1.0e-8});
+}
+
+TEST(LevelSetCurvatureProjection,
      StaticDropQ3SamplesProduceQuantifiedCurvatureRefinement)
 {
     const auto coarse = staticDropQ3CurvatureError(16);
@@ -1031,6 +1414,29 @@ TEST(LevelSetCurvatureProjection, ReportsFailureForUnderresolvedStencil)
     EXPECT_EQ(result.fitted_vertices, 0u);
     EXPECT_EQ(curvature.size(), phi.size());
     EXPECT_NE(result.diagnostic.find("could not fit"), std::string::npos);
+}
+
+TEST(LevelSetCurvatureProjection,
+     GeneratedInterfacePatchFailsClosedWithoutGeometrySamples)
+{
+    StructuredQuadMeshAccess mesh(/*nx=*/4, /*ny=*/4, /*h=*/0.2);
+    std::vector<FE::Real> phi(static_cast<std::size_t>(mesh.numVertices()));
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        const auto x = mesh.getNodeCoordinates(vertex);
+        phi[static_cast<std::size_t>(vertex)] = x[0];
+    }
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.recovery_mode =
+        level_set::LevelSetCurvatureRecoveryMode::GeneratedInterfacePatch;
+    std::vector<FE::Real> curvature;
+    const auto result = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, options, curvature);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.generated_interface_geometry_samples, 0u);
+    EXPECT_NE(result.diagnostic.find("requires generated interface geometry"),
+              std::string::npos);
 }
 
 TEST(LevelSetCurvatureProjection, SupplementalSamplesAllowUnderresolvedQuadraticStencil)
@@ -1392,6 +1798,25 @@ TEST(LevelSetCurvatureProjection,
 }
 
 TEST(LevelSetCurvatureProjection,
+     ParsesCurvatureRecoveryModesAndRejectsUnknownTokens)
+{
+    EXPECT_EQ(level_set::parseLevelSetCurvatureRecoveryMode(
+                  "level_set_quadratic"),
+              level_set::LevelSetCurvatureRecoveryMode::LevelSetQuadratic);
+    EXPECT_EQ(level_set::parseLevelSetCurvatureRecoveryMode(
+                  "generated-interface-patch"),
+              level_set::LevelSetCurvatureRecoveryMode::
+                  GeneratedInterfacePatch);
+    EXPECT_STREQ(level_set::levelSetCurvatureRecoveryModeName(
+                     level_set::LevelSetCurvatureRecoveryMode::
+                         GeneratedInterfacePatch),
+                 "generated_interface_patch");
+    EXPECT_THROW((void)level_set::parseLevelSetCurvatureRecoveryMode(
+                     "unsupported"),
+                 std::invalid_argument);
+}
+
+TEST(LevelSetCurvatureProjection,
      MassStiffnessOperatorSmoothingReducesCurvatureGraphVariation)
 {
     StructuredQuadMeshAccess mesh(/*nx=*/8, /*ny=*/8, /*h=*/0.08);
@@ -1530,6 +1955,15 @@ TEST(LevelSetCurvatureProjection, WorkspaceReusesMeshAndSampleAdjacency)
     EXPECT_FALSE(fifth.reused_sample_adjacency);
     EXPECT_EQ(fifth.vertex_adjacency_builds, 1u);
     EXPECT_EQ(fifth.sample_adjacency_builds, 3u);
+
+    samples.front().generated_interface_geometry = true;
+    const auto sixth = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, samples, options, curvature, workspace);
+    ASSERT_TRUE(sixth.success) << sixth.diagnostic;
+    EXPECT_TRUE(sixth.reused_vertex_adjacency);
+    EXPECT_FALSE(sixth.reused_sample_adjacency);
+    EXPECT_EQ(sixth.vertex_adjacency_builds, 1u);
+    EXPECT_EQ(sixth.sample_adjacency_builds, 4u);
 }
 
 TEST(LevelSetCurvatureProjection,

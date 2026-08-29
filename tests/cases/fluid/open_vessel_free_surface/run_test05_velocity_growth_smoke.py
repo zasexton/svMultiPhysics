@@ -675,6 +675,8 @@ def configure_solver(solver_xml: Path,
                      curvature_projection_max_normalized_fit_residual: float | None = None,
                      curvature_projection_max_neighbor_fallback_vertices: int | None = None,
                      curvature_projection_max_zero_fallback_vertices: int | None = None,
+                     curvature_projection_supplemental_sample_weight: float | None = None,
+                     curvature_projection_recovery_mode: str | None = None,
                      curvature_projection_narrow_band_width: float | None = None,
                      curvature_projection_smoothing_iterations: int | None = None,
                      curvature_projection_smoothing_relaxation: float | None = None,
@@ -947,6 +949,18 @@ def configure_solver(solver_xml: Path,
                 level_set,
                 "Curvature_projection_max_zero_fallback_vertices",
                 str(curvature_projection_max_zero_fallback_vertices),
+            )
+        if curvature_projection_supplemental_sample_weight is not None:
+            set_text(
+                level_set,
+                "Curvature_projection_supplemental_sample_weight",
+                f"{curvature_projection_supplemental_sample_weight:.16g}",
+            )
+        if curvature_projection_recovery_mode is not None:
+            set_text(
+                level_set,
+                "Curvature_projection_recovery_mode",
+                curvature_projection_recovery_mode,
             )
         if curvature_projection_narrow_band_width is not None:
             set_text(
@@ -1811,6 +1825,8 @@ def configure_sessile_solver_xml(case_dir: Path,
             "Enable_curvature_projection",
             "Projected_curvature_field",
             "Curvature_projection_cadence_steps",
+            "Curvature_projection_supplemental_sample_weight",
+            "Curvature_projection_recovery_mode",
             "Curvature_projection_narrow_band_width",
             "Curvature_projection_smoothing_iterations",
             "Curvature_projection_smoothing_relaxation",
@@ -4495,6 +4511,40 @@ def curvature_projection_errors(metrics: dict[str, Any],
                 "curvature projection smoothing mode "
                 f"{observed or 'unavailable'} does not include {expected}"
             )
+    if args.expect_curvature_projection_recovery_mode is not None:
+        counts = metrics.get(
+            "diagnostic_curvature_projection_recovery_mode_counts")
+        expected = args.expect_curvature_projection_recovery_mode
+        if not isinstance(counts, dict) or not counts:
+            errors.append("curvature projection recovery-mode diagnostics are unavailable")
+        elif expected not in counts:
+            observed = ", ".join(str(key) for key in sorted(counts))
+            errors.append(
+                "curvature projection recovery mode "
+                f"{observed or 'unavailable'} does not include {expected}"
+            )
+    for argument, metric, label in (
+        (
+            "min_diagnostic_curvature_projection_interface_geometry_samples",
+            "diagnostic_curvature_projection_max_interface_geometry_samples",
+            "generated interface geometry samples",
+        ),
+        (
+            "min_diagnostic_curvature_projection_interface_patch_fitted_vertices",
+            "diagnostic_curvature_projection_max_interface_patch_fitted_vertices",
+            "generated interface patch fitted vertices",
+        ),
+    ):
+        minimum = getattr(args, argument)
+        if minimum is None:
+            continue
+        value = metrics.get(metric)
+        if not isinstance(value, (int, float)):
+            errors.append(f"curvature projection {label} diagnostic is unavailable")
+        elif value < minimum:
+            errors.append(
+                f"curvature projection {label} {value} is below {minimum}"
+            )
     if args.min_diagnostic_curvature_projection_operator_edges is not None:
         value = metrics.get(
             "diagnostic_curvature_projection_max_smoothing_operator_edges")
@@ -6815,6 +6865,15 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         metrics["diagnostic_curvature_projection_smoothing_mode_counts"] = (
             top_counts(smoothing_mode_counts)
         )
+        recovery_mode_counts: dict[str, int] = {}
+        for record in records:
+            increment_count(
+                recovery_mode_counts,
+                str(record.get("recovery_mode", "unknown")),
+            )
+        metrics["diagnostic_curvature_projection_recovery_mode_counts"] = (
+            top_counts(recovery_mode_counts)
+        )
         cache_counts: dict[str, int] = {}
         cut_signature_cache_counts: dict[str, int] = {}
         skipped_count = 0
@@ -6869,6 +6928,12 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         for source, target in (
                 ("fitted_vertices",
                  "diagnostic_curvature_projection_max_fitted_vertices"),
+                ("generated_interface_geometry_samples",
+                 "diagnostic_curvature_projection_max_interface_geometry_samples"),
+                ("generated_interface_patch_fitted_vertices",
+                 "diagnostic_curvature_projection_max_interface_patch_fitted_vertices"),
+                ("generated_interface_patch_expanded_vertices",
+                 "diagnostic_curvature_projection_max_interface_patch_expanded_vertices"),
                 ("fallback_vertices",
                  "diagnostic_curvature_projection_max_fallback_vertices"),
                 ("zero_fallback_vertices",
@@ -7488,6 +7553,8 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "curvature_projection_max_normalized_fit_residual",
         "curvature_projection_max_neighbor_fallback_vertices",
         "curvature_projection_max_zero_fallback_vertices",
+        "curvature_projection_supplemental_sample_weight",
+        "curvature_projection_recovery_mode",
         "curvature_projection_narrow_band_width",
         "curvature_projection_smoothing_iterations",
         "curvature_projection_smoothing_relaxation",
@@ -7503,7 +7570,10 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "static_capillary_max_iterations",
         "require_static_capillary_balance_qualification",
         "expect_curvature_projection_smoothing_mode",
+        "expect_curvature_projection_recovery_mode",
         "min_diagnostic_curvature_projection_operator_edges",
+        "min_diagnostic_curvature_projection_interface_geometry_samples",
+        "min_diagnostic_curvature_projection_interface_patch_fitted_vertices",
         "max_capillary_curvature_relative_error",
         "max_capillary_pressure_jump_relative_error",
         "max_capillary_parasitic_capillary_number",
@@ -7648,10 +7718,15 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "curvature_projection_max_normalized_fit_residual",
         "curvature_projection_max_neighbor_fallback_vertices",
         "curvature_projection_max_zero_fallback_vertices",
+        "curvature_projection_supplemental_sample_weight",
+        "curvature_projection_recovery_mode",
         "curvature_projection_smoothing_iterations",
         "curvature_projection_smoothing_relaxation",
         "expect_curvature_projection_smoothing_mode",
+        "expect_curvature_projection_recovery_mode",
         "min_diagnostic_curvature_projection_operator_edges",
+        "min_diagnostic_curvature_projection_interface_geometry_samples",
+        "min_diagnostic_curvature_projection_interface_patch_fitted_vertices",
         "max_capillary_curvature_relative_error",
         "max_capillary_pressure_jump_relative_error",
         "max_capillary_rejected_steps",
@@ -11930,6 +12005,10 @@ def configure_case_solver_xml(run_dir: Path, args: argparse.Namespace) -> None:
             args.curvature_projection_max_neighbor_fallback_vertices),
         curvature_projection_max_zero_fallback_vertices=(
             args.curvature_projection_max_zero_fallback_vertices),
+        curvature_projection_supplemental_sample_weight=(
+            args.curvature_projection_supplemental_sample_weight),
+        curvature_projection_recovery_mode=(
+            args.curvature_projection_recovery_mode),
         curvature_projection_narrow_band_width=(
             args.curvature_projection_narrow_band_width),
         curvature_projection_smoothing_iterations=(
@@ -14365,6 +14444,11 @@ def main() -> int:
     parser.add_argument("--curvature-projection-max-normalized-fit-residual", type=float)
     parser.add_argument("--curvature-projection-max-neighbor-fallback-vertices", type=int)
     parser.add_argument("--curvature-projection-max-zero-fallback-vertices", type=int)
+    parser.add_argument("--curvature-projection-supplemental-sample-weight", type=float)
+    parser.add_argument(
+        "--curvature-projection-recovery-mode",
+        choices=("level_set_quadratic", "generated_interface_patch"),
+    )
     parser.add_argument("--curvature-projection-narrow-band-width", type=float)
     parser.add_argument("--curvature-projection-smoothing-iterations", type=int)
     parser.add_argument("--curvature-projection-smoothing-relaxation", type=float)
@@ -14373,7 +14457,19 @@ def main() -> int:
         choices=("local_graph", "mass_stiffness_operator", "mass_stiffness"),
     )
     parser.add_argument("--expect-curvature-projection-smoothing-mode")
+    parser.add_argument(
+        "--expect-curvature-projection-recovery-mode",
+        choices=("level_set_quadratic", "generated_interface_patch"),
+    )
     parser.add_argument("--min-diagnostic-curvature-projection-operator-edges", type=int)
+    parser.add_argument(
+        "--min-diagnostic-curvature-projection-interface-geometry-samples",
+        type=int,
+    )
+    parser.add_argument(
+        "--min-diagnostic-curvature-projection-interface-patch-fitted-vertices",
+        type=int,
+    )
     parser.add_argument("--max-capillary-curvature-relative-error", type=float)
     parser.add_argument("--max-capillary-pressure-jump-relative-error", type=float)
     parser.add_argument("--max-capillary-rejected-steps", type=int)
