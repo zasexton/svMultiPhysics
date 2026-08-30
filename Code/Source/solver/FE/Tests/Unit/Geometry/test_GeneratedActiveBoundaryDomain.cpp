@@ -2987,10 +2987,14 @@ TEST(FreeSurfaceGeometrySnapshot,
         "tracked_mesh_consumption");
     FE::assembly::CutIntegrationContext context;
     context.addFreeSurfaceGeometrySnapshot(snapshot);
+    EXPECT_TRUE(
+        context.freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(mesh));
     EXPECT_NO_THROW(
         context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh));
 
     mesh.enableRevisionTracking(12u, 12u, 13u, 0u);
+    EXPECT_FALSE(
+        context.freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(mesh));
     try {
         context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh);
         ADD_FAILURE() << "stale geometry revision was accepted";
@@ -3017,16 +3021,24 @@ TEST(FreeSurfaceGeometrySnapshot,
                   std::string::npos);
     }
     mesh.enableRevisionTracking(11u, 14u, 13u, 0u);
+    EXPECT_FALSE(
+        context.freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(mesh));
     EXPECT_THROW(context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh),
                  std::invalid_argument);
     mesh.enableRevisionTracking(11u, 12u, 15u, 0u);
+    EXPECT_FALSE(
+        context.freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(mesh));
     EXPECT_THROW(context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh),
                  std::invalid_argument);
     mesh.enableRevisionTracking(11u, 12u, 13u, 1u);
+    EXPECT_FALSE(
+        context.freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(mesh));
     EXPECT_THROW(context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh),
                  std::invalid_argument);
 
     mesh.enableRevisionTracking();
+    EXPECT_TRUE(
+        context.freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(mesh));
     EXPECT_NO_THROW(
         context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh));
     RecordProperty("snapshot_stale_mesh_build_rejection_count", 3);
@@ -3454,6 +3466,10 @@ TEST(FreeSurfaceGeometrySnapshot,
     }
     EXPECT_THROW(
         stale_source_snapshot.assertAllFreeSurfaceGeometrySnapshotsCurrent(),
+        std::invalid_argument);
+    EXPECT_THROW(
+        stale_source_snapshot
+            .freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(mesh),
         std::invalid_argument);
 
     const auto interface_rule_index =

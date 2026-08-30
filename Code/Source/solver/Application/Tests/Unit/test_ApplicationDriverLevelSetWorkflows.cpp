@@ -13110,6 +13110,81 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
 }
 
 TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       CachedRefreshRebuildsARevisionStaleContextOnBothInputPaths)
+{
+  const auto clone_current_context = [&]() {
+    const auto* context = sim_.fe_system->cutIntegrationContext();
+    EXPECT_NE(context, nullptr);
+    return context != nullptr
+               ? std::make_shared<svmp::FE::assembly::CutIntegrationContext>(
+                     *context)
+               : std::shared_ptr<
+                     svmp::FE::assembly::CutIntegrationContext>{};
+  };
+  const auto context_is_current = [&](const auto& context) {
+    return context != nullptr &&
+           context->freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(
+               sim_.fe_system->meshAccess());
+  };
+
+  auto stale_for_vector = clone_current_context();
+  ASSERT_TRUE(context_is_current(stale_for_vector));
+  sim_.fe_system->setCutIntegrationContext(stale_for_vector);
+  mesh_->event_bus().notify(svmp::MeshEvent::NumberingChanged);
+  ASSERT_FALSE(context_is_current(stale_for_vector));
+  const auto current_vector_signature =
+      activeCutContextRefreshSignature(
+          sim_, active_requests_, history().u());
+  ASSERT_TRUE(current_vector_signature.has_value());
+  // Reproduce a cache record advanced independently from the retained
+  // context.  Signature equality alone used to accept this stale snapshot.
+  refresh_cache_.last_vector_signature = *current_vector_signature;
+
+  const auto vector_recovery = refreshActiveCutIntegrationContextCached(
+      sim_,
+      *params_,
+      history().u(),
+      lifecycle_,
+      refresh_cache_,
+      "vector_stale_context_recovery");
+  EXPECT_TRUE(vector_recovery.refreshed);
+  ASSERT_NE(sim_.fe_system->cutIntegrationContext(), nullptr);
+  EXPECT_TRUE(
+      sim_.fe_system->cutIntegrationContext()
+          ->freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(
+              sim_.fe_system->meshAccess()));
+
+  auto stale_for_span = clone_current_context();
+  ASSERT_TRUE(context_is_current(stale_for_span));
+  sim_.fe_system->setCutIntegrationContext(stale_for_span);
+  mesh_->event_bus().notify(svmp::MeshEvent::NumberingChanged);
+  const auto staged_solution = gatherFeOrderedSolution(history().u());
+  ASSERT_FALSE(context_is_current(stale_for_span));
+  const auto current_span_signature = activeCutContextRefreshSignature(
+      sim_, active_requests_, staged_solution);
+  ASSERT_TRUE(current_span_signature.has_value());
+  // Exercise the staged-span cache independently of the vector fast path.
+  refresh_cache_.last_signature = *current_span_signature;
+  refresh_cache_.last_vector_signature.reset();
+
+  const auto span_recovery =
+      refreshActiveCutIntegrationContextFromSolutionCached(
+          sim_,
+          *params_,
+          staged_solution,
+          lifecycle_,
+          refresh_cache_,
+          "span_stale_context_recovery",
+          "staged_fe_solution");
+  EXPECT_TRUE(span_recovery.refreshed);
+  ASSERT_NE(sim_.fe_system->cutIntegrationContext(), nullptr);
+  EXPECT_TRUE(
+      sim_.fe_system->cutIntegrationContext()
+          ->freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(
+              sim_.fe_system->meshAccess()));
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
        InitializesEveryHistoryLevelAndOnlyItsRateSlices)
 {
   const auto current = gatherFeOrderedSolution(history().u());

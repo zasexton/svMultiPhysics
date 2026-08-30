@@ -496,6 +496,8 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
     phi[2] = -1.0;
     phi[5] = -1.0;
     EXPECT_TRUE(system.constraintStateStaleForCurrentRevisions());
+    const auto ownership_revision_before_refresh =
+        mesh->local_mesh().ownership_revision();
 
     const auto refresh =
         system.refreshConstraintStateForCurrentRevisions(/*time=*/0.0,
@@ -510,6 +512,8 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
     EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 3)));
     EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 4)));
     EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 5)));
+    EXPECT_EQ(mesh->local_mesh().ownership_revision(),
+              ownership_revision_before_refresh);
 #endif
 }
 

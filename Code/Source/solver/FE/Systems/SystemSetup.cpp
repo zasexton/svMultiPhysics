@@ -2655,16 +2655,24 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 
         const bool edges_missing =
             mesh_storage.edge_storage && mesh_base.n_edges() == 0u;
+        bool topology_ownership_refresh_required = false;
         if (needs_full_faces &&
             mesh_base.codim1_storage_mode() == MeshCodim1StorageMode::BoundaryOnly) {
             materializeFullCodim1TopologyPreservingFaceMetadata(mesh_base, mesh_storage);
+            topology_ownership_refresh_required = true;
         } else if (faces_missing || edges_missing) {
             if (!faces_missing) {
                 mesh_storage.codim1_storage = mesh_base.codim1_storage_mode();
             }
             mesh_base.finalize(mesh_storage);
+            topology_ownership_refresh_required = true;
         }
-        mutable_mesh.refresh_topology_ownership();
+        // Rebuilding FE state for a field-layout or field-value change must
+        // not masquerade as repartitioning.  Refresh derived face/edge
+        // ownership only when this setup invocation materialized topology.
+        if (topology_ownership_refresh_required) {
+            mutable_mesh.refresh_topology_ownership();
+        }
     }
 #endif
 

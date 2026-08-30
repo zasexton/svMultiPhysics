@@ -19238,6 +19238,43 @@ struct ActiveCutContextRefreshCache {
   }
 };
 
+bool activeCutContextMatchesRefreshCache(
+    const svmp::FE::systems::FESystem& system,
+    const ActiveCutContextRefreshCache& cache,
+    const svmp::MeshComm& comm,
+    std::string_view phase)
+{
+  bool local_matches = false;
+  std::exception_ptr local_validation_failure;
+  try {
+    const auto* context = system.cutIntegrationContext();
+    if (context != nullptr &&
+        context->freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(
+            system.meshAccess()) &&
+        cache.topology_key.has_value() &&
+        *cache.topology_key != 0u &&
+        !cache.evaluated_state_source_revisions.empty()) {
+      local_matches = true;
+      for (const auto& [marker, source_revision] :
+           cache.evaluated_state_source_revisions) {
+        if (source_revision == 0u ||
+            !context->hasFreeSurfaceGeometrySnapshotForMarker(marker) ||
+            !context->hasExpectedGeneratedSourceValueRevision(marker) ||
+            context->expectedGeneratedSourceValueRevision(marker) !=
+                source_revision) {
+          local_matches = false;
+          break;
+        }
+      }
+    }
+  } catch (...) {
+    local_validation_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_validation_failure, comm, phase);
+  return !globalAnyBool(!local_matches, comm);
+}
+
 void observeActiveCutContextRefresh(
     const ActiveCutContextRefreshCache& cache,
     const ActiveCutContextRefreshReport& report,
@@ -19497,12 +19534,19 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolutionCach
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
   const auto signature =
       activeCutContextRefreshSignature(sim, requests, fe_solution);
+  const bool disable_refresh_cache =
+      parseBoolEnv("SVMP_DISABLE_ACTIVE_CUT_REFRESH_CACHE", false);
+  const bool context_matches_cache = activeCutContextMatchesRefreshCache(
+      *sim.fe_system,
+      cache,
+      comm,
+      "active_cut_span_context_before_cache_consensus");
   const bool local_can_skip =
-      !parseBoolEnv("SVMP_DISABLE_ACTIVE_CUT_REFRESH_CACHE", false) &&
+      !disable_refresh_cache &&
       signature.has_value() &&
       cache.last_signature.has_value() &&
       *signature == *cache.last_signature &&
-      sim.fe_system->cutIntegrationContext() != nullptr;
+      context_matches_cache;
   if (!globalAnyBool(!local_can_skip, comm)) {
     skipped_report.evaluated_state_source_revisions =
         cache.evaluated_state_source_revisions;
@@ -19601,12 +19645,17 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCachedFromVector
       "active_cut_vector_signature_before_cache_consensus");
   const bool disable_refresh_cache =
       parseBoolEnv("SVMP_DISABLE_ACTIVE_CUT_REFRESH_CACHE", false);
+  const bool context_matches_cache = activeCutContextMatchesRefreshCache(
+      *sim.fe_system,
+      cache,
+      comm,
+      "active_cut_vector_context_before_cache_consensus");
   const bool local_vector_can_skip =
       !disable_refresh_cache &&
       vector_signature.has_value() &&
       cache.last_vector_signature.has_value() &&
       *vector_signature == *cache.last_vector_signature &&
-      sim.fe_system->cutIntegrationContext() != nullptr;
+      context_matches_cache;
   if (!globalAnyBool(!local_vector_can_skip, comm)) {
     skipped_report.evaluated_state_source_revisions =
         cache.evaluated_state_source_revisions;
@@ -19649,7 +19698,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCachedFromVector
       signature.has_value() &&
       cache.last_signature.has_value() &&
       *signature == *cache.last_signature &&
-      sim.fe_system->cutIntegrationContext() != nullptr;
+      context_matches_cache;
   if (!globalAnyBool(!local_fe_can_skip, comm)) {
     skipped_report.evaluated_state_source_revisions =
         cache.evaluated_state_source_revisions;

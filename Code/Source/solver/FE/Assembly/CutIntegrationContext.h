@@ -1891,6 +1891,33 @@ public:
     }
 
     template <typename MeshAccessLike>
+    [[nodiscard]] bool
+    freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(
+        const MeshAccessLike& mesh) const {
+        // Structural and source-revision defects are not cache misses.  Keep
+        // them fail-closed so only an otherwise valid snapshot whose tracked
+        // mesh tuple has moved can request a rebuild.
+        assertAllFreeSurfaceGeometrySnapshotsCurrent();
+        if (!mesh.revisionTrackingAvailable()) {
+            return true;
+        }
+        for (const auto& snapshot : free_surface_geometry_snapshots_) {
+            if (!snapshot) {
+                throw std::invalid_argument(
+                    "free-surface geometry snapshot storage is incomplete");
+            }
+            const auto& revision = snapshot->localMeshRevision();
+            if (revision.mesh_geometry_revision != mesh.geometryRevision() ||
+                revision.mesh_topology_revision != mesh.topologyRevision() ||
+                revision.ownership_revision != mesh.ownershipRevision() ||
+                revision.numbering_revision != mesh.numberingRevision()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    template <typename MeshAccessLike>
     void assertAllFreeSurfaceGeometrySnapshotsCurrent(
         const MeshAccessLike& mesh) const {
         assertAllFreeSurfaceGeometrySnapshotsCurrent();
