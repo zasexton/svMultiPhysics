@@ -11,7 +11,7 @@
       "id": "q0_audit_contract",
       "role": "criteria",
       "path": "Documentation/free_surface_boundary_unfitted_audit_20260720.md",
-      "sha256": "f3d39efdafaa16cdb9dabc5b06626906eb05f5a78b1c87583347dcc008473652",
+      "sha256": "f0d8f2343b3e7064b37b673695a52bef2b56f5d1e47cb1c7b895c2d509971dac",
       "required_fragments": [
         "#### Q0: harness, provenance, and negative configuration tests",
         "Run the complete WP-0 invalid-input matrix in continuous integration.",
@@ -123,7 +123,7 @@
       "id": "wp2_runner",
       "role": "strict_runner",
       "path": "tests/cases/fluid/run_free_surface_wp2_geometry_qualification.py",
-      "sha256": "4b2e8a97ff080450c560e921e58a9dd92474ff561faabbcb10bacd6264f542d9",
+      "sha256": "5387dd19618139aeee45bb6f3c77f27fd8b26ce28713d221a866e1eea4662037",
       "required_fragments": [
         "run_clean_builds",
         "--timestepping-binary",
@@ -196,7 +196,7 @@
       "id": "campaign_registry",
       "role": "q0_open_campaign_definition",
       "path": "tests/cases/fluid/free_surface_qualification_campaign_registry.json",
-      "sha256": "8688bec9260d294ee0e9f5450813e70db2001d1c595974d9d244cfd9eb1d7a99",
+      "sha256": "a12fe75d658de332007f5f037d557c4ddcb665850cc003ef27c95f79ab228e98",
       "required_fragments": [
         "\"id\": \"Q0\"",
         "\"id\": \"q0_campaign_execution\"",
@@ -255,8 +255,9 @@
       "id": "campaign_validator_tests",
       "role": "python_test_definition",
       "path": "tests/test_free_surface_qualification_campaign_validator.py",
-      "sha256": "3d03f1edeec889fe302a8203b98c6fb0a4bd404a57a3acee87f16a686d490b10",
+      "sha256": "f4fe973409cf0e93f5e505dab29e2cc819fa49bbf07306e9614affdbcfbb6d6a",
       "required_fragments": [
+        "test_q4_reference_is_pinned_without_promoting_the_campaign",
         "test_prerequisite_only_evidence_is_refused_for_promotion",
         "test_source_tree_mismatch_is_rejected_before_promotion",
         "test_checksum_mismatch_is_rejected"

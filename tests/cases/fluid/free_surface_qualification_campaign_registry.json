@@ -565,21 +565,21 @@
           "id": "q4_dynamic_contact_and_capillary_rise",
           "description": "Local advancing and receding contact plus capillary-rise integral validation",
           "reference": {
-            "kind": "contract_section",
-            "status": "REFERENCE_UNRESOLVED",
-            "title": "Free-surface boundary and unfitted-method audit",
-            "locator": "Qualification campaign Q0--Q7 / Q4",
-            "version": "2026-07-20",
-            "data_units": "case_specific",
-            "uncertainty": "experimental_uncertainty_band_not_yet_pinned",
-            "limitations": "Distributed wall-aware maintenance and the full capillary-rise matrix remain unresolved."
+            "kind": "reference_dataset",
+            "status": "PINNED",
+            "title": "Gründing et al. transient capillary-rise resolved-slip Omega=1 intercode histories",
+            "locator": "article DOI 10.1016/j.apm.2020.04.020; dataset DOI 10.25534/tudatalib-173; repository registry tests/cases/fluid/free_surface_wp5_capillary_rise_reference.json",
+            "version": "comparison contract gruending_2020_omega1_intercode_envelope_v1",
+            "data_units": "time in seconds and rise height in millimetres",
+            "uncertainty": "pointwise half-range of the three reported mesh-converged primary methods plus 0.05462284216241642 mm maximum primary truncation component; candidate gate uses twice the root-sum-square with independently estimated candidate numerical uncertainty",
+            "limitations": "The pinned reference does not execute the candidate spatial, temporal, slip-resolution, or dynamic-contact campaign; distributed wall-aware maintenance also remains unresolved."
           }
         }
       ],
       "unresolved_exits": [
         "q0_through_q3_not_qualified",
         "dynamic_wetting_sign_speed_and_energy_matrix_not_complete",
-        "capillary_rise_reference_data_not_pinned"
+        "capillary_rise_candidate_refinement_and_uncertainty_comparison_not_executed"
       ]
     },
     {

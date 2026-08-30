@@ -29,7 +29,7 @@ DEFAULT_MATRIX = SCRIPT_PATH.with_name(
     "free_surface_q0_harness_qualification_matrix.json"
 )
 EXPECTED_MATRIX_SHA256 = (
-    "f1e7c0446dc9a5af2678c53e15b018dd235e307a87aab1483c091a34c6635eaa"
+    "386018b08f6d0bb508bd530592dfb47d47a3e3af853e59229dc82c99c5cd9997"
 )
 EXPECTED_MATRIX_ID = "free_surface_q0_harness_prerequisite_v1"
 EXPECTED_STATUS = "FROZEN_PREREQUISITE_NONCLOSURE"

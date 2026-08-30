@@ -272,6 +272,32 @@ def test_central_registry_is_strict_and_explicitly_unresolved():
     assert "geometry.validation_maxima" in metric_names
 
 
+def test_q4_reference_is_pinned_without_promoting_the_campaign():
+    validator = load_validator()
+    registry = validator.load_campaign_registry(REGISTRY_PATH, ROOT)
+    q4 = registry["campaigns"][4]
+    reference = q4["benchmarks"][0]["reference"]
+
+    assert q4["id"] == "Q4"
+    assert q4["state"] == "UNRESOLVED"
+    assert reference["kind"] == "reference_dataset"
+    assert reference["status"] == "PINNED"
+    assert "10.1016/j.apm.2020.04.020" in reference["locator"]
+    assert "10.25534/tudatalib-173" in reference["locator"]
+    assert reference["version"] == (
+        "comparison contract gruending_2020_omega1_intercode_envelope_v1"
+    )
+    assert reference["data_units"] == (
+        "time in seconds and rise height in millimetres"
+    )
+    assert "pointwise half-range" in reference["uncertainty"]
+    assert "candidate numerical uncertainty" in reference["uncertainty"]
+    assert "does not execute the candidate" in reference["limitations"]
+    assert q4["unresolved_exits"][-1] == (
+        "capillary_rise_candidate_refinement_and_uncertainty_comparison_not_executed"
+    )
+
+
 def test_record_only_prerequisite_artifact_cannot_promote(tmp_path):
     validator = load_validator()
     registry_path = make_registry(tmp_path)
