@@ -4,6 +4,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 include_directories(${MPI_C_INCLUDE_PATH})
 
+find_package(BLAS REQUIRED)
+
 if(CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
   set(CMAKE_Fortran_FLAGS "-cpp -pthread")
   set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -std=legacy")
@@ -49,7 +51,7 @@ set(CSRCS
 
 add_library(${lib} ${SV_LIBRARY_TYPE} ${CSRCS})
 
-target_link_libraries(${lib} ${MPI_LIBRARY} ${MPI_Fortran_LIBRARIES})
+target_link_libraries(${lib} ${MPI_LIBRARY} ${MPI_Fortran_LIBRARIES} ${BLAS_LIBRARIES})
 #target_link_libraries(${lib} ${MPI_LIBRARY} ${MPI_Fortran_LIBRARIES} ${VTK_LIBRARIES})
 
 # extra MPI libraries only if there are not set to NOT_FOUND or other null 

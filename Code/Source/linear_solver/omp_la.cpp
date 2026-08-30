@@ -5,6 +5,11 @@
 
 #include "omp_la.h"
 
+extern "C" {
+  void daxpy_(const int* n, const double* alpha, const double* x,
+      const int* incx, double* y, const int* incy);
+}
+
 namespace omp_la {
 
 /// @brief Reproduces 'SUBROUTINE OMPMULS (nNo, r, U)'.
@@ -74,6 +79,13 @@ void omp_sum_s(const int nNo, const double r, Vector<double>& U, const Vector<do
 //
 void omp_sum_v(const int dof, const int nNo, const double r, Array<double>& U, const Array<double>& V)
 {
+  if (dof > 0 && nNo > 0 && U.nrows() == dof && V.nrows() == dof) {
+    const int size = dof * nNo;
+    const int stride = 1;
+    daxpy_(&size, &r, V.data(), &stride, U.data(), &stride);
+    return;
+  }
+
   switch (dof) {
 
     case 1:
@@ -118,5 +130,4 @@ void omp_sum_v(const int dof, const int nNo, const double r, Array<double>& U, c
 
 
 };
-
 
