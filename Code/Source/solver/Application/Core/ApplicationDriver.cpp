@@ -2206,6 +2206,28 @@ int parseIntEnv(const char* name, int default_value)
   return static_cast<int>(value);
 }
 
+void applyGeneratedStateOuterRelaxationEnvOptions(
+    svmp::FE::timestepping::NewtonOptions& opts)
+{
+  auto& relaxation =
+      opts.external_state_fixed_point.dynamic_relaxation;
+  relaxation.enabled = parseBoolEnv(
+      "SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION",
+      relaxation.enabled);
+  relaxation.initial_factor = parseDoubleEnv(
+      "SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION_INITIAL_FACTOR",
+      relaxation.initial_factor);
+  relaxation.minimum_factor = parseDoubleEnv(
+      "SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION_MINIMUM_FACTOR",
+      relaxation.minimum_factor);
+  relaxation.maximum_factor = parseDoubleEnv(
+      "SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION_MAXIMUM_FACTOR",
+      relaxation.maximum_factor);
+  relaxation.denominator_relative_tolerance = parseDoubleEnv(
+      "SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION_DENOMINATOR_RELATIVE_TOLERANCE",
+      relaxation.denominator_relative_tolerance);
+}
+
 void applyNewtonLineSearchEnvOptions(svmp::FE::timestepping::NewtonOptions& opts)
 {
   opts.line_search_max_iterations =
@@ -26841,6 +26863,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   newton_opts.external_state_fixed_point.max_iterations = std::max(
       1,
       parseIntEnv("SVMP_GENERATED_STATE_OUTER_MAX_ITERATIONS", 12));
+  applyGeneratedStateOuterRelaxationEnvOptions(newton_opts);
   // Legacy refreshed/quasi-Newton mode remains available for controlled
   // comparisons.  Production generated geometry uses an outer Picard loop so
   // each inner Newton residual and Jacobian share exactly one frozen G.
@@ -26977,7 +27000,21 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
             << " inner_iterations_total=" << report.inner_iterations_total
             << " outer_state_change_norm=" << report.outer_state_change_norm
             << " field_residual_norm=" << report.field_residual_norm
-            << " auxiliary_residual_norm=" << report.auxiliary_residual_norm << std::endl;
+            << " auxiliary_residual_norm=" << report.auxiliary_residual_norm
+            << " outer_dynamic_relaxation_enabled="
+            << report.outer_dynamic_relaxation_enabled
+            << " outer_dynamic_relaxation_updates="
+            << report.outer_dynamic_relaxation_updates
+            << " outer_dynamic_relaxation_safeguards="
+            << report.outer_dynamic_relaxation_safeguards
+            << " outer_dynamic_relaxation_resets="
+            << report.outer_dynamic_relaxation_resets
+            << " outer_dynamic_relaxation_factor="
+            << report.outer_dynamic_relaxation_factor
+            << " outer_relaxed_state_change_norm="
+            << report.outer_relaxed_state_change_norm
+            << " outer_raw_contraction_ratio="
+            << report.outer_raw_contraction_ratio << std::endl;
 
   if (!report.converged) {
     throw std::runtime_error(
@@ -27335,6 +27372,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   opts.newton.external_state_fixed_point.max_iterations = std::max(
       1,
       parseIntEnv("SVMP_GENERATED_STATE_OUTER_MAX_ITERATIONS", 12));
+  applyGeneratedStateOuterRelaxationEnvOptions(opts.newton);
   const bool refresh_generated_geometry_within_solve =
       has_transient_generated_state &&
       !use_transient_external_state_fixed_point &&
@@ -27346,6 +27384,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
            "wet-extension map; solve each inner Newton problem with frozen "
            "generated state), max_outer_iterations="
         << opts.newton.external_state_fixed_point.max_iterations
+        << ", dynamic_relaxation="
+        << (opts.newton.external_state_fixed_point.dynamic_relaxation.enabled
+                ? "enabled"
+                : "disabled")
         << std::endl;
   } else if (has_frozen_algebraic_level_set_extension) {
     oopCout()
@@ -27912,7 +27954,21 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << " ||r_aux||=" << nr.auxiliary_residual_norm
               << " (linear: converged=" << nr.linear.converged
               << " iters=" << nr.linear.iterations
-              << " rel=" << nr.linear.relative_residual << ")" << std::endl;
+              << " rel=" << nr.linear.relative_residual << ")"
+              << " outer_dynamic_relaxation_enabled="
+              << nr.outer_dynamic_relaxation_enabled
+              << " outer_dynamic_relaxation_updates="
+              << nr.outer_dynamic_relaxation_updates
+              << " outer_dynamic_relaxation_safeguards="
+              << nr.outer_dynamic_relaxation_safeguards
+              << " outer_dynamic_relaxation_resets="
+              << nr.outer_dynamic_relaxation_resets
+              << " outer_dynamic_relaxation_factor="
+              << nr.outer_dynamic_relaxation_factor
+              << " outer_relaxed_state_change_norm="
+              << nr.outer_relaxed_state_change_norm
+              << " outer_raw_contraction_ratio="
+              << nr.outer_raw_contraction_ratio << std::endl;
   };
   std::function<void(
       const svmp::FE::timestepping::CandidateStageObservation&)>
@@ -30979,7 +31035,21 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << " inner_iters_total=" << nr.inner_iterations_total
               << " ||r||=" << nr.residual_norm
               << " ||r_field||=" << nr.field_residual_norm
-              << " ||r_aux||=" << nr.auxiliary_residual_norm << ")" << std::endl;
+              << " ||r_aux||=" << nr.auxiliary_residual_norm << ")"
+              << " outer_dynamic_relaxation_enabled="
+              << nr.outer_dynamic_relaxation_enabled
+              << " outer_dynamic_relaxation_updates="
+              << nr.outer_dynamic_relaxation_updates
+              << " outer_dynamic_relaxation_safeguards="
+              << nr.outer_dynamic_relaxation_safeguards
+              << " outer_dynamic_relaxation_resets="
+              << nr.outer_dynamic_relaxation_resets
+              << " outer_dynamic_relaxation_factor="
+              << nr.outer_dynamic_relaxation_factor
+              << " outer_relaxed_state_change_norm="
+              << nr.outer_relaxed_state_change_norm
+              << " outer_raw_contraction_ratio="
+              << nr.outer_raw_contraction_ratio << std::endl;
   };
   callbacks.on_dt_updated = [&](double old_dt, double new_dt, int step_index, int attempt_index) {
     if (!oopTraceEnabled()) {

@@ -166,8 +166,28 @@ struct NewtonOptions {
      * RestoredOuterFixedPointState callback rebuilds the entry generated state.
      */
     struct ExternalStateFixedPointOptions {
+        /**
+         * @brief Safeguarded vector delta-squared relaxation.
+         *
+         * The first outer update uses `initial_factor`.  Later updates infer a
+         * scalar factor from two consecutive raw fixed-point updates.  The
+         * estimate is accepted only while the affine-constraint semantics are
+         * unchanged, is bounded by the configured interval, and falls back to
+         * `initial_factor` when its denominator or candidate is unsafe.  This
+         * changes only the next outer iterate: convergence still requires a
+         * freshly regenerated zero-update inner solve.
+         */
+        struct DynamicRelaxationOptions {
+            bool enabled{false};
+            double initial_factor{1.0};
+            double minimum_factor{0.05};
+            double maximum_factor{25.0};
+            double denominator_relative_tolerance{1.0e-12};
+        };
+
         bool enabled{false};
         int max_iterations{12};
+        DynamicRelaxationOptions dynamic_relaxation{};
     };
 
     ExternalStateFixedPointOptions external_state_fixed_point{};
@@ -304,6 +324,14 @@ struct NewtonReport {
     int outer_iterations{0};
     int inner_iterations_total{0};
     double outer_state_change_norm{0.0};
+    bool outer_dynamic_relaxation_enabled{false};
+    int outer_dynamic_relaxation_updates{0};
+    int outer_dynamic_relaxation_safeguards{0};
+    int outer_dynamic_relaxation_resets{0};
+    double outer_dynamic_relaxation_factor{1.0};
+    double outer_relaxed_state_change_norm{0.0};
+    double outer_raw_contraction_ratio{
+        std::numeric_limits<double>::quiet_NaN()};
     double residual_norm0{0.0};
     double residual_norm{0.0};
     double field_residual_norm0{0.0};

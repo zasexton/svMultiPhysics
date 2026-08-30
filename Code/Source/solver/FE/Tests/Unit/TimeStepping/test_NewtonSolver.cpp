@@ -2995,6 +2995,191 @@ TEST(NewtonSolverExternalStateFixedPoint,
 }
 
 TEST(NewtonSolverExternalStateFixedPoint,
+     DynamicRelaxationReachesFreshCertificateWithinBoundedBudget)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+
+    const auto run = [&](bool enable_relaxation) {
+        double generated_measure = 20.0;
+        auto problem = makeRefreshedGeometryRootProblem(
+            /*target=*/1.0,
+            /*dt=*/0.1,
+            /*u0=*/{0.0},
+            &generated_measure);
+
+        svmp::FE::timestepping::NewtonOptions options;
+        options.residual_op = "op";
+        options.jacobian_op = "op";
+        options.max_iterations = 3;
+        options.abs_tolerance = 1e-13;
+        options.rel_tolerance = 0.0;
+        options.use_line_search = false;
+        options.external_state_fixed_point.enabled = true;
+        options.external_state_fixed_point.max_iterations = 4;
+        auto& relaxation =
+            options.external_state_fixed_point.dynamic_relaxation;
+        relaxation.enabled = enable_relaxation;
+        relaxation.maximum_factor = 25.0;
+        options.synchronize_state =
+            [&](const svmp::FE::systems::SystemStateView& state,
+                SyncPoint point) {
+                if (point != SyncPoint::OuterFixedPointState &&
+                    point != SyncPoint::ProjectedOuterFixedPointState &&
+                    point != SyncPoint::RestoredOuterFixedPointState) {
+                    return;
+                }
+                ASSERT_FALSE(state.u.empty());
+                const double u = static_cast<double>(state.u.front());
+                generated_measure = 1.0 / (0.95 * u + 0.05);
+            };
+
+        svmp::FE::timestepping::NewtonSolver newton(options);
+        svmp::FE::timestepping::NewtonWorkspace workspace;
+        newton.allocateWorkspace(
+            *problem.sys, *problem.factory, workspace);
+        problem.history.repack(*problem.factory);
+
+        const auto report = newton.solveStep(
+            *problem.transient,
+            *problem.linear,
+            /*solve_time=*/problem.history.dt(),
+            problem.history,
+            workspace);
+        return std::pair{
+            report, scalarFromDofVector(problem.history.u())};
+    };
+
+    const auto [unrelaxed_report, unrelaxed_value] = run(false);
+    EXPECT_FALSE(unrelaxed_report.converged);
+    EXPECT_EQ(unrelaxed_report.outer_iterations, 4);
+    EXPECT_NEAR(unrelaxed_value, 0.0, 1e-13);
+
+    const auto [relaxed_report, relaxed_value] = run(true);
+    EXPECT_TRUE(relaxed_report.converged);
+    EXPECT_EQ(relaxed_report.outer_iterations, 3);
+    EXPECT_EQ(relaxed_report.inner_iterations_total, 2);
+    EXPECT_EQ(relaxed_report.iterations, 2);
+    EXPECT_TRUE(relaxed_report.outer_dynamic_relaxation_enabled);
+    EXPECT_EQ(relaxed_report.outer_dynamic_relaxation_updates, 2);
+    EXPECT_EQ(relaxed_report.outer_dynamic_relaxation_safeguards, 0);
+    EXPECT_EQ(relaxed_report.outer_dynamic_relaxation_resets, 0);
+    EXPECT_NEAR(
+        relaxed_report.outer_dynamic_relaxation_factor, 20.0, 1e-10);
+    EXPECT_NEAR(
+        relaxed_report.outer_relaxed_state_change_norm, 0.0, 1e-13);
+    EXPECT_NEAR(
+        relaxed_report.outer_raw_contraction_ratio, 0.0, 1e-13);
+    EXPECT_NEAR(relaxed_value, 1.0, 1e-12);
+}
+
+TEST(NewtonSolverExternalStateFixedPoint,
+     DynamicRelaxationSmallDenominatorFallsBackSafely)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+
+    double generated_measure = 1.0;
+    auto problem = makeRefreshedGeometryRootProblem(
+        /*target=*/1.0,
+        /*dt=*/0.1,
+        /*u0=*/{0.0},
+        &generated_measure);
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 3;
+    options.abs_tolerance = 1e-13;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+    options.external_state_fixed_point.enabled = true;
+    options.external_state_fixed_point.max_iterations = 2;
+    auto& relaxation =
+        options.external_state_fixed_point.dynamic_relaxation;
+    relaxation.enabled = true;
+    relaxation.initial_factor = 0.5;
+    options.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView& state,
+            SyncPoint point) {
+            if (point != SyncPoint::OuterFixedPointState &&
+                point != SyncPoint::ProjectedOuterFixedPointState &&
+                point != SyncPoint::RestoredOuterFixedPointState) {
+                return;
+            }
+            ASSERT_FALSE(state.u.empty());
+            generated_measure =
+                1.0 / (static_cast<double>(state.u.front()) + 1.0);
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+
+    EXPECT_FALSE(report.converged);
+    EXPECT_EQ(report.outer_iterations, 2);
+    EXPECT_EQ(report.outer_dynamic_relaxation_updates, 2);
+    EXPECT_EQ(report.outer_dynamic_relaxation_safeguards, 1);
+    EXPECT_EQ(report.outer_dynamic_relaxation_resets, 0);
+    EXPECT_NEAR(report.outer_dynamic_relaxation_factor, 0.5, 1e-13);
+    EXPECT_NEAR(report.outer_raw_contraction_ratio, 1.0, 1e-13);
+    EXPECT_NEAR(report.outer_relaxed_state_change_norm, 0.5, 1e-13);
+    EXPECT_NEAR(
+        scalarFromDofVector(problem.history.u()), 0.0, 1e-13);
+}
+
+TEST(NewtonSolverExternalStateFixedPoint,
+     RejectsInvalidDynamicRelaxationOptions)
+{
+    auto make_options = [] {
+        svmp::FE::timestepping::NewtonOptions options;
+        options.external_state_fixed_point.enabled = true;
+        options.synchronize_state =
+            [](const svmp::FE::systems::SystemStateView&,
+               svmp::FE::timestepping::NewtonOptions::
+                   StateSynchronizationPoint) {};
+        return options;
+    };
+
+    auto zero_initial = make_options();
+    zero_initial.external_state_fixed_point.dynamic_relaxation.initial_factor =
+        0.0;
+    EXPECT_THROW(
+        (void)svmp::FE::timestepping::NewtonSolver(zero_initial),
+        svmp::FE::InvalidArgumentException);
+
+    auto reversed_bounds = make_options();
+    reversed_bounds.external_state_fixed_point.dynamic_relaxation
+        .minimum_factor = 2.0;
+    EXPECT_THROW(
+        (void)svmp::FE::timestepping::NewtonSolver(reversed_bounds),
+        svmp::FE::InvalidArgumentException);
+
+    auto negative_tolerance = make_options();
+    negative_tolerance.external_state_fixed_point.dynamic_relaxation
+        .denominator_relative_tolerance = -1.0;
+    EXPECT_THROW(
+        (void)svmp::FE::timestepping::NewtonSolver(negative_tolerance),
+        svmp::FE::InvalidArgumentException);
+}
+
+TEST(NewtonSolverExternalStateFixedPoint,
      OuterIterationFailureRestoresSolutionHistoryAndRateState)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
@@ -3273,6 +3458,7 @@ TEST(NewtonSolverExternalStateFixedPoint,
     options.assemble_both_when_possible = false;
     options.external_state_fixed_point.enabled = true;
     options.external_state_fixed_point.max_iterations = 4;
+    options.external_state_fixed_point.dynamic_relaxation.enabled = true;
     options.synchronize_state =
         [&](const svmp::FE::systems::SystemStateView& state,
             SyncPoint point) {
@@ -3338,6 +3524,9 @@ TEST(NewtonSolverExternalStateFixedPoint,
     EXPECT_TRUE(report.converged);
     EXPECT_EQ(report.outer_iterations, 2);
     EXPECT_EQ(report.inner_iterations_total, 1);
+    EXPECT_TRUE(report.outer_dynamic_relaxation_enabled);
+    EXPECT_EQ(report.outer_dynamic_relaxation_updates, 1);
+    EXPECT_EQ(report.outer_dynamic_relaxation_resets, 1);
     EXPECT_EQ(topology_flips, 1);
     EXPECT_TRUE(projected_callback_saw_restored_entry_history);
     EXPECT_GT(problem.sys->sparsityPatternRevision(), entry_revision);

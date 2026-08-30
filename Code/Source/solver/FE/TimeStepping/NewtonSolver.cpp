@@ -11051,6 +11051,33 @@ NewtonSolver::NewtonSolver(
             options_.external_state_fixed_point.max_iterations <= 0,
             InvalidArgumentException,
             "NewtonSolver: external_state_fixed_point.max_iterations must be > 0");
+        const auto& relaxation =
+            options_.external_state_fixed_point.dynamic_relaxation;
+        FE_THROW_IF(
+            !std::isfinite(relaxation.initial_factor) ||
+                !(relaxation.initial_factor > 0.0),
+            InvalidArgumentException,
+            "NewtonSolver: external-state dynamic-relaxation initial factor must be finite and > 0");
+        FE_THROW_IF(
+            !std::isfinite(relaxation.minimum_factor) ||
+                !(relaxation.minimum_factor > 0.0),
+            InvalidArgumentException,
+            "NewtonSolver: external-state dynamic-relaxation minimum factor must be finite and > 0");
+        FE_THROW_IF(
+            !std::isfinite(relaxation.maximum_factor) ||
+                !(relaxation.maximum_factor > 0.0),
+            InvalidArgumentException,
+            "NewtonSolver: external-state dynamic-relaxation maximum factor must be finite and > 0");
+        FE_THROW_IF(
+            relaxation.minimum_factor > relaxation.initial_factor ||
+                relaxation.initial_factor > relaxation.maximum_factor,
+            InvalidArgumentException,
+            "NewtonSolver: external-state dynamic-relaxation factors must satisfy minimum <= initial <= maximum");
+        FE_THROW_IF(
+            !std::isfinite(relaxation.denominator_relative_tolerance) ||
+                relaxation.denominator_relative_tolerance < 0.0,
+            InvalidArgumentException,
+            "NewtonSolver: external-state dynamic-relaxation denominator relative tolerance must be finite and >= 0");
         FE_THROW_IF(
             !(options_.abs_tolerance > 0.0),
             InvalidArgumentException,
@@ -11929,6 +11956,30 @@ NewtonReport NewtonSolver::solveStep(
     FE_CHECK_NOT_NULL(
         previous_outer_iterate.get(),
         "NewtonSolver: external-state previous outer iterate");
+    const auto& dynamic_relaxation =
+        options_.external_state_fixed_point.dynamic_relaxation;
+    std::unique_ptr<backends::GenericVector> previous_raw_outer_update;
+    std::unique_ptr<backends::GenericVector> raw_outer_update_difference;
+    if (dynamic_relaxation.enabled) {
+        previous_raw_outer_update =
+            workspace.factory->createVector(vector_size);
+        raw_outer_update_difference =
+            workspace.factory->createVector(vector_size);
+        FE_CHECK_NOT_NULL(
+            previous_raw_outer_update.get(),
+            "NewtonSolver: external-state previous raw outer update");
+        FE_CHECK_NOT_NULL(
+            raw_outer_update_difference.get(),
+            "NewtonSolver: external-state raw outer update difference");
+    }
+    bool have_previous_raw_outer_update = false;
+    ConstraintSemanticFingerprint previous_relaxation_constraint_semantics{};
+    double previous_raw_outer_update_norm =
+        std::numeric_limits<double>::quiet_NaN();
+    double outer_relaxation_factor = dynamic_relaxation.initial_factor;
+    int outer_relaxation_updates = 0;
+    int outer_relaxation_safeguards = 0;
+    int outer_relaxation_resets = 0;
 
     bool entry_state_restored = false;
     auto restoreEntryState = [&]() {
@@ -12190,6 +12241,21 @@ NewtonReport NewtonSolver::solveStep(
                     NewtonOptions::StateSynchronizationPoint::
                         OuterFixedPointState);
             }
+            const auto current_constraint_semantics =
+                constraintSemanticFingerprint(system.constraints());
+            bool relaxation_history_reset = false;
+            if (dynamic_relaxation.enabled &&
+                have_previous_raw_outer_update &&
+                anyRank(current_constraint_semantics !=
+                        previous_relaxation_constraint_semantics)) {
+                have_previous_raw_outer_update = false;
+                previous_raw_outer_update_norm =
+                    std::numeric_limits<double>::quiet_NaN();
+                outer_relaxation_factor =
+                    dynamic_relaxation.initial_factor;
+                ++outer_relaxation_resets;
+                relaxation_history_reset = true;
+            }
             FE_THROW_IF(
                 system.meshCoordinateTransactionActive(),
                 systems::InvalidStateException,
@@ -12221,24 +12287,64 @@ NewtonReport NewtonSolver::solveStep(
             aggregate.inner_iterations_total = inner_iterations_total;
             aggregate.iterations = inner_iterations_total;
             aggregate.outer_state_change_norm = state_change_norm;
+            aggregate.outer_dynamic_relaxation_enabled =
+                dynamic_relaxation.enabled;
+            aggregate.outer_dynamic_relaxation_updates =
+                outer_relaxation_updates;
+            aggregate.outer_dynamic_relaxation_safeguards =
+                outer_relaxation_safeguards;
+            aggregate.outer_dynamic_relaxation_resets =
+                outer_relaxation_resets;
+            aggregate.outer_dynamic_relaxation_factor =
+                dynamic_relaxation.enabled ? outer_relaxation_factor : 1.0;
+            aggregate.outer_relaxed_state_change_norm = state_change_norm;
+            aggregate.outer_raw_contraction_ratio =
+                std::numeric_limits<double>::quiet_NaN();
 
-            if (oopTraceEnabled()) {
-                std::ostringstream oss;
-                oss << "NewtonSolver: external-state fixed point"
-                    << " outer_iteration=" << (outer + 1)
-                    << " inner_converged="
-                    << (inner_report.converged ? 1 : 0)
-                    << " inner_iterations=" << inner_report.iterations
-                    << " inner_iterations_total="
-                    << inner_iterations_total
-                    << " state_change_norm=" << state_change_norm
-                    << " refreshed_residual_norm="
-                    << inner_report.residual_norm;
-                traceLog(oss.str());
+            if (dynamic_relaxation.enabled &&
+                have_previous_raw_outer_update &&
+                std::isfinite(previous_raw_outer_update_norm) &&
+                previous_raw_outer_update_norm > 0.0) {
+                aggregate.outer_raw_contraction_ratio =
+                    state_change_norm / previous_raw_outer_update_norm;
             }
+
+            std::string relaxation_reason = dynamic_relaxation.enabled
+                                                ? "not_applied"
+                                                : "disabled";
 
             if (!inner_report.converged) {
                 aggregate.converged = false;
+                relaxation_reason = "inner_not_converged";
+                if (oopTraceEnabled()) {
+                    std::ostringstream oss;
+                    oss << std::setprecision(17)
+                        << "NewtonSolver: external-state fixed point"
+                        << " outer_iteration=" << (outer + 1)
+                        << " inner_converged=0"
+                        << " inner_iterations=" << inner_report.iterations
+                        << " inner_iterations_total="
+                        << inner_iterations_total
+                        << " state_change_norm=" << state_change_norm
+                        << " raw_contraction_ratio="
+                        << aggregate.outer_raw_contraction_ratio
+                        << " dynamic_relaxation_enabled="
+                        << (dynamic_relaxation.enabled ? 1 : 0)
+                        << " relaxation_factor="
+                        << aggregate.outer_dynamic_relaxation_factor
+                        << " relaxed_state_change_norm="
+                        << aggregate.outer_relaxed_state_change_norm
+                        << " relaxation_updates="
+                        << aggregate.outer_dynamic_relaxation_updates
+                        << " relaxation_safeguards="
+                        << aggregate.outer_dynamic_relaxation_safeguards
+                        << " relaxation_resets="
+                        << aggregate.outer_dynamic_relaxation_resets
+                        << " relaxation_reason=" << relaxation_reason
+                        << " refreshed_residual_norm="
+                        << inner_report.residual_norm;
+                    traceLog(oss.str());
+                }
                 restoreEntryState();
                 return aggregate;
             }
@@ -12247,6 +12353,34 @@ NewtonReport NewtonSolver::solveStep(
             // residual was assembled after G was regenerated from this exact
             // algebraic state and already met every absolute tolerance.
             if (inner_report.iterations == 0) {
+                relaxation_reason = "fresh_zero_update_certificate";
+                if (oopTraceEnabled()) {
+                    std::ostringstream oss;
+                    oss << std::setprecision(17)
+                        << "NewtonSolver: external-state fixed point"
+                        << " outer_iteration=" << (outer + 1)
+                        << " inner_converged=1 inner_iterations=0"
+                        << " inner_iterations_total="
+                        << inner_iterations_total
+                        << " state_change_norm=" << state_change_norm
+                        << " raw_contraction_ratio="
+                        << aggregate.outer_raw_contraction_ratio
+                        << " dynamic_relaxation_enabled="
+                        << (dynamic_relaxation.enabled ? 1 : 0)
+                        << " relaxation_factor="
+                        << aggregate.outer_dynamic_relaxation_factor
+                        << " relaxed_state_change_norm=0"
+                        << " relaxation_updates="
+                        << aggregate.outer_dynamic_relaxation_updates
+                        << " relaxation_safeguards="
+                        << aggregate.outer_dynamic_relaxation_safeguards
+                        << " relaxation_resets="
+                        << aggregate.outer_dynamic_relaxation_resets
+                        << " relaxation_reason=" << relaxation_reason
+                        << " refreshed_residual_norm="
+                        << inner_report.residual_norm;
+                    traceLog(oss.str());
+                }
                 if (!applyDeferredFreeSurfaceDistanceGates(
                         aggregate, outer + 1)) {
                     aggregate.converged = false;
@@ -12259,6 +12393,149 @@ NewtonReport NewtonSolver::solveStep(
                     aggregate.linear = last_nontrivial_linear;
                 }
                 return aggregate;
+            }
+
+            if (dynamic_relaxation.enabled) {
+                FE_THROW_IF(
+                    !std::isfinite(state_change_norm),
+                    systems::InvalidStateException,
+                    "NewtonSolver: external-state raw update norm is nonfinite");
+
+                double candidate_factor =
+                    dynamic_relaxation.initial_factor;
+                if (have_previous_raw_outer_update) {
+                    raw_outer_update_difference->copyFrom(
+                        *workspace.residual_scratch);
+                    axpy(*raw_outer_update_difference,
+                         Real{-1.0},
+                         *previous_raw_outer_update);
+                    const double denominator =
+                        raw_outer_update_difference->dot(
+                            *raw_outer_update_difference);
+                    const double numerator =
+                        previous_raw_outer_update->dot(
+                            *raw_outer_update_difference);
+                    const double previous_update_squared =
+                        previous_raw_outer_update_norm *
+                        previous_raw_outer_update_norm;
+                    const double current_update_squared =
+                        state_change_norm * state_change_norm;
+                    const double denominator_scale = std::max(
+                        previous_update_squared,
+                        current_update_squared);
+                    const double denominator_threshold =
+                        dynamic_relaxation.denominator_relative_tolerance *
+                        denominator_scale;
+
+                    if (std::isfinite(denominator) &&
+                        std::isfinite(numerator) && denominator > 0.0 &&
+                        denominator > denominator_threshold) {
+                        const double inferred_factor =
+                            -outer_relaxation_factor * numerator /
+                            denominator;
+                        if (std::isfinite(inferred_factor)) {
+                            candidate_factor = std::clamp(
+                                inferred_factor,
+                                dynamic_relaxation.minimum_factor,
+                                dynamic_relaxation.maximum_factor);
+                            if (candidate_factor != inferred_factor) {
+                                ++outer_relaxation_safeguards;
+                                relaxation_reason =
+                                    "bounded_delta_squared_estimate";
+                            } else {
+                                relaxation_reason =
+                                    "delta_squared_estimate";
+                            }
+                        } else {
+                            ++outer_relaxation_safeguards;
+                            relaxation_reason =
+                                "nonfinite_estimate_initial_factor";
+                        }
+                    } else {
+                        ++outer_relaxation_safeguards;
+                        relaxation_reason =
+                            "small_denominator_initial_factor";
+                    }
+                } else if (relaxation_history_reset) {
+                    relaxation_reason =
+                        "constraint_semantics_reset_initial_factor";
+                } else {
+                    relaxation_reason = "initial_factor";
+                }
+
+                history.u().copyFrom(*previous_outer_iterate);
+                axpy(history.u(),
+                     static_cast<Real>(candidate_factor),
+                     *workspace.residual_scratch);
+                syncOwnedRowHaloIfNeeded(history.u());
+                double candidate_norm = history.u().norm();
+                if (!std::isfinite(candidate_norm)) {
+                    ++outer_relaxation_safeguards;
+                    candidate_factor =
+                        dynamic_relaxation.initial_factor;
+                    relaxation_reason =
+                        "nonfinite_candidate_initial_factor";
+                    history.u().copyFrom(*previous_outer_iterate);
+                    axpy(history.u(),
+                         static_cast<Real>(candidate_factor),
+                         *workspace.residual_scratch);
+                    syncOwnedRowHaloIfNeeded(history.u());
+                    candidate_norm = history.u().norm();
+                    FE_THROW_IF(
+                        !std::isfinite(candidate_norm),
+                        systems::InvalidStateException,
+                        "NewtonSolver: external-state relaxed candidate is nonfinite after fallback");
+                }
+
+                outer_relaxation_factor = candidate_factor;
+                previous_raw_outer_update->copyFrom(
+                    *workspace.residual_scratch);
+                previous_raw_outer_update_norm = state_change_norm;
+                previous_relaxation_constraint_semantics =
+                    current_constraint_semantics;
+                have_previous_raw_outer_update = true;
+                ++outer_relaxation_updates;
+
+                aggregate.outer_dynamic_relaxation_updates =
+                    outer_relaxation_updates;
+                aggregate.outer_dynamic_relaxation_safeguards =
+                    outer_relaxation_safeguards;
+                aggregate.outer_dynamic_relaxation_resets =
+                    outer_relaxation_resets;
+                aggregate.outer_dynamic_relaxation_factor =
+                    outer_relaxation_factor;
+                aggregate.outer_relaxed_state_change_norm =
+                    std::abs(outer_relaxation_factor) * state_change_norm;
+            }
+
+            if (oopTraceEnabled()) {
+                std::ostringstream oss;
+                oss << std::setprecision(17)
+                    << "NewtonSolver: external-state fixed point"
+                    << " outer_iteration=" << (outer + 1)
+                    << " inner_converged=1"
+                    << " inner_iterations=" << inner_report.iterations
+                    << " inner_iterations_total="
+                    << inner_iterations_total
+                    << " state_change_norm=" << state_change_norm
+                    << " raw_contraction_ratio="
+                    << aggregate.outer_raw_contraction_ratio
+                    << " dynamic_relaxation_enabled="
+                    << (dynamic_relaxation.enabled ? 1 : 0)
+                    << " relaxation_factor="
+                    << aggregate.outer_dynamic_relaxation_factor
+                    << " relaxed_state_change_norm="
+                    << aggregate.outer_relaxed_state_change_norm
+                    << " relaxation_updates="
+                    << aggregate.outer_dynamic_relaxation_updates
+                    << " relaxation_safeguards="
+                    << aggregate.outer_dynamic_relaxation_safeguards
+                    << " relaxation_resets="
+                    << aggregate.outer_dynamic_relaxation_resets
+                    << " relaxation_reason=" << relaxation_reason
+                    << " refreshed_residual_norm="
+                    << inner_report.residual_norm;
+                traceLog(oss.str());
             }
         }
 
