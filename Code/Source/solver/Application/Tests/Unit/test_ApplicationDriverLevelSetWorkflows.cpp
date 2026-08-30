@@ -12606,6 +12606,119 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
+     UnstagedEnergyRejectionPrecedesACompleteAcceptedRetry)
+{
+  using EnergyReason =
+      application::core::FreeSurfaceEnergyRejectionReason;
+  using StepReason = svmp::FE::timestepping::StepRejectReason;
+  const auto before = makeCompleteEnergyEndpoint(false);
+  const auto after = makeCompleteEnergyEndpoint(true);
+  auto rejected_metadata = application::core::
+      buildUnstagedFreeSurfaceEnergyAttemptMetadata(
+          71u,
+          5u,
+          1u,
+          before.accepted_time,
+          after.dt,
+          before);
+
+  EXPECT_EQ(rejected_metadata.step, 5u);
+  EXPECT_EQ(rejected_metadata.attempt, 1u);
+  EXPECT_EQ(
+      rejected_metadata.algebraic_state_revision_before,
+      before.state_revision);
+  EXPECT_EQ(
+      rejected_metadata.snapshot_set_revision_before,
+      before.snapshot_set_revision);
+  EXPECT_EQ(
+      rejected_metadata.mesh_topology_set_revision_before,
+      before.mesh_topology_set_revision);
+  EXPECT_EQ(
+      rejected_metadata.cut_topology_set_revision_before,
+      before.cut_topology_set_revision);
+  EXPECT_TRUE(std::isnan(
+      rejected_metadata.physical_evaluation_time));
+  EXPECT_EQ(
+      rejected_metadata
+          .physical_endpoint_algebraic_state_revision,
+      0u);
+  EXPECT_EQ(
+      application::core::
+          freeSurfaceEnergyRejectionReasonForStepReject(
+              StepReason::NonlinearSolveFailed),
+      EnergyReason::NonlinearSolveFailure);
+  EXPECT_EQ(
+      application::core::
+          freeSurfaceEnergyRejectionReasonForStepReject(
+              StepReason::ErrorTooLarge),
+      EnergyReason::StepControllerRejection);
+  EXPECT_EQ(
+      application::core::
+          freeSurfaceEnergyRejectionReasonForStepReject(
+              StepReason::CutTopologyChanged),
+      EnergyReason::PreacceptRejection);
+
+  application::core::FreeSurfaceEnergyLedger ledger;
+  ledger.beginAttempt(std::move(rejected_metadata));
+  ledger.rejectUnstagedAttempt(
+      EnergyReason::NonlinearSolveFailure);
+  ASSERT_EQ(ledger.rejectedAttempts().size(), 1u);
+  const auto& rejected = ledger.rejectedAttempts().front();
+  EXPECT_FALSE(rejected.balance_staged);
+  EXPECT_TRUE(std::isnan(rejected.stored_energy_before));
+  EXPECT_TRUE(std::isnan(rejected.trial_balance_residual));
+  EXPECT_DOUBLE_EQ(rejected.accepted_stored_energy_change, 0.0);
+  EXPECT_DOUBLE_EQ(
+      rejected.accepted_physical_stored_energy_change,
+      0.0);
+  EXPECT_DOUBLE_EQ(
+      rejected.accepted_maintenance_stored_energy_change,
+      0.0);
+  EXPECT_DOUBLE_EQ(
+      rejected.accepted_integrated_physical_dissipation,
+      0.0);
+  EXPECT_DOUBLE_EQ(rejected.accepted_external_work, 0.0);
+  EXPECT_DOUBLE_EQ(rejected.accepted_numerical_work, 0.0);
+  EXPECT_DOUBLE_EQ(rejected.accepted_balance_residual, 0.0);
+
+  const auto result = application::core::
+      buildFixedTopologyOnePhaseEnergyCandidate(
+          72u,
+          2u,
+          true,
+          before,
+          after,
+          after.state_revision,
+          makeCompleteEnergyResidualWork(),
+          makeCompleteEnergyResidualDeclarations(),
+          makeClosedCompleteEnergyBoundary(),
+          true,
+          false,
+          true,
+          false);
+  EXPECT_TRUE(result.missing_requirements.empty());
+  ASSERT_TRUE(result.candidate.has_value());
+  const auto& candidate = *result.candidate;
+  ledger.beginAttempt(candidate.metadata);
+  ledger.stageBalance(
+      candidate.before,
+      candidate.physical_endpoint,
+      candidate.after,
+      candidate.dissipation,
+      candidate.external,
+      candidate.numerical,
+      candidate.sources);
+  ledger.commitAttempt();
+
+  ASSERT_EQ(ledger.acceptedAttempts().size(), 1u);
+  const auto& accepted = ledger.acceptedAttempts().front();
+  EXPECT_EQ(accepted.metadata.transaction_id, 72u);
+  EXPECT_EQ(accepted.metadata.step, 5u);
+  EXPECT_EQ(accepted.metadata.attempt, 2u);
+  EXPECT_TRUE(std::isfinite(accepted.accepted_balance_residual));
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
      CompleteEnergyCandidateFailsClosedForUnresolvedEvents)
 {
   const auto before = makeCompleteEnergyEndpoint(false);
@@ -12650,7 +12763,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
                requirement) != result.missing_requirements.end();
   };
   for (const std::string_view requirement : {
-           "rejected_attempt_energy_history",
            "preceding_complete_energy_history",
            "fixed_mesh_and_cut_topology",
            "extension_work_classification",

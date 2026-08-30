@@ -447,7 +447,6 @@ buildFixedTopologyOnePhaseEnergyCandidate(
        std::abs(after.dt)});
   require(transaction_id != 0u, "transaction_id");
   require(attempt != 0u, "attempt_index");
-  require(attempt == 1u, "rejected_attempt_energy_history");
   require(preceding_history_complete,
           "preceding_complete_energy_history");
   require(after.accepted_step == before.accepted_step + 1u,
@@ -835,6 +834,108 @@ buildFixedTopologyOnePhaseEnergyCandidate(
   };
   result.candidate = std::move(candidate);
   return result;
+}
+
+FreeSurfaceEnergyAttemptMetadata
+buildUnstagedFreeSurfaceEnergyAttemptMetadata(
+    std::uint64_t transaction_id,
+    std::uint64_t prospective_step,
+    std::uint64_t attempt,
+    double time_before,
+    double dt,
+    const FreeSurfaceAcceptedEnergyGroup& before)
+{
+  const double time_scale = std::max(
+      {1.0, std::abs(time_before), std::abs(before.accepted_time)});
+  const double time_tolerance =
+      64.0 * std::numeric_limits<double>::epsilon() * time_scale;
+  if (transaction_id == 0u || prospective_step == 0u ||
+      attempt == 0u || !std::isfinite(time_before) ||
+      !std::isfinite(dt) || dt <= 0.0 ||
+      before.accepted_step ==
+          std::numeric_limits<std::uint64_t>::max() ||
+      prospective_step != before.accepted_step + 1u ||
+      !std::isfinite(before.accepted_time) ||
+      std::abs(before.accepted_time - time_before) >
+          time_tolerance ||
+      before.state_revision == 0u ||
+      before.snapshot_set_revision == 0u ||
+      before.mesh_topology_set_revision == 0u ||
+      before.cut_topology_set_revision == 0u ||
+      (before.extension_map_revision.has_value() &&
+       *before.extension_map_revision == 0u)) {
+    throw std::invalid_argument(
+        "An unstaged free-surface energy attempt requires one complete matching accepted starting endpoint.");
+  }
+  const double time_after = time_before + dt;
+  if (!std::isfinite(time_after) || time_after <= time_before) {
+    throw std::invalid_argument(
+        "An unstaged free-surface energy attempt requires one finite positive time interval.");
+  }
+  return FreeSurfaceEnergyAttemptMetadata{
+      .transaction_id = transaction_id,
+      .step = prospective_step,
+      .attempt = attempt,
+      .time_before = time_before,
+      .time_after = time_after,
+      .dt = dt,
+      .temporal_scheme =
+          FreeSurfaceEnergyTemporalScheme::BackwardEuler,
+      .algebraic_state_revision_before = before.state_revision,
+      .snapshot_set_revision_before = before.snapshot_set_revision,
+      .mesh_topology_set_revision_before =
+          before.mesh_topology_set_revision,
+      .cut_topology_set_revision_before =
+          before.cut_topology_set_revision,
+      .extension_map_revision_before =
+          before.extension_map_revision,
+  };
+}
+
+FreeSurfaceEnergyRejectionReason
+freeSurfaceEnergyRejectionReasonForStepReject(
+    svmp::FE::timestepping::StepRejectReason reason)
+{
+  using StepRejectReason =
+      svmp::FE::timestepping::StepRejectReason;
+  switch (reason) {
+    case StepRejectReason::NonlinearSolveFailed:
+      return FreeSurfaceEnergyRejectionReason::
+          NonlinearSolveFailure;
+    case StepRejectReason::ErrorTooLarge:
+      return FreeSurfaceEnergyRejectionReason::
+          StepControllerRejection;
+    case StepRejectReason::CutTopologyChanged:
+      // The restored callback state has no rejected physical endpoint
+      // revision tuple, so this is a preaccept rejection rather than a
+      // claimed topology-jump energy record.
+      return FreeSurfaceEnergyRejectionReason::
+          PreacceptRejection;
+  }
+  throw std::invalid_argument(
+      "Free-surface energy rejection received an unknown time-loop reason.");
+}
+
+const char* freeSurfaceEnergyRejectionReasonName(
+    FreeSurfaceEnergyRejectionReason reason) noexcept
+{
+  switch (reason) {
+    case FreeSurfaceEnergyRejectionReason::NonlinearSolveFailure:
+      return "nonlinear_solve_failure";
+    case FreeSurfaceEnergyRejectionReason::StepControllerRejection:
+      return "step_controller_rejection";
+    case FreeSurfaceEnergyRejectionReason::PreacceptRejection:
+      return "preaccept_rejection";
+    case FreeSurfaceEnergyRejectionReason::TopologyChange:
+      return "topology_change";
+    case FreeSurfaceEnergyRejectionReason::MaintenanceRollback:
+      return "maintenance_rollback";
+    case FreeSurfaceEnergyRejectionReason::PublicationFailure:
+      return "publication_failure";
+    case FreeSurfaceEnergyRejectionReason::None:
+      return "none";
+  }
+  return "invalid";
 }
 
 struct FreeSurfaceAggregationEnergyClassification {
@@ -28363,6 +28464,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   bool free_surface_energy_history_contiguous{true};
   std::uint64_t step_acceptance_attempt{0u};
   std::optional<int> step_acceptance_attempt_step{};
+  std::uint64_t free_surface_energy_attempt{0u};
+  std::optional<int> free_surface_energy_attempt_step{};
   const auto velocity_extension_artifact_comm =
       activeFESystemCommunicator(*sim.fe_system);
   const bool local_has_conservative_phase = std::any_of(
@@ -28595,6 +28698,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       opts.scheme ==
           svmp::FE::timestepping::SchemeKind::BackwardEuler &&
       sim.fe_system->temporalOrder() == 1;
+  const bool complete_free_surface_energy_connector_available =
+      has_free_surface_functional &&
+      evaluate_free_surface_residual_work &&
+      free_surface_boundary_energy_declaration.has_value();
   struct FreeSurfaceResidualWorkStage {
     std::uint64_t step{0u};
     int attempt_index{-1};
@@ -28809,6 +28916,18 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         *step_acceptance_attempt_step != h.stepIndex()) {
       step_acceptance_attempt_step = h.stepIndex();
       step_acceptance_attempt = 0u;
+    }
+    if (!free_surface_energy_attempt_step.has_value() ||
+        *free_surface_energy_attempt_step != h.stepIndex()) {
+      free_surface_energy_attempt_step = h.stepIndex();
+      free_surface_energy_attempt = 1u;
+    } else {
+      if (free_surface_energy_attempt ==
+          std::numeric_limits<std::uint64_t>::max()) {
+        throw std::overflow_error(
+            "[svMultiPhysics::Application] Free-surface energy attempt index overflowed.");
+      }
+      ++free_surface_energy_attempt;
     }
     oopCout() << "[svMultiPhysics::Application] TimeLoop: step_start step=" << h.stepIndex()
               << " time=" << h.time() << " dt=" << h.dt() << std::endl;
@@ -29717,8 +29836,13 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           }
           step_acceptance_attempt =
               consumed_conservative_phase_stage->attempt;
+          if (step_acceptance_attempt !=
+              free_surface_energy_attempt) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Conservative phase and free-surface energy attempt provenance disagree for the current physical step.");
+          }
         } else {
-          ++step_acceptance_attempt;
+          step_acceptance_attempt = free_surface_energy_attempt;
         }
         if (evaluate_free_surface_residual_work) {
           const auto [minimum_stage_present,
@@ -32458,8 +32582,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         complete_energy_build =
             buildFixedTopologyOnePhaseEnergyCandidate(
                 free_surface_energy_transaction_sequence + 1u,
-                std::max<std::uint64_t>(
-                    1u, step_acceptance_attempt),
+                free_surface_energy_attempt,
                 free_surface_energy_history_contiguous,
                 before_energy,
                 after_energy,
@@ -32503,8 +32626,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             << " status=not_published"
             << " step=" << h.stepIndex()
             << " attempt="
-            << std::max<std::uint64_t>(
-                   1u, step_acceptance_attempt)
+            << free_surface_energy_attempt
             << " preceding_history_complete="
             << (preceding_history_complete ? "true" : "false")
             << " accepted_history_contiguous=false"
@@ -32967,6 +33089,136 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   callbacks.on_step_rejected = [&](const svmp::FE::timestepping::TimeHistory& h,
                                   svmp::FE::timestepping::StepRejectReason reason,
                                   const svmp::FE::timestepping::NewtonReport& nr) {
+    if (complete_free_surface_energy_connector_available &&
+        free_surface_energy_history_contiguous) {
+      const auto functional_history =
+          sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
+      const auto declaration_count =
+          free_surface_declarations.size();
+      if (h.stepIndex() < 0 || declaration_count == 0u ||
+          functional_history.size() < declaration_count ||
+          functional_history.size() % declaration_count != 0u) {
+        throw std::logic_error(
+            "[svMultiPhysics::Application] A rejected free-surface energy attempt requires one complete accepted functional endpoint.");
+      }
+      const auto before =
+          summarizeAcceptedFreeSurfaceEnergyGroup(
+              functional_history.last(declaration_count));
+      const auto accepted_step =
+          static_cast<std::uint64_t>(h.stepIndex());
+      const double accepted_time_scale = std::max(
+          {1.0,
+           std::abs(before.accepted_time),
+           std::abs(h.time())});
+      const double accepted_time_tolerance =
+          64.0 * std::numeric_limits<double>::epsilon() *
+          accepted_time_scale;
+      if (before.accepted_step != accepted_step ||
+          std::abs(before.accepted_time - h.time()) >
+              accepted_time_tolerance ||
+          !free_surface_energy_attempt_step.has_value() ||
+          *free_surface_energy_attempt_step != h.stepIndex() ||
+          free_surface_energy_attempt == 0u) {
+        throw std::logic_error(
+            "[svMultiPhysics::Application] Rejected free-surface energy provenance does not match the restored accepted endpoint and solve attempt.");
+      }
+      if (free_surface_energy_transaction_sequence ==
+          std::numeric_limits<std::uint64_t>::max()) {
+        throw std::overflow_error(
+            "[svMultiPhysics::Application] Free-surface energy transaction identifier overflowed.");
+      }
+      const auto ledger_reason =
+          freeSurfaceEnergyRejectionReasonForStepReject(reason);
+      auto metadata =
+          buildUnstagedFreeSurfaceEnergyAttemptMetadata(
+              free_surface_energy_transaction_sequence + 1u,
+              accepted_step + 1u,
+              free_surface_energy_attempt,
+              h.time(),
+              h.dt(),
+              before);
+      const auto transaction_id = metadata.transaction_id;
+      free_surface_energy_ledger.beginAttempt(
+          std::move(metadata));
+      free_surface_energy_ledger.rejectUnstagedAttempt(
+          ledger_reason);
+      free_surface_energy_transaction_sequence = transaction_id;
+      const auto& record =
+          free_surface_energy_ledger.rejectedAttempts().back();
+      oopCout()
+          << std::setprecision(17)
+          << "[svMultiPhysics::Application] Free-surface complete energy"
+          << " diagnostic=free_surface_complete_energy_record"
+          << " status=rejected"
+          << " transaction_id="
+          << record.metadata.transaction_id
+          << " step=" << record.metadata.step
+          << " attempt=" << record.metadata.attempt
+          << " time_before=" << record.metadata.time_before
+          << " time_after=" << record.metadata.time_after
+          << " dt=" << record.metadata.dt
+          << " temporal_scheme=backward_euler"
+          << " time_loop_rejection_reason="
+          << step_reject_reason_to_string(reason)
+          << " ledger_rejection_reason="
+          << freeSurfaceEnergyRejectionReasonName(
+                 record.rejection_reason)
+          << " algebraic_state_revision_before="
+          << record.metadata.algebraic_state_revision_before
+          << " snapshot_set_revision_before="
+          << record.metadata.snapshot_set_revision_before
+          << " mesh_topology_set_revision_before="
+          << record.metadata.mesh_topology_set_revision_before
+          << " cut_topology_set_revision_before="
+          << record.metadata.cut_topology_set_revision_before
+          << " extension_map_revision_before_available="
+          << (record.metadata.extension_map_revision_before
+                      .has_value()
+                  ? "true"
+                  : "false")
+          << " extension_map_revision_before="
+          << record.metadata.extension_map_revision_before
+                 .value_or(0u)
+          << " physical_endpoint_metadata_available=false"
+          << " topology_event_endpoint_metadata_available=false"
+          << " topology_change_mapped_to_preaccept="
+          << (reason == svmp::FE::timestepping::
+                            StepRejectReason::CutTopologyChanged
+                  ? "true"
+                  : "false")
+          << " balance_staged=false"
+          << " trial_balance_values_available=false"
+          << " accepted_stored_energy_change="
+          << record.accepted_stored_energy_change
+          << " accepted_physical_stored_energy_change="
+          << record.accepted_physical_stored_energy_change
+          << " accepted_maintenance_stored_energy_change="
+          << record.accepted_maintenance_stored_energy_change
+          << " accepted_integrated_physical_dissipation="
+          << record.accepted_integrated_physical_dissipation
+          << " accepted_external_work="
+          << record.accepted_external_work
+          << " accepted_numerical_work="
+          << record.accepted_numerical_work
+          << " accepted_balance_residual="
+          << record.accepted_balance_residual
+          << " accepted_history_contiguous=true"
+          << " complete_energy_attempt_connected=true"
+          << std::endl;
+    } else if (complete_free_surface_energy_connector_available) {
+      oopCout()
+          << "[svMultiPhysics::Application] Free-surface complete energy"
+          << " diagnostic=free_surface_complete_energy_record"
+          << " status=not_published"
+          << " step=" << h.stepIndex() + 1
+          << " attempt=" << free_surface_energy_attempt
+          << " time_loop_rejection_reason="
+          << step_reject_reason_to_string(reason)
+          << " accepted_history_contiguous=false"
+          << " missing_requirements=preceding_complete_energy_history"
+          << " complete_energy_attempt_connected=false"
+          << std::endl;
+    }
     oopCout() << "[svMultiPhysics::Application] TimeLoop: step_rejected step=" << h.stepIndex()
               << " time=" << h.time() << " dt=" << h.dt() << " reason=" << step_reject_reason_to_string(reason)
               << " (newton: converged=" << nr.converged << " iters=" << nr.iterations
