@@ -171,42 +171,62 @@ void fsils_spar_mul_vv(FSILS_lhsType& lhs, const Array<int>& rowPtr, const Vecto
 
     case 1:
       for (int i = 0; i < nNo; i++) {
+        double sum = 0.0;
         for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-          KU(0,i) = KU(0,i) + K(0,j)*U(0,colPtr(j));
+          sum = sum + K(0,j)*U(0,colPtr(j));
         }
+        KU(0,i) = sum;
       }
     break;
 
     case 2:
       for (int i = 0; i < nNo; i++) {
+        double sum0 = 0.0;
+        double sum1 = 0.0;
         for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
           int col = colPtr(j);
-          KU(0,i) = KU(0,i) + K(0,j)*U(0,col) + K(1,j)*U(1,col);
-          KU(1,i) = KU(1,i) + K(2,j)*U(0,col) + K(3,j)*U(1,col);
+          sum0 = sum0 + K(0,j)*U(0,col) + K(1,j)*U(1,col);
+          sum1 = sum1 + K(2,j)*U(0,col) + K(3,j)*U(1,col);
         }
+        KU(0,i) = sum0;
+        KU(1,i) = sum1;
       }
     break;
 
     case 3:
       for (int i = 0; i < nNo; i++) {
+        double sum0 = 0.0;
+        double sum1 = 0.0;
+        double sum2 = 0.0;
         for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
           int col = colPtr(j);
-          KU(0,i) = KU(0,i) + K(0,j)*U(0,col) + K(1,j)*U(1,col) + K(2,j)*U(2,col);
-          KU(1,i) = KU(1,i) + K(3,j)*U(0,col) + K(4,j)*U(1,col) + K(5,j)*U(2,col);
-          KU(2,i) = KU(2,i) + K(6,j)*U(0,col) + K(7,j)*U(1,col) + K(8,j)*U(2,col);
+          sum0 = sum0 + K(0,j)*U(0,col) + K(1,j)*U(1,col) + K(2,j)*U(2,col);
+          sum1 = sum1 + K(3,j)*U(0,col) + K(4,j)*U(1,col) + K(5,j)*U(2,col);
+          sum2 = sum2 + K(6,j)*U(0,col) + K(7,j)*U(1,col) + K(8,j)*U(2,col);
         }
+        KU(0,i) = sum0;
+        KU(1,i) = sum1;
+        KU(2,i) = sum2;
       }
     break;
 
     case 4:
       for (int i = 0; i < nNo; i++) {
+        double sum0 = 0.0;
+        double sum1 = 0.0;
+        double sum2 = 0.0;
+        double sum3 = 0.0;
         for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
           int col = colPtr(j);
-          KU(0,i) = KU(0,i) + K(0 ,j)*U(0,col) + K(1 ,j)*U(1,col) + K(2 ,j)*U(2,col) + K(3 ,j)*U(3,col);
-          KU(1,i) = KU(1,i) + K(4 ,j)*U(0,col) + K(5 ,j)*U(1,col) + K(6 ,j)*U(2,col) + K(7 ,j)*U(3,col);
-          KU(2,i) = KU(2,i) + K(8 ,j)*U(0,col) + K(9,j)*U(1,col) + K(10,j)*U(2,col) + K(11,j)*U(3,col);
-          KU(3,i) = KU(3,i) + K(12,j)*U(0,col) + K(13,j)*U(1,col) + K(14,j)*U(2,col) + K(15,j)*U(3,col);
+          sum0 = sum0 + K(0 ,j)*U(0,col) + K(1 ,j)*U(1,col) + K(2 ,j)*U(2,col) + K(3 ,j)*U(3,col);
+          sum1 = sum1 + K(4 ,j)*U(0,col) + K(5 ,j)*U(1,col) + K(6 ,j)*U(2,col) + K(7 ,j)*U(3,col);
+          sum2 = sum2 + K(8 ,j)*U(0,col) + K(9,j)*U(1,col) + K(10,j)*U(2,col) + K(11,j)*U(3,col);
+          sum3 = sum3 + K(12,j)*U(0,col) + K(13,j)*U(1,col) + K(14,j)*U(2,col) + K(15,j)*U(3,col);
         }
+        KU(0,i) = sum0;
+        KU(1,i) = sum1;
+        KU(2,i) = sum2;
+        KU(3,i) = sum3;
       }
     break;
 
@@ -231,5 +251,4 @@ void fsils_spar_mul_vv(FSILS_lhsType& lhs, const Array<int>& rowPtr, const Vecto
 }
 
 };
-
 
