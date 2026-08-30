@@ -350,17 +350,20 @@ void gmres_s(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
     #endif
     ls.dB = ls.fNorm;
     ls.itr = ls.itr + 1;
-    auto u_col = u.col(0);
+    auto u_col = u.rcol(0);
     spar_mul::fsils_spar_mul_ss(lhs, lhs.rowPtr, lhs.colPtr, Val, X, u_col);
-    u.set_col(0, R - u_col);
+    for (int a = 0; a < nNo; a++) {
+      u_col(a) = R(a) - u_col(a);
+    }
 
-    err[0] = norm::fsi_ls_norms(mynNo, lhs.commu, u.col(0));
+    err[0] = norm::fsi_ls_norms(mynNo, lhs.commu, u_col);
     if (err[0] == 0.0) { 
       throw std::runtime_error("FSILS: A zero matrix norm has been computed. This is probably caused by ill-posed boundary conditions.");
     }
 
-    u_col = u.col(0) / err[0];
-    u.set_col(0, u_col);
+    for (int a = 0; a < nNo; a++) {
+      u_col(a) = u_col(a) / err[0];
+    }
     #ifdef debug_gmres_s
     dmsg << "err(1): " << err[0];
     #endif
@@ -373,10 +376,9 @@ void gmres_s(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
       #endif
       ls.itr = ls.itr + 1;
       last_i = i;
-      auto u_col = u.col(i);
-      auto u_col_1 = u.col(i+1);
+      auto u_col = u.rcol(i);
+      auto u_col_1 = u.rcol(i+1);
       spar_mul::fsils_spar_mul_ss(lhs, lhs.rowPtr, lhs.colPtr, Val, u_col, u_col_1);
-      u.set_col(i+1, u_col_1);
 
       orthogonalize_s(lhs, nNo, mynNo, i, u, h);
 
@@ -420,7 +422,7 @@ void gmres_s(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
     }
 
     for (int j = 0; j <= last_i; j++) {
-      omp_la::omp_sum_s(nNo, y(j), X, u.col(j));
+      omp_la::omp_sum_s(nNo, y(j), X, u.rcol(j));
     }
 
     ls.fNorm = fabs(err(last_i+1));
@@ -613,5 +615,4 @@ void gmres_v(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
 }
 
 };
-
 
