@@ -13151,9 +13151,8 @@ capturePostacceptMaintenanceVectorCollectively(
     const svmp::MeshComm& comm);
 
 /**
- * Algebraic closure for planning a future first-order generalized-alpha
- * level-set repair publication after TimeHistory::acceptStep().  Arbitrary
- * non-endpoint repairs remain rejected by the production path below.
+ * Algebraic closure for planning a first-order generalized-alpha level-set
+ * repair publication after TimeHistory::acceptStep().
  *
  * Neither policy infers a past-rate change from two repaired state slices.
  * The choice is explicit because the generalized-alpha state identities do
@@ -13218,10 +13217,7 @@ struct FirstOrderGeneralizedAlphaMaintenancePublicationPlan {
   std::string diagnostic{};
 };
 
-// The serial unit translation unit includes this implementation to exercise
-// the pure planner.  Production intentionally leaves it unwired until paired
-// endpoint geometry and work accounting exist.
-[[maybe_unused]] FirstOrderGeneralizedAlphaMaintenanceScheme
+FirstOrderGeneralizedAlphaMaintenanceScheme
 makeFirstOrderGeneralizedAlphaMaintenanceScheme(
     svmp::FE::Real alpha_m,
     svmp::FE::Real alpha_f,
@@ -13263,7 +13259,7 @@ makeFirstOrderGeneralizedAlphaMaintenanceScheme(
   };
 }
 
-[[maybe_unused]] FirstOrderGeneralizedAlphaMaintenancePublicationPlan
+FirstOrderGeneralizedAlphaMaintenancePublicationPlan
 planFirstOrderGeneralizedAlphaMaintenancePublication(
     const FirstOrderGeneralizedAlphaMaintenanceScheme& scheme,
     FirstOrderGeneralizedAlphaMaintenanceClosure closure,
@@ -13591,7 +13587,83 @@ makeCommonRepresentationMaintainedFieldPublication(
   };
 }
 
-[[maybe_unused]] MaintainedFieldPostAcceptPublicationView
+FirstOrderGeneralizedAlphaPostAcceptPublication
+combineFirstOrderGeneralizedAlphaPublicationWithCommonDelta(
+    const FirstOrderGeneralizedAlphaMaintenancePublicationPlan& plan,
+    std::span<const svmp::FE::Real> common_delta)
+{
+  if (plan.status !=
+          FirstOrderGeneralizedAlphaMaintenancePlanStatus::
+              AlgebraicallyComplete ||
+      !plan.post_accept.has_value()) {
+    throw std::invalid_argument(
+        "Combining a generalized-alpha maintained-field publication "
+        "requires an algebraically complete planner result.");
+  }
+  auto combined = *plan.post_accept;
+  const auto count = combined.u_delta.size();
+  const bool common_layout =
+      count != 0u && common_delta.size() == count &&
+      combined.u_prev_delta.size() == count &&
+      combined.u_prev2_and_deeper_delta.size() == count &&
+      combined.prior_rate_delta.size() == count &&
+      combined.u_dot_delta.size() == count &&
+      combined.accepted_stage_rate_delta.size() == count;
+  if (!common_layout) {
+    throw std::invalid_argument(
+        "Combining a generalized-alpha maintained-field publication "
+        "requires one nonempty common field layout.");
+  }
+  for (std::size_t i = 0u; i < count; ++i) {
+    if (!std::isfinite(common_delta[i])) {
+      throw std::invalid_argument(
+          "A generalized-alpha maintained-field common delta must be "
+          "finite.");
+    }
+    combined.u_delta[i] += common_delta[i];
+    combined.u_prev_delta[i] += common_delta[i];
+    combined.u_prev2_and_deeper_delta[i] += common_delta[i];
+    if (!std::isfinite(combined.u_delta[i]) ||
+        !std::isfinite(combined.u_prev_delta[i]) ||
+        !std::isfinite(combined.u_prev2_and_deeper_delta[i])) {
+      throw std::overflow_error(
+          "A generalized-alpha maintained-field combined state "
+          "publication overflowed.");
+    }
+  }
+  return combined;
+}
+
+MaintainedFieldPostAcceptPublicationView
+makeFirstOrderGeneralizedAlphaMaintainedFieldPublication(
+    svmp::FE::FieldId field,
+    std::size_t field_offset,
+    const FirstOrderGeneralizedAlphaPostAcceptPublication& publication,
+    bool publish_u_dot,
+    bool maintained_field_has_time_derivative)
+{
+  if (publish_u_dot && !maintained_field_has_time_derivative) {
+    throw std::invalid_argument(
+        "First-order generalized-alpha maintained-field rate publication "
+        "requires a time-derivative field target.");
+  }
+  return MaintainedFieldPostAcceptPublicationView{
+      .field = field,
+      .field_offset = field_offset,
+      .u_delta = publication.u_delta,
+      .u_prev_delta = publication.u_prev_delta,
+      .u_prev2_and_deeper_delta =
+          publication.u_prev2_and_deeper_delta,
+      .u_dot_delta = publish_u_dot
+          ? std::optional<std::span<const svmp::FE::Real>>{
+                publication.u_dot_delta}
+          : std::nullopt,
+      .maintained_first_order_u_ddot_unchanged =
+          publication.maintained_first_order_u_ddot_unchanged,
+  };
+}
+
+MaintainedFieldPostAcceptPublicationView
 makeFirstOrderGeneralizedAlphaMaintainedFieldPublication(
     svmp::FE::FieldId field,
     std::size_t field_offset,
@@ -13607,26 +13679,12 @@ makeFirstOrderGeneralizedAlphaMaintainedFieldPublication(
         "First-order generalized-alpha maintained-field publication requires "
         "an algebraically complete planner result.");
   }
-  if (publish_u_dot && !maintained_field_has_time_derivative) {
-    throw std::invalid_argument(
-        "First-order generalized-alpha maintained-field rate publication "
-        "requires a time-derivative field target.");
-  }
-  const auto& publication = *plan.post_accept;
-  return MaintainedFieldPostAcceptPublicationView{
-      .field = field,
-      .field_offset = field_offset,
-      .u_delta = publication.u_delta,
-      .u_prev_delta = publication.u_prev_delta,
-      .u_prev2_and_deeper_delta =
-          publication.u_prev2_and_deeper_delta,
-      .u_dot_delta = publish_u_dot
-          ? std::optional<std::span<const svmp::FE::Real>>{
-                publication.u_dot_delta}
-          : std::nullopt,
-      .maintained_first_order_u_ddot_unchanged =
-          publication.maintained_first_order_u_ddot_unchanged,
-  };
+  return makeFirstOrderGeneralizedAlphaMaintainedFieldPublication(
+      field,
+      field_offset,
+      *plan.post_accept,
+      publish_u_dot,
+      maintained_field_has_time_derivative);
 }
 
 StagedPostacceptMaintenanceHistoryPublication
@@ -13926,6 +13984,8 @@ struct LevelSetProjectionReinitializationCandidate {
   bool applied{false};
   svmp::FE::level_set::LevelSetSignedDistanceRepairResult repair{};
   LevelSetWallAwareMaintenanceContext wall_context{};
+  std::optional<FirstOrderGeneralizedAlphaMaintenancePublicationPlan>
+      generalized_alpha_publication{};
 };
 
 LevelSetProjectionReinitializationCandidate
@@ -14027,7 +14087,6 @@ stageLevelSetProjectionReinitialization(
           "[svMultiPhysics::Application] Dynamic wall-aware level-set maintenance contact-stage solution does not contain the complete maintained field slice.");
     }
     bool local_stage_endpoint_slice_finite = true;
-    double local_stage_endpoint_max_difference = 0.0;
     for (std::size_t i = 0u; i < field_dof_count; ++i) {
       const auto index = field_offset + i;
       const auto stage_value = accepted_contact_stage_solution[index];
@@ -14035,26 +14094,11 @@ stageLevelSetProjectionReinitialization(
       local_stage_endpoint_slice_finite =
           std::isfinite(stage_value) && std::isfinite(endpoint_value) &&
           local_stage_endpoint_slice_finite;
-      local_stage_endpoint_max_difference = std::max(
-          local_stage_endpoint_max_difference,
-          static_cast<double>(std::abs(stage_value - endpoint_value)));
     }
     if (globalMinDouble(
             local_stage_endpoint_slice_finite ? 1.0 : 0.0, comm) != 1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Dynamic wall-aware level-set maintenance requires finite stage and endpoint level-set coefficients.");
-    }
-    const auto stage_endpoint_max_difference = globalMaxDouble(
-        local_stage_endpoint_max_difference, comm);
-    // This remains the production publication boundary.  The pure
-    // generalized-alpha planner above deliberately cannot manufacture the
-    // missing endpoint-frame repair or alpha_m/gamma provenance from
-    // alpha_f, and its non-common policy still requires a separately
-    // classified maintenance/geometric-motion account.
-    if (staged.wall_context.stage_alpha_f != svmp::FE::Real{1.0} &&
-        stage_endpoint_max_difference > 0.0) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Dynamic wall-aware level-set maintenance cannot apply a non-endpoint generalized-alpha stage repair to accepted endpoint history; use an endpoint stage with alpha_f=1 until paired stage-frame and endpoint-frame repairs, history/rate publication, and separate maintenance/geometric-motion accounting are implemented.");
     }
     reinitialization_input = accepted_contact_stage_solution;
   }
@@ -14093,9 +14137,55 @@ stageLevelSetProjectionReinitialization(
     throw std::runtime_error(
         "[svMultiPhysics::Application] Wall-aware level-set reinitialization returned an incompatible field slice.");
   }
-  for (std::size_t i = 0; i < field_dof_count; ++i) {
+  std::vector<svmp::FE::Real> stage_delta(field_dof_count);
+  for (std::size_t i = 0u; i < field_dof_count; ++i) {
     const auto index = field_offset + i;
-    candidate[index] += repaired[index] - reinitialization_input[index];
+    stage_delta[i] = repaired[index] - reinitialization_input[index];
+  }
+  if (staged.wall_context.requires_accepted_dynamic_stage &&
+      staged.wall_context.stage_alpha_f != svmp::FE::Real{1.0}) {
+    if (!staged.wall_context.first_order_generalized_alpha.has_value()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Non-endpoint dynamic wall-aware level-set maintenance requires complete first-order generalized-alpha provenance.");
+    }
+    const auto& provenance =
+        *staged.wall_context.first_order_generalized_alpha;
+    const auto scheme = makeFirstOrderGeneralizedAlphaMaintenanceScheme(
+        provenance.alpha_m,
+        provenance.alpha_f,
+        provenance.gamma,
+        provenance.dt);
+    std::vector<svmp::FE::Real> endpoint_delta(field_dof_count);
+    for (std::size_t i = 0u; i < field_dof_count; ++i) {
+      endpoint_delta[i] = stage_delta[i] / scheme.alpha_f;
+      if (!std::isfinite(endpoint_delta[i])) {
+        throw std::overflow_error(
+            "[svMultiPhysics::Application] Non-endpoint dynamic wall-aware level-set maintenance endpoint repair overflowed.");
+      }
+    }
+    auto publication =
+        planFirstOrderGeneralizedAlphaMaintenancePublication(
+            scheme,
+            FirstOrderGeneralizedAlphaMaintenanceClosure::
+                PreservePriorStateAndRate,
+            stage_delta,
+            endpoint_delta);
+    if (publication.status !=
+            FirstOrderGeneralizedAlphaMaintenancePlanStatus::
+                AlgebraicallyComplete ||
+        !publication.post_accept.has_value()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Non-endpoint dynamic wall-aware level-set maintenance could not construct a complete state/rate publication: " +
+          publication.diagnostic);
+    }
+    for (std::size_t i = 0u; i < field_dof_count; ++i) {
+      candidate[field_offset + i] += endpoint_delta[i];
+    }
+    staged.generalized_alpha_publication = std::move(publication);
+  } else {
+    for (std::size_t i = 0u; i < field_dof_count; ++i) {
+      candidate[field_offset + i] += stage_delta[i];
+    }
   }
   staged.applied = true;
   return staged;
@@ -14152,6 +14242,10 @@ bool applyLevelSetMaintenance(
   auto fe_solution = gatherFeOrderedSolution(history.u(), comm);
   const auto accepted_solution_before_maintenance = fe_solution;
   std::set<svmp::FE::FieldId> modified_level_set_fields;
+  std::map<
+      svmp::FE::FieldId,
+      FirstOrderGeneralizedAlphaMaintenancePublicationPlan>
+      generalized_alpha_publications;
   for (auto& request : staged_requests) {
     // Conservative requests own reinitialization inside their prospective
     // step transaction.  Repeating it here after acceptance would expose an
@@ -14238,14 +14332,28 @@ bool applyLevelSetMaintenance(
             << " diagnostic='" << result.diagnostic << "'";
         staged_commit_logs.push_back(log.str());
       } else {
-        // For a generalized-alpha contact law, repaired is the accepted stage
-        // representation.  Apply only its field delta to the endpoint.  The
-        // common history update below applies that same representation delta
-        // to every older level, so the accepted stage becomes repaired while
-        // all temporal increments remain exact.
+        // For a dynamic contact law, repaired is the accepted operator-stage
+        // representation.  Endpoint stages retain the common representation
+        // policy.  Non-endpoint first-order stages carry an explicit
+        // endpoint/history/rate publication plan into the transaction below.
         if (!staged_reinitialization.applied) {
           throw std::logic_error(
               "[svMultiPhysics::Application] A converged level-set reinitialization was not applied to its staged candidate.");
+        }
+        if (staged_reinitialization.generalized_alpha_publication.has_value()) {
+          if (!observe_stage || !validate_candidate) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Non-endpoint generalized-alpha level-set maintenance requires an endpoint maintenance-work observer and final candidate validator before state/rate publication.");
+          }
+          if (!generalized_alpha_publications
+                   .emplace(
+                       field,
+                       *staged_reinitialization
+                            .generalized_alpha_publication)
+                   .second) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] One maintenance transaction cannot publish multiple non-endpoint generalized-alpha repairs for the same level-set field.");
+          }
         }
         changed = true;
         modified_level_set_fields.insert(field);
@@ -14299,6 +14407,11 @@ bool applyLevelSetMaintenance(
                   : svmp::FE::Real{1.0})
           << " accepted_contact_stage_revision="
           << wall_context.stage_state_revision
+          << " generalized_alpha_history_policy="
+          << (staged_reinitialization.generalized_alpha_publication
+                      .has_value()
+                  ? "preserve_prior_state_and_rate"
+                  : "common_representation_delta")
           << " prescribed_contact_rules="
           << wall_context.global_prescribed_contact_rules
           << " dynamic_contact_rules="
@@ -14485,14 +14598,12 @@ bool applyLevelSetMaintenance(
   }
 
   if (changed) {
-    // Reinitialization and a global shift change the level-set
-    // representation after the physical step.  Apply the identical FE
-    // coefficient delta to every stored history level.  This preserves every
-    // BDF/generalized-alpha temporal difference exactly and therefore keeps
-    // the already stored rate state consistent.  Copying the repaired current
-    // field into uPrev (the former behavior) erased the accepted increment,
-    // left older BDF history in another representation, and disagreed with
-    // uDot.
+    // Publish each representation change through one explicit field mapping.
+    // Endpoint-stage and global-shift changes use a common delta on every
+    // stored state.  A non-endpoint first-order generalized-alpha repair keeps
+    // the prior accepted state/rate fixed and publishes the corresponding
+    // endpoint rate; any subsequent global shift is then composed into all
+    // state levels without changing that rate correction.
     const auto comm = activeFESystemCommunicator(*sim.fe_system);
     std::optional<StagedPostacceptMaintenanceHistoryPublication>
         staged_history_publication;
@@ -14511,8 +14622,31 @@ bool applyLevelSetMaintenance(
           "[svMultiPhysics::Application] Postaccept maintenance history "
           "depth differs across the FE communicator.");
     }
+    const auto [minimum_rate_publication_count,
+                maximum_rate_publication_count] =
+        globalMinMaxUint64(
+            static_cast<std::uint64_t>(
+                generalized_alpha_publications.size()),
+            comm);
+    if (minimum_rate_publication_count !=
+        maximum_rate_publication_count) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Postaccept generalized-alpha "
+          "maintenance field coverage differs across the FE communicator.");
+    }
+    const bool publishes_rate = maximum_rate_publication_count != 0u;
+    const auto [minimum_rate_target_present,
+                maximum_rate_target_present] =
+        globalMinMaxUint64(history.hasUDotState() ? 1u : 0u, comm);
+    if (minimum_rate_target_present != maximum_rate_target_present ||
+        (publishes_rate && minimum_rate_target_present == 0u)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Non-endpoint generalized-alpha "
+          "maintenance requires a communicator-complete uDot target.");
+    }
     std::vector<svmp::FE::backends::GenericVector*> publication_targets;
     std::vector<std::vector<svmp::FE::Real>> synchronized_history;
+    std::optional<std::vector<svmp::FE::Real>> synchronized_u_dot;
     std::exception_ptr local_staging_failure;
     try {
       publication_targets.resize(
@@ -14540,13 +14674,19 @@ bool applyLevelSetMaintenance(
           *publication_targets[static_cast<std::size_t>(k)], comm);
       synchronized_history[static_cast<std::size_t>(k - 1)].swap(captured);
     }
+    if (publishes_rate) {
+      synchronized_u_dot =
+          capturePostacceptMaintenanceVectorCollectively(
+              history.uDot(), comm);
+    }
 
     local_staging_failure = nullptr;
     try {
       staged_history_publication.emplace(
           makeStagedPostacceptMaintenanceHistoryPublication(
               std::move(current_solution),
-              std::move(synchronized_history)));
+              std::move(synchronized_history),
+              std::move(synchronized_u_dot)));
 
       for (const auto field : modified_level_set_fields) {
         const auto raw_offset = sim.fe_system->fieldDofOffset(field);
@@ -14574,10 +14714,58 @@ bool applyLevelSetMaintenance(
               fe_solution[index] -
               accepted_solution_before_maintenance[index];
         }
-        stageMaintainedFieldPostAcceptPublication(
-            makeCommonRepresentationMaintainedFieldPublication(
-                field, offset, representation_delta),
-            *staged_history_publication);
+        const auto generalized_alpha =
+            generalized_alpha_publications.find(field);
+        if (generalized_alpha ==
+            generalized_alpha_publications.end()) {
+          stageMaintainedFieldPostAcceptPublication(
+              makeCommonRepresentationMaintainedFieldPublication(
+                  field, offset, representation_delta),
+              *staged_history_publication);
+        } else {
+          const auto& plan = generalized_alpha->second;
+          if (!plan.post_accept.has_value() ||
+              plan.post_accept->u_delta.size() != count) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Generalized-alpha "
+                "maintenance publication does not match its maintained "
+                "field layout.");
+          }
+          bool endpoint_copies_match = true;
+          for (std::size_t i = 0u; i < count; ++i) {
+            const auto index = offset + i;
+            const auto endpoint_value =
+                staged_history_publication->current[index];
+            const auto endpoint_copy_value =
+                staged_history_publication->history.front()[index];
+            endpoint_copies_match =
+                std::isfinite(endpoint_value) &&
+                std::isfinite(endpoint_copy_value) &&
+                endpoint_value == endpoint_copy_value &&
+                endpoint_copies_match;
+          }
+          if (!endpoint_copies_match) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Non-endpoint generalized-alpha maintenance publication requires identical finite u and uPrevK(1) accepted-endpoint field slices.");
+          }
+          std::vector<svmp::FE::Real> common_delta(count);
+          for (std::size_t i = 0u; i < count; ++i) {
+            common_delta[i] =
+                representation_delta[i] -
+                plan.post_accept->u_delta[i];
+          }
+          const auto combined =
+              combineFirstOrderGeneralizedAlphaPublicationWithCommonDelta(
+                  plan, common_delta);
+          stageMaintainedFieldPostAcceptPublication(
+              makeFirstOrderGeneralizedAlphaMaintainedFieldPublication(
+                  field,
+                  offset,
+                  combined,
+                  /*publish_u_dot=*/true,
+                  history.hasUDotState()),
+              *staged_history_publication);
+        }
         synchronized_dofs += count;
       }
     } catch (...) {
@@ -14605,9 +14793,20 @@ bool applyLevelSetMaintenance(
     log
         << "[svMultiPhysics::Application] Level-set maintenance synchronized"
         << " step=" << history.stepIndex()
-        << " representation_delta=all_history_levels"
-        << " temporal_increments=preserved"
-        << " rate_state=unchanged_consistently"
+        << " representation_delta="
+        << (publishes_rate
+                ? "field_specific_generalized_alpha_closure"
+                : "all_history_levels")
+        << " temporal_increments="
+        << (publishes_rate
+                ? "generalized_alpha_identities_preserved"
+                : "preserved")
+        << " rate_state="
+        << (publishes_rate
+                ? "maintained_field_endpoint_rate_updated"
+                : "unchanged_consistently")
+        << " rate_synchronized_fields="
+        << generalized_alpha_publications.size()
         << " synchronized_fields=" << modified_level_set_fields.size()
         << " synchronized_dofs=" << synchronized_dofs
         << " current_previous_max_abs_delta=" << current_previous_delta
@@ -14622,10 +14821,9 @@ bool applyLevelSetMaintenance(
         *staged_history_publication,
         comm,
         rate_publication_started);
-    // The common-shift view has no uDot target.  The rate vectors are therefore
-    // deliberately untouched, including their backend content revisions,
-    // because an identical representation delta on every stored solution level
-    // leaves the accepted temporal differences unchanged.
+    // uDDot is never a publication target for a maintained first-order field.
+    // If every field used a common representation delta, uDot was not staged
+    // and therefore retains both its values and backend content revision.
   }
   requests = std::move(staged_requests);
   if (deferred_commit_logs != nullptr) {
@@ -29761,7 +29959,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                     RejectMaintenance;
         std::vector<std::uint64_t> commit_state_words;
         commit_state_words.reserve(
-            15u + 3u * static_cast<std::size_t>(
+            27u + 3u * static_cast<std::size_t>(
                             std::max(0, h.historyDepth())));
         for (const auto word : local_topology_evidence_words) {
           appendMaintenanceScheduleWord(
@@ -29828,6 +30026,77 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   maintenance_history_before_transaction[index].size() &&
               local_transaction_invariants_satisfied;
         }
+        const auto [minimum_u_dot_present, maximum_u_dot_present] =
+            globalMinMaxUint64(
+                h.hasUDotState() ? 1u : 0u,
+                velocity_extension_artifact_comm);
+        const auto [minimum_u_ddot_present, maximum_u_ddot_present] =
+            globalMinMaxUint64(
+                h.hasUDDotState() ? 1u : 0u,
+                velocity_extension_artifact_comm);
+        const bool u_dot_presence_agrees =
+            minimum_u_dot_present == maximum_u_dot_present;
+        const bool u_ddot_presence_agrees =
+            minimum_u_ddot_present == maximum_u_ddot_present;
+        appendMaintenanceScheduleBool(
+            commit_state_words, h.hasUDotState());
+        appendMaintenanceScheduleBool(
+            commit_state_words, h.hasUDDotState());
+        appendMaintenanceScheduleBool(
+            commit_state_words,
+            maintenance_rate_publication_started);
+        if (u_dot_presence_agrees && maximum_u_dot_present != 0u) {
+          const auto u_dot_after_maintenance =
+              gatherFeOrderedSolution(
+                  h.uDot(), velocity_extension_artifact_comm);
+          appendMaintenanceScheduleWord(
+              commit_state_words,
+              levelSetMaintenanceAlgebraicRevision(
+                  u_dot_after_maintenance));
+          appendMaintenanceScheduleWord(
+              commit_state_words, h.uDot().valueRevision());
+          appendMaintenanceScheduleWord(
+              commit_state_words,
+              static_cast<std::uint64_t>(
+                  u_dot_after_maintenance.size()));
+          local_transaction_invariants_satisfied =
+              u_dot_after_maintenance.size() ==
+                  current_after_maintenance.size() &&
+              local_transaction_invariants_satisfied;
+        } else {
+          appendMaintenanceScheduleWord(commit_state_words, 0u);
+          appendMaintenanceScheduleWord(commit_state_words, 0u);
+          appendMaintenanceScheduleWord(commit_state_words, 0u);
+        }
+        if (u_ddot_presence_agrees && maximum_u_ddot_present != 0u) {
+          const auto u_ddot_after_maintenance =
+              gatherFeOrderedSolution(
+                  h.uDDot(), velocity_extension_artifact_comm);
+          appendMaintenanceScheduleWord(
+              commit_state_words,
+              levelSetMaintenanceAlgebraicRevision(
+                  u_ddot_after_maintenance));
+          appendMaintenanceScheduleWord(
+              commit_state_words, h.uDDot().valueRevision());
+          appendMaintenanceScheduleWord(
+              commit_state_words,
+              static_cast<std::uint64_t>(
+                  u_ddot_after_maintenance.size()));
+          local_transaction_invariants_satisfied =
+              u_ddot_after_maintenance.size() ==
+                  current_after_maintenance.size() &&
+              local_transaction_invariants_satisfied;
+        } else {
+          appendMaintenanceScheduleWord(commit_state_words, 0u);
+          appendMaintenanceScheduleWord(commit_state_words, 0u);
+          appendMaintenanceScheduleWord(commit_state_words, 0u);
+        }
+        local_transaction_invariants_satisfied =
+            u_dot_presence_agrees &&
+            u_ddot_presence_agrees &&
+            (!maintenance_rate_publication_started ||
+             maximum_u_dot_present != 0u) &&
+            local_transaction_invariants_satisfied;
         const auto request_schedule =
             canonicalLevelSetMaintenanceRequestSchedule(
                 level_set_maintenance,
