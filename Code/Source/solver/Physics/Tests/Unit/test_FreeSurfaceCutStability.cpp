@@ -249,6 +249,28 @@ struct StabilitySample {
     std::vector<FE::Real> canonical_mixed_operator{};
     std::vector<FE::Real> canonical_pressure_ghost_operator{};
     std::vector<FE::Real> canonical_pressure_pspg_operator{};
+    // Response vectors are populated only for the focused node-crossing
+    // continuity fixture. Keeping them opt-in avoids adding a dense solve to
+    // every conditioning sample in the full cut matrix.
+    std::vector<FE::GlobalIndex> canonical_mixed_dofs{};
+    std::vector<FE::Real> canonical_mixed_state{};
+    std::vector<FE::Real> canonical_mixed_residual{};
+    std::vector<FE::Real> canonical_mixed_solved_state{};
+    // Fixed physical affine probes compare response functionals independently
+    // of which nodal coefficients are eliminated by aggregation.
+    std::vector<FE::Real> canonical_affine_probe_operator_actions{};
+    std::vector<FE::Real> canonical_affine_probe_residual_actions{};
+    std::size_t affine_probe_constraint_line_count{0u};
+    FE::Real affine_probe_constraint_reproduction_error{0.0};
+    FE::Real affine_probe_constraint_roundoff_bound{0.0};
+    std::vector<FE::Real> canonical_mixed_operator_without_pressure_ghost{};
+    std::vector<FE::Real> canonical_mixed_residual_without_pressure_ghost{};
+    std::vector<FE::Real> canonical_mixed_solved_state_without_pressure_ghost{};
+    std::vector<FE::Real> canonical_pressure_ghost_residual{};
+    FE::Real response_linear_solve_relative_residual{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real response_without_pressure_ghost_linear_solve_relative_residual{
+        std::numeric_limits<FE::Real>::infinity()};
     std::size_t equilibrated_rank{0u};
     std::size_t equilibrated_size{0u};
     FE::Real equilibrated_smallest_singular_value{0.0};
@@ -256,6 +278,50 @@ struct StabilitySample {
     FE::Real equilibrated_condition_inf{
         std::numeric_limits<FE::Real>::infinity()};
     KrylovTelemetry krylov{};
+};
+
+struct StabilityResponseDifference {
+    std::size_t common_dofs{0u};
+    FE::Real relative_affine_probe_operator_difference{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real relative_affine_probe_residual_difference{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real relative_operator_difference{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real relative_residual_difference{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real relative_solved_state_difference{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real relative_pressure_ghost_operator_difference{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real relative_pressure_pspg_operator_difference{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real relative_velocity_residual_difference{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real relative_pressure_residual_difference{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real relative_velocity_solved_state_difference{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real relative_pressure_solved_state_difference{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real relative_operator_without_pressure_ghost_difference{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real relative_residual_without_pressure_ghost_difference{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real relative_solved_state_without_pressure_ghost_difference{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real residual_difference_norm{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real residual_reference_norm{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real velocity_residual_difference_norm{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real velocity_residual_reference_norm{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real pressure_residual_difference_norm{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real pressure_residual_reference_norm{
+        std::numeric_limits<FE::Real>::infinity()};
 };
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -1908,6 +1974,7 @@ struct CanonicalP1Dof {
     gid_t vertex_gid{0};
     std::size_t component{0u};
     FE::GlobalIndex global_dof{FE::INVALID_GLOBAL_INDEX};
+    std::array<FE::Real, 3> point{};
 };
 
 /** Return all P1 DOFs in physical vertex-GID/component order. */
@@ -1947,9 +2014,13 @@ struct CanonicalP1Dof {
              component < components;
              ++component) {
             canonical.push_back(CanonicalP1Dof{
-                vertex_gids[static_cast<std::size_t>(vertex)],
-                component,
-                offset + vertex_dofs[component]});
+                .vertex_gid =
+                    vertex_gids[static_cast<std::size_t>(vertex)],
+                .component = component,
+                .global_dof = offset + vertex_dofs[component],
+                .point = system.meshAccess().getNodeCoordinates(
+                    static_cast<FE::GlobalIndex>(vertex)),
+            });
         }
     }
 
@@ -1988,6 +2059,226 @@ struct CanonicalP1Dof {
         }
     }
     return dofs;
+}
+
+constexpr std::size_t stability_affine_basis_count = 4u;
+constexpr std::size_t stability_velocity_affine_probe_count = 12u;
+constexpr std::size_t stability_mixed_affine_probe_count = 16u;
+
+[[nodiscard]] std::array<FE::Real, stability_affine_basis_count>
+physicalAffineP1Basis(const std::array<FE::Real, 3>& point) noexcept
+{
+    return {{FE::Real{1.0}, point[0], point[1], point[2]}};
+}
+
+struct AffineProbeConstraintReproduction {
+    std::size_t master_bearing_lines{0u};
+    FE::Real maximum_error{0.0};
+    FE::Real maximum_roundoff_bound{0.0};
+};
+
+[[nodiscard]] AffineProbeConstraintReproduction
+affineProbeConstraintReproduction(
+    const FE::systems::FESystem& system,
+    std::span<const CanonicalP1Dof> canonical)
+{
+    std::vector<const CanonicalP1Dof*> by_dof;
+    by_dof.reserve(canonical.size());
+    for (const auto& entry : canonical) {
+        by_dof.push_back(&entry);
+    }
+    std::sort(by_dof.begin(),
+              by_dof.end(),
+              [](const auto* lhs, const auto* rhs) {
+                  return lhs->global_dof < rhs->global_dof;
+              });
+    if (std::adjacent_find(
+            by_dof.begin(), by_dof.end(), [](const auto* lhs, const auto* rhs) {
+                return lhs->global_dof == rhs->global_dof;
+            }) != by_dof.end()) {
+        throw std::runtime_error(
+            "stability canonical P1 field contains a duplicate global DOF");
+    }
+
+    const auto find_dof = [&](FE::GlobalIndex dof) {
+        const auto found = std::lower_bound(
+            by_dof.begin(),
+            by_dof.end(),
+            dof,
+            [](const auto* entry, FE::GlobalIndex target) {
+                return entry->global_dof < target;
+            });
+        if (found == by_dof.end() || (*found)->global_dof != dof) {
+            throw std::runtime_error(
+                "aggregation constraint master is outside its P1 field");
+        }
+        return *found;
+    };
+
+    AffineProbeConstraintReproduction reproduction;
+    const auto& constraints = system.constraints();
+    constexpr long double roundoff_multiplier = 512.0L;
+    const auto epsilon = static_cast<long double>(
+        std::numeric_limits<FE::Real>::epsilon());
+    for (const auto& slave : canonical) {
+        const auto line = constraints.getConstraint(slave.global_dof);
+        if (!line.has_value() || line->entries.empty()) {
+            continue;
+        }
+        ++reproduction.master_bearing_lines;
+        const auto slave_basis = physicalAffineP1Basis(slave.point);
+        for (std::size_t basis = 0u;
+             basis < stability_affine_basis_count;
+             ++basis) {
+            long double reconstructed =
+                static_cast<long double>(line->inhomogeneity);
+            long double magnitude = std::abs(reconstructed);
+            for (const auto& relation : line->entries) {
+                const auto* master = find_dof(relation.master_dof);
+                if (master->component != slave.component) {
+                    throw std::runtime_error(
+                        "aggregation constraint changes a P1 field component");
+                }
+                const auto master_basis =
+                    physicalAffineP1Basis(master->point);
+                const auto term =
+                    static_cast<long double>(relation.weight) *
+                    static_cast<long double>(master_basis[basis]);
+                reconstructed += term;
+                magnitude += std::abs(term);
+            }
+            const auto expected =
+                static_cast<long double>(slave_basis[basis]);
+            const auto error = std::abs(reconstructed - expected);
+            const auto bound =
+                roundoff_multiplier * epsilon *
+                std::max(1.0L, magnitude + std::abs(expected));
+            reproduction.maximum_error = std::max(
+                reproduction.maximum_error,
+                static_cast<FE::Real>(error));
+            reproduction.maximum_roundoff_bound = std::max(
+                reproduction.maximum_roundoff_bound,
+                static_cast<FE::Real>(bound));
+        }
+    }
+    return reproduction;
+}
+
+[[nodiscard]] std::vector<FE::Real> mixedPhysicalAffineP1Probes(
+    const FE::systems::FESystem& system,
+    std::span<const CanonicalP1Dof> canonical_velocity,
+    std::span<const CanonicalP1Dof> canonical_pressure,
+    std::span<const FE::GlobalIndex> free_mixed)
+{
+    const auto n = free_mixed.size();
+    std::vector<FE::Real> probes(
+        stability_mixed_affine_probe_count * n, FE::Real{0.0});
+    std::size_t free_index = 0u;
+    const auto append_field = [&](std::span<const CanonicalP1Dof> canonical,
+                                  std::size_t field_probe_offset,
+                                  std::size_t expected_components) {
+        for (const auto& entry : canonical) {
+            if (entry.component >= expected_components) {
+                throw std::runtime_error(
+                    "stability affine probe has an invalid field component");
+            }
+            if (system.constraints().isConstrained(entry.global_dof)) {
+                continue;
+            }
+            if (free_index >= n ||
+                free_mixed[free_index] != entry.global_dof) {
+                throw std::runtime_error(
+                    "stability affine probe free-DOF order is not canonical");
+            }
+            const auto basis = physicalAffineP1Basis(entry.point);
+            const auto component_offset =
+                field_probe_offset +
+                entry.component * stability_affine_basis_count;
+            for (std::size_t mode = 0u;
+                 mode < stability_affine_basis_count;
+                 ++mode) {
+                probes[(component_offset + mode) * n + free_index] =
+                    basis[mode];
+            }
+            ++free_index;
+        }
+    };
+    append_field(canonical_velocity,
+                 /*field_probe_offset=*/0u,
+                 /*expected_components=*/3u);
+    append_field(canonical_pressure,
+                 stability_velocity_affine_probe_count,
+                 /*expected_components=*/1u);
+    if (free_index != n) {
+        throw std::runtime_error(
+            "stability affine probe did not cover the mixed free space");
+    }
+    return probes;
+}
+
+void capturePhysicalAffineProbeActions(
+    StabilitySample& sample,
+    std::span<const FE::Real> probes)
+{
+    const auto n = sample.canonical_mixed_dofs.size();
+    if (n == 0u ||
+        sample.canonical_mixed_operator.size() != n * n ||
+        sample.canonical_mixed_residual.size() != n ||
+        probes.size() != stability_mixed_affine_probe_count * n) {
+        throw std::invalid_argument(
+            "stability affine-probe response input is incomplete");
+    }
+
+    sample.canonical_affine_probe_residual_actions.assign(
+        stability_mixed_affine_probe_count, FE::Real{0.0});
+    for (std::size_t test = 0u;
+         test < stability_mixed_affine_probe_count;
+         ++test) {
+        long double action = 0.0L;
+        for (std::size_t index = 0u; index < n; ++index) {
+            action += static_cast<long double>(probes[test * n + index]) *
+                      static_cast<long double>(
+                          sample.canonical_mixed_residual[index]);
+        }
+        sample.canonical_affine_probe_residual_actions[test] =
+            static_cast<FE::Real>(action);
+    }
+
+    sample.canonical_affine_probe_operator_actions.assign(
+        stability_mixed_affine_probe_count *
+            stability_mixed_affine_probe_count,
+        FE::Real{0.0});
+    std::vector<long double> applied(n, 0.0L);
+    for (std::size_t trial = 0u;
+         trial < stability_mixed_affine_probe_count;
+         ++trial) {
+        std::fill(applied.begin(), applied.end(), 0.0L);
+        for (std::size_t column = 0u; column < n; ++column) {
+            const auto coefficient = probes[trial * n + column];
+            if (coefficient == FE::Real{0.0}) {
+                continue;
+            }
+            for (std::size_t row = 0u; row < n; ++row) {
+                applied[row] +=
+                    static_cast<long double>(
+                        sample.canonical_mixed_operator[row * n + column]) *
+                    static_cast<long double>(coefficient);
+            }
+        }
+        for (std::size_t test = 0u;
+             test < stability_mixed_affine_probe_count;
+             ++test) {
+            long double action = 0.0L;
+            for (std::size_t row = 0u; row < n; ++row) {
+                action +=
+                    static_cast<long double>(probes[test * n + row]) *
+                    applied[row];
+            }
+            sample.canonical_affine_probe_operator_actions
+                [test * stability_mixed_affine_probe_count + trial] =
+                static_cast<FE::Real>(action);
+        }
+    }
 }
 
 struct PressureAnchorState {
@@ -2948,17 +3239,342 @@ struct ScaledWetBlockDifference {
     return static_cast<FE::Real>(std::sqrt(squared));
 }
 
-[[nodiscard]] bool sameWetBlockDofIdentity(
-    const CanonicalWetBlockDof& lhs,
-    const CanonicalWetBlockDof& rhs) noexcept
+[[nodiscard]] StabilityResponseDifference compareCommonStabilityResponse(
+    const StabilitySample& first,
+    const StabilitySample& second,
+    bool include_pressure_ghost_counterfactual = true)
+{
+    const auto validate = [&](const StabilitySample& sample) {
+        const auto n = sample.canonical_mixed_dofs.size();
+        auto sorted_dofs = sample.canonical_mixed_dofs;
+        std::sort(sorted_dofs.begin(), sorted_dofs.end());
+        const bool base_incomplete =
+            n == 0u ||
+            sample.free_velocity_dofs + sample.free_pressure_dofs != n ||
+            sample.canonical_mixed_state.size() != n ||
+            sample.canonical_mixed_residual.size() != n ||
+            sample.canonical_mixed_solved_state.size() != n ||
+            sample.canonical_mixed_operator.size() != n * n ||
+            sample.canonical_affine_probe_operator_actions.size() !=
+                stability_mixed_affine_probe_count *
+                    stability_mixed_affine_probe_count ||
+            sample.canonical_affine_probe_residual_actions.size() !=
+                stability_mixed_affine_probe_count ||
+            sample.canonical_pressure_ghost_operator.size() !=
+                sample.free_pressure_dofs * sample.free_pressure_dofs ||
+            sample.canonical_pressure_pspg_operator.size() !=
+                sample.free_pressure_dofs * sample.free_pressure_dofs ||
+            std::adjacent_find(sorted_dofs.begin(), sorted_dofs.end()) !=
+                sorted_dofs.end();
+        const bool counterfactual_incomplete =
+            include_pressure_ghost_counterfactual &&
+            (sample.canonical_mixed_operator_without_pressure_ghost.size() !=
+                 n * n ||
+             sample.canonical_mixed_residual_without_pressure_ghost.size() !=
+                 n ||
+             sample.canonical_mixed_solved_state_without_pressure_ghost
+                     .size() != n ||
+             sample.canonical_pressure_ghost_residual.size() !=
+                 sample.free_pressure_dofs);
+        if (base_incomplete || counterfactual_incomplete) {
+            throw std::invalid_argument(
+                "node-crossing response sample is incomplete or noncanonical");
+        }
+    };
+    validate(first);
+    validate(second);
+
+    std::vector<std::size_t> first_indices;
+    std::vector<std::size_t> second_indices;
+    first_indices.reserve(first.canonical_mixed_dofs.size());
+    second_indices.reserve(first.canonical_mixed_dofs.size());
+    for (std::size_t first_index = 0u;
+         first_index < first.canonical_mixed_dofs.size();
+         ++first_index) {
+        const auto dof = first.canonical_mixed_dofs[first_index];
+        const auto second_it = std::find(second.canonical_mixed_dofs.begin(),
+                                         second.canonical_mixed_dofs.end(),
+                                         dof);
+        if (second_it == second.canonical_mixed_dofs.end() ||
+            *second_it != dof) {
+            continue;
+        }
+        first_indices.push_back(first_index);
+        second_indices.push_back(static_cast<std::size_t>(
+            std::distance(second.canonical_mixed_dofs.begin(), second_it)));
+    }
+    if (first_indices.empty()) {
+        throw std::runtime_error(
+            "node-crossing response samples have no common free DOFs");
+    }
+    std::vector<std::size_t> velocity_positions;
+    std::vector<std::size_t> pressure_positions;
+    for (std::size_t position = 0u; position < first_indices.size();
+         ++position) {
+        const bool first_velocity =
+            first_indices[position] < first.free_velocity_dofs;
+        const bool second_velocity =
+            second_indices[position] < second.free_velocity_dofs;
+        if (first_velocity != second_velocity) {
+            throw std::runtime_error(
+                "node-crossing response DOF identity changed field block");
+        }
+        (first_velocity ? velocity_positions : pressure_positions)
+            .push_back(position);
+    }
+    if (velocity_positions.empty() || pressure_positions.empty()) {
+        throw std::runtime_error(
+            "node-crossing response common space omits a mixed field block");
+    }
+
+    constexpr long double scale_floor =
+        64.0L *
+        static_cast<long double>(std::numeric_limits<FE::Real>::epsilon());
+    const auto relative_vector_difference =
+        [&](std::span<const FE::Real> first_values,
+            std::span<const FE::Real> second_values,
+            std::span<const std::size_t> positions = {}) {
+            long double difference_squared = 0.0L;
+            long double first_squared = 0.0L;
+            long double second_squared = 0.0L;
+            const auto accumulate = [&](std::size_t index) {
+                const auto first_value = static_cast<long double>(
+                    first_values[first_indices[index]]);
+                const auto second_value = static_cast<long double>(
+                    second_values[second_indices[index]]);
+                const auto difference = first_value - second_value;
+                difference_squared += difference * difference;
+                first_squared += first_value * first_value;
+                second_squared += second_value * second_value;
+            };
+            if (positions.empty()) {
+                for (std::size_t index = 0u; index < first_indices.size();
+                     ++index) {
+                    accumulate(index);
+                }
+            } else {
+                for (const auto index : positions) {
+                    accumulate(index);
+                }
+            }
+            return static_cast<FE::Real>(
+                std::sqrt(difference_squared) /
+                (scale_floor + std::max(std::sqrt(first_squared),
+                                        std::sqrt(second_squared))));
+        };
+    const auto vector_difference_norms =
+        [&](std::span<const FE::Real> first_values,
+            std::span<const FE::Real> second_values,
+            std::span<const std::size_t> positions = {}) {
+            long double difference_squared = 0.0L;
+            long double first_squared = 0.0L;
+            long double second_squared = 0.0L;
+            const auto accumulate = [&](std::size_t index) {
+                const auto first_value = static_cast<long double>(
+                    first_values[first_indices[index]]);
+                const auto second_value = static_cast<long double>(
+                    second_values[second_indices[index]]);
+                const auto value_difference = first_value - second_value;
+                difference_squared += value_difference * value_difference;
+                first_squared += first_value * first_value;
+                second_squared += second_value * second_value;
+            };
+            if (positions.empty()) {
+                for (std::size_t index = 0u; index < first_indices.size();
+                     ++index) {
+                    accumulate(index);
+                }
+            } else {
+                for (const auto index : positions) {
+                    accumulate(index);
+                }
+            }
+            return std::array<FE::Real, 2>{{
+                static_cast<FE::Real>(std::sqrt(difference_squared)),
+                static_cast<FE::Real>(std::max(std::sqrt(first_squared),
+                                               std::sqrt(second_squared))),
+            }};
+        };
+
+    const auto relative_pressure_matrix_difference =
+        [&](std::span<const FE::Real> first_values,
+            std::span<const FE::Real> second_values) {
+            long double difference_squared = 0.0L;
+            long double first_squared = 0.0L;
+            long double second_squared = 0.0L;
+            for (const auto row_position : pressure_positions) {
+                const auto first_row =
+                    first_indices[row_position] - first.free_velocity_dofs;
+                const auto second_row =
+                    second_indices[row_position] - second.free_velocity_dofs;
+                for (const auto column_position : pressure_positions) {
+                    const auto first_column = first_indices[column_position] -
+                                              first.free_velocity_dofs;
+                    const auto second_column = second_indices[column_position] -
+                                               second.free_velocity_dofs;
+                    const auto first_value = static_cast<long double>(
+                        first_values[first_row * first.free_pressure_dofs +
+                                     first_column]);
+                    const auto second_value = static_cast<long double>(
+                        second_values[second_row * second.free_pressure_dofs +
+                                      second_column]);
+                    const auto value_difference = first_value - second_value;
+                    difference_squared += value_difference * value_difference;
+                    first_squared += first_value * first_value;
+                    second_squared += second_value * second_value;
+                }
+            }
+            return static_cast<FE::Real>(
+                std::sqrt(difference_squared) /
+                (scale_floor + std::max(std::sqrt(first_squared),
+                                        std::sqrt(second_squared))));
+        };
+
+    const auto first_size = first.canonical_mixed_dofs.size();
+    const auto second_size = second.canonical_mixed_dofs.size();
+    const auto relative_mixed_matrix_difference =
+        [&](std::span<const FE::Real> first_values,
+            std::span<const FE::Real> second_values) {
+            long double difference_squared = 0.0L;
+            long double first_squared = 0.0L;
+            long double second_squared = 0.0L;
+            for (std::size_t row = 0u; row < first_indices.size(); ++row) {
+                for (std::size_t column = 0u; column < first_indices.size();
+                     ++column) {
+                    const auto first_value = static_cast<long double>(
+                        first_values[first_indices[row] * first_size +
+                                     first_indices[column]]);
+                    const auto second_value = static_cast<long double>(
+                        second_values[second_indices[row] * second_size +
+                                      second_indices[column]]);
+                    const auto value_difference = first_value - second_value;
+                    difference_squared += value_difference * value_difference;
+                    first_squared += first_value * first_value;
+                    second_squared += second_value * second_value;
+                }
+            }
+            return static_cast<FE::Real>(
+                std::sqrt(difference_squared) /
+                (scale_floor + std::max(std::sqrt(first_squared),
+                                        std::sqrt(second_squared))));
+        };
+    const auto relative_dense_difference =
+        [&](std::span<const FE::Real> first_values,
+            std::span<const FE::Real> second_values) {
+            if (first_values.empty() ||
+                first_values.size() != second_values.size()) {
+                throw std::invalid_argument(
+                    "physical affine-probe responses have different sizes");
+            }
+            long double difference_squared = 0.0L;
+            long double first_squared = 0.0L;
+            long double second_squared = 0.0L;
+            for (std::size_t index = 0u; index < first_values.size();
+                 ++index) {
+                const auto first_value =
+                    static_cast<long double>(first_values[index]);
+                const auto second_value =
+                    static_cast<long double>(second_values[index]);
+                const auto value_difference = first_value - second_value;
+                difference_squared += value_difference * value_difference;
+                first_squared += first_value * first_value;
+                second_squared += second_value * second_value;
+            }
+            return static_cast<FE::Real>(
+                std::sqrt(difference_squared) /
+                (scale_floor + std::max(std::sqrt(first_squared),
+                                        std::sqrt(second_squared))));
+        };
+
+    StabilityResponseDifference difference;
+    difference.common_dofs = first_indices.size();
+    difference.relative_affine_probe_operator_difference =
+        relative_dense_difference(
+            first.canonical_affine_probe_operator_actions,
+            second.canonical_affine_probe_operator_actions);
+    difference.relative_affine_probe_residual_difference =
+        relative_dense_difference(
+            first.canonical_affine_probe_residual_actions,
+            second.canonical_affine_probe_residual_actions);
+    difference.relative_operator_difference = relative_mixed_matrix_difference(
+        first.canonical_mixed_operator, second.canonical_mixed_operator);
+    difference.relative_residual_difference = relative_vector_difference(
+        first.canonical_mixed_residual, second.canonical_mixed_residual);
+    difference.relative_solved_state_difference =
+        relative_vector_difference(first.canonical_mixed_solved_state,
+                                   second.canonical_mixed_solved_state);
+    difference.relative_pressure_ghost_operator_difference =
+        relative_pressure_matrix_difference(
+            first.canonical_pressure_ghost_operator,
+            second.canonical_pressure_ghost_operator);
+    difference.relative_pressure_pspg_operator_difference =
+        relative_pressure_matrix_difference(
+            first.canonical_pressure_pspg_operator,
+            second.canonical_pressure_pspg_operator);
+    difference.relative_velocity_residual_difference =
+        relative_vector_difference(first.canonical_mixed_residual,
+                                   second.canonical_mixed_residual,
+                                   velocity_positions);
+    difference.relative_pressure_residual_difference =
+        relative_vector_difference(first.canonical_mixed_residual,
+                                   second.canonical_mixed_residual,
+                                   pressure_positions);
+    difference.relative_velocity_solved_state_difference =
+        relative_vector_difference(first.canonical_mixed_solved_state,
+                                   second.canonical_mixed_solved_state,
+                                   velocity_positions);
+    difference.relative_pressure_solved_state_difference =
+        relative_vector_difference(first.canonical_mixed_solved_state,
+                                   second.canonical_mixed_solved_state,
+                                   pressure_positions);
+    const auto residual_norms = vector_difference_norms(
+        first.canonical_mixed_residual, second.canonical_mixed_residual);
+    difference.residual_difference_norm = residual_norms[0];
+    difference.residual_reference_norm = residual_norms[1];
+    const auto velocity_residual_norms = vector_difference_norms(
+        first.canonical_mixed_residual,
+        second.canonical_mixed_residual,
+        velocity_positions);
+    difference.velocity_residual_difference_norm =
+        velocity_residual_norms[0];
+    difference.velocity_residual_reference_norm =
+        velocity_residual_norms[1];
+    const auto pressure_residual_norms = vector_difference_norms(
+        first.canonical_mixed_residual,
+        second.canonical_mixed_residual,
+        pressure_positions);
+    difference.pressure_residual_difference_norm =
+        pressure_residual_norms[0];
+    difference.pressure_residual_reference_norm =
+        pressure_residual_norms[1];
+    if (include_pressure_ghost_counterfactual) {
+        difference.relative_operator_without_pressure_ghost_difference =
+            relative_mixed_matrix_difference(
+                first.canonical_mixed_operator_without_pressure_ghost,
+                second.canonical_mixed_operator_without_pressure_ghost);
+        difference.relative_residual_without_pressure_ghost_difference =
+            relative_vector_difference(
+                first.canonical_mixed_residual_without_pressure_ghost,
+                second.canonical_mixed_residual_without_pressure_ghost);
+        difference.relative_solved_state_without_pressure_ghost_difference =
+            relative_vector_difference(
+                first.canonical_mixed_solved_state_without_pressure_ghost,
+                second.canonical_mixed_solved_state_without_pressure_ghost);
+    }
+    return difference;
+}
+
+[[nodiscard]] bool
+sameWetBlockDofIdentity(const CanonicalWetBlockDof& lhs,
+                        const CanonicalWetBlockDof& rhs) noexcept
 {
     return lhs.field == rhs.field && lhs.vertex_gid == rhs.vertex_gid &&
            lhs.component == rhs.component && lhs.point == rhs.point;
 }
 
-[[nodiscard]] ScaledWetBlockDifference compareWetBlockSamples(
-    const WetBlockAssemblySample& baseline,
-    const WetBlockAssemblySample& candidate)
+[[nodiscard]] ScaledWetBlockDifference
+compareWetBlockSamples(const WetBlockAssemblySample& baseline,
+                       const WetBlockAssemblySample& candidate)
 {
     if (baseline.dofs.size() != candidate.dofs.size() ||
         baseline.current_state.size() != candidate.current_state.size() ||
@@ -2969,10 +3585,10 @@ struct ScaledWetBlockDifference {
             "wet-block comparison requires matching canonical block sizes");
     }
     for (std::size_t index = 0u; index < baseline.dofs.size(); ++index) {
-        if (!sameWetBlockDofIdentity(
-                baseline.dofs[index], candidate.dofs[index])) {
-            throw std::invalid_argument(
-                "wet-block comparison encountered different canonical DOF identities");
+        if (!sameWetBlockDofIdentity(baseline.dofs[index],
+                                     candidate.dofs[index])) {
+            throw std::invalid_argument("wet-block comparison encountered "
+                                        "different canonical DOF identities");
         }
     }
 
@@ -2983,24 +3599,24 @@ struct ScaledWetBlockDifference {
     constexpr FE::Real jacobian_absolute_floor = FE::Real{1.0e-12};
     constexpr FE::Real solved_state_absolute_floor = FE::Real{1.0e-12};
     ScaledWetBlockDifference difference;
-    difference.residual_absolute = vectorDifferenceL2Norm(
-        baseline.residual, candidate.residual);
-    difference.jacobian_absolute = vectorDifferenceL2Norm(
-        baseline.jacobian, candidate.jacobian);
-    difference.solved_state_absolute = vectorDifferenceL2Norm(
-        baseline.solved_state, candidate.solved_state);
-    difference.residual = difference.residual_absolute /
-        (residual_absolute_floor +
-         std::max(vectorL2Norm(baseline.residual),
-                  vectorL2Norm(candidate.residual)));
-    difference.jacobian = difference.jacobian_absolute /
-        (jacobian_absolute_floor +
-         std::max(vectorL2Norm(baseline.jacobian),
-                  vectorL2Norm(candidate.jacobian)));
+    difference.residual_absolute =
+        vectorDifferenceL2Norm(baseline.residual, candidate.residual);
+    difference.jacobian_absolute =
+        vectorDifferenceL2Norm(baseline.jacobian, candidate.jacobian);
+    difference.solved_state_absolute =
+        vectorDifferenceL2Norm(baseline.solved_state, candidate.solved_state);
+    difference.residual =
+        difference.residual_absolute /
+        (residual_absolute_floor + std::max(vectorL2Norm(baseline.residual),
+                                            vectorL2Norm(candidate.residual)));
+    difference.jacobian =
+        difference.jacobian_absolute /
+        (jacobian_absolute_floor + std::max(vectorL2Norm(baseline.jacobian),
+                                            vectorL2Norm(candidate.jacobian)));
     difference.solved_state = difference.solved_state_absolute /
-        (solved_state_absolute_floor +
-         std::max(vectorL2Norm(baseline.solved_state),
-                  vectorL2Norm(candidate.solved_state)));
+                              (solved_state_absolute_floor +
+                               std::max(vectorL2Norm(baseline.solved_state),
+                                        vectorL2Norm(candidate.solved_state)));
     return difference;
 }
 
@@ -3897,19 +4513,23 @@ runManufacturedAffineQ1Balance(FE::Real geometry_angle,
 
 class PersistentStabilityProblem {
 public:
-    explicit PersistentStabilityProblem(const PlaneCutPosition& initial_cut,
-                                        int cells_per_axis = 2,
-                                        StabilityRegime regime = {})
+    explicit PersistentStabilityProblem(
+        const PlaneCutPosition& initial_cut,
+        int cells_per_axis = 2,
+        StabilityRegime regime = {},
+        bool capture_response = false,
+        bool small_cut_aggregation = true,
+        bool capture_response_counterfactuals = true)
         : mesh_(makeFixedTetraMesh(initial_cut, cells_per_axis)),
           velocity_space_(FE::spaces::SpaceFactory::create_vector_h1(
               FE::ElementType::Tetra4, /*order=*/1, /*components=*/3)),
           pressure_space_(FE::spaces::SpaceFactory::create_h1(
               FE::ElementType::Tetra4, /*order=*/1)),
-          system_(mesh_),
-          cells_per_axis_(cells_per_axis),
-          mesh_spacing_(FE::Real{2.0} /
-                        static_cast<FE::Real>(cells_per_axis)),
-          regime_(regime)
+          system_(mesh_), cells_per_axis_(cells_per_axis),
+          mesh_spacing_(FE::Real{2.0} / static_cast<FE::Real>(cells_per_axis)),
+          regime_(regime), capture_response_(capture_response),
+          small_cut_aggregation_(small_cut_aggregation),
+          capture_response_counterfactuals_(capture_response_counterfactuals)
     {
         // Keep phi as an unknown only so the production lifecycle receives its
         // normal coefficient span.  It owns no residual, and is intentionally
@@ -3921,8 +4541,10 @@ public:
             .source_kind = FE::systems::FieldSourceKind::Unknown,
         });
 
-        auto options = stabilityOptions(
-            interface_marker, std::string(domain_id), regime_);
+        auto options =
+            stabilityOptions(interface_marker, std::string(domain_id), regime_);
+        options.free_surface.front().small_cut_aggregation =
+            small_cut_aggregation_;
 
         ns::IncompressibleNavierStokesVMSModule module(
             velocity_space_, pressure_space_, options);
@@ -3937,8 +4559,7 @@ public:
 
         velocity_ = system_.findFieldByName("u");
         pressure_ = system_.findFieldByName("p");
-        if (phi_ == FE::INVALID_FIELD_ID ||
-            velocity_ == FE::INVALID_FIELD_ID ||
+        if (phi_ == FE::INVALID_FIELD_ID || velocity_ == FE::INVALID_FIELD_ID ||
             pressure_ == FE::INVALID_FIELD_ID) {
             throw std::runtime_error(
                 "fixed-sweep Navier--Stokes fields were not registered");
@@ -3961,16 +4582,56 @@ public:
                 throw std::runtime_error(
                     "fixed-sweep velocity field is not vector P1");
             }
-            solution_.at(static_cast<std::size_t>(
-                velocity_offset + dofs[0])) = regime_.advective_speed;
+            if (!capture_response_) {
+                solution_.at(static_cast<std::size_t>(
+                    velocity_offset + dofs[0])) = regime_.advective_speed;
+                continue;
+            }
+            const auto point = system_.meshAccess().getNodeCoordinates(vertex);
+            const std::array<FE::Real, 3> value = {{
+                FE::Real{0.41} + FE::Real{0.13} * point[0] -
+                    FE::Real{0.07} * point[1] + FE::Real{0.05} * point[2],
+                -FE::Real{0.23} + FE::Real{0.04} * point[0] +
+                    FE::Real{0.11} * point[1] - FE::Real{0.03} * point[2],
+                FE::Real{0.17} - FE::Real{0.06} * point[0] +
+                    FE::Real{0.02} * point[1] + FE::Real{0.09} * point[2],
+            }};
+            for (std::size_t component = 0u; component < value.size();
+                 ++component) {
+                solution_.at(static_cast<std::size_t>(
+                    velocity_offset + dofs[component])) = value[component];
+            }
+        }
+        if (capture_response_) {
+            const auto* pressure_map =
+                system_.fieldDofHandler(pressure_).getEntityDofMap();
+            if (pressure_map == nullptr) {
+                throw std::runtime_error(
+                    "fixed-sweep pressure field has no entity map");
+            }
+            const auto pressure_offset = system_.fieldDofOffset(pressure_);
+            for (FE::GlobalIndex vertex = 0;
+                 vertex < system_.meshAccess().numVertices();
+                 ++vertex) {
+                const auto dofs = pressure_map->getVertexDofs(vertex);
+                if (dofs.size() != 1u) {
+                    throw std::runtime_error(
+                        "fixed-sweep pressure field is not scalar P1");
+                }
+                const auto point =
+                    system_.meshAccess().getNodeCoordinates(vertex);
+                solution_.at(
+                    static_cast<std::size_t>(pressure_offset + dofs.front())) =
+                    FE::Real{0.19} - FE::Real{0.08} * point[0] +
+                    FE::Real{0.05} * point[1] + FE::Real{0.07} * point[2];
+            }
         }
         previous_ = solution_;
     }
 
-    [[nodiscard]] StabilitySample evaluate(
-        const PlaneCutPosition& cut,
-        std::optional<FE::MeshIndex> designated_parent_cell =
-            std::nullopt)
+    [[nodiscard]] StabilitySample
+    evaluate(const PlaneCutPosition& cut,
+             std::optional<FE::MeshIndex> designated_parent_cell = std::nullopt)
     {
         setScalarVertexField(solution_, system_, phi_, cut);
         // Post-setup active-side and aggregation constraint rebuilds consume
@@ -3989,8 +4650,8 @@ public:
         cut_options.quadrature_order = 2;
         cut_options.interface_quadrature_order = 1;
         cut_options.volume_quadrature_order = 2;
-        const auto generated = lifecycle_.build(
-            system_, cut_options, solution_);
+        const auto generated =
+            lifecycle_.build(system_, cut_options, solution_);
         if (!generated.success) {
             throw std::runtime_error(generated.diagnostic);
         }
@@ -4003,17 +4664,21 @@ public:
         system_.rebuildConstraintState();
         const auto pressure_anchor = pressureAnchorState(system_, pressure_);
         const auto velocity_topology_transition =
-            aggregationTopologyTransitionMetrics(
-                system_,
-                velocity_,
-                interface_marker,
-                FE::geometry::CutIntegrationSide::Negative);
+            small_cut_aggregation_
+                ? aggregationTopologyTransitionMetrics(
+                      system_,
+                      velocity_,
+                      interface_marker,
+                      FE::geometry::CutIntegrationSide::Negative)
+                : AggregationTopologyTransitionMetrics{};
         const auto pressure_topology_transition =
-            aggregationTopologyTransitionMetrics(
-                system_,
-                pressure_,
-                interface_marker,
-                FE::geometry::CutIntegrationSide::Negative);
+            small_cut_aggregation_
+                ? aggregationTopologyTransitionMetrics(
+                      system_,
+                      pressure_,
+                      interface_marker,
+                      FE::geometry::CutIntegrationSide::Negative)
+                : AggregationTopologyTransitionMetrics{};
 
         FE::systems::SystemStateView state;
         state.dt = regime_.dt;
@@ -4026,50 +4691,75 @@ public:
 
         const auto jacobian =
             assembleOperatorMatrix(system_, state, "equations");
+        const auto response_residual =
+            capture_response_
+                ? assembleOperatorResidual(system_, state, "equations")
+                : std::vector<FE::Real>{};
+        const auto response_pressure_ghost_residual =
+            capture_response_ && capture_response_counterfactuals_
+                ? assembleOperatorResidual(
+                      system_,
+                      state,
+                      "equations_diagnostic_ns_pressure_ghost_penalty")
+                : std::vector<FE::Real>{};
         const auto ghost = assembleOperatorMatrix(
-            system_, state,
-            "equations_diagnostic_ns_pressure_ghost_penalty");
+            system_, state, "equations_diagnostic_ns_pressure_ghost_penalty");
         const auto pspg = assembleOperatorMatrix(
-            system_, state,
+            system_,
+            state,
             "equations_diagnostic_ns_vms_pspg_pressure_gradient");
-        const auto galerkin_continuity = assembleOperatorMatrix(
-            system_, state,
-            "equations_diagnostic_ns_galerkin_continuity");
 
-        auto free_velocity =
-            canonicalFreeP1Dofs(*mesh_, system_, velocity_, 3u);
-        auto free_pressure =
-            canonicalFreeP1Dofs(*mesh_, system_, pressure_, 1u);
+        const auto canonical_velocity =
+            canonicalP1Dofs(*mesh_, system_, velocity_, 3u);
+        const auto canonical_pressure =
+            canonicalP1Dofs(*mesh_, system_, pressure_, 1u);
+        const auto select_free = [&](const auto& canonical) {
+            std::vector<FE::GlobalIndex> selected;
+            selected.reserve(canonical.size());
+            for (const auto& entry : canonical) {
+                if (!system_.constraints().isConstrained(entry.global_dof)) {
+                    selected.push_back(entry.global_dof);
+                }
+            }
+            return selected;
+        };
+        auto free_velocity = select_free(canonical_velocity);
+        auto free_pressure = select_free(canonical_pressure);
         std::vector<FE::GlobalIndex> free_mixed = free_velocity;
         free_mixed.insert(
             free_mixed.end(), free_pressure.begin(), free_pressure.end());
         if (free_mixed.empty() || free_pressure.empty()) {
             throw std::runtime_error("fixed-sweep mixed free space is empty");
         }
-        const auto raw_pressure_mass = assembleRawActivePressureMass(
-            system_,
-            pressure_,
-            *pressure_space_,
-            *context,
-            interface_marker);
-        const auto reduced_pressure_mass = reduceFieldMatrixByConstraints(
-            raw_pressure_mass, system_, pressure_, free_pressure);
-        const auto pressure_control = pressureControlMetrics(
-            jacobian,
-            galerkin_continuity,
-            ghost,
-            pspg,
-            reduced_pressure_mass,
-            free_velocity,
-            free_pressure);
+        PressureControlMetrics pressure_control;
+        if (!capture_response_) {
+            const auto galerkin_continuity = assembleOperatorMatrix(
+                system_, state, "equations_diagnostic_ns_galerkin_continuity");
+            const auto raw_pressure_mass =
+                assembleRawActivePressureMass(system_,
+                                              pressure_,
+                                              *pressure_space_,
+                                              *context,
+                                              interface_marker);
+            const auto reduced_pressure_mass = reduceFieldMatrixByConstraints(
+                raw_pressure_mass, system_, pressure_, free_pressure);
+            pressure_control = pressureControlMetrics(jacobian,
+                                                      galerkin_continuity,
+                                                      ghost,
+                                                      pspg,
+                                                      reduced_pressure_mass,
+                                                      free_velocity,
+                                                      free_pressure);
+        }
 
-        auto reduced = extractReducedMatrix(jacobian, free_mixed);
-        const auto canonical_mixed_operator = reduced;
+        const auto canonical_mixed_operator =
+            extractReducedMatrix(jacobian, free_mixed);
         const auto canonical_pressure_ghost_operator =
             extractReducedMatrix(ghost, free_pressure);
         const auto canonical_pressure_pspg_operator =
             extractReducedMatrix(pspg, free_pressure);
-        const auto reduced_max = FE::math::dense_matrix_max_abs(reduced);
+        const auto reduced_max =
+            FE::math::dense_matrix_max_abs(canonical_mixed_operator);
         const auto zero_row_tolerance =
             std::max(FE::Real{1.0}, reduced_max) * FE::Real{1.0e-12};
         std::size_t zero_pressure_rows = 0u;
@@ -4077,21 +4767,14 @@ public:
             const auto row = free_velocity.size() + local;
             FE::Real row_norm = 0.0;
             for (std::size_t column = 0; column < free_mixed.size(); ++column) {
-                const auto value = reduced[row * free_mixed.size() + column];
+                const auto value =
+                    canonical_mixed_operator[row * free_mixed.size() + column];
                 row_norm += value * value;
             }
             if (std::sqrt(row_norm) <= zero_row_tolerance) {
                 ++zero_pressure_rows;
             }
         }
-
-        equilibrate(reduced, free_mixed.size());
-        const auto diagnostics = FE::math::dense_matrix_diagnostics(
-            reduced,
-            free_mixed.size(),
-            free_mixed.size(),
-            "equilibrated free-surface mixed Jacobian");
-
         StabilitySample sample;
         sample.label = cut.label;
         sample.reference_active_volume =
@@ -4126,12 +4809,10 @@ public:
         }
         sample.velocity_constraints = countFieldConstraints(system_, velocity_);
         sample.pressure_constraints = countFieldConstraints(system_, pressure_);
-        sample.pressure_aggregation = aggregationConstraintMetrics(
-            system_, pressure_, mesh_spacing_);
-        sample.velocity_topology_transition =
-            velocity_topology_transition;
-        sample.pressure_topology_transition =
-            pressure_topology_transition;
+        sample.pressure_aggregation =
+            aggregationConstraintMetrics(system_, pressure_, mesh_spacing_);
+        sample.velocity_topology_transition = velocity_topology_transition;
+        sample.pressure_topology_transition = pressure_topology_transition;
         sample.pressure_control = pressure_control;
         sample.mesh_cells_per_axis = cells_per_axis_;
         sample.mesh_spacing = mesh_spacing_;
@@ -4147,16 +4828,146 @@ public:
             canonical_pressure_ghost_operator;
         sample.canonical_pressure_pspg_operator =
             canonical_pressure_pspg_operator;
-        sample.equilibrated_rank = diagnostics.rank;
-        sample.equilibrated_size = free_mixed.size();
-        sample.equilibrated_smallest_singular_value =
-            diagnostics.smallest_retained_singular_value;
-        sample.equilibrated_largest_singular_value =
-            diagnostics.largest_singular_value;
-        sample.equilibrated_condition_inf =
-            infinityNormCondition(reduced, free_mixed.size());
-        sample.krylov = runEquilibratedJacobiBicgstab(
-            reduced, free_mixed.size());
+        if (capture_response_) {
+            sample.canonical_mixed_dofs = free_mixed;
+            sample.canonical_mixed_state.reserve(free_mixed.size());
+            sample.canonical_mixed_residual.reserve(free_mixed.size());
+            for (const auto dof : free_mixed) {
+                sample.canonical_mixed_state.push_back(
+                    solution_.at(static_cast<std::size_t>(dof)));
+                sample.canonical_mixed_residual.push_back(
+                    response_residual.at(static_cast<std::size_t>(dof)));
+            }
+            const auto velocity_reproduction =
+                affineProbeConstraintReproduction(system_, canonical_velocity);
+            const auto pressure_reproduction =
+                affineProbeConstraintReproduction(system_, canonical_pressure);
+            sample.affine_probe_constraint_line_count =
+                velocity_reproduction.master_bearing_lines +
+                pressure_reproduction.master_bearing_lines;
+            sample.affine_probe_constraint_reproduction_error = std::max(
+                velocity_reproduction.maximum_error,
+                pressure_reproduction.maximum_error);
+            sample.affine_probe_constraint_roundoff_bound = std::max(
+                velocity_reproduction.maximum_roundoff_bound,
+                pressure_reproduction.maximum_roundoff_bound);
+            const auto affine_probes = mixedPhysicalAffineP1Probes(
+                system_,
+                canonical_velocity,
+                canonical_pressure,
+                free_mixed);
+            capturePhysicalAffineProbeActions(sample, affine_probes);
+            if (capture_response_counterfactuals_) {
+                sample.canonical_pressure_ghost_residual.reserve(
+                    free_pressure.size());
+                for (const auto dof : free_pressure) {
+                    sample.canonical_pressure_ghost_residual.push_back(
+                        response_pressure_ghost_residual.at(
+                            static_cast<std::size_t>(dof)));
+                }
+
+                sample.canonical_mixed_operator_without_pressure_ghost =
+                    sample.canonical_mixed_operator;
+                sample.canonical_mixed_residual_without_pressure_ghost =
+                    sample.canonical_mixed_residual;
+                for (std::size_t row = 0u; row < free_pressure.size(); ++row) {
+                    const auto mixed_row = free_velocity.size() + row;
+                    sample.canonical_mixed_residual_without_pressure_ghost
+                        [mixed_row] -=
+                        sample.canonical_pressure_ghost_residual[row];
+                    for (std::size_t column = 0u; column < free_pressure.size();
+                         ++column) {
+                        const auto mixed_column = free_velocity.size() + column;
+                        sample.canonical_mixed_operator_without_pressure_ghost
+                            [mixed_row * free_mixed.size() + mixed_column] -=
+                            sample.canonical_pressure_ghost_operator
+                                [row * free_pressure.size() + column];
+                    }
+                }
+            }
+
+            const auto solve_response =
+                [&](const std::vector<FE::Real>& response_operator,
+                    const std::vector<FE::Real>& residual,
+                    std::string_view context,
+                    std::vector<FE::Real>& solved_state) {
+                    auto correction = residual;
+                    for (auto& value : correction) {
+                        value = -value;
+                    }
+                    auto response_solver =
+                        FE::math::factor_dense_matrix(response_operator,
+                                                      free_mixed.size(),
+                                                      std::string(context));
+                    response_solver.solve_in_place(correction,
+                                                   /*right_hand_sides=*/1u);
+                    solved_state = sample.canonical_mixed_state;
+                    for (std::size_t index = 0u; index < correction.size();
+                         ++index) {
+                        solved_state[index] += correction[index];
+                    }
+
+                    long double residual_squared = 0.0L;
+                    long double reference_squared = 0.0L;
+                    for (std::size_t row = 0u; row < free_mixed.size(); ++row) {
+                        long double value =
+                            static_cast<long double>(residual[row]);
+                        for (std::size_t column = 0u;
+                             column < free_mixed.size();
+                             ++column) {
+                            value +=
+                                static_cast<long double>(
+                                    response_operator[row * free_mixed.size() +
+                                                      column]) *
+                                static_cast<long double>(correction[column]);
+                        }
+                        residual_squared += value * value;
+                        const auto reference =
+                            static_cast<long double>(residual[row]);
+                        reference_squared += reference * reference;
+                    }
+                    return static_cast<FE::Real>(
+                        std::sqrt(residual_squared) /
+                        (64.0L * static_cast<long double>(
+                                     std::numeric_limits<FE::Real>::epsilon()) +
+                         std::sqrt(reference_squared)));
+                };
+            sample.response_linear_solve_relative_residual =
+                solve_response(sample.canonical_mixed_operator,
+                               sample.canonical_mixed_residual,
+                               "node-crossing mixed response operator",
+                               sample.canonical_mixed_solved_state);
+            if (capture_response_counterfactuals_) {
+                sample
+                    .response_without_pressure_ghost_linear_solve_relative_residual =
+                    solve_response(
+                        sample.canonical_mixed_operator_without_pressure_ghost,
+                        sample.canonical_mixed_residual_without_pressure_ghost,
+                        "node-crossing mixed response operator without "
+                        "pressure "
+                        "ghost",
+                        sample
+                            .canonical_mixed_solved_state_without_pressure_ghost);
+            }
+        } else {
+            auto reduced = sample.canonical_mixed_operator;
+            equilibrate(reduced, free_mixed.size());
+            const auto diagnostics = FE::math::dense_matrix_diagnostics(
+                reduced,
+                free_mixed.size(),
+                free_mixed.size(),
+                "equilibrated free-surface mixed Jacobian");
+            sample.equilibrated_rank = diagnostics.rank;
+            sample.equilibrated_size = free_mixed.size();
+            sample.equilibrated_smallest_singular_value =
+                diagnostics.smallest_retained_singular_value;
+            sample.equilibrated_largest_singular_value =
+                diagnostics.largest_singular_value;
+            sample.equilibrated_condition_inf =
+                infinityNormCondition(reduced, free_mixed.size());
+            sample.krylov =
+                runEquilibratedJacobiBicgstab(reduced, free_mixed.size());
+        }
 
         previous_ = solution_;
         has_previous_sample_ = true;
@@ -4165,8 +4976,7 @@ public:
 
 private:
     static constexpr int interface_marker = 27013;
-    static constexpr std::string_view domain_id =
-        "fs14_fixed_tetra_sweep";
+    static constexpr std::string_view domain_id = "fs14_fixed_tetra_sweep";
 
     std::shared_ptr<Mesh> mesh_{};
     std::shared_ptr<FE::spaces::ProductSpace> velocity_space_{};
@@ -4182,6 +4992,9 @@ private:
     int cells_per_axis_{2};
     FE::Real mesh_spacing_{1.0};
     StabilityRegime regime_{};
+    bool capture_response_{false};
+    bool small_cut_aggregation_{true};
+    bool capture_response_counterfactuals_{true};
 };
 
 struct NitscheEnergyOrientation {
@@ -9027,6 +9840,1010 @@ TEST(FreeSurfaceCutStability,
     RecordProperty(
         "wp7_node_crossing_same_count_membership_identity",
         "probabilistic_64_bit_class_tagged_cell_gid_digests");
+#endif
+}
+
+TEST(FreeSurfaceCutStability,
+     DISABLED_FixedMeshNodeCrossingOffsetRefinementDiagnostic)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP()
+        << "Node-crossing response continuity requires native mesh support.";
+#else
+    const ScopedEnvVar pressure_diagnostics(
+        "SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC", "1");
+
+    // Evaluate independent problems at symmetric offsets so that no response
+    // difference can be attributed to history or stale aggregation state.  A
+    // separate persistent pair below proves that the crossed topology change
+    // is reported.  These limits are declared before observing this fixture:
+    // linear solve residual <= 1e-10, finest paired difference <= 0.1,
+    // finest/coarsest contraction <= 0.5, and every successive halving
+    // contraction <= 0.75 for operator, residual, and solution.  The exact
+    // pressure-ghost-removal counterfactual is subject to the same limits;
+    // it subtracts the separately assembled ghost operator and residual
+    // without changing aggregation, VMS/PSPG, state, or common-DOF selection.
+    // A second exact counterfactual disables only small-cut aggregation while
+    // retaining VMS/PSPG, pressure ghost stabilization, the state, and every
+    // response gate to isolate the aggregate-space topology switch.
+    constexpr FE::Real node_x = FE::Real{4.0} / FE::Real{3.0};
+    constexpr std::array<FE::Real, 4> offsets = {{
+        FE::Real{0.08},
+        FE::Real{0.04},
+        FE::Real{0.02},
+        FE::Real{0.01},
+    }};
+    constexpr FE::Real maximum_linear_solve_relative_residual =
+        FE::Real{1.0e-10};
+    constexpr FE::Real maximum_finest_relative_difference = FE::Real{0.1};
+    constexpr FE::Real maximum_coarse_to_finest_contraction = FE::Real{0.5};
+    constexpr FE::Real maximum_successive_contraction = FE::Real{0.75};
+    const StabilityRegime regime{
+        .id = "node_crossing_linear_response",
+        .density = FE::Real{1.7},
+        .viscosity = FE::Real{0.13},
+        .dt = FE::Real{0.2},
+        .convection = false,
+        .advective_speed = FE::Real{0.0},
+    };
+
+    std::array<StabilityResponseDifference, offsets.size()> differences;
+    std::array<StabilityResponseDifference, offsets.size()>
+        differences_without_aggregation;
+    std::size_t minimum_common_dofs = std::numeric_limits<std::size_t>::max();
+    std::size_t minimum_common_dofs_without_aggregation =
+        std::numeric_limits<std::size_t>::max();
+    FE::Real maximum_observed_linear_solve_relative_residual = 0.0;
+    FE::Real
+        maximum_observed_without_pressure_ghost_linear_solve_relative_residual =
+            0.0;
+    FE::Real
+        maximum_observed_without_aggregation_linear_solve_relative_residual =
+            0.0;
+    for (std::size_t index = 0u; index < offsets.size(); ++index) {
+        const PlaneCutPosition left{"response_left_" + std::to_string(index),
+                                    {{1.0, 0.0, 0.0}},
+                                    node_x - offsets[index]};
+        const PlaneCutPosition right{"response_right_" + std::to_string(index),
+                                     {{1.0, 0.0, 0.0}},
+                                     node_x + offsets[index]};
+        SCOPED_TRACE("symmetric_offset=" + std::to_string(offsets[index]));
+
+        PersistentStabilityProblem left_problem(left,
+                                                /*cells_per_axis=*/3,
+                                                regime,
+                                                /*capture_response=*/true);
+        PersistentStabilityProblem right_problem(
+            right, /*cells_per_axis=*/3, regime, /*capture_response=*/true);
+        const auto left_sample = left_problem.evaluate(left);
+        const auto right_sample = right_problem.evaluate(right);
+
+        for (const auto* sample : {&left_sample, &right_sample}) {
+            EXPECT_TRUE(
+                std::isfinite(sample->response_linear_solve_relative_residual));
+            EXPECT_LE(sample->response_linear_solve_relative_residual,
+                      maximum_linear_solve_relative_residual);
+            EXPECT_TRUE(std::isfinite(
+                sample
+                    ->response_without_pressure_ghost_linear_solve_relative_residual));
+            EXPECT_LE(
+                sample
+                    ->response_without_pressure_ghost_linear_solve_relative_residual,
+                maximum_linear_solve_relative_residual);
+            maximum_observed_linear_solve_relative_residual =
+                std::max(maximum_observed_linear_solve_relative_residual,
+                         sample->response_linear_solve_relative_residual);
+            maximum_observed_without_pressure_ghost_linear_solve_relative_residual =
+                std::max(
+                    maximum_observed_without_pressure_ghost_linear_solve_relative_residual,
+                    sample
+                        ->response_without_pressure_ghost_linear_solve_relative_residual);
+        }
+
+        differences[index] =
+            compareCommonStabilityResponse(left_sample, right_sample);
+        minimum_common_dofs =
+            std::min(minimum_common_dofs, differences[index].common_dofs);
+        EXPECT_GT(differences[index].common_dofs, 0u);
+        EXPECT_TRUE(
+            std::isfinite(differences[index].relative_operator_difference));
+        EXPECT_TRUE(
+            std::isfinite(differences[index].relative_residual_difference));
+        EXPECT_TRUE(
+            std::isfinite(differences[index].relative_solved_state_difference));
+        EXPECT_TRUE(std::isfinite(
+            differences[index].relative_pressure_ghost_operator_difference));
+        EXPECT_TRUE(std::isfinite(
+            differences[index].relative_pressure_pspg_operator_difference));
+        EXPECT_TRUE(std::isfinite(
+            differences[index].relative_velocity_residual_difference));
+        EXPECT_TRUE(std::isfinite(
+            differences[index].relative_pressure_residual_difference));
+        EXPECT_TRUE(std::isfinite(
+            differences[index].relative_velocity_solved_state_difference));
+        EXPECT_TRUE(std::isfinite(
+            differences[index].relative_pressure_solved_state_difference));
+        EXPECT_TRUE(std::isfinite(
+            differences[index]
+                .relative_operator_without_pressure_ghost_difference));
+        EXPECT_TRUE(std::isfinite(
+            differences[index]
+                .relative_residual_without_pressure_ghost_difference));
+        EXPECT_TRUE(std::isfinite(
+            differences[index]
+                .relative_solved_state_without_pressure_ghost_difference));
+
+        PersistentStabilityProblem left_without_aggregation_problem(
+            left,
+            /*cells_per_axis=*/3,
+            regime,
+            /*capture_response=*/true,
+            /*small_cut_aggregation=*/false);
+        PersistentStabilityProblem right_without_aggregation_problem(
+            right,
+            /*cells_per_axis=*/3,
+            regime,
+            /*capture_response=*/true,
+            /*small_cut_aggregation=*/false);
+        const auto left_without_aggregation_sample =
+            left_without_aggregation_problem.evaluate(left);
+        const auto right_without_aggregation_sample =
+            right_without_aggregation_problem.evaluate(right);
+        for (const auto* sample : {&left_without_aggregation_sample,
+                                   &right_without_aggregation_sample}) {
+            EXPECT_EQ(sample->velocity_constraints.master_bearing, 0u);
+            EXPECT_EQ(sample->pressure_constraints.master_bearing, 0u);
+            EXPECT_GT(sample->pressure_ghost_norm, FE::Real{1.0e-14});
+            EXPECT_GT(sample->pspg_pressure_gradient_norm, FE::Real{1.0e-14});
+            EXPECT_TRUE(
+                std::isfinite(sample->response_linear_solve_relative_residual));
+            EXPECT_LE(sample->response_linear_solve_relative_residual,
+                      maximum_linear_solve_relative_residual);
+            maximum_observed_without_aggregation_linear_solve_relative_residual =
+                std::max(
+                    maximum_observed_without_aggregation_linear_solve_relative_residual,
+                    sample->response_linear_solve_relative_residual);
+        }
+        differences_without_aggregation[index] = compareCommonStabilityResponse(
+            left_without_aggregation_sample, right_without_aggregation_sample);
+        minimum_common_dofs_without_aggregation =
+            std::min(minimum_common_dofs_without_aggregation,
+                     differences_without_aggregation[index].common_dofs);
+        EXPECT_GT(differences_without_aggregation[index].common_dofs, 0u);
+        EXPECT_TRUE(std::isfinite(differences_without_aggregation[index]
+                                      .relative_operator_difference));
+        EXPECT_TRUE(std::isfinite(differences_without_aggregation[index]
+                                      .relative_residual_difference));
+        EXPECT_TRUE(std::isfinite(differences_without_aggregation[index]
+                                      .relative_solved_state_difference));
+    }
+
+    const PlaneCutPosition transition_left{
+        "transition_left", {{1.0, 0.0, 0.0}}, node_x - FE::Real{0.04}};
+    const PlaneCutPosition transition_right{
+        "transition_right", {{1.0, 0.0, 0.0}}, node_x + FE::Real{0.04}};
+    PersistentStabilityProblem transition_problem(transition_left,
+                                                  /*cells_per_axis=*/3,
+                                                  regime);
+    const auto transition_before = transition_problem.evaluate(transition_left);
+    const auto transition_after = transition_problem.evaluate(transition_right);
+    EXPECT_FALSE(transition_before.velocity_topology_transition.available);
+    EXPECT_FALSE(transition_before.pressure_topology_transition.available);
+    ASSERT_TRUE(transition_after.velocity_topology_transition.available);
+    ASSERT_TRUE(transition_after.pressure_topology_transition.available);
+    EXPECT_TRUE(transition_after.velocity_topology_transition.topology_changed);
+    EXPECT_TRUE(transition_after.pressure_topology_transition.topology_changed);
+    EXPECT_EQ(transition_after.velocity_topology_transition.topology_changed,
+              transition_after.pressure_topology_transition.topology_changed);
+    const std::size_t reported_changed_transition_count =
+        transition_after.pressure_topology_transition.topology_changed ? 1u
+                                                                       : 0u;
+
+    const auto contraction_ratio = [](FE::Real finest, FE::Real coarsest) {
+        constexpr FE::Real floor =
+            FE::Real{64.0} * std::numeric_limits<FE::Real>::epsilon();
+        return finest / (floor + coarsest);
+    };
+    const auto& coarsest = differences.front();
+    const auto& finest = differences.back();
+    const auto operator_contraction =
+        contraction_ratio(finest.relative_operator_difference,
+                          coarsest.relative_operator_difference);
+    const auto residual_contraction =
+        contraction_ratio(finest.relative_residual_difference,
+                          coarsest.relative_residual_difference);
+    const auto solved_state_contraction =
+        contraction_ratio(finest.relative_solved_state_difference,
+                          coarsest.relative_solved_state_difference);
+    const auto operator_without_pressure_ghost_contraction = contraction_ratio(
+        finest.relative_operator_without_pressure_ghost_difference,
+        coarsest.relative_operator_without_pressure_ghost_difference);
+    const auto residual_without_pressure_ghost_contraction = contraction_ratio(
+        finest.relative_residual_without_pressure_ghost_difference,
+        coarsest.relative_residual_without_pressure_ghost_difference);
+    const auto solved_state_without_pressure_ghost_contraction =
+        contraction_ratio(
+            finest.relative_solved_state_without_pressure_ghost_difference,
+            coarsest.relative_solved_state_without_pressure_ghost_difference);
+    const auto& coarsest_without_aggregation =
+        differences_without_aggregation.front();
+    const auto& finest_without_aggregation =
+        differences_without_aggregation.back();
+    const auto operator_without_aggregation_contraction = contraction_ratio(
+        finest_without_aggregation.relative_operator_difference,
+        coarsest_without_aggregation.relative_operator_difference);
+    const auto residual_without_aggregation_contraction = contraction_ratio(
+        finest_without_aggregation.relative_residual_difference,
+        coarsest_without_aggregation.relative_residual_difference);
+    const auto solved_state_without_aggregation_contraction = contraction_ratio(
+        finest_without_aggregation.relative_solved_state_difference,
+        coarsest_without_aggregation.relative_solved_state_difference);
+
+    std::array<FE::Real, offsets.size() - 1u>
+        successive_operator_contractions{};
+    std::array<FE::Real, offsets.size() - 1u>
+        successive_residual_contractions{};
+    std::array<FE::Real, offsets.size() - 1u>
+        successive_solved_state_contractions{};
+    std::array<FE::Real, offsets.size() - 1u>
+        successive_operator_without_pressure_ghost_contractions{};
+    std::array<FE::Real, offsets.size() - 1u>
+        successive_residual_without_pressure_ghost_contractions{};
+    std::array<FE::Real, offsets.size() - 1u>
+        successive_solved_state_without_pressure_ghost_contractions{};
+    std::array<FE::Real, offsets.size() - 1u>
+        successive_operator_without_aggregation_contractions{};
+    std::array<FE::Real, offsets.size() - 1u>
+        successive_residual_without_aggregation_contractions{};
+    std::array<FE::Real, offsets.size() - 1u>
+        successive_solved_state_without_aggregation_contractions{};
+    for (std::size_t index = 0u; index + 1u < differences.size(); ++index) {
+        successive_operator_contractions[index] = contraction_ratio(
+            differences[index + 1u].relative_operator_difference,
+            differences[index].relative_operator_difference);
+        successive_residual_contractions[index] = contraction_ratio(
+            differences[index + 1u].relative_residual_difference,
+            differences[index].relative_residual_difference);
+        successive_solved_state_contractions[index] = contraction_ratio(
+            differences[index + 1u].relative_solved_state_difference,
+            differences[index].relative_solved_state_difference);
+        successive_operator_without_pressure_ghost_contractions[index] =
+            contraction_ratio(
+                differences[index + 1u]
+                    .relative_operator_without_pressure_ghost_difference,
+                differences[index]
+                    .relative_operator_without_pressure_ghost_difference);
+        successive_residual_without_pressure_ghost_contractions[index] =
+            contraction_ratio(
+                differences[index + 1u]
+                    .relative_residual_without_pressure_ghost_difference,
+                differences[index]
+                    .relative_residual_without_pressure_ghost_difference);
+        successive_solved_state_without_pressure_ghost_contractions[index] =
+            contraction_ratio(
+                differences[index + 1u]
+                    .relative_solved_state_without_pressure_ghost_difference,
+                differences[index]
+                    .relative_solved_state_without_pressure_ghost_difference);
+        successive_operator_without_aggregation_contractions[index] =
+            contraction_ratio(differences_without_aggregation[index + 1u]
+                                  .relative_operator_difference,
+                              differences_without_aggregation[index]
+                                  .relative_operator_difference);
+        successive_residual_without_aggregation_contractions[index] =
+            contraction_ratio(differences_without_aggregation[index + 1u]
+                                  .relative_residual_difference,
+                              differences_without_aggregation[index]
+                                  .relative_residual_difference);
+        successive_solved_state_without_aggregation_contractions[index] =
+            contraction_ratio(differences_without_aggregation[index + 1u]
+                                  .relative_solved_state_difference,
+                              differences_without_aggregation[index]
+                                  .relative_solved_state_difference);
+        EXPECT_LE(successive_operator_contractions[index],
+                  maximum_successive_contraction);
+        EXPECT_LE(successive_residual_contractions[index],
+                  maximum_successive_contraction);
+        EXPECT_LE(successive_solved_state_contractions[index],
+                  maximum_successive_contraction);
+        EXPECT_LE(
+            successive_operator_without_pressure_ghost_contractions[index],
+            maximum_successive_contraction);
+        EXPECT_LE(
+            successive_residual_without_pressure_ghost_contractions[index],
+            maximum_successive_contraction);
+        EXPECT_LE(
+            successive_solved_state_without_pressure_ghost_contractions[index],
+            maximum_successive_contraction);
+        EXPECT_LE(successive_operator_without_aggregation_contractions[index],
+                  maximum_successive_contraction);
+        EXPECT_LE(successive_residual_without_aggregation_contractions[index],
+                  maximum_successive_contraction);
+        EXPECT_LE(
+            successive_solved_state_without_aggregation_contractions[index],
+            maximum_successive_contraction);
+    }
+
+    EXPECT_LE(finest.relative_operator_difference,
+              maximum_finest_relative_difference);
+    EXPECT_LE(finest.relative_residual_difference,
+              maximum_finest_relative_difference);
+    EXPECT_LE(finest.relative_solved_state_difference,
+              maximum_finest_relative_difference);
+    EXPECT_LE(operator_contraction, maximum_coarse_to_finest_contraction);
+    EXPECT_LE(residual_contraction, maximum_coarse_to_finest_contraction);
+    EXPECT_LE(solved_state_contraction, maximum_coarse_to_finest_contraction);
+    EXPECT_LE(finest.relative_operator_without_pressure_ghost_difference,
+              maximum_finest_relative_difference);
+    EXPECT_LE(finest.relative_residual_without_pressure_ghost_difference,
+              maximum_finest_relative_difference);
+    EXPECT_LE(finest.relative_solved_state_without_pressure_ghost_difference,
+              maximum_finest_relative_difference);
+    EXPECT_LE(operator_without_pressure_ghost_contraction,
+              maximum_coarse_to_finest_contraction);
+    EXPECT_LE(residual_without_pressure_ghost_contraction,
+              maximum_coarse_to_finest_contraction);
+    EXPECT_LE(solved_state_without_pressure_ghost_contraction,
+              maximum_coarse_to_finest_contraction);
+    EXPECT_LE(finest_without_aggregation.relative_operator_difference,
+              maximum_finest_relative_difference);
+    EXPECT_LE(finest_without_aggregation.relative_residual_difference,
+              maximum_finest_relative_difference);
+    EXPECT_LE(finest_without_aggregation.relative_solved_state_difference,
+              maximum_finest_relative_difference);
+    EXPECT_LE(operator_without_aggregation_contraction,
+              maximum_coarse_to_finest_contraction);
+    EXPECT_LE(residual_without_aggregation_contraction,
+              maximum_coarse_to_finest_contraction);
+    EXPECT_LE(solved_state_without_aggregation_contraction,
+              maximum_coarse_to_finest_contraction);
+    EXPECT_EQ(reported_changed_transition_count, 1u);
+
+    RecordProperty("wp7_node_crossing_response_pair_count", differences.size());
+    RecordProperty(
+        "wp7_node_crossing_response_reported_changed_transition_count",
+        reported_changed_transition_count);
+    RecordProperty("wp7_node_crossing_response_minimum_common_dof_count",
+                   minimum_common_dofs);
+    RecordProperty("wp7_node_crossing_response_without_aggregation_minimum_"
+                   "common_dof_count",
+                   minimum_common_dofs_without_aggregation);
+    RecordProperty(
+        "wp7_node_crossing_response_maximum_linear_solve_relative_residual",
+        realPropertyValue(maximum_observed_linear_solve_relative_residual));
+    RecordProperty(
+        "wp7_node_crossing_response_without_pressure_ghost_maximum_linear_"
+        "solve_"
+        "relative_residual",
+        realPropertyValue(
+            maximum_observed_without_pressure_ghost_linear_solve_relative_residual));
+    RecordProperty(
+        "wp7_node_crossing_response_without_aggregation_maximum_linear_solve_"
+        "relative_residual",
+        realPropertyValue(
+            maximum_observed_without_aggregation_linear_solve_relative_residual));
+    RecordProperty(
+        "wp7_node_crossing_response_finest_operator_relative_difference",
+        realPropertyValue(finest.relative_operator_difference));
+    RecordProperty(
+        "wp7_node_crossing_response_finest_residual_relative_difference",
+        realPropertyValue(finest.relative_residual_difference));
+    RecordProperty(
+        "wp7_node_crossing_response_finest_solved_state_relative_difference",
+        realPropertyValue(finest.relative_solved_state_difference));
+    RecordProperty(
+        "wp7_node_crossing_response_without_pressure_ghost_finest_operator_"
+        "relative_difference",
+        realPropertyValue(
+            finest.relative_operator_without_pressure_ghost_difference));
+    RecordProperty(
+        "wp7_node_crossing_response_without_pressure_ghost_finest_residual_"
+        "relative_difference",
+        realPropertyValue(
+            finest.relative_residual_without_pressure_ghost_difference));
+    RecordProperty(
+        "wp7_node_crossing_response_without_pressure_ghost_finest_solved_state_"
+        "relative_difference",
+        realPropertyValue(
+            finest.relative_solved_state_without_pressure_ghost_difference));
+    RecordProperty(
+        "wp7_node_crossing_response_without_aggregation_finest_"
+        "operator_relative_difference",
+        realPropertyValue(
+            finest_without_aggregation.relative_operator_difference));
+    RecordProperty(
+        "wp7_node_crossing_response_without_aggregation_finest_"
+        "residual_relative_difference",
+        realPropertyValue(
+            finest_without_aggregation.relative_residual_difference));
+    RecordProperty(
+        "wp7_node_crossing_response_without_aggregation_finest_solved_state_"
+        "relative_difference",
+        realPropertyValue(
+            finest_without_aggregation.relative_solved_state_difference));
+    RecordProperty("wp7_node_crossing_response_operator_contraction_ratio",
+                   realPropertyValue(operator_contraction));
+    RecordProperty("wp7_node_crossing_response_residual_contraction_ratio",
+                   realPropertyValue(residual_contraction));
+    RecordProperty("wp7_node_crossing_response_solved_state_contraction_ratio",
+                   realPropertyValue(solved_state_contraction));
+    RecordProperty(
+        "wp7_node_crossing_response_without_pressure_ghost_operator_"
+        "contraction_"
+        "ratio",
+        realPropertyValue(operator_without_pressure_ghost_contraction));
+    RecordProperty(
+        "wp7_node_crossing_response_without_pressure_ghost_residual_"
+        "contraction_"
+        "ratio",
+        realPropertyValue(residual_without_pressure_ghost_contraction));
+    RecordProperty(
+        "wp7_node_crossing_response_without_pressure_ghost_solved_state_"
+        "contraction_ratio",
+        realPropertyValue(solved_state_without_pressure_ghost_contraction));
+    RecordProperty("wp7_node_crossing_response_without_aggregation_operator_"
+                   "contraction_ratio",
+                   realPropertyValue(operator_without_aggregation_contraction));
+    RecordProperty("wp7_node_crossing_response_without_aggregation_residual_"
+                   "contraction_ratio",
+                   realPropertyValue(residual_without_aggregation_contraction));
+    RecordProperty(
+        "wp7_node_crossing_response_without_aggregation_solved_state_"
+        "contraction_"
+        "ratio",
+        realPropertyValue(solved_state_without_aggregation_contraction));
+    RecordProperty(
+        "wp7_node_crossing_response_maximum_successive_operator_contraction",
+        realPropertyValue(
+            *std::max_element(successive_operator_contractions.begin(),
+                              successive_operator_contractions.end())));
+    RecordProperty(
+        "wp7_node_crossing_response_maximum_successive_residual_contraction",
+        realPropertyValue(
+            *std::max_element(successive_residual_contractions.begin(),
+                              successive_residual_contractions.end())));
+    RecordProperty("wp7_node_crossing_response_maximum_successive_solved_state_"
+                   "contraction",
+                   realPropertyValue(*std::max_element(
+                       successive_solved_state_contractions.begin(),
+                       successive_solved_state_contractions.end())));
+    RecordProperty(
+        "wp7_node_crossing_response_without_pressure_ghost_maximum_successive_"
+        "operator_contraction",
+        realPropertyValue(*std::max_element(
+            successive_operator_without_pressure_ghost_contractions.begin(),
+            successive_operator_without_pressure_ghost_contractions.end())));
+    RecordProperty(
+        "wp7_node_crossing_response_without_pressure_ghost_maximum_successive_"
+        "residual_contraction",
+        realPropertyValue(*std::max_element(
+            successive_residual_without_pressure_ghost_contractions.begin(),
+            successive_residual_without_pressure_ghost_contractions.end())));
+    RecordProperty(
+        "wp7_node_crossing_response_without_pressure_ghost_maximum_successive_"
+        "solved_state_contraction",
+        realPropertyValue(*std::max_element(
+            successive_solved_state_without_pressure_ghost_contractions.begin(),
+            successive_solved_state_without_pressure_ghost_contractions
+                .end())));
+    RecordProperty(
+        "wp7_node_crossing_response_without_aggregation_maximum_successive_"
+        "operator_contraction",
+        realPropertyValue(*std::max_element(
+            successive_operator_without_aggregation_contractions.begin(),
+            successive_operator_without_aggregation_contractions.end())));
+    RecordProperty(
+        "wp7_node_crossing_response_without_aggregation_maximum_successive_"
+        "residual_contraction",
+        realPropertyValue(*std::max_element(
+            successive_residual_without_aggregation_contractions.begin(),
+            successive_residual_without_aggregation_contractions.end())));
+    RecordProperty(
+        "wp7_node_crossing_response_without_aggregation_maximum_successive_"
+        "solved_state_contraction",
+        realPropertyValue(*std::max_element(
+            successive_solved_state_without_aggregation_contractions.begin(),
+            successive_solved_state_without_aggregation_contractions.end())));
+    for (std::size_t index = 0u; index < differences.size(); ++index) {
+        const auto suffix = std::to_string(index);
+        RecordProperty(("wp7_node_crossing_response_offset_" + suffix).c_str(),
+                       realPropertyValue(offsets[index]));
+        RecordProperty(
+            ("wp7_node_crossing_response_operator_difference_" + suffix)
+                .c_str(),
+            realPropertyValue(differences[index].relative_operator_difference));
+        RecordProperty(
+            ("wp7_node_crossing_response_residual_difference_" + suffix)
+                .c_str(),
+            realPropertyValue(differences[index].relative_residual_difference));
+        RecordProperty(
+            ("wp7_node_crossing_response_solved_state_difference_" + suffix)
+                .c_str(),
+            realPropertyValue(
+                differences[index].relative_solved_state_difference));
+        RecordProperty(
+            ("wp7_node_crossing_response_pressure_ghost_difference_" + suffix)
+                .c_str(),
+            realPropertyValue(
+                differences[index]
+                    .relative_pressure_ghost_operator_difference));
+        RecordProperty(
+            ("wp7_node_crossing_response_pressure_pspg_difference_" + suffix)
+                .c_str(),
+            realPropertyValue(
+                differences[index].relative_pressure_pspg_operator_difference));
+        RecordProperty(
+            ("wp7_node_crossing_response_velocity_residual_difference_" +
+             suffix)
+                .c_str(),
+            realPropertyValue(
+                differences[index].relative_velocity_residual_difference));
+        RecordProperty(
+            ("wp7_node_crossing_response_pressure_residual_difference_" +
+             suffix)
+                .c_str(),
+            realPropertyValue(
+                differences[index].relative_pressure_residual_difference));
+        RecordProperty(
+            ("wp7_node_crossing_response_velocity_solved_state_difference_" +
+             suffix)
+                .c_str(),
+            realPropertyValue(
+                differences[index].relative_velocity_solved_state_difference));
+        RecordProperty(
+            ("wp7_node_crossing_response_pressure_solved_state_difference_" +
+             suffix)
+                .c_str(),
+            realPropertyValue(
+                differences[index].relative_pressure_solved_state_difference));
+        RecordProperty(
+            ("wp7_node_crossing_response_without_pressure_ghost_operator_"
+             "difference_" +
+             suffix)
+                .c_str(),
+            realPropertyValue(
+                differences[index]
+                    .relative_operator_without_pressure_ghost_difference));
+        RecordProperty(
+            ("wp7_node_crossing_response_without_pressure_ghost_residual_"
+             "difference_" +
+             suffix)
+                .c_str(),
+            realPropertyValue(
+                differences[index]
+                    .relative_residual_without_pressure_ghost_difference));
+        RecordProperty(
+            ("wp7_node_crossing_response_without_pressure_ghost_solved_state_"
+             "difference_" +
+             suffix)
+                .c_str(),
+            realPropertyValue(
+                differences[index]
+                    .relative_solved_state_without_pressure_ghost_difference));
+        RecordProperty(("wp7_node_crossing_response_without_aggregation_"
+                        "operator_difference_" +
+                        suffix)
+                           .c_str(),
+                       realPropertyValue(differences_without_aggregation[index]
+                                             .relative_operator_difference));
+        RecordProperty(("wp7_node_crossing_response_without_aggregation_"
+                        "residual_difference_" +
+                        suffix)
+                           .c_str(),
+                       realPropertyValue(differences_without_aggregation[index]
+                                             .relative_residual_difference));
+        RecordProperty(
+            ("wp7_node_crossing_response_without_aggregation_solved_"
+             "state_difference_" +
+             suffix)
+                .c_str(),
+            realPropertyValue(differences_without_aggregation[index]
+                                  .relative_solved_state_difference));
+        if (index + 1u < differences.size()) {
+            RecordProperty(
+                ("wp7_node_crossing_response_successive_operator_contraction_" +
+                 suffix)
+                    .c_str(),
+                realPropertyValue(successive_operator_contractions[index]));
+            RecordProperty(
+                ("wp7_node_crossing_response_successive_residual_contraction_" +
+                 suffix)
+                    .c_str(),
+                realPropertyValue(successive_residual_contractions[index]));
+            RecordProperty(
+                ("wp7_node_crossing_response_successive_solved_state_"
+                 "contraction_" +
+                 suffix)
+                    .c_str(),
+                realPropertyValue(successive_solved_state_contractions[index]));
+            RecordProperty(
+                ("wp7_node_crossing_response_without_pressure_ghost_successive_"
+                 "operator_contraction_" +
+                 suffix)
+                    .c_str(),
+                realPropertyValue(
+                    successive_operator_without_pressure_ghost_contractions
+                        [index]));
+            RecordProperty(
+                ("wp7_node_crossing_response_without_pressure_ghost_successive_"
+                 "residual_contraction_" +
+                 suffix)
+                    .c_str(),
+                realPropertyValue(
+                    successive_residual_without_pressure_ghost_contractions
+                        [index]));
+            RecordProperty(
+                ("wp7_node_crossing_response_without_pressure_ghost_successive_"
+                 "solved_state_contraction_" +
+                 suffix)
+                    .c_str(),
+                realPropertyValue(
+                    successive_solved_state_without_pressure_ghost_contractions
+                        [index]));
+            RecordProperty(
+                ("wp7_node_crossing_response_without_aggregation_successive_"
+                 "operator_"
+                 "contraction_" +
+                 suffix)
+                    .c_str(),
+                realPropertyValue(
+                    successive_operator_without_aggregation_contractions
+                        [index]));
+            RecordProperty(
+                ("wp7_node_crossing_response_without_aggregation_successive_"
+                 "residual_"
+                 "contraction_" +
+                 suffix)
+                    .c_str(),
+                realPropertyValue(
+                    successive_residual_without_aggregation_contractions
+                        [index]));
+            RecordProperty(
+                ("wp7_node_crossing_response_without_aggregation_successive_"
+                 "solved_"
+                 "state_contraction_" +
+                 suffix)
+                    .c_str(),
+                realPropertyValue(
+                    successive_solved_state_without_aggregation_contractions
+                        [index]));
+        }
+    }
+#endif
+}
+
+TEST(FreeSurfaceCutStability,
+     ContinuousNodeCrossingHasNoUnreportedOperatorOrSolutionJump)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP()
+        << "Node-crossing response convergence requires native mesh support.";
+#else
+    const ScopedEnvVar pressure_diagnostics(
+        "SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC", "1");
+
+    // Cross the same physical node plane on successively refined meshes. The
+    // symmetric distance is a fixed fraction of h, so the aggregate-space
+    // switch is exercised at every level while the physical perturbation
+    // vanishes. Operator and residual responses are actions on the same 16
+    // physical affine P1 probes on both sides; raw reduced-coordinate blocks
+    // remain diagnostics because aggregation changes their basis. These
+    // limits are fixed before execution: exact dense solves must reach 1e-10
+    // relative residual, no adjacent response may grow by more than 10%,
+    // every global response order must be at least 0.2, and the finest
+    // operator, residual, and solved-state differences must be no larger than
+    // 0.60, 0.65, and 0.20, respectively.
+    constexpr FE::Real node_x = FE::Real{1.0};
+    constexpr FE::Real offset_over_h = FE::Real{0.04};
+    constexpr std::array<int, 3> cells_per_axis = {{4, 6, 8}};
+    constexpr FE::Real maximum_linear_solve_relative_residual =
+        FE::Real{1.0e-10};
+    constexpr FE::Real maximum_adjacent_growth = FE::Real{1.10};
+    constexpr FE::Real minimum_global_observed_order = FE::Real{0.20};
+    constexpr FE::Real maximum_finest_operator_difference = FE::Real{0.60};
+    constexpr FE::Real maximum_finest_residual_difference = FE::Real{0.65};
+    constexpr FE::Real maximum_finest_solved_state_difference = FE::Real{0.20};
+
+    StabilityRegime regime;
+    regime.dt = FE::Real{0.2};
+    regime.density = FE::Real{1.0};
+    regime.viscosity = FE::Real{0.05};
+    regime.advective_speed = FE::Real{0.4};
+    regime.convection = false;
+
+    std::array<StabilityResponseDifference, cells_per_axis.size()>
+        differences{};
+    std::array<FE::Real, cells_per_axis.size()> mesh_spacings{};
+    std::array<FE::Real, cells_per_axis.size()> offsets{};
+    std::array<FE::Real, cells_per_axis.size()> physical_volume_jumps{};
+    std::array<std::size_t, cells_per_axis.size()> common_dof_counts{};
+    FE::Real maximum_observed_linear_solve_relative_residual{0.0};
+    std::size_t reported_changed_transition_count{0u};
+
+    for (std::size_t level = 0u; level < cells_per_axis.size(); ++level) {
+        const int resolution = cells_per_axis[level];
+        const FE::Real h = FE::Real{2.0} / static_cast<FE::Real>(resolution);
+        const FE::Real offset = offset_over_h * h;
+        mesh_spacings[level] = h;
+        offsets[level] = offset;
+        const PlaneCutPosition left{
+            "refined_node_left_" + std::to_string(resolution),
+            {{FE::Real{1.0}, FE::Real{0.0}, FE::Real{0.0}}},
+            node_x - offset};
+        const PlaneCutPosition right{
+            "refined_node_right_" + std::to_string(resolution),
+            {{FE::Real{1.0}, FE::Real{0.0}, FE::Real{0.0}}},
+            node_x + offset};
+        SCOPED_TRACE("cells_per_axis=" + std::to_string(resolution));
+
+        PersistentStabilityProblem problem(
+            left,
+            resolution,
+            regime,
+            /*capture_response=*/true,
+            /*small_cut_aggregation=*/true,
+            /*capture_response_counterfactuals=*/false);
+        const auto left_sample = problem.evaluate(left);
+        const auto right_sample = problem.evaluate(right);
+
+        EXPECT_FALSE(left_sample.velocity_topology_transition.available);
+        EXPECT_FALSE(left_sample.pressure_topology_transition.available);
+        ASSERT_TRUE(right_sample.velocity_topology_transition.available);
+        ASSERT_TRUE(right_sample.pressure_topology_transition.available);
+        EXPECT_TRUE(right_sample.velocity_topology_transition.topology_changed);
+        EXPECT_TRUE(right_sample.pressure_topology_transition.topology_changed);
+        EXPECT_EQ(right_sample.velocity_topology_transition.topology_changed,
+                  right_sample.pressure_topology_transition.topology_changed);
+        EXPECT_EQ(right_sample.velocity_topology_transition
+                      .feature_class_fingerprint_before,
+                  right_sample.pressure_topology_transition
+                      .feature_class_fingerprint_before);
+        EXPECT_EQ(right_sample.velocity_topology_transition
+                      .feature_class_fingerprint_after,
+                  right_sample.pressure_topology_transition
+                      .feature_class_fingerprint_after);
+        EXPECT_NE(right_sample.pressure_topology_transition
+                      .feature_class_fingerprint_before,
+                  right_sample.pressure_topology_transition
+                      .feature_class_fingerprint_after);
+        reported_changed_transition_count += static_cast<std::size_t>(
+            right_sample.pressure_topology_transition.topology_changed);
+
+        for (const auto* sample : {&left_sample, &right_sample}) {
+            ASSERT_TRUE(
+                std::isfinite(sample->response_linear_solve_relative_residual));
+            EXPECT_LE(sample->response_linear_solve_relative_residual,
+                      maximum_linear_solve_relative_residual);
+            maximum_observed_linear_solve_relative_residual =
+                std::max(maximum_observed_linear_solve_relative_residual,
+                         sample->response_linear_solve_relative_residual);
+            EXPECT_GT(sample->pressure_ghost_norm, FE::Real{1.0e-14});
+            EXPECT_GT(sample->pspg_pressure_gradient_norm, FE::Real{1.0e-14});
+            EXPECT_EQ(sample->backend_fallback_cells, 0u);
+            EXPECT_EQ(sample->pruned_volume_rules, 0u);
+            EXPECT_GT(sample->affine_probe_constraint_line_count, 0u);
+            EXPECT_EQ(
+                sample->affine_probe_constraint_line_count,
+                sample->velocity_constraints.master_bearing +
+                    sample->pressure_constraints.master_bearing);
+            EXPECT_GT(sample->affine_probe_constraint_roundoff_bound,
+                      FE::Real{0.0});
+            EXPECT_LE(sample->affine_probe_constraint_reproduction_error,
+                      sample->affine_probe_constraint_roundoff_bound);
+        }
+
+        differences[level] = compareCommonStabilityResponse(
+            left_sample,
+            right_sample,
+            /*include_pressure_ghost_counterfactual=*/false);
+        common_dof_counts[level] = differences[level].common_dofs;
+        EXPECT_GT(common_dof_counts[level], 0u);
+        EXPECT_TRUE(
+            std::isfinite(differences[level].relative_operator_difference));
+        EXPECT_TRUE(
+            std::isfinite(differences[level].relative_residual_difference));
+        EXPECT_TRUE(std::isfinite(
+            differences[level].relative_affine_probe_operator_difference));
+        EXPECT_TRUE(std::isfinite(
+            differences[level].relative_affine_probe_residual_difference));
+        EXPECT_TRUE(
+            std::isfinite(differences[level].relative_solved_state_difference));
+
+        const FE::Real expected_volume_jump = FE::Real{8.0} * offset;
+        physical_volume_jumps[level] = right_sample.physical_active_volume -
+                                       left_sample.physical_active_volume;
+        const FE::Real volume_tolerance =
+            FE::Real{2.0e-10} * std::max(FE::Real{1.0}, expected_volume_jump);
+        EXPECT_NEAR(physical_volume_jumps[level],
+                    expected_volume_jump,
+                    volume_tolerance);
+
+        const auto suffix = std::to_string(level);
+        RecordProperty(
+            ("wp7_node_crossing_refined_cells_per_axis_" + suffix).c_str(),
+            resolution);
+        RecordProperty(
+            ("wp7_node_crossing_refined_mesh_spacing_" + suffix).c_str(),
+            realPropertyValue(h));
+        RecordProperty(("wp7_node_crossing_refined_offset_" + suffix).c_str(),
+                       realPropertyValue(offset));
+        RecordProperty(
+            ("wp7_node_crossing_refined_operator_difference_" + suffix).c_str(),
+            realPropertyValue(
+                differences[level].relative_affine_probe_operator_difference));
+        RecordProperty(
+            ("wp7_node_crossing_refined_residual_difference_" + suffix).c_str(),
+            realPropertyValue(
+                differences[level].relative_affine_probe_residual_difference));
+        RecordProperty(
+            ("wp7_node_crossing_refined_raw_reduced_operator_difference_" +
+             suffix)
+                .c_str(),
+            realPropertyValue(differences[level].relative_operator_difference));
+        RecordProperty(
+            ("wp7_node_crossing_refined_raw_reduced_residual_difference_" +
+             suffix)
+                .c_str(),
+            realPropertyValue(differences[level].relative_residual_difference));
+        RecordProperty(
+            ("wp7_node_crossing_refined_raw_reduced_velocity_residual_"
+             "difference_" + suffix)
+                .c_str(),
+            realPropertyValue(
+                differences[level].relative_velocity_residual_difference));
+        RecordProperty(
+            ("wp7_node_crossing_refined_raw_reduced_pressure_residual_"
+             "difference_" + suffix)
+                .c_str(),
+            realPropertyValue(
+                differences[level].relative_pressure_residual_difference));
+        RecordProperty(
+            ("wp7_node_crossing_refined_raw_reduced_residual_difference_norm_" +
+             suffix)
+                .c_str(),
+            realPropertyValue(differences[level].residual_difference_norm));
+        RecordProperty(
+            ("wp7_node_crossing_refined_raw_reduced_residual_reference_norm_" +
+             suffix)
+                .c_str(),
+            realPropertyValue(differences[level].residual_reference_norm));
+        RecordProperty(
+            ("wp7_node_crossing_refined_raw_reduced_velocity_residual_"
+             "difference_norm_" + suffix)
+                .c_str(),
+            realPropertyValue(
+                differences[level].velocity_residual_difference_norm));
+        RecordProperty(
+            ("wp7_node_crossing_refined_raw_reduced_velocity_residual_"
+             "reference_norm_" + suffix)
+                .c_str(),
+            realPropertyValue(
+                differences[level].velocity_residual_reference_norm));
+        RecordProperty(
+            ("wp7_node_crossing_refined_raw_reduced_pressure_residual_"
+             "difference_norm_" + suffix)
+                .c_str(),
+            realPropertyValue(
+                differences[level].pressure_residual_difference_norm));
+        RecordProperty(
+            ("wp7_node_crossing_refined_raw_reduced_pressure_residual_"
+             "reference_norm_" + suffix)
+                .c_str(),
+            realPropertyValue(
+                differences[level].pressure_residual_reference_norm));
+        RecordProperty(
+            ("wp7_node_crossing_refined_solved_state_difference_" + suffix)
+                .c_str(),
+            realPropertyValue(
+                differences[level].relative_solved_state_difference));
+        RecordProperty(
+            ("wp7_node_crossing_refined_physical_volume_jump_" + suffix)
+                .c_str(),
+            realPropertyValue(physical_volume_jumps[level]));
+        RecordProperty(
+            ("wp7_node_crossing_refined_common_dof_count_" + suffix).c_str(),
+            common_dof_counts[level]);
+        RecordProperty(
+            ("wp7_node_crossing_refined_left_affine_constraint_line_count_" +
+             suffix)
+                .c_str(),
+            left_sample.affine_probe_constraint_line_count);
+        RecordProperty(
+            ("wp7_node_crossing_refined_right_affine_constraint_line_count_" +
+             suffix)
+                .c_str(),
+            right_sample.affine_probe_constraint_line_count);
+        RecordProperty(
+            ("wp7_node_crossing_refined_affine_constraint_reproduction_error_" +
+             suffix)
+                .c_str(),
+            realPropertyValue(std::max(
+                left_sample.affine_probe_constraint_reproduction_error,
+                right_sample.affine_probe_constraint_reproduction_error)));
+        RecordProperty(
+            ("wp7_node_crossing_refined_affine_constraint_roundoff_bound_" +
+             suffix)
+                .c_str(),
+            realPropertyValue(std::max(
+                left_sample.affine_probe_constraint_roundoff_bound,
+                right_sample.affine_probe_constraint_roundoff_bound)));
+    }
+
+    const auto response_value = [](const auto& difference,
+                                   std::size_t response) {
+        if (response == 0u) {
+            return difference.relative_affine_probe_operator_difference;
+        }
+        if (response == 1u) {
+            return difference.relative_affine_probe_residual_difference;
+        }
+        return difference.relative_solved_state_difference;
+    };
+    const auto contraction = [](FE::Real fine, FE::Real coarse) {
+        constexpr FE::Real floor =
+            FE::Real{64.0} * std::numeric_limits<FE::Real>::epsilon();
+        return fine / (floor + coarse);
+    };
+    const auto observed_order = [](FE::Real coarse_value,
+                                   FE::Real fine_value,
+                                   FE::Real coarse_h,
+                                   FE::Real fine_h) {
+        constexpr FE::Real floor =
+            FE::Real{64.0} * std::numeric_limits<FE::Real>::epsilon();
+        return std::log((floor + coarse_value) / (floor + fine_value)) /
+               std::log(coarse_h / fine_h);
+    };
+
+    std::array<FE::Real, 3> global_orders{};
+    std::array<FE::Real, 3> maximum_adjacent_growths{};
+    for (std::size_t response = 0u; response < 3u; ++response) {
+        global_orders[response] =
+            observed_order(response_value(differences.front(), response),
+                           response_value(differences.back(), response),
+                           mesh_spacings.front(),
+                           mesh_spacings.back());
+        EXPECT_TRUE(std::isfinite(global_orders[response]));
+        EXPECT_GE(global_orders[response], minimum_global_observed_order);
+        for (std::size_t level = 1u; level < differences.size(); ++level) {
+            maximum_adjacent_growths[response] = std::max(
+                maximum_adjacent_growths[response],
+                contraction(response_value(differences[level], response),
+                            response_value(differences[level - 1u], response)));
+        }
+        EXPECT_LE(maximum_adjacent_growths[response], maximum_adjacent_growth);
+    }
+
+    const auto& finest = differences.back();
+    EXPECT_LE(finest.relative_affine_probe_operator_difference,
+              maximum_finest_operator_difference);
+    EXPECT_LE(finest.relative_affine_probe_residual_difference,
+              maximum_finest_residual_difference);
+    EXPECT_LE(finest.relative_solved_state_difference,
+              maximum_finest_solved_state_difference);
+    EXPECT_EQ(reported_changed_transition_count, cells_per_axis.size());
+    EXPECT_LT(common_dof_counts.front(), common_dof_counts.back());
+
+    RecordProperty("wp7_node_crossing_refined_level_count",
+                   cells_per_axis.size());
+    RecordProperty(
+        "wp7_node_crossing_refined_reported_changed_transition_count",
+        reported_changed_transition_count);
+    RecordProperty(
+        "wp7_node_crossing_refined_maximum_linear_solve_relative_residual",
+        realPropertyValue(maximum_observed_linear_solve_relative_residual));
+    RecordProperty("wp7_node_crossing_refined_operator_global_order",
+                   realPropertyValue(global_orders[0]));
+    RecordProperty("wp7_node_crossing_refined_residual_global_order",
+                   realPropertyValue(global_orders[1]));
+    RecordProperty("wp7_node_crossing_refined_solved_state_global_order",
+                   realPropertyValue(global_orders[2]));
+    RecordProperty("wp7_node_crossing_refined_operator_maximum_adjacent_growth",
+                   realPropertyValue(maximum_adjacent_growths[0]));
+    RecordProperty("wp7_node_crossing_refined_residual_maximum_adjacent_growth",
+                   realPropertyValue(maximum_adjacent_growths[1]));
+    RecordProperty(
+        "wp7_node_crossing_refined_solved_state_maximum_adjacent_growth",
+        realPropertyValue(maximum_adjacent_growths[2]));
 #endif
 }
 

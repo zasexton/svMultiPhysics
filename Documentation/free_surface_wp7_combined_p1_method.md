@@ -207,12 +207,172 @@ slave churn. The direct constraint regression
 holds feature membership and class counts fixed while swapping the physical
 full/cut cell identities, and checks the class digests plus before/after source
 and ordinal provenance. Existing rollback coverage additionally checks that
-the checkpoint restores the ordinal with the report. This source slice was
-added under the repository memory gate and has not been built or executed in
-this worktree. It is deliberately not the frozen prospective test
-`FreeSurfaceCutStability.ContinuousNodeCrossingHasNoUnreportedOperatorOrSolutionJump`:
-the ledger compares neither assembled operators nor solved states, so the full
-node-crossing exit and every qualification claim remain open.
+the checkpoint restores the ordinal with the report.
+
+The response-continuity source slice adds the formerly prospective regression
+`FreeSurfaceCutStability.ContinuousNodeCrossingHasNoUnreportedOperatorOrSolutionJump`.
+It evaluates four independent pairs at symmetric distances `0.08`, `0.04`,
+`0.02`, and `0.01` from the interior node plane `x=4/3` on the three-cell mesh.
+Every member starts from the same deterministic affine P1 velocity and pressure
+state in a nonconvective transient Stokes regime. The fixture assembles the
+unscaled constrained mixed operator and residual, computes the exact dense
+linear response on the retained free space, and compares only common physical
+degrees of freedom across the left and right topology. A separate persistent
+left-to-right pair must report the crossed aggregate topology change.
+
+The limits were fixed before execution: each of the eight dense solves has
+relative residual at most `1e-10`; the finest common-space operator, residual,
+and solved-state relative differences are each at most `0.1`; and each
+finest-to-coarsest ratio is at most `0.5`. Before the final result was
+observed, the gate was strengthened to require every adjacent offset-halving
+ratio to be at most `0.75`. These finite limits reject a hidden nonvanishing
+jump but are not a smooth-parameter theorem, a production-preconditioner
+result, or a simulation exit.
+
+The first immutable focused execution, job `41265718`, failed numerically
+despite all eight dense solves reaching relative residual at most
+`2.070216710331556e-15` and the persistent pair reporting exactly one topology
+change. At the finest offset, the operator, residual, and solved-state
+differences were `0.66988818148593277`, `0.77857463897704082`, and
+`0.18804222079955726`; their finest-to-coarsest ratios were
+`1.0992459269515737`, `0.99285930834981029`, and `0.95811454707512655`.
+None of the adjacent ratios met the predeclared `0.75` contraction limit.
+
+Job `41269422` reran the unchanged response with stabilization-block and field-
+block diagnostics. From offsets `0.08` through `0.01`, the relative pressure-
+ghost operator difference was `0.97307941524760511`,
+`0.98247236791864268`, `0.98373757165775411`, and
+`0.98420843042668993`; the pressure PSPG operator difference was
+`0.50248075907081491`, `0.53929178053539573`,
+`0.55658494296529437`, and `0.56495185065523701`. At the finest offset,
+the velocity and pressure residual differences were `0.79858068161174101`
+and `0.57342030954104461`, while the velocity and pressure solved-state
+differences were `0.023646448833889888` and `0.47415493834706302`.
+This localizes a discontinuous facet-stabilization block and a pressure-led
+state response, while also showing that PSPG and the constrained velocity
+residual cannot yet be assumed continuous.
+
+The strong whole-cut-band aggregation ablation in job `41268899` did not
+repair the response. Its finest operator, residual, and solved-state
+differences worsened to `0.780146`, `0.862462`, and `0.227646`, with
+finest-to-coarsest ratios `0.960079`, `1.001266`, and `0.981122`. That mode is
+retained as failed ablation evidence and is not a selected method.
+
+The exact pressure-ghost-removal counterfactual subtracts only the separately
+assembled pressure-ghost operator and residual from each already assembled
+mixed response. It leaves aggregation, VMS/PSPG, the affine state, topology,
+and common-DOF selection unchanged and subjects the adjusted dense solves to
+the same predeclared `1e-10`, `0.1`, `0.5`, and `0.75` limits. Job `41270464`
+failed decisively despite an exact-solve relative residual no larger than
+`9.106019225462806e-16`. Its finest operator, residual, and solved-state
+differences were `0.66934512178152927`, `0.77857463897704082`, and
+`0.17825037579845354`; the corresponding coarse-to-finest ratios were
+`1.0990466415161013`, `0.99285930834981029`, and
+`0.93430647511155041`. Maximum adjacent ratios were
+`1.058631642852865`, `0.99990715145582587`, and
+`0.9927692935966993`. Pressure-ghost removal therefore neither removes nor
+makes the jump contract under offset refinement and is rejected as a method
+change.
+
+The next bounded counterfactual disables only small-cut aggregation while
+retaining pressure-ghost stabilization, VMS/PSPG, the deterministic affine
+state, the independent symmetric problems, common-DOF comparison, and every
+predeclared response limit. Both field blocks must report zero aggregate
+slave constraints, both retained stabilization blocks must remain nonzero,
+and every dense solve must meet the unchanged `1e-10` residual limit. This
+isolates whether the aggregate trial/test-space switch is the persistent jump
+source; it does not select an aggregation-free production method or change any
+qualification or closure state before execution and the complete frozen
+matrix. Initial job `41272546` stopped before the counterfactual response was
+formed because the no-aggregation fixture still requested an aggregation-only
+transition record; it produced no method metric and is not physical evidence.
+The retry with that irrelevant query disabled, job `41273182`, formed every
+response and reached a maximum dense-solve relative residual of
+`1.1737989171366622e-15`. With aggregation disabled, the finest operator,
+residual, and solved-state differences were `0.066963038496607258`,
+`0.025175066644206524`, and `0.069176964899505158`. Their coarse-to-finest
+ratios were `0.39029413586112305`, `0.13335548124667368`, and
+`0.5968579939926022`; the maximum adjacent ratios were
+`0.89682848891260314`, `0.51929368485842009`, and
+`0.94270202811795833`. Removing aggregation therefore makes the operator and
+residual responses much smaller, but the solved state still approaches a
+nonzero fixed-mesh jump too slowly to satisfy the predeclared response gate.
+This is failed ablation evidence, not a selected method.
+
+The three fixed-mesh ablations also expose a flaw in the acceptance sequence:
+offset refinement at constant `h` repeatedly crosses the same discontinuous
+aggregate-space switch. It cannot establish whether that switch vanishes
+under physical mesh refinement. The fixed-mesh test is retained as a disabled
+diagnostic, while the acceptance test crosses the same physical node on a
+sequence of refined meshes, uses an offset proportional to `h`, and requires
+the operator, residual, and solved-state jumps to converge while every actual
+aggregate-topology change remains reported.
+
+The rooted physical-refinement test uses `4`, `6`, and `8` cells per axis,
+crosses `x=1` at symmetric distance `0.04 h`, and fixes its gates before
+execution: dense-solve relative residual at most `1e-10`, adjacent growth at
+most `1.10`, global order at least `0.20`, and finest operator, residual, and
+solved-state differences at most `0.60`, `0.65`, and `0.20`. Job `41275455`
+first exposed that the operator and solved state passed while the residual
+coordinate did not. The isolated immutable diagnostic job `41276518`
+reproduced that result from an unchanged source hash. The raw reduced operator
+differences were `0.66837491311399466`, `0.59695269865934153`, and
+`0.55147552700110425`; solved-state differences were
+`0.090282139412239948`, `0.037126430228979719`, and
+`0.022081613219203326`. Their global orders were `0.27736071976332538` and
+`2.0315950313006996`, and their maximum adjacent growth factors were
+`0.92381779702079458` and `0.59476801521194089`. Every level reported the
+actual topology change, no rule was pruned, no backend fallback occurred, the
+physical volume jumps were `0.16000000000000503`,
+`0.10666666666667846`, and `0.07999999999999341`, and the maximum exact-solve
+relative residual was `1.7670895540162012e-14`.
+
+The failing raw reduced residual differences were `0.54743877416024689`,
+`0.6612192115855795`, and `0.67583560435098922`, giving global order
+`-0.30397473455497698`, maximum adjacent growth `1.2078413930395246`, and a
+finest value above `0.65`. Their absolute difference norms were instead
+`0.20290148255193544`, `0.20399229067654656`, and
+`0.16846335821940436`, while the corresponding reference norms decreased from
+`0.37063776284968469` to `0.24926677010627693`. This distinction identifies a
+coordinate-comparison defect rather than evidence that the assembled physical
+residual work itself jumps.
+
+If the closed aggregate constraints are written as `u_full = C u_free`, the
+assembled reduced residual and operator are `r_free = C^T r_full` and
+`A_free = C^T A_full C`. When the aggregate slave set changes, the same master
+coordinate vector selects a different physical test function because its
+column of `C` absorbs different slaves. Entrywise or Euclidean comparison of
+raw reduced residual coordinates therefore compares different bases. The
+corrected acceptance metric evaluates both residuals and operators on the same
+physical affine P1 probe space: `{1,x,y,z}` for each of three velocity
+components and pressure, for 16 probes total. For probe coefficient vectors
+`v` and `w`, it compares `v^T r_free` and `v^T A_free w`. Every master-bearing
+aggregate line must independently reproduce all four scalar affine modes to a
+row-scaled roundoff bound. Raw reduced-coordinate differences remain recorded
+as diagnostics, and none of the predeclared response thresholds is changed.
+
+The isolated immutable execution in job `41279463` passed this corrected
+response test from source SHA-256
+`5e93afc9f6678d1328c94d46ec5595ebd6dc649856cc612297f45843756c40d2`.
+For `4`, `6`, and `8` cells per axis, the physical affine-probe operator
+differences were `0.046786767783159551`, `0.031454651029532064`, and
+`0.023686113325394276`; the residual-action differences were
+`0.042420097718013743`, `0.027705212494174375`, and
+`0.020719120017658289`; and the common-physical-DOF solved-state differences
+were `0.090282139412239948`, `0.037126430228979719`, and
+`0.022081613219203326`. Their global orders were respectively
+`0.98205908006808296`, `1.0337852140421999`, and
+`2.0315950313006996`, with maximum adjacent growth factors
+`0.75302419674423393`, `0.74784194569900186`, and
+`0.59476801521194089`. The maximum affine-constraint reproduction error was
+`1.5913919487742234e-15`, below its corresponding row-scaled roundoff bound
+`8.3370347662518439e-13`; the maximum dense-solve relative residual remained
+`1.7670895540162012e-14`. All three physical crossings reported their
+topology change. The raw reduced-coordinate diagnostics reproduced the prior
+values and remain nonacceptance telemetry. The result XML SHA-256 is
+`201da315b0bae857051d87a5420f29851c7155730a89ce2f2c3a812dfe0d835f`.
+This closes the finite node-crossing response slice only; the broader WP-7
+exits below remain open.
 
 ## Closure boundary
 
