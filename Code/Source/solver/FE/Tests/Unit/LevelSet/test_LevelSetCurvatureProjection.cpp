@@ -3348,6 +3348,74 @@ TEST(LevelSetCurvatureProjection,
 }
 
 TEST(LevelSetCurvatureProjection,
+     UnfilteredKinematicAreaGradientSolvesProductionScaleSphereQuotient)
+{
+    auto mesh = makeStructuredTetrahedronMesh(
+        /*subdivisions=*/18, FE::Real{0.0}, FE::Real{1.0});
+    const auto evaluation = evaluateKinematicCurvature(
+        mesh,
+        FE::Real{0.45},
+        {{FE::Real{0.5}, FE::Real{0.5}, FE::Real{0.5}}},
+        FE::Real{1.0},
+        /*filter_coefficient=*/FE::Real{0.0});
+
+    ASSERT_TRUE(evaluation.result.success)
+        << evaluation.result.diagnostic;
+    EXPECT_TRUE(
+        evaluation.result.kinematic_area_gradient_minimum_norm_solver);
+    EXPECT_EQ(evaluation.result.kinematic_area_gradient_components, 1u);
+    EXPECT_GT(
+        evaluation.result.kinematic_area_gradient_operator_vertices, 0u);
+    EXPECT_GT(
+        evaluation.result.kinematic_area_gradient_linear_iterations, 0u);
+    EXPECT_LT(
+        evaluation.result.kinematic_area_gradient_relative_linear_residual,
+        FE::Real{1.0e-9});
+    EXPECT_LT(
+        evaluation.result
+            .kinematic_area_gradient_max_relative_regularized_identity_residual,
+        FE::Real{1.0e-7});
+    EXPECT_TRUE(std::isfinite(evaluation.mean_curvature));
+    EXPECT_TRUE(std::isfinite(evaluation.mean_absolute_error));
+    EXPECT_TRUE(std::isfinite(
+        evaluation.mass_weighted_root_mean_square_error));
+    // Bulk P1 coefficients are representatives of a trace-space quotient:
+    // adding the level-set scaling null direction does not alter the
+    // interface field.  The mass-weighted mean is quotient invariant and is
+    // the pressure-jump quantity relevant to this closed equilibrium.
+    const FE::Real exact_mean_curvature = FE::Real{2.0} / FE::Real{0.45};
+    EXPECT_LT(
+        std::abs(
+            evaluation.result
+                .kinematic_area_gradient_mass_weighted_mean_curvature -
+            exact_mean_curvature),
+        FE::Real{0.50});
+
+    RecordProperty(
+        "kinematic_area_gradient_unfiltered_sphere_operator_vertices",
+        evaluation.result.kinematic_area_gradient_operator_vertices);
+    RecordProperty(
+        "kinematic_area_gradient_unfiltered_sphere_linear_iterations",
+        evaluation.result.kinematic_area_gradient_linear_iterations);
+    RecordProperty(
+        "kinematic_area_gradient_unfiltered_sphere_relative_residual",
+        evaluation.result.kinematic_area_gradient_relative_linear_residual);
+    RecordProperty(
+        "kinematic_area_gradient_unfiltered_sphere_mean_error",
+        evaluation.mean_absolute_error);
+    RecordProperty(
+        "kinematic_area_gradient_unfiltered_sphere_mass_weighted_rms_error",
+        evaluation.mass_weighted_root_mean_square_error);
+    RecordProperty(
+        "kinematic_area_gradient_unfiltered_sphere_mass_weighted_mean",
+        evaluation.result.kinematic_area_gradient_mass_weighted_mean_curvature);
+    RecordProperty(
+        "kinematic_area_gradient_unfiltered_sphere_mass_weighted_deviation",
+        evaluation.result
+            .kinematic_area_gradient_mass_weighted_rms_deviation);
+}
+
+TEST(LevelSetCurvatureProjection,
      KinematicAreaGradientIsRoundoffBalancedForAffineFlatInterface)
 {
     auto mesh = makeStructuredTriangleMesh(

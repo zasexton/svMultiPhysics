@@ -2405,6 +2405,8 @@ void accumulateDifferentiatedTriangleMeasure(
 [[nodiscard]] bool solveKinematicAreaMassSystem(
     const std::vector<std::map<std::size_t, Real>>& matrix,
     std::span<const Real> rhs,
+    std::span<const std::size_t> null_component_ids,
+    std::size_t null_component_count,
     std::span<const Real> null_direction,
     bool use_diagonal_preconditioner,
     std::vector<Real>& solution,
@@ -2420,25 +2422,64 @@ void accumulateDifferentiatedTriangleMeasure(
 
     const auto dot_product = [](std::span<const Real> a,
                                 std::span<const Real> b) noexcept {
-        Real value{0.0};
+        long double value{0.0L};
         for (std::size_t i = 0; i < a.size(); ++i) {
-            value += a[i] * b[i];
+            value += static_cast<long double>(a[i]) *
+                     static_cast<long double>(b[i]);
         }
-        return value;
+        return static_cast<Real>(value);
     };
+    const bool project_component_nullspace = null_component_count > 0u;
+    if (project_component_nullspace &&
+        (null_component_ids.size() != n || null_direction.size() != n)) {
+        return false;
+    }
+    std::vector<long double> null_denominators(
+        null_component_count, 0.0L);
+    std::vector<long double> null_numerators(
+        null_component_count, 0.0L);
+    if (project_component_nullspace) {
+        for (std::size_t i = 0u; i < n; ++i) {
+            const auto component = null_component_ids[i];
+            if (component >= null_component_count) {
+                continue;
+            }
+            null_denominators[component] +=
+                static_cast<long double>(null_direction[i]) *
+                static_cast<long double>(null_direction[i]);
+        }
+        if (std::any_of(
+                null_denominators.begin(),
+                null_denominators.end(),
+                [](long double denominator) {
+                    return !(denominator > 0.0L) ||
+                           !std::isfinite(denominator);
+                })) {
+            return false;
+        }
+    }
     const auto project_null = [&](std::vector<Real>& vector) noexcept {
-        if (null_direction.size() != vector.size()) {
+        if (!project_component_nullspace) {
             return;
         }
-        const Real denominator =
-            dot_product(null_direction, null_direction);
-        if (!(denominator > Real{0.0}) || !std::isfinite(denominator)) {
-            return;
+        std::fill(
+            null_numerators.begin(), null_numerators.end(), 0.0L);
+        for (std::size_t i = 0u; i < vector.size(); ++i) {
+            const auto component = null_component_ids[i];
+            if (component < null_component_count) {
+                null_numerators[component] +=
+                    static_cast<long double>(vector[i]) *
+                    static_cast<long double>(null_direction[i]);
+            }
         }
-        const Real coefficient =
-            dot_product(vector, null_direction) / denominator;
-        for (std::size_t i = 0; i < vector.size(); ++i) {
-            vector[i] -= coefficient * null_direction[i];
+        for (std::size_t i = 0u; i < vector.size(); ++i) {
+            const auto component = null_component_ids[i];
+            if (component < null_component_count) {
+                vector[i] -= static_cast<Real>(
+                                 null_numerators[component] /
+                                 null_denominators[component]) *
+                             null_direction[i];
+            }
         }
     };
     const auto apply = [&](std::span<const Real> x,
@@ -2505,6 +2546,7 @@ void accumulateDifferentiatedTriangleMeasure(
             return false;
         }
         if (relative_residual <= tolerance) {
+            project_null(solution);
             return true;
         }
         precondition(residual, preconditioned);
@@ -2526,10 +2568,30 @@ void accumulateDifferentiatedTriangleMeasure(
 [[nodiscard]] bool solveKinematicAreaMassMinimumNorm(
     const std::vector<std::map<std::size_t, Real>>& matrix,
     std::span<const Real> rhs,
+    std::span<const std::size_t> null_component_ids,
+    std::size_t null_component_count,
+    std::span<const Real> null_direction,
     std::vector<Real>& solution,
     std::size_t& iterations,
     Real& relative_residual) noexcept
 {
+    if (solveKinematicAreaMassSystem(
+            matrix,
+            rhs,
+            null_component_ids,
+            null_component_count,
+            null_direction,
+            /*use_diagonal_preconditioner=*/true,
+            solution,
+            iterations,
+            relative_residual)) {
+        return true;
+    }
+
+    // Retain the unpreconditioned Golub--Kahan route as an independent
+    // least-squares fallback.  The component-quotient solve above is the
+    // primary path because the trace mass has one level-set scaling mode per
+    // connected interface component.
     const auto n = rhs.size();
     if (matrix.size() != n) {
         return false;
@@ -3492,6 +3554,14 @@ void accumulateDifferentiatedTriangleMeasure(
             }
         }
     }
+    std::vector<Real> component_scaling_null(n_vertices, Real{0.0});
+    for (std::size_t vertex = 0u; vertex < n_vertices; ++vertex) {
+        if (component_ids[vertex] < components.size()) {
+            component_scaling_null[vertex] =
+                working_level_set_values[vertex] - options.isovalue;
+        }
+    }
+
     result.kinematic_area_gradient_minimum_norm_solver =
         options.kinematic_area_gradient_filter_coefficient == Real{0.0};
     const bool mass_system_solved =
@@ -3499,12 +3569,20 @@ void accumulateDifferentiatedTriangleMeasure(
         ? solveKinematicAreaMassMinimumNorm(
               regularized_mass,
               std::span<const Real>(rhs.data(), rhs.size()),
+              std::span<const std::size_t>(
+                  component_ids.data(), component_ids.size()),
+              components.size(),
+              std::span<const Real>(
+                  component_scaling_null.data(),
+                  component_scaling_null.size()),
               solved_curvature,
               result.kinematic_area_gradient_linear_iterations,
               result.kinematic_area_gradient_relative_linear_residual)
         : solveKinematicAreaMassSystem(
               regularized_mass,
               std::span<const Real>(rhs.data(), rhs.size()),
+              std::span<const std::size_t>{},
+              /*null_component_count=*/0u,
               std::span<const Real>{},
               /*use_diagonal_preconditioner=*/true,
               solved_curvature,
