@@ -23,9 +23,11 @@ void fsils_spar_mul_ss(FSILS_lhsType& lhs, const Array<int>& rowPtr, const Vecto
   KU = 0.0;
 
   for (int i = 0; i < nNo; i++) {
+    double sum = 0.0;
     for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-      KU(i) = KU(i) + K(j) * U(colPtr(j));
-    } 
+      sum = sum + K(j) * U(colPtr(j));
+    }
+    KU(i) = sum;
   }
 
   fsils_commus(lhs, KU);
