@@ -119,7 +119,6 @@ void heats_2d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
   using namespace consts;
   using namespace mat_fun;
 
-  const int nsd = com_mod.nsd;
   const int cEq = com_mod.cEq;
   auto& eq = com_mod.eq[cEq];
   const int cDmn = com_mod.cDmn;
@@ -146,23 +145,25 @@ void heats_2d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
   #endif
 
   double Td = -s;
-  Vector<double> Tx(nsd);
+  double Tx0 = 0.0;
+  double Tx1 = 0.0;
 
   for (int a = 0; a < eNoN; a++) {
     Td = Td + N(a)*al(i,a);
-    Tx(0) = Tx(0) + Nx(0,a)*yl(i,a);
-    Tx(1) = Tx(1) + Nx(1,a)*yl(i,a);
+    Tx0 = Tx0 + Nx(0,a)*yl(i,a);
+    Tx1 = Tx1 + Nx(1,a)*yl(i,a);
   }
 
   Td = Td * rho;
   #ifdef debug_heats_2d 
+  Vector<double> Tx{Tx0, Tx1};
   dmsg;
   dmsg << "Td: " << Td;
   dmsg << "Tx: " << Tx;
   #endif
 
   for (int a = 0; a < eNoN; a++) {
-    lR(0,a) = lR(0,a) + w*(N(a)*Td + (Nx(0,a)*Tx(0) + Nx(1,a)*Tx(1))*nu);
+    lR(0,a) = lR(0,a) + w*(N(a)*Td + (Nx(0,a)*Tx0 + Nx(1,a)*Tx1)*nu);
 
     for (int b = 0; b < eNoN; b++) {
       lK(0,a,b) = lK(0,a,b) + wl*(N(a)*N(b)*amd + nu*(Nx(0,a)*Nx(0,b) + Nx(1,a)*Nx(1,b)));
@@ -184,7 +185,6 @@ void heats_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
   using namespace consts;
   using namespace mat_fun;
 
-  const int nsd = com_mod.nsd;
   const int cEq = com_mod.cEq;
   auto& eq = com_mod.eq[cEq];
   const int cDmn = com_mod.cDmn;
@@ -211,19 +211,21 @@ void heats_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
   #endif
 
   double Td = -s;
-  Vector<double> Tx(nsd);
+  double Tx0 = 0.0;
+  double Tx1 = 0.0;
+  double Tx2 = 0.0;
 
   for (int a = 0; a < eNoN; a++) {
     Td = Td + N(a)*al(i,a);
-    Tx(0) = Tx(0) + Nx(0,a)*yl(i,a);
-    Tx(1) = Tx(1) + Nx(1,a)*yl(i,a);
-    Tx(2) = Tx(2) + Nx(2,a)*yl(i,a);
+    Tx0 = Tx0 + Nx(0,a)*yl(i,a);
+    Tx1 = Tx1 + Nx(1,a)*yl(i,a);
+    Tx2 = Tx2 + Nx(2,a)*yl(i,a);
   }
 
   Td = Td * rho;
 
   for (int a = 0; a < eNoN; a++) {
-    lR(0,a) = lR(0,a) + w*(N(a)*Td + (Nx(0,a)*Tx(0) + Nx(1,a)*Tx(1) + Nx(2,a)*Tx(2))*nu);
+    lR(0,a) = lR(0,a) + w*(N(a)*Td + (Nx(0,a)*Tx0 + Nx(1,a)*Tx1 + Nx(2,a)*Tx2)*nu);
 
     for (int b = 0; b < eNoN; b++) {
       lK(0,a,b) = lK(0,a,b) + wl*(N(a)*N(b)*amd + nu*(Nx(0,a)*Nx(0,b) +Nx(1,a)*Nx(1,b) + Nx(2,a)*Nx(2,b)));
