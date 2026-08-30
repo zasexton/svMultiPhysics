@@ -304,8 +304,8 @@ def test_wp8_production_source_contract_is_fail_closed(tmp_path):
             "selection.generalized_alpha_rho_inf = 0.5;",
         ),
         "stage": (
-            "transient_scheme.stage_alpha_f",
-            "svmp::FE::Real{0.5}",
+            "        .stage_alpha_f = svmp::FE::Real{1.0},",
+            "        .stage_alpha_f = svmp::FE::Real{0.5},",
         ),
         "rate": (
             (

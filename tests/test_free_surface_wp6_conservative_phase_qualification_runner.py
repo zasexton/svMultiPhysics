@@ -262,7 +262,7 @@ def test_wp6_production_source_contract_is_fail_closed(tmp_path):
     assert runner.validate_wp6_production_source_contract() == {
         "collective_graph_staleness_gates": 1,
         "partition_local_graph_cache_stamps_excluded": 4,
-        "schedule_initialization_gates": 2,
+        "schedule_initialization_gates": 4,
         "schedule_first_callback_gates": 2,
         "live_geometry_consensus_sites": 2,
         "publication_ordering_sites": 2,
@@ -271,6 +271,31 @@ def test_wp6_production_source_contract_is_fail_closed(tmp_path):
     }
 
     source = APPLICATION_DRIVER_SOURCE_PATH.read_text(encoding="utf-8")
+    accepted_callback_start = (
+        "callbacks.on_step_accepted = "
+        "[&](svmp::FE::timestepping::TimeHistory& h) {\n"
+        "    requireCollectiveLevelSetMaintenanceRequestSchedule("
+    )
+    assert source.count(accepted_callback_start) == 1
+    delayed_accepted_preflight = (
+        tmp_path / "ApplicationDriver-delayed-accepted-preflight.cpp"
+    )
+    delayed_accepted_preflight.write_text(
+        source.replace(
+            accepted_callback_start,
+            accepted_callback_start.replace(
+                " {\n    requireCollective",
+                " {\n    (void)h;\n    requireCollective",
+            ),
+            1,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="first on_step_accepted"):
+        runner.validate_wp6_production_source_contract(
+            delayed_accepted_preflight
+        )
+
     collective_graph_staleness_gate = (
         "  const bool graph_rebuild_required =\n"
         "      globalAnyBool(!local_graph_is_current, comm);"
@@ -400,27 +425,33 @@ def test_wp6_production_source_contract_is_fail_closed(tmp_path):
     with pytest.raises(ValueError, match="missing or out-of-order"):
         runner.validate_wp6_production_source_contract(ungated_source)
 
-    missing_transient_gate = (
-        tmp_path / "ApplicationDriver-missing-transient-gate.cpp"
+    transient_gate = (
+        "  requireCollectiveLevelSetMaintenanceRequestSchedule(\n"
+        "      level_set_maintenance,\n"
+        "      LevelSetMaintenanceScheduleStage::TransientInitialization,\n"
+        "      sim.time_history->stepIndex(),\n"
+        "      activeFESystemCommunicator(*sim.fe_system));\n"
     )
-    transient_stage = source.index(
-        "LevelSetMaintenanceScheduleStage::TransientInitialization"
-    )
-    transient_call_start = source.rfind(
-        "  requireCollectiveLevelSetMaintenanceRequestSchedule(",
-        0,
-        transient_stage,
-    )
-    transient_call_end = source.index(";\n", transient_stage) + 2
-    assert transient_call_start >= 0
-    missing_transient_gate.write_text(
-        source[:transient_call_start] + source[transient_call_end:],
-        encoding="utf-8",
-    )
-    with pytest.raises(ValueError, match="transient initialization"):
-        runner.validate_wp6_production_source_contract(
-            missing_transient_gate
+    assert source.count(transient_gate) == 2
+    for gate_index in range(2):
+        missing_transient_gate = (
+            tmp_path
+            / f"ApplicationDriver-missing-transient-gate-{gate_index}.cpp"
         )
+        gate_start = -1
+        search_start = 0
+        for _ in range(gate_index + 1):
+            gate_start = source.index(transient_gate, search_start)
+            search_start = gate_start + len(transient_gate)
+        missing_transient_gate.write_text(
+            source[:gate_start]
+            + source[gate_start + len(transient_gate) :],
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="transient initialization"):
+            runner.validate_wp6_production_source_contract(
+                missing_transient_gate
+            )
 
     time_loop_source = TIME_LOOP_SOURCE_PATH.read_text(encoding="utf-8")
     disarm_sequence = (
@@ -548,7 +579,7 @@ def test_wp6_validate_only_reports_prerequisite_without_closure():
     assert summary["production_source_contract"] == {
         "collective_graph_staleness_gates": 1,
         "partition_local_graph_cache_stamps_excluded": 4,
-        "schedule_initialization_gates": 2,
+        "schedule_initialization_gates": 4,
         "schedule_first_callback_gates": 2,
         "live_geometry_consensus_sites": 2,
         "publication_ordering_sites": 2,

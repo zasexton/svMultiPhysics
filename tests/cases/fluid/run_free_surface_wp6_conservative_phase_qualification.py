@@ -350,8 +350,11 @@ def validate_wp6_production_source_contract(
             "levelSetMaintenanceRequests(params);",
             "requireCollectiveLevelSetMaintenanceRequestSchedule(",
             "LevelSetMaintenanceScheduleStage::SteadyInitialization",
+            "bindKinematicAreaGradientTractionMaintenance(",
+            "requireCollectiveLevelSetMaintenanceRequestSchedule(",
+            "LevelSetMaintenanceScheduleStage::SteadyInitialization",
         ),
-        "steady initialization schedule preflight",
+        "steady initialization schedule preflights before and after binding",
     )
     steady_request = source.find(
         "auto level_set_maintenance = "
@@ -379,8 +382,11 @@ def validate_wp6_production_source_contract(
             "levelSetMaintenanceRequests(params);",
             "requireCollectiveLevelSetMaintenanceRequestSchedule(",
             "LevelSetMaintenanceScheduleStage::TransientInitialization",
+            "bindKinematicAreaGradientTractionMaintenance(",
+            "requireCollectiveLevelSetMaintenanceRequestSchedule(",
+            "LevelSetMaintenanceScheduleStage::TransientInitialization",
         ),
-        "transient initialization schedule preflight",
+        "transient initialization schedule preflights before and after binding",
     )
 
     before_accept = _callback_body(
@@ -505,9 +511,13 @@ def validate_wp6_production_source_contract(
             "canonicalLevelSetMaintenanceGeometryState(",
             "appendCanonicalLevelSetMaintenanceGeometrySection(",
             "geometry_state.supported",
+            "const auto non_topology_decision =",
             "collectiveLevelSetMaintenanceTransactionDecision(",
-            "if (decision ==",
+            "if (non_topology_decision ==",
             "LevelSetMaintenanceTransactionDecision::Reject",
+            "rollback_and_reject_maintenance(",
+            "if (communicator_complete_topology_mismatch)",
+            "MaintenanceCutTopologyChanged",
             "rollback_and_reject_maintenance(",
             "maintenance_publication_started = true;",
             "maintenance_geometry_transaction->commit();",
@@ -601,7 +611,7 @@ def validate_wp6_production_source_contract(
     return {
         "collective_graph_staleness_gates": 1,
         "partition_local_graph_cache_stamps_excluded": 4,
-        "schedule_initialization_gates": 2,
+        "schedule_initialization_gates": 4,
         "schedule_first_callback_gates": 2,
         "live_geometry_consensus_sites": 2,
         "publication_ordering_sites": 2,

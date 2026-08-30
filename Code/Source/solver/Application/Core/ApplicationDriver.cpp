@@ -28886,6 +28886,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   };
   double vtk_total_time = 0.0;
   callbacks.on_step_accepted = [&](svmp::FE::timestepping::TimeHistory& h) {
+    requireCollectiveLevelSetMaintenanceRequestSchedule(
+        level_set_maintenance,
+        LevelSetMaintenanceScheduleStage::
+            AcceptedEndpointPostStep,
+        h.stepIndex(),
+        velocity_extension_artifact_comm);
     if (evaluate_fitted_ale_operator_stage) {
       sim.fe_system
           ->commitPendingFittedALENormalOperatorStageMeasurements(
@@ -28893,12 +28899,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               static_cast<svmp::FE::Real>(h.time()),
               static_cast<svmp::FE::Real>(h.dt()));
     }
-    requireCollectiveLevelSetMaintenanceRequestSchedule(
-        level_set_maintenance,
-        LevelSetMaintenanceScheduleStage::
-            AcceptedEndpointPostStep,
-        h.stepIndex(),
-        velocity_extension_artifact_comm);
     if (has_free_surface_functional) {
       const auto endpoint_solution =
           gatherFeOrderedSolution(

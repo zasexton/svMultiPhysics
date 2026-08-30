@@ -522,10 +522,61 @@ def validate_wp8_production_source_contract() -> dict[str, int]:
         ),
         "pre-solve scheme selection and rate initialization",
     )
-    if transient.count("transient_scheme.stage_alpha_f") != 2:
+
+    contact_resolver_start = application_source.find(
+        "FreeSurfaceContactStageTemporalCoordinates\n"
+        "resolveFreeSurfaceContactStageTemporalCoordinates("
+    )
+    contact_resolver_end = application_source.find(
+        "std::uint64_t acceptedContactStageRevision(",
+        contact_resolver_start,
+    )
+    if contact_resolver_start < 0 or contact_resolver_end < 0:
+        raise ValueError(
+            "WP-8 production source contract cannot isolate the contact "
+            "stage temporal resolver"
+        )
+    contact_resolver = application_source[
+        contact_resolver_start:contact_resolver_end
+    ]
+    _require_tokens_in_order(
+        contact_resolver,
+        (
+            "const bool endpoint_stage_scheme =",
+            "svmp::FE::timestepping::SchemeKind::BackwardEuler",
+            "svmp::FE::timestepping::SchemeKind::BDF2",
+            "svmp::FE::timestepping::SchemeKind::VSVO_BDF",
+            "if (endpoint_stage_scheme)",
+            "history.time() + history.dt()",
+            ".stage_alpha_f = svmp::FE::Real{1.0}",
+            "scheme != svmp::FE::timestepping::SchemeKind::GeneralizedAlpha",
+            "observation.state_time",
+            "observation.provenance.alpha_f",
+        ),
+        "endpoint and authentic generalized-alpha contact stages",
+    )
+    resolved_contact_stage = (
+        "resolve_contact_stage_temporal_coordinates_collectively("
+    )
+    if transient.count(resolved_contact_stage) != 2:
         raise ValueError(
             "WP-8 production source contract requires the resolved endpoint "
             "stage at both contact-stage sites"
+        )
+    _require_tokens_in_order(
+        transient,
+        (
+            "const auto build_contact_stage_candidate =",
+            resolved_contact_stage,
+            "callbacks.on_step_candidate_ready =",
+            resolved_contact_stage,
+        ),
+        "resolved prospective and final contact stages",
+    )
+    if "transient_scheme.stage_alpha_f" in transient:
+        raise ValueError(
+            "WP-8 production source contract forbids replacing authentic "
+            "contact-stage provenance with the nominal scheme stage"
         )
     if "generalizedAlphaFirstOrderFromRhoInf(" in transient:
         raise ValueError(
