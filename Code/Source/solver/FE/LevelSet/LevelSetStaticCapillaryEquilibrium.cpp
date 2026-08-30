@@ -1078,6 +1078,11 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                                 std::move(trial_state)};
                         last_evaluation_diagnostic =
                             "candidate_cut_topology_transition_deferred";
+                        // Reproduce the first admissible transition once
+                        // outside the line search.  Further shrink trials
+                        // cannot improve its fixed-topology certificate and
+                        // may rebuild the same cut snapshot at every alpha.
+                        break;
                     } else if (
                         options.allow_topology_epoch_transitions &&
                         !transition_limit_available) {

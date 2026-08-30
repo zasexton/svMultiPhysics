@@ -503,6 +503,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     EXPECT_NEAR(accepted[1], 2.0, 1.0e-7);
     EXPECT_EQ(result.topology_epoch_transitions, 1u);
     EXPECT_GT(result.topology_change_rejections, 0u);
+    EXPECT_LE(result.functional_evaluations, 8u);
     EXPECT_EQ(result.cut_topology_key, 11u);
     EXPECT_EQ(result.constraint_semantics_key, 33u);
 }
