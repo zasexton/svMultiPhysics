@@ -3,10 +3,10 @@
 Status: low-level prerequisite implemented; FSR-05, WP-5, Q4, and physical
 dynamic-wetting qualification remain open.
 
-Audit basis: repository HEAD
-`6306165b436ba6d81b50a2e348025038bf049fa2`, plus the dirty tracked source
-state reviewed on 2026-07-23. A result produced from a dirty source tree does
-not establish source-to-binary correspondence.
+Implementation basis: commit
+`54860f29e8656dad4d6376e8f380d30ab49ad48c`, reviewed on 2026-08-30.
+The historical frozen matrix below predates this checkpoint and retains its
+originally declared scope.
 
 ## Verdict
 
@@ -185,13 +185,14 @@ explicitly unavailable; it does not substitute zero. This diagnostic exposes
 stage mismatch for refinement studies but does not establish pointwise
 material contact-line kinematics or physical qualification.
 
-The frozen serial application test explicitly emulates the four relevant
+The serial application test explicitly emulates the five relevant
 transitions in order: generalized-alpha endpoint finalization, commit-ready
 stage reconstruction, `TimeHistory::acceptStep()` (including its backend
-counter bump), and accepted-callback content capture/bind. It intentionally
-does not claim a full nonlinear `TimeLoop` integration run: such a fixture
-would require a second coupled solve/mesh campaign, while this frozen matrix
-is limited to low-level prerequisite evidence.
+counter bump), accepted-callback content capture/bind, and non-endpoint
+wall-aware maintenance publication. It also exercises missing-accounting and
+mismatched-endpoint-copy rejection. It does not claim a full nonlinear
+`TimeLoop` integration run: that still requires a coupled solve/mesh campaign,
+while this test is limited to low-level prerequisite evidence.
 
 These WP-5 history revisions fingerprint gathered FE-ordered algebraic
 content; they are not rank-local backend mutation counters. This prerequisite
@@ -205,16 +206,48 @@ scale. This leaves their zero crossing and unit normal unchanged while
 allowing signed-distance repair away from the accepted contact.
 
 Maintenance publishes an accepted endpoint and its stored history, not an
-independent generalized-alpha stage state. A repair computed from a
-non-endpoint stage therefore may not be added to the endpoint as though it
-were a representation-only update. The application compares the exact
-maintained level-set slices before repair: when `stage_alpha_f != 1` and the
-accepted stage slice differs from the endpoint slice, the complete
-maintenance attempt is rejected before the low-level repair or any history
-mutation. An endpoint stage (`stage_alpha_f = 1`) remains supported. Separate
-stage and endpoint repairs, together with their corresponding history/rate
-updates and geometric-motion account, remain required before non-endpoint
-generalized-alpha wall-aware maintenance can be enabled.
+independent generalized-alpha stage state. For a non-endpoint first-order
+stage, let `S` be the signed-distance repair delta computed on the exact
+accepted operator-stage coefficients. The implemented fixed-prior-state/rate
+closure sets the endpoint delta to
+
+\[
+E=S/\alpha_f.
+\]
+
+After `TimeHistory::acceptStep()`, `u` and `uPrevK(1)` are identical endpoint
+copies. Both receive `E`; `uPrevK(2)` and deeper prior states remain fixed;
+the prior rate remains fixed; and the maintained level-set slice of `uDot`
+receives
+
+\[
+\Delta\dot u_{n+1}=E/(\gamma\,\Delta t).
+\]
+
+The maintained first-order slice of `uDDot` is not a publication target. This
+reconstructs both `S = alpha_f E` at the accepted operator stage and the
+endpoint update identity with the prior state/rate fixed. The parameters
+`alpha_m`, `alpha_f`, `gamma`, and `dt` must be the authentic accepted-stage
+tuple; missing, inconsistent, nonfinite, or rank-dependent provenance fails
+closed.
+
+If a later volume correction contributes one common representation shift
+`C`, the transaction composes `E+C` into `u` and `uPrevK(1)`, `C` into every
+deeper state, and retains the rate correction `E/(gamma dt)`. Thus the common
+shift changes the represented geometry without changing the newly established
+temporal increment. An endpoint stage (`alpha_f = 1`) continues to use the
+existing common-representation policy on every stored state with no rate
+publication.
+
+Non-endpoint publication requires both a maintenance-work observer and a final
+candidate validator. It also requires identical finite maintained-field
+slices in `u` and `uPrevK(1)`, a communicator-complete `uDot` target, common
+history depth and field coverage, and rank-identical publication schedules and
+values. All state and rate arrays are staged before publication. The outer
+accepted-step transaction snapshots current, history, and rate state; includes
+`uDot` and `uDDot` presence, content, size, and backend revisions in collective
+commit consensus; and restores the complete snapshot if any later invariant,
+geometry commit, or accounting step rejects.
 
 For prescribed angle, the accepted contact point, physical wall normal, and
 oriented contact-line tangent define a complete physical frame. The target
@@ -267,7 +300,7 @@ The two MPI groups are frozen at two ranks. Four-rank audit runs exercise the
 same rank-independent repair and accepted-frame tests but do not replace the
 still-open representative partition campaign.
 
-The current stage/endpoint fail-closed guard, endpoint-root regression, and
+The former stage/endpoint fail-closed guard, endpoint-root regression, and
 accepted-history geometric-speed/mismatch telemetry postdate that frozen
 evidence. On 2026-08-17, a current-tree diagnostic application binary compiled
 `FESystem.cpp` and `test_ApplicationDriverLevelSetWorkflows.cpp` at `-O0` under
@@ -282,10 +315,55 @@ establish Release source-to-binary correspondence or qualification for these
 changes.
 
 The authentic generalized-alpha tuple, exact operator-stage slice retention,
-and residual/Jacobian tag-separation regressions described above postdate both
-the frozen matrix and the 2026-08-17 diagnostic execution. They have received
-static source review only in the current resource-constrained worktree and are
-not execution evidence.
+and residual/Jacobian tag-separation regressions described above also postdate
+both the frozen matrix and the 2026-08-17 diagnostic execution. The current
+focused checkpoint below exercises the tuple, retained stage, and maintenance
+publication path, but does not retroactively enlarge the frozen matrix.
+
+## Non-endpoint maintenance checkpoint
+
+Commit `54860f29e8656dad4d6376e8f380d30ab49ad48c` connects the fixed-prior-
+state/rate planner to production wall-aware maintenance. Validation job
+`41287133` rebuilt the Release application test target after forcing the two
+changed translation inputs to be recompiled. The driver and test source
+SHA-256 values were respectively
+`de2a7406b61acd135f557e57ed06038ec527a853b9267a670931f206b673f3ca`
+and
+`3b88033140fee1975ef1b59f5494cebf8d8a0ccaddc24d21a556152a95a27285`;
+the exact two-file binary diff from parent commit
+`dca1897af277f0635bdf872ab883c2a6b6a77d09` had SHA-256
+`b05cac78c28ebae088bbf01855675692decfcb1c7242199d87c4f2cc870689ef`.
+Those bytes are the source changes in the implementation commit.
+
+All six focused application tests passed. They cover the common-delta and
+fixed-prior closures, arbitrary-pair and invalid-input rejection, composition
+with a later common shift, exact accepted-stage-to-endpoint mapping, required
+work and validator hooks, rejection of mismatched `u`/`uPrevK(1)` endpoint
+copies without history/rate mutation, endpoint/history publication, the
+expected `uDot` increment, and unchanged `uDDot`. The accepted-step commit
+fingerprint extension is compiled by the same target; a full nonlinear
+accepted-step run with maintenance enabled remains part of the open physical
+campaign.
+
+The preceding job `41285794` is not counted as passing evidence. Its
+production publication test passed, but a newly added pure composition check
+used exact equality for one rounded sum. The final source replaces that check
+with a fixed near-roundoff tolerance, and only the clean six-test result from
+`41287133` is accepted here.
+
+The VTK revision-stability checkpoint is independent. Job `41284271` built
+the clean parent commit, passed the three focused geometry/constraint/
+application tests, and completed three accepted dynamic-contact steps with
+three VTK outputs. Its wrapper then referenced a retired result-field name.
+Corrected evidence-harvest job `41286764` required the current `passed` flag,
+an empty error list, three accepted steps, all three output files, and no
+stale snapshot-index diagnostic; every corrected gate passed with
+`revision_mismatch_count=0`.
+
+These are implementation and evidence-plumbing checkpoints, not WP-5 or Q4
+closure. They do not replace mesh/time/slip refinement, advancing/receding and
+wall-orientation matrices, representative MPI partitions, complete energy
+accounting, or the public capillary-rise comparison.
 
 ## Public capillary-rise reference pin
 
