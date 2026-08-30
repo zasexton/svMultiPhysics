@@ -1765,6 +1765,21 @@ if(FE_ENABLE_LLVM_JIT_RESOLVED AND FE_ENABLE_ASSEMBLY)
         target_compile_definitions(svfe PUBLIC ${FE_LLVM_JIT_COMPILE_DEFINITIONS})
     endif()
 
+    # JITEngine owns ObjectCache implementations supplied to LLVM.  When LLVM
+    # was built without C++ RTTI, compile this translation unit the same way so
+    # its derived-class metadata does not reference type information absent
+    # from the LLVM libraries.  Keep the setting source-local because the rest
+    # of svfe legitimately uses dynamic_cast.
+    if(DEFINED FE_LLVM_ENABLE_RTTI AND NOT FE_LLVM_ENABLE_RTTI)
+        if(MSVC)
+            set_property(SOURCE Forms/JIT/JITEngine.cpp APPEND PROPERTY
+                COMPILE_OPTIONS /GR-)
+        else()
+            set_property(SOURCE Forms/JIT/JITEngine.cpp APPEND PROPERTY
+                COMPILE_OPTIONS -fno-rtti)
+        endif()
+    endif()
+
     if(DEFINED FE_LLVM_JIT_LIBRARIES AND NOT FE_LLVM_JIT_LIBRARIES STREQUAL "")
         target_link_libraries(svfe PUBLIC ${FE_LLVM_JIT_LIBRARIES})
     endif()

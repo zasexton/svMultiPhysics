@@ -33,6 +33,7 @@
 #if SVMP_FE_ENABLE_LLVM_JIT
 #include <llvm/Config/llvm-config.h>
 #include <llvm/ExecutionEngine/ObjectCache.h>
+#include <llvm/ExecutionEngine/SectionMemoryManager.h>
 #include <llvm/ExecutionEngine/JITEventListener.h>
 #include <llvm/ExecutionEngine/Orc/Core.h>
 #include <llvm/ExecutionEngine/Orc/CompileUtils.h>
@@ -617,25 +618,6 @@ void initializeLLVMOnce()
     });
 }
 
-void configureObjectCache(llvm::orc::IRCompileLayer& compile_layer,
-                          llvm::ObjectCache* cache)
-{
-    if (cache == nullptr) {
-        return;
-    }
-
-    // LLVM 14: IRCompileLayer has no setObjectCache; configure via the compiler.
-    auto& compiler = compile_layer.getCompiler();
-    if (auto* simple = dynamic_cast<llvm::orc::SimpleCompiler*>(&compiler)) {
-        simple->setObjectCache(cache);
-        return;
-    }
-    if (auto* concurrent = dynamic_cast<llvm::orc::ConcurrentIRCompiler*>(&compiler)) {
-        concurrent->setObjectCache(cache);
-        return;
-    }
-}
-
 void configureTransformLayer(llvm::orc::IRTransformLayer& transform_layer,
                              const JITOptions& options)
 {
@@ -865,7 +847,7 @@ void registerExternalCallSymbols(llvm::orc::LLJIT& jit)
     }
 }
 
-void configureEventListeners(llvm::orc::LLJIT& jit)
+void configureEventListeners(llvm::orc::RTDyldObjectLinkingLayer& object_layer)
 {
     // NOTE: Some LLVM builds are sensitive to the lifetime of JITEventListener
     // instances (notably the GDB registration listener). Keeping listeners alive
@@ -873,9 +855,7 @@ void configureEventListeners(llvm::orc::LLJIT& jit)
     // when multiple JITEngine instances are created/destroyed.
     static llvm::JITEventListener* gdb_listener = llvm::JITEventListener::createGDBRegistrationListener();
     if (gdb_listener != nullptr) {
-        if (auto* layer = dynamic_cast<llvm::orc::RTDyldObjectLinkingLayer*>(&jit.getObjLinkingLayer())) {
-            layer->registerJITEventListener(*gdb_listener);
-        }
+        object_layer.registerJITEventListener(*gdb_listener);
     }
 
 #if SVMP_FE_LLVM_HAS_PERF_LISTENER
@@ -891,9 +871,7 @@ void configureEventListeners(llvm::orc::LLJIT& jit)
     }();
 
     if (perf_listener != nullptr) {
-        if (auto* layer = dynamic_cast<llvm::orc::RTDyldObjectLinkingLayer*>(&jit.getObjLinkingLayer())) {
-            layer->registerJITEventListener(*perf_listener);
-        }
+        object_layer.registerJITEventListener(*perf_listener);
     }
 #else
 #endif
@@ -901,7 +879,8 @@ void configureEventListeners(llvm::orc::LLJIT& jit)
 
 [[nodiscard]] std::unique_ptr<llvm::orc::LLJIT> createLLJIT(const JITOptions& options,
                                                            std::string& out_target_triple,
-                                                           std::string& out_data_layout)
+                                                           std::string& out_data_layout,
+                                                           llvm::ObjectCache* object_cache)
 {
     auto jtmb_expected = llvm::orc::JITTargetMachineBuilder::detectHost();
     if (!jtmb_expected) {
@@ -931,6 +910,45 @@ void configureEventListeners(llvm::orc::LLJIT& jit)
 
     llvm::orc::LLJITBuilder builder;
     builder.setJITTargetMachineBuilder(std::move(jtmb));
+    builder.setObjectLinkingLayerCreator(
+        [](llvm::orc::ExecutionSession& session,
+           const llvm::Triple& triple)
+            -> llvm::Expected<std::unique_ptr<llvm::orc::ObjectLayer>> {
+            auto memory_manager = []() {
+                return std::make_unique<llvm::SectionMemoryManager>();
+            };
+            auto object_layer =
+                std::make_unique<llvm::orc::RTDyldObjectLinkingLayer>(
+                    session, std::move(memory_manager));
+            if (triple.isOSBinFormatCOFF()) {
+                object_layer->setOverrideObjectFlagsWithResponsibilityFlags(
+                    true);
+                object_layer->setAutoClaimResponsibilityForObjectSymbols(true);
+            }
+            if (triple.isOSBinFormatELF() &&
+                (triple.getArch() == llvm::Triple::ppc64 ||
+                 triple.getArch() == llvm::Triple::ppc64le)) {
+                object_layer->setAutoClaimResponsibilityForObjectSymbols(true);
+            }
+            configureEventListeners(*object_layer);
+            return std::unique_ptr<llvm::orc::ObjectLayer>(
+                std::move(object_layer));
+        });
+    if (object_cache != nullptr) {
+        builder.setCompileFunctionCreator(
+            [object_cache](llvm::orc::JITTargetMachineBuilder machine_builder)
+                -> llvm::Expected<std::unique_ptr<
+                    llvm::orc::IRCompileLayer::IRCompiler>> {
+                auto target_machine = machine_builder.createTargetMachine();
+                if (!target_machine) {
+                    return target_machine.takeError();
+                }
+                return std::unique_ptr<
+                    llvm::orc::IRCompileLayer::IRCompiler>(
+                    std::make_unique<llvm::orc::TMOwningSimpleCompiler>(
+                        std::move(*target_machine), object_cache));
+            });
+    }
 
     auto jit_expected = builder.create();
     if (!jit_expected) {
@@ -955,8 +973,10 @@ void configureEventListeners(llvm::orc::LLJIT& jit)
 struct JITEngine::Impl {
 #if SVMP_FE_ENABLE_LLVM_JIT
     JITOptions options{};
-    std::unique_ptr<llvm::ObjectCache> object_cache{};
     ObjectCacheCounters object_cache_counters{};
+    std::unique_ptr<llvm::ObjectCache> object_cache{};
+    FileSystemObjectCache* filesystem_object_cache{nullptr};
+    InMemoryObjectCache* in_memory_object_cache{nullptr};
     std::unique_ptr<llvm::orc::LLJIT> jit{};
     std::string target_triple{};
     std::string data_layout{};
@@ -979,18 +999,6 @@ std::unique_ptr<JITEngine> JITEngine::create(const JITOptions& options)
         // optimization level) are derived automatically from the hardware
         // profile and calibration.  No runtime overrides needed.
 
-        std::string triple;
-        std::string data_layout;
-        auto jit = createLLJIT(options, triple, data_layout);
-
-        engine->impl_->jit = std::move(jit);
-        engine->impl_->target_triple = std::move(triple);
-        engine->impl_->data_layout = std::move(data_layout);
-        engine->impl_->cpu_name = hostCPUName();
-        engine->impl_->cpu_features = hostCPUFeaturesString();
-
-        configureEventListeners(*engine->impl_->jit);
-
         // Resolve effective cache directory: default to ~/.cache/svMultiPhysics/jit_cache/
         // when no explicit directory is set but caching is enabled.
         std::string effective_cache_dir = options.cache_directory;
@@ -1005,13 +1013,27 @@ std::unique_ptr<JITEngine> JITEngine::create(const JITOptions& options)
                 validatedObjectCacheDirectory(effective_cache_dir,
                                               llvmVersionString(),
                                               options.cache_diagnostics);
-            engine->impl_->object_cache = std::make_unique<FileSystemObjectCache>(cache_dir,
-                                                                                  &engine->impl_->object_cache_counters);
-            configureObjectCache(engine->impl_->jit->getIRCompileLayer(), engine->impl_->object_cache.get());
+            auto cache = std::make_unique<FileSystemObjectCache>(
+                cache_dir, &engine->impl_->object_cache_counters);
+            engine->impl_->filesystem_object_cache = cache.get();
+            engine->impl_->object_cache = std::move(cache);
         } else if (options.cache_kernels) {
-            engine->impl_->object_cache = std::make_unique<InMemoryObjectCache>(&engine->impl_->object_cache_counters);
-            configureObjectCache(engine->impl_->jit->getIRCompileLayer(), engine->impl_->object_cache.get());
+            auto cache = std::make_unique<InMemoryObjectCache>(
+                &engine->impl_->object_cache_counters);
+            engine->impl_->in_memory_object_cache = cache.get();
+            engine->impl_->object_cache = std::move(cache);
         }
+
+        std::string triple;
+        std::string data_layout;
+        auto jit = createLLJIT(options, triple, data_layout,
+                               engine->impl_->object_cache.get());
+
+        engine->impl_->jit = std::move(jit);
+        engine->impl_->target_triple = std::move(triple);
+        engine->impl_->data_layout = std::move(data_layout);
+        engine->impl_->cpu_name = hostCPUName();
+        engine->impl_->cpu_features = hostCPUFeaturesString();
 
         {
             const auto& hw = hardwareProfile();
@@ -1118,10 +1140,11 @@ bool JITEngine::tryLoadFromObjectCache(std::string_view name,
     }
 
     std::unique_ptr<llvm::MemoryBuffer> buf;
-    if (auto* fs_cache = dynamic_cast<FileSystemObjectCache*>(impl_->object_cache.get())) {
-        buf = fs_cache->getObjectById(name, expected_symbols);
-    } else if (auto* mem_cache = dynamic_cast<InMemoryObjectCache*>(impl_->object_cache.get())) {
-        buf = mem_cache->getObjectById(name);
+    if (impl_->filesystem_object_cache != nullptr) {
+        buf = impl_->filesystem_object_cache->getObjectById(
+            name, expected_symbols);
+    } else if (impl_->in_memory_object_cache != nullptr) {
+        buf = impl_->in_memory_object_cache->getObjectById(name);
     }
 
     if (!buf) {
