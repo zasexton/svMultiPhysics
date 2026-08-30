@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "matrix_id": "free_surface_wp7_cut_stability_v3",
+  "status": "FROZEN_BEFORE_EXECUTION",
+  "work_package": "WP-7",
+  "findings": [
+    "FSR-07"
+  ],
+  "implementation_source_commit": "b2232646d5004fcb7ca812ea2dc4202dbfa5592e",
+  "base_artifacts": {
+    "matrix_path": "tests/cases/fluid/free_surface_wp7_cut_stability_qualification_matrix.json",
+    "matrix_sha256": "a49cadbcbe1b56bf69e4520a5281fc942ac4dc9de82da4e3bdaa083d6334ab1f",
+    "runner_path": "tests/cases/fluid/run_free_surface_wp7_cut_stability_qualification.py",
+    "runner_sha256": "30c59eb725ba88b87447b935a915c6561b9ae25f082d93052d5cb9be4e337f6f"
+  },
+  "implementation_source": {
+    "path": "Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp",
+    "sha256": "8187a5c3eaca04957a0cf875cf0697a237faeb4a2fa7deb6bf139a613b529522"
+  },
+  "qualification_scope": "Executable prerequisite evidence for the production connected, disconnected, and rootless active-feature policy. Six prospective manufactured-error, node-crossing, and simulation-exit rows remain absent, so this revision does not close FSR-07, WP-7, or Q1.",
+  "closure_request_policy": {
+    "accepted_claim": "topology_policy_prerequisite",
+    "rejected_claims": [
+      "fsr07_closure",
+      "wp7_closure",
+      "q1_closure"
+    ],
+    "diagnostic": "The promoted topology-policy row is prerequisite evidence only; manufactured errors, operator and solution continuity, production-preconditioner spread, and simulation exits remain open."
+  },
+  "qualification_disposition": {
+    "fsr07_closed": false,
+    "wp7_closed": false,
+    "q1_closed": false
+  },
+  "closure_state": "BLOCKED_BY_SIX_PROSPECTIVE_EVIDENCE_ROWS",
+  "promotion": {
+    "test": "FreeSurfaceCutStability.ConnectedDisconnectedAndRootlessFeaturesReportTopologyPolicy",
+    "source_state_before": "prospective",
+    "source_state_after": "executable",
+    "remaining_prospective_test_count": 6,
+    "quantitative_evidence": [
+      {
+        "test": "FreeSurfaceCutStability.ConnectedDisconnectedAndRootlessFeaturesReportTopologyPolicy",
+        "property": "wp7_active_cell_topology_case_count",
+        "type": "integer",
+        "relation": "equal",
+        "threshold": 3
+      },
+      {
+        "test": "FreeSurfaceCutStability.ConnectedDisconnectedAndRootlessFeaturesReportTopologyPolicy",
+        "property": "wp7_active_cell_topology_feature_count",
+        "type": "integer",
+        "relation": "equal",
+        "threshold": 5
+      },
+      {
+        "test": "FreeSurfaceCutStability.ConnectedDisconnectedAndRootlessFeaturesReportTopologyPolicy",
+        "property": "wp7_active_cell_topology_rooted_feature_count",
+        "type": "integer",
+        "relation": "equal",
+        "threshold": 4
+      },
+      {
+        "test": "FreeSurfaceCutStability.ConnectedDisconnectedAndRootlessFeaturesReportTopologyPolicy",
+        "property": "wp7_active_cell_topology_rootless_feature_count",
+        "type": "integer",
+        "relation": "equal",
+        "threshold": 1
+      },
+      {
+        "test": "FreeSurfaceCutStability.ConnectedDisconnectedAndRootlessFeaturesReportTopologyPolicy",
+        "property": "wp7_active_cell_topology_rootless_retained_physical_volume",
+        "type": "real",
+        "relation": "less_than_or_equal",
+        "threshold": 1.000000000001
+      },
+      {
+        "test": "FreeSurfaceCutStability.ConnectedDisconnectedAndRootlessFeaturesReportTopologyPolicy",
+        "property": "wp7_active_cell_topology_velocity_pressure_mismatch_count",
+        "type": "integer",
+        "relation": "equal",
+        "threshold": 0
+      }
+    ]
+  },
+  "closure_contract": [
+    {
+      "claim": "selected_combined_method_and_finite_cut_foundation_remain_gated",
+      "evidence": [
+        "FreeSurfaceCutStability.SelectedCombinedAggregateAndPressureStabilizationContractIsExplicit",
+        "FreeSurfaceCutStability.ExactTargetFractionGeometryCoversAxisObliqueAndThreeHLevels",
+        "FreeSurfaceCutStability.ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
+        "FreeSurfaceCutStability.FixedTetraMeshGenericAndNearFeatureSweepHasNoFreePressureNullRows",
+        "FreeSurfaceCutStability.FixedPhysicalCutThreeLevelRefinementBoundsPressureControlAndAggregation",
+        "FreeSurfaceCutStability.PersistentMovingCutRefreshesAggregationAndRetainsMixedRankWithoutPressurePin",
+        "FreeSurfaceCutStability.ProductionSmallCutAggregationPreservesPartialWallDirichletPerComponent",
+        "FreeSurfaceCutStability.DisconnectedLiquidIslandsHaveZeroPhysicalCrossCouplingThroughDryStrip",
+        "FreeSurfaceCutStability.FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations",
+        "FreeSurfaceCutStabilityMPI.DistributedMovingCutRemainsStableAcrossBlockAndMetisPartitions",
+        "FreeSurfaceCutStabilityMPI.LimitedMetisHaloFailsClosedOnIncompleteAggregationSupport",
+        "FreeSurfaceCutStabilityMPI.TwoRankFractionOrientationRegimeMatrixMatchesSerial",
+        "FreeSurfaceCutStabilityMPI.FourRankFixedCutIsInvariantAcrossBlockAndMetisPartitions",
+        "FreeSurfaceCutStabilityMPI.FourRankFractionOrientationRegimeMatrixMatchesSerial"
+      ]
+    },
+    {
+      "claim": "connected_disconnected_and_rootless_feature_policy_is_executable",
+      "evidence": [
+        "FreeSurfaceCutStability.ConnectedDisconnectedAndRootlessFeaturesReportTopologyPolicy"
+      ]
+    }
+  ],
+  "runtime_gates": {
+    "expected_group_count": 4,
+    "expected_distinct_test_count": 15,
+    "expected_quantitative_evidence_count": 55,
+    "expected_failures": 0,
+    "expected_errors": 0,
+    "expected_disabled": 0,
+    "expected_skipped": 0
+  }
+}
