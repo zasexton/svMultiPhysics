@@ -27,8 +27,9 @@ double fsils_dot_s(const int nNo, FSILS_commuType& commu, const Vector<double>& 
 {
   double result = 0.0; 
 
-  for (int i = 0; i < nNo; i++) {
-    result = result + U(i)*V(i);
+  if (nNo > 0) {
+    const int stride = 1;
+    result = ddot_(&nNo, U.data(), &stride, V.data(), &stride);
   }
 
   if (commu.nTasks == 1) {
@@ -155,4 +156,3 @@ double fsils_nc_dot_v(const int dof, const int nNo, const Array<double>& U, cons
 }
 
 };
-
