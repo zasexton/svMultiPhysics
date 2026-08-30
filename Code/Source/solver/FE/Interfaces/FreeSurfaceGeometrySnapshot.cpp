@@ -3539,6 +3539,10 @@ void finalizeFreeSurfaceDynamicContactState(
     state.wall_slip_dissipation = Real{0.0};
     state.total_dissipation = Real{0.0};
     for (auto& wall : state.walls) {
+        const bool prescribed_angle =
+            wall.law == FreeSurfaceContactLaw::PrescribedAngle;
+        const bool dynamic_ren_e =
+            wall.law == FreeSurfaceContactLaw::DynamicRenE;
         const auto count = wall.owned_advancing_point_count +
                            wall.owned_receding_point_count +
                            wall.owned_stationary_point_count;
@@ -3553,7 +3557,9 @@ void finalizeFreeSurfaceDynamicContactState(
             !(wall.equilibrium_contact_angle_radians <
               std::numbers::pi_v<Real>) ||
             !std::isfinite(wall.mobility) ||
-            !(wall.mobility > Real{0.0}) ||
+            (!prescribed_angle && !dynamic_ren_e) ||
+            (dynamic_ren_e && !(wall.mobility > Real{0.0})) ||
+            (prescribed_angle && wall.mobility != Real{0.0}) ||
             !std::isfinite(wall.slip_length) ||
             !(wall.slip_length > Real{0.0}) ||
             !std::isfinite(wall.dynamic_viscosity) ||
@@ -3618,8 +3624,9 @@ void finalizeFreeSurfaceDynamicContactState(
             throw std::invalid_argument(
                 "free-surface dynamic-contact wall-slip integrals violate their measure bounds");
         }
-        wall.line_friction_dissipation =
-            wall.contact_speed_squared_integral / wall.mobility;
+        wall.line_friction_dissipation = dynamic_ren_e
+            ? wall.contact_speed_squared_integral / wall.mobility
+            : Real{0.0};
         wall.wall_slip_dissipation =
             wall.dynamic_viscosity / wall.slip_length *
             wall.wall_slip_speed_squared_integral;
@@ -3732,6 +3739,10 @@ FreeSurfaceDynamicContactState evaluateFreeSurfaceDynamicContactState(
     std::map<int, FreeSurfaceDynamicContactWallState> walls;
     for (const auto& coefficient :
          parameters.dynamic_contact_coefficients) {
+        const bool prescribed_angle =
+            coefficient.law == FreeSurfaceContactLaw::PrescribedAngle;
+        const bool dynamic_ren_e =
+            coefficient.law == FreeSurfaceContactLaw::DynamicRenE;
         if (coefficient.boundary_marker < 0 ||
             !std::isfinite(
                 coefficient.equilibrium_contact_angle_radians) ||
@@ -3739,13 +3750,15 @@ FreeSurfaceDynamicContactState evaluateFreeSurfaceDynamicContactState(
             !(coefficient.equilibrium_contact_angle_radians <
               std::numbers::pi_v<Real>) ||
             !std::isfinite(coefficient.mobility) ||
-            !(coefficient.mobility > Real{0.0}) ||
+            (!prescribed_angle && !dynamic_ren_e) ||
+            (dynamic_ren_e && !(coefficient.mobility > Real{0.0})) ||
+            (prescribed_angle && coefficient.mobility != Real{0.0}) ||
             !std::isfinite(coefficient.slip_length) ||
             !(coefficient.slip_length > Real{0.0}) ||
             !std::isfinite(coefficient.dynamic_viscosity) ||
             !(coefficient.dynamic_viscosity > Real{0.0})) {
             throw std::invalid_argument(
-                "free-surface dynamic-contact coefficient requires a nonnegative marker, an angle strictly between zero and pi, positive mobility, positive slip length, and positive dynamic viscosity");
+                "free-surface contact coefficient requires a supported law, a nonnegative marker, an angle strictly between zero and pi, law-consistent mobility, positive slip length, and positive dynamic viscosity");
         }
         const auto young = std::find_if(
             parameters.young_wall_coefficients.begin(),
@@ -3764,6 +3777,7 @@ FreeSurfaceDynamicContactState evaluateFreeSurfaceDynamicContactState(
         wall.boundary_marker = coefficient.boundary_marker;
         wall.equilibrium_contact_angle_radians =
             coefficient.equilibrium_contact_angle_radians;
+        wall.law = coefficient.law;
         wall.mobility = coefficient.mobility;
         wall.slip_length = coefficient.slip_length;
         wall.dynamic_viscosity = coefficient.dynamic_viscosity;
@@ -3867,7 +3881,10 @@ FreeSurfaceDynamicContactState evaluateFreeSurfaceDynamicContactState(
             }
             continue;
         }
-        const Real line_friction = Real{1.0} / wall.mobility;
+        const Real line_friction =
+            wall.law == FreeSurfaceContactLaw::DynamicRenE
+                ? Real{1.0} / wall.mobility
+                : Real{0.0};
         const Real equilibrium_cosine =
             std::cos(wall.equilibrium_contact_angle_radians);
         for (std::size_t point_index = 0;

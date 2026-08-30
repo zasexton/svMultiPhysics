@@ -3200,6 +3200,10 @@ void append_free_surface_contact_line(
       {"Wall_slip_length", "WallSlipLength", "Slip_length", "SlipLength"});
   const bool has_contact_marker = any_parameter_defined(
       params, {"Contact_line_marker", "ContactLineMarker"});
+  const auto slip_model = first_defined_string(
+      params,
+      {"Wall_slip_model", "WallSlipModel",
+       "Contact_line_wall_slip_model", "ContactLineWallSlipModel"});
 
   if (parsed_model == ParsedFreeSurfaceContactModel::None) {
     if (has_angle || has_wall_marker || has_wall_normal || has_mobility ||
@@ -3229,9 +3233,20 @@ void append_free_surface_contact_line(
           "[svMultiPhysics::Physics] PrescribedAngle and DynamicRenE require an explicit angle, wall marker(s), and wall normal(s).");
     }
     if (parsed_model == ParsedFreeSurfaceContactModel::PrescribedAngle) {
-      if (has_mobility || has_slip_model || has_slip_length) {
+      if (has_mobility) {
         throw std::runtime_error(
-            "[svMultiPhysics::Physics] PrescribedAngle does not accept mobility or wall-slip parameters.");
+            "[svMultiPhysics::Physics] PrescribedAngle does not accept contact-line mobility.");
+      }
+      if (has_slip_model != has_slip_length) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Physics] PrescribedAngle Navier slip requires both Wall_slip_model and Wall_slip_length, or neither.");
+      }
+      if (has_slip_model &&
+          parse_free_surface_wall_slip_model(
+              *slip_model, "Free-surface Wall_slip_model") !=
+              ParsedFreeSurfaceWallSlipModel::Navier) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Physics] PrescribedAngle wall slip requires Wall_slip_model=Navier.");
       }
     } else if (!has_mobility || !has_slip_model || !has_slip_length) {
       throw std::runtime_error(
@@ -3278,10 +3293,6 @@ void append_free_surface_contact_line(
     mobility = static_cast<svmp::FE::Real>(*parsed_mobility);
   }
 
-  const auto slip_model = first_defined_string(
-          params,
-          {"Wall_slip_model", "WallSlipModel", "Contact_line_wall_slip_model",
-           "ContactLineWallSlipModel"});
   if (parsed_model == ParsedFreeSurfaceContactModel::DynamicRenE &&
       (!slip_model.has_value() ||
        parse_free_surface_wall_slip_model(
@@ -3342,6 +3353,11 @@ void append_free_surface_contact_line(
               .contact_line_marker = contact_marker,
               .contact_angle_radians = contact_angle,
               .wall_normal = wall_normal,
+              .slip_length = has_slip_length
+                  ? std::optional<
+                        IncompressibleNavierStokesVMSOptions::ScalarValue>{
+                        slip_length}
+                  : std::nullopt,
           },
       });
       break;

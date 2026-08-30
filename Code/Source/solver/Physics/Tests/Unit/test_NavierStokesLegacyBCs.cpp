@@ -1402,7 +1402,41 @@ TEST(NavierStokesLegacyBCs,
                 {"Contact_angle_radians", "1.0"},
                 {"Contact_line_mobility", "0.5"},
             },
-            "PrescribedAngle does not accept mobility",
+            "PrescribedAngle does not accept contact-line mobility",
+        },
+        {
+            "prescribed with incomplete slip model",
+            {
+                {"Contact_line_model", "PrescribedAngle"},
+                {"Contact_line_wall_marker", "80"},
+                {"Contact_line_wall_normal", "1 0 0"},
+                {"Contact_angle_radians", "1.0"},
+                {"Wall_slip_model", "Navier"},
+            },
+            "requires both Wall_slip_model and Wall_slip_length",
+        },
+        {
+            "prescribed with incomplete slip length",
+            {
+                {"Contact_line_model", "PrescribedAngle"},
+                {"Contact_line_wall_marker", "80"},
+                {"Contact_line_wall_normal", "1 0 0"},
+                {"Contact_angle_radians", "1.0"},
+                {"Wall_slip_length", "0.1"},
+            },
+            "requires both Wall_slip_model and Wall_slip_length",
+        },
+        {
+            "prescribed with unsupported slip model",
+            {
+                {"Contact_line_model", "PrescribedAngle"},
+                {"Contact_line_wall_marker", "80"},
+                {"Contact_line_wall_normal", "1 0 0"},
+                {"Contact_angle_radians", "1.0"},
+                {"Wall_slip_model", "None"},
+                {"Wall_slip_length", "0.1"},
+            },
+            "requires Wall_slip_model=Navier",
         },
         {
             "removed prescribed-angle coefficient",
@@ -1859,6 +1893,126 @@ TEST(NavierStokesLegacyBCs,
     // in the inner Newton operator; WP-8 must supply that tangent or a
     // converged common-stage outer iteration.
     EXPECT_FALSE(found_velocity_phi_coupling);
+#endif
+}
+
+TEST(NavierStokesLegacyBCs,
+     UnfittedPrescribedAngleNavierSlipUsesSharpWallWithoutLineFriction)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+
+    constexpr int wall_marker = 82;
+    constexpr int interface_marker = 205;
+    auto mesh = buildSingleTetraBoundaryMesh(
+        wall_marker, /*label_all_faces=*/false);
+    ASSERT_TRUE(mesh);
+
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "fluid";
+    input.mesh_name = "single_tetra";
+    input.mesh = mesh->local_mesh_ptr();
+    input.equation_params["Operator_tag"] = defined("equations");
+    input.default_domain.params["Density"] = defined("1.0");
+    input.default_domain.params["Viscosity.model"] = defined("Constant");
+    input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+    svmp::Physics::BoundaryConditionInput free_surface{};
+    free_surface.name = "free_surface";
+    free_surface.boundary_marker = svmp::INVALID_LABEL;
+    free_surface.params["Type"] = defined("Free_surface");
+    free_surface.params["Implementation"] = defined("UnfittedLevelSet");
+    free_surface.params["Interface_marker"] =
+        defined(std::to_string(interface_marker));
+    free_surface.params["Level_set_field_name"] =
+        defined("phi_prescribed_slip");
+    free_surface.params["Active_domain"] = defined("LevelSetNegative");
+    free_surface.params["Active_domain_method"] = defined("CutVolume");
+    free_surface.params["Generated_interface_geometry"] =
+        defined("LinearCorner");
+    free_surface.params["Small_cut_aggregation"] = defined("false");
+    free_surface.params["Surface_tension"] = defined("0.8");
+    free_surface.params["Curvature"] = defined("0.0");
+    free_surface.params["Use_level_set_curvature"] = defined("false");
+    free_surface.params["Contact_line_model"] =
+        defined("PrescribedAngle");
+    free_surface.params["Contact_line_wall_marker"] =
+        defined(std::to_string(wall_marker));
+    free_surface.params["Contact_line_wall_normal"] =
+        defined("0.0 0.0 -1.0");
+    free_surface.params["Contact_angle_degrees"] = defined("60.0");
+    free_surface.params["Wall_slip_model"] = defined("Navier");
+    free_surface.params["Wall_slip_length"] = defined("0.2");
+    input.boundary_conditions.push_back(std::move(free_surface));
+
+    svmp::Physics::BoundaryConditionInput wall{};
+    wall.name = "prescribed_contact_wall";
+    wall.boundary_marker = wall_marker;
+    wall.params["Type"] = defined("Dirichlet");
+    wall.params["Value"] = defined("0.0");
+    wall.params["Effective_direction"] = defined("0 0 1");
+    input.boundary_conditions.push_back(std::move(wall));
+
+    svmp::FE::systems::FESystem system(mesh);
+    auto scalar_space = svmp::FE::spaces::SpaceFactory::create_h1(
+        svmp::FE::ElementType::Tetra4, 1);
+    const auto phi = system.addField(svmp::FE::systems::FieldSpec{
+        .name = "phi_prescribed_slip",
+        .space = scalar_space,
+        .components = 1,
+    });
+    system.addOperator("level_set_owner");
+    const auto phi_state = svmp::FE::forms::StateField(
+        phi, *scalar_space, "phi_prescribed_slip_owner");
+    const auto eta = svmp::FE::forms::TestField(
+        phi, *scalar_space, "eta_prescribed_slip_owner");
+    (void)svmp::FE::systems::installFormulation(
+        system,
+        "level_set_owner",
+        {phi},
+        (phi_state * eta).dx());
+    const int contact_marker = stableGeneratedContactLineMarker(
+        phi, interface_marker, wall_marker);
+    svmp::FE::interfaces::GeneratedActiveBoundaryMarkerKey active_key{};
+    active_key.source =
+        svmp::FE::interfaces::LevelSetInterfaceSource::fromField(phi);
+    active_key.domain_id = "free_surface";
+    active_key.interface_marker = interface_marker;
+    active_key.boundary_marker = wall_marker;
+    active_key.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+    const int active_wall_marker =
+        svmp::FE::interfaces::stableGeneratedActiveBoundaryMarker(active_key);
+
+    auto module = svmp::Physics::EquationModuleRegistry::instance().create(
+        "fluid", input, system);
+    ASSERT_TRUE(module);
+    EXPECT_TRUE(formulationRecordsContainInterfaceMarker(
+        system, contact_marker));
+    EXPECT_TRUE(formulationRecordsContainInterfaceMarker(
+        system, active_wall_marker));
+
+    const auto declarations =
+        system.freeSurfaceDiscreteFunctionalDeclarations();
+    ASSERT_EQ(declarations.size(), 1u);
+    ASSERT_EQ(
+        declarations.front().parameters.dynamic_contact_coefficients.size(),
+        1u);
+    const auto& coefficient =
+        declarations.front().parameters.dynamic_contact_coefficients.front();
+    EXPECT_EQ(coefficient.law,
+              svmp::FE::interfaces::FreeSurfaceContactLaw::PrescribedAngle);
+    EXPECT_DOUBLE_EQ(coefficient.mobility, 0.0);
+    EXPECT_DOUBLE_EQ(coefficient.slip_length, 0.2);
+    EXPECT_DOUBLE_EQ(coefficient.dynamic_viscosity, 0.01);
+
+    const auto artifact = module->effectiveConfigurationArtifact();
+    ASSERT_TRUE(artifact.has_value());
+    EXPECT_NE(artifact->json.find("\"wall_slip_model\":\"Navier\""),
+              std::string::npos);
+    EXPECT_NE(artifact->json.find("\"line_friction\":\"absent\""),
+              std::string::npos);
 #endif
 }
 

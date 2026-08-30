@@ -239,9 +239,15 @@ struct FreeSurfaceYoungWallCoefficient {
     Real equilibrium_contact_angle_radians{0.0};
 };
 
+enum class FreeSurfaceContactLaw : std::uint8_t {
+    PrescribedAngle,
+    DynamicRenE
+};
+
 struct FreeSurfaceDynamicContactCoefficient {
     int boundary_marker{-1};
     Real equilibrium_contact_angle_radians{0.0};
+    FreeSurfaceContactLaw law{FreeSurfaceContactLaw::DynamicRenE};
     Real mobility{0.0};
     Real slip_length{0.0};
     Real dynamic_viscosity{0.0};
@@ -360,16 +366,19 @@ enum class FreeSurfaceContactMotion : std::uint8_t {
 };
 
 /**
- * Rank-owned Ren--E contact-law sample on one wall and one geometry snapshot.
+ * Rank-owned contact-law sample on one wall and one geometry snapshot.
  *
  * The integral fields are additive across ranks.  The mean fields are derived
  * from those integrals and are recomputed after communicator reduction.  The
  * mean frame vectors retain their magnitude: a value below one records frame
- * variation instead of disguising it through renormalization.
+ * variation instead of disguising it through renormalization.  Prescribed
+ * angle records set mobility and line-friction dissipation to zero while
+ * retaining sharp wetted-wall Navier dissipation and geometric angle error.
  */
 struct FreeSurfaceDynamicContactWallState {
     int boundary_marker{-1};
     Real equilibrium_contact_angle_radians{0.0};
+    FreeSurfaceContactLaw law{FreeSurfaceContactLaw::DynamicRenE};
     Real mobility{0.0};
     Real slip_length{0.0};
     Real dynamic_viscosity{0.0};
