@@ -18,15 +18,21 @@
 
 #include <math.h>
 
+extern "C" {
+  double ddot_(const int* n, const double* x, const int* incx,
+      const double* y, const int* incy);
+}
+
 namespace norm {
 
 double fsi_ls_norms(const int nNo, FSILS_commuType& commu, const Vector<double>& U)
 {
   double result = 0.0;
 
-  for (int i = 0; i < nNo; i++) {
-    result = result + U(i)*U(i);
-  } 
+  if (nNo > 0) {
+    const int stride = 1;
+    result = ddot_(&nNo, U.data(), &stride, U.data(), &stride);
+  }
 
   if (commu.nTasks != 1) {
     double tmp;
