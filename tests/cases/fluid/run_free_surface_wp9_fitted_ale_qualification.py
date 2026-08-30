@@ -23,10 +23,12 @@ if str(SCRIPT_DIRECTORY) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIRECTORY))
 
 import run_free_surface_configuration_qualification as base_runner  # noqa: E402
+import mpi_aware_gtest_discovery as gtest_discovery  # noqa: E402
 
 
 SCRIPT_PATH = Path(__file__).resolve()
 SOURCE_ROOT = SCRIPT_PATH.parents[3]
+DEFAULT_MPI_LAUNCHER = Path("/usr/bin/mpiexec")
 DEFAULT_MATRIX = SCRIPT_PATH.with_name(
     "free_surface_wp9_fitted_ale_qualification_matrix.json"
 )
@@ -529,25 +531,37 @@ def _tests_for_binary(
     ]
 
 
-def _listed_gtests(binary: Path) -> set[str]:
-    result = subprocess.run(
-        [str(binary), "--gtest_list_tests"],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=60,
+def _single_rank_command(
+    mpi_launcher: Path,
+    binary: Path,
+    arguments: list[str],
+) -> list[str]:
+    return [
+        str(mpi_launcher),
+        *gtest_discovery.MPI_SINGLE_RANK_ARGUMENTS,
+        str(binary),
+        *arguments,
+    ]
+
+
+def _single_rank_contract(mpi_launcher: Path) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "launcher": str(mpi_launcher),
+        "arguments": list(gtest_discovery.MPI_SINGLE_RANK_ARGUMENTS),
+        "binary_keys": ["application", "physics"],
+        "inherited_scheduler_process_policy": (
+            "isolate_in_explicit_single_rank_world"
+        ),
+    }
+
+
+def _listed_gtests(binary: Path, mpi_launcher: Path) -> set[str]:
+    return gtest_discovery.listed_gtests(
+        binary,
+        mpi_launcher=mpi_launcher,
+        timeout_seconds=60,
     )
-    suite = ""
-    tests: set[str] = set()
-    for line in result.stdout.splitlines():
-        if line and not line[0].isspace():
-            suite = line.split("#", 1)[0].strip().removesuffix(".")
-            continue
-        test = line.split("#", 1)[0].strip()
-        if suite and test:
-            tests.add(f"{suite}.{test}")
-    return tests
 
 
 def _requested_claim(
@@ -626,12 +640,21 @@ def _run_validate_only(claim: str, remaining: list[str]) -> int:
 def _parse_binary_arguments(
     program: str,
     arguments: list[str],
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path, Path]:
     parser = argparse.ArgumentParser(prog=program)
     parser.add_argument("--physics-binary", type=Path, required=True)
     parser.add_argument("--application-binary", type=Path, required=True)
+    parser.add_argument(
+        "--mpi-launcher",
+        type=Path,
+        default=DEFAULT_MPI_LAUNCHER,
+    )
     parsed = parser.parse_args(arguments)
-    return parsed.physics_binary.resolve(), parsed.application_binary.resolve()
+    return (
+        parsed.physics_binary.resolve(),
+        parsed.application_binary.resolve(),
+        parsed.mpi_launcher.resolve(),
+    )
 
 
 def _require_executable(path: Path) -> None:
@@ -640,12 +663,13 @@ def _require_executable(path: Path) -> None:
 
 
 def _run_list_only(claim: str, remaining: list[str]) -> int:
-    physics, application = _parse_binary_arguments(
+    physics, application, mpi_launcher = _parse_binary_arguments(
         f"{SCRIPT_PATH.name} --list-only",
         remaining,
     )
     _require_executable(physics)
     _require_executable(application)
+    _require_executable(mpi_launcher)
     matrix = load_matrix(DEFAULT_MATRIX)
     binaries = {"physics": physics, "application": application}
     missing_by_binary: dict[str, list[str]] = {}
@@ -653,7 +677,7 @@ def _run_list_only(claim: str, remaining: list[str]) -> int:
     binary_hashes: dict[str, str] = {}
     for key, binary in binaries.items():
         expected = set(_tests_for_binary(matrix, key))
-        listed = _listed_gtests(binary)
+        listed = _listed_gtests(binary, mpi_launcher)
         missing_by_binary[key] = sorted(expected - listed)
         listed_counts[key] = len(expected & listed)
         binary_hashes[key] = base_runner.sha256_file(binary)
@@ -663,6 +687,9 @@ def _run_list_only(claim: str, remaining: list[str]) -> int:
             {
                 **_validation_summary(matrix, claim),
                 "binary_sha256": binary_hashes,
+                "single_rank_execution": _single_rank_contract(
+                    mpi_launcher
+                ),
                 "listed_expected_test_count": listed_counts,
                 "missing_tests": missing_by_binary,
                 "tests_executed": 0,
@@ -682,17 +709,21 @@ def _run_one_binary(
     matrix: dict[str, Any],
     source_root: Path,
     output: Path,
+    mpi_launcher: Path,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     group_output = output / key
     group_output.mkdir(exist_ok=False)
     gtest_path = group_output / "gtest.json"
     stdout_path = group_output / "stdout.txt"
     stderr_path = group_output / "stderr.txt"
-    command = [
-        str(binary),
-        f"--gtest_filter={':'.join(tests)}",
-        f"--gtest_output=json:{gtest_path}",
-    ]
+    command = _single_rank_command(
+        mpi_launcher,
+        binary,
+        [
+            f"--gtest_filter={':'.join(tests)}",
+            f"--gtest_output=json:{gtest_path}",
+        ],
+    )
     execution = matrix["execution"]
     environment = os.environ.copy()
     environment["OMP_NUM_THREADS"] = str(execution["threads"])
@@ -748,6 +779,11 @@ def _run_execution(claim: str, remaining: list[str]) -> int:
     parser = argparse.ArgumentParser(prog=SCRIPT_PATH.name)
     parser.add_argument("--physics-binary", type=Path, required=True)
     parser.add_argument("--application-binary", type=Path, required=True)
+    parser.add_argument(
+        "--mpi-launcher",
+        type=Path,
+        default=DEFAULT_MPI_LAUNCHER,
+    )
     parser.add_argument("--source-root", type=Path, default=SOURCE_ROOT)
     parser.add_argument(
         "--supplemental-source",
@@ -764,8 +800,10 @@ def _run_execution(claim: str, remaining: list[str]) -> int:
         "physics": parsed.physics_binary.resolve(),
         "application": parsed.application_binary.resolve(),
     }
+    mpi_launcher = parsed.mpi_launcher.resolve()
     for binary in binaries.values():
         _require_executable(binary)
+    _require_executable(mpi_launcher)
     if output.exists():
         raise ValueError(f"refusing to replace output directory: {output}")
 
@@ -797,6 +835,9 @@ def _run_execution(claim: str, remaining: list[str]) -> int:
             "tests": matrix["tests"],
             "tests_by_binary": tests_by_binary,
             "exit_contract": matrix["exit_contract"],
+            "single_rank_execution": _single_rank_contract(
+                mpi_launcher
+            ),
         },
     )
     write_json(
@@ -818,6 +859,10 @@ def _run_execution(claim: str, remaining: list[str]) -> int:
             },
             "mpi_ranks": matrix["execution"]["mpi_ranks"],
             "threads": matrix["execution"]["threads"],
+            "mpi_launcher": {
+                "path": str(mpi_launcher),
+                "sha256": base_runner.sha256_file(mpi_launcher),
+            },
         },
     )
     write_json(
@@ -839,6 +884,7 @@ def _run_execution(claim: str, remaining: list[str]) -> int:
             matrix,
             source_root,
             output,
+            mpi_launcher,
         )
 
     if (

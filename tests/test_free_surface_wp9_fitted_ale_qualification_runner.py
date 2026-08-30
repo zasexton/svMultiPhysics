@@ -294,3 +294,60 @@ def test_wp9_validate_only_reports_prerequisite_nonclosure():
     assert summary["wp9_closed"] is False
     assert summary["q4_closed"] is False
     assert summary["physical_fitted_ale_qualified"] is False
+
+
+def test_wp9_single_rank_command_is_explicit_and_bounded():
+    runner = _load_runner()
+    launcher = Path("/opt/mpi/bin/mpiexec")
+    binary = Path("/tmp/test_physics")
+
+    assert runner._single_rank_command(
+        launcher,
+        binary,
+        ["--gtest_list_tests"],
+    ) == [
+        str(launcher),
+        "--oversubscribe",
+        "-n",
+        "1",
+        str(binary),
+        "--gtest_list_tests",
+    ]
+    assert runner._single_rank_contract(launcher) == {
+        "schema_version": 1,
+        "launcher": str(launcher),
+        "arguments": ["--oversubscribe", "-n", "1"],
+        "binary_keys": ["application", "physics"],
+        "inherited_scheduler_process_policy": (
+            "isolate_in_explicit_single_rank_world"
+        ),
+    }
+
+
+def test_wp9_discovery_uses_the_explicit_single_rank_launcher(monkeypatch):
+    runner = _load_runner()
+    launcher = Path("/opt/mpi/bin/mpiexec")
+    binary = Path("/tmp/test_physics")
+    observed = {}
+
+    def run(command, **options):
+        observed["command"] = command
+        observed["options"] = options
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            "MovingDomainPhysics.\n  Example\n",
+            "",
+        )
+
+    monkeypatch.setattr(runner.gtest_discovery.subprocess, "run", run)
+
+    assert runner._listed_gtests(binary, launcher) == {
+        "MovingDomainPhysics.Example"
+    }
+    assert observed["command"] == runner._single_rank_command(
+        launcher,
+        binary,
+        ["--gtest_list_tests"],
+    )
+    assert observed["options"]["timeout"] == 60
