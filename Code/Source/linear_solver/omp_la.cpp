@@ -70,8 +70,9 @@ void omp_mul_v(const int dof, const int nNo, const double r, Array<double>& U)
 //
 void omp_sum_s(const int nNo, const double r, Vector<double>& U, const Vector<double>& V)
 {
-  for (int i = 0; i < nNo; i++) {
-    U(i) = U(i) + r*V(i);
+  if (nNo > 0) {
+    const int stride = 1;
+    daxpy_(&nNo, &r, V.data(), &stride, U.data(), &stride);
   }
 }
 
@@ -130,4 +131,3 @@ void omp_sum_v(const int dof, const int nNo, const double r, Array<double>& U, c
 
 
 };
-
