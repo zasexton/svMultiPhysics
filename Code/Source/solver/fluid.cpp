@@ -795,7 +795,8 @@ void fluid_2d_c(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int e
   const double ctC = 36.0;
 
   double rho = dmn.prop[PhysicalProperyType::fluid_density];
-  Vector<double> f(2);
+  std::array<double, 2> f_data{};
+  Vector<double> f(2, f_data.data());
   // f_x is internal force in x-direction; what is internal force?
   f[0] = dmn.prop[PhysicalProperyType::f_x];
   
@@ -815,13 +816,16 @@ void fluid_2d_c(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int e
   // Velocity and its gradients, inertia (acceleration & body force)
   //
   // ud[j] = jth component of (acceleration - body force)
-  Vector<double> ud{-f[0], -f[1]};
+  std::array<double, 2> ud_data{-f[0], -f[1]};
+  Vector<double> ud(2, ud_data.data());
   
   // u[j] = jth component of velocity, u
-  Vector<double> u(2);
+  std::array<double, 2> u_data{};
+  Vector<double> u(2, u_data.data());
   
   // ux[i, j] = derivative of jth component of velocity with respect to ith component of x = du_j/dx_i
-  Array<double> ux(2,2);
+  std::array<double, 4> ux_data{};
+  Array<double> ux(2, 2, ux_data.data());
   
   // uxx[i, j, k] = 2nd derivative of jth component of velocity with respect to ith component of x and kth component of x = d2(u_j)/(dx_i*dx_k)
   Array3<double> uxx(2,2,2);
@@ -881,14 +885,16 @@ void fluid_2d_c(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int e
   uxx(0,1,1) = uxx(1,1,0);
 
   // d2u2[j] = laplacian of jth component of velocity
-  Vector<double> d2u2(2);
+  std::array<double, 2> d2u2_data{};
+  Vector<double> d2u2(2, d2u2_data.data());
   d2u2(0) = uxx(0,0,0) + uxx(1,0,1);
   d2u2(1) = uxx(0,1,0) + uxx(1,1,1);
 
 
   // Pressure and its gradient
   // px[i] = derivative of pressure with respect to ith component of x = dp/dx_i
-  Vector<double> px(2);
+  std::array<double, 2> px_data{};
+  Vector<double> px(2, px_data.data());
   for (int a = 0; a < eNoNq; a++) {
     px(0) = px(0) + Nqx(0,a)*yl(2,a);
     px(1) = px(1) + Nqx(1,a)*yl(2,a);
@@ -903,7 +909,8 @@ void fluid_2d_c(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int e
   }
 
   // 2 * strain rate tensor = 2*e_ij = du_i/dx_j + du_j/dx_i)
-  Array<double> es(2,2);
+  std::array<double, 4> es_data{};
+  Array<double> es(2, 2, es_data.data());
   es(0,0) = ux(0,0) + ux(0,0);
   es(1,0) = ux(1,0) + ux(0,1);
   es(1,1) = ux(1,1) + ux(1,1);
@@ -942,7 +949,8 @@ void fluid_2d_c(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int e
   }
   
   // mu_x[j] = gamma * derivative of gamma with respect to jth component of x
-  Vector<double> mu_x(2);
+  std::array<double, 2> mu_x_data{};
+  Vector<double> mu_x(2, mu_x_data.data());
   mu_x(0) = (es_x(0,0,0)*es(0,0) + es_x(1,1,0)*es(1,1))*0.50 +  es_x(1,0,0)*es(1,0);
   mu_x(1) = (es_x(0,0,1)*es(0,0) + es_x(1,1,1)*es(1,1))*0.50 +  es_x(1,0,1)*es(1,0);
 
@@ -981,7 +989,8 @@ void fluid_2d_c(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int e
   Array3<double> updu(2,2,eNoNw);
   
   // up[i] = ith component of u_prime (where u_prime = fine-scale velocity in VMS) = -tau_M / rho * ith component of momentum PDE residual (not weak form residual)
-  Vector<double> up(2);
+  std::array<double, 2> up_data{};
+  Vector<double> up(2, up_data.data());
   
   // tauM = tau_M / rho = tau_SUPS / rho
   double tauM{0.0};
@@ -1000,12 +1009,14 @@ void fluid_2d_c(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int e
     tauM = 1.0 / (rho * sqrt( kT + kU + kS ));
 
     // rV[i] = ith component of (acceleration + convective term - body force)
-    Vector<double> rV(2);
+    std::array<double, 2> rV_data{};
+    Vector<double> rV(2, rV_data.data());
     rV(0) = ud(0) + u(0)*ux(0,0) + u(1)*ux(1,0);
     rV(1) = ud(1) + u(0)*ux(0,1) + u(1)*ux(1,1);
 
     // rS[i] = ith component of divergence of (2 * effective dynamic viscosity * strain rate tensor) = d(2 * mu * e_ij)/dx_j
-    Vector<double> rS(2);
+    std::array<double, 2> rS_data{};
+    Vector<double> rS(2, rS_data.data());
     rS(0) = mu_x(0)*es(0,0) + mu_x(1)*es(1,0) + mu*d2u2(0);
     rS(1) = mu_x(0)*es(0,1) + mu_x(1)*es(1,1) + mu*d2u2(1);
 
