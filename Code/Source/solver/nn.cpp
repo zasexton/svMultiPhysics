@@ -1174,10 +1174,15 @@ void gnns(const int nsd, const int eNoN, const Array<double>& Nxi, Array<double>
 void gn_nxx(const int l, const int eNoN, const int nsd, const int insd, Array<double>& Nxi, Array<double>& Nxi2, Array<double>& lx,
     Array<double>& Nx, Array<double>& Nxx)
 {
-  Array<double> xXi(nsd,insd); 
-  Array<double> xXi2(nsd,l); 
-  Array<double> K(l,l); 
+  std::array<double, 9> xXi_data{};
+  std::array<double, 18> xXi2_data{};
+  std::array<double, 36> K_data{};
+  std::array<int, 6> ipiv_data{};
+  Array<double> xXi(nsd, insd, xXi_data.data());
+  Array<double> xXi2(nsd, l, xXi2_data.data());
+  Array<double> K(l, l, K_data.data());
   Array<double> B(l,eNoN);
+  Vector<int> IPIV(l, ipiv_data.data());
 
   double t = 2.0;
 
@@ -1204,7 +1209,6 @@ void gn_nxx(const int l, const int eNoN, const int nsd, const int insd, Array<do
 
     // Compute the solution to the linear equations K * X = B.
     //
-    Vector<int> IPIV(l);
     int INFO;
 
     dgesv_(&l, &eNoN, K.data(), &l, IPIV.data(), B.data(), &l, &INFO);
@@ -1273,7 +1277,6 @@ void gn_nxx(const int l, const int eNoN, const int nsd, const int insd, Array<do
 
     // Compute the solution to the linear equations K * X = B.
     //
-    Vector<int> IPIV(l);
     int INFO;
 
     dgesv_(&l, &eNoN, K.data(), &l, IPIV.data(), B.data(), &l, &INFO);
