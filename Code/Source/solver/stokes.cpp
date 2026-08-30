@@ -233,7 +233,8 @@ void stokes_2d_c(ComMod& com_mod, const int lStab, const int eNoNw, const int eN
   double mu = dmn.fluid_visc.mu_i;
   double ctM = dmn.prop[PhysicalProperyType::ctau_M];
 
-  Vector<double> fb(2);
+  std::array<double, 2> fb_data{};
+  Vector<double> fb(2, fb_data.data());
   fb[0] = dmn.prop[PhysicalProperyType::f_x];
   fb[1] = dmn.prop[PhysicalProperyType::f_y];
   double wm = w * eq.am;
@@ -258,9 +259,8 @@ void stokes_2d_c(ComMod& com_mod, const int lStab, const int eNoNw, const int eN
   // fluid equation always come first
   // Velocity and its gradients, inertia (acceleration & body force)
   //
-  Vector<double> vd{-fb[0], -fb[1]};
-  Vector<double> v(2);
-  Array<double> vx(2,2);
+  std::array<double, 2> vd_data{-fb[0], -fb[1]};
+  Vector<double> vd(2, vd_data.data());
 
   double div = 0.0;
 
@@ -271,7 +271,8 @@ void stokes_2d_c(ComMod& com_mod, const int lStab, const int eNoNw, const int eN
   }
 
   // Pressure and its gradient
-  Vector<double> px(2);
+  std::array<double, 2> px_data{};
+  Vector<double> px(2, px_data.data());
   for (int a = 0; a < eNoNq; a++) {
     px(0) = px(0) + Nqx(0,a)*yl(k,a);
     px(1) = px(1) + Nqx(1,a)*yl(k,a);
@@ -290,7 +291,8 @@ void stokes_2d_c(ComMod& com_mod, const int lStab, const int eNoNw, const int eN
 
   // Local residual
   //
-  auto rMv = vd + px;
+  std::array<double, 2> rMv_data{vd(0) + px(0), vd(1) + px(1)};
+  Vector<double> rMv(2, rMv_data.data());
 
   #ifdef debug_stokes_2d_c
   dmsg << "div: " << div;
