@@ -356,7 +356,8 @@ void stokes_2d_m(ComMod& com_mod, const int eNoNw, const int eNoNq, const double
   const double dt = com_mod.dt;
 
   double mu = dmn.fluid_visc.mu_i;
-  Vector<double> fb(2);
+  std::array<double, 2> fb_data{};
+  Vector<double> fb(2, fb_data.data());
   fb[0] = dmn.prop[PhysicalProperyType::f_x];
   fb[1] = dmn.prop[PhysicalProperyType::f_y];
 
@@ -381,14 +382,12 @@ void stokes_2d_m(ComMod& com_mod, const int eNoNw, const int eNoNq, const double
   // fluid equation always come first
   // Velocity and its gradients, inertia (acceleration & body force)
   //
-  Vector<double> vd{-fb[0], -fb[1]};
-  Vector<double> v(2);
-  Array<double> vx(2,2);
+  std::array<double, 2> vd_data{-fb[0], -fb[1]};
+  Vector<double> vd(2, vd_data.data());
+  std::array<double, 4> vx_data{};
+  Array<double> vx(2, 2, vx_data.data());
 
   for (int a = 0; a < eNoNw; a++) {
-    v(0) = v(0) + Nw(a)*yl(i,a);
-    v(1) = v(1) + Nw(a)*yl(j,a);
-
     vx(0,0) = vx(0,0) + Nwx(0,a)*yl(i,a);
     vx(0,1) = vx(0,1) + Nwx(1,a)*yl(i,a);
 
@@ -406,7 +405,8 @@ void stokes_2d_m(ComMod& com_mod, const int eNoNw, const int eNoNq, const double
   }
 
   // Viscous stress tensor 
-  Array<double> es(2,2);
+  std::array<double, 4> es_data{};
+  Array<double> es(2, 2, es_data.data());
   es(0,0) = mu * (vx(0,0) + vx(0,0));
   es(1,1) = mu * (vx(1,1) + vx(1,1));
   es(0,1) = mu * (vx(0,1) + vx(1,0));
