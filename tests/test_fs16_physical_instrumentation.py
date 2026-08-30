@@ -118,6 +118,22 @@ def test_validation_grade_requires_and_gates_false_wall_wet_history():
         "first_wall_only_false_wet": None,
         "wall_inward_cell_centroid_stencil_complete": True,
     }, physical_args) == []
+    closed_interface = {
+        "wall_only_false_wet_applicability": (
+            "not_applicable_closed_interface"),
+        "wall_only_false_wet_closed_interface_certified": True,
+        "wall_only_false_wet_history": [],
+        "first_wall_only_false_wet": None,
+    }
+    assert runner.false_wall_wet_failures(closed_interface) == []
+    assert physical_runner.false_wall_wet_history_errors(
+        closed_interface, physical_args) == []
+    uncertified = dict(closed_interface)
+    uncertified["wall_only_false_wet_closed_interface_certified"] = False
+    assert "without a valid" in runner.false_wall_wet_failures(
+        uncertified)[0]
+    assert "without a valid" in physical_runner.false_wall_wet_history_errors(
+        uncertified, physical_args)[0]
     detected = runner.false_wall_wet_failures({
         "wall_only_false_wet_history": [{"step": 470, "time": 0.235, "count": 1}],
         "first_wall_only_false_wet": {
@@ -1536,6 +1552,69 @@ def test_point_scalar_mapping_rejects_missing_or_ghost_only_coverage():
     ghost_only.point_data["phi"] = runner.np.asarray([0.25, -0.5])
     with pytest.raises(ValueError, match="owned coverage is ambiguous"):
         runner.point_scalar_in_initial_gid_order(initial, ghost_only, "phi")
+
+
+def test_closed_interface_certificate_reads_vtu_wall_surfaces():
+    runner = _load_runner()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        case_dir = Path(temp_dir)
+        surface_dir = case_dir / "mesh/background/mesh-surfaces"
+        surface_dir.mkdir(parents=True)
+        initial = runner.pv.ImageData(
+            dimensions=(3, 3, 3),
+            spacing=(0.5, 0.5, 0.5),
+        )
+        points = runner.np.asarray(initial.points, dtype=float)
+        gids = runner.np.arange(
+            1, initial.n_points + 1, dtype=runner.np.int64)
+        initial.point_data["GlobalNodeID"] = gids
+        initial.point_data["phi"] = (
+            runner.np.linalg.norm(points - 0.5, axis=1) - 0.25)
+        wall_masks = {
+            "wall_left": runner.np.isclose(points[:, 0], 0.0),
+            "wall_right": runner.np.isclose(points[:, 0], 1.0),
+            "wall_bottom": runner.np.isclose(points[:, 1], 0.0),
+            "wall_top": runner.np.isclose(points[:, 1], 1.0),
+            "wall_back": runner.np.isclose(points[:, 2], 0.0),
+            "wall_front": runner.np.isclose(points[:, 2], 1.0),
+        }
+        for name, mask in wall_masks.items():
+            surface = runner.pv.PolyData(points[mask])
+            surface.point_data["GlobalNodeID"] = gids[mask]
+            surface.cast_to_unstructured_grid().save(
+                surface_dir / f"{name}.vtu")
+        declarations = "".join(
+            f'<Add_face name="{name}" />' for name in wall_masks)
+        (case_dir / "solver.xml").write_text(
+            f"<svMultiPhysicsFile><Add_mesh>{declarations}"
+            "</Add_mesh></svMultiPhysicsFile>",
+            encoding="utf-8",
+        )
+
+        wall_indices = runner.boundary_face_point_indices(case_dir, initial)
+        assert set(wall_indices) == set(wall_masks)
+        assert len(runner.np.unique(runner.np.concatenate(
+            list(wall_indices.values())))) == 26
+        evidence = runner.wall_false_wet_applicability(
+            case_dir, initial, wall_indices)
+        assert evidence["wall_only_false_wet_applicability"] == (
+            "not_applicable_closed_interface")
+        assert evidence[
+            "wall_only_false_wet_closed_interface_certified"] is True
+        assert evidence[
+            "wall_only_false_wet_boundary_coverage_complete"] is True
+        assert evidence["wall_only_false_wet_initial_domain_phi_min"] < 0.0
+        assert evidence["wall_only_false_wet_initial_boundary_phi_min"] > 0.0
+
+        incomplete = dict(wall_indices)
+        del incomplete["wall_top"]
+        evidence = runner.wall_false_wet_applicability(
+            case_dir, initial, incomplete)
+        assert evidence["wall_only_false_wet_applicability"] == "indeterminate"
+        assert evidence[
+            "wall_only_false_wet_closed_interface_certified"] is False
+        assert evidence["wall_only_false_wet_missing_boundary_names"] == [
+            "wall_top"]
 
 
 def test_wall_centroid_false_wet_uses_global_ids_for_permuted_output():

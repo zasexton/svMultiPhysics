@@ -193,6 +193,15 @@ def gate_max(
 
 def false_wall_wet_failures(probe: dict[str, Any]) -> list[str]:
     """Require the instrumented wall history and reject its first event."""
+    if (probe.get("wall_only_false_wet_applicability") ==
+            "not_applicable_closed_interface"):
+        if probe.get(
+                "wall_only_false_wet_closed_interface_certified") is True:
+            return []
+        return [
+            "wall-wetting instrumentation claimed a closed-interface "
+            "exemption without a valid initial P1 boundary-sign certificate"
+        ]
     if "wall_only_false_wet_history" not in probe or \
             "first_wall_only_false_wet" not in probe:
         return [

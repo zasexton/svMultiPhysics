@@ -4930,7 +4930,6 @@ def curvature_projection_errors(metrics: dict[str, Any],
         required_reasons = {
             "initial": 1,
             "before_physics_solve": accepted_steps,
-            "jacobian_and_residual": accepted_steps,
             "accepted_step": accepted_steps,
         }
         # ApplicationDriver refreshes cut geometry and phi-derived state at
@@ -4948,6 +4947,36 @@ def curvature_projection_errors(metrics: dict[str, Any],
                 errors.append(
                     f"curvature projection reason '{reason}' count {count} is below {minimum}"
                 )
+        residual_refreshes = reason_counts.get("jacobian_and_residual", 0)
+        residual_path_valid = (
+            isinstance(residual_refreshes, int) and
+            residual_refreshes >= accepted_steps
+        )
+        outer_iterations = summary.get("outer_iterations_total")
+        projected_outer_refreshes = reason_counts.get(
+            "projected_outer_fixed_point", 0)
+        outer_path_valid = (
+            isinstance(outer_iterations, int) and outer_iterations > 0 and
+            isinstance(projected_outer_refreshes, int) and
+            projected_outer_refreshes >= outer_iterations
+        )
+        # Production generated geometry has two admissible nonlinear
+        # contracts.  Refreshed residual/Jacobian solves synchronize generated
+        # state at assembly.  Frozen-generated-state solves instead establish
+        # one projected constraint/state fixed point before every inner solve;
+        # the inner residual and Jacobian then share that exact state.  The
+        # latter deliberately has no jacobian_and_residual callback.
+        if not residual_path_valid and not outer_path_valid:
+            errors.append(
+                "curvature projection freshness has neither "
+                "jacobian_and_residual refreshes for every accepted step "
+                "nor projected_outer_fixed_point refreshes for every "
+                "reported outer iteration "
+                f"(jacobian_and_residual={residual_refreshes!r}, "
+                f"accepted_steps={accepted_steps}, "
+                f"projected_outer_fixed_point={projected_outer_refreshes!r}, "
+                f"outer_iterations_total={outer_iterations!r})"
+            )
     return errors
 
 
@@ -9818,7 +9847,11 @@ def boundary_face_point_indices(case_dir: Path,
     gid_to_index = {int(gid): index for index, gid in enumerate(initial_gids)}
     result: dict[str, np.ndarray] = {}
     surface_dir = case_dir / "mesh/background/mesh-surfaces"
-    for path in sorted(surface_dir.glob("wall_*.vtp")):
+    surface_paths = sorted({
+        *surface_dir.glob("wall_*.vtp"),
+        *surface_dir.glob("wall_*.vtu"),
+    })
+    for path in surface_paths:
         surface = pv.read(path)
         if "GlobalNodeID" not in surface.point_data:
             continue
@@ -9828,8 +9861,127 @@ def boundary_face_point_indices(case_dir: Path,
             if int(gid) in gid_to_index
         ]
         if indices:
-            result[path.stem] = np.unique(np.asarray(indices, dtype=np.int64))
+            prior = result.get(path.stem, np.asarray([], dtype=np.int64))
+            result[path.stem] = np.unique(np.concatenate((
+                prior,
+                np.asarray(indices, dtype=np.int64),
+            )))
     return result
+
+
+def wall_false_wet_applicability(
+        case_dir: Path,
+        initial: pv.DataSet,
+        wall_indices: dict[str, np.ndarray],
+) -> dict[str, Any]:
+    """Classify whether initially dry wall vertices must be monitored.
+
+    A continuous P1 interface cannot meet a boundary face when all boundary
+    vertices are strictly on one side of zero.  The closed-interface
+    exemption additionally requires both signs in the volume mesh, so a
+    missing or one-phase level-set field can never be mistaken for evidence
+    that the wall symptom is inapplicable.
+    """
+    evidence: dict[str, Any] = {
+        "wall_only_false_wet_applicability": "indeterminate",
+        "wall_only_false_wet_closed_interface_certified": False,
+        "wall_only_false_wet_boundary_surface_count": len(wall_indices),
+    }
+    try:
+        solver_root = ET.parse(case_dir / "solver.xml").getroot()
+        declared_walls = sorted({
+            element.attrib["name"]
+            for element in solver_root.findall(".//Add_face")
+            if element.attrib.get("name", "").startswith("wall_")
+        })
+    except (OSError, ET.ParseError):
+        declared_walls = []
+    observed_walls = sorted(wall_indices)
+    missing_walls = sorted(set(declared_walls) - set(observed_walls))
+    unexpected_walls = sorted(set(observed_walls) - set(declared_walls))
+    wall_coverage_complete = bool(
+        declared_walls and not missing_walls and not unexpected_walls)
+    evidence.update({
+        "wall_only_false_wet_declared_boundary_names": declared_walls,
+        "wall_only_false_wet_observed_boundary_names": observed_walls,
+        "wall_only_false_wet_missing_boundary_names": missing_walls,
+        "wall_only_false_wet_unexpected_boundary_names": unexpected_walls,
+        "wall_only_false_wet_boundary_coverage_complete": (
+            wall_coverage_complete),
+    })
+    if not wall_indices:
+        evidence["wall_only_false_wet_applicability_reason"] = (
+            "no_readable_wall_surface_global_node_ids")
+        return evidence
+    if "phi" not in initial.point_data:
+        evidence["wall_only_false_wet_applicability_reason"] = (
+            "initial_level_set_field_unavailable")
+        return evidence
+
+    phi = np.asarray(initial.point_data["phi"], dtype=float).reshape(-1)
+    if phi.size != initial.n_points or not np.isfinite(phi).all():
+        evidence["wall_only_false_wet_applicability_reason"] = (
+            "initial_level_set_field_invalid")
+        return evidence
+    wall_points = np.unique(np.concatenate([
+        np.asarray(indices, dtype=np.int64).reshape(-1)
+        for indices in wall_indices.values()
+    ]))
+    if (wall_points.size == 0 or int(wall_points[0]) < 0 or
+            int(wall_points[-1]) >= initial.n_points):
+        evidence["wall_only_false_wet_applicability_reason"] = (
+            "wall_point_indices_invalid")
+        return evidence
+
+    spacing = coordinate_min_spacing(np.asarray(initial.points, dtype=float))
+    tolerance = (
+        max(1.0e-10, 1.0e-3 * spacing)
+        if spacing is not None else 1.0e-10
+    )
+    wall_phi = phi[wall_points]
+    domain_min = float(np.min(phi))
+    domain_max = float(np.max(phi))
+    boundary_min = float(np.min(wall_phi))
+    boundary_max = float(np.max(wall_phi))
+    evidence.update({
+        "wall_only_false_wet_boundary_point_count": int(wall_points.size),
+        "wall_only_false_wet_initial_domain_phi_min": domain_min,
+        "wall_only_false_wet_initial_domain_phi_max": domain_max,
+        "wall_only_false_wet_initial_boundary_phi_min": boundary_min,
+        "wall_only_false_wet_initial_boundary_phi_max": boundary_max,
+        "wall_only_false_wet_initial_boundary_phi_min_abs": float(
+            np.min(np.abs(wall_phi))),
+        "wall_only_false_wet_level_set_tolerance": tolerance,
+    })
+    two_phase_domain = domain_min < -tolerance and domain_max > tolerance
+    boundary_strictly_positive = boundary_min > tolerance
+    boundary_strictly_negative = boundary_max < -tolerance
+    if (two_phase_domain and wall_coverage_complete and
+            (boundary_strictly_positive or boundary_strictly_negative)):
+        evidence.update({
+            "wall_only_false_wet_applicability": (
+                "not_applicable_closed_interface"),
+            "wall_only_false_wet_applicability_reason": (
+                "two_phase_P1_field_has_uniform_nonzero_boundary_sign"),
+            "wall_only_false_wet_closed_interface_certified": True,
+            "wall_only_false_wet_initial_boundary_sign": (
+                "positive" if boundary_strictly_positive else "negative"),
+        })
+        return evidence
+
+    if (two_phase_domain and
+            (boundary_strictly_positive or boundary_strictly_negative)):
+        evidence["wall_only_false_wet_applicability_reason"] = (
+            "uniform_boundary_sign_but_declared_wall_coverage_is_incomplete")
+        return evidence
+
+    evidence.update({
+        "wall_only_false_wet_applicability": (
+            "applicable_interface_may_contact_boundary"),
+        "wall_only_false_wet_applicability_reason": (
+            "boundary_sign_is_not_uniformly_separated_from_zero"),
+    })
+    return evidence
 
 
 def inward_cell_centroid_stencils_by_wall(
@@ -10748,6 +10900,14 @@ def add_physical_time_history_metrics(metrics: dict[str, Any],
         not clock_errors and not missing_clock_steps and exact_output_identity
     )
     wall_indices = boundary_face_point_indices(case_dir, initial)
+    applicability = wall_false_wet_applicability(
+        case_dir, initial, wall_indices)
+    metrics.update(applicability)
+    if (applicability["wall_only_false_wet_applicability"] ==
+            "not_applicable_closed_interface"):
+        metrics["wall_only_false_wet_history"] = []
+        metrics["first_wall_only_false_wet"] = None
+        return
     if not wall_indices or "phi" not in initial.point_data:
         return
     phi0 = np.asarray(initial.point_data["phi"], dtype=float).reshape(-1)
@@ -10985,6 +11145,15 @@ def false_wall_wet_history_errors(
     """Fail an instrumented run on missing history or the first false-wet event."""
     if not getattr(args, "enable_physical_history_instrumentation", False):
         return []
+    applicability = metrics.get("wall_only_false_wet_applicability")
+    if applicability == "not_applicable_closed_interface":
+        if metrics.get(
+                "wall_only_false_wet_closed_interface_certified") is True:
+            return []
+        return [
+            "wall false-wet instrumentation claimed a closed-interface "
+            "exemption without a valid initial P1 boundary-sign certificate"
+        ]
     errors: list[str] = []
     if metrics.get("wall_inward_cell_centroid_stencil_complete") is not True:
         structural_count = metrics.get(

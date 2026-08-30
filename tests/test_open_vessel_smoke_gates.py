@@ -661,6 +661,66 @@ def test_curvature_projection_freshness_does_not_require_a_trial_per_accepted_st
     ]
 
 
+def test_curvature_projection_freshness_accepts_projected_outer_fixed_points():
+    smoke = _load_smoke_module()
+
+    class OptionalArgs:
+        def __getattr__(self, _name):
+            return None
+
+    args = OptionalArgs()
+    args.require_curvature_projection_diagnostics = False
+    args.require_curvature_projection_newton_freshness = True
+    metrics = {
+        "diagnostics": {},
+        "diagnostic_curvature_projection_reason_counts": {
+            "initial": 1,
+            "before_physics_solve": 2,
+            "projected_outer_fixed_point": 5,
+            "accepted_step": 2,
+        },
+        "time_loop": {"summary": {
+            "accepted_steps": 2,
+            "outer_iterations_total": 5,
+        }},
+    }
+
+    assert smoke.curvature_projection_errors(metrics, args) == []
+
+    metrics["diagnostic_curvature_projection_reason_counts"][
+        "projected_outer_fixed_point"] = 4
+    errors = smoke.curvature_projection_errors(metrics, args)
+    assert len(errors) == 1
+    assert "neither jacobian_and_residual" in errors[0]
+    assert "projected_outer_fixed_point=4" in errors[0]
+    assert "outer_iterations_total=5" in errors[0]
+
+
+def test_curvature_projection_freshness_rejects_missing_refresh_contract():
+    smoke = _load_smoke_module()
+
+    class OptionalArgs:
+        def __getattr__(self, _name):
+            return None
+
+    args = OptionalArgs()
+    args.require_curvature_projection_diagnostics = False
+    args.require_curvature_projection_newton_freshness = True
+    metrics = {
+        "diagnostics": {},
+        "diagnostic_curvature_projection_reason_counts": {
+            "initial": 1,
+            "before_physics_solve": 1,
+            "accepted_step": 1,
+        },
+        "time_loop": {"summary": {"accepted_steps": 1}},
+    }
+
+    errors = smoke.curvature_projection_errors(metrics, args)
+    assert len(errors) == 1
+    assert "neither jacobian_and_residual" in errors[0]
+
+
 def test_capillary_benchmark_errors_check_curvature_and_pressure_jump():
     smoke = _load_smoke_module()
     args = argparse.Namespace(
@@ -1326,6 +1386,8 @@ def _passing_static_capillary_equilibrium_initialization_record():
         "analytic_derivative_evaluations": 0,
         "derivative_resolution_step_acceptances": 0,
         "acceptance_certificate_evaluations": 1,
+        "topology_epoch_transitions": 0,
+        "max_topology_epoch_transitions": 64,
         "topology_change_rejections": 0,
         "constraint_change_rejections": 0,
         "production_force_projection_applied": 0,
