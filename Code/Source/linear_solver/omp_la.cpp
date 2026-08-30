@@ -8,6 +8,7 @@
 extern "C" {
   void daxpy_(const int* n, const double* alpha, const double* x,
       const int* incx, double* y, const int* incy);
+  void dscal_(const int* n, const double* alpha, double* x, const int* incx);
 }
 
 namespace omp_la {
@@ -16,8 +17,9 @@ namespace omp_la {
 //
 void omp_mul_s(const int nNo, const double r, Vector<double>& U)
 {
-  for (int i = 0; i < nNo; i++) {
-    U(i) = r * U(i);
+  if (nNo > 0) {
+    const int stride = 1;
+    dscal_(&nNo, &r, U.data(), &stride);
   }
 }
 
