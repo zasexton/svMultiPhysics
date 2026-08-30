@@ -45,7 +45,6 @@ void construct_heats(ComMod& com_mod, const mshType& lM, const SolutionStates& s
   #endif
 
   Vector<int> ptr(eNoN);
-  Vector<double> N(eNoN);
   Array<double> xl(nsd,eNoN), al(tDof,eNoN), yl(tDof,eNoN), Nx(nsd,eNoN), lR(dof,eNoN);
   Array3<double> lK(dof*dof,eNoN,eNoN);
   Array<double> ksix(nsd,nsd); 
@@ -87,7 +86,7 @@ void construct_heats(ComMod& com_mod, const mshType& lM, const SolutionStates& s
 
     for (int g = 0; g < lM.nG; g++) {
       if (g == 0 || !lM.lShpF) {
-        auto Nx_g = lM.Nx.slice(g);
+        auto Nx_g = lM.Nx.rslice(g);
         nn::gnn(eNoN, nsd, nsd, Nx_g, xl, Nx, Jac, ksix);
         if (utils::is_zero(Jac)) {
           throw std::runtime_error("[construct_heats] Jacobian for element " + std::to_string(e) + " is < 0.");
@@ -95,7 +94,7 @@ void construct_heats(ComMod& com_mod, const mshType& lM, const SolutionStates& s
       }
 
       double w = lM.w(g) * Jac;
-      N = lM.N.col(g);
+      const auto N = lM.N.rcol(g);
 
       if (nsd == 3) {
         heats_3d(com_mod, eNoN, w, N, Nx, al, yl, lR, lK);
