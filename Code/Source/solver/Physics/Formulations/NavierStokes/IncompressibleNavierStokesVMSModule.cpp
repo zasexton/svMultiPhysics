@@ -7409,7 +7409,8 @@ tangentialPolicyProvenance(
     std::vector<FreeSurfaceBoundary> free_surfaces,
     const FE::systems::FESystem& system,
     int dimension,
-    bool effective_enable_vms)
+    bool effective_enable_vms,
+    PspgPressureGradientForm pspg_pressure_gradient_form)
 {
     std::sort(free_surfaces.begin(), free_surfaces.end(),
               freeSurfaceConfigurationLess);
@@ -7486,6 +7487,10 @@ tangentialPolicyProvenance(
         << ",\"ct_m\":" << jsonReal(options.ct_m)
         << ",\"ct_c\":" << jsonReal(options.ct_c)
         << ",\"epsilon\":" << jsonReal(options.stabilization_epsilon)
+        << ",\"pspg_pressure_gradient_form\":"
+        << jsonString(
+               pspgPressureGradientFormName(
+                   pspg_pressure_gradient_form))
         << '}'
         << ",\"maintenance_policy\":{\"owner_component\":\"level_set_transport\",\"coupling\":\"one_way_velocity_to_extension_to_level_set\"}"
         << ",\"extension_guards\":{\"physical_momentum_dry_extension_allowed\":false,\"auxiliary_extension_owner\":\"level_set_transport\",\"external_owner_required\":true}"
@@ -7838,10 +7843,20 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         navierStokesPspgContinuityFullCellSupportDiagnosticEnabled();
     const auto pspg_pressure_gradient_form_override =
         navierStokesPspgPressureGradientForm();
+    // The area-gradient traction publishes a compatible stationary pressure
+    // state and history. Stabilizing its absolute gradient would recreate a
+    // pressure residual after the discrete capillary balance has closed.
+    const bool kinematic_area_gradient_pressure_reference =
+        std::any_of(
+            options_.free_surface.begin(),
+            options_.free_surface.end(),
+            usesKinematicAreaGradientTraction);
     const PspgPressureGradientForm pspg_pressure_gradient_form =
         pspg_pressure_gradient_form_override.has_value()
             ? pspg_pressure_gradient_form_override->value
-            : PspgPressureGradientForm::Absolute;
+            : (kinematic_area_gradient_pressure_reference
+                   ? PspgPressureGradientForm::Incremental
+                   : PspgPressureGradientForm::Absolute);
     const auto pspg_boundary_pressure_gradient_scale_override =
         navierStokesPspgBoundaryPressureGradientScale();
     const FE::Real pspg_boundary_pressure_gradient_scale =
@@ -7906,6 +7921,15 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             std::string("IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_pressure_gradient_form") +
             " env=" + pspg_pressure_gradient_form_override->name +
             " raw='" + pspg_pressure_gradient_form_override->raw + "'" +
+            " form=" +
+            pspgPressureGradientFormName(pspg_pressure_gradient_form));
+    } else {
+        FE_LOG_INFO(
+            std::string("IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_pressure_gradient_form") +
+            " source=" +
+            (kinematic_area_gradient_pressure_reference
+                 ? "kinematic_area_gradient_stationary_pressure"
+                 : "absolute_pressure_default") +
             " form=" +
             pspgPressureGradientFormName(pspg_pressure_gradient_form));
     }
@@ -9915,7 +9939,12 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     }
 
     effective_configuration_artifact_ = makeEffectiveConfigurationArtifact(
-        options_, effective_free_surfaces, system, dim, enable_vms);
+        options_,
+        effective_free_surfaces,
+        system,
+        dim,
+        enable_vms,
+        pspg_pressure_gradient_form);
 }
 
 std::optional<EffectiveConfigurationArtifact>

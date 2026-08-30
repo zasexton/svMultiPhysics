@@ -331,6 +331,45 @@ bool formulationRecordsContainFieldExprType(const FE::systems::FESystem& system,
     return false;
 }
 
+bool containsExprTypeAppliedToField(const FormExprNode* node,
+                                    FormExprType target,
+                                    FE::FieldId field)
+{
+    if (node == nullptr) {
+        return false;
+    }
+    if (node->type() == target &&
+        containsFieldExprType(node, FormExprType::StateField, field)) {
+        return true;
+    }
+    for (const auto* child : node->children()) {
+        if (containsExprTypeAppliedToField(child, target, field)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool formulationRecordsContainExprTypeAppliedToField(
+    const FE::systems::FESystem& system,
+    FormExprType target,
+    FE::FieldId field)
+{
+    for (const auto& record : system.formulationRecords()) {
+        if (containsExprTypeAppliedToField(
+                record.residual_expr.get(), target, field)) {
+            return true;
+        }
+        for (const auto& [block, expr] : record.block_residual_exprs) {
+            (void)block;
+            if (containsExprTypeAppliedToField(expr.get(), target, field)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool interfaceKernelContainsGradientOfTrialFunction(
     const FE::systems::FESystem& system,
     int interface_marker,
@@ -7855,11 +7894,19 @@ TEST(MovingDomainPhysics,
                   "\"surface_tension_normal_source\":"
                   "\"generated_interface_rule_geometry\""),
               std::string::npos);
+    EXPECT_NE(
+        artifact->json.find(
+            "\"pspg_pressure_gradient_form\":\"absolute\""),
+        std::string::npos);
     EXPECT_NE(log_output.find(
                   "diagnostic=free_surface_generated_curvature_traction"),
               std::string::npos);
     EXPECT_NE(log_output.find("qualification=Experimental"),
               std::string::npos);
+    EXPECT_NE(
+        log_output.find(
+            "source=absolute_pressure_default form=absolute"),
+        std::string::npos);
 }
 
 TEST(MovingDomainPhysics,
@@ -7871,6 +7918,7 @@ TEST(MovingDomainPhysics,
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
     opts.enable_convection = false;
+    opts.enable_vms = true;
     opts.free_surface.push_back(
         ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
             .implementation =
@@ -7937,8 +7985,22 @@ TEST(MovingDomainPhysics,
             "\"total_energy_gradient_traction\""),
         std::string::npos);
     EXPECT_NE(
+        artifact->json.find(
+            "\"pspg_pressure_gradient_form\":\"incremental\""),
+        std::string::npos);
+    const auto pressure = system.findFieldByName("p");
+    ASSERT_NE(pressure, FE::INVALID_FIELD_ID);
+    EXPECT_TRUE(formulationRecordsContainExprTypeAppliedToField(
+        system,
+        FormExprType::TimeDerivative,
+        pressure));
+    EXPECT_NE(
         log_output.find(
             "diagnostic=free_surface_total_energy_gradient_traction"),
+        std::string::npos);
+    EXPECT_NE(
+        log_output.find(
+            "source=kinematic_area_gradient_stationary_pressure form=incremental"),
         std::string::npos);
 }
 
@@ -11624,7 +11686,7 @@ TEST(MovingDomainPhysics,
     const auto artifact = module.effectiveConfigurationArtifact();
     ASSERT_TRUE(artifact.has_value());
     constexpr std::string_view expected =
-        R"json({"artifact_schema_version":1,"component":"incompressible_navier_stokes_free_surface","configuration_schema":{"input_version":2,"effective_version":2,"migration_mode":"current"},"capability_label":"one_phase_liquid_sharp_interface","units":{"system":"consistent_solver_units","angle":"radian","length":"solver_length","pressure":"solver_pressure","surface_tension":"force_per_length"},"fields":{"velocity":"u","pressure":"p","operator":"equations","dimension":3},"ale":{"enabled":true,"mesh_velocity_source":"CoupledDisplacement","mesh_velocity_field":"mesh_velocity","mesh_displacement_field":"mesh_displacement","geometry_tangent_path":"SymbolicRequired"},"generic_velocity_nitsche":{"gamma":23,"symmetric":false,"scale_with_polynomial_order":false,"generated_active_boundary_minimum_energy_ratio":0.25},"stabilization":{"vms_enabled":false,"ct_m":1,"ct_c":36,"epsilon":9.9999999999999998e-13},"maintenance_policy":{"owner_component":"level_set_transport","coupling":"one_way_velocity_to_extension_to_level_set"},"extension_guards":{"physical_momentum_dry_extension_allowed":false,"auxiliary_extension_owner":"level_set_transport","external_owner_required":true},"free_surfaces":[{"implementation":"FittedALE","boundary_marker":172,"interface_marker":-1,"level_set_field":"level_set","generated_interface_domain":"free_surface","generated_interface_geometry":"LinearCorner","geometry_tangent_policy":"RefreshedFrozenQuadrature","level_set_isovalue":0,"active_domain":"None","active_phase_sign":"full_domain","active_domain_method":"CutVolume","active_domain_smoothing_width":0,"smoothing_width_unit":"length","allow_full_domain_unfitted_free_surface":false,"external_pressure":2.25,"surface_tension":0.5,"surface_tension_form_requested":"Automatic","surface_tension_form_effective":"CurvatureTraction","curvature_policy":"supplied_scalar","curvature_tangent_policy":"supplied_scalar_frozen","kinematic":{"normal_policy":"MatchFluidNormalVelocity","tangential_mesh_policy":"Prescribed","prescribed_tangential_mesh_velocity":[0,0,0],"enforcement":"Nitsche","penalty":0,"nitsche":{"gamma":17,"symmetric":false,"scale_with_polynomial_order":false}},"stabilization":{"enabled":false,"small_cut_aggregation":true,"pressure_policy":"Enabled","pressure_gradient_penalty":1,"use_cut_metadata_scale":false,"cut_metadata_scale_cap":null},"pruning":{"decision_owner":"authoritative_geometry_snapshot","fallback_to_whole_face":false},"legacy_dry_velocity_diffusion":{"enabled":false,"diffusivity":1,"production_allowed":false},"contact_lines":[{"model":"None"}]}]})json";
+        R"json({"artifact_schema_version":1,"component":"incompressible_navier_stokes_free_surface","configuration_schema":{"input_version":2,"effective_version":2,"migration_mode":"current"},"capability_label":"one_phase_liquid_sharp_interface","units":{"system":"consistent_solver_units","angle":"radian","length":"solver_length","pressure":"solver_pressure","surface_tension":"force_per_length"},"fields":{"velocity":"u","pressure":"p","operator":"equations","dimension":3},"ale":{"enabled":true,"mesh_velocity_source":"CoupledDisplacement","mesh_velocity_field":"mesh_velocity","mesh_displacement_field":"mesh_displacement","geometry_tangent_path":"SymbolicRequired"},"generic_velocity_nitsche":{"gamma":23,"symmetric":false,"scale_with_polynomial_order":false,"generated_active_boundary_minimum_energy_ratio":0.25},"stabilization":{"vms_enabled":false,"ct_m":1,"ct_c":36,"epsilon":9.9999999999999998e-13,"pspg_pressure_gradient_form":"absolute"},"maintenance_policy":{"owner_component":"level_set_transport","coupling":"one_way_velocity_to_extension_to_level_set"},"extension_guards":{"physical_momentum_dry_extension_allowed":false,"auxiliary_extension_owner":"level_set_transport","external_owner_required":true},"free_surfaces":[{"implementation":"FittedALE","boundary_marker":172,"interface_marker":-1,"level_set_field":"level_set","generated_interface_domain":"free_surface","generated_interface_geometry":"LinearCorner","geometry_tangent_policy":"RefreshedFrozenQuadrature","level_set_isovalue":0,"active_domain":"None","active_phase_sign":"full_domain","active_domain_method":"CutVolume","active_domain_smoothing_width":0,"smoothing_width_unit":"length","allow_full_domain_unfitted_free_surface":false,"external_pressure":2.25,"surface_tension":0.5,"surface_tension_form_requested":"Automatic","surface_tension_form_effective":"CurvatureTraction","curvature_policy":"supplied_scalar","curvature_tangent_policy":"supplied_scalar_frozen","kinematic":{"normal_policy":"MatchFluidNormalVelocity","tangential_mesh_policy":"Prescribed","prescribed_tangential_mesh_velocity":[0,0,0],"enforcement":"Nitsche","penalty":0,"nitsche":{"gamma":17,"symmetric":false,"scale_with_polynomial_order":false}},"stabilization":{"enabled":false,"small_cut_aggregation":true,"pressure_policy":"Enabled","pressure_gradient_penalty":1,"use_cut_metadata_scale":false,"cut_metadata_scale_cap":null},"pruning":{"decision_owner":"authoritative_geometry_snapshot","fallback_to_whole_face":false},"legacy_dry_velocity_diffusion":{"enabled":false,"diffusivity":1,"production_allowed":false},"contact_lines":[{"model":"None"}]}]})json";
     std::string expected_with_aggregation_guards(expected);
     constexpr std::string_view artifact_schema_fragment =
         "\"artifact_schema_version\":1";
