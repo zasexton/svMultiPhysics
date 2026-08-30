@@ -5,6 +5,8 @@
 //
 // Reproduces Fortran code in LELAS.f.
 
+#include <array>
+
 #include "l_elas.h"
 
 #include "all_fun.h"
@@ -273,9 +275,10 @@ void l_elas_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<dou
   double elM = dmn.prop.at(PhysicalProperyType::elasticity_modulus);
   double nu = dmn.prop.at(PhysicalProperyType::poisson_ratio);
 
-  Vector<double> f({dmn.prop.at(PhysicalProperyType::f_x),
-                    dmn.prop.at(PhysicalProperyType::f_y),
-                    dmn.prop.at(PhysicalProperyType::f_z)});
+  std::array<double, 3> f{
+      dmn.prop.at(PhysicalProperyType::f_x),
+      dmn.prop.at(PhysicalProperyType::f_y),
+      dmn.prop.at(PhysicalProperyType::f_z)};
 
   int i = eq.s;
   int j = i + 1;
@@ -295,52 +298,56 @@ void l_elas_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<dou
   dmsg << "i: " << i;
   dmsg << "j: " << j;
   dmsg << "k: " << k;
-  dmsg << "f: " << f;
+  Vector<double> f_view(3, f.data());
+  dmsg << "f: " << f_view;
   dmsg << "lambda: " << lambda;
   #endif
 
-  Vector<double> ed(6), ud(3), S0(6), S(6);
-
-  ud = -f;
+  std::array<double, 6> ed{};
+  std::array<double, 3> ud{-f[0], -f[1], -f[2]};
+  std::array<double, 6> S0{};
+  std::array<double, 6> S{};
 
   for (int a = 0; a < eNoN; a++) {
-    ud(0) = ud(0) + N(a)*(al(i,a)-bfl(0,a));
-    ud(1) = ud(1) + N(a)*(al(j,a)-bfl(1,a));
-    ud(2) = ud(2) + N(a)*(al(k,a)-bfl(2,a));
+    ud[0] = ud[0] + N(a)*(al(i,a)-bfl(0,a));
+    ud[1] = ud[1] + N(a)*(al(j,a)-bfl(1,a));
+    ud[2] = ud[2] + N(a)*(al(k,a)-bfl(2,a));
 
-    ed(0) = ed(0) + Nx(0,a)*dl(i,a);
-    ed(1) = ed(1) + Nx(1,a)*dl(j,a);
-    ed(2) = ed(2) + Nx(2,a)*dl(k,a);
-    ed(3) = ed(3) + Nx(1,a)*dl(i,a) + Nx(0,a)*dl(j,a);
-    ed(4) = ed(4) + Nx(2,a)*dl(j,a) + Nx(1,a)*dl(k,a);
-    ed(5) = ed(5) + Nx(0,a)*dl(k,a) + Nx(2,a)*dl(i,a);
+    ed[0] = ed[0] + Nx(0,a)*dl(i,a);
+    ed[1] = ed[1] + Nx(1,a)*dl(j,a);
+    ed[2] = ed[2] + Nx(2,a)*dl(k,a);
+    ed[3] = ed[3] + Nx(1,a)*dl(i,a) + Nx(0,a)*dl(j,a);
+    ed[4] = ed[4] + Nx(2,a)*dl(j,a) + Nx(1,a)*dl(k,a);
+    ed[5] = ed[5] + Nx(0,a)*dl(k,a) + Nx(2,a)*dl(i,a);
 
-    S0(0) = S0(0) + N(a)*pS0l(0,a);
-    S0(1) = S0(1) + N(a)*pS0l(1,a);
-    S0(2) = S0(2) + N(a)*pS0l(2,a);
-    S0(3) = S0(3) + N(a)*pS0l(3,a);
-    S0(4) = S0(4) + N(a)*pS0l(4,a);
-    S0(5) = S0(5) + N(a)*pS0l(5,a);
+    S0[0] = S0[0] + N(a)*pS0l(0,a);
+    S0[1] = S0[1] + N(a)*pS0l(1,a);
+    S0[2] = S0[2] + N(a)*pS0l(2,a);
+    S0[3] = S0[3] + N(a)*pS0l(3,a);
+    S0[4] = S0[4] + N(a)*pS0l(4,a);
+    S0[5] = S0[5] + N(a)*pS0l(5,a);
   }
 
-  double divD = lambda * (ed(0) + ed(1) + ed(2));
+  double divD = lambda * (ed[0] + ed[1] + ed[2]);
 
   // Stress in Voigt notation
-  S(0) = divD + 2.0*mu*ed(0);
-  S(1) = divD + 2.0*mu*ed(1);
-  S(2) = divD + 2.0*mu*ed(2);
-  S(3) = mu*ed(3);  // 2*eps_12
-  S(4) = mu*ed(4);  // 2*eps_23
-  S(5) = mu*ed(5);  // 2*eps_13
-  pSl = S;
+  S[0] = divD + 2.0*mu*ed[0];
+  S[1] = divD + 2.0*mu*ed[1];
+  S[2] = divD + 2.0*mu*ed[2];
+  S[3] = mu*ed[3];  // 2*eps_12
+  S[4] = mu*ed[4];  // 2*eps_23
+  S[5] = mu*ed[5];  // 2*eps_13
 
   // Add prestress contribution
-  S = pSl + S0;
+  for (int q = 0; q < 6; q++) {
+    pSl(q) = S[q];
+    S[q] = pSl(q) + S0[q];
+  }
 
   for (int a = 0; a < eNoN; a++) {
-    lR(0,a) = lR(0,a) + w*(rho*N(a)*ud(0) + Nx(0,a)*S(0) + Nx(1,a)*S(3) + Nx(2,a)*S(5));
-    lR(1,a) = lR(1,a) + w*(rho*N(a)*ud(1) + Nx(0,a)*S(3) + Nx(1,a)*S(1) + Nx(2,a)*S(4));
-    lR(2,a) = lR(2,a) + w*(rho*N(a)*ud(2) + Nx(0,a)*S(5) + Nx(1,a)*S(4) + Nx(2,a)*S(2));
+    lR(0,a) = lR(0,a) + w*(rho*N(a)*ud[0] + Nx(0,a)*S[0] + Nx(1,a)*S[3] + Nx(2,a)*S[5]);
+    lR(1,a) = lR(1,a) + w*(rho*N(a)*ud[1] + Nx(0,a)*S[3] + Nx(1,a)*S[1] + Nx(2,a)*S[4]);
+    lR(2,a) = lR(2,a) + w*(rho*N(a)*ud[2] + Nx(0,a)*S[5] + Nx(1,a)*S[4] + Nx(2,a)*S[2]);
 
     for (int b = 0; b < eNoN; b++) {
       double NxdNx = Nx(0,a)*Nx(0,b) + Nx(1,a)*Nx(1,b) + Nx(2,a)*Nx(2,b);
@@ -362,4 +369,3 @@ void l_elas_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<dou
 }
 
 };
-
