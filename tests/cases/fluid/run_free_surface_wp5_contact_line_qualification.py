@@ -358,6 +358,8 @@ strict_runner.__doc__ = __doc__
 _shared_load_registry = strict_runner.load_registry
 _shared_write_json = strict_runner.write_json
 _shared_write_text = strict_runner.write_text
+_shared_listed_gtests = strict_runner.listed_gtests
+_execution_discovery_by_binary: dict[Path, tuple[int, Path]] = {}
 
 
 def _reject_duplicate_json_keys(
@@ -408,6 +410,17 @@ def write_json(path: Path, value: Any) -> None:
         value["fsr05_closure_claimed"] = False
         value["wp5_closure_claimed"] = False
         value["q4_closure_claimed"] = False
+        if path.name == "build_preflight.json":
+            for validation in value.get("post_build_validation", []):
+                binary = Path(validation["binary_path"]).resolve()
+                discovery = _execution_discovery_by_binary.get(binary)
+                if discovery is None:
+                    continue
+                mpi_ranks, mpiexec = discovery
+                validation["list_mpi_ranks"] = mpi_ranks
+                validation["list_launcher"] = (
+                    str(mpiexec) if mpi_ranks > 1 else "direct"
+                )
     _shared_write_json(path, value)
 
 
@@ -446,14 +459,31 @@ def _tests_for_binary(
     ]
 
 
-def _listed_gtests(binary: Path) -> set[str]:
+def _listed_gtests(
+    binary: Path,
+    *,
+    mpi_ranks: int,
+    mpiexec: Path,
+    timeout_seconds: int = 60,
+) -> set[str]:
+    if isinstance(mpi_ranks, bool) or mpi_ranks <= 0:
+        raise ValueError("gtest discovery requires a positive MPI rank count")
+    command = [str(binary), "--gtest_list_tests"]
+    if mpi_ranks > 1:
+        command = [
+            str(mpiexec),
+            "--oversubscribe",
+            "-n",
+            str(mpi_ranks),
+            *command,
+        ]
     result = subprocess.run(
-        [str(binary), "--gtest_list_tests"],
+        command,
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        timeout=60,
+        timeout=timeout_seconds,
     )
     suite = ""
     tests: set[str] = set()
@@ -465,6 +495,68 @@ def _listed_gtests(binary: Path) -> set[str]:
         if suite and test:
             tests.add(f"{suite}.{test}")
     return tests
+
+
+def _execution_listed_gtests(
+    binary: Path,
+    timeout_seconds: int = 60,
+) -> set[str]:
+    discovery = _execution_discovery_by_binary.get(binary.resolve())
+    if discovery is None:
+        return _shared_listed_gtests(binary, timeout_seconds)
+    mpi_ranks, mpiexec = discovery
+    return _listed_gtests(
+        binary,
+        mpi_ranks=mpi_ranks,
+        mpiexec=mpiexec,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+strict_runner.listed_gtests = _execution_listed_gtests
+
+
+def _configure_execution_discovery(arguments: list[str]) -> None:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--mpiexec", type=Path, default=Path("/usr/bin/mpiexec"))
+    binary_flags = {
+        "geometry": "--geometry-binary",
+        "level_set": "--level-set-binary",
+        "systems": "--systems-binary",
+        "assembly": "--assembly-binary",
+        "physics": "--physics-binary",
+        "application": "--application-binary",
+        "assembly_mpi": "--assembly-mpi-binary",
+        "application_mpi": "--application-mpi-binary",
+    }
+    for key, flag in binary_flags.items():
+        parser.add_argument(flag, dest=key, type=Path)
+    parsed, _ = parser.parse_known_args(arguments)
+    mpiexec = parsed.mpiexec.resolve()
+    registry = load_registry(DEFAULT_REGISTRY)
+    ranks_by_binary = {
+        key: max(
+            group["mpi_ranks"]
+            for group in registry["groups"]
+            if group["binary"] == key
+        )
+        for key in {
+            group["binary"]
+            for group in registry["groups"]
+        }
+    }
+    _execution_discovery_by_binary.clear()
+    for key, mpi_ranks in ranks_by_binary.items():
+        binary = getattr(parsed, key)
+        if binary is None:
+            continue
+        resolved = binary.resolve()
+        previous = _execution_discovery_by_binary.get(resolved)
+        if previous is not None and previous != (mpi_ranks, mpiexec):
+            raise ValueError(
+                "one test binary cannot use conflicting discovery launch policies"
+            )
+        _execution_discovery_by_binary[resolved] = (mpi_ranks, mpiexec)
 
 
 def requested_claim(
@@ -482,7 +574,7 @@ def requested_claim(
             "--level-set-binary PATH --physics-binary PATH\n"
             "      --application-binary PATH "
             "--assembly-mpi-binary PATH "
-            "--application-mpi-binary PATH\n"
+            "--application-mpi-binary PATH --mpiexec PATH\n"
             "      Check exact frozen test discovery without executing tests "
             "or writing artifacts.\n"
         )
@@ -541,7 +633,7 @@ def _run_validate_only(claim: str, remaining: list[str]) -> int:
 
 def _parse_list_binary_arguments(
     arguments: list[str],
-) -> dict[str, Path]:
+) -> tuple[dict[str, Path], Path]:
     parser = argparse.ArgumentParser(
         prog=f"{SCRIPT_PATH.name} --list-only",
     )
@@ -551,15 +643,19 @@ def _parse_list_binary_arguments(
     parser.add_argument("--application-binary", type=Path, required=True)
     parser.add_argument("--assembly-mpi-binary", type=Path, required=True)
     parser.add_argument("--application-mpi-binary", type=Path, required=True)
+    parser.add_argument("--mpiexec", type=Path, default=Path("/usr/bin/mpiexec"))
     parsed = parser.parse_args(arguments)
-    return {
-        "geometry": parsed.geometry_binary.resolve(),
-        "level_set": parsed.level_set_binary.resolve(),
-        "physics": parsed.physics_binary.resolve(),
-        "application": parsed.application_binary.resolve(),
-        "assembly_mpi": parsed.assembly_mpi_binary.resolve(),
-        "application_mpi": parsed.application_mpi_binary.resolve(),
-    }
+    return (
+        {
+            "geometry": parsed.geometry_binary.resolve(),
+            "level_set": parsed.level_set_binary.resolve(),
+            "physics": parsed.physics_binary.resolve(),
+            "application": parsed.application_binary.resolve(),
+            "assembly_mpi": parsed.assembly_mpi_binary.resolve(),
+            "application_mpi": parsed.application_mpi_binary.resolve(),
+        },
+        parsed.mpiexec.resolve(),
+    )
 
 
 def _require_executable(path: Path) -> None:
@@ -568,9 +664,10 @@ def _require_executable(path: Path) -> None:
 
 
 def _run_list_only(claim: str, remaining: list[str]) -> int:
-    binaries = _parse_list_binary_arguments(remaining)
+    binaries, mpiexec = _parse_list_binary_arguments(remaining)
     for binary in binaries.values():
         _require_executable(binary)
+    _require_executable(mpiexec)
     registry = load_registry(DEFAULT_REGISTRY)
     missing_by_binary: dict[str, list[str]] = {}
     expected_counts: dict[str, int] = {}
@@ -579,7 +676,16 @@ def _run_list_only(claim: str, remaining: list[str]) -> int:
     binary_hashes: dict[str, str] = {}
     for key, binary in binaries.items():
         expected = set(_tests_for_binary(registry, key))
-        listed = _listed_gtests(binary)
+        mpi_ranks = max(
+            group["mpi_ranks"]
+            for group in registry["groups"]
+            if group["binary"] == key
+        )
+        listed = _listed_gtests(
+            binary,
+            mpi_ranks=mpi_ranks,
+            mpiexec=mpiexec,
+        )
         missing_by_binary[key] = sorted(expected - listed)
         expected_counts[key] = len(expected)
         listed_expected_counts[key] = len(expected & listed)
@@ -617,6 +723,7 @@ if __name__ == "__main__":
             raise SystemExit(_run_validate_only(_claim, _remaining_arguments))
         if _list_only:
             raise SystemExit(_run_list_only(_claim, _remaining_arguments))
+        _configure_execution_discovery(_remaining_arguments)
         sys.argv = [sys.argv[0], *_remaining_arguments]
         raise SystemExit(strict_runner.main())
     except (

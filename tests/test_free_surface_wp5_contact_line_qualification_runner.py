@@ -79,6 +79,22 @@ def _write_gtest_lister(path: Path, tests: list[str]) -> None:
     path.chmod(0o755)
 
 
+def _write_mpi_launcher(path: Path) -> None:
+    path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import sys\n"
+        "if len(sys.argv) < 6 or sys.argv[1:3] != "
+        "['--oversubscribe', '-n']:\n"
+        "    raise SystemExit(3)\n"
+        "if not sys.argv[3].isdigit() or int(sys.argv[3]) < 1:\n"
+        "    raise SystemExit(4)\n"
+        "os.execv(sys.argv[4], sys.argv[4:])\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
 def test_wp5_matrix_digest_and_canonical_path_are_exact(runner, tmp_path):
     digest = hashlib.sha256(MATRIX_PATH.read_bytes()).hexdigest()
 
@@ -209,6 +225,9 @@ def test_wp5_list_only_discovers_every_frozen_test_exactly(
         str(RUNNER_PATH),
         "--list-only",
     ]
+    launcher = tmp_path / "mpiexec"
+    _write_mpi_launcher(launcher)
+    arguments.extend(["--mpiexec", str(launcher)])
     for key, flag in BINARY_FLAGS.items():
         binary = tmp_path / f"{key}-gtest"
         _write_gtest_lister(
@@ -234,3 +253,34 @@ def test_wp5_list_only_discovers_every_frozen_test_exactly(
     assert summary["missing_tests"] == {key: [] for key in EXPECTED_BINARY_TEST_COUNTS}
     assert summary["tests_executed"] == 0
     assert summary["artifacts_written"] == 0
+
+
+def test_wp5_execution_discovery_launches_distributed_binary(
+    runner,
+    tmp_path,
+):
+    matrix = runner.load_registry(MATRIX_PATH)
+    binary = tmp_path / "assembly-mpi-gtest"
+    _write_gtest_lister(
+        binary,
+        runner._tests_for_binary(matrix, "assembly_mpi"),
+    )
+    launcher = tmp_path / "mpiexec"
+    _write_mpi_launcher(launcher)
+
+    runner._configure_execution_discovery(
+        [
+            "--mpiexec",
+            str(launcher),
+            "--assembly-mpi-binary",
+            str(binary),
+        ]
+    )
+
+    listed = runner._execution_listed_gtests(binary)
+
+    assert listed == set(runner._tests_for_binary(matrix, "assembly_mpi"))
+    assert runner._execution_discovery_by_binary[binary.resolve()] == (
+        2,
+        launcher.resolve(),
+    )
