@@ -414,7 +414,9 @@ inline void applyVelocityNitscheBCs(
     std::vector<
         FE::forms::bc::
             GeneratedBoundaryNitscheTraceFormBinding>*
-        generated_trace_bindings = nullptr)
+        generated_trace_bindings = nullptr,
+    FE::forms::FormExpr* momentum_residual_work_form = nullptr,
+    FE::forms::FormExpr* continuity_residual_work_form = nullptr)
 {
     if (options.velocity_dirichlet_weak.empty()) {
         return;
@@ -451,6 +453,20 @@ inline void applyVelocityNitscheBCs(
                           fullPhysical(marker);
             return integrand.dExteriorBoundary(measure);
         };
+    const auto append_momentum = [&](const FE::forms::FormExpr& contribution) {
+        momentum_form = momentum_form + contribution;
+        if (momentum_residual_work_form != nullptr) {
+            appendDiagnosticForm(
+                *momentum_residual_work_form, contribution);
+        }
+    };
+    const auto append_continuity = [&](const FE::forms::FormExpr& contribution) {
+        continuity_form = continuity_form + contribution;
+        if (continuity_residual_work_form != nullptr) {
+            appendDiagnosticForm(
+                *continuity_residual_work_form, contribution);
+        }
+    };
 
     for (const auto& bc : options.velocity_dirichlet_weak) {
         const int marker =
@@ -473,12 +489,11 @@ inline void applyVelocityNitscheBCs(
         const auto diff = u - uD;
 
         // Pressure consistency remains outside the form-bound viscous route.
-        momentum_form =
-            momentum_form +
+        append_momentum(
             integrate(
                 p * FE::forms::inner(n, v),
                 marker,
-                generated_marker);
+                generated_marker));
 
         if (generated_marker.has_value() &&
             generated_trace_bindings != nullptr) {
@@ -500,15 +515,13 @@ inline void applyVelocityNitscheBCs(
                                       NitscheVariant::Unsymmetric,
                             .scale_with_p =
                                 options.nitsche_scale_with_p});
-            momentum_form =
-                momentum_form +
-                bound_terms.route_contribution;
+            append_momentum(bound_terms.route_contribution);
             if (options.nitsche_symmetric) {
-                continuity_form = continuity_form +
-                                  integrate(
-                                      q * FE::forms::inner(n, diff),
-                                      marker,
-                                      generated_marker);
+                append_continuity(
+                    integrate(
+                        q * FE::forms::inner(n, diff),
+                        marker,
+                        generated_marker));
                 if (energy_forms != nullptr) {
                     appendDiagnosticForm(
                         energy_forms->symmetric_consistency,
@@ -525,11 +538,11 @@ inline void applyVelocityNitscheBCs(
                         });
                 }
             } else {
-                continuity_form = continuity_form -
-                                  integrate(
-                                      q * FE::forms::inner(n, diff),
-                                      marker,
-                                      generated_marker);
+                append_continuity(
+                    -integrate(
+                        q * FE::forms::inner(n, diff),
+                        marker,
+                        generated_marker));
             }
             generated_trace_bindings->push_back(
                 std::move(bound_terms.binding));
@@ -537,24 +550,22 @@ inline void applyVelocityNitscheBCs(
         }
 
         // Ordinary fitted or uncertified routes retain the generic lowering.
-        momentum_form =
-            momentum_form -
-            integrate(
+        append_momentum(
+            -integrate(
                 FE::forms::inner(stress_u * n, v),
                 marker,
-                generated_marker);
+                generated_marker));
         if (options.nitsche_symmetric) {
-            momentum_form =
-                momentum_form -
-                integrate(
+            append_momentum(
+                -integrate(
                     FE::forms::inner(stress_v * n, diff),
                     marker,
-                    generated_marker);
-            continuity_form = continuity_form +
-                              integrate(
-                                  q * FE::forms::inner(n, diff),
-                                  marker,
-                                  generated_marker);
+                    generated_marker));
+            append_continuity(
+                integrate(
+                    q * FE::forms::inner(n, diff),
+                    marker,
+                    generated_marker));
             if (energy_forms != nullptr) {
                 const auto consistency =
                     -integrate(
@@ -581,23 +592,22 @@ inline void applyVelocityNitscheBCs(
                     });
             }
         } else {
-            momentum_form =
-                momentum_form +
+            append_momentum(
                 integrate(
                     FE::forms::inner(stress_v * n, diff),
                     marker,
-                    generated_marker);
-            continuity_form = continuity_form -
-                              integrate(
-                                  q * FE::forms::inner(n, diff),
-                                  marker,
-                                  generated_marker);
+                    generated_marker));
+            append_continuity(
+                -integrate(
+                    q * FE::forms::inner(n, diff),
+                    marker,
+                    generated_marker));
         }
-        momentum_form = momentum_form +
-                        integrate(
-                            penalty * FE::forms::inner(diff, v),
-                            marker,
-                            generated_marker);
+        append_momentum(
+            integrate(
+                penalty * FE::forms::inner(diff, v),
+                marker,
+                generated_marker));
     }
 }
 

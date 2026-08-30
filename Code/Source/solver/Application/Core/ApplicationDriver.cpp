@@ -1074,6 +1074,88 @@ evaluateLevelSetMaintenancePhysicalEndpointChannels(
   return channels;
 }
 
+FreeSurfaceResidualWorkChannels
+evaluateFreeSurfaceResidualWorkChannels(
+    std::span<const FreeSurfaceResidualWorkPairing> pairings,
+    double dt)
+{
+  if (!std::isfinite(dt) || !(dt > 0.0)) {
+    throw std::invalid_argument(
+        "Free-surface residual work requires a finite positive duration.");
+  }
+  if (pairings.size() != 7u) {
+    throw std::invalid_argument(
+        "Free-surface residual work requires exactly seven connected channel rows.");
+  }
+  FreeSurfaceResidualWorkChannels channels;
+  for (const auto& pairing : pairings) {
+    if (pairing.owner_component.find_first_not_of(" \t\r\n") ==
+        std::string::npos) {
+      throw std::invalid_argument(
+          "Free-surface residual work requires one named channel owner.");
+    }
+    if (!std::isfinite(pairing.residual_state_pairing)) {
+      throw std::invalid_argument(
+          "Free-surface residual/state pairing must be finite.");
+    }
+    if (pairing.produced && pairing.operator_tag.empty()) {
+      throw std::invalid_argument(
+          "A produced free-surface residual-work channel requires an operator tag.");
+    }
+    if (!pairing.produced &&
+        (!pairing.operator_tag.empty() ||
+         pairing.residual_state_pairing != 0.0)) {
+      throw std::invalid_argument(
+          "An inapplicable free-surface residual-work channel requires an empty operator and exact-zero pairing.");
+    }
+    const double signed_work =
+        pairing.produced
+            ? -dt * pairing.residual_state_pairing
+            : 0.0;
+    if (!std::isfinite(signed_work)) {
+      throw std::overflow_error(
+          "Free-surface residual step work is not finite.");
+    }
+    std::optional<double>* destination = nullptr;
+    if (pairing.channel == "convection") {
+      destination = &channels.convection;
+    } else if (pairing.channel == "pressure_continuity") {
+      destination = &channels.pressure_continuity;
+    } else if (pairing.channel == "nonconservative_body_force") {
+      destination = &channels.nonconservative_body_force;
+    } else if (pairing.channel == "weak_boundary") {
+      destination = &channels.weak_boundary;
+    } else if (pairing.channel == "vms_pspg") {
+      destination = &channels.vms_pspg;
+    } else if (pairing.channel == "cut_stabilization") {
+      destination = &channels.cut_stabilization;
+    } else if (pairing.channel == "ghost_penalty") {
+      destination = &channels.ghost_penalty;
+    } else {
+      throw std::invalid_argument(
+          "Free-surface residual work contains an unknown connected channel '" +
+          pairing.channel + "'.");
+    }
+    if (destination->has_value()) {
+      throw std::invalid_argument(
+          "Free-surface residual work contains a duplicate channel '" +
+          pairing.channel + "'.");
+    }
+    *destination = signed_work;
+  }
+  if (!channels.convection.has_value() ||
+      !channels.pressure_continuity.has_value() ||
+      !channels.nonconservative_body_force.has_value() ||
+      !channels.weak_boundary.has_value() ||
+      !channels.vms_pspg.has_value() ||
+      !channels.cut_stabilization.has_value() ||
+      !channels.ghost_penalty.has_value()) {
+    throw std::invalid_argument(
+        "Free-surface residual work is missing a connected channel.");
+  }
+  return channels;
+}
+
 void LevelSetMaintenanceWorkLedger::beginTransaction(
     LevelSetMaintenanceWorkTransaction transaction)
 {
@@ -11046,6 +11128,34 @@ void logLevelSetMaintenancePhysicalEndpointChannels(
       log,
       "external_pressure_work",
       channels.external_pressure_work);
+  append_channel(
+      log,
+      "convection_work",
+      channels.convection_work);
+  append_channel(
+      log,
+      "pressure_continuity_work",
+      channels.pressure_continuity_work);
+  append_channel(
+      log,
+      "nonconservative_body_force_work",
+      channels.nonconservative_body_force_work);
+  append_channel(
+      log,
+      "weak_boundary_work",
+      channels.weak_boundary_work);
+  append_channel(
+      log,
+      "vms_pspg_work",
+      channels.vms_pspg_work);
+  append_channel(
+      log,
+      "cut_stabilization_work",
+      channels.cut_stabilization_work);
+  append_channel(
+      log,
+      "ghost_penalty_work",
+      channels.ghost_penalty_work);
   log << " complete_energy_record_connected=false";
   application::core::oopCout() << log.str() << std::endl;
 }
@@ -27598,6 +27708,88 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       free_surface_acceptance_coverage.has_functional;
   const bool has_dynamic_contact_stage =
       free_surface_acceptance_coverage.has_dynamic_contact;
+  const auto free_surface_residual_work_declarations =
+      sim.fe_system->freeSurfaceResidualWorkDeclarations();
+  const auto [minimum_residual_work_declaration_count,
+              maximum_residual_work_declaration_count] =
+      globalMinMaxUint64(
+          static_cast<std::uint64_t>(
+              free_surface_residual_work_declarations.size()),
+          velocity_extension_artifact_comm);
+  if (minimum_residual_work_declaration_count !=
+      maximum_residual_work_declaration_count) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Free-surface residual-work declaration count differs across the active FE communicator.");
+  }
+  if (maximum_residual_work_declaration_count != 0u &&
+      maximum_residual_work_declaration_count != 7u) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] The connected free-surface residual-work set must contain exactly seven channel declarations.");
+  }
+  std::uint64_t residual_work_declaration_fingerprint =
+      14695981039346656037ull;
+  for (const auto& declaration :
+       free_surface_residual_work_declarations) {
+    mixConservativePhaseArtifactFingerprint(
+        residual_work_declaration_fingerprint,
+        static_cast<std::uint8_t>(declaration.channel));
+    mixConservativePhaseArtifactFingerprint(
+        residual_work_declaration_fingerprint,
+        static_cast<std::uint8_t>(declaration.applicability));
+    mixConservativePhaseArtifactFingerprint(
+        residual_work_declaration_fingerprint,
+        declaration.operator_tag);
+    mixConservativePhaseArtifactFingerprint(
+        residual_work_declaration_fingerprint,
+        declaration.owner_component);
+  }
+  const auto [minimum_residual_work_declaration_fingerprint,
+              maximum_residual_work_declaration_fingerprint] =
+      globalMinMaxUint64(
+          residual_work_declaration_fingerprint,
+          velocity_extension_artifact_comm);
+  if (minimum_residual_work_declaration_fingerprint !=
+      maximum_residual_work_declaration_fingerprint) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Free-surface residual-work declarations differ across the active FE communicator.");
+  }
+  const bool evaluate_free_surface_residual_work =
+      maximum_residual_work_declaration_count != 0u &&
+      opts.scheme ==
+          svmp::FE::timestepping::SchemeKind::BackwardEuler &&
+      sim.fe_system->temporalOrder() == 1;
+  struct FreeSurfaceResidualWorkStage {
+    std::uint64_t step{0u};
+    int attempt_index{-1};
+    double time{0.0};
+    double dt{0.0};
+    std::uint64_t algebraic_state_revision{0u};
+    std::vector<application::core::FreeSurfaceResidualWorkPairing>
+        pairings{};
+    application::core::FreeSurfaceResidualWorkChannels channels{};
+  };
+  std::optional<FreeSurfaceResidualWorkStage>
+      pending_free_surface_residual_work_stage;
+  std::unique_ptr<svmp::FE::backends::GenericVector>
+      free_surface_residual_work_scratch;
+  if (evaluate_free_surface_residual_work) {
+    free_surface_residual_work_scratch =
+        sim.backend->createVector(
+            sim.fe_system->dofHandler().getNumDofs());
+    if (!free_surface_residual_work_scratch) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Could not allocate the free-surface residual-work vector.");
+    }
+  } else if (maximum_residual_work_declaration_count != 0u) {
+    oopCout()
+        << "[svMultiPhysics::Application] Free-surface residual work"
+        << " diagnostic=free_surface_residual_work_stage"
+        << " status=not_evaluated"
+        << " scheme=" << transient_scheme.canonical_name
+        << " temporal_order=" << sim.fe_system->temporalOrder()
+        << " reason=backward_euler_temporal_order_one_required"
+        << std::endl;
+  }
   const bool capture_dynamic_contact_generalized_alpha =
       has_dynamic_contact_stage &&
       opts.scheme ==
@@ -27724,6 +27916,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     }
   };
   callbacks.on_step_start = [&](const svmp::FE::timestepping::TimeHistory& h) {
+    if (evaluate_free_surface_residual_work &&
+        pending_free_surface_residual_work_stage.has_value()) {
+      throw std::logic_error(
+          "[svMultiPhysics::Application] A free-surface residual-work stage survived into a new solve/retry attempt.");
+    }
     if (capture_dynamic_contact_generalized_alpha) {
       if (!dynamic_contact_solve_attempt_step.has_value() ||
           *dynamic_contact_solve_attempt_step != h.stepIndex()) {
@@ -27976,6 +28173,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   std::function<void(
       const svmp::FE::timestepping::CandidateStageObservation&)>
       dynamic_contact_candidate_stage_observer;
+  std::function<void(
+      const svmp::FE::timestepping::CandidateStageObservation&)>
+      free_surface_residual_work_candidate_stage_observer;
   if (capture_dynamic_contact_generalized_alpha) {
     dynamic_contact_candidate_stage_observer =
         [&](const svmp::FE::timestepping::CandidateStageObservation&
@@ -28206,8 +28406,234 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   *stage_state, std::move(*stage_metadata));
         };
   }
+  if (evaluate_free_surface_residual_work) {
+    free_surface_residual_work_candidate_stage_observer =
+        [&](const svmp::FE::timestepping::CandidateStageObservation&
+                observation) {
+          const auto expected_size =
+              sim.fe_system->dofHandler().getNumDofs();
+          const bool local_stage_ready =
+              observation.scheme ==
+                  svmp::FE::timestepping::SchemeKind::BackwardEuler &&
+              observation.temporal_order == 1 &&
+              observation.step_index > 0 &&
+              observation.attempt_index >= 0 &&
+              std::isfinite(observation.state_time) &&
+              std::isfinite(observation.dt) &&
+              observation.dt > 0.0 &&
+              observation.state_time == observation.step_end_time &&
+              !observation.generalized_alpha.has_value() &&
+              observation.state_vector != nullptr &&
+              observation.state_vector->size() == expected_size &&
+              observation.mesh_revision.has_value() &&
+              dynamicContactStageMeshRevisionMatches(
+                  *observation.mesh_revision,
+                  sim.fe_system->meshAccess()) &&
+              free_surface_residual_work_scratch != nullptr &&
+              free_surface_residual_work_scratch->size() ==
+                  expected_size &&
+              !pending_free_surface_residual_work_stage.has_value();
+          if (globalAnyBool(
+                  !local_stage_ready,
+                  velocity_extension_artifact_comm)) {
+            if (!local_stage_ready) {
+              throw std::runtime_error(
+                  "[svMultiPhysics::Application] Free-surface residual work requires one fresh backward-Euler operator-stage state with matching live mesh revisions.");
+            }
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Another active FE communicator rank rejected free-surface residual-work stage readiness.");
+          }
+
+          auto& history = *sim.time_history;
+          svmp::FE::systems::SystemStateView stage_state;
+          stage_state.time = observation.state_time;
+          stage_state.dt = observation.dt;
+          stage_state.effective_dt = observation.dt;
+          stage_state.dt_prev = history.dtPrev();
+          stage_state.u = observation.state_vector->localSpan();
+          stage_state.u_prev = history.uPrevSpan();
+          stage_state.u_prev2 = history.uPrev2Span();
+          stage_state.u_vector = observation.state_vector;
+          stage_state.u_prev_vector = &history.uPrev();
+          stage_state.u_prev2_vector = &history.uPrev2();
+          stage_state.u_history = history.uHistorySpans();
+          stage_state.dt_history = history.dtHistory();
+
+          std::vector<application::core::
+                          FreeSurfaceResidualWorkPairing>
+              pairings;
+          pairings.reserve(
+              free_surface_residual_work_declarations.size());
+          const auto constrained_dofs =
+              sim.fe_system->constraints().getConstrainedDofs();
+          for (const auto& declaration :
+               free_surface_residual_work_declarations) {
+            const bool produced =
+                declaration.applicability ==
+                svmp::FE::systems::
+                    FreeSurfaceResidualWorkApplicability::Produced;
+            double residual_state_pairing = 0.0;
+            if (produced) {
+              std::exception_ptr local_assembly_failure;
+              try {
+                free_surface_residual_work_scratch->zero();
+                auto residual_view =
+                    free_surface_residual_work_scratch
+                        ->createAssemblyView();
+                if (!residual_view) {
+                  throw std::runtime_error(
+                      "Free-surface residual-work assembly could not create a vector view.");
+                }
+                svmp::FE::systems::AssemblyRequest request;
+                request.op = declaration.operator_tag;
+                request.want_vector = true;
+                request.suppress_constraint_inhomogeneity = true;
+                request.suppress_auxiliary_coupling_assembly = true;
+                request.is_nonlinear_iteration = true;
+                const auto assembled = transient.assemble(
+                    request,
+                    stage_state,
+                    nullptr,
+                    residual_view.get());
+                if (!assembled.success) {
+                  throw std::runtime_error(
+                      "Free-surface residual-work operator '" +
+                      declaration.operator_tag +
+                      "' failed assembly: " +
+                      assembled.error_message);
+                }
+                residual_view =
+                    free_surface_residual_work_scratch
+                        ->createAssemblyView();
+                if (!residual_view) {
+                  throw std::runtime_error(
+                      "Free-surface residual-work constraint projection could not create a vector view.");
+                }
+                residual_view->beginAssemblyPhase();
+                if (!constrained_dofs.empty()) {
+                  residual_view->zeroVectorEntries(
+                      constrained_dofs);
+                }
+                residual_view->finalizeAssembly();
+              } catch (...) {
+                local_assembly_failure =
+                    std::current_exception();
+              }
+              requireCollectivePhasePreparation(
+                  local_assembly_failure,
+                  velocity_extension_artifact_comm,
+                  "free_surface_residual_work_operator_assembly");
+
+              std::exception_ptr local_pairing_failure;
+              try {
+                residual_state_pairing = static_cast<double>(
+                    free_surface_residual_work_scratch->dot(
+                        *observation.state_vector));
+                if (!std::isfinite(residual_state_pairing)) {
+                  throw std::overflow_error(
+                      "Free-surface residual/state pairing is not finite.");
+                }
+              } catch (...) {
+                local_pairing_failure =
+                    std::current_exception();
+              }
+              requireCollectivePhasePreparation(
+                  local_pairing_failure,
+                  velocity_extension_artifact_comm,
+                  "free_surface_residual_work_operator_pairing");
+              if (globalMinDouble(
+                      residual_state_pairing,
+                      velocity_extension_artifact_comm) !=
+                  globalMaxDouble(
+                      residual_state_pairing,
+                      velocity_extension_artifact_comm)) {
+                throw std::runtime_error(
+                    "[svMultiPhysics::Application] Free-surface residual/state pairing differs across the active FE communicator.");
+              }
+            }
+            pairings.push_back(
+                application::core::
+                    FreeSurfaceResidualWorkPairing{
+                        .channel = svmp::FE::systems::
+                            freeSurfaceResidualWorkChannelName(
+                                declaration.channel),
+                        .produced = produced,
+                        .owner_component =
+                            declaration.owner_component,
+                        .operator_tag = declaration.operator_tag,
+                        .residual_state_pairing =
+                            residual_state_pairing,
+                    });
+          }
+
+          const auto candidate_solution =
+              gatherFeOrderedSolution(
+                  stage_state,
+                  velocity_extension_artifact_comm);
+          const auto live_solution = gatherFeOrderedSolution(
+              history.u(), velocity_extension_artifact_comm);
+          const auto candidate_state_revision =
+              collectiveLevelSetMaintenanceAlgebraicRevision(
+                  candidate_solution,
+                  velocity_extension_artifact_comm);
+          const auto live_state_revision =
+              collectiveLevelSetMaintenanceAlgebraicRevision(
+                  live_solution,
+                  velocity_extension_artifact_comm);
+          if (candidate_state_revision == 0u ||
+              candidate_state_revision != live_state_revision) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Free-surface residual work was not evaluated on the live converged candidate state.");
+          }
+          auto channels = application::core::
+              evaluateFreeSurfaceResidualWorkChannels(
+                  pairings, observation.dt);
+          pending_free_surface_residual_work_stage.emplace(
+              FreeSurfaceResidualWorkStage{
+                  .step = static_cast<std::uint64_t>(
+                      observation.step_index),
+                  .attempt_index = observation.attempt_index,
+                  .time = observation.state_time,
+                  .dt = observation.dt,
+                  .algebraic_state_revision =
+                      candidate_state_revision,
+                  .pairings = std::move(pairings),
+                  .channels = std::move(channels),
+              });
+          const auto& staged =
+              *pending_free_surface_residual_work_stage;
+          oopCout()
+              << std::setprecision(17)
+              << "[svMultiPhysics::Application] Free-surface residual work"
+              << " diagnostic=free_surface_residual_work_stage"
+              << " status=staged"
+              << " step=" << staged.step
+              << " attempt_index=" << staged.attempt_index
+              << " time=" << staged.time
+              << " dt=" << staged.dt
+              << " algebraic_state_revision="
+              << staged.algebraic_state_revision
+              << " convection_work="
+              << *staged.channels.convection
+              << " pressure_continuity_work="
+              << *staged.channels.pressure_continuity
+              << " nonconservative_body_force_work="
+              << *staged.channels.nonconservative_body_force
+              << " weak_boundary_work="
+              << *staged.channels.weak_boundary
+              << " vms_pspg_work="
+              << *staged.channels.vms_pspg
+              << " cut_stabilization_work="
+              << *staged.channels.cut_stabilization
+              << " ghost_penalty_work="
+              << *staged.channels.ghost_penalty
+              << " accepted_state_contribution=staged_not_published"
+              << std::endl;
+        };
+  }
   if (evaluate_fitted_ale_operator_stage || has_conservative_phase ||
-      capture_dynamic_contact_generalized_alpha) {
+      capture_dynamic_contact_generalized_alpha ||
+      evaluate_free_surface_residual_work) {
     callbacks.on_candidate_stage =
         [&](const svmp::FE::timestepping::CandidateStageObservation&
                 observation) {
@@ -28216,6 +28642,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           }
           if (fitted_ale_candidate_stage_observer) {
             fitted_ale_candidate_stage_observer(observation);
+          }
+          if (free_surface_residual_work_candidate_stage_observer) {
+            free_surface_residual_work_candidate_stage_observer(
+                observation);
           }
           if (!has_conservative_phase) {
             return;
@@ -28452,6 +28882,36 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               consumed_conservative_phase_stage->attempt;
         } else {
           ++step_acceptance_attempt;
+        }
+        if (evaluate_free_surface_residual_work) {
+          const auto [minimum_stage_present,
+                      maximum_stage_present] =
+              globalMinMaxUint64(
+                  pending_free_surface_residual_work_stage
+                          .has_value()
+                      ? 1u
+                      : 0u,
+                  velocity_extension_artifact_comm);
+          if (minimum_stage_present != 1u ||
+              maximum_stage_present != 1u) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Free-surface acceptance requires one staged residual-work record on every active FE rank.");
+          }
+          const auto& residual_work_stage =
+              *pending_free_surface_residual_work_stage;
+          if (residual_work_stage.step !=
+                  static_cast<std::uint64_t>(
+                      h.stepIndex() + 1) ||
+              residual_work_stage.attempt_index < 0 ||
+              static_cast<std::uint64_t>(
+                  residual_work_stage.attempt_index + 1) !=
+                  step_acceptance_attempt ||
+              residual_work_stage.time != h.time() + h.dt() ||
+              residual_work_stage.dt != h.dt() ||
+              residual_work_stage.algebraic_state_revision == 0u) {
+            throw std::logic_error(
+                "[svMultiPhysics::Application] Staged free-surface residual work does not match the prospective accepted-step transaction.");
+          }
         }
         clear_pending_contact_provenance();
         if (pending_phase_publication_state !=
@@ -28719,6 +29179,27 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       };
   callbacks.on_step_candidate_discarded =
       [&](svmp::FE::timestepping::TimeHistory& h) {
+        if (pending_free_surface_residual_work_stage.has_value()) {
+          oopCout()
+              << std::setprecision(17)
+              << "[svMultiPhysics::Application] Free-surface residual work"
+              << " diagnostic=free_surface_residual_work_stage"
+              << " status=discarded"
+              << " step="
+              << pending_free_surface_residual_work_stage->step
+              << " attempt_index="
+              << pending_free_surface_residual_work_stage
+                     ->attempt_index
+              << " accepted_state_convection_work=0"
+              << " accepted_state_pressure_continuity_work=0"
+              << " accepted_state_nonconservative_body_force_work=0"
+              << " accepted_state_weak_boundary_work=0"
+              << " accepted_state_vms_pspg_work=0"
+              << " accepted_state_cut_stabilization_work=0"
+              << " accepted_state_ghost_penalty_work=0"
+              << std::endl;
+          pending_free_surface_residual_work_stage.reset();
+        }
         pending_conservative_phase_stage.reset();
         pending_dynamic_contact_generalized_alpha_observation.reset();
         if (track_transient_cut_topology) {
@@ -28867,6 +29348,28 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       };
   callbacks.on_step_commit_ready =
       [&](svmp::FE::timestepping::TimeHistory& h) {
+        if (evaluate_free_surface_residual_work) {
+          const auto [minimum_stage_present,
+                      maximum_stage_present] =
+              globalMinMaxUint64(
+                  pending_free_surface_residual_work_stage
+                          .has_value()
+                      ? 1u
+                      : 0u,
+                  velocity_extension_artifact_comm);
+          if (minimum_stage_present != 1u ||
+              maximum_stage_present != 1u ||
+              pending_free_surface_residual_work_stage->step !=
+                  static_cast<std::uint64_t>(
+                      h.stepIndex() + 1) ||
+              static_cast<std::uint64_t>(
+                  pending_free_surface_residual_work_stage
+                          ->attempt_index +
+                      1) != step_acceptance_attempt) {
+            throw std::logic_error(
+                "[svMultiPhysics::Application] Free-surface residual work reached commit-ready without one matching staged record on every active FE rank.");
+          }
+        }
         if (capture_dynamic_contact_generalized_alpha) {
           const auto [minimum_pending_stage, maximum_pending_stage] =
               globalMinMaxUint64(
@@ -29217,6 +29720,25 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             AcceptedEndpointPostStep,
         h.stepIndex(),
         velocity_extension_artifact_comm);
+    if (evaluate_free_surface_residual_work) {
+      const auto [minimum_stage_present,
+                  maximum_stage_present] =
+          globalMinMaxUint64(
+              pending_free_surface_residual_work_stage.has_value()
+                  ? 1u
+                  : 0u,
+              velocity_extension_artifact_comm);
+      if (minimum_stage_present != 1u ||
+          maximum_stage_present != 1u ||
+          pending_free_surface_residual_work_stage->step !=
+              static_cast<std::uint64_t>(h.stepIndex()) ||
+          pending_free_surface_residual_work_stage->time !=
+              h.time() ||
+          pending_free_surface_residual_work_stage->dt != h.dt()) {
+        throw std::logic_error(
+            "[svMultiPhysics::Application] Accepted free-surface step does not match its staged residual-work record.");
+      }
+    }
     if (evaluate_fitted_ale_operator_stage) {
       sim.fe_system
           ->commitPendingFittedALENormalOperatorStageMeasurements(
@@ -30528,6 +31050,46 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                       account,
                       preceding_gravitational_energy,
                       preceding_surface_wall_energy);
+          if (evaluate_free_surface_residual_work) {
+            if (!pending_free_surface_residual_work_stage
+                     .has_value() ||
+                !account.maintenance_start.has_value()) {
+              throw std::logic_error(
+                  "[svMultiPhysics::Application] Accepted residual work requires the staged operator endpoint and maintenance-chain start.");
+            }
+            const auto& residual_work_stage =
+                *pending_free_surface_residual_work_stage;
+            if (residual_work_stage.step != account.step ||
+                residual_work_stage.attempt_index < 0 ||
+                static_cast<std::uint64_t>(
+                    residual_work_stage.attempt_index + 1) !=
+                    account.attempt ||
+                residual_work_stage.time != account.time ||
+                residual_work_stage.dt != account.dt ||
+                residual_work_stage.algebraic_state_revision !=
+                    account.maintenance_start
+                        ->algebraic_state_revision) {
+              throw std::logic_error(
+                  "[svMultiPhysics::Application] Accepted residual-work stage does not match the physical maintenance-chain start.");
+            }
+            auto& physical_channels =
+                *pending_accepted_step_physical_endpoint_channels;
+            physical_channels.convection_work =
+                residual_work_stage.channels.convection;
+            physical_channels.pressure_continuity_work =
+                residual_work_stage.channels.pressure_continuity;
+            physical_channels.nonconservative_body_force_work =
+                residual_work_stage.channels
+                    .nonconservative_body_force;
+            physical_channels.weak_boundary_work =
+                residual_work_stage.channels.weak_boundary;
+            physical_channels.vms_pspg_work =
+                residual_work_stage.channels.vms_pspg;
+            physical_channels.cut_stabilization_work =
+                residual_work_stage.channels.cut_stabilization;
+            physical_channels.ghost_penalty_work =
+                residual_work_stage.channels.ghost_penalty;
+          }
           logLevelSetMaintenancePhysicalEndpointChannels(
               account,
               *pending_accepted_step_physical_endpoint_channels,
@@ -30956,6 +31518,74 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             << " complete_energy_record_connected=false"
             << std::endl;
       }
+    }
+    if (pending_free_surface_residual_work_stage.has_value()) {
+      const auto& residual_work_stage =
+          *pending_free_surface_residual_work_stage;
+      const bool maintenance_chain_start_available =
+          pending_accepted_step_maintenance_energy_account
+                  .has_value() &&
+          pending_accepted_step_maintenance_energy_account
+              ->maintenance_start.has_value();
+      const bool maintenance_chain_start_matches =
+          maintenance_chain_start_available &&
+          pending_accepted_step_maintenance_energy_account
+                  ->maintenance_start
+                  ->algebraic_state_revision ==
+              residual_work_stage.algebraic_state_revision;
+      const bool physical_channel_connection_complete =
+          pending_accepted_step_physical_endpoint_channels
+                  .has_value() &&
+          pending_accepted_step_physical_endpoint_channels
+              ->convection_work.has_value() &&
+          pending_accepted_step_physical_endpoint_channels
+              ->pressure_continuity_work.has_value() &&
+          pending_accepted_step_physical_endpoint_channels
+              ->nonconservative_body_force_work.has_value() &&
+          pending_accepted_step_physical_endpoint_channels
+              ->weak_boundary_work.has_value() &&
+          pending_accepted_step_physical_endpoint_channels
+              ->vms_pspg_work.has_value() &&
+          pending_accepted_step_physical_endpoint_channels
+              ->cut_stabilization_work.has_value() &&
+          pending_accepted_step_physical_endpoint_channels
+              ->ghost_penalty_work.has_value();
+      oopCout()
+          << std::setprecision(17)
+          << "[svMultiPhysics::Application] Free-surface residual work"
+          << " diagnostic=free_surface_residual_work_stage"
+          << " status=accepted"
+          << " step=" << residual_work_stage.step
+          << " attempt_index="
+          << residual_work_stage.attempt_index
+          << " time=" << residual_work_stage.time
+          << " dt=" << residual_work_stage.dt
+          << " algebraic_state_revision="
+          << residual_work_stage.algebraic_state_revision
+          << " maintenance_chain_start_available="
+          << (maintenance_chain_start_available ? "true" : "false")
+          << " maintenance_chain_start_matches="
+          << (maintenance_chain_start_matches ? "true" : "false")
+          << " physical_channel_connection_complete="
+          << (physical_channel_connection_complete ? "true" : "false")
+          << " accepted_state_convection_work="
+          << *residual_work_stage.channels.convection
+          << " accepted_state_pressure_continuity_work="
+          << *residual_work_stage.channels.pressure_continuity
+          << " accepted_state_nonconservative_body_force_work="
+          << *residual_work_stage.channels
+                  .nonconservative_body_force
+          << " accepted_state_weak_boundary_work="
+          << *residual_work_stage.channels.weak_boundary
+          << " accepted_state_vms_pspg_work="
+          << *residual_work_stage.channels.vms_pspg
+          << " accepted_state_cut_stabilization_work="
+          << *residual_work_stage.channels.cut_stabilization
+          << " accepted_state_ghost_penalty_work="
+          << *residual_work_stage.channels.ghost_penalty
+          << " complete_energy_record_connected=false"
+          << std::endl;
+      pending_free_surface_residual_work_stage.reset();
     }
     clear_pending_contact_provenance();
     if (level_set_maintenance_changed && cut_report.refreshed) {

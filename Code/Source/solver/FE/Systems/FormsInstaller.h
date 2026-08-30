@@ -67,6 +67,12 @@ struct FormInstallOptions {
     forms::ADMode ad_mode{forms::ADMode::Forward};
     forms::SymbolicOptions compiler_options{};
 
+    /// Whether this formulation describes the physical problem seen by the
+    /// well-posedness and gauge analyzers. Diagnostic and measurement-only
+    /// operators keep their formulation records for provenance, but must set
+    /// this false so they cannot introduce constraints into the solved system.
+    bool contributes_to_problem_analysis{true};
+
     /// Additional trial fields that contribute tangent columns but do not own
     /// residual rows in this formulation. This is intended for monolithic
     /// couplings such as ALE fluid residuals differentiated with respect to a

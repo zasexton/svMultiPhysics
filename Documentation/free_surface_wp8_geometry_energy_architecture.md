@@ -306,9 +306,11 @@ rejection until a topology-jump classification and acceptance policy exist.
 
 This class is a validation and publication contract, not an assembler.
 Production does not yet populate this complete record or connect it to the
-time-step transaction. Kinetic and gravitational values now have a separate
+time-step transaction. Kinetic and gravitational values have a separate
 accepted-history producer described below, including a zero-duration initial
-endpoint baseline, but that partial history is not a complete balance record.
+endpoint baseline. Production also stages the complete seven-row declared
+residual-work set at a converged backward-Euler operator endpoint, but that
+partial record is not a complete balance.
 The ledger's focused unit fixtures built and passed all ten frozen serial
 filters. They validate this fail-closed prerequisite contract; they do not
 supply physical qualification evidence.
@@ -327,19 +329,58 @@ ownership boundary is:
 | Gas/compressibility stored energy | Gas model, when present | Explicitly inapplicable for the selected one-phase envelope; no gas model exists. |
 | Bulk-viscous dissipation | Active-volume Galerkin viscous form tested by the endpoint velocity | For constant Newtonian viscosity, `evaluateFreeSurfaceActiveVolumeDissipation` evaluates the production density \(2\mu\,\mathrm{sym}(\nabla u):\mathrm{sym}(\nabla u)\) on retained endpoint rules. The application path reduces it exactly once and attaches it to accepted functional history. Variable-viscosity declarations leave this channel absent rather than substituting a literal coefficient. The frozen serial accepted-functional fixture executes this source path; complete-ledger connection remains open. |
 | Navier-slip and line-friction dissipation | Accepted sharp wall/contact state at the declared endpoint | Sharp stage records exist; complete step integration and all-wall coverage remain unconnected. |
-| External pressure and body-force work | Separately installed production pressure and forcing forms | Literal exterior pressure now has a retained-interface endpoint-power producer with the production sign \(-p_{\mathrm{ext}}\int u\cdot n_l\); it records outward liquid flux, area, and power in accepted history. Constant conservative body acceleration remains owned by gravitational stored energy, whose endpoint potential-power producer now records \(-\rho\int g\cdot u\), and must not be counted twice as external work. The literal-pressure and gravitational endpoint producers execute in the frozen serial accepted-functional fixture. Space/time-dependent pressure, prescribed-field forcing, rotating-frame terms, signed step integration, and complete-ledger connection remain open. |
+| External pressure and body-force work | Separately installed production pressure and forcing forms | Literal exterior pressure now has a retained-interface endpoint-power producer with the production sign \(-p_{\mathrm{ext}}\int u\cdot n_l\); it records outward liquid flux, area, and power in accepted history. Constant conservative body acceleration remains owned by gravitational stored energy, whose endpoint potential-power producer records \(-\rho\int g\cdot u\), and must not be counted twice as external work. Space/time-dependent forcing, prescribed-field forcing, and rotating-frame terms are isolated from the constant conservative acceleration in a named accepted-stage residual operator. Its signed work is staged, but mapping that value into the complete ledger's external body-work channel remains open. |
 | Imposed-traction work and open-boundary energy flux | Generated-wet or full-physical boundary form that owns the corresponding condition | Boundary factories assemble the residual, but do not publish distinct work scalars. |
 | Time-discretization work | Difference between endpoint-tested backward-Euler inertia and the kinetic-energy increment on the identical declared domains | `evaluateFreeSurfaceBackwardEulerKineticWork` evaluates both velocities on the retained endpoint rules. The backward-Euler application path reduces its components exactly once, recomputes the global identity residual, checks the endpoint kinetic energy against the accepted stored energy, and attaches it to accepted history. Generalized-alpha and steady records leave the channel absent. The frozen serial accepted-functional fixture executes this source path; complete-ledger connection remains open. |
 | Kinetic-domain and gravitational transport coupling | Difference between the preceding kinetic energy on the endpoint and preceding retained domains; and gravitational stored-energy change minus endpoint gravitational-potential power integrated over the step | The endpoint-domain kinetic evaluator and accepted stored-energy history expose the kinetic remainder without equating different quadrature domains. Accepted active-volume history records gravitational stored energy and endpoint potential power. Production now pairs the immediately preceding accepted gravitational energy with the maintenance account's post-Transport endpoint and publishes their signed difference minus the endpoint potential power integrated over the step. Frozen serial fixtures exercise the endpoint-domain and gravitational maintenance accounting; the kinetic-domain remainder and complete-ledger connection remain open. |
-| Convection and pressure/continuity work | Separately assembled Galerkin momentum and continuity components, including the declared boundary flux convention | Partial pressure diagnostics exist; a complete accepted-step work split does not. |
+| Convection and pressure/continuity work | Separately assembled Galerkin momentum and continuity components, including the declared boundary flux convention | The flow module now installs exact additive Galerkin convection/moving-control-volume and pressure/continuity operators. Each channel has one setup-time owner and explicit produced/inapplicable status. For backward Euler with temporal order one, production pairs the constrained operator residual with the converged candidate state and stages \(-\Delta t R_i(u)[u]\). Complete-ledger connection and boundary-flux qualification remain open. |
 | Surface-transport coupling work | Difference between endpoint-tested surface/wall first variation and the accepted functional increment | Discrete-energy `SurfaceStress` declarations now explicitly enable an endpoint functional-power producer. It evaluates the existing surface/wall/volume first variation with the accepted velocity and physical gradient on the authoritative snapshot, reduces it once, and stores it beside the accepted functional value. Production now pairs the immediately preceding accepted surface-plus-wall energy with the maintenance account's post-Transport endpoint and publishes their signed difference minus the endpoint first-variation power integrated over the step when that power has complete coverage. Curvature-traction and synthetic functional-only declarations leave the coupling channel absent. The endpoint path executes in the frozen serial fixture; complete-ledger connection and a production MPI path remain open. |
-| Weak-boundary work | Nitsche consistency/penalty and other weak-boundary residual components | A low-level Nitsche spectral certificate exists; accepted-step work is absent. |
-| VMS/PSPG work | Full momentum and continuity stabilization residual components | Pressure-row diagnostic components exist, but they are not a complete energy-work decomposition. |
-| Cut stabilization and ghost-penalty work | Named stabilization residual components | Selected low-level forms exist; no accepted-step work scalar is published. |
+| Weak-boundary work | Nitsche consistency/penalty and other weak-boundary residual components | The flow module now retains exact, separate momentum and continuity forms for fitted free-surface kinematic penalty/Nitsche enforcement and generic weak velocity Nitsche conditions. Generated-active-boundary trace certification is installed for both the production and named work operators. The converged-stage pairing is published; complete-ledger connection remains open. |
+| VMS/PSPG work | Full momentum and continuity stabilization residual components | The flow module now installs the exact difference between the complete active VMS/PSPG momentum/continuity forms and their Galerkin bases, including configured PSPG boundary variants and the separately installed direct pressure-gradient formulation. The accepted-stage pairing uses the same setup-time owner/applicability contract as convection and pressure/continuity. Complete-ledger connection remains open. |
+| Cut stabilization and ghost-penalty work | Named stabilization residual components | The retired velocity ghost penalty leaves the distinct cut-stabilization channel explicitly inapplicable; aggregation has its own later energy owner. When active, the retained pressure ghost-penalty form is installed under the named ghost-penalty work operator and paired at the converged stage. Complete-ledger connection remains open. |
 | Aggregation work | Difference induced by the accepted aggregate constraint projection, with the unconstrained reference defined before execution | Constraint provenance exists; no energy-work comparison is defined. |
 | Extension work | Accepted interface-transport change attributable to the bounded extension map | Map revision and amplification are provenance only, not work. |
 | Pruning work | Difference between declared unpruned and retained authoritative functionals | Pruning telemetry exists; no paired functional work is published. |
 | Limiting, redistancing, local reconciliation, and global correction | Transactional maintenance rows | Surface/wall/volume-potential changes are implemented. With exactly one active-volume owner across all declarations, the same exact before/after candidates now also publish kinetic-plus-gravitational-plus-every-interface surface-plus-wall modeled-energy changes, excluding the constraint potential. Accepted attempt records preserve separate row counts and modeled-energy sums for transport, limiting, reinitialization, geometry reconciliation, and global correction, plus a numerical-maintenance total that deliberately excludes physical transport. All pre-commit and post-accept transactions for one accepted step are then combined by a fail-closed metadata-consistent aggregate, preserving unavailable channels and logging one step-level maintenance account. Rejected attempts preserve the diagnostic changes but publish exact-zero accepted contributions. A second bulk owner is rejected before declaration mutation. Frozen serial and two-rank fixtures execute the modeled row and aggregation path; complete-record connection remains open. |
+
+The residual-work path is transactional as well. Setup accepts either no
+declarations or the complete seven-row set, requires communicator-identical
+owner, applicability, and operator metadata, and refuses partial coverage.
+For each converged backward-Euler temporal-order-one candidate it assembles
+each produced operator at the candidate endpoint, suppresses constraint
+inhomogeneity and auxiliary coupling, zeros constrained residual rows, pairs
+the result with that same candidate state, and stages signed work
+\(-\Delta t R_i(u)[u]\) with an algebraic-state revision. Candidate discard
+logs exact-zero accepted contributions and clears the stage. Acceptance
+requires matching step, attempt, time, duration, and maintenance-chain-start
+state revision before adding all seven values to the partial physical-channel
+record. Convection, pressure/continuity, nonconservative body force,
+weak-boundary, VMS/PSPG, cut-stabilization, and ghost-penalty each have one
+explicit produced-or-inapplicable decision. Other energy channels are still
+unconnected, so the complete-record flag remains false.
+
+The named work operators are measurement-only formulations. They retain
+their formulation records, installed kernels, operator tags, and any exact
+generated-boundary trace binding needed for assembly provenance, but they do
+not publish normalized physical-problem contributions and are omitted from
+the problem-analysis context. Consequently an auxiliary work operator cannot
+introduce a nullspace gauge or other constraint into the physical system it
+measures. The production equations remain fully visible to the same analysis
+and constraint path.
+
+This measurement-isolation increment is frozen by
+[`free_surface_wp8_residual_work_20260830_41312481/record.json`](qualification_logs/free_surface_wp8_residual_work_20260830_41312481/record.json).
+On source parent `3ee5556efe90d0dc2c10557660c67b802f93824b`, ledgered
+`amarsden` job `41312481` completed with exit code `0:0` in `00:34:12` and
+a batch peak resident set of 2,458,248 KiB. The hash-bound campaign passed 3
+focused Application tests, 6 focused Physics tests, all 96
+`ApplicationDriverLevelSetWorkflows` tests, and all 202
+`MovingDomainPhysics` tests, with zero failures, errors, or disabled tests.
+Its checksum manifest has SHA-256
+`720aeb6870d03b0966f2bcf203457c214be2fe72a2e9a6cc4333e02f0f3ac524`.
+This accepts only the converged-stage residual-work prerequisite. It does not
+connect the complete energy record, close FSR-09 or WP-8, or qualify a
+physical simulation exit.
 
 The `Transport` maintenance-row label describes the physical conservative
 phase-transport stage. Its modeled stored-energy change is now published under

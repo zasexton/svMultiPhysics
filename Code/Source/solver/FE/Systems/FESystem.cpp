@@ -108,6 +108,28 @@ namespace svmp {
 namespace FE {
 namespace systems {
 
+const char* freeSurfaceResidualWorkChannelName(
+    FreeSurfaceResidualWorkChannel channel) noexcept
+{
+    switch (channel) {
+    case FreeSurfaceResidualWorkChannel::Convection:
+        return "convection";
+    case FreeSurfaceResidualWorkChannel::PressureContinuity:
+        return "pressure_continuity";
+    case FreeSurfaceResidualWorkChannel::NonconservativeBodyForce:
+        return "nonconservative_body_force";
+    case FreeSurfaceResidualWorkChannel::WeakBoundary:
+        return "weak_boundary";
+    case FreeSurfaceResidualWorkChannel::VmsPspg:
+        return "vms_pspg";
+    case FreeSurfaceResidualWorkChannel::CutStabilization:
+        return "cut_stabilization";
+    case FreeSurfaceResidualWorkChannel::GhostPenalty:
+        return "ghost_penalty";
+    }
+    return "unknown";
+}
+
 namespace {
 
 void coordinateFinalizedReportLocalFailure(
@@ -8381,7 +8403,9 @@ analysis::ProblemAnalysisContext FESystem::buildProblemAnalysisContext() const {
 
     // Populate formulation records.
     for (const auto& rec : formulation_records_) {
-        ctx.addFormulationRecord(rec);
+        if (rec.contributes_to_problem_analysis) {
+            ctx.addFormulationRecord(rec);
+        }
     }
 
     // Populate normalized contributions.
@@ -12156,6 +12180,64 @@ void FESystem::recordAcceptedMeshBoundaryProvenance(
     throw std::runtime_error(
         "FESystem::recordAcceptedMeshBoundaryProvenance: another active FE "
         "communicator rank rejected accepted mesh-boundary provenance");
+}
+
+void FESystem::declareFreeSurfaceResidualWork(
+    FreeSurfaceResidualWorkDeclaration declaration)
+{
+    FE_THROW_IF(
+        isSetup(),
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceResidualWork: declarations cannot change after setup");
+    FE_THROW_IF(
+        std::string_view(
+            freeSurfaceResidualWorkChannelName(declaration.channel)) ==
+            "unknown",
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceResidualWork: channel is invalid");
+    FE_THROW_IF(
+        declaration.owner_component.find_first_not_of(" \t\r\n") ==
+            std::string::npos,
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceResidualWork: owner component must be nonempty");
+    const bool produced =
+        declaration.applicability ==
+        FreeSurfaceResidualWorkApplicability::Produced;
+    const bool inapplicable =
+        declaration.applicability ==
+        FreeSurfaceResidualWorkApplicability::NotApplicable;
+    FE_THROW_IF(
+        !produced && !inapplicable,
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceResidualWork: applicability is invalid");
+    FE_THROW_IF(
+        produced && declaration.operator_tag.empty(),
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceResidualWork: a produced channel requires an operator tag");
+    FE_THROW_IF(
+        produced && !hasOperator(declaration.operator_tag),
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceResidualWork: produced operator '" +
+            declaration.operator_tag + "' is not installed");
+    FE_THROW_IF(
+        inapplicable && !declaration.operator_tag.empty(),
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceResidualWork: an inapplicable channel cannot name an operator");
+    const auto duplicate = std::find_if(
+        free_surface_residual_work_declarations_.begin(),
+        free_surface_residual_work_declarations_.end(),
+        [&](const auto& existing) {
+            return existing.channel == declaration.channel;
+        });
+    FE_THROW_IF(
+        duplicate != free_surface_residual_work_declarations_.end(),
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceResidualWork: channel '" +
+            std::string(freeSurfaceResidualWorkChannelName(
+                declaration.channel)) +
+            "' already has an owner");
+    free_surface_residual_work_declarations_.push_back(
+        std::move(declaration));
 }
 
 void FESystem::declareFreeSurfaceDiscreteFunctional(

@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "record_id": "free_surface_wp8_residual_work_20260830_41312481",
+  "recorded_at": "2026-08-30T12:42:00-07:00",
+  "outcome": "PASS_PREREQUISITE_NONCLOSURE",
+  "accepted_claim": "accepted_stage_residual_work_prerequisite",
+  "work_package": "WP-8",
+  "fsr09_closed": false,
+  "wp8_closed": false,
+  "complete_energy_record_connected": false,
+  "source_parent_commit": "3ee5556efe90d0dc2c10557660c67b802f93824b",
+  "scheduler": {
+    "job_id": 41312481,
+    "ledger": "/scratch/users/zsexton/svmp-job-ledgers/wp4-primary.tsv",
+    "partition": "amarsden",
+    "account": "amarsden",
+    "nodes": 1,
+    "cpus_per_task": 2,
+    "memory": "6G",
+    "mail_user": "zsexton@stanford.edu",
+    "mail_events": [
+      "BEGIN",
+      "END",
+      "FAIL"
+    ],
+    "state": "COMPLETED",
+    "exit_code": "0:0",
+    "elapsed": "00:34:12",
+    "batch_max_rss_kib": 2458248
+  },
+  "campaign": {
+    "script": "/scratch/users/zsexton/wp8-residual-work-stage-r5/run.sbatch",
+    "script_sha256": "7beb7252958c8ef7677cc14209caed8ed087ca2b9a73e1f69a8dfe0a6ef9c1cf",
+    "result_root": "/scratch/users/zsexton/wp8-residual-work-stage-r5/result-41312481",
+    "manifest": "/scratch/users/zsexton/wp8-residual-work-stage-r5/result-41312481/campaign.sha256",
+    "manifest_sha256": "720aeb6870d03b0966f2bcf203457c214be2fe72a2e9a6cc4333e02f0f3ac524",
+    "manifest_check_passed": true,
+    "failure_lines_absent": true
+  },
+  "test_binaries": {
+    "test_application_sha256": "76a55fbce359bf774fdbe086cea95f0c0ca7e477c327c087f7a10f2686cfbdf4",
+    "test_physics_sha256": "b0621a2fac11bd4ef18b09279fa4e1d42e53714046d42bb7783e8fadb9da9e21"
+  },
+  "suites": {
+    "application_focused": {
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "disabled": 0,
+      "elapsed_seconds": 13.163,
+      "xml": "application-focused.xml"
+    },
+    "physics_focused": {
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "disabled": 0,
+      "elapsed_seconds": 0.059,
+      "xml": "physics-focused.xml"
+    },
+    "application_workflows": {
+      "tests": 96,
+      "failures": 0,
+      "errors": 0,
+      "disabled": 0,
+      "elapsed_seconds": 248.89,
+      "xml": "application-workflows.xml"
+    },
+    "moving_domain_physics": {
+      "tests": 202,
+      "failures": 0,
+      "errors": 0,
+      "disabled": 0,
+      "elapsed_seconds": 2.831,
+      "xml": "moving-domain-physics.xml"
+    }
+  },
+  "source_sha256": {
+    "Code/Source/solver/Application/Core/ApplicationDriver.cpp": "7cfdc186b1fb6404337743645ca0857166cdc7bc19dcc8b203c5a474a7fdcb39",
+    "Code/Source/solver/Application/Core/ApplicationDriver.h": "03c25e8ece29d4df12b1d272b3686f5b3a02bc01cb6313ff3717c341352c9e8e",
+    "Code/Source/solver/Application/Tests/Unit/test_ApplicationDriverLevelSetWorkflows.cpp": "11ee2fdaf62206e296ee2b7d1ce3d6f099e99dc548536d05459fab6bde6787ac",
+    "Code/Source/solver/FE/Analysis/FormulationRecord.h": "f362983b09eb9a768ee26f75ae4e3957624ff61a9e270a8a5f2a8441d66e9f0f",
+    "Code/Source/solver/FE/Systems/FESystem.cpp": "bf1fdd989b677dd6feebe3785bb3d7e6e225a8772f8195cd85eca367a43f47e3",
+    "Code/Source/solver/FE/Systems/FESystem.h": "e7f3d5d026c50a7416a253281805e1c578b9aba229768a00b6a0433f2cd5a686",
+    "Code/Source/solver/FE/Systems/FormsInstaller.cpp": "d5c11edeb339212183abe2097786ffd02a12775d39e6446483be4624fde22146",
+    "Code/Source/solver/FE/Systems/FormsInstaller.h": "b33ef879d5f91cacc1a6e224049d2224ab86773ecdab888bffe038da29bdbbc6",
+    "Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.cpp": "4bac650e84b3e6cc3d3ecb877ee4f1545620af4d556bad490f950ca551a54be6",
+    "Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h": "f6c85699111bae49cdce51c0a2f27cbbf9f8b2a86432ae14db6fdcde474b1223",
+    "Code/Source/solver/Physics/Formulations/NavierStokes/NavierStokesBCFactories.h": "25497121d0629bd6eb53df98f11df3ef57d498c0125b5df015c6f00775020f75",
+    "Code/Source/solver/Physics/Tests/Unit/test_MovingDomainPhysics.cpp": "6c4d3b1b30526b584517989aba3dd092c1b11c2e02e8d273e9613b3ffb607281"
+  },
+  "validated_contracts": [
+    "exact seven-channel setup-time owner and applicability declaration",
+    "negative-duration-times constrained endpoint residual pairing",
+    "candidate-stage discard and accepted-stage transaction matching",
+    "production and measurement trace scopes remain distinct",
+    "measurement-only formulations cannot change physical problem analysis or gauge constraints",
+    "produced and not-applicable channel behavior remains fail closed"
+  ],
+  "open_requirements": [
+    "connect every stored-energy, dissipation, external-work, numerical-work, and maintenance channel to one accepted complete ledger record",
+    "classify aggregation, extension, pruning, imposed traction, and open-boundary flux without invented zeros",
+    "freeze and execute backward-Euler complete-energy identity thresholds",
+    "execute refinement, cut-shift, and partition studies",
+    "complete the six required physical simulation exits",
+    "qualify topology events and generalized-alpha stage consistency"
+  ]
+}

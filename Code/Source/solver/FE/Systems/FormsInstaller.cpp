@@ -3742,6 +3742,8 @@ CoupledResidualKernels installFormulation(
     std::vector<analysis::ContributionDescriptor> pending_contributions;
     {
         rec.operator_tag = op;
+        rec.contributes_to_problem_analysis =
+            options.contributes_to_problem_analysis;
         rec.active_fields.assign(trial_fields.begin(), trial_fields.end());
         rec.residual_expr = residual.nodeShared();
         rec.is_mixed = (fields.size() > 1 || trial_fields.size() > 1);
@@ -4074,9 +4076,13 @@ CoupledResidualKernels installFormulation(
             }
         }
 
-        // Lower the formulation into normalized ContributionDescriptors.
-        // Store them pending — they will be committed after installation succeeds.
-        pending_contributions = analysis::lowerFormulation(rec);
+        // Lower only physical formulations into normalized
+        // ContributionDescriptors. Measurement-only operators retain their
+        // FormulationRecord for provenance without altering gauge resolution
+        // or any other physical problem analysis.
+        if (rec.contributes_to_problem_analysis) {
+            pending_contributions = analysis::lowerFormulation(rec);
+        }
     }
 
     const auto num_test = countUniqueTestSpaces(*resolved.node());

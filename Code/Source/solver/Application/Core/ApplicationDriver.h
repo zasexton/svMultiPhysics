@@ -242,7 +242,46 @@ struct LevelSetMaintenancePhysicalEndpointChannels {
       gravitational_transport_coupling_work{};
   std::optional<double> bulk_viscous_dissipation_rate{};
   std::optional<double> external_pressure_work{};
+  std::optional<double> convection_work{};
+  std::optional<double> pressure_continuity_work{};
+  std::optional<double> nonconservative_body_force_work{};
+  std::optional<double> weak_boundary_work{};
+  std::optional<double> vms_pspg_work{};
+  std::optional<double> cut_stabilization_work{};
+  std::optional<double> ghost_penalty_work{};
 };
+
+/** One exact assembled residual/state pairing at the converged operator stage. */
+struct FreeSurfaceResidualWorkPairing {
+  std::string channel{};
+  bool produced{false};
+  std::string owner_component{};
+  std::string operator_tag{};
+  double residual_state_pairing{0.0};
+};
+
+/**
+ * Signed step work from the currently connected Navier--Stokes residual
+ * groups.  Positive values add modeled stored energy.
+ */
+struct FreeSurfaceResidualWorkChannels {
+  std::optional<double> convection{};
+  std::optional<double> pressure_continuity{};
+  std::optional<double> nonconservative_body_force{};
+  std::optional<double> weak_boundary{};
+  std::optional<double> vms_pspg{};
+  std::optional<double> cut_stabilization{};
+  std::optional<double> ghost_penalty{};
+};
+
+/**
+ * Validate one explicit owner/applicability row for every connected channel
+ * and convert residual pairings to signed step work as -dt R_i(x)[x].
+ */
+[[nodiscard]] FreeSurfaceResidualWorkChannels
+evaluateFreeSurfaceResidualWorkChannels(
+    std::span<const FreeSurfaceResidualWorkPairing> pairings,
+    double dt);
 
 /**
  * Pair the post-Transport endpoint with the preceding accepted

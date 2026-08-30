@@ -63,6 +63,11 @@ struct FormulationRecord {
     /// Operator tag (e.g. "equations", "NavierStokesVMS")
     std::string operator_tag;
 
+    /// False for diagnostic or measurement-only operators that retain this
+    /// record solely for assembly provenance. Such records are excluded from
+    /// physical well-posedness and gauge analysis.
+    bool contributes_to_problem_analysis{true};
+
     /// FE fields appearing in the residual
     std::vector<FieldId> active_fields;
 

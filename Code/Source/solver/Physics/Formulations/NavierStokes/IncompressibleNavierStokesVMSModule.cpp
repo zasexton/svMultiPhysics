@@ -6501,9 +6501,22 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
                               FE::forms::FormExpr* tangential_pressure_gradient_probe_form = nullptr,
                               FE::forms::FormExpr* conservative_pressure_form = nullptr,
                               FE::forms::FormExpr* conservative_external_pressure_form = nullptr,
-                              FE::forms::FormExpr* conservative_surface_energy_form = nullptr)
+                              FE::forms::FormExpr* conservative_surface_energy_form = nullptr,
+                              FE::forms::FormExpr* weak_boundary_momentum_work_form = nullptr,
+                              FE::forms::FormExpr* weak_boundary_continuity_work_form = nullptr)
 {
     using namespace FE::forms;
+
+    const auto append_weak_work = [](
+        FormExpr* destination,
+        const FormExpr& contribution) {
+        if (destination == nullptr) {
+            return;
+        }
+        *destination = destination->isValid()
+                           ? (*destination + contribution)
+                           : contribution;
+    };
 
     validateFreeSurfaceBoundary(bc, options, ale_enabled, system, dim);
     warnUnfittedRawCurvatureIfNeeded(bc);
@@ -6820,8 +6833,11 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
         const auto normal_mismatch = normalTrace(u - mesh_velocity, n);
         const auto residual_integrand =
             penalty * normal_mismatch * normalTrace(v, n);
-        momentum_form = momentum_form + integrateOnFreeSurface(
+        const auto residual_form = integrateOnFreeSurface(
             residual_integrand, bc, ale_enabled);
+        momentum_form = momentum_form + residual_form;
+        append_weak_work(
+            weak_boundary_momentum_work_form, residual_form);
         appendUnfittedInterfaceMeasureShapeTangent(
             level_set_shape_tangent_form,
             residual_integrand,
@@ -6868,21 +6884,47 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
                     : bc::NitscheVariant::Unsymmetric,
                 .scale_with_p = bc.kinematic_nitsche_scale_with_p});
 
-        momentum_form = momentum_form + integrateOnFreeSurface(
+        const auto consistency_penalty_form = integrateOnFreeSurface(
             (p - normal_stress_u) * v_normal +
             penalty * normal_mismatch * v_normal,
             bc,
             ale_enabled);
+        momentum_form = momentum_form + consistency_penalty_form;
+        append_weak_work(
+            weak_boundary_momentum_work_form,
+            consistency_penalty_form);
         if (bc.kinematic_nitsche_symmetric) {
-            momentum_form = momentum_form - integrateOnFreeSurface(
-                normal_stress_v * normal_mismatch, bc, ale_enabled);
-            continuity_form = continuity_form + integrateOnFreeSurface(
-                q * normal_mismatch, bc, ale_enabled);
+            const auto adjoint_form = -integrateOnFreeSurface(
+                normal_stress_v * normal_mismatch,
+                bc,
+                ale_enabled);
+            const auto kinematic_continuity_form =
+                integrateOnFreeSurface(
+                    q * normal_mismatch, bc, ale_enabled);
+            momentum_form = momentum_form + adjoint_form;
+            continuity_form =
+                continuity_form + kinematic_continuity_form;
+            append_weak_work(
+                weak_boundary_momentum_work_form, adjoint_form);
+            append_weak_work(
+                weak_boundary_continuity_work_form,
+                kinematic_continuity_form);
         } else {
-            momentum_form = momentum_form + integrateOnFreeSurface(
-                normal_stress_v * normal_mismatch, bc, ale_enabled);
-            continuity_form = continuity_form - integrateOnFreeSurface(
-                q * normal_mismatch, bc, ale_enabled);
+            const auto adjoint_form = integrateOnFreeSurface(
+                normal_stress_v * normal_mismatch,
+                bc,
+                ale_enabled);
+            const auto kinematic_continuity_form =
+                -integrateOnFreeSurface(
+                    q * normal_mismatch, bc, ale_enabled);
+            momentum_form = momentum_form + adjoint_form;
+            continuity_form =
+                continuity_form + kinematic_continuity_form;
+            append_weak_work(
+                weak_boundary_momentum_work_form, adjoint_form);
+            append_weak_work(
+                weak_boundary_continuity_work_form,
+                kinematic_continuity_form);
         }
         return;
     }
@@ -9241,6 +9283,31 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         integrateOnActiveVolume(active_momentum_integrand, active_volume_domain);
     FormExpr continuity_form =
         integrateOnActiveVolume(active_continuity_integrand, active_volume_domain);
+    const auto galerkin_momentum_form =
+        integrateOnActiveVolume(
+            galerkin_momentum_integrand, active_volume_domain);
+    const auto galerkin_continuity_form =
+        integrateOnActiveVolume(
+            galerkin_continuity_integrand, active_volume_domain);
+    const auto convection_work_form =
+        integrateOnActiveVolume(
+            moving_volume + convection, active_volume_domain);
+    const auto pressure_work_form =
+        integrateOnActiveVolume(pressure, active_volume_domain);
+    const auto continuity_work_form = galerkin_continuity_form;
+    const bool has_nonconservative_body_force =
+        options_.has_body_force_spacetime ||
+        body_force_field_id != FE::INVALID_FIELD_ID ||
+        options_.rotating_frame_coriolis_enabled;
+    FormExpr nonconservative_body_force_work_form;
+    if (has_nonconservative_body_force) {
+        const auto conservative_body_force_residual =
+            -rho * inner(constant_body_force, v);
+        nonconservative_body_force_work_form =
+            integrateOnActiveVolume(
+                forcing - conservative_body_force_residual,
+                active_volume_domain);
+    }
     FormExpr vms_pspg_pressure_gradient_form;
     if (vms_pspg_pressure_gradient_integrand.isValid()) {
         vms_pspg_pressure_gradient_form =
@@ -9277,7 +9344,17 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             continuity_form +
             vms_pspg_boundary_tangential_momentum_residual_form;
     }
+    FormExpr vms_pspg_momentum_work_form;
+    FormExpr vms_pspg_continuity_work_form;
+    if (enable_vms) {
+        vms_pspg_momentum_work_form =
+            momentum_form - galerkin_momentum_form;
+        vms_pspg_continuity_work_form =
+            continuity_form - galerkin_continuity_form;
+    }
     FormExpr pressure_ghost_penalty_form;
+    FormExpr weak_boundary_momentum_work_form;
+    FormExpr weak_boundary_continuity_work_form;
     FormExpr free_surface_pressure_reference_probe_form;
     FormExpr free_surface_tangential_pressure_gradient_probe_form;
     FormExpr free_surface_conservative_pressure_form;
@@ -9410,7 +9487,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                 : nullptr,
             conservative_balance_diagnostic_supported
                 ? &free_surface_conservative_surface_energy_form
-                : nullptr);
+                : nullptr,
+            &weak_boundary_momentum_work_form,
+            &weak_boundary_continuity_work_form);
         installFittedFreeSurfaceMeshKinematics(
             system,
             effective_bc,
@@ -9433,9 +9512,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             dim,
             velocity_space_->polynomial_order(),
             pressure_space_->polynomial_order(),
-            pressureRowContributionDiagnosticEnabled()
-                ? &pressure_ghost_penalty_form
-                : nullptr);
+            &pressure_ghost_penalty_form);
     }
 
     bc_manager.install(options_.traction_neumann, [&](const auto& bc) {
@@ -9551,7 +9628,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             : nullptr,
         pending_small_cut_aggregation.has_value()
             ? &generated_nitsche_trace_bindings
-            : nullptr);
+            : nullptr,
+        &weak_boundary_momentum_work_form,
+        &weak_boundary_continuity_work_form);
     std::size_t expected_generated_nitsche_trace_bindings = 0u;
     for (const auto& bc : options_.velocity_dirichlet_weak) {
         const int physical_marker =
@@ -9621,6 +9700,185 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     ale_binding.configureInstallOptions(install);
     (void)FE::systems::installFormulation(
         system, options_.operator_tag, {u_id, p_id}, residual, install);
+
+    if (!effective_free_surfaces.empty()) {
+        const auto work_operator_tag =
+            [&](std::string_view suffix) {
+                return options_.operator_tag + "_" +
+                    std::string(suffix);
+            };
+        const auto install_work_operator =
+            [&](FE::systems::FreeSurfaceResidualWorkChannel channel,
+                std::string_view suffix,
+                const FormExpr& momentum_work_form,
+                const FormExpr& continuity_work_form,
+                const FormExpr& supplemental_continuity_work_form,
+                bool retain_generated_nitsche_trace_requests) {
+                const auto operator_tag = work_operator_tag(suffix);
+                bool installed = false;
+                if (momentum_work_form.isValid()) {
+                    auto momentum_install = install;
+                    momentum_install.contributes_to_problem_analysis = false;
+                    if (!retain_generated_nitsche_trace_requests) {
+                        momentum_install
+                            .generated_boundary_nitsche_trace_requests
+                            .clear();
+                    }
+                    momentum_install.source_component_tag = operator_tag;
+                    (void)FE::systems::installFormulation(
+                        system,
+                        operator_tag,
+                        {u_id},
+                        momentum_work_form,
+                        momentum_install);
+                    installed = true;
+                }
+                const auto install_continuity_component =
+                    [&](const FormExpr& work_form) {
+                        if (!work_form.isValid()) {
+                            return;
+                        }
+                        auto continuity_install = install;
+                        continuity_install.contributes_to_problem_analysis =
+                            false;
+                        continuity_install
+                            .generated_boundary_nitsche_trace_requests
+                            .clear();
+                        continuity_install.source_component_tag =
+                            operator_tag;
+                        if (std::find(
+                                continuity_install.extra_trial_fields.begin(),
+                                continuity_install.extra_trial_fields.end(),
+                                u_id) ==
+                            continuity_install.extra_trial_fields.end()) {
+                            continuity_install.extra_trial_fields.push_back(
+                                u_id);
+                        }
+                        (void)FE::systems::installFormulation(
+                            system,
+                            operator_tag,
+                            {p_id},
+                            work_form,
+                            continuity_install);
+                        installed = true;
+                    };
+                install_continuity_component(continuity_work_form);
+                install_continuity_component(
+                    supplemental_continuity_work_form);
+                FE_THROW_IF(
+                    !installed,
+                    FE::InvalidArgumentException,
+                    "IncompressibleNavierStokesVMSModule: produced free-surface residual-work channel has no form component");
+                system.declareFreeSurfaceResidualWork(
+                    FE::systems::FreeSurfaceResidualWorkDeclaration{
+                        .channel = channel,
+                        .applicability = FE::systems::
+                            FreeSurfaceResidualWorkApplicability::Produced,
+                        .operator_tag = operator_tag,
+                        .owner_component =
+                            "IncompressibleNavierStokesVMSModule." +
+                            std::string(
+                                FE::systems::
+                                    freeSurfaceResidualWorkChannelName(
+                                        channel)),
+                    });
+            };
+        const auto declare_inapplicable =
+            [&](FE::systems::FreeSurfaceResidualWorkChannel channel) {
+                system.declareFreeSurfaceResidualWork(
+                    FE::systems::FreeSurfaceResidualWorkDeclaration{
+                        .channel = channel,
+                        .applicability = FE::systems::
+                            FreeSurfaceResidualWorkApplicability::
+                                NotApplicable,
+                        .operator_tag = {},
+                        .owner_component =
+                            "IncompressibleNavierStokesVMSModule." +
+                            std::string(
+                                FE::systems::
+                                    freeSurfaceResidualWorkChannelName(
+                                        channel)),
+                    });
+            };
+
+        if (options_.enable_convection || include_mcv) {
+            install_work_operator(
+                FE::systems::FreeSurfaceResidualWorkChannel::Convection,
+                FreeSurfaceResidualWorkOperatorSuffixes::convection,
+                convection_work_form,
+                FormExpr{},
+                FormExpr{},
+                false);
+        } else {
+            declare_inapplicable(
+                FE::systems::FreeSurfaceResidualWorkChannel::Convection);
+        }
+        install_work_operator(
+            FE::systems::FreeSurfaceResidualWorkChannel::
+                PressureContinuity,
+            FreeSurfaceResidualWorkOperatorSuffixes::
+                pressure_continuity,
+            pressure_work_form,
+            continuity_work_form,
+            FormExpr{},
+            false);
+        if (has_nonconservative_body_force) {
+            install_work_operator(
+                FE::systems::FreeSurfaceResidualWorkChannel::
+                    NonconservativeBodyForce,
+                FreeSurfaceResidualWorkOperatorSuffixes::
+                    nonconservative_body_force,
+                nonconservative_body_force_work_form,
+                FormExpr{},
+                FormExpr{},
+                false);
+        } else {
+            declare_inapplicable(
+                FE::systems::FreeSurfaceResidualWorkChannel::
+                    NonconservativeBodyForce);
+        }
+        if (weak_boundary_momentum_work_form.isValid() ||
+            weak_boundary_continuity_work_form.isValid()) {
+            install_work_operator(
+                FE::systems::FreeSurfaceResidualWorkChannel::WeakBoundary,
+                FreeSurfaceResidualWorkOperatorSuffixes::weak_boundary,
+                weak_boundary_momentum_work_form,
+                weak_boundary_continuity_work_form,
+                FormExpr{},
+                true);
+        } else {
+            declare_inapplicable(
+                FE::systems::FreeSurfaceResidualWorkChannel::WeakBoundary);
+        }
+        if (enable_vms) {
+            install_work_operator(
+                FE::systems::FreeSurfaceResidualWorkChannel::VmsPspg,
+                FreeSurfaceResidualWorkOperatorSuffixes::vms_pspg,
+                vms_pspg_momentum_work_form,
+                vms_pspg_continuity_work_form,
+                vms_pspg_pressure_gradient_form,
+                false);
+        } else {
+            declare_inapplicable(
+                FE::systems::FreeSurfaceResidualWorkChannel::VmsPspg);
+        }
+        declare_inapplicable(
+            FE::systems::FreeSurfaceResidualWorkChannel::CutStabilization);
+        if (pressure_ghost_penalty_form.isValid()) {
+            install_work_operator(
+                FE::systems::FreeSurfaceResidualWorkChannel::GhostPenalty,
+                FreeSurfaceResidualWorkOperatorSuffixes::ghost_penalty,
+                FormExpr{},
+                pressure_ghost_penalty_form,
+                FormExpr{},
+                false);
+        } else {
+            declare_inapplicable(
+                FE::systems::FreeSurfaceResidualWorkChannel::GhostPenalty);
+        }
+        FE_LOG_INFO(
+            "IncompressibleNavierStokesVMSModule: diagnostic=free_surface_residual_work_operators status=declared channels=convection|pressure_continuity|nonconservative_body_force|weak_boundary|vms_pspg|cut_stabilization|ghost_penalty contract=negative_dt_times_constrained_operator_stage_pairing");
+    }
 
     if (nitsche_energy_diagnostic_requested &&
         !nitsche_energy_forms.symmetric_boundaries.empty()) {

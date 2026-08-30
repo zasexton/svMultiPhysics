@@ -9523,6 +9523,63 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceAddsCutCellStabilizatio
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Jump));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Average));
     EXPECT_FALSE(formulationRecordsContain(system, FormExprType::ParameterRef));
+    const auto residual_work =
+        system.freeSurfaceResidualWorkDeclarations();
+    ASSERT_EQ(residual_work.size(), 7u);
+    const auto find_residual_work =
+        [&](FE::systems::FreeSurfaceResidualWorkChannel channel) {
+            return std::find_if(
+                residual_work.begin(),
+                residual_work.end(),
+                [&](const auto& declaration) {
+                    return declaration.channel == channel;
+                });
+        };
+    const auto weak_boundary_work = find_residual_work(
+        FE::systems::FreeSurfaceResidualWorkChannel::WeakBoundary);
+    const auto cut_stabilization_work = find_residual_work(
+        FE::systems::FreeSurfaceResidualWorkChannel::CutStabilization);
+    const auto ghost_penalty_work = find_residual_work(
+        FE::systems::FreeSurfaceResidualWorkChannel::GhostPenalty);
+    ASSERT_NE(weak_boundary_work, residual_work.end());
+    ASSERT_NE(cut_stabilization_work, residual_work.end());
+    ASSERT_NE(ghost_penalty_work, residual_work.end());
+    EXPECT_EQ(
+        weak_boundary_work->applicability,
+        FE::systems::FreeSurfaceResidualWorkApplicability::NotApplicable);
+    EXPECT_EQ(
+        cut_stabilization_work->applicability,
+        FE::systems::FreeSurfaceResidualWorkApplicability::NotApplicable);
+    EXPECT_EQ(
+        ghost_penalty_work->applicability,
+        FE::systems::FreeSurfaceResidualWorkApplicability::Produced);
+    ASSERT_FALSE(ghost_penalty_work->operator_tag.empty());
+    EXPECT_TRUE(system.hasOperator(ghost_penalty_work->operator_tag));
+    const auto ghost_penalty_formulation = std::find_if(
+        system.formulationRecords().begin(),
+        system.formulationRecords().end(),
+        [&](const auto& record) {
+            if (record.operator_tag !=
+                ghost_penalty_work->operator_tag) {
+                return false;
+            }
+            if (containsInteriorFaceMarker(
+                    record.residual_expr.get(), expected_marker)) {
+                return true;
+            }
+            return std::any_of(
+                record.block_residual_exprs.begin(),
+                record.block_residual_exprs.end(),
+                [&](const auto& block) {
+                    return containsInteriorFaceMarker(
+                        block.second.get(), expected_marker);
+                });
+        });
+    EXPECT_NE(
+        ghost_penalty_formulation,
+        system.formulationRecords().end());
+    EXPECT_FALSE(
+        ghost_penalty_formulation->contributes_to_problem_analysis);
     EXPECT_NE(log_output.find("cut-cell stabilization"), std::string::npos);
     EXPECT_NE(log_output.find("interface_side=Minus"), std::string::npos);
     EXPECT_NE(log_output.find("active_domain_side=Negative"), std::string::npos);
@@ -10233,11 +10290,72 @@ TEST(MovingDomainPhysics, NavierStokesInactiveActiveDomainKeepsFullCellVolumeKer
     ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
     module.registerOn(system);
 
+    const auto residual_work =
+        system.freeSurfaceResidualWorkDeclarations();
+    ASSERT_EQ(residual_work.size(), 7u);
+    for (const auto channel : {
+             FE::systems::FreeSurfaceResidualWorkChannel::Convection,
+             FE::systems::FreeSurfaceResidualWorkChannel::
+                 PressureContinuity,
+             FE::systems::FreeSurfaceResidualWorkChannel::VmsPspg}) {
+        const auto declaration = std::find_if(
+            residual_work.begin(),
+            residual_work.end(),
+            [&](const auto& candidate) {
+                return candidate.channel == channel;
+            });
+        ASSERT_NE(declaration, residual_work.end());
+        EXPECT_EQ(
+            declaration->applicability,
+            FE::systems::FreeSurfaceResidualWorkApplicability::Produced);
+        EXPECT_TRUE(system.hasOperator(declaration->operator_tag));
+        EXPECT_FALSE(
+            system.operatorDefinition(declaration->operator_tag)
+                .cells.empty());
+    }
+    for (const auto channel : {
+             FE::systems::FreeSurfaceResidualWorkChannel::
+                 NonconservativeBodyForce,
+             FE::systems::FreeSurfaceResidualWorkChannel::WeakBoundary,
+             FE::systems::FreeSurfaceResidualWorkChannel::CutStabilization,
+             FE::systems::FreeSurfaceResidualWorkChannel::GhostPenalty}) {
+        const auto declaration = std::find_if(
+            residual_work.begin(),
+            residual_work.end(),
+            [&](const auto& candidate) {
+                return candidate.channel == channel;
+            });
+        ASSERT_NE(declaration, residual_work.end());
+        EXPECT_EQ(
+            declaration->applicability,
+            FE::systems::FreeSurfaceResidualWorkApplicability::
+                NotApplicable);
+        EXPECT_TRUE(declaration->operator_tag.empty());
+    }
+
     const auto& equations = system.operatorDefinition("equations");
     EXPECT_FALSE(equations.cells.empty());
     EXPECT_TRUE(equations.cut_volumes.empty());
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellIntegral));
     EXPECT_FALSE(formulationRecordsContain(system, FormExprType::CutVolumeIntegral));
+}
+
+TEST(MovingDomainPhysics,
+     FreeSurfaceResidualWorkDeclarationRejectsInvalidChannelBeforeMutation)
+{
+    FE::systems::FESystem system(makeMesh());
+    EXPECT_THROW(
+        system.declareFreeSurfaceResidualWork(
+            FE::systems::FreeSurfaceResidualWorkDeclaration{
+                .channel = static_cast<
+                    FE::systems::FreeSurfaceResidualWorkChannel>(255),
+                .applicability = FE::systems::
+                    FreeSurfaceResidualWorkApplicability::NotApplicable,
+                .operator_tag = {},
+                .owner_component = "invalid.channel.fixture",
+            }),
+        FE::InvalidArgumentException);
+    EXPECT_TRUE(system.freeSurfaceResidualWorkDeclarations().empty());
 }
 
 TEST(MovingDomainPhysics, NavierStokesActiveDomainInstallsCutVolumeKernels)
@@ -10872,6 +10990,76 @@ TEST(MovingDomainPhysics,
         FE::Real{0.0});
     EXPECT_TRUE(
         declarations.front().endpoint_functional_power_enabled);
+    const auto residual_work =
+        system.freeSurfaceResidualWorkDeclarations();
+    ASSERT_EQ(residual_work.size(), 7u);
+    const auto find_residual_work =
+        [&](FE::systems::FreeSurfaceResidualWorkChannel channel) {
+            return std::find_if(
+                residual_work.begin(),
+                residual_work.end(),
+                [&](const auto& declaration) {
+                    return declaration.channel == channel;
+                });
+        };
+    const auto convection_work = find_residual_work(
+        FE::systems::FreeSurfaceResidualWorkChannel::Convection);
+    const auto pressure_work = find_residual_work(
+        FE::systems::FreeSurfaceResidualWorkChannel::
+            PressureContinuity);
+    const auto body_force_work = find_residual_work(
+        FE::systems::FreeSurfaceResidualWorkChannel::
+            NonconservativeBodyForce);
+    const auto weak_boundary_work = find_residual_work(
+        FE::systems::FreeSurfaceResidualWorkChannel::WeakBoundary);
+    const auto stabilization_work = find_residual_work(
+        FE::systems::FreeSurfaceResidualWorkChannel::VmsPspg);
+    const auto cut_stabilization_work = find_residual_work(
+        FE::systems::FreeSurfaceResidualWorkChannel::CutStabilization);
+    const auto ghost_penalty_work = find_residual_work(
+        FE::systems::FreeSurfaceResidualWorkChannel::GhostPenalty);
+    ASSERT_NE(convection_work, residual_work.end());
+    ASSERT_NE(pressure_work, residual_work.end());
+    ASSERT_NE(body_force_work, residual_work.end());
+    ASSERT_NE(weak_boundary_work, residual_work.end());
+    ASSERT_NE(stabilization_work, residual_work.end());
+    ASSERT_NE(cut_stabilization_work, residual_work.end());
+    ASSERT_NE(ghost_penalty_work, residual_work.end());
+    EXPECT_EQ(
+        convection_work->applicability,
+        FE::systems::FreeSurfaceResidualWorkApplicability::
+            NotApplicable);
+    EXPECT_TRUE(convection_work->operator_tag.empty());
+    EXPECT_EQ(
+        pressure_work->applicability,
+        FE::systems::FreeSurfaceResidualWorkApplicability::Produced);
+    EXPECT_FALSE(pressure_work->operator_tag.empty());
+    EXPECT_TRUE(system.hasOperator(pressure_work->operator_tag));
+    EXPECT_EQ(
+        body_force_work->applicability,
+        FE::systems::FreeSurfaceResidualWorkApplicability::
+            NotApplicable);
+    EXPECT_TRUE(body_force_work->operator_tag.empty());
+    EXPECT_EQ(
+        weak_boundary_work->applicability,
+        FE::systems::FreeSurfaceResidualWorkApplicability::
+            NotApplicable);
+    EXPECT_TRUE(weak_boundary_work->operator_tag.empty());
+    EXPECT_EQ(
+        stabilization_work->applicability,
+        FE::systems::FreeSurfaceResidualWorkApplicability::
+            NotApplicable);
+    EXPECT_TRUE(stabilization_work->operator_tag.empty());
+    EXPECT_EQ(
+        cut_stabilization_work->applicability,
+        FE::systems::FreeSurfaceResidualWorkApplicability::
+            NotApplicable);
+    EXPECT_TRUE(cut_stabilization_work->operator_tag.empty());
+    EXPECT_EQ(
+        ghost_penalty_work->applicability,
+        FE::systems::FreeSurfaceResidualWorkApplicability::
+            NotApplicable);
+    EXPECT_TRUE(ghost_penalty_work->operator_tag.empty());
     ASSERT_EQ(
         declarations.front().parameters.young_wall_coefficients.size(),
         1u);
@@ -14793,74 +14981,121 @@ TEST(MovingDomainPhysics,
     const auto velocity =
         system.findFieldByName("u");
     ASSERT_NE(velocity, FE::INVALID_FIELD_ID);
+    const auto residual_work =
+        system.freeSurfaceResidualWorkDeclarations();
+    ASSERT_EQ(residual_work.size(), 7u);
+    const auto weak_boundary_work = std::find_if(
+        residual_work.begin(),
+        residual_work.end(),
+        [](const auto& declaration) {
+            return declaration.channel ==
+                FE::systems::FreeSurfaceResidualWorkChannel::WeakBoundary;
+        });
+    ASSERT_NE(weak_boundary_work, residual_work.end());
+    EXPECT_EQ(
+        weak_boundary_work->applicability,
+        FE::systems::FreeSurfaceResidualWorkApplicability::Produced);
+    ASSERT_FALSE(weak_boundary_work->operator_tag.empty());
+    EXPECT_TRUE(system.hasOperator(weak_boundary_work->operator_tag));
     const auto policies =
         system.generatedBoundaryNitscheTracePolicies();
-    ASSERT_EQ(policies.size(), 1u);
-    EXPECT_EQ(policies.front().op, "equations");
+    ASSERT_EQ(policies.size(), 2u);
+    const auto production_policy = std::find_if(
+        policies.begin(), policies.end(), [](const auto& policy) {
+            return policy.op == "equations";
+        });
+    const auto work_policy = std::find_if(
+        policies.begin(),
+        policies.end(),
+        [&](const auto& policy) {
+            return policy.op == weak_boundary_work->operator_tag;
+        });
+    ASSERT_NE(production_policy, policies.end());
+    ASSERT_NE(work_policy, policies.end());
+    EXPECT_EQ(production_policy->op, "equations");
+    EXPECT_EQ(work_policy->velocity_field, velocity);
     EXPECT_EQ(
-        policies.front().velocity_field,
+        work_policy->physical_boundary_marker,
+        left_marker);
+    EXPECT_EQ(
+        work_policy->volume_interface_marker,
+        interface_marker);
+    EXPECT_NE(work_policy->form_binding_digest, 0u);
+    EXPECT_EQ(
+        production_policy->velocity_field,
         velocity);
     EXPECT_EQ(
-        policies.front().physical_boundary_marker,
+        production_policy->physical_boundary_marker,
         left_marker);
     EXPECT_EQ(
-        policies.front().volume_interface_marker,
+        production_policy->volume_interface_marker,
         interface_marker);
     EXPECT_GE(
-        policies.front().generated_active_boundary_marker,
+        production_policy->generated_active_boundary_marker,
         0);
     EXPECT_NE(
-        policies.front().generated_active_boundary_marker,
+        production_policy->generated_active_boundary_marker,
         left_marker);
     EXPECT_EQ(
-        policies.front().dynamic_viscosity,
+        production_policy->dynamic_viscosity,
         FE::Real{0.037});
     EXPECT_EQ(
-        policies.front().penalty_gamma,
+        production_policy->penalty_gamma,
         FE::Real{9.0});
     EXPECT_TRUE(
-        policies.front().scale_with_polynomial_order);
+        production_policy->scale_with_polynomial_order);
     EXPECT_EQ(
-        policies.front().penalty_polynomial_order,
+        production_policy->penalty_polynomial_order,
         1);
     EXPECT_EQ(
-        policies.front().velocity_space_signature.space_type,
+        production_policy->velocity_space_signature.space_type,
         velocity_space->space_type());
     EXPECT_EQ(
-        policies.front().velocity_space_signature.field_type,
+        production_policy->velocity_space_signature.field_type,
         velocity_space->field_type());
     EXPECT_EQ(
-        policies.front().velocity_space_signature.continuity,
+        production_policy->velocity_space_signature.continuity,
         velocity_space->continuity());
     EXPECT_EQ(
-        policies.front().velocity_space_signature.value_dimension,
+        production_policy->velocity_space_signature.value_dimension,
         velocity_space->value_dimension());
     EXPECT_EQ(
-        policies.front()
-            .velocity_space_signature
+        production_policy
+            ->velocity_space_signature
             .topological_dimension,
         velocity_space->topological_dimension());
     EXPECT_EQ(
-        policies.front().velocity_space_signature.element_type,
+        production_policy->velocity_space_signature.element_type,
         velocity_space->element_type());
     EXPECT_EQ(
-        policies.front().effective_penalty_multiplier,
+        production_policy->effective_penalty_multiplier,
         FE::Real{9.0});
     EXPECT_EQ(
-        policies.front().minimum_symmetric_energy_ratio,
+        production_policy->minimum_symmetric_energy_ratio,
         FE::Real{0.25});
     EXPECT_NE(
-        policies.front().form_binding_digest,
+        production_policy->form_binding_digest,
         0u);
     ASSERT_LT(
-        policies.front().source_formulation_record_index,
+        production_policy->source_formulation_record_index,
+        system.formulationRecords().size());
+    ASSERT_LT(
+        work_policy->source_formulation_record_index,
         system.formulationRecords().size());
     EXPECT_EQ(
         system.formulationRecords()[
-            policies.front().source_formulation_record_index]
+            production_policy->source_formulation_record_index]
             .operator_tag,
         "equations");
-    EXPECT_TRUE(policies.front().symmetric);
+    EXPECT_TRUE(
+        system.formulationRecords()[
+            production_policy->source_formulation_record_index]
+            .contributes_to_problem_analysis);
+    EXPECT_FALSE(
+        system.formulationRecords()[
+            work_policy->source_formulation_record_index]
+            .contributes_to_problem_analysis);
+    EXPECT_TRUE(production_policy->symmetric);
     ASSERT_NO_THROW(system.setup());
     EXPECT_TRUE(
         system.generatedBoundaryNitscheTraceCertificates()

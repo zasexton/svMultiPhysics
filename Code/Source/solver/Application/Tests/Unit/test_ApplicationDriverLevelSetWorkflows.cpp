@@ -1341,12 +1341,25 @@ public:
 
     const auto trace_records =
         sim_.fe_system->generatedBoundaryNitscheTraceCertificates();
-    result.trace_certificate_count = trace_records.size();
-    if (trace_records.size() != 1u) {
+    const auto production_trace_count =
+        static_cast<std::size_t>(std::count_if(
+            trace_records.begin(),
+            trace_records.end(),
+            [](const auto& record) {
+              return record.policy.op == "equations";
+            }));
+    result.trace_certificate_count = production_trace_count;
+    if (production_trace_count != 1u) {
       throw std::runtime_error(
-          "native manufactured channel requires one trace certificate");
+          "native manufactured channel requires one production trace certificate");
     }
-    const auto& trace = trace_records.front();
+    const auto production_trace = std::find_if(
+        trace_records.begin(),
+        trace_records.end(),
+        [](const auto& record) {
+          return record.policy.op == "equations";
+        });
+    const auto& trace = *production_trace;
     result.trace_patch_count =
         trace.certificate.certified_patch_count;
     result.trace_localized_support_patch_count =
@@ -12298,6 +12311,95 @@ TEST(ApplicationDriverLevelSetWorkflows,
           aggregateLevelSetMaintenanceAcceptedStepEnergy(
               staged_ledger.acceptedAttempts(),
               nontelescoping_rows),
+      std::invalid_argument);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     ResidualWorkChannelsUseSignedOperatorStagePairingsAndFailClosed)
+{
+  std::vector<application::core::FreeSurfaceResidualWorkPairing>
+      pairings{
+          {.channel = "pressure_continuity",
+           .produced = true,
+           .owner_component = "flow.pressure_continuity",
+           .operator_tag = "pressure_operator",
+           .residual_state_pairing = -3.0},
+          {.channel = "convection",
+           .produced = true,
+           .owner_component = "flow.convection",
+           .operator_tag = "convection_operator",
+           .residual_state_pairing = 2.0},
+          {.channel = "vms_pspg",
+           .produced = true,
+           .owner_component = "flow.vms_pspg",
+           .operator_tag = "stabilization_operator",
+           .residual_state_pairing = 4.0},
+          {.channel = "nonconservative_body_force",
+           .produced = false,
+           .owner_component = "flow.nonconservative_body_force",
+           .operator_tag = {},
+           .residual_state_pairing = 0.0},
+          {.channel = "weak_boundary",
+           .produced = true,
+           .owner_component = "flow.weak_boundary",
+           .operator_tag = "weak_boundary_operator",
+           .residual_state_pairing = 1.0},
+          {.channel = "cut_stabilization",
+           .produced = false,
+           .owner_component = "flow.cut_stabilization",
+           .operator_tag = {},
+           .residual_state_pairing = 0.0},
+          {.channel = "ghost_penalty",
+           .produced = true,
+           .owner_component = "flow.ghost_penalty",
+           .operator_tag = "ghost_penalty_operator",
+           .residual_state_pairing = -2.0},
+      };
+  const auto channels = application::core::
+      evaluateFreeSurfaceResidualWorkChannels(pairings, 0.25);
+  ASSERT_TRUE(channels.convection.has_value());
+  ASSERT_TRUE(channels.pressure_continuity.has_value());
+  ASSERT_TRUE(channels.nonconservative_body_force.has_value());
+  ASSERT_TRUE(channels.weak_boundary.has_value());
+  ASSERT_TRUE(channels.vms_pspg.has_value());
+  ASSERT_TRUE(channels.cut_stabilization.has_value());
+  ASSERT_TRUE(channels.ghost_penalty.has_value());
+  EXPECT_DOUBLE_EQ(*channels.convection, -0.5);
+  EXPECT_DOUBLE_EQ(*channels.pressure_continuity, 0.75);
+  EXPECT_DOUBLE_EQ(*channels.nonconservative_body_force, 0.0);
+  EXPECT_DOUBLE_EQ(*channels.weak_boundary, -0.25);
+  EXPECT_DOUBLE_EQ(*channels.vms_pspg, -1.0);
+  EXPECT_DOUBLE_EQ(*channels.cut_stabilization, 0.0);
+  EXPECT_DOUBLE_EQ(*channels.ghost_penalty, 0.5);
+
+  auto malformed = pairings;
+  malformed[3].residual_state_pairing = 1.0;
+  EXPECT_THROW(
+      application::core::evaluateFreeSurfaceResidualWorkChannels(
+          malformed, 0.25),
+      std::invalid_argument);
+  malformed = pairings;
+  malformed.back().owner_component.clear();
+  EXPECT_THROW(
+      application::core::evaluateFreeSurfaceResidualWorkChannels(
+          malformed, 0.25),
+      std::invalid_argument);
+  malformed = pairings;
+  malformed.back().channel = "convection";
+  EXPECT_THROW(
+      application::core::evaluateFreeSurfaceResidualWorkChannels(
+          malformed, 0.25),
+      std::invalid_argument);
+  malformed = pairings;
+  malformed.front().residual_state_pairing =
+      std::numeric_limits<double>::infinity();
+  EXPECT_THROW(
+      application::core::evaluateFreeSurfaceResidualWorkChannels(
+          malformed, 0.25),
+      std::invalid_argument);
+  EXPECT_THROW(
+      application::core::evaluateFreeSurfaceResidualWorkChannels(
+          pairings, 0.0),
       std::invalid_argument);
 }
 

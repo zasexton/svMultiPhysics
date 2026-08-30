@@ -443,6 +443,55 @@ enum class FreeSurfaceCapillaryBalanceQualification : std::uint8_t {
     Qualified
 };
 
+/**
+ * Residual components whose accepted operator-stage pairing contributes to
+ * the free-surface work account.
+ *
+ * These channels contain only assembled residual work.  Stored-energy,
+ * physical-dissipation, maintenance, aggregation-projection, extension, and
+ * pruning contributions have separate owners and must not be folded into one
+ * of these declarations.
+ */
+enum class FreeSurfaceResidualWorkChannel : std::uint8_t {
+    Convection,
+    PressureContinuity,
+    NonconservativeBodyForce,
+    WeakBoundary,
+    VmsPspg,
+    CutStabilization,
+    GhostPenalty
+};
+
+[[nodiscard]] const char* freeSurfaceResidualWorkChannelName(
+    FreeSurfaceResidualWorkChannel channel) noexcept;
+
+enum class FreeSurfaceResidualWorkApplicability : std::uint8_t {
+    Produced,
+    NotApplicable
+};
+
+/**
+ * One setup-time owner for an accepted-stage residual-work channel.
+ *
+ * A produced channel names an installed operator containing exactly that
+ * residual component.  A channel that is not active in the effective
+ * formulation remains explicit through NotApplicable and carries no operator
+ * tag.  The signed step work is evaluated later as minus dt times the
+ * constrained residual paired with the converged operator-stage state.
+ */
+struct FreeSurfaceResidualWorkDeclaration {
+    FreeSurfaceResidualWorkChannel channel{
+        FreeSurfaceResidualWorkChannel::Convection};
+    FreeSurfaceResidualWorkApplicability applicability{
+        FreeSurfaceResidualWorkApplicability::NotApplicable};
+    OperatorTag operator_tag{};
+    std::string owner_component{};
+
+    friend bool operator==(
+        const FreeSurfaceResidualWorkDeclaration&,
+        const FreeSurfaceResidualWorkDeclaration&) = default;
+};
+
 struct FreeSurfaceDiscreteFunctionalDeclaration {
     int interface_marker{-1};
     FieldId level_set_field{INVALID_FIELD_ID};
@@ -1015,6 +1064,13 @@ public:
         std::uint64_t state_revision);
     void declareFreeSurfaceDiscreteFunctional(
         FreeSurfaceDiscreteFunctionalDeclaration declaration);
+    void declareFreeSurfaceResidualWork(
+        FreeSurfaceResidualWorkDeclaration declaration);
+    [[nodiscard]] std::span<
+        const FreeSurfaceResidualWorkDeclaration>
+    freeSurfaceResidualWorkDeclarations() const noexcept {
+        return free_surface_residual_work_declarations_;
+    }
     [[nodiscard]] std::span<
         const FreeSurfaceDiscreteFunctionalDeclaration>
     freeSurfaceDiscreteFunctionalDeclarations() const noexcept {
@@ -2592,6 +2648,8 @@ private:
     bool mesh_boundary_history_defer_logging_{false};
     std::vector<FreeSurfaceDiscreteFunctionalDeclaration>
         free_surface_discrete_functional_declarations_{};
+    std::vector<FreeSurfaceResidualWorkDeclaration>
+        free_surface_residual_work_declarations_{};
     std::vector<FreeSurfaceDiscreteFunctionalHistoryRecord>
         free_surface_discrete_functional_history_{};
     GeometricNonlinearityPolicy geometric_nonlinearity_policy_{};

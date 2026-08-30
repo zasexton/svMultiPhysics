@@ -173,6 +173,31 @@ struct FreeSurfaceConservativeBalanceDiagnosticOperators {
 };
 
 /**
+ * System-registered residual operators used by the accepted-stage
+ * free-surface work account.
+ *
+ * Each installed operator is an exact additive group from the production
+ * residual.  Pairing its constrained residual with the converged state and
+ * multiplying by minus the step duration gives signed work added to modeled
+ * stored energy.  The system declaration records the effective operator tag,
+ * so application code does not depend on these suffixes.
+ */
+struct FreeSurfaceResidualWorkOperatorSuffixes {
+    inline static constexpr std::string_view convection{
+        "free_surface_work_convection"};
+    inline static constexpr std::string_view pressure_continuity{
+        "free_surface_work_pressure_continuity"};
+    inline static constexpr std::string_view nonconservative_body_force{
+        "free_surface_work_nonconservative_body_force"};
+    inline static constexpr std::string_view weak_boundary{
+        "free_surface_work_weak_boundary"};
+    inline static constexpr std::string_view vms_pspg{
+        "free_surface_work_vms_pspg"};
+    inline static constexpr std::string_view ghost_penalty{
+        "free_surface_work_ghost_penalty"};
+};
+
+/**
  * @brief Velocity-block operators for a symmetric Nitsche energy certificate
  *
  * These operators are installed only for constant viscosity when
