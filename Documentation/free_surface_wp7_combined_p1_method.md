@@ -374,6 +374,16 @@ values and remain nonacceptance telemetry. The result XML SHA-256 is
 This closes the finite node-crossing response slice only; the broader WP-7
 exits below remain open.
 
+The versioned promotion registry
+`free_surface_wp7_cut_stability_qualification_revision_v4.json` binds the
+topology-policy and physical node-crossing rows to implementation commit
+`79f05c22bf57712c16a9132ac9115a0b5efe0dce` and exact source bytes. Its
+runtime contains 16 executable tests and 67 quantitative gates while retaining
+five prospective manufactured-error and simulation rows. It accepts only the
+combined topology-and-node-crossing prerequisite claim and rejects FSR-07,
+WP-7, and Q1 closure requests before execution. This registry must still run
+from immutable source before it supplies promoted matrix evidence.
+
 ## Closure boundary
 
 Passing the finite cross-product can establish only that the named P1 fixtures
