@@ -10,16 +10,28 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import copy
+import importlib.util
 import json
 import sys
 from pathlib import Path
 from typing import Any
 
 SCRIPT_DIRECTORY = Path(__file__).resolve().parent
-if str(SCRIPT_DIRECTORY) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIRECTORY))
-
-import run_free_surface_wp2_geometry_qualification as strict_runner  # noqa: E402
+_SHARED_RUNNER_IMPORT_PATH = (
+    SCRIPT_DIRECTORY / "run_free_surface_wp2_geometry_qualification.py"
+)
+_SHARED_RUNNER_MODULE_NAME = (
+    "_free_surface_wp6_private_geometry_qualification_runner"
+)
+_SHARED_RUNNER_SPEC = importlib.util.spec_from_file_location(
+    _SHARED_RUNNER_MODULE_NAME,
+    _SHARED_RUNNER_IMPORT_PATH,
+)
+if _SHARED_RUNNER_SPEC is None or _SHARED_RUNNER_SPEC.loader is None:
+    raise ImportError(f"cannot load shared runner: {_SHARED_RUNNER_IMPORT_PATH}")
+strict_runner = importlib.util.module_from_spec(_SHARED_RUNNER_SPEC)
+sys.modules[_SHARED_RUNNER_MODULE_NAME] = strict_runner
+_SHARED_RUNNER_SPEC.loader.exec_module(strict_runner)
 
 
 SHARED_QUALIFICATION_BINARY_KEYS = frozenset(

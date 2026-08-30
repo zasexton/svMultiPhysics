@@ -19,6 +19,12 @@ RUNNER_PATH = (
 MATRIX_PATH = RUNNER_PATH.with_name(
     "free_surface_wp6_conservative_phase_qualification_matrix.json"
 )
+WP5_RUNNER_PATH = RUNNER_PATH.with_name(
+    "run_free_surface_wp5_contact_line_qualification.py"
+)
+WP5_MATRIX_PATH = RUNNER_PATH.with_name(
+    "free_surface_wp5_contact_line_qualification_matrix.json"
+)
 APPLICATION_TEST_CMAKE_PATH = (
     ROOT / "Code" / "Source" / "solver" / "Application" / "Tests"
     / "CMakeLists.txt"
@@ -72,6 +78,25 @@ def load_runner():
     sys.modules[specification.name] = module
     specification.loader.exec_module(module)
     return module
+
+
+def test_wp6_shared_runner_state_is_isolated_from_wp5():
+    specification = importlib.util.spec_from_file_location(
+        "free_surface_wp5_runner_loaded_before_wp6",
+        WP5_RUNNER_PATH,
+    )
+    wp5_runner = importlib.util.module_from_spec(specification)
+    assert specification.loader is not None
+    sys.modules[specification.name] = wp5_runner
+    specification.loader.exec_module(wp5_runner)
+    wp5_runner.load_registry(WP5_MATRIX_PATH)
+
+    wp6_runner = load_runner()
+    wp6_runner.load_registry(MATRIX_PATH)
+
+    assert wp5_runner.strict_runner is not wp6_runner.strict_runner
+    assert wp5_runner.strict_runner.load_registry is wp5_runner.load_registry
+    assert wp6_runner.strict_runner.load_registry is wp6_runner.load_registry
 
 
 def test_wp6_matrix_is_frozen_but_explicitly_incomplete():
