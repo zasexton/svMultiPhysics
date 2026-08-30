@@ -71,7 +71,7 @@ EXPECTED_BUILD_TARGETS = {
     "assembly_mpi": "test_fe_levelset_mpi",
     "application_mpi": "test_application_mpi",
 }
-WP5_BINARY_LINK_PROVENANCE_MEMORY_MIB = 4096
+WP5_BINARY_LINK_PROVENANCE_MEMORY_MIB = 1024
 WP5_BINARY_LINK_PROVENANCE_POLICY = {
     "address_space_limit_mib": WP5_BINARY_LINK_PROVENANCE_MEMORY_MIB,
     "aggregate_resident_monitoring": True,

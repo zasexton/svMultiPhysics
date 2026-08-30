@@ -118,7 +118,7 @@ def test_wp5_vtk_link_provenance_has_a_bounded_mapping_envelope(
     runner,
     tmp_path,
 ):
-    assert runner.WP5_BINARY_LINK_PROVENANCE_MEMORY_MIB == 4096
+    assert runner.WP5_BINARY_LINK_PROVENANCE_MEMORY_MIB == 1024
     assert (
         runner.strict_runner.BINARY_LINK_PROVENANCE_MEMORY_MIB
         == runner.WP5_BINARY_LINK_PROVENANCE_MEMORY_MIB
@@ -129,7 +129,7 @@ def test_wp5_vtk_link_provenance_has_a_bounded_mapping_envelope(
     record = json.loads(output.read_text(encoding="utf-8"))
 
     assert record["linked_library_provenance_policy"] == {
-        "address_space_limit_mib": 4096,
+        "address_space_limit_mib": 1024,
         "aggregate_resident_monitoring": True,
         "scope": "linked-library discovery subprocess session",
     }

@@ -132,6 +132,25 @@ def test_wp6_matrix_is_frozen_but_explicitly_incomplete():
     ]
 
 
+def test_wp6_link_provenance_uses_the_qualified_mapping_envelope(tmp_path):
+    runner = load_runner()
+    assert runner.WP6_BINARY_LINK_PROVENANCE_MEMORY_MIB == 1024
+    assert (
+        runner.strict_runner.BINARY_LINK_PROVENANCE_MEMORY_MIB
+        == runner.WP6_BINARY_LINK_PROVENANCE_MEMORY_MIB
+    )
+
+    output = tmp_path / "build.json"
+    runner.write_json(output, {"binaries": {}})
+    record = json.loads(output.read_text(encoding="utf-8"))
+
+    assert record["linked_library_provenance_policy"] == {
+        "address_space_limit_mib": 1024,
+        "aggregate_resident_monitoring": True,
+        "scope": "linked-library discovery subprocess session",
+    }
+
+
 def test_wp6_timestepping_binary_key_override_is_scoped():
     runner = load_runner()
     shared_keys = frozenset(
