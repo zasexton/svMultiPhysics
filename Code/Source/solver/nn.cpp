@@ -814,8 +814,10 @@ void get_xi(const int nsd, consts::ElementType eType, const int eNoN, const Arra
 void gnn(const int eNoN, const int nsd, const int insd, Array<double>& Nxi, Array<double>& x, Array<double>& Nx, 
     double& Jac, Array<double>& ks)
 {
-  Array<double> xXi(nsd,insd);   
-  Array<double> xiX(insd,nsd);
+  std::array<double, 9> xXi_data{};
+  std::array<double, 9> xiX_data{};
+  Array<double> xXi(nsd, insd, xXi_data.data());
+  Array<double> xiX(insd, nsd, xiX_data.data());
 
   Jac = 0.0;
   Nx  = 0.0;
