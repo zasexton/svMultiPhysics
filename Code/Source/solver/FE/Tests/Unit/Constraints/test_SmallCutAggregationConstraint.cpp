@@ -1275,6 +1275,13 @@ TEST(SmallCutAggregationConstraint, SlavesOnlyUnsupportedCutVerticesWithExtrapol
     EXPECT_NE(log_output.find("maximum_observed_root_path=1"),
               std::string::npos);
     EXPECT_NE(log_output.find(
+                  "root_path_search=bounded_candidate_neighborhood"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("root_path_seed_index_entries=4"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("root_path_search_cell_visits=4"),
+              std::string::npos);
+    EXPECT_NE(log_output.find(
                   "maximum_observed_reference_extrapolation=2"),
               std::string::npos);
     EXPECT_NE(log_output.find("maximum_observed_absolute_coefficient=2"),
@@ -1733,6 +1740,68 @@ TEST(SmallCutAggregationConstraint, RootPathGuardRejectsLongCutBand)
                   std::string::npos);
     }
     EXPECT_EQ(system.constraints().numConstraints(), 0u);
+#endif
+}
+
+TEST(SmallCutAggregationConstraint,
+     RootTraversalRetainsOnlyRootsInsideGuardedCandidateNeighborhood)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    auto mesh = buildQuadStrip(7);
+    auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    auto guards = SmallCutAggregationGuardOptions{};
+    guards.maximum_root_path_length = 3u;
+    system.addSystemConstraint(std::make_unique<SmallCutAggregationConstraint>(
+        pressure,
+        geometry::CutIntegrationSide::Negative,
+        kInterfaceMarker,
+        std::vector<int>{},
+        std::vector<GlobalIndex>{},
+        guards));
+    ASSERT_NO_THROW(system.setup());
+    system.setCutIntegrationContext(makeCutContext({
+        {.cell = 0, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+        {.cell = 1, .volume_fraction = Real{0.2}, .full_cell_equivalent = false},
+        {.cell = 2, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
+        {.cell = 3, .volume_fraction = Real{0.4}, .full_cell_equivalent = false},
+        {.cell = 4, .volume_fraction = Real{0.5}, .full_cell_equivalent = false},
+        {.cell = 5, .volume_fraction = Real{0.6}, .full_cell_equivalent = false},
+        {.cell = 6, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+    }));
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
+
+    const auto reports = system.completedSmallCutAggregationRefreshReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports.front().maximum_root_path_length, 3u);
+    EXPECT_EQ(reports.front().maximum_observed_root_path, 3u);
+    EXPECT_EQ(reports.front().root_path_guard_rejections, 0u);
+    EXPECT_NE(log_output.find(
+                  "root_path_search=bounded_candidate_neighborhood"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("maximum_observed_root_path=3"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("root_path_guard_rejections=0"),
+              std::string::npos);
+
+    const auto prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(prolongations.size(), 1u);
+    ASSERT_NE(prolongations.front(), nullptr);
+    ASSERT_FALSE(prolongations.front()->rows.empty());
+    for (const auto& row : prolongations.front()->rows) {
+        EXPECT_LE(row.root_distance, 3u);
+    }
 #endif
 }
 

@@ -4577,6 +4577,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         global_roots_by_candidate;
     std::size_t maximum_observed_root_path = 0u;
     std::size_t root_path_guard_rejections = 0u;
+    std::size_t root_path_search_cell_visits = 0u;
+    std::size_t root_path_seed_index_entries = 0u;
     std::exception_ptr local_global_graph_exception;
     try {
     for (const auto& [dof, support] : global_candidates) {
@@ -4584,14 +4586,67 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         all_candidate_component_dofs.insert(support.component_dofs.begin(),
                                             support.component_dofs.end());
     }
+
+    // Index cut-cell seeds once. The former traversal searched every
+    // classified cell for every candidate and then walked the complete
+    // connected cut band even though roots beyond the configured path guard
+    // can never contribute an admissible row. On a closed three-dimensional
+    // interface that work grows with candidate_count * cut_band_size and can
+    // dominate every geometry refresh. The index and bounded traversal below
+    // retain exactly the roots that can pass the path guard.
+    std::map<GlobalIndex, std::vector<CellKey>>
+        cut_seed_cells_by_dof;
+    for (const auto& [cell, klass] : global_cell_classes) {
+        if (!klass.cut) {
+            continue;
+        }
+        for (const auto dof : cell) {
+            cut_seed_cells_by_dof[dof].push_back(cell);
+            ++root_path_seed_index_entries;
+        }
+    }
+    for (auto& [dof, seeds] : cut_seed_cells_by_dof) {
+        static_cast<void>(dof);
+        std::sort(seeds.begin(), seeds.end());
+        seeds.erase(std::unique(seeds.begin(), seeds.end()), seeds.end());
+    }
+
+    // A feature is root-eligible when it owns at least one full-active cell
+    // that satisfies the selected aggregation policy. For the strong
+    // all-cut experiment, a full cell containing any candidate DOF is not a
+    // valid root for any candidate because it would introduce slave/master
+    // cycles. This policy is cell-global, so it can be classified once.
+    std::set<GlobalIndex> root_eligible_feature_ids;
+    for (const auto& [cell, klass] : global_cell_classes) {
+        if (!klass.full_active) {
+            continue;
+        }
+        bool eligible = true;
+        if (slave_all_cut) {
+            eligible = std::none_of(
+                cell.begin(), cell.end(), [&](GlobalIndex root_dof) {
+                    return all_candidate_component_dofs.count(root_dof) > 0u;
+                });
+        }
+        if (eligible) {
+            const auto feature = active_feature_by_cell.find(cell);
+            if (feature == active_feature_by_cell.end()) {
+                throw std::logic_error(
+                    "SmallCutAggregationConstraint: full-active root cell "
+                    "is missing its canonical active feature");
+            }
+            root_eligible_feature_ids.insert(feature->second);
+        }
+    }
+
     for (auto& [dof, support] : global_candidates) {
         std::deque<std::pair<CellKey, std::size_t>> queue;
         std::set<CellKey> visited;
-        for (const auto& [key, klass] : global_cell_classes) {
-            if (klass.cut &&
-                std::binary_search(key.begin(), key.end(), dof)) {
-                queue.emplace_back(key, 0u);
-                visited.insert(key);
+        const auto seed_it = cut_seed_cells_by_dof.find(dof);
+        if (seed_it != cut_seed_cells_by_dof.end()) {
+            for (const auto& seed : seed_it->second) {
+                queue.emplace_back(seed, 0u);
+                visited.insert(seed);
             }
         }
         if (queue.empty()) {
@@ -4602,10 +4657,24 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 std::to_string(dof));
         }
 
+        bool feature_has_eligible_root = false;
+        for (const auto& seed : seed_it->second) {
+            const auto feature = active_feature_by_cell.find(seed);
+            if (feature == active_feature_by_cell.end()) {
+                throw std::logic_error(
+                    "SmallCutAggregationConstraint: candidate cut seed is "
+                    "missing its canonical active feature");
+            }
+            feature_has_eligible_root =
+                feature_has_eligible_root ||
+                root_eligible_feature_ids.count(feature->second) > 0u;
+        }
+
         auto& roots = global_roots_by_candidate[dof];
         while (!queue.empty()) {
             auto [key, distance] = std::move(queue.front());
             queue.pop_front();
+            ++root_path_search_cell_visits;
             const auto klass_it = global_cell_classes.find(key);
             if (klass_it == global_cell_classes.end()) {
                 continue;
@@ -4624,6 +4693,9 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 continue;
             }
             if (!klass.cut && !(slave_all_cut && klass.full_active)) {
+                continue;
+            }
+            if (distance >= guards_.maximum_root_path_length) {
                 continue;
             }
             const auto neighbors_it = global_neighbors.find(key);
@@ -4649,19 +4721,18 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                             return a.key == b.key;
                         }),
                     roots.end());
-        const bool had_unguarded_root = !roots.empty();
         for (const auto& root : roots) {
             maximum_observed_root_path =
                 std::max(maximum_observed_root_path, root.distance);
         }
-        const auto first_rejected = std::remove_if(
-            roots.begin(), roots.end(), [&](const auto& root) {
-                return root.distance > guards_.maximum_root_path_length;
-            });
-        root_path_guard_rejections += static_cast<std::size_t>(
-            std::distance(first_rejected, roots.end()));
-        roots.erase(first_rejected, roots.end());
-        if (had_unguarded_root && roots.empty()) {
+        if (feature_has_eligible_root && roots.empty()) {
+            ++root_path_guard_rejections;
+            maximum_observed_root_path = std::max(
+                maximum_observed_root_path,
+                guards_.maximum_root_path_length ==
+                        std::numeric_limits<std::size_t>::max()
+                    ? guards_.maximum_root_path_length
+                    : guards_.maximum_root_path_length + 1u);
             throw std::runtime_error(
                 "SmallCutAggregationConstraint: diagnostic="
                 "root_path_guard_rejection candidate_dof=" +
@@ -5275,6 +5346,11 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         << maximum_observed_root_path
         << " root_path_guard_rejections="
         << root_path_guard_rejections
+        << " root_path_search=bounded_candidate_neighborhood"
+        << " root_path_seed_index_entries="
+        << root_path_seed_index_entries
+        << " root_path_search_cell_visits="
+        << root_path_search_cell_visits
         << " maximum_reference_extrapolation_distance="
         << guards_.maximum_reference_extrapolation_distance
         << " maximum_observed_reference_extrapolation="
