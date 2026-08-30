@@ -117,21 +117,37 @@ void TTP::distribute_parameters(const CmMod &cm_mod, const cmType &cm) {
 
 void TTP::update_g(const unsigned int zone_id, const double dt,
                    const Vector<double> &X, Vector<double> &Xg) const {
-  // Local copies of state and gating variables.
+  struct GateKinetics {
+    bool valid = false;
+    unsigned int zone_id = 0;
+    double V = 0.0;
+    double Ca_ss = 0.0;
+    double steady[12] = {};
+    double tau[12] = {};
+  };
+
+  // RK evaluates the voltage-dependent kinetics at both half and full steps.
+  // Retain those shared values per thread while applying each distinct dt.
+  static thread_local GateKinetics kinetics;
+  const auto apply_kinetics = [&]() {
+    for (unsigned int i = 0; i < 12; ++i) {
+      Xg(i) = kinetics.steady[i] -
+              (kinetics.steady[i] - Xg(i)) * exp(-dt / kinetics.tau[i]);
+    }
+  };
+
   const double V = X(0);
   const double Ca_ss = X(4);
-  const double xr1 = Xg(0);
-  const double xr2 = Xg(1);
-  const double xs = Xg(2);
-  const double m = Xg(3);
-  const double h = Xg(4);
-  const double j = Xg(5);
-  const double d = Xg(6);
-  const double f = Xg(7);
-  const double f2 = Xg(8);
-  const double fcass = Xg(9);
-  const double s = Xg(10);
-  const double r = Xg(11);
+
+  if (kinetics.valid && kinetics.zone_id == zone_id && kinetics.V == V &&
+      kinetics.Ca_ss == Ca_ss) {
+    apply_kinetics();
+    return;
+  }
+
+  kinetics.zone_id = zone_id;
+  kinetics.V = V;
+  kinetics.Ca_ss = Ca_ss;
 
   // xr1: activation gate for I_Kr
   {
@@ -140,7 +156,8 @@ void TTP::update_g(const unsigned int zone_id, const double dt,
     const double b = 6.0 / (1.0 + exp((30.0 + V) / 11.50));
     const double tau = a * b;
 
-    Xg(0) = xr1i - (xr1i - xr1) * exp(-dt / tau);
+    kinetics.steady[0] = xr1i;
+    kinetics.tau[0] = tau;
   }
 
   // xr2: inactivation gate for I_Kr
@@ -150,7 +167,8 @@ void TTP::update_g(const unsigned int zone_id, const double dt,
     const double b = 1.120 / (1.0 + exp(-(60.0 - V) / 20.0));
     const double tau = a * b;
 
-    Xg(1) = xr2i - (xr2i - xr2) * exp(-dt / tau);
+    kinetics.steady[1] = xr2i;
+    kinetics.tau[1] = tau;
   }
 
   // xs: activation gate for I_Ks
@@ -160,7 +178,8 @@ void TTP::update_g(const unsigned int zone_id, const double dt,
     const double b = 1.0 / (1.0 + exp((V - 35.0) / 15.0));
     const double tau = a * b + 80.0;
 
-    Xg(2) = xsi - (xsi - xs) * exp(-dt / tau);
+    kinetics.steady[2] = xsi;
+    kinetics.tau[2] = tau;
   }
 
   // m: activation gate for I_Na
@@ -172,7 +191,8 @@ void TTP::update_g(const unsigned int zone_id, const double dt,
                      0.10 / (1.0 + exp((V - 50.0) / 200.0));
     const double tau = a * b;
 
-    Xg(3) = mi - (mi - m) * exp(-dt / tau);
+    kinetics.steady[3] = mi;
+    kinetics.tau[3] = tau;
   }
 
   // h: fast inactivation gate for I_Na
@@ -191,7 +211,8 @@ void TTP::update_g(const unsigned int zone_id, const double dt,
 
     const double tau = 1.0 / (a + b);
 
-    Xg(4) = hi - (hi - h) * exp(-dt / tau);
+    kinetics.steady[4] = hi;
+    kinetics.tau[4] = tau;
   }
 
   // j: slow inactivation gate for I_Na
@@ -210,7 +231,8 @@ void TTP::update_g(const unsigned int zone_id, const double dt,
     }
     const double tau = 1.0 / (a + b);
 
-    Xg(5) = ji - (ji - j) * exp(-dt / tau);
+    kinetics.steady[5] = ji;
+    kinetics.tau[5] = tau;
   }
 
   // d: activation gate for I_CaL
@@ -221,7 +243,8 @@ void TTP::update_g(const unsigned int zone_id, const double dt,
     const double c = 1.0 / (1.0 + exp((50.0 - V) / 20.0));
     const double tau = a * b + c;
 
-    Xg(6) = di - (di - d) * exp(-dt / tau);
+    kinetics.steady[6] = di;
+    kinetics.tau[6] = tau;
   }
 
   // f: slow inactivation gate for I_CaL
@@ -235,7 +258,8 @@ void TTP::update_g(const unsigned int zone_id, const double dt,
     // for spiral wave breakup
     // if (V .GT. 0.0) tau = tau*2.0
 
-    Xg(7) = fi - (fi - f) * exp(-dt / tau);
+    kinetics.steady[7] = fi;
+    kinetics.tau[7] = tau;
   }
 
   // f2: fast inactivation gate for I_CaL
@@ -247,7 +271,8 @@ void TTP::update_g(const unsigned int zone_id, const double dt,
     const double c = 80.0 / (1.0 + exp((30.0 + V) / 10.0));
     const double tau = a + b + c;
 
-    Xg(8) = f2i - (f2i - f2) * exp(-dt / tau);
+    kinetics.steady[8] = f2i;
+    kinetics.tau[8] = tau;
   }
 
   // fCass: inactivation gate for I_CaL into subspace
@@ -257,7 +282,8 @@ void TTP::update_g(const unsigned int zone_id, const double dt,
     const double fcassi = 0.60 * c + 0.40;
     const double tau = 80.0 * c + 2.0;
 
-    Xg(9) = fcassi - (fcassi - fcass) * exp(-dt / tau);
+    kinetics.steady[9] = fcassi;
+    kinetics.tau[9] = tau;
   }
 
   // s: inactivation gate for I_to
@@ -274,7 +300,8 @@ void TTP::update_g(const unsigned int zone_id, const double dt,
       // tau = 1000.0*exp(-((V+67.0)**2.0) /1000.0) + 8.0;
     }
 
-    Xg(10) = si - (si - s) * exp(-dt / tau);
+    kinetics.steady[10] = si;
+    kinetics.tau[10] = tau;
   }
 
   // r: activation gate for I_to
@@ -283,8 +310,12 @@ void TTP::update_g(const unsigned int zone_id, const double dt,
     const double tau = 9.50 * exp(-pow(V + 40.0, 2.0) / 1800.0) + 0.80;
     // tau = 9.50*exp(-((V+40.0)**2.0) /1800.0) + 0.80
 
-    Xg(11) = ri - (ri - r) * exp(-dt / tau);
+    kinetics.steady[11] = ri;
+    kinetics.tau[11] = tau;
   }
+
+  kinetics.valid = true;
+  apply_kinetics();
 }
 
 Vector<double> TTP::getf(const unsigned int zone_id, const Vector<double> &X,
