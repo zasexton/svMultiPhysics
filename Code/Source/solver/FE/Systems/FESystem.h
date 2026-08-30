@@ -492,6 +492,35 @@ struct FreeSurfaceResidualWorkDeclaration {
         const FreeSurfaceResidualWorkDeclaration&) = default;
 };
 
+enum class FreeSurfaceExternalBoundaryEnergyApplicability : std::uint8_t {
+    Unresolved,
+    NotApplicable
+};
+
+/**
+ * Setup-time proof boundary for external work not represented by the
+ * prescribed exterior-pressure or residual-work producers.
+ *
+ * NotApplicable is allowed only when the owning physics module found no
+ * configured route for the channel. Unresolved keeps the complete energy
+ * record fail closed until a distinct accepted-stage work producer exists.
+ * Homogeneous velocity data are recorded separately because prescribed wall
+ * motion can inject energy even on a geometrically closed boundary.
+ */
+struct FreeSurfaceExternalBoundaryEnergyDeclaration {
+    FreeSurfaceExternalBoundaryEnergyApplicability imposed_traction{
+        FreeSurfaceExternalBoundaryEnergyApplicability::Unresolved};
+    FreeSurfaceExternalBoundaryEnergyApplicability open_boundary_flux{
+        FreeSurfaceExternalBoundaryEnergyApplicability::Unresolved};
+    bool homogeneous_velocity_data{false};
+    bool pressure_dirichlet_absent{false};
+    std::string owner_component{};
+
+    friend bool operator==(
+        const FreeSurfaceExternalBoundaryEnergyDeclaration&,
+        const FreeSurfaceExternalBoundaryEnergyDeclaration&) = default;
+};
+
 struct FreeSurfaceDiscreteFunctionalDeclaration {
     int interface_marker{-1};
     FieldId level_set_field{INVALID_FIELD_ID};
@@ -588,6 +617,9 @@ struct AcceptedFreeSurfaceDiscreteFunctionalState {
     // Communicator-consistent topology-only fingerprint for the exact
     // authoritative snapshot rules used by this state.
     std::uint64_t cut_topology_revision{0};
+    // Communicator-wide truth value for any pruning in the authoritative
+    // snapshot. False is the proof required to mark pruning work inapplicable.
+    bool geometry_pruning_occurred{false};
     interfaces::FreeSurfaceDiscreteFunctionalState state{};
     std::optional<
         interfaces::FreeSurfaceDiscreteFunctionalVariationState>
@@ -619,6 +651,7 @@ struct FreeSurfaceDiscreteFunctionalHistoryRecord {
     FreeSurfaceDiscreteFunctionalDeclaration declaration{};
     interfaces::FreeSurfaceGeometryRevision geometry_revision{};
     std::uint64_t cut_topology_revision{0};
+    bool geometry_pruning_occurred{false};
     interfaces::FreeSurfaceDiscreteFunctionalState state{};
     std::optional<
         interfaces::FreeSurfaceDiscreteFunctionalVariationState>
@@ -1070,6 +1103,13 @@ public:
         const FreeSurfaceResidualWorkDeclaration>
     freeSurfaceResidualWorkDeclarations() const noexcept {
         return free_surface_residual_work_declarations_;
+    }
+    void declareFreeSurfaceExternalBoundaryEnergy(
+        FreeSurfaceExternalBoundaryEnergyDeclaration declaration);
+    [[nodiscard]] const std::optional<
+        FreeSurfaceExternalBoundaryEnergyDeclaration>&
+    freeSurfaceExternalBoundaryEnergyDeclaration() const noexcept {
+        return free_surface_external_boundary_energy_declaration_;
     }
     [[nodiscard]] std::span<
         const FreeSurfaceDiscreteFunctionalDeclaration>
@@ -2650,6 +2690,8 @@ private:
         free_surface_discrete_functional_declarations_{};
     std::vector<FreeSurfaceResidualWorkDeclaration>
         free_surface_residual_work_declarations_{};
+    std::optional<FreeSurfaceExternalBoundaryEnergyDeclaration>
+        free_surface_external_boundary_energy_declaration_{};
     std::vector<FreeSurfaceDiscreteFunctionalHistoryRecord>
         free_surface_discrete_functional_history_{};
     GeometricNonlinearityPolicy geometric_nonlinearity_policy_{};

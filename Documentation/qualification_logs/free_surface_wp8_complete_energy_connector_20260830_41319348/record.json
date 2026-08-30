@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "record_id": "free_surface_wp8_complete_energy_connector_20260830_41319348",
+  "recorded_at": "2026-08-30T13:57:11-07:00",
+  "outcome": "PASS_PREREQUISITE_NONCLOSURE",
+  "accepted_claim": "fixed_topology_one_phase_complete_energy_connector_prerequisite",
+  "work_package": "WP-8",
+  "fsr09_closed": false,
+  "wp8_closed": false,
+  "complete_energy_record_connected": true,
+  "physical_complete_energy_record_observed": false,
+  "source_parent_commit": "0fca222c04978727c6b4c1cf76132703e2b8f3ce",
+  "scheduler": {
+    "job_id": 41319348,
+    "ledger": "/scratch/users/zsexton/svmp-job-ledgers/wp4-primary.tsv",
+    "partition": "amarsden",
+    "account": "amarsden",
+    "nodes": 1,
+    "cpus_per_task": 2,
+    "memory": "6G",
+    "mail_user": "zsexton@stanford.edu",
+    "mail_events": [
+      "BEGIN",
+      "END",
+      "FAIL"
+    ],
+    "state": "COMPLETED",
+    "exit_code": "0:0",
+    "elapsed": "00:07:23",
+    "batch_max_rss_kib": 2506560
+  },
+  "campaign": {
+    "script": "/scratch/users/zsexton/wp8-complete-energy-connector-r2/run.sbatch",
+    "script_sha256": "54dd9399df94f78a173aa2a254e8b7570e7bab2868ca1d972f95804ed7f5ba66",
+    "result_root": "/scratch/users/zsexton/wp8-complete-energy-connector-r2/result-41319348",
+    "manifest": "/scratch/users/zsexton/wp8-complete-energy-connector-r2/result-41319348/campaign.sha256",
+    "manifest_sha256": "5bc297c16b45ef4b44e0cee6da65c01107d78f8c0891eddbac3c21cf2d7e876b",
+    "manifest_check_passed": true,
+    "failure_lines_absent": true
+  },
+  "test_binaries": {
+    "test_application_sha256": "937cc1669e08e32caed79100052b1ef2563318d04d5f53c671debeebd5cd60d3",
+    "test_physics_sha256": "34e3553fa210235d8cc259c0e3e0d2ec4a480bd593b5990e71ac3c98f6220899"
+  },
+  "suites": {
+    "application_focused": {
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "disabled": 0,
+      "elapsed_seconds": 13.15,
+      "xml": "application-focused.xml"
+    },
+    "physics_focused": {
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "disabled": 0,
+      "elapsed_seconds": 0.008,
+      "xml": "physics-focused.xml"
+    },
+    "application_workflows": {
+      "tests": 98,
+      "failures": 0,
+      "errors": 0,
+      "disabled": 0,
+      "elapsed_seconds": 256.191,
+      "xml": "application-workflows.xml"
+    },
+    "moving_domain_physics": {
+      "tests": 204,
+      "failures": 0,
+      "errors": 0,
+      "disabled": 0,
+      "elapsed_seconds": 2.846,
+      "xml": "moving-domain-physics.xml"
+    }
+  },
+  "source_sha256": {
+    "Code/Source/solver/Application/Core/ApplicationDriver.cpp": "3883fc17c969bee946343d5344fd0b21c0b93dc68f70642eafdf2cd54c37b7a4",
+    "Code/Source/solver/Application/Core/ApplicationDriver.h": "03c25e8ece29d4df12b1d272b3686f5b3a02bc01cb6313ff3717c341352c9e8e",
+    "Code/Source/solver/Application/Core/FreeSurfaceEnergyLedger.cpp": "f5ddbad219577eac3e5f3cc4235d67d96bf1e15b8daa9edf1f149f64bd66e701",
+    "Code/Source/solver/Application/Core/FreeSurfaceEnergyLedger.h": "b8151fa15be3d422c18361e3be3cb58aaee66c8d190772f83dbb6e2614e83cc2",
+    "Code/Source/solver/Application/Tests/Unit/test_ApplicationDriverLevelSetWorkflows.cpp": "42ebc7d19f879b13788684375224c10d9e1be8a26a2905510c2b64d6aff98b97",
+    "Code/Source/solver/FE/Systems/FESystem.cpp": "361630590d61353a6b724314c9c27ed543af8dc6add9be623ab42e53b9bd37f4",
+    "Code/Source/solver/FE/Systems/FESystem.h": "d0e73e37a5d20eecfa4bb183e8f92e6c44c20eb83c0cb44200e09c73b504e177",
+    "Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.cpp": "97e145931185f67a0d6ea33df1bcc97b9d640408ee9f6017e6393938d640336f",
+    "Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h": "f6c85699111bae49cdce51c0a2f27cbbf9f8b2a86432ae14db6fdcde474b1223",
+    "Code/Source/solver/Physics/Tests/Unit/test_MovingDomainPhysics.cpp": "c4b43d74a2baa47e5242d94483787faa6bde1f1c3e7af54aad99b5de9839ffd0"
+  },
+  "validated_contracts": [
+    "one active-volume owner is aggregated with every declared surface and wall functional",
+    "backward-Euler time loss and kinetic-domain transport map to distinct signed numerical-work channels",
+    "gravitational and surface endpoint powers map to distinct transport-coupling channels",
+    "all seven accepted residual-work channels map to their declared owners",
+    "literal exterior-pressure power and nonconservative body work map to distinct external channels",
+    "closed homogeneous boundaries declare imposed-traction and open-flux work inapplicable",
+    "configured boundary work remains unresolved rather than becoming an invented zero",
+    "physical Transport rows remain eligible while any numerical-maintenance row fails closed",
+    "extension, pruning, rootless aggregation, nonneutral aggregation, topology changes, and rejected-attempt history fail closed",
+    "accepted records publish every component value, revision tuple, applicability decision, owner, total, and balance residual"
+  ],
+  "qualification_envelope": {
+    "temporal_scheme": "BackwardEuler",
+    "temporal_order": 1,
+    "phase_model": "one_phase_liquid_with_prescribed_exterior_pressure",
+    "accepted_attempt": 1,
+    "topology": "fixed_mesh_and_cut_topology",
+    "extension_map": "absent",
+    "geometry_pruning": "absent",
+    "numerical_maintenance": "absent",
+    "aggregation": "absent_or_exactly_constraint_neutral_without_rootless_features",
+    "external_boundary": "closed_with_homogeneous_velocity_data",
+    "physical_simulation_evidence": "not_executed_by_this_record"
+  },
+  "open_requirements": [
+    "observe and independently recompute the production record in physical backward-Euler cases",
+    "freeze and execute complete-energy residual thresholds under spatial, temporal, cut-shift, and partition refinement",
+    "connect rejected attempts and accepted topology-event decisions to the complete ledger",
+    "classify nonzero numerical-maintenance, extension, pruning, and aggregation work",
+    "add imposed-traction and open-boundary work producers",
+    "complete the six required physical simulation exits",
+    "qualify generalized-alpha only after backward-Euler closure",
+    "establish the partitioned split energy argument and outer-contraction exits"
+  ]
+}

@@ -12403,6 +12403,273 @@ TEST(ApplicationDriverLevelSetWorkflows,
       std::invalid_argument);
 }
 
+application::core::FreeSurfaceAcceptedEnergyGroup
+makeCompleteEnergyEndpoint(bool endpoint)
+{
+  const std::uint64_t state_revision = endpoint ? 502u : 501u;
+  application::core::FreeSurfaceAcceptedEnergyGroup group{
+      .accepted_step = endpoint ? 5u : 4u,
+      .accepted_time = endpoint ? 1.25 : 1.0,
+      .dt = 0.25,
+      .pre_maintenance_endpoint_state_revision = state_revision,
+      .state_revision = state_revision,
+      .snapshot_set_revision = endpoint ? 602u : 601u,
+      .mesh_topology_set_revision = 701u,
+      .cut_topology_set_revision = 801u,
+      .extension_map_revision = std::nullopt,
+      .kinetic_energy = endpoint ? 2.5 : 2.0,
+      .gravitational_energy = endpoint ? 3.4 : 3.0,
+      .gravitational_potential_power = 1.2,
+      .liquid_gas_surface_energy = endpoint ? 4.6 : 4.0,
+      .solid_liquid_wall_energy = endpoint ? 0.6 : 0.5,
+      .surface_wall_potential_power = 0.8,
+      .bulk_viscous_dissipation_rate = 0.4,
+      .external_pressure_power = 0.6,
+      .backward_euler_kinetic_work =
+          svmp::FE::interfaces::
+              FreeSurfaceBackwardEulerKineticWorkState{
+                  .snapshot_revision_key = endpoint ? 902u : 901u,
+                  .previous_velocity_revision = 1001u,
+                  .endpoint_velocity_revision =
+                      endpoint ? 1002u : 1001u,
+                  .liquid_side = svmp::FE::geometry::
+                      CutIntegrationSide::Negative,
+                  .density = 1.0,
+                  .owned_quadrature_point_count = 8u,
+                  .owned_liquid_volume = 1.0,
+                  .kinetic_energy_before_on_endpoint_domain =
+                      endpoint ? 2.2 : 2.0,
+                  .kinetic_energy_after = endpoint ? 2.5 : 2.0,
+                  .kinetic_energy_change_on_endpoint_domain =
+                      endpoint ? 0.3 : 0.0,
+                  .step_integrated_inertia_work =
+                      endpoint ? 0.33 : 0.0,
+                  .time_discretization_loss =
+                      endpoint ? 0.03 : 0.0,
+                  .identity_residual = 0.0,
+              },
+      .contact_dissipation_applicable = false,
+      .navier_slip_dissipation_rate = 0.0,
+      .line_friction_dissipation_rate = 0.0,
+      .geometry_pruning_occurred = false,
+  };
+  return group;
+}
+
+std::vector<svmp::FE::systems::FreeSurfaceResidualWorkDeclaration>
+makeCompleteEnergyResidualDeclarations()
+{
+  using Applicability = svmp::FE::systems::
+      FreeSurfaceResidualWorkApplicability;
+  using Channel =
+      svmp::FE::systems::FreeSurfaceResidualWorkChannel;
+  return {
+      {.channel = Channel::Convection,
+       .applicability = Applicability::Produced,
+       .operator_tag = "energy_convection",
+       .owner_component = "energy.convection"},
+      {.channel = Channel::PressureContinuity,
+       .applicability = Applicability::Produced,
+       .operator_tag = "energy_pressure_continuity",
+       .owner_component = "energy.pressure_continuity"},
+      {.channel = Channel::NonconservativeBodyForce,
+       .applicability = Applicability::Produced,
+       .operator_tag = "energy_body_force",
+       .owner_component = "energy.body_force"},
+      {.channel = Channel::WeakBoundary,
+       .applicability = Applicability::Produced,
+       .operator_tag = "energy_weak_boundary",
+       .owner_component = "energy.weak_boundary"},
+      {.channel = Channel::VmsPspg,
+       .applicability = Applicability::Produced,
+       .operator_tag = "energy_vms_pspg",
+       .owner_component = "energy.vms_pspg"},
+      {.channel = Channel::CutStabilization,
+       .applicability = Applicability::Produced,
+       .operator_tag = "energy_cut_stabilization",
+       .owner_component = "energy.cut_stabilization"},
+      {.channel = Channel::GhostPenalty,
+       .applicability = Applicability::Produced,
+       .operator_tag = "energy_ghost_penalty",
+       .owner_component = "energy.ghost_penalty"},
+  };
+}
+
+application::core::FreeSurfaceResidualWorkChannels
+makeCompleteEnergyResidualWork()
+{
+  return application::core::FreeSurfaceResidualWorkChannels{
+      .convection = 0.11,
+      .pressure_continuity = -0.12,
+      .nonconservative_body_force = 0.13,
+      .weak_boundary = -0.14,
+      .vms_pspg = 0.15,
+      .cut_stabilization = -0.16,
+      .ghost_penalty = 0.17,
+  };
+}
+
+std::optional<svmp::FE::systems::
+                  FreeSurfaceExternalBoundaryEnergyDeclaration>
+makeClosedCompleteEnergyBoundary()
+{
+  using Applicability = svmp::FE::systems::
+      FreeSurfaceExternalBoundaryEnergyApplicability;
+  return svmp::FE::systems::
+      FreeSurfaceExternalBoundaryEnergyDeclaration{
+          .imposed_traction = Applicability::NotApplicable,
+          .open_boundary_flux = Applicability::NotApplicable,
+          .homogeneous_velocity_data = true,
+          .pressure_dirichlet_absent = true,
+          .owner_component = "energy.closed_boundary",
+      };
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     CompleteEnergyCandidateMapsEveryAcceptedChannelAndCommits)
+{
+  const auto before = makeCompleteEnergyEndpoint(false);
+  const auto after = makeCompleteEnergyEndpoint(true);
+  const auto residual_declarations =
+      makeCompleteEnergyResidualDeclarations();
+  const auto residual_work = makeCompleteEnergyResidualWork();
+  const auto boundary = makeClosedCompleteEnergyBoundary();
+  const auto result = application::core::
+      buildFixedTopologyOnePhaseEnergyCandidate(
+          71u,
+          1u,
+          true,
+          before,
+          after,
+          after.state_revision,
+          residual_work,
+          residual_declarations,
+          boundary,
+          true,
+          false,
+          true,
+          false);
+
+  EXPECT_TRUE(result.missing_requirements.empty());
+  ASSERT_TRUE(result.candidate.has_value());
+  const auto& candidate = *result.candidate;
+  EXPECT_DOUBLE_EQ(candidate.numerical.time_discretization, -0.03);
+  EXPECT_NEAR(candidate.numerical.kinetic_domain_transport, 0.2, 1e-15);
+  EXPECT_NEAR(
+      candidate.numerical.gravitational_transport_coupling,
+      0.1,
+      1e-15);
+  EXPECT_DOUBLE_EQ(candidate.numerical.convection, 0.11);
+  EXPECT_DOUBLE_EQ(candidate.numerical.pressure_continuity, -0.12);
+  EXPECT_NEAR(
+      candidate.numerical.surface_transport_coupling,
+      0.5,
+      1e-15);
+  EXPECT_DOUBLE_EQ(candidate.numerical.weak_boundary, -0.14);
+  EXPECT_DOUBLE_EQ(candidate.numerical.vms_pspg, 0.15);
+  EXPECT_DOUBLE_EQ(candidate.numerical.cut_stabilization, -0.16);
+  EXPECT_DOUBLE_EQ(candidate.numerical.ghost_penalty, 0.17);
+  EXPECT_DOUBLE_EQ(candidate.external.pressure, 0.15);
+  EXPECT_DOUBLE_EQ(candidate.external.body_force, 0.13);
+  EXPECT_DOUBLE_EQ(candidate.external.imposed_traction, 0.0);
+  EXPECT_DOUBLE_EQ(candidate.external.open_boundary_flux, 0.0);
+  EXPECT_EQ(
+      candidate.sources.external.imposed_traction.applicability,
+      application::core::
+          FreeSurfaceEnergyChannelApplicability::NotApplicable);
+  EXPECT_EQ(
+      candidate.sources.numerical.convection.owner,
+      "energy.convection");
+
+  application::core::FreeSurfaceEnergyLedger ledger;
+  ledger.beginAttempt(candidate.metadata);
+  ledger.stageBalance(
+      candidate.before,
+      candidate.physical_endpoint,
+      candidate.after,
+      candidate.dissipation,
+      candidate.external,
+      candidate.numerical,
+      candidate.sources);
+  ledger.commitAttempt();
+  ASSERT_EQ(ledger.acceptedAttempts().size(), 1u);
+  EXPECT_TRUE(ledger.rejectedAttempts().empty());
+  const auto& accepted = ledger.acceptedAttempts().front();
+  EXPECT_EQ(
+      accepted.status,
+      application::core::FreeSurfaceEnergyAttemptStatus::Accepted);
+  EXPECT_EQ(accepted.metadata.transaction_id, 71u);
+  EXPECT_DOUBLE_EQ(
+      accepted.numerical_work.time_discretization,
+      -0.03);
+  EXPECT_TRUE(std::isfinite(accepted.accepted_balance_residual));
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     CompleteEnergyCandidateFailsClosedForUnresolvedEvents)
+{
+  const auto before = makeCompleteEnergyEndpoint(false);
+  auto after = makeCompleteEnergyEndpoint(true);
+  after.mesh_topology_set_revision = 702u;
+  after.extension_map_revision = 1101u;
+  after.geometry_pruning_occurred = true;
+  auto residual_declarations =
+      makeCompleteEnergyResidualDeclarations();
+  residual_declarations.pop_back();
+  auto residual_work = makeCompleteEnergyResidualWork();
+  residual_work.ghost_penalty.reset();
+  auto boundary = makeClosedCompleteEnergyBoundary();
+  ASSERT_TRUE(boundary.has_value());
+  boundary->imposed_traction = svmp::FE::systems::
+      FreeSurfaceExternalBoundaryEnergyApplicability::Unresolved;
+  boundary->open_boundary_flux = svmp::FE::systems::
+      FreeSurfaceExternalBoundaryEnergyApplicability::Unresolved;
+  boundary->homogeneous_velocity_data = false;
+  boundary->pressure_dirichlet_absent = false;
+
+  const auto result = application::core::
+      buildFixedTopologyOnePhaseEnergyCandidate(
+          72u,
+          2u,
+          false,
+          before,
+          after,
+          after.state_revision,
+          residual_work,
+          residual_declarations,
+          boundary,
+          false,
+          true,
+          false,
+          true);
+  EXPECT_FALSE(result.candidate.has_value());
+  const auto has_requirement = [&](std::string_view requirement) {
+    return std::find(
+               result.missing_requirements.begin(),
+               result.missing_requirements.end(),
+               requirement) != result.missing_requirements.end();
+  };
+  for (const std::string_view requirement : {
+           "rejected_attempt_energy_history",
+           "preceding_complete_energy_history",
+           "fixed_mesh_and_cut_topology",
+           "extension_work_classification",
+           "pruning_work_classification",
+           "zero_numerical_maintenance_substage_coverage",
+           "rootless_aggregation_event_classification",
+           "accepted_aggregation_projection_neutrality",
+           "imposed_traction_work_producer",
+           "open_boundary_energy_flux_producer",
+           "prescribed_boundary_motion_work",
+           "pressure_dirichlet_boundary_flux",
+           "seven_residual_work_declarations",
+           "ghost_penalty_work",
+           "residual_owner_ghost_penalty",
+       }) {
+    EXPECT_TRUE(has_requirement(requirement)) << requirement;
+  }
+}
+
 TEST(ApplicationDriverLevelSetWorkflows,
      MaintenanceWorkLedgerCountsOneBulkOwnerAcrossMultipleInterfaces)
 {

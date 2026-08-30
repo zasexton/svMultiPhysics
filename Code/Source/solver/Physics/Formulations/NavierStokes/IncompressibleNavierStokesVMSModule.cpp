@@ -9702,6 +9702,59 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         system, options_.operator_tag, {u_id, p_id}, residual, install);
 
     if (!effective_free_surfaces.empty()) {
+        const auto velocity_data_are_homogeneous = [](const auto& bcs) {
+            return std::all_of(
+                bcs.begin(), bcs.end(), [](const auto& bc) {
+                    for (std::size_t component = 0u;
+                         component < bc.active_components.size();
+                         ++component) {
+                        if (bc.active_components[component] &&
+                            !FE::forms::bc::isZeroConstantScalarValue(
+                                bc.value[component])) {
+                            return false;
+                        }
+                    }
+                    return true;
+                });
+        };
+        const bool homogeneous_velocity_data =
+            velocity_data_are_homogeneous(
+                options_.velocity_dirichlet) &&
+            velocity_data_are_homogeneous(
+                options_.velocity_dirichlet_weak);
+        const bool imposed_traction_absent =
+            options_.traction_neumann.empty() &&
+            options_.traction_robin.empty();
+        const bool open_boundary_flux_absent =
+            options_.pressure_outflow.empty() &&
+            options_.coupled_outflow_rcr.empty() &&
+            options_.coupled_outflow_rcrcr.empty();
+        system.declareFreeSurfaceExternalBoundaryEnergy(
+            FE::systems::
+                FreeSurfaceExternalBoundaryEnergyDeclaration{
+                    .imposed_traction =
+                        imposed_traction_absent
+                            ? FE::systems::
+                                  FreeSurfaceExternalBoundaryEnergyApplicability::
+                                      NotApplicable
+                            : FE::systems::
+                                  FreeSurfaceExternalBoundaryEnergyApplicability::
+                                      Unresolved,
+                    .open_boundary_flux =
+                        open_boundary_flux_absent
+                            ? FE::systems::
+                                  FreeSurfaceExternalBoundaryEnergyApplicability::
+                                      NotApplicable
+                            : FE::systems::
+                                  FreeSurfaceExternalBoundaryEnergyApplicability::
+                                      Unresolved,
+                    .homogeneous_velocity_data =
+                        homogeneous_velocity_data,
+                    .pressure_dirichlet_absent =
+                        options_.pressure_dirichlet.empty(),
+                    .owner_component =
+                        "IncompressibleNavierStokesVMSModule.boundary_energy_coverage",
+                });
         const auto work_operator_tag =
             [&](std::string_view suffix) {
                 return options_.operator_tag + "_" +

@@ -12240,6 +12240,39 @@ void FESystem::declareFreeSurfaceResidualWork(
         std::move(declaration));
 }
 
+void FESystem::declareFreeSurfaceExternalBoundaryEnergy(
+    FreeSurfaceExternalBoundaryEnergyDeclaration declaration)
+{
+    FE_THROW_IF(
+        isSetup(),
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceExternalBoundaryEnergy: declaration cannot change after setup");
+    FE_THROW_IF(
+        free_surface_external_boundary_energy_declaration_.has_value(),
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceExternalBoundaryEnergy: the system already has an external-boundary energy owner");
+    FE_THROW_IF(
+        declaration.owner_component.find_first_not_of(" \t\r\n") ==
+            std::string::npos,
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceExternalBoundaryEnergy: owner component must be nonempty");
+    const auto valid_applicability = [](auto applicability) {
+        return applicability ==
+                   FreeSurfaceExternalBoundaryEnergyApplicability::
+                       Unresolved ||
+            applicability ==
+                   FreeSurfaceExternalBoundaryEnergyApplicability::
+                       NotApplicable;
+    };
+    FE_THROW_IF(
+        !valid_applicability(declaration.imposed_traction) ||
+            !valid_applicability(declaration.open_boundary_flux),
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceExternalBoundaryEnergy: channel applicability is invalid");
+    free_surface_external_boundary_energy_declaration_ =
+        std::move(declaration);
+}
+
 void FESystem::declareFreeSurfaceDiscreteFunctional(
     FreeSurfaceDiscreteFunctionalDeclaration declaration)
 {
@@ -13977,6 +14010,8 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                             states[i].geometry_revision) ||
                         record.cut_topology_revision !=
                             states[i].cut_topology_revision ||
+                        record.geometry_pruning_occurred !=
+                            states[i].geometry_pruning_occurred ||
                         !sameFreeSurfaceFunctionalState(
                             record.state, states[i].state) ||
                         record.endpoint_functional_power.has_value() !=
@@ -14055,6 +14090,8 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 .geometry_revision = accepted.geometry_revision,
                 .cut_topology_revision =
                     accepted.cut_topology_revision,
+                .geometry_pruning_occurred =
+                    accepted.geometry_pruning_occurred,
                 .state = accepted.state,
                 .endpoint_functional_power =
                     accepted.endpoint_functional_power,
@@ -14130,6 +14167,10 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 << revision.snapshot_revision_key
                 << " cut_topology_revision="
                 << accepted.cut_topology_revision
+                << " geometry_pruning_occurred="
+                << (accepted.geometry_pruning_occurred
+                        ? "true"
+                        : "false")
                 << " liquid_side="
                 << (state.liquid_side ==
                             geometry::CutIntegrationSide::Negative

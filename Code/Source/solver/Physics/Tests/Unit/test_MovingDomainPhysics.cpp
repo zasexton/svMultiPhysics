@@ -9526,6 +9526,24 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceAddsCutCellStabilizatio
     const auto residual_work =
         system.freeSurfaceResidualWorkDeclarations();
     ASSERT_EQ(residual_work.size(), 7u);
+    const auto& boundary_energy =
+        system.freeSurfaceExternalBoundaryEnergyDeclaration();
+    ASSERT_TRUE(boundary_energy.has_value());
+    EXPECT_EQ(
+        boundary_energy->imposed_traction,
+        FE::systems::
+            FreeSurfaceExternalBoundaryEnergyApplicability::
+                NotApplicable);
+    EXPECT_EQ(
+        boundary_energy->open_boundary_flux,
+        FE::systems::
+            FreeSurfaceExternalBoundaryEnergyApplicability::
+                NotApplicable);
+    EXPECT_TRUE(boundary_energy->homogeneous_velocity_data);
+    EXPECT_TRUE(boundary_energy->pressure_dirichlet_absent);
+    EXPECT_EQ(
+        boundary_energy->owner_component,
+        "IncompressibleNavierStokesVMSModule.boundary_energy_coverage");
     const auto find_residual_work =
         [&](FE::systems::FreeSurfaceResidualWorkChannel channel) {
             return std::find_if(
@@ -10356,6 +10374,125 @@ TEST(MovingDomainPhysics,
             }),
         FE::InvalidArgumentException);
     EXPECT_TRUE(system.freeSurfaceResidualWorkDeclarations().empty());
+}
+
+TEST(MovingDomainPhysics,
+     FreeSurfaceExternalBoundaryEnergyRequiresOneValidOwner)
+{
+    FE::systems::FESystem system(makeMesh());
+    using Applicability = FE::systems::
+        FreeSurfaceExternalBoundaryEnergyApplicability;
+    using Declaration = FE::systems::
+        FreeSurfaceExternalBoundaryEnergyDeclaration;
+    EXPECT_THROW(
+        system.declareFreeSurfaceExternalBoundaryEnergy(
+            Declaration{
+                .imposed_traction =
+                    static_cast<Applicability>(255),
+                .open_boundary_flux =
+                    Applicability::NotApplicable,
+                .homogeneous_velocity_data = true,
+                .pressure_dirichlet_absent = true,
+                .owner_component = "invalid.fixture",
+            }),
+        FE::InvalidArgumentException);
+    EXPECT_FALSE(
+        system.freeSurfaceExternalBoundaryEnergyDeclaration()
+            .has_value());
+
+    system.declareFreeSurfaceExternalBoundaryEnergy(
+        Declaration{
+            .imposed_traction = Applicability::NotApplicable,
+            .open_boundary_flux = Applicability::Unresolved,
+            .homogeneous_velocity_data = false,
+            .pressure_dirichlet_absent = true,
+            .owner_component = "boundary.energy.fixture",
+        });
+    ASSERT_TRUE(
+        system.freeSurfaceExternalBoundaryEnergyDeclaration()
+            .has_value());
+    EXPECT_THROW(
+        system.declareFreeSurfaceExternalBoundaryEnergy(
+            Declaration{
+                .imposed_traction = Applicability::NotApplicable,
+                .open_boundary_flux =
+                    Applicability::NotApplicable,
+                .homogeneous_velocity_data = true,
+                .pressure_dirichlet_absent = true,
+                .owner_component = "duplicate.fixture",
+            }),
+        FE::InvalidArgumentException);
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesExternalBoundaryEnergyLeavesConfiguredWorkUnresolved)
+{
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::
+            FreeSurfaceBoundary{
+                .implementation =
+                    ns::FreeSurfaceImplementation::UnfittedLevelSet,
+                .interface_marker = 141,
+                .level_set_field_name = "phi",
+                .active_domain =
+                    ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            });
+    opts.velocity_dirichlet.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::
+            VelocityDirichletBC{
+                .boundary_marker = 142,
+                .value = {1.0, 0.0, 0.0},
+            });
+    opts.pressure_dirichlet.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::
+            PressureDirichletBC{
+                .boundary_marker = 143,
+                .value = 0.0,
+            });
+    opts.traction_neumann.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::
+            TractionNeumannBC{
+                .boundary_marker = 144,
+                .traction = {1.0, 0.0, 0.0},
+            });
+    opts.pressure_outflow.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::
+            PressureOutflowBC{
+                .boundary_marker = 145,
+                .pressure = 0.0,
+            });
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind =
+            FE::systems::FieldSourceKind::PrescribedData,
+    });
+    ns::IncompressibleNavierStokesVMSModule module(
+        u_space, p_space, opts);
+    module.registerOn(system);
+
+    const auto& declaration =
+        system.freeSurfaceExternalBoundaryEnergyDeclaration();
+    ASSERT_TRUE(declaration.has_value());
+    EXPECT_EQ(
+        declaration->imposed_traction,
+        FE::systems::
+            FreeSurfaceExternalBoundaryEnergyApplicability::
+                Unresolved);
+    EXPECT_EQ(
+        declaration->open_boundary_flux,
+        FE::systems::
+            FreeSurfaceExternalBoundaryEnergyApplicability::
+                Unresolved);
+    EXPECT_FALSE(declaration->homogeneous_velocity_data);
+    EXPECT_FALSE(declaration->pressure_dirichlet_absent);
 }
 
 TEST(MovingDomainPhysics, NavierStokesActiveDomainInstallsCutVolumeKernels)
