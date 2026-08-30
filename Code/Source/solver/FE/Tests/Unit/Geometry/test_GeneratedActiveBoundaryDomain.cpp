@@ -2991,8 +2991,31 @@ TEST(FreeSurfaceGeometrySnapshot,
         context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh));
 
     mesh.enableRevisionTracking(12u, 12u, 13u, 0u);
-    EXPECT_THROW(context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh),
-                 std::invalid_argument);
+    try {
+        context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh);
+        ADD_FAILURE() << "stale geometry revision was accepted";
+    } catch (const std::invalid_argument& error) {
+        const std::string diagnostic = error.what();
+        EXPECT_NE(diagnostic.find("snapshot_index=0"), std::string::npos);
+        EXPECT_NE(diagnostic.find("snapshot_revision_key="),
+                  std::string::npos);
+        EXPECT_NE(diagnostic.find("snapshot_geometry_revision=11"),
+                  std::string::npos);
+        EXPECT_NE(diagnostic.find("current_geometry_revision=12"),
+                  std::string::npos);
+        EXPECT_NE(diagnostic.find("snapshot_topology_revision=12"),
+                  std::string::npos);
+        EXPECT_NE(diagnostic.find("current_topology_revision=12"),
+                  std::string::npos);
+        EXPECT_NE(diagnostic.find("snapshot_ownership_revision=13"),
+                  std::string::npos);
+        EXPECT_NE(diagnostic.find("current_ownership_revision=13"),
+                  std::string::npos);
+        EXPECT_NE(diagnostic.find("snapshot_numbering_revision=0"),
+                  std::string::npos);
+        EXPECT_NE(diagnostic.find("current_numbering_revision=0"),
+                  std::string::npos);
+    }
     mesh.enableRevisionTracking(11u, 14u, 13u, 0u);
     EXPECT_THROW(context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh),
                  std::invalid_argument);

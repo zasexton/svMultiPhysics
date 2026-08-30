@@ -1897,7 +1897,11 @@ public:
         if (!mesh.revisionTrackingAvailable()) {
             return;
         }
-        for (const auto& snapshot : free_surface_geometry_snapshots_) {
+        for (std::size_t snapshot_index = 0u;
+             snapshot_index < free_surface_geometry_snapshots_.size();
+             ++snapshot_index) {
+            const auto& snapshot =
+                free_surface_geometry_snapshots_[snapshot_index];
             if (!snapshot) {
                 throw std::invalid_argument(
                     "free-surface geometry snapshot storage is incomplete");
@@ -1908,7 +1912,28 @@ public:
                 revision.ownership_revision != mesh.ownershipRevision() ||
                 revision.numbering_revision != mesh.numberingRevision()) {
                 throw std::invalid_argument(
-                    "free-surface geometry snapshot does not match the current mesh revision");
+                    "free-surface geometry snapshot does not match the current "
+                    "mesh revision: snapshot_index=" +
+                    std::to_string(snapshot_index) +
+                    " snapshot_revision_key=" +
+                    std::to_string(
+                        snapshot->revision().snapshot_revision_key) +
+                    " snapshot_geometry_revision=" +
+                    std::to_string(revision.mesh_geometry_revision) +
+                    " current_geometry_revision=" +
+                    std::to_string(mesh.geometryRevision()) +
+                    " snapshot_topology_revision=" +
+                    std::to_string(revision.mesh_topology_revision) +
+                    " current_topology_revision=" +
+                    std::to_string(mesh.topologyRevision()) +
+                    " snapshot_ownership_revision=" +
+                    std::to_string(revision.ownership_revision) +
+                    " current_ownership_revision=" +
+                    std::to_string(mesh.ownershipRevision()) +
+                    " snapshot_numbering_revision=" +
+                    std::to_string(revision.numbering_revision) +
+                    " current_numbering_revision=" +
+                    std::to_string(mesh.numberingRevision()));
             }
         }
     }
