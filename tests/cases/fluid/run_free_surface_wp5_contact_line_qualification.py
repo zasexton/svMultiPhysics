@@ -71,6 +71,12 @@ EXPECTED_BUILD_TARGETS = {
     "assembly_mpi": "test_fe_levelset_mpi",
     "application_mpi": "test_application_mpi",
 }
+WP5_BINARY_LINK_PROVENANCE_MEMORY_MIB = 4096
+WP5_BINARY_LINK_PROVENANCE_POLICY = {
+    "address_space_limit_mib": WP5_BINARY_LINK_PROVENANCE_MEMORY_MIB,
+    "aggregate_resident_monitoring": True,
+    "scope": "linked-library discovery subprocess session",
+}
 
 EXPECTED_SIGN_CONVENTION = {
     "footprint_direction": "outward_from_wetted_footprint",
@@ -353,6 +359,9 @@ strict_runner.DEFAULT_REGISTRY = DEFAULT_REGISTRY
 strict_runner.EXPECTED_MATRIX_ID = "free_surface_wp5_contact_line_v1"
 strict_runner.EXPECTED_MATRIX_STATUS = "FROZEN_BEFORE_EXECUTION"
 strict_runner.EXPECTED_WORK_PACKAGE = "WP-5"
+strict_runner.BINARY_LINK_PROVENANCE_MEMORY_MIB = (
+    WP5_BINARY_LINK_PROVENANCE_MEMORY_MIB
+)
 strict_runner.__doc__ = __doc__
 
 _shared_load_registry = strict_runner.load_registry
@@ -393,6 +402,11 @@ def load_registry(path: Path) -> dict[str, Any]:
 def write_json(path: Path, value: Any) -> None:
     if strict_runner.sha256_file(SHARED_RUNNER_PATH) != SHARED_RUNNER_SHA256:
         raise RuntimeError("shared qualification runner changed during execution")
+    if isinstance(value, dict) and path.name == "build.json":
+        value = copy.deepcopy(value)
+        value["linked_library_provenance_policy"] = copy.deepcopy(
+            WP5_BINARY_LINK_PROVENANCE_POLICY
+        )
     if isinstance(value, dict) and path.name in {
         "build_preflight.json",
         "manifest.json",

@@ -114,6 +114,27 @@ def test_wp5_matrix_digest_and_canonical_path_are_exact(runner, tmp_path):
         runner.load_registry(alias)
 
 
+def test_wp5_vtk_link_provenance_has_a_bounded_mapping_envelope(
+    runner,
+    tmp_path,
+):
+    assert runner.WP5_BINARY_LINK_PROVENANCE_MEMORY_MIB == 4096
+    assert (
+        runner.strict_runner.BINARY_LINK_PROVENANCE_MEMORY_MIB
+        == runner.WP5_BINARY_LINK_PROVENANCE_MEMORY_MIB
+    )
+
+    output = tmp_path / "build.json"
+    runner.write_json(output, {"binaries": {}})
+    record = json.loads(output.read_text(encoding="utf-8"))
+
+    assert record["linked_library_provenance_policy"] == {
+        "address_space_limit_mib": 4096,
+        "aggregate_resident_monitoring": True,
+        "scope": "linked-library discovery subprocess session",
+    }
+
+
 def test_wp5_matrix_byte_drift_is_rejected(runner, tmp_path, monkeypatch):
     changed = tmp_path / MATRIX_PATH.name
     changed.write_bytes(MATRIX_PATH.read_bytes() + b"\n")
