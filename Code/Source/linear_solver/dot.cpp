@@ -14,6 +14,11 @@
 
 #include "fils_struct.hpp"
 
+extern "C" {
+  double ddot_(const int* n, const double* x, const int* incx,
+      const double* y, const int* incy);
+}
+
 namespace dot {
 
 /// @brief Reproduces 'FUNCTION FSILS_DOTS(nNo, commu, U, V)'. 
@@ -43,7 +48,12 @@ double fsils_dot_v(const int dof, const int nNo, FSILS_commuType& commu, const A
 {
   double result = 0.0; 
 
-  switch (dof) {
+  if (dof > 0 && nNo > 0 && U.nrows() == dof && V.nrows() == dof) {
+    const int size = dof * nNo;
+    const int stride = 1;
+    result = ddot_(&size, U.data(), &stride, V.data(), &stride);
+  } else {
+    switch (dof) {
     case 1:
       for (int i = 0; i < nNo; i++) {
         result = result + U(0,i)*V(0,i);
@@ -76,6 +86,7 @@ double fsils_dot_v(const int dof, const int nNo, FSILS_commuType& commu, const A
         }
         result = result + sum; 
       }
+    }
   }
 
   if (commu.nTasks == 1) {
@@ -144,5 +155,4 @@ double fsils_nc_dot_v(const int dof, const int nNo, const Array<double>& U, cons
 }
 
 };
-
 
