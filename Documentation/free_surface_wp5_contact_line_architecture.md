@@ -287,6 +287,49 @@ the frozen matrix and the 2026-08-17 diagnostic execution. They have received
 static source review only in the current resource-constrained worktree and are
 not execution evidence.
 
+## Public capillary-rise reference pin
+
+The Gründing et al. transient capillary-rise source is now described by
+`tests/cases/fluid/free_surface_wp5_capillary_rise_reference.json`. The record
+pins the article and dataset identifiers, CC-BY-NC-4.0 access terms, physical
+parameters for the resolved-slip `Omega=1` case, the exact 6,102,220-byte
+archive, its SHA-256 and repository MD5 checksums, and four published finest
+rise-height histories. The selected interTrackFoam, BoSSS, FS3D, and interFoam
+members also have independent size, row-count, and SHA-256 contracts. Four
+published convergence-error records are pinned separately.
+
+The accompanying fetcher verifies the archive before opening it, rejects
+unsafe or changed member paths, checks every selected member before writing,
+requires finite nondecreasing two-column histories, preserves repeated
+timestamps, and emits an independently checkable manifest and checksum list.
+The published timestamps are retained exactly, including method-specific
+negative startup times and repeated rows; a qualifying comparison may neither
+shift nor filter them. The fixed common comparison interval is `0` through
+`0.69 s`.
+
+The immutable comparison contract
+`tests/cases/fluid/free_surface_wp5_capillary_rise_comparison_v1.json`
+constructs a 691-point, `0.001 s` intercode envelope before any candidate run.
+Its primary center is the pointwise median of the three methods reported as
+mesh converged for resolved slip: interTrackFoam, BoSSS, and FS3D. The
+nonconverged interFoam curve remains a visible sensitivity history but cannot
+enlarge the acceptance band. Duplicate published timestamps are reduced only
+by their arithmetic mean, after which interpolation is piecewise linear and
+strictly inside published support. The pointwise reference uncertainty is one
+half of the primary range plus the largest finest-level maximum-height
+difference reported by those three methods, `0.05462284216241642 mm`.
+
+The frozen envelope reproduces a `23.13339393939394 mm` median peak at
+`0.208 s`, `19.378985549132945 mm` at `0.69 s`, reference-uncertainty RMS
+`0.10711443117049838 mm`, and maximum reference uncertainty
+`0.16555284216241617 mm`. Candidate comparisons must use the declared factor
+of two on the root-sum-square of this reference uncertainty and independently
+estimated candidate numerical uncertainty. The source identity, access terms,
+units, model applicability, raw-series provenance, and history envelope are
+therefore frozen. Candidate spatial/time/slip refinement, feature uncertainty,
+the complete rise simulation, and every physical gate remain unexecuted, so
+this checkpoint supplies no WP-5 or Q4 closure credit.
+
 ## Open qualification campaigns
 
 All required physical and refinement campaigns remain unclaimed:

@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "comparison_id": "gruending_2020_omega1_intercode_envelope_v1",
+  "status": "FROZEN_BEFORE_CANDIDATE_EXECUTION",
+  "reference_registry": {
+    "path": "tests/cases/fluid/free_surface_wp5_capillary_rise_reference.json",
+    "sha256": "32d163e43a4d8c29c58cb22451a450c5517c2583c358e92c82326d1e8c319531"
+  },
+  "primary_methods": [
+    "interTrackFoam",
+    "BoSSS",
+    "FS3D"
+  ],
+  "sensitivity_method": {
+    "method": "interFoam",
+    "role": "reported_nonconverged_sensitivity_only",
+    "reason": "The publication reports that this method did not reach mesh convergence for the resolved-slip study; its curve remains visible but does not enlarge the primary acceptance band."
+  },
+  "common_grid": {
+    "start_s": 0.0,
+    "end_s": 0.69,
+    "step_s": 0.001,
+    "point_count": 691
+  },
+  "preprocessing": {
+    "time_shift_s": 0.0,
+    "filter": "none",
+    "duplicate_timestamp_rule": "arithmetic_mean_at_identical_published_time",
+    "interpolation": "piecewise_linear_inside_published_support_only"
+  },
+  "reference_uncertainty": {
+    "center": "pointwise_median_of_primary_methods",
+    "intercode_component": "one_half_pointwise_primary_range_mm",
+    "truncation_component": "maximum_primary_finest_compared_maximum_height_error_mm",
+    "combination": "additive",
+    "confidence_multiplier": 2.0,
+    "candidate_combination": "two_times_square_root_of_reference_squared_plus_candidate_numerical_squared",
+    "maximum_primary_truncation_component_mm": 0.05462284216241642
+  },
+  "frozen_statistics": {
+    "reference_center_start_mm": 9.1575,
+    "reference_center_peak_mm": 23.13339393939394,
+    "reference_center_peak_time_s": 0.208,
+    "reference_center_end_mm": 19.378985549132945,
+    "reference_uncertainty_rms_mm": 0.10711443117049838,
+    "reference_uncertainty_maximum_mm": 0.16555284216241617,
+    "primary_range_rms_mm": 0.11532364005435324,
+    "primary_range_maximum_mm": 0.2218599999999995,
+    "sensitivity_range_maximum_mm": 0.968,
+    "sensitivity_range_maximum_time_s": 0.284
+  },
+  "candidate_requirements": {
+    "history_columns": [
+      "time_s",
+      "apex_height_mm",
+      "numerical_uncertainty_mm"
+    ],
+    "coverage": "complete_common_grid_support",
+    "spatial_levels": 3,
+    "temporal_levels": 3,
+    "slip_length_to_mesh_ratios": [
+      2.0,
+      4.0,
+      8.0
+    ],
+    "maximum_contact_motion_cells_per_step": [
+      0.2,
+      0.1,
+      0.05
+    ],
+    "history_gate": "Every point and the RMS history error must satisfy the declared combined-uncertainty rule.",
+    "feature_gates": [
+      "peak_height",
+      "peak_time",
+      "height_at_0.69_s",
+      "corrected_equilibrium_height",
+      "overshoot",
+      "damping"
+    ]
+  },
+  "qualification_disposition": {
+    "reference_envelope_frozen": true,
+    "candidate_executed": false,
+    "wp5_closed": false,
+    "q4_closed": false
+  }
+}

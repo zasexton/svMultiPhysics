@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "reference_id": "gruending_2020_capillary_rise_omega1_resolved_slip",
+  "status": "PINNED_SOURCE_AND_RAW_SERIES",
+  "verified_date": "2026-08-30",
+  "citation": {
+    "authors": "Gründing, D.; Smuda, M.; Antritter, T.; Fricke, M.; Rettenmaier, D.; Kummer, F.; Stephan, P.; Marschall, H.; Bothe, D.",
+    "title": "A comparative study of transient capillary rise using direct numerical simulations",
+    "journal": "Applied Mathematical Modelling",
+    "volume": 86,
+    "pages": "142-165",
+    "year": 2020,
+    "article_doi": "10.1016/j.apm.2020.04.020",
+    "preprint": "https://arxiv.org/abs/1907.05054v1",
+    "dataset_doi": "10.25534/tudatalib-173"
+  },
+  "access": {
+    "repository_item_uuid": "f9419b22-e8ae-4291-8fe4-36d4a0de03a6",
+    "bitstream_uuid": "2f72cef5-8f52-41ba-a904-8f9fb739e5fb",
+    "url": "https://tudatalib.ulb.tu-darmstadt.de/server/api/core/bitstreams/2f72cef5-8f52-41ba-a904-8f9fb739e5fb/content",
+    "license": "CC-BY-NC-4.0",
+    "access_note": "Open-access third-party benchmark data. The fetcher verifies and extracts the data but the archive is not redistributed by this repository."
+  },
+  "archive": {
+    "name": "benchmark_data_capillary_rise.zip",
+    "size_bytes": 6102220,
+    "sha256": "afd841e1e351399a32fe606b5540fbc18ceccd37ad67c45f0de7115252eafbca",
+    "repository_md5": "7ad163e244cf57451349ecfe4ea7b81e"
+  },
+  "model_applicability": {
+    "dimension": 2,
+    "observable": "liquid-gas interface apex rise height",
+    "observable_units": {
+      "time": "s",
+      "height": "mm"
+    },
+    "one_phase_use": "The publication deliberately makes gas density and viscosity one thousand times smaller than the liquid values and includes a one-phase free-surface method. Comparison is restricted to the liquid rise-height history and does not qualify gas dynamics.",
+    "contact_model": "static contact angle with resolved Navier slip",
+    "omega": 1.0,
+    "channel_half_gap_m": 0.005,
+    "domain_height_m": 0.04,
+    "nominal_initial_height_m": 0.01,
+    "liquid_density_kg_per_m3": 83.1,
+    "liquid_dynamic_viscosity_pa_s": 0.01,
+    "gravity_m_per_s2": 4.17,
+    "surface_tension_n_per_m": 0.04,
+    "equilibrium_contact_angle_degrees": 30.0,
+    "navier_slip_length_m": 0.001,
+    "slip_to_half_gap_ratio": 0.2,
+    "gas_to_liquid_density_ratio": 0.001,
+    "gas_to_liquid_viscosity_ratio": 0.001,
+    "eotvos_number": 0.217,
+    "reported_maximum_capillary_number": 0.029
+  },
+  "comparison_contract": {
+    "fixed_time_interval_s": [
+      0.0,
+      0.69
+    ],
+    "time_origin_policy": "Use the published timestamps exactly; do not shift or register curves.",
+    "filter_policy": "Do not smooth or filter the published or computed height histories.",
+    "interpolation_policy": "Interpolate each history only inside its published time support onto a predeclared common comparison grid.",
+    "reference_uncertainty_status": "FROZEN_IN_COMPARISON_V1",
+    "comparison_path": "tests/cases/fluid/free_surface_wp5_capillary_rise_comparison_v1.json",
+    "qualification_boundary": "Source and raw series are pinned here. The intercode envelope is frozen separately in comparison V1. Candidate numerical convergence and every physical acceptance result remain pending."
+  },
+  "selected_series": [
+    {
+      "method": "interTrackFoam",
+      "member": "PaperPlots/methodData/ale/omega_study/Omega1_finest.csv",
+      "output_name": "interTrackFoam_Omega1_finest.csv",
+      "size_bytes": 1834483,
+      "row_count": 125001,
+      "sha256": "306e9805c3dbc9170ead1ff18cb304a71c9f84f1541cb4cfe43411fc1b971a3f"
+    },
+    {
+      "method": "BoSSS",
+      "member": "PaperPlots/methodData/bosss/omega_study/Omega1_finest.csv",
+      "output_name": "BoSSS_Omega1_finest.csv",
+      "size_bytes": 10464,
+      "row_count": 701,
+      "sha256": "798328c8fdba76f72d18cd11e31a6adccf7e64459659fa2d4515d103a153e2df"
+    },
+    {
+      "method": "FS3D",
+      "member": "PaperPlots/methodData/fs3d/omega_study/Omega1_finest.csv",
+      "output_name": "FS3D_Omega1_finest.csv",
+      "size_bytes": 1503,
+      "row_count": 101,
+      "sha256": "acb58337c19dad52d821578d627a3912075a93bbf371df474d6f30fe2a5cd99c"
+    },
+    {
+      "method": "interFoam",
+      "member": "PaperPlots/methodData/interFoam/omega_study/Omega1_finest.csv",
+      "output_name": "interFoam_Omega1_finest.csv",
+      "size_bytes": 724144,
+      "row_count": 47952,
+      "sha256": "86dbeb96e02b680ae775719a8060ee0fc06739c59e39411bea757a652e6fbd82"
+    }
+  ],
+  "selected_convergence_records": [
+    {
+      "method": "interTrackFoam",
+      "member": "PaperPlots/methodData/ale/convergence_study/navierSlip_SlipLength1e-3/capRiseConvErrData.csv",
+      "output_name": "interTrackFoam_Omega1_convergence_errors.csv",
+      "size_bytes": 375,
+      "resolution_count": 5,
+      "sha256": "08f73a146973adbb5a46b2642e69aba3b96540fd29395cc398b46b99777b9369"
+    },
+    {
+      "method": "BoSSS",
+      "member": "PaperPlots/methodData/bosss/convergence_study/navierSlip_SlipLength1e-3/capRiseConvErrData.csv",
+      "output_name": "BoSSS_Omega1_convergence_errors.csv",
+      "size_bytes": 375,
+      "resolution_count": 5,
+      "sha256": "50dc3adcf3a6ddebfe0ff2faefbee24181d359ac9ddb74de4eb694c0dfb2b195"
+    },
+    {
+      "method": "FS3D",
+      "member": "PaperPlots/methodData/fs3d/convergence_study/navierSlip_SlipLength1e-3/capRiseConvErrData.csv",
+      "output_name": "FS3D_Omega1_convergence_errors.csv",
+      "size_bytes": 225,
+      "resolution_count": 3,
+      "sha256": "f59bfe197dd46d990681d4cc748a253c8aabc3fb3fb985c9ff62ed15f4360ff4"
+    },
+    {
+      "method": "interFoam",
+      "member": "PaperPlots/methodData/interFoam/convergence_study/navierSlip_SlipLength1e-3/capRiseConvErrData.csv",
+      "output_name": "interFoam_Omega1_convergence_errors.csv",
+      "size_bytes": 375,
+      "resolution_count": 5,
+      "sha256": "6bc54309021f9be6d22d469bfb42e497b9865a500adc137aba879d901dd9c40e"
+    }
+  ]
+}
