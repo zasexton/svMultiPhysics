@@ -4203,10 +4203,23 @@ TEST(MovingDomainPhysicsMPI,
     EXPECT_TRUE(std::isfinite(raw.Wn));
     EXPECT_TRUE(std::isfinite(raw.Un));
     EXPECT_TRUE(std::isfinite(raw.gap_sq));
+    EXPECT_TRUE(std::isfinite(raw.mesh_velocity_sq));
+    EXPECT_TRUE(std::isfinite(raw.mesh_normal_sq));
+    EXPECT_TRUE(std::isfinite(raw.mesh_tangential_sq));
     EXPECT_NEAR(raw.A, kParentBoundaryMeasure, FE::Real{1.0e-12});
     EXPECT_GT(std::abs(raw.Wn), FE::Real{0.0});
     EXPECT_GT(std::abs(raw.Un), FE::Real{0.0});
     EXPECT_GT(raw.gap_sq, FE::Real{0.0});
+    EXPECT_NEAR(
+        raw.mesh_velocity_sq,
+        raw.A * FE::Real{0.1025},
+        FE::Real{1.0e-12});
+    EXPECT_GE(raw.mesh_normal_sq, FE::Real{0.0});
+    EXPECT_GE(raw.mesh_tangential_sq, FE::Real{0.0});
+    EXPECT_NEAR(
+        raw.mesh_velocity_sq,
+        raw.mesh_normal_sq + raw.mesh_tangential_sq,
+        FE::Real{1.0e-12});
     EXPECT_NEAR(
         raw.gap_sq,
         (raw.Wn - raw.Un) * (raw.Wn - raw.Un) / raw.A,
@@ -4215,6 +4228,9 @@ TEST(MovingDomainPhysicsMPI,
     expect_global_value(raw.Wn);
     expect_global_value(raw.Un);
     expect_global_value(raw.gap_sq);
+    expect_global_value(raw.mesh_velocity_sq);
+    expect_global_value(raw.mesh_normal_sq);
+    expect_global_value(raw.mesh_tangential_sq);
     EXPECT_TRUE(
         system.fittedALENormalOperatorStageMeasurementHistory().empty());
 
@@ -4232,6 +4248,15 @@ TEST(MovingDomainPhysicsMPI,
     EXPECT_DOUBLE_EQ(history.front().raw.Wn, raw.Wn);
     EXPECT_DOUBLE_EQ(history.front().raw.Un, raw.Un);
     EXPECT_DOUBLE_EQ(history.front().raw.gap_sq, raw.gap_sq);
+    EXPECT_DOUBLE_EQ(
+        history.front().raw.mesh_velocity_sq,
+        raw.mesh_velocity_sq);
+    EXPECT_DOUBLE_EQ(
+        history.front().raw.mesh_normal_sq,
+        raw.mesh_normal_sq);
+    EXPECT_DOUBLE_EQ(
+        history.front().raw.mesh_tangential_sq,
+        raw.mesh_tangential_sq);
     EXPECT_EQ(history.front().raw.stage_mesh_revision,
               expected_geometry);
 

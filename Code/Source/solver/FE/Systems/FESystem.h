@@ -359,6 +359,9 @@ struct FittedALENormalMeasurementDeclaration {
     std::string mesh_normal_integral_functional{};
     std::string fluid_normal_integral_functional{};
     std::string normal_gap_squared_integral_functional{};
+    std::string mesh_velocity_squared_integral_functional{};
+    std::string mesh_normal_squared_integral_functional{};
+    std::string mesh_tangential_squared_integral_functional{};
 };
 
 /**
@@ -366,8 +369,10 @@ struct FittedALENormalMeasurementDeclaration {
  *
  * A is boundary measure, Wn is the integral of mesh normal velocity, Un is
  * the integral of fluid normal velocity, and gap_sq is the integral of their
- * squared difference.  These are raw operator-stage moments: they are not
- * endpoint values and must not be reported as work or dissipation.
+ * squared difference.  The remaining squared integrals retain the complete
+ * mesh velocity and its orthogonal normal/tangential projections.  These are
+ * raw operator-stage moments: they are not endpoint values and must not be
+ * reported as work or dissipation.
  */
 struct FittedALENormalOperatorStageRawValue {
     FittedALENormalMeasurementKey key{};
@@ -375,6 +380,9 @@ struct FittedALENormalOperatorStageRawValue {
     Real Wn{0.0};
     Real Un{0.0};
     Real gap_sq{0.0};
+    Real mesh_velocity_sq{0.0};
+    Real mesh_normal_sq{0.0};
+    Real mesh_tangential_sq{0.0};
     /** Complete rank-local live stamp; deliberately excluded from consensus. */
     OperatorStageGeometryMetadata stage_mesh_revision{};
 };

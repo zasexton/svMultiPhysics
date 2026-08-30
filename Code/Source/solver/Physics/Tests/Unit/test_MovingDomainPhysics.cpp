@@ -4939,14 +4939,29 @@ TEST(MovingDomainPhysics,
         EXPECT_FALSE(
             measurements.front()
                 .normal_gap_squared_integral_functional.empty());
-        EXPECT_EQ(
+        EXPECT_FALSE(
             measurements.front()
-                .normal_gap_squared_integral_functional.find("work"),
-            std::string::npos);
-        EXPECT_EQ(
+                .mesh_velocity_squared_integral_functional.empty());
+        EXPECT_FALSE(
             measurements.front()
-                .normal_gap_squared_integral_functional.find("dissipation"),
-            std::string::npos);
+                .mesh_normal_squared_integral_functional.empty());
+        EXPECT_FALSE(
+            measurements.front()
+                .mesh_tangential_squared_integral_functional.empty());
+        for (const auto& functional_name : {
+                 measurements.front()
+                     .normal_gap_squared_integral_functional,
+                 measurements.front()
+                     .mesh_velocity_squared_integral_functional,
+                 measurements.front()
+                     .mesh_normal_squared_integral_functional,
+                 measurements.front()
+                     .mesh_tangential_squared_integral_functional}) {
+            EXPECT_EQ(functional_name.find("work"), std::string::npos);
+            EXPECT_EQ(
+                functional_name.find("dissipation"),
+                std::string::npos);
+        }
         const auto find_normal_descriptor =
             [&](std::string_view source) {
                 return std::find_if(
@@ -16807,6 +16822,12 @@ TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
                                FE::Real(-0.015) + FE::Real(0.003) * x);
         setFieldComponentValue(solution, system, displacement, vertex, 2,
                                FE::Real(0.01) - FE::Real(0.002) * x);
+        setFieldComponentValue(previous_solution, system, displacement,
+                               vertex, 0, FE::Real{0.1});
+        setFieldComponentValue(previous_solution, system, displacement,
+                               vertex, 1, FE::Real{-0.05});
+        setFieldComponentValue(previous_solution, system, displacement,
+                               vertex, 2, FE::Real{0.3});
     }
     updateBoundaryMeshCurrentCoordinates(*mesh, system, displacement, solution);
 
@@ -16857,11 +16878,25 @@ TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
     EXPECT_EQ(pending_measurements.front().raw.key.boundary_marker,
               marker);
     EXPECT_GT(pending_measurements.front().raw.A, FE::Real{0.0});
-    EXPECT_NEAR(pending_measurements.front().raw.Wn,
-                FE::Real{0.0}, FE::Real{1.0e-14});
+    EXPECT_TRUE(std::isfinite(pending_measurements.front().raw.Wn));
     EXPECT_TRUE(std::isfinite(pending_measurements.front().raw.Un));
     EXPECT_GE(pending_measurements.front().raw.gap_sq,
               FE::Real{0.0});
+    EXPECT_NEAR(
+        pending_measurements.front().raw.mesh_velocity_sq,
+        pending_measurements.front().raw.A * FE::Real{0.1025},
+        FE::Real{1.0e-12});
+    EXPECT_GE(
+        pending_measurements.front().raw.mesh_normal_sq,
+        FE::Real{0.0});
+    EXPECT_GE(
+        pending_measurements.front().raw.mesh_tangential_sq,
+        FE::Real{0.0});
+    EXPECT_NEAR(
+        pending_measurements.front().raw.mesh_velocity_sq,
+        pending_measurements.front().raw.mesh_normal_sq +
+            pending_measurements.front().raw.mesh_tangential_sq,
+        FE::Real{1.0e-12});
     EXPECT_EQ(pending_measurements.front().raw.stage_mesh_revision,
               stage_geometry);
     EXPECT_TRUE(

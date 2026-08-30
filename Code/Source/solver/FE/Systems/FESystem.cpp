@@ -1855,6 +1855,12 @@ void appendFittedALENormalMeasurementDeclaration(
         tokens, declaration.fluid_normal_integral_functional);
     appendMeshBoundaryString(
         tokens, declaration.normal_gap_squared_integral_functional);
+    appendMeshBoundaryString(
+        tokens, declaration.mesh_velocity_squared_integral_functional);
+    appendMeshBoundaryString(
+        tokens, declaration.mesh_normal_squared_integral_functional);
+    appendMeshBoundaryString(
+        tokens, declaration.mesh_tangential_squared_integral_functional);
 }
 
 void appendOperatorStageMeasurementMetadata(
@@ -1920,6 +1926,12 @@ void appendFittedALENormalOperatorStageRawValue(
         tokens, generatedBoundaryTraceRealBits(raw.Un));
     appendMeshBoundaryToken(
         tokens, generatedBoundaryTraceRealBits(raw.gap_sq));
+    appendMeshBoundaryToken(
+        tokens, generatedBoundaryTraceRealBits(raw.mesh_velocity_sq));
+    appendMeshBoundaryToken(
+        tokens, generatedBoundaryTraceRealBits(raw.mesh_normal_sq));
+    appendMeshBoundaryToken(
+        tokens, generatedBoundaryTraceRealBits(raw.mesh_tangential_sq));
     // Both geometry stamps are rank-local provenance and must never
     // participate in a cross-rank equality claim.
 }
@@ -10032,6 +10044,12 @@ void FESystem::registerFittedALENormalOperatorStageMeasurement(
             name_base + "_integral_fluid_normal",
         .normal_gap_squared_integral_functional =
             name_base + "_integral_normal_gap_squared",
+        .mesh_velocity_squared_integral_functional =
+            name_base + "_integral_mesh_velocity_squared",
+        .mesh_normal_squared_integral_functional =
+            name_base + "_integral_mesh_normal_squared",
+        .mesh_tangential_squared_integral_functional =
+            name_base + "_integral_mesh_tangential_squared",
     };
 
     const auto existing = std::find_if(
@@ -10051,7 +10069,13 @@ void FESystem::registerFittedALENormalOperatorStageMeasurement(
                 existing->fluid_normal_integral_functional !=
                     measurement.fluid_normal_integral_functional ||
                 existing->normal_gap_squared_integral_functional !=
-                    measurement.normal_gap_squared_integral_functional,
+                    measurement.normal_gap_squared_integral_functional ||
+                existing->mesh_velocity_squared_integral_functional !=
+                    measurement.mesh_velocity_squared_integral_functional ||
+                existing->mesh_normal_squared_integral_functional !=
+                    measurement.mesh_normal_squared_integral_functional ||
+                existing->mesh_tangential_squared_integral_functional !=
+                    measurement.mesh_tangential_squared_integral_functional,
             InvalidArgumentException,
             "FESystem::registerFittedALENormalOperatorStageMeasurement: "
             "measurement key already has a conflicting declaration");
@@ -10067,6 +10091,12 @@ void FESystem::registerFittedALENormalOperatorStageMeasurement(
     const auto current_normal = forms::currentNormal();
     const auto mesh_normal = forms::normalTrace(
         displacement_state.dt(), current_normal);
+    const auto mesh_velocity = displacement_state.dt();
+    const auto tangential_projector =
+        forms::FormExpr::identity(displacement.components) -
+        forms::outer(current_normal, current_normal);
+    const auto mesh_tangential_velocity =
+        tangential_projector * mesh_velocity;
     // Preserve the exact consumer-bound expression rather than rebuilding an
     // equivalent fluid trace from field metadata.
     const auto fluid_normal = constraint.target_expression;
@@ -10090,6 +10120,25 @@ void FESystem::registerFittedALENormalOperatorStageMeasurement(
         .name = measurement.normal_gap_squared_integral_functional,
         .reduction = forms::BoundaryFunctional::Reduction::Sum,
     };
+    forms::BoundaryFunctional mesh_velocity_squared_functional{
+        .integrand = forms::inner(mesh_velocity, mesh_velocity),
+        .boundary_marker = boundary_marker,
+        .name = measurement.mesh_velocity_squared_integral_functional,
+        .reduction = forms::BoundaryFunctional::Reduction::Sum,
+    };
+    forms::BoundaryFunctional mesh_normal_squared_functional{
+        .integrand = mesh_normal * mesh_normal,
+        .boundary_marker = boundary_marker,
+        .name = measurement.mesh_normal_squared_integral_functional,
+        .reduction = forms::BoundaryFunctional::Reduction::Sum,
+    };
+    forms::BoundaryFunctional mesh_tangential_squared_functional{
+        .integrand = forms::inner(
+            mesh_tangential_velocity, mesh_tangential_velocity),
+        .boundary_marker = boundary_marker,
+        .name = measurement.mesh_tangential_squared_integral_functional,
+        .reduction = forms::BoundaryFunctional::Reduction::Sum,
+    };
 
     // The displacement must remain primary: dt(StateField(d)) consumes its
     // exact history alias.  The velocity is a current-only secondary field.
@@ -10097,6 +10146,12 @@ void FESystem::registerFittedALENormalOperatorStageMeasurement(
     service.addBoundaryFunctional(std::move(mesh_functional));
     service.addBoundaryFunctional(std::move(fluid_functional));
     service.addBoundaryFunctional(std::move(gap_functional));
+    service.addBoundaryFunctional(
+        std::move(mesh_velocity_squared_functional));
+    service.addBoundaryFunctional(
+        std::move(mesh_normal_squared_functional));
+    service.addBoundaryFunctional(
+        std::move(mesh_tangential_squared_functional));
     bindSecondaryFields(
         service,
         mesh_displacement_field,
@@ -10305,7 +10360,13 @@ void FESystem::stageFittedALENormalOperatorStageMeasurements(
                     !service->hasFunctional(
                         declaration.fluid_normal_integral_functional) ||
                     !service->hasFunctional(
-                        declaration.normal_gap_squared_integral_functional),
+                        declaration.normal_gap_squared_integral_functional) ||
+                    !service->hasFunctional(
+                        declaration.mesh_velocity_squared_integral_functional) ||
+                    !service->hasFunctional(
+                        declaration.mesh_normal_squared_integral_functional) ||
+                    !service->hasFunctional(
+                        declaration.mesh_tangential_squared_integral_functional),
                 InvalidArgumentException,
                 "FESystem::stageFittedALENormalOperatorStageMeasurements: "
                 "registered reduction service is incomplete");
@@ -10424,6 +10485,9 @@ void FESystem::stageFittedALENormalOperatorStageMeasurements(
         std::string_view mesh_normal_name{};
         std::string_view fluid_normal_name{};
         std::string_view gap_squared_name{};
+        std::string_view mesh_velocity_squared_name{};
+        std::string_view mesh_normal_squared_name{};
+        std::string_view mesh_tangential_squared_name{};
     };
     std::optional<assembly::TimeIntegrationContext> exact_rate_alias;
     std::optional<SystemStateView> measurement_state;
@@ -10475,6 +10539,12 @@ void FESystem::stageFittedALENormalOperatorStageMeasurements(
                         declaration.fluid_normal_integral_functional,
                     .gap_squared_name =
                         declaration.normal_gap_squared_integral_functional,
+                    .mesh_velocity_squared_name =
+                        declaration.mesh_velocity_squared_integral_functional,
+                    .mesh_normal_squared_name =
+                        declaration.mesh_normal_squared_integral_functional,
+                    .mesh_tangential_squared_name =
+                        declaration.mesh_tangential_squared_integral_functional,
                 });
             staged_records.push_back(
                 FittedALENormalOperatorStageHistoryRecord{
@@ -10522,34 +10592,75 @@ void FESystem::stageFittedALENormalOperatorStageMeasurements(
                 route.fluid_normal_name, *measurement_state);
             raw.gap_sq = route.service->evaluateFunctional(
                 route.gap_squared_name, *measurement_state);
+            raw.mesh_velocity_sq = route.service->evaluateFunctional(
+                route.mesh_velocity_squared_name, *measurement_state);
+            raw.mesh_normal_sq = route.service->evaluateFunctional(
+                route.mesh_normal_squared_name, *measurement_state);
+            raw.mesh_tangential_sq = route.service->evaluateFunctional(
+                route.mesh_tangential_squared_name, *measurement_state);
         }
         for (auto& record : staged_records) {
             auto& raw = record.raw;
             FE_THROW_IF(
                 !std::isfinite(raw.A) || raw.A <= Real{0.0} ||
                     !std::isfinite(raw.Wn) || !std::isfinite(raw.Un) ||
-                    !std::isfinite(raw.gap_sq),
+                    !std::isfinite(raw.gap_sq) ||
+                    !std::isfinite(raw.mesh_velocity_sq) ||
+                    !std::isfinite(raw.mesh_normal_sq) ||
+                    !std::isfinite(raw.mesh_tangential_sq),
                 InvalidArgumentException,
                 "FESystem::stageFittedALENormalOperatorStageMeasurements: "
                 "boundary measure and raw moments must be finite and area "
                 "must be positive");
-            const Real gap_roundoff =
+            const Real squared_moment_roundoff =
                 Real{128.0} * std::numeric_limits<Real>::epsilon() *
                 std::max(
                     {Real{1.0},
                      std::abs(raw.A),
                      std::abs(raw.Wn),
                      std::abs(raw.Un),
-                     std::abs(raw.gap_sq)});
+                     std::abs(raw.gap_sq),
+                     std::abs(raw.mesh_velocity_sq),
+                     std::abs(raw.mesh_normal_sq),
+                     std::abs(raw.mesh_tangential_sq)});
             FE_THROW_IF(
-                raw.gap_sq < -gap_roundoff,
+                raw.gap_sq < -squared_moment_roundoff ||
+                    raw.mesh_velocity_sq < -squared_moment_roundoff ||
+                    raw.mesh_normal_sq < -squared_moment_roundoff ||
+                    raw.mesh_tangential_sq < -squared_moment_roundoff,
                 InvalidArgumentException,
                 "FESystem::stageFittedALENormalOperatorStageMeasurements: "
-                "integrated squared normal gap is negative beyond "
+                "an integrated squared velocity moment is negative beyond "
                 "roundoff");
             if (raw.gap_sq < Real{0.0}) {
                 raw.gap_sq = Real{0.0};
             }
+            if (raw.mesh_velocity_sq < Real{0.0}) {
+                raw.mesh_velocity_sq = Real{0.0};
+            }
+            if (raw.mesh_normal_sq < Real{0.0}) {
+                raw.mesh_normal_sq = Real{0.0};
+            }
+            if (raw.mesh_tangential_sq < Real{0.0}) {
+                raw.mesh_tangential_sq = Real{0.0};
+            }
+            const Real projection_identity_residual =
+                raw.mesh_velocity_sq - raw.mesh_normal_sq -
+                raw.mesh_tangential_sq;
+            const Real projection_identity_tolerance =
+                Real{1024.0} * std::numeric_limits<Real>::epsilon() *
+                std::max(
+                    {Real{1.0},
+                     raw.mesh_velocity_sq,
+                     raw.mesh_normal_sq,
+                     raw.mesh_tangential_sq});
+            FE_THROW_IF(
+                std::abs(projection_identity_residual) >
+                    projection_identity_tolerance,
+                InvalidArgumentException,
+                "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+                "mesh normal and tangential projection moments do not "
+                "reconstruct the full velocity norm");
         }
         FE_THROW_IF(
             captureOperatorStageGeometry(meshAccess()) !=
@@ -10704,6 +10815,18 @@ void FESystem::commitPendingFittedALENormalOperatorStageMeasurements(
                                 .normal_gap_squared_integral_functional !=
                             declaration
                                 .normal_gap_squared_integral_functional ||
+                        pending.declaration
+                                .mesh_velocity_squared_integral_functional !=
+                            declaration
+                                .mesh_velocity_squared_integral_functional ||
+                        pending.declaration
+                                .mesh_normal_squared_integral_functional !=
+                            declaration
+                                .mesh_normal_squared_integral_functional ||
+                        pending.declaration
+                                .mesh_tangential_squared_integral_functional !=
+                            declaration
+                                .mesh_tangential_squared_integral_functional ||
                         !meshNormalDeclarationsStructurallyEqual(
                             pending.declaration.normal_constraint,
                             declaration.normal_constraint) ||
@@ -10934,6 +11057,30 @@ void FESystem::commitPendingFittedALENormalOperatorStageMeasurements(
                     << " Wn=" << record.raw.Wn
                     << " Un=" << record.raw.Un
                     << " gap_sq=" << record.raw.gap_sq
+                    << " mesh_velocity_sq="
+                    << record.raw.mesh_velocity_sq
+                    << " mesh_normal_sq="
+                    << record.raw.mesh_normal_sq
+                    << " mesh_tangential_sq="
+                    << record.raw.mesh_tangential_sq
+                    << " mesh_velocity_rms="
+                    << std::sqrt(
+                           record.raw.mesh_velocity_sq /
+                           record.raw.A)
+                    << " mesh_normal_rms="
+                    << std::sqrt(
+                           record.raw.mesh_normal_sq /
+                           record.raw.A)
+                    << " mesh_tangential_rms="
+                    << std::sqrt(
+                           record.raw.mesh_tangential_sq /
+                           record.raw.A)
+                    << " normal_gap_rms="
+                    << std::sqrt(record.raw.gap_sq / record.raw.A)
+                    << " projection_identity_residual="
+                    << record.raw.mesh_velocity_sq -
+                           record.raw.mesh_normal_sq -
+                           record.raw.mesh_tangential_sq
                     << " stage_mesh_geometry_revision="
                     << record.raw.stage_mesh_revision.geometry_revision
                     << " stage_mesh_topology_revision="
