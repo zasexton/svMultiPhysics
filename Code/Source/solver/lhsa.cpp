@@ -74,40 +74,59 @@ void do_assem(ComMod& com_mod, const int d, const Vector<int>& eqN, const Array3
   auto& Val = com_mod.Val;
   const auto& rowPtr = com_mod.rowPtr;
   const auto& colPtr = com_mod.colPtr;
+  const int residual_rows = R.nrows();
+  const int matrix_rows = Val.nrows();
+  const int local_residual_rows = lR.nrows();
+  const int local_matrix_rows = lK.nrows();
+  const int local_matrix_slice_size = local_matrix_rows * lK.ncols();
+  auto* const residual_data = R.data();
+  auto* const matrix_data = Val.data();
+  const auto* const element_nodes = eqN.data();
+  const auto* const row_ptr = rowPtr.data();
+  const auto* const col_ptr = colPtr.data();
+  const auto* const local_residual_data = lR.data();
+  const auto* const local_matrix_data = lK.data();
   //std::cout << "[lhs::do_assem] R.size(): " << R.size() << std::endl;
   //std::cout << "[lhs::do_assem] Val.size(): " << Val.size() << std::endl;
 
   for (int a = 0; a < d; a++) {
-    int rowN = eqN(a);
+    const int rowN = element_nodes[a];
     if (rowN == -1) {
       continue;
     }
 
-    for (int i = 0; i < R.nrows(); i++) {
-      R(i,rowN) = R(i,rowN) + lR(i,a);
+    auto* const residual = residual_data + rowN*residual_rows;
+    const auto* const element_residual = local_residual_data + a*local_residual_rows;
+    for (int i = 0; i < residual_rows; i++) {
+      residual[i] = residual[i] + element_residual[i];
     }
 
+    const int row_left = row_ptr[rowN];
+    const int row_right = row_ptr[rowN+1];
+    const int local_matrix_row = a*local_matrix_rows;
     for (int b = 0; b < d; b++) {
-      int colN = eqN(b);
+      const int colN = element_nodes[b];
       if (colN == -1) {
         continue;
       }
 
-      int left = rowPtr(rowN);
-      int right = rowPtr(rowN+1);
+      int left = row_left;
+      int right = row_right;
       int ptr = (right + left) / 2;
 
-      while (colN != colPtr(ptr)) {
-        if (colN > colPtr(ptr)) { 
+      while (colN != col_ptr[ptr]) {
+        if (colN > col_ptr[ptr]) {
           left  = ptr;
-        } else { 
+        } else {
           right = ptr;
         }
         ptr = (right + left) / 2;
       }
 
-      for (int i = 0; i < Val.nrows(); i++) {
-        Val(i,ptr) = Val(i,ptr) + lK(i,a,b);
+      auto* const matrix = matrix_data + ptr*matrix_rows;
+      const auto* const element_matrix = local_matrix_data + local_matrix_row + b*local_matrix_slice_size;
+      for (int i = 0; i < matrix_rows; i++) {
+        matrix[i] = matrix[i] + element_matrix[i];
       }
     }
   }
@@ -408,5 +427,4 @@ void resiz(const int tnNo, int& mnnzeic, Array<int>& uInd)
 }
 
 };
-
 
