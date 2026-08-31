@@ -226,20 +226,23 @@ not satisfy WP-10.
 
 ## Implementation sequence
 
-1. Add the phase-pair option and immutable effective-configuration artifact.
-2. Add complementary phase fields and phase-local cut-volume operators without
-   internal-interface exterior traction.
-3. Add the weighted symmetric velocity/stress interface form and one combined
-   gauge contract.
-4. Add phase-local aggregation and stabilization identity tests under side
-   reversal and partition changes.
-5. Add accepted-stage interface, mass, momentum, and flux histories.
-6. Connect the common interface velocity to conservative level-set transport
-   and make every correction momentum-explicit.
-7. Add the production parser and fail-closed configuration matrix only after
-   the direct C++ formulation gates pass.
-8. Freeze and run the complete WP-10 qualification matrix from a clean source
-   tree.
+Completed items below establish only the direct formulation boundary. WP-10
+remains open until every remaining item and the qualification progression pass.
+
+- [x] Add the phase-pair option and immutable effective-configuration artifact.
+- [x] Add complementary phase fields and phase-local cut-volume operators
+  without internal-interface exterior traction.
+- [x] Add the weighted symmetric velocity/stress interface form and one
+  combined gauge contract.
+- [ ] Add phase-local aggregation and stabilization identity tests under side
+  reversal and partition changes.
+- [ ] Add accepted-stage interface, mass, momentum, and flux histories.
+- [ ] Connect the common interface velocity to conservative level-set
+  transport and make every correction momentum-explicit.
+- [ ] Add the production parser and fail-closed configuration matrix only after
+  the direct C++ formulation gates pass.
+- [ ] Freeze and run the complete WP-10 qualification matrix from a clean
+  source tree.
 
 ## Qualification progression
 

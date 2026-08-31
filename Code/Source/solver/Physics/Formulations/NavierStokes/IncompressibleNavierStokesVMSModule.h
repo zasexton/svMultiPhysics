@@ -64,6 +64,20 @@ enum class FreeSurfaceImplementation : std::uint8_t {
     UnfittedLevelSet
 };
 
+/**
+ * @brief Ownership role of a free-surface-shaped interface declaration
+ *
+ * ExteriorOnePhaseBoundary retains the liquid/exterior-pressure boundary
+ * contract. InternalMaterialInterfaceVolume is a phase-local implementation
+ * detail for a coupled two-fluid owner: it restricts volume and stabilization
+ * terms to one cut side but installs no interface traction, kinematic law,
+ * pressure anchor, contact law, or boundary-energy declaration.
+ */
+enum class FreeSurfaceBoundaryRole : std::uint8_t {
+    ExteriorOnePhaseBoundary,
+    InternalMaterialInterfaceVolume
+};
+
 enum class FreeSurfacePhysicalModel : std::uint8_t {
     OnePhaseLiquidPrescribedExteriorPressure
 };
@@ -379,6 +393,8 @@ struct IncompressibleNavierStokesVMSOptions {
      * moving-geometry terminals, and integration domains.
      */
     struct FreeSurfaceBoundary {
+        FreeSurfaceBoundaryRole role{
+            FreeSurfaceBoundaryRole::ExteriorOnePhaseBoundary};
         FreeSurfaceImplementation implementation{FreeSurfaceImplementation::FittedALE};
 
         // Fitted ALE free surfaces integrate on ds(boundary_marker).

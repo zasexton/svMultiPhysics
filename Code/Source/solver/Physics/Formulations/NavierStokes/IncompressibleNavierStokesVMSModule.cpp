@@ -1820,6 +1820,19 @@ namespace {
     return bc.implementation == FreeSurfaceImplementation::UnfittedLevelSet;
 }
 
+[[nodiscard]] bool isExteriorOnePhaseBoundary(
+    const FreeSurfaceBoundary& bc) noexcept
+{
+    return bc.role == FreeSurfaceBoundaryRole::ExteriorOnePhaseBoundary;
+}
+
+[[nodiscard]] bool isInternalMaterialInterfaceVolume(
+    const FreeSurfaceBoundary& bc) noexcept
+{
+    return bc.role ==
+        FreeSurfaceBoundaryRole::InternalMaterialInterfaceVolume;
+}
+
 [[nodiscard]] bool usesSurfaceStress(
     const FreeSurfaceBoundary& bc) noexcept
 {
@@ -2337,7 +2350,8 @@ void validateGeneratedFreeSurfaceMarkerUniqueness(
 [[nodiscard]] bool shouldDeclareFreeSurfaceDiscreteFunctional(
     const FreeSurfaceBoundary& boundary)
 {
-    return isUnfittedLevelSet(boundary) &&
+    return isExteriorOnePhaseBoundary(boundary) &&
+           isUnfittedLevelSet(boundary) &&
            boundary.active_domain != FreeSurfaceActiveDomain::None &&
            (usesSurfaceStress(boundary) ||
             usesKinematicAreaGradientTraction(boundary) ||
@@ -3996,6 +4010,14 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                                  const FE::systems::FESystem& system,
                                  int dim)
 {
+    if (bc.role !=
+            FreeSurfaceBoundaryRole::ExteriorOnePhaseBoundary &&
+        bc.role !=
+            FreeSurfaceBoundaryRole::InternalMaterialInterfaceVolume) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: unsupported "
+            "free-surface boundary role");
+    }
     if (bc.implementation != FreeSurfaceImplementation::FittedALE &&
         bc.implementation !=
             FreeSurfaceImplementation::UnfittedLevelSet) {
@@ -4117,6 +4139,60 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                     "prescribed tangential velocity");
             }
         }
+    }
+
+    if (isInternalMaterialInterfaceVolume(bc)) {
+        if (!isUnfittedLevelSet(bc) || ale_enabled ||
+            bc.boundary_marker >= 0 || bc.interface_marker < 0 ||
+            bc.level_set_field_name.empty() ||
+            bc.generated_interface_domain_id.empty() ||
+            bc.active_domain == FreeSurfaceActiveDomain::None ||
+            bc.active_domain_method !=
+                FreeSurfaceActiveDomainMethod::CutVolume ||
+            bc.active_domain_smoothing_width != FE::Real{0.0} ||
+            bc.allow_full_domain_unfitted_free_surface) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: an internal material-interface volume requires fixed Eulerian UnfittedLevelSet CutVolume integration on one explicit active side, no exterior boundary marker, and no smoothing/full-domain fallback");
+        }
+        if (!FE::forms::bc::isZeroConstantScalarValue(
+                bc.external_pressure) ||
+            !FE::forms::bc::isZeroConstantScalarValue(
+                bc.surface_tension) ||
+            !FE::forms::bc::isZeroConstantScalarValue(bc.curvature) ||
+            bc.surface_tension_form !=
+                FreeSurfaceSurfaceTensionForm::Automatic ||
+            !bc.curvature_field_name.empty() ||
+            bc.use_current_geometry_curvature ||
+            bc.use_level_set_curvature) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: an internal material-interface volume cannot own exterior pressure, surface tension, curvature, or an interface-traction representation");
+        }
+        if (bc.kinematic_enforcement !=
+                FreeSurfaceKinematicEnforcement::None ||
+            bc.normal_kinematic_policy !=
+                FreeSurfaceNormalKinematicPolicy::None ||
+            bc.tangential_mesh_policy !=
+                FreeSurfaceTangentialMeshPolicy::Free ||
+            !bc.contact_lines.empty() ||
+            bc.velocity_extension.enabled) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: an internal material-interface volume cannot own interface kinematics, tangential mesh motion, contact laws, or velocity extension");
+        }
+        const auto phi_id = resolveLevelSetFieldId(bc, system);
+        const auto& phi_record = system.fieldRecord(phi_id);
+        if (phi_record.components != 1 || !phi_record.space ||
+            phi_record.space->value_dimension() != 1) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: an internal material-interface volume requires a scalar level-set field");
+        }
+        const auto& cut = bc.cut_cell_stabilization;
+        if (cut.enabled && cut.cut_metadata_scale_cap.has_value() &&
+            (!std::isfinite(*cut.cut_metadata_scale_cap) ||
+             *cut.cut_metadata_scale_cap < FE::Real{1.0})) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: cut-cell metadata scale cap must be finite and at least 1");
+        }
+        return;
     }
 
     if (isUnfittedLevelSet(bc)) {
@@ -7314,6 +7390,18 @@ void installFittedFreeSurfaceMeshKinematics(
                : "UnfittedLevelSet";
 }
 
+[[nodiscard]] const char* freeSurfaceBoundaryRoleName(
+    FreeSurfaceBoundaryRole role) noexcept
+{
+    switch (role) {
+    case FreeSurfaceBoundaryRole::ExteriorOnePhaseBoundary:
+        return "ExteriorOnePhaseBoundary";
+    case FreeSurfaceBoundaryRole::InternalMaterialInterfaceVolume:
+        return "InternalMaterialInterfaceVolume";
+    }
+    return "Unknown";
+}
+
 [[nodiscard]] const char* freeSurfacePhysicalModelName(
     FreeSurfacePhysicalModel model) noexcept
 {
@@ -7454,12 +7542,14 @@ void installFittedFreeSurfaceMeshKinematics(
     const FreeSurfaceBoundary& lhs,
     const FreeSurfaceBoundary& rhs)
 {
-    return std::tie(lhs.implementation,
+    return std::tie(lhs.role,
+                    lhs.implementation,
                     lhs.boundary_marker,
                     lhs.interface_marker,
                     lhs.level_set_field_name,
                     lhs.generated_interface_domain_id) <
-           std::tie(rhs.implementation,
+           std::tie(rhs.role,
+                    rhs.implementation,
                     rhs.boundary_marker,
                     rhs.interface_marker,
                     rhs.level_set_field_name,
@@ -7567,10 +7657,18 @@ tangentialPolicyProvenance(
 {
     std::sort(free_surfaces.begin(), free_surfaces.end(),
               freeSurfaceConfigurationLess);
+    const bool has_internal_material_interface_volume = std::any_of(
+        free_surfaces.begin(),
+        free_surfaces.end(),
+        isInternalMaterialInterfaceVolume);
+    const bool has_exterior_one_phase_boundary = std::any_of(
+        free_surfaces.begin(),
+        free_surfaces.end(),
+        isExteriorOnePhaseBoundary);
 
     std::ostringstream out;
     out.imbue(std::locale::classic());
-    out << "{\"artifact_schema_version\":3"
+    out << "{\"artifact_schema_version\":4"
         << ",\"component\":\"incompressible_navier_stokes_free_surface\""
         << ",\"configuration_schema\":{\"input_version\":"
         << options.input_configuration_schema_version
@@ -7585,10 +7683,19 @@ tangentialPolicyProvenance(
         << ",\"capability_label\":"
         << jsonString(options.explicit_legacy_configuration
                           ? "legacy_diagnostic"
-                          : "one_phase_liquid_sharp_interface")
+                          : has_internal_material_interface_volume &&
+                                    !has_exterior_one_phase_boundary
+                                ? "internal_material_interface_phase_volume"
+                                : "one_phase_liquid_sharp_interface")
         << ",\"physical_model\":";
     if (options.explicit_legacy_configuration) {
         out << "null";
+    } else if (has_internal_material_interface_volume &&
+               !has_exterior_one_phase_boundary) {
+        out << "{\"name\":\"internal_material_interface_phase_volume\""
+            << ",\"interface_traction_owner\":\"coupled_parent\""
+            << ",\"pressure_gauge_owner\":\"coupled_parent\""
+            << ",\"external_boundary_model\":false}";
     } else {
         out << "{\"name\":"
             << jsonString(freeSurfacePhysicalModelName(
@@ -7660,7 +7767,9 @@ tangentialPolicyProvenance(
         auto contacts = boundary.contact_lines;
         std::sort(contacts.begin(), contacts.end(), contactConfigurationLess);
 
-        out << "{\"implementation\":"
+        out << "{\"role\":"
+            << jsonString(freeSurfaceBoundaryRoleName(boundary.role))
+            << ",\"implementation\":"
             << jsonString(freeSurfaceImplementationName(boundary.implementation))
             << ",\"boundary_marker\":" << boundary.boundary_marker
             << ",\"interface_marker\":" << boundary.interface_marker
@@ -7708,14 +7817,19 @@ tangentialPolicyProvenance(
             break;
         }
         out << ",\"surface_tension_form_effective\":"
-            << jsonString(surfaceTensionFormName(boundary));
-        if (usesGeneratedCurvatureTraction(boundary)) {
+            << jsonString(
+                   isInternalMaterialInterfaceVolume(boundary)
+                       ? "NotApplicableInternalVolume"
+                       : surfaceTensionFormName(boundary));
+        if (isExteriorOnePhaseBoundary(boundary) &&
+            usesGeneratedCurvatureTraction(boundary)) {
             out << ",\"surface_tension_form_qualification\":"
                 << "\"experimental_candidate\""
                 << ",\"surface_tension_normal_source\":"
                 << "\"generated_interface_rule_geometry\"";
         }
-        if (usesKinematicAreaGradientTraction(boundary)) {
+        if (isExteriorOnePhaseBoundary(boundary) &&
+            usesKinematicAreaGradientTraction(boundary)) {
             out << ",\"surface_tension_form_qualification\":"
                 << "\"prerequisite_only\""
                 << ",\"surface_tension_normal_source\":"
@@ -8317,6 +8431,10 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         system,
         options_,
         effective_free_surfaces);
+    const bool has_exterior_free_surface = std::any_of(
+        effective_free_surfaces.begin(),
+        effective_free_surfaces.end(),
+        isExteriorOnePhaseBoundary);
     const auto active_pressure_domain =
         activePressureDomainFor(effective_free_surfaces);
     if (!(options_
@@ -8555,6 +8673,8 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     };
     std::optional<PendingSmallCutAggregation> pending_small_cut_aggregation;
     if (active_pressure_domain.has_value() &&
+        isExteriorOnePhaseBoundary(
+            *active_pressure_domain->boundary) &&
         active_pressure_domain->boundary->active_domain_method ==
             FreeSurfaceActiveDomainMethod::CutVolume) {
         auto& gauge_registry = system.gaugeRegistry();
@@ -9369,7 +9489,8 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             effective_free_surfaces.begin(),
             effective_free_surfaces.end(),
             [](const FreeSurfaceBoundary& bc) {
-                return (usesSurfaceStress(bc) ||
+                return isExteriorOnePhaseBoundary(bc) &&
+                       (usesSurfaceStress(bc) ||
                         usesKinematicAreaGradientTraction(bc)) &&
                        FE::forms::bc::isConstantScalarValue(
                            bc.surface_tension) &&
@@ -9377,15 +9498,16 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                            bc.surface_tension);
             });
     const bool conservative_balance_all_discrete_energy_tractions =
-        !effective_free_surfaces.empty() &&
+        has_exterior_free_surface &&
         std::all_of(
             effective_free_surfaces.begin(),
             effective_free_surfaces.end(),
             [](const FreeSurfaceBoundary& bc) {
-                return (usesSurfaceStress(bc) ||
-                        usesKinematicAreaGradientTraction(bc)) &&
-                       FE::forms::bc::isConstantScalarValue(
-                           bc.surface_tension);
+                return isInternalMaterialInterfaceVolume(bc) ||
+                       ((usesSurfaceStress(bc) ||
+                         usesKinematicAreaGradientTraction(bc)) &&
+                        FE::forms::bc::isConstantScalarValue(
+                            bc.surface_tension));
             });
     const bool conservative_balance_diagnostic_supported =
         conservative_balance_diagnostic_requested &&
@@ -9442,62 +9564,69 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     auto free_surface_kinematics_install =
         physicsInstallOptions(options_.jit_policy);
     for (const auto& effective_bc : effective_free_surfaces) {
-        applyFreeSurfaceContactLineConstraints(system, effective_bc, ale_binding, dim);
-        registerFreeSurfacePrescribedAngleGeometry(system, effective_bc);
-        applyDynamicContactAngleResidual(
-            momentum_form,
-            system,
-            effective_bc,
-            u,
-            v,
-            mu,
-            dim,
-            conservative_balance_diagnostic_supported
-                ? &free_surface_conservative_surface_energy_form
-                : nullptr);
-        if (effective_bc.implementation == FreeSurfaceImplementation::FittedALE) {
-            bc_manager.add(std::make_unique<FE::forms::bc::ReservedBC>(effective_bc.boundary_marker));
+        if (isExteriorOnePhaseBoundary(effective_bc)) {
+            applyFreeSurfaceContactLineConstraints(
+                system, effective_bc, ale_binding, dim);
+            registerFreeSurfacePrescribedAngleGeometry(
+                system, effective_bc);
+            applyDynamicContactAngleResidual(
+                momentum_form,
+                system,
+                effective_bc,
+                u,
+                v,
+                mu,
+                dim,
+                conservative_balance_diagnostic_supported
+                    ? &free_surface_conservative_surface_energy_form
+                    : nullptr);
+            if (effective_bc.implementation ==
+                FreeSurfaceImplementation::FittedALE) {
+                bc_manager.add(
+                    std::make_unique<FE::forms::bc::ReservedBC>(
+                        effective_bc.boundary_marker));
+            }
+            applyFreeSurfaceBoundary(
+                momentum_form,
+                continuity_form,
+                level_set_shape_tangent_form,
+                effective_bc,
+                system,
+                u,
+                p,
+                v,
+                q,
+                mesh_velocity,
+                mu,
+                options_,
+                options_.enable_ale,
+                dim,
+                pressureRowContributionDiagnosticEnabled()
+                    ? &free_surface_pressure_reference_probe_form
+                    : nullptr,
+                pressureRowContributionDiagnosticEnabled()
+                    ? &free_surface_tangential_pressure_gradient_probe_form
+                    : nullptr,
+                conservative_balance_diagnostic_supported
+                    ? &free_surface_conservative_pressure_form
+                    : nullptr,
+                conservative_balance_diagnostic_supported
+                    ? &free_surface_conservative_external_pressure_form
+                    : nullptr,
+                conservative_balance_diagnostic_supported
+                    ? &free_surface_conservative_surface_energy_form
+                    : nullptr,
+                &weak_boundary_momentum_work_form,
+                &weak_boundary_continuity_work_form);
+            installFittedFreeSurfaceMeshKinematics(
+                system,
+                effective_bc,
+                ale_binding,
+                u,
+                options_,
+                free_surface_kinematics_install,
+                u_id);
         }
-        applyFreeSurfaceBoundary(
-            momentum_form,
-            continuity_form,
-            level_set_shape_tangent_form,
-            effective_bc,
-            system,
-            u,
-            p,
-            v,
-            q,
-            mesh_velocity,
-            mu,
-            options_,
-            options_.enable_ale,
-            dim,
-            pressureRowContributionDiagnosticEnabled()
-                ? &free_surface_pressure_reference_probe_form
-                : nullptr,
-            pressureRowContributionDiagnosticEnabled()
-                ? &free_surface_tangential_pressure_gradient_probe_form
-                : nullptr,
-            conservative_balance_diagnostic_supported
-                ? &free_surface_conservative_pressure_form
-                : nullptr,
-            conservative_balance_diagnostic_supported
-                ? &free_surface_conservative_external_pressure_form
-                : nullptr,
-            conservative_balance_diagnostic_supported
-                ? &free_surface_conservative_surface_energy_form
-                : nullptr,
-            &weak_boundary_momentum_work_form,
-            &weak_boundary_continuity_work_form);
-        installFittedFreeSurfaceMeshKinematics(
-            system,
-            effective_bc,
-            ale_binding,
-            u,
-            options_,
-            free_surface_kinematics_install,
-            u_id);
         applyFreeSurfaceCutCellStabilization(
             momentum_form,
             continuity_form,
@@ -9701,7 +9830,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     (void)FE::systems::installFormulation(
         system, options_.operator_tag, {u_id, p_id}, residual, install);
 
-    if (!effective_free_surfaces.empty()) {
+    if (has_exterior_free_surface) {
         const auto velocity_data_are_homogeneous = [](const auto& bcs) {
             return std::all_of(
                 bcs.begin(), bcs.end(), [](const auto& bc) {

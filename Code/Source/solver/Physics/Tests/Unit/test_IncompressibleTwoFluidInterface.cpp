@@ -9,12 +9,17 @@
 #include <gtest/gtest.h>
 
 #include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidInterface.h"
+#include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidModule.h"
 
 #include "FE/Forms/FormCompiler.h"
+#include "FE/Tests/Unit/Forms/FormsTestHelpers.h"
 #include "FE/Forms/Vocabulary.h"
+#include "FE/Interfaces/LevelSetInterfaceDomain.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
+#include "FE/Systems/FESystem.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -103,6 +108,32 @@ bool expressionContains(const FE::forms::FormExpr &expression,
   }
   return false;
 }
+
+struct TwoFluidRegistrationFixture {
+  std::shared_ptr<FE::forms::test::SingleTriangleMeshAccess> mesh{
+      std::make_shared<FE::forms::test::SingleTriangleMeshAccess>()};
+  std::shared_ptr<FE::spaces::H1Space> scalar_space{
+      std::make_shared<FE::spaces::H1Space>(FE::ElementType::Triangle3, 1)};
+  std::shared_ptr<FE::spaces::ProductSpace> velocity_space{
+      std::make_shared<FE::spaces::ProductSpace>(scalar_space, 2)};
+  FE::systems::FESystem system{mesh};
+
+  TwoFluidRegistrationFixture() {
+    (void)system.addField(FE::systems::FieldSpec{
+        .name = "level_set",
+        .space = scalar_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+  }
+
+  [[nodiscard]] ns::IncompressibleTwoFluidModule makeModule(
+      ns::IncompressibleTwoFluidOptions options = {}) const {
+    return ns::IncompressibleTwoFluidModule(
+        velocity_space, scalar_space, velocity_space, scalar_space,
+        std::move(options));
+  }
+};
 
 TEST(IncompressibleTwoFluidInterface,
      ViscosityWeightsAreComplementaryAndSideReversalInvariant) {
@@ -222,6 +253,244 @@ TEST(IncompressibleTwoFluidInterface, RejectsMissingExpression) {
                    expressions.v_positive, expressions.q_positive,
                    makeParameters()),
                std::invalid_argument);
+}
+
+TEST(IncompressibleTwoFluidModule,
+     RegistersFourPhaseFieldsOneInterfaceBlockAndOneSharedGauge) {
+  TwoFluidRegistrationFixture fixture;
+  ns::IncompressibleTwoFluidOptions options;
+  options.surface_tension = FE::Real{0.072};
+  auto module = fixture.makeModule(std::move(options));
+  module.registerOn(fixture.system);
+
+  const auto u_negative = fixture.system.findFieldByName("u_negative");
+  const auto p_negative = fixture.system.findFieldByName("p_negative");
+  const auto u_positive = fixture.system.findFieldByName("u_positive");
+  const auto p_positive = fixture.system.findFieldByName("p_positive");
+  EXPECT_NE(u_negative, FE::INVALID_FIELD_ID);
+  EXPECT_NE(p_negative, FE::INVALID_FIELD_ID);
+  EXPECT_NE(u_positive, FE::INVALID_FIELD_ID);
+  EXPECT_NE(p_positive, FE::INVALID_FIELD_ID);
+  EXPECT_TRUE(fixture.system.hasOperator("equations"));
+
+  const auto level_set = fixture.system.findFieldByName("level_set");
+  FE::interfaces::GeneratedInterfaceMarkerKey marker_key{};
+  marker_key.source =
+      FE::interfaces::LevelSetInterfaceSource::fromField(level_set);
+  marker_key.domain_id = "two_fluid_interface";
+  marker_key.isovalue = FE::Real{0.0};
+  const auto interface_marker =
+      FE::interfaces::stableGeneratedInterfaceMarker(marker_key);
+  const auto negative_cut_terms = fixture.system.cutVolumeKernelCount(
+      interface_marker, FE::geometry::CutIntegrationSide::Negative);
+  const auto positive_cut_terms = fixture.system.cutVolumeKernelCount(
+      interface_marker, FE::geometry::CutIntegrationSide::Positive);
+  EXPECT_GT(negative_cut_terms, 0u);
+  EXPECT_EQ(negative_cut_terms, positive_cut_terms);
+
+  const auto interface_records = static_cast<std::size_t>(std::count_if(
+      fixture.system.formulationRecords().begin(),
+      fixture.system.formulationRecords().end(),
+      [](const auto &record) {
+        return record.operator_tag == "equations" &&
+               record.active_fields.size() == 4u &&
+               std::find(record.active_domains.begin(),
+                         record.active_domains.end(),
+                         FE::analysis::DomainKind::InterfaceFace) !=
+                   record.active_domains.end();
+      }));
+  EXPECT_EQ(interface_records, 1u);
+  EXPECT_TRUE(fixture.system.freeSurfaceResidualWorkDeclarations().empty());
+  EXPECT_FALSE(
+      fixture.system.freeSurfaceExternalBoundaryEnergyDeclaration().has_value());
+  EXPECT_TRUE(
+      fixture.system.freeSurfaceDiscreteFunctionalDeclarations().empty());
+
+  const auto shared_gauge_evidence = static_cast<std::size_t>(std::count_if(
+      fixture.system.gaugeRegistry().anchoring().begin(),
+      fixture.system.gaugeRegistry().anchoring().end(),
+      [](const auto &evidence) {
+        return evidence.source ==
+               "Coupled two-fluid shared pressure gauge constraint";
+      }));
+  EXPECT_EQ(shared_gauge_evidence, 2u);
+  EXPECT_EQ(fixture.system.gaugeRegistry().anchoring().size(), 2u);
+
+  const auto artifact_before_setup =
+      module.effectiveConfigurationArtifact();
+  ASSERT_TRUE(artifact_before_setup.has_value());
+
+  fixture.system.setup({});
+  std::size_t pressure_pins = 0u;
+  for (const auto field : {p_negative, p_positive}) {
+    const auto offset = fixture.system.fieldDofOffset(field);
+    const auto count = fixture.system.fieldDofHandler(field).getNumDofs();
+    for (FE::GlobalIndex local = 0; local < count; ++local) {
+      const auto line = fixture.system.constraints().getConstraint(
+          offset + local);
+      if (line.has_value() && line->entries.empty()) {
+        ++pressure_pins;
+      }
+    }
+  }
+  EXPECT_EQ(pressure_pins, 1u);
+
+  const auto artifact = module.effectiveConfigurationArtifact();
+  ASSERT_TRUE(artifact.has_value());
+  EXPECT_EQ(artifact->json, artifact_before_setup->json);
+  EXPECT_EQ(artifact->component, "incompressible_two_fluid");
+  EXPECT_NE(artifact->json.find("\"shared_gauge_count\":1"),
+            std::string::npos);
+  EXPECT_NE(artifact->json.find("\"compressible_gas\""),
+            std::string::npos);
+
+  TwoFluidRegistrationFixture repeated_fixture;
+  ns::IncompressibleTwoFluidOptions repeated_options;
+  repeated_options.surface_tension = FE::Real{0.072};
+  auto repeated_module =
+      repeated_fixture.makeModule(std::move(repeated_options));
+  repeated_module.registerOn(repeated_fixture.system);
+  const auto repeated_artifact =
+      repeated_module.effectiveConfigurationArtifact();
+  ASSERT_TRUE(repeated_artifact.has_value());
+  EXPECT_EQ(repeated_artifact->component, artifact->component);
+  EXPECT_EQ(repeated_artifact->json, artifact->json);
+}
+
+TEST(IncompressibleTwoFluidModule,
+     MissingLevelSetFailsBeforePhaseFieldsOrOperatorAreAdded) {
+  auto mesh =
+      std::make_shared<FE::forms::test::SingleTriangleMeshAccess>();
+  auto scalar_space =
+      std::make_shared<FE::spaces::H1Space>(FE::ElementType::Triangle3, 1);
+  auto velocity_space =
+      std::make_shared<FE::spaces::ProductSpace>(scalar_space, 2);
+  FE::systems::FESystem system(mesh);
+  ns::IncompressibleTwoFluidModule module(
+      velocity_space, scalar_space, velocity_space, scalar_space);
+
+  EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+  EXPECT_EQ(system.findFieldByName("u_negative"), FE::INVALID_FIELD_ID);
+  EXPECT_EQ(system.findFieldByName("p_negative"), FE::INVALID_FIELD_ID);
+  EXPECT_EQ(system.findFieldByName("u_positive"), FE::INVALID_FIELD_ID);
+  EXPECT_EQ(system.findFieldByName("p_positive"), FE::INVALID_FIELD_ID);
+  EXPECT_FALSE(system.hasOperator("equations"));
+  EXPECT_FALSE(module.effectiveConfigurationArtifact().has_value());
+}
+
+TEST(IncompressibleTwoFluidModule,
+     RejectsSpacesOutsideAffineSimplexEnvelopeBeforeMutation) {
+  auto mesh =
+      std::make_shared<FE::forms::test::SingleTriangleMeshAccess>();
+  auto scalar_space =
+      std::make_shared<FE::spaces::H1Space>(FE::ElementType::Quad4, 1);
+  auto velocity_space =
+      std::make_shared<FE::spaces::ProductSpace>(scalar_space, 2);
+  FE::systems::FESystem system(mesh);
+  (void)system.addField(FE::systems::FieldSpec{
+      .name = "level_set",
+      .space = scalar_space,
+      .components = 1,
+      .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+  });
+  ns::IncompressibleTwoFluidModule module(
+      velocity_space, scalar_space, velocity_space, scalar_space);
+
+  EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+  EXPECT_EQ(system.findFieldByName("u_negative"), FE::INVALID_FIELD_ID);
+  EXPECT_EQ(system.findFieldByName("u_positive"), FE::INVALID_FIELD_ID);
+  EXPECT_FALSE(system.hasOperator("equations"));
+}
+
+TEST(IncompressibleTwoFluidModule,
+     InternalPhaseRoleRejectsExteriorTractionBeforeMutation) {
+  TwoFluidRegistrationFixture fixture;
+  ns::IncompressibleNavierStokesVMSOptions options;
+  options.velocity_field_name = "phase_velocity";
+  options.pressure_field_name = "phase_pressure";
+  ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary interface;
+  interface.role =
+      ns::FreeSurfaceBoundaryRole::InternalMaterialInterfaceVolume;
+  interface.implementation =
+      ns::FreeSurfaceImplementation::UnfittedLevelSet;
+  interface.interface_marker = 481;
+  interface.level_set_field_name = "level_set";
+  interface.generated_interface_domain_id = "invalid_internal_phase";
+  interface.active_domain =
+      ns::FreeSurfaceActiveDomain::LevelSetNegative;
+  interface.active_domain_method =
+      ns::FreeSurfaceActiveDomainMethod::CutVolume;
+  interface.external_pressure = FE::Real{1.0};
+  interface.surface_tension = FE::Real{0.0};
+  interface.use_level_set_curvature = false;
+  interface.normal_kinematic_policy =
+      ns::FreeSurfaceNormalKinematicPolicy::None;
+  interface.tangential_mesh_policy =
+      ns::FreeSurfaceTangentialMeshPolicy::Free;
+  options.free_surface.push_back(std::move(interface));
+  ns::IncompressibleNavierStokesVMSModule module(
+      fixture.velocity_space, fixture.scalar_space, std::move(options));
+
+  EXPECT_THROW(module.registerOn(fixture.system), std::invalid_argument);
+  EXPECT_EQ(fixture.system.findFieldByName("phase_velocity"),
+            FE::INVALID_FIELD_ID);
+  EXPECT_EQ(fixture.system.findFieldByName("phase_pressure"),
+            FE::INVALID_FIELD_ID);
+  EXPECT_FALSE(fixture.system.hasOperator("equations"));
+}
+
+TEST(IncompressibleTwoFluidModule,
+     InternalPhaseRoleSerializesVolumeOnlyOwnership) {
+  TwoFluidRegistrationFixture fixture;
+  ns::IncompressibleNavierStokesVMSOptions options;
+  options.velocity_field_name = "phase_velocity";
+  options.pressure_field_name = "phase_pressure";
+  options.enable_convection = false;
+  ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary interface;
+  interface.role =
+      ns::FreeSurfaceBoundaryRole::InternalMaterialInterfaceVolume;
+  interface.implementation =
+      ns::FreeSurfaceImplementation::UnfittedLevelSet;
+  interface.interface_marker = 482;
+  interface.level_set_field_name = "level_set";
+  interface.generated_interface_domain_id = "valid_internal_phase";
+  interface.active_domain =
+      ns::FreeSurfaceActiveDomain::LevelSetNegative;
+  interface.active_domain_method =
+      ns::FreeSurfaceActiveDomainMethod::CutVolume;
+  interface.external_pressure = FE::Real{0.0};
+  interface.surface_tension = FE::Real{0.0};
+  interface.use_level_set_curvature = false;
+  interface.normal_kinematic_policy =
+      ns::FreeSurfaceNormalKinematicPolicy::None;
+  interface.tangential_mesh_policy =
+      ns::FreeSurfaceTangentialMeshPolicy::Free;
+  interface.cut_cell_stabilization.enabled = true;
+  interface.small_cut_aggregation = true;
+  options.free_surface.push_back(std::move(interface));
+  ns::IncompressibleNavierStokesVMSModule module(
+      fixture.velocity_space, fixture.scalar_space, std::move(options));
+
+  ASSERT_NO_THROW(module.registerOn(fixture.system));
+  const auto artifact = module.effectiveConfigurationArtifact();
+  ASSERT_TRUE(artifact.has_value());
+  EXPECT_NE(
+      artifact->json.find(
+          "\"capability_label\":\"internal_material_interface_phase_volume\""),
+      std::string::npos);
+  EXPECT_NE(
+      artifact->json.find(
+          "\"role\":\"InternalMaterialInterfaceVolume\""),
+      std::string::npos);
+  EXPECT_NE(
+      artifact->json.find(
+          "\"surface_tension_form_effective\":\"NotApplicableInternalVolume\""),
+      std::string::npos);
+  EXPECT_FALSE(
+      fixture.system.freeSurfaceExternalBoundaryEnergyDeclaration().has_value());
+  EXPECT_TRUE(fixture.system.freeSurfaceResidualWorkDeclarations().empty());
+  EXPECT_TRUE(
+      fixture.system.freeSurfaceDiscreteFunctionalDeclarations().empty());
 }
 
 } // namespace

@@ -12066,7 +12066,15 @@ TEST(MovingDomainPhysics,
     expected_with_aggregation_guards.replace(
         artifact_schema,
         artifact_schema_fragment.size(),
-        "\"artifact_schema_version\":3");
+        "\"artifact_schema_version\":4");
+    constexpr std::string_view free_surface_fragment =
+        "\"free_surfaces\":[{";
+    const auto free_surface_role =
+        expected_with_aggregation_guards.find(free_surface_fragment);
+    ASSERT_NE(free_surface_role, std::string::npos);
+    expected_with_aggregation_guards.insert(
+        free_surface_role + free_surface_fragment.size(),
+        "\"role\":\"ExteriorOnePhaseBoundary\",");
     constexpr std::string_view capability_fragment =
         "\"capability_label\":\"one_phase_liquid_sharp_interface\"";
     const auto physical_model =
