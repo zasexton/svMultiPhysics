@@ -29,11 +29,13 @@ namespace {
 constexpr int kMaximumNewtonIterations = 100;
 // Guard recurrence and Newton-update rounding; exhaustive supported-size
 // sweeps qualify this scale.
-constexpr double kNewtonCorrectionTolerance = 64.0 * std::numeric_limits<double>::epsilon();
+constexpr double kNewtonCorrectionTolerance =
+    64.0 * std::numeric_limits<double>::epsilon();
 // Provide conservative O(n epsilon) accumulation headroom, qualified by those
 // sweeps.
-constexpr double kRuleValidationTolerance = 32.0 * static_cast<double>(max_gauss_legendre_points()) *
-                                            std::numeric_limits<double>::epsilon();
+constexpr double kRuleValidationTolerance =
+    32.0 * static_cast<double>(max_gauss_legendre_points()) *
+    std::numeric_limits<double>::epsilon();
 
 std::pair<double, double> evaluate_legendre_with_derivative(
     int degree,
@@ -41,27 +43,17 @@ std::pair<double, double> evaluate_legendre_with_derivative(
 {
     double previous_value = 1.0;
     double previous_derivative = 0.0;
-
-    if (degree == 0) {
-        return {previous_value, previous_derivative};
-    }
-
     double value = coordinate;
     double derivative = 1.0;
     for (int recurrence_degree = 2; recurrence_degree <= degree; ++recurrence_degree) {
-        const double degree_value =
-            static_cast<double>(recurrence_degree);
-        const double recurrence_factor =
-            static_cast<double>(2 * recurrence_degree - 1);
+        const double degree_value = static_cast<double>(recurrence_degree);
+        const double recurrence_factor = static_cast<double>(2 * recurrence_degree - 1);
         const double next_value =
             (recurrence_factor * coordinate * value -
-             static_cast<double>(recurrence_degree - 1) * previous_value) /
-            degree_value;
+             static_cast<double>(recurrence_degree - 1) * previous_value) / degree_value;
         const double next_derivative =
             (recurrence_factor * (value + coordinate * derivative) -
-             static_cast<double>(recurrence_degree - 1) *
-                 previous_derivative) /
-            degree_value;
+             static_cast<double>(recurrence_degree - 1) * previous_derivative) / degree_value;
 
         previous_value = value;
         previous_derivative = derivative;
@@ -91,24 +83,15 @@ std::pair<double, double> evaluate_legendre_with_derivative(
     svmp::raise<ConvergenceException>(message.str(), iteration, residual);
 }
 
-void require_generation(
-    bool condition,
-    int num_points,
-    int root_index,
-    int iteration,
-    double diagnostic_value,
-    std::string_view detail)
+void require_generation(bool condition, int num_points, int root_index, int iteration,
+    double diagnostic_value, std::string_view detail)
 {
     if (!condition) {
-        raise_generation_failure(
-            num_points, root_index, iteration, diagnostic_value, detail);
+        raise_generation_failure(num_points, root_index, iteration, diagnostic_value, detail);
     }
 }
 
-std::pair<double, double> generate_root_and_weight(
-    int num_points,
-    int root_index,
-    bool is_center)
+std::pair<double, double> generate_root_and_weight(int num_points, int root_index, bool is_center)
 {
     const double pi = std::numbers::pi_v<double>;
     double root = std::cos(
@@ -116,9 +99,7 @@ std::pair<double, double> generate_root_and_weight(
         (static_cast<double>(num_points) + 0.5));
     double correction = 0.0;
 
-    for (int iteration = 1;
-         iteration <= kMaximumNewtonIterations;
-         ++iteration) {
+    for (int iteration = 1; iteration <= kMaximumNewtonIterations; ++iteration) {
         const auto [polynomial_value, polynomial_derivative] =
             evaluate_legendre_with_derivative(num_points, root);
         require_generation(
@@ -194,32 +175,23 @@ std::pair<double, double> generate_root_and_weight(
 
 QuadratureRule make_gauss_legendre_rule(int num_points)
 {
-    if (num_points < 1 ||
-        num_points > max_gauss_legendre_points()) {
+    if (num_points < 1 || num_points > max_gauss_legendre_points()) {
         std::ostringstream message;
         message << "Gauss-Legendre generator: num_points must be in [1, "
                 << max_gauss_legendre_points() << ']';
         svmp::raise<InvalidArgumentException>(message.str());
     }
 
-    const std::size_t point_count =
-        static_cast<std::size_t>(num_points);
     std::vector<QuadPoint> points(
-        point_count, QuadPoint::Zero());
-    std::vector<double> weights(point_count);
+        static_cast<std::size_t>(num_points), QuadPoint::Zero());
+    std::vector<double> weights(points.size());
 
     const int roots_to_refine = (num_points + 1) / 2;
-    for (int root_index = 0;
-         root_index < roots_to_refine;
-         ++root_index) {
-        const std::size_t left_index =
-            static_cast<std::size_t>(root_index);
-        const std::size_t right_index =
-            point_count - 1u - left_index;
+    for (int root_index = 0; root_index < roots_to_refine; ++root_index) {
+        const std::size_t left_index = static_cast<std::size_t>(root_index);
+        const std::size_t right_index = points.size() - 1u - left_index;
         const auto [root, weight] = generate_root_and_weight(
-            num_points,
-            root_index,
-            left_index == right_index);
+            num_points, root_index, left_index == right_index);
 
         points[left_index][0] = -root;
         points[right_index][0] = root;
@@ -227,11 +199,8 @@ QuadratureRule make_gauss_legendre_rule(int num_points)
         weights[right_index] = weight;
     }
 
-    for (std::size_t point_index = 1;
-         point_index < points.size();
-         ++point_index) {
-        const double spacing =
-            points[point_index][0] - points[point_index - 1u][0];
+    for (std::size_t point_index = 1; point_index < points.size(); ++point_index) {
+        const double spacing = points[point_index][0] - points[point_index - 1u][0];
         require_generation(
             spacing > 0.0,
             num_points, static_cast<int>(point_index), -1, spacing,
@@ -239,10 +208,8 @@ QuadratureRule make_gauss_legendre_rule(int num_points)
     }
 
     // Report a failed measure instead of repairing or rescaling the weights.
-    const long double weight_sum =
-        std::accumulate(weights.begin(), weights.end(), 0.0L);
-    const long double measure_error =
-        std::abs(weight_sum - 2.0L);
+    const long double weight_sum = std::accumulate(weights.begin(), weights.end(), 0.0L);
+    const long double measure_error = std::abs(weight_sum - 2.0L);
     require_generation(
         std::isfinite(weight_sum) &&
             measure_error <=
@@ -252,10 +219,8 @@ QuadratureRule make_gauss_legendre_rule(int num_points)
 
     const int polynomial_exactness = 2 * num_points - 1;
     return QuadratureRule(
-        svmp::CellFamily::Line,
-        polynomial_exactness,
-        std::move(points),
-        std::move(weights));
+        svmp::CellFamily::Line, polynomial_exactness,
+        std::move(points), std::move(weights));
 }
 
 } // namespace svmp::FE::quadrature

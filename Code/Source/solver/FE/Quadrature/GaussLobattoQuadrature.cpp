@@ -44,9 +44,7 @@ std::pair<double, double> evaluate_adjacent_legendre_values(
     double previous_value = 1.0;
     double value = coordinate;
 
-    for (int recurrence_degree = 2;
-         recurrence_degree <= degree;
-         ++recurrence_degree) {
+    for (int recurrence_degree = 2; recurrence_degree <= degree; ++recurrence_degree) {
         const double next_value =
             (static_cast<double>(2 * recurrence_degree - 1) *
                  coordinate * value -
@@ -59,12 +57,8 @@ std::pair<double, double> evaluate_adjacent_legendre_values(
     return {value, previous_value};
 }
 
-[[noreturn]] void raise_generation_failure(
-    int num_points,
-    int half_root_index,
-    int iteration,
-    double diagnostic_value,
-    std::string_view detail)
+[[noreturn]] void raise_generation_failure(int num_points, int half_root_index,
+    int iteration, double diagnostic_value, std::string_view detail)
 {
     std::ostringstream message;
     message << "Gauss-Lobatto-Legendre generator: " << detail
@@ -78,84 +72,53 @@ std::pair<double, double> evaluate_adjacent_legendre_values(
     svmp::raise<ConvergenceException>(message.str(), iteration, residual);
 }
 
-void require_generation(
-    bool condition,
-    int num_points,
-    int half_root_index,
-    int iteration,
-    double diagnostic_value,
-    std::string_view detail)
+void require_generation(bool condition, int num_points, int half_root_index,
+    int iteration, double diagnostic_value, std::string_view detail)
 {
     if (!condition) {
         raise_generation_failure(
-            num_points,
-            half_root_index,
-            iteration,
-            diagnostic_value,
-            detail);
+            num_points, half_root_index, iteration, diagnostic_value, detail);
     }
 }
 
-std::pair<double, double> generate_interior_root_and_weight(
-    int num_points,
-    int polynomial_degree,
-    int half_root_index,
-    bool is_center,
-    double weight_denominator_scale)
+std::pair<double, double> generate_interior_root_and_weight(int num_points, int half_root_index,
+    bool is_center, double weight_denominator_scale)
 {
+    const int polynomial_degree = num_points - 1;
     const double num_points_value = static_cast<double>(num_points);
     const double degree_value = static_cast<double>(polynomial_degree);
     const double pi = std::numbers::pi_v<double>;
-    double root = std::cos(
-        pi * static_cast<double>(half_root_index + 1) /
-        degree_value);
+    double root = std::cos(pi * static_cast<double>(half_root_index + 1) / degree_value);
     double correction = 0.0;
 
     // For f = x*P_m - P_(m-1), Legendre identities give
     // f' = (m+1)*P_m = n*P_m exactly.
-    for (int iteration = 1;
-         iteration <= kMaximumNewtonIterations;
-         ++iteration) {
+    for (int iteration = 1; iteration <= kMaximumNewtonIterations; ++iteration) {
         const auto [polynomial_value, previous_polynomial_value] =
             evaluate_adjacent_legendre_values(polynomial_degree, root);
         require_generation(
-            std::isfinite(polynomial_value),
-            num_points, half_root_index, iteration, polynomial_value,
-            "encountered a non-finite P_m value");
-        require_generation(
-            std::isfinite(previous_polynomial_value),
+            std::isfinite(polynomial_value) &&
+                std::isfinite(previous_polynomial_value),
             num_points, half_root_index, iteration,
-            previous_polynomial_value,
-            "encountered a non-finite P_(m-1) value");
+            polynomial_value,
+            "encountered invalid adjacent Legendre values");
 
         const double residual =
             root * polynomial_value - previous_polynomial_value;
-        require_generation(
-            std::isfinite(residual),
-            num_points, half_root_index, iteration, residual,
-            "computed a non-finite root-function residual");
-
         const double derivative = num_points_value * polynomial_value;
         require_generation(
-            std::isfinite(derivative),
+            std::isfinite(residual) &&
+                std::isfinite(derivative) &&
+                derivative != 0.0,
             num_points, half_root_index, iteration, derivative,
-            "computed a non-finite root-function derivative");
-        require_generation(
-            derivative != 0.0,
-            num_points, half_root_index, iteration, derivative,
-            "encountered a zero root-function derivative");
+            "computed an invalid root-function residual or derivative");
 
         correction = residual / derivative;
-        require_generation(
-            std::isfinite(correction),
-            num_points, half_root_index, iteration, correction,
-            "computed a non-finite Newton correction");
-
         const double updated_root = root - correction;
         require_generation(
-            std::isfinite(updated_root),
-            num_points, half_root_index, iteration, updated_root,
-            "computed a non-finite updated root");
+            std::isfinite(correction) && std::isfinite(updated_root),
+            num_points, half_root_index, iteration, correction,
+            "computed an invalid Newton update");
         root = updated_root;
 
         if (std::abs(correction) > kNewtonCorrectionTolerance) {
@@ -165,87 +128,61 @@ std::pair<double, double> generate_interior_root_and_weight(
         if (is_center) {
             root = 0.0;
         }
+        require_generation(
+            root >= 0.0 && root < 1.0 && (is_center || root > 0.0),
+            num_points, half_root_index, iteration, root,
+            "refined root is outside the expected half interval");
 
         const auto [final_polynomial_value,
                     final_previous_polynomial_value] =
             evaluate_adjacent_legendre_values(polynomial_degree, root);
         require_generation(
-            std::isfinite(final_polynomial_value),
+            std::isfinite(final_polynomial_value) &&
+                std::isfinite(final_previous_polynomial_value),
             num_points, half_root_index, iteration,
             final_polynomial_value,
-            "refined root produced a non-finite P_m value");
-        require_generation(
-            std::isfinite(final_previous_polynomial_value),
-            num_points, half_root_index, iteration,
-            final_previous_polynomial_value,
-            "refined root produced a non-finite P_(m-1) value");
+            "refined root produced invalid adjacent Legendre values");
 
         const double final_residual =
             root * final_polynomial_value -
             final_previous_polynomial_value;
-        require_generation(
-            std::isfinite(final_residual),
-            num_points, half_root_index, iteration, final_residual,
-            "refined root produced a non-finite residual");
-
         const double final_derivative =
             num_points_value * final_polynomial_value;
         require_generation(
-            std::isfinite(final_derivative),
+            std::isfinite(final_residual) &&
+                std::isfinite(final_derivative) &&
+                final_derivative != 0.0,
             num_points, half_root_index, iteration, final_derivative,
-            "refined root produced a non-finite derivative");
-        require_generation(
-            final_derivative != 0.0,
-            num_points, half_root_index, iteration, final_derivative,
-            "refined root produced a zero derivative");
+            "refined root produced an invalid residual or derivative");
 
         const double final_correction =
             final_residual / final_derivative;
         require_generation(
-            std::isfinite(final_correction),
-            num_points, half_root_index, iteration, final_correction,
-            "refined root produced a non-finite final correction");
-        require_generation(
-            std::abs(final_correction) <=
-                kNewtonCorrectionTolerance,
+            std::isfinite(final_correction) &&
+                std::abs(final_correction) <=
+                    kNewtonCorrectionTolerance,
             num_points, half_root_index, iteration, final_correction,
             "refined root failed final correction validation");
-        require_generation(
-            root >= 0.0 && root < 1.0 &&
-                (is_center || root > 0.0),
-            num_points, half_root_index, iteration, root,
-            "refined root is outside the expected half interval");
 
         const double denominator =
             weight_denominator_scale * final_polynomial_value *
             final_polynomial_value;
         require_generation(
-            std::isfinite(denominator),
+            std::isfinite(denominator) && denominator > 0.0,
             num_points, half_root_index, iteration, denominator,
-            "refined root produced a non-finite weight denominator");
-        require_generation(
-            denominator > 0.0,
-            num_points, half_root_index, iteration, denominator,
-            "refined root produced a non-positive weight denominator");
+            "refined root produced an invalid weight denominator");
 
         const double weight = 2.0 / denominator;
         require_generation(
-            std::isfinite(weight),
+            std::isfinite(weight) && weight > 0.0,
             num_points, half_root_index, iteration, weight,
-            "refined root produced a non-finite quadrature weight");
-        require_generation(
-            weight > 0.0,
-            num_points, half_root_index, iteration, weight,
-            "refined root produced a non-positive quadrature weight");
+            "refined root produced an invalid quadrature weight");
 
         return {root, weight};
     }
 
     raise_generation_failure(
-        num_points,
-        half_root_index,
-        kMaximumNewtonIterations,
-        correction,
+        num_points, half_root_index, kMaximumNewtonIterations, correction,
         "Newton refinement did not converge");
 }
 
@@ -253,8 +190,7 @@ std::pair<double, double> generate_interior_root_and_weight(
 
 QuadratureRule make_gauss_lobatto_rule(int num_points)
 {
-    if (num_points < 2 ||
-        num_points > max_gauss_lobatto_points()) {
+    if (num_points < 2 || num_points > max_gauss_lobatto_points()) {
         std::ostringstream message;
         message << "Gauss-Lobatto-Legendre generator: "
                 << "num_points must be in [2, "
@@ -262,55 +198,30 @@ QuadratureRule make_gauss_lobatto_rule(int num_points)
         svmp::raise<InvalidArgumentException>(message.str());
     }
 
-    const std::size_t point_count =
-        static_cast<std::size_t>(num_points);
     std::vector<QuadPoint> points(
-        point_count, QuadPoint::Zero());
-    std::vector<double> weights(point_count);
+        static_cast<std::size_t>(num_points), QuadPoint::Zero());
+    std::vector<double> weights(points.size());
 
     points.front()[0] = -1.0;
     points.back()[0] = 1.0;
 
-    const double num_points_value = static_cast<double>(num_points);
     const double weight_denominator_scale =
-        num_points_value * (num_points_value - 1.0);
-    require_generation(
-        std::isfinite(weight_denominator_scale),
-        num_points, -1, -1, weight_denominator_scale,
-        "computed a non-finite weight denominator scale");
-    require_generation(
-        weight_denominator_scale > 0.0,
-        num_points, -1, -1, weight_denominator_scale,
-        "computed a non-positive weight denominator scale");
-
+        static_cast<double>(num_points * (num_points - 1));
     const double endpoint_weight = 2.0 / weight_denominator_scale;
-    require_generation(
-        std::isfinite(endpoint_weight),
-        num_points, -1, -1, endpoint_weight,
-        "computed a non-finite endpoint weight");
-    require_generation(
-        endpoint_weight > 0.0,
-        num_points, -1, -1, endpoint_weight,
-        "computed a non-positive endpoint weight");
     weights.front() = endpoint_weight;
     weights.back() = endpoint_weight;
 
-    const int polynomial_degree = num_points - 1;
     const int interior_roots_to_refine = (num_points - 1) / 2;
     for (int half_root_index = 0;
-         half_root_index < interior_roots_to_refine;
-         ++half_root_index) {
+         half_root_index < interior_roots_to_refine; ++half_root_index) {
         const std::size_t left_index =
             1u + static_cast<std::size_t>(half_root_index);
         const std::size_t right_index =
-            point_count - 2u -
+            points.size() - 2u -
             static_cast<std::size_t>(half_root_index);
         const auto [root, weight] =
             generate_interior_root_and_weight(
-                num_points,
-                polynomial_degree,
-                half_root_index,
-                left_index == right_index,
+                num_points, half_root_index, left_index == right_index,
                 weight_denominator_scale);
 
         points[left_index][0] = -root;
@@ -319,47 +230,28 @@ QuadratureRule make_gauss_lobatto_rule(int num_points)
         weights[right_index] = weight;
     }
 
-    for (std::size_t point_index = 1;
-         point_index < points.size();
-         ++point_index) {
-        const double spacing =
-            points[point_index][0] - points[point_index - 1u][0];
+    for (std::size_t point_index = 1; point_index < points.size(); ++point_index) {
+        const double spacing = points[point_index][0] - points[point_index - 1u][0];
         require_generation(
             spacing > 0.0,
-            num_points,
-            static_cast<int>(point_index),
-            -1,
-            spacing,
+            num_points, static_cast<int>(point_index), -1, spacing,
             "generated points are not strictly increasing");
     }
 
     // Report a failed measure instead of repairing or rescaling the weights.
-    const long double weight_sum =
-        std::accumulate(weights.begin(), weights.end(), 0.0L);
-    require_generation(
-        std::isfinite(weight_sum),
-        num_points,
-        -1,
-        -1,
-        static_cast<double>(weight_sum),
-        "generated weights produced a non-finite measure");
-
+    const long double weight_sum = std::accumulate(weights.begin(), weights.end(), 0.0L);
     const long double measure_error = std::abs(weight_sum - 2.0L);
     require_generation(
-        measure_error <=
-            static_cast<long double>(kRuleValidationTolerance),
-        num_points,
-        -1,
-        -1,
-        static_cast<double>(measure_error),
+        std::isfinite(weight_sum) &&
+            measure_error <=
+                static_cast<long double>(kRuleValidationTolerance),
+        num_points, -1, -1, static_cast<double>(measure_error),
         "generated weights do not reproduce the reference measure");
 
     const int polynomial_exactness = 2 * num_points - 3;
     return QuadratureRule(
-        svmp::CellFamily::Line,
-        polynomial_exactness,
-        std::move(points),
-        std::move(weights));
+        svmp::CellFamily::Line, polynomial_exactness,
+        std::move(points), std::move(weights));
 }
 
 } // namespace svmp::FE::quadrature
