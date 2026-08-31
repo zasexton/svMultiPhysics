@@ -647,6 +647,7 @@ set(FE_CONSTRAINTS_HEADERS
     Constraints/ConstraintsIO.h
     Constraints/GaugeDiagnostics.h
     Constraints/GaugeRegistry.h
+    Constraints/CoupledFieldGaugeConstraint.h
     Constraints/SystemConstraint.h
     Constraints/SystemConstraints.h
     Constraints/StrongDirichletConstraint.h
@@ -677,6 +678,7 @@ set(FE_CONSTRAINTS_SOURCES
     Constraints/ConstraintsIO.cpp
     Constraints/GaugeDiagnostics.cpp
     Constraints/GaugeRegistry.cpp
+    Constraints/CoupledFieldGaugeConstraint.cpp
     Constraints/MovingConstraintComposition.cpp
     Constraints/SystemConstraints.cpp
     Constraints/StrongDirichletConstraint.cpp
@@ -2517,6 +2519,7 @@ if(FE_BUILD_TESTS)
     )
     if(FE_WITH_MESH)
         list(APPEND FE_CONSTRAINTS_TEST_SOURCES
+            Tests/Unit/Constraints/test_CoupledFieldGaugeConstraint.cpp
             Tests/Unit/Constraints/test_LevelSetActiveSideVertexDirichletConstraint.cpp
             Tests/Unit/Constraints/test_SmallCutAggregationConstraint.cpp
         )
