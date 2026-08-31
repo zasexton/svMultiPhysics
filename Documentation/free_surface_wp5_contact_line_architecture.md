@@ -408,6 +408,45 @@ therefore frozen. Candidate spatial/time/slip refinement, feature uncertainty,
 the complete rise simulation, and every physical gate remain unexecuted, so
 this checkpoint supplies no WP-5 or Q4 closure credit.
 
+## Capillary-rise candidate substrate
+
+The resolved-slip candidate generator now provides the two-dimensional
+half-channel case matching the pinned `Omega=1` parameters. It uses the fixed
+`0.005 m` half gap, `0.001 m` Navier slip length, `30`-degree prescribed
+contact angle, open zero-pressure inlet, wall-compatible wet-velocity
+extension, sharp zero-width wall model, and no global volume correction. Its
+volume-preserving P1 initial meniscus reproduces the approximately `9.16 mm`
+published apex while preserving the nominal `0.01 m` mean column height. The
+three intended spatial levels contain `10`, `20`, and `40` cells per half gap,
+so the independently fixed slip length is resolved at ratios `2`, `4`, and
+`8`.
+
+Every saved accepted state is measured from the same VTK state. The history
+records the symmetry-plane apex, physical-wall crossing, contact-fragment
+angle, wall-interpolated fluid speed, sharp wetted-wall measure, and analytic
+P1 Navier-slip dissipation. Missing fields, multiple wall crossings,
+zero-valued wall edges, nontransverse or multiply owned contact fragments,
+nonfinite observables, negative dissipation, incomplete accepted-step clocks,
+and missing outputs all fail closed. Optional gates bound contact motion in
+cells per accepted step and the prescribed-angle error.
+
+The candidate comparator consumes only the exact three-column history
+contract `time_s,apex_height_mm,numerical_uncertainty_mm`. It rejects shifted,
+truncated, duplicate-time, nonfinite, or negative-uncertainty histories,
+interpolates only on the immutable `0` through `0.69 s` common grid, and
+applies the frozen factor-two root-sum-square uncertainty rule at every point
+and to the RMS history error. Comparison outputs are create-only and retain
+the candidate and reference identities. A passing history result explicitly
+leaves refinement, feature, WP-5, and Q4 status false because candidate
+numerical uncertainty still has to be derived from the complete independent
+space/time matrix and the peak, equilibrium, overshoot, and damping feature
+uncertainties remain to be frozen.
+
+The capillary-specific generator, reference, envelope, and comparator suite
+passes all `33` tests. This establishes the deterministic candidate and
+comparison plumbing only. No production transient or refinement level has
+yet passed, and no closure status changes with this checkpoint.
+
 ## Open qualification campaigns
 
 All required physical and refinement campaigns remain unclaimed:
