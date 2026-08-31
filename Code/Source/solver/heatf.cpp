@@ -263,41 +263,49 @@ void heatf_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
   #endif
 
   double Td = -s;
-  Vector<double> Tx(nsd), u(nsd), udNx(eNoN);
+  double Tx0 = 0.0;
+  double Tx1 = 0.0;
+  double Tx2 = 0.0;
+  double u0 = 0.0;
+  double u1 = 0.0;
+  double u2 = 0.0;
+  Vector<double> udNx(eNoN);
 
   for (int a = 0; a < eNoN; a++) {
-    u(0) = u(0) + N(a)*yl(0,a);
-    u(1) = u(1) + N(a)*yl(1,a);
-    u(2) = u(2) + N(a)*yl(2,a);
+    u0 = u0 + N(a)*yl(0,a);
+    u1 = u1 + N(a)*yl(1,a);
+    u2 = u2 + N(a)*yl(2,a);
 
     Td = Td + N(a)*al(i,a);
 
-    Tx(0) = Tx(0) + Nx(0,a)*yl(i,a);
-    Tx(1) = Tx(1) + Nx(1,a)*yl(i,a);
-    Tx(2) = Tx(2) + Nx(2,a)*yl(i,a);
+    Tx0 = Tx0 + Nx(0,a)*yl(i,a);
+    Tx1 = Tx1 + Nx(1,a)*yl(i,a);
+    Tx2 = Tx2 + Nx(2,a)*yl(i,a);
   }
 
   if (com_mod.mvMsh) {
     for (int a = 0; a < eNoN; a++) {
-      u(0) = u(0) - N(a)*yl(4,a);
-      u(1) = u(1) - N(a)*yl(5,a);
-      u(2) = u(2) - N(a)*yl(6,a);
+      u0 = u0 - N(a)*yl(4,a);
+      u1 = u1 - N(a)*yl(5,a);
+      u2 = u2 - N(a)*yl(6,a);
     }
   }
 
-  double kU = u(0)*u(0)*ksix(0,0) + u(1)*u(0)*ksix(1,0) + u(2)*u(0)*ksix(2,0) + u(0)*u(1)*ksix(0,1) + 
-              u(1)*u(1)*ksix(1,1) + u(2)*u(1)*ksix(2,1) + u(0)*u(2)*ksix(0,2) + u(1)*u(2)*ksix(1,2) + 
-              u(2)*u(2)*ksix(2,2);
+  double kU = u0*u0*ksix(0,0) + u1*u0*ksix(1,0) + u2*u0*ksix(2,0) + u0*u1*ksix(0,1) +
+              u1*u1*ksix(1,1) + u2*u1*ksix(2,1) + u0*u2*ksix(0,2) + u1*u2*ksix(1,2) +
+              u2*u2*ksix(2,2);
 
   double kS = ksix(0,0)*ksix(0,0) + ksix(1,0)*ksix(1,0) + ksix(2,0)*ksix(2,0) + ksix(0,1)*ksix(0,1) + 
               ksix(1,1)*ksix(1,1) + ksix(2,1)*ksix(2,1) + ksix(0,2)*ksix(0,2) + ksix(1,2)*ksix(1,2) + 
               ksix(2,2)*ksix(2,2);
 
-  double nTx = ksix(0,0)*Tx(0)*Tx(0) + ksix(1,1)*Tx(1)*Tx(1) + ksix(2,2)*Tx(2)*Tx(2) + 
-               (ksix(0,1) + ksix(1,0))*Tx(0)*Tx(1) + (ksix(0,2) + ksix(2,0))*Tx(0)*Tx(2) + 
-               (ksix(1,2) + ksix(2,1))*Tx(1)*Tx(2);
+  double nTx = ksix(0,0)*Tx0*Tx0 + ksix(1,1)*Tx1*Tx1 + ksix(2,2)*Tx2*Tx2 +
+               (ksix(0,1) + ksix(1,0))*Tx0*Tx1 + (ksix(0,2) + ksix(2,0))*Tx0*Tx2 +
+               (ksix(1,2) + ksix(2,1))*Tx1*Tx2;
 
   #ifdef debug_heatf_3d 
+  Vector<double> u({u0, u1, u2});
+  Vector<double> Tx({Tx0, Tx1, Tx2});
   dmsg << "u: " << u;
   dmsg << "Tx: " << Tx;
   dmsg << "kU: " << kU;
@@ -309,18 +317,18 @@ void heatf_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
     nTx = std::numeric_limits<double>::epsilon();
   }
 
-  double udTx = u(0)*Tx(0) + u(1)*Tx(1) + u(2)*Tx(2);
+  double udTx = u0*Tx0 + u1*Tx1 + u2*Tx2;
   double Tp = fabs(Td + udTx);
   nu = nu + 0.5 * Tp / sqrt(nTx);
   double tauM = ct(3) / sqrt((ct(0)/(dt*dt)) + ct(1)*kU + ct(2)*nu*nu*kS);
   Tp = -tauM*(Td + udTx);
 
   for (int a = 0; a < eNoN; a++) {
-    udNx(a) = u(0)*Nx(0,a) + u(1)*Nx(1,a) + u(2)*Nx(2,a);
+    udNx(a) = u0*Nx(0,a) + u1*Nx(1,a) + u2*Nx(2,a);
   }
 
   for (int a = 0; a < eNoN; a++) {
-    lR(0,a) = lR(0,a) + w*(N(a)*(Td + udTx) + (Nx(0,a)*Tx(0) + Nx(1,a)*Tx(1) + Nx(2,a)*Tx(2))*nu - udNx(a)*Tp);
+    lR(0,a) = lR(0,a) + w*(N(a)*(Td + udTx) + (Nx(0,a)*Tx0 + Nx(1,a)*Tx1 + Nx(2,a)*Tx2)*nu - udNx(a)*Tp);
 
     for (int b = 0; b < eNoN; b++) {
       lK(0,a,b) = lK(0,a,b) + wl*(nu*(Nx(0,a)*Nx(0,b) + Nx(1,a)*Nx(1,b) + Nx(2,a)*Nx(2,b)) + 
