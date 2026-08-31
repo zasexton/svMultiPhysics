@@ -326,6 +326,7 @@ if(PHYSICS_BUILD_TESTS)
         Tests/Unit/test_NavierStokesPressureGauge.cpp
         Tests/Unit/test_NavierStokesLegacyBCs.cpp
         Tests/Unit/test_NavierStokesOutletFactory.cpp
+        Tests/Unit/test_IncompressibleTwoFluidInterface.cpp
         Tests/Unit/test_MovingDomainPhysics.cpp
         Tests/Unit/test_SharpBoundaryOperatorMPI.cpp
         Tests/Unit/test_FreeSurfaceCutStability.cpp
