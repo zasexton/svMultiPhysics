@@ -1,0 +1,164 @@
+{
+  "schema_version": 1,
+  "record_id": "free_surface_wp9_fitted_ale_prerequisite_20260830_41333535",
+  "recorded_at": "2026-08-30T17:05:42-07:00",
+  "outcome": "PASS_PREREQUISITE_NONCLOSURE",
+  "accepted_claim": "fitted_ale_low_level_prerequisite_and_velocity_projection_telemetry",
+  "work_package": "WP-9",
+  "fsr10_closed": false,
+  "fsr11_closed": false,
+  "wp9_closed": false,
+  "q4_closed": false,
+  "physical_fitted_ale_qualified": false,
+  "source_commits": {
+    "velocity_projection_implementation": "afb0f65788215e38e70a170aa108d037527c4248",
+    "clean_matrix_runner": "6213ef09988a1e364a62ab20d5cd174c57da49f6"
+  },
+  "clean_prerequisite_matrix": {
+    "scheduler": {
+      "job_id": 41333535,
+      "ledger": "/scratch/users/zsexton/svmp-job-ledgers/wp4-primary.tsv",
+      "partition": "amarsden",
+      "account": "amarsden",
+      "nodes": 1,
+      "cpus_per_task": 2,
+      "memory": "6G",
+      "mail_user": "zsexton@stanford.edu",
+      "mail_events": [
+        "BEGIN",
+        "END",
+        "FAIL"
+      ],
+      "state": "COMPLETED",
+      "exit_code": "0:0",
+      "elapsed": "00:30:20",
+      "batch_max_rss_kib": 3372188
+    },
+    "campaign": {
+      "script": "/scratch/users/zsexton/wp9-prerequisite-clean-6213ef09-20260830/run.sbatch",
+      "script_sha256": "27c1dfa9298b113f256efde1ad475e1092b7e1925b833b4827325009ba8fe6b6",
+      "result_root": "/scratch/users/zsexton/wp9-prerequisite-clean-6213ef09-20260830/result-41333535",
+      "checksums": "/scratch/users/zsexton/wp9-prerequisite-clean-6213ef09-20260830/result-41333535/checksums.txt",
+      "checksums_sha256": "7d436d9d2abc4fe97bd2d93774233727add5be3eb7854a8ac9cea2e92f3e73fd",
+      "manifest_sha256": "aca4a277ec76e79257d26a2553b5fec39453e0d783828698cbcf8179ec5915a7",
+      "comparison_sha256": "e13aa8758582e02774c7907ef24dcc1772a2d8163330a5294a057d2d0e0f2e6a",
+      "checksum_check_passed": true
+    },
+    "source": {
+      "commit": "6213ef09988a1e364a62ab20d5cd174c57da49f6",
+      "tree": "41d66bf1167fcb259a1d4837c82d10eec584ac0f",
+      "tracked_sources_clean": true,
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "matrix": {
+      "id": "free_surface_wp9_fitted_ale_prerequisite_v4",
+      "sha256": "46225d9c90e71c90881725d4e871466f7a0e19e04a4309627b82e376583715d9",
+      "runner_sha256": "f712560d7d129eeb292f5ba773a588e91d3e5211ac6d8ef68e16d7260a7a6cdb",
+      "status_at_execution": "FROZEN_BEFORE_EXECUTION",
+      "disposition": "PASS_PREREQUISITE_NONCLOSURE"
+    },
+    "binaries": {
+      "test_application_sha256": "295d1882d9714c05c652106d80560af9deb8277241c39ca375f7b2979978ef13",
+      "test_physics_sha256": "4f8786666f0db9632d1420698afc27b3a4d8b84a168007f60178ed07b38c3e36",
+      "mpi_launcher_sha256": "8d48ac61307f87faac0f34cccef9b8c31260bc84053a1a3fb5d2e05017c6af88"
+    },
+    "suites": {
+      "application": {
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "disabled": 0,
+        "wall_time_seconds": 1.0065502529032528
+      },
+      "physics": {
+        "tests": 28,
+        "failures": 0,
+        "errors": 0,
+        "disabled": 0,
+        "wall_time_seconds": 3.231246834853664
+      }
+    }
+  },
+  "velocity_projection_telemetry": {
+    "scheduler": {
+      "job_id": 41330972,
+      "ledger": "/scratch/users/zsexton/svmp-job-ledgers/wp4-primary.tsv",
+      "partition": "amarsden",
+      "account": "amarsden",
+      "nodes": 1,
+      "tasks": 2,
+      "cpus_per_task": 1,
+      "memory": "6G",
+      "mail_user": "zsexton@stanford.edu",
+      "mail_events": [
+        "BEGIN",
+        "END",
+        "FAIL"
+      ],
+      "state": "COMPLETED",
+      "exit_code": "0:0",
+      "elapsed": "00:00:27",
+      "batch_max_rss_kib": 353780
+    },
+    "campaign": {
+      "script": "/scratch/users/zsexton/wp9-velocity-telemetry-20260830/run.sbatch",
+      "script_sha256": "3902c2d7b2e58496ad2a0a07a4ff5e9aeccff763892e8a5ae9753e6093dc8d2e",
+      "result_root": "/scratch/users/zsexton/wp9-velocity-telemetry-20260830/result-41330972",
+      "manifest": "/scratch/users/zsexton/wp9-velocity-telemetry-20260830/result-41330972/campaign.sha256",
+      "manifest_sha256": "dc16370759d0597f70c73a4c0359b5aa3807b9f23dcbda20abbbf2dd20380bbf",
+      "manifest_check_passed": true
+    },
+    "suites": {
+      "focused_serial": {
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "disabled": 0
+      },
+      "moving_domain_serial": {
+        "tests": 204,
+        "failures": 0,
+        "errors": 0,
+        "disabled": 0
+      },
+      "two_rank_projection_history": {
+        "tests": 1,
+        "failures": 0,
+        "errors": 0,
+        "disabled": 0
+      }
+    },
+    "serial_measurement": {
+      "boundary_measure": 0.5050049504707851,
+      "mesh_velocity_squared_integral": 0.051763007423255465,
+      "mesh_normal_squared_integral": 0.045449554461996916,
+      "mesh_tangential_squared_integral": 0.006313452961258539,
+      "projection_identity_residual": 1.0408340855860843e-17
+    },
+    "two_rank_measurement": {
+      "boundary_measure": 0.5000000000000002,
+      "mesh_velocity_squared_integral": 0.05125000000000002,
+      "mesh_normal_squared_integral": 0.04500000000000001,
+      "mesh_tangential_squared_integral": 0.006250000000000004,
+      "projection_identity_residual": 1.734723475976807e-18,
+      "rank_local_revision_provenance_preserved": true
+    }
+  },
+  "validated_contracts": [
+    "the frozen schema-2 fitted policy matrix passes from a clean source revision",
+    "all three tangential policy states retain distinct source-level behavior",
+    "unsupported mesh-velocity, normal-enforcement, surface-stress, and contact requests fail closed",
+    "accepted operator-stage telemetry separates full, normal, and tangential mesh-velocity moments",
+    "the full squared moment equals the normal plus tangential moments to roundoff",
+    "the two-rank history preserves complete global moments and rank-local geometry revisions"
+  ],
+  "open_requirements": [
+    "derive and qualify prescribed tangential-penalty scaling",
+    "derive and qualify surface-smoothing scaling, consistency, stability, and work",
+    "add accepted target-error, normal-kinematic-error, and surface-work histories",
+    "serialize fitted boundary histories and prove restart continuity",
+    "freeze rotation, numbering, and representative partition equivalence",
+    "freeze geometric-conservation, phase-volume, surface-work, and mesh-quality metrics",
+    "complete the flat translation, prescribed tangential shear, and fitted sloshing campaigns"
+  ]
+}

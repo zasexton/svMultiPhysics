@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "record_id": "free_surface_wp8_rejected_attempt_20260830_41333499",
+  "recorded_at": "2026-08-30T17:05:42-07:00",
+  "outcome": "PASS_PREREQUISITE_NONCLOSURE",
+  "accepted_claim": "unstaged_rejected_attempt_production_connector_prerequisite",
+  "work_package": "WP-8",
+  "fsr09_closed": false,
+  "wp8_closed": false,
+  "implementation_commit": "646e947d0ce18407b0dc70f1b9783bd8978b1179",
+  "scheduler": {
+    "job_id": 41333499,
+    "ledger": "/scratch/users/zsexton/svmp-job-ledgers/wp4-primary.tsv",
+    "partition": "amarsden",
+    "account": "amarsden",
+    "nodes": 1,
+    "cpus_per_task": 2,
+    "memory": "8G",
+    "mail_user": "zsexton@stanford.edu",
+    "mail_events": [
+      "BEGIN",
+      "END",
+      "FAIL"
+    ],
+    "state": "COMPLETED",
+    "exit_code": "0:0",
+    "elapsed": "00:32:27",
+    "batch_max_rss_kib": 3277684
+  },
+  "campaign": {
+    "script": "/scratch/users/zsexton/wp4-wp8-focused-20260830/run.sbatch",
+    "script_sha256": "4aecd9fc76155a2d77bdc73a6f3018931c580f36906192c4fe2b70fe5d44063e",
+    "result_root": "/scratch/users/zsexton/wp4-wp8-focused-20260830/result-41333499",
+    "manifest": "/scratch/users/zsexton/wp4-wp8-focused-20260830/result-41333499/campaign.sha256",
+    "manifest_sha256": "197a4e8648aea38c72d99b99689171d3a28c98b37145a5d6d2ce90cc3269c0b3",
+    "manifest_check_passed": true,
+    "source_hash_check_passed": true
+  },
+  "source_sha256": {
+    "Code/Source/solver/Application/Core/ApplicationDriver.cpp": "abf5a5a13d91572ff4b3a0774f967e8c1cd1ca73c8f85f1d82c88906f6be7715",
+    "Code/Source/solver/Application/Tests/Unit/test_ApplicationDriverLevelSetWorkflows.cpp": "2d09a361c1381e5c4b759bbc0b3e5c031efb32e4e3fe36477cf40ac5375f6105"
+  },
+  "test_binaries": {
+    "test_application_sha256": "1cf41d8ee1e77c5376be8276465873f81cdb359d99731d8b038c688d52afb546"
+  },
+  "suites": {
+    "application_workflows": {
+      "tests": 99,
+      "failures": 0,
+      "errors": 0,
+      "disabled": 0,
+      "elapsed_seconds": 249.109
+    },
+    "free_surface_energy_ledger": {
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "disabled": 0,
+      "elapsed_seconds": 0.003
+    }
+  },
+  "validated_contracts": [
+    "a restored rejected solve attempt publishes before an accepted retry",
+    "the rejected attempt and accepted retry use consecutive transaction identifiers and attempt indices",
+    "the rejected attempt retains its explicit reason without inventing unavailable trial-balance values",
+    "every rejected attempt contributes exact zero to accepted-state energy channels",
+    "a cut-topology time-loop rejection is not relabeled as a topology-jump energy record without rejected endpoint provenance",
+    "a later accepted retry may publish a complete fixed-topology backward-Euler record"
+  ],
+  "open_requirements": [
+    "capture rejected physical endpoint and trial-balance values when available",
+    "define and qualify topology-jump energy accounting",
+    "qualify physical backward-Euler rejection and retry histories",
+    "qualify distributed rejection publication and recovery",
+    "complete the full WP-8 physical campaign matrix"
+  ]
+}

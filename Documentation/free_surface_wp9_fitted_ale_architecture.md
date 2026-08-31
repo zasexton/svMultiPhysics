@@ -3,16 +3,18 @@
 Status: low-level policy operators, boundary-local normal ownership, exact
 consumer binding, bounded fitted surface/contact capability provenance, and
 transactional in-memory accepted-policy provenance are present in source. A
-bounded raw fitted-normal operator-stage measurement path is also present in
-the current dirty source but remains uncompiled and unexecuted;
-focused mixed-optimization serial and two-rank diagnostics have executed,
-while an integrated Release build, the frozen matrix, WP-9, Q4, and physical
-fitted-ALE qualification remain open.
+bounded fitted-normal operator-stage measurement path now records full,
+normal, and tangential mesh-velocity moments. Hash-bound serial and two-rank
+telemetry passed, and the frozen 32-test prerequisite matrix passed from a
+clean Release source revision. The method exits, all three physical
+fitted-ALE campaigns, WP-9, FSR-10, FSR-11, and Q4 remain open.
 
-Audit basis: repository HEAD
-`a3f8ccfe82e0a9d32e2ee30c35a9e48325de8f07`, plus the dirty tracked
-source state reviewed through 2026-08-17. Results produced from a dirty source
-tree do not establish immutable source-to-binary correspondence.
+Audit basis: projection telemetry implementation commit
+`afb0f65788215e38e70a170aa108d037527c4248`, clean-matrix runner commit
+`6213ef09988a1e364a62ab20d5cd174c57da49f6`, and the two 2026-08-30
+campaigns recorded below. Earlier dated diagnostic sections are retained as
+historical development evidence and are superseded where this checkpoint
+reports a later execution result.
 
 This record updates the WP-9 boundary from
 `Documentation/free_surface_boundary_unfitted_audit_20260720.md`. It does
@@ -50,12 +52,12 @@ schema-2 supported capability.
 
 This is enough to freeze a truthful source prerequisite harness. It is not
 enough to close WP-9 or Q4. The boundary-local normal ownership slice has a
-focused dirty-tree diagnostic pass, but an integrated Release build and frozen
-matrix run remain absent. Measured boundary kinematics and work, scaling,
-restart continuity, and fault-complete accepted-history arguments remain open.
-The current dirty source records only raw normal operator-stage moments, not
-the complete policy-specific boundary-kinematics/work contract, and none of
-the required physical ALE campaigns has run.
+clean Release prerequisite-matrix pass. Measured target error and work,
+scaling, restart continuity, and fault-complete accepted-history arguments
+remain open. The executed operator-stage telemetry records full, normal, and
+tangential mesh-velocity moments plus their projection identity, but not the
+complete policy-specific boundary-kinematics/work contract. None of the
+required physical ALE campaigns has run.
 
 ## Schema and policy contract
 
@@ -535,21 +537,22 @@ matrix, or support WP-9, Q4, or any audit checkbox.
 
 The matrix keeps the following method work open:
 
-1. Run the three-policy source fixtures in an integrated current-tree Release
-   build and freeze their exact operator/state provenance.
+1. Expand the clean matrix beyond the present 32-test source-contract slice
+   to the complete operator-stage history, accepted transaction, and backend
+   ownership contract.
 2. Derive and freeze dimensional, mesh, time-step, and polynomial-order
    scaling for the prescribed tangential penalty.
 3. Derive the dimensional and mesh-order scaling of the surface-smoothing
    weight and establish consistency, stability, and surface-work arguments
    for the coupled fluid and mesh rows.
-4. Record measured boundary mesh velocity, normal and tangential projection,
+4. Extend the executed full, normal, and tangential mesh-velocity moments with
    target error, normal-kinematic error, and surface work at accepted steps.
 5. Serialize those histories and prove restart continuity.
-6. Establish rotation, numbering, and representative MPI partition
-   equivalence.
-7. Promote the source-level fitted surface/contact capability provenance and
-   its pre-mutation rejection coverage into the frozen matrix and execute it
-   in an integrated current-tree build.
+6. Extend the existing two-rank moment/revision regression to rotation,
+   numbering, and representative MPI partition equivalence.
+7. Expand the frozen capability exclusions beyond the executed surface-stress
+   and fitted contact-model cases to every supported registration order and
+   boundary combination.
 8. Promote the current normal-ownership prerequisite into the frozen matrix,
    freeze the current consumer-bound accepted provenance tests, execute the
    complete compatibility outcomes in an integrated build, exercise the
@@ -578,6 +581,46 @@ No low-level test count, schema-1 regression, fitted example, or policy
 declaration can close FSR-10, FSR-11, WP-9, or Q4. Closure requires the open
 method exits and all physical campaigns to pass at one immutable source
 revision with complete provenance.
+
+## 2026-08-30 clean prerequisite and projection checkpoint
+
+Commit `afb0f65788215e38e70a170aa108d037527c4248` extends the accepted
+operator-stage record from a scalar normal-gap view to the full squared
+mesh-velocity moment and its orthogonal normal and tangential components. The
+published record includes all three RMS values and the residual of
+
+\[
+\int_{\Gamma_f}|w_m|^2\,dS
+-\int_{\Gamma_f}|w_m\mathbin{\cdot}n|^2\,dS
+-\int_{\Gamma_f}|(I-n\mathbin{\otimes}n)w_m|^2\,dS=0.
+\]
+
+Hash-bound `amarsden` job `41330972` completed with exit `0:0` in
+`00:00:27`, using one node, two tasks, 6 GB, and a batch peak resident set of
+353,780 KiB. It passed two focused serial tests, all 204
+`MovingDomainPhysics` tests, and the two-rank accepted-history regression. The
+serial projection residual was `1.0408340855860843e-17`; the two-rank result
+was `1.734723475976807e-18`. Both records retained the expected complete
+global moments, while the distributed case retained distinct rank-local
+geometry revisions.
+
+Commit `6213ef09988a1e364a62ab20d5cd174c57da49f6` freezes launcher-isolated
+single-rank execution for the prerequisite wrapper. Clean-source Release job
+`41333535` completed with exit `0:0` in `00:30:20`, using one node, two CPUs,
+6 GB, and a batch peak resident set of 3,372,188 KiB. The Application group
+passed 4/4 tests and the Physics group passed 28/28 tests with no failures,
+errors, disabled tests, unexpected tests, or missing tests. The matrix stayed
+byte-identical at SHA-256
+`46225d9c90e71c90881725d4e871466f7a0e19e04a4309627b82e376583715d9`,
+and every result checksum verified.
+
+The immutable non-closure record is
+[`free_surface_wp9_fitted_ale_prerequisite_20260830_41333535/record.json`](qualification_logs/free_surface_wp9_fitted_ale_prerequisite_20260830_41333535/record.json).
+This checkpoint establishes only the stated prerequisite and projection
+telemetry. Penalty/smoothing scaling, target and kinematic error, surface work,
+restart continuity, broader partition equivalence, fault-complete publication,
+and the flat-translation, prescribed-shear, and sloshing campaigns remain
+open. Therefore WP-9, FSR-10, FSR-11, and Q4 remain unchecked.
 
 ## Source evidence map
 

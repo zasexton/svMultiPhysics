@@ -307,16 +307,35 @@ rejection until a topology-jump classification and acceptance policy exist.
 This class validates and publishes values assembled by distinct owners; it
 does not assemble a channel itself. Production now connects it to the
 accepted-step transaction for a deliberately narrow one-phase envelope. The
-connector requires backward Euler with temporal order one, a first attempt
-following a continuous complete-energy history, two consecutive accepted
-functional groups, one common unmodified operator/stored-energy revision,
-fixed mesh and cut topology, no extension map, no geometry pruning, and no
-numerical-maintenance row. Physical `Transport` rows remain eligible because
-they are not numerical maintenance. An accepted aggregate constraint is
-allowed only when every rooted row is satisfied to scaled roundoff and no
-rootless feature exists. The owning flow module must also prove a closed
-boundary with homogeneous prescribed velocity data, no pressure Dirichlet
-boundary, no imposed traction, and no open-boundary route.
+connector requires backward Euler with temporal order one, a nonzero sequenced
+attempt following a continuous complete-energy history, two consecutive
+accepted functional groups, one common unmodified operator/stored-energy
+revision, fixed mesh and cut topology, no extension map, no geometry pruning,
+and no numerical-maintenance row. An accepted retry is eligible when its
+attempt index agrees with the conservative-phase transaction and every earlier
+attempt was published against the same restored accepted endpoint. Physical
+`Transport` rows remain eligible because they are not numerical maintenance.
+An accepted aggregate constraint is allowed only when every rooted row is
+satisfied to scaled roundoff and no rootless feature exists. The owning flow
+module must also prove a closed boundary with homogeneous prescribed velocity
+data, no pressure Dirichlet boundary, no imposed traction, and no open-boundary
+route.
+
+The production rejection callback now publishes an unstaged ledger attempt
+after state restoration and before the step controller changes the next time
+step. It uses the latest complete accepted functional group as the starting
+endpoint, retains the exact solve-attempt sequence, advances the transaction
+identifier, maps the time-loop reason, keeps unavailable rejected endpoint and
+trial-balance fields unavailable, and publishes exact zero for every
+accepted-state contribution. A cut-topology rejection is conservatively
+classified as `PreacceptRejection` because the restored callback has no
+rejected physical endpoint tuple from which to prove a topology-jump record.
+If complete accepted history is already discontinuous, no rejection record is
+published and the missing preceding-history requirement remains explicit.
+Hash-bound `amarsden` job `41333499` passed all 99 application workflow tests
+and all 12 energy-ledger tests with no failures, errors, or disabled tests. Its
+immutable prerequisite/non-closure record is
+[`free_surface_wp8_rejected_attempt_20260830_41333499/record.json`](qualification_logs/free_surface_wp8_rejected_attempt_20260830_41333499/record.json).
 
 Within that envelope, the connector consumes kinetic, gravitational,
 surface, and wall stored energy; endpoint bulk, wall-slip, and line-friction
@@ -335,9 +354,10 @@ The focused fixtures validate exact channel mapping, ledger commit, and
 simultaneous fail-closed classification of rejected attempts, topology
 changes, extension, pruning, numerical maintenance, rootless/nonneutral
 aggregation, unresolved boundary work, and incomplete residual work. They do
-not supply physical qualification evidence. Nonzero event work, complete
-rejected-attempt publication, a topology-event policy, a convergent energy
-identity, thresholds, simulations, and WP-8 closure all remain open.
+not supply physical qualification evidence. The unstaged rollback attempt is
+connected, but rejected physical endpoint/trial-balance values, topology-jump
+energy classification, nonzero event work, a convergent energy identity,
+thresholds, simulations, and WP-8 closure all remain open.
 
 ### Production channel ownership
 
