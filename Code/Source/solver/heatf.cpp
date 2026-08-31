@@ -68,7 +68,6 @@ void construct_heatf(ComMod& com_mod, const mshType& lM, const SolutionStates& s
   #endif
 
   Vector<int> ptr(eNoN);
-  Vector<double> N(eNoN);
   Array<double> xl(nsd,eNoN), al(tDof,eNoN), yl(tDof,eNoN), Nx(nsd,eNoN), lR(dof,eNoN);
   Array3<double> lK(dof*dof,eNoN,eNoN);
   Array<double> ksix(nsd,nsd);
@@ -118,7 +117,7 @@ void construct_heatf(ComMod& com_mod, const mshType& lM, const SolutionStates& s
       }
 
       double w = lM.w(g) * Jac;
-      N = lM.N.col(g);
+      const auto N = lM.N.rcol(g);
 
       if (nsd == 3) {
         heatf_3d(com_mod, eNoN, w, N, Nx, al, yl, ksix, lR, lK);
