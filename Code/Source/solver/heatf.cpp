@@ -319,21 +319,29 @@ void heatf_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
   }
 
   double udTx = u0*Tx0 + u1*Tx1 + u2*Tx2;
-  double Tp = fabs(Td + udTx);
+  const double residual = Td + udTx;
+  double Tp = fabs(residual);
   nu = nu + 0.5 * Tp / sqrt(nTx);
   double tauM = ct(3) / sqrt((ct(0)/(dt*dt)) + ct(1)*kU + ct(2)*nu*nu*kS);
-  Tp = -tauM*(Td + udTx);
+  Tp = -tauM*residual;
 
   for (int a = 0; a < eNoN; a++) {
     udNx(a) = u0*Nx(0,a) + u1*Nx(1,a) + u2*Nx(2,a);
   }
 
   for (int a = 0; a < eNoN; a++) {
-    lR(0,a) = lR(0,a) + w*(N(a)*(Td + udTx) + (Nx(0,a)*Tx0 + Nx(1,a)*Tx1 + Nx(2,a)*Tx2)*nu - udNx(a)*Tp);
+    const double Na = N(a);
+    const double Nxa0 = Nx(0,a);
+    const double Nxa1 = Nx(1,a);
+    const double Nxa2 = Nx(2,a);
+    const double udNxa = udNx(a);
+    const double test = Na + tauM*udNxa;
+
+    lR(0,a) = lR(0,a) + w*(Na*residual + (Nxa0*Tx0 + Nxa1*Tx1 + Nxa2*Tx2)*nu - udNxa*Tp);
 
     for (int b = 0; b < eNoN; b++) {
-      lK(0,a,b) = lK(0,a,b) + wl*(nu*(Nx(0,a)*Nx(0,b) + Nx(1,a)*Nx(1,b) + Nx(2,a)*Nx(2,b)) + 
-                  (N(a) + tauM*udNx(a))*(N(b)*amd + udNx(b)));
+      lK(0,a,b) = lK(0,a,b) + wl*(nu*(Nxa0*Nx(0,b) + Nxa1*Nx(1,b) + Nxa2*Nx(2,b)) +
+                  test*(N(b)*amd + udNx(b)));
     }
   }
 }
