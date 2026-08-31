@@ -33,8 +33,10 @@
 #include "FE/LevelSet/LevelSetVelocityExtensionConstraint.h"
 #include "FE/LevelSet/LevelSetVolume.h"
 #include "FE/Geometry/MappingFactory.h"
+#include "FE/Geometry/CutQuadratureMapping.h"
 #include "FE/Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "FE/Interfaces/IncompressibleTwoFluidDiagnostics.h"
 #include "FE/Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "FE/PostProcessing/DerivedResultTypes.h"
 #include "FE/PostProcessing/DerivedResultEvaluator.h"
@@ -9515,6 +9517,270 @@ makeFreeSurfaceVelocityEvaluator(
         return physical_gradient;
       };
   return velocity;
+}
+
+svmp::FE::interfaces::FreeSurfaceGeometryScalarEvaluator
+makeFreeSurfaceScalarValueEvaluator(
+    application::core::SimulationComponents& sim,
+    svmp::FE::FieldId scalar_field,
+    std::span<const svmp::FE::Real> solution,
+    std::string_view diagnostic_context)
+{
+  const auto& record = sim.fe_system->fieldRecord(scalar_field);
+  const auto offset = sim.fe_system->fieldDofOffset(scalar_field);
+  if (!record.space || offset < 0 || record.components != 1 ||
+      record.space->value_dimension() != 1) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] " +
+        std::string(diagnostic_context) +
+        " scalar field is incompatible with its diagnostic declaration.");
+  }
+  auto* const fe_system = sim.fe_system.get();
+  const auto space = record.space;
+  const auto context = std::string(diagnostic_context);
+  svmp::FE::interfaces::FreeSurfaceGeometryScalarEvaluator evaluator;
+  evaluator.value =
+      [fe_system,
+       space,
+       offset,
+       scalar_field,
+       solution,
+       context](
+          svmp::FE::GlobalIndex cell,
+          const std::array<svmp::FE::Real, 3>& reference_point,
+          const svmp::FE::geometry::CutQuadratureProvenance&) {
+        const auto cell_dofs =
+            fe_system->fieldDofHandler(scalar_field).getCellDofs(cell);
+        std::vector<svmp::FE::Real> coefficients;
+        coefficients.reserve(cell_dofs.size());
+        for (const auto dof : cell_dofs) {
+          if (dof < 0) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] " + context +
+                " scalar cell has a negative DOF.");
+          }
+          const auto index = static_cast<std::size_t>(offset + dof);
+          if (index >= solution.size()) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] " + context +
+                " solution is too small for the scalar field.");
+          }
+          coefficients.push_back(solution[index]);
+        }
+        const svmp::FE::spaces::FunctionSpace::Value point{
+            reference_point[0], reference_point[1], reference_point[2]};
+        const auto value = space->evaluate(point, coefficients);
+        return value[0];
+      };
+  return evaluator;
+}
+
+std::vector<svmp::FE::systems::AcceptedTwoFluidStageDiagnosticState>
+evaluateCurrentTwoFluidStageDiagnostics(
+    application::core::SimulationComponents& sim,
+    std::span<const svmp::FE::systems::
+                        TwoFluidAcceptedStageDiagnosticDeclaration>
+        declarations,
+    std::span<const svmp::FE::Real> stage_solution,
+    svmp::FE::Real effective_dt,
+    const svmp::MeshComm& comm)
+{
+  const auto local_count = static_cast<double>(declarations.size());
+  if (globalMinDouble(local_count, comm) !=
+      globalMaxDouble(local_count, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Two-fluid diagnostic declaration coverage differs across the FE communicator.");
+  }
+  if (declarations.empty()) {
+    return {};
+  }
+  const auto* context = sim.fe_system->cutIntegrationContext();
+  if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0 ||
+      globalMinDouble(stage_solution.empty() ? 0.0 : 1.0, comm) != 1.0 ||
+      globalMinDouble(static_cast<double>(stage_solution.size()), comm) !=
+          globalMaxDouble(static_cast<double>(stage_solution.size()), comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Two-fluid stage diagnostics require an authoritative cut context and a communicator-consistent stage solution.");
+  }
+  context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+      sim.fe_system->meshAccess());
+
+  std::vector<svmp::FE::systems::AcceptedTwoFluidStageDiagnosticState>
+      states;
+  states.reserve(declarations.size());
+  for (const auto& declaration : declarations) {
+    const auto expected_source_id =
+        svmp::FE::interfaces::LevelSetInterfaceSource::fromField(
+            declaration.level_set_field)
+            .identifier();
+    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto found = std::find_if(
+        snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
+          return candidate &&
+                 candidate->revision().interface_marker ==
+                     declaration.interface_marker &&
+                 candidate->revision().domain_id ==
+                     declaration.geometry_domain_id &&
+                 candidate->revision().source_id == expected_source_id &&
+                 candidate->revision().isovalue ==
+                     declaration.level_set_isovalue;
+        });
+    if (globalMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
+        1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Two-fluid stage diagnostics cannot resolve the declared authoritative snapshot for marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    const auto& snapshot = **found;
+    const auto [minimum_snapshot_revision, maximum_snapshot_revision] =
+        globalMinMaxUint64(
+            snapshot.revision().snapshot_revision_key, comm);
+    if (minimum_snapshot_revision == 0u ||
+        minimum_snapshot_revision != maximum_snapshot_revision) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Two-fluid snapshot revision differs across the FE communicator.");
+    }
+
+    std::optional<
+        svmp::FE::interfaces::IncompressibleTwoFluidDiagnosticAccumulator>
+        local_accumulator;
+    std::exception_ptr local_evaluation_failure;
+    try {
+      svmp::FE::interfaces::IncompressibleTwoFluidPhaseEvaluators negative{
+          .velocity = makeFreeSurfaceVelocityEvaluator(
+              sim,
+              declaration.negative_velocity_field,
+              stage_solution,
+              "Two-fluid negative-phase stage"),
+          .pressure = makeFreeSurfaceScalarValueEvaluator(
+              sim,
+              declaration.negative_pressure_field,
+              stage_solution,
+              "Two-fluid negative-phase stage"),
+      };
+      svmp::FE::interfaces::IncompressibleTwoFluidPhaseEvaluators positive{
+          .velocity = makeFreeSurfaceVelocityEvaluator(
+              sim,
+              declaration.positive_velocity_field,
+              stage_solution,
+              "Two-fluid positive-phase stage"),
+          .pressure = makeFreeSurfaceScalarValueEvaluator(
+              sim,
+              declaration.positive_pressure_field,
+              stage_solution,
+              "Two-fluid positive-phase stage"),
+      };
+      auto cell_measures =
+          std::make_shared<std::map<svmp::FE::GlobalIndex, svmp::FE::Real>>();
+      auto* const mesh = &sim.fe_system->meshAccess();
+      svmp::FE::interfaces::IncompressibleTwoFluidCellMeasureEvaluator
+          cell_measure;
+      cell_measure.physical_cell_measure =
+          [mesh, cell_measures](svmp::FE::GlobalIndex cell) {
+            const auto existing = cell_measures->find(cell);
+            if (existing != cell_measures->end()) {
+              return existing->second;
+            }
+            const auto value =
+                svmp::FE::geometry::physicalCellMeasureFromMapping(
+                    *mesh, cell);
+            cell_measures->emplace(cell, value);
+            return value;
+          };
+      local_accumulator.emplace(
+          svmp::FE::interfaces::
+              evaluateLocalIncompressibleTwoFluidDiagnostics(
+                  snapshot,
+                  declaration.parameters,
+                  negative,
+                  positive,
+                  cell_measure,
+                  effective_dt));
+    } catch (...) {
+      local_evaluation_failure = std::current_exception();
+    }
+    if (globalAnyBool(local_evaluation_failure != nullptr, comm)) {
+      if (local_evaluation_failure != nullptr) {
+        std::rethrow_exception(local_evaluation_failure);
+      }
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Another FE communicator rank could not evaluate the two-fluid stage diagnostics.");
+    }
+    auto global = std::move(*local_accumulator);
+
+    const auto global_sum = [&comm](svmp::FE::Real value) {
+      return static_cast<svmp::FE::Real>(
+          globalSumDouble(static_cast<double>(value), comm));
+    };
+    global.owned_interface_quadrature_point_count = globalSumSize(
+        global.owned_interface_quadrature_point_count, comm);
+    global.interface_measure = global_sum(global.interface_measure);
+    global.velocity_jump_squared =
+        global_sum(global.velocity_jump_squared);
+    global.normal_velocity_jump_squared =
+        global_sum(global.normal_velocity_jump_squared);
+    global.tangential_velocity_jump_squared =
+        global_sum(global.tangential_velocity_jump_squared);
+    global.negative_normal_flux = global_sum(global.negative_normal_flux);
+    global.positive_normal_flux = global_sum(global.positive_normal_flux);
+    global.traction_jump_squared =
+        global_sum(global.traction_jump_squared);
+    global.traction_jump_normal_integral =
+        global_sum(global.traction_jump_normal_integral);
+    global.pressure_jump_integral =
+        global_sum(global.pressure_jump_integral);
+    global.pressure_jump_squared =
+        global_sum(global.pressure_jump_squared);
+    global.surface_energy_work = global_sum(global.surface_energy_work);
+    global.nitsche_consistency_work =
+        global_sum(global.nitsche_consistency_work);
+    global.nitsche_adjoint_work =
+        global_sum(global.nitsche_adjoint_work);
+    global.nitsche_penalty_work =
+        global_sum(global.nitsche_penalty_work);
+    for (auto* vector : {&global.negative_traction_integral,
+                         &global.positive_traction_integral,
+                         &global.traction_jump_integral}) {
+      for (auto& value : *vector) {
+        value = global_sum(value);
+      }
+    }
+    const auto reduce_optional = [&](std::optional<svmp::FE::Real>& value) {
+      const double present = value.has_value() ? 1.0 : 0.0;
+      if (globalMinDouble(present, comm) !=
+          globalMaxDouble(present, comm)) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Two-fluid prescribed diagnostic applicability differs across the FE communicator.");
+      }
+      if (value.has_value()) {
+        value = global_sum(*value);
+      }
+    };
+    reduce_optional(global.prescribed_stress_jump_residual_squared);
+    reduce_optional(global.prescribed_pressure_jump_error_squared);
+    const auto reduce_phase = [&](auto& phase) {
+      phase.owned_quadrature_point_count =
+          globalSumSize(phase.owned_quadrature_point_count, comm);
+      phase.volume = global_sum(phase.volume);
+      phase.velocity_squared_integral =
+          global_sum(phase.velocity_squared_integral);
+      for (auto& value : phase.velocity_integral) {
+        value = global_sum(value);
+      }
+    };
+    reduce_phase(global.negative_phase);
+    reduce_phase(global.positive_phase);
+    states.push_back(
+        svmp::FE::systems::AcceptedTwoFluidStageDiagnosticState{
+            .interface_marker = declaration.interface_marker,
+            .geometry_revision = snapshot.revision(),
+            .diagnostics =
+                svmp::FE::interfaces::
+                    finalizeIncompressibleTwoFluidDiagnostics(
+                        global, declaration.parameters),
+        });
+  }
+  return states;
 }
 
 std::vector<svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
@@ -28587,6 +28853,43 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       fitted_ale_operator_stage_scheme_supported,
       transient_scheme.canonical_name,
       sim.fe_system->temporalOrder());
+  const auto two_fluid_stage_declarations =
+      sim.fe_system->twoFluidAcceptedStageDiagnosticDeclarations();
+  const auto [minimum_two_fluid_stage_count,
+              maximum_two_fluid_stage_count] =
+      globalMinMaxUint64(
+          static_cast<std::uint64_t>(two_fluid_stage_declarations.size()),
+          velocity_extension_artifact_comm);
+  if (minimum_two_fluid_stage_count != maximum_two_fluid_stage_count) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Two-fluid accepted-stage declaration coverage differs across the active FE communicator.");
+  }
+  const bool local_two_fluid_stage_scheme_supported =
+      sim.fe_system->temporalOrder() == 1 &&
+      (opts.scheme ==
+           svmp::FE::timestepping::SchemeKind::BackwardEuler ||
+       opts.scheme == svmp::FE::timestepping::SchemeKind::DG0 ||
+       opts.scheme ==
+           svmp::FE::timestepping::SchemeKind::GeneralizedAlpha);
+  const auto [minimum_two_fluid_stage_scheme_supported,
+              maximum_two_fluid_stage_scheme_supported] =
+      globalMinMaxUint64(
+          local_two_fluid_stage_scheme_supported ? 1u : 0u,
+          velocity_extension_artifact_comm);
+  if (minimum_two_fluid_stage_scheme_supported !=
+      maximum_two_fluid_stage_scheme_supported) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Two-fluid accepted-stage scheme support differs across the active FE communicator.");
+  }
+  if (maximum_two_fluid_stage_count != 0u &&
+      maximum_two_fluid_stage_scheme_supported == 0u) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Two-fluid accepted-stage diagnostics require temporal-order-one Backward Euler, DG0, or first-order generalized-alpha.");
+  }
+  const bool evaluate_two_fluid_stage =
+      maximum_two_fluid_stage_count != 0u;
+  const auto two_fluid_stage_state_size =
+      sim.fe_system->dofHandler().getNumDofs();
   const auto free_surface_declarations =
       sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
   const auto free_surface_acceptance_coverage =
@@ -29128,6 +29431,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       fitted_ale_candidate_stage_observer;
   std::function<void(
       const svmp::FE::timestepping::CandidateStageObservation&)>
+      two_fluid_candidate_stage_observer;
+  std::function<void(
+      const svmp::FE::timestepping::CandidateStageObservation&)>
       dynamic_contact_candidate_stage_observer;
   std::function<void(
       const svmp::FE::timestepping::CandidateStageObservation&)>
@@ -29362,6 +29668,131 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   *stage_state, std::move(*stage_metadata));
         };
   }
+  if (evaluate_two_fluid_stage) {
+    two_fluid_candidate_stage_observer =
+        [&](const svmp::FE::timestepping::CandidateStageObservation&
+                observation) {
+          const bool scheme_matches =
+              observation.scheme == opts.scheme &&
+              (observation.scheme ==
+                       svmp::FE::timestepping::SchemeKind::BackwardEuler ||
+               observation.scheme ==
+                       svmp::FE::timestepping::SchemeKind::DG0 ||
+               observation.scheme ==
+                       svmp::FE::timestepping::SchemeKind::GeneralizedAlpha);
+          const bool generalized_alpha_shape_matches =
+              observation.scheme ==
+                      svmp::FE::timestepping::SchemeKind::GeneralizedAlpha
+                  ? observation.generalized_alpha.has_value()
+                  : !observation.generalized_alpha.has_value();
+          const bool local_stage_ready =
+              scheme_matches && generalized_alpha_shape_matches &&
+              observation.temporal_order == 1 &&
+              observation.step_index > 0 && observation.attempt_index >= 0 &&
+              observation.state_vector != nullptr &&
+              observation.rate_vector != nullptr &&
+              observation.state_vector != observation.rate_vector &&
+              observation.state_vector->size() ==
+                  two_fluid_stage_state_size &&
+              observation.rate_vector->size() ==
+                  two_fluid_stage_state_size &&
+              observation.mesh_revision.has_value();
+          if (globalAnyBool(
+                  !local_stage_ready,
+                  velocity_extension_artifact_comm)) {
+            if (!local_stage_ready) {
+              throw std::runtime_error(
+                  "[svMultiPhysics::Application] Two-fluid accepted-stage diagnostics require matching temporal-order-one state/rate vectors, scheme coordinates, and a complete mesh revision.");
+            }
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Another active FE communicator rank rejected two-fluid stage readiness.");
+          }
+
+          const auto stage_state_revision =
+              collectiveMeshBoundaryStateFingerprint(
+                  *observation.state_vector,
+                  velocity_extension_artifact_comm);
+          const auto stage_rate_revision =
+              collectiveMeshBoundaryStateFingerprint(
+                  *observation.rate_vector,
+                  velocity_extension_artifact_comm);
+          std::vector<svmp::FE::Real> stage_solution;
+          std::optional<
+              svmp::FE::systems::OperatorStageMeasurementMetadata>
+              stage_metadata;
+          std::exception_ptr local_preparation_failure;
+          try {
+            svmp::FE::systems::SystemStateView stage_view;
+            stage_view.u_vector = observation.state_vector;
+            stage_solution = gatherFeOrderedSolution(
+                stage_view,
+                velocity_extension_artifact_comm);
+            const auto& revision = *observation.mesh_revision;
+            svmp::FE::systems::OperatorStageMeasurementMetadata metadata{
+                .scheme_name =
+                    observation.scheme ==
+                            svmp::FE::timestepping::SchemeKind::BackwardEuler
+                        ? "BackwardEuler"
+                        : observation.scheme ==
+                                  svmp::FE::timestepping::SchemeKind::DG0
+                              ? "DG0"
+                              : "GeneralizedAlphaFirstOrder",
+                .temporal_order = observation.temporal_order,
+                .prospective_accepted_step =
+                    static_cast<std::uint64_t>(observation.step_index),
+                .prospective_attempt =
+                    static_cast<std::uint64_t>(observation.attempt_index),
+                .step_start_time = observation.step_start_time,
+                .step_end_time = observation.step_end_time,
+                .state_time = observation.state_time,
+                .rate_time = observation.rate_time,
+                .dt = observation.dt,
+                .expected_stage_geometry =
+                    svmp::FE::systems::OperatorStageGeometryMetadata{
+                        .geometry_revision = revision.geometry_revision,
+                        .topology_revision = revision.topology_revision,
+                        .ownership_revision = revision.ownership_revision,
+                        .numbering_revision = revision.numbering_revision,
+                        .field_layout_revision =
+                            revision.field_layout_revision,
+                        .label_revision = revision.label_revision,
+                        .active_configuration_epoch =
+                            revision.active_configuration_epoch,
+                        .coordinate_configuration_key =
+                            revision.coordinate_configuration_key,
+                    },
+                .state_revision = stage_state_revision,
+                .rate_revision = stage_rate_revision,
+                .derivative_fields = observation.time_derivative_fields,
+            };
+            if (observation.generalized_alpha.has_value()) {
+              metadata.generalized_alpha =
+                  svmp::FE::systems::
+                      OperatorStageGeneralizedAlphaMetadata{
+                          .alpha_f =
+                              observation.generalized_alpha->alpha_f,
+                          .alpha_m =
+                              observation.generalized_alpha->alpha_m,
+                      };
+            }
+            stage_metadata.emplace(std::move(metadata));
+          } catch (...) {
+            local_preparation_failure = std::current_exception();
+          }
+          requireCollectivePhasePreparation(
+              local_preparation_failure,
+              velocity_extension_artifact_comm,
+              "two_fluid_operator_stage_preparation");
+          auto states = evaluateCurrentTwoFluidStageDiagnostics(
+              sim,
+              two_fluid_stage_declarations,
+              stage_solution,
+              observation.state_time - observation.step_start_time,
+              velocity_extension_artifact_comm);
+          sim.fe_system->stageTwoFluidAcceptedStageDiagnostics(
+              std::move(*stage_metadata), states);
+        };
+  }
   if (evaluate_free_surface_residual_work) {
     free_surface_residual_work_candidate_stage_observer =
         [&](const svmp::FE::timestepping::CandidateStageObservation&
@@ -29587,7 +30018,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << std::endl;
         };
   }
-  if (evaluate_fitted_ale_operator_stage || has_conservative_phase ||
+  if (evaluate_fitted_ale_operator_stage || evaluate_two_fluid_stage ||
+      has_conservative_phase ||
       capture_dynamic_contact_generalized_alpha ||
       evaluate_free_surface_residual_work) {
     callbacks.on_candidate_stage =
@@ -29598,6 +30030,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           }
           if (fitted_ale_candidate_stage_observer) {
             fitted_ale_candidate_stage_observer(observation);
+          }
+          if (two_fluid_candidate_stage_observer) {
+            two_fluid_candidate_stage_observer(observation);
           }
           if (free_surface_residual_work_candidate_stage_observer) {
             free_surface_residual_work_candidate_stage_observer(
@@ -30168,6 +30603,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         }
         sim.fe_system
             ->discardPendingFittedALENormalOperatorStageMeasurements();
+        sim.fe_system->discardPendingTwoFluidAcceptedStageDiagnostics();
         clear_pending_contact_provenance();
         rollback_and_reject_pending_phase(
             h, "time_loop_candidate_discarded");
@@ -30706,6 +31142,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               static_cast<std::uint64_t>(h.stepIndex()),
               static_cast<svmp::FE::Real>(h.time()),
               static_cast<svmp::FE::Real>(h.dt()));
+    }
+    if (evaluate_two_fluid_stage) {
+      sim.fe_system->commitPendingTwoFluidAcceptedStageDiagnostics(
+          static_cast<std::uint64_t>(h.stepIndex()),
+          static_cast<svmp::FE::Real>(h.time()),
+          static_cast<svmp::FE::Real>(h.dt()));
     }
     if (has_free_surface_functional) {
       const auto endpoint_solution =

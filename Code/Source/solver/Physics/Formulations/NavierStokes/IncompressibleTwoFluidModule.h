@@ -69,6 +69,8 @@ struct IncompressibleTwoFluidOptions {
     FE::Real level_set_isovalue{0.0};
 
     FE::Real surface_tension{0.0};
+    /** Optional exact p_minus-p_plus target for manufactured jump histories. */
+    std::optional<FE::Real> prescribed_pressure_jump{};
     FE::Real interface_nitsche_gamma{20.0};
     bool include_transient_interface_penalty{true};
 

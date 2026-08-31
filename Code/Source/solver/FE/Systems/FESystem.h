@@ -33,6 +33,7 @@
 #include "PostProcessing/DerivedResultOutput.h"
 #include "PostProcessing/DerivedResultRegistry.h"
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/IncompressibleTwoFluidDiagnostics.h"
 
 #include "Assembly/Assembler.h"
 
@@ -343,6 +344,39 @@ struct OperatorStageMeasurementMetadata {
     [[nodiscard]] friend bool operator==(
         const OperatorStageMeasurementMetadata&,
         const OperatorStageMeasurementMetadata&) = default;
+};
+
+/** Setup-time owner for one sharp incompressible two-fluid history stream. */
+struct TwoFluidAcceptedStageDiagnosticDeclaration {
+    int interface_marker{-1};
+    FieldId level_set_field{INVALID_FIELD_ID};
+    FieldId negative_velocity_field{INVALID_FIELD_ID};
+    FieldId negative_pressure_field{INVALID_FIELD_ID};
+    FieldId positive_velocity_field{INVALID_FIELD_ID};
+    FieldId positive_pressure_field{INVALID_FIELD_ID};
+    OperatorTag operator_tag{};
+    std::string geometry_domain_id{};
+    Real level_set_isovalue{0.0};
+    interfaces::IncompressibleTwoFluidDiagnosticParameters parameters{};
+    std::string owner_component{};
+
+    [[nodiscard]] friend bool operator==(
+        const TwoFluidAcceptedStageDiagnosticDeclaration&,
+        const TwoFluidAcceptedStageDiagnosticDeclaration&) = default;
+};
+
+/** One already reduced state bound to its immutable snapshot revision. */
+struct AcceptedTwoFluidStageDiagnosticState {
+    int interface_marker{-1};
+    interfaces::FreeSurfaceGeometryRevision geometry_revision{};
+    interfaces::IncompressibleTwoFluidDiagnosticState diagnostics{};
+};
+
+/** Pending or accepted two-fluid diagnostics at the converged operator stage. */
+struct TwoFluidAcceptedStageDiagnosticHistoryRecord {
+    TwoFluidAcceptedStageDiagnosticDeclaration declaration{};
+    OperatorStageMeasurementMetadata stage{};
+    AcceptedTwoFluidStageDiagnosticState state{};
 };
 
 enum class MeshTangentialBoundaryPolicy : std::uint8_t {
@@ -1043,6 +1077,35 @@ public:
         const FittedALENormalOperatorStageHistoryRecord>
     fittedALENormalOperatorStageMeasurementHistory() const noexcept {
         return fitted_ale_normal_measurement_history_;
+    }
+    /** Register one deterministic two-fluid accepted-stage diagnostic owner. */
+    void declareTwoFluidAcceptedStageDiagnostics(
+        TwoFluidAcceptedStageDiagnosticDeclaration declaration);
+    [[nodiscard]] std::span<
+        const TwoFluidAcceptedStageDiagnosticDeclaration>
+    twoFluidAcceptedStageDiagnosticDeclarations() const noexcept {
+        return two_fluid_accepted_stage_declarations_;
+    }
+    /** Stage communicator-global diagnostics for a prospective accepted step. */
+    void stageTwoFluidAcceptedStageDiagnostics(
+        OperatorStageMeasurementMetadata metadata,
+        std::span<const AcceptedTwoFluidStageDiagnosticState> states);
+    /** Discard a rejected candidate without publishing accepted history. */
+    void discardPendingTwoFluidAcceptedStageDiagnostics() noexcept;
+    /** Publish the complete pending group after irreversible step acceptance. */
+    void commitPendingTwoFluidAcceptedStageDiagnostics(
+        std::uint64_t accepted_step,
+        Real accepted_time,
+        Real dt);
+    [[nodiscard]] std::span<
+        const TwoFluidAcceptedStageDiagnosticHistoryRecord>
+    pendingTwoFluidAcceptedStageDiagnostics() const noexcept {
+        return pending_two_fluid_accepted_stage_diagnostics_;
+    }
+    [[nodiscard]] std::span<
+        const TwoFluidAcceptedStageDiagnosticHistoryRecord>
+    twoFluidAcceptedStageDiagnosticHistory() const noexcept {
+        return two_fluid_accepted_stage_diagnostic_history_;
     }
     [[nodiscard]] std::span<
         const MeshNormalBoundaryConstraintDeclaration>
@@ -2699,6 +2762,14 @@ private:
         fitted_ale_normal_measurement_history_{};
     bool fitted_ale_normal_measurement_declarations_frozen_{false};
     bool fitted_ale_normal_measurement_transaction_active_{false};
+    std::vector<TwoFluidAcceptedStageDiagnosticDeclaration>
+        two_fluid_accepted_stage_declarations_{};
+    std::vector<TwoFluidAcceptedStageDiagnosticHistoryRecord>
+        pending_two_fluid_accepted_stage_diagnostics_{};
+    std::vector<TwoFluidAcceptedStageDiagnosticHistoryRecord>
+        two_fluid_accepted_stage_diagnostic_history_{};
+    bool two_fluid_accepted_stage_declarations_frozen_{false};
+    bool two_fluid_accepted_stage_transaction_active_{false};
     std::vector<MeshTangentialBoundaryPolicyDeclaration>
         mesh_tangential_boundary_policies_{};
     std::vector<MeshTangentialBoundaryPolicyHistoryRecord>

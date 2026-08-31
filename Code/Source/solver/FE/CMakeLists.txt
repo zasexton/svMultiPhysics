@@ -865,6 +865,7 @@ set(FE_GEOMETRY_HEADERS
     Geometry/CutQuadratureMapping.h
     Interfaces/CutInterfaceFieldEvaluation.h
     Interfaces/FreeSurfaceGeometrySnapshot.h
+    Interfaces/IncompressibleTwoFluidDiagnostics.h
     Interfaces/GeneratedActiveBoundaryDomain.h
     Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h
     Interfaces/LevelSetInterfaceDiagnostics.h
@@ -897,6 +898,7 @@ set(FE_GEOMETRY_SOURCES
     Geometry/CutQuadratureMapping.cpp
     Interfaces/CutInterfaceFieldEvaluation.cpp
     Interfaces/FreeSurfaceGeometrySnapshot.cpp
+    Interfaces/IncompressibleTwoFluidDiagnostics.cpp
     Interfaces/GeneratedActiveBoundaryDomain.cpp
     Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.cpp
     Interfaces/LevelSetInterfaceDiagnostics.cpp

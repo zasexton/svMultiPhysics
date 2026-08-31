@@ -13259,6 +13259,160 @@ TEST(FreeSurfaceCutStabilityMPI,
 }
 
 TEST(FreeSurfaceCutStabilityMPI,
+     TwoFluidAcceptedStageHistoryRejectsRankDivergence)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH && \
+      defined(FE_HAS_MPI) && defined(MESH_HAS_MPI))
+    GTEST_SKIP() << "Distributed two-fluid history requires MPI-enabled FE and Mesh.";
+#else
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized == 0) {
+        GTEST_SKIP() << "Run this test under mpiexec.";
+    }
+    MPI_Comm comm = MPI_COMM_WORLD;
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly two MPI ranks.";
+    }
+
+    const PlaneCutPosition level_set_cut{
+        "distributed_two_fluid_history",
+        {{FE::Real{1.0}, FE::Real{0.73}, FE::Real{0.41}}},
+        FE::Real{2.1}};
+    auto mesh = makeDistributedStructuredTetraMesh(
+        level_set_cut, comm, "block", /*cells_per_axis=*/2);
+    auto pressure_space = FE::spaces::SpaceFactory::create_h1(
+        FE::ElementType::Tetra4, /*order=*/1);
+    auto velocity_space = FE::spaces::SpaceFactory::create_vector_h1(
+        FE::ElementType::Tetra4, /*order=*/1, /*components=*/3);
+    FE::systems::FESystem system(mesh);
+    (void)system.addField(FE::systems::FieldSpec{
+        .name = "phi_history",
+        .space = pressure_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::Unknown,
+    });
+
+    ns::IncompressibleTwoFluidOptions options;
+    options.level_set_field_name = "phi_history";
+    options.generated_interface_domain_id =
+        "distributed_two_fluid_history";
+    options.interface_marker = 27411;
+    options.surface_tension = FE::Real{0.0};
+    options.include_transient_interface_penalty = false;
+    options.enable_convection = false;
+    ns::IncompressibleTwoFluidModule module(
+        velocity_space,
+        pressure_space,
+        velocity_space,
+        pressure_space,
+        options);
+    module.registerOn(system);
+
+    FE::systems::SetupOptions setup;
+    setup.use_backend_row_ownership_for_assembly = true;
+    setup.dof_options.global_numbering =
+        FE::dofs::GlobalNumberingMode::OwnerContiguous;
+    setup.dof_options.ownership =
+        FE::dofs::OwnershipStrategy::VertexGID;
+    setup.dof_options.my_rank = rank;
+    setup.dof_options.world_size = size;
+    setup.dof_options.mpi_comm = comm;
+    system.setup(setup);
+
+    const auto declarations =
+        system.twoFluidAcceptedStageDiagnosticDeclarations();
+    ASSERT_EQ(declarations.size(), 1u);
+    const auto& declaration = declarations.front();
+    FE::interfaces::IncompressibleTwoFluidDiagnosticAccumulator accumulator;
+    accumulator.snapshot_revision_key = 91u;
+    accumulator.owned_interface_quadrature_point_count = 2u;
+    accumulator.interface_measure = FE::Real{0.5};
+    accumulator.negative_phase.owned_quadrature_point_count = 1u;
+    accumulator.negative_phase.volume = FE::Real{0.25};
+    accumulator.positive_phase.owned_quadrature_point_count = 1u;
+    accumulator.positive_phase.volume = FE::Real{0.25};
+    const auto diagnostics =
+        FE::interfaces::finalizeIncompressibleTwoFluidDiagnostics(
+            accumulator, declaration.parameters);
+    const auto& mesh_access = system.meshAccess();
+    const FE::systems::OperatorStageGeometryMetadata stage_geometry{
+        .geometry_revision = mesh_access.geometryRevision(),
+        .topology_revision = mesh_access.topologyRevision(),
+        .ownership_revision = mesh_access.ownershipRevision(),
+        .numbering_revision = mesh_access.numberingRevision(),
+        .field_layout_revision = mesh_access.fieldLayoutRevision(),
+        .label_revision = mesh_access.labelRevision(),
+        .active_configuration_epoch = mesh_access.activeConfigurationEpoch(),
+        .coordinate_configuration_key =
+            mesh_access.coordinateConfigurationKey(),
+    };
+    FE::systems::AcceptedTwoFluidStageDiagnosticState state{
+        .interface_marker = declaration.interface_marker,
+        .geometry_revision =
+            FE::interfaces::FreeSurfaceGeometryRevision{
+                .source_id =
+                    FE::interfaces::LevelSetInterfaceSource::fromField(
+                        declaration.level_set_field)
+                        .identifier(),
+                .domain_id = declaration.geometry_domain_id,
+                .interface_marker = declaration.interface_marker,
+                .isovalue = declaration.level_set_isovalue,
+                .source_value_revision = 7u,
+                .mesh_geometry_revision = stage_geometry.geometry_revision,
+                .mesh_topology_revision = stage_geometry.topology_revision,
+                .ownership_revision = stage_geometry.ownership_revision,
+                .numbering_revision = stage_geometry.numbering_revision,
+                .snapshot_revision_key = 91u,
+            },
+        .diagnostics = diagnostics,
+    };
+    const auto metadata = [&](std::uint64_t step,
+                              FE::Real start,
+                              FE::Real end) {
+        return FE::systems::OperatorStageMeasurementMetadata{
+            .scheme_name = "BackwardEuler",
+            .temporal_order = 1,
+            .prospective_accepted_step = step,
+            .prospective_attempt = 1u,
+            .step_start_time = start,
+            .step_end_time = end,
+            .state_time = end,
+            .rate_time = end,
+            .dt = end - start,
+            .expected_stage_geometry = stage_geometry,
+            .state_revision = 41u + step,
+            .rate_revision = 51u + step,
+        };
+    };
+
+    const std::array accepted_states{state};
+    ASSERT_NO_THROW(system.stageTwoFluidAcceptedStageDiagnostics(
+        metadata(1u, FE::Real{0.0}, FE::Real{0.1}), accepted_states));
+    ASSERT_NO_THROW(system.commitPendingTwoFluidAcceptedStageDiagnostics(
+        1u, FE::Real{0.1}, FE::Real{0.1}));
+    ASSERT_EQ(system.twoFluidAcceptedStageDiagnosticHistory().size(), 1u);
+
+    auto divergent_state = state;
+    if (rank == 1) {
+        divergent_state.diagnostics.surface_energy_work = FE::Real{1.0};
+    }
+    const std::array divergent_states{divergent_state};
+    EXPECT_THROW(
+        system.stageTwoFluidAcceptedStageDiagnostics(
+            metadata(2u, FE::Real{0.1}, FE::Real{0.2}), divergent_states),
+        FE::InvalidArgumentException);
+    EXPECT_TRUE(system.pendingTwoFluidAcceptedStageDiagnostics().empty());
+    EXPECT_EQ(system.twoFluidAcceptedStageDiagnosticHistory().size(), 1u);
+    MPI_Barrier(comm);
+#endif
+}
+
+TEST(FreeSurfaceCutStabilityMPI,
      PhysicalWetBlocksAndDisconnectedIslandsAreInvariantAcrossDryMPIData)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH && \
