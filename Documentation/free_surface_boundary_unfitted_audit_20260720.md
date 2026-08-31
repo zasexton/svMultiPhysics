@@ -1639,6 +1639,26 @@ WP-6 prerequisite harness checkpoint recorded on 2026-08-31:
   pending a successful clean prerequisite rerun and the complete release
   transport campaign.
 
+WP-6 corrected prerequisite and release-profile checkpoint recorded on
+2026-08-31:
+
+- Clean-source job `41432079` at commit
+  `fe50a5a7b6bb64271c3064dc401f66b1bc925b01` passed the frozen
+  `free_surface_wp6_conservative_phase_prerequisite_v2` matrix. All `59`
+  distinct tests in eight serial/distributed groups passed, as did all `40`
+  quantitative checks and final provenance. Independent verification of the
+  archived `campaign.sha256` passed.
+- Release-profile job `41432654` passed the Enright `64^3`, CFL `0.5` point.
+  The achieved graph CFL was `0.4998555981578833`, maximum accounted balance
+  error was `2.949029909160572e-17`, maximum raw measure error was
+  `2.9014984859188075e-14`, and interface L1 error was
+  `0.010704584875548373`; the indicator remained in
+  `[-1.3461454173580023e-15, 1.0000000000000004]`. All emitted history and
+  final flux-ledger artifacts passed their checksum manifests.
+- The point correctly reports `INCONCLUSIVE_RESOLUTION`. It does not replace
+  the independent spatial and temporal studies or the complete `18`-point
+  release campaign. WP-6, FSR-06, and Q3 therefore remain open.
+
 ### WP-7: coherent small-cut stability and conditioning
 
 **Finding addressed:** FSR-07; this replaces any conditioning role previously attributed to FSR-01.
