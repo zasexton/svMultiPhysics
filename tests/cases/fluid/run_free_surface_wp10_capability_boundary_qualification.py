@@ -25,7 +25,7 @@ REPOSITORY_ROOT = SCRIPT_PATH.parents[3]
 DEFAULT_MATRIX = SCRIPT_PATH.with_name(
     "free_surface_wp10_capability_boundary_matrix.json"
 )
-EXPECTED_MATRIX_ID = "free_surface_wp10_capability_boundary_v3"
+EXPECTED_MATRIX_ID = "free_surface_wp10_capability_boundary_v4"
 EXPECTED_STATUS = "FROZEN_CAPABILITY_BOUNDARY"
 EXPECTED_ARCHITECTURE_RECORD = (
     "Documentation/free_surface_wp10_physical_capability_boundary.md"
@@ -37,7 +37,7 @@ EXPECTED_SCOPE = (
     "qualify any two-fluid or gas-sensitive phenomenon."
 )
 EXPECTED_CURRENT_BOUNDARY = {
-    "artifact_schema_version": 3,
+    "artifact_schema_version": 4,
     "momentum_capability_label": "one_phase_liquid_sharp_interface",
     "physical_model_name": "one_phase_liquid_prescribed_exterior_pressure",
     "legacy_physical_model": None,
@@ -89,7 +89,7 @@ EXPECTED_SOURCE_CHECKS = {
             "IncompressibleNavierStokesVMSModule.cpp"
         ),
         "required_fragments": [
-            'out << "{\\"artifact_schema_version\\":3"',
+            'out << "{\\"artifact_schema_version\\":4"',
             "fitted_surface_contact_capability",
             "supported_configuration_envelope",
             "fail_closed_before_system_mutation",
