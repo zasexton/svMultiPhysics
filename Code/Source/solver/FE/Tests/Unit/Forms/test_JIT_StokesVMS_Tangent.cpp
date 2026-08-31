@@ -494,7 +494,18 @@ TEST(JITCompilerStokesVMS,
         std::move(jit_ir), NonlinearKernelOutput::Both);
     auto jit_options = makeUnitTestJITOptions();
     jit_options.enable = true;
-    jit_options.optimization_level = 2;
+    jit_options.cache_kernels = false;
+    jit_options.optimization_level = 3;
+    jit_options.specialization.enable = true;
+    jit_options.specialization.specialize_n_qpts = true;
+    jit_options.specialization.specialize_dofs = true;
+    jit_options.specialization.max_unroll_trip_count = 64u;
+    // Keep the six-point specialization in one helper while rolling both
+    // quadrature and DOF loops so the guarded cross-term cache is exercised.
+    jit_options.specialization.text_budget_bytes = 48u * 1024u;
+    jit_options.specialization.helper_text_budget_bytes = 24u * 1024u;
+    jit_options.specialization.bytes_per_op_estimate = 92u;
+    jit_options.basis_baking.enable = false;
     forms::jit::JITKernelWrapper jit_kernel(jit_fallback, jit_options);
     jit_kernel.resolveInlinableConstitutives();
     jit_kernel.ensureCompiled();
@@ -513,10 +524,20 @@ TEST(JITCompilerStokesVMS,
     rule.frame = geometry::CutGeometryFrame::Reference;
     rule.provenance.parent_entity = 0;
     rule.provenance.marker = marker;
-    rule.points.push_back(geometry::CutQuadraturePoint{
-        .point = {{Real{1.0 / 6.0}, Real{1.0 / 6.0}, Real{0.0}}},
-        .weight = rule.measure,
-    });
+    constexpr std::array<std::array<Real, 3>, 6> cut_points = {{
+        {{Real{0.1}, Real{0.1}, Real{0.0}}},
+        {{Real{0.2}, Real{0.1}, Real{0.0}}},
+        {{Real{0.1}, Real{0.2}, Real{0.0}}},
+        {{Real{0.3}, Real{0.1}, Real{0.0}}},
+        {{Real{0.1}, Real{0.3}, Real{0.0}}},
+        {{Real{0.2}, Real{0.2}, Real{0.0}}},
+    }};
+    for (const auto& point : cut_points) {
+        rule.points.push_back(geometry::CutQuadraturePoint{
+            .point = point,
+            .weight = rule.measure / Real{cut_points.size()},
+        });
+    }
     assembly::CutCellAssemblyMetadata metadata;
     metadata.parent_entity = 0;
     metadata.side = geometry::CutIntegrationSide::Negative;

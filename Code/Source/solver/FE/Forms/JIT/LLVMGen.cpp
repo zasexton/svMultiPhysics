@@ -9753,11 +9753,17 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             return h;
         };
 
-        auto makeDep0XBlockKey = [](int trial_group, std::uint64_t op_hash,
+        auto makeDep0XBlockKey = [](int trial_group,
+                                     int time_derivative_order,
+                                     std::uint64_t op_hash,
                                      const Shape& shape) -> std::uint64_t {
             std::uint64_t h = 0xcbf29ce484222325ULL;
             auto mix = [&h](std::uint64_t v) { h ^= v; h *= 0x100000001b3ULL; };
             mix(static_cast<std::uint64_t>(trial_group));
+            // Terms with different derivative orders have distinct runtime
+            // weight guards. A skipped producer must never initialize storage
+            // consumed by a term whose guard remains active.
+            mix(static_cast<std::uint64_t>(time_derivative_order));
             mix(op_hash);
             mix(static_cast<std::uint64_t>(shape.kind));
             mix(static_cast<std::uint64_t>(shape.dims[0]));
@@ -9916,8 +9922,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 // computed by a previous coupled block with the same structural hash.
                 if (dep0_xblock_active && !term.op_hashes.empty()) {
                     const auto op_hash = term.op_hashes[op_idx];
-                    const auto xblock_key =
-                        makeDep0XBlockKey(qp_cache_trial_group, op_hash, term.shapes[op_idx]);
+                    const auto xblock_key = makeDep0XBlockKey(
+                        qp_cache_trial_group, term.time_derivative_order,
+                        op_hash, term.shapes[op_idx]);
                     auto it = dep0_xblock_cache.find(xblock_key);
                     if (it != dep0_xblock_cache.end()) {
                         // In buffer mode, re-derive data pointer for current function.
@@ -12274,8 +12281,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     if (!costs.empty() && op_idx < costs.size() &&
                         costs[op_idx] >= xblock_cost_threshold) {
                         const auto op_hash = term.op_hashes[op_idx];
-                        const auto xblock_key =
-                            makeDep0XBlockKey(qp_cache_trial_group, op_hash, values[op_idx].shape);
+                        const auto xblock_key = makeDep0XBlockKey(
+                            qp_cache_trial_group, term.time_derivative_order,
+                            op_hash, values[op_idx].shape);
                         if (dep0_xblock_cache.find(xblock_key) == dep0_xblock_cache.end()) {
                             const auto n_elems = static_cast<std::uint32_t>(elemCount(values[op_idx].shape));
                             auto* xb_elem_ty = simd_active ? vf64 : f64;
