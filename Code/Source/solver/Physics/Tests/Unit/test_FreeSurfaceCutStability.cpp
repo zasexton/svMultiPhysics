@@ -28,6 +28,7 @@
 #include <gtest/gtest.h>
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
+#include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidModule.h"
 
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Assembly/GlobalSystemView.h"
@@ -1233,13 +1234,15 @@ struct TetraStripArrays {
 [[nodiscard]] std::vector<FE::MeshIndex> retainedCells(
     const FE::assembly::CutIntegrationContext& context,
     int marker,
-    bool cut_only)
+    bool cut_only,
+    FE::geometry::CutIntegrationSide side =
+        FE::geometry::CutIntegrationSide::Negative)
 {
     std::vector<FE::MeshIndex> cells;
     constexpr FE::Real full_fraction_tolerance = FE::Real{1.0e-12};
     for (const auto* metadata :
          context.generatedVolumeMetadataForMarkerAndSide(
-             marker, FE::geometry::CutIntegrationSide::Negative)) {
+             marker, side)) {
         if (metadata == nullptr || metadata->parent_entity < 0 ||
             !std::isfinite(metadata->volume_fraction) ||
             metadata->volume_fraction <= FE::Real{0.0}) {
@@ -1262,7 +1265,9 @@ struct TetraStripArrays {
 [[nodiscard]] FE::assembly::CutFacetSetHandle addProductionFacetSet(
     FE::assembly::CutIntegrationContext& context,
     const FE::interfaces::LevelSetInterfaceDomain& domain,
-    const FE::assembly::IMeshAccess& mesh)
+    const FE::assembly::IMeshAccess& mesh,
+    FE::geometry::CutIntegrationSide side =
+        FE::geometry::CutIntegrationSide::Negative)
 {
     std::vector<FE::systems::CutInteriorFacetAdjacency> adjacency;
     mesh.forEachInteriorFace(
@@ -1276,14 +1281,16 @@ struct TetraStripArrays {
             });
         });
 
-    auto cut_cells = retainedCells(context, domain.marker(), true);
+    auto cut_cells = retainedCells(
+        context, domain.marker(), true, side);
     if (cut_cells.empty()) {
         cut_cells = domain.cutCells();
     }
     auto facets = FE::systems::identifyCutAdjacentInteriorFacets(
         cut_cells, adjacency);
 
-    const auto active_cells = retainedCells(context, domain.marker(), false);
+    const auto active_cells = retainedCells(
+        context, domain.marker(), false, side);
     const auto is_active = [&active_cells](FE::MeshIndex cell) {
         return std::binary_search(active_cells.begin(), active_cells.end(), cell);
     };
@@ -1315,7 +1322,7 @@ struct TetraStripArrays {
     context.bindFacetStabilizationScalesForMarkerAndSide(
         handle,
         domain.marker(),
-        FE::geometry::CutIntegrationSide::Negative);
+        side);
     return context.addFacetSetHandle(std::move(handle));
 }
 
@@ -4509,6 +4516,590 @@ runManufacturedAffineQ1Balance(FE::Real geometry_angle,
     }
     sample.free_velocity_dofs = freeFieldDofs(system, velocity).size();
     return sample;
+}
+
+struct CanonicalPhaseConstraintMaster {
+    gid_t vertex_gid{INVALID_GID};
+    std::size_t component{0u};
+    FE::Real weight{0.0};
+};
+
+struct CanonicalPhaseConstraintLine {
+    gid_t slave_vertex_gid{INVALID_GID};
+    std::size_t slave_component{0u};
+    gid_t root_cell_gid{INVALID_GID};
+    FE::Real inhomogeneity{0.0};
+    std::vector<CanonicalPhaseConstraintMaster> masters{};
+};
+
+struct CanonicalPhaseFacetScale {
+    gid_t facet_gid{INVALID_GID};
+    FE::Real stabilization_scale{0.0};
+};
+
+struct PhaseLocalIdentitySample {
+    FE::geometry::CutIntegrationSide active_side{
+        FE::geometry::CutIntegrationSide::Negative};
+    FE::constraints::SmallCutAggregationRefreshReport velocity_report{};
+    FE::constraints::SmallCutAggregationRefreshReport pressure_report{};
+    std::vector<CanonicalPhaseConstraintLine>
+        velocity_aggregation_lines{};
+    std::vector<CanonicalPhaseConstraintLine>
+        pressure_aggregation_lines{};
+    std::vector<CanonicalPhaseFacetScale> facet_scales{};
+    std::vector<FE::Real> pressure_pspg_operator{};
+    std::vector<FE::Real> pressure_ghost_operator{};
+    FE::Real active_volume{0.0};
+    std::size_t cut_cells{0u};
+    std::size_t velocity_dofs{0u};
+    std::size_t pressure_dofs{0u};
+};
+
+[[nodiscard]] PlaneCutPosition reverseLevelSet(
+    const PlaneCutPosition& cut)
+{
+    return PlaneCutPosition{
+        .label = cut.label + "_reversed",
+        .normal = {{-cut.normal[0], -cut.normal[1], -cut.normal[2]}},
+        .offset = -cut.offset,
+    };
+}
+
+[[nodiscard]] std::vector<CanonicalPhaseConstraintLine>
+canonicalRootedAggregationLines(
+    const Mesh& mesh,
+    const FE::systems::FESystem& system,
+    FE::FieldId field,
+    std::size_t components,
+    FE::geometry::CutIntegrationSide active_side,
+    int interface_marker)
+{
+    const auto canonical = canonicalP1Dofs(
+        mesh, system, field, components);
+    const auto physical_key = [&](FE::GlobalIndex global_dof)
+        -> const CanonicalP1Dof* {
+        const auto found = std::find_if(
+            canonical.begin(), canonical.end(), [&](const auto& candidate) {
+                return candidate.global_dof == global_dof;
+            });
+        return found == canonical.end() ? nullptr : &*found;
+    };
+
+    const auto prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    const auto matches = [&](const auto& report) {
+        return report && report->field == field &&
+               report->active_side == active_side &&
+               report->interface_marker == interface_marker;
+    };
+    const auto count = static_cast<std::size_t>(std::count_if(
+        prolongations.begin(), prolongations.end(), matches));
+    if (count != 1u) {
+        throw std::runtime_error(
+            "phase-local aggregation prolongation is not unique");
+    }
+    const auto report = *std::find_if(
+        prolongations.begin(), prolongations.end(), matches);
+
+    std::vector<CanonicalPhaseConstraintLine> lines;
+    for (const auto& row : report->rows) {
+        if (row.provisional_kind !=
+                FE::constraints::
+                    SmallCutAggregationProvisionalRowKind::
+                        RootedExtension ||
+            row.provisional_entries.empty()) {
+            continue;
+        }
+        const auto* slave = physical_key(row.slave_dof);
+        if (slave == nullptr || row.root_cell_gid < 0) {
+            throw std::runtime_error(
+                "phase-local rooted aggregation row has no physical identity");
+        }
+        CanonicalPhaseConstraintLine canonical_line{
+            .slave_vertex_gid = slave->vertex_gid,
+            .slave_component = slave->component,
+            .root_cell_gid = static_cast<gid_t>(row.root_cell_gid),
+        };
+        for (const auto& entry : row.provisional_entries) {
+            const auto* master = physical_key(entry.master_dof);
+            if (master == nullptr) {
+                throw std::runtime_error(
+                    "phase-local rooted aggregation master has no physical identity");
+            }
+            canonical_line.masters.push_back(
+                CanonicalPhaseConstraintMaster{
+                    .vertex_gid = master->vertex_gid,
+                    .component = master->component,
+                    .weight = entry.weight,
+                });
+        }
+        std::sort(
+            canonical_line.masters.begin(),
+            canonical_line.masters.end(),
+            [](const auto& lhs, const auto& rhs) {
+                if (lhs.vertex_gid != rhs.vertex_gid) {
+                    return lhs.vertex_gid < rhs.vertex_gid;
+                }
+                return lhs.component < rhs.component;
+            });
+        lines.push_back(std::move(canonical_line));
+    }
+    std::sort(
+        lines.begin(), lines.end(), [](const auto& lhs, const auto& rhs) {
+            if (lhs.slave_vertex_gid != rhs.slave_vertex_gid) {
+                return lhs.slave_vertex_gid < rhs.slave_vertex_gid;
+            }
+            return lhs.slave_component < rhs.slave_component;
+        });
+    return lines;
+}
+
+[[nodiscard]] std::vector<CanonicalPhaseFacetScale>
+canonicalPhaseFacetScales(
+    const Mesh& mesh,
+    const FE::assembly::CutFacetSetHandle& handle)
+{
+    const auto& face_gids = mesh.base().face_gids();
+    std::vector<CanonicalPhaseFacetScale> scales;
+    scales.reserve(handle.facets.size());
+    for (const auto facet : handle.facets) {
+        if (facet < 0 ||
+            static_cast<std::size_t>(facet) >= face_gids.size()) {
+            throw std::runtime_error(
+                "phase-local facet has no physical face identity");
+        }
+        const auto* metadata = handle.metadataForFacet(facet);
+        if (metadata == nullptr ||
+            !std::isfinite(metadata->stabilization_scale) ||
+            !(metadata->stabilization_scale > FE::Real{0.0})) {
+            throw std::runtime_error(
+                "phase-local facet has no finite positive stabilization scale");
+        }
+        scales.push_back(CanonicalPhaseFacetScale{
+            .facet_gid = face_gids[static_cast<std::size_t>(facet)],
+            .stabilization_scale = metadata->stabilization_scale,
+        });
+    }
+    std::sort(
+        scales.begin(), scales.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.facet_gid < rhs.facet_gid;
+        });
+    if (std::adjacent_find(
+            scales.begin(), scales.end(), [](const auto& lhs, const auto& rhs) {
+                return lhs.facet_gid == rhs.facet_gid;
+            }) != scales.end()) {
+        throw std::runtime_error(
+            "phase-local facet set contains duplicate physical faces");
+    }
+    return scales;
+}
+
+template <typename MatrixGlobalizer>
+[[nodiscard]] PhaseLocalIdentitySample assemblePhaseLocalIdentitySample(
+    const std::shared_ptr<Mesh>& mesh,
+    const PlaneCutPosition& level_set_cut,
+    FE::geometry::CutIntegrationSide target_side,
+    FE::Real target_density,
+    FE::Real target_viscosity,
+    FE::Real complementary_density,
+    FE::Real complementary_viscosity,
+    FE::systems::SetupOptions setup,
+    MatrixGlobalizer&& globalize_matrix)
+{
+    constexpr int interface_marker = 27410;
+    constexpr std::string_view domain_id =
+        "wp10_phase_local_identity";
+    if (target_side == FE::geometry::CutIntegrationSide::Interface) {
+        throw std::invalid_argument(
+            "phase-local identity requires a volume side");
+    }
+
+    auto pressure_space = FE::spaces::SpaceFactory::create_h1(
+        FE::ElementType::Tetra4, /*order=*/1);
+    auto velocity_space = FE::spaces::SpaceFactory::create_vector_h1(
+        FE::ElementType::Tetra4, /*order=*/1, /*components=*/3);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = pressure_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::Unknown,
+    });
+
+    ns::IncompressibleTwoFluidOptions options;
+    options.level_set_field_name = "phi";
+    options.generated_interface_domain_id = std::string(domain_id);
+    options.interface_marker = interface_marker;
+    options.surface_tension = FE::Real{0.0};
+    options.include_transient_interface_penalty = false;
+    options.enable_convection = false;
+    options.use_cut_metadata_scale = true;
+    options.cut_metadata_scale_cap = FE::Real{100.0};
+
+    const auto target_phase =
+        ns::IncompressibleTwoFluidPhaseOptions{
+            .velocity_field_name = "u_target",
+            .pressure_field_name = "p_target",
+            .density = target_density,
+            .viscosity = target_viscosity,
+        };
+    const auto complementary_phase =
+        ns::IncompressibleTwoFluidPhaseOptions{
+            .velocity_field_name = "u_complementary",
+            .pressure_field_name = "p_complementary",
+            .density = complementary_density,
+            .viscosity = complementary_viscosity,
+        };
+    if (target_side == FE::geometry::CutIntegrationSide::Negative) {
+        options.negative_phase = target_phase;
+        options.positive_phase = complementary_phase;
+    } else {
+        options.negative_phase = complementary_phase;
+        options.positive_phase = target_phase;
+    }
+
+    ns::IncompressibleTwoFluidModule module(
+        velocity_space,
+        pressure_space,
+        velocity_space,
+        pressure_space,
+        options);
+    module.registerOn(system);
+    setup.use_constraints_in_assembly = false;
+    system.setup(setup);
+
+    const auto velocity = system.findFieldByName("u_target");
+    const auto pressure = system.findFieldByName("p_target");
+    if (phi == FE::INVALID_FIELD_ID ||
+        velocity == FE::INVALID_FIELD_ID ||
+        pressure == FE::INVALID_FIELD_ID) {
+        throw std::runtime_error(
+            "phase-local identity fields were not registered");
+    }
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()),
+        FE::Real{0.0});
+    setScalarVertexField(solution, system, phi, level_set_cut);
+    setMeshVertexField(*mesh, level_set_cut);
+    const auto previous = solution;
+
+    FE::level_set::LevelSetGeneratedInterfaceOptions cut_options;
+    cut_options.level_set_field_name = "phi";
+    cut_options.domain_id = std::string(domain_id);
+    cut_options.requested_interface_marker = interface_marker;
+    cut_options.tolerance = FE::Real{1.0e-12};
+    cut_options.quadrature_order = 2;
+    cut_options.interface_quadrature_order = 2;
+    cut_options.volume_quadrature_order = 2;
+    FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto generated = lifecycle.build(
+        system, cut_options, solution);
+    if (!generated.success) {
+        throw std::runtime_error(generated.diagnostic);
+    }
+
+    auto context = std::make_shared<FE::assembly::CutIntegrationContext>();
+    context->addGeneratedInterfaceDomain(generated.domain);
+    const auto facet_handle = addProductionFacetSet(
+        *context,
+        generated.domain,
+        system.meshAccess(),
+        target_side);
+    system.setCutIntegrationContext(context);
+    system.rebuildConstraintState();
+
+    const auto reports =
+        system.completedSmallCutAggregationRefreshReports();
+    const auto unique_report = [&](FE::FieldId field) {
+        const auto matches = [&](const auto& report) {
+            return report.field == field &&
+                   report.interface_marker == interface_marker &&
+                   report.active_side == target_side;
+        };
+        const auto count = static_cast<std::size_t>(
+            std::count_if(reports.begin(), reports.end(), matches));
+        if (count != 1u) {
+            throw std::runtime_error(
+                "phase-local aggregation report is not unique");
+        }
+        return *std::find_if(reports.begin(), reports.end(), matches);
+    };
+
+    FE::systems::SystemStateView state;
+    state.dt = FE::Real{0.05};
+    state.u = std::span<const FE::Real>(solution);
+    state.u_prev = std::span<const FE::Real>(previous);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context =
+        integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+
+    const auto pressure_pspg = globalize_matrix(
+        assembleOperatorMatrix(
+            system,
+            state,
+            "equations_diagnostic_ns_vms_pspg_pressure_gradient"),
+        system);
+    const auto pressure_ghost = globalize_matrix(
+        assembleOperatorMatrix(
+            system,
+            state,
+            "equations_diagnostic_ns_pressure_ghost_penalty"),
+        system);
+
+    const auto canonical_velocity = canonicalP1Dofs(
+        *mesh, system, velocity, /*components=*/3u);
+    const auto canonical_pressure = canonicalP1Dofs(
+        *mesh, system, pressure, /*components=*/1u);
+    std::vector<FE::GlobalIndex> velocity_dofs;
+    std::vector<FE::GlobalIndex> pressure_dofs;
+    velocity_dofs.reserve(canonical_velocity.size());
+    pressure_dofs.reserve(canonical_pressure.size());
+    for (const auto& dof : canonical_velocity) {
+        velocity_dofs.push_back(dof.global_dof);
+    }
+    for (const auto& dof : canonical_pressure) {
+        pressure_dofs.push_back(dof.global_dof);
+    }
+    return PhaseLocalIdentitySample{
+        .active_side = target_side,
+        .velocity_report = unique_report(velocity),
+        .pressure_report = unique_report(pressure),
+        .velocity_aggregation_lines =
+            canonicalRootedAggregationLines(
+                *mesh,
+                system,
+                velocity,
+                /*components=*/3u,
+                target_side,
+                interface_marker),
+        .pressure_aggregation_lines =
+            canonicalRootedAggregationLines(
+                *mesh,
+                system,
+                pressure,
+                /*components=*/1u,
+                target_side,
+                interface_marker),
+        .facet_scales = canonicalPhaseFacetScales(*mesh, facet_handle),
+        .pressure_pspg_operator =
+            extractReducedMatrix(pressure_pspg, pressure_dofs),
+        .pressure_ghost_operator =
+            extractReducedMatrix(pressure_ghost, pressure_dofs),
+        .active_volume =
+            target_side == FE::geometry::CutIntegrationSide::Negative
+                ? generated.summary.negative_volume_measure
+                : generated.summary.positive_volume_measure,
+        .cut_cells = generated.domain.cutCells().size(),
+        .velocity_dofs = velocity_dofs.size(),
+        .pressure_dofs = pressure_dofs.size(),
+    };
+}
+
+void expectEquivalentAggregationReports(
+    const FE::constraints::SmallCutAggregationRefreshReport& lhs,
+    const FE::constraints::SmallCutAggregationRefreshReport& rhs)
+{
+    EXPECT_EQ(lhs.interface_marker, rhs.interface_marker);
+    EXPECT_EQ(lhs.canonical_feature_class_fingerprint,
+              rhs.canonical_feature_class_fingerprint);
+    EXPECT_NE(lhs.canonical_slave_set_fingerprint, 0u);
+    EXPECT_NE(rhs.canonical_slave_set_fingerprint, 0u);
+    // The slave fingerprint intentionally hashes algebraic DOF numbers and
+    // is therefore communicator-canonical for one partition, but not a
+    // physical partition-invariance key. Exact physical rooted rows are
+    // compared below instead.
+    EXPECT_EQ(lhs.maximum_observed_root_path,
+              rhs.maximum_observed_root_path);
+    EXPECT_EQ(lhs.root_path_guard_rejections,
+              rhs.root_path_guard_rejections);
+    EXPECT_EQ(lhs.extrapolation_guard_rejections,
+              rhs.extrapolation_guard_rejections);
+    EXPECT_EQ(lhs.line_guard_rejections,
+              rhs.line_guard_rejections);
+    EXPECT_EQ(lhs.canonical_candidate_vertices,
+              rhs.canonical_candidate_vertices);
+    EXPECT_EQ(lhs.canonical_rooted_candidate_vertices,
+              rhs.canonical_rooted_candidate_vertices);
+    EXPECT_EQ(lhs.canonical_rootless_candidate_vertices,
+              rhs.canonical_rootless_candidate_vertices);
+    EXPECT_EQ(lhs.canonical_owned_aggregate_dofs,
+              rhs.canonical_owned_aggregate_dofs);
+    EXPECT_EQ(lhs.canonical_owned_pinned_dofs,
+              rhs.canonical_owned_pinned_dofs);
+    EXPECT_EQ(lhs.canonical_strong_suppressed_dofs,
+              rhs.canonical_strong_suppressed_dofs);
+    EXPECT_EQ(lhs.canonical_active_feature_count,
+              rhs.canonical_active_feature_count);
+    EXPECT_EQ(lhs.canonical_rooted_active_feature_count,
+              rhs.canonical_rooted_active_feature_count);
+    EXPECT_EQ(lhs.canonical_rootless_active_feature_count,
+              rhs.canonical_rootless_active_feature_count);
+    EXPECT_NEAR(
+        lhs.canonical_rootless_active_physical_volume,
+        rhs.canonical_rootless_active_physical_volume,
+        FE::Real{1.0e-12} *
+            std::max(
+                FE::Real{1.0},
+                std::abs(lhs.canonical_rootless_active_physical_volume)));
+    EXPECT_NEAR(
+        lhs.maximum_observed_reference_extrapolation,
+        rhs.maximum_observed_reference_extrapolation,
+        FE::Real{1.0e-12} *
+            std::max(
+                FE::Real{1.0},
+                std::abs(lhs.maximum_observed_reference_extrapolation)));
+    EXPECT_NEAR(
+        lhs.maximum_observed_absolute_coefficient,
+        rhs.maximum_observed_absolute_coefficient,
+        FE::Real{1.0e-12} *
+            std::max(
+                FE::Real{1.0},
+                std::abs(lhs.maximum_observed_absolute_coefficient)));
+    EXPECT_NEAR(
+        lhs.maximum_observed_row_l1_norm,
+        rhs.maximum_observed_row_l1_norm,
+        FE::Real{1.0e-12} *
+            std::max(
+                FE::Real{1.0},
+                std::abs(lhs.maximum_observed_row_l1_norm)));
+
+    ASSERT_EQ(lhs.canonical_active_features.size(),
+              rhs.canonical_active_features.size());
+    for (std::size_t index = 0u;
+         index < lhs.canonical_active_features.size();
+         ++index) {
+        const auto& first = lhs.canonical_active_features[index];
+        const auto& second = rhs.canonical_active_features[index];
+        EXPECT_EQ(first.stable_feature_id, second.stable_feature_id);
+        EXPECT_EQ(first.canonical_cell_gid_digest,
+                  second.canonical_cell_gid_digest);
+        EXPECT_EQ(first.canonical_full_active_cell_gid_digest,
+                  second.canonical_full_active_cell_gid_digest);
+        EXPECT_EQ(first.canonical_cut_cell_gid_digest,
+                  second.canonical_cut_cell_gid_digest);
+        EXPECT_EQ(first.disposition, second.disposition);
+        EXPECT_EQ(first.canonical_cell_count,
+                  second.canonical_cell_count);
+        EXPECT_EQ(first.canonical_full_active_cell_count,
+                  second.canonical_full_active_cell_count);
+        EXPECT_EQ(first.canonical_cut_cell_count,
+                  second.canonical_cut_cell_count);
+        EXPECT_NEAR(
+            first.canonical_retained_physical_volume,
+            second.canonical_retained_physical_volume,
+            FE::Real{1.0e-12} *
+                std::max(
+                    FE::Real{1.0},
+                    std::abs(first.canonical_retained_physical_volume)));
+    }
+}
+
+void expectEquivalentConstraintLines(
+    const std::vector<CanonicalPhaseConstraintLine>& lhs,
+    const std::vector<CanonicalPhaseConstraintLine>& rhs)
+{
+    ASSERT_EQ(lhs.size(), rhs.size());
+    for (std::size_t line = 0u; line < lhs.size(); ++line) {
+        EXPECT_EQ(lhs[line].slave_vertex_gid,
+                  rhs[line].slave_vertex_gid);
+        EXPECT_EQ(lhs[line].slave_component,
+                  rhs[line].slave_component);
+        EXPECT_EQ(lhs[line].root_cell_gid,
+                  rhs[line].root_cell_gid);
+        EXPECT_NEAR(lhs[line].inhomogeneity,
+                    rhs[line].inhomogeneity,
+                    FE::Real{1.0e-13});
+        ASSERT_EQ(lhs[line].masters.size(), rhs[line].masters.size());
+        for (std::size_t master = 0u;
+             master < lhs[line].masters.size();
+             ++master) {
+            EXPECT_EQ(lhs[line].masters[master].vertex_gid,
+                      rhs[line].masters[master].vertex_gid);
+            EXPECT_EQ(lhs[line].masters[master].component,
+                      rhs[line].masters[master].component);
+            EXPECT_NEAR(
+                lhs[line].masters[master].weight,
+                rhs[line].masters[master].weight,
+                FE::Real{1.0e-12} *
+                    std::max(
+                        FE::Real{1.0},
+                        std::abs(lhs[line].masters[master].weight)));
+        }
+    }
+}
+
+void expectEquivalentPhaseLocalSamples(
+    const PhaseLocalIdentitySample& lhs,
+    const PhaseLocalIdentitySample& rhs,
+    bool require_side_reversal = true)
+{
+    if (require_side_reversal) {
+        EXPECT_NE(lhs.active_side, rhs.active_side);
+    } else {
+        EXPECT_EQ(lhs.active_side, rhs.active_side);
+    }
+    EXPECT_EQ(lhs.cut_cells, rhs.cut_cells);
+    EXPECT_EQ(lhs.velocity_dofs, rhs.velocity_dofs);
+    EXPECT_EQ(lhs.pressure_dofs, rhs.pressure_dofs);
+    EXPECT_NEAR(lhs.active_volume,
+                rhs.active_volume,
+                FE::Real{1.0e-12} *
+                    std::max(FE::Real{1.0}, std::abs(lhs.active_volume)));
+    expectEquivalentAggregationReports(
+        lhs.velocity_report, rhs.velocity_report);
+    expectEquivalentAggregationReports(
+        lhs.pressure_report, rhs.pressure_report);
+    expectEquivalentConstraintLines(
+        lhs.velocity_aggregation_lines,
+        rhs.velocity_aggregation_lines);
+    expectEquivalentConstraintLines(
+        lhs.pressure_aggregation_lines,
+        rhs.pressure_aggregation_lines);
+
+    ASSERT_EQ(lhs.facet_scales.size(), rhs.facet_scales.size());
+    for (std::size_t facet = 0u; facet < lhs.facet_scales.size(); ++facet) {
+        EXPECT_EQ(lhs.facet_scales[facet].facet_gid,
+                  rhs.facet_scales[facet].facet_gid);
+        EXPECT_NEAR(
+            lhs.facet_scales[facet].stabilization_scale,
+            rhs.facet_scales[facet].stabilization_scale,
+            FE::Real{1.0e-12} *
+                std::max(
+                    FE::Real{1.0},
+                    std::abs(
+                        lhs.facet_scales[facet].stabilization_scale)));
+    }
+
+    const auto expect_operator = [](std::span<const FE::Real> first,
+                                    std::span<const FE::Real> second,
+                                    std::string_view name) {
+        ASSERT_EQ(first.size(), second.size()) << name;
+        FE::Real maximum_entry = 0.0;
+        FE::Real maximum_difference = 0.0;
+        for (std::size_t index = 0u; index < first.size(); ++index) {
+            maximum_entry = std::max(
+                maximum_entry,
+                std::max(std::abs(first[index]), std::abs(second[index])));
+            maximum_difference = std::max(
+                maximum_difference,
+                std::abs(first[index] - second[index]));
+        }
+        const auto tolerance =
+            FE::Real{32768.0} *
+            std::numeric_limits<FE::Real>::epsilon() *
+            std::max(FE::Real{1.0}, maximum_entry);
+        EXPECT_LE(maximum_difference, tolerance) << name;
+    };
+    expect_operator(
+        lhs.pressure_pspg_operator,
+        rhs.pressure_pspg_operator,
+        "pressure PSPG");
+    expect_operator(
+        lhs.pressure_ghost_operator,
+        rhs.pressure_ghost_operator,
+        "pressure ghost");
 }
 
 class PersistentStabilityProblem {
@@ -12377,6 +12968,293 @@ TEST(FreeSurfaceCutStability,
         << "\"accepted_claim\":"
         << "\"accepted_state_coercivity_policy_prerequisite\"}"
         << '\n';
+#endif
+}
+
+TEST(FreeSurfaceCutStability,
+     TwoFluidPhaseAggregationAndStabilizationAreSideReversalInvariant)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Two-fluid phase identity requires native mesh support.";
+#else
+    const ScopedEnvVar pressure_diagnostics(
+        "SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC", "1");
+    const PlaneCutPosition dense_phase_cut{
+        "two_fluid_dense_phase_identity",
+        {{FE::Real{1.0}, FE::Real{0.73}, FE::Real{0.41}}},
+        FE::Real{2.307}};
+    const PlaneCutPosition light_phase_cut{
+        "two_fluid_light_phase_identity",
+        {{FE::Real{1.0}, FE::Real{0.73}, FE::Real{0.41}}},
+        FE::Real{1.833}};
+    const auto reversed_dense_phase_cut = reverseLevelSet(dense_phase_cut);
+    const auto reversed_light_phase_cut = reverseLevelSet(light_phase_cut);
+
+    const auto assemble =
+        [&](const PlaneCutPosition& level_set_cut,
+            FE::geometry::CutIntegrationSide target_side,
+            FE::Real target_density,
+            FE::Real target_viscosity,
+            FE::Real complementary_density,
+            FE::Real complementary_viscosity) {
+            auto mesh = makeFixedTetraMesh(
+                level_set_cut, /*cells_per_axis=*/2);
+            FE::systems::SetupOptions setup;
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+            setup.dof_options.my_rank = 0;
+            setup.dof_options.world_size = 1;
+            setup.dof_options.mpi_comm = MPI_COMM_SELF;
+#endif
+            return assemblePhaseLocalIdentitySample(
+                mesh,
+                level_set_cut,
+                target_side,
+                target_density,
+                target_viscosity,
+                complementary_density,
+                complementary_viscosity,
+                setup,
+                [](FE::assembly::DenseMatrixView matrix,
+                   const FE::systems::FESystem&) {
+                    return matrix;
+                });
+        };
+
+    constexpr FE::Real dense_density = FE::Real{1000.0};
+    constexpr FE::Real dense_viscosity = FE::Real{0.01};
+    constexpr FE::Real light_density = FE::Real{1.0};
+    constexpr FE::Real light_viscosity = FE::Real{0.001};
+    const auto dense_negative = assemble(
+        dense_phase_cut,
+        FE::geometry::CutIntegrationSide::Negative,
+        dense_density,
+        dense_viscosity,
+        light_density,
+        light_viscosity);
+    const auto dense_positive = assemble(
+        reversed_dense_phase_cut,
+        FE::geometry::CutIntegrationSide::Positive,
+        dense_density,
+        dense_viscosity,
+        light_density,
+        light_viscosity);
+    const auto light_positive = assemble(
+        light_phase_cut,
+        FE::geometry::CutIntegrationSide::Positive,
+        light_density,
+        light_viscosity,
+        dense_density,
+        dense_viscosity);
+    const auto light_negative = assemble(
+        reversed_light_phase_cut,
+        FE::geometry::CutIntegrationSide::Negative,
+        light_density,
+        light_viscosity,
+        dense_density,
+        dense_viscosity);
+
+    for (const auto* sample : {
+             &dense_negative,
+             &dense_positive,
+             &light_positive,
+             &light_negative}) {
+        EXPECT_GT(sample->active_volume, FE::Real{0.0});
+        EXPECT_GT(sample->cut_cells, 0u);
+        EXPECT_GT(sample->facet_scales.size(), 0u);
+        EXPECT_GT(sample->velocity_report.canonical_candidate_vertices, 0u);
+        EXPECT_GT(sample->pressure_report.canonical_candidate_vertices, 0u);
+        EXPECT_GT(sample->velocity_report.canonical_owned_aggregate_dofs, 0u);
+        EXPECT_GT(sample->pressure_report.canonical_owned_aggregate_dofs, 0u);
+        EXPECT_GT(sample->velocity_aggregation_lines.size(), 0u);
+        EXPECT_GT(sample->pressure_aggregation_lines.size(), 0u);
+        EXPECT_GT(vectorL2Norm(sample->pressure_pspg_operator),
+                  FE::Real{1.0e-14});
+        EXPECT_GT(vectorL2Norm(sample->pressure_ghost_operator),
+                  FE::Real{1.0e-14});
+    }
+
+    expectEquivalentPhaseLocalSamples(
+        dense_negative, dense_positive);
+    expectEquivalentPhaseLocalSamples(
+        light_positive, light_negative);
+    RecordProperty("wp10_phase_identity_case_count", 4);
+    RecordProperty("wp10_phase_identity_material_count", 2);
+    RecordProperty("wp10_phase_identity_active_side_count", 2);
+    RecordProperty(
+        "wp10_phase_identity_dense_velocity_aggregate_lines",
+        dense_negative.velocity_aggregation_lines.size());
+    RecordProperty(
+        "wp10_phase_identity_dense_pressure_aggregate_lines",
+        dense_negative.pressure_aggregation_lines.size());
+    RecordProperty(
+        "wp10_phase_identity_light_velocity_aggregate_lines",
+        light_positive.velocity_aggregation_lines.size());
+    RecordProperty(
+        "wp10_phase_identity_light_pressure_aggregate_lines",
+        light_positive.pressure_aggregation_lines.size());
+#endif
+}
+
+TEST(FreeSurfaceCutStabilityMPI,
+     TwoFluidPhaseIdentityIsInvariantAcrossSideAndPartitionChanges)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH && \
+      defined(FE_HAS_MPI) && defined(MESH_HAS_MPI))
+    GTEST_SKIP() << "Distributed two-fluid phase identity requires MPI-enabled FE and Mesh.";
+#else
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized == 0) {
+        GTEST_SKIP() << "Run this test under mpiexec.";
+    }
+    MPI_Comm comm = MPI_COMM_WORLD;
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly two MPI ranks.";
+    }
+
+    const ScopedEnvVar pressure_diagnostics(
+        "SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC", "1");
+    const PlaneCutPosition dense_phase_cut{
+        "distributed_two_fluid_dense_phase_identity",
+        {{FE::Real{1.0}, FE::Real{0.73}, FE::Real{0.41}}},
+        FE::Real{2.307}};
+    const PlaneCutPosition light_phase_cut{
+        "distributed_two_fluid_light_phase_identity",
+        {{FE::Real{1.0}, FE::Real{0.73}, FE::Real{0.41}}},
+        FE::Real{1.833}};
+    const auto reversed_dense_phase_cut = reverseLevelSet(dense_phase_cut);
+    const auto reversed_light_phase_cut = reverseLevelSet(light_phase_cut);
+    constexpr FE::Real dense_density = FE::Real{1000.0};
+    constexpr FE::Real dense_viscosity = FE::Real{0.01};
+    constexpr FE::Real light_density = FE::Real{1.0};
+    constexpr FE::Real light_viscosity = FE::Real{0.001};
+
+    const auto assemble =
+        [&](std::string_view partition_method,
+            const PlaneCutPosition& level_set_cut,
+            FE::geometry::CutIntegrationSide target_side,
+            FE::Real target_density,
+            FE::Real target_viscosity,
+            FE::Real complementary_density,
+            FE::Real complementary_viscosity) {
+            auto mesh = makeDistributedStructuredTetraMesh(
+                level_set_cut,
+                comm,
+                partition_method,
+                /*cells_per_axis=*/2);
+            if (mesh->n_owned_cells() == 0u ||
+                mesh->n_owned_cells() >= mesh->global_n_cells()) {
+                throw std::runtime_error(
+                    "phase-local identity mesh is not genuinely partitioned");
+            }
+            FE::systems::SetupOptions setup;
+            setup.use_backend_row_ownership_for_assembly = true;
+            setup.dof_options.global_numbering =
+                FE::dofs::GlobalNumberingMode::OwnerContiguous;
+            setup.dof_options.ownership =
+                FE::dofs::OwnershipStrategy::VertexGID;
+            setup.dof_options.my_rank = rank;
+            setup.dof_options.world_size = size;
+            setup.dof_options.mpi_comm = comm;
+            return assemblePhaseLocalIdentitySample(
+                mesh,
+                level_set_cut,
+                target_side,
+                target_density,
+                target_viscosity,
+                complementary_density,
+                complementary_viscosity,
+                setup,
+                [&](FE::assembly::DenseMatrixView matrix,
+                    const FE::systems::FESystem& system) {
+                    return globalizeOwnedRows(matrix, system, comm);
+                });
+        };
+
+    struct PartitionSamples {
+        std::string_view name{};
+        PhaseLocalIdentitySample dense_negative{};
+        PhaseLocalIdentitySample dense_positive{};
+        PhaseLocalIdentitySample light_positive{};
+        PhaseLocalIdentitySample light_negative{};
+    };
+    std::array<PartitionSamples, 2> samples;
+    constexpr std::array<std::string_view, 2> partitions = {
+        "block", "metis"};
+    for (std::size_t partition = 0u;
+         partition < partitions.size();
+         ++partition) {
+        auto& current = samples[partition];
+        current.name = partitions[partition];
+        current.dense_negative = assemble(
+            current.name,
+            dense_phase_cut,
+            FE::geometry::CutIntegrationSide::Negative,
+            dense_density,
+            dense_viscosity,
+            light_density,
+            light_viscosity);
+        current.dense_positive = assemble(
+            current.name,
+            reversed_dense_phase_cut,
+            FE::geometry::CutIntegrationSide::Positive,
+            dense_density,
+            dense_viscosity,
+            light_density,
+            light_viscosity);
+        current.light_positive = assemble(
+            current.name,
+            light_phase_cut,
+            FE::geometry::CutIntegrationSide::Positive,
+            light_density,
+            light_viscosity,
+            dense_density,
+            dense_viscosity);
+        current.light_negative = assemble(
+            current.name,
+            reversed_light_phase_cut,
+            FE::geometry::CutIntegrationSide::Negative,
+            light_density,
+            light_viscosity,
+            dense_density,
+            dense_viscosity);
+        expectEquivalentPhaseLocalSamples(
+            current.dense_negative, current.dense_positive);
+        expectEquivalentPhaseLocalSamples(
+            current.light_positive, current.light_negative);
+    }
+
+    expectEquivalentPhaseLocalSamples(
+        samples[0].dense_negative,
+        samples[1].dense_negative,
+        /*require_side_reversal=*/false);
+    expectEquivalentPhaseLocalSamples(
+        samples[0].dense_positive,
+        samples[1].dense_positive,
+        /*require_side_reversal=*/false);
+    expectEquivalentPhaseLocalSamples(
+        samples[0].light_positive,
+        samples[1].light_positive,
+        /*require_side_reversal=*/false);
+    expectEquivalentPhaseLocalSamples(
+        samples[0].light_negative,
+        samples[1].light_negative,
+        /*require_side_reversal=*/false);
+
+    if (rank == 0) {
+        std::cout
+            << "WP10_phase_local_partition_identity"
+            << " ranks=" << size
+            << " partitions=" << partitions.size()
+            << " material_cases=2"
+            << " active_sides=2"
+            << " status=exact_canonical_identity"
+            << '\n';
+    }
 #endif
 }
 

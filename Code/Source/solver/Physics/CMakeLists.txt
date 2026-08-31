@@ -438,7 +438,7 @@ if(PHYSICS_BUILD_TESTS)
         add_test(
             NAME Physics_FreeSurfaceCutStability_MPI_2
             COMMAND ${MPIEXEC_EXECUTABLE} -np 2 $<TARGET_FILE:test_physics>
-                    --gtest_filter=FreeSurfaceCutStabilityMPI.PhysicalWetBlocksAndDisconnectedIslandsAreInvariantAcrossDryMPIData:FreeSurfaceCutStabilityMPI.DistributedMovingCutRemainsStableAcrossBlockAndMetisPartitions:FreeSurfaceCutStabilityMPI.LimitedMetisHaloFailsClosedOnIncompleteAggregationSupport:FreeSurfaceCutStabilityMPI.TwoRankFractionOrientationRegimeMatrixMatchesSerial
+                    --gtest_filter=FreeSurfaceCutStabilityMPI.TwoFluidPhaseIdentityIsInvariantAcrossSideAndPartitionChanges:FreeSurfaceCutStabilityMPI.PhysicalWetBlocksAndDisconnectedIslandsAreInvariantAcrossDryMPIData:FreeSurfaceCutStabilityMPI.DistributedMovingCutRemainsStableAcrossBlockAndMetisPartitions:FreeSurfaceCutStabilityMPI.LimitedMetisHaloFailsClosedOnIncompleteAggregationSupport:FreeSurfaceCutStabilityMPI.TwoRankFractionOrientationRegimeMatrixMatchesSerial
         )
         set_tests_properties(Physics_FreeSurfaceCutStability_MPI_2 PROPERTIES
             TIMEOUT 43200

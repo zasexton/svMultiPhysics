@@ -234,7 +234,7 @@ remains open until every remaining item and the qualification progression pass.
   without internal-interface exterior traction.
 - [x] Add the weighted symmetric velocity/stress interface form and one
   combined gauge contract.
-- [ ] Add phase-local aggregation and stabilization identity tests under side
+- [x] Add phase-local aggregation and stabilization identity tests under side
   reversal and partition changes.
 - [ ] Add accepted-stage interface, mass, momentum, and flux histories.
 - [ ] Connect the common interface velocity to conservative level-set
@@ -243,6 +243,18 @@ remains open until every remaining item and the qualification progression pass.
   the direct C++ formulation gates pass.
 - [ ] Freeze and run the complete WP-10 qualification matrix from a clean
   source tree.
+
+The phase-local identity item was completed on 2026-08-31. The serial fixture
+holds each physical material fixed while reversing the level-set sign and
+swapping the owning cut side. The two-rank fixture repeats both material
+assignments with block and METIS cell partitions. In physical vertex, cell,
+and face identity, both fixtures require exact rooted aggregation selection,
+polynomial-extension weights, cut-adjacent facet scales, retained phase
+volume, PSPG pressure-gradient action, and pressure ghost-penalty action.
+Algebraic DOF fingerprints and the subsequently closed coupled pressure-gauge
+row are deliberately outside this comparison because they change with
+owner-contiguous numbering; the underlying provisional aggregation rows and
+globalized phase operators are the tested invariant.
 
 ## Qualification progression
 
