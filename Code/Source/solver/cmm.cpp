@@ -104,31 +104,31 @@ void cmm_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<double
 
   // Strain rate tensor 2*e_ij := (u_ij + u_ji)
   //
-  Array<double> es(3,3);
-  es(0,0) = ux[0][0] + ux[0][0];
-  es(1,0) = ux[1][0] + ux[0][1];
-  es(2,0) = ux[2][0] + ux[0][2];
+  std::array<std::array<double, 3>, 3> es{};
+  es[0][0] = ux[0][0] + ux[0][0];
+  es[1][0] = ux[1][0] + ux[0][1];
+  es[2][0] = ux[2][0] + ux[0][2];
 
-  es(0,1) = es(1,0);
-  es(1,1) = ux[1][1] + ux[1][1];
-  es(2,1) = ux[2][1] + ux[1][2];
+  es[0][1] = es[1][0];
+  es[1][1] = ux[1][1] + ux[1][1];
+  es[2][1] = ux[2][1] + ux[1][2];
 
-  es(0,2) = es(2,0);
-  es(1,2) = es(2,1);
-  es(2,2) = ux[2][2] + ux[2][2];
+  es[0][2] = es[2][0];
+  es[1][2] = es[2][1];
+  es[2][2] = ux[2][2] + ux[2][2];
 
   Array<double> es_x(3,eNoN);
   for (int a = 0; a < eNoN; a++) {
-    es_x(0,a) = es(0,0)*Nx(0,a) + es(1,0)*Nx(1,a) + es(2,0)*Nx(2,a);
-    es_x(1,a) = es(0,1)*Nx(0,a) + es(1,1)*Nx(1,a) + es(2,1)*Nx(2,a);
-    es_x(2,a) = es(0,2)*Nx(0,a) + es(1,2)*Nx(1,a) + es(2,2)*Nx(2,a);
+    es_x(0,a) = es[0][0]*Nx(0,a) + es[1][0]*Nx(1,a) + es[2][0]*Nx(2,a);
+    es_x(1,a) = es[0][1]*Nx(0,a) + es[1][1]*Nx(1,a) + es[2][1]*Nx(2,a);
+    es_x(2,a) = es[0][2]*Nx(0,a) + es[1][2]*Nx(1,a) + es[2][2]*Nx(2,a);
   }
 
   // Shear-rate := (1*e_ij*e_ij)^.5
   //
-  double gam = es(0,0)*es(0,0) + es(1,0)*es(1,0) + es(2,0)*es(2,0) + 
-               es(0,1)*es(0,1) + es(1,1)*es(1,1) + es(2,1)*es(2,1) + 
-               es(0,2)*es(0,2) + es(1,2)*es(1,2) + es(2,2)*es(2,2);
+  double gam = es[0][0]*es[0][0] + es[1][0]*es[1][0] + es[2][0]*es[2][0] +
+               es[0][1]*es[0][1] + es[1][1]*es[1][1] + es[2][1]*es[2][1] +
+               es[0][2]*es[0][2] + es[1][2]*es[1][2] + es[2][2]*es[2][2];
   gam = sqrt(0.50*gam);
 
   // Compute viscosity based on shear-rate and chosen viscosity model
@@ -156,78 +156,78 @@ void cmm_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<double
   double tauM = 1.0 / (rho * sqrt( kT + kU + kS ));
   double tauC = 1.0 / (tauM * (Kxi(0,0) + Kxi(1,1) + Kxi(2,2)));
 
-  Vector<double> rV(3);
-  rV(0) = ud[0] + u[0]*ux[0][0] + u[1]*ux[1][0] + u[2]*ux[2][0];
-  rV(1) = ud[1] + u[0]*ux[0][1] + u[1]*ux[1][1] + u[2]*ux[2][1];
-  rV(2) = ud[2] + u[0]*ux[0][2] + u[1]*ux[1][2] + u[2]*ux[2][2];
+  std::array<double, 3> rV{};
+  rV[0] = ud[0] + u[0]*ux[0][0] + u[1]*ux[1][0] + u[2]*ux[2][0];
+  rV[1] = ud[1] + u[0]*ux[0][1] + u[1]*ux[1][1] + u[2]*ux[2][1];
+  rV[2] = ud[2] + u[0]*ux[0][2] + u[1]*ux[1][2] + u[2]*ux[2][2];
 
-  Vector<double> up(3);
-  up(0) = -tauM*(rho*rV(0) + px[0]);
-  up(1) = -tauM*(rho*rV(1) + px[1]);
-  up(2) = -tauM*(rho*rV(2) + px[2]);
+  std::array<double, 3> up{};
+  up[0] = -tauM*(rho*rV[0] + px[0]);
+  up[1] = -tauM*(rho*rV[1] + px[1]);
+  up[2] = -tauM*(rho*rV[2] + px[2]);
 
-  double tauB = up(0)*up(0)*Kxi(0,0) + up(1)*up(0)*Kxi(1,0) + 
-                up(2)*up(0)*Kxi(2,0) + up(0)*up(1)*Kxi(0,1) + 
-                up(1)*up(1)*Kxi(1,1) + up(2)*up(1)*Kxi(2,1) + 
-                up(0)*up(2)*Kxi(0,2) + up(1)*up(2)*Kxi(1,2) + 
-                up(2)*up(2)*Kxi(2,2);
+  double tauB = up[0]*up[0]*Kxi(0,0) + up[1]*up[0]*Kxi(1,0) +
+                up[2]*up[0]*Kxi(2,0) + up[0]*up[1]*Kxi(0,1) +
+                up[1]*up[1]*Kxi(1,1) + up[2]*up[1]*Kxi(2,1) +
+                up[0]*up[2]*Kxi(0,2) + up[1]*up[2]*Kxi(1,2) +
+                up[2]*up[2]*Kxi(2,2);
 
   if (utils::is_zero(tauB)) {
     tauB = std::numeric_limits<double>::epsilon();
   }
   tauB = rho / sqrt(tauB);
 
-  Vector<double> ua(3);
-  ua(0) = u[0] + up(0);
-  ua(1) = u[1] + up(1);
-  ua(2) = u[2] + up(2);
+  std::array<double, 3> ua{};
+  ua[0] = u[0] + up[0];
+  ua[1] = u[1] + up[1];
+  ua[2] = u[2] + up[2];
   double pa = p - tauC*divU;
 
-  rV(0) = tauB*(up(0)*ux[0][0] + up(1)*ux[1][0] + up(2)*ux[2][0]);
-  rV(1) = tauB*(up(0)*ux[0][1] + up(1)*ux[1][1] + up(2)*ux[2][1]);
-  rV(2) = tauB*(up(0)*ux[0][2] + up(1)*ux[1][2] + up(2)*ux[2][2]);
+  rV[0] = tauB*(up[0]*ux[0][0] + up[1]*ux[1][0] + up[2]*ux[2][0]);
+  rV[1] = tauB*(up[0]*ux[0][1] + up[1]*ux[1][1] + up[2]*ux[2][1]);
+  rV[2] = tauB*(up[0]*ux[0][2] + up[1]*ux[1][2] + up[2]*ux[2][2]);
 
-  Array<double> rM(3,3);
-  rM(0,0) = mu*es(0,0) - rho*up(0)*ua(0) + rV(0)*up(0) - pa;
-  rM(1,0) = mu*es(1,0) - rho*up(0)*ua(1) + rV(0)*up(1);
-  rM(2,0) = mu*es(2,0) - rho*up(0)*ua(2) + rV(0)*up(2);
+  std::array<std::array<double, 3>, 3> rM{};
+  rM[0][0] = mu*es[0][0] - rho*up[0]*ua[0] + rV[0]*up[0] - pa;
+  rM[1][0] = mu*es[1][0] - rho*up[0]*ua[1] + rV[0]*up[1];
+  rM[2][0] = mu*es[2][0] - rho*up[0]*ua[2] + rV[0]*up[2];
 
-  rM(0,1) = mu*es(0,1) - rho*up(1)*ua(0) + rV(1)*up(0);
-  rM(1,1) = mu*es(1,1) - rho*up(1)*ua(1) + rV(1)*up(1) - pa;
-  rM(2,1) = mu*es(2,1) - rho*up(1)*ua(2) + rV(1)*up(2);
+  rM[0][1] = mu*es[0][1] - rho*up[1]*ua[0] + rV[1]*up[0];
+  rM[1][1] = mu*es[1][1] - rho*up[1]*ua[1] + rV[1]*up[1] - pa;
+  rM[2][1] = mu*es[2][1] - rho*up[1]*ua[2] + rV[1]*up[2];
 
-  rM(0,2) = mu*es(0,2) - rho*up(2)*ua(0) + rV(2)*up(0);
-  rM(1,2) = mu*es(1,2) - rho*up(2)*ua(1) + rV(2)*up(1);
-  rM(2,2) = mu*es(2,2) - rho*up(2)*ua(2) + rV(2)*up(2) - pa;
+  rM[0][2] = mu*es[0][2] - rho*up[2]*ua[0] + rV[2]*up[0];
+  rM[1][2] = mu*es[1][2] - rho*up[2]*ua[1] + rV[2]*up[1];
+  rM[2][2] = mu*es[2][2] - rho*up[2]*ua[2] + rV[2]*up[2] - pa;
 
-  rV(0) = ud[0] + ua(0)*ux[0][0] + ua(1)*ux[1][0] + ua(2)*ux[2][0];
-  rV(1) = ud[1] + ua(0)*ux[0][1] + ua(1)*ux[1][1] + ua(2)*ux[2][1];
-  rV(2) = ud[2] + ua(0)*ux[0][2] + ua(1)*ux[1][2] + ua(2)*ux[2][2];
+  rV[0] = ud[0] + ua[0]*ux[0][0] + ua[1]*ux[1][0] + ua[2]*ux[2][0];
+  rV[1] = ud[1] + ua[0]*ux[0][1] + ua[1]*ux[1][1] + ua[2]*ux[2][1];
+  rV[2] = ud[2] + ua[0]*ux[0][2] + ua[1]*ux[1][2] + ua[2]*ux[2][2];
 
   Vector<double> uNx(eNoN), upNx(eNoN), uaNx(eNoN);
 
   for (int a = 0; a < eNoN; a++) {
     uNx(a) = u[0]*Nx(0,a)  + u[1]*Nx(1,a)  + u[2]*Nx(2,a);
-    upNx(a) = up(0)*Nx(0,a) + up(1)*Nx(1,a) + up(2)*Nx(2,a);
+    upNx(a) = up[0]*Nx(0,a) + up[1]*Nx(1,a) + up[2]*Nx(2,a);
     uaNx(a) = uNx(a) + upNx(a);
 
-    lR(0,a) = lR(0,a) + wr*N(a)*rV(0) + w*(Nx(0,a)*rM(0,0) + Nx(1,a)*rM(1,0) + Nx(2,a)*rM(2,0));
-    lR(1,a) = lR(1,a) + wr*N(a)*rV(1) + w*(Nx(0,a)*rM(0,1) + Nx(1,a)*rM(1,1) + Nx(2,a)*rM(2,1));
-    lR(2,a) = lR(2,a) + wr*N(a)*rV(2) + w*(Nx(0,a)*rM(0,2) + Nx(1,a)*rM(1,2) + Nx(2,a)*rM(2,2));
+    lR(0,a) = lR(0,a) + wr*N(a)*rV[0] + w*(Nx(0,a)*rM[0][0] + Nx(1,a)*rM[1][0] + Nx(2,a)*rM[2][0]);
+    lR(1,a) = lR(1,a) + wr*N(a)*rV[1] + w*(Nx(0,a)*rM[0][1] + Nx(1,a)*rM[1][1] + Nx(2,a)*rM[2][1]);
+    lR(2,a) = lR(2,a) + wr*N(a)*rV[2] + w*(Nx(0,a)*rM[0][2] + Nx(1,a)*rM[1][2] + Nx(2,a)*rM[2][2]);
     lR(3,a) = lR(3,a) + w*(N(a)*divU - upNx(a));
   }
 
   for (int a = 0; a < eNoN; a++) {
     for (int b = 0; b < eNoN; b++) {
-      rM(0,0) = Nx(0,a)*Nx(0,b);
-      rM(1,0) = Nx(1,a)*Nx(0,b);
-      rM(2,0) = Nx(2,a)*Nx(0,b);
-      rM(0,1) = Nx(0,a)*Nx(1,b);
-      rM(1,1) = Nx(1,a)*Nx(1,b);
-      rM(2,1) = Nx(2,a)*Nx(1,b);
-      rM(0,2) = Nx(0,a)*Nx(2,b);
-      rM(1,2) = Nx(1,a)*Nx(2,b);
-      rM(2,2) = Nx(2,a)*Nx(2,b);
+      rM[0][0] = Nx(0,a)*Nx(0,b);
+      rM[1][0] = Nx(1,a)*Nx(0,b);
+      rM[2][0] = Nx(2,a)*Nx(0,b);
+      rM[0][1] = Nx(0,a)*Nx(1,b);
+      rM[1][1] = Nx(1,a)*Nx(1,b);
+      rM[2][1] = Nx(2,a)*Nx(1,b);
+      rM[0][2] = Nx(0,a)*Nx(2,b);
+      rM[1][2] = Nx(1,a)*Nx(2,b);
+      rM[2][2] = Nx(2,a)*Nx(2,b);
 
       double NxNx = Nx(0,a)*Nx(0,b) + Nx(1,a)*Nx(1,b) + Nx(2,a)*Nx(2,b);
       double T1 = mu*NxNx + tauB*upNx(a)*upNx(b) + rho*( N(a)*(amd*N(b) + uaNx(b)) + 
@@ -237,15 +237,15 @@ void cmm_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<double
 
       // dM/dU
       //
-      lK(0,a,b)  = lK(0,a,b)  + wl*((mu + tauC)*rM(0,0) + T1 + mu_x*es_x(0,a)*es_x(0,b));
-      lK(1,a,b)  = lK(1,a,b)  + wl*(mu*rM(1,0) + tauC*rM(0,1) + mu_x*es_x(0,a)*es_x(1,b));
-      lK(2,a,b)  = lK(2,a,b)  + wl*(mu*rM(2,0) + tauC*rM(0,2) + mu_x*es_x(0,a)*es_x(2,b));
-      lK(4,a,b)  = lK(4,a,b)  + wl*(mu*rM(0,1) + tauC*rM(1,0) + mu_x*es_x(1,a)*es_x(0,b));
-      lK(5,a,b)  = lK(5,a,b)  + wl*((mu + tauC)*rM(1,1) + T1 + mu_x*es_x(1,a)*es_x(1,b));
-      lK(6,a,b)  = lK(6,a,b)  + wl*(mu*rM(2,1) + tauC*rM(1,2) + mu_x*es_x(1,a)*es_x(2,b));
-      lK(8,a,b)  = lK(8,a,b)  + wl*(mu*rM(0,2) + tauC*rM(2,0) + mu_x*es_x(2,a)*es_x(0,b));
-      lK(9,a,b) = lK(9,a,b) + wl*(mu*rM(1,2) + tauC*rM(2,1) + mu_x*es_x(2,a)*es_x(1,b));
-      lK(10,a,b) = lK(10,a,b) + wl*((mu + tauC)*rM(2,2) + T1 + mu_x*es_x(2,a)*es_x(2,b));
+      lK(0,a,b)  = lK(0,a,b)  + wl*((mu + tauC)*rM[0][0] + T1 + mu_x*es_x(0,a)*es_x(0,b));
+      lK(1,a,b)  = lK(1,a,b)  + wl*(mu*rM[1][0] + tauC*rM[0][1] + mu_x*es_x(0,a)*es_x(1,b));
+      lK(2,a,b)  = lK(2,a,b)  + wl*(mu*rM[2][0] + tauC*rM[0][2] + mu_x*es_x(0,a)*es_x(2,b));
+      lK(4,a,b)  = lK(4,a,b)  + wl*(mu*rM[0][1] + tauC*rM[1][0] + mu_x*es_x(1,a)*es_x(0,b));
+      lK(5,a,b)  = lK(5,a,b)  + wl*((mu + tauC)*rM[1][1] + T1 + mu_x*es_x(1,a)*es_x(1,b));
+      lK(6,a,b)  = lK(6,a,b)  + wl*(mu*rM[2][1] + tauC*rM[1][2] + mu_x*es_x(1,a)*es_x(2,b));
+      lK(8,a,b)  = lK(8,a,b)  + wl*(mu*rM[0][2] + tauC*rM[2][0] + mu_x*es_x(2,a)*es_x(0,b));
+      lK(9,a,b) = lK(9,a,b) + wl*(mu*rM[1][2] + tauC*rM[2][1] + mu_x*es_x(2,a)*es_x(1,b));
+      lK(10,a,b) = lK(10,a,b) + wl*((mu + tauC)*rM[2][2] + T1 + mu_x*es_x(2,a)*es_x(2,b));
 
       // dM/dP
       lK(3,a,b)  = lK(3,a,b)  - wl*(Nx(0,a)*N(b) - Nx(0,b)*T2);
