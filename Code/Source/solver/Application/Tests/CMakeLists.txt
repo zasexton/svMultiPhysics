@@ -70,6 +70,7 @@ if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
     Unit/test_LevelSetMaintenanceTransactionConsensusMPI.cpp
     Unit/test_LegacyParameterStubs.cpp
     ../Core/ActiveDomainOutput.cpp
+    ../Core/FreeSurfaceEnergyLedger.cpp
     ../Core/LevelSetCutConfiguration.cpp
     ../Core/LevelSetCurvatureSamples.cpp
     ../Core/LevelSetMaintenanceHistory.cpp
