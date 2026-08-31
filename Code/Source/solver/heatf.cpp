@@ -110,7 +110,7 @@ void construct_heatf(ComMod& com_mod, const mshType& lM, const SolutionStates& s
 
     for (int g = 0; g < lM.nG; g++) {
       if (g == 0 || !lM.lShpF) {
-        auto Nx_g = lM.Nx.slice(g);
+        auto Nx_g = lM.Nx.rslice(g);
         nn::gnn(eNoN, nsd, nsd, Nx_g, xl, Nx, Jac, ksix);
         if (utils::is_zero(Jac)) {
           throw std::runtime_error("[construct_heatf] Jacobian for element " + std::to_string(e) + " is < 0.");
