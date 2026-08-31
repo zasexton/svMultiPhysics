@@ -68,6 +68,7 @@ void construct_heatf(ComMod& com_mod, const mshType& lM, const SolutionStates& s
   #endif
 
   Vector<int> ptr(eNoN);
+  Vector<double> udNx(eNoN);
   Array<double> xl(nsd,eNoN), al(tDof,eNoN), yl(tDof,eNoN), Nx(nsd,eNoN), lR(dof,eNoN);
   Array3<double> lK(dof*dof,eNoN,eNoN);
   Array<double> ksix(nsd,nsd);
@@ -120,10 +121,10 @@ void construct_heatf(ComMod& com_mod, const mshType& lM, const SolutionStates& s
       const auto N = lM.N.rcol(g);
 
       if (nsd == 3) {
-        heatf_3d(com_mod, eNoN, w, N, Nx, al, yl, ksix, lR, lK);
+        heatf_3d(com_mod, eNoN, w, N, Nx, al, yl, ksix, udNx, lR, lK);
 
       } else if (nsd == 2) {
-        heatf_2d(com_mod, eNoN, w, N, Nx, al, yl, ksix, lR, lK);
+        heatf_2d(com_mod, eNoN, w, N, Nx, al, yl, ksix, udNx, lR, lK);
       }
     } // for g = 0
 
@@ -133,7 +134,8 @@ void construct_heatf(ComMod& com_mod, const mshType& lM, const SolutionStates& s
 }
 
 void heatf_2d(ComMod& com_mod, const int eNoN, const double w, const Vector<double>& N, const Array<double>& Nx,
-    const Array<double>& al, const Array<double>& yl, const Array<double>& ksix, Array<double>& lR, Array3<double>& lK)
+    const Array<double>& al, const Array<double>& yl, const Array<double>& ksix, Vector<double>& udNx,
+    Array<double>& lR, Array3<double>& lK)
 {
   #define n_debug_heatf_2d 
   #ifdef debug_heatf_2d 
@@ -170,7 +172,7 @@ void heatf_2d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
   #endif
 
   double Td = -s;
-  Vector<double> Tx(nsd), u(nsd), udNx(eNoN);
+  Vector<double> Tx(nsd), u(nsd);
 
   for (int a = 0; a < eNoN; a++) {
     u(0) = u(0) + N(a)*yl(0,a);
@@ -219,7 +221,8 @@ void heatf_2d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
 
 
 void heatf_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<double>& N, const Array<double>& Nx,
-    const Array<double>& al, const Array<double>& yl, const Array<double>& ksix, Array<double>& lR, Array3<double>& lK)
+    const Array<double>& al, const Array<double>& yl, const Array<double>& ksix, Vector<double>& udNx,
+    Array<double>& lR, Array3<double>& lK)
 {
   #define n_debug_heatf_3d 
   #ifdef debug_heatf_3d 
@@ -269,8 +272,6 @@ void heatf_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
   double u0 = 0.0;
   double u1 = 0.0;
   double u2 = 0.0;
-  Vector<double> udNx(eNoN);
-
   for (int a = 0; a < eNoN; a++) {
     u0 = u0 + N(a)*yl(0,a);
     u1 = u1 + N(a)*yl(1,a);
