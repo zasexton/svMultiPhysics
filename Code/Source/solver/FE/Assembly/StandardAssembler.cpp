@@ -13398,6 +13398,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
 
                         double tp0 = TP();
                         prepareGeometry(shared, mesh, cell_id, *fused_quad_rule);
+                        shared.setEntityMeasures(
+                            cached_geom_h_, cached_geom_volume_, 0.0);
                         tp_m_geom += TP() - tp0;
 
                         saved_node_coords[slot].node_coords = scratch_node_coords_;
@@ -14138,6 +14140,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             }
             double tp0 = TP();
             prepareGeometry(shared_ctx, mesh, cell_id, *fused_quad_rule);
+            shared_ctx.setEntityMeasures(
+                cached_geom_h_, cached_geom_volume_, 0.0);
             tp_m_geom += TP() - tp0;
             setCommonContextState(shared_ctx);
             if (any_need_field_solutions) {

@@ -973,6 +973,36 @@ private:
     int compute_cell_calls_{0};
 };
 
+class CountingDiameterMassKernel final : public MassKernel {
+public:
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        ++compute_cell_calls_;
+        MassKernel::computeCell(ctx, output);
+        const Real diameter = ctx.cellDiameter();
+        for (auto& value : output.local_matrix) {
+            value *= diameter;
+        }
+        for (auto& value : output.local_vector) {
+            value *= diameter;
+        }
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return MassKernel::getRequiredData() |
+               RequiredData::EntityMeasures;
+    }
+
+    [[nodiscard]] int computeCellCalls() const noexcept
+    {
+        return compute_cell_calls_;
+    }
+
+private:
+    int compute_cell_calls_{0};
+};
+
 /**
  * @brief Stiffness matrix kernel - computes local stiffness matrix
  * K_ij = integral(grad(phi_i) . grad(phi_j))
@@ -5737,12 +5767,14 @@ TEST(StandardAssemblerCaches, MonolithicCompiledDispatchDefersToSelectiveWeightF
     auto scalar_space =
         std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
     auto scalar_map = createSingleCellDofMap(4);
-    auto fallback_kernel = std::make_shared<CountingMassKernel>();
+    auto fallback_kernel =
+        std::make_shared<CountingDiameterMassKernel>();
 
     const auto u = forms::TrialFunction(*scalar_space, "u");
     const auto v = forms::TestFunction(*scalar_space, "v");
     forms::FormCompiler form_compiler;
-    auto tangent_ir = form_compiler.compileBilinear((u * v).dx());
+    auto tangent_ir = form_compiler.compileBilinear(
+        (forms::h() * u * v).dx());
 
     forms::JITOptions jit_options;
     jit_options.enable = true;
@@ -5804,6 +5836,12 @@ TEST(StandardAssemblerCaches, MonolithicCompiledDispatchDefersToSelectiveWeightF
     EXPECT_EQ(fallback_kernel->computeCellCalls(), 0)
         << "control assembly did not take the env-enabled coupled dispatch";
     const auto compiled_matrix = output.matrix();
+    Real compiled_l1 = 0.0;
+    for (const auto value : compiled_matrix) {
+        EXPECT_TRUE(std::isfinite(value));
+        compiled_l1 += std::abs(value);
+    }
+    EXPECT_GT(compiled_l1, 0.0);
 
     time_ctx.time_derivative_term_weight = Real{0.0};
     time_ctx.non_time_derivative_term_weight = Real{1.0};

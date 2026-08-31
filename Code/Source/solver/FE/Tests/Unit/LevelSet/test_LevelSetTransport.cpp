@@ -10,6 +10,8 @@
 #include "Systems/FESystem.h"
 #include "Systems/SystemSetup.h"
 #include "Systems/TimeIntegrator.h"
+#include "TimeStepping/GeneralizedAlpha.h"
+#include "TimeStepping/TimeSteppingUtils.h"
 
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
@@ -21,10 +23,13 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -36,6 +41,35 @@ namespace level_set = svmp::FE::level_set;
 using FE::forms::FormExpr;
 using FE::forms::FormExprNode;
 using FE::forms::FormExprType;
+
+class ScopedEnvironmentVariable final {
+public:
+    ScopedEnvironmentVariable(const char* key, const char* value)
+        : key_(key)
+    {
+        if (const char* current = std::getenv(key); current != nullptr) {
+            prior_ = std::string(current);
+        }
+        ::setenv(key_.c_str(), value, 1);
+    }
+
+    ~ScopedEnvironmentVariable()
+    {
+        if (prior_.has_value()) {
+            ::setenv(key_.c_str(), prior_->c_str(), 1);
+        } else {
+            ::unsetenv(key_.c_str());
+        }
+    }
+
+    ScopedEnvironmentVariable(const ScopedEnvironmentVariable&) = delete;
+    ScopedEnvironmentVariable& operator=(
+        const ScopedEnvironmentVariable&) = delete;
+
+private:
+    std::string key_;
+    std::optional<std::string> prior_;
+};
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 [[nodiscard]] std::shared_ptr<svmp::Mesh> buildNativeQuad9Mesh()
@@ -158,6 +192,97 @@ public:
 private:
     std::vector<std::array<FE::Real, 3>> nodes_{};
     std::array<FE::GlobalIndex, 4> cell_{};
+};
+
+class SingleTriangleMeshAccess final : public FE::assembly::IMeshAccess {
+public:
+    SingleTriangleMeshAccess()
+    {
+        nodes_ = {
+            std::array<FE::Real, 3>{0.0, 0.0, 0.0},
+            std::array<FE::Real, 3>{2.0, 0.0, 0.0},
+            std::array<FE::Real, 3>{0.0, 1.0, 0.0},
+        };
+        cell_ = {0, 1, 2};
+    }
+
+    [[nodiscard]] FE::GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] FE::GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] FE::GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] FE::GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 2; }
+    [[nodiscard]] bool isOwnedCell(FE::GlobalIndex) const override { return true; }
+
+    [[nodiscard]] FE::ElementType getCellType(FE::GlobalIndex) const override
+    {
+        return FE::ElementType::Triangle3;
+    }
+
+    void getCellNodes(FE::GlobalIndex,
+                      std::vector<FE::GlobalIndex>& nodes) const override
+    {
+        nodes.assign(cell_.begin(), cell_.end());
+    }
+
+    [[nodiscard]] std::array<FE::Real, 3> getNodeCoordinates(
+        FE::GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(
+        FE::GlobalIndex,
+        std::vector<std::array<FE::Real, 3>>& coords) const override
+    {
+        coords = nodes_;
+    }
+
+    [[nodiscard]] FE::LocalIndex getLocalFaceIndex(
+        FE::GlobalIndex,
+        FE::GlobalIndex) const override
+    {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(FE::GlobalIndex) const override
+    {
+        return -1;
+    }
+
+    [[nodiscard]] std::pair<FE::GlobalIndex, FE::GlobalIndex>
+    getInteriorFaceCells(FE::GlobalIndex) const override
+    {
+        return {0, 0};
+    }
+
+    void forEachCell(
+        std::function<void(FE::GlobalIndex)> callback) const override
+    {
+        callback(0);
+    }
+
+    void forEachOwnedCell(
+        std::function<void(FE::GlobalIndex)> callback) const override
+    {
+        callback(0);
+    }
+
+    void forEachBoundaryFace(
+        int,
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex)>) const override
+    {
+    }
+
+    void forEachInteriorFace(
+        std::function<void(FE::GlobalIndex,
+                           FE::GlobalIndex,
+                           FE::GlobalIndex)>) const override
+    {
+    }
+
+private:
+    std::vector<std::array<FE::Real, 3>> nodes_{};
+    std::array<FE::GlobalIndex, 3> cell_{};
 };
 
 class SingleQuad9MeshAccess final : public FE::assembly::IMeshAccess {
@@ -625,6 +750,26 @@ void addScalarAndVelocityFields(FE::systems::FESystem& system,
     topo.cell2vertex_offsets = {0, 4};
     topo.cell2vertex_data = {0, 1, 2, 3};
     topo.vertex_gids = {0, 1, 2, 3};
+    topo.cell_gids = {0};
+    topo.cell_owner_ranks = {0};
+
+    FE::systems::SetupInputs inputs;
+    inputs.topology_override = std::move(topo);
+    return inputs;
+}
+
+[[nodiscard]] FE::systems::SetupInputs makeSingleTriangleSetupInputs()
+{
+    FE::dofs::MeshTopologyInfo topo;
+    topo.n_cells = 1;
+    topo.n_vertices = 3;
+    topo.n_edges = 0;
+    topo.n_faces = 0;
+    topo.dim = 2;
+
+    topo.cell2vertex_offsets = {0, 3};
+    topo.cell2vertex_data = {0, 1, 2};
+    topo.vertex_gids = {0, 1, 2};
     topo.cell_gids = {0};
     topo.cell_owner_ranks = {0};
 
@@ -1522,6 +1667,177 @@ TEST(LevelSetTransport,
             << "residual row=" << row;
         EXPECT_NEAR(combined_residual[row], interpreter_residual[row], 1.0e-12)
             << "interpreter residual row=" << row;
+    }
+}
+
+TEST(LevelSetTransport,
+     DiscontinuityCapturingCompiledGeneralizedAlphaMatchesInterpreterOnTriangle)
+{
+    ScopedEnvironmentVariable enable_compiled(
+        "SVMP_FE_ENABLE_MONOLITHIC_COMPILED_DISPATCH", "1");
+    ScopedEnvironmentVariable allow_compiled(
+        "SVMP_FE_DISABLE_MONOLITHIC_COMPILED_DISPATCH", "0");
+    ScopedEnvironmentVariable disable_compare(
+        "SVMP_FE_COMPARE_MONOLITHIC_COMPILED", "0");
+
+    const auto mesh = std::make_shared<SingleTriangleMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+    auto velocity_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1,
+        mesh,
+        /*order=*/1,
+        /*components=*/2);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi", .space = phi_space, .components = 1});
+    const auto velocity = system.addField(FE::systems::FieldSpec{
+        .name = "advecting_velocity",
+        .space = velocity_space,
+        .components = velocity_space->value_dimension(),
+    });
+
+    level_set::LevelSetTransportOptions options{};
+    options.level_set.field_name = "phi";
+    options.level_set.auto_register_field = false;
+    options.velocity.field_name = "advecting_velocity";
+    options.velocity.source =
+        level_set::LevelSetVelocitySource::CoupledField;
+    options.supg.enabled = true;
+    options.supg.discontinuity_capturing_enabled = true;
+
+    FE::systems::FormInstallOptions install_options{};
+    install_options.compiler_options.jit.enable = true;
+    const auto kernels = level_set::installLevelSetTransport(
+        system, phi_space, options, install_options);
+    ASSERT_TRUE(kernels.mixed_plan);
+    EXPECT_TRUE(kernels.mixed_plan->jit_requested);
+    EXPECT_TRUE(kernels.mixed_plan->monolithic_cell_requested);
+    ASSERT_NO_THROW(system.setup({}, makeSingleTriangleSetupInputs()));
+
+    const auto n = system.dofHandler().getNumDofs();
+    std::vector<FE::Real> solution(static_cast<std::size_t>(n), 0.0);
+    std::vector<FE::Real> previous(solution.size(), 0.0);
+    std::vector<FE::Real> injected_rate(solution.size(), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 3; ++vertex) {
+        const auto point = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(
+            solution,
+            system,
+            phi,
+            vertex,
+            0,
+            0.18 + 0.07 * point[0] - 0.05 * point[1]);
+        setFieldComponentValue(
+            previous,
+            system,
+            phi,
+            vertex,
+            0,
+            0.11 - 0.03 * point[0] + 0.02 * point[1]);
+        setFieldComponentValue(
+            injected_rate,
+            system,
+            phi,
+            vertex,
+            0,
+            -0.04 + 0.01 * point[0]);
+        const FE::Real velocity_x = 0.35 + 0.02 * point[0];
+        const FE::Real velocity_y = -0.16 + 0.03 * point[1];
+        setFieldComponentValue(
+            solution, system, velocity, vertex, 0, velocity_x);
+        setFieldComponentValue(
+            solution, system, velocity, vertex, 1, velocity_y);
+        setFieldComponentValue(
+            previous, system, velocity, vertex, 0, velocity_x);
+        setFieldComponentValue(
+            previous, system, velocity, vertex, 1, velocity_y);
+    }
+
+    constexpr double dt = 0.05;
+    constexpr double dt_prev = 0.04;
+    const std::vector<std::span<const FE::Real>> history = {
+        std::span<const FE::Real>(previous),
+        std::span<const FE::Real>(injected_rate),
+    };
+    const std::array<double, 2> dt_history = {dt_prev, dt_prev};
+    FE::systems::SystemStateView state;
+    state.time = 0.125;
+    state.dt = dt;
+    state.effective_dt = dt;
+    state.dt_prev = dt_prev;
+    state.u = solution;
+    state.u_prev = previous;
+    state.u_prev2 = injected_rate;
+    state.u_history = history;
+    state.dt_history = dt_history;
+
+    const auto ga = FE::timestepping::utils::
+        generalizedAlphaFirstOrderFromRhoInf(0.5);
+    const FE::timestepping::GeneralizedAlphaFirstOrderIntegrator integrator({
+        .alpha_m = ga.alpha_m,
+        .alpha_f = ga.alpha_f,
+        .gamma = ga.gamma,
+        .history_rate_order = 0,
+    });
+    const auto time_context =
+        integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+
+    FE::assembly::DenseMatrixView jacobian(n);
+    FE::assembly::DenseVectorView compiled_residual(n);
+    FE::systems::AssemblyRequest combined_request;
+    combined_request.op = "level_set";
+    combined_request.want_matrix = true;
+    combined_request.want_vector = true;
+    const auto compiled = system.assemble(
+        combined_request, state, &jacobian, &compiled_residual);
+    ASSERT_TRUE(compiled.success) << compiled.error_message;
+
+    FE::Real matrix_l1 = 0.0;
+    for (const auto value : jacobian.data()) {
+        EXPECT_TRUE(std::isfinite(value));
+        matrix_l1 += std::abs(value);
+    }
+    EXPECT_GT(matrix_l1, 0.0);
+    for (FE::GlobalIndex row = 0; row < n; ++row) {
+        EXPECT_TRUE(std::isfinite(compiled_residual[row]));
+    }
+
+    FE::systems::FESystem interpreter_system(mesh);
+    (void)interpreter_system.addField(FE::systems::FieldSpec{
+        .name = "phi", .space = phi_space, .components = 1});
+    (void)interpreter_system.addField(FE::systems::FieldSpec{
+        .name = "advecting_velocity",
+        .space = velocity_space,
+        .components = velocity_space->value_dimension(),
+    });
+    auto interpreter_install_options = install_options;
+    interpreter_install_options.compiler_options.jit.enable = false;
+    (void)level_set::installLevelSetTransport(
+        interpreter_system,
+        phi_space,
+        options,
+        interpreter_install_options);
+    ASSERT_NO_THROW(
+        interpreter_system.setup({}, makeSingleTriangleSetupInputs()));
+    ASSERT_EQ(interpreter_system.dofHandler().getNumDofs(), n);
+
+    FE::assembly::DenseVectorView interpreter_residual(n);
+    FE::systems::AssemblyRequest residual_request;
+    residual_request.op = "level_set";
+    residual_request.want_vector = true;
+    const auto interpreted = interpreter_system.assemble(
+        residual_request, state, nullptr, &interpreter_residual);
+    ASSERT_TRUE(interpreted.success) << interpreted.error_message;
+
+    for (FE::GlobalIndex row = 0; row < n; ++row) {
+        ASSERT_TRUE(std::isfinite(interpreter_residual[row]));
+        EXPECT_NEAR(
+            compiled_residual[row],
+            interpreter_residual[row],
+            1.0e-11)
+            << "residual row=" << row;
     }
 }
 
