@@ -162,9 +162,9 @@ makeTwoFluidDiagnosticSnapshot(
       FE::FieldId{0}, 0u, 7u);
   request.generated_domain_id = "two_fluid_interface";
   request.interface_marker = marker;
-  request.quadrature_order = 0;
-  request.interface_quadrature_order = 0;
-  request.volume_quadrature_order = 0;
+  request.quadrature_order = 1;
+  request.interface_quadrature_order = 1;
+  request.volume_quadrature_order = 1;
   request.implicit_geometry_mode = "LinearCorner";
   request.implicit_quadrature_backend = "LinearCorner";
   request.implicit_fallback_status = "None";
@@ -243,7 +243,7 @@ makeTwoFluidDiagnosticSnapshot(
 
   FE::interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
   policy.require_complete_exterior_boundary_partition = false;
-  policy.minimum_achieved_quadrature_order = 0;
+  policy.minimum_achieved_quadrature_order = 1;
   FE::interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
   scalar.value = [](FE::GlobalIndex,
                     const std::array<FE::Real, 3>& point,
