@@ -3,6 +3,8 @@
 
 // These subroutines implement the Coupled Momentum Method (CMM).
 
+#include <array>
+
 #include "cmm.h"
 
 #include "all_fun.h"
@@ -38,9 +40,10 @@ void cmm_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<double
   const double ctC = 36.0;
 
   double rho = dmn.prop.at(PhysicalProperyType::fluid_density);
-  Vector<double> f({dmn.prop.at(PhysicalProperyType::f_x), 
-                    dmn.prop.at(PhysicalProperyType::f_y), 
-                    dmn.prop.at(PhysicalProperyType::f_z)});
+  std::array<double, 3> f{
+      dmn.prop.at(PhysicalProperyType::f_x),
+      dmn.prop.at(PhysicalProperyType::f_y),
+      dmn.prop.at(PhysicalProperyType::f_z)};
 
   double T1 = eq.af * eq.gam * dt;
   double amd = eq.am/T1;
@@ -56,62 +59,63 @@ void cmm_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<double
   // because fluid equation always come first
   //
   double p = 0.0;
-  Vector<double> u(3), px(3);
-  Array<double> ux(3,3);
-  auto ud = -f;
+  std::array<double, 3> u{};
+  std::array<double, 3> px{};
+  std::array<std::array<double, 3>, 3> ux{};
+  std::array<double, 3> ud{-f[0], -f[1], -f[2]};
 
   for (int a = 0; a < eNoN; a++) {
     p = p + N(a)*yl(3,a);
 
-    ud(0) = ud(0) + N(a)*(al(0,a)-bfl(0,a));
-    ud(1) = ud(1) + N(a)*(al(1,a)-bfl(1,a));
-    ud(2) = ud(2) + N(a)*(al(2,a)-bfl(2,a));
+    ud[0] = ud[0] + N(a)*(al(0,a)-bfl(0,a));
+    ud[1] = ud[1] + N(a)*(al(1,a)-bfl(1,a));
+    ud[2] = ud[2] + N(a)*(al(2,a)-bfl(2,a));
 
-    px(0) = px(0) + Nx(0,a)*yl(3,a);
-    px(1) = px(1) + Nx(1,a)*yl(3,a);
-    px(2) = px(2) + Nx(2,a)*yl(3,a);
+    px[0] = px[0] + Nx(0,a)*yl(3,a);
+    px[1] = px[1] + Nx(1,a)*yl(3,a);
+    px[2] = px[2] + Nx(2,a)*yl(3,a);
 
-    u(0) = u(0) + N(a)*yl(0,a);
-    u(1) = u(1) + N(a)*yl(1,a);
-    u(2) = u(2) + N(a)*yl(2,a);
+    u[0] = u[0] + N(a)*yl(0,a);
+    u[1] = u[1] + N(a)*yl(1,a);
+    u[2] = u[2] + N(a)*yl(2,a);
 
-    ux(0,0) = ux(0,0) + Nx(0,a)*yl(0,a);
-    ux(1,0) = ux(1,0) + Nx(1,a)*yl(0,a);
-    ux(2,0) = ux(2,0) + Nx(2,a)*yl(0,a);
+    ux[0][0] = ux[0][0] + Nx(0,a)*yl(0,a);
+    ux[1][0] = ux[1][0] + Nx(1,a)*yl(0,a);
+    ux[2][0] = ux[2][0] + Nx(2,a)*yl(0,a);
 
-    ux(0,1) = ux(0,1) + Nx(0,a)*yl(1,a);
-    ux(1,1) = ux(1,1) + Nx(1,a)*yl(1,a);
-    ux(2,1) = ux(2,1) + Nx(2,a)*yl(1,a);
+    ux[0][1] = ux[0][1] + Nx(0,a)*yl(1,a);
+    ux[1][1] = ux[1][1] + Nx(1,a)*yl(1,a);
+    ux[2][1] = ux[2][1] + Nx(2,a)*yl(1,a);
 
-    ux(0,2) = ux(0,2) + Nx(0,a)*yl(2,a);
-    ux(1,2) = ux(1,2) + Nx(1,a)*yl(2,a);
-    ux(2,2) = ux(2,2) + Nx(2,a)*yl(2,a);
+    ux[0][2] = ux[0][2] + Nx(0,a)*yl(2,a);
+    ux[1][2] = ux[1][2] + Nx(1,a)*yl(2,a);
+    ux[2][2] = ux[2][2] + Nx(2,a)*yl(2,a);
   }
 
-  double divU = ux(0,0) + ux(1,1) + ux(2,2);
+  double divU = ux[0][0] + ux[1][1] + ux[2][2];
 
   if (com_mod.mvMsh) {
     for (int a = 0; a < eNoN; a++) {
-      u(0) = u(0) - N(a)*yl(4,a);
-      u(1) = u(1) - N(a)*yl(5,a);
-      u(2) = u(2) - N(a)*yl(6,a);
+      u[0] = u[0] - N(a)*yl(4,a);
+      u[1] = u[1] - N(a)*yl(5,a);
+      u[2] = u[2] - N(a)*yl(6,a);
     }
   }
 
   // Strain rate tensor 2*e_ij := (u_ij + u_ji)
   //
   Array<double> es(3,3);
-  es(0,0) = ux(0,0) + ux(0,0);
-  es(1,0) = ux(1,0) + ux(0,1);
-  es(2,0) = ux(2,0) + ux(0,2);
+  es(0,0) = ux[0][0] + ux[0][0];
+  es(1,0) = ux[1][0] + ux[0][1];
+  es(2,0) = ux[2][0] + ux[0][2];
 
   es(0,1) = es(1,0);
-  es(1,1) = ux(1,1) + ux(1,1);
-  es(2,1) = ux(2,1) + ux(1,2);
+  es(1,1) = ux[1][1] + ux[1][1];
+  es(2,1) = ux[2][1] + ux[1][2];
 
   es(0,2) = es(2,0);
   es(1,2) = es(2,1);
-  es(2,2) = ux(2,2) + ux(2,2);
+  es(2,2) = ux[2][2] + ux[2][2];
 
   Array<double> es_x(3,eNoN);
   for (int a = 0; a < eNoN; a++) {
@@ -140,9 +144,9 @@ void cmm_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<double
 
   double kT = 4.0*pow(ctM/dt,2.0);
 
-  double kU = u(0)*u(0)*Kxi(0,0) + u(1)*u(0)*Kxi(1,0) + u(2)*u(0)*Kxi(2,0) +
-              u(0)*u(1)*Kxi(0,1) + u(1)*u(1)*Kxi(1,1) + u(2)*u(1)*Kxi(2,1) + 
-              u(0)*u(2)*Kxi(0,2) + u(1)*u(2)*Kxi(1,2) + u(2)*u(2)*Kxi(2,2);
+  double kU = u[0]*u[0]*Kxi(0,0) + u[1]*u[0]*Kxi(1,0) + u[2]*u[0]*Kxi(2,0) +
+              u[0]*u[1]*Kxi(0,1) + u[1]*u[1]*Kxi(1,1) + u[2]*u[1]*Kxi(2,1) +
+              u[0]*u[2]*Kxi(0,2) + u[1]*u[2]*Kxi(1,2) + u[2]*u[2]*Kxi(2,2);
 
   double kS = Kxi(0,0)*Kxi(0,0) + Kxi(1,0)*Kxi(1,0) + Kxi(2,0)*Kxi(2,0) + 
               Kxi(0,1)*Kxi(0,1) + Kxi(1,1)*Kxi(1,1) + Kxi(2,1)*Kxi(2,1) + 
@@ -153,14 +157,14 @@ void cmm_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<double
   double tauC = 1.0 / (tauM * (Kxi(0,0) + Kxi(1,1) + Kxi(2,2)));
 
   Vector<double> rV(3);
-  rV(0) = ud(0) + u(0)*ux(0,0) + u(1)*ux(1,0) + u(2)*ux(2,0);
-  rV(1) = ud(1) + u(0)*ux(0,1) + u(1)*ux(1,1) + u(2)*ux(2,1);
-  rV(2) = ud(2) + u(0)*ux(0,2) + u(1)*ux(1,2) + u(2)*ux(2,2);
+  rV(0) = ud[0] + u[0]*ux[0][0] + u[1]*ux[1][0] + u[2]*ux[2][0];
+  rV(1) = ud[1] + u[0]*ux[0][1] + u[1]*ux[1][1] + u[2]*ux[2][1];
+  rV(2) = ud[2] + u[0]*ux[0][2] + u[1]*ux[1][2] + u[2]*ux[2][2];
 
   Vector<double> up(3);
-  up(0) = -tauM*(rho*rV(0) + px(0));
-  up(1) = -tauM*(rho*rV(1) + px(1));
-  up(2) = -tauM*(rho*rV(2) + px(2));
+  up(0) = -tauM*(rho*rV(0) + px[0]);
+  up(1) = -tauM*(rho*rV(1) + px[1]);
+  up(2) = -tauM*(rho*rV(2) + px[2]);
 
   double tauB = up(0)*up(0)*Kxi(0,0) + up(1)*up(0)*Kxi(1,0) + 
                 up(2)*up(0)*Kxi(2,0) + up(0)*up(1)*Kxi(0,1) + 
@@ -174,14 +178,14 @@ void cmm_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<double
   tauB = rho / sqrt(tauB);
 
   Vector<double> ua(3);
-  ua(0) = u(0) + up(0);
-  ua(1) = u(1) + up(1);
-  ua(2) = u(2) + up(2);
+  ua(0) = u[0] + up(0);
+  ua(1) = u[1] + up(1);
+  ua(2) = u[2] + up(2);
   double pa = p - tauC*divU;
 
-  rV(0) = tauB*(up(0)*ux(0,0) + up(1)*ux(1,0) + up(2)*ux(2,0));
-  rV(1) = tauB*(up(0)*ux(0,1) + up(1)*ux(1,1) + up(2)*ux(2,1));
-  rV(2) = tauB*(up(0)*ux(0,2) + up(1)*ux(1,2) + up(2)*ux(2,2));
+  rV(0) = tauB*(up(0)*ux[0][0] + up(1)*ux[1][0] + up(2)*ux[2][0]);
+  rV(1) = tauB*(up(0)*ux[0][1] + up(1)*ux[1][1] + up(2)*ux[2][1]);
+  rV(2) = tauB*(up(0)*ux[0][2] + up(1)*ux[1][2] + up(2)*ux[2][2]);
 
   Array<double> rM(3,3);
   rM(0,0) = mu*es(0,0) - rho*up(0)*ua(0) + rV(0)*up(0) - pa;
@@ -196,14 +200,14 @@ void cmm_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<double
   rM(1,2) = mu*es(1,2) - rho*up(2)*ua(1) + rV(2)*up(1);
   rM(2,2) = mu*es(2,2) - rho*up(2)*ua(2) + rV(2)*up(2) - pa;
 
-  rV(0) = ud(0) + ua(0)*ux(0,0) + ua(1)*ux(1,0) + ua(2)*ux(2,0);
-  rV(1) = ud(1) + ua(0)*ux(0,1) + ua(1)*ux(1,1) + ua(2)*ux(2,1);
-  rV(2) = ud(2) + ua(0)*ux(0,2) + ua(1)*ux(1,2) + ua(2)*ux(2,2);
+  rV(0) = ud[0] + ua(0)*ux[0][0] + ua(1)*ux[1][0] + ua(2)*ux[2][0];
+  rV(1) = ud[1] + ua(0)*ux[0][1] + ua(1)*ux[1][1] + ua(2)*ux[2][1];
+  rV(2) = ud[2] + ua(0)*ux[0][2] + ua(1)*ux[1][2] + ua(2)*ux[2][2];
 
   Vector<double> uNx(eNoN), upNx(eNoN), uaNx(eNoN);
 
   for (int a = 0; a < eNoN; a++) {
-    uNx(a) = u(0)*Nx(0,a)  + u(1)*Nx(1,a)  + u(2)*Nx(2,a);
+    uNx(a) = u[0]*Nx(0,a)  + u[1]*Nx(1,a)  + u[2]*Nx(2,a);
     upNx(a) = up(0)*Nx(0,a) + up(1)*Nx(1,a) + up(2)*Nx(2,a);
     uaNx(a) = uNx(a) + upNx(a);
 
