@@ -117,11 +117,12 @@ void cmm_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<double
   es[1][2] = es[2][1];
   es[2][2] = ux[2][2] + ux[2][2];
 
-  Array<double> es_x(3,eNoN);
+  // Store the strain and velocity gradient products in one element-node buffer.
+  Array<double> nodal_work(6,eNoN);
   for (int a = 0; a < eNoN; a++) {
-    es_x(0,a) = es[0][0]*Nx(0,a) + es[1][0]*Nx(1,a) + es[2][0]*Nx(2,a);
-    es_x(1,a) = es[0][1]*Nx(0,a) + es[1][1]*Nx(1,a) + es[2][1]*Nx(2,a);
-    es_x(2,a) = es[0][2]*Nx(0,a) + es[1][2]*Nx(1,a) + es[2][2]*Nx(2,a);
+    nodal_work(0,a) = es[0][0]*Nx(0,a) + es[1][0]*Nx(1,a) + es[2][0]*Nx(2,a);
+    nodal_work(1,a) = es[0][1]*Nx(0,a) + es[1][1]*Nx(1,a) + es[2][1]*Nx(2,a);
+    nodal_work(2,a) = es[0][2]*Nx(0,a) + es[1][2]*Nx(1,a) + es[2][2]*Nx(2,a);
   }
 
   // Shear-rate := (1*e_ij*e_ij)^.5
@@ -204,17 +205,15 @@ void cmm_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<double
   rV[1] = ud[1] + ua[0]*ux[0][1] + ua[1]*ux[1][1] + ua[2]*ux[2][1];
   rV[2] = ud[2] + ua[0]*ux[0][2] + ua[1]*ux[1][2] + ua[2]*ux[2][2];
 
-  Vector<double> uNx(eNoN), upNx(eNoN), uaNx(eNoN);
-
   for (int a = 0; a < eNoN; a++) {
-    uNx(a) = u[0]*Nx(0,a)  + u[1]*Nx(1,a)  + u[2]*Nx(2,a);
-    upNx(a) = up[0]*Nx(0,a) + up[1]*Nx(1,a) + up[2]*Nx(2,a);
-    uaNx(a) = uNx(a) + upNx(a);
+    nodal_work(3,a) = u[0]*Nx(0,a)  + u[1]*Nx(1,a)  + u[2]*Nx(2,a);
+    nodal_work(4,a) = up[0]*Nx(0,a) + up[1]*Nx(1,a) + up[2]*Nx(2,a);
+    nodal_work(5,a) = nodal_work(3,a) + nodal_work(4,a);
 
     lR(0,a) = lR(0,a) + wr*N(a)*rV[0] + w*(Nx(0,a)*rM[0][0] + Nx(1,a)*rM[1][0] + Nx(2,a)*rM[2][0]);
     lR(1,a) = lR(1,a) + wr*N(a)*rV[1] + w*(Nx(0,a)*rM[0][1] + Nx(1,a)*rM[1][1] + Nx(2,a)*rM[2][1]);
     lR(2,a) = lR(2,a) + wr*N(a)*rV[2] + w*(Nx(0,a)*rM[0][2] + Nx(1,a)*rM[1][2] + Nx(2,a)*rM[2][2]);
-    lR(3,a) = lR(3,a) + w*(N(a)*divU - upNx(a));
+    lR(3,a) = lR(3,a) + w*(N(a)*divU - nodal_work(4,a));
   }
 
   for (int a = 0; a < eNoN; a++) {
@@ -230,22 +229,23 @@ void cmm_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<double
       rM[2][2] = Nx(2,a)*Nx(2,b);
 
       double NxNx = Nx(0,a)*Nx(0,b) + Nx(1,a)*Nx(1,b) + Nx(2,a)*Nx(2,b);
-      double T1 = mu*NxNx + tauB*upNx(a)*upNx(b) + rho*( N(a)*(amd*N(b) + uaNx(b)) + 
-                  rho*tauM*uaNx(a)*(uNx(b) + amd*N(b)) );
-      double T2 = rho*tauM*uNx(a);
-      double T3 = rho*tauM*(amd*N(b) + uNx(b));
+      double T1 = mu*NxNx + tauB*nodal_work(4,a)*nodal_work(4,b) +
+                  rho*( N(a)*(amd*N(b) + nodal_work(5,b)) +
+                  rho*tauM*nodal_work(5,a)*(nodal_work(3,b) + amd*N(b)) );
+      double T2 = rho*tauM*nodal_work(3,a);
+      double T3 = rho*tauM*(amd*N(b) + nodal_work(3,b));
 
       // dM/dU
       //
-      lK(0,a,b)  = lK(0,a,b)  + wl*((mu + tauC)*rM[0][0] + T1 + mu_x*es_x(0,a)*es_x(0,b));
-      lK(1,a,b)  = lK(1,a,b)  + wl*(mu*rM[1][0] + tauC*rM[0][1] + mu_x*es_x(0,a)*es_x(1,b));
-      lK(2,a,b)  = lK(2,a,b)  + wl*(mu*rM[2][0] + tauC*rM[0][2] + mu_x*es_x(0,a)*es_x(2,b));
-      lK(4,a,b)  = lK(4,a,b)  + wl*(mu*rM[0][1] + tauC*rM[1][0] + mu_x*es_x(1,a)*es_x(0,b));
-      lK(5,a,b)  = lK(5,a,b)  + wl*((mu + tauC)*rM[1][1] + T1 + mu_x*es_x(1,a)*es_x(1,b));
-      lK(6,a,b)  = lK(6,a,b)  + wl*(mu*rM[2][1] + tauC*rM[1][2] + mu_x*es_x(1,a)*es_x(2,b));
-      lK(8,a,b)  = lK(8,a,b)  + wl*(mu*rM[0][2] + tauC*rM[2][0] + mu_x*es_x(2,a)*es_x(0,b));
-      lK(9,a,b) = lK(9,a,b) + wl*(mu*rM[1][2] + tauC*rM[2][1] + mu_x*es_x(2,a)*es_x(1,b));
-      lK(10,a,b) = lK(10,a,b) + wl*((mu + tauC)*rM[2][2] + T1 + mu_x*es_x(2,a)*es_x(2,b));
+      lK(0,a,b)  = lK(0,a,b)  + wl*((mu + tauC)*rM[0][0] + T1 + mu_x*nodal_work(0,a)*nodal_work(0,b));
+      lK(1,a,b)  = lK(1,a,b)  + wl*(mu*rM[1][0] + tauC*rM[0][1] + mu_x*nodal_work(0,a)*nodal_work(1,b));
+      lK(2,a,b)  = lK(2,a,b)  + wl*(mu*rM[2][0] + tauC*rM[0][2] + mu_x*nodal_work(0,a)*nodal_work(2,b));
+      lK(4,a,b)  = lK(4,a,b)  + wl*(mu*rM[0][1] + tauC*rM[1][0] + mu_x*nodal_work(1,a)*nodal_work(0,b));
+      lK(5,a,b)  = lK(5,a,b)  + wl*((mu + tauC)*rM[1][1] + T1 + mu_x*nodal_work(1,a)*nodal_work(1,b));
+      lK(6,a,b)  = lK(6,a,b)  + wl*(mu*rM[2][1] + tauC*rM[1][2] + mu_x*nodal_work(1,a)*nodal_work(2,b));
+      lK(8,a,b)  = lK(8,a,b)  + wl*(mu*rM[0][2] + tauC*rM[2][0] + mu_x*nodal_work(2,a)*nodal_work(0,b));
+      lK(9,a,b) = lK(9,a,b) + wl*(mu*rM[1][2] + tauC*rM[2][1] + mu_x*nodal_work(2,a)*nodal_work(1,b));
+      lK(10,a,b) = lK(10,a,b) + wl*((mu + tauC)*rM[2][2] + T1 + mu_x*nodal_work(2,a)*nodal_work(2,b));
 
       // dM/dP
       lK(3,a,b)  = lK(3,a,b)  - wl*(Nx(0,a)*N(b) - Nx(0,b)*T2);
