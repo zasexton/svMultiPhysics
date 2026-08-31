@@ -10346,6 +10346,34 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         const auto marker = declaration.boundary_marker;
         const auto displacement_field =
             declaration.mesh_displacement_field;
+        const auto fitted_boundary = std::find_if(
+            effective_free_surfaces.begin(),
+            effective_free_surfaces.end(),
+            [&](const auto& candidate) {
+                return candidate.implementation ==
+                           FreeSurfaceImplementation::FittedALE &&
+                       candidate.boundary_marker == marker;
+            });
+        if (fitted_boundary == effective_free_surfaces.end()) {
+            throw std::logic_error(
+                "IncompressibleNavierStokesVMSModule: fitted normal "
+                "measurement lost its owning free-surface boundary");
+        }
+        std::optional<std::array<FE::Real, 3>>
+            prescribed_tangential_mesh_velocity;
+        if (fitted_boundary->tangential_mesh_policy ==
+            FreeSurfaceTangentialMeshPolicy::Prescribed) {
+            std::array<FE::Real, 3> target{};
+            for (std::size_t component = 0u;
+                 component < target.size();
+                 ++component) {
+                target[component] = constantScalarValueOrThrow(
+                    fitted_boundary
+                        ->prescribed_tangential_mesh_velocity[component],
+                    "fitted prescribed tangential mesh velocity");
+            }
+            prescribed_tangential_mesh_velocity = target;
+        }
         system.declareMeshNormalBoundaryConstraint(
             std::move(declaration));
         system.bindMeshNormalBoundaryConstraintConsumer(
@@ -10357,7 +10385,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             "Fitted free-surface fluid normal kinematic row on marker " +
                 std::to_string(marker));
         system.registerFittedALENormalOperatorStageMeasurement(
-            displacement_field, marker);
+            displacement_field,
+            marker,
+            prescribed_tangential_mesh_velocity);
     }
 
     effective_configuration_artifact_ = makeEffectiveConfigurationArtifact(

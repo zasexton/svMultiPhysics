@@ -4206,6 +4206,7 @@ TEST(MovingDomainPhysicsMPI,
     EXPECT_TRUE(std::isfinite(raw.mesh_velocity_sq));
     EXPECT_TRUE(std::isfinite(raw.mesh_normal_sq));
     EXPECT_TRUE(std::isfinite(raw.mesh_tangential_sq));
+    EXPECT_FALSE(raw.tangential_target_gap_sq.has_value());
     EXPECT_NEAR(raw.A, kParentBoundaryMeasure, FE::Real{1.0e-12});
     EXPECT_GT(std::abs(raw.Wn), FE::Real{0.0});
     EXPECT_GT(std::abs(raw.Un), FE::Real{0.0});
@@ -4257,6 +4258,8 @@ TEST(MovingDomainPhysicsMPI,
     EXPECT_DOUBLE_EQ(
         history.front().raw.mesh_tangential_sq,
         raw.mesh_tangential_sq);
+    EXPECT_FALSE(
+        history.front().raw.tangential_target_gap_sq.has_value());
     EXPECT_EQ(history.front().raw.stage_mesh_revision,
               expected_geometry);
 

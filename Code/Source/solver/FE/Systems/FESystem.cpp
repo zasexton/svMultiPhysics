@@ -1849,6 +1849,19 @@ void appendFittedALENormalMeasurementDeclaration(
         tokens,
         declaration.normal_constraint,
         contains_opaque_callable);
+    appendMeshBoundaryIntegral(tokens, declaration.tangential_policy);
+    appendMeshBoundaryToken(
+        tokens,
+        declaration.prescribed_tangential_mesh_velocity.has_value()
+            ? 1u
+            : 0u);
+    if (declaration.prescribed_tangential_mesh_velocity.has_value()) {
+        for (const auto value :
+             *declaration.prescribed_tangential_mesh_velocity) {
+            appendMeshBoundaryToken(
+                tokens, generatedBoundaryTraceRealBits(value));
+        }
+    }
     appendMeshBoundaryString(
         tokens, declaration.mesh_normal_integral_functional);
     appendMeshBoundaryString(
@@ -1861,6 +1874,9 @@ void appendFittedALENormalMeasurementDeclaration(
         tokens, declaration.mesh_normal_squared_integral_functional);
     appendMeshBoundaryString(
         tokens, declaration.mesh_tangential_squared_integral_functional);
+    appendMeshBoundaryString(
+        tokens,
+        declaration.tangential_target_gap_squared_integral_functional);
 }
 
 void appendOperatorStageMeasurementMetadata(
@@ -1932,6 +1948,14 @@ void appendFittedALENormalOperatorStageRawValue(
         tokens, generatedBoundaryTraceRealBits(raw.mesh_normal_sq));
     appendMeshBoundaryToken(
         tokens, generatedBoundaryTraceRealBits(raw.mesh_tangential_sq));
+    appendMeshBoundaryToken(
+        tokens, raw.tangential_target_gap_sq.has_value() ? 1u : 0u);
+    if (raw.tangential_target_gap_sq.has_value()) {
+        appendMeshBoundaryToken(
+            tokens,
+            generatedBoundaryTraceRealBits(
+                *raw.tangential_target_gap_sq));
+    }
     // Both geometry stamps are rank-local provenance and must never
     // participate in a cross-rank equality claim.
 }
@@ -10007,7 +10031,9 @@ FESystem::validatedFittedALENormalConstraint_(
 
 void FESystem::registerFittedALENormalOperatorStageMeasurement(
     FieldId mesh_displacement_field,
-    int boundary_marker)
+    int boundary_marker,
+    std::optional<std::array<Real, 3>>
+        prescribed_tangential_mesh_velocity)
 {
     FE_THROW_IF(
         mesh_boundary_history_transaction_active_ ||
@@ -10026,6 +10052,37 @@ void FESystem::registerFittedALENormalOperatorStageMeasurement(
     // the reduction service or the measurement declaration table.
     const auto& constraint = validatedFittedALENormalConstraint_(
         mesh_displacement_field, boundary_marker);
+    const auto tangential_declaration = std::find_if(
+        mesh_tangential_boundary_policies_.begin(),
+        mesh_tangential_boundary_policies_.end(),
+        [&](const auto& candidate) {
+            return candidate.mesh_displacement_field ==
+                       mesh_displacement_field &&
+                   candidate.boundary_marker == boundary_marker;
+        });
+    FE_THROW_IF(
+        tangential_declaration ==
+                mesh_tangential_boundary_policies_.end() ||
+            !tangential_declaration->consumer_bound ||
+            tangential_declaration->consumer_operator_tag !=
+                constraint.consumer_binding->operator_tag ||
+            tangential_declaration->consumer_source.find_first_not_of(
+                " \t\r\n") == std::string::npos,
+        InvalidArgumentException,
+        "FESystem::registerFittedALENormalOperatorStageMeasurement: "
+        "the matching tangential policy requires an exact consumer binding "
+        "on the fitted normal operator");
+    const bool has_prescribed_target =
+        prescribed_tangential_mesh_velocity.has_value();
+    const bool requires_prescribed_target =
+        tangential_declaration->policy ==
+        MeshTangentialBoundaryPolicy::Prescribed;
+    FE_THROW_IF(
+        has_prescribed_target != requires_prescribed_target,
+        InvalidArgumentException,
+        "FESystem::registerFittedALENormalOperatorStageMeasurement: "
+        "a prescribed tangential policy requires exactly one velocity "
+        "target and untargeted policies must not invent one");
     const FittedALENormalMeasurementKey key{
         .mesh_displacement_field = mesh_displacement_field,
         .boundary_marker = boundary_marker,
@@ -10038,6 +10095,9 @@ void FESystem::registerFittedALENormalOperatorStageMeasurement(
         .key = key,
         .related_velocity_field = constraint.related_velocity_field,
         .normal_constraint = constraint,
+        .tangential_policy = tangential_declaration->policy,
+        .prescribed_tangential_mesh_velocity =
+            prescribed_tangential_mesh_velocity,
         .mesh_normal_integral_functional =
             name_base + "_integral_mesh_normal",
         .fluid_normal_integral_functional =
@@ -10050,6 +10110,11 @@ void FESystem::registerFittedALENormalOperatorStageMeasurement(
             name_base + "_integral_mesh_normal_squared",
         .mesh_tangential_squared_integral_functional =
             name_base + "_integral_mesh_tangential_squared",
+        .tangential_target_gap_squared_integral_functional =
+            requires_prescribed_target
+                ? name_base +
+                      "_integral_tangential_target_gap_squared"
+                : std::string{},
     };
 
     const auto existing = std::find_if(
@@ -10064,6 +10129,10 @@ void FESystem::registerFittedALENormalOperatorStageMeasurement(
                 !meshNormalDeclarationsStructurallyEqual(
                     existing->normal_constraint,
                     measurement.normal_constraint) ||
+                existing->tangential_policy !=
+                    measurement.tangential_policy ||
+                existing->prescribed_tangential_mesh_velocity !=
+                    measurement.prescribed_tangential_mesh_velocity ||
                 existing->mesh_normal_integral_functional !=
                     measurement.mesh_normal_integral_functional ||
                 existing->fluid_normal_integral_functional !=
@@ -10075,7 +10144,11 @@ void FESystem::registerFittedALENormalOperatorStageMeasurement(
                 existing->mesh_normal_squared_integral_functional !=
                     measurement.mesh_normal_squared_integral_functional ||
                 existing->mesh_tangential_squared_integral_functional !=
-                    measurement.mesh_tangential_squared_integral_functional,
+                    measurement.mesh_tangential_squared_integral_functional ||
+                existing
+                        ->tangential_target_gap_squared_integral_functional !=
+                    measurement
+                        .tangential_target_gap_squared_integral_functional,
             InvalidArgumentException,
             "FESystem::registerFittedALENormalOperatorStageMeasurement: "
             "measurement key already has a conflicting declaration");
@@ -10084,6 +10157,54 @@ void FESystem::registerFittedALENormalOperatorStageMeasurement(
 
     const auto& displacement = field_registry_.get(
         constraint.mesh_displacement_field);
+    if (prescribed_tangential_mesh_velocity.has_value()) {
+        for (int component = 0; component < 3; ++component) {
+            const auto value =
+                (*prescribed_tangential_mesh_velocity)[
+                    static_cast<std::size_t>(component)];
+            FE_THROW_IF(
+                !std::isfinite(value) ||
+                    (component >= displacement.components &&
+                     value != Real{0.0}),
+                InvalidArgumentException,
+                "FESystem::registerFittedALENormalOperatorStageMeasurement: "
+                "the prescribed tangential target must be finite and lie "
+                "in the mesh dimension");
+        }
+    }
+    const auto expected_tangential_enforcement =
+        tangential_declaration->policy ==
+                MeshTangentialBoundaryPolicy::Prescribed
+            ? analysis::EnforcementKind::WeakPenalty
+            : analysis::EnforcementKind::WeakConsistent;
+    const auto tangential_descriptor_count =
+        countOperatorBoundBoundaryDescriptors(
+            bc_descriptors_,
+            bc_descriptor_operator_tags_,
+            tangential_declaration->consumer_operator_tag,
+            [&](const auto& descriptor) {
+                return descriptor.primary_variable ==
+                           analysis::VariableKey::field(
+                               mesh_displacement_field) &&
+                       descriptor.component == -1 &&
+                       descriptor.domain ==
+                           analysis::DomainKind::Boundary &&
+                       descriptor.boundary_marker == boundary_marker &&
+                       descriptor.interface_marker == -1 &&
+                       descriptor.trace_kind ==
+                           analysis::TraceKind::TangentialComponent &&
+                       descriptor.enforcement_kind ==
+                           expected_tangential_enforcement &&
+                       descriptor.related_variables.empty() &&
+                       descriptor.source ==
+                           tangential_declaration->consumer_source;
+            });
+    FE_THROW_IF(
+        tangential_descriptor_count != 1u,
+        InvalidArgumentException,
+        "FESystem::registerFittedALENormalOperatorStageMeasurement: "
+        "the fitted tangential policy requires exactly one bound boundary "
+        "descriptor");
     const auto displacement_state = forms::StateField(
         constraint.mesh_displacement_field,
         *displacement.space,
@@ -10097,6 +10218,23 @@ void FESystem::registerFittedALENormalOperatorStageMeasurement(
         forms::outer(current_normal, current_normal);
     const auto mesh_tangential_velocity =
         tangential_projector * mesh_velocity;
+    std::optional<forms::FormExpr> tangential_target_gap;
+    if (prescribed_tangential_mesh_velocity.has_value()) {
+        std::vector<forms::FormExpr> target_components;
+        target_components.reserve(
+            static_cast<std::size_t>(displacement.components));
+        for (int component = 0;
+             component < displacement.components;
+             ++component) {
+            target_components.push_back(forms::FormExpr::constant(
+                (*prescribed_tangential_mesh_velocity)[
+                    static_cast<std::size_t>(component)]));
+        }
+        const auto target =
+            forms::FormExpr::asVector(std::move(target_components));
+        tangential_target_gap.emplace(
+            tangential_projector * (mesh_velocity - target));
+    }
     // Preserve the exact consumer-bound expression rather than rebuilding an
     // equivalent fluid trace from field metadata.
     const auto fluid_normal = constraint.target_expression;
@@ -10139,6 +10277,21 @@ void FESystem::registerFittedALENormalOperatorStageMeasurement(
         .name = measurement.mesh_tangential_squared_integral_functional,
         .reduction = forms::BoundaryFunctional::Reduction::Sum,
     };
+    std::optional<forms::BoundaryFunctional>
+        tangential_target_gap_squared_functional;
+    if (tangential_target_gap.has_value()) {
+        tangential_target_gap_squared_functional.emplace(
+            forms::BoundaryFunctional{
+                .integrand = forms::inner(
+                    *tangential_target_gap,
+                    *tangential_target_gap),
+                .boundary_marker = boundary_marker,
+                .name = measurement
+                    .tangential_target_gap_squared_integral_functional,
+                .reduction =
+                    forms::BoundaryFunctional::Reduction::Sum,
+            });
+    }
 
     // The displacement must remain primary: dt(StateField(d)) consumes its
     // exact history alias.  The velocity is a current-only secondary field.
@@ -10152,6 +10305,10 @@ void FESystem::registerFittedALENormalOperatorStageMeasurement(
         std::move(mesh_normal_squared_functional));
     service.addBoundaryFunctional(
         std::move(mesh_tangential_squared_functional));
+    if (tangential_target_gap_squared_functional.has_value()) {
+        service.addBoundaryFunctional(
+            std::move(*tangential_target_gap_squared_functional));
+    }
     bindSecondaryFields(
         service,
         mesh_displacement_field,
@@ -10337,12 +10494,37 @@ void FESystem::stageFittedALENormalOperatorStageMeasurements(
                 validatedFittedALENormalConstraint_(
                     declaration.key.mesh_displacement_field,
                     declaration.key.boundary_marker);
+            const auto tangential = std::find_if(
+                mesh_tangential_boundary_policies_.begin(),
+                mesh_tangential_boundary_policies_.end(),
+                [&](const auto& candidate) {
+                    return candidate.mesh_displacement_field ==
+                               declaration.key.mesh_displacement_field &&
+                           candidate.boundary_marker ==
+                               declaration.key.boundary_marker;
+                });
+            const bool has_prescribed_target =
+                declaration.prescribed_tangential_mesh_velocity.has_value();
             FE_THROW_IF(
                 declaration.related_velocity_field !=
                         constraint.related_velocity_field ||
                     !meshNormalDeclarationsStructurallyEqual(
                         declaration.normal_constraint,
                         constraint) ||
+                    tangential ==
+                        mesh_tangential_boundary_policies_.end() ||
+                    !tangential->consumer_bound ||
+                    tangential->consumer_operator_tag !=
+                        constraint.consumer_binding->operator_tag ||
+                    tangential->policy !=
+                        declaration.tangential_policy ||
+                    has_prescribed_target !=
+                        (declaration.tangential_policy ==
+                         MeshTangentialBoundaryPolicy::Prescribed) ||
+                    has_prescribed_target !=
+                        !declaration
+                             .tangential_target_gap_squared_integral_functional
+                             .empty() ||
                     !std::binary_search(
                         metadata.derivative_fields.begin(),
                         metadata.derivative_fields.end(),
@@ -10366,7 +10548,11 @@ void FESystem::stageFittedALENormalOperatorStageMeasurements(
                     !service->hasFunctional(
                         declaration.mesh_normal_squared_integral_functional) ||
                     !service->hasFunctional(
-                        declaration.mesh_tangential_squared_integral_functional),
+                        declaration.mesh_tangential_squared_integral_functional) ||
+                    (has_prescribed_target &&
+                     !service->hasFunctional(
+                         declaration
+                             .tangential_target_gap_squared_integral_functional)),
                 InvalidArgumentException,
                 "FESystem::stageFittedALENormalOperatorStageMeasurements: "
                 "registered reduction service is incomplete");
@@ -10488,6 +10674,7 @@ void FESystem::stageFittedALENormalOperatorStageMeasurements(
         std::string_view mesh_velocity_squared_name{};
         std::string_view mesh_normal_squared_name{};
         std::string_view mesh_tangential_squared_name{};
+        std::string_view tangential_target_gap_squared_name{};
     };
     std::optional<assembly::TimeIntegrationContext> exact_rate_alias;
     std::optional<SystemStateView> measurement_state;
@@ -10545,6 +10732,9 @@ void FESystem::stageFittedALENormalOperatorStageMeasurements(
                         declaration.mesh_normal_squared_integral_functional,
                     .mesh_tangential_squared_name =
                         declaration.mesh_tangential_squared_integral_functional,
+                    .tangential_target_gap_squared_name =
+                        declaration
+                            .tangential_target_gap_squared_integral_functional,
                 });
             staged_records.push_back(
                 FittedALENormalOperatorStageHistoryRecord{
@@ -10553,6 +10743,12 @@ void FESystem::stageFittedALENormalOperatorStageMeasurements(
                     .raw =
                         FittedALENormalOperatorStageRawValue{
                             .key = declaration.key,
+                            .tangential_target_gap_sq =
+                                declaration
+                                        .prescribed_tangential_mesh_velocity
+                                        .has_value()
+                                    ? std::optional<Real>{Real{0.0}}
+                                    : std::nullopt,
                             .stage_mesh_revision = stage_mesh_revision,
                         },
                 });
@@ -10598,6 +10794,12 @@ void FESystem::stageFittedALENormalOperatorStageMeasurements(
                 route.mesh_normal_squared_name, *measurement_state);
             raw.mesh_tangential_sq = route.service->evaluateFunctional(
                 route.mesh_tangential_squared_name, *measurement_state);
+            if (!route.tangential_target_gap_squared_name.empty()) {
+                raw.tangential_target_gap_sq =
+                    route.service->evaluateFunctional(
+                        route.tangential_target_gap_squared_name,
+                        *measurement_state);
+            }
         }
         for (auto& record : staged_records) {
             auto& raw = record.raw;
@@ -10607,7 +10809,9 @@ void FESystem::stageFittedALENormalOperatorStageMeasurements(
                     !std::isfinite(raw.gap_sq) ||
                     !std::isfinite(raw.mesh_velocity_sq) ||
                     !std::isfinite(raw.mesh_normal_sq) ||
-                    !std::isfinite(raw.mesh_tangential_sq),
+                    !std::isfinite(raw.mesh_tangential_sq) ||
+                    (raw.tangential_target_gap_sq.has_value() &&
+                     !std::isfinite(*raw.tangential_target_gap_sq)),
                 InvalidArgumentException,
                 "FESystem::stageFittedALENormalOperatorStageMeasurements: "
                 "boundary measure and raw moments must be finite and area "
@@ -10622,12 +10826,18 @@ void FESystem::stageFittedALENormalOperatorStageMeasurements(
                      std::abs(raw.gap_sq),
                      std::abs(raw.mesh_velocity_sq),
                      std::abs(raw.mesh_normal_sq),
-                     std::abs(raw.mesh_tangential_sq)});
+                     std::abs(raw.mesh_tangential_sq),
+                     std::abs(
+                         raw.tangential_target_gap_sq.value_or(
+                             Real{0.0}))});
             FE_THROW_IF(
                 raw.gap_sq < -squared_moment_roundoff ||
                     raw.mesh_velocity_sq < -squared_moment_roundoff ||
                     raw.mesh_normal_sq < -squared_moment_roundoff ||
-                    raw.mesh_tangential_sq < -squared_moment_roundoff,
+                    raw.mesh_tangential_sq < -squared_moment_roundoff ||
+                    (raw.tangential_target_gap_sq.has_value() &&
+                     *raw.tangential_target_gap_sq <
+                         -squared_moment_roundoff),
                 InvalidArgumentException,
                 "FESystem::stageFittedALENormalOperatorStageMeasurements: "
                 "an integrated squared velocity moment is negative beyond "
@@ -10643,6 +10853,10 @@ void FESystem::stageFittedALENormalOperatorStageMeasurements(
             }
             if (raw.mesh_tangential_sq < Real{0.0}) {
                 raw.mesh_tangential_sq = Real{0.0};
+            }
+            if (raw.tangential_target_gap_sq.has_value() &&
+                *raw.tangential_target_gap_sq < Real{0.0}) {
+                raw.tangential_target_gap_sq = Real{0.0};
             }
             const Real projection_identity_residual =
                 raw.mesh_velocity_sq - raw.mesh_normal_sq -
@@ -10805,6 +11019,12 @@ void FESystem::commitPendingFittedALENormalOperatorStageMeasurements(
                         pending.declaration.key != declaration.key ||
                         pending.declaration.related_velocity_field !=
                             declaration.related_velocity_field ||
+                        pending.declaration.tangential_policy !=
+                            declaration.tangential_policy ||
+                        pending.declaration
+                                .prescribed_tangential_mesh_velocity !=
+                            declaration
+                                .prescribed_tangential_mesh_velocity ||
                         pending.declaration
                                 .mesh_normal_integral_functional !=
                             declaration.mesh_normal_integral_functional ||
@@ -10827,6 +11047,10 @@ void FESystem::commitPendingFittedALENormalOperatorStageMeasurements(
                                 .mesh_tangential_squared_integral_functional !=
                             declaration
                                 .mesh_tangential_squared_integral_functional ||
+                        pending.declaration
+                                .tangential_target_gap_squared_integral_functional !=
+                            declaration
+                                .tangential_target_gap_squared_integral_functional ||
                         !meshNormalDeclarationsStructurallyEqual(
                             pending.declaration.normal_constraint,
                             declaration.normal_constraint) ||
@@ -11063,6 +11287,19 @@ void FESystem::commitPendingFittedALENormalOperatorStageMeasurements(
                     << record.raw.mesh_normal_sq
                     << " mesh_tangential_sq="
                     << record.raw.mesh_tangential_sq
+                    << " tangential_target_gap_applicable="
+                    << (record.raw.tangential_target_gap_sq.has_value()
+                            ? "true"
+                            : "false");
+            if (record.raw.tangential_target_gap_sq.has_value()) {
+                message << " tangential_target_gap_sq="
+                        << *record.raw.tangential_target_gap_sq
+                        << " tangential_target_gap_rms="
+                        << std::sqrt(
+                               *record.raw.tangential_target_gap_sq /
+                               record.raw.A);
+            }
+            message
                     << " mesh_velocity_rms="
                     << std::sqrt(
                            record.raw.mesh_velocity_sq /
