@@ -1305,10 +1305,6 @@ def run_monitored(
 
     def set_limits() -> None:
         resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
-        resource.setrlimit(
-            resource.RLIMIT_FSIZE,
-            (output_bytes, output_bytes),
-        )
 
     started = time.monotonic()
     peak_resident_kib = 0
@@ -1565,8 +1561,11 @@ def run_monitored(
         "wall_time_seconds": final_wall_time_seconds,
         "memory_enforcement_scope": "spawned_process_session",
         "memory_enforcement_method": (
-            "per_process_address_and_file_size_limits_plus_sampled_session_resident_memory"
+            "per_process_address_space_limit_and_sampled_session_resident_memory"
         ),
+        "output_enforcement_scope": "qualification_output_directory",
+        "output_enforcement_method": "sampled_output_directory_size",
+        "process_file_size_limit_applied": False,
         "aggregate_memory_measurement": "sampled_peak",
         "resource_monitoring_outcome": (
             "PASS" if resource_monitoring_succeeded else "FAIL_METHOD"

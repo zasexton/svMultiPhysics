@@ -1616,6 +1616,29 @@ Simulation exits:
 - Continue through capillary jet and filament-necking cases only after raw global and per-component errors converge without global shift.
 - Close with per-control-volume/component phase-flux artifacts, a conservative-limiter derivation, convergent interface norms and geometry, and explicit pre/post-maintenance mass and displacement histories.
 
+WP-6 prerequisite harness checkpoint recorded on 2026-08-31:
+
+- Clean-source job `41371156` rebuilt the FE, Physics, and Application targets
+  and passed every serial group plus all `40` quantitative checks. Its three
+  distributed groups were rejected before test startup: the shared runner
+  applied the declared qualification-output byte budget as `RLIMIT_FSIZE` to
+  the complete launcher process tree, so Open MPI's unrelated shared-memory
+  backing file received signal `25` when it crossed that per-file limit.
+- The failed result remains scratch-only at
+  `/scratch/users/zsexton/wp6-prerequisite-9f2946fd-20260830/result-41371156`.
+  It is not qualification evidence, and dependent jobs `41371210` and
+  `41371301` never received compute allocations.
+- The shared runner now enforces output growth by sampling only the declared
+  qualification artifact directory while retaining the per-process address
+  limit and process-session resident-memory monitor. Focused tests prove both
+  sides of the boundary: a runtime backing file may exceed the artifact budget,
+  while excess growth inside the artifact directory still terminates the
+  process session. The complete shared-runner and WP-6 runner suites pass
+  `18` and `15` tests, respectively.
+- This repairs the execution harness only. WP-6, FSR-06, and Q3 remain open
+  pending a successful clean prerequisite rerun and the complete release
+  transport campaign.
+
 ### WP-7: coherent small-cut stability and conditioning
 
 **Finding addressed:** FSR-07; this replaces any conditioning role previously attributed to FSR-01.

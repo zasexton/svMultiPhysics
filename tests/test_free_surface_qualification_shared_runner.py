@@ -382,6 +382,76 @@ def test_mpi_group_launch_assigns_unique_result_path_per_rank(
     assert "gtest_rank_${rank_value}.json" in command[6]
 
 
+def test_output_envelope_does_not_limit_runtime_backing_files(tmp_path):
+    runner = load_runner()
+    output_directory = tmp_path / "qualification-output"
+    output_directory.mkdir()
+    stdout_path = output_directory / "stdout.txt"
+    stderr_path = output_directory / "stderr.txt"
+    runtime_backing = tmp_path / "runtime-backing.bin"
+    child = (
+        "from pathlib import Path; import sys,time; "
+        "Path(sys.argv[1]).write_bytes(b'x' * (2 * 1024 * 1024)); "
+        "time.sleep(0.2)"
+    )
+
+    result = runner.run_monitored(
+        [sys.executable, "-c", child, str(runtime_backing)],
+        runner.os.environ.copy(),
+        ROOT,
+        stdout_path,
+        stderr_path,
+        output_directory,
+        wall_time_seconds=10,
+        memory_mib=256,
+        output_mib=1,
+        launch_mode="direct_serial",
+    )
+
+    assert result["return_code"] == 0
+    assert result["termination_reason"] is None
+    assert runtime_backing.stat().st_size == 2 * 1024 * 1024
+    assert result["final_output_bytes"] < 1024 * 1024
+    assert result["memory_enforcement_method"] == (
+        "per_process_address_space_limit_and_sampled_session_resident_memory"
+    )
+    assert result["output_enforcement_method"] == (
+        "sampled_output_directory_size"
+    )
+    assert result["process_file_size_limit_applied"] is False
+
+
+def test_output_envelope_still_stops_qualification_output_growth(tmp_path):
+    runner = load_runner()
+    output_directory = tmp_path / "qualification-output"
+    output_directory.mkdir()
+    stdout_path = output_directory / "stdout.txt"
+    stderr_path = output_directory / "stderr.txt"
+    oversized_output = output_directory / "oversized.bin"
+    child = (
+        "from pathlib import Path; import sys,time; "
+        "Path(sys.argv[1]).write_bytes(b'x' * (2 * 1024 * 1024)); "
+        "time.sleep(5)"
+    )
+
+    result = runner.run_monitored(
+        [sys.executable, "-c", child, str(oversized_output)],
+        runner.os.environ.copy(),
+        ROOT,
+        stdout_path,
+        stderr_path,
+        output_directory,
+        wall_time_seconds=10,
+        memory_mib=256,
+        output_mib=1,
+        launch_mode="direct_serial",
+    )
+
+    assert result["termination_reason"] == "output_envelope_exceeded"
+    assert result["final_output_bytes"] > 1024 * 1024
+    assert result["termination"]["all_session_processes_terminated"] is True
+
+
 def test_serial_group_accepts_explicitly_executed_disabled_test(
     tmp_path,
     monkeypatch,
