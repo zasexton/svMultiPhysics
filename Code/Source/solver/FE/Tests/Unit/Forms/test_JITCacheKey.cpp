@@ -212,6 +212,10 @@ TEST(JITCacheKey, GenericCodegenOptionsChangeKey)
                      [](auto& in) { in.jit_options.specialization.max_unroll_trip_count = 12u; });
     expectKeyChanges("text budget",
                      [](auto& in) { in.jit_options.specialization.text_budget_bytes = 999u; });
+    expectKeyChanges("helper text budget",
+                     [](auto& in) {
+                         in.jit_options.specialization.helper_text_budget_bytes = 997u;
+                     });
     expectKeyChanges("bytes per op",
                      [](auto& in) { in.jit_options.specialization.bytes_per_op_estimate += 1u; });
     expectKeyChanges("raw bytes per op",

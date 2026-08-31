@@ -151,7 +151,7 @@ TEST(JITCompilerCache, CacheHitReturnsSameAddress)
     EXPECT_EQ(stats2.kernel.stores, 1u);
 }
 
-TEST(JITCompilerCache, RegistryDistinguishesSIMDBatchAndFastMathMode)
+TEST(JITCompilerCache, RegistryDistinguishesCodeGenerationPolicies)
 {
     requireLLVMJITOrSkip();
 
@@ -166,15 +166,22 @@ TEST(JITCompilerCache, RegistryDistinguishesSIMDBatchAndFastMathMode)
     auto relaxed = base;
     relaxed.fast_math_mode = JITFastMathMode::Relaxed;
 
+    auto helper_budget = base;
+    helper_budget.specialization.helper_text_budget_bytes = 12345u;
+
     const auto compiler_base = jit::JITCompiler::getOrCreate(base);
     const auto compiler_simd = jit::JITCompiler::getOrCreate(simd);
     const auto compiler_relaxed = jit::JITCompiler::getOrCreate(relaxed);
+    const auto compiler_helper_budget =
+        jit::JITCompiler::getOrCreate(helper_budget);
 
     ASSERT_NE(compiler_base, nullptr);
     ASSERT_NE(compiler_simd, nullptr);
     ASSERT_NE(compiler_relaxed, nullptr);
+    ASSERT_NE(compiler_helper_budget, nullptr);
     EXPECT_NE(compiler_base.get(), compiler_simd.get());
     EXPECT_NE(compiler_base.get(), compiler_relaxed.get());
+    EXPECT_NE(compiler_base.get(), compiler_helper_budget.get());
 }
 
 TEST(JITCompilerCache, CacheDisabledCompilesNewInstance)

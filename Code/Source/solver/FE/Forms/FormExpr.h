@@ -278,6 +278,12 @@ struct JITSpecializationOptions {
     // Override at runtime via SVMP_JIT_TEXT_BUDGET.
     std::uint32_t text_budget_bytes{0};
 
+    // Per-helper .text cap for term-group splitting. This is independent of
+    // the outer unrolling budget so helper boundaries can be constrained
+    // without forcing quadrature loops to remain rolled. 0 => auto from the
+    // current hardware profile (typically 3/4 of L1i size).
+    std::uint32_t helper_text_budget_bytes{0};
+
     // Estimated bytes of machine code per KernelIR op in the final emitted
     // object. Used as the uncalibrated fallback for emitted-size telemetry
     // when process-level calibration has insufficient samples.

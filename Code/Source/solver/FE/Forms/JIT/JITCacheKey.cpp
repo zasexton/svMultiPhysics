@@ -52,6 +52,7 @@ void mixCacheKey(std::uint64_t& h, std::uint64_t v) noexcept
     mixCacheKey(h, static_cast<std::uint64_t>(opt.enable_loop_unroll_metadata ? 1u : 0u));
     mixCacheKey(h, static_cast<std::uint64_t>(opt.max_unroll_trip_count));
     mixCacheKey(h, static_cast<std::uint64_t>(opt.text_budget_bytes));
+    mixCacheKey(h, static_cast<std::uint64_t>(opt.helper_text_budget_bytes));
     // Both bytes/op estimates are live codegen inputs. Include them so changing
     // the estimate invalidates cached kernels compiled with the old policy.
     mixCacheKey(h, static_cast<std::uint64_t>(opt.bytes_per_op_estimate));
