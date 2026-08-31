@@ -34,6 +34,14 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from collate_vtk_time_series import collate_time_series
+from capillary_rise_2d import (
+    HALF_GAP_M as CAPILLARY_RISE_HALF_GAP_M,
+    CONTACT_ANGLE_DEGREES as CAPILLARY_RISE_CONTACT_ANGLE_DEGREES,
+    SLIP_LENGTH_M as CAPILLARY_RISE_SLIP_LENGTH_M,
+    SURFACE_TENSION_N_PER_M as CAPILLARY_RISE_SURFACE_TENSION,
+    state_metrics as capillary_rise_state_metrics,
+    write_case as write_capillary_rise_case,
+)
 from free_surface_energy import (
     energy_history_gate_errors,
     free_surface_energy_state_2d,
@@ -56,6 +64,7 @@ CASES = {
     "droplet2d": None,
     "sphere3d": None,
     "capillarywave2d": None,
+    "capillaryrise2d": None,
     "sessile2d": None,
     "sessile3d": None,
     "dynamiccontact2d": None,
@@ -75,6 +84,7 @@ CASE_GATE_X = {
     "droplet2d": 0.5,
     "sphere3d": 0.5,
     "capillarywave2d": 0.5,
+    "capillaryrise2d": 0.5 * CAPILLARY_RISE_HALF_GAP_M,
     "sessile2d": 0.5,
     "sessile3d": 0.5,
     "dynamiccontact2d": 0.5,
@@ -7981,6 +7991,8 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "max_capillary_wave_profile_relative_error",
         "max_capillary_wave_mean_offset",
         "max_capillary_wave_temporal_liquid_volume_relative_drift",
+        "max_capillary_rise_contact_motion_cells_per_step",
+        "max_capillary_rise_contact_angle_error_degrees",
         "max_free_surface_energy_positive_step_increment_relative",
         "max_free_surface_energy_above_initial_relative",
         "max_free_surface_conservative_balance_normalized_imbalance",
@@ -7999,6 +8011,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "synthetic_nx",
         "synthetic_ny",
         "synthetic_nz",
+        "capillary_rise_half_gap_cells",
         "contact_angle_degrees",
         "sessile_radius",
         "sessile_contact_wall",
@@ -10508,6 +10521,78 @@ def add_physical_time_history_metrics(metrics: dict[str, Any],
     # evidence used by the capillary-wave temporal-volume gate.
     metrics["physical_liquid_measure_history"] = liquid_measure_history
 
+    capillary_rise = benchmark.get("capillary_rise")
+    if isinstance(capillary_rise, dict):
+        initial_state = capillary_rise_state_metrics(initial, benchmark)
+        initial_state.update(stamp(0))
+        initial_state["state_source"] = "initialized_mesh"
+        rise_history = [initial_state]
+        for step, path in paths:
+            state = capillary_rise_state_metrics(pv.read(path), benchmark)
+            state.update(stamp(step))
+            state["state_source"] = str(path)
+            rise_history.append(state)
+
+        mesh_resolution = benchmark.get("mesh_resolution", {})
+        dx = mesh_resolution.get("dx_m") if isinstance(
+            mesh_resolution, dict) else None
+        for previous, current in zip(rise_history, rise_history[1:]):
+            elapsed = float(current["time"]) - float(previous["time"])
+            if elapsed <= 0.0:
+                current["kinematic_error"] = (
+                    "capillary-rise history has a nonpositive time increment")
+                continue
+            for height_name, speed_name in (
+                    ("apex_height_m", "apex_geometric_speed_m_per_s"),
+                    ("wall_contact_height_m",
+                     "wall_contact_geometric_speed_m_per_s")):
+                old_height = previous.get(height_name)
+                new_height = current.get(height_name)
+                if (isinstance(old_height, (int, float)) and
+                        isinstance(new_height, (int, float))):
+                    current[speed_name] = (
+                        float(new_height) - float(old_height)) / elapsed
+            old_contact = previous.get("wall_contact_height_m")
+            new_contact = current.get("wall_contact_height_m")
+            if (isinstance(dx, (int, float)) and float(dx) > 0.0 and
+                    isinstance(old_contact, (int, float)) and
+                    isinstance(new_contact, (int, float))):
+                current["wall_contact_motion_cells_per_step"] = (
+                    abs(float(new_contact) - float(old_contact)) / float(dx)
+                )
+
+        metrics["capillary_rise_history"] = rise_history
+        metrics["initial_capillary_rise_state"] = rise_history[0]
+        metrics["final_capillary_rise_state"] = rise_history[-1]
+        metrics["capillary_rise_history_available"] = (
+            exact_output_identity and not clock_errors and
+            all(state.get("available") is True for state in rise_history)
+        )
+        motions = [
+            float(state["wall_contact_motion_cells_per_step"])
+            for state in rise_history[1:]
+            if isinstance(
+                state.get("wall_contact_motion_cells_per_step"),
+                (int, float),
+            )
+        ]
+        if motions:
+            metrics["capillary_rise_max_contact_motion_cells_per_step"] = max(
+                motions)
+        final_state = rise_history[-1]
+        for state_name, metric_name in (
+                ("apex_height_m", "capillary_rise_final_apex_height_m"),
+                ("apex_height_mm", "capillary_rise_final_apex_height_mm"),
+                ("wall_contact_height_m",
+                 "capillary_rise_final_wall_contact_height_m"),
+                ("contact_angle_error_degrees",
+                 "capillary_rise_final_contact_angle_error_degrees"),
+                ("sharp_wall_slip_dissipation_w_per_m",
+                 "capillary_rise_final_wall_slip_dissipation_w_per_m")):
+            value = final_state.get(state_name)
+            if isinstance(value, (int, float)):
+                metrics[metric_name] = float(value)
+
     add_free_surface_energy_history_metrics(
         metrics,
         benchmark,
@@ -11145,6 +11230,13 @@ def false_wall_wet_history_errors(
     """Fail an instrumented run on missing history or the first false-wet event."""
     if not getattr(args, "enable_physical_history_instrumentation", False):
         return []
+    benchmark = metrics.get("benchmark")
+    if (metrics.get("case") == "capillaryrise2d" and
+            isinstance(benchmark, dict) and
+            isinstance(benchmark.get("capillary_rise"), dict)):
+        metrics["wall_only_false_wet_gate_applicability"] = (
+            "not_applicable_to_intentional_moving_contact_line")
+        return []
     applicability = metrics.get("wall_only_false_wet_applicability")
     if applicability == "not_applicable_closed_interface":
         if metrics.get(
@@ -11191,6 +11283,74 @@ def false_wall_wet_history_errors(
         )
         return errors
     errors.append(f"false wall wetting detected: {first_event!r}")
+    return errors
+
+
+def capillary_rise_history_errors(
+        metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
+    if metrics.get("case") != "capillaryrise2d":
+        return []
+    errors: list[str] = []
+    if metrics.get("capillary_rise_history_available") is not True:
+        errors.append(
+            "capillary-rise history does not cover every accepted saved state")
+    history = metrics.get("capillary_rise_history")
+    if not isinstance(history, list) or not history:
+        return [*errors, "capillary-rise physical history is unavailable"]
+    for index, state in enumerate(history):
+        if not isinstance(state, dict) or state.get("available") is not True:
+            detail = state.get("error") if isinstance(state, dict) else None
+            errors.append(
+                f"capillary-rise state {index} is invalid"
+                + (f": {detail}" if detail else ""))
+            continue
+        for name in (
+                "apex_height_m", "wall_contact_height_m",
+                "contact_angle_error_degrees",
+                "sharp_wall_slip_dissipation_w_per_m"):
+            value = state.get(name)
+            if (not isinstance(value, (int, float)) or
+                    isinstance(value, bool) or not math.isfinite(float(value))):
+                errors.append(
+                    f"capillary-rise state {index} lacks finite {name}")
+        dissipation = state.get("sharp_wall_slip_dissipation_w_per_m")
+        if (isinstance(dissipation, (int, float)) and
+                float(dissipation) < -1.0e-15):
+            errors.append(
+                f"capillary-rise state {index} reports negative wall-slip "
+                "dissipation")
+
+    maximum_motion = getattr(
+        args, "max_capillary_rise_contact_motion_cells_per_step", None)
+    if maximum_motion is not None:
+        observed = metrics.get(
+            "capillary_rise_max_contact_motion_cells_per_step")
+        if not isinstance(observed, (int, float)):
+            errors.append(
+                "capillary-rise contact-motion-per-step metric is unavailable")
+        elif float(observed) > float(maximum_motion):
+            errors.append(
+                "capillary-rise maximum contact motion "
+                f"{float(observed):.6g} cells per step exceeds "
+                f"{float(maximum_motion):.6g}")
+
+    maximum_angle_error = getattr(
+        args, "max_capillary_rise_contact_angle_error_degrees", None)
+    if maximum_angle_error is not None:
+        angle_errors = [
+            abs(float(state["contact_angle_error_degrees"]))
+            for state in history
+            if isinstance(state, dict) and isinstance(
+                state.get("contact_angle_error_degrees"), (int, float))
+        ]
+        if len(angle_errors) != len(history):
+            errors.append(
+                "capillary-rise contact-angle history is incomplete")
+        elif max(angle_errors) > float(maximum_angle_error):
+            errors.append(
+                "capillary-rise maximum contact-angle error "
+                f"{max(angle_errors):.6g} degrees exceeds "
+                f"{float(maximum_angle_error):.6g}")
     return errors
 
 
@@ -11367,6 +11527,12 @@ def compute_metrics(case_name: str,
     }
     if case_name == "capillarywave2d":
         metrics.update(capillary_wave_boundary_contract_metrics(case_dir))
+    if case_name == "capillaryrise2d":
+        rise_state = capillary_rise_state_metrics(output, benchmark)
+        metrics["capillary_rise_final_state"] = rise_state
+        for name, value in rise_state.items():
+            if isinstance(value, (int, float, str, bool)):
+                metrics[f"capillary_rise_final_{name}"] = value
     if "Pressure" in output.point_data:
         pressure = np.asarray(output.point_data["Pressure"], dtype=float).reshape(-1)
         pressure_min = float(np.nanmin(pressure))
@@ -11704,6 +11870,7 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
     errors.extend(curvature_projection_errors(metrics, args))
     errors.extend(capillary_benchmark_errors(metrics, args))
     errors.extend(capillary_wave_benchmark_errors(metrics, args))
+    errors.extend(capillary_rise_history_errors(metrics, args))
     errors.extend(capillary_stability_errors(metrics, args))
     errors.extend(free_surface_conservative_balance_errors(metrics, args))
     errors.extend(free_surface_pressure_representability_errors(metrics, args))
@@ -12350,6 +12517,83 @@ def case_args_for_run(case_name: str,
             case_args.linear_solver_type = "ns"
         if not getattr(args, "_explicit_linear_max_iterations", False):
             case_args.linear_max_iterations = 100
+    if case_name == "capillaryrise2d":
+        if getattr(case_args, "use_high_order_implicit_cuts", False):
+            raise ValueError(
+                "capillary-rise qualification requires its affine P1 "
+                "triangular mesh")
+        if getattr(
+                case_args, "level_set_active_domain",
+                "LevelSetNegative") != "LevelSetNegative":
+            raise ValueError(
+                "capillary-rise qualification requires LevelSetNegative liquid")
+        if getattr(
+                case_args, "capillary_force_form",
+                "surface_stress") != "surface_stress":
+            raise ValueError(
+                "capillary-rise qualification requires SurfaceStress")
+        configured_surface_tension = getattr(
+            case_args, "surface_tension", None)
+        if (configured_surface_tension is not None and
+                not math.isclose(
+                    float(configured_surface_tension),
+                    CAPILLARY_RISE_SURFACE_TENSION,
+                    rel_tol=0.0,
+                    abs_tol=1.0e-15,
+                )):
+            raise ValueError(
+                "capillary-rise surface tension is fixed by the reference")
+        if getattr(
+                case_args, "enable_level_set_reinitialization",
+                None) is False:
+            raise ValueError(
+                "capillary-rise qualification requires wall-aware "
+                "reinitialization")
+        if getattr(
+                case_args, "enable_level_set_volume_correction",
+                None) is True:
+            raise ValueError(
+                "capillary-rise open-inlet volume must not be globally corrected")
+        for name in (
+                "max_capillary_rise_contact_motion_cells_per_step",
+                "max_capillary_rise_contact_angle_error_degrees"):
+            value = getattr(case_args, name, None)
+            if (value is not None and
+                    (not math.isfinite(float(value)) or float(value) < 0.0)):
+                raise ValueError(
+                    f"capillary-rise threshold {name} must be finite and "
+                    "nonnegative")
+        if case_args.steps is None:
+            case_args.steps = 1
+        if case_args.time_step_size is None:
+            case_args.time_step_size = 5.0e-4
+        if case_args.timeout_seconds is None:
+            case_args.timeout_seconds = 600.0
+        case_args.surface_tension = CAPILLARY_RISE_SURFACE_TENSION
+        case_args.contact_angle_degrees = (
+            CAPILLARY_RISE_CONTACT_ANGLE_DEGREES)
+        case_args.wall_slip_length = CAPILLARY_RISE_SLIP_LENGTH_M
+        case_args.enable_level_set_reinitialization = True
+        case_args.enable_level_set_volume_correction = False
+        set_default(
+            case_args,
+            "wet_extension_advection_velocity_method",
+            "wall_compatible_normal",
+        )
+        case_args.min_max_speed = 0.0
+        case_args.min_wet_mean_speed = 0.0
+        case_args.min_gate_mean_ux = -1.0
+        case_args.min_front_mean_ux = -1.0
+        case_args.enable_physical_history_instrumentation = True
+        case_args.require_time_loop_convergence = True
+        case_args.disable_velocity_extension = True
+        set_default(case_args, "linear_solver_type", "gmres")
+        set_default(case_args, "linear_algebra_backend", "fsils")
+        set_default(case_args, "linear_preconditioner", "rcs")
+        set_default(case_args, "linear_max_iterations", 100)
+        set_default(case_args, "linear_krylov_space_dimension", 50)
+        set_default(case_args, "linear_relative_tolerance", 1.0e-8)
+        set_default(case_args, "linear_absolute_tolerance", 1.0e-10)
     if case_name in {
             "sessile2d", "sessile3d", "sphere3d", "dynamiccontact2d"}:
         if case_args.steps is None:
@@ -12889,6 +13133,13 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                     run_dir, args.steps, surface_tension, args.time_step_size,
                     args.synthetic_nx, args.synthetic_ny,
                     uses_kinematic_area_gradient_traction)
+            elif case_name == "capillaryrise2d":
+                write_capillary_rise_case(
+                    run_dir,
+                    args.steps,
+                    float(args.time_step_size),
+                    args.capillary_rise_half_gap_cells,
+                )
             elif case_name in {"sessile2d", "dynamiccontact2d"}:
                 dynamic = case_name == "dynamiccontact2d"
                 initial_angle = (
@@ -12957,7 +13208,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                     uses_kinematic_area_gradient_traction or
                     case_name in {
                         "sessile2d", "sessile3d", "dynamiccontact2d",
-                        "sphere3d",
+                        "sphere3d", "capillaryrise2d",
                     }):
                 configure_case_solver_xml(run_dir, args)
         else:
@@ -14899,6 +15150,13 @@ def main() -> int:
                         help="y resolution for synthetic sessile/contact-line cases")
     parser.add_argument("--synthetic-nz", type=int, default=16,
                         help="z resolution for synthetic spatial capillary cases")
+    parser.add_argument(
+        "--capillary-rise-half-gap-cells",
+        type=int,
+        default=10,
+        help=("number of isotropic cells across the published capillary-rise "
+              "half-gap; the vertical resolution is eight times this value"),
+    )
     parser.add_argument("--contact-angle-degrees", type=float, default=90.0,
                         help="static or dynamic equilibrium contact angle through the liquid")
     parser.add_argument("--dynamic-initial-contact-angle-degrees", type=float,
@@ -15357,6 +15615,18 @@ def main() -> int:
         help=("fail when any accepted production physical cut volume drifts "
               "from the pre-loop initialized state by more than this relative "
               "amount"),
+    )
+    parser.add_argument(
+        "--max-capillary-rise-contact-motion-cells-per-step",
+        type=float,
+        help=("fail when any accepted capillary-rise wall-contact increment "
+              "exceeds this fraction of one mesh cell"),
+    )
+    parser.add_argument(
+        "--max-capillary-rise-contact-angle-error-degrees",
+        type=float,
+        help=("fail when any saved capillary-rise wall angle differs from "
+              "the prescribed 30-degree angle by more than this amount"),
     )
     parser.add_argument("--capillary-convergence-resolution-key")
     parser.add_argument("--capillary-convergence-metric", action="append")
