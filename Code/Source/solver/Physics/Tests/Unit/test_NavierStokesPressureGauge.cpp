@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
+#include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidModule.h"
 #include "Physics/Materials/Fluid/CarreauYasudaViscosity.h"
 
 #include "Analysis/ConstitutiveLawMetadata.h"
@@ -278,6 +279,30 @@ private:
     phi[4] = 1.0;
     phi[5] = 1.0;
 
+    return create_mesh(std::move(base));
+}
+
+[[nodiscard]] std::shared_ptr<Mesh> makeSingleTriangleNativeMesh()
+{
+    auto base = std::make_shared<MeshBase>();
+    const std::vector<real_t> x_ref = {
+        0.0, 0.0,
+        1.0, 0.0,
+        0.0, 1.0,
+    };
+    const std::vector<offset_t> cell2vertex_offsets = {0, 3};
+    const std::vector<index_t> cell2vertex = {0, 1, 2};
+    CellShape shape{};
+    shape.family = CellFamily::Triangle;
+    shape.num_corners = 3;
+    shape.order = 1;
+    base->build_from_arrays(
+        /*spatial_dim=*/2,
+        x_ref,
+        cell2vertex_offsets,
+        cell2vertex,
+        {shape});
+    base->finalize();
     return create_mesh(std::move(base));
 }
 #endif
@@ -914,6 +939,105 @@ TEST(NavierStokesInitialConditions, MeshVertexFieldsInitializeVelocityAndPressur
                          velocity[v_base + 1u]);
         EXPECT_DOUBLE_EQ(values[static_cast<std::size_t>(p_offset + p_dofs[0])],
                          pressure[static_cast<std::size_t>(vertex)]);
+    }
+#endif
+}
+
+TEST(NavierStokesInitialConditions,
+     TwoFluidMeshVertexFieldsInitializeBothPhasePairs)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Two-fluid mesh-field initialization requires native mesh support.";
+#else
+    auto mesh = makeSingleTriangleNativeMesh();
+    auto& local_mesh = mesh->local_mesh();
+
+    struct MeshFieldData {
+        std::string name;
+        std::size_t components;
+        std::vector<FE::Real> values;
+    };
+    const std::array<MeshFieldData, 4> mesh_fields{{
+        {"u_negative", 2u, {1.0, 2.0, 1.5, 2.0, 1.0, 2.5}},
+        {"p_negative", 1u, {3.0, 3.5, 4.0}},
+        {"u_positive", 2u, {-1.0, -2.0, 0.0, -2.0, -1.0, 1.0}},
+        {"p_positive", 1u, {-3.0, -2.5, -2.0}},
+    }};
+    for (const auto& source : mesh_fields) {
+        const auto handle = MeshFields::attach_field(
+            local_mesh,
+            EntityKind::Vertex,
+            source.name,
+            FieldScalarType::Float64,
+            source.components);
+        auto* values = MeshFields::field_data_as<real_t>(local_mesh, handle);
+        ASSERT_NE(values, nullptr);
+        std::copy(source.values.begin(), source.values.end(), values);
+    }
+
+    auto scalar_space = FE::spaces::SpaceFactory::create_h1(
+        FE::ElementType::Triangle3, 1);
+    auto velocity_space = FE::spaces::SpaceFactory::create_vector_h1(
+        FE::ElementType::Triangle3, 1, 2);
+    FE::systems::FESystem system(mesh);
+    (void)system.addField(FE::systems::FieldSpec{
+        .name = "level_set",
+        .space = scalar_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::Unknown,
+    });
+    for (const auto& source : mesh_fields) {
+        std::shared_ptr<const FE::spaces::FunctionSpace> field_space =
+            scalar_space;
+        if (source.components != 1u) {
+            field_space = velocity_space;
+        }
+        (void)system.addField(FE::systems::FieldSpec{
+            .name = source.name,
+            .space = std::move(field_space),
+            .components = static_cast<int>(source.components),
+            .source_kind = FE::systems::FieldSourceKind::Unknown,
+        });
+    }
+    ASSERT_NO_THROW(system.setup({}));
+
+    formulations::navier_stokes::IncompressibleTwoFluidOptions options;
+    options.interface_marker = 71;
+    formulations::navier_stokes::IncompressibleTwoFluidModule module(
+        velocity_space,
+        scalar_space,
+        velocity_space,
+        scalar_space,
+        options);
+    auto factory = FE::backends::BackendFactory::create(
+        FE::backends::BackendKind::FSILS);
+    auto state = factory->createVector(system.dofHandler().getNumDofs());
+    state->zero();
+
+    module.applyInitialConditions(system, *state);
+    const auto values = state->localSpan();
+    for (const auto& source : mesh_fields) {
+        const auto field = system.findFieldByName(source.name);
+        ASSERT_NE(field, FE::INVALID_FIELD_ID);
+        const auto* entity_map =
+            system.fieldDofHandler(field).getEntityDofMap();
+        ASSERT_NE(entity_map, nullptr);
+        const auto field_offset = system.fieldDofOffset(field);
+        for (FE::GlobalIndex vertex = 0; vertex < 3; ++vertex) {
+            const auto dofs = entity_map->getVertexDofs(vertex);
+            ASSERT_EQ(dofs.size(), source.components);
+            for (std::size_t component = 0u;
+                 component < source.components;
+                 ++component) {
+                const auto expected_index =
+                    static_cast<std::size_t>(vertex) * source.components +
+                    component;
+                EXPECT_DOUBLE_EQ(
+                    values[static_cast<std::size_t>(
+                        field_offset + dofs[component])],
+                    source.values[expected_index]);
+            }
+        }
     }
 #endif
 }

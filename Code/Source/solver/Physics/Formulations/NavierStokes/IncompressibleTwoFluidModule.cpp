@@ -743,6 +743,42 @@ void IncompressibleTwoFluidModule::registerOn(
         options_, dimension, interface_marker, interface_weights);
 }
 
+void IncompressibleTwoFluidModule::applyInitialConditions(
+    const FE::systems::FESystem& system,
+    FE::backends::GenericVector& u0) const
+{
+    const auto level_set =
+        system.findFieldByName(options_.level_set_field_name);
+    if (level_set == FE::INVALID_FIELD_ID) {
+        throw std::invalid_argument(
+            "IncompressibleTwoFluidModule: initial conditions require the registered level-set field '" +
+            options_.level_set_field_name + "'");
+    }
+    const auto interface_marker =
+        resolvedInterfaceMarker(options_, level_set);
+    auto negative_options = makePhaseOptions(
+        options_,
+        options_.negative_phase,
+        FreeSurfaceActiveDomain::LevelSetNegative,
+        interface_marker);
+    auto positive_options = makePhaseOptions(
+        options_,
+        options_.positive_phase,
+        FreeSurfaceActiveDomain::LevelSetPositive,
+        interface_marker);
+
+    IncompressibleNavierStokesVMSModule negative_module(
+        negative_velocity_space_,
+        negative_pressure_space_,
+        std::move(negative_options));
+    IncompressibleNavierStokesVMSModule positive_module(
+        positive_velocity_space_,
+        positive_pressure_space_,
+        std::move(positive_options));
+    negative_module.applyInitialConditions(system, u0);
+    positive_module.applyInitialConditions(system, u0);
+}
+
 std::optional<EffectiveConfigurationArtifact>
 IncompressibleTwoFluidModule::effectiveConfigurationArtifact() const
 {

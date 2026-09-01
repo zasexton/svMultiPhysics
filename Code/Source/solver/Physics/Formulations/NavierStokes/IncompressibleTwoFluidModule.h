@@ -108,6 +108,8 @@ public:
         IncompressibleTwoFluidOptions options = {});
 
     void registerOn(FE::systems::FESystem& system) const override;
+    void applyInitialConditions(const FE::systems::FESystem& system,
+                                FE::backends::GenericVector& u0) const override;
 
     [[nodiscard]] std::optional<EffectiveConfigurationArtifact>
     effectiveConfigurationArtifact() const override;
