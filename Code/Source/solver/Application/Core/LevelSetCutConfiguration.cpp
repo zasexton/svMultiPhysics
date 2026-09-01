@@ -749,8 +749,68 @@ activeCutVolumeRequests(const EquationParameters& equation)
     }
   }
 
-  if (!equation.type.defined() ||
-      normalizedToken(equation.type.value()) != "fluid") {
+  const auto equation_type =
+      equation.type.defined() ? normalizedToken(equation.type.value())
+                              : std::string{};
+  const bool supports_two_fluid =
+      equation_type == "fluid" || equation_type == "stokes";
+  const auto physical_model = firstDefinedParameter(
+      eq_params,
+      {"Free_surface_physical_model", "FreeSurfacePhysicalModel"});
+  if (supports_two_fluid && physical_model.has_value() &&
+      trimCopy(*physical_model) == "IncompressibleTwoFluid") {
+    const auto level_set_field = firstDefinedParameter(
+        eq_params,
+        {"Level_set_field_name", "LevelSetFieldName"});
+    const auto generated_domain = firstDefinedParameter(
+        eq_params,
+        {"Generated_interface_domain_id", "GeneratedInterfaceDomainId"});
+    const auto interface_marker = firstDefinedIntParameter(
+        eq_params,
+        {"Material_interface_marker", "MaterialInterfaceMarker"});
+    if (!level_set_field.has_value() || !generated_domain.has_value() ||
+        !interface_marker.has_value() || *interface_marker < 0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Incompressible two-fluid generated "
+          "cut construction requires Level_set_field_name, "
+          "Generated_interface_domain_id, and a nonnegative "
+          "Material_interface_marker.");
+    }
+
+    auto material_interface_params = eq_params;
+    material_interface_params["Level_set_field_name"] =
+        trimCopy(*level_set_field);
+    material_interface_params["Generated_interface_domain_id"] =
+        trimCopy(*generated_domain);
+    material_interface_params["Interface_marker"] =
+        std::to_string(*interface_marker);
+    material_interface_params["Active_domain"] = "LevelSetNegative";
+    material_interface_params["Active_domain_method"] = "CutVolume";
+    auto request = activeCutVolumeRequestFromParameters(
+        material_interface_params,
+        true,
+        /*default_linear_corner_to_differentiated=*/false);
+    if (!request.has_value()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Incompressible two-fluid generated "
+          "cut construction did not produce a cut-volume request.");
+    }
+    if (const char* force = std::getenv("SVMP_CUT_RETENTION_FORCE");
+        force != nullptr && std::string_view(force) == "active_only") {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] active-only cut retention is "
+          "incompatible with incompressible two-fluid; both generated "
+          "cut-volume sides are required.");
+    }
+    request->origin = ActiveCutVolumeRequestOrigin::MaterialInterface;
+    request->equation_type = trimCopy(equation.type.value());
+    request->active_side = LevelSetActiveSide::Negative;
+    request->volume_retention =
+        ActiveCutVolumeRetention::ActiveAndInactive;
+    appendUniqueRequest(requests, std::move(*request));
+  }
+
+  if (equation_type != "fluid") {
     return requests;
   }
   for (auto* bc : equation.boundary_conditions) {

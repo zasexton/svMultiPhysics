@@ -21,6 +21,7 @@ enum class LevelSetActiveSide {
 enum class ActiveCutVolumeRequestOrigin {
   Equation,
   FreeSurfaceBoundary,
+  MaterialInterface,
 };
 
 enum class ActiveCutVolumeRetention {

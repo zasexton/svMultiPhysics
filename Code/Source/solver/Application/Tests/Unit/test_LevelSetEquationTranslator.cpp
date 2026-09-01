@@ -1080,6 +1080,111 @@ TEST(LevelSetEquationTranslator,
 #endif
 }
 
+TEST(LevelSetEquationTranslator,
+     InitializesUnknownMaterialInterfaceLevelSetFromMeshVertexField)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryTriangleMesh();
+  auto& local_mesh = mesh->local_mesh();
+  const auto mesh_field = svmp::MeshFields::attach_field(
+      local_mesh,
+      svmp::EntityKind::Vertex,
+      "level_set",
+      svmp::FieldScalarType::Float64,
+      1);
+  auto* mesh_values = svmp::MeshFields::field_data_as<svmp::real_t>(
+      local_mesh, mesh_field);
+  ASSERT_NE(mesh_values, nullptr);
+  const std::array<svmp::FE::Real, 3> expected{-0.25, 0.75, -0.5};
+  std::copy(expected.begin(), expected.end(), mesh_values);
+
+  const auto scalar_space = svmp::FE::spaces::SpaceFactory::create_h1(
+      svmp::FE::ElementType::Triangle3, 1);
+  const auto velocity_space =
+      svmp::FE::spaces::SpaceFactory::create_vector_h1(
+          svmp::FE::ElementType::Triangle3, 1, 2);
+  svmp::FE::systems::FESystem system(mesh);
+  const auto level_set = system.addField(svmp::FE::systems::FieldSpec{
+      .name = "level_set",
+      .space = scalar_space,
+      .components = 1,
+      .source_kind = svmp::FE::systems::FieldSourceKind::Unknown,
+  });
+  const auto negative_velocity =
+      system.addField(svmp::FE::systems::FieldSpec{
+          .name = "u_negative",
+          .space = velocity_space,
+          .components = 2,
+      });
+  const auto positive_velocity =
+      system.addField(svmp::FE::systems::FieldSpec{
+          .name = "u_positive",
+          .space = velocity_space,
+          .components = 2,
+      });
+  system.declareMaterialInterfaceTransportVelocity(
+      svmp::FE::interfaces::MaterialInterfaceTransportVelocityDeclaration{
+          .dimension = 2,
+          .interface_marker = 71,
+          .level_set_field = level_set,
+          .negative_velocity_field = negative_velocity,
+          .positive_velocity_field = positive_velocity,
+          .level_set_isovalue = 0.0,
+          .negative_trace_weight = 0.25,
+          .positive_trace_weight = 0.75,
+          .geometry_domain_id = "material_interface",
+          .owner_component = "incompressible_two_fluid",
+      });
+
+  svmp::Physics::EquationModuleInput input{};
+  input.equation_type = "level_set";
+  input.mesh_name = "triangle";
+  input.mesh = mesh->local_mesh_ptr();
+  input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "level_set"};
+  input.equation_params["Level_set_source"] =
+      svmp::Physics::ParameterValue{true, "unknown"};
+  input.equation_params["Auto_register_level_set_field"] =
+      svmp::Physics::ParameterValue{true, "false"};
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "material_interface_phase_pair"};
+  input.equation_params["Material_interface_marker"] =
+      svmp::Physics::ParameterValue{true, "71"};
+  input.equation_params["Enable_conservative_phase_transport"] =
+      svmp::Physics::ParameterValue{true, "true"};
+  input.equation_params["Conservative_phase_field_name"] =
+      svmp::Physics::ParameterValue{true, "phase"};
+
+  auto module =
+      application::translators::level_set::createModule(input, system);
+  ASSERT_TRUE(module);
+  ASSERT_NO_THROW(system.setup({}));
+
+  auto factory = svmp::FE::backends::BackendFactory::create(
+      svmp::FE::backends::BackendKind::FSILS);
+  auto state = factory->createVector(system.dofHandler().getNumDofs());
+  state->zero();
+  module->applyInitialConditions(system, *state);
+
+  const auto* entity_map =
+      system.fieldDofHandler(level_set).getEntityDofMap();
+  ASSERT_NE(entity_map, nullptr);
+  const auto offset = system.fieldDofOffset(level_set);
+  const auto values = state->localSpan();
+  for (svmp::FE::GlobalIndex vertex = 0; vertex < 3; ++vertex) {
+    const auto vertex_dofs = entity_map->getVertexDofs(vertex);
+    ASSERT_EQ(vertex_dofs.size(), 1u);
+    const auto dof = offset + vertex_dofs.front();
+    ASSERT_GE(dof, 0);
+    ASSERT_LT(static_cast<std::size_t>(dof), values.size());
+    EXPECT_DOUBLE_EQ(values[static_cast<std::size_t>(dof)],
+                     expected[static_cast<std::size_t>(vertex)]);
+  }
+#endif
+}
+
 TEST(LevelSetEquationTranslator, RoutesCoupledTransportToEquationsOperator)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)

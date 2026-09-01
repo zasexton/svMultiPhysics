@@ -723,7 +723,11 @@ public:
   void applyInitialConditions(const svmp::FE::systems::FESystem& system,
                               svmp::FE::backends::GenericVector& u0) const override
   {
-    if (options_.level_set.source != ls::LevelSetFieldSource::PrescribedData) {
+    const bool initialize_from_mesh =
+        options_.level_set.source == ls::LevelSetFieldSource::PrescribedData ||
+        options_.velocity.source ==
+            ls::LevelSetVelocitySource::MaterialInterfacePhasePair;
+    if (!initialize_from_mesh) {
       return;
     }
 
@@ -830,7 +834,7 @@ public:
     (void)system;
     (void)u0;
     throw std::runtime_error(
-        "[svMultiPhysics::Application] Level-set prescribed-data initialization requires mesh support.");
+        "[svMultiPhysics::Application] Level-set mesh initialization requires mesh support.");
 #endif
   }
 

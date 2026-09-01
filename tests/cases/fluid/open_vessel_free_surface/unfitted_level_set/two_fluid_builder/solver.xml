@@ -37,7 +37,7 @@
     <Operator_tag>equations</Operator_tag>
     <LS type="GMRES">
       <Linear_algebra type="fsils">
-        <Preconditioner>none</Preconditioner>
+        <Preconditioner>fsils</Preconditioner>
       </Linear_algebra>
       <Tolerance>1.0e-8</Tolerance>
       <Absolute_tolerance>1.0e-12</Absolute_tolerance>
@@ -62,7 +62,7 @@
     <Operator_tag>equations</Operator_tag>
     <LS type="NS">
       <Linear_algebra type="fsils">
-        <Preconditioner>none</Preconditioner>
+        <Preconditioner>fsils</Preconditioner>
       </Linear_algebra>
       <Max_iterations>100</Max_iterations>
       <Tolerance>1.0e-8</Tolerance>

@@ -22044,7 +22044,8 @@ void gatherTimeDerivativeFieldsFromNode(const forms::FormExprNode& node,
                 }
             } else if (child.type() == forms::FormExprType::StateField ||
                        child.type() == forms::FormExprType::DiscreteField) {
-                if (const auto fid = child.fieldId()) {
+                if (const auto fid = child.fieldId();
+                    fid.has_value() && *fid != INVALID_FIELD_ID) {
                     out.insert(*fid);
                 }
             }

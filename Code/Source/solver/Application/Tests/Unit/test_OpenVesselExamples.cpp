@@ -3,9 +3,11 @@
 #include "Application/Core/LevelSetCutConfiguration.h"
 #include "Application/Core/SimulationBuilder.h"
 #include "Application/Translators/EquationTranslator.h"
+#include "FE/Dofs/EntityDofMap.h"
 #include "FE/Interfaces/LevelSetInterfaceDomain.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/TimeStepping/TimeHistory.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Fields/MeshFields.h"
 #include "Mesh/Mesh.h"
@@ -1349,6 +1351,17 @@ TEST(OpenVesselExamples,
   const ScopedCurrentPath cwd(case_dir);
   ASSERT_NO_THROW(parameters.read_xml("solver.xml"));
 
+  const auto cut_requests =
+      application::core::activeCutVolumeRequests(parameters);
+  ASSERT_EQ(cut_requests.size(), 1u);
+  EXPECT_EQ(
+      cut_requests.front().origin,
+      application::core::ActiveCutVolumeRequestOrigin::MaterialInterface);
+  EXPECT_EQ(cut_requests.front().requested_interface_marker, 71);
+  EXPECT_EQ(
+      cut_requests.front().volume_retention,
+      application::core::ActiveCutVolumeRetention::ActiveAndInactive);
+
   application::core::SimulationBuilder builder(parameters);
   auto components = builder.build();
 
@@ -1374,6 +1387,14 @@ TEST(OpenVesselExamples,
     EXPECT_TRUE(components.fe_system->fieldParticipatesInUnknownVector(
         field));
   }
+  const std::vector<svmp::FE::FieldId> expected_derivative_fields{
+      components.fe_system->findFieldByName("level_set"),
+      components.fe_system->findFieldByName("u_negative"),
+      components.fe_system->findFieldByName("u_positive"),
+  };
+  EXPECT_EQ(
+      components.fe_system->timeDerivativeFields("equations"),
+      expected_derivative_fields);
   EXPECT_TRUE(components.fe_system->hasOperator("equations"));
   EXPECT_EQ(
       components.fe_system
@@ -1390,6 +1411,8 @@ TEST(OpenVesselExamples,
   const auto& solver_options = components.linear_solver->getOptions();
   EXPECT_EQ(solver_options.method,
             svmp::FE::backends::SolverMethod::BlockSchur);
+  EXPECT_EQ(solver_options.preconditioner,
+            svmp::FE::backends::PreconditionerType::Diagonal);
   ASSERT_TRUE(solver_options.block_layout.has_value());
   const auto& layout = *solver_options.block_layout;
   ASSERT_EQ(layout.blocks.size(), 2u);
@@ -1409,6 +1432,55 @@ TEST(OpenVesselExamples,
   EXPECT_EQ(*layout.momentum_block, 0);
   EXPECT_EQ(*layout.constraint_block, 1);
   EXPECT_TRUE(components.time_history);
+  ASSERT_TRUE(components.primary_mesh);
+  const auto& local_mesh = components.primary_mesh->local_mesh();
+  const auto mesh_level_set = svmp::MeshFields::get_field_handle(
+      local_mesh, svmp::EntityKind::Vertex, "level_set");
+  ASSERT_NE(mesh_level_set.id, 0u);
+  const auto* mesh_values =
+      svmp::MeshFields::field_data_as<svmp::real_t>(
+          local_mesh, mesh_level_set);
+  ASSERT_NE(mesh_values, nullptr);
+  bool has_full_negative_cell = false;
+  bool has_full_positive_cell = false;
+  for (svmp::index_t cell = 0;
+       cell < static_cast<svmp::index_t>(local_mesh.n_cells()); ++cell) {
+    const auto [vertices, vertex_count] =
+        local_mesh.cell_vertices_span(cell);
+    ASSERT_NE(vertices, nullptr);
+    bool all_negative = true;
+    bool all_positive = true;
+    for (std::size_t local_vertex = 0;
+         local_vertex < vertex_count; ++local_vertex) {
+      const auto value =
+          mesh_values[static_cast<std::size_t>(vertices[local_vertex])];
+      all_negative = all_negative && value < 0.0;
+      all_positive = all_positive && value > 0.0;
+    }
+    has_full_negative_cell = has_full_negative_cell || all_negative;
+    has_full_positive_cell = has_full_positive_cell || all_positive;
+  }
+  EXPECT_TRUE(has_full_negative_cell);
+  EXPECT_TRUE(has_full_positive_cell);
+  const auto level_set =
+      components.fe_system->findFieldByName("level_set");
+  ASSERT_NE(level_set, svmp::FE::INVALID_FIELD_ID);
+  const auto* entity_map =
+      components.fe_system->fieldDofHandler(level_set).getEntityDofMap();
+  ASSERT_NE(entity_map, nullptr);
+  const auto field_offset =
+      components.fe_system->fieldDofOffset(level_set);
+  auto state_view =
+      components.time_history->u().createGhostedReadView();
+  ASSERT_TRUE(state_view);
+  for (svmp::FE::GlobalIndex vertex = 0;
+       vertex < components.primary_mesh->n_vertices(); ++vertex) {
+    const auto vertex_dofs = entity_map->getVertexDofs(vertex);
+    ASSERT_EQ(vertex_dofs.size(), 1u);
+    EXPECT_DOUBLE_EQ(
+        state_view->getVectorEntry(field_offset + vertex_dofs.front()),
+        mesh_values[static_cast<std::size_t>(vertex)]);
+  }
 #endif
 }
 

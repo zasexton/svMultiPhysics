@@ -209,6 +209,88 @@ TEST(LevelSetCutConfiguration,
 }
 
 TEST(LevelSetCutConfiguration,
+     TwoFluidMaterialInterfaceBuildsTwoSidedCutRequestForFluidAndStokes)
+{
+  struct Case {
+    const char* equation_type;
+    const char* xml;
+  };
+  const std::vector<Case> cases{
+      {"fluid", R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Free_surface_physical_model>IncompressibleTwoFluid</Free_surface_physical_model>
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Generated_interface_domain_id>material_interface</Generated_interface_domain_id>
+    <Material_interface_marker>71</Material_interface_marker>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml"},
+      {"stokes", R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="stokes">
+    <FreeSurfacePhysicalModel>IncompressibleTwoFluid</FreeSurfacePhysicalModel>
+    <LevelSetFieldName>phi</LevelSetFieldName>
+    <GeneratedInterfaceDomainId>material_interface</GeneratedInterfaceDomainId>
+    <MaterialInterfaceMarker>71</MaterialInterfaceMarker>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml"},
+  };
+
+  for (const auto& item : cases) {
+    SCOPED_TRACE(item.equation_type);
+    auto params = parseParametersXml(item.xml);
+    const auto requests = application::core::activeCutVolumeRequests(*params);
+    ASSERT_EQ(requests.size(), 1u);
+    const auto& request = requests.front();
+    EXPECT_EQ(request.origin,
+              application::core::ActiveCutVolumeRequestOrigin::MaterialInterface);
+    EXPECT_EQ(request.equation_type, item.equation_type);
+    EXPECT_EQ(request.level_set_field_name, "phi");
+    EXPECT_EQ(request.domain_id, "material_interface");
+    EXPECT_EQ(request.requested_interface_marker, 71);
+    EXPECT_EQ(request.isovalue, 0.0);
+    EXPECT_EQ(request.active_side,
+              application::core::LevelSetActiveSide::Negative);
+    EXPECT_EQ(request.volume_retention,
+              application::core::ActiveCutVolumeRetention::ActiveAndInactive);
+    EXPECT_EQ(request.geometry_mode,
+              level_set::GeneratedInterfaceGeometryMode::LinearCorner);
+    EXPECT_EQ(request.implicit_cut_backend,
+              level_set::ImplicitCutQuadratureBackend::LinearCorner);
+    EXPECT_EQ(request.geometry_tangent_policy,
+              level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature);
+  }
+}
+
+TEST(LevelSetCutConfiguration,
+     TwoFluidMaterialInterfaceRejectsActiveOnlyRetentionOverride)
+{
+  const ScopedEnvironmentVariable force_retention(
+      "SVMP_CUT_RETENTION_FORCE", "active_only");
+  auto params = parseParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Free_surface_physical_model>IncompressibleTwoFluid</Free_surface_physical_model>
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Generated_interface_domain_id>material_interface</Generated_interface_domain_id>
+    <Material_interface_marker>71</Material_interface_marker>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+
+  try {
+    (void)application::core::activeCutVolumeRequests(*params);
+    FAIL() << "Expected two-fluid active-only retention diagnostic";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find(
+                  "active-only cut retention is incompatible with incompressible two-fluid"),
+              std::string::npos);
+  }
+}
+
+TEST(LevelSetCutConfiguration,
      EverySmallCutAggregationDisableAliasPermitsActiveOnlyRetention)
 {
   for (const std::string_view parameter :
