@@ -467,10 +467,11 @@ mat_mul(const Array<double>& A, const Vector<double>& v)
   int num_rows = A.nrows();
   int num_cols = A.ncols();
 
-  svmp::throw_if<svmp::FE::InvalidArgumentException>(
-      num_cols != v.size(),
-      "[mat_mul] The number of columns of A (" + std::to_string(num_cols) +
-          ") does not equal the size of v (" + std::to_string(v.size()) + ").");
+  if (num_cols != v.size()) {
+    svmp::raise<svmp::FE::InvalidArgumentException>(
+        "[mat_mul] The number of columns of A (" + std::to_string(num_cols) +
+        ") does not equal the size of v (" + std::to_string(v.size()) + ").");
+  }
 
   Vector<double> result(num_rows);
 
@@ -500,11 +501,12 @@ mat_mul(const Array<double>& A, const Array<double>& B)
   int B_num_rows = B.nrows();
   int B_num_cols = B.ncols();
 
-  svmp::throw_if<svmp::FE::InvalidArgumentException>(
-      A_num_cols != B_num_rows,
-      "[mat_mul] The number of columns of A (" + std::to_string(A_num_cols) +
-          ") does not equal the number of rows of B (" +
-          std::to_string(B_num_rows) + ").");
+  if (A_num_cols != B_num_rows) {
+    svmp::raise<svmp::FE::InvalidArgumentException>(
+        "[mat_mul] The number of columns of A (" + std::to_string(A_num_cols) +
+        ") does not equal the number of rows of B (" +
+        std::to_string(B_num_rows) + ").");
+  }
 
   Array<double> result(A_num_rows, B_num_cols);
 
@@ -549,11 +551,12 @@ void mat_mul(const Array<double>& A, const Array<double>& B, Array<double>& resu
   int B_num_rows = B.nrows();
   int B_num_cols = B.ncols();
   
-  svmp::throw_if<svmp::FE::InvalidArgumentException>(
-      A_num_cols != B_num_rows,
-      "[mat_mul] The number of columns of A (" + std::to_string(A_num_cols) +
-          ") does not equal the number of rows of B (" +
-          std::to_string(B_num_rows) + ").");
+  if (A_num_cols != B_num_rows) {
+    svmp::raise<svmp::FE::InvalidArgumentException>(
+        "[mat_mul] The number of columns of A (" + std::to_string(A_num_cols) +
+        ") does not equal the number of rows of B (" +
+        std::to_string(B_num_rows) + ").");
+  }
   
   for (int i = 0; i < A_num_rows; i++) { 
     for (int j = 0; j < B_num_cols; j++) {
@@ -921,5 +924,4 @@ transpose(const Array<double>& A)
 
 
 };
-
 
