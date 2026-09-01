@@ -191,7 +191,7 @@ SetEquationPropertiesMapType set_equation_props = {
 
   propL[0][0] = PhysicalPropertyType::fluid_density;
   propL[1][0] = PhysicalPropertyType::backflow_stab;
-  propL[2][0] = PhysicalPropertyType::inverse_darcy_permeability;
+  propL[2][0] = PhysicalPropertyType::brinkman_inverse_permeability;
   propL[3][0] = PhysicalPropertyType::f_x;
   propL[4][0] = PhysicalPropertyType::f_y;
 

@@ -1577,8 +1577,8 @@ void read_domain(Simulation* simulation, EquationParameters* eq_params, eqType& 
             rtmp = domain_params->source_term.value();
           break;
 
-          case PhysicalPropertyType::inverse_darcy_permeability:
-            rtmp = domain_params->inverse_darcy_permeability.value();
+          case PhysicalPropertyType::brinkman_inverse_permeability:
+            rtmp = domain_params->brinkman_inverse_permeability.value();
           break;
 
           case PhysicalPropertyType::darcy_permeability:
