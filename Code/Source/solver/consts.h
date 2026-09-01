@@ -349,7 +349,7 @@ enum class OutputNameType {
   outGrp_activeTensionFibers = 529,
   outGrp_activeTensionSheets = 530,
   outGrp_activeTensionNormal = 531,
-  outGrp_mbfFlx = 532,
+  outGrp_MBFFlux = 532,
 
   out_velocity = 599,
   out_pressure = 598,
@@ -401,7 +401,7 @@ extern const std::map<std::string,OutputType> output_type_name_to_type;
 
 /// @brief Possible physical properties. Current maxNPror is 20.
 //
-enum class PhysicalProperyType 
+enum class PhysicalPropertyType 
 {
   NA = 0, 
   fluid_density = 1, 
@@ -419,8 +419,8 @@ enum class PhysicalProperyType
   ctau_M = 13,                 // stabilization coeffs. for USTRUCT (momentum, continuity)
   ctau_C = 14,
   inverse_darcy_permeability = 15,
-  permeability = 16,
-  media_compressibility = 17,
+  darcy_permeability = 16,
+  darcy_media_compressibility = 17,
   darcy_fluid_viscosity = 18
 };
 

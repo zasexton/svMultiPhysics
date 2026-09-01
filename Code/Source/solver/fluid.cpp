@@ -65,7 +65,7 @@ void b_fluid(ComMod& com_mod, const int eNoN, const double w, const Vector<doubl
     }
   }
   // Compute u dot n for backflow stabilization
-  udn = 0.50 * dmn.prop.at(PhysicalProperyType::backflow_stab) * dmn.prop.at(PhysicalProperyType::fluid_density) * (udn - fabs(udn));
+  udn = 0.50 * dmn.prop.at(PhysicalPropertyType::backflow_stab) * dmn.prop.at(PhysicalPropertyType::fluid_density) * (udn - fabs(udn));
   auto hc  = h*nV + udn*u;
   #ifdef debug_b_fluid
   dmsg << "udn: " << udn;
@@ -126,7 +126,7 @@ void bw_fluid_2d(ComMod& com_mod, const int eNoNw, const int eNoNq, const double
   auto& dmn = eq.dmn[cDmn];
   const double dt = com_mod.dt;
 
-  double rho = dmn.prop.at(PhysicalProperyType::fluid_density);
+  double rho = dmn.prop.at(PhysicalPropertyType::fluid_density);
   double tauT = tauB(0);
   double tauN = tauB(1);
 
@@ -283,7 +283,7 @@ void bw_fluid_3d(ComMod& com_mod, const int eNoNw, const int eNoNq, const double
   auto& dmn = eq.dmn[cDmn];
   const double dt = com_mod.dt;
 
-  double rho = dmn.prop.at(PhysicalProperyType::fluid_density);
+  double rho = dmn.prop.at(PhysicalPropertyType::fluid_density);
   double tauT = tauB(0);
   double tauN = tauB(1);
 
@@ -553,7 +553,7 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
       continue;
     }
     
-    double K_inverse_darcy_permeability = eq.dmn[cDmn].prop.at(PhysicalProperyType::inverse_darcy_permeability);
+    double K_inverse_darcy_permeability = eq.dmn[cDmn].prop.at(PhysicalPropertyType::inverse_darcy_permeability);
 
     //  Update shape functions for NURBS
     if (lM.eType == ElementType::NRB) {
@@ -794,12 +794,12 @@ void fluid_2d_c(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int e
   const double ctM = 1.0;
   const double ctC = 36.0;
 
-  double rho = dmn.prop[PhysicalProperyType::fluid_density];
+  double rho = dmn.prop[PhysicalPropertyType::fluid_density];
   Vector<double> f(2);
   // f_x is internal force in x-direction; what is internal force?
-  f[0] = dmn.prop[PhysicalProperyType::f_x];
+  f[0] = dmn.prop[PhysicalPropertyType::f_x];
   
-  f[1] = dmn.prop[PhysicalProperyType::f_y];
+  f[1] = dmn.prop[PhysicalPropertyType::f_y];
 
   double T1 = eq.af * eq.gam * dt;
   double amd = eq.am / T1;
@@ -1108,13 +1108,13 @@ void fluid_2d_m(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int e
   double ctM = 1.0;
   double ctC = 36.0;
 
-  double rho = dmn.prop[PhysicalProperyType::fluid_density];
+  double rho = dmn.prop[PhysicalPropertyType::fluid_density];
   Vector<double> f(2);
   
   // f_x is internal force in x-direction; what is internal force?
-  f[0] = dmn.prop[PhysicalProperyType::f_x];
+  f[0] = dmn.prop[PhysicalPropertyType::f_x];
   
-  f[1] = dmn.prop[PhysicalProperyType::f_y];
+  f[1] = dmn.prop[PhysicalPropertyType::f_y];
 
   double T1 = eq.af * eq.gam * dt;
   double amd = eq.am / T1;
@@ -1470,11 +1470,11 @@ void fluid_3d_c(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int e
   const double ctM  = 1.0;
   const double ctC  = 36.0;
 
-  double rho = dmn.prop[PhysicalProperyType::fluid_density];
+  double rho = dmn.prop[PhysicalPropertyType::fluid_density];
   double f[3];
-  f[0] = dmn.prop[PhysicalProperyType::f_x];
-  f[1] = dmn.prop[PhysicalProperyType::f_y];
-  f[2] = dmn.prop[PhysicalProperyType::f_z];
+  f[0] = dmn.prop[PhysicalPropertyType::f_x];
+  f[1] = dmn.prop[PhysicalPropertyType::f_y];
+  f[2] = dmn.prop[PhysicalPropertyType::f_z];
 
   double T1 = eq.af * eq.gam * dt;
   double amd = eq.am / T1;
@@ -1796,11 +1796,11 @@ void fluid_3d_m(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int e
   double ctM  = 1.0;
   double ctC  = 36.0;
 
-  double rho = dmn.prop[PhysicalProperyType::fluid_density];
+  double rho = dmn.prop[PhysicalPropertyType::fluid_density];
   std::array<double,3> f;
-  f[0] = dmn.prop[PhysicalProperyType::f_x];
-  f[1] = dmn.prop[PhysicalProperyType::f_y];
-  f[2] = dmn.prop[PhysicalProperyType::f_z];
+  f[0] = dmn.prop[PhysicalPropertyType::f_x];
+  f[1] = dmn.prop[PhysicalPropertyType::f_y];
+  f[2] = dmn.prop[PhysicalPropertyType::f_z];
 
   double T1 = eq.af * eq.gam * dt;
   double amd = eq.am / T1;

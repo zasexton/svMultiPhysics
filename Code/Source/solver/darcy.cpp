@@ -1,3 +1,11 @@
+#include "darcy.h"
+
+#include "all_fun.h"
+#include "mat_fun.h"
+#include "nn.h"
+#include "utils.h"
+
+namespace darcy {
 /*
  This code implements the Darcy Equation for 2D and 3D
  problems in perfusion of porous media.
@@ -9,31 +17,36 @@
     - Assumptions of Stokes Flow
     - Steady-State
  -------------------------------------------------------------
- Strong form of the Single-Compartment Darcy equation:
-    u = -K∇(P)
-    ∇⋅u = β0(P_source - P) - β1(P - P_sink)
- where:
-    u -> Volume flux vector
-    K -> Permeability tensor
-    P -> Pressure
- -------------------------------------------------------------
- Weak form of the Single-Compartment Darcy equation:
-    -∫(∇q∇P)dΩ - λ∫qPdΩ = ∫qFdΩ - ∫q∇P⋅nvdΓ
- where:
-    q -> Test function
-    λ -> (β0 + β1)/K
-    F -> -(β0(P_source) + β1(P_sink))/K
-    n -> Normal vector to the boundary
+ * Strong form of the Single-Compartment Darcy equation:
+ * \f[ u = -K\nabla P \f]
+ * \f[ \nabla \cdot u = \beta_0(P_{source} - P) - \beta_1(P - P_{sink}) \f]
+ * Note: See equations 8(a)/(b) in https://doi.org/10.1007/s10439-020-02681-z
+ * 
+ * Combined Strong form:
+ * \f[ -\nabla \cdot (K \nabla P) - \beta_0(P_{source} - P) + \beta_1(P - P_{sink}) = 0 \f]
+ * 
+ * Where:
+ *  - \f$ u \f$ : Darcy flux
+ *  - \f$ K \f$ : Permeability tensor
+ *  - \f$ P \f$ : Pressure
+ *  - \f$ P_{source} \f$ : Source pressure (e.g., arterial pressure)
+ *  - \f$ P_{sink} \f$ : Sink pressure (e.g., venous/extraction pressure)
+ *  - \f$ \beta_0 \f$ : Source coupling term (describes conductance of flow entering myocardium)
+ *  - \f$ \beta_1 \f$ : Sink coupling term (describes conductance of flow exiting myocardium)
+ * 
+ * -------------------------------------------------------------
+ * 
+ * Weak form of the Single-Compartment Darcy equation:
+ * \f[ -\int_{\Omega} (\nabla q \cdot \nabla P) d\Omega - \lambda \int_{\Omega} q P d\Omega = \int_{\Omega} q F d\Omega - \int_{\Gamma} q (\nabla P \cdot n) d\Gamma \f]
+ * 
+ * Where:
+ *  - \f$ q \f$ : Test function
+ *  - \f$ \lambda \f$ : \f$ \frac{\beta_0 + \beta_1}{K} \f$
+ *  - \f$ F \f$ : \f$ -\frac{\beta_0 P_{source} + \beta_1 P_{sink}}{K} \f$
+ *  - \f$ n \f$ : Normal vector to the boundary
+ *  - \f$ \Omega \f$ : Computational domain
+ *  - \f$ \Gamma \f$ : Domain boundary
 */
-
-#include "darcy.h"
-
-#include "all_fun.h"
-#include "mat_fun.h"
-#include "nn.h"
-#include "utils.h"
-
-namespace darcy {
 
 void b_darcy(ComMod& com_mod, const int eNoN, const double w, const Vector<double>& N, const double h, Array<double>& lR)
 {
@@ -151,11 +164,11 @@ void darcy_1d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
   const double dt = com_mod.dt;
   const int i = eq.s;
 
-  double k = dmn.prop.at(PhysicalProperyType::permeability);
-  double source = dmn.prop.at(PhysicalProperyType::source_term);
-  double beta_0 = dmn.prop.at(PhysicalProperyType::media_compressibility);
-  double rho_0 = dmn.prop.at(PhysicalProperyType::fluid_density);
-  double mu = dmn.prop.at(PhysicalProperyType::darcy_fluid_viscosity);
+  double k = dmn.prop.at(PhysicalPropertyType::darcy_permeability);
+  double source = dmn.prop.at(PhysicalPropertyType::source_term);
+  double beta_0 = dmn.prop.at(PhysicalPropertyType::darcy_media_compressibility);
+  double rho_0 = dmn.prop.at(PhysicalPropertyType::fluid_density);
+  double mu = dmn.prop.at(PhysicalPropertyType::darcy_fluid_viscosity);
 
   double T1 = eq.af * eq.gam * dt;
   double amd = eq.am / T1;
@@ -199,11 +212,11 @@ void darcy_2d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
   const double dt = com_mod.dt;
   const int i = eq.s;
 
-  double k = dmn.prop.at(PhysicalProperyType::permeability);
-  double source = dmn.prop.at(PhysicalProperyType::source_term);
-  double beta_0 = dmn.prop.at(PhysicalProperyType::media_compressibility);
-  double rho_0 = dmn.prop.at(PhysicalProperyType::fluid_density);
-  double mu = dmn.prop.at(PhysicalProperyType::darcy_fluid_viscosity);
+  double k = dmn.prop.at(PhysicalPropertyType::darcy_permeability);
+  double source = dmn.prop.at(PhysicalPropertyType::source_term);
+  double beta_0 = dmn.prop.at(PhysicalPropertyType::darcy_media_compressibility);
+  double rho_0 = dmn.prop.at(PhysicalPropertyType::fluid_density);
+  double mu = dmn.prop.at(PhysicalPropertyType::darcy_fluid_viscosity);
 
   double T1 = eq.af * eq.gam * dt;
   double amd = eq.am / T1;
@@ -258,11 +271,11 @@ void darcy_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
   const double dt = com_mod.dt;
   const int i = eq.s;
 
-  double k = dmn.prop.at(PhysicalProperyType::permeability);
-  double source = dmn.prop.at(PhysicalProperyType::source_term);
-  double beta_0 = dmn.prop.at(PhysicalProperyType::media_compressibility);
-  double rho_0 = dmn.prop.at(PhysicalProperyType::fluid_density);
-  double mu = dmn.prop.at(PhysicalProperyType::darcy_fluid_viscosity);
+  double k = dmn.prop.at(PhysicalPropertyType::darcy_permeability);
+  double source = dmn.prop.at(PhysicalPropertyType::source_term);
+  double beta_0 = dmn.prop.at(PhysicalPropertyType::darcy_media_compressibility);
+  double rho_0 = dmn.prop.at(PhysicalPropertyType::fluid_density);
+  double mu = dmn.prop.at(PhysicalPropertyType::darcy_fluid_viscosity);
 
   double T1 = eq.af * eq.gam * dt;
   double amd = eq.am / T1;
