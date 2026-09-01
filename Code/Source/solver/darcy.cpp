@@ -1,9 +1,14 @@
 #include "darcy.h"
 
+#include "Core/Exception.h"
 #include "all_fun.h"
 #include "mat_fun.h"
 #include "nn.h"
 #include "utils.h"
+
+#include <iomanip>
+#include <limits>
+#include <sstream>
 
 namespace darcy {
 /*
@@ -47,6 +52,41 @@ namespace darcy {
  *  - \f$ \Omega \f$ : Computational domain
  *  - \f$ \Gamma \f$ : Domain boundary
 */
+
+void validate_material_properties(const dmnType& domain)
+{
+  using consts::PhysicalPropertyType;
+
+  const auto validate = [&domain](const char* name, const double value,
+                                  const bool is_valid,
+                                  const char* requirement) {
+    if (is_valid) {
+      return;
+    }
+
+    std::ostringstream message;
+    message << std::setprecision(std::numeric_limits<double>::max_digits10)
+            << "Darcy domain " << domain.Id << " has invalid " << name
+            << " value " << value << "; expected " << requirement << ".";
+    svmp::raise<svmp::ParseException>(message.str());
+  };
+
+  const double permeability =
+      domain.prop.at(PhysicalPropertyType::darcy_permeability);
+  validate("Darcy_permeability", permeability, permeability > 0.0,
+           "a value greater than zero");
+
+  const double viscosity =
+      domain.prop.at(PhysicalPropertyType::darcy_fluid_viscosity);
+  validate("Darcy_fluid_viscosity", viscosity, viscosity > 0.0,
+           "a value greater than zero");
+
+  const double compressibility =
+      domain.prop.at(PhysicalPropertyType::darcy_media_compressibility);
+  validate("Darcy_media_compressibility", compressibility,
+           compressibility >= 0.0,
+           "a value greater than or equal to zero");
+}
 
 void b_darcy(ComMod& com_mod, const int eNoN, const double w, const Vector<double>& N, const double h, Array<double>& lR)
 {

@@ -292,6 +292,10 @@ SetEquationPropertiesMapType set_equation_props = {
 
     read_domain(simulation, eq_params, lEq, propL);
 
+    for (const auto& domain : lEq.dmn) {
+      darcy::validate_material_properties(domain);
+    }
+
     nDOP = {2,1,1,0};
     outPuts = {OutputNameType::out_darcyPressure, OutputNameType::out_darcyFlux};
 

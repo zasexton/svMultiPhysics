@@ -11,6 +11,8 @@
 
 namespace darcy {
 
+    void validate_material_properties(const dmnType& domain);
+
     void b_darcy(ComMod& com_mod, const int eNoN, const double w, const Vector<double>& N, const double h, Array<double>& lR);
 
     void construct_darcy(ComMod& com_mod, const mshType& lM, const SolutionStates& solutions);

@@ -10,6 +10,7 @@
 #include "ActiveStress.h"
 #include "all_fun.h"
 #include "consts.h"
+#include "darcy.h"
 #include "IonicModel.h"
 #include "read_msh.h"
 #include "vtk_xml.h"
