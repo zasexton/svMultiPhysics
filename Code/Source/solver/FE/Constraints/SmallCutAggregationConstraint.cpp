@@ -4759,8 +4759,11 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     std::size_t empty_lines = 0u;
     std::size_t extrapolation_guard_rejections = 0u;
     std::size_t line_guard_rejections = 0u;
+    Real maximum_attempted_reference_extrapolation = 0.0;
     Real maximum_observed_reference_extrapolation = 0.0;
+    Real maximum_attempted_absolute_coefficient = 0.0;
     Real maximum_observed_absolute_coefficient = 0.0;
+    Real maximum_attempted_row_l1_norm = 0.0;
     Real maximum_observed_row_l1_norm = 0.0;
     std::vector<Real> values;
     std::vector<std::pair<GlobalIndex, double>> pending_entries;
@@ -4891,8 +4894,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             const Real reference_extrapolation =
                 normalizedReferenceExtrapolationDistance(
                     mesh.getCellType(root), xi);
-            maximum_observed_reference_extrapolation = std::max(
-                maximum_observed_reference_extrapolation,
+            maximum_attempted_reference_extrapolation = std::max(
+                maximum_attempted_reference_extrapolation,
                 reference_extrapolation);
             if (!std::isfinite(reference_extrapolation) ||
                 reference_extrapolation >
@@ -4905,6 +4908,9 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 ++extrapolation_guard_rejections;
                 continue;
             }
+            maximum_observed_reference_extrapolation = std::max(
+                maximum_observed_reference_extrapolation,
+                reference_extrapolation);
             extension_basis.evaluate_values(xi, values);
             mesh.getCellNodes(root, cell_nodes);
             const auto n_root_field_nodes = std::min(
@@ -4957,17 +4963,23 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 }
                 const auto line_guard =
                     validateAggregationLineGuards(line, guards_);
-                maximum_observed_absolute_coefficient = std::max(
-                    maximum_observed_absolute_coefficient,
+                maximum_attempted_absolute_coefficient = std::max(
+                    maximum_attempted_absolute_coefficient,
                     line_guard.maximum_absolute_coefficient);
-                maximum_observed_row_l1_norm = std::max(
-                    maximum_observed_row_l1_norm,
+                maximum_attempted_row_l1_norm = std::max(
+                    maximum_attempted_row_l1_norm,
                     line_guard.row_l1_norm);
                 if (!line_guard.valid) {
                     ++line_guard_rejections;
                     proposal_valid = false;
                     break;
                 }
+                maximum_observed_absolute_coefficient = std::max(
+                    maximum_observed_absolute_coefficient,
+                    line_guard.maximum_absolute_coefficient);
+                maximum_observed_row_l1_norm = std::max(
+                    maximum_observed_row_l1_norm,
+                    line_guard.row_l1_norm);
                 declaration.lines.push_back(std::move(line));
             }
             if (!proposal_valid ||
@@ -5028,25 +5040,35 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 static_cast<std::size_t>(summed_guard_rejections[0]);
             communicator_line_guard_rejections =
                 static_cast<std::size_t>(summed_guard_rejections[1]);
-            const std::array<double, 3> local_guard_maxima{{
+            const std::array<double, 6> local_guard_maxima{{
+                static_cast<double>(
+                    maximum_attempted_reference_extrapolation),
                 static_cast<double>(
                     maximum_observed_reference_extrapolation),
+                static_cast<double>(maximum_attempted_absolute_coefficient),
                 static_cast<double>(maximum_observed_absolute_coefficient),
+                static_cast<double>(maximum_attempted_row_l1_norm),
                 static_cast<double>(maximum_observed_row_l1_norm),
             }};
-            std::array<double, 3> global_guard_maxima{};
+            std::array<double, 6> global_guard_maxima{};
             MPI_Allreduce(local_guard_maxima.data(),
                           global_guard_maxima.data(),
                           static_cast<int>(global_guard_maxima.size()),
                           MPI_DOUBLE,
                           MPI_MAX,
                           comm);
-            maximum_observed_reference_extrapolation =
+            maximum_attempted_reference_extrapolation =
                 static_cast<Real>(global_guard_maxima[0]);
-            maximum_observed_absolute_coefficient =
+            maximum_observed_reference_extrapolation =
                 static_cast<Real>(global_guard_maxima[1]);
-            maximum_observed_row_l1_norm =
+            maximum_attempted_absolute_coefficient =
                 static_cast<Real>(global_guard_maxima[2]);
+            maximum_observed_absolute_coefficient =
+                static_cast<Real>(global_guard_maxima[3]);
+            maximum_attempted_row_l1_norm =
+                static_cast<Real>(global_guard_maxima[4]);
+            maximum_observed_row_l1_norm =
+                static_cast<Real>(global_guard_maxima[5]);
         }
     }
 #endif
@@ -5353,16 +5375,22 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         << root_path_search_cell_visits
         << " maximum_reference_extrapolation_distance="
         << guards_.maximum_reference_extrapolation_distance
+        << " maximum_attempted_reference_extrapolation="
+        << maximum_attempted_reference_extrapolation
         << " maximum_observed_reference_extrapolation="
         << maximum_observed_reference_extrapolation
         << " communicator_extrapolation_guard_rejections="
         << communicator_extrapolation_guard_rejections
         << " maximum_absolute_coefficient="
         << guards_.maximum_absolute_coefficient
+        << " maximum_attempted_absolute_coefficient="
+        << maximum_attempted_absolute_coefficient
         << " maximum_observed_absolute_coefficient="
         << maximum_observed_absolute_coefficient
         << " maximum_row_l1_norm="
         << guards_.maximum_row_l1_norm
+        << " maximum_attempted_row_l1_norm="
+        << maximum_attempted_row_l1_norm
         << " maximum_observed_row_l1_norm="
         << maximum_observed_row_l1_norm
         << " communicator_line_guard_rejections="

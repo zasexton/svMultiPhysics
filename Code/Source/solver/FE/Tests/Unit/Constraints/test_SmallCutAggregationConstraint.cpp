@@ -1849,6 +1849,66 @@ TEST(SmallCutAggregationConstraint,
 #endif
 }
 
+TEST(SmallCutAggregationConstraint,
+     RejectedRootProposalDoesNotContaminateAcceptedGuardTelemetry)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    auto mesh = buildQuadStrip(5);
+    auto space = std::make_shared<spaces::H1Space>(
+        ElementType::Quad4, /*order=*/1);
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(systems::FieldSpec{
+        .name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    auto guards = SmallCutAggregationGuardOptions{};
+    guards.maximum_reference_extrapolation_distance = 2.0;
+    system.addSystemConstraint(
+        std::make_unique<SmallCutAggregationConstraint>(
+            pressure,
+            geometry::CutIntegrationSide::Negative,
+            kInterfaceMarker,
+            std::vector<int>{},
+            std::vector<GlobalIndex>{},
+            guards));
+    ASSERT_NO_THROW(system.setup());
+    system.setCutIntegrationContext(makeCutContext({
+        {.cell = 0,
+         .volume_fraction = Real{1.0},
+         .full_cell_equivalent = true},
+        {.cell = 1,
+         .volume_fraction = Real{0.2},
+         .full_cell_equivalent = false},
+        {.cell = 2,
+         .volume_fraction = Real{0.3},
+         .full_cell_equivalent = false},
+        {.cell = 3,
+         .volume_fraction = Real{0.4},
+         .full_cell_equivalent = false},
+        {.cell = 4,
+         .volume_fraction = Real{1.0},
+         .full_cell_equivalent = true},
+    }));
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
+
+    const auto reports =
+        system.completedSmallCutAggregationRefreshReports();
+    ASSERT_EQ(reports.size(), 1u);
+    const auto& report = reports.front();
+    EXPECT_GT(report.extrapolation_guard_rejections, 0u);
+    EXPECT_LE(report.maximum_observed_reference_extrapolation,
+              report.maximum_reference_extrapolation_distance);
+    EXPECT_NE(log_output.find(
+                  "maximum_attempted_reference_extrapolation=4"),
+              std::string::npos);
+#endif
+}
+
 TEST(SmallCutAggregationConstraint, ProductFieldSlavesAllComponentsWithSameWeights)
 {
     SVMP_AGG_TEST_BODY

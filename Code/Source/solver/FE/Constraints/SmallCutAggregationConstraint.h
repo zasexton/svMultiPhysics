@@ -379,8 +379,11 @@ struct SmallCutAggregationTopologyTransitionReport {
  * bounded search found no admissible root. It does not enumerate every remote
  * full-active cell in that feature.
  * Extrapolation and line rejection counts are communicator sums of rank-local
- * attempts; root-path rejection counts are candidate-level guard failures.
- * None of these fields counts unique physical roots.
+ * attempts. The corresponding maximum-observed values cover only proposals
+ * admitted by their guards; attempted maxima, including rejected proposals,
+ * remain available in the refresh diagnostic. Root-path rejection counts are
+ * candidate-level guard failures. None of these fields counts unique physical
+ * roots.
  */
 struct SmallCutAggregationRefreshReport {
     FieldId field{INVALID_FIELD_ID};
