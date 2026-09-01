@@ -13,6 +13,15 @@
 
 namespace heatf {
 
+namespace {
+
+template <bool initialize>
+void heatf_3d_impl(ComMod& com_mod, const int eNoN, const double w, const Vector<double>& N,
+    const Array<double>& Nx, const Array<double>& al, const Array<double>& yl, const Array<double>& ksix,
+    Vector<double>& udNx, Array<double>& lR, Array3<double>& lK);
+
+} // namespace
+
 void b_heatf(ComMod& com_mod, const int eNoN, const double w, const Vector<double>& N, const Vector<double>& y,
     const double h, const Vector<double>& nV, Array<double>& lR, Array3<double>& lK)
 {
@@ -104,8 +113,12 @@ void construct_heatf(ComMod& com_mod, const mshType& lM, const SolutionStates& s
 
     // Gauss integration
     //
-    lR = 0.0;
-    lK = 0.0;
+    // In 3D, the first Gauss point initializes every entry of lR and lK.
+    // Retain explicit clearing for other dimensions and the degenerate no-Gauss case.
+    if (nsd != 3 || lM.nG == 0) {
+      lR = 0.0;
+      lK = 0.0;
+    }
     double Jac{0.0};
 
     for (int g = 0; g < lM.nG; g++) {
@@ -121,7 +134,11 @@ void construct_heatf(ComMod& com_mod, const mshType& lM, const SolutionStates& s
       const auto N = lM.N.rcol(g);
 
       if (nsd == 3) {
-        heatf_3d(com_mod, eNoN, w, N, Nx, al, yl, ksix, udNx, lR, lK);
+        if (g == 0) {
+          heatf_3d_impl<true>(com_mod, eNoN, w, N, Nx, al, yl, ksix, udNx, lR, lK);
+        } else {
+          heatf_3d_impl<false>(com_mod, eNoN, w, N, Nx, al, yl, ksix, udNx, lR, lK);
+        }
 
       } else if (nsd == 2) {
         heatf_2d(com_mod, eNoN, w, N, Nx, al, yl, ksix, udNx, lR, lK);
@@ -220,7 +237,10 @@ void heatf_2d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
 }
 
 
-void heatf_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<double>& N, const Array<double>& Nx,
+namespace {
+
+template <bool initialize>
+void heatf_3d_impl(ComMod& com_mod, const int eNoN, const double w, const Vector<double>& N, const Array<double>& Nx,
     const Array<double>& al, const Array<double>& yl, const Array<double>& ksix, Vector<double>& udNx,
     Array<double>& lR, Array3<double>& lK)
 {
@@ -337,13 +357,34 @@ void heatf_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
     const double udNxa = udNx(a);
     const double test = Na + tauM*udNxa;
 
-    lR(0,a) = lR(0,a) + w*(Na*residual + (Nxa0*Tx0 + Nxa1*Tx1 + Nxa2*Tx2)*nu - udNxa*Tp);
+    const double residual_contribution =
+        w*(Na*residual + (Nxa0*Tx0 + Nxa1*Tx1 + Nxa2*Tx2)*nu - udNxa*Tp);
+    if constexpr (initialize) {
+      lR(0,a) = 0.0 + residual_contribution;
+    } else {
+      lR(0,a) = lR(0,a) + residual_contribution;
+    }
 
     for (int b = 0; b < eNoN; b++) {
-      lK(0,a,b) = lK(0,a,b) + wl*(nu*(Nxa0*Nx(0,b) + Nxa1*Nx(1,b) + Nxa2*Nx(2,b)) +
-                  test*(N(b)*amd + udNx(b)));
+      const double tangent_contribution =
+          wl*(nu*(Nxa0*Nx(0,b) + Nxa1*Nx(1,b) + Nxa2*Nx(2,b)) +
+          test*(N(b)*amd + udNx(b)));
+      if constexpr (initialize) {
+        lK(0,a,b) = 0.0 + tangent_contribution;
+      } else {
+        lK(0,a,b) = lK(0,a,b) + tangent_contribution;
+      }
     }
   }
+}
+
+} // namespace
+
+void heatf_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<double>& N, const Array<double>& Nx,
+    const Array<double>& al, const Array<double>& yl, const Array<double>& ksix, Vector<double>& udNx,
+    Array<double>& lR, Array3<double>& lK)
+{
+  heatf_3d_impl<false>(com_mod, eNoN, w, N, Nx, al, yl, ksix, udNx, lR, lK);
 }
 
 };
