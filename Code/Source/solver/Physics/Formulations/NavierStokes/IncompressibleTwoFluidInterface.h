@@ -17,6 +17,7 @@
 #include "FE/Core/Types.h"
 #include "FE/Forms/FormExpr.h"
 
+#include <array>
 #include <optional>
 
 namespace svmp {
@@ -35,6 +36,9 @@ struct IncompressibleTwoFluidInterfaceParameters {
   FE::Real surface_tension{0.0};
   bool include_transient_penalty{true};
   std::optional<FE::Real> prescribed_pressure_jump{};
+  /** Expected (tau_minus-tau_plus)n in global physical components. */
+  std::optional<std::array<FE::Real, 3>>
+      prescribed_viscous_traction_jump{};
 };
 
 struct IncompressibleTwoFluidInterfaceWeights {
@@ -58,6 +62,7 @@ struct IncompressibleTwoFluidInterfaceForms {
   FE::forms::FormExpr penalty{};
   FE::forms::FormExpr surface_energy{};
   FE::forms::FormExpr prescribed_pressure_jump{};
+  FE::forms::FormExpr prescribed_viscous_traction_jump{};
   FE::forms::FormExpr residual{};
 };
 

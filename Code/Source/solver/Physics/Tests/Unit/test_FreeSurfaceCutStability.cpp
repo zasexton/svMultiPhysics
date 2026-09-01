@@ -13305,6 +13305,9 @@ TEST(FreeSurfaceCutStabilityMPI,
     options.surface_tension = FE::Real{0.0};
     options.include_transient_interface_penalty = false;
     options.enable_convection = false;
+    options.prescribed_pressure_jump = FE::Real{3.0};
+    options.prescribed_viscous_traction_jump =
+        std::array<FE::Real, 3>{{1.0, 2.0, 3.0}};
     options.require_conservative_phase_momentum_reconciliation = true;
     ns::IncompressibleTwoFluidModule module(
         velocity_space,
@@ -13333,6 +13336,20 @@ TEST(FreeSurfaceCutStabilityMPI,
     accumulator.snapshot_revision_key = 91u;
     accumulator.owned_interface_quadrature_point_count = 2u;
     accumulator.interface_measure = FE::Real{0.5};
+    accumulator.interface_normal_integral = {{0.5, 0.0, 0.0}};
+    accumulator.pressure_jump_integral = FE::Real{1.5};
+    accumulator.pressure_jump_squared = FE::Real{4.5};
+    accumulator.negative_traction_integral = {{-1.0, 1.0, 1.5}};
+    accumulator.traction_jump_integral = {{-1.0, 1.0, 1.5}};
+    accumulator.traction_jump_normal_integral = FE::Real{-1.0};
+    accumulator.traction_jump_squared = FE::Real{8.5};
+    accumulator.negative_viscous_traction_integral = {{0.5, 1.0, 1.5}};
+    accumulator.viscous_traction_jump_integral = {{0.5, 1.0, 1.5}};
+    accumulator.viscous_traction_jump_squared = FE::Real{7.0};
+    accumulator.prescribed_pressure_jump_error_squared = FE::Real{0.0};
+    accumulator.prescribed_viscous_traction_jump_error_squared =
+        FE::Real{0.0};
+    accumulator.prescribed_stress_jump_residual_squared = FE::Real{0.0};
     accumulator.negative_phase.owned_quadrature_point_count = 1u;
     accumulator.negative_phase.volume = FE::Real{0.25};
     accumulator.positive_phase.owned_quadrature_point_count = 1u;

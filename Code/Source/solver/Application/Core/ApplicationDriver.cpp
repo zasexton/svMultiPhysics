@@ -9747,6 +9747,8 @@ evaluateCurrentTwoFluidStageDiagnostics(
     global.positive_normal_flux = global_sum(global.positive_normal_flux);
     global.traction_jump_squared =
         global_sum(global.traction_jump_squared);
+    global.viscous_traction_jump_squared =
+        global_sum(global.viscous_traction_jump_squared);
     global.traction_jump_normal_integral =
         global_sum(global.traction_jump_normal_integral);
     global.pressure_jump_integral =
@@ -9760,9 +9762,13 @@ evaluateCurrentTwoFluidStageDiagnostics(
         global_sum(global.nitsche_adjoint_work);
     global.nitsche_penalty_work =
         global_sum(global.nitsche_penalty_work);
-    for (auto* vector : {&global.negative_traction_integral,
+    for (auto* vector : {&global.interface_normal_integral,
+                         &global.negative_traction_integral,
                          &global.positive_traction_integral,
-                         &global.traction_jump_integral}) {
+                         &global.traction_jump_integral,
+                         &global.negative_viscous_traction_integral,
+                         &global.positive_viscous_traction_integral,
+                         &global.viscous_traction_jump_integral}) {
       for (auto& value : *vector) {
         value = global_sum(value);
       }
@@ -9780,6 +9786,8 @@ evaluateCurrentTwoFluidStageDiagnostics(
     };
     reduce_optional(global.prescribed_stress_jump_residual_squared);
     reduce_optional(global.prescribed_pressure_jump_error_squared);
+    reduce_optional(
+        global.prescribed_viscous_traction_jump_error_squared);
     const auto reduce_phase = [&](auto& phase) {
       phase.owned_quadrature_point_count =
           globalSumSize(phase.owned_quadrature_point_count, comm);

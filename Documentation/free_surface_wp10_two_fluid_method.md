@@ -133,6 +133,31 @@ This is the residual load corresponding to
 accepted-stage pressure and stress-jump diagnostics. It is an explicit
 manufactured load, not a postprocessing-only expected value.
 
+An optional manufactured viscous-traction target `g_mu` is defined in global
+physical components by
+
+```text
+g_mu = (2 mu_minus epsilon(u_minus)
+        - 2 mu_plus epsilon(u_plus)) n.
+```
+
+It adds
+
+```text
+- integral_Gamma g_mu dot average_c(v),
+```
+
+so a composed pressure-and-viscous target represents
+
+```text
+(sigma_minus - sigma_plus) n = g_mu - Delta p n.
+```
+
+Accepted-stage evidence retains the viscous jump and its target error
+separately from the full stress jump, and also reports the composed residual.
+The parser requires every in-plane component, rejects duplicate aliases, and
+rejects any out-of-plane component in a two-dimensional problem.
+
 For transient flow the penalty scale is
 
 ```text

@@ -357,6 +357,21 @@ void addSharedGaugeEvidence(FE::systems::FESystem& system,
         out << ",\"prescribed_pressure_jump\":"
             << jsonReal(*options.prescribed_pressure_jump);
     }
+    out << ",\"prescribed_viscous_traction_jump_mode\":\"manufactured_global_viscous_traction_and_composed_stress_target\""
+        << ",\"prescribed_viscous_traction_jump_applicable\":"
+        << jsonBool(options.prescribed_viscous_traction_jump.has_value());
+    if (options.prescribed_viscous_traction_jump.has_value()) {
+        out << ",\"prescribed_viscous_traction_jump\":[";
+        for (int component = 0; component < dimension; ++component) {
+            if (component != 0) {
+                out << ',';
+            }
+            out << jsonReal(
+                (*options.prescribed_viscous_traction_jump)
+                    [static_cast<std::size_t>(component)]);
+        }
+        out << ']';
+    }
     out
         << ",\"nitsche_gamma\":"
         << jsonReal(options.interface_nitsche_gamma)
@@ -417,6 +432,15 @@ void validateIncompressibleTwoFluidConfigurationSemantics(
             "[svMultiPhysics::Physics] "
             "unsupported_two_fluid_nonfinite_prescribed_pressure_jump");
     }
+    if (options.prescribed_viscous_traction_jump.has_value() &&
+        !std::all_of(
+            options.prescribed_viscous_traction_jump->begin(),
+            options.prescribed_viscous_traction_jump->end(),
+            [](FE::Real value) { return std::isfinite(value); })) {
+        throw std::invalid_argument(
+            "[svMultiPhysics::Physics] "
+            "unsupported_two_fluid_nonfinite_prescribed_viscous_traction_jump");
+    }
     validateVelocityBoundaryData(
         options.negative_phase.velocity_dirichlet, "negative-phase");
     validateVelocityBoundaryData(
@@ -455,6 +479,13 @@ void IncompressibleTwoFluidModule::registerOn(
                           *positive_pressure_space_)) {
         throw std::invalid_argument(
             "IncompressibleTwoFluidModule: both phases must use matching velocity and pressure spaces");
+    }
+    if (options_.prescribed_viscous_traction_jump.has_value() &&
+        dimension == 2 &&
+        (*options_.prescribed_viscous_traction_jump)[2] != FE::Real{0.0}) {
+        throw std::invalid_argument(
+            "[svMultiPhysics::Physics] "
+            "unsupported_two_fluid_out_of_plane_prescribed_viscous_traction_jump");
     }
 
     const std::array<std::string_view, 5> field_names{
@@ -594,6 +625,8 @@ void IncompressibleTwoFluidModule::registerOn(
         .include_transient_penalty =
             options_.include_transient_interface_penalty,
         .prescribed_pressure_jump = options_.prescribed_pressure_jump,
+        .prescribed_viscous_traction_jump =
+            options_.prescribed_viscous_traction_jump,
     };
     const auto interface_weights =
         incompressibleTwoFluidInterfaceWeights(interface_parameters);
@@ -735,6 +768,8 @@ void IncompressibleTwoFluidModule::registerOn(
                         options_.include_transient_interface_penalty,
                     .prescribed_pressure_jump =
                         options_.prescribed_pressure_jump,
+                    .prescribed_viscous_traction_jump =
+                        options_.prescribed_viscous_traction_jump,
                 },
             .owner_component = "incompressible_two_fluid",
         });

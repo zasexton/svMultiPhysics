@@ -1129,6 +1129,8 @@ TEST(EquationTranslatorFreeSurface,
   <Two_fluid_surface_tension>0.072</Two_fluid_surface_tension>
   <Two_fluid_interface_nitsche_gamma>24.0</Two_fluid_interface_nitsche_gamma>
   <Prescribed_pressure_jump>3.0</Prescribed_pressure_jump>
+  <Prescribed_viscous_traction_jump_x>6.0</Prescribed_viscous_traction_jump_x>
+  <Prescribed_viscous_traction_jump_y>7.0</Prescribed_viscous_traction_jump_y>
 </Add_equation>
 )xml");
 
@@ -1173,6 +1175,10 @@ TEST(EquationTranslatorFreeSurface,
       std::string::npos);
   EXPECT_NE(
       artifact->json.find(
+          "\"prescribed_viscous_traction_jump\":[6,7]"),
+      std::string::npos);
+  EXPECT_NE(
+      artifact->json.find(
           "\"momentum_reconciliation_required\":true"),
       std::string::npos);
   EXPECT_EQ(
@@ -1203,6 +1209,13 @@ TEST(EquationTranslatorFreeSurface,
   EXPECT_TRUE(system.twoFluidAcceptedStageDiagnosticDeclarations()
                   .front()
                   .require_conservative_phase_momentum_reconciliation);
+  ASSERT_TRUE(system.twoFluidAcceptedStageDiagnosticDeclarations()
+                  .front()
+                  .parameters.prescribed_viscous_traction_jump.has_value());
+  EXPECT_EQ(*system.twoFluidAcceptedStageDiagnosticDeclarations()
+                 .front()
+                 .parameters.prescribed_viscous_traction_jump,
+            (std::array<svmp::FE::Real, 3>{{6.0, 7.0, 0.0}}));
 }
 
 TEST(EquationTranslatorFreeSurface,
@@ -1322,6 +1335,94 @@ TEST(EquationTranslatorFreeSurface,
       system.materialInterfaceTransportVelocityDeclarations().empty());
   EXPECT_TRUE(
       system.twoFluidAcceptedStageDiagnosticDeclarations().empty());
+}
+
+TEST(EquationTranslatorFreeSurface,
+     XmlIncompressibleTwoFluidViscousTractionVectorFailsClosedBeforeMutation)
+{
+  svmp::Physics::formulations::navier_stokes::
+      forceLink_NavierStokesRegister();
+  auto mesh = buildTranslatorTriangleMesh();
+  const auto meshes = singleMeshMap(mesh);
+  struct Case {
+    std::string_view target_elements;
+    std::string_view expected_diagnostic;
+  };
+  const std::array cases{
+      Case{
+          .target_elements =
+              "<Prescribed_viscous_traction_jump_x>1.0</Prescribed_viscous_traction_jump_x>",
+          .expected_diagnostic =
+              "missing_two_fluid_parameter:Prescribed_viscous_traction_jump_y",
+      },
+      Case{
+          .target_elements =
+              "<Prescribed_viscous_traction_jump_x>1.0</Prescribed_viscous_traction_jump_x>"
+              "<PrescribedViscousTractionJumpX>2.0</PrescribedViscousTractionJumpX>"
+              "<Prescribed_viscous_traction_jump_y>3.0</Prescribed_viscous_traction_jump_y>",
+          .expected_diagnostic =
+              "ambiguous_two_fluid_parameter:Prescribed_viscous_traction_jump_x",
+      },
+      Case{
+          .target_elements =
+              "<Prescribed_viscous_traction_jump_x>1.0</Prescribed_viscous_traction_jump_x>"
+              "<Prescribed_viscous_traction_jump_y>2.0</Prescribed_viscous_traction_jump_y>"
+              "<Prescribed_viscous_traction_jump_z>0.0</Prescribed_viscous_traction_jump_z>",
+          .expected_diagnostic =
+              "unsupported_two_fluid_out_of_plane_prescribed_viscous_traction_jump",
+      },
+  };
+
+  for (const auto& item : cases) {
+    SCOPED_TRACE(item.target_elements);
+    const std::string xml =
+        R"xml(<Add_equation type="fluid">
+  <Free_surface_physical_model>IncompressibleTwoFluid</Free_surface_physical_model>
+  <Level_set_field_name>level_set</Level_set_field_name>
+  <Generated_interface_domain_id>material_interface</Generated_interface_domain_id>
+  <Material_interface_marker>71</Material_interface_marker>
+  <Negative_phase_density>1000.0</Negative_phase_density>
+  <Negative_phase_dynamic_viscosity>0.01</Negative_phase_dynamic_viscosity>
+  <Positive_phase_density>1.0</Positive_phase_density>
+  <Positive_phase_dynamic_viscosity>0.001</Positive_phase_dynamic_viscosity>
+  <Two_fluid_surface_tension>0.072</Two_fluid_surface_tension>
+  <Two_fluid_interface_nitsche_gamma>24.0</Two_fluid_interface_nitsche_gamma>
+)xml" +
+        std::string(item.target_elements) + R"xml(
+</Add_equation>)xml";
+    auto params = parseEquationXml(xml.c_str());
+    svmp::FE::systems::FESystem system(mesh);
+    const auto scalar_space =
+        svmp::FE::spaces::SpaceFactory::create_h1(
+            svmp::FE::ElementType::Triangle3, 1);
+    (void)system.addField(svmp::FE::systems::FieldSpec{
+        .name = "level_set",
+        .space = scalar_space,
+        .components = 1,
+    });
+    try {
+      (void)application::translators::EquationTranslator::createModule(
+          *params, system, meshes);
+      FAIL() << "invalid viscous-traction target was accepted";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string_view(error.what()).find(item.expected_diagnostic),
+                std::string_view::npos)
+          << error.what();
+    }
+    EXPECT_EQ(system.findFieldByName("u_negative"),
+              svmp::FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.findFieldByName("p_negative"),
+              svmp::FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.findFieldByName("u_positive"),
+              svmp::FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.findFieldByName("p_positive"),
+              svmp::FE::INVALID_FIELD_ID);
+    EXPECT_TRUE(system.formulationRecords().empty());
+    EXPECT_TRUE(
+        system.materialInterfaceTransportVelocityDeclarations().empty());
+    EXPECT_TRUE(
+        system.twoFluidAcceptedStageDiagnosticDeclarations().empty());
+  }
 }
 
 TEST(EquationTranslatorFreeSurface,

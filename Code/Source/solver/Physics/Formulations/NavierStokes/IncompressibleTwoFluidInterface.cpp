@@ -14,6 +14,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace svmp {
 namespace Physics {
@@ -58,6 +59,21 @@ void validateParameters(
       !std::isfinite(*parameters.prescribed_pressure_jump)) {
     throw std::invalid_argument(
         "incompressible two-fluid prescribed pressure jump must be finite");
+  }
+  if (parameters.prescribed_viscous_traction_jump.has_value()) {
+    const auto& target = *parameters.prescribed_viscous_traction_jump;
+    if (!std::all_of(target.begin(), target.end(), [](FE::Real value) {
+          return std::isfinite(value);
+        })) {
+      throw std::invalid_argument(
+          "incompressible two-fluid prescribed viscous traction jump must be finite");
+    }
+    for (int component = parameters.dimension; component < 3; ++component) {
+      if (target[static_cast<std::size_t>(component)] != FE::Real{0.0}) {
+        throw std::invalid_argument(
+            "incompressible two-fluid prescribed viscous traction jump has an out-of-plane component");
+      }
+    }
   }
 }
 
@@ -244,6 +260,26 @@ IncompressibleTwoFluidInterfaceForms buildIncompressibleTwoFluidInterfaceForms(
          inner(n, positive_velocity_test))
             .dI(parameters.interface_marker);
     forms.residual = forms.residual + forms.prescribed_pressure_jump;
+  }
+
+  if (parameters.prescribed_viscous_traction_jump.has_value()) {
+    std::vector<FormExpr> target_components;
+    target_components.reserve(static_cast<std::size_t>(parameters.dimension));
+    for (int component = 0; component < parameters.dimension; ++component) {
+      target_components.push_back(FormExpr::constant(
+          (*parameters.prescribed_viscous_traction_jump)
+              [static_cast<std::size_t>(component)]));
+    }
+    const auto target = FormExpr::asVector(std::move(target_components));
+    forms.prescribed_viscous_traction_jump =
+        (-FormExpr::constant(weights.negative_complement) *
+         inner(target, negative_velocity_test))
+            .dI(parameters.interface_marker) +
+        (-FormExpr::constant(weights.positive_complement) *
+         inner(target, positive_velocity_test))
+            .dI(parameters.interface_marker);
+    forms.residual =
+        forms.residual + forms.prescribed_viscous_traction_jump;
   }
 
   if (parameters.surface_tension > FE::Real{0.0}) {

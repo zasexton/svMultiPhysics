@@ -156,7 +156,7 @@ enum class NavierStokesPhysicalModel {
 [[nodiscard]] bool is_two_fluid_configuration_key(
     std::string_view key)
 {
-  static constexpr std::array<std::string_view, 16> keys = {
+  static constexpr std::array<std::string_view, 22> keys = {
       "Material_interface_marker",
       "MaterialInterfaceMarker",
       "Negative_phase_density",
@@ -173,6 +173,12 @@ enum class NavierStokesPhysicalModel {
       "TwoFluidInterfaceNitscheGamma",
       "Prescribed_pressure_jump",
       "PrescribedPressureJump",
+      "Prescribed_viscous_traction_jump_x",
+      "PrescribedViscousTractionJumpX",
+      "Prescribed_viscous_traction_jump_y",
+      "PrescribedViscousTractionJumpY",
+      "Prescribed_viscous_traction_jump_z",
+      "PrescribedViscousTractionJumpZ",
   };
   return std::find(keys.begin(), keys.end(), key) != keys.end();
 }
@@ -4900,6 +4906,43 @@ translate_incompressible_two_fluid_input(
         {"Prescribed_pressure_jump", "PrescribedPressureJump"},
         "Prescribed_pressure_jump");
   }
+  if (any_parameter_defined(
+          input.equation_params,
+          {"Prescribed_viscous_traction_jump_x",
+           "PrescribedViscousTractionJumpX",
+           "Prescribed_viscous_traction_jump_y",
+           "PrescribedViscousTractionJumpY",
+           "Prescribed_viscous_traction_jump_z",
+           "PrescribedViscousTractionJumpZ"})) {
+    if (dimension == 2 &&
+        any_parameter_defined(
+            input.equation_params,
+            {"Prescribed_viscous_traction_jump_z",
+             "PrescribedViscousTractionJumpZ"})) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] "
+          "unsupported_two_fluid_out_of_plane_prescribed_viscous_traction_jump");
+    }
+    std::array<svmp::FE::Real, 3> target{};
+    target[0] = require_two_fluid_real(
+        input.equation_params,
+        {"Prescribed_viscous_traction_jump_x",
+         "PrescribedViscousTractionJumpX"},
+        "Prescribed_viscous_traction_jump_x");
+    target[1] = require_two_fluid_real(
+        input.equation_params,
+        {"Prescribed_viscous_traction_jump_y",
+         "PrescribedViscousTractionJumpY"},
+        "Prescribed_viscous_traction_jump_y");
+    if (dimension == 3) {
+      target[2] = require_two_fluid_real(
+          input.equation_params,
+          {"Prescribed_viscous_traction_jump_z",
+           "PrescribedViscousTractionJumpZ"},
+          "Prescribed_viscous_traction_jump_z");
+    }
+    options.prescribed_viscous_traction_jump = target;
+  }
   options.require_conservative_phase_momentum_reconciliation = true;
   if (options.interface_marker < 0) {
     throw std::runtime_error(
@@ -5353,6 +5396,8 @@ void preRegisterIncompressibleTwoFluidDependencyFields(
       .include_transient_penalty =
           options.include_transient_interface_penalty,
       .prescribed_pressure_jump = options.prescribed_pressure_jump,
+      .prescribed_viscous_traction_jump =
+          options.prescribed_viscous_traction_jump,
   };
   const auto weights = incompressibleTwoFluidInterfaceWeights(parameters);
   system.declareMaterialInterfaceTransportVelocity(

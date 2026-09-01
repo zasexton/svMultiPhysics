@@ -1999,6 +1999,16 @@ void appendTwoFluidDiagnosticParameters(
             generatedBoundaryTraceRealBits(
                 *parameters.prescribed_pressure_jump));
     }
+    appendMeshBoundaryToken(
+        tokens,
+        parameters.prescribed_viscous_traction_jump.has_value() ? 1u : 0u);
+    if (parameters.prescribed_viscous_traction_jump.has_value()) {
+        for (const auto value :
+             *parameters.prescribed_viscous_traction_jump) {
+            appendMeshBoundaryToken(
+                tokens, generatedBoundaryTraceRealBits(value));
+        }
+    }
 }
 
 void appendTwoFluidDiagnosticDeclaration(
@@ -2103,7 +2113,7 @@ void appendTwoFluidDiagnosticState(
     appendMeshBoundaryToken(
         tokens,
         static_cast<std::uint64_t>(state.interface_quadrature_point_count));
-    const std::array<Real, 20> scalars{
+    const std::array<Real, 21> scalars{
         state.interface_measure,
         state.velocity_jump_squared,
         state.normal_velocity_jump_squared,
@@ -2115,6 +2125,7 @@ void appendTwoFluidDiagnosticState(
         state.positive_mass_flux,
         state.traction_jump_normal_integral,
         state.traction_jump_squared,
+        state.viscous_traction_jump_squared,
         state.pressure_jump_integral,
         state.mean_pressure_jump,
         state.pressure_jump_squared,
@@ -2128,9 +2139,13 @@ void appendTwoFluidDiagnosticState(
         appendMeshBoundaryToken(
             tokens, generatedBoundaryTraceRealBits(value));
     }
-    for (const auto& vector : {state.negative_traction_integral,
+    for (const auto& vector : {state.interface_normal_integral,
+                               state.negative_traction_integral,
                                state.positive_traction_integral,
-                               state.traction_jump_integral}) {
+                               state.traction_jump_integral,
+                               state.negative_viscous_traction_integral,
+                               state.positive_viscous_traction_integral,
+                               state.viscous_traction_jump_integral}) {
         for (const auto value : vector) {
             appendMeshBoundaryToken(
                 tokens, generatedBoundaryTraceRealBits(value));
@@ -2153,6 +2168,17 @@ void appendTwoFluidDiagnosticState(
             tokens,
             generatedBoundaryTraceRealBits(
                 *state.prescribed_pressure_jump_error_squared));
+    }
+    appendMeshBoundaryToken(
+        tokens,
+        state.prescribed_viscous_traction_jump_error_squared.has_value()
+            ? 1u
+            : 0u);
+    if (state.prescribed_viscous_traction_jump_error_squared.has_value()) {
+        appendMeshBoundaryToken(
+            tokens,
+            generatedBoundaryTraceRealBits(
+                *state.prescribed_viscous_traction_jump_error_squared));
     }
     appendTwoFluidPhaseDiagnosticState(tokens, state.negative_phase);
     appendTwoFluidPhaseDiagnosticState(tokens, state.positive_phase);
@@ -12224,6 +12250,11 @@ void FESystem::declareTwoFluidAcceptedStageDiagnostics(
     const auto finite_positive = [](Real value) {
         return std::isfinite(value) && value > Real{0.0};
     };
+    const auto finite_vector = [](const std::array<Real, 3>& values) {
+        return std::all_of(values.begin(), values.end(), [](Real value) {
+            return std::isfinite(value);
+        });
+    };
     FE_THROW_IF(
         declaration.interface_marker < 0 ||
             declaration.interface_marker != parameters.interface_marker ||
@@ -12258,7 +12289,13 @@ void FESystem::declareTwoFluidAcceptedStageDiagnostics(
                    .pressure_stabilization_cut_metadata_scale_cap <
                   Real{1.0})) ||
             (parameters.prescribed_pressure_jump.has_value() &&
-             !std::isfinite(*parameters.prescribed_pressure_jump)),
+             !std::isfinite(*parameters.prescribed_pressure_jump)) ||
+            (parameters.prescribed_viscous_traction_jump.has_value() &&
+             (!finite_vector(
+                  *parameters.prescribed_viscous_traction_jump) ||
+              (parameters.dimension == 2 &&
+               (*parameters.prescribed_viscous_traction_jump)[2] !=
+                   Real{0.0}))),
         InvalidArgumentException,
         "FESystem::declareTwoFluidAcceptedStageDiagnostics: declaration "
         "metadata and material/interface coefficients are invalid");
@@ -12537,6 +12574,14 @@ void FESystem::stageTwoFluidAcceptedStageDiagnostics(
             }
             return result;
         };
+        const auto dot = [](const std::array<Real, 3>& lhs,
+                            const std::array<Real, 3>& rhs) {
+            Real result{0.0};
+            for (std::size_t component = 0u; component < 3u; ++component) {
+                result += lhs[component] * rhs[component];
+            }
+            return result;
+        };
         for (std::size_t index = 0u; index < states.size(); ++index) {
             const auto& declaration =
                 two_fluid_accepted_stage_declarations_[index];
@@ -12550,7 +12595,7 @@ void FESystem::stageTwoFluidAcceptedStageDiagnostics(
                 interfaces::LevelSetInterfaceSource::fromField(
                     declaration.level_set_field)
                     .identifier();
-            const std::array<Real, 18> scalars{
+            const std::array<Real, 19> scalars{
                 state.interface_measure,
                 state.velocity_jump_squared,
                 state.normal_velocity_jump_squared,
@@ -12562,6 +12607,7 @@ void FESystem::stageTwoFluidAcceptedStageDiagnostics(
                 state.positive_mass_flux,
                 state.traction_jump_normal_integral,
                 state.traction_jump_squared,
+                state.viscous_traction_jump_squared,
                 state.pressure_jump_integral,
                 state.mean_pressure_jump,
                 state.pressure_jump_squared,
@@ -12596,13 +12642,20 @@ void FESystem::stageTwoFluidAcceptedStageDiagnostics(
                         scalars.begin(), scalars.end(), [](Real value) {
                             return std::isfinite(value);
                         }) ||
+                    !finite_vector(state.interface_normal_integral) ||
                     !finite_vector(state.negative_traction_integral) ||
                     !finite_vector(state.positive_traction_integral) ||
                     !finite_vector(state.traction_jump_integral) ||
+                    !finite_vector(
+                        state.negative_viscous_traction_integral) ||
+                    !finite_vector(
+                        state.positive_viscous_traction_integral) ||
+                    !finite_vector(state.viscous_traction_jump_integral) ||
                     state.velocity_jump_squared < Real{0.0} ||
                     state.normal_velocity_jump_squared < Real{0.0} ||
                     state.tangential_velocity_jump_squared < Real{0.0} ||
                     state.traction_jump_squared < Real{0.0} ||
+                    state.viscous_traction_jump_squared < Real{0.0} ||
                     state.pressure_jump_squared < Real{0.0} ||
                     state.nitsche_penalty_work < Real{0.0} ||
                     !near(
@@ -12651,10 +12704,24 @@ void FESystem::stageTwoFluidAcceptedStageDiagnostics(
                         squared_norm(state.traction_jump_integral),
                         state.interface_measure *
                             state.traction_jump_squared) ||
+                    !bounded_moment(
+                        squared_norm(state.interface_normal_integral),
+                        state.interface_measure *
+                            state.interface_measure) ||
+                    !bounded_moment(
+                        squared_norm(state.viscous_traction_jump_integral),
+                        state.interface_measure *
+                            state.viscous_traction_jump_squared) ||
                     state.prescribed_pressure_jump_error_squared.has_value() !=
                         parameters.prescribed_pressure_jump.has_value() ||
+                    state.prescribed_viscous_traction_jump_error_squared
+                            .has_value() !=
+                        parameters.prescribed_viscous_traction_jump
+                            .has_value() ||
                     state.prescribed_stress_jump_residual_squared.has_value() !=
-                        parameters.prescribed_pressure_jump.has_value(),
+                        (parameters.prescribed_pressure_jump.has_value() ||
+                         parameters.prescribed_viscous_traction_jump
+                             .has_value()),
                 InvalidArgumentException,
                 "FESystem::stageTwoFluidAcceptedStageDiagnostics: supplied "
                 "interface state violates its declaration, snapshot, raw "
@@ -12694,6 +12761,13 @@ void FESystem::stageTwoFluidAcceptedStageDiagnostics(
                      (!std::isfinite(
                           *state.prescribed_stress_jump_residual_squared) ||
                       *state.prescribed_stress_jump_residual_squared <
+                          Real{0.0})) ||
+                    (state.prescribed_viscous_traction_jump_error_squared
+                         .has_value() &&
+                     (!std::isfinite(
+                          *state
+                               .prescribed_viscous_traction_jump_error_squared) ||
+                      *state.prescribed_viscous_traction_jump_error_squared <
                           Real{0.0})),
                 InvalidArgumentException,
                 "FESystem::stageTwoFluidAcceptedStageDiagnostics: supplied "
@@ -12708,6 +12782,16 @@ void FESystem::stageTwoFluidAcceptedStageDiagnostics(
                     "FESystem::stageTwoFluidAcceptedStageDiagnostics: "
                     "traction-jump integral does not equal the phase "
                     "traction difference");
+                FE_THROW_IF(
+                    !near(
+                        state.viscous_traction_jump_integral[component],
+                        state.negative_viscous_traction_integral[component] -
+                            state.positive_viscous_traction_integral
+                                [component]),
+                    InvalidArgumentException,
+                    "FESystem::stageTwoFluidAcceptedStageDiagnostics: "
+                    "viscous-traction-jump integral does not equal the phase "
+                    "viscous-traction difference");
             }
             if (parameters.prescribed_pressure_jump.has_value()) {
                 const Real target = *parameters.prescribed_pressure_jump;
@@ -12715,21 +12799,58 @@ void FESystem::stageTwoFluidAcceptedStageDiagnostics(
                     state.pressure_jump_squared -
                     Real{2.0} * target * state.pressure_jump_integral +
                     target * target * state.interface_measure;
-                const Real expected_stress_error =
-                    state.traction_jump_squared +
-                    Real{2.0} * target *
-                        state.traction_jump_normal_integral +
-                    target * target * state.interface_measure;
                 FE_THROW_IF(
                     !near(
                         *state.prescribed_pressure_jump_error_squared,
-                        expected_pressure_error) ||
-                        !near(
-                            *state.prescribed_stress_jump_residual_squared,
-                            expected_stress_error),
+                        expected_pressure_error),
                     InvalidArgumentException,
                     "FESystem::stageTwoFluidAcceptedStageDiagnostics: "
-                    "prescribed-jump errors do not match their raw moments");
+                    "prescribed-pressure-jump error does not match its raw "
+                    "moments");
+            }
+            if (parameters.prescribed_viscous_traction_jump.has_value()) {
+                const auto& target =
+                    *parameters.prescribed_viscous_traction_jump;
+                const Real expected_viscous_error =
+                    state.viscous_traction_jump_squared -
+                    Real{2.0} *
+                        dot(target, state.viscous_traction_jump_integral) +
+                    squared_norm(target) * state.interface_measure;
+                FE_THROW_IF(
+                    !near(
+                        *state
+                             .prescribed_viscous_traction_jump_error_squared,
+                        expected_viscous_error),
+                    InvalidArgumentException,
+                    "FESystem::stageTwoFluidAcceptedStageDiagnostics: "
+                    "prescribed-viscous-traction-jump error does not match "
+                    "its raw moments");
+            }
+            if (state.prescribed_stress_jump_residual_squared.has_value()) {
+                const Real pressure_target =
+                    parameters.prescribed_pressure_jump.value_or(Real{0.0});
+                const std::array<Real, 3> viscous_target =
+                    parameters.prescribed_viscous_traction_jump.value_or(
+                        std::array<Real, 3>{});
+                const Real expected_stress_error =
+                    state.traction_jump_squared +
+                    squared_norm(viscous_target) * state.interface_measure +
+                    pressure_target * pressure_target *
+                        state.interface_measure -
+                    Real{2.0} *
+                        dot(viscous_target, state.traction_jump_integral) +
+                    Real{2.0} * pressure_target *
+                        state.traction_jump_normal_integral -
+                    Real{2.0} * pressure_target *
+                        dot(viscous_target, state.interface_normal_integral);
+                FE_THROW_IF(
+                    !near(
+                        *state.prescribed_stress_jump_residual_squared,
+                        expected_stress_error),
+                    InvalidArgumentException,
+                    "FESystem::stageTwoFluidAcceptedStageDiagnostics: "
+                    "composed stress-jump residual does not match its raw "
+                    "moments");
             }
         }
 
@@ -13469,6 +13590,12 @@ void FESystem::commitPendingTwoFluidAcceptedStageDiagnostics(
                     << " interface_quadrature_points="
                     << state.interface_quadrature_point_count
                     << " interface_measure=" << state.interface_measure
+                    << " interface_normal_integral_0="
+                    << state.interface_normal_integral[0]
+                    << " interface_normal_integral_1="
+                    << state.interface_normal_integral[1]
+                    << " interface_normal_integral_2="
+                    << state.interface_normal_integral[2]
                     << " velocity_jump_sq="
                     << state.velocity_jump_squared
                     << " velocity_jump_normal_sq="
@@ -13512,6 +13639,26 @@ void FESystem::commitPendingTwoFluidAcceptedStageDiagnostics(
                     << state.traction_jump_integral[1]
                     << " traction_jump_integral_2="
                     << state.traction_jump_integral[2]
+                    << " viscous_traction_jump_sq="
+                    << state.viscous_traction_jump_squared
+                    << " negative_viscous_traction_integral_0="
+                    << state.negative_viscous_traction_integral[0]
+                    << " negative_viscous_traction_integral_1="
+                    << state.negative_viscous_traction_integral[1]
+                    << " negative_viscous_traction_integral_2="
+                    << state.negative_viscous_traction_integral[2]
+                    << " positive_viscous_traction_integral_0="
+                    << state.positive_viscous_traction_integral[0]
+                    << " positive_viscous_traction_integral_1="
+                    << state.positive_viscous_traction_integral[1]
+                    << " positive_viscous_traction_integral_2="
+                    << state.positive_viscous_traction_integral[2]
+                    << " viscous_traction_jump_integral_0="
+                    << state.viscous_traction_jump_integral[0]
+                    << " viscous_traction_jump_integral_1="
+                    << state.viscous_traction_jump_integral[1]
+                    << " viscous_traction_jump_integral_2="
+                    << state.viscous_traction_jump_integral[2]
                     << " surface_energy_work="
                     << state.surface_energy_work
                     << " nitsche_consistency_work="
@@ -13560,9 +13707,38 @@ void FESystem::commitPendingTwoFluidAcceptedStageDiagnostics(
                     << *record.declaration.parameters
                             .prescribed_pressure_jump
                     << " prescribed_pressure_jump_error_sq="
-                    << *state.prescribed_pressure_jump_error_squared
-                    << " prescribed_stress_jump_residual_sq="
-                    << *state.prescribed_stress_jump_residual_squared;
+                    << *state.prescribed_pressure_jump_error_squared;
+            }
+            message << " prescribed_viscous_traction_jump_applicable="
+                    << (state
+                                .prescribed_viscous_traction_jump_error_squared
+                                .has_value()
+                            ? "true"
+                            : "false");
+            if (state.prescribed_viscous_traction_jump_error_squared
+                    .has_value()) {
+                const auto& target =
+                    *record.declaration.parameters
+                         .prescribed_viscous_traction_jump;
+                message
+                    << " prescribed_viscous_traction_jump_target_0="
+                    << target[0]
+                    << " prescribed_viscous_traction_jump_target_1="
+                    << target[1]
+                    << " prescribed_viscous_traction_jump_target_2="
+                    << target[2]
+                    << " prescribed_viscous_traction_jump_error_sq="
+                    << *state
+                            .prescribed_viscous_traction_jump_error_squared;
+            }
+            message << " prescribed_stress_jump_residual_applicable="
+                    << (state.prescribed_stress_jump_residual_squared
+                                .has_value()
+                            ? "true"
+                            : "false");
+            if (state.prescribed_stress_jump_residual_squared.has_value()) {
+                message << " prescribed_stress_jump_residual_sq="
+                        << *state.prescribed_stress_jump_residual_squared;
             }
             message << " momentum_reconciliation_applicable="
                     << (record.momentum_reconciliation.has_value()

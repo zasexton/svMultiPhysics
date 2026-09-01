@@ -89,9 +89,20 @@ void validateParameters(
         !std::isfinite(parameters.surface_tension) ||
         parameters.surface_tension < Real{0.0} ||
         (parameters.prescribed_pressure_jump.has_value() &&
-         !std::isfinite(*parameters.prescribed_pressure_jump))) {
+         !std::isfinite(*parameters.prescribed_pressure_jump)) ||
+        (parameters.prescribed_viscous_traction_jump.has_value() &&
+         !finiteVector(*parameters.prescribed_viscous_traction_jump))) {
         throw std::invalid_argument(
-            "incompressible two-fluid diagnostics require a valid marker, dimension, material coefficients, Nitsche coefficient, surface tension, and optional pressure-jump target");
+            "incompressible two-fluid diagnostics require a valid marker, dimension, material coefficients, Nitsche coefficient, surface tension, and optional jump targets");
+    }
+    if (parameters.prescribed_viscous_traction_jump.has_value()) {
+        for (int component = parameters.dimension; component < 3; ++component) {
+            if ((*parameters.prescribed_viscous_traction_jump)
+                    [static_cast<std::size_t>(component)] != Real{0.0}) {
+                throw std::invalid_argument(
+                    "incompressible two-fluid diagnostics prescribed viscous traction has an out-of-plane component");
+            }
+        }
     }
 }
 
@@ -158,7 +169,7 @@ void accumulatePhasePoint(
 void requireFiniteAccumulator(
     const IncompressibleTwoFluidDiagnosticAccumulator& value)
 {
-    const std::array<Real, 19> scalars{
+    const std::array<Real, 20> scalars{
         value.interface_measure,
         value.velocity_jump_squared,
         value.normal_velocity_jump_squared,
@@ -167,6 +178,7 @@ void requireFiniteAccumulator(
         value.positive_normal_flux,
         value.traction_jump_normal_integral,
         value.traction_jump_squared,
+        value.viscous_traction_jump_squared,
         value.pressure_jump_integral,
         value.pressure_jump_squared,
         value.surface_energy_work,
@@ -181,15 +193,22 @@ void requireFiniteAccumulator(
     if (!std::all_of(scalars.begin(), scalars.end(), [](Real scalar) {
             return std::isfinite(scalar);
         }) ||
+        !finiteVector(value.interface_normal_integral) ||
         !finiteVector(value.negative_traction_integral) ||
         !finiteVector(value.positive_traction_integral) ||
         !finiteVector(value.traction_jump_integral) ||
+        !finiteVector(value.negative_viscous_traction_integral) ||
+        !finiteVector(value.positive_viscous_traction_integral) ||
+        !finiteVector(value.viscous_traction_jump_integral) ||
         !finiteVector(value.negative_phase.velocity_integral) ||
         !finiteVector(value.positive_phase.velocity_integral) ||
         (value.prescribed_stress_jump_residual_squared.has_value() &&
          !std::isfinite(*value.prescribed_stress_jump_residual_squared)) ||
         (value.prescribed_pressure_jump_error_squared.has_value() &&
          !std::isfinite(*value.prescribed_pressure_jump_error_squared)) ||
+        (value.prescribed_viscous_traction_jump_error_squared.has_value() &&
+         !std::isfinite(
+             *value.prescribed_viscous_traction_jump_error_squared)) ||
         (value.transient_penalty_effective_dt.has_value() &&
          (!std::isfinite(*value.transient_penalty_effective_dt) ||
           !(*value.transient_penalty_effective_dt > Real{0.0})))) {
@@ -233,9 +252,15 @@ evaluateLocalIncompressibleTwoFluidDiagnostics(
     if (parameters.include_transient_penalty) {
         state.transient_penalty_effective_dt = effective_dt;
     }
-    if (parameters.prescribed_pressure_jump.has_value()) {
+    if (parameters.prescribed_pressure_jump.has_value() ||
+        parameters.prescribed_viscous_traction_jump.has_value()) {
         state.prescribed_stress_jump_residual_squared = Real{0.0};
+    }
+    if (parameters.prescribed_pressure_jump.has_value()) {
         state.prescribed_pressure_jump_error_squared = Real{0.0};
+    }
+    if (parameters.prescribed_viscous_traction_jump.has_value()) {
+        state.prescribed_viscous_traction_jump_error_squared = Real{0.0};
     }
 
     for (const auto& record : snapshot.rules()) {
@@ -376,6 +401,20 @@ evaluateLocalIncompressibleTwoFluidDiagnostics(
             tangential_jump_squared =
                 std::max(Real{0.0}, tangential_jump_squared);
 
+            const auto viscous_t_negative = traction(
+                grad_negative,
+                Real{0.0},
+                parameters.negative_viscosity,
+                physical.normal,
+                parameters.dimension);
+            const auto viscous_t_positive = traction(
+                grad_positive,
+                Real{0.0},
+                parameters.positive_viscosity,
+                physical.normal,
+                parameters.dimension);
+            const auto viscous_traction_jump =
+                subtract(viscous_t_negative, viscous_t_positive);
             const auto t_negative = traction(
                 grad_negative,
                 p_negative,
@@ -420,6 +459,10 @@ evaluateLocalIncompressibleTwoFluidDiagnostics(
             const Real consistency_density = -dot(weighted_traction, jump);
             ++state.owned_interface_quadrature_point_count;
             state.interface_measure += weight;
+            for (std::size_t component = 0u; component < 3u; ++component) {
+                state.interface_normal_integral[component] +=
+                    physical.normal[component] * weight;
+            }
             state.velocity_jump_squared += jump_squared * weight;
             state.normal_velocity_jump_squared +=
                 normal_jump_squared * weight;
@@ -436,11 +479,19 @@ evaluateLocalIncompressibleTwoFluidDiagnostics(
                     t_positive[component] * weight;
                 state.traction_jump_integral[component] +=
                     traction_jump[component] * weight;
+                state.negative_viscous_traction_integral[component] +=
+                    viscous_t_negative[component] * weight;
+                state.positive_viscous_traction_integral[component] +=
+                    viscous_t_positive[component] * weight;
+                state.viscous_traction_jump_integral[component] +=
+                    viscous_traction_jump[component] * weight;
             }
             state.traction_jump_squared +=
                 dot(traction_jump, traction_jump) * weight;
             state.traction_jump_normal_integral +=
                 dot(traction_jump, physical.normal) * weight;
+            state.viscous_traction_jump_squared +=
+                dot(viscous_traction_jump, viscous_traction_jump) * weight;
             state.pressure_jump_integral += pressure_jump * weight;
             state.pressure_jump_squared +=
                 pressure_jump * pressure_jump * weight;
@@ -457,12 +508,29 @@ evaluateLocalIncompressibleTwoFluidDiagnostics(
                 const Real pressure_error = pressure_jump - target;
                 *state.prescribed_pressure_jump_error_squared +=
                     pressure_error * pressure_error * weight;
+            }
+            if (parameters.prescribed_viscous_traction_jump.has_value()) {
+                const auto viscous_residual = subtract(
+                    viscous_traction_jump,
+                    *parameters.prescribed_viscous_traction_jump);
+                *state.prescribed_viscous_traction_jump_error_squared +=
+                    dot(viscous_residual, viscous_residual) * weight;
+            }
+            if (state.prescribed_stress_jump_residual_squared.has_value()) {
                 Vector stress_residual = traction_jump;
-                for (int component = 0;
-                     component < parameters.dimension;
+                for (int component = 0; component < parameters.dimension;
                      ++component) {
                     const auto c = static_cast<std::size_t>(component);
-                    stress_residual[c] += target * physical.normal[c];
+                    if (parameters.prescribed_viscous_traction_jump
+                            .has_value()) {
+                        stress_residual[c] -=
+                            (*parameters.prescribed_viscous_traction_jump)[c];
+                    }
+                    if (parameters.prescribed_pressure_jump.has_value()) {
+                        stress_residual[c] +=
+                            *parameters.prescribed_pressure_jump *
+                            physical.normal[c];
+                    }
                 }
                 *state.prescribed_stress_jump_residual_squared +=
                     dot(stress_residual, stress_residual) * weight;
@@ -489,6 +557,7 @@ finalizeIncompressibleTwoFluidDiagnostics(
         accumulator.normal_velocity_jump_squared < Real{0.0} ||
         accumulator.tangential_velocity_jump_squared < Real{0.0} ||
         accumulator.traction_jump_squared < Real{0.0} ||
+        accumulator.viscous_traction_jump_squared < Real{0.0} ||
         accumulator.pressure_jump_squared < Real{0.0} ||
         accumulator.nitsche_penalty_work < Real{0.0} ||
         accumulator.negative_phase.velocity_squared_integral < Real{0.0} ||
@@ -498,7 +567,10 @@ finalizeIncompressibleTwoFluidDiagnostics(
         accumulator.prescribed_pressure_jump_error_squared.has_value() !=
             parameters.prescribed_pressure_jump.has_value() ||
         accumulator.prescribed_stress_jump_residual_squared.has_value() !=
-            parameters.prescribed_pressure_jump.has_value() ||
+            (parameters.prescribed_pressure_jump.has_value() ||
+             parameters.prescribed_viscous_traction_jump.has_value()) ||
+        accumulator.prescribed_viscous_traction_jump_error_squared.has_value() !=
+            parameters.prescribed_viscous_traction_jump.has_value() ||
         accumulator.transient_penalty_effective_dt.has_value() !=
             parameters.include_transient_penalty) {
         throw std::invalid_argument(
@@ -555,6 +627,30 @@ finalizeIncompressibleTwoFluidDiagnostics(
         throw std::invalid_argument(
             "incompressible two-fluid diagnostics traction-jump moment bound failed");
     }
+    const Real normal_moment_squared =
+        dot(accumulator.interface_normal_integral,
+            accumulator.interface_normal_integral);
+    const Real normal_bound =
+        accumulator.interface_measure * accumulator.interface_measure;
+    if (normal_moment_squared >
+        normal_bound +
+            moment_tolerance(normal_moment_squared, normal_bound)) {
+        throw std::invalid_argument(
+            "incompressible two-fluid diagnostics interface-normal moment bound failed");
+    }
+    const Real viscous_traction_moment_squared =
+        dot(accumulator.viscous_traction_jump_integral,
+            accumulator.viscous_traction_jump_integral);
+    const Real viscous_traction_bound =
+        accumulator.interface_measure *
+        accumulator.viscous_traction_jump_squared;
+    if (viscous_traction_moment_squared >
+        viscous_traction_bound +
+            moment_tolerance(
+                viscous_traction_moment_squared, viscous_traction_bound)) {
+        throw std::invalid_argument(
+            "incompressible two-fluid diagnostics viscous-traction-jump moment bound failed");
+    }
     for (std::size_t component = 0u; component < 3u; ++component) {
         const Real expected =
             accumulator.negative_traction_integral[component] -
@@ -564,6 +660,18 @@ finalizeIncompressibleTwoFluidDiagnostics(
                 accumulator.traction_jump_integral[component], expected)) {
             throw std::invalid_argument(
                 "incompressible two-fluid diagnostics traction-jump integral identity failed");
+        }
+        const Real expected_viscous =
+            accumulator.negative_viscous_traction_integral[component] -
+            accumulator.positive_viscous_traction_integral[component];
+        if (std::abs(
+                accumulator.viscous_traction_jump_integral[component] -
+                expected_viscous) >
+            moment_tolerance(
+                accumulator.viscous_traction_jump_integral[component],
+                expected_viscous)) {
+            throw std::invalid_argument(
+                "incompressible two-fluid diagnostics viscous-traction-jump integral identity failed");
         }
     }
     const auto validate_phase_moment = [&](const auto& phase) {
@@ -586,25 +694,58 @@ finalizeIncompressibleTwoFluidDiagnostics(
             accumulator.pressure_jump_squared -
             Real{2.0} * target * accumulator.pressure_jump_integral +
             target * target * accumulator.interface_measure;
-        const Real expected_stress_error =
-            accumulator.traction_jump_squared +
-            Real{2.0} * target *
-                accumulator.traction_jump_normal_integral +
-            target * target * accumulator.interface_measure;
         if (std::abs(
                 *accumulator.prescribed_pressure_jump_error_squared -
                 expected_pressure_error) >
                 moment_tolerance(
                     *accumulator.prescribed_pressure_jump_error_squared,
-                    expected_pressure_error) ||
-            std::abs(
+                    expected_pressure_error)) {
+            throw std::invalid_argument(
+                "incompressible two-fluid diagnostics prescribed-pressure-jump moment identity failed");
+        }
+    }
+    if (parameters.prescribed_viscous_traction_jump.has_value()) {
+        const auto& target = *parameters.prescribed_viscous_traction_jump;
+        const Real expected_viscous_error =
+            accumulator.viscous_traction_jump_squared -
+            Real{2.0} *
+                dot(target, accumulator.viscous_traction_jump_integral) +
+            dot(target, target) * accumulator.interface_measure;
+        if (std::abs(
+                *accumulator.prescribed_viscous_traction_jump_error_squared -
+                expected_viscous_error) >
+            moment_tolerance(
+                *accumulator.prescribed_viscous_traction_jump_error_squared,
+                expected_viscous_error)) {
+            throw std::invalid_argument(
+                "incompressible two-fluid diagnostics prescribed-viscous-traction-jump moment identity failed");
+        }
+    }
+    if (accumulator.prescribed_stress_jump_residual_squared.has_value()) {
+        const Real pressure_target =
+            parameters.prescribed_pressure_jump.value_or(Real{0.0});
+        const Vector viscous_target =
+            parameters.prescribed_viscous_traction_jump.value_or(Vector{});
+        const Real expected_stress_error =
+            accumulator.traction_jump_squared +
+            dot(viscous_target, viscous_target) *
+                accumulator.interface_measure +
+            pressure_target * pressure_target *
+                accumulator.interface_measure -
+            Real{2.0} *
+                dot(viscous_target, accumulator.traction_jump_integral) +
+            Real{2.0} * pressure_target *
+                accumulator.traction_jump_normal_integral -
+            Real{2.0} * pressure_target *
+                dot(viscous_target, accumulator.interface_normal_integral);
+        if (std::abs(
                 *accumulator.prescribed_stress_jump_residual_squared -
                 expected_stress_error) >
-                moment_tolerance(
-                    *accumulator.prescribed_stress_jump_residual_squared,
-                    expected_stress_error)) {
+            moment_tolerance(
+                *accumulator.prescribed_stress_jump_residual_squared,
+                expected_stress_error)) {
             throw std::invalid_argument(
-                "incompressible two-fluid diagnostics prescribed-jump moment identity failed");
+                "incompressible two-fluid diagnostics composed-stress-jump moment identity failed");
         }
     }
 
@@ -615,6 +756,7 @@ finalizeIncompressibleTwoFluidDiagnostics(
     state.interface_quadrature_point_count =
         accumulator.owned_interface_quadrature_point_count;
     state.interface_measure = accumulator.interface_measure;
+    state.interface_normal_integral = accumulator.interface_normal_integral;
     state.velocity_jump_squared = accumulator.velocity_jump_squared;
     state.normal_velocity_jump_squared =
         accumulator.normal_velocity_jump_squared;
@@ -636,6 +778,14 @@ finalizeIncompressibleTwoFluidDiagnostics(
     state.traction_jump_normal_integral =
         accumulator.traction_jump_normal_integral;
     state.traction_jump_squared = accumulator.traction_jump_squared;
+    state.negative_viscous_traction_integral =
+        accumulator.negative_viscous_traction_integral;
+    state.positive_viscous_traction_integral =
+        accumulator.positive_viscous_traction_integral;
+    state.viscous_traction_jump_integral =
+        accumulator.viscous_traction_jump_integral;
+    state.viscous_traction_jump_squared =
+        accumulator.viscous_traction_jump_squared;
     state.prescribed_stress_jump_residual_squared =
         accumulator.prescribed_stress_jump_residual_squared;
     state.pressure_jump_integral = accumulator.pressure_jump_integral;
@@ -644,6 +794,8 @@ finalizeIncompressibleTwoFluidDiagnostics(
     state.pressure_jump_squared = accumulator.pressure_jump_squared;
     state.prescribed_pressure_jump_error_squared =
         accumulator.prescribed_pressure_jump_error_squared;
+    state.prescribed_viscous_traction_jump_error_squared =
+        accumulator.prescribed_viscous_traction_jump_error_squared;
     state.surface_energy_work = accumulator.surface_energy_work;
     state.nitsche_consistency_work = accumulator.nitsche_consistency_work;
     state.nitsche_adjoint_work = accumulator.nitsche_adjoint_work;

@@ -35,6 +35,8 @@ struct IncompressibleTwoFluidDiagnosticParameters {
     bool include_transient_penalty{true};
     /** Expected p_minus-p_plus. Absence is distinct from a zero target. */
     std::optional<Real> prescribed_pressure_jump{};
+    /** Expected (tau_minus-tau_plus)n in global physical components. */
+    std::optional<std::array<Real, 3>> prescribed_viscous_traction_jump{};
 
     [[nodiscard]] friend bool operator==(
         const IncompressibleTwoFluidDiagnosticParameters&,
@@ -75,6 +77,7 @@ struct IncompressibleTwoFluidDiagnosticAccumulator {
     std::optional<Real> transient_penalty_effective_dt{};
     std::size_t owned_interface_quadrature_point_count{0u};
     Real interface_measure{0.0};
+    std::array<Real, 3> interface_normal_integral{{0.0, 0.0, 0.0}};
     Real velocity_jump_squared{0.0};
     Real normal_velocity_jump_squared{0.0};
     Real tangential_velocity_jump_squared{0.0};
@@ -85,10 +88,15 @@ struct IncompressibleTwoFluidDiagnosticAccumulator {
     std::array<Real, 3> traction_jump_integral{{0.0, 0.0, 0.0}};
     Real traction_jump_normal_integral{0.0};
     Real traction_jump_squared{0.0};
+    std::array<Real, 3> negative_viscous_traction_integral{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> positive_viscous_traction_integral{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> viscous_traction_jump_integral{{0.0, 0.0, 0.0}};
+    Real viscous_traction_jump_squared{0.0};
     std::optional<Real> prescribed_stress_jump_residual_squared{};
     Real pressure_jump_integral{0.0};
     Real pressure_jump_squared{0.0};
     std::optional<Real> prescribed_pressure_jump_error_squared{};
+    std::optional<Real> prescribed_viscous_traction_jump_error_squared{};
     Real surface_energy_work{0.0};
     Real nitsche_consistency_work{0.0};
     Real nitsche_adjoint_work{0.0};
@@ -120,6 +128,7 @@ struct IncompressibleTwoFluidDiagnosticState {
     std::optional<Real> transient_penalty_effective_dt{};
     std::size_t interface_quadrature_point_count{0u};
     Real interface_measure{0.0};
+    std::array<Real, 3> interface_normal_integral{{0.0, 0.0, 0.0}};
     Real velocity_jump_squared{0.0};
     Real normal_velocity_jump_squared{0.0};
     Real tangential_velocity_jump_squared{0.0};
@@ -133,11 +142,16 @@ struct IncompressibleTwoFluidDiagnosticState {
     std::array<Real, 3> traction_jump_integral{{0.0, 0.0, 0.0}};
     Real traction_jump_normal_integral{0.0};
     Real traction_jump_squared{0.0};
+    std::array<Real, 3> negative_viscous_traction_integral{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> positive_viscous_traction_integral{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> viscous_traction_jump_integral{{0.0, 0.0, 0.0}};
+    Real viscous_traction_jump_squared{0.0};
     std::optional<Real> prescribed_stress_jump_residual_squared{};
     Real pressure_jump_integral{0.0};
     Real mean_pressure_jump{0.0};
     Real pressure_jump_squared{0.0};
     std::optional<Real> prescribed_pressure_jump_error_squared{};
+    std::optional<Real> prescribed_viscous_traction_jump_error_squared{};
     Real surface_energy_work{0.0};
     Real nitsche_consistency_work{0.0};
     Real nitsche_adjoint_work{0.0};

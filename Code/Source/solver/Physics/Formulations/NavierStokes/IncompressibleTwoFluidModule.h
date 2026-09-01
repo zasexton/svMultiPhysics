@@ -71,6 +71,9 @@ struct IncompressibleTwoFluidOptions {
     FE::Real surface_tension{0.0};
     /** Optional manufactured p_minus-p_plus load and diagnostic target. */
     std::optional<FE::Real> prescribed_pressure_jump{};
+    /** Optional manufactured (tau_minus-tau_plus)n target in global axes. */
+    std::optional<std::array<FE::Real, 3>>
+        prescribed_viscous_traction_jump{};
     FE::Real interface_nitsche_gamma{20.0};
     bool include_transient_interface_penalty{true};
     bool require_conservative_phase_momentum_reconciliation{false};

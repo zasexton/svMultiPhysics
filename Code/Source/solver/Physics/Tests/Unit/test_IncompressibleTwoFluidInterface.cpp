@@ -361,6 +361,22 @@ TEST(IncompressibleTwoFluidModule,
       "unsupported_two_fluid_nonfinite_prescribed_pressure_jump");
   expect_rejected(
       [](auto& options) {
+        options.prescribed_viscous_traction_jump =
+            std::array<FE::Real, 3>{{
+                FE::Real{1.0},
+                std::numeric_limits<FE::Real>::infinity(),
+                FE::Real{0.0}}};
+      },
+      "unsupported_two_fluid_nonfinite_prescribed_viscous_traction_jump");
+  expect_rejected(
+      [](auto& options) {
+        options.prescribed_viscous_traction_jump =
+            std::array<FE::Real, 3>{{
+                FE::Real{1.0}, FE::Real{2.0}, FE::Real{3.0}}};
+      },
+      "unsupported_two_fluid_out_of_plane_prescribed_viscous_traction_jump");
+  expect_rejected(
+      [](auto& options) {
         ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC
             boundary;
         boundary.boundary_marker = 7;
@@ -469,6 +485,28 @@ TEST(IncompressibleTwoFluidInterface,
 }
 
 TEST(IncompressibleTwoFluidInterface,
+     PrescribedViscousTractionJumpUsesGlobalVectorAndComposesWithPressure) {
+  auto parameters = makeParameters();
+  parameters.surface_tension = FE::Real{0.0};
+  parameters.prescribed_pressure_jump = FE::Real{3.0};
+  parameters.prescribed_viscous_traction_jump =
+      std::array<FE::Real, 3>{{
+          FE::Real{2.0}, FE::Real{-4.0}, FE::Real{1.0}}};
+  const auto forms = build(parameters);
+
+  ASSERT_TRUE(forms.prescribed_pressure_jump.isValid());
+  ASSERT_TRUE(forms.prescribed_viscous_traction_jump.isValid());
+  EXPECT_TRUE(forms.residual.isValid());
+  const auto expression = forms.prescribed_viscous_traction_jump.toString();
+  EXPECT_NE(expression.find("inner(as_vector(2, -4, 1), v_negative)"),
+            std::string::npos)
+      << expression;
+  EXPECT_NE(expression.find("inner(as_vector(2, -4, 1), v_positive)"),
+            std::string::npos)
+      << expression;
+}
+
+TEST(IncompressibleTwoFluidInterface,
      TransientPenaltyRetainsEffectiveStepTerminal) {
   auto parameters = makeParameters();
   parameters.include_transient_penalty = true;
@@ -506,6 +544,14 @@ TEST(IncompressibleTwoFluidInterface, RejectsInvalidParameters) {
   parameters = makeParameters();
   parameters.prescribed_pressure_jump =
       std::numeric_limits<FE::Real>::quiet_NaN();
+  EXPECT_THROW(build(parameters), std::invalid_argument);
+
+  parameters = makeParameters();
+  parameters.prescribed_viscous_traction_jump =
+      std::array<FE::Real, 3>{{
+          FE::Real{0.0},
+          std::numeric_limits<FE::Real>::quiet_NaN(),
+          FE::Real{0.0}}};
   EXPECT_THROW(build(parameters), std::invalid_argument);
 }
 
@@ -682,6 +728,108 @@ TEST(IncompressibleTwoFluidDiagnostics,
   EXPECT_NEAR(state.positive_phase.kinetic_energy,
               FE::Real{0.125},
               tolerance);
+
+  auto composed_parameters = parameters;
+  composed_parameters.prescribed_viscous_traction_jump =
+      std::array<FE::Real, 3>{{
+          FE::Real{6.0}, FE::Real{7.0}, FE::Real{0.0}}};
+  const auto composed_local =
+      FE::interfaces::evaluateLocalIncompressibleTwoFluidDiagnostics(
+          *snapshot,
+          composed_parameters,
+          negative,
+          positive,
+          cell_measure,
+          FE::Real{0.25});
+  const auto composed_state =
+      FE::interfaces::finalizeIncompressibleTwoFluidDiagnostics(
+          composed_local, composed_parameters);
+  EXPECT_EQ(composed_state.interface_normal_integral,
+            (std::array<FE::Real, 3>{{0.5, 0.0, 0.0}}));
+  EXPECT_EQ(composed_state.viscous_traction_jump_integral,
+            (std::array<FE::Real, 3>{{3.0, 3.5, 0.0}}));
+  EXPECT_NEAR(composed_state.viscous_traction_jump_squared,
+              FE::Real{42.5},
+              tolerance);
+  ASSERT_TRUE(composed_state
+                  .prescribed_viscous_traction_jump_error_squared
+                  .has_value());
+  EXPECT_NEAR(
+      *composed_state.prescribed_viscous_traction_jump_error_squared,
+      FE::Real{0.0},
+      tolerance);
+  ASSERT_TRUE(
+      composed_state.prescribed_stress_jump_residual_squared.has_value());
+  EXPECT_NEAR(*composed_state.prescribed_stress_jump_residual_squared,
+              FE::Real{0.0},
+              tolerance);
+}
+
+TEST(IncompressibleTwoFluidDiagnostics,
+     SeparatesViscousTargetErrorFromComposedStressTargetResidual) {
+  FE::interfaces::IncompressibleTwoFluidDiagnosticParameters parameters{
+      .dimension = 2,
+      .interface_marker = 71,
+      .negative_density = FE::Real{4.0},
+      .positive_density = FE::Real{2.0},
+      .negative_viscosity = FE::Real{2.0},
+      .positive_viscosity = FE::Real{1.0},
+      .nitsche_gamma = FE::Real{6.0},
+      .surface_tension = FE::Real{0.0},
+      .include_transient_penalty = false,
+      .prescribed_pressure_jump = FE::Real{3.0},
+      .prescribed_viscous_traction_jump =
+          std::array<FE::Real, 3>{{
+              FE::Real{6.0}, FE::Real{7.0}, FE::Real{0.0}}},
+  };
+  FE::interfaces::IncompressibleTwoFluidDiagnosticAccumulator accumulator;
+  accumulator.snapshot_revision_key = 91u;
+  accumulator.owned_interface_quadrature_point_count = 1u;
+  accumulator.interface_measure = FE::Real{0.5};
+  accumulator.interface_normal_integral =
+      {{FE::Real{0.5}, FE::Real{0.0}, FE::Real{0.0}}};
+  accumulator.negative_traction_integral =
+      {{FE::Real{-0.5}, FE::Real{5.0}, FE::Real{0.0}}};
+  accumulator.positive_traction_integral =
+      {{FE::Real{-2.0}, FE::Real{1.5}, FE::Real{0.0}}};
+  accumulator.traction_jump_integral =
+      {{FE::Real{1.5}, FE::Real{3.5}, FE::Real{0.0}}};
+  accumulator.traction_jump_normal_integral = FE::Real{1.5};
+  accumulator.traction_jump_squared = FE::Real{29.0};
+  accumulator.negative_viscous_traction_integral =
+      {{FE::Real{2.0}, FE::Real{5.0}, FE::Real{0.0}}};
+  accumulator.positive_viscous_traction_integral =
+      {{FE::Real{-1.0}, FE::Real{1.5}, FE::Real{0.0}}};
+  accumulator.viscous_traction_jump_integral =
+      {{FE::Real{3.0}, FE::Real{3.5}, FE::Real{0.0}}};
+  accumulator.viscous_traction_jump_squared = FE::Real{42.5};
+  accumulator.pressure_jump_integral = FE::Real{1.5};
+  accumulator.pressure_jump_squared = FE::Real{4.5};
+  accumulator.prescribed_pressure_jump_error_squared = FE::Real{0.0};
+  accumulator.prescribed_viscous_traction_jump_error_squared = FE::Real{0.0};
+  accumulator.prescribed_stress_jump_residual_squared = FE::Real{0.0};
+  accumulator.negative_phase.owned_quadrature_point_count = 1u;
+  accumulator.negative_phase.volume = FE::Real{0.25};
+  accumulator.positive_phase.owned_quadrature_point_count = 1u;
+  accumulator.positive_phase.volume = FE::Real{0.25};
+
+  const auto state =
+      FE::interfaces::finalizeIncompressibleTwoFluidDiagnostics(
+          accumulator, parameters);
+  EXPECT_EQ(state.negative_viscous_traction_integral,
+            accumulator.negative_viscous_traction_integral);
+  EXPECT_EQ(state.positive_viscous_traction_integral,
+            accumulator.positive_viscous_traction_integral);
+  EXPECT_EQ(state.viscous_traction_jump_integral,
+            accumulator.viscous_traction_jump_integral);
+  EXPECT_DOUBLE_EQ(state.viscous_traction_jump_squared, FE::Real{42.5});
+  ASSERT_TRUE(
+      state.prescribed_viscous_traction_jump_error_squared.has_value());
+  EXPECT_DOUBLE_EQ(
+      *state.prescribed_viscous_traction_jump_error_squared, FE::Real{0.0});
+  ASSERT_TRUE(state.prescribed_stress_jump_residual_squared.has_value());
+  EXPECT_DOUBLE_EQ(
+      *state.prescribed_stress_jump_residual_squared, FE::Real{0.0});
 }
 
 TEST(IncompressibleTwoFluidDiagnostics,
@@ -1059,21 +1207,57 @@ makeAcceptedTwoFluidDiagnosticState(
   }
   accumulator.owned_interface_quadrature_point_count = 2u;
   accumulator.interface_measure = FE::Real{0.5};
+  accumulator.interface_normal_integral = {{0.5, 0.0, 0.0}};
   accumulator.negative_normal_flux = FE::Real{0.25};
   accumulator.positive_normal_flux = FE::Real{0.25};
   accumulator.pressure_jump_integral = FE::Real{1.5};
   accumulator.pressure_jump_squared = FE::Real{4.5};
-  accumulator.negative_traction_integral = {{-1.5, 0.0, 0.0}};
+  const auto viscous_target =
+      parameters.prescribed_viscous_traction_jump.value_or(
+          std::array<FE::Real, 3>{});
+  const std::array<FE::Real, 3> traction_point{{
+      viscous_target[0] - FE::Real{3.0},
+      viscous_target[1],
+      viscous_target[2],
+  }};
+  accumulator.negative_traction_integral = {{
+      FE::Real{0.5} * traction_point[0],
+      FE::Real{0.5} * traction_point[1],
+      FE::Real{0.5} * traction_point[2],
+  }};
   accumulator.positive_traction_integral = {{0.0, 0.0, 0.0}};
-  accumulator.traction_jump_integral = {{-1.5, 0.0, 0.0}};
-  accumulator.traction_jump_normal_integral = FE::Real{-1.5};
-  accumulator.traction_jump_squared = FE::Real{4.5};
+  accumulator.traction_jump_integral =
+      accumulator.negative_traction_integral;
+  accumulator.traction_jump_normal_integral =
+      FE::Real{0.5} * traction_point[0];
+  accumulator.traction_jump_squared = FE::Real{0.5} * (
+      traction_point[0] * traction_point[0] +
+      traction_point[1] * traction_point[1] +
+      traction_point[2] * traction_point[2]);
+  accumulator.negative_viscous_traction_integral = {{
+      FE::Real{0.5} * viscous_target[0],
+      FE::Real{0.5} * viscous_target[1],
+      FE::Real{0.5} * viscous_target[2],
+  }};
+  accumulator.viscous_traction_jump_integral =
+      accumulator.negative_viscous_traction_integral;
+  accumulator.viscous_traction_jump_squared = FE::Real{0.5} * (
+      viscous_target[0] * viscous_target[0] +
+      viscous_target[1] * viscous_target[1] +
+      viscous_target[2] * viscous_target[2]);
   accumulator.negative_phase.owned_quadrature_point_count = 3u;
   accumulator.negative_phase.volume = FE::Real{0.25};
   accumulator.positive_phase.owned_quadrature_point_count = 3u;
   accumulator.positive_phase.volume = FE::Real{0.25};
   if (parameters.prescribed_pressure_jump.has_value()) {
     accumulator.prescribed_pressure_jump_error_squared = FE::Real{0.0};
+  }
+  if (parameters.prescribed_viscous_traction_jump.has_value()) {
+    accumulator.prescribed_viscous_traction_jump_error_squared =
+        FE::Real{0.0};
+  }
+  if (parameters.prescribed_pressure_jump.has_value() ||
+      parameters.prescribed_viscous_traction_jump.has_value()) {
     accumulator.prescribed_stress_jump_residual_squared = FE::Real{0.0};
   }
   return FE::systems::AcceptedTwoFluidStageDiagnosticState{
@@ -1125,6 +1309,8 @@ TEST(IncompressibleTwoFluidModule,
   TwoFluidRegistrationFixture fixture;
   ns::IncompressibleTwoFluidOptions options;
   options.prescribed_pressure_jump = FE::Real{3.0};
+  options.prescribed_viscous_traction_jump =
+      std::array<FE::Real, 3>{{0.0, 2.0, 0.0}};
   auto module = fixture.makeModule(std::move(options));
   module.registerOn(fixture.system);
   fixture.system.setup({});
@@ -1179,6 +1365,11 @@ TEST(IncompressibleTwoFluidModule,
                   .front()
                   .state.diagnostics.prescribed_pressure_jump_error_squared
                   .has_value());
+  EXPECT_TRUE(
+      fixture.system.twoFluidAcceptedStageDiagnosticHistory()
+          .front()
+          .state.diagnostics
+          .prescribed_viscous_traction_jump_error_squared.has_value());
 
   ASSERT_NO_THROW(fixture.system.stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), states));
