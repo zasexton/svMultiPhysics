@@ -1,0 +1,342 @@
+{
+  "schema_version": 1,
+  "registry_id": "free_surface_wp10_literature_v1",
+  "status": "FROZEN_REFERENCE_CONTRACT",
+  "verified_date": "2026-08-31",
+  "work_package": "WP-10",
+  "qualification_campaign": "Q7",
+  "scope": "Primary-source identity, access state, quantitative provenance, applicability limits, and refinement requirements for the initial incompressible two-fluid benchmarks. This registry is not a physical qualification result.",
+  "sources": [
+    {
+      "id": "hysing_2009_bubble_benchmark",
+      "citation": {
+        "authors": [
+          "S. Hysing",
+          "S. Turek",
+          "D. Kuzmin",
+          "N. Parolini",
+          "E. Burman",
+          "S. Ganesan",
+          "L. Tobiska"
+        ],
+        "title": "Quantitative benchmark computations of two-dimensional bubble dynamics",
+        "journal": "International Journal for Numerical Methods in Fluids",
+        "volume": "60",
+        "pages": "1259-1288",
+        "year": 2009,
+        "doi": "10.1002/fld.1934",
+        "persistent_url": "https://doi.org/10.1002/fld.1934"
+      },
+      "asset": {
+        "status": "EXTERNALLY_PINNED",
+        "retrieval_url": "https://www.karlin.mff.cuni.cz/~hron/NMMO403/1934_ftp.pdf",
+        "filename": "hysing_2009_fld_1934.pdf",
+        "sha256": "2c849a2c135a152b268af25e9c5e91ee3c7aed4048d205e2b48a1222d1600794",
+        "bytes": 1336058,
+        "repository_path": null
+      },
+      "access": {
+        "license": "PUBLISHER_COPYRIGHT",
+        "redistribution": "NOT_INCLUDED",
+        "note": "The exact retrieved bytes are checksum-pinned outside the repository; this registry records only values needed for reproducible comparison."
+      },
+      "model_applicability": [
+        "two-dimensional",
+        "isothermal",
+        "incompressible",
+        "two immiscible Newtonian fluids",
+        "constant surface tension",
+        "gravity-driven rising bubble"
+      ],
+      "disposition": "EXECUTABLE_INTERCODE_REFERENCE"
+    },
+    {
+      "id": "prosperetti_1981_two_viscous_fluids",
+      "citation": {
+        "authors": [
+          "A. Prosperetti"
+        ],
+        "title": "Motion of two superposed viscous fluids",
+        "journal": "The Physics of Fluids",
+        "volume": "24",
+        "issue": "7",
+        "pages": "1217-1223",
+        "year": 1981,
+        "doi": "10.1063/1.863522",
+        "persistent_url": "https://doi.org/10.1063/1.863522",
+        "author_bibliography_url": "https://pages.jh.edu/aprospe1/publ.html"
+      },
+      "asset": {
+        "status": "SOURCE_ASSET_UNAVAILABLE",
+        "retrieval_url": null,
+        "filename": null,
+        "sha256": null,
+        "bytes": null,
+        "repository_path": null
+      },
+      "access": {
+        "license": "NO_REUSE_GRANT_RECORDED",
+        "redistribution": "NOT_INCLUDED",
+        "note": "Citation identity is verified through the DOI and the author's bibliography, but the source equations and numerical curves have not been pinned."
+      },
+      "model_applicability": [
+        "linear small-amplitude interface motion",
+        "two superposed incompressible viscous fluids",
+        "initial-value capillary-wave response"
+      ],
+      "disposition": "BLOCKED_QUANTITATIVE_GATE"
+    }
+  ],
+  "benchmarks": [
+    {
+      "id": "two_fluid_capillary_wave",
+      "reference_source": "prosperetti_1981_two_viscous_fluids",
+      "reference_location": null,
+      "setup": {
+        "geometry": "periodic planar interface",
+        "perturbation": "single small-amplitude Fourier mode",
+        "required_reported_quantities": [
+          "interface-mode amplitude",
+          "phase and frequency error",
+          "viscous decay rate",
+          "phasewise mass",
+          "total kinetic and surface energy"
+        ]
+      },
+      "gate_policy": "BLOCKED_UNTIL_SOURCE_PINNED",
+      "quantitative_gate": null,
+      "blocker": "Pin the primary source equations or an author-supplied reference curve, checksum the exact asset, and independently verify the curve generator before declaring numerical tolerances."
+    },
+    {
+      "id": "hysing_case_1",
+      "reference_source": "hysing_2009_bubble_benchmark",
+      "reference_location": "Table XII and pages 17-18",
+      "setup": {
+        "dimension": 2,
+        "domain": {
+          "x": [
+            0.0,
+            1.0
+          ],
+          "y": [
+            0.0,
+            2.0
+          ]
+        },
+        "initial_bubble": {
+          "center": [
+            0.5,
+            0.5
+          ],
+          "radius": 0.25
+        },
+        "boundary_conditions": {
+          "top_bottom": "no_slip",
+          "vertical_walls": "free_slip"
+        },
+        "final_time": 3.0,
+        "gravity": [
+          0.0,
+          -0.98
+        ],
+        "surrounding_fluid": {
+          "density": 1000.0,
+          "viscosity": 10.0
+        },
+        "bubble_fluid": {
+          "density": 100.0,
+          "viscosity": 1.0
+        },
+        "surface_tension": 24.5,
+        "dimensionless_groups": {
+          "reynolds": 35.0,
+          "eotvos": 10.0,
+          "density_ratio": 10.0,
+          "viscosity_ratio": 10.0
+        }
+      },
+      "published_group_values": {
+        "minimum_circularity": [
+          0.9013,
+          0.9011,
+          0.9013
+        ],
+        "minimum_circularity_time": [
+          1.9041,
+          1.875,
+          1.9
+        ],
+        "maximum_rise_velocity": [
+          0.2417,
+          0.2421,
+          0.2417
+        ],
+        "maximum_rise_velocity_time": [
+          0.9213,
+          0.9313,
+          0.9239
+        ],
+        "final_center_of_mass_y": [
+          1.0813,
+          1.0799,
+          1.0817
+        ]
+      },
+      "published_reference_bands": {
+        "minimum_circularity": {
+          "lower": 0.9011,
+          "upper": 0.9013
+        },
+        "final_center_of_mass_y": {
+          "lower": 1.08,
+          "upper": 1.082
+        },
+        "maximum_rise_velocity": {
+          "lower": 0.2417,
+          "upper": 0.2421
+        },
+        "maximum_rise_velocity_time": {
+          "lower": 0.921,
+          "upper": 0.932
+        }
+      },
+      "gate_policy": "FINEST_PAIR_INSIDE_PUBLISHED_BANDS"
+    },
+    {
+      "id": "hysing_case_2",
+      "reference_source": "hysing_2009_bubble_benchmark",
+      "reference_location": "Table XVI and pages 26-27",
+      "setup": {
+        "dimension": 2,
+        "domain": {
+          "x": [
+            0.0,
+            1.0
+          ],
+          "y": [
+            0.0,
+            2.0
+          ]
+        },
+        "initial_bubble": {
+          "center": [
+            0.5,
+            0.5
+          ],
+          "radius": 0.25
+        },
+        "boundary_conditions": {
+          "top_bottom": "no_slip",
+          "vertical_walls": "free_slip"
+        },
+        "final_time": 3.0,
+        "gravity": [
+          0.0,
+          -0.98
+        ],
+        "surrounding_fluid": {
+          "density": 1000.0,
+          "viscosity": 10.0
+        },
+        "bubble_fluid": {
+          "density": 1.0,
+          "viscosity": 0.1
+        },
+        "surface_tension": 1.96,
+        "dimensionless_groups": {
+          "reynolds": 35.0,
+          "eotvos": 125.0,
+          "density_ratio": 1000.0,
+          "viscosity_ratio": 100.0
+        }
+      },
+      "pre_breakup_gate": {
+        "first_rise_velocity_maximum": {
+          "lower": 0.24,
+          "upper": 0.26
+        },
+        "first_rise_velocity_maximum_time": {
+          "lower": 0.71,
+          "upper": 0.75
+        }
+      },
+      "published_post_breakup_intercode_values": {
+        "minimum_circularity": [
+          0.5869,
+          0.4647,
+          0.5144
+        ],
+        "minimum_circularity_time": [
+          2.4004,
+          3.0,
+          3.0
+        ],
+        "second_rise_velocity_maximum": [
+          0.2434,
+          0.244,
+          0.2393
+        ],
+        "second_rise_velocity_maximum_time": [
+          2.0705,
+          1.9844,
+          2.06
+        ],
+        "final_center_of_mass_y": [
+          1.138,
+          1.1249,
+          1.1376
+        ]
+      },
+      "post_breakup_policy": "REPORT_INTERCODE_RANGE_ONLY",
+      "post_breakup_shape_gate": null,
+      "gate_policy": "PRE_BREAKUP_METRICS_ONLY"
+    }
+  ],
+  "common_refinement_contract": {
+    "spatial_levels": [
+      40,
+      80,
+      160
+    ],
+    "spatial_level_semantics": "uniform cells across the unit-width domain",
+    "temporal_levels": [
+      0.005,
+      0.0025,
+      0.00125
+    ],
+    "fixed_space_temporal_study": 160,
+    "fixed_time_spatial_study": 0.00125,
+    "cut_offset_fractions": [
+      0.0,
+      0.173,
+      0.371
+    ],
+    "interface_rotations_degrees": [
+      0.0,
+      17.0,
+      37.0
+    ],
+    "material_side_reversal": [
+      false,
+      true
+    ],
+    "mpi_ranks": [
+      1,
+      2,
+      4
+    ],
+    "raw_and_post_maintenance_histories_required": true,
+    "required_provenance": [
+      "source_revision",
+      "source_status_hash",
+      "compiler_and_libraries",
+      "mesh_checksum",
+      "reference_asset_checksum",
+      "dimensional_parameters",
+      "dimensionless_groups",
+      "solver_options",
+      "rank_and_thread_count",
+      "acceptance_thresholds"
+    ]
+  }
+}
