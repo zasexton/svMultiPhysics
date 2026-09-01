@@ -758,7 +758,7 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
 }
 
 TEST(LevelSetActiveSideVertexDirichletConstraint,
-     RetainedCutAdjacentFacetSupportKeepsGhostFacetDofsActive)
+     RetainedCutAdjacentFacetSupportKeepsBothP1CellsActiveForGradientJump)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
     GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -821,21 +821,24 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
 
     EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 0)));
     EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 1)));
-    EXPECT_TRUE(system.constraints().isConstrained(vertexDof(system, pressure, 2)));
+    EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 2)));
     EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 3)));
     EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 4)));
-    EXPECT_TRUE(system.constraints().isConstrained(vertexDof(system, pressure, 5)));
+    EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 5)));
     EXPECT_NE(log_output.find(
                   "support_mode=retained_cut_volume+cut_adjacent_facets"),
               std::string::npos);
     EXPECT_NE(log_output.find(
                   "active_support_cells_from_cut_adjacent_facets=1"),
               std::string::npos);
+    EXPECT_NE(log_output.find("active_support_vertices=6"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("inactive_vertices=0"), std::string::npos);
 #endif
 }
 
 TEST(LevelSetActiveSideVertexDirichletConstraint,
-     CutAdjacentFacetSupportConstrainsDryOnlyP2Dofs)
+     CutAdjacentFacetSupportKeepsBothP2CellsActiveForGradientJump)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
     GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -913,7 +916,7 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
             continue;
         }
         ++dry_only_dofs;
-        EXPECT_TRUE(system.constraints().isConstrained(offset + local_dof));
+        EXPECT_FALSE(system.constraints().isConstrained(offset + local_dof));
     }
     EXPECT_GT(dry_only_dofs, 0u);
 
@@ -921,7 +924,7 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
         entity->getCellInteriorDofs(/*cell_id=*/1);
     ASSERT_FALSE(dry_cell_interior_dofs.empty());
     for (const auto local_dof : dry_cell_interior_dofs) {
-        EXPECT_TRUE(system.constraints().isConstrained(offset + local_dof));
+        EXPECT_FALSE(system.constraints().isConstrained(offset + local_dof));
     }
 
     EXPECT_NE(log_output.find(
@@ -930,12 +933,13 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
     EXPECT_NE(log_output.find(
                   "active_support_cells_from_cut_adjacent_facets=1"),
               std::string::npos);
-    EXPECT_NE(log_output.find("inactive_cell_dofs=1"), std::string::npos);
+    EXPECT_NE(log_output.find("inactive_dofs=0"), std::string::npos);
+    EXPECT_NE(log_output.find("inactive_cell_dofs=0"), std::string::npos);
 #endif
 }
 
 TEST(LevelSetActiveSideVertexDirichletConstraint,
-     SmallCutAdjacentFacetSupportKeepsHighOrderSharedFacetDofsActive)
+     SmallCutAdjacentFacetSupportKeepsBothP3QuadCellsActiveForGradientJump)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
     GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -1020,7 +1024,7 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
             continue;
         }
         ++dry_only_dofs;
-        EXPECT_TRUE(system.constraints().isConstrained(offset + local_dof));
+        EXPECT_FALSE(system.constraints().isConstrained(offset + local_dof));
     }
     EXPECT_GT(dry_only_dofs, 0u);
 
@@ -1030,11 +1034,14 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
     EXPECT_NE(log_output.find(
                   "active_support_cells_from_cut_adjacent_facets=1"),
               std::string::npos);
+    EXPECT_NE(log_output.find("inactive_dofs=0"), std::string::npos);
+    EXPECT_NE(log_output.find("inactive_edge_dofs=0"), std::string::npos);
+    EXPECT_NE(log_output.find("inactive_cell_dofs=0"), std::string::npos);
 #endif
 }
 
 TEST(LevelSetActiveSideVertexDirichletConstraint,
-     SmallCutAdjacentFacetSupportKeepsP3TetraSharedFaceDofsActive)
+     SmallCutAdjacentFacetSupportKeepsBothP3TetraCellsActiveForGradientJump)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
     GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -1117,13 +1124,9 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
             continue;
         }
         ++dry_only_dofs;
-        EXPECT_TRUE(system.constraints().isConstrained(offset + local_dof));
+        EXPECT_FALSE(system.constraints().isConstrained(offset + local_dof));
     }
     EXPECT_EQ(dry_only_dofs, 10u);
-    EXPECT_EQ(expectInactiveEdgeDofsConstrained(system, pressure, active_support),
-              6u);
-    EXPECT_EQ(expectInactiveFaceDofsConstrained(system, pressure, active_support),
-              3u);
     EXPECT_TRUE(entity->getCellInteriorDofs(/*cell_id=*/1).empty());
 
     EXPECT_NE(log_output.find(
@@ -1132,9 +1135,10 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
     EXPECT_NE(log_output.find(
                   "active_support_cells_from_cut_adjacent_facets=1"),
               std::string::npos);
-    EXPECT_NE(log_output.find("active_support_face_dofs=4"), std::string::npos);
-    EXPECT_NE(log_output.find("inactive_edge_dofs=6"), std::string::npos);
-    EXPECT_NE(log_output.find("inactive_face_dofs=3"), std::string::npos);
+    EXPECT_NE(log_output.find("active_support_face_dofs=7"), std::string::npos);
+    EXPECT_NE(log_output.find("inactive_dofs=0"), std::string::npos);
+    EXPECT_NE(log_output.find("inactive_edge_dofs=0"), std::string::npos);
+    EXPECT_NE(log_output.find("inactive_face_dofs=0"), std::string::npos);
     EXPECT_NE(log_output.find("inactive_cell_dofs=0"), std::string::npos);
 #endif
 }
