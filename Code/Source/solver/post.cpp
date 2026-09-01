@@ -1011,8 +1011,8 @@ void post(Simulation* simulation, const mshType& lM, Array<double>& res, const S
           }
         }
 
-      // Darcy Flux calculation
-      // 
+      // Darcy flux, derived from pressure:
+      // q = -(K/mu) grad(p).
       } else if (outGrp == OutputNameType::outGrp_darcyFlux) {
         const double permeability =
             eq.dmn[cDmn].prop[PhysicalPropertyType::darcy_permeability];
