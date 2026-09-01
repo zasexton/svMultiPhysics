@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "record_id": "free_surface_wp10_pressure_jump_v1_20260901_41581461",
+  "outcome": "PASS",
+  "scope": "incompressible_two_fluid_stationary_planar_prescribed_pressure_jump_prerequisite",
+  "accepted_claim": "planar_pressure_jump_prerequisite",
+  "source": {
+    "commit": "fed44f91f0e7aca24ec49ed499dc06d738e994f0",
+    "tracked_clean": true,
+    "tracked_source_sha256": "3c0ef392002ea989cad202e21f8ba5891ad556e9df08e3fb375c90a987500d34",
+    "solver_sha256": "ccd13717b9acc3471dfea8659af3647390a6f750a3f4a5ce94281deaded075aa",
+    "cmake_cache_sha256": "e55d6b8d8e6f0f8f281b3c717ced2c120c8b44701f8e096520d0b0223e6ea66d",
+    "matrix_sha256": "be5be7bd25d91a1fa9e9cf66835ea84af4892bdb4230b28b1b2b50458e885b23",
+    "runner_sha256": "ac8852afbe26cf6a59402450cbdc7f5e7a15ef08197ee504aac09518ed6fd2e8",
+    "constant_state_runner_sha256": "b899c9415d2800adf10a568e0e384139b05137c0ee86e518de5601c57672a5ca",
+    "matrix_and_runners_tracked_in_commit": true,
+    "matrix_and_runners_match_commit": true
+  },
+  "scheduler": {
+    "job_id": 41581461,
+    "partition": "amarsden",
+    "account": "amarsden",
+    "state": "COMPLETED",
+    "exit_code": "0:0",
+    "elapsed": "00:02:03",
+    "nodes": 1,
+    "allocated_cpus": 8,
+    "requested_memory": "16G",
+    "batch_max_rss_kib": 965120,
+    "batch_max_vm_size_kib": 703476
+  },
+  "prerequisite_regressions": [
+    {
+      "id": "pressure_jump_runner_harness",
+      "test_count": 14,
+      "outcome": "PASS"
+    },
+    {
+      "id": "focused_constraint_suite",
+      "test_count": 4,
+      "outcome": "PASS"
+    },
+    {
+      "id": "complete_constraint_suite",
+      "test_count": 16,
+      "outcome": "PASS"
+    },
+    {
+      "id": "two_fluid_physics_suite",
+      "test_count": 26,
+      "outcome": "PASS"
+    }
+  ],
+  "matrix": {
+    "matrix_id": "free_surface_wp10_pressure_jump_v1",
+    "status": "FROZEN_BEFORE_EXECUTION",
+    "case_count": 12,
+    "passed_case_count": 12,
+    "per_case_check_count": 84,
+    "passed_case_check_count": 1008,
+    "reversal_pair_count": 6,
+    "passed_reversal_check_count": 72,
+    "failed_case_ids": [],
+    "failed_reversal_checks": [],
+    "serial_case_count": 8,
+    "two_rank_case_count": 4,
+    "negative_sign_case_count": 6,
+    "positive_sign_case_count": 6,
+    "interface_orientations": [
+      "x",
+      "y",
+      "x_plus_y",
+      "x_minus_y"
+    ],
+    "pressure_jump_signs": [
+      "negative",
+      "positive"
+    ],
+    "maximum_density_ratio": 10000.0,
+    "ghost_layers": 8
+  },
+  "quantitative_evidence": {
+    "maximum_nonlinear_iterations": 0,
+    "maximum_linear_iterations": 0,
+    "maximum_velocity_jump_squared": 0.0,
+    "maximum_normal_flux_jump": 0.0,
+    "maximum_pressure_jump_absolute_error": 8.881784197001252e-16,
+    "maximum_prescribed_pressure_error_squared": 2.17545469242947e-31,
+    "maximum_prescribed_stress_residual_squared": 2.1754546924294694e-31,
+    "maximum_negative_phase_kinetic_energy": 0.0,
+    "maximum_positive_phase_kinetic_energy": 0.0,
+    "maximum_phase_geometry_measure_mismatch": 3.3306690738754696e-16,
+    "maximum_phase_geometry_nodal_moment_mismatch": 6.938893903907228e-18,
+    "minimum_interface_quadrature_points": 16,
+    "minimum_phase_quadrature_points": 68,
+    "pressure_jump_absolute_threshold": 5.0e-12,
+    "pressure_moment_absolute_threshold": 5.0e-11,
+    "traction_moment_absolute_threshold": 5.0e-11,
+    "prescribed_pressure_error_squared_threshold": 5.0e-22,
+    "prescribed_stress_error_squared_threshold": 5.0e-22,
+    "side_reversal_threshold": 5.0e-12
+  },
+  "artifacts": {
+    "preflight_sha256": "c514080bffb22ff2a02a9f5760e8c6f3722285323ae5836577621d4bd0b41659",
+    "summary_sha256": "a52fdc171a0175bd186bd69b11dcf35bb93290d3cbc8733c8817fd027523405b",
+    "checksums_sha256": "4910b51e4e232ce8f1fdc6ab4de2919d191d46575b2d67b0d4daabef687d2dc0",
+    "recorded_checksum_count": 87,
+    "all_recorded_checksums_verified": true
+  },
+  "closure": {
+    "fsr08_closed": false,
+    "wp10_closed": false,
+    "q7_closed": false
+  },
+  "required_later_progression": [
+    "planar_viscous_traction_jump",
+    "two_fluid_hydrostatics",
+    "static_drop",
+    "both_phase_mass_and_flux_reconciliation",
+    "high_ratio_conditioning_refinement",
+    "two_fluid_capillary_wave",
+    "hysing_case_1",
+    "rising_bubble_experimental_comparison",
+    "hysing_case_2_intercode_range",
+    "gas_sensitive_model_before_gas_sensitive_claims"
+  ],
+  "interpretation": "This record qualifies only exact stationary planar prescribed-pressure-jump balance in the frozen incompressible two-fluid envelope. It does not qualify a viscous jump, moving interface, WP-10 closure, FSR-08 closure, or Q7 closure."
+}
