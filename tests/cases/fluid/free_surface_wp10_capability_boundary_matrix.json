@@ -1,29 +1,42 @@
 {
-  "schema_version": 2,
-  "matrix_id": "free_surface_wp10_capability_boundary_v4",
+  "schema_version": 3,
+  "matrix_id": "free_surface_wp10_capability_boundary_v5",
   "status": "FROZEN_CAPABILITY_BOUNDARY",
   "work_package": "WP-10",
   "finding": "FSR-08",
   "qualification_campaign": "Q7",
   "architecture_record": "Documentation/free_surface_wp10_physical_capability_boundary.md",
-  "model_envelope": "one_phase_incompressible_liquid_with_prescribed_exterior_pressure",
+  "model_envelope": "one_phase_supported_and_incompressible_two_fluid_staged_unqualified",
   "current_capability_boundary": {
-    "artifact_schema_version": 4,
-    "momentum_capability_label": "one_phase_liquid_sharp_interface",
-    "physical_model_name": "one_phase_liquid_prescribed_exterior_pressure",
-    "legacy_physical_model": null,
+    "capability_boundary_schema_version": 5,
+    "one_phase_momentum_artifact_schema_version": 4,
+    "two_fluid_momentum_artifact_schema_version": 3,
+    "level_set_transport_artifact_schema_version": 3,
+    "momentum_capability_labels": [
+      "one_phase_liquid_sharp_interface",
+      "incompressible_two_phase_sharp_interface_initial_envelope"
+    ],
+    "physical_model_names": [
+      "one_phase_liquid_prescribed_exterior_pressure",
+      "incompressible_two_fluid"
+    ],
+    "legacy_one_phase_physical_model": null,
     "transport_capability_labels": [
       "one_phase_interface_transport_nonlocal_conservation",
-      "one_phase_locally_conservative_p1_indicator_transport"
+      "one_phase_locally_conservative_p1_indicator_transport",
+      "two_phase_material_interface_transport"
     ],
-    "liquid_velocity_field_count": 1,
-    "liquid_pressure_field_count": 1,
-    "material_density_state_count": 1,
-    "material_viscosity_state_count": 1,
-    "exterior_state": "prescribed_scalar_traction_reference",
-    "exterior_momentum_solved": false,
-    "exterior_pressure_field_solved": false,
-    "incompressible_two_fluid_implemented": false,
+    "one_phase_velocity_field_count": 1,
+    "one_phase_pressure_field_count": 1,
+    "two_fluid_velocity_field_count": 2,
+    "two_fluid_pressure_field_count": 2,
+    "two_fluid_density_state_count": 2,
+    "two_fluid_viscosity_state_count": 2,
+    "one_phase_exterior_state": "prescribed_scalar_traction_reference",
+    "one_phase_exterior_momentum_solved": false,
+    "one_phase_exterior_pressure_field_solved": false,
+    "incompressible_two_fluid_implemented": true,
+    "incompressible_two_fluid_qualified": false,
     "gas_dynamics_implemented": false,
     "wp10_closure_claimed": false,
     "q7_closure_claimed": false
@@ -136,7 +149,7 @@
       ]
     },
     {
-      "id": "unsupported_scope_containment",
+      "id": "one_phase_subguard_containment",
       "path": "tests/cases/fluid/free_surface_one_phase_scope_guard.py",
       "required_fragments": [
         "\"twophase\"",
@@ -151,6 +164,91 @@
         "def validate_config_mapping(",
         "def validate_mapping_wrapper_pairs(",
         "def validate_xml_scope_subtree("
+      ],
+      "forbidden_fragments": []
+    },
+    {
+      "id": "incompressible_two_fluid_module",
+      "path": "Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleTwoFluidModule.cpp",
+      "required_fragments": [
+        "out << \"{\\\"artifact_schema_version\\\":3\"",
+        "incompressible_two_phase_sharp_interface_initial_envelope",
+        "phasewise_vms_pspg",
+        "separate_phase_fields",
+        "generic_fallback_allowed",
+        "complementary_weighted_every_node",
+        "phasewise_fail_closed_no_hidden_velocity_update",
+        "shared_coupled_nonlinear_linear_report",
+        "validateIncompressibleTwoFluidConfigurationSemantics(",
+        "system.declareTwoFluidAcceptedStageDiagnostics("
+      ],
+      "forbidden_fragments": []
+    },
+    {
+      "id": "incompressible_two_fluid_interface",
+      "path": "Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleTwoFluidInterface.cpp",
+      "required_fragments": [
+        "IncompressibleTwoFluidInterfaceWeights incompressibleTwoFluidInterfaceWeights(",
+        ".negative_traction = viscosity_pair.second_fraction",
+        ".positive_traction = viscosity_pair.first_fraction",
+        "negative_viscous_traction",
+        "positive_viscous_traction",
+        "forms.prescribed_pressure_jump",
+        "forms.residual = forms.residual + forms.prescribed_pressure_jump"
+      ],
+      "forbidden_fragments": []
+    },
+    {
+      "id": "incompressible_two_fluid_registration",
+      "path": "Code/Source/solver/Physics/Formulations/NavierStokes/NavierStokesRegister.cpp",
+      "required_fragments": [
+        "translate_incompressible_two_fluid_input(",
+        "reject_unsupported_two_fluid_equation_parameters(",
+        "reject_unsupported_two_fluid_default_domain_parameters(",
+        "reject_unsupported_two_fluid_boundary_parameters(",
+        "preflightTwoFluidTranslationBeforeMutation(",
+        "validateIncompressibleTwoFluidConfigurationSemantics(options)",
+        "preRegisterIncompressibleTwoFluidDependencyFields("
+      ],
+      "forbidden_fragments": []
+    },
+    {
+      "id": "two_fluid_application_builder",
+      "path": "Code/Source/solver/Application/Core/SimulationBuilder.cpp",
+      "required_fragments": [
+        "preflightAndPreRegisterTwoFluidMaterialInterfaceDependencies(",
+        "requireTwoFluidMaterialInterfaceSolverEnvelope(",
+        "preRegisterIncompressibleTwoFluidDependencyFields(",
+        "registeredFieldCount() != 6u",
+        "TwoFluidMaterialInterfaceComputationalPrimary",
+        "TwoFluidPressureConstraints",
+        "requireTwoFluidMaterialInterfaceSolverLayout("
+      ],
+      "forbidden_fragments": []
+    },
+    {
+      "id": "two_fluid_level_set_transport",
+      "path": "Code/Source/solver/FE/LevelSet/LevelSetTransport.cpp",
+      "required_fragments": [
+        "LevelSetVelocitySource::MaterialInterfacePhasePair",
+        "material-interface phase-pair velocity requires an existing level-set field",
+        "requireMaterialInterfaceVelocityDeclaration(",
+        "materialInterfaceTransportVelocityDeclarations()",
+        "momentum_relative_tolerance"
+      ],
+      "forbidden_fragments": []
+    },
+    {
+      "id": "two_fluid_accepted_stage_telemetry",
+      "path": "Code/Source/solver/FE/Systems/FESystem.cpp",
+      "required_fragments": [
+        "stageTwoFluidAcceptedStageDiagnostics(",
+        "bindPendingTwoFluidAcceptedStageNumerics(",
+        "discardPendingTwoFluidAcceptedStageDiagnostics()",
+        "commitPendingTwoFluidAcceptedStageDiagnostics(",
+        "not_individually_resolved_by_shared_coupled_backend",
+        "pressure_stabilization_work=unavailable",
+        "phase_iteration_scope=shared_coupled_solve"
       ],
       "forbidden_fragments": []
     }
@@ -362,96 +460,163 @@
         "memory_mib": 2048,
         "output_mib": 64
       }
+    },
+    {
+      "id": "two_fluid_material_interface_transport_serial",
+      "binary_argument": "fe_binary",
+      "tests": [
+        "MaterialInterfaceTransportVelocity.SelectsSharpBulkValuesAndTheComplementaryTrace",
+        "LevelSetTransport.MaterialInterfacePhasePairUsesComplementaryCutVolumesAndTrace",
+        "LevelSetTransport.MaterialInterfacePhasePairFailsBeforeConservativeFieldMutation",
+        "LevelSetTransport.MaterialInterfacePhasePairRejectsUnsupportedModesBeforeMutation",
+        "LevelSetTransport.ConservativePhaseConfigurationFailsBeforeFieldMutation"
+      ],
+      "execution": {
+        "wall_time_seconds": 300,
+        "memory_mib": 2048,
+        "output_mib": 64
+      }
+    },
+    {
+      "id": "incompressible_two_fluid_core_serial",
+      "binary_argument": "physics_binary",
+      "tests": [
+        "IncompressibleTwoFluidInterface.ViscosityWeightsAreComplementaryAndSideReversalInvariant",
+        "IncompressibleTwoFluidInterface.PrescribedPlanarPressureJumpUsesBothComplementaryTestTraces",
+        "IncompressibleTwoFluidDiagnostics.EvaluatesRawInterfaceAndPhaseMeasuresOnOneSnapshot",
+        "IncompressibleTwoFluidModule.RegistersFourPhaseFieldsOneInterfaceBlockAndOneSharedGauge",
+        "IncompressibleTwoFluidModule.AcceptedStageHistoryDiscardsRejectsAndReplaysExactly",
+        "IncompressibleTwoFluidModule.RejectsUnsupportedConfigurationSemanticsBeforeMutation",
+        "IncompressibleTwoFluidModule.RejectsSpacesOutsideAffineSimplexEnvelopeBeforeMutation"
+      ],
+      "execution": {
+        "wall_time_seconds": 300,
+        "memory_mib": 4096,
+        "output_mib": 128
+      }
+    },
+    {
+      "id": "incompressible_two_fluid_application_serial",
+      "binary_argument": "application_binary",
+      "tests": [
+        "EquationTranslatorFreeSurface.XmlIncompressibleTwoFluidRejectsDuplicateOperatorTagAliasesBeforeMutation",
+        "EquationTranslatorFreeSurface.XmlIncompressibleTwoFluidRejectsDuplicatePressureJumpAliasesBeforeMutation",
+        "EquationTranslatorFreeSurface.XmlIncompressibleTwoFluidRejectsLegacyBodyForceBlockBeforeMutation",
+        "EquationTranslatorFreeSurface.XmlIncompressibleTwoFluidRejectsOnePhaseDomainControlsBeforeMutation",
+        "EquationTranslatorFreeSurface.XmlIncompressibleTwoFluidRejectsOutputBlocksBeforeMutation",
+        "EquationTranslatorFreeSurface.XmlIncompressibleTwoFluidRejectsUnusedBoundaryControlsBeforeMutation",
+        "EquationTranslatorFreeSurface.XmlIncompressibleTwoFluidRejectsUnusedEquationControlsBeforeMutation",
+        "EquationTranslatorFreeSurface.XmlIncompressibleTwoFluidRejectsUnusedNestedBlocksBeforeMutation",
+        "EquationTranslatorFreeSurface.XmlIncompressibleTwoFluidRequiresEveryMaterialCoefficientBeforeMutation",
+        "EquationTranslatorFreeSurface.XmlIncompressibleTwoFluidSelectsDedicatedModule",
+        "LevelSetEquationTranslator.TranslatesMaterialInterfacePhasePairVelocity",
+        "OpenVesselExamples.SimulationDependencyPreflightResolvesTwoFluidMaterialInterfaceInEitherOrder",
+        "OpenVesselExamples.SimulationBuilderBuildsCompleteTwoFluidMaterialInterfaceSystem",
+        "OpenVesselExamples.MaterialInterfaceDependencyPreflightRejectsNonhomogeneousVelocityBoundaryBeforeMutation",
+        "OpenVesselExamples.MaterialInterfaceDependencyPreflightRejectsDuplicateVelocityBoundaryBeforeMutation",
+        "OpenVesselExamples.MaterialInterfaceDependencyPreflightRejectsNonfiniteBodyForceBeforeMutation",
+        "OpenVesselExamples.MaterialInterfaceDependencyPreflightRejectsNonfinitePressureJumpBeforeMutation",
+        "OpenVesselExamples.MaterialInterfaceDependencyPreflightRejectsSolverEnvelopeBeforeMutation",
+        "ApplicationDriverConservativePhaseVelocity.SamplesTheDeclaredCommonInterfaceVelocityAtEveryGraphNode",
+        "ApplicationDriverTwoFluidAcceptedStageTelemetry.ExactEntryConvergenceMarksTheUnattemptedLinearSolveConverged"
+      ],
+      "execution": {
+        "wall_time_seconds": 300,
+        "memory_mib": 4096,
+        "output_mib": 128
+      }
     }
   ],
-  "unimplemented_wp10_requirements": [
+  "staged_wp10_capabilities": [
     {
       "id": "phasewise_density_and_viscosity",
-      "status": "REQUIRED_NOT_IMPLEMENTED"
+      "status": "STAGED_UNQUALIFIED"
     },
     {
       "id": "both_phase_fields_or_stable_one_field_jump_formulation",
-      "status": "REQUIRED_NOT_IMPLEMENTED"
+      "status": "STAGED_UNQUALIFIED"
     },
     {
       "id": "interface_velocity_and_stress_conditions",
-      "status": "REQUIRED_NOT_IMPLEMENTED"
+      "status": "STAGED_UNQUALIFIED"
     },
     {
       "id": "pressure_jump_space_treatment",
-      "status": "REQUIRED_NOT_IMPLEMENTED"
+      "status": "STAGED_UNQUALIFIED"
     },
     {
       "id": "both_phase_stabilization",
-      "status": "REQUIRED_NOT_IMPLEMENTED"
+      "status": "STAGED_UNQUALIFIED"
     },
     {
       "id": "phasewise_mass_conservation",
-      "status": "REQUIRED_NOT_IMPLEMENTED"
+      "status": "STAGED_UNQUALIFIED"
     },
     {
       "id": "phase_flux_momentum_flux_consistency",
-      "status": "REQUIRED_NOT_IMPLEMENTED"
+      "status": "STAGED_UNQUALIFIED"
     },
     {
       "id": "high_density_ratio_robust_solver",
-      "status": "REQUIRED_NOT_IMPLEMENTED"
-    },
+      "status": "STAGED_UNQUALIFIED"
+    }
+  ],
+  "deferred_gas_requirements": [
     {
       "id": "gas_dynamics_and_thermodynamic_closure",
-      "status": "REQUIRED_NOT_IMPLEMENTED"
+      "status": "NOT_IMPLEMENTED_OUTSIDE_INCOMPRESSIBLE_WP10"
     }
   ],
   "blocked_wp10_qualification_exits": [
     {
       "id": "planar_pressure_jump",
-      "status": "BLOCKED_BY_MISSING_IMPLEMENTATION"
+      "status": "BLOCKED_BY_MISSING_QUALIFICATION"
     },
     {
       "id": "planar_viscous_jump",
-      "status": "BLOCKED_BY_MISSING_IMPLEMENTATION"
+      "status": "BLOCKED_BY_MISSING_QUALIFICATION"
     },
     {
       "id": "two_fluid_hydrostatics",
-      "status": "BLOCKED_BY_MISSING_IMPLEMENTATION"
+      "status": "BLOCKED_BY_MISSING_QUALIFICATION"
     },
     {
       "id": "static_drop",
-      "status": "BLOCKED_BY_MISSING_IMPLEMENTATION"
+      "status": "BLOCKED_BY_MISSING_QUALIFICATION"
     },
     {
       "id": "material_side_reversal",
-      "status": "BLOCKED_BY_MISSING_IMPLEMENTATION"
+      "status": "BLOCKED_BY_MISSING_QUALIFICATION"
     },
     {
       "id": "both_phase_mass",
-      "status": "BLOCKED_BY_MISSING_IMPLEMENTATION"
+      "status": "BLOCKED_BY_MISSING_QUALIFICATION"
     },
     {
       "id": "high_density_ratio_conditioning",
-      "status": "BLOCKED_BY_MISSING_IMPLEMENTATION"
+      "status": "BLOCKED_BY_MISSING_QUALIFICATION"
     },
     {
       "id": "phase_and_momentum_flux_consistency",
-      "status": "BLOCKED_BY_MISSING_IMPLEMENTATION"
+      "status": "BLOCKED_BY_MISSING_QUALIFICATION"
     }
   ],
   "blocked_q7_progression": [
     {
       "id": "hysing_case_1",
-      "status": "BLOCKED_BY_WP10"
+      "status": "BLOCKED_BY_WP10_QUALIFICATION"
     },
     {
       "id": "two_fluid_capillary_waves",
-      "status": "BLOCKED_BY_WP10"
+      "status": "BLOCKED_BY_WP10_QUALIFICATION"
     },
     {
       "id": "rising_bubble",
-      "status": "BLOCKED_BY_WP10"
+      "status": "BLOCKED_BY_WP10_QUALIFICATION"
     },
     {
       "id": "hysing_case_2_intercode_range",
-      "status": "BLOCKED_BY_WP10"
+      "status": "BLOCKED_BY_WP10_QUALIFICATION"
     },
     {
       "id": "air_cushioning",
@@ -482,7 +647,7 @@
     "late_atomization"
   ],
   "closure_request_policy": {
-    "accepted_claim": "one_phase_capability_boundary",
+    "accepted_claim": "staged_two_fluid_capability_boundary",
     "rejected_claims": [
       "fsr08_closure",
       "wp10_closure",
@@ -490,7 +655,7 @@
       "incompressible_two_fluid_qualification",
       "gas_sensitive_qualification"
     ],
-    "diagnostic": "This matrix verifies only the explicit new-OOP Navier-Stokes one-phase model boundary. Legacy-solver input, the two-fluid and gas formulations, and every physical WP-10/Q7 exit are outside this evidence."
+    "diagnostic": "This matrix verifies the explicit one-phase boundary and the staged incompressible two-fluid core envelope. Legacy-solver input, physical two-fluid qualification, gas formulation, and every WP-10/Q7 closure claim are outside this evidence."
   },
-  "qualification_scope": "New-OOP Navier-Stokes explicit one-phase capability labeling and unsupported-scope containment only; legacy-solver input is outside this evidence. This matrix does not close FSR-08, WP-10, or Q7 and does not qualify any two-fluid or gas-sensitive phenomenon."
+  "qualification_scope": "Explicit one-phase capability labeling and its supplemental one-phase subguard, plus the staged new-OOP incompressible two-fluid core envelope. Legacy-solver input is outside this evidence. This matrix does not close FSR-08, WP-10, or Q7 and does not qualify any two-fluid or gas-sensitive phenomenon."
 }

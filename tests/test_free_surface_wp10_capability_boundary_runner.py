@@ -54,8 +54,23 @@ def test_canonical_boundary_is_strict_and_explicitly_open(tmp_path):
     guard = runner.validate_scope_guard_contract(matrix, ROOT)
 
     assert matrix["status"] == "FROZEN_CAPABILITY_BOUNDARY"
-    assert matrix["matrix_id"] == "free_surface_wp10_capability_boundary_v4"
-    assert matrix["current_capability_boundary"]["artifact_schema_version"] == 4
+    assert matrix["matrix_id"] == "free_surface_wp10_capability_boundary_v5"
+    assert matrix["schema_version"] == 3
+    assert (
+        matrix["current_capability_boundary"]
+        ["capability_boundary_schema_version"]
+        == 5
+    )
+    assert (
+        matrix["current_capability_boundary"]
+        ["incompressible_two_fluid_implemented"]
+        is True
+    )
+    assert (
+        matrix["current_capability_boundary"]
+        ["incompressible_two_fluid_qualified"]
+        is False
+    )
     assert matrix["current_capability_boundary"]["wp10_closure_claimed"] is False
     assert matrix["current_capability_boundary"]["q7_closure_claimed"] is False
     momentum_check = next(
@@ -92,14 +107,49 @@ def test_canonical_boundary_is_strict_and_explicitly_open(tmp_path):
         "OpenVesselExamples."
         "SimulationBuilderPreflightsFittedCapabilityBeforeWetExtensionMutation"
     ) in application_group["tests"]
+    two_fluid_module = next(
+        check
+        for check in matrix["source_checks"]
+        if check["id"] == "incompressible_two_fluid_module"
+    )
+    for fragment in (
+        'out << "{\\"artifact_schema_version\\":3"',
+        "incompressible_two_phase_sharp_interface_initial_envelope",
+        "complementary_weighted_every_node",
+        "phasewise_fail_closed_no_hidden_velocity_update",
+        "shared_coupled_nonlinear_linear_report",
+        "generic_fallback_allowed",
+    ):
+        assert fragment in two_fluid_module["required_fragments"]
+    fe_group = next(
+        group
+        for group in matrix["groups"]
+        if group["id"] == "two_fluid_material_interface_transport_serial"
+    )
+    assert fe_group["binary_argument"] == "fe_binary"
+    assert (
+        "MaterialInterfaceTransportVelocity."
+        "SelectsSharpBulkValuesAndTheComplementaryTrace"
+    ) in fe_group["tests"]
+    assert (
+        "LevelSetTransport."
+        "MaterialInterfacePhasePairFailsBeforeConservativeFieldMutation"
+    ) in fe_group["tests"]
+    staged = matrix["staged_wp10_capabilities"]
     assert all(
-        entry["status"] == "REQUIRED_NOT_IMPLEMENTED"
-        for entry in matrix["unimplemented_wp10_requirements"]
+        entry["status"] == "STAGED_UNQUALIFIED"
+        for entry in staged
     )
     assert all(
-        entry["status"] == "BLOCKED_BY_MISSING_IMPLEMENTATION"
+        entry["status"] == "BLOCKED_BY_MISSING_QUALIFICATION"
         for entry in matrix["blocked_wp10_qualification_exits"]
     )
+    assert matrix["deferred_gas_requirements"] == [
+        {
+            "id": "gas_dynamics_and_thermodynamic_closure",
+            "status": "NOT_IMPLEMENTED_OUTSIDE_INCOMPRESSIBLE_WP10",
+        }
+    ]
     assert guard["diagnostic"] == ("unsupported_two_phase_or_jump_free_surface_scope")
     assert guard["accepted_case_count"] == 3
     assert guard["rejected_case_count"] == 21
@@ -211,15 +261,15 @@ def test_unknown_claim_is_rejected():
     [
         (
             lambda matrix: matrix["current_capability_boundary"].__setitem__(
-                "incompressible_two_fluid_implemented", True
+                "incompressible_two_fluid_implemented", False
             ),
             "current capability boundary changed",
         ),
         (
-            lambda matrix: matrix["unimplemented_wp10_requirements"][0].__setitem__(
-                "status", "IMPLEMENTED"
+            lambda matrix: matrix["staged_wp10_capabilities"][0].__setitem__(
+                "status", "QUALIFIED"
             ),
-            "invalid unimplemented WP-10 requirements entry",
+            "invalid staged WP-10 capabilities entry",
         ),
         (
             lambda matrix: matrix["blocked_wp10_qualification_exits"].pop(),
@@ -312,6 +362,8 @@ def test_cli_rejects_closure_before_binary_or_output_validation(tmp_path):
             "wp10_closure",
             "--physics-binary",
             str(tmp_path / "missing-physics"),
+            "--fe-binary",
+            str(tmp_path / "missing-fe"),
             "--application-binary",
             str(tmp_path / "missing-application"),
             "--output",
@@ -341,8 +393,12 @@ def test_validate_only_reports_boundary_without_claiming_closure():
     summary = json.loads(result.stdout)
 
     assert summary["outcome"] == "PASS"
-    assert summary["requested_claim"] == "one_phase_capability_boundary"
-    assert summary["unimplemented_wp10_requirement_count"] == 9
+    assert summary["requested_claim"] == "staged_two_fluid_capability_boundary"
+    assert summary["source_check_count"] == 13
+    assert summary["group_count"] == 5
+    assert summary["test_count"] == 40
+    assert summary["staged_wp10_capability_count"] == 8
+    assert summary["deferred_gas_requirement_count"] == 1
     assert summary["blocked_wp10_exit_count"] == 8
     assert summary["blocked_q7_exit_count"] == 8
     assert summary["scope_guard_accepted_case_count"] == 3

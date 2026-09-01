@@ -1,10 +1,11 @@
 # WP-10 physical-capability boundary record
 
-Status: the one-phase model boundary is explicit; the staged physical
-extensions and their qualification are absent. FSR-08, WP-10, and Q7 remain
-open.
+Status: the one-phase model boundary is explicit and the initial
+incompressible two-fluid core is staged. The two-fluid method has not passed
+the required physical qualification progression. Gas dynamics are absent.
+FSR-08, WP-10, and Q7 remain open.
 
-Scope: AD-6, the free-surface momentum and transport model, and the
+Scope: AD-6, the free-surface momentum and transport models, and the
 qualification progression required before any two-fluid or gas-sensitive
 claim. The runner binds each declared source to exact bytes and records the
 current Git revision, whether the worktree is clean, and a hash of the raw
@@ -17,16 +18,16 @@ AD-6 is split into three capability records that may not borrow evidence from
 one another:
 
 1. a one-phase incompressible liquid with prescribed exterior pressure;
-2. an incompressible two-fluid extension; and
+2. a staged incompressible two-fluid extension; and
 3. a gas model validated for the compressibility or other gas dynamics
    required by the target regime.
 
-Only the first model exists. Its presence is not by itself a qualification
-result: each one-phase capability still depends on the applicable Q0--Q6
-matrices. The second and third models have no production implementation and
-therefore have no qualifying simulation matrix.
+The first model is implemented and explicitly labeled, but its physical claims
+remain bounded by the applicable Q0--Q6 matrices. The second now has a
+production core inside a deliberately narrow initial envelope, but no WP-10
+physical exit has passed. The third is not implemented.
 
-## Current source contract
+## One-phase source contract
 
 `IncompressibleNavierStokesVMSOptions` defaults the
 `FreeSurfacePhysicalModel` enum to
@@ -34,220 +35,206 @@ therefore have no qualifying simulation matrix.
 pressure field, one density, and one viscosity value or constitutive
 viscosity model. A free surface owns a scalar `external_pressure`. The
 boundary operator uses that value as the prescribed exterior traction
-reference. It does not solve an exterior momentum equation or an exterior
-pressure field.
+reference. It does not solve exterior momentum or an exterior pressure field.
 
-Effective-artifact schema 3 retains the momentum capability label
-`one_phase_liquid_sharp_interface` and adds a `physical_model` record named
-`one_phase_liquid_prescribed_exterior_pressure`. That record states that
-there is one liquid phase, one liquid velocity field, one liquid pressure
-field, one material density state, and one material viscosity state. Its
-exterior-pressure mode is `prescribed_scalar_traction_reference`; exterior
-momentum and pressure fields are not solved. Explicit schema-1 legacy
-artifacts carry `physical_model: null` and cannot inherit this current model
-record. Schema 3 also adds the fitted surface/contact request envelope and
-stable fail-closed reason codes; it does not add a second fluid or gas model.
+The one-phase effective artifact emits the capability label
+`one_phase_liquid_sharp_interface` and physical model
+`one_phase_liquid_prescribed_exterior_pressure`. Explicit legacy output cannot
+inherit that current model record. Level-set transport independently labels
+its nonlocally conservative and locally conservative indicator variants as
+one-phase transport.
 
-Level-set transport independently labels its nonlocally conservative and
-locally conservative indicator variants as one-phase transport. The locally
-conservative indicator is a liquid-geometry transport variable; it is not a
-second-fluid momentum or pressure field.
+The canonical one-phase equation selectors remain
+`Free_surface_physical_model` and `FreeSurfacePhysicalModel`. Their supported
+one-phase value is `OnePhaseLiquidPrescribedExteriorPressure`; absence selects
+that default for the one-phase module. Fitted surface/contact combinations
+outside the implemented envelope fail before field mutation.
 
-The two canonical equation-level selectors are
-`Free_surface_physical_model` and `FreeSurfacePhysicalModel`. Their only
-supported normalized value is
-`OnePhaseLiquidPrescribedExteriorPressure`; absence selects that same default.
-The XML parameter parser enforces this value for both solver modes, rejects
-the aliases outside fluid or stokes equation scope, and rejects duplicate
-aliases before overwrite. Schema and explicit-legacy aliases are parsed once
-by a shared strict contract: current schema with legacy behavior disabled, or
-schema 1 with explicit legacy behavior enabled. An explicit physical-model
-selector is legal only in the current contract.
+## Staged incompressible two-fluid contract
 
-The new-OOP Navier--Stokes factory and primary-velocity pre-registration path
-run the same production guard before creating fields, forms, or operators.
-It scans equation parameters, default and explicit domains, boundary
-conditions, and inline module options. Keys are always checked; values are
-checked only when assigned to normalized model/scope selectors. The exact
-unsupported marker vocabulary is `twophase`, `twofluid`, `multiphase`,
-`pressureenrichment`, `jump`, `gas`, `gasdensity`, and `gasviscosity`.
-Module-options file paths, mesh names, and other nonselector values are not
-interpreted as physics declarations. Boundary `Type` and implementation
-aliases are accepted only in their existing Navier--Stokes contexts and with
-existing fitted or unfitted tokens. Unsupported marked scope uses
-`unsupported_two_phase_or_jump_free_surface_scope`; unknown physical models,
-misplaced selectors, and ambiguous aliases have distinct stable diagnostics.
+The dedicated `IncompressibleTwoFluid` route owns two velocity fields, two
+pressure fields, two constant densities, two constant viscosities, one shared
+level-set field, and one generated material interface. Its artifact schema 3
+uses capability label
+`incompressible_two_phase_sharp_interface_initial_envelope`.
 
-This semantic direct-map and generic-selector guard belongs to the new-OOP
-Navier--Stokes input boundary. The legacy solver does not call it, so this
-record does not claim whole-program containment of generic legacy
-`Model` controls. The canonical physical-model XML aliases are nevertheless
-value-checked by the common parser.
+The current envelope is fixed-Eulerian affine C0 P1 Triangle3/Tetra4 with
+constant phase properties, CutVolume restriction on both complementary sides,
+phasewise VMS/PSPG pressure stabilization, phasewise small-cut aggregation,
+one weighted symmetric interface coupling, and one shared pressure gauge. The
+interface form includes complementary viscosity weights, velocity and traction
+coupling, surface tension, and an optional manufactured prescribed pressure
+jump.
 
-The committed qualification scope guard parses representative XML, JSON, and
-already-decoded mapping inputs. It rejects keys, tags, model values, and
-name/key/option/parameter wrappers when they carry the frozen normalized
-`two_phase`, `two_fluid`, `multiphase`, `jump`, `gas`, or
-`pressure_enrichment` markers. Rejection uses the stable diagnostic
-`unsupported_two_phase_or_jump_free_surface_scope`. The normalized scope
-selector set includes `freesurfacephysicalmodel` and `physicalmodel`. This
-standalone guard is supplemental executable control-layer containment
-evidence; the production parser, factory, and pre-registration checks above
-are authoritative for the new canonical prerequisite. Neither guard is a
-two-fluid formulation, a physical qualification result, or the missing
-implementation.
+The parser requires every material coefficient and rejects unknown,
+duplicated, unused, misplaced, nonfinite, or unsupported equation, domain,
+boundary, and nested-block controls. Translation, semantic validation,
+cross-equation dependency pairing, field compatibility, solver-envelope
+checks, and future-field probes complete before live field or operator
+mutation. The complete builder admits exactly one paired level-set/two-fluid
+system with FSILS BlockSchur and the canonical role order
 
-The authoritative geometry snapshot retains negative- and positive-side
-quadrature on cut cells. References there to a two-sided volume family are
-geometric completeness rules only. Both geometric sides do not imply that
-both sides have solved fluid physics.
+```text
+(material_interface_level_set,
+ conservative_phase_indicator,
+ negative_velocity, positive_velocity,
+ negative_pressure, positive_pressure).
+```
+
+The first four roles form the computational-primary block and both pressures
+form the constraint block. There is no generic solver-layout fallback.
+
+The conservative indicator declares the two-fluid owner and samples the
+complementary weighted common interface velocity at every graph node. The
+momentum weak form retains sharp phase-local bulk values and the same common
+trace at the interface. A geometry correction must publish phasewise raw and
+corrected mass/momentum records and is rejected when the declared momentum
+tolerance is exceeded; no hidden velocity update is applied.
+
+Accepted-stage records include interface measure, velocity and traction jump,
+phase flux, prescribed pressure-jump error when applicable, interface work,
+phase volume/mass/momentum/kinetic energy, momentum reconciliation, canonical
+phasewise aggregation, pressure-stabilization configuration, and the shared
+coupled nonlinear/linear solve report. Phase-resolved iterations and separately
+resolved pressure-stabilization work carry explicit unavailable reasons when
+the coupled backend cannot provide them.
+
+This implementation boundary is not a physical qualification result. Contact,
+moving mesh, variable material laws, turbulence, phase change, compressible
+gas, trapped-gas pressure, and cushioning remain outside the two-fluid
+artifact. High density-ratio robustness is a qualification question, not an
+inference from the existence of a BlockSchur layout.
+
+## Supplemental one-phase subguard
+
+The committed scope guard parses representative XML, JSON, and decoded mapping
+inputs and rejects two-phase, jump, enrichment, and gas markers with
+`unsupported_two_phase_or_jump_free_surface_scope`. It remains executable
+containment evidence for paths that declare the one-phase model. It is not the
+global two-fluid parser and must not be applied to a dedicated
+`IncompressibleTwoFluid` equation.
+
+The production equation translator and module register are authoritative for
+the new two-fluid route. The supplemental subguard continues to prove that a
+one-phase configuration cannot silently acquire two-fluid or gas-sensitive
+meaning.
 
 ## Capability ledger
 
 | Capability | Current state | Permitted statement |
 |---|---|---|
 | One-phase incompressible liquid | Implemented and explicitly labeled; broader qualification remains governed by Q0--Q6 | Liquid dynamics with prescribed exterior pressure, within the separately qualified one-phase envelope |
-| Incompressible two-fluid flow | Not implemented | No two-fluid hydrostatic, jump, Hysing, rising-bubble, or high-density-ratio claim |
+| Incompressible two-fluid flow | Initial production core staged; WP-10 physical exits not yet passed | Core formulation, parser, dependency, transport, telemetry, and solver-envelope behavior only |
 | Compressible or otherwise gas-dynamic flow | Not implemented | No trapped-gas pressure, cushioning, ambient-pressure threshold, aerodynamic breakup, or late-atomization claim |
 
-## Missing incompressible two-fluid implementation
+## Staged WP-10 capabilities
 
-WP-10 cannot close until production contains and qualifies all of the
-following as one coherent method:
+Matrix v5 labels the following as `STAGED_UNQUALIFIED`:
 
 - phasewise density and viscosity;
-- either both-phase velocity and pressure fields or a demonstrated stable
-  one-field jump formulation;
+- both-phase velocity and pressure fields;
 - interface velocity and stress conditions;
-- pressure-space treatment appropriate to the pressure jump;
-- stabilization acting on both phases;
+- separate phase pressure fields and manufactured pressure-jump treatment;
+- stabilization and aggregation on both phases;
 - phasewise mass accounting;
-- phase-flux and momentum-flux consistency across material jumps;
-- bounded phase reconciliation that cannot create unreported momentum; and
-- solvers whose convergence and conditioning remain acceptable over the
-  predeclared density-ratio range.
+- phase-flux/momentum-flux reconciliation; and
+- the exact initial high-ratio solver route.
 
-No current low-level free-surface test establishes any item in this list.
+This status means that the implementation and focused identity tests exist. It
+does not mean that a physical convergence, conservation, conditioning, or
+literature gate has passed. Every WP-10 exit is therefore
+`BLOCKED_BY_MISSING_QUALIFICATION`, not blocked by a wholly absent core.
 
-## Missing gas-model implementation
+## Deferred gas-model requirement
 
-Incompressible two-fluid support would not automatically qualify gas-sensitive
-phenomena. Before those claims, the implemented gas model must reproduce the
-pressure, inertia, viscosity, and compressibility effects relevant to the
-benchmark nondimensional regime. A compressible or otherwise independently
-validated gas formulation, its thermodynamic closure, interface coupling,
-conservation ledger, and robust solver are absent.
+Incompressible two-fluid support does not qualify gas-sensitive phenomena.
+Before those claims, the implemented gas model must reproduce the pressure,
+inertia, viscosity, and compressibility effects relevant to the benchmark
+nondimensional regime. A gas formulation, thermodynamic closure, interface
+coupling, conservation ledger, and robust solver remain absent.
 
 Consequently dry splash, entrainment, roof-impact pressure, trapped gas,
 air cushioning, ambient-pressure splash thresholds, aerodynamic sheet
 breakup, and late atomization remain outside the current model.
 
-## Frozen low-level boundary evidence
+## Frozen v5 core-boundary evidence
 
 The matrix
 `tests/cases/fluid/free_surface_wp10_capability_boundary_matrix.json` and
 wrapper
 `tests/cases/fluid/run_free_surface_wp10_capability_boundary_qualification.py`
-freeze only the following evidence:
+freeze only categorical core evidence:
 
-- the option enum and default make the supported physical model explicit;
-- artifact schema 3 emits the canonical physical-model record, prescribed
-  exterior-pressure state, and fitted surface/contact request envelope, while
-  explicit legacy output carries a null model;
-- canonical XML aliases, direct maps, domains, boundary conditions, and
-  inline module options fail closed before Navier--Stokes system mutation;
-- the normal factory, primary-velocity pre-registration path, and
-  cross-equation wet-extension dependency pass execute the same early fitted
-  surface/contact capability validation before field mutation;
-- the two level-set transport modes emit one-phase labels;
-- the production option record still contains a single liquid
-  velocity/pressure/density/viscosity state; and
-- the committed one-phase scope guard executes a frozen positive/negative
-  contract over representative XML, JSON, and mapping encodings, including
-  tag, attribute, model-value, coupled wrapper-name/value, nested-list, and
-  structured nested-value and XML tail forms. JSON configuration roots must
-  be mappings; a non-mapping root is structural invalidity rather than an
-  unsupported-physics diagnostic.
+- 13 exact source checks retain the one-phase boundary and bind the two-fluid
+  module, interface form, parser/register, application dependency builder,
+  material-interface level-set transport, and accepted-stage telemetry;
+- the one-phase subguard retains 3 accepted, 21 rejected, and 2 structurally
+  invalid fixtures;
+- five binary groups freeze 40 exact tests across FE, Physics, and Application;
+- the accepted claim is `staged_two_fluid_capability_boundary`; and
+- FSR-08, WP-10, Q7, incompressible two-fluid physical qualification, and
+  gas-sensitive qualification requests are rejected before binary execution.
 
-The two frozen groups contain eight tests: four Physics tests for the current
-artifact, legacy artifact, invalid enum, direct-map, and pre-registration
-boundaries, and four Application tests for both transport labels, XML
-containment, and cross-equation fitted-capability preflight ordering.
-
-The wrapper accepts only the claim `one_phase_capability_boundary`. It rejects
-requests for FSR-08 closure, WP-10 closure, Q7 closure, incompressible
-two-fluid qualification, or gas-sensitive qualification before executing any
-test binary. Validation-only and full execution both run the frozen scope-guard
-contract and require its exact rejection diagnostic. There are deliberately
-no invented numerical thresholds:
-artifact-label tests are categorical containment checks, not physical
-validation.
-
-Current-tree validation-only passes the one-phase boundary with all 7 source
-checks and the frozen scope-guard cases (3 accepted, 21 rejected, and 2
-structurally invalid); all 16 runner unit tests pass. The result still records
-9 unimplemented WP-10 requirements and 8 blocked exits each for WP-10 and Q7.
-No Physics or Application binary was supplied, so the eight frozen binary
-tests are not counted as executed evidence.
+The v5 runner's 16 unit tests and validation-only route pass in the current
+tree. A full three-binary v5 execution record is still required before this
+version is committed as executed evidence. No numerical threshold is invented:
+these source and unit gates establish the staged capability boundary, not
+physical validation.
 
 ## Required WP-10 progression
 
-After the formulation exists, freeze thresholds and execute:
+Freeze dimensional inputs, nondimensional groups, references, uncertainty
+bands, mesh/time sequences, cut offsets, side reversal, rank counts, and solver
+limits before running, then execute in this order:
 
-1. planar pressure and viscous jumps;
-2. two-fluid hydrostatics;
-3. a static drop;
-4. material-side reversal;
-5. both-phase mass conservation;
-6. high-density-ratio conditioning and solver convergence;
-7. phase-flux versus momentum-flux consistency; and
-8. representative serial/MPI, cut-position, rotation, spatial, and temporal
-   refinements.
+1. constant-state cancellation and interface action/reaction;
+2. planar pressure jump;
+3. planar viscous traction jump;
+4. two-fluid hydrostatics;
+5. static circular and spherical drops;
+6. material-side reversal;
+7. both-phase volume and mass conservation;
+8. phase-flux/momentum-flux consistency under bounded correction;
+9. conditioning and solver iterations over the declared high-ratio range;
+10. two-fluid capillary waves;
+11. Hysing case 1 and a rising bubble; and
+12. Hysing case 2 against a predeclared intercode range.
 
 Each record must identify the exact model, source revision, phase properties,
 interface representation, pressure treatment, stabilization, solver,
-configuration, and raw phase/momentum ledgers.
+configuration, and raw phase/momentum ledgers. The planar and static gates are
+hard prerequisites for moving benchmarks.
 
 ## Q7 remains blocked
 
-Q7 starts only after the preceding WP-10 exits pass. Its order is:
+The incompressible Q7 branch starts only after the preceding WP-10 exits pass.
+Its order is static/jump evidence, Hysing case 1, two-fluid capillary waves and
+a rising bubble, then Hysing case 2 with its post-breakup result treated as an
+intercode range.
 
-1. the static and jump matrix;
-2. Hysing case 1;
-3. two-fluid capillary waves and a rising bubble;
-4. Hysing case 2 with its post-breakup result treated as an intercode range;
-5. air-cushioning and trapped-gas cases appropriate to the implemented gas
-   model; and
-6. ambient-pressure and dry-wall splash sweeps.
-
-No Q7 case may reuse a one-phase result as evidence. The present repository
-has neither the required physical implementation nor a frozen applicable Q7
-matrix, so Q7 and WP-10 must remain unchecked.
+The gas-sensitive Q7 branch remains separate and begins only after an
+applicable gas model is implemented and qualified. No Q7 case may reuse a
+one-phase result as two-fluid or gas evidence. WP-10, Q7, and FSR-08 remain
+unchecked.
 
 ## Source evidence map
 
-- One liquid field pair and material state:
+- One-phase option and artifact boundary:
   `Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h`
-- Schema-3 physical-model and fitted surface/contact capability artifact,
-  invalid-enum stop, and prescribed exterior pressure:
-  `Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.cpp`
-- Direct-map, domain, boundary, module-option, factory, and pre-registration
-  containment:
+  and `.cpp`
+- Dedicated two-fluid artifact, semantic validation, and registration:
+  `Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleTwoFluidModule.cpp`
+- Weighted interface form:
+  `Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleTwoFluidInterface.cpp`
+- Production parser and dependency pre-registration:
   `Code/Source/solver/Physics/Formulations/NavierStokes/NavierStokesRegister.cpp`
-- Cross-module capability preflight before future wet-extension velocity
-  pre-registration:
+- Cross-equation dependency and exact solver layout:
   `Code/Source/solver/Application/Core/SimulationBuilder.cpp`
-- Canonical XML alias placement, duplication, and value containment:
-  `Code/Source/solver/Parameters.cpp`
-- One-phase transport capability artifacts:
-  `Code/Source/solver/Application/Translators/LevelSetEquationTranslator.cpp`
-- Supplemental representative XML/JSON/mapping containment:
+- Material-interface conservative transport:
+  `Code/Source/solver/FE/LevelSet/LevelSetTransport.cpp`
+- Accepted-stage transaction and publication:
+  `Code/Source/solver/FE/Systems/FESystem.cpp`
+- Supplemental one-phase XML/JSON/mapping containment:
   `tests/cases/fluid/free_surface_one_phase_scope_guard.py`
-- Artifact, direct-input, pre-registration, and XML unit evidence:
-  `Code/Source/solver/Physics/Tests/Unit/test_MovingDomainPhysics.cpp` and
-  `Code/Source/solver/Physics/Tests/Unit/test_NavierStokesLegacyBCs.cpp`,
-  `Code/Source/solver/Application/Tests/Unit/test_EquationTranslator.cpp`, and
-  `Code/Source/solver/Application/Tests/Unit/test_LevelSetEquationTranslator.cpp`
-- Application ordering evidence for capability rejection before wet-extension
-  preregistration:
-  `Code/Source/solver/Application/Tests/Unit/test_OpenVesselExamples.cpp`
+- Frozen executable inventory:
+  `tests/cases/fluid/free_surface_wp10_capability_boundary_matrix.json`

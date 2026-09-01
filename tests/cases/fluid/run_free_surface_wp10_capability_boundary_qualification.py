@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Verify the frozen WP-10 one-phase capability boundary.
+"""Verify the frozen WP-10 staged two-fluid capability boundary.
 
-The only accepted claim is ``one_phase_capability_boundary``. Requests for
-FSR-08, WP-10, Q7, two-fluid, or gas-sensitive closure are rejected before
-any test binary is executed.
+The only accepted claim is ``staged_two_fluid_capability_boundary``. Requests
+for FSR-08, WP-10, Q7, physical two-fluid qualification, or gas-sensitive
+closure are rejected before any test binary is executed.
 """
 
 from __future__ import annotations
@@ -25,34 +25,48 @@ REPOSITORY_ROOT = SCRIPT_PATH.parents[3]
 DEFAULT_MATRIX = SCRIPT_PATH.with_name(
     "free_surface_wp10_capability_boundary_matrix.json"
 )
-EXPECTED_MATRIX_ID = "free_surface_wp10_capability_boundary_v4"
+EXPECTED_MATRIX_ID = "free_surface_wp10_capability_boundary_v5"
 EXPECTED_STATUS = "FROZEN_CAPABILITY_BOUNDARY"
 EXPECTED_ARCHITECTURE_RECORD = (
     "Documentation/free_surface_wp10_physical_capability_boundary.md"
 )
 EXPECTED_SCOPE = (
-    "New-OOP Navier-Stokes explicit one-phase capability labeling and "
-    "unsupported-scope containment only; legacy-solver input is outside this "
-    "evidence. This matrix does not close FSR-08, WP-10, or Q7 and does not "
-    "qualify any two-fluid or gas-sensitive phenomenon."
+    "Explicit one-phase capability labeling and its supplemental one-phase "
+    "subguard, plus the staged new-OOP incompressible two-fluid core envelope. "
+    "Legacy-solver input is outside this evidence. This matrix does not close "
+    "FSR-08, WP-10, or Q7 and does not qualify any two-fluid or gas-sensitive "
+    "phenomenon."
 )
 EXPECTED_CURRENT_BOUNDARY = {
-    "artifact_schema_version": 4,
-    "momentum_capability_label": "one_phase_liquid_sharp_interface",
-    "physical_model_name": "one_phase_liquid_prescribed_exterior_pressure",
-    "legacy_physical_model": None,
+    "capability_boundary_schema_version": 5,
+    "one_phase_momentum_artifact_schema_version": 4,
+    "two_fluid_momentum_artifact_schema_version": 3,
+    "level_set_transport_artifact_schema_version": 3,
+    "momentum_capability_labels": [
+        "one_phase_liquid_sharp_interface",
+        "incompressible_two_phase_sharp_interface_initial_envelope",
+    ],
+    "physical_model_names": [
+        "one_phase_liquid_prescribed_exterior_pressure",
+        "incompressible_two_fluid",
+    ],
+    "legacy_one_phase_physical_model": None,
     "transport_capability_labels": [
         "one_phase_interface_transport_nonlocal_conservation",
         "one_phase_locally_conservative_p1_indicator_transport",
+        "two_phase_material_interface_transport",
     ],
-    "liquid_velocity_field_count": 1,
-    "liquid_pressure_field_count": 1,
-    "material_density_state_count": 1,
-    "material_viscosity_state_count": 1,
-    "exterior_state": "prescribed_scalar_traction_reference",
-    "exterior_momentum_solved": False,
-    "exterior_pressure_field_solved": False,
-    "incompressible_two_fluid_implemented": False,
+    "one_phase_velocity_field_count": 1,
+    "one_phase_pressure_field_count": 1,
+    "two_fluid_velocity_field_count": 2,
+    "two_fluid_pressure_field_count": 2,
+    "two_fluid_density_state_count": 2,
+    "two_fluid_viscosity_state_count": 2,
+    "one_phase_exterior_state": "prescribed_scalar_traction_reference",
+    "one_phase_exterior_momentum_solved": False,
+    "one_phase_exterior_pressure_field_solved": False,
+    "incompressible_two_fluid_implemented": True,
+    "incompressible_two_fluid_qualified": False,
     "gas_dynamics_implemented": False,
     "wp10_closure_claimed": False,
     "q7_closure_claimed": False,
@@ -169,7 +183,7 @@ EXPECTED_SOURCE_CHECKS = {
             '"compressible_gas_transport"',
         ],
     },
-    "unsupported_scope_containment": {
+    "one_phase_subguard_containment": {
         "path": "tests/cases/fluid/free_surface_one_phase_scope_guard.py",
         "required_fragments": [
             '"twophase"',
@@ -184,6 +198,96 @@ EXPECTED_SOURCE_CHECKS = {
             "def validate_config_mapping(",
             "def validate_mapping_wrapper_pairs(",
             "def validate_xml_scope_subtree(",
+        ],
+        "forbidden_fragments": [],
+    },
+    "incompressible_two_fluid_module": {
+        "path": (
+            "Code/Source/solver/Physics/Formulations/NavierStokes/"
+            "IncompressibleTwoFluidModule.cpp"
+        ),
+        "required_fragments": [
+            'out << "{\\"artifact_schema_version\\":3"',
+            "incompressible_two_phase_sharp_interface_initial_envelope",
+            "phasewise_vms_pspg",
+            "separate_phase_fields",
+            "generic_fallback_allowed",
+            "complementary_weighted_every_node",
+            "phasewise_fail_closed_no_hidden_velocity_update",
+            "shared_coupled_nonlinear_linear_report",
+            "validateIncompressibleTwoFluidConfigurationSemantics(",
+            "system.declareTwoFluidAcceptedStageDiagnostics(",
+        ],
+        "forbidden_fragments": [],
+    },
+    "incompressible_two_fluid_interface": {
+        "path": (
+            "Code/Source/solver/Physics/Formulations/NavierStokes/"
+            "IncompressibleTwoFluidInterface.cpp"
+        ),
+        "required_fragments": [
+            "IncompressibleTwoFluidInterfaceWeights "
+            "incompressibleTwoFluidInterfaceWeights(",
+            ".negative_traction = viscosity_pair.second_fraction",
+            ".positive_traction = viscosity_pair.first_fraction",
+            "negative_viscous_traction",
+            "positive_viscous_traction",
+            "forms.prescribed_pressure_jump",
+            "forms.residual = forms.residual + forms.prescribed_pressure_jump",
+        ],
+        "forbidden_fragments": [],
+    },
+    "incompressible_two_fluid_registration": {
+        "path": (
+            "Code/Source/solver/Physics/Formulations/NavierStokes/"
+            "NavierStokesRegister.cpp"
+        ),
+        "required_fragments": [
+            "translate_incompressible_two_fluid_input(",
+            "reject_unsupported_two_fluid_equation_parameters(",
+            "reject_unsupported_two_fluid_default_domain_parameters(",
+            "reject_unsupported_two_fluid_boundary_parameters(",
+            "preflightTwoFluidTranslationBeforeMutation(",
+            "validateIncompressibleTwoFluidConfigurationSemantics(options)",
+            "preRegisterIncompressibleTwoFluidDependencyFields(",
+        ],
+        "forbidden_fragments": [],
+    },
+    "two_fluid_application_builder": {
+        "path": "Code/Source/solver/Application/Core/SimulationBuilder.cpp",
+        "required_fragments": [
+            "preflightAndPreRegisterTwoFluidMaterialInterfaceDependencies(",
+            "requireTwoFluidMaterialInterfaceSolverEnvelope(",
+            "preRegisterIncompressibleTwoFluidDependencyFields(",
+            "registeredFieldCount() != 6u",
+            "TwoFluidMaterialInterfaceComputationalPrimary",
+            "TwoFluidPressureConstraints",
+            "requireTwoFluidMaterialInterfaceSolverLayout(",
+        ],
+        "forbidden_fragments": [],
+    },
+    "two_fluid_level_set_transport": {
+        "path": "Code/Source/solver/FE/LevelSet/LevelSetTransport.cpp",
+        "required_fragments": [
+            "LevelSetVelocitySource::MaterialInterfacePhasePair",
+            "material-interface phase-pair velocity requires an existing "
+            "level-set field",
+            "requireMaterialInterfaceVelocityDeclaration(",
+            "materialInterfaceTransportVelocityDeclarations()",
+            "momentum_relative_tolerance",
+        ],
+        "forbidden_fragments": [],
+    },
+    "two_fluid_accepted_stage_telemetry": {
+        "path": "Code/Source/solver/FE/Systems/FESystem.cpp",
+        "required_fragments": [
+            "stageTwoFluidAcceptedStageDiagnostics(",
+            "bindPendingTwoFluidAcceptedStageNumerics(",
+            "discardPendingTwoFluidAcceptedStageDiagnostics()",
+            "commitPendingTwoFluidAcceptedStageDiagnostics(",
+            "not_individually_resolved_by_shared_coupled_backend",
+            "pressure_stabilization_work=unavailable",
+            "phase_iteration_scope=shared_coupled_solve",
         ],
         "forbidden_fragments": [],
     },
@@ -238,8 +342,166 @@ EXPECTED_GROUPS = {
             "output_mib": 64,
         },
     },
+    "two_fluid_material_interface_transport_serial": {
+        "binary_argument": "fe_binary",
+        "tests": [
+            (
+                "MaterialInterfaceTransportVelocity."
+                "SelectsSharpBulkValuesAndTheComplementaryTrace"
+            ),
+            (
+                "LevelSetTransport."
+                "MaterialInterfacePhasePairUsesComplementaryCutVolumesAndTrace"
+            ),
+            (
+                "LevelSetTransport."
+                "MaterialInterfacePhasePairFailsBeforeConservativeFieldMutation"
+            ),
+            (
+                "LevelSetTransport."
+                "MaterialInterfacePhasePairRejectsUnsupportedModesBeforeMutation"
+            ),
+            (
+                "LevelSetTransport."
+                "ConservativePhaseConfigurationFailsBeforeFieldMutation"
+            ),
+        ],
+        "execution": {
+            "wall_time_seconds": 300,
+            "memory_mib": 2048,
+            "output_mib": 64,
+        },
+    },
+    "incompressible_two_fluid_core_serial": {
+        "binary_argument": "physics_binary",
+        "tests": [
+            (
+                "IncompressibleTwoFluidInterface."
+                "ViscosityWeightsAreComplementaryAndSideReversalInvariant"
+            ),
+            (
+                "IncompressibleTwoFluidInterface."
+                "PrescribedPlanarPressureJumpUsesBothComplementaryTestTraces"
+            ),
+            (
+                "IncompressibleTwoFluidDiagnostics."
+                "EvaluatesRawInterfaceAndPhaseMeasuresOnOneSnapshot"
+            ),
+            (
+                "IncompressibleTwoFluidModule."
+                "RegistersFourPhaseFieldsOneInterfaceBlockAndOneSharedGauge"
+            ),
+            (
+                "IncompressibleTwoFluidModule."
+                "AcceptedStageHistoryDiscardsRejectsAndReplaysExactly"
+            ),
+            (
+                "IncompressibleTwoFluidModule."
+                "RejectsUnsupportedConfigurationSemanticsBeforeMutation"
+            ),
+            (
+                "IncompressibleTwoFluidModule."
+                "RejectsSpacesOutsideAffineSimplexEnvelopeBeforeMutation"
+            ),
+        ],
+        "execution": {
+            "wall_time_seconds": 300,
+            "memory_mib": 4096,
+            "output_mib": 128,
+        },
+    },
+    "incompressible_two_fluid_application_serial": {
+        "binary_argument": "application_binary",
+        "tests": [
+            (
+                "EquationTranslatorFreeSurface."
+                "XmlIncompressibleTwoFluidRejectsDuplicateOperatorTagAliasesBeforeMutation"
+            ),
+            (
+                "EquationTranslatorFreeSurface."
+                "XmlIncompressibleTwoFluidRejectsDuplicatePressureJumpAliasesBeforeMutation"
+            ),
+            (
+                "EquationTranslatorFreeSurface."
+                "XmlIncompressibleTwoFluidRejectsLegacyBodyForceBlockBeforeMutation"
+            ),
+            (
+                "EquationTranslatorFreeSurface."
+                "XmlIncompressibleTwoFluidRejectsOnePhaseDomainControlsBeforeMutation"
+            ),
+            (
+                "EquationTranslatorFreeSurface."
+                "XmlIncompressibleTwoFluidRejectsOutputBlocksBeforeMutation"
+            ),
+            (
+                "EquationTranslatorFreeSurface."
+                "XmlIncompressibleTwoFluidRejectsUnusedBoundaryControlsBeforeMutation"
+            ),
+            (
+                "EquationTranslatorFreeSurface."
+                "XmlIncompressibleTwoFluidRejectsUnusedEquationControlsBeforeMutation"
+            ),
+            (
+                "EquationTranslatorFreeSurface."
+                "XmlIncompressibleTwoFluidRejectsUnusedNestedBlocksBeforeMutation"
+            ),
+            (
+                "EquationTranslatorFreeSurface."
+                "XmlIncompressibleTwoFluidRequiresEveryMaterialCoefficientBeforeMutation"
+            ),
+            (
+                "EquationTranslatorFreeSurface."
+                "XmlIncompressibleTwoFluidSelectsDedicatedModule"
+            ),
+            (
+                "LevelSetEquationTranslator."
+                "TranslatesMaterialInterfacePhasePairVelocity"
+            ),
+            (
+                "OpenVesselExamples."
+                "SimulationDependencyPreflightResolvesTwoFluidMaterialInterfaceInEitherOrder"
+            ),
+            (
+                "OpenVesselExamples."
+                "SimulationBuilderBuildsCompleteTwoFluidMaterialInterfaceSystem"
+            ),
+            (
+                "OpenVesselExamples."
+                "MaterialInterfaceDependencyPreflightRejectsNonhomogeneousVelocityBoundaryBeforeMutation"
+            ),
+            (
+                "OpenVesselExamples."
+                "MaterialInterfaceDependencyPreflightRejectsDuplicateVelocityBoundaryBeforeMutation"
+            ),
+            (
+                "OpenVesselExamples."
+                "MaterialInterfaceDependencyPreflightRejectsNonfiniteBodyForceBeforeMutation"
+            ),
+            (
+                "OpenVesselExamples."
+                "MaterialInterfaceDependencyPreflightRejectsNonfinitePressureJumpBeforeMutation"
+            ),
+            (
+                "OpenVesselExamples."
+                "MaterialInterfaceDependencyPreflightRejectsSolverEnvelopeBeforeMutation"
+            ),
+            (
+                "ApplicationDriverConservativePhaseVelocity."
+                "SamplesTheDeclaredCommonInterfaceVelocityAtEveryGraphNode"
+            ),
+            (
+                "ApplicationDriverTwoFluidAcceptedStageTelemetry."
+                "ExactEntryConvergenceMarksTheUnattemptedLinearSolveConverged"
+            ),
+        ],
+        "execution": {
+            "wall_time_seconds": 300,
+            "memory_mib": 4096,
+            "output_mib": 128,
+        },
+    },
 }
-EXPECTED_UNIMPLEMENTED = {
+EXPECTED_STAGED_CAPABILITIES = {
     "phasewise_density_and_viscosity",
     "both_phase_fields_or_stable_one_field_jump_formulation",
     "interface_velocity_and_stress_conditions",
@@ -248,8 +510,8 @@ EXPECTED_UNIMPLEMENTED = {
     "phasewise_mass_conservation",
     "phase_flux_momentum_flux_consistency",
     "high_density_ratio_robust_solver",
-    "gas_dynamics_and_thermodynamic_closure",
 }
+EXPECTED_DEFERRED_GAS = {"gas_dynamics_and_thermodynamic_closure"}
 EXPECTED_WP10_EXITS = {
     "planar_pressure_jump",
     "planar_viscous_jump",
@@ -261,10 +523,10 @@ EXPECTED_WP10_EXITS = {
     "phase_and_momentum_flux_consistency",
 }
 EXPECTED_Q7_EXITS = {
-    "hysing_case_1": "BLOCKED_BY_WP10",
-    "two_fluid_capillary_waves": "BLOCKED_BY_WP10",
-    "rising_bubble": "BLOCKED_BY_WP10",
-    "hysing_case_2_intercode_range": "BLOCKED_BY_WP10",
+    "hysing_case_1": "BLOCKED_BY_WP10_QUALIFICATION",
+    "two_fluid_capillary_waves": "BLOCKED_BY_WP10_QUALIFICATION",
+    "rising_bubble": "BLOCKED_BY_WP10_QUALIFICATION",
+    "hysing_case_2_intercode_range": "BLOCKED_BY_WP10_QUALIFICATION",
     "air_cushioning": "BLOCKED_BY_GAS_MODEL",
     "trapped_gas": "BLOCKED_BY_GAS_MODEL",
     "ambient_pressure_sweep": "BLOCKED_BY_GAS_MODEL",
@@ -282,7 +544,7 @@ EXPECTED_EXCLUSIONS = {
     "late_atomization",
 }
 EXPECTED_POLICY = {
-    "accepted_claim": "one_phase_capability_boundary",
+    "accepted_claim": "staged_two_fluid_capability_boundary",
     "rejected_claims": [
         "fsr08_closure",
         "wp10_closure",
@@ -291,10 +553,10 @@ EXPECTED_POLICY = {
         "gas_sensitive_qualification",
     ],
     "diagnostic": (
-        "This matrix verifies only the explicit new-OOP Navier-Stokes "
-        "one-phase model boundary. Legacy-solver input, the two-fluid and gas "
-        "formulations, and every physical WP-10/Q7 exit are outside this "
-        "evidence."
+        "This matrix verifies the explicit one-phase boundary and the staged "
+        "incompressible two-fluid core envelope. Legacy-solver input, physical "
+        "two-fluid qualification, gas formulation, and every WP-10/Q7 closure "
+        "claim are outside this evidence."
     ),
 }
 EXPECTED_MATRIX_KEYS = {
@@ -310,7 +572,8 @@ EXPECTED_MATRIX_KEYS = {
     "source_checks",
     "scope_guard_contract",
     "groups",
-    "unimplemented_wp10_requirements",
+    "staged_wp10_capabilities",
+    "deferred_gas_requirements",
     "blocked_wp10_qualification_exits",
     "blocked_q7_progression",
     "excluded_current_claims",
@@ -386,7 +649,7 @@ def validate_matrix(path: Path) -> dict[str, Any]:
     )
     if not isinstance(matrix, dict) or set(matrix) != EXPECTED_MATRIX_KEYS:
         raise ValueError("WP-10 matrix top-level contract changed")
-    if matrix.get("schema_version") != 2:
+    if matrix.get("schema_version") != 3:
         raise ValueError("unsupported WP-10 matrix schema")
     if matrix.get("matrix_id") != EXPECTED_MATRIX_ID:
         raise ValueError("unexpected WP-10 matrix id")
@@ -402,9 +665,9 @@ def validate_matrix(path: Path) -> dict[str, Any]:
         raise ValueError("architecture-record path changed after freeze")
     if (
         matrix.get("model_envelope")
-        != "one_phase_incompressible_liquid_with_prescribed_exterior_pressure"
+        != "one_phase_supported_and_incompressible_two_fluid_staged_unqualified"
     ):
-        raise ValueError("one-phase model envelope changed after freeze")
+        raise ValueError("model envelope changed after freeze")
     if matrix.get("current_capability_boundary") != EXPECTED_CURRENT_BOUNDARY:
         raise ValueError("current capability boundary changed after freeze")
 
@@ -499,15 +762,21 @@ def validate_matrix(path: Path) -> dict[str, Any]:
         raise ValueError("test groups changed after freeze")
 
     validate_status_entries(
-        matrix.get("unimplemented_wp10_requirements"),
-        EXPECTED_UNIMPLEMENTED,
-        "REQUIRED_NOT_IMPLEMENTED",
-        "unimplemented WP-10 requirements",
+        matrix.get("staged_wp10_capabilities"),
+        EXPECTED_STAGED_CAPABILITIES,
+        "STAGED_UNQUALIFIED",
+        "staged WP-10 capabilities",
+    )
+    validate_status_entries(
+        matrix.get("deferred_gas_requirements"),
+        EXPECTED_DEFERRED_GAS,
+        "NOT_IMPLEMENTED_OUTSIDE_INCOMPRESSIBLE_WP10",
+        "deferred gas requirements",
     )
     validate_status_entries(
         matrix.get("blocked_wp10_qualification_exits"),
         EXPECTED_WP10_EXITS,
-        "BLOCKED_BY_MISSING_IMPLEMENTATION",
+        "BLOCKED_BY_MISSING_QUALIFICATION",
         "blocked WP-10 exits",
     )
 
@@ -716,7 +985,7 @@ def bind_scope_guard_source_record(
     matching = [
         record
         for record in source_records
-        if record["id"] == "unsupported_scope_containment"
+        if record["id"] == "one_phase_subguard_containment"
     ]
     if (
         len(matching) != 1
@@ -849,6 +1118,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--source-root", type=Path, default=REPOSITORY_ROOT)
     parser.add_argument("--requested-claim", default=EXPECTED_POLICY["accepted_claim"])
     parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--fe-binary", type=Path)
     parser.add_argument("--physics-binary", type=Path)
     parser.add_argument("--application-binary", type=Path)
     parser.add_argument("--output", type=Path)
@@ -873,9 +1143,10 @@ def main() -> int:
         "scope_guard_invalid_case_count": scope_guard_record["invalid_case_count"],
         "group_count": len(matrix["groups"]),
         "test_count": sum(len(group["tests"]) for group in matrix["groups"]),
-        "unimplemented_wp10_requirement_count": len(
-            matrix["unimplemented_wp10_requirements"]
+        "staged_wp10_capability_count": len(
+            matrix["staged_wp10_capabilities"]
         ),
+        "deferred_gas_requirement_count": len(matrix["deferred_gas_requirements"]),
         "blocked_wp10_exit_count": len(matrix["blocked_wp10_qualification_exits"]),
         "blocked_q7_exit_count": len(matrix["blocked_q7_progression"]),
         "wp10_closed": False,
@@ -886,6 +1157,7 @@ def main() -> int:
         if any(
             value is not None
             for value in (
+                arguments.fe_binary,
                 arguments.physics_binary,
                 arguments.application_binary,
                 arguments.output,
@@ -898,12 +1170,14 @@ def main() -> int:
         return 0
 
     if (
-        arguments.physics_binary is None
+        arguments.fe_binary is None
+        or arguments.physics_binary is None
         or arguments.application_binary is None
         or arguments.output is None
     ):
         raise ValueError(
-            "execution requires --physics-binary, --application-binary, and --output"
+            "execution requires --fe-binary, --physics-binary, "
+            "--application-binary, and --output"
         )
     output = arguments.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -913,6 +1187,7 @@ def main() -> int:
         record["path"]: record["sha256"] for record in source_records
     }
     binary_arguments = {
+        "fe_binary": arguments.fe_binary,
         "physics_binary": arguments.physics_binary,
         "application_binary": arguments.application_binary,
     }
