@@ -18,6 +18,18 @@
 
 namespace fluid {
 
+static void fluid_3d_c_impl(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int eNoNq, const double w,
+    const Array<double>& Kxi, const Vector<double>& Nw, const Vector<double>& Nq, const Array<double>& Nwx,
+    const Array<double>& Nqx, const Array<double>& Nwxx, const Array<double>& al, const Array<double>& yl,
+    const Array<double>& bfl, Array<double>& lR, Array3<double>& lK, double K_inverse_darcy_permeability,
+    const double urisFactorTotal, const double* urisValveVelTermTotal);
+
+static void fluid_3d_m_impl(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int eNoNq, const double w,
+    const Array<double>& Kxi, const Vector<double>& Nw, const Vector<double>& Nq, const Array<double>& Nwx,
+    const Array<double>& Nqx, const Array<double>& Nwxx, const Array<double>& al, const Array<double>& yl,
+    const Array<double>& bfl, Array<double>& lR, Array3<double>& lK, double K_inverse_darcy_permeability,
+    const double urisFactorTotal, const double* urisValveVelTermTotal);
+
 void b_fluid(ComMod& com_mod, const int eNoN, const double w, const Vector<double>& N, const Vector<double>& y, 
     const double h, const Vector<double>& nV, Array<double>& lR, Array3<double>& lK)
 {
@@ -537,6 +549,8 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
   
   // local tangent matrix (for a single element)
   Array3<double> lK(dof*dof,eNoN,eNoN);
+
+  static constexpr std::array<double,3> zeroUrisValveVelTermTotal{};
   
   // Loop over all elements of mesh
   //
@@ -662,14 +676,14 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
         auto N0 = fs[0].N.rcol(g); 
         auto N1 = fs[1].N.rcol(g); 
         double urisFactorTotal = 0.0;
-        Vector<double> urisValveVelTermTotal(nsd);
+        const double* urisValveVelTermTotalPtr = zeroUrisValveVelTermTotal.data();
         if (com_mod.urisFlag) {
           urisFactorTotal = urisFactorTotalEl(g);
-          urisValveVelTermTotal = urisValveVelTermTotalEl.rcol(g);
+          urisValveVelTermTotalPtr = urisValveVelTermTotalEl.col_data(g);
         }
-        fluid_3d_m(com_mod, vmsStab, fs[0].eNoN, fs[1].eNoN, w, ksix, N0, N1, 
+        fluid_3d_m_impl(com_mod, vmsStab, fs[0].eNoN, fs[1].eNoN, w, ksix, N0, N1,
             Nwx, Nqx, Nwxx, al, yl, bfl, lR, lK, K_inverse_darcy_permeability, 
-            urisFactorTotal, urisValveVelTermTotal);
+            urisFactorTotal, urisValveVelTermTotalPtr);
 
       } else if (nsd == 2) {
         auto N0 = fs[0].N.rcol(g); 
@@ -728,14 +742,14 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
         auto N0 = fs[0].N.rcol(g); 
         auto N1 = fs[1].N.rcol(g); 
         double urisFactorTotal = 0.0;
-        Vector<double> urisValveVelTermTotal(nsd);
+        const double* urisValveVelTermTotalPtr = zeroUrisValveVelTermTotal.data();
         if (com_mod.urisFlag) {
           urisFactorTotal = urisFactorTotalEl(g);
-          urisValveVelTermTotal = urisValveVelTermTotalEl.rcol(g);
+          urisValveVelTermTotalPtr = urisValveVelTermTotalEl.col_data(g);
         }
-        fluid_3d_c(com_mod, vmsStab, fs[0].eNoN, fs[1].eNoN, w, ksix, N0, N1, 
+        fluid_3d_c_impl(com_mod, vmsStab, fs[0].eNoN, fs[1].eNoN, w, ksix, N0, N1,
               Nwx, Nqx, Nwxx, al, yl, bfl, lR, lK, K_inverse_darcy_permeability, 
-              urisFactorTotal, urisValveVelTermTotal);
+              urisFactorTotal, urisValveVelTermTotalPtr);
 
       } else if (nsd == 2) {
         auto N0 = fs[0].N.rcol(g); 
@@ -1470,9 +1484,23 @@ void fluid_3d_c(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int e
     const Array<double>& bfl, Array<double>& lR, Array3<double>& lK, double K_inverse_darcy_permeability, 
     const double urisFactorTotal, const Vector<double>& urisValveVelTermTotal)
 {
+  #ifdef Vector_check_enabled
+  (void)urisValveVelTermTotal[2];
+  #endif
+  fluid_3d_c_impl(com_mod, vmsFlag, eNoNw, eNoNq, w, Kxi, Nw, Nq, Nwx, Nqx,
+      Nwxx, al, yl, bfl, lR, lK, K_inverse_darcy_permeability, urisFactorTotal,
+      urisValveVelTermTotal.data());
+}
+
+static void fluid_3d_c_impl(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int eNoNq, const double w,
+    const Array<double>& Kxi, const Vector<double>& Nw, const Vector<double>& Nq, const Array<double>& Nwx,
+    const Array<double>& Nqx, const Array<double>& Nwxx, const Array<double>& al, const Array<double>& yl,
+    const Array<double>& bfl, Array<double>& lR, Array3<double>& lK, double K_inverse_darcy_permeability,
+    const double urisFactorTotal, const double* urisValveVelTermTotal)
+{
   #define n_debug_fluid3d_c
   #ifdef debug_fluid3d_c
-  DebugMsg dmsg(__func__, com_mod.cm.idcm());
+  DebugMsg dmsg("fluid_3d_c", com_mod.cm.idcm());
   dmsg.banner();
   dmsg << "vmsFlag: " << vmsFlag;
   dmsg << "eNoNw: " << eNoNw;
@@ -1795,9 +1823,23 @@ void fluid_3d_m(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int e
     const Array<double>& bfl, Array<double>& lR, Array3<double>& lK, double K_inverse_darcy_permeability, 
     const double urisFactorTotal, const Vector<double>& urisValveVelTermTotal)
 {
+  #ifdef Vector_check_enabled
+  (void)urisValveVelTermTotal[2];
+  #endif
+  fluid_3d_m_impl(com_mod, vmsFlag, eNoNw, eNoNq, w, Kxi, Nw, Nq, Nwx, Nqx,
+      Nwxx, al, yl, bfl, lR, lK, K_inverse_darcy_permeability, urisFactorTotal,
+      urisValveVelTermTotal.data());
+}
+
+static void fluid_3d_m_impl(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int eNoNq, const double w,
+    const Array<double>& Kxi, const Vector<double>& Nw, const Vector<double>& Nq, const Array<double>& Nwx,
+    const Array<double>& Nqx, const Array<double>& Nwxx, const Array<double>& al, const Array<double>& yl,
+    const Array<double>& bfl, Array<double>& lR, Array3<double>& lK, double K_inverse_darcy_permeability,
+    const double urisFactorTotal, const double* urisValveVelTermTotal)
+{
   #define n_debug_fluid_3d_m
   #ifdef debug_fluid_3d_m
-  DebugMsg dmsg(__func__, com_mod.cm.idcm());
+  DebugMsg dmsg("fluid_3d_m", com_mod.cm.idcm());
   dmsg.banner();
   dmsg << "vmsFlag: " << vmsFlag;
   dmsg << "eNoNw: " << eNoNw;
