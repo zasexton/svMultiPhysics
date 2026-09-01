@@ -1,0 +1,152 @@
+{
+  "schema_version": 3,
+  "registry_id": "free_surface_wp10_literature_v3",
+  "status": "FROZEN_RISING_BUBBLE_EXPERIMENTAL_REFERENCE_CONTRACT",
+  "verified_date": "2026-08-31",
+  "work_package": "WP-10",
+  "qualification_campaign": "Q7",
+  "scope": "Published point values and qualitative observations for four single air bubbles rising through stagnant de-ionized water. This extends the immutable version-2 registry without changing it. The reported rounded values are experimental expectations, not solver acceptance bands, because Table 3 gives no measurement uncertainty and the raw datasets are available only from the authors on request.",
+  "extends": {
+    "registry_id": "free_surface_wp10_literature_v2",
+    "repository_path": "tests/cases/fluid/free_surface_wp10_literature_registry_v2.json",
+    "sha256": "e59e3abd4da037cdf1ed2d939c20a4cf316b7a9b7ceb58af8e3741806a7b7589",
+    "mutation_policy": "PRESERVE_V2_BYTE_FOR_BYTE"
+  },
+  "sources": [
+    {
+      "id": "chang_2024_rising_air_bubbles",
+      "citation": {
+        "authors": [
+          "Yingjie Chang",
+          "Conrad Muller",
+          "Peter Kovats",
+          "Liejin Guo",
+          "Katharina Zahringer"
+        ],
+        "title": "Hydrodynamics and shape reconstruction of single rising air bubbles in water using high-speed tomographic particle tracking velocimetry and 3D geometric reconstruction",
+        "journal": "Experiments in Fluids",
+        "volume": "65",
+        "article": "6",
+        "year": 2024,
+        "published": "2023-12-14",
+        "doi": "10.1007/s00348-023-03746-0",
+        "persistent_url": "https://doi.org/10.1007/s00348-023-03746-0"
+      },
+      "asset": {
+        "status": "EXTERNALLY_PINNED",
+        "retrieval_url": "https://link.springer.com/article/10.1007/s00348-023-03746-0/tables/3",
+        "filename": "rising-bubble-springer-table3-2023.html",
+        "sha256": "d44ad9f5e8dda1cfa9df7912994d6436c32fc5a7017bea760a956aa628245bda",
+        "bytes": 210813,
+        "repository_path": null
+      },
+      "access": {
+        "license": "CC-BY-4.0",
+        "redistribution": "NOT_INCLUDED",
+        "note": "The open article and full-size Table 3 page identify the Creative Commons Attribution 4.0 license. Exact retrieved table-page bytes remain external and checksum-pinned."
+      },
+      "reference_locations": {
+        "apparatus_and_properties": "Section 2.1",
+        "diameter_method": "Section 4.1 and Table 2",
+        "reported_values": "Table 3",
+        "velocity_and_reynolds_range": "Section 4.2",
+        "path_regime": "Figure 8 and Sections 4.1-4.2",
+        "data_availability": "Data availability statement"
+      },
+      "disposition": "EXPERIMENTAL_EXPECTATION_POINTS_NO_RELEASE_BAND"
+    }
+  ],
+  "experimental_reference": {
+    "name": "single_rising_air_bubbles_in_stagnant_deionized_water",
+    "primary_source": "chang_2024_rising_air_bubbles",
+    "liquid": {
+      "temperature_c": 20.0,
+      "density_kg_per_m3": 998.2,
+      "dynamic_viscosity_pa_s": 0.001002,
+      "surface_tension_n_per_m": 0.07286
+    },
+    "gas": "air",
+    "ambient_pressure": true,
+    "gravity_m_per_s2": 9.81,
+    "tank": {
+      "inscribed_diameter_m": 0.2,
+      "height_m": 0.345,
+      "measurement_volume_m": [
+        0.047,
+        0.067,
+        0.04
+      ],
+      "measurement_volume_bottom_above_nozzle_m": 0.2
+    },
+    "diameter_definition": "3D reconstructed sphere-equivalent diameter",
+    "reported_measurement_uncertainty": null,
+    "solver_acceptance_band": null,
+    "gate_policy": "REPORT_POINTS_AND_NUMERICAL_UNCERTAINTY_NO_RELEASE_BAND",
+    "raw_dataset_access": "AVAILABLE_FROM_AUTHORS_ON_REQUEST",
+    "reported_rounding_reproduction_relative_tolerance": 0.035,
+    "required_solver_reporting": [
+      "independent spatial and temporal refinement",
+      "cut-position and partition sensitivity",
+      "bubble sphere-equivalent diameter history",
+      "center-of-mass and rise-velocity history",
+      "phasewise raw and corrected mass",
+      "trajectory and shape classification",
+      "numerical uncertainty separate from experimental variability"
+    ],
+    "qualitative_expectations": {
+      "reported_path_regime": "flattened_spiral",
+      "reported_shape_region": "spheroid",
+      "reported_velocity_range_m_per_s": [
+        0.24,
+        0.32
+      ],
+      "reported_reynolds_range": [
+        760,
+        2400
+      ],
+      "velocity_monotonicity_gate": null
+    }
+  },
+  "reference_cases": [
+    {
+      "id": "chang_d2p4_mm",
+      "diameter_mm": 2.4,
+      "average_velocity_m_per_s": 0.32,
+      "reynolds": 760.0,
+      "weber": 3.3,
+      "eotvos": 0.8,
+      "galilei": 367.0,
+      "morton": 2.56e-11
+    },
+    {
+      "id": "chang_d4p0_mm",
+      "diameter_mm": 4.0,
+      "average_velocity_m_per_s": 0.27,
+      "reynolds": 1068.0,
+      "weber": 3.9,
+      "eotvos": 2.2,
+      "galilei": 789.0,
+      "morton": 2.56e-11
+    },
+    {
+      "id": "chang_d6p0_mm",
+      "diameter_mm": 6.0,
+      "average_velocity_m_per_s": 0.24,
+      "reynolds": 1429.0,
+      "weber": 4.7,
+      "eotvos": 4.8,
+      "galilei": 1450.0,
+      "morton": 2.56e-11
+    },
+    {
+      "id": "chang_d9p6_mm",
+      "diameter_mm": 9.6,
+      "average_velocity_m_per_s": 0.25,
+      "reynolds": 2400.0,
+      "weber": 8.3,
+      "eotvos": 12.4,
+      "galilei": 2935.0,
+      "morton": 2.56e-11
+    }
+  ]
+}
