@@ -23,6 +23,12 @@
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/TimeIntegrator.h"
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#  include "Mesh/Fields/MeshFields.h"
+#  include "Mesh/Mesh.h"
+#  include "Mesh/Topology/CellShape.h"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -313,6 +319,67 @@ struct TwoFluidRegistrationFixture {
   }
 };
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+[[nodiscard]] std::shared_ptr<svmp::Mesh>
+makeTwoTriangleTwoFluidBoundaryMesh(int boundary_marker) {
+  auto base = std::make_shared<svmp::MeshBase>();
+  const std::vector<svmp::real_t> coordinates{
+      0.0, 0.0,
+      1.0, 0.0,
+      0.0, 1.0,
+      1.0, 1.0,
+  };
+  const std::vector<svmp::offset_t> cell_offsets{0, 3, 6};
+  const std::vector<svmp::index_t> cell_vertices{
+      0, 1, 2,
+      1, 3, 2,
+  };
+  const svmp::CellShape triangle{
+      svmp::CellFamily::Triangle, 3, 1};
+  base->build_from_arrays(
+      /*spatial_dim=*/2,
+      coordinates,
+      cell_offsets,
+      cell_vertices,
+      std::vector<svmp::CellShape>(2u, triangle));
+  base->finalize();
+
+  base->register_label(
+      "two_fluid_wall", static_cast<svmp::label_t>(boundary_marker));
+  const auto& face_cells = base->face2cell();
+  for (svmp::index_t face = 0;
+       face < static_cast<svmp::index_t>(face_cells.size());
+       ++face) {
+    const auto& cells = face_cells[static_cast<std::size_t>(face)];
+    const bool first_valid = cells[0] != svmp::INVALID_INDEX;
+    const bool second_valid = cells[1] != svmp::INVALID_INDEX;
+    if (first_valid == second_valid) {
+      continue;
+    }
+    base->set_boundary_label(
+        face, static_cast<svmp::label_t>(boundary_marker));
+  }
+
+  const auto phi_handle = svmp::MeshFields::attach_field(
+      *base,
+      svmp::EntityKind::Vertex,
+      "level_set",
+      svmp::FieldScalarType::Float64,
+      1);
+  auto* phi = svmp::MeshFields::field_data_as<svmp::real_t>(
+      *base, phi_handle);
+  if (phi == nullptr) {
+    throw std::runtime_error(
+        "two-fluid boundary test could not allocate its level-set field");
+  }
+  phi[0] = -1.0;
+  phi[1] = 0.0;
+  phi[2] = 0.0;
+  phi[3] = 1.0;
+  return svmp::create_mesh(std::move(base));
+}
+#endif
+
 TEST(IncompressibleTwoFluidModule,
      RejectsUnsupportedConfigurationSemanticsBeforeMutation)
 {
@@ -480,6 +547,72 @@ TEST(IncompressibleTwoFluidModule,
       artifact->json.find(
           "\"shared_velocity_dirichlet\":[{\"marker\":7,\"active_components\":[true,true],\"values\":[{\"kind\":\"literal\",\"value\":1},{\"kind\":\"time_coefficient\"}]}]"),
       std::string::npos);
+}
+
+TEST(IncompressibleTwoFluidModule,
+     SharedNonhomogeneousVelocityBoundaryOwnsInactiveExteriorTraceDofs) {
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires native mesh support.";
+#else
+  constexpr int wall_marker = 73;
+  auto mesh = makeTwoTriangleTwoFluidBoundaryMesh(wall_marker);
+  auto pressure_space =
+      std::make_shared<FE::spaces::H1Space>(FE::ElementType::Triangle3, 1);
+  auto velocity_space =
+      std::make_shared<FE::spaces::ProductSpace>(pressure_space, 2);
+  FE::systems::FESystem system(mesh);
+  (void)system.addField(FE::systems::FieldSpec{
+      .name = "level_set",
+      .space = pressure_space,
+      .components = 1,
+      .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+  });
+
+  ns::IncompressibleTwoFluidOptions options;
+  options.interface_marker = 7301;
+  options.enable_convection = false;
+  ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC wall;
+  wall.boundary_marker = wall_marker;
+  wall.active_components = {{true, true, false}};
+  wall.value[0] =
+      ns::IncompressibleNavierStokesVMSOptions::ScalarValue{1.25};
+  wall.value[1] =
+      ns::IncompressibleNavierStokesVMSOptions::ScalarValue{-0.75};
+  options.shared_velocity_dirichlet.push_back(std::move(wall));
+
+  ns::IncompressibleTwoFluidModule module(
+      velocity_space,
+      pressure_space,
+      velocity_space,
+      pressure_space,
+      std::move(options));
+  ASSERT_NO_THROW(module.registerOn(system));
+  ASSERT_NO_THROW(system.setup({}));
+
+  constexpr std::array<FE::Real, 2> expected{{1.25, -0.75}};
+  const auto expect_physical_trace = [&] {
+    for (const std::string_view field : {"u_negative", "u_positive"}) {
+      for (int component = 0; component < 2; ++component) {
+        const auto dofs = system.fieldMap()
+                              .getComponentDofs(
+                                  std::string(field),
+                                  static_cast<FE::LocalIndex>(component))
+                              .toVector();
+        ASSERT_EQ(dofs.size(), 4u);
+        for (const auto dof : dofs) {
+          const auto constraint = system.constraints().getConstraint(dof);
+          ASSERT_TRUE(constraint.has_value());
+          EXPECT_TRUE(constraint->isDirichlet());
+          EXPECT_NEAR(
+              constraint->inhomogeneity,
+              expected[static_cast<std::size_t>(component)],
+              FE::Real{1.0e-14});
+        }
+      }
+    }
+  };
+  expect_physical_trace();
+#endif
 }
 
 TEST(IncompressibleTwoFluidInterface,

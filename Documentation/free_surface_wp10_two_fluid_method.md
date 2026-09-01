@@ -193,6 +193,25 @@ boundary. Phase-local lists remain homogeneous-only, and a shared marker may
 not overlap either phase-local list. Duplicate markers are rejected before
 field or operator mutation.
 
+Constraint registration follows physical ownership. Physical velocity and
+pressure data are registered first, inactive-side zero extensions fill only
+the remaining unconstrained degrees of freedom, and small-cut aggregation is
+registered last. A physical value prescribed at an exterior vertex therefore
+remains the trace value on both phase restrictions even when that vertex lies
+outside one phase's active volume support. On that inactive restriction the
+value is an algebraic extension only; it is not integrated as phase momentum.
+Conflicting physical owners still fail instead of relying on registration
+order.
+
+A temporal/spatial values file selects one node-ID convention for the complete
+file. Exactly one of legacy one-based ordinal IDs or imported global vertex
+IDs must cover the requested vertex set; mixed conventions, duplicate IDs,
+nonfinite or incomplete values, and trailing data fail closed. Boundary data
+must cover the complete marked trace, while a spacetime momentum source must
+cover all mesh vertices. Distributed convention checks use the active FE
+communicator, so independent systems in different communicator groups cannot
+affect one another's mapping decision.
+
 Artifact schema 3 records the shared-boundary policy, count, marker, active
 components, and each component's value kind; finite literal values are also
 recorded. This distinguishes identical physical exterior data from

@@ -8671,7 +8671,17 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         int interface_marker{-1};
         FE::constraints::SmallCutAggregationGuardOptions guards{};
     };
+    struct PendingActiveDomainConstraints {
+        FE::constraints::LevelSetConstraintSide side{
+            FE::constraints::LevelSetConstraintSide::Negative};
+        std::string level_set_field_name{};
+        FE::Real level_set_isovalue{0.0};
+        int interface_marker{-1};
+        bool constrain_inactive_velocity{true};
+    };
     std::optional<PendingSmallCutAggregation> pending_small_cut_aggregation;
+    std::optional<PendingActiveDomainConstraints>
+        pending_active_domain_constraints;
     if (active_pressure_domain.has_value() &&
         isExteriorOnePhaseBoundary(
             *active_pressure_domain->boundary) &&
@@ -8760,17 +8770,22 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             const bool constrain_inactive_velocity =
                 constrainInactiveActiveDomainVelocity(
                     *active_pressure_domain->boundary);
-            if (constrain_inactive_velocity) {
-                system.addSystemConstraint(
-                    std::make_unique<
-                        FE::constraints::LevelSetActiveSideVertexDirichletConstraint>(
-                        u_id,
-                        active_pressure_domain->boundary->level_set_field_name,
-                        side,
-                        active_pressure_domain->boundary->level_set_isovalue,
-                        FE::Real{0.0},
-                        active_pressure_domain->boundary->interface_marker));
-            } else {
+            pending_active_domain_constraints =
+                PendingActiveDomainConstraints{
+                    .side = side,
+                    .level_set_field_name =
+                        active_pressure_domain->boundary
+                            ->level_set_field_name,
+                    .level_set_isovalue =
+                        active_pressure_domain->boundary
+                            ->level_set_isovalue,
+                    .interface_marker =
+                        active_pressure_domain->boundary
+                            ->interface_marker,
+                    .constrain_inactive_velocity =
+                        constrain_inactive_velocity,
+                };
+            if (!constrain_inactive_velocity) {
                 FE_LOG_INFO(
                     std::string("IncompressibleNavierStokesVMSModule: inactive active-domain velocity constraints disabled") +
                     " marker=" +
@@ -8780,15 +8795,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                     active_pressure_domain->boundary->level_set_field_name +
                     "' reason=velocity_extension_enabled");
             }
-            system.addSystemConstraint(
-                std::make_unique<
-                    FE::constraints::LevelSetActiveSideVertexDirichletConstraint>(
-                    p_id,
-                    active_pressure_domain->boundary->level_set_field_name,
-                    side,
-                    active_pressure_domain->boundary->level_set_isovalue,
-                    FE::Real{0.0},
-                    active_pressure_domain->boundary->interface_marker));
             if (active_pressure_domain->boundary->small_cut_aggregation) {
                 const auto aggregation_side =
                     active_pressure_domain->active_domain ==
@@ -9683,6 +9689,40 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     p_bc_manager.install(options_.pressure_dirichlet,
                          [&](const auto& bc) { return Factories::toPressureEssentialBC(bc, options_.pressure_field_name); });
     p_bc_manager.applyAll(system, p_id);
+
+    if (pending_active_domain_constraints.has_value()) {
+        // Physical essential data owns the exterior trace.  The artificial
+        // inactive-side extension is registered afterward so its existing
+        // per-DOF precedence rule fills only otherwise unconstrained support.
+        // Aggregation remains last and therefore sees the complete physical
+        // and inactive constraint set.
+        const auto& pending = *pending_active_domain_constraints;
+        if (pending.constrain_inactive_velocity) {
+            system.addSystemConstraint(
+                std::make_unique<
+                    FE::constraints::LevelSetActiveSideVertexDirichletConstraint>(
+                    u_id,
+                    pending.level_set_field_name,
+                    pending.side,
+                    pending.level_set_isovalue,
+                    FE::Real{0.0},
+                    pending.interface_marker));
+        }
+        system.addSystemConstraint(
+            std::make_unique<
+                FE::constraints::LevelSetActiveSideVertexDirichletConstraint>(
+                p_id,
+                pending.level_set_field_name,
+                pending.side,
+                pending.level_set_isovalue,
+                FE::Real{0.0},
+                pending.interface_marker));
+        FE_LOG_INFO(
+            std::string("IncompressibleNavierStokesVMSModule: active-domain inactive constraints enabled") +
+            " marker=" + std::to_string(pending.interface_marker) +
+            " registration_order=after_physical_essential_constraints"
+            " physical_trace_precedence=per_dof");
+    }
 
     if (pending_small_cut_aggregation.has_value()) {
         // Mixed problems must aggregate both spaces: leaving the small-cut

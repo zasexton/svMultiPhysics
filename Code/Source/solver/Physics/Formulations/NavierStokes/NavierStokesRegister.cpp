@@ -46,6 +46,12 @@
 
 namespace {
 
+#if FE_HAS_MPI
+using MarkerCommunicator = MPI_Comm;
+#else
+using MarkerCommunicator = int;
+#endif
+
 std::string trim_copy(std::string s)
 {
   auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
@@ -1001,10 +1007,16 @@ struct TemporalSpatialValues {
   }
 };
 
-std::unordered_set<svmp::gid_t> collect_boundary_vertex_gids(const svmp::MeshBase& mesh, int boundary_marker)
+std::unordered_set<svmp::gid_t> collect_temporal_spatial_target_vertex_gids(
+    const svmp::MeshBase& mesh,
+    int boundary_marker)
 {
   std::unordered_set<svmp::gid_t> gids;
   const auto& vgids = mesh.vertex_gids();
+  if (boundary_marker < 0) {
+    gids.insert(vgids.begin(), vgids.end());
+    return gids;
+  }
   const auto add_vertex = [&](svmp::index_t v) {
     if (v < 0) {
       return;
@@ -1080,7 +1092,8 @@ std::unordered_set<svmp::gid_t> collect_boundary_vertex_gids(const svmp::MeshBas
 
 std::shared_ptr<TemporalSpatialValues> read_temporal_and_spatial_values_file(const svmp::MeshBase& mesh,
                                                                             int boundary_marker,
-                                                                            const std::string& file_path)
+                                                                            const std::string& file_path,
+                                                                            MarkerCommunicator comm)
 {
   std::ifstream in(file_path);
   if (!in.is_open()) {
@@ -1107,25 +1120,12 @@ std::shared_ptr<TemporalSpatialValues> read_temporal_and_spatial_values_file(con
         ", but mesh dimension is " + std::to_string(dim) + ".");
   }
 
-  const auto boundary_gids = collect_boundary_vertex_gids(mesh, boundary_marker);
-  const bool identity_vertex_gids = [&] {
-    const auto& vgids = mesh.vertex_gids();
-    if (vgids.size() != mesh.n_vertices()) {
-      return false;
-    }
-    for (std::size_t i = 0; i < vgids.size(); ++i) {
-      if (vgids[i] != static_cast<svmp::gid_t>(i)) {
-        return false;
-      }
-    }
-    return true;
-  }();
-
-  if (identity_vertex_gids && !boundary_gids.empty() && static_cast<int>(boundary_gids.size()) != num_nodes) {
+  const auto target_gids =
+      collect_temporal_spatial_target_vertex_gids(mesh, boundary_marker);
+  if (mesh.vertex_gids().size() != mesh.n_vertices()) {
     throw std::runtime_error(
-        "[svMultiPhysics::Physics] Temporal/spatial BC file '" + file_path + "' specifies num_nodes=" +
-        std::to_string(num_nodes) + ", but boundary marker " + std::to_string(boundary_marker) + " has " +
-        std::to_string(boundary_gids.size()) + " unique nodes.");
+        "[svMultiPhysics::Physics] Temporal/spatial BC file '" + file_path +
+        "' requires stable global vertex IDs on the boundary mesh.");
   }
 
   auto out = std::make_shared<TemporalSpatialValues>();
@@ -1139,7 +1139,12 @@ std::shared_ptr<TemporalSpatialValues> read_temporal_and_spatial_values_file(con
   // Time sequence (t0 must be 0 and increasing).
   for (int i = 0; i < num_ts; ++i) {
     double ti = 0.0;
-    in >> ti;
+    if (!(in >> ti) || !std::isfinite(ti)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Temporal/spatial BC file '" + file_path +
+          "' contains a missing or nonfinite time value at index " +
+          std::to_string(i) + ".");
+    }
     out->t[static_cast<std::size_t>(i)] = ti;
     if (i == 0) {
       if (std::abs(ti) > 1e-14) {
@@ -1156,6 +1161,150 @@ std::shared_ptr<TemporalSpatialValues> read_temporal_and_spatial_values_file(con
   }
   out->period = out->t.back();
 
+  struct FileNodeRecord {
+    long long file_node_id{0};
+    std::vector<svmp::FE::Real> values{};
+  };
+  std::vector<FileNodeRecord> file_nodes;
+  file_nodes.reserve(static_cast<std::size_t>(num_nodes));
+  std::unordered_set<long long> seen_file_node_ids;
+  for (int b = 0; b < num_nodes; ++b) {
+    FileNodeRecord record;
+    if (!(in >> record.file_node_id)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Temporal/spatial BC file '" + file_path +
+          "' ended before node record " + std::to_string(b + 1) + ".");
+    }
+    if (record.file_node_id <= 0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Temporal/spatial BC file '" + file_path +
+          "' contains a nonpositive node id: " + std::to_string(record.file_node_id) + ".");
+    }
+    if (!seen_file_node_ids.insert(record.file_node_id).second) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Temporal/spatial BC file '" + file_path +
+          "' contains duplicate node id " + std::to_string(record.file_node_id) + ".");
+    }
+
+    record.values.reserve(static_cast<std::size_t>(num_ts) * static_cast<std::size_t>(ndof));
+    for (int i = 0; i < num_ts; ++i) {
+      for (int k = 0; k < ndof; ++k) {
+        double value = 0.0;
+        if (!(in >> value) || !std::isfinite(value)) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Physics] Temporal/spatial BC file '" + file_path +
+              "' contains a missing or nonfinite value for node id " +
+              std::to_string(record.file_node_id) + ".");
+        }
+        record.values.push_back(static_cast<svmp::FE::Real>(value));
+      }
+    }
+    file_nodes.push_back(std::move(record));
+  }
+  std::string trailing_token;
+  if (in >> trailing_token) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Temporal/spatial BC file '" + file_path +
+        "' contains trailing data after " + std::to_string(num_nodes) +
+        " node records (first unexpected token: '" + trailing_token + "').");
+  }
+
+  enum class NodeIdConvention {
+    LegacyOneBasedOrdinal,
+    ImportedGlobalId,
+  };
+  struct NodeIdCoverage {
+    NodeIdConvention convention{NodeIdConvention::LegacyOneBasedOrdinal};
+    std::vector<svmp::gid_t> mapped_gids{};
+    std::size_t globally_matched_nodes{0};
+    bool covers_global_boundary{false};
+    bool exact{false};
+  };
+
+  const auto evaluate_convention = [&](NodeIdConvention convention) {
+    NodeIdCoverage coverage;
+    coverage.convention = convention;
+    coverage.mapped_gids.reserve(file_nodes.size());
+    std::unordered_set<svmp::gid_t> mapped_gid_set;
+    mapped_gid_set.reserve(file_nodes.size());
+    for (const auto& record : file_nodes) {
+      const auto mapped =
+          convention == NodeIdConvention::ImportedGlobalId
+              ? static_cast<svmp::gid_t>(record.file_node_id)
+              : static_cast<svmp::gid_t>(record.file_node_id - 1);
+      coverage.mapped_gids.push_back(mapped);
+      mapped_gid_set.insert(mapped);
+    }
+
+    std::vector<int> globally_matched(file_nodes.size(), 0);
+    for (std::size_t i = 0; i < coverage.mapped_gids.size(); ++i) {
+      globally_matched[i] = target_gids.count(coverage.mapped_gids[i]) != 0u ? 1 : 0;
+    }
+    int covers_global_boundary = std::all_of(
+                                      target_gids.begin(),
+                                      target_gids.end(),
+                                      [&](svmp::gid_t gid) {
+                                        return mapped_gid_set.count(gid) != 0u;
+                                      })
+                                      ? 1
+                                      : 0;
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    int mpi_finalized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized) {
+      MPI_Finalized(&mpi_finalized);
+    }
+    if (mpi_initialized && !mpi_finalized && comm != MPI_COMM_NULL) {
+      MPI_Allreduce(
+          MPI_IN_PLACE,
+          globally_matched.data(),
+          static_cast<int>(globally_matched.size()),
+          MPI_INT,
+          MPI_MAX,
+          comm);
+      MPI_Allreduce(
+          MPI_IN_PLACE,
+          &covers_global_boundary,
+          1,
+          MPI_INT,
+          MPI_MIN,
+          comm);
+    }
+#endif
+    coverage.globally_matched_nodes = static_cast<std::size_t>(
+        std::count(globally_matched.begin(), globally_matched.end(), 1));
+    coverage.covers_global_boundary = covers_global_boundary != 0;
+    coverage.exact =
+        coverage.covers_global_boundary && coverage.globally_matched_nodes == file_nodes.size();
+    return coverage;
+  };
+
+  const auto legacy_coverage = evaluate_convention(NodeIdConvention::LegacyOneBasedOrdinal);
+  const auto imported_coverage = evaluate_convention(NodeIdConvention::ImportedGlobalId);
+  if (legacy_coverage.exact == imported_coverage.exact) {
+    std::ostringstream message;
+    message << "[svMultiPhysics::Physics] Temporal/spatial BC file '" << file_path << "' node IDs ";
+    if (legacy_coverage.exact) {
+      message << "are ambiguous";
+    } else {
+      message << "do not exactly cover ";
+      if (boundary_marker < 0) {
+        message << "the mesh vertex set";
+      } else {
+        message << "boundary marker " << boundary_marker;
+      }
+    }
+    message << " under either the legacy one-based ordinal convention or the imported global-ID convention"
+            << " (file_nodes=" << file_nodes.size()
+            << ", legacy_matched=" << legacy_coverage.globally_matched_nodes
+            << ", legacy_covers_boundary=" << (legacy_coverage.covers_global_boundary ? 1 : 0)
+            << ", imported_matched=" << imported_coverage.globally_matched_nodes
+            << ", imported_covers_boundary=" << (imported_coverage.covers_global_boundary ? 1 : 0) << ").";
+    throw std::runtime_error(message.str());
+  }
+  const auto& selected_coverage = imported_coverage.exact ? imported_coverage : legacy_coverage;
+
   out->node_ids.clear();
   out->coords.clear();
   out->d.clear();
@@ -1165,67 +1314,12 @@ std::shared_ptr<TemporalSpatialValues> read_temporal_and_spatial_values_file(con
 
   int missing_local_vertex_count = 0;
   int non_boundary_file_node_count = 0;
-  int raw_gid_fallback_count = 0;
-
-  for (int b = 0; b < num_nodes; ++b) {
-    long long node_id_1based = 0;
-    in >> node_id_1based;
-    const long long node_gid0_ll = node_id_1based - 1;
-    if (node_gid0_ll < 0) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] Temporal/spatial BC file '" + file_path +
-          "': invalid negative node id: " + std::to_string(node_id_1based) + ".");
-    }
-
-    struct NodeCandidate {
-      svmp::gid_t gid{svmp::INVALID_GID};
-      svmp::index_t local{svmp::INVALID_INDEX};
-      bool on_boundary{false};
-    };
-    const auto make_candidate = [&](svmp::gid_t gid) {
-      NodeCandidate c{};
-      c.gid = gid;
-      c.local = mesh.global_to_local_vertex(gid);
-      c.on_boundary = boundary_gids.empty() || boundary_gids.count(gid) != 0u;
-      return c;
-    };
-
-    const auto zero_based = make_candidate(static_cast<svmp::gid_t>(node_gid0_ll));
-    NodeCandidate chosen = zero_based;
-    bool used_raw_gid = false;
-    if (!identity_vertex_gids) {
-      const auto raw = make_candidate(static_cast<svmp::gid_t>(node_id_1based));
-      if (!(zero_based.local != svmp::INVALID_INDEX && zero_based.on_boundary)) {
-        if (raw.local != svmp::INVALID_INDEX && raw.on_boundary) {
-          chosen = raw;
-          used_raw_gid = true;
-        } else if (zero_based.local == svmp::INVALID_INDEX && raw.local != svmp::INVALID_INDEX) {
-          chosen = raw;
-          used_raw_gid = true;
-        }
-      }
-    }
-
-    const auto node_gid = chosen.gid;
-    const auto node_idx = chosen.local;
-    if (used_raw_gid) {
-      ++raw_gid_fallback_count;
-    }
-
-    if (identity_vertex_gids && node_idx == svmp::INVALID_INDEX) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] Temporal/spatial BC file '" + file_path +
-          "': node id out of range: " + std::to_string(node_id_1based) + ".");
-    }
-    if (identity_vertex_gids && node_idx != svmp::INVALID_INDEX && !boundary_gids.empty() &&
-        boundary_gids.count(node_gid) == 0u) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] Temporal/spatial BC file '" + file_path + "': node id " +
-          std::to_string(node_id_1based) + " is not on boundary marker " + std::to_string(boundary_marker) + ".");
-    }
+  for (std::size_t b = 0; b < file_nodes.size(); ++b) {
+    const auto node_gid = selected_coverage.mapped_gids[b];
+    const auto node_idx = mesh.global_to_local_vertex(node_gid);
 
     const bool has_local_vertex = node_idx != svmp::INVALID_INDEX;
-    const bool is_boundary_node = chosen.on_boundary;
+    const bool is_boundary_node = target_gids.count(node_gid) != 0u;
     if (!has_local_vertex) {
       ++missing_local_vertex_count;
     } else if (!is_boundary_node) {
@@ -1251,14 +1345,8 @@ std::shared_ptr<TemporalSpatialValues> read_temporal_and_spatial_values_file(con
       out->node_index_by_key.emplace(TemporalSpatialValues::quantize(p, dim), stored_idx);
     }
 
-    for (int i = 0; i < num_ts; ++i) {
-      for (int k = 0; k < ndof; ++k) {
-        double value = 0.0;
-        in >> value;
-        if (keep) {
-          out->d.push_back(static_cast<svmp::FE::Real>(value));
-        }
-      }
+    if (keep) {
+      out->d.insert(out->d.end(), file_nodes[b].values.begin(), file_nodes[b].values.end());
     }
   }
 
@@ -1267,8 +1355,12 @@ std::shared_ptr<TemporalSpatialValues> read_temporal_and_spatial_values_file(con
 #if FE_HAS_MPI
     int initialized = 0;
     MPI_Initialized(&initialized);
+    int finalized = 0;
     if (initialized) {
-      MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+      MPI_Finalized(&finalized);
+    }
+    if (initialized && !finalized && comm != MPI_COMM_NULL) {
+      MPI_Comm_rank(comm, &rank);
     }
 #endif
     std::ostringstream oss;
@@ -1279,11 +1371,16 @@ std::shared_ptr<TemporalSpatialValues> read_temporal_and_spatial_values_file(con
         << " time_points=" << num_ts
         << " file_nodes=" << num_nodes
         << " kept_nodes=" << out->coords.size()
-        << " boundary_marker_nodes=" << boundary_gids.size()
+        << " mapping_scope="
+        << (boundary_marker < 0 ? "mesh_vertices" : "boundary_marker")
+        << " target_nodes=" << target_gids.size()
         << " missing_local_vertex_nodes=" << missing_local_vertex_count
         << " non_boundary_file_nodes=" << non_boundary_file_node_count
-        << " raw_gid_fallback_nodes=" << raw_gid_fallback_count
-        << " identity_vertex_gids=" << (identity_vertex_gids ? 1 : 0);
+        << " node_id_convention="
+        << (selected_coverage.convention == NodeIdConvention::ImportedGlobalId ? "imported_global_id"
+                                                                               : "legacy_one_based_ordinal")
+        << " legacy_matched_nodes=" << legacy_coverage.globally_matched_nodes
+        << " imported_matched_nodes=" << imported_coverage.globally_matched_nodes;
     navierStokesTraceLog(oss.str());
   }
 
@@ -1906,12 +2003,6 @@ MarkerGeometry local_marker_geometry(const svmp::MeshBase& mesh, int boundary_ma
   }
   return out;
 }
-
-#if FE_HAS_MPI
-using MarkerCommunicator = MPI_Comm;
-#else
-using MarkerCommunicator = int;
-#endif
 
 [[nodiscard]] MarkerCommunicator markerCommunicator(
     const svmp::FE::systems::FESystem& system) noexcept
@@ -3193,6 +3284,7 @@ void apply_fluid_momentum_source_spacetime_file(
     const svmp::Physics::EquationModuleInput& input,
     const svmp::Physics::DomainInput& domain,
     int dim,
+    MarkerCommunicator comm,
     svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
 {
   const auto path = first_defined_string(
@@ -3220,7 +3312,8 @@ void apply_fluid_momentum_source_spacetime_file(
   auto data = read_temporal_and_spatial_values_file(
       *input.mesh,
       /*boundary_marker=*/-1,
-      *source_path);
+      *source_path,
+      comm);
   options.has_body_force_spacetime = true;
   for (int d = 0; d < dim; ++d) {
     if (d < data->dof) {
@@ -4307,7 +4400,8 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
               "[svMultiPhysics::Physics] General Dirichlet BC is missing Temporal_and_spatial_values_file_path.");
         }
 
-        auto data = read_temporal_and_spatial_values_file(*input.mesh, bc.boundary_marker, file_path);
+        auto data = read_temporal_and_spatial_values_file(
+            *input.mesh, bc.boundary_marker, file_path, comm);
 
         IncompressibleNavierStokesVMSOptions::VelocityDirichletBC dir{};
         dir.boundary_marker = bc.boundary_marker;
@@ -5110,7 +5204,8 @@ create_navier_stokes_from_input(const svmp::Physics::EquationModuleInput& input,
   apply_fluid_moving_domain_options(input, domain, options);
   apply_fluid_momentum_source_params(input.equation_params, options);
   apply_fluid_properties(domain, options);
-  apply_fluid_momentum_source_spacetime_file(input, domain, dim, options);
+  apply_fluid_momentum_source_spacetime_file(
+      input, domain, dim, markerCommunicator(system), options);
   apply_fluid_rotating_frame_coriolis(input, domain, dim, options);
   apply_node_pressure_constraints(input, options);
   apply_fluid_bcs(input, domain, markerCommunicator(system), options);

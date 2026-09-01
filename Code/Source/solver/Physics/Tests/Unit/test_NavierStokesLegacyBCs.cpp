@@ -28,6 +28,7 @@
 #include <cmath>
 #include <cstddef>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -39,9 +40,33 @@
 #  include "Mesh/Topology/CellShape.h"
 #endif
 
+#if defined(FE_HAS_MPI) && FE_HAS_MPI && defined(MESH_HAS_MPI)
+#  include <mpi.h>
+#endif
+
 namespace svmp::Physics::test {
 
 namespace {
+
+class ScopedPathRemoval {
+public:
+    explicit ScopedPathRemoval(std::filesystem::path path)
+        : path_(std::move(path))
+    {
+    }
+
+    ~ScopedPathRemoval()
+    {
+        std::error_code error;
+        std::filesystem::remove(path_, error);
+    }
+
+    ScopedPathRemoval(const ScopedPathRemoval&) = delete;
+    ScopedPathRemoval& operator=(const ScopedPathRemoval&) = delete;
+
+private:
+    std::filesystem::path path_;
+};
 
 svmp::Physics::ParameterValue defined(std::string v)
 {
@@ -129,7 +154,8 @@ InletOutletMarkers labelBeamInletOutlet(svmp::Mesh& mesh_mut)
 
 [[nodiscard]] std::shared_ptr<svmp::Mesh> buildSingleTetraBoundaryMesh(
     int marker,
-    bool label_all_faces = true)
+    bool label_all_faces = true,
+    svmp::MeshComm comm = svmp::MeshComm::world())
 {
     auto base = std::make_shared<svmp::MeshBase>();
 
@@ -158,7 +184,137 @@ InletOutletMarkers labelBeamInletOutlet(svmp::Mesh& mesh_mut)
         base->add_to_set(svmp::EntityKind::Face, "free_surface", f);
     }
 
-    return svmp::create_mesh(std::move(base));
+    return svmp::create_mesh(std::move(base), comm);
+}
+
+void writeTemporalSpatialValuesFile(
+    const std::filesystem::path& path,
+    const std::vector<long long>& node_ids,
+    std::string_view time_value = "0",
+    std::string_view trailing_data = {})
+{
+    std::ofstream values(path);
+    ASSERT_TRUE(values.is_open());
+    values << "3 1 " << node_ids.size() << "\n"
+           << time_value << '\n';
+    for (std::size_t i = 0; i < node_ids.size(); ++i) {
+        const auto base = 10 * static_cast<int>(i + 1);
+        values << node_ids[i] << ' '
+               << base << ' ' << base + 1 << ' ' << base + 2 << '\n';
+    }
+    if (!trailing_data.empty()) {
+        values << trailing_data << '\n';
+    }
+    ASSERT_TRUE(values.good());
+}
+
+[[nodiscard]] svmp::Physics::EquationModuleInput
+makeGeneralVelocityInput(
+    const std::shared_ptr<svmp::Mesh>& mesh,
+    int marker,
+    const std::filesystem::path& values_path)
+{
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "fluid";
+    input.mesh_name = "tetra";
+    input.mesh = mesh->local_mesh_ptr();
+    input.default_domain.params["Density"] = defined("1.0");
+    input.default_domain.params["Viscosity.model"] = defined("Constant");
+    input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+    svmp::Physics::BoundaryConditionInput boundary{};
+    boundary.name = "wall";
+    boundary.boundary_marker = marker;
+    boundary.params["Type"] = defined("Dir");
+    boundary.params["Time_dependence"] = defined("General");
+    boundary.params["Weakly_applied"] = defined("false");
+    boundary.params["Temporal_and_spatial_values_file_path"] =
+        defined(values_path.string());
+    input.boundary_conditions.push_back(std::move(boundary));
+    return input;
+}
+
+void expectGeneralVelocityFileConstraints(
+    std::vector<svmp::gid_t> vertex_gids,
+    std::string_view path_suffix,
+    svmp::MeshComm comm = svmp::MeshComm::world())
+{
+    constexpr int marker = 76;
+    auto mesh = buildSingleTetraBoundaryMesh(marker, true, comm);
+    ASSERT_TRUE(mesh);
+    mesh->base().set_vertex_gids(std::move(vertex_gids));
+
+    const auto values_path =
+        std::filesystem::temp_directory_path() /
+        ("svmp_general_velocity_" + std::string(path_suffix) + ".dat");
+    const ScopedPathRemoval cleanup(values_path);
+    writeTemporalSpatialValuesFile(values_path, {1, 2, 3, 4});
+    auto input = makeGeneralVelocityInput(mesh, marker, values_path);
+
+    svmp::FE::systems::FESystem system(mesh);
+    auto module = svmp::Physics::EquationModuleRegistry::instance().create(
+        "fluid", input, system);
+    ASSERT_TRUE(module);
+    ASSERT_NO_THROW(system.setup());
+
+    const std::array<std::array<double, 4>, 3> expected{{
+        {{10.0, 20.0, 30.0, 40.0}},
+        {{11.0, 21.0, 31.0, 41.0}},
+        {{12.0, 22.0, 32.0, 42.0}},
+    }};
+    for (int component = 0; component < 3; ++component) {
+        const auto dofs = system.fieldMap()
+                              .getComponentDofs(
+                                  "Velocity",
+                                  static_cast<svmp::FE::LocalIndex>(component))
+                              .toVector();
+        std::vector<double> actual;
+        for (const auto dof : dofs) {
+            const auto constraint = system.constraints().getConstraint(dof);
+            ASSERT_TRUE(constraint.has_value());
+            ASSERT_TRUE(constraint->isDirichlet());
+            actual.push_back(constraint->inhomogeneity);
+        }
+        std::sort(actual.begin(), actual.end());
+        EXPECT_EQ(actual,
+                  std::vector<double>(expected[static_cast<std::size_t>(
+                      component)].begin(),
+                                      expected[static_cast<std::size_t>(
+                                          component)].end()));
+    }
+}
+
+void expectGeneralVelocityFileRejected(
+    std::vector<long long> file_node_ids,
+    std::string_view expected_message,
+    std::string_view path_suffix,
+    std::string_view time_value = "0",
+    std::string_view trailing_data = {})
+{
+    constexpr int marker = 76;
+    auto mesh = buildSingleTetraBoundaryMesh(marker);
+    ASSERT_TRUE(mesh);
+    mesh->base().set_vertex_gids({1, 2, 3, 4});
+
+    const auto values_path =
+        std::filesystem::temp_directory_path() /
+        ("svmp_general_velocity_" + std::string(path_suffix) + ".dat");
+    const ScopedPathRemoval cleanup(values_path);
+    writeTemporalSpatialValuesFile(
+        values_path, file_node_ids, time_value, trailing_data);
+    auto input = makeGeneralVelocityInput(mesh, marker, values_path);
+
+    svmp::FE::systems::FESystem system(mesh);
+    try {
+        auto module = svmp::Physics::EquationModuleRegistry::instance().create(
+            "fluid", input, system);
+        (void)module;
+        FAIL() << "Expected temporal/spatial node-ID mapping to fail closed.";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find(expected_message),
+                  std::string::npos)
+            << error.what();
+    }
 }
 
 #endif
@@ -953,6 +1109,160 @@ TEST(NavierStokesLegacyBCs, ParabolicFluxInflow_ResistanceOutflow_SetupSucceeds)
     // Parabolic inflow should produce a non-uniform velocity component along the beam axis.
     expectParabolicInflowVaries(system, markers.axis);
 #  endif
+#endif
+}
+
+TEST(NavierStokesLegacyBCs,
+     GeneralVelocityFileUsesImportedOneBasedGlobalNodeIds)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+    expectGeneralVelocityFileConstraints(
+        {1, 2, 3, 4}, "imported_one_based_global_node_ids");
+#endif
+}
+
+TEST(NavierStokesLegacyBCs,
+     GeneralVelocityFileSupportsLegacyOneBasedOrdinalNodeIds)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+    expectGeneralVelocityFileConstraints(
+        {0, 1, 2, 3}, "legacy_one_based_ordinal_node_ids");
+#endif
+}
+
+TEST(NavierStokesLegacyBCs,
+     GeneralVelocityFileRejectsMixedNodeIdConventions)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+    expectGeneralVelocityFileRejected(
+        {1, 2, 3, 5},
+        "do not exactly cover boundary marker",
+        "mixed_node_id_conventions");
+#endif
+}
+
+TEST(NavierStokesLegacyBCs,
+     GeneralVelocityFileRejectsDuplicateNodeIds)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+    expectGeneralVelocityFileRejected(
+        {1, 2, 2, 4},
+        "contains duplicate node id 2",
+        "duplicate_node_ids");
+#endif
+}
+
+TEST(NavierStokesLegacyBCs,
+     GeneralVelocityFileRejectsNonfiniteTimeData)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+    expectGeneralVelocityFileRejected(
+        {1, 2, 3, 4},
+        "contains a missing or nonfinite time value",
+        "nonfinite_time_data",
+        "nan");
+#endif
+}
+
+TEST(NavierStokesLegacyBCs,
+     GeneralVelocityFileRejectsTrailingData)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+    expectGeneralVelocityFileRejected(
+        {1, 2, 3, 4},
+        "contains trailing data",
+        "trailing_data",
+        "0",
+        "unexpected_token");
+#endif
+}
+
+TEST(NavierStokesLegacyBCs,
+     SpacetimeMomentumFileUsesAllMeshVertices)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+
+    constexpr int marker = 76;
+    auto mesh = buildSingleTetraBoundaryMesh(marker);
+    ASSERT_TRUE(mesh);
+    mesh->base().set_vertex_gids({1, 2, 3, 4});
+
+    const auto values_path =
+        std::filesystem::temp_directory_path() /
+        "svmp_spacetime_momentum_all_mesh_vertices.dat";
+    const ScopedPathRemoval cleanup(values_path);
+    writeTemporalSpatialValuesFile(values_path, {1, 2, 3, 4});
+
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "fluid";
+    input.mesh_name = "tetra";
+    input.mesh = mesh->local_mesh_ptr();
+    input.equation_params[
+        "Momentum_source_temporal_and_spatial_values_file_path"] =
+        defined(values_path.string());
+    input.default_domain.params["Density"] = defined("1.0");
+    input.default_domain.params["Viscosity.model"] = defined("Constant");
+    input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+    svmp::FE::systems::FESystem system(mesh);
+    ASSERT_NO_THROW({
+        auto module =
+            svmp::Physics::EquationModuleRegistry::instance().create(
+                "fluid", input, system);
+        ASSERT_TRUE(module);
+    });
+#endif
+}
+
+TEST(NavierStokesLegacyBCsMPI,
+     GeneralVelocityFileMappingIsolatedToActiveCommunicator)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH && \
+      defined(FE_HAS_MPI) && FE_HAS_MPI && defined(MESH_HAS_MPI))
+    GTEST_SKIP() << "Requires MPI-enabled FE and Mesh integration.";
+#else
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized == 0) {
+        GTEST_SKIP() << "Run this test under mpiexec.";
+    }
+    int world_rank = 0;
+    int world_size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    if (world_size != 2) {
+        GTEST_SKIP() << "This test requires exactly two MPI ranks.";
+    }
+
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+    const auto path_suffix =
+        "split_communicator_rank_" + std::to_string(world_rank);
+    expectGeneralVelocityFileConstraints(
+        world_rank == 0 ? std::vector<svmp::gid_t>{1, 2, 3, 4}
+                        : std::vector<svmp::gid_t>{0, 1, 2, 3},
+        path_suffix,
+        svmp::MeshComm(MPI_COMM_SELF));
 #endif
 }
 
