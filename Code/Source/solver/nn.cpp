@@ -943,15 +943,43 @@ void gnnb(const ComMod& com_mod, const faceType& lFa, const int e, const int g, 
   dmsg << "msh.IEN.ncols: " << msh.IEN.ncols();
   #endif
 
-  Array<double> lX(nsd,eNoN); 
-  Vector<int> ptr(eNoN); 
-  std::vector<bool> setIt(eNoN);
+  constexpr int max_spatial_dimension = 3;
+  constexpr int max_element_nodes = 27;
+  const bool use_node_stack = nsd <= max_spatial_dimension && eNoN <= max_element_nodes;
+
+  std::array<double, max_spatial_dimension * max_element_nodes> lX_stack{};
+  std::array<int, max_element_nodes> ptr_stack{};
+  std::array<unsigned char, max_element_nodes> setIt_stack{};
+  std::vector<double> lX_heap(use_node_stack ? 0 : nsd*eNoN, 0.0);
+  std::vector<int> ptr_heap(use_node_stack ? 0 : eNoN, 0);
+  std::vector<unsigned char> setIt_heap(use_node_stack ? 0 : eNoN, 0);
+
+  Array<double> lX(nsd, eNoN, use_node_stack ? lX_stack.data() : lX_heap.data());
+  Vector<int> ptr(eNoN, use_node_stack ? ptr_stack.data() : ptr_heap.data());
+  auto* setIt = use_node_stack ? setIt_stack.data() : setIt_heap.data();
+
+  const bool use_spatial_stack = nsd <= max_spatial_dimension;
+  std::array<double, max_spatial_dimension> v_stack{};
+  std::vector<double> v_heap(use_spatial_stack ? 0 : nsd, 0.0);
+  Vector<double> v(nsd, use_spatial_stack ? v_stack.data() : v_heap.data());
+
+  auto cross_into = [](const Array<double>& values, Vector<double>& result) {
+    result = 0.0;
+    if (values.nrows() == 2) {
+      result(0) = values(1,0);
+      result(1) = -values(0,0);
+    } else {
+      result(0) = values(1,0)*values(2,1) - values(2,0)*values(1,1);
+      result(1) = values(2,0)*values(0,1) - values(0,0)*values(2,1);
+      result(2) = values(0,0)*values(1,1) - values(1,0)*values(0,1);
+    }
+  };
 
   // Creating a ptr list that contains pointer to the nodes of elements
   // that are at the face at the beginning of the list and the rest at
   // the end
   //
-  std::fill(setIt.begin(), setIt.end(), true);
+  std::fill_n(setIt, eNoN, true);
 
   for (int a = 0; a < eNoNb; a++) {
     int Ac = lFa.IEN(a,e);
@@ -1038,7 +1066,10 @@ void gnnb(const ComMod& com_mod, const faceType& lFa, const int e, const int g, 
 
     // Compute adjoining mesh element normal
     //
-    Array<double> xXi(nsd,nsd-1);
+    std::array<double, max_spatial_dimension * max_spatial_dimension> xXi_stack{};
+    std::vector<double> xXi_heap(use_spatial_stack ? 0 : nsd*(nsd-1), 0.0);
+    Array<double> xXi(nsd, nsd-1,
+        use_spatial_stack ? xXi_stack.data() : xXi_heap.data());
 
     for (int a = 0; a < eNoN; a++) {
       for (int i = 0; i < insd; i++) {
@@ -1048,24 +1079,27 @@ void gnnb(const ComMod& com_mod, const faceType& lFa, const int e, const int g, 
       }
     }
 
-    auto v = utils::cross(xXi);
+    cross_into(xXi, v);
     for (int i = 0; i < nsd; i++) {
       v(i) = v(i) / utils::norm(v);
     }
 
     // Face element surface deflation
-    xXi.resize(nsd,1);
+    std::array<double, max_spatial_dimension> face_xXi_stack{};
+    std::vector<double> face_xXi_heap(use_spatial_stack ? 0 : nsd, 0.0);
+    Array<double> face_xXi(nsd, 1,
+        use_spatial_stack ? face_xXi_stack.data() : face_xXi_heap.data());
     for (int a = 0; a < eNoNb; a++) {
       int b = ptr(a);
       for (int i = 0; i < nsd; i++) {
-        xXi(i,0) = xXi(i,0) + lFa.Nx(0,a,g)*lX(i,b);
+        face_xXi(i,0) = face_xXi(i,0) + lFa.Nx(0,a,g)*lX(i,b);
       }
     }
 
     // Face normal
-    n(0) = v(1)*xXi(2,0) - v(2)*xXi(1,0);
-    n(1) = v(2)*xXi(0,0) - v(0)*xXi(2,0);
-    n(2) = v(0)*xXi(1,0) - v(1)*xXi(0,0);
+    n(0) = v(1)*face_xXi(2,0) - v(2)*face_xXi(1,0);
+    n(1) = v(2)*face_xXi(0,0) - v(0)*face_xXi(2,0);
+    n(2) = v(0)*face_xXi(1,0) - v(1)*face_xXi(0,0);
 
     // I choose Gauss point of the mesh element for calculating
     // interior edge
@@ -1082,14 +1116,20 @@ void gnnb(const ComMod& com_mod, const faceType& lFa, const int e, const int g, 
     }
 
     if (n * v < 0.0) {
-      n = -n;
+      for (int i = 0; i < nsd; i++) {
+        n(i) = -n(i);
+      }
     }
 
     return;
 
   } else {
 
-    Array<double> xXi(nsd,insd);
+    std::array<double, max_spatial_dimension * max_spatial_dimension> xXi_stack{};
+    const bool use_xXi_stack = use_spatial_stack && insd <= max_spatial_dimension;
+    std::vector<double> xXi_heap(use_xXi_stack ? 0 : nsd*insd, 0.0);
+    Array<double> xXi(nsd, insd,
+        use_xXi_stack ? xXi_stack.data() : xXi_heap.data());
 
     for (int a = 0; a < eNoNb; a++) {
       int b = ptr(a);
@@ -1100,7 +1140,7 @@ void gnnb(const ComMod& com_mod, const faceType& lFa, const int e, const int g, 
       }
     }
 
-    n = utils::cross(xXi);
+    cross_into(xXi, n);
   }
 
   // Changing the sign if neccessary. 'a' locates on the face and 'b'
@@ -1108,14 +1148,15 @@ void gnnb(const ComMod& com_mod, const faceType& lFa, const int e, const int g, 
   //
   a = ptr(0);
   int b = ptr(lFa.eNoN);
-  Vector<double> v(nsd);
 
   for (int i = 0; i < nsd; i++) {
     v(i) = lX(i,a) - lX(i,b);
   }
 
   if (n * v < 0.0) {
-    n = -n;
+    for (int i = 0; i < nsd; i++) {
+      n(i) = -n(i);
+    }
   }
 }
 
