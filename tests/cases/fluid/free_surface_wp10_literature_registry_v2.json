@@ -1,0 +1,191 @@
+{
+  "schema_version": 2,
+  "registry_id": "free_surface_wp10_literature_v2",
+  "status": "FROZEN_EXECUTABLE_CAPILLARY_REFERENCE_CONTRACT",
+  "verified_date": "2026-08-31",
+  "work_package": "WP-10",
+  "qualification_campaign": "Q7",
+  "scope": "An executable small-amplitude capillary-wave reference for one fluid with a free surface and two fluids with equal kinematic viscosity. This extends the immutable version-1 source registry without changing its blocked Prosperetti record and is not a solver qualification result.",
+  "extends": {
+    "registry_id": "free_surface_wp10_literature_v1",
+    "repository_path": "tests/cases/fluid/free_surface_wp10_literature_registry_v1.json",
+    "sha256": "33953b7eab91540628340043faf01bfa1765be0be8e7257064269af553660f5d",
+    "mutation_policy": "PRESERVE_V1_BYTE_FOR_BYTE"
+  },
+  "sources": [
+    {
+      "id": "denner_2016_capillary_dispersion",
+      "citation": {
+        "authors": [
+          "Fabian Denner"
+        ],
+        "title": "Frequency dispersion of small-amplitude capillary waves in viscous fluids",
+        "journal": "Physical Review E",
+        "volume": "94",
+        "article": "023110",
+        "year": 2016,
+        "doi": "10.1103/PhysRevE.94.023110",
+        "persistent_url": "https://doi.org/10.1103/PhysRevE.94.023110"
+      },
+      "asset": {
+        "status": "EXTERNALLY_PINNED",
+        "retrieval_url": "https://harvest.aps.org/v2/journals/articles/10.1103/PhysRevE.94.023110/fulltext",
+        "filename": "PhysRevE.94.023110.pdf",
+        "sha256": "07d63d4fcd6a10c82d17414f685cca80857e11c6af1253ce4333a4df8ca24853",
+        "bytes": 520532,
+        "repository_path": null
+      },
+      "access": {
+        "license": "CC-BY-3.0",
+        "redistribution": "NOT_INCLUDED",
+        "note": "The publisher identifies the article as open access under Creative Commons Attribution 3.0. Exact retrieved bytes remain external and checksum-pinned."
+      },
+      "reference_locations": {
+        "fluid_properties": "Table I",
+        "initial_value_solution": "Equations 12-13",
+        "initial_amplitude": "Section III, first paragraph",
+        "time_sampling": "Section III.A",
+        "numerical_setup": "Section III.B"
+      },
+      "disposition": "EXECUTABLE_ANALYTICAL_REFERENCE"
+    },
+    {
+      "id": "denner_2016_prosperetti_reference_script",
+      "citation": {
+        "authors": [
+          "Fabian Denner",
+          "Fabien Evrard",
+          "Ricardo Serfaty",
+          "Berend van Wachem"
+        ],
+        "title": "Artificial viscosity model to mitigate numerical artefacts at fluid interfaces with surface tension (Supporting data)",
+        "publisher": "Zenodo",
+        "version": "v1",
+        "year": 2016,
+        "doi": "10.5281/zenodo.166716",
+        "persistent_url": "https://doi.org/10.5281/zenodo.166716"
+      },
+      "asset": {
+        "status": "EXTERNALLY_PINNED",
+        "retrieval_url": "https://zenodo.org/records/166716/files/capillaryWave_Prosperetti1981.m?download=1",
+        "filename": "capillaryWave_Prosperetti1981.m",
+        "md5": "c49622cf98249f13d5a315a0e28b1a86",
+        "sha256": "c94a19d3870393cc2393c0d300a07c94b1dea8e08121171a40595792cb6a52f1",
+        "bytes": 3544,
+        "repository_path": null
+      },
+      "access": {
+        "license": "OPEN_DATA_RECORD",
+        "redistribution": "NOT_INCLUDED",
+        "note": "The exact author-supplied script is checksum-pinned as corroborating provenance. The repository implementation is derived independently from the published equations."
+      },
+      "disposition": "CORROBORATING_ASSET_NOT_NUMERICAL_ORACLE"
+    }
+  ],
+  "analytical_reference": {
+    "name": "equal_kinematic_viscosity_capillary_initial_value_solution",
+    "primary_source": "denner_2016_capillary_dispersion",
+    "underlying_source_doi": "10.1063/1.863522",
+    "equation_location": "Equations 12-13",
+    "assumptions": [
+      "small-amplitude standing capillary wave",
+      "isothermal incompressible Newtonian fluids",
+      "constant surface tension",
+      "zero gravity",
+      "zero initial velocity",
+      "one viscous fluid with a free surface or two fluids with equal kinematic viscosity"
+    ],
+    "inviscid_angular_frequency": "sqrt(surface_tension*wavenumber^3/(rho_upper+rho_lower))",
+    "density_parameter": "rho_upper*rho_lower/(rho_upper+rho_lower)^2",
+    "quartic_constant_term": "(1-4*density_parameter)*kinematic_viscosity^2*wavenumber^4+inviscid_angular_frequency^2",
+    "complex_erfc_argument": "z_i_times_sqrt_t",
+    "normalization": {
+      "dimensionless_time": "inviscid_angular_frequency*time",
+      "normalized_amplitude": "amplitude/initial_amplitude"
+    },
+    "author_script_role": "CHECKSUM_PINNED_CORROBORATION_NOT_NUMERICAL_ORACLE",
+    "author_script_difference": "uses_real_part_of_z_i_in_erfc_argument",
+    "difference_policy": "The executable gate follows the complex argument printed in the open-access article. The author script is retained only as provenance and must not silently replace that equation."
+  },
+  "reference_cases": [
+    {
+      "id": "denner_case_d",
+      "published_case": "D",
+      "property_location": "Table I",
+      "selection_location": "Author-supplied reference script input",
+      "upper_fluid": {
+        "density": 0.0,
+        "dynamic_viscosity": 0.0
+      },
+      "lower_fluid": {
+        "density": 1000.0,
+        "dynamic_viscosity": 0.001
+      },
+      "surface_tension": 0.072,
+      "wavelength": 0.0001,
+      "initial_amplitude_over_wavelength": 0.01,
+      "checkpoints": {
+        "dimensionless_time": [
+          0.0,
+          0.25,
+          0.5,
+          1.0,
+          2.0,
+          3.141592653589793
+        ],
+        "normalized_amplitude": [
+          1.0,
+          0.9692031250269033,
+          0.8798093272804911,
+          0.5561768692261875,
+          -0.33032144562011306,
+          -0.8586740656216184
+        ],
+        "inviscid_angular_frequency": 133639.87192396095,
+        "relative_tolerance": 2e-12,
+        "absolute_tolerance": 2e-12
+      }
+    },
+    {
+      "id": "denner_case_a_selected_wave_number",
+      "published_case": "A",
+      "property_location": "Table I",
+      "selection_location": "Section III.C selects case A at wavenumber/critical_wavenumber=1e-4; the registry defines critical_wavenumber with Equation 23 for a reproducible executable point",
+      "upper_fluid": {
+        "density": 5.0,
+        "dynamic_viscosity": 0.7
+      },
+      "lower_fluid": {
+        "density": 5.0,
+        "dynamic_viscosity": 0.7
+      },
+      "surface_tension": 0.001,
+      "wave_number_selection": {
+        "model": "denner_equation_23",
+        "wave_number_over_critical": 0.0001
+      },
+      "initial_amplitude_over_wavelength": 0.01,
+      "checkpoints": {
+        "dimensionless_time": [
+          0.0,
+          0.25,
+          0.5,
+          1.0,
+          2.0,
+          3.141592653589793
+        ],
+        "normalized_amplitude": [
+          1.0,
+          0.969959165639748,
+          0.8833635901169464,
+          0.5700063394492536,
+          -0.30512698758798534,
+          -0.8853920825880313
+        ],
+        "inviscid_angular_frequency": 7.288629737609331e-12,
+        "relative_tolerance": 2e-12,
+        "absolute_tolerance": 2e-12
+      }
+    }
+  ]
+}
