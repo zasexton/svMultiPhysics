@@ -29,7 +29,7 @@ namespace darcy {
  *  - \f$ u \f$ : Darcy flux
  *  - \f$ K \f$ : Permeability tensor
  *  - \f$ P \f$ : Pressure
- *  - \f$ P_{source} \f$ : Source pressure (e.g., arterial pressure)
+ *  - \f$ P_{source} \f$ : Source pressure (e.g., arterial pressure) 
  *  - \f$ P_{sink} \f$ : Sink pressure (e.g., venous/extraction pressure)
  *  - \f$ \beta_0 \f$ : Source coupling term (describes conductance of flow entering myocardium)
  *  - \f$ \beta_1 \f$ : Sink coupling term (describes conductance of flow exiting myocardium)
@@ -141,55 +141,12 @@ void construct_darcy(ComMod& com_mod, const mshType& lM, const SolutionStates& s
         darcy_3d(com_mod, eNoN, w, N, Nx, al, yl, lR, lK);
       } else if (insd == 2) {
         darcy_2d(com_mod, eNoN, w, N, Nx, al, yl, lR, lK);
-      } else if (insd == 1) {
-        darcy_1d(com_mod, eNoN, w, N, Nx, al, yl, lR, lK);
       } else {
-        throw std::runtime_error("[construct_darcy] insd must be 1, 2 or 3.");
+        throw std::runtime_error("[construct_darcy] insd must be 2 or 3.");
       }
     }
 
     eq.linear_algebra->assemble(com_mod, eNoN, ptr, lK, lR);
-  }
-}
-
-void darcy_1d(ComMod& com_mod, const int eNoN, const double w, const Vector<double>& N, const Array<double>& Nx,
-              const Array<double>& al, const Array<double>& yl, Array<double>& lR, Array3<double>& lK)
-{
-  using namespace consts;
-
-  const int cEq = com_mod.cEq;
-  auto& eq = com_mod.eq[cEq];
-  const int cDmn = com_mod.cDmn;
-  auto& dmn = eq.dmn[cDmn];
-  const double dt = com_mod.dt;
-  const int i = eq.s;
-
-  double k = dmn.prop.at(PhysicalPropertyType::darcy_permeability);
-  double source = dmn.prop.at(PhysicalPropertyType::source_term);
-  double beta_0 = dmn.prop.at(PhysicalPropertyType::darcy_media_compressibility);
-  double rho_0 = dmn.prop.at(PhysicalPropertyType::fluid_density);
-  double mu = dmn.prop.at(PhysicalPropertyType::darcy_fluid_viscosity);
-
-  double T1 = eq.af * eq.gam * dt;
-  double amd = eq.am / T1;
-  double wl = w * T1;
-
-  double p_dot = 0.0;
-  double Px = 0.0;
-
-  for (int a = 0; a < eNoN; a++) {
-    p_dot = p_dot + N(a) * al(i, a);
-    Px = Px + Nx(0, a) * yl(i, a);
-  }
-
-  for (int a = 0; a < eNoN; a++) {
-    lR(0, a) = lR(0, a) +
-        w * (rho_0 * N(a) * (beta_0 * p_dot - source) +
-             ((k * rho_0) / mu) * Nx(0, a) * Px);
-    for (int b = 0; b < eNoN; b++) {
-      lK(0, a, b) = lK(0, a, b) + wl * (rho_0 * beta_0 * N(a) * N(b) * amd +
-                                       ((((rho_0 * k) / mu) * (Nx(0, a) * Nx(0, b)))));
-    }
   }
 }
 

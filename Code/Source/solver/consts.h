@@ -349,7 +349,7 @@ enum class OutputNameType {
   outGrp_activeTensionFibers = 529,
   outGrp_activeTensionSheets = 530,
   outGrp_activeTensionNormal = 531,
-  outGrp_MBFFlux = 532,
+  outGrp_darcyFlux = 532,
 
   out_velocity = 599,
   out_pressure = 598,
@@ -384,8 +384,8 @@ enum class OutputNameType {
   out_activeTensionFibers = 569,
   out_activeTensionSheets = 568,
   out_activeTensionNormal = 567,
-  out_MBF = 566,
-  out_mbfFlux = 565
+  out_darcyPressure = 566,
+  out_darcyFlux = 565
 };
 
 /// @brief Simulation output file types. 

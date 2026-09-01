@@ -916,29 +916,11 @@ void post(Simulation* simulation, const mshType& lM, Array<double>& res, const S
 
     Array<double> ksix(nsd,nsd);
     double Jac = 0.0;
-    Vector<double> fiber_tangent(nsd);
 
     for (int g = 0; g < lM.nG; g++) {
       if (g == 0 || !lM.lShpF) {
         auto Nx_g = lM.Nx.slice(g);
         nn::gnn(eNoN, nsd, insd, Nx_g, xl, Nx, Jac, ksix);
-        
-        if (lM.lFib) {
-          fiber_tangent = 0.0;
-          for (int a = 0; a < eNoN; a++) {
-            for (int j = 0; j < nsd; j++) {
-              fiber_tangent(j) =
-                  fiber_tangent(j) + xl(j,a) * Nx_g(0,a);
-            }
-          }
-
-          const double tangent_norm = utils::norm(fiber_tangent);
-          if (utils::is_zero(tangent_norm)) {
-            throw std::runtime_error(
-                "[post] Cannot compute Darcy flux for a degenerate fiber element.");
-          }
-          fiber_tangent = fiber_tangent / tangent_norm;
-        }
       }
 
       double w = lM.w(g) * Jac;
@@ -1029,9 +1011,9 @@ void post(Simulation* simulation, const mshType& lM, Array<double>& res, const S
           }
         }
 
-      // MBF Flux calculation
+      // Darcy Flux calculation
       // 
-      } else if (outGrp == OutputNameType::outGrp_MBFFlux) {
+      } else if (outGrp == OutputNameType::outGrp_darcyFlux) {
         const double permeability =
             eq.dmn[cDmn].prop[PhysicalPropertyType::darcy_permeability];
         const double viscosity =
@@ -1041,22 +1023,12 @@ void post(Simulation* simulation, const mshType& lM, Array<double>& res, const S
 
         Vector<double> grad_p(nsd);
 
-        if (lM.lFib) {
-          double dp_ds = 0.0;
-          for (int a = 0; a < eNoN; a++) {
-            dp_ds = dp_ds + Nx(0,a) * yl(equation_index,a);
-          }
+        for (int a = 0; a < eNoN; a++) {
           for (int j = 0; j < nsd; j++) {
-            grad_p(j) = dp_ds * fiber_tangent(j);
+            grad_p(j) = grad_p(j) + Nx(j,a) * yl(equation_index,a);
           }
-        } else {
-          for (int a = 0; a < eNoN; a++) {
-            for (int j = 0; j < nsd; j++) {
-              grad_p(j) = grad_p(j) + Nx(j,a) * yl(equation_index,a);
-            }
-           }
-         }
-
+        }
+         
         for (int j = 0; j < nsd; j++) {
           lRes(j) = -mobility * grad_p(j);
         }

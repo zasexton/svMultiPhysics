@@ -60,6 +60,6 @@ std::map<consts::OutputNameType, OutputProps> output_props_map =
   {OutputNameType::out_vortex,       std::make_tuple(OutputNameType::outGrp_vortex, 0, 1,             "Vortex") },
   {OutputNameType::out_vorticity,    std::make_tuple(OutputNameType::outGrp_vort,   0, maxNSD,        "Vorticity") },
   {OutputNameType::out_WSS,          std::make_tuple(OutputNameType::outGrp_WSS,    0, maxNSD,        "WSS") }, 
-  {OutputNameType::out_MBF,          std::make_tuple(OutputNameType::outGrp_Y,      0, 1,             "MBF")},
-  {OutputNameType::out_mbfFlux,      std::make_tuple(OutputNameType::outGrp_MBFFlux, 0, nsd,           "MBF_flux")}
+  {OutputNameType::out_darcyPressure,  std::make_tuple(OutputNameType::outGrp_Y,      0, 1,             "Darcy_pressure")},
+  {OutputNameType::out_darcyFlux,      std::make_tuple(OutputNameType::outGrp_darcyFlux, 0, nsd,           "Darcy_flux")}
 };

@@ -15,9 +15,6 @@ namespace darcy {
 
     void construct_darcy(ComMod& com_mod, const mshType& lM, const SolutionStates& solutions);
 
-    void darcy_1d(ComMod& com_mod, const int eNoN, const double w, const Vector<double>& N, const Array<double>& Nx,
-                  const Array<double>& al, const Array<double>& yl, Array<double>& lR, Array3<double>& lK);
-
     void darcy_2d(ComMod& com_mod, const int eNoN, const double w, const Vector<double>& N, const Array<double>& Nx,
                   const Array<double>& al, const Array<double>& yl, Array<double>& lR, Array3<double>& lK);
 

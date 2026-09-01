@@ -293,7 +293,7 @@ SetEquationPropertiesMapType set_equation_props = {
     read_domain(simulation, eq_params, lEq, propL);
 
     nDOP = {2,1,1,0};
-    outPuts = {OutputNameType::out_MBF, OutputNameType::out_mbfFlux};
+    outPuts = {OutputNameType::out_darcyPressure, OutputNameType::out_darcyFlux};
 
     // Set solver parameters.
     read_ls(simulation, eq_params, SolverType::lSolver_CG, lEq);
