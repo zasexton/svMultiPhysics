@@ -175,11 +175,17 @@ freeze only categorical core evidence:
 - FSR-08, WP-10, Q7, incompressible two-fluid physical qualification, and
   gas-sensitive qualification requests are rejected before binary execution.
 
-The v5 runner's 16 unit tests and validation-only route pass in the current
-tree. A full three-binary v5 execution record is still required before this
-version is committed as executed evidence. No numerical threshold is invented:
-these source and unit gates establish the staged capability boundary, not
-physical validation.
+The v5 runner's 16 unit tests and validation-only route pass. Clean-source
+`amarsden` job `41545273` executed all five groups at commit
+`1d1a4e96e49541ab5f884371c5ca1ac3c80be94b`: 4 one-phase Physics, 4 one-phase
+Application, 5 material-interface FE, 7 two-fluid Physics, and 20 two-fluid
+Application tests all passed. The job completed `0:0` in 39 seconds with
+330,800 KiB peak batch RSS. Its `summary.json` SHA-256 is
+`2c9622ab0af04c61ddd3e91c8507be81411d7c2ea2c5ed774533791322a8859f`.
+The durable execution catalog is
+[`record.json`](qualification_logs/free_surface_wp10_capability_boundary_v5_20260901_41545273/record.json).
+No numerical threshold is invented: these source and unit gates establish the
+staged capability boundary, not physical validation.
 
 ## Required WP-10 progression
 

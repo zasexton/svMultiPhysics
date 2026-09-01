@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "record_id": "free_surface_wp10_capability_boundary_v5_20260901_41545273",
+  "outcome": "PASS",
+  "scope": "staged_two_fluid_capability_boundary",
+  "physical_qualification_claimed": false,
+  "wp10_closed": false,
+  "q7_closed": false,
+  "source": {
+    "commit": "1d1a4e96e49541ab5f884371c5ca1ac3c80be94b",
+    "worktree_clean": true,
+    "code_sha256": "d40c0763054b40927c7422705465ae37cd5699f9dde5e66bcda0d77d906a3049",
+    "matrix_sha256": "0c987af3db826d0fcffca3e3abe45a64eda3e91789ebb04ff52b6dd4bca9704e",
+    "runner_sha256": "56b0d9be8b71db155650c4210bbe9526a0af1ea619a6644ae45df0388f97b25a"
+  },
+  "scheduler": {
+    "job_id": 41545273,
+    "partition": "amarsden",
+    "account": "amarsden",
+    "state": "COMPLETED",
+    "exit_code": "0:0",
+    "elapsed": "00:00:39",
+    "nodes": 1,
+    "allocated_cpus": 4,
+    "requested_memory": "8G",
+    "batch_max_rss_kib": 330800
+  },
+  "contract": {
+    "source_check_count": 13,
+    "scope_guard_accepted_case_count": 3,
+    "scope_guard_rejected_case_count": 21,
+    "scope_guard_invalid_case_count": 2,
+    "staged_wp10_capability_count": 8,
+    "blocked_wp10_exit_count": 8,
+    "blocked_q7_exit_count": 8,
+    "deferred_gas_requirement_count": 1
+  },
+  "groups": [
+    {
+      "id": "momentum_physical_model_boundary_serial",
+      "test_count": 4,
+      "binary_sha256": "fcebddac864b018285426c9ef3911a7143b48e3648a7bbf5828365b27f8736f3",
+      "outcome": "PASS"
+    },
+    {
+      "id": "application_physical_model_boundary_serial",
+      "test_count": 4,
+      "binary_sha256": "608e477a7adc6ddd462c3f867b31e3f385aca6f1aa0711241122b6cde42c2d8c",
+      "outcome": "PASS"
+    },
+    {
+      "id": "two_fluid_material_interface_transport_serial",
+      "test_count": 5,
+      "binary_sha256": "535c85c80bdc7d66fe360a5c5ce2150994c8ec60888752eae48f2fe5dfd5122d",
+      "outcome": "PASS"
+    },
+    {
+      "id": "incompressible_two_fluid_core_serial",
+      "test_count": 7,
+      "binary_sha256": "fcebddac864b018285426c9ef3911a7143b48e3648a7bbf5828365b27f8736f3",
+      "outcome": "PASS"
+    },
+    {
+      "id": "incompressible_two_fluid_application_serial",
+      "test_count": 20,
+      "binary_sha256": "608e477a7adc6ddd462c3f867b31e3f385aca6f1aa0711241122b6cde42c2d8c",
+      "outcome": "PASS"
+    }
+  ],
+  "runner_summary": {
+    "scratch_path": "/scratch/users/zsexton/wp10-capability-v5-exec-1d1a4e96/result-41545273/summary.json",
+    "sha256": "2c9622ab0af04c61ddd3e91c8507be81411d7c2ea2c5ed774533791322a8859f"
+  },
+  "interpretation": "Categorical staged-core evidence only; no WP-10 physical exit or Q7 case is qualified by this record."
+}
