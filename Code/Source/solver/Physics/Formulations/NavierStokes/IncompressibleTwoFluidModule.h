@@ -60,6 +60,13 @@ struct IncompressibleTwoFluidOptions {
         .viscosity = 0.00001,
     };
 
+    /**
+     * Physical exterior velocity data applied identically to both phase
+     * restrictions. Phase-local velocity data remain homogeneous-only.
+     */
+    std::vector<IncompressibleNavierStokesVMSOptions::VelocityDirichletBC>
+        shared_velocity_dirichlet{};
+
     std::string operator_tag{"equations"};
     std::string level_set_field_name{"level_set"};
     std::string generated_interface_domain_id{"two_fluid_interface"};

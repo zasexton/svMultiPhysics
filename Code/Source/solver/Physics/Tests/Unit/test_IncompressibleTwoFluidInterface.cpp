@@ -391,9 +391,95 @@ TEST(IncompressibleTwoFluidModule,
         ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC
             boundary;
         boundary.boundary_marker = 7;
+        boundary.value[0] =
+            ns::IncompressibleNavierStokesVMSOptions::ScalarValue{
+                std::numeric_limits<FE::Real>::infinity()};
+        options.shared_velocity_dirichlet.push_back(std::move(boundary));
+      },
+      "unsupported_two_fluid_nonfinite_shared_velocity_boundary");
+  expect_rejected(
+      [](auto& options) {
+        ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC
+            boundary;
+        boundary.boundary_marker = 7;
+        boundary.value[0] = FE::forms::FormExpr::constant(FE::Real{1.0});
+        options.shared_velocity_dirichlet.push_back(std::move(boundary));
+      },
+      "unsupported_two_fluid_shared_velocity_form_expression");
+  expect_rejected(
+      [](auto& options) {
+        ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC
+            boundary;
+        boundary.boundary_marker = 7;
+        boundary.value[0] = FE::forms::ScalarCoefficient{};
+        options.shared_velocity_dirichlet.push_back(std::move(boundary));
+      },
+      "unsupported_two_fluid_empty_shared_velocity_coefficient");
+  expect_rejected(
+      [](auto& options) {
+        ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC
+            shared;
+        shared.boundary_marker = 7;
+        options.shared_velocity_dirichlet.push_back(std::move(shared));
+        ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC
+            phase_local;
+        phase_local.boundary_marker = 7;
+        options.negative_phase.velocity_dirichlet.push_back(
+            std::move(phase_local));
+      },
+      "unsupported_two_fluid_overlapping_shared_velocity_boundary_marker");
+  expect_rejected(
+      [](auto& options) {
+        ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC
+            boundary;
+        boundary.boundary_marker = 7;
         options.positive_phase.velocity_dirichlet = {boundary, boundary};
       },
       "unsupported_two_fluid_duplicate_velocity_boundary_marker");
+}
+
+TEST(IncompressibleTwoFluidModule,
+     RegistersSharedNonhomogeneousVelocityBoundaryOnBothPhases) {
+  TwoFluidRegistrationFixture fixture;
+  ns::IncompressibleTwoFluidOptions options;
+  ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC boundary;
+  boundary.boundary_marker = 7;
+  boundary.active_components = {{true, true, false}};
+  boundary.value[0] =
+      ns::IncompressibleNavierStokesVMSOptions::ScalarValue{1.0};
+  boundary.value[1] = FE::forms::TimeScalarCoefficient{
+      [](FE::Real x, FE::Real, FE::Real, FE::Real time) {
+        return x + time;
+      }};
+  options.shared_velocity_dirichlet.push_back(std::move(boundary));
+  auto module = fixture.makeModule(std::move(options));
+
+  ASSERT_NO_THROW(module.registerOn(fixture.system));
+  const auto u_negative = fixture.system.findFieldByName("u_negative");
+  const auto u_positive = fixture.system.findFieldByName("u_positive");
+  ASSERT_NE(u_negative, FE::INVALID_FIELD_ID);
+  ASSERT_NE(u_positive, FE::INVALID_FIELD_ID);
+  const auto shared_descriptors = static_cast<std::size_t>(std::count_if(
+      fixture.system.boundaryConditionDescriptors().begin(),
+      fixture.system.boundaryConditionDescriptors().end(),
+      [&](const auto& descriptor) {
+        return descriptor.boundary_marker == 7 &&
+               (descriptor.primary_variable.field_id == u_negative ||
+                descriptor.primary_variable.field_id == u_positive);
+      }));
+  EXPECT_EQ(shared_descriptors, 4u);
+  const auto artifact = module.effectiveConfigurationArtifact();
+  ASSERT_TRUE(artifact.has_value());
+  EXPECT_NE(artifact->json.find("\"shared_velocity_dirichlet_count\":1"),
+            std::string::npos);
+  EXPECT_NE(
+      artifact->json.find(
+          "\"shared_velocity_dirichlet_policy\":\"identical_external_data_on_both_phase_restrictions\""),
+      std::string::npos);
+  EXPECT_NE(
+      artifact->json.find(
+          "\"shared_velocity_dirichlet\":[{\"marker\":7,\"active_components\":[true,true],\"values\":[{\"kind\":\"literal\",\"value\":1},{\"kind\":\"time_coefficient\"}]}]"),
+      std::string::npos);
 }
 
 TEST(IncompressibleTwoFluidInterface,

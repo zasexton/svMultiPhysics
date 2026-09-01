@@ -1709,7 +1709,7 @@ TEST(OpenVesselExamples,
 }
 
 TEST(OpenVesselExamples,
-     MaterialInterfaceDependencyPreflightRejectsNonhomogeneousVelocityBoundaryBeforeMutation)
+     MaterialInterfaceDependencyRegistersSharedNonhomogeneousVelocityBoundary)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -1743,30 +1743,36 @@ TEST(OpenVesselExamples,
   components.fe_system =
       std::make_unique<svmp::FE::systems::FESystem>(mesh);
 
-  try {
-    application::core::detail::
-        preflightAndPreRegisterPhysicsModuleDependencies(
-            parameters, components);
-    FAIL() << "Expected nonhomogeneous phase boundary to fail preflight";
-  } catch (const std::exception& error) {
-    EXPECT_NE(
-        std::string_view(error.what()).find(
-            "unsupported_two_fluid_nonhomogeneous_velocity_boundary"),
-        std::string_view::npos)
-        << error.what();
+  ASSERT_NO_THROW(
+      application::core::detail::
+          preflightAndPreRegisterPhysicsModuleDependencies(
+              parameters, components));
+  for (const auto* equation : parameters.equation_parameters) {
+    ASSERT_NE(equation, nullptr);
+    ASSERT_NO_THROW(components.physics_modules.push_back(
+        application::translators::EquationTranslator::createModule(
+            *equation,
+            *components.fe_system,
+            components.meshes)));
   }
   ASSERT_TRUE(components.fe_system);
-  EXPECT_EQ(components.fe_system->registeredFieldCount(), 0u);
-  EXPECT_TRUE(
-      components.fe_system
-          ->materialInterfaceTransportVelocityDeclarations()
-          .empty());
-  EXPECT_TRUE(
-      components.fe_system
-          ->twoFluidAcceptedStageDiagnosticDeclarations()
-          .empty());
-  EXPECT_FALSE(components.fe_system->hasOperator("equations"));
-  EXPECT_TRUE(components.physics_modules.empty());
+  EXPECT_EQ(components.physics_modules.size(), 2u);
+  EXPECT_TRUE(components.fe_system->hasOperator("equations"));
+  const auto u_negative =
+      components.fe_system->findFieldByName("u_negative");
+  const auto u_positive =
+      components.fe_system->findFieldByName("u_positive");
+  ASSERT_NE(u_negative, svmp::FE::INVALID_FIELD_ID);
+  ASSERT_NE(u_positive, svmp::FE::INVALID_FIELD_ID);
+  const auto shared_descriptors = static_cast<std::size_t>(std::count_if(
+      components.fe_system->boundaryConditionDescriptors().begin(),
+      components.fe_system->boundaryConditionDescriptors().end(),
+      [&](const auto& descriptor) {
+        return descriptor.boundary_marker == 9 &&
+               (descriptor.primary_variable.field_id == u_negative ||
+                descriptor.primary_variable.field_id == u_positive);
+      }));
+  EXPECT_EQ(shared_descriptors, 4u);
 #endif
 }
 

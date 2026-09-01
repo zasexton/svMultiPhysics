@@ -185,6 +185,19 @@ The phase-local volume owners provide:
 - pressure jump stabilization on the phase's cut-adjacent facets; and
 - small-cut aggregation for that phase's velocity and pressure fields.
 
+Physical strong velocity data on an exterior marker are owned once by the
+two-fluid module and installed identically on both complementary phase
+restrictions. This shared list admits finite literals and nonempty spatial or
+time-dependent scalar coefficients. Raw form expressions fail closed at this
+boundary. Phase-local lists remain homogeneous-only, and a shared marker may
+not overlap either phase-local list. Duplicate markers are rejected before
+field or operator mutation.
+
+Artifact schema 3 records the shared-boundary policy, count, marker, active
+components, and each component's value kind; finite literal values are also
+recorded. This distinguishes identical physical exterior data from
+independently configured phase data without serializing callable internals.
+
 The two-fluid owner alone provides:
 
 - interface velocity and stress coupling;

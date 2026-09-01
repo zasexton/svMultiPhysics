@@ -56,10 +56,55 @@ void requireFinitePositive(FE::Real value, std::string_view name)
     }
 }
 
+enum class VelocityBoundaryDataPolicy {
+    HomogeneousPhaseLocal,
+    SharedExternalData,
+};
+
+void validateSharedVelocityBoundaryValue(
+    const IncompressibleNavierStokesVMSOptions::ScalarValue& value,
+    std::string_view scope)
+{
+    if (const auto* literal = std::get_if<FE::Real>(&value)) {
+        if (!std::isfinite(*literal)) {
+            throw std::invalid_argument(
+                "[svMultiPhysics::Physics] "
+                "unsupported_two_fluid_nonfinite_shared_velocity_boundary:" +
+                std::string(scope));
+        }
+        return;
+    }
+    if (const auto* coefficient =
+            std::get_if<FE::forms::ScalarCoefficient>(&value)) {
+        if (!*coefficient) {
+            throw std::invalid_argument(
+                "[svMultiPhysics::Physics] "
+                "unsupported_two_fluid_empty_shared_velocity_coefficient:" +
+                std::string(scope));
+        }
+        return;
+    }
+    if (const auto* coefficient =
+            std::get_if<FE::forms::TimeScalarCoefficient>(&value)) {
+        if (!*coefficient) {
+            throw std::invalid_argument(
+                "[svMultiPhysics::Physics] "
+                "unsupported_two_fluid_empty_shared_velocity_coefficient:" +
+                std::string(scope));
+        }
+        return;
+    }
+    throw std::invalid_argument(
+        "[svMultiPhysics::Physics] "
+        "unsupported_two_fluid_shared_velocity_form_expression:" +
+        std::string(scope));
+}
+
 void validateVelocityBoundaryData(
     std::span<const IncompressibleNavierStokesVMSOptions::VelocityDirichletBC>
         boundaries,
-    std::string_view phase)
+    std::string_view scope,
+    VelocityBoundaryDataPolicy policy)
 {
     std::set<int> markers;
     for (const auto& boundary : boundaries) {
@@ -67,24 +112,51 @@ void validateVelocityBoundaryData(
             throw std::invalid_argument(
                 "[svMultiPhysics::Physics] "
                 "unsupported_two_fluid_negative_velocity_boundary_marker:" +
-                std::string(phase));
+                std::string(scope));
         }
         if (!markers.insert(boundary.boundary_marker).second) {
             throw std::invalid_argument(
                 "[svMultiPhysics::Physics] "
                 "unsupported_two_fluid_duplicate_velocity_boundary_marker:" +
-                std::string(phase));
+                std::string(scope));
         }
         for (std::size_t component = 0u;
              component < boundary.active_components.size(); ++component) {
-            if (boundary.active_components[component] &&
-                !FE::forms::bc::isZeroConstantScalarValue(
-                    boundary.value[component])) {
+            if (!boundary.active_components[component]) {
+                continue;
+            }
+            if (policy == VelocityBoundaryDataPolicy::SharedExternalData) {
+                validateSharedVelocityBoundaryValue(
+                    boundary.value[component], scope);
+            } else if (!FE::forms::bc::isZeroConstantScalarValue(
+                           boundary.value[component])) {
                 throw std::invalid_argument(
                     "[svMultiPhysics::Physics] "
                     "unsupported_two_fluid_nonhomogeneous_velocity_boundary:" +
-                    std::string(phase));
+                    std::string(scope));
             }
+        }
+    }
+}
+
+void validateNoSharedVelocityBoundaryOverlap(
+    std::span<const IncompressibleNavierStokesVMSOptions::VelocityDirichletBC>
+        shared,
+    std::span<const IncompressibleNavierStokesVMSOptions::VelocityDirichletBC>
+        phase_local,
+    std::string_view phase)
+{
+    std::set<int> shared_markers;
+    for (const auto& boundary : shared) {
+        shared_markers.insert(boundary.boundary_marker);
+    }
+    for (const auto& boundary : phase_local) {
+        if (shared_markers.find(boundary.boundary_marker) !=
+            shared_markers.end()) {
+            throw std::invalid_argument(
+                "[svMultiPhysics::Physics] "
+                "unsupported_two_fluid_overlapping_shared_velocity_boundary_marker:" +
+                std::string(phase));
         }
     }
 }
@@ -208,6 +280,69 @@ void validateExistingUnknownField(
     return value ? "true" : "false";
 }
 
+[[nodiscard]] std::string sharedVelocityValueArtifact(
+    const IncompressibleNavierStokesVMSOptions::ScalarValue& value)
+{
+    if (const auto* literal = std::get_if<FE::Real>(&value)) {
+        return "{\"kind\":\"literal\",\"value\":" +
+               jsonReal(*literal) + '}';
+    }
+    if (std::holds_alternative<FE::forms::ScalarCoefficient>(value)) {
+        return R"({"kind":"spatial_coefficient"})";
+    }
+    if (std::holds_alternative<FE::forms::TimeScalarCoefficient>(value)) {
+        return R"({"kind":"time_coefficient"})";
+    }
+    return R"({"kind":"form_expression"})";
+}
+
+void appendVelocityBoundaryArtifact(
+    std::ostringstream& out,
+    const IncompressibleTwoFluidOptions& options,
+    int dimension)
+{
+    out << ",\"boundary_conditions\":{"
+        << "\"shared_velocity_dirichlet_count\":"
+        << options.shared_velocity_dirichlet.size()
+        << ",\"shared_velocity_dirichlet_policy\":"
+        << jsonString(
+               "identical_external_data_on_both_phase_restrictions")
+        << ",\"shared_velocity_dirichlet\":[";
+    for (std::size_t boundary_index = 0u;
+         boundary_index < options.shared_velocity_dirichlet.size();
+         ++boundary_index) {
+        if (boundary_index != 0u) {
+            out << ',';
+        }
+        const auto& boundary =
+            options.shared_velocity_dirichlet[boundary_index];
+        out << "{\"marker\":" << boundary.boundary_marker
+            << ",\"active_components\":[";
+        for (int component = 0; component < dimension; ++component) {
+            if (component != 0) {
+                out << ',';
+            }
+            out << jsonBool(
+                boundary.active_components[static_cast<std::size_t>(
+                    component)]);
+        }
+        out << "],\"values\":[";
+        for (int component = 0; component < dimension; ++component) {
+            if (component != 0) {
+                out << ',';
+            }
+            out << sharedVelocityValueArtifact(
+                boundary.value[static_cast<std::size_t>(component)]);
+        }
+        out << "]}";
+    }
+    out << "]"
+        << ",\"negative_phase_local_velocity_dirichlet_count\":"
+        << options.negative_phase.velocity_dirichlet.size()
+        << ",\"positive_phase_local_velocity_dirichlet_count\":"
+        << options.positive_phase.velocity_dirichlet.size() << '}';
+}
+
 [[nodiscard]] int resolvedInterfaceMarker(
     const IncompressibleTwoFluidOptions& options,
     FE::FieldId level_set_field)
@@ -259,6 +394,10 @@ void addSharedGaugeEvidence(FE::systems::FESystem& system,
     options.stabilization_epsilon = owner.stabilization_epsilon;
     options.jit_policy = owner.jit_policy;
     options.velocity_dirichlet = phase.velocity_dirichlet;
+    options.velocity_dirichlet.insert(
+        options.velocity_dirichlet.end(),
+        owner.shared_velocity_dirichlet.begin(),
+        owner.shared_velocity_dirichlet.end());
 
     IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary interface;
     interface.role =
@@ -399,8 +538,9 @@ void addSharedGaugeEvidence(FE::systems::FESystem& system,
     } else {
         out << "null";
     }
-    out << '}'
-        << ",\"pressure_space\":{\"representation\":\"separate_phase_fields\",\"shared_gauge_count\":1}"
+    out << '}';
+    appendVelocityBoundaryArtifact(out, options, dimension);
+    out << ",\"pressure_space\":{\"representation\":\"separate_phase_fields\",\"shared_gauge_count\":1}"
         << ",\"solver_contract\":{\"backend\":\"FSILS\",\"method\":\"BlockSchur\",\"unknown_role_order\":[\"material_interface_level_set\",\"conservative_phase_indicator\",\"negative_velocity\",\"positive_velocity\",\"negative_pressure\",\"positive_pressure\"],\"blocks\":[{\"name\":\"TwoFluidMaterialInterfaceComputationalPrimary\",\"role\":\"primary\"},{\"name\":\"TwoFluidPressureConstraints\",\"role\":\"constraint\"}],\"generic_fallback_allowed\":false}"
         << ",\"phase_transport_coupling\":{\"owner\":\"declared_material_interface_phase_pair\",\"weak_bulk_velocity\":\"sharp_phase_local\",\"weak_interface_trace\":\"complementary_weighted\",\"conservative_graph_velocity\":\"complementary_weighted_every_node\",\"momentum_reconciliation_required\":"
         << jsonBool(
@@ -442,9 +582,25 @@ void validateIncompressibleTwoFluidConfigurationSemantics(
             "unsupported_two_fluid_nonfinite_prescribed_viscous_traction_jump");
     }
     validateVelocityBoundaryData(
-        options.negative_phase.velocity_dirichlet, "negative-phase");
+        options.negative_phase.velocity_dirichlet,
+        "negative-phase",
+        VelocityBoundaryDataPolicy::HomogeneousPhaseLocal);
     validateVelocityBoundaryData(
-        options.positive_phase.velocity_dirichlet, "positive-phase");
+        options.positive_phase.velocity_dirichlet,
+        "positive-phase",
+        VelocityBoundaryDataPolicy::HomogeneousPhaseLocal);
+    validateVelocityBoundaryData(
+        options.shared_velocity_dirichlet,
+        "shared",
+        VelocityBoundaryDataPolicy::SharedExternalData);
+    validateNoSharedVelocityBoundaryOverlap(
+        options.shared_velocity_dirichlet,
+        options.negative_phase.velocity_dirichlet,
+        "negative-phase");
+    validateNoSharedVelocityBoundaryOverlap(
+        options.shared_velocity_dirichlet,
+        options.positive_phase.velocity_dirichlet,
+        "positive-phase");
 }
 
 IncompressibleTwoFluidModule::IncompressibleTwoFluidModule(

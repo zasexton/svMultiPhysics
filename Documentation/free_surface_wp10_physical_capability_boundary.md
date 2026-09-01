@@ -66,6 +66,14 @@ interface form includes complementary viscosity weights, velocity and traction
 coupling, surface tension, and an optional manufactured prescribed pressure
 jump.
 
+Strong physical velocity data on an exterior marker are stored once and
+installed identically on both phase restrictions. Finite literals and
+nonempty spatial or time-dependent coefficients are supported; raw form
+expressions, duplicate markers, shared/phase-local marker overlap, and
+nonhomogeneous phase-local data fail before mutation. Artifact schema 3
+publishes the shared-data policy together with marker, active-component, and
+value-kind provenance.
+
 The parser requires every material coefficient and rejects unknown,
 duplicated, unused, misplaced, nonfinite, or unsupported equation, domain,
 boundary, and nested-block controls. Translation, semantic validation,

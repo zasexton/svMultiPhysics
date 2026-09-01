@@ -2984,12 +2984,13 @@ void reject_unsupported_two_fluid_equation_parameters(
 void reject_unsupported_two_fluid_boundary_parameters(
     std::span<const svmp::Physics::BoundaryConditionInput> boundaries)
 {
-  static constexpr std::array<std::string_view, 5> supported{
+  static constexpr std::array<std::string_view, 6> supported{
       "Type",
       "Time_dependence",
       "Value",
       "Effective_direction",
       "Weakly_applied",
+      "Temporal_and_spatial_values_file_path",
   };
   for (const auto& boundary : boundaries) {
     if (!boundary.nested_configuration_blocks.empty()) {
@@ -5018,10 +5019,8 @@ translate_incompressible_two_fluid_input(
   }
   reject_unsupported_two_fluid_boundary_parameters(
       input.boundary_conditions);
-  options.negative_phase.velocity_dirichlet =
-      translated_boundaries.velocity_dirichlet;
-  options.positive_phase.velocity_dirichlet =
-      translated_boundaries.velocity_dirichlet;
+  options.shared_velocity_dirichlet =
+      std::move(translated_boundaries.velocity_dirichlet);
 
   auto velocity_space = svmp::FE::spaces::VectorSpace(
       svmp::FE::spaces::SpaceType::H1,
