@@ -54,8 +54,8 @@ def test_canonical_boundary_is_strict_and_explicitly_open(tmp_path):
     guard = runner.validate_scope_guard_contract(matrix, ROOT)
 
     assert matrix["status"] == "FROZEN_CAPABILITY_BOUNDARY"
-    assert matrix["matrix_id"] == "free_surface_wp10_capability_boundary_v3"
-    assert matrix["current_capability_boundary"]["artifact_schema_version"] == 3
+    assert matrix["matrix_id"] == "free_surface_wp10_capability_boundary_v4"
+    assert matrix["current_capability_boundary"]["artifact_schema_version"] == 4
     assert matrix["current_capability_boundary"]["wp10_closure_claimed"] is False
     assert matrix["current_capability_boundary"]["q7_closure_claimed"] is False
     momentum_check = next(
