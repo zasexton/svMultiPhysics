@@ -54,6 +54,11 @@ void validateParameters(
     throw std::invalid_argument("incompressible two-fluid interface surface "
                                 "tension must be finite and nonnegative");
   }
+  if (parameters.prescribed_pressure_jump.has_value() &&
+      !std::isfinite(*parameters.prescribed_pressure_jump)) {
+    throw std::invalid_argument(
+        "incompressible two-fluid prescribed pressure jump must be finite");
+  }
 }
 
 void validateExpression(const FE::forms::FormExpr &expression,
@@ -227,6 +232,19 @@ IncompressibleTwoFluidInterfaceForms buildIncompressibleTwoFluidInterfaceForms(
       (penalty_scale * inner(positive_velocity, positive_velocity_test))
           .dI(parameters.interface_marker);
   forms.residual = forms.consistency + forms.adjoint + forms.penalty;
+
+  if (parameters.prescribed_pressure_jump.has_value()) {
+    const auto target =
+        FormExpr::constant(*parameters.prescribed_pressure_jump);
+    forms.prescribed_pressure_jump =
+        (target * FormExpr::constant(weights.negative_complement) *
+         inner(n, negative_velocity_test))
+            .dI(parameters.interface_marker) +
+        (target * FormExpr::constant(weights.positive_complement) *
+         inner(n, positive_velocity_test))
+            .dI(parameters.interface_marker);
+    forms.residual = forms.residual + forms.prescribed_pressure_jump;
+  }
 
   if (parameters.surface_tension > FE::Real{0.0}) {
     const auto projector = identity - outer(n, n);

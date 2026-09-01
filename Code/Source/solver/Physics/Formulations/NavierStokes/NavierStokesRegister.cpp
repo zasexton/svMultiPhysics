@@ -1,4 +1,6 @@
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
+#include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidInterface.h"
+#include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidModule.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesRegister.h"
 
 #include "Physics/Core/EquationModuleInput.h"
@@ -9,6 +11,8 @@
 
 #include "FE/Core/Logger.h"
 #include "FE/Forms/FormExpr.h"
+#include "FE/Interfaces/LevelSetInterfaceDomain.h"
+#include "FE/Interfaces/MaterialInterfaceTransportVelocity.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
 #include "Mesh/Core/MeshBase.h"
@@ -26,6 +30,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
 #include <sstream>
@@ -143,6 +148,35 @@ void validate_free_surface_scope_entry(std::string_view key,
          key == "FreeSurfacePhysicalModel";
 }
 
+enum class NavierStokesPhysicalModel {
+  OnePhaseLiquidPrescribedExteriorPressure,
+  IncompressibleTwoFluid,
+};
+
+[[nodiscard]] bool is_two_fluid_configuration_key(
+    std::string_view key)
+{
+  static constexpr std::array<std::string_view, 16> keys = {
+      "Material_interface_marker",
+      "MaterialInterfaceMarker",
+      "Negative_phase_density",
+      "NegativePhaseDensity",
+      "Negative_phase_dynamic_viscosity",
+      "NegativePhaseDynamicViscosity",
+      "Positive_phase_density",
+      "PositivePhaseDensity",
+      "Positive_phase_dynamic_viscosity",
+      "PositivePhaseDynamicViscosity",
+      "Two_fluid_surface_tension",
+      "TwoFluidSurfaceTension",
+      "Two_fluid_interface_nitsche_gamma",
+      "TwoFluidInterfaceNitscheGamma",
+      "Prescribed_pressure_jump",
+      "PrescribedPressureJump",
+  };
+  return std::find(keys.begin(), keys.end(), key) != keys.end();
+}
+
 enum class FreeSurfaceScopeLocation {
   Equation,
   Domain,
@@ -166,21 +200,15 @@ enum class FreeSurfaceScopeLocation {
 
 void validate_free_surface_scope_map(
     const svmp::Physics::ParameterMap& params,
-    FreeSurfaceScopeLocation location)
+    FreeSurfaceScopeLocation location,
+    NavierStokesPhysicalModel physical_model)
 {
   for (const auto& [key, parameter] : params) {
-    validate_free_surface_scope_entry(
-        key, parameter.value, parameter.defined);
     const auto normalized_key = normalized_scope_token(key);
-    if (parameter.defined &&
-        is_free_surface_implementation_selector(normalized_key)) {
-      validate_free_surface_scope_entry(
-          "Implementation", parameter.value, true);
-    }
-    if (!parameter.defined) {
-      continue;
-    }
     if (normalized_key == "freesurfacephysicalmodel") {
+      if (!parameter.defined) {
+        continue;
+      }
       if (location != FreeSurfaceScopeLocation::Equation) {
         throw std::runtime_error(
             "[svMultiPhysics::Physics] "
@@ -191,6 +219,24 @@ void validate_free_surface_scope_map(
             "[svMultiPhysics::Physics] "
             "unsupported_free_surface_physical_model");
       }
+      continue;
+    }
+    if (is_two_fluid_configuration_key(key)) {
+      if (location != FreeSurfaceScopeLocation::Equation ||
+          physical_model !=
+              NavierStokesPhysicalModel::IncompressibleTwoFluid) {
+        reject_unsupported_free_surface_scope();
+      }
+      continue;
+    }
+    validate_free_surface_scope_entry(
+        key, parameter.value, parameter.defined);
+    if (parameter.defined &&
+        is_free_surface_implementation_selector(normalized_key)) {
+      validate_free_surface_scope_entry(
+          "Implementation", parameter.value, true);
+    }
+    if (!parameter.defined) {
       continue;
     }
     const bool boundary_control =
@@ -209,10 +255,11 @@ void validate_free_surface_scope_map(
 }
 
 void validate_free_surface_boundary_scope(
-    const svmp::Physics::ParameterMap& params)
+    const svmp::Physics::ParameterMap& params,
+    NavierStokesPhysicalModel physical_model)
 {
   validate_free_surface_scope_map(
-      params, FreeSurfaceScopeLocation::Boundary);
+      params, FreeSurfaceScopeLocation::Boundary, physical_model);
 
   const auto type_it = params.find("Type");
   if (type_it == params.end() || !type_it->second.defined) {
@@ -406,25 +453,10 @@ FreeSurfaceSchemaContract resolve_free_surface_schema_contract(
   return contract;
 }
 
-svmp::Physics::formulations::navier_stokes::FreeSurfacePhysicalModel
+NavierStokesPhysicalModel
 validate_and_resolve_free_surface_physical_model(
     const svmp::Physics::EquationModuleInput& input)
 {
-  using PhysicalModel = svmp::Physics::formulations::navier_stokes::
-      FreeSurfacePhysicalModel;
-  validate_free_surface_scope_map(
-      input.equation_params, FreeSurfaceScopeLocation::Equation);
-  validate_free_surface_scope_map(
-      input.default_domain.params, FreeSurfaceScopeLocation::Domain);
-  for (const auto& domain : input.domains) {
-    validate_free_surface_scope_map(
-        domain.params, FreeSurfaceScopeLocation::Domain);
-  }
-  for (const auto& boundary : input.boundary_conditions) {
-    validate_free_surface_boundary_scope(boundary.params);
-  }
-  validate_free_surface_module_options(input.module_options);
-
   const svmp::Physics::ParameterValue* selected = nullptr;
   for (const auto key : {
            "Free_surface_physical_model",
@@ -444,21 +476,56 @@ validate_and_resolve_free_surface_physical_model(
 
   const auto schema_contract =
       resolve_free_surface_schema_contract(input.equation_params);
+  auto physical_model =
+      NavierStokesPhysicalModel::
+          OnePhaseLiquidPrescribedExteriorPressure;
   if (selected == nullptr) {
-    return PhysicalModel::OnePhaseLiquidPrescribedExteriorPressure;
+    physical_model = NavierStokesPhysicalModel::
+        OnePhaseLiquidPrescribedExteriorPressure;
+  } else {
+    if (schema_contract.explicit_legacy) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] "
+          "unsupported_free_surface_physical_model");
+    }
+    const auto exact_value = trim_copy(selected->value);
+    if (exact_value == "IncompressibleTwoFluid") {
+      physical_model =
+          NavierStokesPhysicalModel::IncompressibleTwoFluid;
+    } else if (normalized_scope_token(exact_value) ==
+               "onephaseliquidprescribedexteriorpressure") {
+      physical_model = NavierStokesPhysicalModel::
+          OnePhaseLiquidPrescribedExteriorPressure;
+    } else if (contains_unsupported_free_surface_scope_marker(
+                   exact_value)) {
+      reject_unsupported_free_surface_scope();
+    } else {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] "
+          "unsupported_free_surface_physical_model");
+    }
   }
-  if (schema_contract.explicit_legacy) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] "
-        "unsupported_free_surface_physical_model");
+
+  validate_free_surface_scope_map(
+      input.equation_params,
+      FreeSurfaceScopeLocation::Equation,
+      physical_model);
+  validate_free_surface_scope_map(
+      input.default_domain.params,
+      FreeSurfaceScopeLocation::Domain,
+      physical_model);
+  for (const auto& domain : input.domains) {
+    validate_free_surface_scope_map(
+        domain.params,
+        FreeSurfaceScopeLocation::Domain,
+        physical_model);
   }
-  if (normalized_scope_token(selected->value) !=
-      "onephaseliquidprescribedexteriorpressure") {
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] "
-        "unsupported_free_surface_physical_model");
+  for (const auto& boundary : input.boundary_conditions) {
+    validate_free_surface_boundary_scope(
+        boundary.params, physical_model);
   }
-  return PhysicalModel::OnePhaseLiquidPrescribedExteriorPressure;
+  validate_free_surface_module_options(input.module_options);
+  return physical_model;
 }
 
 bool parse_bool_relaxed(std::string_view raw)
@@ -2758,6 +2825,76 @@ std::optional<int> first_defined_int(const svmp::Physics::ParameterMap& params,
   return std::nullopt;
 }
 
+const svmp::Physics::ParameterValue& require_two_fluid_parameter(
+    const svmp::Physics::ParameterMap& params,
+    std::initializer_list<std::string_view> keys,
+    std::string_view canonical_name)
+{
+  const svmp::Physics::ParameterValue* selected = nullptr;
+  for (const auto key : keys) {
+    const auto it = params.find(std::string(key));
+    if (it == params.end() || !it->second.defined) {
+      continue;
+    }
+    if (selected != nullptr) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] "
+          "ambiguous_two_fluid_parameter:" +
+          std::string(canonical_name));
+    }
+    selected = &it->second;
+  }
+  if (selected == nullptr || trim_copy(selected->value).empty()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] "
+        "missing_two_fluid_parameter:" +
+        std::string(canonical_name));
+  }
+  return *selected;
+}
+
+std::string require_two_fluid_string(
+    const svmp::Physics::ParameterMap& params,
+    std::initializer_list<std::string_view> keys,
+    std::string_view canonical_name)
+{
+  return trim_copy(
+      require_two_fluid_parameter(params, keys, canonical_name).value);
+}
+
+svmp::FE::Real require_two_fluid_real(
+    const svmp::Physics::ParameterMap& params,
+    std::initializer_list<std::string_view> keys,
+    std::string_view canonical_name)
+{
+  const auto& parameter =
+      require_two_fluid_parameter(params, keys, canonical_name);
+  return static_cast<svmp::FE::Real>(
+      parse_double(parameter.value, canonical_name));
+}
+
+int require_two_fluid_int(
+    const svmp::Physics::ParameterMap& params,
+    std::initializer_list<std::string_view> keys,
+    std::string_view canonical_name)
+{
+  const auto& parameter =
+      require_two_fluid_parameter(params, keys, canonical_name);
+  const auto value = trim_copy(parameter.value);
+  try {
+    std::size_t parsed = 0u;
+    const int result = std::stoi(value, &parsed);
+    if (parsed != value.size()) {
+      throw std::runtime_error("");
+    }
+    return result;
+  } catch (...) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Failed to parse integer value '" +
+        parameter.value + "' for " + std::string(canonical_name) + ".");
+  }
+}
+
 std::size_t defined_parameter_count(
     const svmp::Physics::ParameterMap& params,
     std::initializer_list<std::string_view> keys)
@@ -2774,6 +2911,99 @@ bool any_parameter_defined(
     std::initializer_list<std::string_view> keys)
 {
   return defined_parameter_count(params, keys) != 0u;
+}
+
+void reject_unsupported_two_fluid_default_domain_parameters(
+    const svmp::Physics::ParameterMap& params)
+{
+  static constexpr std::array<std::string_view, 3> supported{
+      "Force_x", "Force_y", "Force_z"};
+  for (const auto& [key, parameter] : params) {
+    if (!parameter.defined ||
+        std::find(supported.begin(), supported.end(), key) !=
+            supported.end()) {
+      continue;
+    }
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] "
+        "unsupported_two_fluid_default_domain_parameter:" +
+        key);
+  }
+}
+
+void reject_unsupported_two_fluid_equation_parameters(
+    const svmp::Physics::ParameterMap& params)
+{
+  static constexpr std::array<std::string_view, 26> supported{
+      "Coupled",
+      "Max_iterations",
+      "Min_iterations",
+      "Tolerance",
+      "Use_taylor_hood_type_basis",
+      "Free_surface_physical_model",
+      "FreeSurfacePhysicalModel",
+      "Free_surface_configuration_schema_version",
+      "FreeSurfaceConfigurationSchemaVersion",
+      "Free_surface_schema_version",
+      "Enable_explicit_legacy_free_surface_configuration",
+      "EnableExplicitLegacyFreeSurfaceConfiguration",
+      "Free_surface_legacy_behavior",
+      "Level_set_field_name",
+      "LevelSetFieldName",
+      "Generated_interface_domain_id",
+      "GeneratedInterfaceDomainId",
+      "Operator_tag",
+      "OperatorTag",
+      "Element_order",
+      "Jit_enable",
+      "Enable_jit",
+      "Use_jit",
+      "Jit_specialization_enable",
+      "Enable_jit_specialization",
+      "Use_jit_specialization",
+  };
+  for (const auto& [key, parameter] : params) {
+    if (!parameter.defined || is_two_fluid_configuration_key(key) ||
+        std::find(supported.begin(), supported.end(), key) !=
+            supported.end()) {
+      continue;
+    }
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] "
+        "unsupported_two_fluid_equation_parameter:" +
+        key);
+  }
+}
+
+void reject_unsupported_two_fluid_boundary_parameters(
+    std::span<const svmp::Physics::BoundaryConditionInput> boundaries)
+{
+  static constexpr std::array<std::string_view, 5> supported{
+      "Type",
+      "Time_dependence",
+      "Value",
+      "Effective_direction",
+      "Weakly_applied",
+  };
+  for (const auto& boundary : boundaries) {
+    if (!boundary.nested_configuration_blocks.empty()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] "
+          "unsupported_two_fluid_boundary_block:" +
+          boundary.nested_configuration_blocks.front());
+    }
+    for (const auto& [key, parameter] : boundary.params) {
+      if (!parameter.defined ||
+          std::find(supported.begin(), supported.end(), key) !=
+              supported.end()) {
+        continue;
+      }
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] "
+          "unsupported_two_fluid_boundary_parameter:" +
+          key);
+    }
+  }
 }
 
 void reject_duplicate_aliases(
@@ -4548,14 +4778,252 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
   }
 }
 
+struct TranslatedIncompressibleTwoFluidInput {
+  std::shared_ptr<const svmp::FE::spaces::FunctionSpace> velocity_space{};
+  std::shared_ptr<const svmp::FE::spaces::FunctionSpace> pressure_space{};
+  svmp::Physics::formulations::navier_stokes::
+      IncompressibleTwoFluidOptions options{};
+};
+
+TranslatedIncompressibleTwoFluidInput
+translate_incompressible_two_fluid_input(
+    const svmp::Physics::EquationModuleInput& input,
+    const svmp::FE::systems::FESystem& system)
+{
+  using Options = svmp::Physics::formulations::navier_stokes::
+      IncompressibleTwoFluidOptions;
+  using BoundaryOptions = svmp::Physics::formulations::navier_stokes::
+      IncompressibleNavierStokesVMSOptions;
+
+  if (!input.mesh) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Incompressible two-fluid module factory received null mesh.");
+  }
+  if (input.body_force_block_count != 0u) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] unsupported_two_fluid_body_force_configuration");
+  }
+  if (!input.domains.empty()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] unsupported_two_fluid_explicit_domain_configuration");
+  }
+  if (!trim_copy(input.module_options).empty() ||
+      !trim_copy(input.module_options_file_path).empty()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] unsupported_two_fluid_module_options");
+  }
+  if (input.node_pressure_constraints.has_value()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] unsupported_two_fluid_node_pressure_constraints");
+  }
+  if (!input.outputs.empty()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] unsupported_two_fluid_output_configuration");
+  }
+  if (!input.nested_configuration_blocks.empty()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] "
+        "unsupported_two_fluid_equation_block:" +
+        input.nested_configuration_blocks.front());
+  }
+  if (!input.default_domain.nested_configuration_blocks.empty()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] "
+        "unsupported_two_fluid_default_domain_block:" +
+        input.default_domain.nested_configuration_blocks.front());
+  }
+
+  const int dimension = input.mesh->dim();
+  if (dimension != 2 && dimension != 3) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Incompressible two-fluid spaces require dimension two or three.");
+  }
+  const auto element_type = infer_base_element_type(*input.mesh);
+  const bool supported_cell =
+      (dimension == 2 && element_type == svmp::FE::ElementType::Triangle3) ||
+      (dimension == 3 && element_type == svmp::FE::ElementType::Tetra4);
+  const int order =
+      resolve_element_order(input, infer_polynomial_order(*input.mesh));
+  const bool taylor_hood = first_defined_bool(
+      input.equation_params,
+      {"Use_taylor_hood_type_basis"}).value_or(false);
+  if (!supported_cell || order != 1 || taylor_hood) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Incompressible two-fluid input requires affine equal-order P1 Triangle3 or Tetra4 spaces.");
+  }
+
+  Options options;
+  options.level_set_field_name = require_two_fluid_string(
+      input.equation_params,
+      {"Level_set_field_name", "LevelSetFieldName"},
+      "Level_set_field_name");
+  options.generated_interface_domain_id = require_two_fluid_string(
+      input.equation_params,
+      {"Generated_interface_domain_id", "GeneratedInterfaceDomainId"},
+      "Generated_interface_domain_id");
+  options.interface_marker = require_two_fluid_int(
+      input.equation_params,
+      {"Material_interface_marker", "MaterialInterfaceMarker"},
+      "Material_interface_marker");
+  options.negative_phase.density = require_two_fluid_real(
+      input.equation_params,
+      {"Negative_phase_density", "NegativePhaseDensity"},
+      "Negative_phase_density");
+  options.negative_phase.viscosity = require_two_fluid_real(
+      input.equation_params,
+      {"Negative_phase_dynamic_viscosity",
+       "NegativePhaseDynamicViscosity"},
+      "Negative_phase_dynamic_viscosity");
+  options.positive_phase.density = require_two_fluid_real(
+      input.equation_params,
+      {"Positive_phase_density", "PositivePhaseDensity"},
+      "Positive_phase_density");
+  options.positive_phase.viscosity = require_two_fluid_real(
+      input.equation_params,
+      {"Positive_phase_dynamic_viscosity",
+       "PositivePhaseDynamicViscosity"},
+      "Positive_phase_dynamic_viscosity");
+  options.surface_tension = require_two_fluid_real(
+      input.equation_params,
+      {"Two_fluid_surface_tension", "TwoFluidSurfaceTension"},
+      "Two_fluid_surface_tension");
+  options.interface_nitsche_gamma = require_two_fluid_real(
+      input.equation_params,
+      {"Two_fluid_interface_nitsche_gamma",
+       "TwoFluidInterfaceNitscheGamma"},
+      "Two_fluid_interface_nitsche_gamma");
+  if (any_parameter_defined(
+          input.equation_params,
+          {"Prescribed_pressure_jump", "PrescribedPressureJump"})) {
+    options.prescribed_pressure_jump = require_two_fluid_real(
+        input.equation_params,
+        {"Prescribed_pressure_jump", "PrescribedPressureJump"},
+        "Prescribed_pressure_jump");
+  }
+  options.require_conservative_phase_momentum_reconciliation = true;
+  if (options.interface_marker < 0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Material_interface_marker must be nonnegative for incompressible two-fluid input.");
+  }
+  if (any_parameter_defined(
+          input.equation_params, {"Operator_tag", "OperatorTag"})) {
+    options.operator_tag = require_two_fluid_string(
+        input.equation_params,
+        {"Operator_tag", "OperatorTag"},
+        "Operator_tag");
+  }
+  options.enable_convection = input.equation_type != "stokes";
+  options.jit_policy =
+      svmp::Physics::core::resolveOopJitPolicy(input, options.jit_policy);
+
+  for (std::size_t component = 0u; component < options.body_force.size();
+       ++component) {
+    static constexpr std::array<std::string_view, 3> force_keys{
+        "Force_x", "Force_y", "Force_z"};
+    if (const auto value = get_defined_double(
+            input.default_domain.params, force_keys[component])) {
+      options.body_force[component] = static_cast<svmp::FE::Real>(*value);
+    }
+  }
+
+  BoundaryOptions translated_boundaries;
+  apply_fluid_moving_domain_options(
+      input, input.default_domain, translated_boundaries);
+  if (translated_boundaries.enable_ale) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] unsupported_two_fluid_moving_mesh");
+  }
+  apply_fluid_momentum_source_params(
+      input.equation_params, translated_boundaries);
+  apply_fluid_momentum_source_params(
+      input.default_domain.params, translated_boundaries);
+  if (!translated_boundaries.body_force_field_name.empty() ||
+      any_parameter_defined(
+          input.equation_params,
+          {"Momentum_source_temporal_and_spatial_values_file_path",
+           "MomentumSourceTemporalAndSpatialValuesFilePath",
+           "Body_force_temporal_and_spatial_values_file_path",
+           "BodyForceTemporalAndSpatialValuesFilePath"}) ||
+      any_parameter_defined(
+          input.default_domain.params,
+          {"Momentum_source_temporal_and_spatial_values_file_path",
+           "MomentumSourceTemporalAndSpatialValuesFilePath",
+           "Body_force_temporal_and_spatial_values_file_path",
+           "BodyForceTemporalAndSpatialValuesFilePath"})) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] unsupported_two_fluid_nonconstant_momentum_source");
+  }
+  reject_unsupported_two_fluid_equation_parameters(
+      input.equation_params);
+  reject_unsupported_two_fluid_default_domain_parameters(
+      input.default_domain.params);
+  apply_fluid_bcs(
+      input,
+      input.default_domain,
+      markerCommunicator(system),
+      translated_boundaries);
+  if (!translated_boundaries.velocity_dirichlet_weak.empty() ||
+      !translated_boundaries.pressure_dirichlet.empty() ||
+      !translated_boundaries.traction_neumann.empty() ||
+      !translated_boundaries.traction_robin.empty() ||
+      !translated_boundaries.pressure_outflow.empty() ||
+      !translated_boundaries.free_surface.empty() ||
+      !translated_boundaries.coupled_outflow_rcr.empty() ||
+      !translated_boundaries.coupled_outflow_rcrcr.empty()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] unsupported_two_fluid_boundary_condition");
+  }
+  reject_unsupported_two_fluid_boundary_parameters(
+      input.boundary_conditions);
+  options.negative_phase.velocity_dirichlet =
+      translated_boundaries.velocity_dirichlet;
+  options.positive_phase.velocity_dirichlet =
+      translated_boundaries.velocity_dirichlet;
+
+  auto velocity_space = svmp::FE::spaces::VectorSpace(
+      svmp::FE::spaces::SpaceType::H1,
+      element_type,
+      1,
+      dimension);
+  auto pressure_space =
+      svmp::FE::spaces::SpaceFactory::create_h1(element_type, 1);
+  return TranslatedIncompressibleTwoFluidInput{
+      .velocity_space = std::move(velocity_space),
+      .pressure_space = std::move(pressure_space),
+      .options = std::move(options),
+  };
+}
+
+std::unique_ptr<svmp::Physics::PhysicsModule>
+create_incompressible_two_fluid_from_input(
+    const svmp::Physics::EquationModuleInput& input,
+    svmp::FE::systems::FESystem& system)
+{
+  using Module = svmp::Physics::formulations::navier_stokes::
+      IncompressibleTwoFluidModule;
+  auto translated = translate_incompressible_two_fluid_input(input, system);
+  auto module = std::make_unique<Module>(
+      translated.velocity_space,
+      translated.pressure_space,
+      translated.velocity_space,
+      translated.pressure_space,
+      std::move(translated.options));
+  module->registerOn(system);
+  return module;
+}
+
 std::unique_ptr<svmp::Physics::PhysicsModule>
 create_navier_stokes_from_input(const svmp::Physics::EquationModuleInput& input,
                                 svmp::FE::systems::FESystem& system)
 {
   svmp::Physics::formulations::navier_stokes::
       preflightFittedSurfaceContactCapability(input);
-  const auto free_surface_physical_model =
+  const auto physical_model =
       validate_and_resolve_free_surface_physical_model(input);
+  if (physical_model ==
+      NavierStokesPhysicalModel::IncompressibleTwoFluid) {
+    return create_incompressible_two_fluid_from_input(input, system);
+  }
   if (!input.mesh) {
     throw std::runtime_error("[svMultiPhysics::Physics] Navier-Stokes module factory received null mesh.");
   }
@@ -4585,7 +5053,10 @@ create_navier_stokes_from_input(const svmp::Physics::EquationModuleInput& input,
   svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions options{};
   options.velocity_field_name = "Velocity";
   options.pressure_field_name = "Pressure";
-  options.free_surface_physical_model = free_surface_physical_model;
+  options.free_surface_physical_model =
+      svmp::Physics::formulations::navier_stokes::
+          FreeSurfacePhysicalModel::
+              OnePhaseLiquidPrescribedExteriorPressure;
   if (const auto operator_tag = first_defined_string(
           input.equation_params, {"Operator_tag", "OperatorTag"})) {
     options.operator_tag = *operator_tag;
@@ -4608,6 +5079,154 @@ create_navier_stokes_from_input(const svmp::Physics::EquationModuleInput& input,
   return module;
 }
 
+[[nodiscard]] bool dependencySpacesCompatible(
+    const svmp::FE::spaces::FunctionSpace& lhs,
+    const svmp::FE::spaces::FunctionSpace& rhs) noexcept
+{
+  return lhs.space_type() == rhs.space_type() &&
+         lhs.field_type() == rhs.field_type() &&
+         lhs.value_dimension() == rhs.value_dimension() &&
+         lhs.topological_dimension() == rhs.topological_dimension() &&
+         lhs.polynomial_order() == rhs.polynomial_order() &&
+         lhs.element_type() == rhs.element_type();
+}
+
+void preflightTwoFluidUnknownField(
+    const svmp::FE::systems::FESystem& system,
+    std::string_view name,
+    const std::shared_ptr<const svmp::FE::spaces::FunctionSpace>& space,
+    int components)
+{
+  if (name.empty() || !space || components <= 0) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Physics] invalid two-fluid dependency field specification");
+  }
+  const auto existing = system.findFieldByName(name);
+  if (existing == svmp::FE::INVALID_FIELD_ID) {
+    return;
+  }
+  const auto& record = system.fieldRecord(existing);
+  if (record.source_kind !=
+          svmp::FE::systems::FieldSourceKind::Unknown ||
+      record.components != components || !record.space ||
+      !dependencySpacesCompatible(*record.space, *space)) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Physics] two-fluid dependency field '" +
+        std::string(name) + "' is incompatible with the requested unknown");
+  }
+}
+
+[[nodiscard]] svmp::FE::FieldId ensureTwoFluidUnknownField(
+    svmp::FE::systems::FESystem& system,
+    std::string name,
+    const std::shared_ptr<const svmp::FE::spaces::FunctionSpace>& space,
+    int components)
+{
+  const auto existing = system.findFieldByName(name);
+  if (existing != svmp::FE::INVALID_FIELD_ID) {
+    return existing;
+  }
+  return system.addField(svmp::FE::systems::FieldSpec{
+      .name = std::move(name),
+      .space = space,
+      .components = components,
+      .source_kind = svmp::FE::systems::FieldSourceKind::Unknown,
+  });
+}
+
+void preflightTwoFluidTranslationBeforeMutation(
+    const TranslatedIncompressibleTwoFluidInput& translated,
+    const svmp::FE::systems::FESystem& system)
+{
+  const auto& options = translated.options;
+  const int dimension = translated.velocity_space
+                            ? translated.velocity_space->value_dimension()
+                            : 0;
+  if ((dimension != 2 && dimension != 3) ||
+      !translated.pressure_space || options.interface_marker < 0 ||
+      options.operator_tag.empty() ||
+      options.generated_interface_domain_id.empty() ||
+      !std::isfinite(options.level_set_isovalue) ||
+      !std::isfinite(options.surface_tension) ||
+      options.surface_tension < svmp::FE::Real{0.0} ||
+      !std::isfinite(options.interface_nitsche_gamma) ||
+      !(options.interface_nitsche_gamma > svmp::FE::Real{0.0}) ||
+      !std::isfinite(options.negative_phase.density) ||
+      !(options.negative_phase.density > svmp::FE::Real{0.0}) ||
+      !std::isfinite(options.positive_phase.density) ||
+      !(options.positive_phase.density > svmp::FE::Real{0.0}) ||
+      !std::isfinite(options.negative_phase.viscosity) ||
+      !(options.negative_phase.viscosity > svmp::FE::Real{0.0}) ||
+      !std::isfinite(options.positive_phase.viscosity) ||
+      !(options.positive_phase.viscosity > svmp::FE::Real{0.0})) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Physics] invalid incompressible two-fluid dependency definition");
+  }
+
+  svmp::Physics::formulations::navier_stokes::
+      validateIncompressibleTwoFluidConfigurationSemantics(options);
+
+  const std::array<std::string_view, 5> names{
+      options.level_set_field_name,
+      options.negative_phase.velocity_field_name,
+      options.positive_phase.velocity_field_name,
+      options.negative_phase.pressure_field_name,
+      options.positive_phase.pressure_field_name,
+  };
+  for (std::size_t i = 0u; i < names.size(); ++i) {
+    if (names[i].empty()) {
+      throw std::invalid_argument(
+          "[svMultiPhysics::Physics] two-fluid dependency field names must be nonempty");
+    }
+    for (std::size_t j = i + 1u; j < names.size(); ++j) {
+      if (names[i] == names[j]) {
+        throw std::invalid_argument(
+            "[svMultiPhysics::Physics] two-fluid dependency field names must be distinct");
+      }
+    }
+  }
+
+  const auto level_set = system.findFieldByName(options.level_set_field_name);
+  if (level_set == svmp::FE::INVALID_FIELD_ID) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Physics] two-fluid dependency requires its level-set field to be pre-registered");
+  }
+  const auto& level_set_record = system.fieldRecord(level_set);
+  const bool supported_level_set_source =
+      level_set_record.source_kind ==
+          svmp::FE::systems::FieldSourceKind::Unknown ||
+      level_set_record.source_kind ==
+          svmp::FE::systems::FieldSourceKind::PrescribedData;
+  if (!supported_level_set_source || level_set_record.components != 1 ||
+      !level_set_record.space ||
+      !dependencySpacesCompatible(
+          *level_set_record.space, *translated.pressure_space)) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Physics] two-fluid dependency requires a compatible scalar level-set field");
+  }
+
+  preflightTwoFluidUnknownField(
+      system,
+      options.negative_phase.velocity_field_name,
+      translated.velocity_space,
+      dimension);
+  preflightTwoFluidUnknownField(
+      system,
+      options.positive_phase.velocity_field_name,
+      translated.velocity_space,
+      dimension);
+  preflightTwoFluidUnknownField(
+      system,
+      options.negative_phase.pressure_field_name,
+      translated.pressure_space,
+      1);
+  preflightTwoFluidUnknownField(
+      system,
+      options.positive_phase.pressure_field_name,
+      translated.pressure_space,
+      1);
+}
+
 } // namespace
 
 SVMP_REGISTER_EQUATION("fluid", &create_navier_stokes_from_input);
@@ -4622,9 +5241,133 @@ void preflightFittedSurfaceContactCapability(
     throw std::invalid_argument(
         "preflightFittedSurfaceContactCapability requires a fluid or stokes equation input");
   }
-  (void)validate_and_resolve_free_surface_physical_model(input);
+  const auto physical_model =
+      validate_and_resolve_free_surface_physical_model(input);
+  if (physical_model ==
+      NavierStokesPhysicalModel::IncompressibleTwoFluid) {
+    return;
+  }
   validate_fitted_surface_contact_capability(
       translate_fitted_surface_contact_capability(input));
+}
+
+std::optional<IncompressibleTwoFluidDependency>
+incompressibleTwoFluidDependency(
+    const svmp::Physics::EquationModuleInput& input,
+    const FE::systems::FESystem& system)
+{
+  if (input.equation_type != "fluid" && input.equation_type != "stokes") {
+    throw std::invalid_argument(
+        "incompressibleTwoFluidDependency requires a fluid or stokes equation input");
+  }
+  if (validate_and_resolve_free_surface_physical_model(input) !=
+      NavierStokesPhysicalModel::IncompressibleTwoFluid) {
+    return std::nullopt;
+  }
+  auto translated =
+      translate_incompressible_two_fluid_input(input, system);
+  const auto& options = translated.options;
+  if (!input.mesh || !translated.velocity_space ||
+      !translated.pressure_space) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Physics] incomplete incompressible two-fluid dependency");
+  }
+  return IncompressibleTwoFluidDependency{
+      .mesh = input.mesh.get(),
+      .mesh_name = input.mesh_name,
+      .dimension = translated.velocity_space->value_dimension(),
+      .interface_marker = options.interface_marker,
+      .level_set_field_name = options.level_set_field_name,
+      .negative_velocity_field_name =
+          options.negative_phase.velocity_field_name,
+      .positive_velocity_field_name =
+          options.positive_phase.velocity_field_name,
+      .negative_pressure_field_name =
+          options.negative_phase.pressure_field_name,
+      .positive_pressure_field_name =
+          options.positive_phase.pressure_field_name,
+      .operator_tag = options.operator_tag,
+      .generated_interface_domain_id =
+          options.generated_interface_domain_id,
+  };
+}
+
+void preRegisterIncompressibleTwoFluidDependencyFields(
+    const svmp::Physics::EquationModuleInput& input,
+    FE::systems::FESystem& system)
+{
+  if (validate_and_resolve_free_surface_physical_model(input) !=
+      NavierStokesPhysicalModel::IncompressibleTwoFluid) {
+    throw std::invalid_argument(
+        "preRegisterIncompressibleTwoFluidDependencyFields requires incompressible two-fluid input");
+  }
+  auto translated =
+      translate_incompressible_two_fluid_input(input, system);
+  preflightTwoFluidTranslationBeforeMutation(translated, system);
+
+  const auto& options = translated.options;
+  const int dimension = translated.velocity_space->value_dimension();
+  const auto u_negative = ensureTwoFluidUnknownField(
+      system,
+      options.negative_phase.velocity_field_name,
+      translated.velocity_space,
+      dimension);
+  const auto u_positive = ensureTwoFluidUnknownField(
+      system,
+      options.positive_phase.velocity_field_name,
+      translated.velocity_space,
+      dimension);
+  const auto p_negative = ensureTwoFluidUnknownField(
+      system,
+      options.negative_phase.pressure_field_name,
+      translated.pressure_space,
+      1);
+  const auto p_positive = ensureTwoFluidUnknownField(
+      system,
+      options.positive_phase.pressure_field_name,
+      translated.pressure_space,
+      1);
+  (void)p_negative;
+  (void)p_positive;
+
+  const auto level_set =
+      system.findFieldByName(options.level_set_field_name);
+  FE::interfaces::GeneratedInterfaceMarkerKey marker_key{};
+  marker_key.source =
+      FE::interfaces::LevelSetInterfaceSource::fromField(level_set);
+  marker_key.domain_id = options.generated_interface_domain_id;
+  marker_key.isovalue = options.level_set_isovalue;
+  marker_key.requested_marker = options.interface_marker;
+  const int interface_marker =
+      FE::interfaces::stableGeneratedInterfaceMarker(marker_key);
+
+  const IncompressibleTwoFluidInterfaceParameters parameters{
+      .dimension = dimension,
+      .interface_marker = interface_marker,
+      .negative_density = options.negative_phase.density,
+      .positive_density = options.positive_phase.density,
+      .negative_viscosity = options.negative_phase.viscosity,
+      .positive_viscosity = options.positive_phase.viscosity,
+      .nitsche_gamma = options.interface_nitsche_gamma,
+      .surface_tension = options.surface_tension,
+      .include_transient_penalty =
+          options.include_transient_interface_penalty,
+      .prescribed_pressure_jump = options.prescribed_pressure_jump,
+  };
+  const auto weights = incompressibleTwoFluidInterfaceWeights(parameters);
+  system.declareMaterialInterfaceTransportVelocity(
+      FE::interfaces::MaterialInterfaceTransportVelocityDeclaration{
+          .dimension = dimension,
+          .interface_marker = interface_marker,
+          .level_set_field = level_set,
+          .negative_velocity_field = u_negative,
+          .positive_velocity_field = u_positive,
+          .level_set_isovalue = options.level_set_isovalue,
+          .negative_trace_weight = weights.negative_complement,
+          .positive_trace_weight = weights.positive_complement,
+          .geometry_domain_id = options.generated_interface_domain_id,
+          .owner_component = "incompressible_two_fluid",
+      });
 }
 
 FE::FieldId preRegisterPrimaryVelocityField(
@@ -4632,6 +5375,11 @@ FE::FieldId preRegisterPrimaryVelocityField(
     FE::systems::FESystem& system)
 {
   preflightFittedSurfaceContactCapability(input);
+  if (validate_and_resolve_free_surface_physical_model(input) ==
+      NavierStokesPhysicalModel::IncompressibleTwoFluid) {
+    throw std::invalid_argument(
+        "Incompressible two-fluid input owns separate phase velocities and cannot pre-register a field named 'Velocity'");
+  }
   if (input.equation_type != "fluid" && input.equation_type != "stokes") {
     throw std::invalid_argument(
         "preRegisterPrimaryVelocityField requires a fluid or stokes equation input");

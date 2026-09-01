@@ -37,7 +37,7 @@ struct IncompressibleTwoFluidPhaseOptions {
 };
 
 /**
- * @brief Qualified initial envelope for a sharp incompressible two-fluid pair
+ * @brief Initial supported envelope for a sharp incompressible two-fluid pair
  *
  * The current owner intentionally admits only fixed-Eulerian affine C0 P1
  * Triangle3/Tetra4 spaces, constant phase materials, one shared generated
@@ -69,10 +69,11 @@ struct IncompressibleTwoFluidOptions {
     FE::Real level_set_isovalue{0.0};
 
     FE::Real surface_tension{0.0};
-    /** Optional exact p_minus-p_plus target for manufactured jump histories. */
+    /** Optional manufactured p_minus-p_plus load and diagnostic target. */
     std::optional<FE::Real> prescribed_pressure_jump{};
     FE::Real interface_nitsche_gamma{20.0};
     bool include_transient_interface_penalty{true};
+    bool require_conservative_phase_momentum_reconciliation{false};
 
     std::array<FE::Real, 3> body_force{0.0, 0.0, 0.0};
     bool enable_convection{true};
@@ -88,6 +89,10 @@ struct IncompressibleTwoFluidOptions {
         small_cut_aggregation_guards{};
     core::PhysicsJITPolicy jit_policy{};
 };
+
+/** Validate parser-visible semantics shared by preflight and registration. */
+void validateIncompressibleTwoFluidConfigurationSemantics(
+    const IncompressibleTwoFluidOptions& options);
 
 class IncompressibleTwoFluidModule final : public PhysicsModule {
 public:

@@ -866,6 +866,7 @@ set(FE_GEOMETRY_HEADERS
     Interfaces/CutInterfaceFieldEvaluation.h
     Interfaces/FreeSurfaceGeometrySnapshot.h
     Interfaces/IncompressibleTwoFluidDiagnostics.h
+    Interfaces/MaterialInterfaceTransportVelocity.h
     Interfaces/GeneratedActiveBoundaryDomain.h
     Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h
     Interfaces/LevelSetInterfaceDiagnostics.h
@@ -899,6 +900,7 @@ set(FE_GEOMETRY_SOURCES
     Interfaces/CutInterfaceFieldEvaluation.cpp
     Interfaces/FreeSurfaceGeometrySnapshot.cpp
     Interfaces/IncompressibleTwoFluidDiagnostics.cpp
+    Interfaces/MaterialInterfaceTransportVelocity.cpp
     Interfaces/GeneratedActiveBoundaryDomain.cpp
     Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.cpp
     Interfaces/LevelSetInterfaceDiagnostics.cpp

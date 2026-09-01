@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
@@ -23,6 +24,9 @@ class FreeSurfaceGeometrySnapshotCache;
 namespace backends {
 class BackendFactory;
 class LinearSolver;
+struct BlockLayout;
+enum class BackendKind : std::uint8_t;
+enum class SolverMethod : std::uint8_t;
 } // namespace backends
 
 namespace timestepping {
@@ -75,6 +79,26 @@ namespace detail {
 void preflightAndPreRegisterPhysicsModuleDependencies(
     const Parameters& params,
     SimulationComponents& components);
+
+/**
+ * Form the exact two-block FSILS partition for the monolithic material-
+ * interface/two-fluid unknown layout.  Returns false without mutation when
+ * the declarations or field layout do not match the declared contract.
+ */
+bool groupTwoFluidMaterialInterfaceFsilsLayout(
+    const svmp::FE::systems::FESystem& system,
+    svmp::FE::backends::BlockLayout& layout);
+
+/**
+ * Enforce the solver envelope for a declared material-interface/two-fluid
+ * pair and install its exact two-block layout.  Systems without either
+ * declaration are left unchanged.
+ */
+void requireTwoFluidMaterialInterfaceSolverLayout(
+    const svmp::FE::systems::FESystem& system,
+    svmp::FE::backends::BackendKind backend_kind,
+    svmp::FE::backends::SolverMethod solver_method,
+    svmp::FE::backends::BlockLayout& layout);
 
 } // namespace detail
 

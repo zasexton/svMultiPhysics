@@ -2016,6 +2016,32 @@ void appendTwoFluidDiagnosticDeclaration(
     appendMeshBoundaryToken(
         tokens,
         generatedBoundaryTraceRealBits(declaration.level_set_isovalue));
+    appendMeshBoundaryToken(
+        tokens,
+        declaration.require_conservative_phase_momentum_reconciliation
+            ? 1u
+            : 0u);
+    appendMeshBoundaryToken(
+        tokens, declaration.require_accepted_stage_numerics ? 1u : 0u);
+    appendMeshBoundaryToken(
+        tokens,
+        generatedBoundaryTraceRealBits(
+            declaration.pressure_stabilization_coefficient));
+    appendMeshBoundaryToken(
+        tokens,
+        declaration.pressure_stabilization_use_cut_metadata_scale ? 1u : 0u);
+    appendMeshBoundaryToken(
+        tokens,
+        declaration.pressure_stabilization_cut_metadata_scale_cap.has_value()
+            ? 1u
+            : 0u);
+    if (declaration.pressure_stabilization_cut_metadata_scale_cap.has_value()) {
+        appendMeshBoundaryToken(
+            tokens,
+            generatedBoundaryTraceRealBits(
+                *declaration
+                     .pressure_stabilization_cut_metadata_scale_cap));
+    }
     appendTwoFluidDiagnosticParameters(tokens, declaration.parameters);
     appendMeshBoundaryString(tokens, declaration.owner_component);
 }
@@ -2132,6 +2158,327 @@ void appendTwoFluidDiagnosticState(
     appendTwoFluidPhaseDiagnosticState(tokens, state.positive_phase);
 }
 
+void appendTwoFluidPhaseMomentumReconciliation(
+    MeshBoundaryConsensusTokens& tokens,
+    const interfaces::IncompressibleTwoFluidPhaseMomentumReconciliation& phase)
+{
+    appendMeshBoundaryIntegral(tokens, phase.side);
+    const std::array<Real, 7> scalars{
+        phase.density,
+        phase.raw_volume,
+        phase.corrected_volume,
+        phase.raw_mass,
+        phase.corrected_mass,
+        phase.momentum_delta_norm,
+        phase.momentum_reference_norm};
+    for (const auto value : scalars) {
+        appendMeshBoundaryToken(
+            tokens, generatedBoundaryTraceRealBits(value));
+    }
+    appendMeshBoundaryToken(
+        tokens, generatedBoundaryTraceRealBits(phase.allowed_momentum_delta));
+    for (const auto& vector : {phase.raw_momentum,
+                               phase.corrected_momentum,
+                               phase.momentum_delta}) {
+        for (const auto value : vector) {
+            appendMeshBoundaryToken(
+                tokens, generatedBoundaryTraceRealBits(value));
+        }
+    }
+    appendMeshBoundaryToken(tokens, phase.satisfied ? 1u : 0u);
+}
+
+void appendTwoFluidMomentumReconciliation(
+    MeshBoundaryConsensusTokens& tokens,
+    const interfaces::IncompressibleTwoFluidMomentumReconciliation& record)
+{
+    appendMeshBoundaryIntegral(tokens, record.interface_marker);
+    appendTwoFluidGeometryRevision(tokens, record.raw_geometry_revision);
+    appendTwoFluidGeometryRevision(tokens, record.corrected_geometry_revision);
+    appendMeshBoundaryToken(tokens, record.raw_algebraic_revision);
+    appendMeshBoundaryToken(tokens, record.corrected_algebraic_revision);
+    appendMeshBoundaryToken(
+        tokens, generatedBoundaryTraceRealBits(record.relative_tolerance));
+    appendMeshBoundaryToken(tokens, record.velocity_update_applied ? 1u : 0u);
+    appendMeshBoundaryToken(tokens, record.satisfied ? 1u : 0u);
+    appendTwoFluidPhaseMomentumReconciliation(
+        tokens, record.negative_phase);
+    appendTwoFluidPhaseMomentumReconciliation(
+        tokens, record.positive_phase);
+}
+
+void appendTwoFluidAcceptedStageAggregationGeometry(
+    MeshBoundaryConsensusTokens& tokens,
+    const TwoFluidAcceptedStageAggregationGeometryTelemetry& geometry)
+{
+    appendMeshBoundaryIntegral(tokens, geometry.kind);
+    appendMeshBoundaryToken(tokens, geometry.available ? 1u : 0u);
+    appendMeshBoundaryToken(
+        tokens,
+        geometry.communicator_fingerprint_consensus_validated ? 1u : 0u);
+    appendMeshBoundaryString(tokens, geometry.source_id);
+    appendMeshBoundaryString(tokens, geometry.domain_id);
+    appendMeshBoundaryIntegral(tokens, geometry.interface_marker);
+    appendMeshBoundaryToken(
+        tokens, generatedBoundaryTraceRealBits(geometry.isovalue));
+    appendMeshBoundaryToken(tokens, geometry.source_layout_revision);
+    appendMeshBoundaryToken(tokens, geometry.source_value_revision);
+    appendMeshBoundaryToken(tokens, geometry.quadrature_policy_key);
+    appendMeshBoundaryToken(tokens, geometry.snapshot_revision_key);
+    appendMeshBoundaryToken(
+        tokens, geometry.distributed_mesh_geometry_revision);
+    appendMeshBoundaryToken(
+        tokens, geometry.distributed_mesh_topology_revision);
+    appendMeshBoundaryToken(tokens, geometry.distributed_ownership_revision);
+    appendMeshBoundaryToken(tokens, geometry.distributed_numbering_revision);
+    appendMeshBoundaryToken(tokens, geometry.canonical_fingerprint);
+}
+
+void appendTwoFluidAcceptedStageAggregationTransition(
+    MeshBoundaryConsensusTokens& tokens,
+    const TwoFluidAcceptedStageAggregationTransitionTelemetry& transition)
+{
+    appendTwoFluidAcceptedStageAggregationGeometry(
+        tokens, transition.geometry_identity_before);
+    appendTwoFluidAcceptedStageAggregationGeometry(
+        tokens, transition.geometry_identity_after);
+    const std::array<std::uint64_t, 4> fingerprints{
+        transition.canonical_feature_class_fingerprint_before,
+        transition.canonical_feature_class_fingerprint_after,
+        transition.canonical_slave_set_fingerprint_before,
+        transition.canonical_slave_set_fingerprint_after};
+    for (const auto value : fingerprints) {
+        appendMeshBoundaryToken(tokens, value);
+    }
+    const std::array<std::size_t, 12> counts{
+        transition.canonical_active_feature_count_before,
+        transition.canonical_active_feature_count_after,
+        transition.canonical_features_entered,
+        transition.canonical_features_exited,
+        transition.canonical_features_persisted,
+        transition.canonical_feature_classification_changes,
+        transition.canonical_features_became_rooted,
+        transition.canonical_features_became_rootless,
+        transition.canonical_aggregate_slaves_before,
+        transition.canonical_aggregate_slaves_after,
+        transition.canonical_aggregate_slaves_entered,
+        transition.canonical_aggregate_slaves_left};
+    for (const auto value : counts) {
+        appendMeshBoundaryToken(
+            tokens, static_cast<std::uint64_t>(value));
+    }
+    appendMeshBoundaryToken(
+        tokens,
+        generatedBoundaryTraceRealBits(
+            transition.canonical_rootless_active_physical_volume_before));
+    appendMeshBoundaryToken(
+        tokens,
+        generatedBoundaryTraceRealBits(
+            transition.canonical_rootless_active_physical_volume_after));
+    appendMeshBoundaryToken(
+        tokens,
+        generatedBoundaryTraceRealBits(
+            transition.canonical_rootless_active_physical_volume_delta));
+    appendMeshBoundaryToken(
+        tokens, transition.canonical_topology_changed ? 1u : 0u);
+}
+
+void appendTwoFluidAcceptedStageAggregation(
+    MeshBoundaryConsensusTokens& tokens,
+    const TwoFluidAcceptedStageAggregationTelemetry& aggregation)
+{
+    appendTwoFluidAcceptedStageAggregationGeometry(
+        tokens, aggregation.geometry_identity);
+    appendMeshBoundaryToken(
+        tokens, aggregation.canonical_feature_class_fingerprint);
+    appendMeshBoundaryToken(
+        tokens, aggregation.canonical_slave_set_fingerprint);
+    const std::array<std::size_t, 14> counts{
+        aggregation.maximum_root_path_length,
+        aggregation.maximum_observed_root_path,
+        aggregation.root_path_guard_rejections,
+        aggregation.extrapolation_guard_rejections,
+        aggregation.line_guard_rejections,
+        aggregation.canonical_candidate_vertices,
+        aggregation.canonical_rooted_candidate_vertices,
+        aggregation.canonical_rootless_candidate_vertices,
+        aggregation.canonical_owned_aggregate_dofs,
+        aggregation.canonical_owned_pinned_dofs,
+        aggregation.canonical_strong_suppressed_dofs,
+        aggregation.canonical_active_feature_count,
+        aggregation.canonical_rooted_active_feature_count,
+        aggregation.canonical_rootless_active_feature_count};
+    for (const auto value : counts) {
+        appendMeshBoundaryToken(tokens, static_cast<std::uint64_t>(value));
+    }
+    const std::array<Real, 7> scalars{
+        aggregation.maximum_reference_extrapolation_distance,
+        aggregation.maximum_observed_reference_extrapolation,
+        aggregation.maximum_absolute_coefficient,
+        aggregation.maximum_observed_absolute_coefficient,
+        aggregation.maximum_row_l1_norm,
+        aggregation.maximum_observed_row_l1_norm,
+        aggregation.canonical_rootless_active_physical_volume};
+    for (const auto value : scalars) {
+        appendMeshBoundaryToken(
+            tokens, generatedBoundaryTraceRealBits(value));
+    }
+    appendMeshBoundaryToken(
+        tokens,
+        aggregation.canonical_topology_transition.has_value() ? 1u : 0u);
+    if (aggregation.canonical_topology_transition.has_value()) {
+        appendTwoFluidAcceptedStageAggregationTransition(
+            tokens, *aggregation.canonical_topology_transition);
+    }
+}
+
+void appendTwoFluidAcceptedStageSolveTelemetry(
+    MeshBoundaryConsensusTokens& tokens,
+    const TwoFluidAcceptedStageSolveTelemetry& solve)
+{
+    const auto& nonlinear = solve.nonlinear;
+    appendMeshBoundaryToken(tokens, nonlinear.converged ? 1u : 0u);
+    appendMeshBoundaryIntegral(tokens, nonlinear.iterations);
+    appendMeshBoundaryIntegral(tokens, nonlinear.outer_iterations);
+    appendMeshBoundaryIntegral(tokens, nonlinear.inner_iterations_total);
+    appendMeshBoundaryToken(
+        tokens, generatedBoundaryTraceRealBits(nonlinear.outer_state_change_norm));
+    appendMeshBoundaryToken(
+        tokens, nonlinear.outer_dynamic_relaxation_enabled ? 1u : 0u);
+    appendMeshBoundaryIntegral(
+        tokens, nonlinear.outer_dynamic_relaxation_updates);
+    appendMeshBoundaryIntegral(
+        tokens, nonlinear.outer_dynamic_relaxation_safeguards);
+    appendMeshBoundaryIntegral(
+        tokens, nonlinear.outer_dynamic_relaxation_resets);
+    appendMeshBoundaryToken(
+        tokens,
+        generatedBoundaryTraceRealBits(
+            nonlinear.outer_dynamic_relaxation_factor));
+    appendMeshBoundaryToken(
+        tokens,
+        generatedBoundaryTraceRealBits(
+            nonlinear.outer_relaxed_state_change_norm));
+    appendMeshBoundaryToken(
+        tokens, nonlinear.outer_raw_contraction_ratio.has_value() ? 1u : 0u);
+    if (nonlinear.outer_raw_contraction_ratio.has_value()) {
+        appendMeshBoundaryToken(
+            tokens,
+            generatedBoundaryTraceRealBits(
+                *nonlinear.outer_raw_contraction_ratio));
+    }
+    const std::array<Real, 6> nonlinear_residuals{
+        nonlinear.initial_residual_norm,
+        nonlinear.final_residual_norm,
+        nonlinear.initial_field_residual_norm,
+        nonlinear.final_field_residual_norm,
+        nonlinear.initial_auxiliary_residual_norm,
+        nonlinear.final_auxiliary_residual_norm};
+    for (const auto value : nonlinear_residuals) {
+        appendMeshBoundaryToken(
+            tokens, generatedBoundaryTraceRealBits(value));
+    }
+    appendMeshBoundaryToken(
+        tokens, nonlinear.component_residual_convergence ? 1u : 0u);
+    appendMeshBoundaryString(tokens, nonlinear.reason);
+
+    const auto& linear = solve.linear;
+    appendMeshBoundaryToken(tokens, linear.attempted ? 1u : 0u);
+    appendMeshBoundaryToken(tokens, linear.converged ? 1u : 0u);
+    appendMeshBoundaryToken(tokens, linear.numerical_breakdown ? 1u : 0u);
+    appendMeshBoundaryIntegral(tokens, linear.iterations);
+    for (const auto value : {linear.initial_residual_norm,
+                             linear.final_residual_norm,
+                             linear.relative_residual}) {
+        appendMeshBoundaryToken(
+            tokens, generatedBoundaryTraceRealBits(value));
+    }
+    appendMeshBoundaryToken(tokens, linear.collective_calls);
+    appendMeshBoundaryToken(tokens, linear.collective_words);
+    appendMeshBoundaryIntegral(tokens, linear.blockschur_outer_iterations);
+    appendMeshBoundaryToken(
+        tokens, linear.blockschur_collective_calls_max_per_outer);
+    appendMeshBoundaryIntegral(
+        tokens, linear.blockschur_momentum_solve_calls);
+    appendMeshBoundaryIntegral(
+        tokens, linear.blockschur_momentum_iterations);
+    appendMeshBoundaryIntegral(
+        tokens, linear.blockschur_momentum_restart_cycles);
+    appendMeshBoundaryToken(
+        tokens, linear.blockschur_momentum_collective_calls);
+    appendMeshBoundaryToken(
+        tokens, linear.blockschur_momentum_collective_words);
+    appendMeshBoundaryIntegral(
+        tokens, linear.blockschur_schur_solve_calls);
+    appendMeshBoundaryIntegral(
+        tokens, linear.blockschur_schur_iterations);
+    appendMeshBoundaryIntegral(
+        tokens, linear.blockschur_true_residual_retries);
+    appendMeshBoundaryToken(
+        tokens, linear.blockschur_schur_collective_calls);
+    appendMeshBoundaryToken(
+        tokens, linear.blockschur_schur_collective_words);
+    appendMeshBoundaryString(tokens, linear.reason);
+}
+
+void appendTwoFluidAcceptedStagePhaseNumerics(
+    MeshBoundaryConsensusTokens& tokens,
+    const TwoFluidAcceptedStagePhaseNumerics& phase)
+{
+    appendMeshBoundaryIntegral(tokens, phase.side);
+    appendTwoFluidAcceptedStageAggregation(
+        tokens, phase.velocity_aggregation);
+    appendTwoFluidAcceptedStageAggregation(
+        tokens, phase.pressure_aggregation);
+    const auto& stabilization = phase.pressure_stabilization;
+    appendMeshBoundaryToken(
+        tokens, generatedBoundaryTraceRealBits(stabilization.coefficient));
+    appendMeshBoundaryToken(
+        tokens, stabilization.use_cut_metadata_scale ? 1u : 0u);
+    appendMeshBoundaryToken(
+        tokens, stabilization.cut_metadata_scale_cap.has_value() ? 1u : 0u);
+    if (stabilization.cut_metadata_scale_cap.has_value()) {
+        appendMeshBoundaryToken(
+            tokens,
+            generatedBoundaryTraceRealBits(
+                *stabilization.cut_metadata_scale_cap));
+    }
+    appendMeshBoundaryToken(
+        tokens, stabilization.accepted_stage_work.has_value() ? 1u : 0u);
+    if (stabilization.accepted_stage_work.has_value()) {
+        appendMeshBoundaryToken(
+            tokens,
+            generatedBoundaryTraceRealBits(
+                *stabilization.accepted_stage_work));
+    }
+    appendMeshBoundaryString(tokens, stabilization.work_reason);
+    appendMeshBoundaryIntegral(tokens, phase.linear_iteration_scope);
+    appendMeshBoundaryToken(
+        tokens, phase.linear_iterations.has_value() ? 1u : 0u);
+    if (phase.linear_iterations.has_value()) {
+        appendMeshBoundaryIntegral(tokens, *phase.linear_iterations);
+    }
+    appendMeshBoundaryString(tokens, phase.linear_reason);
+    appendMeshBoundaryIntegral(tokens, phase.nonlinear_iteration_scope);
+    appendMeshBoundaryToken(
+        tokens, phase.nonlinear_iterations.has_value() ? 1u : 0u);
+    if (phase.nonlinear_iterations.has_value()) {
+        appendMeshBoundaryIntegral(tokens, *phase.nonlinear_iterations);
+    }
+    appendMeshBoundaryString(tokens, phase.nonlinear_reason);
+}
+
+void appendTwoFluidAcceptedStageNumerics(
+    MeshBoundaryConsensusTokens& tokens,
+    const TwoFluidAcceptedStageNumerics& numerics)
+{
+    appendTwoFluidAcceptedStageSolveTelemetry(tokens, numerics.solve);
+    appendTwoFluidAcceptedStagePhaseNumerics(
+        tokens, numerics.negative_phase);
+    appendTwoFluidAcceptedStagePhaseNumerics(
+        tokens, numerics.positive_phase);
+}
+
 void appendTwoFluidAcceptedStageRecord(
     MeshBoundaryConsensusTokens& tokens,
     const TwoFluidAcceptedStageDiagnosticHistoryRecord& record)
@@ -2140,7 +2487,353 @@ void appendTwoFluidAcceptedStageRecord(
     appendOperatorStageMeasurementMetadata(tokens, record.stage);
     appendMeshBoundaryIntegral(tokens, record.state.interface_marker);
     appendTwoFluidGeometryRevision(tokens, record.state.geometry_revision);
+    // local_mesh_revision is rank-local staleness provenance. It is checked
+    // against the live operator-stage stamp but excluded from MPI consensus.
     appendTwoFluidDiagnosticState(tokens, record.state.diagnostics);
+    appendMeshBoundaryToken(
+        tokens, record.momentum_reconciliation.has_value() ? 1u : 0u);
+    if (record.momentum_reconciliation.has_value()) {
+        appendTwoFluidMomentumReconciliation(
+            tokens, *record.momentum_reconciliation);
+    }
+    appendMeshBoundaryToken(tokens, record.numerics.has_value() ? 1u : 0u);
+    if (record.numerics.has_value()) {
+        appendTwoFluidAcceptedStageNumerics(tokens, *record.numerics);
+    }
+}
+
+[[nodiscard]] bool twoFluidTelemetryStringPresent(
+    const std::string& value) noexcept
+{
+    return value.find_first_not_of(" \t\r\n") != std::string::npos;
+}
+
+[[nodiscard]] bool twoFluidTelemetryFiniteNonnegative(Real value) noexcept
+{
+    return std::isfinite(value) && value >= Real{0.0};
+}
+
+[[nodiscard]] bool twoFluidTelemetryWithinGuard(
+    Real observed,
+    Real maximum) noexcept
+{
+    if (!twoFluidTelemetryFiniteNonnegative(observed) ||
+        !twoFluidTelemetryFiniteNonnegative(maximum)) {
+        return false;
+    }
+    const Real scale = std::max({Real{1.0}, observed, maximum});
+    return observed <=
+           maximum + Real{1024.0} * std::numeric_limits<Real>::epsilon() *
+                         scale;
+}
+
+[[nodiscard]] TwoFluidAcceptedStageAggregationGeometryTelemetry
+compactTwoFluidAcceptedStageAggregationGeometry(
+    const constraints::SmallCutAggregationCanonicalGeometryIdentity& source)
+{
+    return TwoFluidAcceptedStageAggregationGeometryTelemetry{
+        .kind = source.kind,
+        .available = source.available,
+        .communicator_fingerprint_consensus_validated =
+            source.communicator_fingerprint_consensus_validated,
+        .source_id = source.source_id,
+        .domain_id = source.domain_id,
+        .interface_marker = source.interface_marker,
+        .isovalue = source.isovalue,
+        .source_layout_revision = source.source_layout_revision,
+        .source_value_revision = source.source_value_revision,
+        .quadrature_policy_key = source.quadrature_policy_key,
+        .snapshot_revision_key = source.snapshot_revision_key,
+        .distributed_mesh_geometry_revision =
+            source.distributed_mesh_geometry_revision,
+        .distributed_mesh_topology_revision =
+            source.distributed_mesh_topology_revision,
+        .distributed_ownership_revision =
+            source.distributed_ownership_revision,
+        .distributed_numbering_revision =
+            source.distributed_numbering_revision,
+        .canonical_fingerprint = source.canonical_fingerprint,
+    };
+}
+
+void validateTwoFluidAcceptedStageAggregationGeometry(
+    const TwoFluidAcceptedStageAggregationGeometryTelemetry& identity,
+    const interfaces::FreeSurfaceGeometryRevision& expected)
+{
+    const bool common_identity_matches =
+        identity.available &&
+        identity.communicator_fingerprint_consensus_validated &&
+        identity.source_id == expected.source_id &&
+        identity.domain_id == expected.domain_id &&
+        identity.interface_marker == expected.interface_marker &&
+        identity.isovalue == expected.isovalue &&
+        identity.source_layout_revision == expected.source_layout_revision &&
+        identity.source_value_revision == expected.source_value_revision &&
+        identity.quadrature_policy_key == expected.quadrature_policy_key;
+    const bool authoritative =
+        identity.kind == constraints::
+                             SmallCutAggregationGeometryIdentityKind::
+                                 AuthoritativeFreeSurfaceSnapshot &&
+        identity.snapshot_revision_key == expected.snapshot_revision_key &&
+        identity.distributed_mesh_geometry_revision ==
+            expected.mesh_geometry_revision &&
+        identity.distributed_mesh_topology_revision ==
+            expected.mesh_topology_revision &&
+        identity.distributed_ownership_revision ==
+            expected.ownership_revision &&
+        identity.distributed_numbering_revision ==
+            expected.numbering_revision;
+    const bool generated =
+        identity.kind == constraints::
+                             SmallCutAggregationGeometryIdentityKind::
+                                 GeneratedPublicationSource &&
+        identity.snapshot_revision_key == 0u &&
+        identity.distributed_mesh_geometry_revision == 0u &&
+        identity.distributed_mesh_topology_revision == 0u &&
+        identity.distributed_ownership_revision == 0u &&
+        identity.distributed_numbering_revision == 0u;
+    FE_THROW_IF(
+        !common_identity_matches || (!authoritative && !generated),
+        InvalidArgumentException,
+        "FESystem::bindPendingTwoFluidAcceptedStageNumerics: aggregation geometry identity does not certify the pending interface source state");
+}
+
+[[nodiscard]] TwoFluidAcceptedStageAggregationTransitionTelemetry
+compactTwoFluidAcceptedStageAggregationTransition(
+    const constraints::SmallCutAggregationTopologyTransitionReport& source)
+{
+    FE_THROW_IF(
+        !twoFluidTelemetryFiniteNonnegative(
+            source.canonical_rootless_active_physical_volume_before) ||
+            !twoFluidTelemetryFiniteNonnegative(
+                source.canonical_rootless_active_physical_volume_after) ||
+            !std::isfinite(
+                source.canonical_rootless_active_physical_volume_delta),
+        InvalidArgumentException,
+        "FESystem::bindPendingTwoFluidAcceptedStageNumerics: aggregation topology-transition volumes are invalid");
+    return TwoFluidAcceptedStageAggregationTransitionTelemetry{
+        .geometry_identity_before =
+            compactTwoFluidAcceptedStageAggregationGeometry(
+                source.geometry_identity_before),
+        .geometry_identity_after =
+            compactTwoFluidAcceptedStageAggregationGeometry(
+                source.geometry_identity_after),
+        .canonical_feature_class_fingerprint_before =
+            source.canonical_feature_class_fingerprint_before,
+        .canonical_feature_class_fingerprint_after =
+            source.canonical_feature_class_fingerprint_after,
+        .canonical_slave_set_fingerprint_before =
+            source.canonical_slave_set_fingerprint_before,
+        .canonical_slave_set_fingerprint_after =
+            source.canonical_slave_set_fingerprint_after,
+        .canonical_active_feature_count_before =
+            source.canonical_active_feature_count_before,
+        .canonical_active_feature_count_after =
+            source.canonical_active_feature_count_after,
+        .canonical_features_entered = source.canonical_features_entered,
+        .canonical_features_exited = source.canonical_features_exited,
+        .canonical_features_persisted = source.canonical_features_persisted,
+        .canonical_feature_classification_changes =
+            source.canonical_feature_classification_changes,
+        .canonical_features_became_rooted =
+            source.canonical_features_became_rooted,
+        .canonical_features_became_rootless =
+            source.canonical_features_became_rootless,
+        .canonical_aggregate_slaves_before =
+            source.canonical_aggregate_slaves_before,
+        .canonical_aggregate_slaves_after =
+            source.canonical_aggregate_slaves_after,
+        .canonical_aggregate_slaves_entered =
+            source.canonical_aggregate_slaves_entered,
+        .canonical_aggregate_slaves_left =
+            source.canonical_aggregate_slaves_left,
+        .canonical_rootless_active_physical_volume_before =
+            source.canonical_rootless_active_physical_volume_before,
+        .canonical_rootless_active_physical_volume_after =
+            source.canonical_rootless_active_physical_volume_after,
+        .canonical_rootless_active_physical_volume_delta =
+            source.canonical_rootless_active_physical_volume_delta,
+        .canonical_topology_changed = source.canonical_topology_changed,
+    };
+}
+
+[[nodiscard]] TwoFluidAcceptedStageAggregationTelemetry
+compactTwoFluidAcceptedStageAggregation(
+    const constraints::SmallCutAggregationRefreshReport& source,
+    const interfaces::FreeSurfaceGeometryRevision& expected_geometry)
+{
+    const auto geometry =
+        compactTwoFluidAcceptedStageAggregationGeometry(
+            source.geometry_identity);
+    validateTwoFluidAcceptedStageAggregationGeometry(
+        geometry, expected_geometry);
+    FE_THROW_IF(
+        source.maximum_observed_root_path >
+                source.maximum_root_path_length ||
+            !twoFluidTelemetryWithinGuard(
+                source.maximum_observed_reference_extrapolation,
+                source.maximum_reference_extrapolation_distance) ||
+            !twoFluidTelemetryWithinGuard(
+                source.maximum_observed_absolute_coefficient,
+                source.maximum_absolute_coefficient) ||
+            !twoFluidTelemetryWithinGuard(
+                source.maximum_observed_row_l1_norm,
+                source.maximum_row_l1_norm) ||
+            source.canonical_rooted_candidate_vertices +
+                    source.canonical_rootless_candidate_vertices !=
+                source.canonical_candidate_vertices ||
+            source.canonical_rooted_active_feature_count +
+                    source.canonical_rootless_active_feature_count !=
+                source.canonical_active_feature_count ||
+            !twoFluidTelemetryFiniteNonnegative(
+                source.canonical_rootless_active_physical_volume),
+        InvalidArgumentException,
+        "FESystem::bindPendingTwoFluidAcceptedStageNumerics: aggregation guards or canonical counts are invalid");
+
+    TwoFluidAcceptedStageAggregationTelemetry compact{
+        .geometry_identity = geometry,
+        .canonical_feature_class_fingerprint =
+            source.canonical_feature_class_fingerprint,
+        .canonical_slave_set_fingerprint =
+            source.canonical_slave_set_fingerprint,
+        .maximum_root_path_length = source.maximum_root_path_length,
+        .maximum_observed_root_path = source.maximum_observed_root_path,
+        .root_path_guard_rejections = source.root_path_guard_rejections,
+        .maximum_reference_extrapolation_distance =
+            source.maximum_reference_extrapolation_distance,
+        .maximum_observed_reference_extrapolation =
+            source.maximum_observed_reference_extrapolation,
+        .extrapolation_guard_rejections =
+            source.extrapolation_guard_rejections,
+        .maximum_absolute_coefficient =
+            source.maximum_absolute_coefficient,
+        .maximum_observed_absolute_coefficient =
+            source.maximum_observed_absolute_coefficient,
+        .maximum_row_l1_norm = source.maximum_row_l1_norm,
+        .maximum_observed_row_l1_norm =
+            source.maximum_observed_row_l1_norm,
+        .line_guard_rejections = source.line_guard_rejections,
+        .canonical_candidate_vertices =
+            source.canonical_candidate_vertices,
+        .canonical_rooted_candidate_vertices =
+            source.canonical_rooted_candidate_vertices,
+        .canonical_rootless_candidate_vertices =
+            source.canonical_rootless_candidate_vertices,
+        .canonical_owned_aggregate_dofs =
+            source.canonical_owned_aggregate_dofs,
+        .canonical_owned_pinned_dofs =
+            source.canonical_owned_pinned_dofs,
+        .canonical_strong_suppressed_dofs =
+            source.canonical_strong_suppressed_dofs,
+        .canonical_active_feature_count =
+            source.canonical_active_feature_count,
+        .canonical_rooted_active_feature_count =
+            source.canonical_rooted_active_feature_count,
+        .canonical_rootless_active_feature_count =
+            source.canonical_rootless_active_feature_count,
+        .canonical_rootless_active_physical_volume =
+            source.canonical_rootless_active_physical_volume,
+    };
+    if (source.canonical_topology_transition.has_value()) {
+        compact.canonical_topology_transition =
+            compactTwoFluidAcceptedStageAggregationTransition(
+                *source.canonical_topology_transition);
+        FE_THROW_IF(
+            compact.canonical_topology_transition->geometry_identity_after !=
+                compact.geometry_identity,
+            InvalidArgumentException,
+            "FESystem::bindPendingTwoFluidAcceptedStageNumerics: aggregation topology transition does not end at the report geometry identity");
+    }
+    return compact;
+}
+
+void validateTwoFluidAcceptedStageSolveTelemetry(
+    const TwoFluidAcceptedStageSolveTelemetry& solve)
+{
+    const auto& nonlinear = solve.nonlinear;
+    const std::array<int, 6> nonlinear_counts{
+        nonlinear.iterations,
+        nonlinear.outer_iterations,
+        nonlinear.inner_iterations_total,
+        nonlinear.outer_dynamic_relaxation_updates,
+        nonlinear.outer_dynamic_relaxation_safeguards,
+        nonlinear.outer_dynamic_relaxation_resets};
+    const std::array<Real, 10> nonlinear_scalars{
+        nonlinear.outer_state_change_norm,
+        nonlinear.outer_dynamic_relaxation_factor,
+        nonlinear.outer_relaxed_state_change_norm,
+        nonlinear.initial_residual_norm,
+        nonlinear.final_residual_norm,
+        nonlinear.initial_field_residual_norm,
+        nonlinear.final_field_residual_norm,
+        nonlinear.initial_auxiliary_residual_norm,
+        nonlinear.final_auxiliary_residual_norm,
+        nonlinear.outer_raw_contraction_ratio.value_or(Real{0.0})};
+    FE_THROW_IF(
+        !nonlinear.converged ||
+            std::any_of(
+                nonlinear_counts.begin(), nonlinear_counts.end(),
+                [](int value) { return value < 0; }) ||
+            std::any_of(
+                nonlinear_scalars.begin(),
+                nonlinear_scalars.end(),
+                [](Real value) {
+                    return !twoFluidTelemetryFiniteNonnegative(value);
+                }) ||
+            !twoFluidTelemetryStringPresent(nonlinear.reason),
+        InvalidArgumentException,
+        "FESystem::bindPendingTwoFluidAcceptedStageNumerics: nonlinear solve evidence is invalid or unconverged");
+
+    const auto& linear = solve.linear;
+    const std::array<int, 8> linear_counts{
+        linear.iterations,
+        linear.blockschur_outer_iterations,
+        linear.blockschur_momentum_solve_calls,
+        linear.blockschur_momentum_iterations,
+        linear.blockschur_momentum_restart_cycles,
+        linear.blockschur_schur_solve_calls,
+        linear.blockschur_schur_iterations,
+        linear.blockschur_true_residual_retries};
+    const std::array<std::uint64_t, 7> linear_collective_counts{
+        linear.collective_calls,
+        linear.collective_words,
+        linear.blockschur_collective_calls_max_per_outer,
+        linear.blockschur_momentum_collective_calls,
+        linear.blockschur_momentum_collective_words,
+        linear.blockschur_schur_collective_calls,
+        linear.blockschur_schur_collective_words};
+    const std::array<Real, 3> linear_scalars{
+        linear.initial_residual_norm,
+        linear.final_residual_norm,
+        linear.relative_residual};
+    const bool valid_unattempted_exact_entry =
+        nonlinear.iterations == 0 &&
+        nonlinear.inner_iterations_total == 0 &&
+        std::all_of(
+            linear_counts.begin(), linear_counts.end(),
+            [](int value) { return value == 0; }) &&
+        std::all_of(
+            linear_collective_counts.begin(),
+            linear_collective_counts.end(),
+            [](std::uint64_t value) { return value == 0u; }) &&
+        std::all_of(
+            linear_scalars.begin(), linear_scalars.end(),
+            [](Real value) { return value == Real{0.0}; });
+    FE_THROW_IF(
+        !linear.converged ||
+            linear.numerical_breakdown ||
+            std::any_of(
+                linear_counts.begin(), linear_counts.end(),
+                [](int value) { return value < 0; }) ||
+            std::any_of(
+                linear_scalars.begin(), linear_scalars.end(),
+                [](Real value) {
+                    return !twoFluidTelemetryFiniteNonnegative(value);
+                }) ||
+            !twoFluidTelemetryStringPresent(linear.reason) ||
+            (!linear.attempted && !valid_unattempted_exact_entry),
+        InvalidArgumentException,
+        "FESystem::bindPendingTwoFluidAcceptedStageNumerics: linear solve evidence is invalid, unjustifiably unattempted, unconverged, or numerically broken down");
 }
 
 struct MeshBoundaryCollectiveContext {
@@ -11548,6 +12241,22 @@ void FESystem::declareTwoFluidAcceptedStageDiagnostics(
             !finite_positive(parameters.nitsche_gamma) ||
             !std::isfinite(parameters.surface_tension) ||
             parameters.surface_tension < Real{0.0} ||
+            (declaration.require_accepted_stage_numerics &&
+             !finite_positive(
+                 declaration.pressure_stabilization_coefficient)) ||
+            (!declaration.require_accepted_stage_numerics &&
+             (!std::isfinite(
+                  declaration.pressure_stabilization_coefficient) ||
+              declaration.pressure_stabilization_coefficient <
+                  Real{0.0})) ||
+            (declaration.pressure_stabilization_cut_metadata_scale_cap
+                 .has_value() &&
+             (!std::isfinite(
+                  *declaration
+                       .pressure_stabilization_cut_metadata_scale_cap) ||
+              *declaration
+                   .pressure_stabilization_cut_metadata_scale_cap <
+                  Real{1.0})) ||
             (parameters.prescribed_pressure_jump.has_value() &&
              !std::isfinite(*parameters.prescribed_pressure_jump)),
         InvalidArgumentException,
@@ -11585,6 +12294,9 @@ void FESystem::declareTwoFluidAcceptedStageDiagnostics(
         field_registry_.get(declaration.positive_pressure_field);
     FE_THROW_IF(
         level_set.components != 1 || level_set.space == nullptr ||
+            level_set.space->value_dimension() != 1 ||
+            level_set.space->topological_dimension() !=
+                parameters.dimension ||
             negative_velocity.source_kind != FieldSourceKind::Unknown ||
             positive_velocity.source_kind != FieldSourceKind::Unknown ||
             negative_pressure.source_kind != FieldSourceKind::Unknown ||
@@ -11620,6 +12332,85 @@ void FESystem::declareTwoFluidAcceptedStageDiagnostics(
     std::sort(
         two_fluid_accepted_stage_declarations_.begin(),
         two_fluid_accepted_stage_declarations_.end(),
+        [](const auto& lhs, const auto& rhs) {
+            return lhs.interface_marker < rhs.interface_marker;
+        });
+}
+
+void FESystem::declareMaterialInterfaceTransportVelocity(
+    interfaces::MaterialInterfaceTransportVelocityDeclaration declaration)
+{
+    FE_THROW_IF(
+        is_setup_,
+        InvalidArgumentException,
+        "FESystem::declareMaterialInterfaceTransportVelocity: declarations must be complete before setup");
+    try {
+        interfaces::validateMaterialInterfaceTransportVelocityDeclaration(
+            declaration);
+    } catch (const std::invalid_argument& error) {
+        throw InvalidArgumentException(
+            std::string(
+                "FESystem::declareMaterialInterfaceTransportVelocity: ") +
+            error.what());
+    }
+    const std::array<FieldId, 3> fields{
+        declaration.level_set_field,
+        declaration.negative_velocity_field,
+        declaration.positive_velocity_field};
+    for (const auto field : fields) {
+        FE_THROW_IF(
+            !field_registry_.has(field),
+            InvalidArgumentException,
+            "FESystem::declareMaterialInterfaceTransportVelocity: every declared field must already exist");
+    }
+    const auto& level_set = field_registry_.get(declaration.level_set_field);
+    const auto& negative_velocity =
+        field_registry_.get(declaration.negative_velocity_field);
+    const auto& positive_velocity =
+        field_registry_.get(declaration.positive_velocity_field);
+    FE_THROW_IF(
+        level_set.components != 1 || level_set.space == nullptr ||
+            level_set.space->value_dimension() != 1 ||
+            level_set.space->topological_dimension() !=
+                declaration.dimension ||
+            negative_velocity.source_kind != FieldSourceKind::Unknown ||
+            positive_velocity.source_kind != FieldSourceKind::Unknown ||
+            negative_velocity.components != declaration.dimension ||
+            positive_velocity.components != declaration.dimension ||
+            negative_velocity.space == nullptr ||
+            positive_velocity.space == nullptr ||
+            negative_velocity.space->value_dimension() !=
+                declaration.dimension ||
+            positive_velocity.space->value_dimension() !=
+                declaration.dimension ||
+            negative_velocity.space->topological_dimension() !=
+                declaration.dimension ||
+            positive_velocity.space->topological_dimension() !=
+                declaration.dimension,
+        InvalidArgumentException,
+        "FESystem::declareMaterialInterfaceTransportVelocity: field roles and dimensions are incompatible with a phase-pair velocity");
+
+    const auto existing = std::find_if(
+        material_interface_transport_velocity_declarations_.begin(),
+        material_interface_transport_velocity_declarations_.end(),
+        [&](const auto& candidate) {
+            return candidate.interface_marker ==
+                       declaration.interface_marker ||
+                   candidate.level_set_field == declaration.level_set_field;
+        });
+    if (existing !=
+        material_interface_transport_velocity_declarations_.end()) {
+        FE_THROW_IF(
+            *existing != declaration,
+            InvalidArgumentException,
+            "FESystem::declareMaterialInterfaceTransportVelocity: interface marker or level-set field already has a conflicting owner");
+        return;
+    }
+    material_interface_transport_velocity_declarations_.push_back(
+        std::move(declaration));
+    std::sort(
+        material_interface_transport_velocity_declarations_.begin(),
+        material_interface_transport_velocity_declarations_.end(),
         [](const auto& lhs, const auto& rhs) {
             return lhs.interface_marker < rhs.interface_marker;
         });
@@ -11751,6 +12542,7 @@ void FESystem::stageTwoFluidAcceptedStageDiagnostics(
                 two_fluid_accepted_stage_declarations_[index];
             const auto& supplied = states[index];
             const auto& revision = supplied.geometry_revision;
+            const auto& local_revision = supplied.local_mesh_revision;
             const auto& state = supplied.diagnostics;
             const auto& parameters = declaration.parameters;
             const auto& expected = *metadata.expected_stage_geometry;
@@ -11790,10 +12582,14 @@ void FESystem::stageTwoFluidAcceptedStageDiagnostics(
                     !revision.complete() ||
                     revision.snapshot_revision_key !=
                         state.snapshot_revision_key ||
-                    revision.mesh_geometry_revision != expected.geometry_revision ||
-                    revision.mesh_topology_revision != expected.topology_revision ||
-                    revision.ownership_revision != expected.ownership_revision ||
-                    revision.numbering_revision != expected.numbering_revision ||
+                    local_revision.mesh_geometry_revision !=
+                        expected.geometry_revision ||
+                    local_revision.mesh_topology_revision !=
+                        expected.topology_revision ||
+                    local_revision.ownership_revision !=
+                        expected.ownership_revision ||
+                    local_revision.numbering_revision !=
+                        expected.numbering_revision ||
                     state.interface_quadrature_point_count == 0u ||
                     !(state.interface_measure > Real{0.0}) ||
                     !std::all_of(
@@ -12029,6 +12825,337 @@ void FESystem::stageTwoFluidAcceptedStageDiagnostics(
     two_fluid_accepted_stage_transaction_active_ = false;
 }
 
+void FESystem::bindPendingTwoFluidMomentumReconciliations(
+    std::span<const interfaces::IncompressibleTwoFluidMomentumReconciliation>
+        reconciliations)
+{
+    const auto collective = meshBoundaryCollectiveContext(*this);
+    MeshBoundaryConsensusTokens local_tokens;
+    MeshBoundaryConsensusTokens minimum_tokens;
+    MeshBoundaryConsensusTokens maximum_tokens;
+    std::exception_ptr local_exception;
+    std::vector<interfaces::IncompressibleTwoFluidMomentumReconciliation>
+        staged;
+
+    try {
+        const auto required_count = static_cast<std::size_t>(std::count_if(
+            two_fluid_accepted_stage_declarations_.begin(),
+            two_fluid_accepted_stage_declarations_.end(),
+            [](const auto& declaration) {
+                return declaration
+                    .require_conservative_phase_momentum_reconciliation;
+            }));
+        FE_THROW_IF(
+            !is_setup_ || two_fluid_accepted_stage_transaction_active_ ||
+                pending_two_fluid_accepted_stage_diagnostics_.size() !=
+                    two_fluid_accepted_stage_declarations_.size() ||
+                reconciliations.size() != required_count,
+            InvalidArgumentException,
+            "FESystem::bindPendingTwoFluidMomentumReconciliations: pending group or required reconciliation coverage is invalid");
+
+        staged.assign(reconciliations.begin(), reconciliations.end());
+        std::size_t reconciliation_index = 0u;
+        for (std::size_t index = 0u;
+             index < pending_two_fluid_accepted_stage_diagnostics_.size();
+             ++index) {
+            const auto& pending =
+                pending_two_fluid_accepted_stage_diagnostics_[index];
+            const bool required = pending.declaration
+                                      .require_conservative_phase_momentum_reconciliation;
+            FE_THROW_IF(
+                pending.momentum_reconciliation.has_value(),
+                InvalidArgumentException,
+                "FESystem::bindPendingTwoFluidMomentumReconciliations: pending group is already bound");
+            if (!required) {
+                continue;
+            }
+
+            auto& reconciliation = staged[reconciliation_index++];
+            try {
+                interfaces::validateIncompressibleTwoFluidMomentumReconciliation(
+                    reconciliation);
+            } catch (const std::invalid_argument& error) {
+                throw InvalidArgumentException(
+                    std::string(
+                        "FESystem::bindPendingTwoFluidMomentumReconciliations: ") +
+                    error.what());
+            }
+            const auto& raw = pending.state.diagnostics;
+            const auto& raw_revision = pending.state.geometry_revision;
+            const auto& negative = reconciliation.negative_phase;
+            const auto& positive = reconciliation.positive_phase;
+            const bool raw_revision_matches =
+                reconciliation.raw_geometry_revision.sameSourceState(
+                    raw_revision) &&
+                reconciliation.raw_geometry_revision.snapshot_revision_key ==
+                    raw_revision.snapshot_revision_key;
+            const bool negative_matches =
+                negative.side == raw.negative_phase.side &&
+                negative.density == raw.negative_phase.density &&
+                negative.raw_volume == raw.negative_phase.volume &&
+                negative.raw_mass == raw.negative_phase.mass &&
+                negative.raw_momentum == raw.negative_phase.momentum;
+            const bool positive_matches =
+                positive.side == raw.positive_phase.side &&
+                positive.density == raw.positive_phase.density &&
+                positive.raw_volume == raw.positive_phase.volume &&
+                positive.raw_mass == raw.positive_phase.mass &&
+                positive.raw_momentum == raw.positive_phase.momentum;
+            FE_THROW_IF(
+                !reconciliation.satisfied ||
+                    reconciliation.interface_marker !=
+                        pending.declaration.interface_marker ||
+                    !raw_revision_matches ||
+                    reconciliation.raw_algebraic_revision !=
+                        pending.stage.state_revision ||
+                    !negative_matches || !positive_matches,
+                InvalidArgumentException,
+                "FESystem::bindPendingTwoFluidMomentumReconciliations: reconciliation does not match the pending raw stage or failed its phasewise gate");
+        }
+
+        appendMeshBoundaryToken(
+            local_tokens,
+            static_cast<std::uint64_t>(reconciliations.size()));
+        for (const auto& reconciliation : staged) {
+            appendTwoFluidMomentumReconciliation(
+                local_tokens, reconciliation);
+        }
+        FE_THROW_IF(
+            local_tokens.size() >
+                static_cast<std::size_t>(std::numeric_limits<int>::max()),
+            InvalidArgumentException,
+            "FESystem::bindPendingTwoFluidMomentumReconciliations: consensus token sequence exceeds the MPI count range");
+        minimum_tokens = local_tokens;
+        maximum_tokens = local_tokens;
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+
+    if (coordinateMeshBoundaryLocalFailure(
+            collective,
+            local_exception != nullptr,
+            "FESystem::bindPendingTwoFluidMomentumReconciliations/preflight")) {
+        if (local_exception != nullptr) {
+            std::rethrow_exception(local_exception);
+        }
+        throw InvalidArgumentException(
+            "FESystem::bindPendingTwoFluidMomentumReconciliations: another active communicator rank rejected the binding");
+    }
+    requireMeshBoundaryTokenConsensus(
+        collective,
+        local_tokens,
+        minimum_tokens,
+        maximum_tokens,
+        "FESystem::bindPendingTwoFluidMomentumReconciliations/consensus");
+
+    static_assert(std::is_nothrow_move_constructible_v<
+                  interfaces::IncompressibleTwoFluidMomentumReconciliation>);
+    two_fluid_accepted_stage_transaction_active_ = true;
+    std::size_t reconciliation_index = 0u;
+    for (auto& pending : pending_two_fluid_accepted_stage_diagnostics_) {
+        if (pending.declaration
+                .require_conservative_phase_momentum_reconciliation) {
+            pending.momentum_reconciliation.emplace(
+                std::move(staged[reconciliation_index++]));
+        }
+    }
+    two_fluid_accepted_stage_transaction_active_ = false;
+}
+
+void FESystem::bindPendingTwoFluidAcceptedStageNumerics(
+    TwoFluidAcceptedStageSolveTelemetry solve,
+    std::span<const constraints::SmallCutAggregationRefreshReport>
+        aggregation_reports)
+{
+    const auto collective = meshBoundaryCollectiveContext(*this);
+    MeshBoundaryConsensusTokens local_tokens;
+    MeshBoundaryConsensusTokens minimum_tokens;
+    MeshBoundaryConsensusTokens maximum_tokens;
+    std::exception_ptr local_exception;
+    std::vector<std::pair<std::size_t, TwoFluidAcceptedStageNumerics>>
+        staged;
+
+    try {
+        const auto required_count = static_cast<std::size_t>(std::count_if(
+            two_fluid_accepted_stage_declarations_.begin(),
+            two_fluid_accepted_stage_declarations_.end(),
+            [](const auto& declaration) {
+                return declaration.require_accepted_stage_numerics;
+            }));
+        FE_THROW_IF(
+            !is_setup_ || two_fluid_accepted_stage_transaction_active_ ||
+                pending_two_fluid_accepted_stage_diagnostics_.size() !=
+                    two_fluid_accepted_stage_declarations_.size() ||
+                required_count == 0u,
+            InvalidArgumentException,
+            "FESystem::bindPendingTwoFluidAcceptedStageNumerics: pending group or required numerical-evidence coverage is invalid");
+        validateTwoFluidAcceptedStageSolveTelemetry(solve);
+        staged.reserve(required_count);
+
+        for (std::size_t record_index = 0u;
+             record_index <
+                 pending_two_fluid_accepted_stage_diagnostics_.size();
+             ++record_index) {
+            const auto& pending =
+                pending_two_fluid_accepted_stage_diagnostics_[record_index];
+            FE_THROW_IF(
+                pending.numerics.has_value(),
+                InvalidArgumentException,
+                "FESystem::bindPendingTwoFluidAcceptedStageNumerics: pending group is already bound");
+            if (!pending.declaration.require_accepted_stage_numerics) {
+                continue;
+            }
+
+            const auto& declaration = pending.declaration;
+            const std::array<FieldId, 4> expected_fields{
+                declaration.negative_velocity_field,
+                declaration.negative_pressure_field,
+                declaration.positive_velocity_field,
+                declaration.positive_pressure_field};
+            const std::array<geometry::CutIntegrationSide, 4>
+                expected_sides{
+                    geometry::CutIntegrationSide::Negative,
+                    geometry::CutIntegrationSide::Negative,
+                    geometry::CutIntegrationSide::Positive,
+                    geometry::CutIntegrationSide::Positive};
+            std::array<
+                const constraints::SmallCutAggregationRefreshReport*, 4>
+                matched{};
+            for (const auto& report : aggregation_reports) {
+                if (report.interface_marker !=
+                    declaration.interface_marker) {
+                    continue;
+                }
+                const auto field = std::find(
+                    expected_fields.begin(),
+                    expected_fields.end(),
+                    report.field);
+                FE_THROW_IF(
+                    field == expected_fields.end(),
+                    InvalidArgumentException,
+                    "FESystem::bindPendingTwoFluidAcceptedStageNumerics: unexpected aggregation field for a required interface marker");
+                const auto index = static_cast<std::size_t>(
+                    std::distance(expected_fields.begin(), field));
+                FE_THROW_IF(
+                    matched[index] != nullptr ||
+                        report.active_side != expected_sides[index],
+                    InvalidArgumentException,
+                    "FESystem::bindPendingTwoFluidAcceptedStageNumerics: duplicate or wrong-side aggregation evidence for a required phase field");
+                matched[index] = &report;
+            }
+            FE_THROW_IF(
+                std::any_of(
+                    matched.begin(), matched.end(),
+                    [](const auto* report) { return report == nullptr; }),
+                InvalidArgumentException,
+                "FESystem::bindPendingTwoFluidAcceptedStageNumerics: required velocity/pressure aggregation evidence is incomplete");
+
+            std::array<TwoFluidAcceptedStageAggregationTelemetry, 4>
+                compact;
+            for (std::size_t index = 0u; index < compact.size(); ++index) {
+                compact[index] = compactTwoFluidAcceptedStageAggregation(
+                    *matched[index], pending.state.geometry_revision);
+                FE_THROW_IF(
+                    index != 0u &&
+                        compact[index].geometry_identity !=
+                            compact.front().geometry_identity,
+                    InvalidArgumentException,
+                    "FESystem::bindPendingTwoFluidAcceptedStageNumerics: phase aggregation reports do not share one canonical geometry identity");
+            }
+
+            const auto pressure_stabilization = [&declaration] {
+                return TwoFluidAcceptedStagePressureStabilizationTelemetry{
+                    .coefficient =
+                        declaration.pressure_stabilization_coefficient,
+                    .use_cut_metadata_scale = declaration
+                        .pressure_stabilization_use_cut_metadata_scale,
+                    .cut_metadata_scale_cap = declaration
+                        .pressure_stabilization_cut_metadata_scale_cap,
+                    .accepted_stage_work = std::nullopt,
+                    .work_reason =
+                        "not_separately_resolved_by_coupled_operator",
+                };
+            };
+            const auto phase = [&](geometry::CutIntegrationSide side,
+                                   std::size_t velocity_index,
+                                   std::size_t pressure_index) {
+                return TwoFluidAcceptedStagePhaseNumerics{
+                    .side = side,
+                    .velocity_aggregation =
+                        std::move(compact[velocity_index]),
+                    .pressure_aggregation =
+                        std::move(compact[pressure_index]),
+                    .pressure_stabilization = pressure_stabilization(),
+                    .linear_iteration_scope =
+                        TwoFluidAcceptedStageLinearIterationScope::
+                            SharedCoupledSolve,
+                    .linear_iterations = std::nullopt,
+                    .linear_reason =
+                        "not_individually_resolved_by_shared_coupled_backend",
+                    .nonlinear_iteration_scope =
+                        TwoFluidAcceptedStageNonlinearIterationScope::
+                            SharedCoupledSolve,
+                    .nonlinear_iterations = std::nullopt,
+                    .nonlinear_reason =
+                        "not_individually_resolved_by_shared_coupled_backend",
+                };
+            };
+            staged.emplace_back(
+                record_index,
+                TwoFluidAcceptedStageNumerics{
+                    .solve = solve,
+                    .negative_phase = phase(
+                        geometry::CutIntegrationSide::Negative, 0u, 1u),
+                    .positive_phase = phase(
+                        geometry::CutIntegrationSide::Positive, 2u, 3u),
+                });
+        }
+
+        appendMeshBoundaryToken(
+            local_tokens, static_cast<std::uint64_t>(staged.size()));
+        for (const auto& [record_index, numerics] : staged) {
+            appendMeshBoundaryToken(
+                local_tokens, static_cast<std::uint64_t>(record_index));
+            appendTwoFluidAcceptedStageNumerics(local_tokens, numerics);
+        }
+        FE_THROW_IF(
+            local_tokens.size() >
+                static_cast<std::size_t>(std::numeric_limits<int>::max()),
+            InvalidArgumentException,
+            "FESystem::bindPendingTwoFluidAcceptedStageNumerics: consensus token sequence exceeds the MPI count range");
+        minimum_tokens = local_tokens;
+        maximum_tokens = local_tokens;
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+
+    if (coordinateMeshBoundaryLocalFailure(
+            collective,
+            local_exception != nullptr,
+            "FESystem::bindPendingTwoFluidAcceptedStageNumerics/preflight")) {
+        if (local_exception != nullptr) {
+            std::rethrow_exception(local_exception);
+        }
+        throw InvalidArgumentException(
+            "FESystem::bindPendingTwoFluidAcceptedStageNumerics: another active communicator rank rejected the numerical-evidence binding");
+    }
+    requireMeshBoundaryTokenConsensus(
+        collective,
+        local_tokens,
+        minimum_tokens,
+        maximum_tokens,
+        "FESystem::bindPendingTwoFluidAcceptedStageNumerics/consensus");
+
+    static_assert(std::is_nothrow_move_constructible_v<
+                  TwoFluidAcceptedStageNumerics>);
+    two_fluid_accepted_stage_transaction_active_ = true;
+    for (auto& [record_index, numerics] : staged) {
+        pending_two_fluid_accepted_stage_diagnostics_[record_index]
+            .numerics.emplace(std::move(numerics));
+    }
+    two_fluid_accepted_stage_transaction_active_ = false;
+}
+
 void FESystem::discardPendingTwoFluidAcceptedStageDiagnostics() noexcept
 {
     pending_two_fluid_accepted_stage_diagnostics_.clear();
@@ -12090,11 +13217,75 @@ void FESystem::commitPendingTwoFluidAcceptedStageDiagnostics(
                             two_fluid_accepted_stage_declarations_[index] ||
                         pending.stage != pending_stage ||
                         pending.state.interface_marker !=
-                            pending.declaration.interface_marker,
+                            pending.declaration.interface_marker ||
+                        pending.declaration
+                                .require_conservative_phase_momentum_reconciliation !=
+                            pending.momentum_reconciliation.has_value() ||
+                        pending.declaration.require_accepted_stage_numerics !=
+                            pending.numerics.has_value(),
                     InvalidArgumentException,
                     "FESystem::commitPendingTwoFluidAcceptedStageDiagnostics: "
                     "pending group no longer matches its declaration or "
-                    "shared stage");
+                    "shared stage, or required momentum/numerical evidence is missing");
+                if (pending.momentum_reconciliation.has_value()) {
+                    try {
+                        interfaces::validateIncompressibleTwoFluidMomentumReconciliation(
+                            *pending.momentum_reconciliation);
+                    } catch (const std::invalid_argument& error) {
+                        throw InvalidArgumentException(
+                            std::string(
+                                "FESystem::commitPendingTwoFluidAcceptedStageDiagnostics: ") +
+                            error.what());
+                    }
+                    FE_THROW_IF(
+                        !pending.momentum_reconciliation->satisfied ||
+                            pending.momentum_reconciliation
+                                    ->interface_marker !=
+                                pending.declaration.interface_marker ||
+                            pending.momentum_reconciliation
+                                    ->raw_algebraic_revision !=
+                                pending.stage.state_revision,
+                        InvalidArgumentException,
+                        "FESystem::commitPendingTwoFluidAcceptedStageDiagnostics: momentum reconciliation does not certify the pending raw stage");
+                }
+                if (pending.numerics.has_value()) {
+                    validateTwoFluidAcceptedStageSolveTelemetry(
+                        pending.numerics->solve);
+                    const auto phase_matches = [&](const auto& phase,
+                                                   auto side) {
+                        return phase.side == side &&
+                               phase.pressure_stabilization.coefficient ==
+                                   pending.declaration
+                                       .pressure_stabilization_coefficient &&
+                               phase.pressure_stabilization
+                                       .use_cut_metadata_scale ==
+                                   pending.declaration
+                                       .pressure_stabilization_use_cut_metadata_scale &&
+                               phase.pressure_stabilization
+                                       .cut_metadata_scale_cap ==
+                                   pending.declaration
+                                       .pressure_stabilization_cut_metadata_scale_cap &&
+                               !phase.pressure_stabilization
+                                    .accepted_stage_work.has_value() &&
+                               phase.linear_iteration_scope ==
+                                   TwoFluidAcceptedStageLinearIterationScope::
+                                       SharedCoupledSolve &&
+                               !phase.linear_iterations.has_value() &&
+                               phase.nonlinear_iteration_scope ==
+                                   TwoFluidAcceptedStageNonlinearIterationScope::
+                                       SharedCoupledSolve &&
+                               !phase.nonlinear_iterations.has_value();
+                    };
+                    FE_THROW_IF(
+                        !phase_matches(
+                            pending.numerics->negative_phase,
+                            geometry::CutIntegrationSide::Negative) ||
+                            !phase_matches(
+                                pending.numerics->positive_phase,
+                                geometry::CutIntegrationSide::Positive),
+                        InvalidArgumentException,
+                        "FESystem::commitPendingTwoFluidAcceptedStageDiagnostics: phase numerical evidence no longer matches its declaration or shared-solve scope");
+                }
                 appendTwoFluidAcceptedStageRecord(local_tokens, pending);
             }
             appendMeshBoundaryToken(local_tokens, accepted_step);
@@ -12138,6 +13329,11 @@ void FESystem::commitPendingTwoFluidAcceptedStageDiagnostics(
                         identical_replay =
                             identical_replay &&
                             pending_tokens == latest_tokens &&
+                            pending_two_fluid_accepted_stage_diagnostics_[index]
+                                    .state.local_mesh_revision ==
+                                two_fluid_accepted_stage_diagnostic_history_[
+                                    latest_begin + index]
+                                    .state.local_mesh_revision &&
                             pending_two_fluid_accepted_stage_diagnostics_[index]
                                     .stage.expected_stage_geometry ==
                                 two_fluid_accepted_stage_diagnostic_history_[
@@ -12367,6 +13563,74 @@ void FESystem::commitPendingTwoFluidAcceptedStageDiagnostics(
                     << *state.prescribed_pressure_jump_error_squared
                     << " prescribed_stress_jump_residual_sq="
                     << *state.prescribed_stress_jump_residual_squared;
+            }
+            message << " momentum_reconciliation_applicable="
+                    << (record.momentum_reconciliation.has_value()
+                            ? "true"
+                            : "false");
+            if (record.momentum_reconciliation.has_value()) {
+                const auto& reconciliation =
+                    *record.momentum_reconciliation;
+                message
+                    << " corrected_snapshot_revision="
+                    << reconciliation.corrected_geometry_revision
+                           .snapshot_revision_key
+                    << " raw_algebraic_revision="
+                    << reconciliation.raw_algebraic_revision
+                    << " corrected_algebraic_revision="
+                    << reconciliation.corrected_algebraic_revision
+                    << " momentum_relative_tolerance="
+                    << reconciliation.relative_tolerance
+                    << " velocity_update_applied=false"
+                    << " negative_momentum_delta_norm="
+                    << reconciliation.negative_phase.momentum_delta_norm
+                    << " negative_allowed_momentum_delta="
+                    << reconciliation.negative_phase
+                           .allowed_momentum_delta
+                    << " positive_momentum_delta_norm="
+                    << reconciliation.positive_phase.momentum_delta_norm
+                    << " positive_allowed_momentum_delta="
+                    << reconciliation.positive_phase
+                           .allowed_momentum_delta
+                    << " momentum_reconciliation_satisfied=true";
+            }
+            message << " accepted_stage_numerics_applicable="
+                    << (record.numerics.has_value() ? "true" : "false");
+            if (record.numerics.has_value()) {
+                const auto& numerics = *record.numerics;
+                message
+                    << " nonlinear_converged="
+                    << (numerics.solve.nonlinear.converged ? "true"
+                                                           : "false")
+                    << " nonlinear_iterations="
+                    << numerics.solve.nonlinear.iterations
+                    << " nonlinear_reason='"
+                    << numerics.solve.nonlinear.reason << "'"
+                    << " linear_converged="
+                    << (numerics.solve.linear.converged ? "true"
+                                                        : "false")
+                    << " linear_iterations="
+                    << numerics.solve.linear.iterations
+                    << " linear_relative_residual="
+                    << numerics.solve.linear.relative_residual
+                    << " linear_reason='"
+                    << numerics.solve.linear.reason << "'"
+                    << " blockschur_outer_iterations="
+                    << numerics.solve.linear.blockschur_outer_iterations
+                    << " negative_velocity_aggregate_dofs="
+                    << numerics.negative_phase.velocity_aggregation
+                           .canonical_owned_aggregate_dofs
+                    << " negative_pressure_aggregate_dofs="
+                    << numerics.negative_phase.pressure_aggregation
+                           .canonical_owned_aggregate_dofs
+                    << " positive_velocity_aggregate_dofs="
+                    << numerics.positive_phase.velocity_aggregation
+                           .canonical_owned_aggregate_dofs
+                    << " positive_pressure_aggregate_dofs="
+                    << numerics.positive_phase.pressure_aggregation
+                           .canonical_owned_aggregate_dofs
+                    << " pressure_stabilization_work=unavailable"
+                    << " phase_iteration_scope=shared_coupled_solve";
             }
             FE_LOG_INFO(message.str());
         }

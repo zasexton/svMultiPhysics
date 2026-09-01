@@ -98,6 +98,10 @@ struct FreeSurfaceGeometryLocalMeshRevision {
     std::uint64_t mesh_topology_revision{0};
     std::uint64_t ownership_revision{0};
     std::uint64_t numbering_revision{0};
+
+    [[nodiscard]] friend bool operator==(
+        const FreeSurfaceGeometryLocalMeshRevision&,
+        const FreeSurfaceGeometryLocalMeshRevision&) = default;
 };
 
 struct FreeSurfaceGeometryRuleRecord {

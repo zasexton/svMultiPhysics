@@ -46,6 +46,22 @@ namespace {
 namespace channel_ns =
     svmp::Physics::formulations::navier_stokes;
 
+TEST(ApplicationDriverTwoFluidAcceptedStageTelemetry,
+     ExactEntryConvergenceMarksTheUnattemptedLinearSolveConverged)
+{
+  svmp::FE::timestepping::NewtonReport report;
+  report.converged = true;
+  report.outer_iterations = 1;
+
+  const auto telemetry = makeTwoFluidAcceptedStageSolveTelemetry(report);
+
+  EXPECT_TRUE(telemetry.nonlinear.converged);
+  EXPECT_FALSE(telemetry.linear.attempted);
+  EXPECT_TRUE(telemetry.linear.converged);
+  EXPECT_EQ(telemetry.linear.reason,
+            "not_required_exact_entry_convergence");
+}
+
 std::shared_ptr<svmp::Mesh> makeWorkflowTriangleMesh()
 {
   auto base = std::make_shared<svmp::MeshBase>();
@@ -13510,6 +13526,136 @@ TEST(ApplicationDriverLevelSetWorkflows,
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 namespace {
+
+TEST(ApplicationDriverConservativePhaseVelocity,
+     SamplesTheDeclaredCommonInterfaceVelocityAtEveryGraphNode)
+{
+  auto mesh = makeWorkflowTriangleMesh();
+  auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
+      svmp::FE::ElementType::Triangle3,
+      /*order=*/1);
+  auto velocity_space =
+      std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_space, 2);
+  auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
+  const auto phi = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "phi",
+      .space = scalar_space,
+      .components = 1,
+  });
+  const auto phase = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "phase",
+      .space = scalar_space,
+      .components = 1,
+  });
+  const auto negative_velocity =
+      system->addField(svmp::FE::systems::FieldSpec{
+          .name = "u_negative",
+          .space = velocity_space,
+          .components = 2,
+      });
+  const auto positive_velocity =
+      system->addField(svmp::FE::systems::FieldSpec{
+          .name = "u_positive",
+          .space = velocity_space,
+          .components = 2,
+      });
+  constexpr int interface_marker = 911;
+  system->declareMaterialInterfaceTransportVelocity(
+      svmp::FE::interfaces::MaterialInterfaceTransportVelocityDeclaration{
+          .dimension = 2,
+          .interface_marker = interface_marker,
+          .level_set_field = phi,
+          .negative_velocity_field = negative_velocity,
+          .positive_velocity_field = positive_velocity,
+          .level_set_isovalue = 0.0,
+          .negative_trace_weight = 0.25,
+          .positive_trace_weight = 0.75,
+          .geometry_domain_id = "material_interface",
+          .owner_component = "two_fluid_test",
+      });
+  ASSERT_NO_THROW(system->setup({}));
+
+  const std::vector<svmp::FE::Real> phi_vertex_values{-1.0, 0.0, 1.0};
+  const std::vector<svmp::FE::Real> negative_vertex_values{
+      1.0, 2.0,
+      3.0, 4.0,
+      5.0, 6.0,
+  };
+  const std::vector<svmp::FE::Real> positive_vertex_values{
+      9.0, 10.0,
+      11.0, 12.0,
+      13.0, 14.0,
+  };
+  const auto phi_coefficients = projectWorkflowVertexValues(
+      *system,
+      phi,
+      phi_vertex_values,
+      1u,
+      "ApplicationDriver material velocity phi");
+  const auto negative_coefficients = projectWorkflowVertexValues(
+      *system,
+      negative_velocity,
+      negative_vertex_values,
+      2u,
+      "ApplicationDriver negative material velocity");
+  const auto positive_coefficients = projectWorkflowVertexValues(
+      *system,
+      positive_velocity,
+      positive_vertex_values,
+      2u,
+      "ApplicationDriver positive material velocity");
+  std::vector<svmp::FE::Real> solution(
+      static_cast<std::size_t>(system->dofHandler().getNumDofs()),
+      svmp::FE::Real{0.0});
+  writeWorkflowFieldSlice(*system, phi, phi_coefficients, solution);
+  writeWorkflowFieldSlice(
+      *system, negative_velocity, negative_coefficients, solution);
+  writeWorkflowFieldSlice(
+      *system, positive_velocity, positive_coefficients, solution);
+
+  svmp::FE::level_set::LevelSetP1PhaseGraphOptions graph_options;
+  const auto graph =
+      svmp::FE::level_set::buildLevelSetP1PhaseTransportGraph(
+          *system, phase, graph_options);
+  ASSERT_TRUE(graph.success) << graph.diagnostic;
+
+  application::core::SimulationComponents sim;
+  sim.primary_mesh = mesh;
+  sim.fe_system = std::move(system);
+  LevelSetMaintenanceRequest request;
+  request.level_set_field_name = "phi";
+  request.conservative_phase.liquid_indicator.field_name = "phase";
+  request.velocity.source =
+      svmp::FE::level_set::LevelSetVelocitySource::
+          MaterialInterfacePhasePair;
+  request.velocity.material_interface_marker = interface_marker;
+  svmp::FE::systems::SystemStateView state;
+  state.u = std::span<const svmp::FE::Real>(
+      solution.data(), solution.size());
+
+  const auto sampled = sampleConservativePhaseVelocity(
+      sim, request, graph, state);
+  ASSERT_EQ(sampled.size(), graph.nodes);
+  const auto* phase_entities =
+      sim.fe_system->fieldDofHandler(phase).getEntityDofMap();
+  ASSERT_NE(phase_entities, nullptr);
+  const std::array<std::array<svmp::FE::Real, 2>, 3> expected{{
+      {{7.0, 8.0}},
+      {{9.0, 10.0}},
+      {{11.0, 12.0}},
+  }};
+  for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
+    const auto dofs = phase_entities->getVertexDofs(
+        static_cast<svmp::FE::GlobalIndex>(vertex));
+    ASSERT_EQ(dofs.size(), 1u);
+    ASSERT_GE(dofs.front(), 0);
+    const auto node = static_cast<std::size_t>(dofs.front());
+    ASSERT_LT(node, sampled.size());
+    EXPECT_NEAR(sampled[node][0], expected[vertex][0], 1.0e-14);
+    EXPECT_NEAR(sampled[node][1], expected[vertex][1], 1.0e-14);
+    EXPECT_EQ(sampled[node][2], 0.0);
+  }
+}
 
 class ApplicationDriverConservativePhaseCandidatesTest
     : public ::testing::Test {

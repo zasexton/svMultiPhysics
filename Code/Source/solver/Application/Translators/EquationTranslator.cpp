@@ -206,6 +206,19 @@ svmp::Physics::DomainInput snapshot_domain(const DomainParameters& domain)
   out.id = domain.id.value();
   out.params = snapshot_params(domain);
 
+  if (domain.constitutive_model.defined()) {
+    out.nested_configuration_blocks.push_back(
+        ConstitutiveModelParameters::xml_element_name_);
+  }
+  if (domain.fiber_reinforcement_stress.defined()) {
+    out.nested_configuration_blocks.push_back(
+        FiberReinforcementStressParameters::xml_element_name_);
+  }
+  if (domain.stimulus.defined()) {
+    out.nested_configuration_blocks.push_back(
+        StimulusParameters::xml_element_name_);
+  }
+
   if (domain.fluid_viscosity.model.defined()) {
     out.params["Viscosity.model"] =
         svmp::Physics::ParameterValue{domain.fluid_viscosity.model.defined(), domain.fluid_viscosity.model.value()};
@@ -266,6 +279,35 @@ svmp::Physics::EquationModuleInput EquationTranslator::buildInput(
   input.equation_params = snapshot_params(eq_params);
   input.mesh_name = mesh_name;
   input.mesh = mesh->local_mesh_ptr();
+
+  const auto append_nested_equation_block =
+      [&](bool defined, const std::string& name) {
+        if (defined) {
+          input.nested_configuration_blocks.push_back(name);
+        }
+      };
+  append_nested_equation_block(
+      eq_params.couple_to_cplBC.defined(),
+      CoupleCplBCParameters::xml_element_name_);
+  append_nested_equation_block(
+      eq_params.couple_to_genBC.defined(),
+      CoupleGenBCParameters::xml_element_name_);
+  append_nested_equation_block(
+      eq_params.svzerodsolver_interface_parameters.defined(),
+      svZeroDSolverInterfaceParameters::xml_element_name_);
+  append_nested_equation_block(
+      eq_params.remesher.defined(),
+      RemesherParameters::xml_element_name_);
+  append_nested_equation_block(
+      eq_params.variable_wall_properties.defined(),
+      VariableWallPropsParameters::xml_element_name_);
+  append_nested_equation_block(
+      eq_params.ecg_leads.defined(),
+      ECGLeadsParameters::xml_element_name_);
+  input.body_force_block_count = static_cast<std::size_t>(std::count_if(
+      eq_params.body_forces.begin(),
+      eq_params.body_forces.end(),
+      [](const auto* body_force) { return body_force != nullptr; }));
 
   application::core::oopCout() << "[svMultiPhysics::Application] EquationTranslator: mesh='" << mesh_name << "'"
                                << " domains=" << static_cast<int>(eq_params.domains.size())
@@ -364,12 +406,16 @@ svmp::Physics::EquationModuleInput EquationTranslator::buildInput(
       }
 
       if (bc->rcr.value_set) {
+        bc_in.nested_configuration_blocks.push_back(
+            BoundaryConditionRCRParameters::xml_element_name_);
         const auto rcr = snapshot_params(bc->rcr);
         for (const auto& [k, v] : rcr) {
           bc_in.params["RCR." + k] = v;
         }
       }
       if (bc->rcrcr.value_set) {
+        bc_in.nested_configuration_blocks.push_back(
+            BoundaryConditionRCRCRParameters::xml_element_name_);
         const auto rcrcr = snapshot_params(bc->rcrcr);
         for (const auto& [k, v] : rcrcr) {
           bc_in.params["RCRCR." + k] = v;

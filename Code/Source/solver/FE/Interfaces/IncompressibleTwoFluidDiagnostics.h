@@ -146,6 +146,49 @@ struct IncompressibleTwoFluidDiagnosticState {
     IncompressibleTwoFluidPhaseDiagnosticState positive_phase{};
 };
 
+/** One phase's before/after momentum contract across phase maintenance. */
+struct IncompressibleTwoFluidPhaseMomentumReconciliation {
+    geometry::CutIntegrationSide side{
+        geometry::CutIntegrationSide::Negative};
+    Real density{0.0};
+    Real raw_volume{0.0};
+    Real corrected_volume{0.0};
+    Real raw_mass{0.0};
+    Real corrected_mass{0.0};
+    std::array<Real, 3> raw_momentum{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> corrected_momentum{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> momentum_delta{{0.0, 0.0, 0.0}};
+    Real momentum_delta_norm{0.0};
+    Real momentum_reference_norm{0.0};
+    Real allowed_momentum_delta{0.0};
+    bool satisfied{false};
+
+    [[nodiscard]] friend bool operator==(
+        const IncompressibleTwoFluidPhaseMomentumReconciliation&,
+        const IncompressibleTwoFluidPhaseMomentumReconciliation&) = default;
+};
+
+/**
+ * Accepted-step phase/momentum contract for conservative phase maintenance.
+ *
+ * The initial supported policy never applies a hidden velocity correction.
+ * A geometry/phase correction is accepted only when both phasewise momentum
+ * deltas satisfy the declared relative gate.
+ */
+struct IncompressibleTwoFluidMomentumReconciliation {
+    int interface_marker{-1};
+    FreeSurfaceGeometryRevision raw_geometry_revision{};
+    FreeSurfaceGeometryRevision corrected_geometry_revision{};
+    std::uint64_t raw_algebraic_revision{0u};
+    std::uint64_t corrected_algebraic_revision{0u};
+    Real relative_tolerance{0.0};
+    bool velocity_update_applied{false};
+    bool satisfied{false};
+    IncompressibleTwoFluidPhaseMomentumReconciliation negative_phase{};
+    IncompressibleTwoFluidPhaseMomentumReconciliation positive_phase{};
+
+};
+
 /** Evaluate rank-owned additive quantities on one immutable snapshot. */
 [[nodiscard]] IncompressibleTwoFluidDiagnosticAccumulator
 evaluateLocalIncompressibleTwoFluidDiagnostics(
@@ -161,6 +204,22 @@ evaluateLocalIncompressibleTwoFluidDiagnostics(
 finalizeIncompressibleTwoFluidDiagnostics(
     const IncompressibleTwoFluidDiagnosticAccumulator& accumulator,
     const IncompressibleTwoFluidDiagnosticParameters& parameters);
+
+/** Build the explicit no-hidden-update phasewise momentum contract. */
+[[nodiscard]] IncompressibleTwoFluidMomentumReconciliation
+buildIncompressibleTwoFluidMomentumReconciliation(
+    int interface_marker,
+    const FreeSurfaceGeometryRevision& raw_geometry_revision,
+    const IncompressibleTwoFluidDiagnosticState& raw,
+    std::uint64_t raw_algebraic_revision,
+    const FreeSurfaceGeometryRevision& corrected_geometry_revision,
+    const IncompressibleTwoFluidDiagnosticState& corrected,
+    std::uint64_t corrected_algebraic_revision,
+    Real relative_tolerance);
+
+/** Reject any inconsistent or non-finite reconciliation record. */
+void validateIncompressibleTwoFluidMomentumReconciliation(
+    const IncompressibleTwoFluidMomentumReconciliation& reconciliation);
 
 } // namespace svmp::FE::interfaces
 

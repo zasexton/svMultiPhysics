@@ -2,6 +2,13 @@
 
 #include "FE/Core/Types.h"
 
+#include <optional>
+#include <string>
+
+namespace svmp {
+class MeshBase;
+}
+
 namespace svmp::FE::systems {
 class FESystem;
 }
@@ -12,6 +19,21 @@ struct EquationModuleInput;
 
 namespace svmp::Physics::formulations::navier_stokes {
 
+/** Pure dependency advertised by the sharp incompressible two-fluid owner. */
+struct IncompressibleTwoFluidDependency {
+  const svmp::MeshBase* mesh{nullptr};
+  std::string mesh_name{};
+  int dimension{0};
+  int interface_marker{-1};
+  std::string level_set_field_name{};
+  std::string negative_velocity_field_name{};
+  std::string positive_velocity_field_name{};
+  std::string negative_pressure_field_name{};
+  std::string positive_pressure_field_name{};
+  std::string operator_tag{};
+  std::string generated_interface_domain_id{};
+};
+
 /**
  * Validate the fitted free-surface/contact capability encoded by an input.
  *
@@ -21,6 +43,20 @@ namespace svmp::Physics::formulations::navier_stokes {
  */
 void preflightFittedSurfaceContactCapability(
     const EquationModuleInput& input);
+
+/** Return the validated two-fluid dependency, or nullopt for another model. */
+[[nodiscard]] std::optional<IncompressibleTwoFluidDependency>
+incompressibleTwoFluidDependency(
+    const EquationModuleInput& input,
+    const FE::systems::FESystem& system);
+
+/**
+ * Predeclare phase fields in velocity-pair/pressure-pair order and publish the
+ * matching material-interface velocity owner before equation installation.
+ */
+void preRegisterIncompressibleTwoFluidDependencyFields(
+    const EquationModuleInput& input,
+    FE::systems::FESystem& system);
 
 /**
  * Predeclare the primary velocity unknown described by a fluid/stokes input.

@@ -6,6 +6,8 @@
 #include "FE/Forms/FormExpr.h"
 #include "FE/Forms/JIT/JITKernelWrapper.h"
 #include "FE/Forms/JIT/LLVMJITBuildInfo.h"
+#include "FE/Interfaces/MaterialInterfaceTransportVelocity.h"
+#include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
@@ -188,6 +190,30 @@ std::shared_ptr<svmp::Mesh> makeRegistryQuadMesh()
       {shape});
   base->finalize();
 
+  return svmp::create_mesh(std::move(base));
+}
+
+std::shared_ptr<svmp::Mesh> makeRegistryTriangleMesh()
+{
+  auto base = std::make_shared<svmp::MeshBase>();
+  const std::vector<svmp::real_t> x_ref = {
+      0.0, 0.0,
+      1.0, 0.0,
+      0.0, 1.0,
+  };
+  const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 3};
+  const std::vector<svmp::index_t> cell2vertex = {0, 1, 2};
+  svmp::CellShape shape{};
+  shape.family = svmp::CellFamily::Triangle;
+  shape.num_corners = 3;
+  shape.order = 1;
+  base->build_from_arrays(
+      /*spatial_dim=*/2,
+      x_ref,
+      cell2vertex_offsets,
+      cell2vertex,
+      {shape});
+  base->finalize();
   return svmp::create_mesh(std::move(base));
 }
 
@@ -384,12 +410,21 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
   expected.replace(
       schema_version,
       std::string_view{"\"artifact_schema_version\":1"}.size(),
-      "\"artifact_schema_version\":2");
+      "\"artifact_schema_version\":3");
   const auto phase_insertion = expected.find(",\"advection_velocity\"");
   ASSERT_NE(phase_insertion, std::string::npos);
   expected.insert(
       phase_insertion,
-      R"json(,"conservative_phase":{"enabled":false,"field":"liquid_indicator","source":"Unknown","auto_register":true,"liquid_side":"Negative","invariant_tolerance":9.9999999999999998e-13,"component_activity_tolerance":1e-08,"maximum_courant":1,"enforce_courant_limit":true,"require_constant_preservation":true,"write_flux_artifacts":false,"flux_artifact_cadence_steps":1,"classify_nonprimary_components_as_satellites":false,"fixed_flux_regions":[],"impermeable_normal_velocity_tolerance":1e-10,"reconcile_geometry":true,"geometry_measure_tolerance":1e-10,"geometry_correction_max_iterations":50,"maximum_geometry_displacement_fraction":0.10000000000000001,"boundary_flux_policy":"closed_boundary_only","newton_policy":"held_at_previous_accepted_endpoint"})json");
+      R"json(,"conservative_phase":{"enabled":false,"field":"liquid_indicator","source":"Unknown","auto_register":true,"liquid_side":"Negative","invariant_tolerance":9.9999999999999998e-13,"component_activity_tolerance":1e-08,"maximum_courant":1,"enforce_courant_limit":true,"require_constant_preservation":true,"momentum_relative_tolerance":1e-10,"momentum_reconciliation_policy":"phasewise_fail_closed_no_hidden_velocity_update","write_flux_artifacts":false,"flux_artifact_cadence_steps":1,"classify_nonprimary_components_as_satellites":false,"fixed_flux_regions":[],"impermeable_normal_velocity_tolerance":1e-10,"reconcile_geometry":true,"geometry_measure_tolerance":1e-10,"geometry_correction_max_iterations":50,"maximum_geometry_displacement_fraction":0.10000000000000001,"boundary_flux_policy":"closed_boundary_only","newton_policy":"held_at_previous_accepted_endpoint"})json");
+  const auto advection_velocity =
+      expected.find(",\"advection_velocity\"");
+  ASSERT_NE(advection_velocity, std::string::npos);
+  const auto advection_auto_register =
+      expected.find(",\"auto_register\":", advection_velocity);
+  ASSERT_NE(advection_auto_register, std::string::npos);
+  expected.insert(
+      advection_auto_register,
+      R"json(,"material_interface_marker":-1)json");
   const auto pointwise_contract =
       expected.find("\"impermeable_normal_velocity_tolerance\":1e-10");
   ASSERT_NE(pointwise_contract, std::string::npos);
@@ -496,6 +531,9 @@ TEST(LevelSetEquationTranslator, TranslatesConservativePhaseControls)
       "Conservative_phase_require_constant_preservation"] =
       svmp::Physics::ParameterValue{true, "false"};
   input.equation_params[
+      "Conservative_phase_momentum_relative_tolerance"] =
+      svmp::Physics::ParameterValue{true, "7.5e-9"};
+  input.equation_params[
       "Conservative_phase_write_flux_artifacts"] =
       svmp::Physics::ParameterValue{true, "true"};
   input.equation_params[
@@ -553,6 +591,12 @@ TEST(LevelSetEquationTranslator, TranslatesConservativePhaseControls)
   EXPECT_NE(artifact->json.find("\"write_flux_artifacts\":true"),
             std::string::npos);
   EXPECT_NE(artifact->json.find(
+                "\"momentum_relative_tolerance\":7.4999999999999993e-09"),
+            std::string::npos);
+  EXPECT_NE(artifact->json.find(
+                "\"momentum_reconciliation_policy\":\"phasewise_fail_closed_no_hidden_velocity_update\""),
+            std::string::npos);
+  EXPECT_NE(artifact->json.find(
                 "\"flux_artifact_cadence_steps\":3"),
             std::string::npos);
   EXPECT_NE(artifact->json.find(
@@ -569,7 +613,7 @@ TEST(LevelSetEquationTranslator, TranslatesConservativePhaseControls)
   EXPECT_NE(artifact->json.find(
                 "\"geometry_correction_max_iterations\":19"),
             std::string::npos);
-  EXPECT_NE(artifact->json.find("\"artifact_schema_version\":2"),
+  EXPECT_NE(artifact->json.find("\"artifact_schema_version\":3"),
             std::string::npos);
   EXPECT_NE(artifact->json.find(
                 "\"pointwise_impermeable_velocity_tolerance_explicitly_requested\":false"),
@@ -937,6 +981,102 @@ TEST(LevelSetEquationTranslator, TranslatesConstantVelocity)
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Constant));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
   EXPECT_FALSE(formulationRecordsContain(system, FormExprType::DiscreteField));
+#endif
+}
+
+TEST(LevelSetEquationTranslator,
+     TranslatesMaterialInterfacePhasePairVelocity)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryTriangleMesh();
+  const auto scalar_space =
+      svmp::FE::spaces::SpaceFactory::create_h1(
+          svmp::FE::ElementType::Triangle3, 1);
+  const auto velocity_space =
+      svmp::FE::spaces::SpaceFactory::create_vector_h1(
+          svmp::FE::ElementType::Triangle3, 1, 2);
+  svmp::FE::systems::FESystem system(mesh);
+  const auto level_set = system.addField(svmp::FE::systems::FieldSpec{
+      .name = "level_set",
+      .space = scalar_space,
+      .components = 1,
+  });
+  const auto negative_velocity =
+      system.addField(svmp::FE::systems::FieldSpec{
+          .name = "u_negative",
+          .space = velocity_space,
+          .components = 2,
+      });
+  const auto positive_velocity =
+      system.addField(svmp::FE::systems::FieldSpec{
+          .name = "u_positive",
+          .space = velocity_space,
+          .components = 2,
+      });
+  system.declareMaterialInterfaceTransportVelocity(
+      svmp::FE::interfaces::MaterialInterfaceTransportVelocityDeclaration{
+          .dimension = 2,
+          .interface_marker = 71,
+          .level_set_field = level_set,
+          .negative_velocity_field = negative_velocity,
+          .positive_velocity_field = positive_velocity,
+          .level_set_isovalue = 0.0,
+          .negative_trace_weight = 0.25,
+          .positive_trace_weight = 0.75,
+          .geometry_domain_id = "material_interface",
+          .owner_component = "incompressible_two_fluid",
+      });
+
+  svmp::Physics::EquationModuleInput input{};
+  input.equation_type = "level_set";
+  input.mesh_name = "triangle";
+  input.mesh = mesh->local_mesh_ptr();
+  input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "level_set"};
+  input.equation_params["Auto_register_level_set_field"] =
+      svmp::Physics::ParameterValue{true, "false"};
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{
+          true, "material_interface_phase_pair"};
+  input.equation_params["Material_interface_marker"] =
+      svmp::Physics::ParameterValue{true, "71"};
+  input.equation_params["Transport_form"] =
+      svmp::Physics::ParameterValue{true, "advective"};
+  input.equation_params["Enable_conservative_phase_transport"] =
+      svmp::Physics::ParameterValue{true, "true"};
+  input.equation_params["Conservative_phase_field_name"] =
+      svmp::Physics::ParameterValue{true, "phase"};
+  input.equation_params[
+      "Conservative_phase_momentum_relative_tolerance"] =
+      svmp::Physics::ParameterValue{true, "2.5e-8"};
+
+  auto module =
+      application::translators::level_set::createModule(input, system);
+
+  ASSERT_TRUE(module);
+  EXPECT_NE(
+      system.findFieldByName("phase"), svmp::FE::INVALID_FIELD_ID);
+  EXPECT_EQ(
+      system.findFieldByName("Velocity"), svmp::FE::INVALID_FIELD_ID);
+  const auto artifact = module->effectiveConfigurationArtifact();
+  ASSERT_TRUE(artifact.has_value());
+  EXPECT_NE(
+      artifact->json.find(
+          "\"source\":\"MaterialInterfacePhasePair\""),
+      std::string::npos);
+  EXPECT_NE(
+      artifact->json.find("\"material_interface_marker\":71"),
+      std::string::npos);
+  EXPECT_NE(
+      artifact->json.find(
+          "\"capability_label\":\"two_phase_material_interface_transport\""),
+      std::string::npos);
+  EXPECT_NE(
+      artifact->json.find(
+          "\"momentum_relative_tolerance\":2.4999999999999999e-08"),
+      std::string::npos);
 #endif
 }
 

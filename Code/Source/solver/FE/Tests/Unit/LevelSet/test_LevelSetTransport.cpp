@@ -5,6 +5,7 @@
 #include "Dofs/EntityDofMap.h"
 #include "Forms/FormExpr.h"
 #include "Forms/JIT/JITKernelWrapper.h"
+#include "Interfaces/MaterialInterfaceTransportVelocity.h"
 #include "Spaces/SpaceFactory.h"
 #include "Sparsity/SparsityPattern.h"
 #include "Systems/FESystem.h"
@@ -30,6 +31,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -1258,6 +1260,200 @@ TEST(LevelSetTransport,
     EXPECT_FALSE(kernels.residual.empty());
 }
 
+TEST(MaterialInterfaceTransportVelocity,
+     SelectsSharpBulkValuesAndTheComplementaryTrace)
+{
+    const FE::interfaces::MaterialInterfaceTransportVelocityDeclaration
+        declaration{
+            .dimension = 2,
+            .interface_marker = 17,
+            .level_set_field = 1,
+            .negative_velocity_field = 2,
+            .positive_velocity_field = 3,
+            .level_set_isovalue = 0.25,
+            .negative_trace_weight = 0.2,
+            .positive_trace_weight = 0.8,
+            .geometry_domain_id = "material_interface",
+            .owner_component = "two_phase_owner",
+        };
+    const std::array<FE::Real, 3> negative{{2.0, -1.0, 0.0}};
+    const std::array<FE::Real, 3> positive{{-3.0, 4.0, 0.0}};
+
+    const auto negative_sample =
+        FE::interfaces::selectMaterialInterfaceTransportVelocity(
+            declaration, 0.1, negative, positive);
+    const auto trace_sample =
+        FE::interfaces::selectMaterialInterfaceTransportVelocity(
+            declaration, 0.25, negative, positive);
+    const auto positive_sample =
+        FE::interfaces::selectMaterialInterfaceTransportVelocity(
+            declaration, 0.4, negative, positive);
+
+    EXPECT_EQ(
+        negative_sample.region,
+        FE::interfaces::MaterialInterfaceVelocityRegion::NegativeBulk);
+    EXPECT_EQ(negative_sample.value, negative);
+    EXPECT_EQ(
+        trace_sample.region,
+        FE::interfaces::MaterialInterfaceVelocityRegion::InterfaceTrace);
+    EXPECT_NEAR(trace_sample.value[0], -2.0, 1.0e-15);
+    EXPECT_NEAR(trace_sample.value[1], 3.0, 1.0e-15);
+    EXPECT_EQ(
+        positive_sample.region,
+        FE::interfaces::MaterialInterfaceVelocityRegion::PositiveBulk);
+    EXPECT_EQ(positive_sample.value, positive);
+}
+
+TEST(LevelSetTransport,
+     MaterialInterfacePhasePairUsesComplementaryCutVolumesAndTrace)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+    auto velocity_space = vectorSpace(mesh);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi", .space = phi_space, .components = 1});
+    const auto negative_velocity = system.addField(FE::systems::FieldSpec{
+        .name = "u_negative",
+        .space = velocity_space,
+        .components = velocity_space->value_dimension(),
+    });
+    const auto positive_velocity = system.addField(FE::systems::FieldSpec{
+        .name = "u_positive",
+        .space = velocity_space,
+        .components = velocity_space->value_dimension(),
+    });
+    system.declareMaterialInterfaceTransportVelocity(
+        FE::interfaces::MaterialInterfaceTransportVelocityDeclaration{
+            .dimension = 3,
+            .interface_marker = 17,
+            .level_set_field = phi,
+            .negative_velocity_field = negative_velocity,
+            .positive_velocity_field = positive_velocity,
+            .level_set_isovalue = 0.0,
+            .negative_trace_weight = 0.25,
+            .positive_trace_weight = 0.75,
+            .geometry_domain_id = "material_interface",
+            .owner_component = "two_phase_owner",
+        });
+
+    level_set::LevelSetTransportOptions options{};
+    options.level_set.field_name = "phi";
+    options.level_set.auto_register_field = false;
+    options.velocity.source =
+        level_set::LevelSetVelocitySource::MaterialInterfacePhasePair;
+    options.velocity.material_interface_marker = 17;
+    options.conservative_phase.enabled = true;
+    options.conservative_phase.liquid_indicator.field_name = "phase";
+    options.interface_kinematic.enabled = true;
+    options.interface_kinematic.interface_marker = 17;
+    options.supg.enabled = true;
+
+    const auto kernels = level_set::installLevelSetTransport(
+        system, phi_space, options);
+    EXPECT_FALSE(kernels.residual.empty());
+    EXPECT_TRUE(formulationRecordsContain(
+        system, FormExprType::CutVolumeIntegral));
+    EXPECT_TRUE(formulationRecordsContain(
+        system, FormExprType::InterfaceIntegral));
+    EXPECT_EQ(system.findFieldByName("Velocity"), FE::INVALID_FIELD_ID);
+
+    bool negative_coupled = false;
+    bool positive_coupled = false;
+    for (const auto& record : system.formulationRecords()) {
+        for (const auto& [test, trial] : record.block_couplings) {
+            negative_coupled = negative_coupled ||
+                               (test == phi && trial == negative_velocity);
+            positive_coupled = positive_coupled ||
+                               (test == phi && trial == positive_velocity);
+        }
+    }
+    EXPECT_TRUE(negative_coupled);
+    EXPECT_TRUE(positive_coupled);
+}
+
+TEST(LevelSetTransport,
+     MaterialInterfacePhasePairFailsBeforeConservativeFieldMutation)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+    FE::systems::FESystem system(mesh);
+    (void)system.addField(FE::systems::FieldSpec{
+        .name = "phi", .space = phi_space, .components = 1});
+
+    level_set::LevelSetTransportOptions options{};
+    options.level_set.field_name = "phi";
+    options.level_set.auto_register_field = false;
+    options.velocity.source =
+        level_set::LevelSetVelocitySource::MaterialInterfacePhasePair;
+    options.velocity.material_interface_marker = 17;
+    options.conservative_phase.enabled = true;
+    options.conservative_phase.liquid_indicator.field_name = "phase";
+    options.interface_kinematic.enabled = true;
+    options.interface_kinematic.interface_marker = 17;
+
+    EXPECT_THROW(
+        (void)level_set::installLevelSetTransport(
+            system, phi_space, options),
+        std::invalid_argument);
+    EXPECT_EQ(system.findFieldByName("phase"), FE::INVALID_FIELD_ID);
+    EXPECT_FALSE(system.hasOperator(options.operator_tag));
+}
+
+TEST(LevelSetTransport,
+     MaterialInterfacePhasePairRejectsUnsupportedModesBeforeMutation)
+{
+    const auto expect_rejected = [](
+        const std::function<void(level_set::LevelSetTransportOptions&)>&
+            configure,
+        std::string_view expected_diagnostic) {
+        const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+        auto phi_space = scalarSpace(mesh);
+        FE::systems::FESystem system(mesh);
+        (void)system.addField(FE::systems::FieldSpec{
+            .name = "phi", .space = phi_space, .components = 1});
+
+        level_set::LevelSetTransportOptions options{};
+        options.level_set.field_name = "phi";
+        options.level_set.auto_register_field = false;
+        options.velocity.source =
+            level_set::LevelSetVelocitySource::MaterialInterfacePhasePair;
+        options.velocity.material_interface_marker = 17;
+        options.conservative_phase.enabled = true;
+        options.conservative_phase.liquid_indicator.field_name = "phase";
+        options.interface_kinematic.enabled = true;
+        options.interface_kinematic.interface_marker = 17;
+        configure(options);
+
+        try {
+            (void)level_set::installLevelSetTransport(
+                system, phi_space, options);
+            FAIL() << "unsupported material-interface mode was accepted";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(
+                std::string_view(error.what()).find(expected_diagnostic),
+                std::string_view::npos);
+        }
+        EXPECT_EQ(system.findFieldByName("phase"), FE::INVALID_FIELD_ID);
+        EXPECT_FALSE(system.hasOperator(options.operator_tag));
+    };
+
+    expect_rejected(
+        [](auto& options) {
+            options.transport_form =
+                level_set::LevelSetTransportForm::ConservativeDivergence;
+        },
+        "advective-form");
+    expect_rejected(
+        [](auto& options) { options.bound_preserving.enabled = true; },
+        "legacy nonconservative level-set limiter");
+    expect_rejected(
+        [](auto& options) {
+            options.conservative_phase.reconcile_geometry = false;
+        },
+        "geometry reconciliation");
+}
+
 TEST(LevelSetTransport,
      ConservativePhaseEndpointHoldAssemblesOnlyTheCurrentMinusPreviousState)
 {
@@ -1361,6 +1557,9 @@ TEST(LevelSetTransport,
     });
     expect_rejected_without_fields([](auto& options) {
         options.conservative_phase.flux_artifact_cadence_steps = 0;
+    });
+    expect_rejected_without_fields([](auto& options) {
+        options.conservative_phase.momentum_relative_tolerance = 0.0;
     });
     expect_rejected_without_fields([](auto& options) {
         options.conservative_phase

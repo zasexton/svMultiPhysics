@@ -5,12 +5,14 @@
 #include "Dofs/EntityDofMap.h"
 #include "Elements/ReferenceElement.h"
 #include "Forms/Vocabulary.h"
+#include "Interfaces/MaterialInterfaceTransportVelocity.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <set>
 #include <span>
 #include <stdexcept>
@@ -320,6 +322,11 @@ public:
             throw std::invalid_argument(
                 "evaluateLevelSetTransportSafety: mesh dimension must be in [1, 3]");
         }
+        if (options_.source ==
+            LevelSetVelocitySource::MaterialInterfacePhasePair) {
+            throw std::invalid_argument(
+                "evaluateLevelSetTransportSafety: material-interface phase-pair velocity is reserved for conservative transport and has no legacy bound-preserving safety route");
+        }
         if (options_.source == LevelSetVelocitySource::ConstantVector) {
             return;
         }
@@ -405,6 +412,35 @@ private:
     return field;
 }
 
+[[nodiscard]] const interfaces::
+    MaterialInterfaceTransportVelocityDeclaration&
+requireMaterialInterfaceVelocityDeclaration(
+    const systems::FESystem& system,
+    FieldId level_set_field,
+    int interface_marker)
+{
+    const auto declarations =
+        system.materialInterfaceTransportVelocityDeclarations();
+    const interfaces::MaterialInterfaceTransportVelocityDeclaration*
+        found = nullptr;
+    for (const auto& declaration : declarations) {
+        if (declaration.level_set_field != level_set_field ||
+            declaration.interface_marker != interface_marker) {
+            continue;
+        }
+        if (found != nullptr) {
+            throw std::invalid_argument(
+                "installLevelSetTransport: material-interface phase-pair velocity has more than one matching owner");
+        }
+        found = &declaration;
+    }
+    if (found == nullptr) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: material-interface phase-pair velocity has no matching declaration");
+    }
+    return *found;
+}
+
 [[nodiscard]] systems::FieldSourceKind sourceKind(LevelSetFieldSource source) noexcept
 {
     switch (source) {
@@ -425,6 +461,8 @@ private:
     case LevelSetVelocitySource::PrescribedData:
     case LevelSetVelocitySource::ConstantVector:
         return systems::FieldSourceKind::PrescribedData;
+    case LevelSetVelocitySource::MaterialInterfacePhasePair:
+        return systems::FieldSourceKind::Unknown;
     }
     return systems::FieldSourceKind::Unknown;
 }
@@ -677,6 +715,11 @@ void validateConservativePhaseOptions(
     if (phase.flux_artifact_cadence_steps <= 0) {
         throw std::invalid_argument(
             "installLevelSetTransport: conservative phase flux artifact cadence must be positive");
+    }
+    if (!std::isfinite(phase.momentum_relative_tolerance) ||
+        !(phase.momentum_relative_tolerance > Real{0.0})) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: conservative phase momentum relative tolerance must be positive and finite");
     }
     try {
         static_cast<void>(makeAxisAlignedBoxPhaseRegions(
@@ -1492,11 +1535,15 @@ systems::CoupledResidualKernels installLevelSetTransport(
     const LevelSetTransportOptions& options,
     const systems::FormInstallOptions& install_options)
 {
+    const bool material_interface_velocity =
+        options.velocity.source ==
+        LevelSetVelocitySource::MaterialInterfacePhasePair;
     if (options.level_set.field_name.empty()) {
         throw std::invalid_argument(
             "installLevelSetTransport: level-set field name must be non-empty");
     }
     if (options.velocity.source != LevelSetVelocitySource::ConstantVector &&
+        !material_interface_velocity &&
         options.velocity.field_name.empty()) {
         throw std::invalid_argument(
             "installLevelSetTransport: velocity field name must be non-empty");
@@ -1565,6 +1612,7 @@ systems::CoupledResidualKernels installLevelSetTransport(
     }
 
     if (options.velocity.source != LevelSetVelocitySource::ConstantVector &&
+        !material_interface_velocity &&
         options.level_set.field_name == options.velocity.field_name) {
         throw std::invalid_argument(
             "installLevelSetTransport: level-set and velocity fields must be distinct");
@@ -1577,6 +1625,7 @@ systems::CoupledResidualKernels installLevelSetTransport(
     }
     if (options.conservative_phase.enabled &&
         options.velocity.source != LevelSetVelocitySource::ConstantVector &&
+        !material_interface_velocity &&
         options.conservative_phase.liquid_indicator.field_name ==
             options.velocity.field_name) {
         throw std::invalid_argument(
@@ -1596,6 +1645,24 @@ systems::CoupledResidualKernels installLevelSetTransport(
             "installLevelSetTransport: level-set space dimension must be in [1, 3]");
     }
 
+    if (material_interface_velocity &&
+        (pending_phi.existing_id == INVALID_FIELD_ID ||
+         options.velocity.material_interface_marker < 0 ||
+         options.velocity.auto_register_field || options.velocity.space ||
+         !options.velocity.algebraic_extension_source_field_name.empty() ||
+         options.transport_form != LevelSetTransportForm::Advective ||
+         options.bound_preserving.enabled ||
+         !options.conservative_phase.enabled ||
+         !options.conservative_phase.reconcile_geometry ||
+         !options.interface_kinematic.enabled ||
+         options.interface_kinematic.interface_marker !=
+             options.velocity.material_interface_marker ||
+         !options.boundaries.inflow.empty() ||
+         !options.boundaries.outflow.empty())) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: material-interface phase-pair velocity requires an existing level-set field, one matching interface marker, advective-form conservative phase transport with geometry reconciliation, interface kinematic enforcement, no legacy bound projection, no separate velocity registration or extension, and a closed physical boundary");
+    }
+
     std::optional<PendingTransportField> pending_phase;
     if (options.conservative_phase.enabled) {
         pending_phase = preflightLevelSetField(
@@ -1611,9 +1678,24 @@ systems::CoupledResidualKernels installLevelSetTransport(
     }
 
     std::optional<PendingTransportField> pending_velocity;
-    if (options.velocity.source != LevelSetVelocitySource::ConstantVector) {
+    if (options.velocity.source != LevelSetVelocitySource::ConstantVector &&
+        !material_interface_velocity) {
         pending_velocity = preflightVelocityField(
             system, options.velocity, dimension);
+    }
+
+    const interfaces::MaterialInterfaceTransportVelocityDeclaration*
+        material_velocity_declaration = nullptr;
+    if (material_interface_velocity) {
+        material_velocity_declaration =
+            &requireMaterialInterfaceVelocityDeclaration(
+                system,
+                pending_phi.existing_id,
+                options.velocity.material_interface_marker);
+        if (material_velocity_declaration->dimension != dimension) {
+            throw std::invalid_argument(
+                "installLevelSetTransport: material-interface phase-pair velocity dimension differs from the level-set space");
+        }
     }
 
     FieldId algebraic_extension_source_id = INVALID_FIELD_ID;
@@ -1683,7 +1765,8 @@ systems::CoupledResidualKernels installLevelSetTransport(
     }
 
     FieldId velocity_id = INVALID_FIELD_ID;
-    if (options.velocity.source != LevelSetVelocitySource::ConstantVector) {
+    if (options.velocity.source != LevelSetVelocitySource::ConstantVector &&
+        !material_interface_velocity) {
         velocity_id = ensureVelocityField(system, options.velocity);
     }
 
@@ -1693,7 +1776,31 @@ systems::CoupledResidualKernels installLevelSetTransport(
     const auto phi = StateField(phi_id, *phi_rec.space, options.level_set.field_name);
     const auto eta = TestField(phi_id, *phi_rec.space, "eta");
     FormExpr velocity;
-    if (options.velocity.source == LevelSetVelocitySource::ConstantVector) {
+    FormExpr negative_material_velocity;
+    FormExpr positive_material_velocity;
+    FormExpr material_interface_trace_velocity;
+    if (material_interface_velocity) {
+        const auto& negative_record = system.fieldRecord(
+            material_velocity_declaration->negative_velocity_field);
+        const auto& positive_record = system.fieldRecord(
+            material_velocity_declaration->positive_velocity_field);
+        negative_material_velocity = StateField(
+            material_velocity_declaration->negative_velocity_field,
+            *negative_record.space,
+            negative_record.name);
+        positive_material_velocity = StateField(
+            material_velocity_declaration->positive_velocity_field,
+            *positive_record.space,
+            positive_record.name);
+        material_interface_trace_velocity =
+            FormExpr::constant(
+                material_velocity_declaration->negative_trace_weight) *
+                negative_material_velocity +
+            FormExpr::constant(
+                material_velocity_declaration->positive_trace_weight) *
+                positive_material_velocity;
+    } else if (options.velocity.source ==
+               LevelSetVelocitySource::ConstantVector) {
         std::vector<FormExpr> components;
         components.reserve(static_cast<std::size_t>(dimension));
         for (int d = 0; d < dimension; ++d) {
@@ -1712,14 +1819,41 @@ systems::CoupledResidualKernels installLevelSetTransport(
     }
 
     const auto time_residual = dt(phi);
-    const auto advective_spatial_residual = dot(velocity, grad(phi));
-    const auto conservative_spatial_residual = div(phi * velocity);
-    const auto spatial_residual =
-        options.transport_form == LevelSetTransportForm::ConservativeDivergence
-            ? conservative_spatial_residual
-            : advective_spatial_residual;
-    auto residual = (time_residual * eta).dx() + (spatial_residual * eta).dx();
-    if (options.supg.enabled) {
+    const auto spatialResidual = [&](const FormExpr& advecting_velocity) {
+        return options.transport_form ==
+                       LevelSetTransportForm::ConservativeDivergence
+                   ? div(phi * advecting_velocity)
+                   : dot(advecting_velocity, grad(phi));
+    };
+    auto residual = (time_residual * eta).dx();
+    FormExpr interface_spatial_residual;
+    if (material_interface_velocity) {
+        const auto negative_spatial_residual =
+            spatialResidual(negative_material_velocity);
+        const auto positive_spatial_residual =
+            spatialResidual(positive_material_velocity);
+        residual = residual +
+                   (negative_spatial_residual * eta)
+                       .dCutVolume(
+                           material_velocity_declaration->interface_marker,
+                           CutVolumeSide::Negative) +
+                   (positive_spatial_residual * eta)
+                       .dCutVolume(
+                           material_velocity_declaration->interface_marker,
+                           CutVolumeSide::Positive);
+        interface_spatial_residual =
+            spatialResidual(material_interface_trace_velocity);
+    } else {
+        interface_spatial_residual = spatialResidual(velocity);
+        residual = residual + (interface_spatial_residual * eta).dx();
+    }
+
+    const auto appendSupg = [&](const FormExpr& advecting_velocity,
+                                const FormExpr& spatial_residual,
+                                std::optional<CutVolumeSide> side) {
+        if (!options.supg.enabled) {
+            return;
+        }
         // Directional/transient SUPG scale:
         //   tau = c_tau / sqrt((c_t/dt_eff)^2 + u . G u + eps),
         //   G   = J^{-T} J^{-1}.
@@ -1731,14 +1865,22 @@ systems::CoupledResidualKernels installLevelSetTransport(
         const auto metric = transpose(Jinv()) * Jinv();
         const auto transient_rate =
             FormExpr::constant(options.supg.transient_scale) / dt_eff;
-        const auto directional_rate_squared = inner(velocity, metric * velocity);
+        const auto directional_rate_squared =
+            inner(advecting_velocity, metric * advecting_velocity);
         const auto tau = FormExpr::constant(options.supg.tau_scale) /
                          sqrt(transient_rate * transient_rate +
                               directional_rate_squared + eps);
-        const auto streamline_test = tau * dot(velocity, grad(eta));
-        residual = residual +
-                   (streamline_test * time_residual).dx() +
-                   (streamline_test * spatial_residual).dx();
+        const auto streamline_test =
+            tau * dot(advecting_velocity, grad(eta));
+        const auto integrate = [&](const FormExpr& integrand) {
+            return side.has_value()
+                       ? integrand.dCutVolume(
+                             material_velocity_declaration->interface_marker,
+                             *side)
+                       : integrand.dx();
+        };
+        residual = residual + integrate(streamline_test * time_residual) +
+                   integrate(streamline_test * spatial_residual);
 
         if (options.supg.discontinuity_capturing_enabled) {
             // Residual-based diffusion supplies the cross-stream control that
@@ -1751,7 +1893,7 @@ systems::CoupledResidualKernels installLevelSetTransport(
                 inner(grad(phi), grad(phi)) +
                 FormExpr::constant(options.supg.gradient_epsilon));
             const auto speed = sqrt(
-                inner(velocity, velocity) + eps);
+                inner(advecting_velocity, advecting_velocity) + eps);
             const auto raw_diffusivity =
                 FormExpr::constant(options.supg.discontinuity_capturing_scale) *
                 h() *
@@ -1769,9 +1911,21 @@ systems::CoupledResidualKernels installLevelSetTransport(
                     options.supg.discontinuity_capturing_max_courant) *
                 (h() * speed + h() * h() / dt_eff);
             const auto diffusivity = min(raw_diffusivity, diffusivity_cap);
-            residual = residual +
-                       (diffusivity * inner(grad(phi), grad(eta))).dx();
+            residual = residual + integrate(
+                diffusivity * inner(grad(phi), grad(eta)));
         }
+    };
+    if (material_interface_velocity) {
+        appendSupg(
+            negative_material_velocity,
+            spatialResidual(negative_material_velocity),
+            CutVolumeSide::Negative);
+        appendSupg(
+            positive_material_velocity,
+            spatialResidual(positive_material_velocity),
+            CutVolumeSide::Positive);
+    } else {
+        appendSupg(velocity, interface_spatial_residual, std::nullopt);
     }
     if (options.interface_kinematic.enabled) {
         residual = residual +
@@ -1779,7 +1933,7 @@ systems::CoupledResidualKernels installLevelSetTransport(
                     h() * time_residual * eta)
                        .dI(options.interface_kinematic.interface_marker) +
                    (FormExpr::constant(options.interface_kinematic.weight_scale) *
-                    h() * spatial_residual * eta)
+                    h() * interface_spatial_residual * eta)
                        .dI(options.interface_kinematic.interface_marker);
     }
 
@@ -1825,6 +1979,11 @@ systems::CoupledResidualKernels installLevelSetTransport(
     install.compiler_options.use_symbolic_tangent = true;
     if (options.velocity.source == LevelSetVelocitySource::CoupledField) {
         install.extra_trial_fields.push_back(velocity_id);
+    } else if (material_interface_velocity) {
+        install.extra_trial_fields.push_back(
+            material_velocity_declaration->negative_velocity_field);
+        install.extra_trial_fields.push_back(
+            material_velocity_declaration->positive_velocity_field);
     }
     std::vector<FieldId> residual_fields{phi_id};
     if (phase_id != INVALID_FIELD_ID) {

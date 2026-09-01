@@ -3,9 +3,10 @@
 #include "Application/Core/LevelSetCutConfiguration.h"
 #include "Application/Core/OopMpiLog.h"
 #include "Application/Translators/EquationTranslator.h"
-#include "FE/Interfaces/LevelSetInterfaceDomain.h"
+#include "Application/Translators/LevelSetEquationTranslator.h"
 #include "Application/Translators/MeshTranslator.h"
 
+#include "FE/Interfaces/LevelSetInterfaceDomain.h"
 #include "FE/Backends/Interfaces/BackendFactory.h"
 #include "FE/Backends/Interfaces/BackendKind.h"
 #include "FE/Backends/Interfaces/GenericVector.h"
@@ -19,10 +20,12 @@
 #include "FE/TimeStepping/TimeHistory.h"
 #include "Mesh/Mesh.h"
 #include "Physics/Core/PhysicsModule.h"
+#include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesRegister.h"
 #include "Parameters.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -74,6 +77,26 @@ bool parse_bool_relaxed(std::string value)
          value == "on";
 }
 
+svmp::FE::backends::BackendKind selectBackend(const Parameters& params);
+
+svmp::FE::backends::SolverOptions translateSolverOptions(
+    const Parameters& params,
+    svmp::FE::backends::BackendKind backend_kind);
+
+void requireTwoFluidMaterialInterfaceSolverEnvelope(
+    svmp::FE::backends::BackendKind backend_kind,
+    svmp::FE::backends::SolverMethod solver_method)
+{
+  if (backend_kind != svmp::FE::backends::BackendKind::FSILS) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Application] two_fluid_material_interface_solver_requires_fsils");
+  }
+  if (solver_method != svmp::FE::backends::SolverMethod::BlockSchur) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Application] two_fluid_material_interface_solver_requires_block_schur");
+  }
+}
+
 void preflightNavierStokesFittedSurfaceContactCapabilities(
     const Parameters& params,
     const std::map<std::string, std::shared_ptr<svmp::Mesh>>& meshes)
@@ -92,6 +115,174 @@ void preflightNavierStokesFittedSurfaceContactCapabilities(
     svmp::Physics::formulations::navier_stokes::
         preflightFittedSurfaceContactCapability(input);
   }
+}
+
+void preflightAndPreRegisterTwoFluidMaterialInterfaceDependencies(
+    const Parameters& params,
+    const std::map<std::string, std::shared_ptr<svmp::Mesh>>& meshes,
+    svmp::FE::systems::FESystem& system)
+{
+  namespace level_set = application::translators::level_set;
+  namespace navier_stokes =
+      svmp::Physics::formulations::navier_stokes;
+
+  struct MaterialTransportCandidate {
+    svmp::Physics::EquationModuleInput input{};
+    level_set::MaterialInterfaceTransportDependency dependency{};
+  };
+  struct TwoFluidCandidate {
+    svmp::Physics::EquationModuleInput input{};
+    navier_stokes::IncompressibleTwoFluidDependency dependency{};
+  };
+  std::vector<MaterialTransportCandidate> transports;
+  std::vector<TwoFluidCandidate> owners;
+  std::size_t equation_count = 0u;
+
+  for (const auto* equation : params.equation_parameters) {
+    if (equation == nullptr) {
+      continue;
+    }
+    ++equation_count;
+    if (!equation->type.defined()) {
+      continue;
+    }
+    const auto type = lower_copy(trim_copy(equation->type.value()));
+    if (type != "fluid" && type != "stokes" &&
+        type != "level_set" && type != "levelset" &&
+        type != "level_set_transport") {
+      continue;
+    }
+    auto input = application::translators::EquationTranslator::buildInput(
+        *equation, meshes);
+    if (type == "fluid" || type == "stokes") {
+      if (auto dependency =
+              navier_stokes::incompressibleTwoFluidDependency(
+                  input, system)) {
+        owners.push_back(TwoFluidCandidate{
+            .input = std::move(input),
+            .dependency = std::move(*dependency),
+        });
+      }
+      continue;
+    }
+    if (auto dependency =
+            level_set::materialInterfaceTransportDependency(input)) {
+      transports.push_back(MaterialTransportCandidate{
+          .input = std::move(input),
+          .dependency = std::move(*dependency),
+      });
+    }
+  }
+
+  if (transports.size() > 1u || owners.size() > 1u) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] ambiguous_material_interface_dependency_pair");
+  }
+  if (transports.size() == 1u && owners.empty()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] material_interface_dependency_missing_two_fluid_owner");
+  }
+  if (owners.size() == 1u && transports.empty()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] two_fluid_dependency_missing_material_interface_transport");
+  }
+  if (transports.empty()) {
+    return;
+  }
+  if (equation_count != 2u) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] two_fluid_material_interface_solver_requires_exact_equation_pair");
+  }
+
+  const auto& transport = transports.front().dependency;
+  const auto& owner = owners.front().dependency;
+  if (transport.interface_marker != owner.interface_marker) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] material_interface_dependency_marker_mismatch");
+  }
+  if (transport.mesh == nullptr || owner.mesh == nullptr ||
+      transport.mesh != owner.mesh ||
+      transport.mesh_name != owner.mesh_name ||
+      transport.dimension != owner.dimension ||
+      transport.level_set_field_name != owner.level_set_field_name ||
+      transport.operator_tag != owner.operator_tag) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] material_interface_dependency_contract_mismatch");
+  }
+
+  const std::array<std::string_view, 6> field_names{
+      transport.level_set_field_name,
+      transport.conservative_phase_field_name,
+      owner.negative_velocity_field_name,
+      owner.positive_velocity_field_name,
+      owner.negative_pressure_field_name,
+      owner.positive_pressure_field_name,
+  };
+  for (std::size_t i = 0u; i < field_names.size(); ++i) {
+    if (field_names[i].empty()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] material_interface_dependency_empty_field_name");
+    }
+    for (std::size_t j = i + 1u; j < field_names.size(); ++j) {
+      if (field_names[i] == field_names[j]) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] material_interface_dependency_field_name_collision");
+      }
+    }
+  }
+
+  const auto backend_kind = selectBackend(params);
+  const auto solver_options =
+      translateSolverOptions(params, backend_kind);
+  requireTwoFluidMaterialInterfaceSolverEnvelope(
+      backend_kind, solver_options.method);
+
+  const auto register_dependencies = [&](auto& target_system) {
+    level_set::preRegisterMaterialInterfaceTransportFields(
+        transports.front().input, target_system);
+    navier_stokes::preRegisterIncompressibleTwoFluidDependencyFields(
+        owners.front().input, target_system);
+  };
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+  const auto mesh_it = meshes.find(transport.mesh_name);
+  if (mesh_it == meshes.end() || mesh_it->second == nullptr ||
+      mesh_it->second->local_mesh_ptr().get() != transport.mesh) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] material_interface_dependency_mesh_preflight_mismatch");
+  }
+  svmp::FE::systems::FESystem probe(mesh_it->second);
+  for (std::size_t index = 0u;
+       index < system.registeredFieldCount(); ++index) {
+    const auto field = static_cast<svmp::FE::FieldId>(index);
+    const auto& record = system.fieldRecord(field);
+    const auto copied = probe.addField(svmp::FE::systems::FieldSpec{
+        .name = record.name,
+        .space = record.space,
+        .components = record.components,
+        .scope = record.scope,
+        .interface_marker = record.interface_marker,
+        .participant_name = record.participant_name,
+        .participant_domain_id = record.participant_domain_id,
+        .source_kind = record.source_kind,
+        .derived = record.derived,
+    });
+    if (copied != record.id) {
+      throw std::logic_error(
+          "[svMultiPhysics::Application] material_interface_dependency_probe_field_order_mismatch");
+    }
+  }
+  for (const auto& declaration :
+       system.materialInterfaceTransportVelocityDeclarations()) {
+    probe.declareMaterialInterfaceTransportVelocity(declaration);
+  }
+  register_dependencies(probe);
+#else
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] material_interface_dependency_preflight_requires_mesh_integration");
+#endif
+
+  register_dependencies(system);
 }
 
 void preRegisterFutureWetExtensionVelocity(
@@ -450,7 +641,14 @@ bool firstEquationTypeIs(const Parameters& params, const std::string& equation_t
     if (!e) {
       continue;
     }
-    return e->type.defined() && lower_copy(e->type.value()) == equation_type;
+    if (!e->type.defined()) {
+      return false;
+    }
+    const auto type = trim_copy(e->type.value());
+    if (equation_type == "level_set") {
+      return application::translators::level_set::isEquationType(type);
+    }
+    return lower_copy(type) == equation_type;
   }
   return false;
 }
@@ -539,9 +737,15 @@ const EquationParameters* selectSolverEquation(const Parameters& params)
     return nullptr;
   }
 
-  if (first->type.defined() && lower_copy(first->type.value()) == "level_set") {
+  if (first->type.defined() &&
+      application::translators::level_set::isEquationType(
+          trim_copy(first->type.value()))) {
     for (const auto* e : params.equation_parameters) {
-      if (e && e->type.defined() && lower_copy(e->type.value()) == "fluid") {
+      if (!e || !e->type.defined()) {
+        continue;
+      }
+      const auto owner_type = lower_copy(trim_copy(e->type.value()));
+      if (owner_type == "fluid" || owner_type == "stokes") {
         return e;
       }
     }
@@ -905,6 +1109,110 @@ SimulationComponents& SimulationComponents::operator=(SimulationComponents&&) no
 
 SimulationComponents::~SimulationComponents() = default;
 
+bool detail::groupTwoFluidMaterialInterfaceFsilsLayout(
+    const svmp::FE::systems::FESystem& system,
+    svmp::FE::backends::BlockLayout& layout)
+{
+  const auto& material =
+      system.materialInterfaceTransportVelocityDeclarations();
+  const auto& diagnostics =
+      system.twoFluidAcceptedStageDiagnosticDeclarations();
+  if (material.size() != 1u || diagnostics.size() != 1u ||
+      system.registeredFieldCount() != 6u || layout.blocks.size() != 6u) {
+    return false;
+  }
+
+  const auto& velocity = material.front();
+  const auto& diagnostic = diagnostics.front();
+  constexpr svmp::FE::FieldId level_set = 0;
+  constexpr svmp::FE::FieldId conservative_phase = 1;
+  constexpr svmp::FE::FieldId negative_velocity = 2;
+  constexpr svmp::FE::FieldId positive_velocity = 3;
+  constexpr svmp::FE::FieldId negative_pressure = 4;
+  constexpr svmp::FE::FieldId positive_pressure = 5;
+  if (velocity.dimension != 2 && velocity.dimension != 3) {
+    return false;
+  }
+  if (velocity.interface_marker != diagnostic.interface_marker ||
+      velocity.level_set_field != level_set ||
+      diagnostic.level_set_field != level_set ||
+      velocity.negative_velocity_field != negative_velocity ||
+      velocity.positive_velocity_field != positive_velocity ||
+      diagnostic.negative_velocity_field != negative_velocity ||
+      diagnostic.positive_velocity_field != positive_velocity ||
+      diagnostic.negative_pressure_field != negative_pressure ||
+      diagnostic.positive_pressure_field != positive_pressure ||
+      velocity.geometry_domain_id != diagnostic.geometry_domain_id ||
+      velocity.level_set_isovalue != diagnostic.level_set_isovalue) {
+    return false;
+  }
+
+  const std::array<int, 6> expected_components{
+      1, 1, velocity.dimension, velocity.dimension, 1, 1};
+  int component_offset = 0;
+  for (std::size_t index = 0u; index < expected_components.size(); ++index) {
+    const auto field = static_cast<svmp::FE::FieldId>(index);
+    const auto& record = system.fieldRecord(field);
+    const auto& block = layout.blocks[index];
+    if (!system.fieldParticipatesInUnknownVector(field) ||
+        record.components != expected_components[index] ||
+        block.name != record.name ||
+        block.start_component != component_offset ||
+        block.n_components != expected_components[index]) {
+      return false;
+    }
+    component_offset += expected_components[index];
+  }
+  if (system.fieldRecord(conservative_phase).components != 1) {
+    return false;
+  }
+
+  const int primary_components = component_offset - 2;
+  svmp::FE::backends::BlockLayout grouped{};
+  grouped.blocks.push_back({
+      "TwoFluidMaterialInterfaceComputationalPrimary",
+      0,
+      primary_components,
+      svmp::FE::backends::BlockRole::PrimaryField});
+  grouped.blocks.push_back({
+      "TwoFluidPressureConstraints",
+      primary_components,
+      2,
+      svmp::FE::backends::BlockRole::ConstraintField});
+  grouped.momentum_block = 0;
+  grouped.constraint_block = 1;
+  layout = std::move(grouped);
+  return true;
+}
+
+void detail::requireTwoFluidMaterialInterfaceSolverLayout(
+    const svmp::FE::systems::FESystem& system,
+    svmp::FE::backends::BackendKind backend_kind,
+    svmp::FE::backends::SolverMethod solver_method,
+    svmp::FE::backends::BlockLayout& layout)
+{
+  const auto material_count =
+      system.materialInterfaceTransportVelocityDeclarations().size();
+  const auto diagnostic_count =
+      system.twoFluidAcceptedStageDiagnosticDeclarations().size();
+  if (material_count == 0u && diagnostic_count == 0u) {
+    return;
+  }
+  if (material_count != 1u || diagnostic_count != 1u) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Application] two_fluid_material_interface_solver_declaration_pair_required");
+  }
+  requireTwoFluidMaterialInterfaceSolverEnvelope(
+      backend_kind, solver_method);
+
+  auto grouped = layout;
+  if (!groupTwoFluidMaterialInterfaceFsilsLayout(system, grouped)) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Application] two_fluid_material_interface_solver_layout_contract_mismatch");
+  }
+  layout = std::move(grouped);
+}
+
 void detail::preflightAndPreRegisterPhysicsModuleDependencies(
     const Parameters& params,
     SimulationComponents& components)
@@ -915,6 +1223,8 @@ void detail::preflightAndPreRegisterPhysicsModuleDependencies(
   }
   preflightNavierStokesFittedSurfaceContactCapabilities(
       params, components.meshes);
+  preflightAndPreRegisterTwoFluidMaterialInterfaceDependencies(
+      params, components.meshes, *components.fe_system);
   preRegisterFutureWetExtensionVelocity(
       params, components.meshes, *components.fe_system);
 }
@@ -1306,6 +1616,12 @@ void SimulationBuilder::createSolvers()
         layout.blocks.push_back({f.name, offset, ncomp});
         offset += ncomp;
       }
+
+      detail::requireTwoFluidMaterialInterfaceSolverLayout(
+          *components_.fe_system,
+          backend_kind,
+          solver_options.method,
+          layout);
 
       const bool is_ustruct_blockschur =
           backend_kind == svmp::FE::backends::BackendKind::FSILS &&

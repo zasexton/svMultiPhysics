@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <map>
 #include <memory>
 #include <optional>
@@ -23,11 +24,13 @@ struct BoundaryConditionInput {
   std::string name{};
   int boundary_marker{-1};
   ParameterMap params{};
+  std::vector<std::string> nested_configuration_blocks{};
 };
 
 struct DomainInput {
   std::string id{};
   ParameterMap params{};
+  std::vector<std::string> nested_configuration_blocks{};
 };
 
 struct NodePressureConstraintInput {
@@ -44,6 +47,7 @@ struct EquationModuleInput {
   std::string equation_type{};
 
   ParameterMap equation_params{};
+  std::vector<std::string> nested_configuration_blocks{};
 
   std::string module_options{};
   std::string module_options_file_path{};
@@ -56,6 +60,7 @@ struct EquationModuleInput {
 
   std::vector<BoundaryConditionInput> boundary_conditions{};
 
+  std::size_t body_force_block_count{0u};
   std::vector<OutputRequestInput> outputs{};
 
   std::optional<NodePressureConstraintInput> node_pressure_constraints{};

@@ -13291,20 +13291,21 @@ TEST(FreeSurfaceCutStabilityMPI,
         FE::ElementType::Tetra4, /*order=*/1, /*components=*/3);
     FE::systems::FESystem system(mesh);
     (void)system.addField(FE::systems::FieldSpec{
-        .name = "phi_history",
+        .name = "phi",
         .space = pressure_space,
         .components = 1,
         .source_kind = FE::systems::FieldSourceKind::Unknown,
     });
 
     ns::IncompressibleTwoFluidOptions options;
-    options.level_set_field_name = "phi_history";
+    options.level_set_field_name = "phi";
     options.generated_interface_domain_id =
         "distributed_two_fluid_history";
     options.interface_marker = 27411;
     options.surface_tension = FE::Real{0.0};
     options.include_transient_interface_penalty = false;
     options.enable_convection = false;
+    options.require_conservative_phase_momentum_reconciliation = true;
     ns::IncompressibleTwoFluidModule module(
         velocity_space,
         pressure_space,
@@ -13363,11 +13364,18 @@ TEST(FreeSurfaceCutStabilityMPI,
                 .interface_marker = declaration.interface_marker,
                 .isovalue = declaration.level_set_isovalue,
                 .source_value_revision = 7u,
+                .mesh_geometry_revision = 101u,
+                .mesh_topology_revision = 102u,
+                .ownership_revision = 103u,
+                .numbering_revision = 104u,
+                .snapshot_revision_key = 91u,
+            },
+        .local_mesh_revision =
+            FE::interfaces::FreeSurfaceGeometryLocalMeshRevision{
                 .mesh_geometry_revision = stage_geometry.geometry_revision,
                 .mesh_topology_revision = stage_geometry.topology_revision,
                 .ownership_revision = stage_geometry.ownership_revision,
                 .numbering_revision = stage_geometry.numbering_revision,
-                .snapshot_revision_key = 91u,
             },
         .diagnostics = diagnostics,
     };
@@ -13389,13 +13397,184 @@ TEST(FreeSurfaceCutStabilityMPI,
             .rate_revision = 51u + step,
         };
     };
+    const FE::systems::TwoFluidAcceptedStageSolveTelemetry solve_telemetry{
+        .nonlinear =
+            FE::systems::TwoFluidAcceptedStageNonlinearTelemetry{
+                .converged = true,
+                .iterations = 2,
+                .outer_iterations = 1,
+                .inner_iterations_total = 2,
+                .initial_residual_norm = FE::Real{1.0},
+                .final_residual_norm = FE::Real{1.0e-10},
+                .reason = "converged",
+            },
+        .linear =
+            FE::systems::TwoFluidAcceptedStageLinearTelemetry{
+                .converged = true,
+                .iterations = 11,
+                .initial_residual_norm = FE::Real{1.0},
+                .final_residual_norm = FE::Real{1.0e-11},
+                .relative_residual = FE::Real{1.0e-11},
+                .reason = "relative residual target reached",
+            },
+    };
+    const auto aggregation_reports = [&]() {
+        const auto make_report =
+            [&](FE::FieldId field,
+                FE::geometry::CutIntegrationSide side,
+                std::uint64_t fingerprint) {
+                FE::constraints::SmallCutAggregationRefreshReport report;
+                report.field = field;
+                report.active_side = side;
+                report.interface_marker = declaration.interface_marker;
+                report.geometry_identity.kind = FE::constraints::
+                    SmallCutAggregationGeometryIdentityKind::
+                        AuthoritativeFreeSurfaceSnapshot;
+                report.geometry_identity.available = true;
+                report.geometry_identity
+                    .communicator_fingerprint_consensus_validated = true;
+                report.geometry_identity.source_id =
+                    state.geometry_revision.source_id;
+                report.geometry_identity.domain_id =
+                    state.geometry_revision.domain_id;
+                report.geometry_identity.interface_marker =
+                    state.geometry_revision.interface_marker;
+                report.geometry_identity.isovalue =
+                    state.geometry_revision.isovalue;
+                report.geometry_identity.source_layout_revision =
+                    state.geometry_revision.source_layout_revision;
+                report.geometry_identity.source_value_revision =
+                    state.geometry_revision.source_value_revision;
+                report.geometry_identity.quadrature_policy_key =
+                    state.geometry_revision.quadrature_policy_key;
+                report.geometry_identity.snapshot_revision_key =
+                    state.geometry_revision.snapshot_revision_key;
+                report.geometry_identity.distributed_mesh_geometry_revision =
+                    state.geometry_revision.mesh_geometry_revision;
+                report.geometry_identity.distributed_mesh_topology_revision =
+                    state.geometry_revision.mesh_topology_revision;
+                report.geometry_identity.distributed_ownership_revision =
+                    state.geometry_revision.ownership_revision;
+                report.geometry_identity.distributed_numbering_revision =
+                    state.geometry_revision.numbering_revision;
+                report.geometry_identity.canonical_fingerprint = 700u;
+                report.local_lineage.successful_publication_ordinal =
+                    1u + static_cast<std::uint64_t>(rank);
+                report.local_lineage.mesh_geometry_revision =
+                    1000u + static_cast<std::uint64_t>(rank);
+                report.canonical_feature_class_fingerprint =
+                    fingerprint + 100u;
+                report.canonical_slave_set_fingerprint = fingerprint + 200u;
+                report.maximum_root_path_length = 4u;
+                report.maximum_observed_root_path = 1u;
+                report.maximum_reference_extrapolation_distance =
+                    FE::Real{1.5};
+                report.maximum_observed_reference_extrapolation =
+                    FE::Real{0.25};
+                report.maximum_absolute_coefficient = FE::Real{8.0};
+                report.maximum_observed_absolute_coefficient =
+                    FE::Real{1.25};
+                report.maximum_row_l1_norm = FE::Real{12.0};
+                report.maximum_observed_row_l1_norm = FE::Real{2.0};
+                report.canonical_candidate_vertices = 2u;
+                report.canonical_rooted_candidate_vertices = 2u;
+                report.canonical_owned_aggregate_dofs = 3u;
+                report.canonical_active_feature_count = 1u;
+                report.canonical_rooted_active_feature_count = 1u;
+                return report;
+            };
+        return std::array{
+            make_report(
+                declaration.negative_velocity_field,
+                FE::geometry::CutIntegrationSide::Negative,
+                701u),
+            make_report(
+                declaration.negative_pressure_field,
+                FE::geometry::CutIntegrationSide::Negative,
+                702u),
+            make_report(
+                declaration.positive_velocity_field,
+                FE::geometry::CutIntegrationSide::Positive,
+                703u),
+            make_report(
+                declaration.positive_pressure_field,
+                FE::geometry::CutIntegrationSide::Positive,
+                704u),
+        };
+    }();
 
     const std::array accepted_states{state};
     ASSERT_NO_THROW(system.stageTwoFluidAcceptedStageDiagnostics(
         metadata(1u, FE::Real{0.0}, FE::Real{0.1}), accepted_states));
+    auto corrected_state = state;
+    corrected_state.geometry_revision.source_value_revision = 8u;
+    corrected_state.geometry_revision.snapshot_revision_key = 92u;
+    corrected_state.diagnostics.snapshot_revision_key = 92u;
+    const auto accepted_reconciliation = FE::interfaces::
+        buildIncompressibleTwoFluidMomentumReconciliation(
+            declaration.interface_marker,
+            state.geometry_revision,
+            state.diagnostics,
+            /*raw_algebraic_revision=*/42u,
+            corrected_state.geometry_revision,
+            corrected_state.diagnostics,
+            /*corrected_algebraic_revision=*/62u,
+            FE::Real{1.0e-10});
+    const std::array accepted_reconciliations{accepted_reconciliation};
+    ASSERT_NO_THROW(system.bindPendingTwoFluidMomentumReconciliations(
+        accepted_reconciliations));
+    ASSERT_NO_THROW(system.bindPendingTwoFluidAcceptedStageNumerics(
+        solve_telemetry, aggregation_reports));
     ASSERT_NO_THROW(system.commitPendingTwoFluidAcceptedStageDiagnostics(
         1u, FE::Real{0.1}, FE::Real{0.1}));
     ASSERT_EQ(system.twoFluidAcceptedStageDiagnosticHistory().size(), 1u);
+
+    ASSERT_NO_THROW(system.stageTwoFluidAcceptedStageDiagnostics(
+        metadata(2u, FE::Real{0.1}, FE::Real{0.2}), accepted_states));
+    auto rank_divergent_corrected = corrected_state;
+    rank_divergent_corrected.geometry_revision.source_value_revision =
+        9u + static_cast<std::uint64_t>(rank);
+    rank_divergent_corrected.geometry_revision.snapshot_revision_key =
+        93u + static_cast<std::uint64_t>(rank);
+    rank_divergent_corrected.diagnostics.snapshot_revision_key =
+        93u + static_cast<std::uint64_t>(rank);
+    const auto rank_divergent_reconciliation = FE::interfaces::
+        buildIncompressibleTwoFluidMomentumReconciliation(
+            declaration.interface_marker,
+            state.geometry_revision,
+            state.diagnostics,
+            /*raw_algebraic_revision=*/43u,
+            rank_divergent_corrected.geometry_revision,
+            rank_divergent_corrected.diagnostics,
+            /*corrected_algebraic_revision=*/63u +
+                static_cast<std::uint64_t>(rank),
+            FE::Real{1.0e-10});
+    const std::array rank_divergent_reconciliations{
+        rank_divergent_reconciliation};
+    EXPECT_THROW(system.bindPendingTwoFluidMomentumReconciliations(
+                     rank_divergent_reconciliations),
+                 FE::InvalidArgumentException);
+    EXPECT_FALSE(system.pendingTwoFluidAcceptedStageDiagnostics()
+                     .front()
+                     .momentum_reconciliation.has_value());
+    system.discardPendingTwoFluidAcceptedStageDiagnostics();
+
+    ASSERT_NO_THROW(system.stageTwoFluidAcceptedStageDiagnostics(
+        metadata(2u, FE::Real{0.1}, FE::Real{0.2}), accepted_states));
+    auto rank_divergent_aggregation = aggregation_reports;
+    if (rank == 1) {
+        ++rank_divergent_aggregation.front()
+              .canonical_candidate_vertices;
+        ++rank_divergent_aggregation.front()
+              .canonical_rooted_candidate_vertices;
+    }
+    EXPECT_THROW(system.bindPendingTwoFluidAcceptedStageNumerics(
+                     solve_telemetry, rank_divergent_aggregation),
+                 FE::InvalidArgumentException);
+    EXPECT_FALSE(system.pendingTwoFluidAcceptedStageDiagnostics()
+                     .front()
+                     .numerics.has_value());
+    system.discardPendingTwoFluidAcceptedStageDiagnostics();
 
     auto divergent_state = state;
     if (rank == 1) {

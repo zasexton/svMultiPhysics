@@ -699,4 +699,250 @@ finalizeIncompressibleTwoFluidDiagnostics(
     return state;
 }
 
+namespace {
+
+[[nodiscard]] Real vectorNorm(const std::array<Real, 3>& value) noexcept
+{
+    const long double squared =
+        static_cast<long double>(value[0]) * value[0] +
+        static_cast<long double>(value[1]) * value[1] +
+        static_cast<long double>(value[2]) * value[2];
+    return static_cast<Real>(std::sqrt(std::max(0.0L, squared)));
+}
+
+[[nodiscard]] bool reconciliationNear(Real lhs, Real rhs) noexcept
+{
+    const Real scale = std::max({Real{1.0}, std::abs(lhs), std::abs(rhs)});
+    return std::abs(lhs - rhs) <=
+           Real{64.0} * std::numeric_limits<Real>::epsilon() * scale;
+}
+
+[[nodiscard]] IncompressibleTwoFluidPhaseMomentumReconciliation
+buildPhaseMomentumReconciliation(
+    const IncompressibleTwoFluidPhaseDiagnosticState& raw,
+    const IncompressibleTwoFluidPhaseDiagnosticState& corrected,
+    Real relative_tolerance)
+{
+    if (raw.side != corrected.side || !std::isfinite(raw.density) ||
+        !std::isfinite(corrected.density) ||
+        !(raw.density > Real{0.0}) || raw.density != corrected.density ||
+        !std::isfinite(raw.volume) ||
+        !std::isfinite(corrected.volume) || !std::isfinite(raw.mass) ||
+        !std::isfinite(corrected.mass) || raw.volume < Real{0.0} ||
+        corrected.volume < Real{0.0} || raw.mass < Real{0.0} ||
+        corrected.mass < Real{0.0} ||
+        !reconciliationNear(raw.mass, raw.density * raw.volume) ||
+        !reconciliationNear(
+            corrected.mass, corrected.density * corrected.volume) ||
+        !finiteVector(raw.momentum) ||
+        !finiteVector(corrected.momentum)) {
+        throw std::invalid_argument(
+            "incompressible two-fluid momentum reconciliation received invalid phase states");
+    }
+    IncompressibleTwoFluidPhaseMomentumReconciliation phase;
+    phase.side = raw.side;
+    phase.density = raw.density;
+    phase.raw_volume = raw.volume;
+    phase.corrected_volume = corrected.volume;
+    phase.raw_mass = raw.mass;
+    phase.corrected_mass = corrected.mass;
+    phase.raw_momentum = raw.momentum;
+    phase.corrected_momentum = corrected.momentum;
+    for (std::size_t component = 0u; component < 3u; ++component) {
+        phase.momentum_delta[component] =
+            corrected.momentum[component] - raw.momentum[component];
+    }
+    phase.momentum_delta_norm = vectorNorm(phase.momentum_delta);
+    phase.momentum_reference_norm =
+        std::max(vectorNorm(raw.momentum), vectorNorm(corrected.momentum));
+    phase.allowed_momentum_delta =
+        relative_tolerance * phase.momentum_reference_norm;
+    phase.satisfied =
+        phase.momentum_delta_norm <= phase.allowed_momentum_delta;
+    return phase;
+}
+
+void validatePhaseMomentumReconciliation(
+    const IncompressibleTwoFluidPhaseMomentumReconciliation& phase,
+    geometry::CutIntegrationSide expected_side,
+    Real relative_tolerance)
+{
+    if (phase.side != expected_side || !std::isfinite(phase.density) ||
+        !(phase.density > Real{0.0}) ||
+        !std::isfinite(phase.raw_volume) ||
+        !std::isfinite(phase.corrected_volume) ||
+        !std::isfinite(phase.raw_mass) ||
+        !std::isfinite(phase.corrected_mass) ||
+        phase.raw_volume < Real{0.0} ||
+        phase.corrected_volume < Real{0.0} ||
+        phase.raw_mass < Real{0.0} || phase.corrected_mass < Real{0.0} ||
+        !reconciliationNear(
+            phase.raw_mass, phase.density * phase.raw_volume) ||
+        !reconciliationNear(
+            phase.corrected_mass,
+            phase.density * phase.corrected_volume) ||
+        !finiteVector(phase.raw_momentum) ||
+        !finiteVector(phase.corrected_momentum) ||
+        !finiteVector(phase.momentum_delta) ||
+        !std::isfinite(phase.momentum_delta_norm) ||
+        !std::isfinite(phase.momentum_reference_norm) ||
+        !std::isfinite(phase.allowed_momentum_delta) ||
+        phase.momentum_delta_norm < Real{0.0} ||
+        phase.momentum_reference_norm < Real{0.0} ||
+        phase.allowed_momentum_delta < Real{0.0}) {
+        throw std::invalid_argument(
+            "incompressible two-fluid momentum reconciliation phase record is invalid");
+    }
+    std::array<Real, 3> expected_delta{};
+    for (std::size_t component = 0u; component < 3u; ++component) {
+        expected_delta[component] =
+            phase.corrected_momentum[component] -
+            phase.raw_momentum[component];
+        if (!reconciliationNear(
+                phase.momentum_delta[component],
+                expected_delta[component])) {
+            throw std::invalid_argument(
+                "incompressible two-fluid momentum reconciliation delta is inconsistent");
+        }
+    }
+    const Real expected_delta_norm = vectorNorm(expected_delta);
+    const Real expected_reference_norm = std::max(
+        vectorNorm(phase.raw_momentum),
+        vectorNorm(phase.corrected_momentum));
+    const Real expected_allowed =
+        relative_tolerance * expected_reference_norm;
+    const bool expected_satisfied =
+        expected_delta_norm <= expected_allowed;
+    if (!reconciliationNear(
+            phase.momentum_delta_norm, expected_delta_norm) ||
+        !reconciliationNear(
+            phase.momentum_reference_norm, expected_reference_norm) ||
+        !reconciliationNear(
+            phase.allowed_momentum_delta, expected_allowed) ||
+        phase.satisfied != expected_satisfied) {
+        throw std::invalid_argument(
+            "incompressible two-fluid momentum reconciliation phase gate is inconsistent");
+    }
+}
+
+} // namespace
+
+IncompressibleTwoFluidMomentumReconciliation
+buildIncompressibleTwoFluidMomentumReconciliation(
+    int interface_marker,
+    const FreeSurfaceGeometryRevision& raw_geometry_revision,
+    const IncompressibleTwoFluidDiagnosticState& raw,
+    std::uint64_t raw_algebraic_revision,
+    const FreeSurfaceGeometryRevision& corrected_geometry_revision,
+    const IncompressibleTwoFluidDiagnosticState& corrected,
+    std::uint64_t corrected_algebraic_revision,
+    Real relative_tolerance)
+{
+    if (interface_marker < 0 || !std::isfinite(relative_tolerance) ||
+        !(relative_tolerance > Real{0.0}) ||
+        raw_algebraic_revision == 0u ||
+        corrected_algebraic_revision == 0u ||
+        raw.snapshot_revision_key == 0u ||
+        corrected.snapshot_revision_key == 0u ||
+        !raw_geometry_revision.complete() ||
+        !corrected_geometry_revision.complete() ||
+        raw_geometry_revision.interface_marker != interface_marker ||
+        corrected_geometry_revision.interface_marker != interface_marker ||
+        raw_geometry_revision.snapshot_revision_key !=
+            raw.snapshot_revision_key ||
+        corrected_geometry_revision.snapshot_revision_key !=
+            corrected.snapshot_revision_key ||
+        raw_geometry_revision.source_id !=
+            corrected_geometry_revision.source_id ||
+        raw_geometry_revision.domain_id !=
+            corrected_geometry_revision.domain_id ||
+        raw_geometry_revision.isovalue !=
+            corrected_geometry_revision.isovalue ||
+        raw_geometry_revision.source_layout_revision !=
+            corrected_geometry_revision.source_layout_revision ||
+        raw_geometry_revision.mesh_geometry_revision !=
+            corrected_geometry_revision.mesh_geometry_revision ||
+        raw_geometry_revision.mesh_topology_revision !=
+            corrected_geometry_revision.mesh_topology_revision ||
+        raw_geometry_revision.ownership_revision !=
+            corrected_geometry_revision.ownership_revision ||
+        raw_geometry_revision.numbering_revision !=
+            corrected_geometry_revision.numbering_revision ||
+        raw_geometry_revision.quadrature_policy_key !=
+            corrected_geometry_revision.quadrature_policy_key) {
+        throw std::invalid_argument(
+            "incompressible two-fluid momentum reconciliation provenance is invalid");
+    }
+    IncompressibleTwoFluidMomentumReconciliation reconciliation;
+    reconciliation.interface_marker = interface_marker;
+    reconciliation.raw_geometry_revision = raw_geometry_revision;
+    reconciliation.corrected_geometry_revision = corrected_geometry_revision;
+    reconciliation.raw_algebraic_revision = raw_algebraic_revision;
+    reconciliation.corrected_algebraic_revision =
+        corrected_algebraic_revision;
+    reconciliation.relative_tolerance = relative_tolerance;
+    reconciliation.velocity_update_applied = false;
+    reconciliation.negative_phase = buildPhaseMomentumReconciliation(
+        raw.negative_phase, corrected.negative_phase, relative_tolerance);
+    reconciliation.positive_phase = buildPhaseMomentumReconciliation(
+        raw.positive_phase, corrected.positive_phase, relative_tolerance);
+    reconciliation.satisfied =
+        reconciliation.negative_phase.satisfied &&
+        reconciliation.positive_phase.satisfied;
+    validateIncompressibleTwoFluidMomentumReconciliation(reconciliation);
+    return reconciliation;
+}
+
+void validateIncompressibleTwoFluidMomentumReconciliation(
+    const IncompressibleTwoFluidMomentumReconciliation& reconciliation)
+{
+    const auto& raw_geometry = reconciliation.raw_geometry_revision;
+    const auto& corrected_geometry =
+        reconciliation.corrected_geometry_revision;
+    if (reconciliation.interface_marker < 0 ||
+        !std::isfinite(reconciliation.relative_tolerance) ||
+        !(reconciliation.relative_tolerance > Real{0.0}) ||
+        reconciliation.raw_algebraic_revision == 0u ||
+        reconciliation.corrected_algebraic_revision == 0u ||
+        reconciliation.velocity_update_applied ||
+        !raw_geometry.complete() || !corrected_geometry.complete() ||
+        raw_geometry.interface_marker != reconciliation.interface_marker ||
+        corrected_geometry.interface_marker !=
+            reconciliation.interface_marker ||
+        raw_geometry.snapshot_revision_key == 0u ||
+        corrected_geometry.snapshot_revision_key == 0u ||
+        raw_geometry.source_id != corrected_geometry.source_id ||
+        raw_geometry.domain_id != corrected_geometry.domain_id ||
+        raw_geometry.isovalue != corrected_geometry.isovalue ||
+        raw_geometry.source_layout_revision !=
+            corrected_geometry.source_layout_revision ||
+        raw_geometry.mesh_geometry_revision !=
+            corrected_geometry.mesh_geometry_revision ||
+        raw_geometry.mesh_topology_revision !=
+            corrected_geometry.mesh_topology_revision ||
+        raw_geometry.ownership_revision !=
+            corrected_geometry.ownership_revision ||
+        raw_geometry.numbering_revision !=
+            corrected_geometry.numbering_revision ||
+        raw_geometry.quadrature_policy_key !=
+            corrected_geometry.quadrature_policy_key) {
+        throw std::invalid_argument(
+            "incompressible two-fluid momentum reconciliation metadata is invalid");
+    }
+    validatePhaseMomentumReconciliation(
+        reconciliation.negative_phase,
+        geometry::CutIntegrationSide::Negative,
+        reconciliation.relative_tolerance);
+    validatePhaseMomentumReconciliation(
+        reconciliation.positive_phase,
+        geometry::CutIntegrationSide::Positive,
+        reconciliation.relative_tolerance);
+    if (reconciliation.satisfied !=
+        (reconciliation.negative_phase.satisfied &&
+         reconciliation.positive_phase.satisfied)) {
+        throw std::invalid_argument(
+            "incompressible two-fluid momentum reconciliation aggregate gate is inconsistent");
+    }
+}
+
 } // namespace svmp::FE::interfaces

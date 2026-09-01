@@ -65,13 +65,15 @@ void validateVelocityBoundaryData(
     for (const auto& boundary : boundaries) {
         if (boundary.boundary_marker < 0) {
             throw std::invalid_argument(
-                "IncompressibleTwoFluidModule: " + std::string(phase) +
-                " velocity boundary marker must be nonnegative");
+                "[svMultiPhysics::Physics] "
+                "unsupported_two_fluid_negative_velocity_boundary_marker:" +
+                std::string(phase));
         }
         if (!markers.insert(boundary.boundary_marker).second) {
             throw std::invalid_argument(
-                "IncompressibleTwoFluidModule: " + std::string(phase) +
-                " velocity boundary markers must be unique");
+                "[svMultiPhysics::Physics] "
+                "unsupported_two_fluid_duplicate_velocity_boundary_marker:" +
+                std::string(phase));
         }
         for (std::size_t component = 0u;
              component < boundary.active_components.size(); ++component) {
@@ -79,7 +81,9 @@ void validateVelocityBoundaryData(
                 !FE::forms::bc::isZeroConstantScalarValue(
                     boundary.value[component])) {
                 throw std::invalid_argument(
-                    "IncompressibleTwoFluidModule: the initial envelope supports only homogeneous phase velocity boundary data");
+                    "[svMultiPhysics::Physics] "
+                    "unsupported_two_fluid_nonhomogeneous_velocity_boundary:" +
+                    std::string(phase));
             }
         }
     }
@@ -315,7 +319,7 @@ void addSharedGaugeEvidence(FE::systems::FESystem& system,
 {
     std::ostringstream out;
     out.imbue(std::locale::classic());
-    out << "{\"artifact_schema_version\":1"
+    out << "{\"artifact_schema_version\":3"
         << ",\"component\":\"incompressible_two_fluid\""
         << ",\"capability_label\":\"incompressible_two_phase_sharp_interface_initial_envelope\""
         << ",\"fields\":{\"negative_velocity\":"
@@ -346,6 +350,7 @@ void addSharedGaugeEvidence(FE::systems::FESystem& system,
         << ",\"geometry_tangent_policy\":"
         << jsonString(options.geometry_tangent_policy)
         << ",\"surface_tension\":" << jsonReal(options.surface_tension)
+        << ",\"prescribed_pressure_jump_mode\":\"manufactured_normal_traction_and_diagnostic_target\""
         << ",\"prescribed_pressure_jump_applicable\":"
         << jsonBool(options.prescribed_pressure_jump.has_value());
     if (options.prescribed_pressure_jump.has_value()) {
@@ -370,9 +375,23 @@ void addSharedGaugeEvidence(FE::systems::FESystem& system,
         << ",\"phasewise_pressure_ghost_penalty\":true"
         << ",\"phasewise_small_cut_aggregation\":true"
         << ",\"pressure_gradient_penalty\":"
-        << jsonReal(options.pressure_gradient_penalty) << '}'
+        << jsonReal(options.pressure_gradient_penalty)
+        << ",\"use_cut_metadata_scale\":"
+        << jsonBool(options.use_cut_metadata_scale)
+        << ",\"cut_metadata_scale_cap\":";
+    if (options.cut_metadata_scale_cap.has_value()) {
+        out << jsonReal(*options.cut_metadata_scale_cap);
+    } else {
+        out << "null";
+    }
+    out << '}'
         << ",\"pressure_space\":{\"representation\":\"separate_phase_fields\",\"shared_gauge_count\":1}"
-        << ",\"phase_transport_coupling\":{\"owner\":\"external_level_set_transport\",\"momentum_flux_reconciliation_qualified\":false}"
+        << ",\"solver_contract\":{\"backend\":\"FSILS\",\"method\":\"BlockSchur\",\"unknown_role_order\":[\"material_interface_level_set\",\"conservative_phase_indicator\",\"negative_velocity\",\"positive_velocity\",\"negative_pressure\",\"positive_pressure\"],\"blocks\":[{\"name\":\"TwoFluidMaterialInterfaceComputationalPrimary\",\"role\":\"primary\"},{\"name\":\"TwoFluidPressureConstraints\",\"role\":\"constraint\"}],\"generic_fallback_allowed\":false}"
+        << ",\"phase_transport_coupling\":{\"owner\":\"declared_material_interface_phase_pair\",\"weak_bulk_velocity\":\"sharp_phase_local\",\"weak_interface_trace\":\"complementary_weighted\",\"conservative_graph_velocity\":\"complementary_weighted_every_node\",\"momentum_reconciliation_required\":"
+        << jsonBool(
+               options.require_conservative_phase_momentum_reconciliation)
+        << ",\"momentum_reconciliation_policy\":\"phasewise_fail_closed_no_hidden_velocity_update\"}"
+        << ",\"accepted_stage_evidence\":{\"required\":true,\"operator_stage_interface_mass_momentum_flux\":true,\"canonical_phase_aggregation\":true,\"pressure_stabilization_configuration\":true,\"shared_coupled_nonlinear_linear_report\":true,\"timing_values_retained\":false,\"rank_local_aggregation_lineage_retained\":false,\"phase_resolved_iterations\":\"unavailable_from_shared_backend\",\"pressure_stabilization_work\":\"not_separately_resolved_by_coupled_operator\"}"
         << ",\"exclusions\":[\"compressible_gas\",\"trapped_gas_pressure\",\"air_cushioning\",\"phase_change\",\"contact\",\"moving_mesh\",\"variable_material_laws\",\"turbulence\"]}";
     return EffectiveConfigurationArtifact{
         .component = "incompressible_two_fluid",
@@ -381,6 +400,28 @@ void addSharedGaugeEvidence(FE::systems::FESystem& system,
 }
 
 } // namespace
+
+void validateIncompressibleTwoFluidConfigurationSemantics(
+    const IncompressibleTwoFluidOptions& options)
+{
+    for (const auto acceleration : options.body_force) {
+        if (!std::isfinite(acceleration)) {
+            throw std::invalid_argument(
+                "[svMultiPhysics::Physics] "
+                "unsupported_two_fluid_nonfinite_body_force");
+        }
+    }
+    if (options.prescribed_pressure_jump.has_value() &&
+        !std::isfinite(*options.prescribed_pressure_jump)) {
+        throw std::invalid_argument(
+            "[svMultiPhysics::Physics] "
+            "unsupported_two_fluid_nonfinite_prescribed_pressure_jump");
+    }
+    validateVelocityBoundaryData(
+        options.negative_phase.velocity_dirichlet, "negative-phase");
+    validateVelocityBoundaryData(
+        options.positive_phase.velocity_dirichlet, "positive-phase");
+}
 
 IncompressibleTwoFluidModule::IncompressibleTwoFluidModule(
     std::shared_ptr<const FE::spaces::FunctionSpace> negative_velocity_space,
@@ -450,11 +491,9 @@ void IncompressibleTwoFluidModule::registerOn(
     }
     if (!std::isfinite(options_.level_set_isovalue) ||
         !std::isfinite(options_.surface_tension) ||
-        options_.surface_tension < FE::Real{0.0} ||
-        (options_.prescribed_pressure_jump.has_value() &&
-         !std::isfinite(*options_.prescribed_pressure_jump))) {
+        options_.surface_tension < FE::Real{0.0}) {
         throw std::invalid_argument(
-            "IncompressibleTwoFluidModule: level-set isovalue, nonnegative surface tension, and optional pressure-jump target must be finite");
+            "IncompressibleTwoFluidModule: level-set isovalue and nonnegative surface tension must be finite");
     }
     if (!options_.enable_vms) {
         throw std::invalid_argument(
@@ -477,12 +516,6 @@ void IncompressibleTwoFluidModule::registerOn(
     requireFinitePositive(
         options_.pressure_gradient_penalty,
         "pressure-gradient ghost penalty");
-    for (const auto acceleration : options_.body_force) {
-        if (!std::isfinite(acceleration)) {
-            throw std::invalid_argument(
-                "IncompressibleTwoFluidModule: body-force acceleration must be finite");
-        }
-    }
     if (options_.cut_metadata_scale_cap.has_value() &&
         (!std::isfinite(*options_.cut_metadata_scale_cap) ||
          *options_.cut_metadata_scale_cap < FE::Real{1.0})) {
@@ -500,10 +533,7 @@ void IncompressibleTwoFluidModule::registerOn(
         throw std::invalid_argument(
             "IncompressibleTwoFluidModule: invalid small-cut aggregation guards");
     }
-    validateVelocityBoundaryData(
-        options_.negative_phase.velocity_dirichlet, "negative-phase");
-    validateVelocityBoundaryData(
-        options_.positive_phase.velocity_dirichlet, "positive-phase");
+    validateIncompressibleTwoFluidConfigurationSemantics(options_);
 
     const auto level_set =
         system.findFieldByName(options_.level_set_field_name);
@@ -563,6 +593,7 @@ void IncompressibleTwoFluidModule::registerOn(
         .surface_tension = options_.surface_tension,
         .include_transient_penalty =
             options_.include_transient_interface_penalty,
+        .prescribed_pressure_jump = options_.prescribed_pressure_jump,
     };
     const auto interface_weights =
         incompressibleTwoFluidInterfaceWeights(interface_parameters);
@@ -653,6 +684,22 @@ void IncompressibleTwoFluidModule::registerOn(
             p_negative, p_positive));
     addSharedGaugeEvidence(system, p_negative, p_positive);
 
+    system.declareMaterialInterfaceTransportVelocity(
+        FE::interfaces::MaterialInterfaceTransportVelocityDeclaration{
+            .dimension = dimension,
+            .interface_marker = interface_marker,
+            .level_set_field = level_set,
+            .negative_velocity_field = u_negative,
+            .positive_velocity_field = u_positive,
+            .level_set_isovalue = options_.level_set_isovalue,
+            .negative_trace_weight =
+                interface_weights.negative_complement,
+            .positive_trace_weight =
+                interface_weights.positive_complement,
+            .geometry_domain_id = options_.generated_interface_domain_id,
+            .owner_component = "incompressible_two_fluid",
+        });
+
     system.declareTwoFluidAcceptedStageDiagnostics(
         FE::systems::TwoFluidAcceptedStageDiagnosticDeclaration{
             .interface_marker = interface_marker,
@@ -664,6 +711,16 @@ void IncompressibleTwoFluidModule::registerOn(
             .operator_tag = options_.operator_tag,
             .geometry_domain_id = options_.generated_interface_domain_id,
             .level_set_isovalue = options_.level_set_isovalue,
+            .require_conservative_phase_momentum_reconciliation =
+                options_
+                    .require_conservative_phase_momentum_reconciliation,
+            .require_accepted_stage_numerics = true,
+            .pressure_stabilization_coefficient =
+                options_.pressure_gradient_penalty,
+            .pressure_stabilization_use_cut_metadata_scale =
+                options_.use_cut_metadata_scale,
+            .pressure_stabilization_cut_metadata_scale_cap =
+                options_.cut_metadata_scale_cap,
             .parameters =
                 FE::interfaces::IncompressibleTwoFluidDiagnosticParameters{
                     .dimension = dimension,

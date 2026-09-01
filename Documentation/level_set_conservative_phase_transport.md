@@ -29,6 +29,16 @@ level-set state. The release-scale multi-resolution transport matrix and
 explicit moving-crown morphology extraction remain qualification work; fixed
 region observers and opt-in resolved-satellite classification are available as
 described below.
+
+For a declared incompressible two-fluid material interface, the graph samples
+the complementary weighted common trace velocity at every graph node. The
+level-set field and interface marker bind that graph route to its phase-pair
+owner, while the weak momentum operator continues to use sharp phase-local
+bulk velocities and the same complementary trace on the generated interface.
+This gives the indicator a single explicit velocity extension instead of
+switching between phase fields at nodes whose signed-distance value is not
+zero.
+
 When conservative phase transport is disabled, the independent signed-distance
 transport remains nonconservative and must continue to report that limitation.
 
@@ -169,7 +179,7 @@ remain within the scaled `invariant_tolerance`. It is not a pointwise check of
 before registration/time stepping; its default value is dormant and is not
 reported as an enforced tolerance.
 
-The level-set module effective-configuration artifact is schema version 2. It
+The level-set module effective-configuration artifact is schema version 3. It
 labels that legacy value as an unsupported pointwise contract, records whether
 it was explicitly requested, and names the actual policy as
 `closed_domain_discrete_q_flux_only` with `invariant_tolerance` as its
@@ -199,7 +209,13 @@ inside a rollback-capable geometry transaction:
 4. reconcile geometry locally against the transported nodal liquid moments;
 5. validate global measure, every nodal moment, cut-context provenance, and
    all transport invariants; and
-6. compare the complete trial ledger, current and all-history content
+6. for a declared incompressible two-fluid material interface, re-evaluate
+   phasewise mass and momentum on the corrected authoritative geometry and
+   reject unless each momentum change is within
+   `Conservative_phase_momentum_relative_tolerance`; this gate records both
+   geometry revisions and both algebraic revisions and never applies an
+   implicit velocity change; and
+7. compare the complete trial ledger, current and all-history content
    revisions, geometry-transaction presence, the final live FE layout state,
    canonical authoritative snapshot revision identities (including their
    communicator-replicated geometry/topology/ownership/numbering mesh
@@ -209,6 +225,14 @@ inside a rollback-capable geometry transaction:
    reference-configuration, field-layout, and active-configuration epochs,
    are deliberately excluded because they can advance a different number of
    times on equally valid partitions.
+
+The two-fluid momentum record is part of the accepted-stage history and its
+communicator consensus token. A required history stream cannot commit until a
+successful record is bound, and a rejected candidate publishes neither the
+raw diagnostic stage nor the reconciliation. The current fail-closed policy
+does not redistribute momentum after phase correction: users must tighten or
+relax the positive relative tolerance explicitly, and any phasewise change
+outside that bound rejects the entire candidate for a smaller-step retry.
 
 The distributed graph builder requires an identical global field size, FE
 layout revision, dimension, graph options, and graph content identity, while

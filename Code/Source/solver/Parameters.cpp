@@ -131,6 +131,14 @@ std::string normalized_free_surface_physical_model_token(
 
 void validate_free_surface_physical_model_value(std::string_view raw)
 {
+  const auto first = raw.find_first_not_of(" \t\r\n");
+  const auto last = raw.find_last_not_of(" \t\r\n");
+  const auto trimmed = first == std::string_view::npos
+      ? std::string_view{}
+      : raw.substr(first, last - first + 1u);
+  if (trimmed == "IncompressibleTwoFluid") {
+    return;
+  }
   const auto token =
       normalized_free_surface_physical_model_token(raw);
   static constexpr std::array<std::string_view, 8> unsupported_markers = {
@@ -185,6 +193,22 @@ bool is_oop_equation_extension_parameter(const std::string& name)
     "ALE_moving_mesh_tangent_path",
     "Free_surface_physical_model",
     "FreeSurfacePhysicalModel",
+    "Material_interface_marker",
+    "MaterialInterfaceMarker",
+    "Negative_phase_density",
+    "NegativePhaseDensity",
+    "Negative_phase_dynamic_viscosity",
+    "NegativePhaseDynamicViscosity",
+    "Positive_phase_density",
+    "PositivePhaseDensity",
+    "Positive_phase_dynamic_viscosity",
+    "PositivePhaseDynamicViscosity",
+    "Two_fluid_surface_tension",
+    "TwoFluidSurfaceTension",
+    "Two_fluid_interface_nitsche_gamma",
+    "TwoFluidInterfaceNitscheGamma",
+    "Prescribed_pressure_jump",
+    "PrescribedPressureJump",
     "Level_set_field_name",
     "LevelSetFieldName",
     "Level_set_field",
@@ -214,6 +238,8 @@ bool is_oop_equation_extension_parameter(const std::string& name)
     "ConservativePhaseEnforceCourantLimit",
     "Conservative_phase_require_constant_preservation",
     "ConservativePhaseRequireConstantPreservation",
+    "Conservative_phase_momentum_relative_tolerance",
+    "ConservativePhaseMomentumRelativeTolerance",
     "Conservative_phase_impermeable_normal_velocity_tolerance",
     "ConservativePhaseImpermeableNormalVelocityTolerance",
     "Conservative_phase_reconcile_geometry",

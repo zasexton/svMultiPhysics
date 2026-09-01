@@ -1748,6 +1748,12 @@ Required qualification progression:
 - Add two-fluid capillary waves, Hysing case 1, and a rising bubble. Treat Hysing case 2 after breakup as an intercode range rather than a single exact shape.
 - Only then add ambient-pressure and gas-property sweeps for impact/cushioning and dry-wall splash. Maintain separate one-phase, incompressible-two-phase, and compressible-gas qualification records.
 
+WP-10 staged two-fluid core checkpoint recorded on 2026-09-01:
+
+- Immutable `Code/` digest `d40c0763054b40927c7422705465ae37cd5699f9dde5e66bcda0d77d906a3049` includes complementary phase registration, the weighted common interface trace, conservative phase-transport ownership, momentum-explicit correction reconciliation, accepted-stage interface/phase/numerics history, the exact six-role solver layout, transactional dependency preflight, and a fail-closed production parser.
+- `amarsden` build job `41541399` produced the focused FE, Physics, and Application binaries. FE job `41541411` passed 5/5 selected material-interface transport tests; Application job `41542616` passed 43/43 selected parser, dependency, complete-builder, graph-transport, and accepted-stage telemetry tests; Physics job `41543288` passed 27/27 selected serial tests and 2/2 selected two-rank tests with explicit rank-0/rank-1 evidence.
+- This is a staged implementation checkpoint, not WP-10 or FSR-08 closure. The frozen physical progression, high-ratio solver evidence, capillary-wave and rising-bubble comparisons, Hysing ranges, and capability-specific qualification matrix remain open; WP-10, Q7, and the associated release gate therefore remain unchecked.
+
 ### Finding-to-closure traceability matrix
 
 | Finding | Primary work package | Must pass before closure | Required completion artifact |

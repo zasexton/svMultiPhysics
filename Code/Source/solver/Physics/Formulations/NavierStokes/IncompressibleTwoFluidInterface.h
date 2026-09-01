@@ -17,6 +17,8 @@
 #include "FE/Core/Types.h"
 #include "FE/Forms/FormExpr.h"
 
+#include <optional>
+
 namespace svmp {
 namespace Physics {
 namespace formulations {
@@ -32,6 +34,7 @@ struct IncompressibleTwoFluidInterfaceParameters {
   FE::Real nitsche_gamma{20.0};
   FE::Real surface_tension{0.0};
   bool include_transient_penalty{true};
+  std::optional<FE::Real> prescribed_pressure_jump{};
 };
 
 struct IncompressibleTwoFluidInterfaceWeights {
@@ -54,6 +57,7 @@ struct IncompressibleTwoFluidInterfaceForms {
   FE::forms::FormExpr adjoint{};
   FE::forms::FormExpr penalty{};
   FE::forms::FormExpr surface_energy{};
+  FE::forms::FormExpr prescribed_pressure_jump{};
   FE::forms::FormExpr residual{};
 };
 

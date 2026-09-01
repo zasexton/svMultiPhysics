@@ -121,6 +121,18 @@ interface it is equivalent to the traction-jump load with the sign convention
 above. It uses the same generated normal and measure as all other interface
 terms.
 
+For planar manufactured-jump verification, an optional target
+`Delta p = p_minus - p_plus` adds
+
+```text
++ integral_Gamma Delta p n dot average_c(v).
+```
+
+This is the residual load corresponding to
+`(sigma_minus-sigma_plus)n = -Delta p n`; the same target is retained in the
+accepted-stage pressure and stress-jump diagnostics. It is an explicit
+manufactured load, not a postprocessing-only expected value.
+
 For transient flow the penalty scale is
 
 ```text
@@ -168,6 +180,14 @@ must consume an explicitly declared interface velocity whose trace is
 `average_c(u)`; it may not select one phase by name without recording the
 equivalence error.
 
+The momentum weak form retains sharp phase-local velocity values in each bulk
+restriction and uses `average_c(u)` on the generated interface. The
+conservative indicator graph requires one velocity extension on every graph
+node, so its declared material-interface route samples `average_c(u)` at every
+node. Its level-set field and marker identify the owning declaration; the
+nodal level-set sign does not switch the graph extension back to a phase-local
+bulk value.
+
 At every accepted stage, record
 
 ```text
@@ -196,8 +216,11 @@ The coupled operator publishes raw integrals before derived norms:
 - Nitsche consistency, adjoint, and penalty work separately;
 - phase volume, mass, momentum, and kinetic energy;
 - phase-transport and momentum-flux reconciliation; and
-- aggregation, pressure stabilization, nonlinear iterations, linear
-  iterations, and solver reason for each phase block.
+- canonical phasewise aggregation and pressure-stabilization configuration;
+- nonlinear and linear iterations plus convergence reasons for the shared
+  coupled solve; and
+- explicit unavailable reasons for phase-resolved iteration counts and
+  pressure-stabilization work when the coupled backend cannot separate them.
 
 Absence and inapplicability are distinct from a numeric zero. Diagnostics are
 staged with operator state, committed only after step acceptance, replay-safe,
@@ -205,18 +228,29 @@ and communicator-consistent.
 
 ## Solver contract
 
-The first supported linear strategy is a four-field block solve ordered as
+The first supported linear strategy uses the exact canonical unknown-role
+order
 
 ```text
-(u_minus, p_minus, u_plus, p_plus).
+(level_set, phase_indicator,
+ u_minus, u_plus,
+ p_minus, p_plus).
 ```
 
-Velocity blocks include the interface penalty and phase-local viscous,
-transient, and convective contributions. Pressure preconditioning uses
-phasewise pressure mass or pressure-convection-diffusion approximations scaled
-with the matching density and viscosity. The interface coupling is retained
-in the preconditioned operator; treating it only as an outer residual is not a
-qualified high-ratio route.
+FSILS BlockSchur groups the level set, conservative phase indicator, and both
+phase velocities into one computational-primary block. The two phase
+pressures form the constraint block. The layout is admitted only for the exact
+paired level-set/two-fluid equation system; additional equations, another
+backend, another solver method, or a malformed field layout fail before the
+live system is mutated. There is no generic layout fallback.
+
+The velocity portion of the primary block includes the interface penalty and
+phase-local viscous, transient, and convective contributions. Pressure
+preconditioning uses phasewise pressure mass or
+pressure-convection-diffusion approximations scaled with the matching density
+and viscosity. The interface coupling is retained in the preconditioned
+operator; treating it only as an outer residual is not a qualified high-ratio
+route.
 
 The qualification matrix records spectrum estimates where available, Krylov
 iterations, nonlinear iterations, convergence reasons, and iteration spread
@@ -236,10 +270,10 @@ remains open until every remaining item and the qualification progression pass.
   combined gauge contract.
 - [x] Add phase-local aggregation and stabilization identity tests under side
   reversal and partition changes.
-- [ ] Add accepted-stage interface, mass, momentum, and flux histories.
-- [ ] Connect the common interface velocity to conservative level-set
+- [x] Add accepted-stage interface, mass, momentum, and flux histories.
+- [x] Connect the common interface velocity to conservative level-set
   transport and make every correction momentum-explicit.
-- [ ] Add the production parser and fail-closed configuration matrix only after
+- [x] Add the production parser and fail-closed configuration matrix only after
   the direct C++ formulation gates pass.
 - [ ] Freeze and run the complete WP-10 qualification matrix from a clean
   source tree.
@@ -255,6 +289,17 @@ Algebraic DOF fingerprints and the subsequently closed coupled pressure-gauge
 row are deliberately outside this comparison because they change with
 owner-contiguous numbering; the underlying provisional aggregation rows and
 globalized phase operators are the tested invariant.
+
+The staged core checkpoint was completed on 2026-09-01 from immutable `Code/`
+digest `d40c0763054b40927c7422705465ae37cd5699f9dde5e66bcda0d77d906a3049`.
+`amarsden` build job `41541399` produced the three focused binaries. FE job
+`41541411` passed all 5 selected material-interface transport tests,
+Application job `41542616` passed all 43 selected parser, dependency,
+builder, transport, and accepted-stage telemetry tests, and Physics job
+`41543288` passed all 27 selected serial tests plus both selected two-rank
+tests with explicit evidence from ranks 0 and 1. This closes the three staged
+implementation items above; it is not physical qualification, and the final
+matrix item remains unchecked.
 
 ## Qualification progression
 
