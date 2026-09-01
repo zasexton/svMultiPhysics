@@ -346,7 +346,7 @@ double integ(const ComMod& com_mod, const CmMod& cm_mod, int iM, const Array<dou
   int eNoN = fs.eNoN;
 
   Array<double> xl(nsd,eNoN); 
-  Array<double> Nxi(insd,eNoN); 
+  Array<double> Nxi(insd,eNoN);
   Array<double> Nx(insd,eNoN); 
   Vector<double> sl(eNoN); 
   Array<double> tmps(nsd,insd);
@@ -362,12 +362,18 @@ double integ(const ComMod& com_mod, const CmMod& cm_mod, int iM, const Array<dou
       fs.w  = msh.w;
       fs.N  = msh.N;
       fs.Nx = msh.Nx;
+      if ((Nxi.nrows() != fs.Nx.nrows()) ||
+          (Nxi.ncols() != fs.Nx.ncols())) {
+        Nxi.resize(fs.Nx.nrows(), fs.Nx.ncols());
+      }
     }
 
     int ibl = 0;
     for (int a = 0; a < eNoN; a++) { 
       int Ac = msh.IEN(a,e);
-      xl.set_col(a, com_mod.x.col(Ac));
+      for (int i = 0; i < nsd; i++) {
+        xl(i,a) = com_mod.x(i,Ac);
+      }
 
       if (com_mod.mvMsh) {
         for (int i = 0; i < nsd; i++) { 
@@ -385,7 +391,11 @@ double integ(const ComMod& com_mod, const CmMod& cm_mod, int iM, const Array<dou
     double Jac = 0.0;
 
     for (int g = 0; g < fs.nG; g++) {
-      Nxi = fs.Nx.slice(g);
+      for (int a = 0; a < eNoN; a++) {
+        for (int i = 0; i < Nxi.nrows(); i++) {
+          Nxi(i,a) = fs.Nx(i,a,g);
+        }
+      }
 
       if (g == 0 || !fs.lShpF) {
         if (msh.lShl) {
@@ -533,7 +543,7 @@ double integ(const ComMod& com_mod, const CmMod& cm_mod, int dId, const Array<do
       int eNoN = fs.eNoN;
 
       Array<double> xl(nsd,eNoN); 
-      Array<double> Nxi(insd,eNoN); 
+      Array<double> Nxi(insd,eNoN);
       Array<double> Nx(insd,eNoN); 
       Vector<double> sl(eNoN); 
       Array<double> tmps(nsd,insd);
@@ -555,12 +565,18 @@ double integ(const ComMod& com_mod, const CmMod& cm_mod, int dId, const Array<do
           fs.w  = msh.w;
           fs.N  = msh.N;
           fs.Nx = msh.Nx;
+          if ((Nxi.nrows() != fs.Nx.nrows()) ||
+              (Nxi.ncols() != fs.Nx.ncols())) {
+            Nxi.resize(fs.Nx.nrows(), fs.Nx.ncols());
+          }
         }
 
         int ibl = 0;
         for (int a = 0; a < eNoN; a++) { 
           int Ac = msh.IEN(a,e);
-          xl.set_col(a, com_mod.x.col(Ac));
+          for (int i = 0; i < nsd; i++) {
+            xl(i,a) = com_mod.x(i,Ac);
+          }
 
           if (com_mod.mvMsh) {
             for (int i = 0; i < nsd; i++) { 
@@ -584,7 +600,11 @@ double integ(const ComMod& com_mod, const CmMod& cm_mod, int dId, const Array<do
         double Jac = 0.0;
 
         for (int g = 0; g < fs.nG; g++) {
-          Nxi = fs.Nx.slice(g);
+          for (int a = 0; a < eNoN; a++) {
+            for (int i = 0; i < Nxi.nrows(); i++) {
+              Nxi(i,a) = fs.Nx(i,a,g);
+            }
+          }
 
           if (g == 0 || !fs.lShpF) {
             if (msh.lShl) {
@@ -617,7 +637,7 @@ double integ(const ComMod& com_mod, const CmMod& cm_mod, int dId, const Array<do
       int insd = nsd;
 
       Array<double> xl(nsd,eNoN); 
-      Array<double> Nxi(insd,eNoN); 
+      Array<double> Nxi(ib.msh[iM].Nx.nrows(),eNoN);
       Array<double> Nx(insd,eNoN); 
       Vector<double> sl(eNoN); 
       Array<double> tmps(nsd,insd);
@@ -652,7 +672,11 @@ double integ(const ComMod& com_mod, const CmMod& cm_mod, int dId, const Array<do
 
         for (int g = 0; g < ib.msh[iM].nG; g++) {
           double Jac = 0.0;
-          Nxi = ib.msh[iM].Nx.slice(g);
+          for (int a = 0; a < eNoN; a++) {
+            for (int i = 0; i < Nxi.nrows(); i++) {
+              Nxi(i,a) = ib.msh[iM].Nx(i,a,g);
+            }
+          }
           if (g == 0 ||  !ib.msh[iM].lShpF) {
             nn::gnn(eNoN, nsd, insd, Nxi, xl, Nx, Jac, tmp);
           }
@@ -790,6 +814,7 @@ double integ(const ComMod& com_mod, const CmMod& cm_mod, const faceType& lFa, co
 
   // Initialize integral to 0
   double result = 0.0;
+  Vector<double> n(nsd);
 
   // Loop over elements on face
   for (int e = 0; e < lFa.nEl; e++) {
@@ -807,10 +832,10 @@ double integ(const ComMod& com_mod, const CmMod& cm_mod, const faceType& lFa, co
 
     // Loop over the Gauss points
     for (int g = 0; g < fs.nG; g++) {
-      Vector<double> n(nsd);
+      n = 0.0;
       if (!isIB) {
         // Get normal vector in cfg configuration
-        auto Nx = fs.Nx.slice(g);
+        auto Nx = fs.Nx.rslice(g);
         nn::gnnb(com_mod, lFa, e, g, nsd, insd, fs.eNoN, Nx, n, solutions, cfg);
       }
 
@@ -911,6 +936,7 @@ double integ(const ComMod& com_mod, const CmMod& cm_mod, const faceType& lFa,
 
   // Initialize integral to 0
   double result =  0.0;
+  Vector<double> n(nsd);
 
   // Loop over elements on face
   for (int e = 0; e < lFa.nEl; e++) {
@@ -927,10 +953,10 @@ double integ(const ComMod& com_mod, const CmMod& cm_mod, const faceType& lFa,
     // Loop over the Gauss points
     for (int g = 0; g < lFa.nG; g++) {
       //dmsg << ">>> g: " << g+1;
-      Vector<double> n(nsd);
+      n = 0.0;
       if (!isIB) {
         // Get normal vector in cfg configuration
-        auto Nx = lFa.Nx.slice(g);
+        auto Nx = lFa.Nx.rslice(g);
         nn::gnnb(com_mod, lFa, e, g, nsd, nsd-1, lFa.eNoN, Nx, n, solutions, cfg);
         //CALL GNNB(lFa, e, g, nsd-1, lFa.eNoN, lFa.Nx(:,:,g), n)
       } else {
