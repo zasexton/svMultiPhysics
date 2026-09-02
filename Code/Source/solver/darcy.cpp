@@ -11,51 +11,6 @@
 #include <sstream>
 
 namespace darcy {
-/*
- This code implements the Darcy equation for perfusion of porous media.
- -------------------------------------------------------------
- Assumptions:
-    - Material coefficients are homogeneous within each solver domain
-    - Isotropic Permeability
-    - Assumptions of Stokes Flow
- -------------------------------------------------------------
- * Strong form of the Darcy equation assembled by these kernels:
- * \f[
- *   \rho \beta \frac{\partial p}{\partial t}
- *   - \nabla \cdot \left(\frac{\rho K}{\mu}\nabla p\right)
- *   = \rho s.
- * \f]
- *
- * After pressure is solved, Darcy velocity is
- * evaluated as the derived field
- * \f[
- *   \boldsymbol{q} = -\frac{K}{\mu}\nabla p.
- * \f]
- *
- * Model quantities and ranges:
- *  - \f$p\f$: pressure.
- *  - \f$\boldsymbol{q}\f$: derived Darcy velocity.
- *  - \f$K\f$: scalar permeability (`Darcy_permeability`, default
- *    \f$10^{-15}\f$, \f$K > 0\f$).
- *  - \f$\mu\f$: dynamic viscosity (`Darcy_fluid_viscosity`, default 1,
- *    \f$\mu > 0\f$).
- *  - \f$\rho\f$: fluid density (`Fluid_density`, default 0.5,
- *    \f$\rho > 0\f$).
- *  - \f$\beta\f$: compressibility (`Darcy_media_compressibility`, default 0,
- *    \f$\beta \ge 0\f$).
- *  - \f$s\f$: volumetric source (`Source_term`, default 0), constant per
- *    domain.
- *
- * The current implementation accepts a positive scalar \f$K\f$ for each
- * solver domain. Spatially heterogeneous or tensor-valued permeability is
- * currently not implemented.
- *
- * Density is retained in the mass-conservation form because it may differ
- * between solver domains, although it cancels after normalization within a
- * single homogeneous domain. Viscosity is retained because \f$K/\mu\f$ is
- * mobility; folding \f$\mu\f$ into \f$K\f$ would change the meaning and units
- * of the permeability input.
-*/
 
 void validate_material_properties(const dmnType& domain)
 {
