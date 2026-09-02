@@ -40,6 +40,10 @@ namespace darcy {
  *  - \f$ \mu \f$ is dynamic viscosity.
  *  - \f$ s \f$ is the volumetric source specified by `Source_term`.
  *
+ * The current implementation accepts a positive scalar \f$K\f$ for each
+ * solver domain. Spatially heterogeneous or tensor-valued permeability is
+ * currently not implemented.
+ *
  * Density is retained in the mass-conservation form because it may differ
  * between solver domains, although it cancels after normalization within a
  * single homogeneous domain. Viscosity is retained because \f$K/\mu\f$ is
