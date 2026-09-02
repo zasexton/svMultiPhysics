@@ -757,13 +757,26 @@ public:
       }
     }
 
-    const auto records =
+    const auto trace_records =
         sim_.fe_system->generatedBoundaryNitscheTraceCertificates();
-    if (records.size() != 1u) {
+    const auto production_trace_count =
+        static_cast<std::size_t>(std::count_if(
+            trace_records.begin(),
+            trace_records.end(),
+            [](const auto& record) {
+              return record.policy.op == "equations";
+            }));
+    if (production_trace_count != 1u) {
       throw std::runtime_error(
-          "distributed native channel requires one trace certificate");
+          "distributed native channel requires one production trace certificate");
     }
-    const auto& trace = records.front();
+    const auto production_trace = std::find_if(
+        trace_records.begin(),
+        trace_records.end(),
+        [](const auto& record) {
+          return record.policy.op == "equations";
+        });
+    const auto& trace = *production_trace;
     result.trace_patch_count = trace.certificate.certified_patch_count;
     result.trace_localized_support_patch_count =
         trace.certificate.localized_support_patch_count;

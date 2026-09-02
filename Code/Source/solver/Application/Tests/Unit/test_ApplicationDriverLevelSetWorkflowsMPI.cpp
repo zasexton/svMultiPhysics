@@ -2785,6 +2785,22 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
               phi_offset + phi_dofs.getNumDofs()),
       expected_older.begin() +
           static_cast<std::ptrdiff_t>(phi_offset));
+  std::copy(
+      expected_solution.begin() +
+          static_cast<std::ptrdiff_t>(pressure_offset),
+      expected_solution.begin() +
+          static_cast<std::ptrdiff_t>(
+              pressure_offset + pressure_count),
+      expected_previous.begin() +
+          static_cast<std::ptrdiff_t>(pressure_offset));
+  std::copy(
+      expected_solution.begin() +
+          static_cast<std::ptrdiff_t>(pressure_offset),
+      expected_solution.begin() +
+          static_cast<std::ptrdiff_t>(
+              pressure_offset + pressure_count),
+      expected_older.begin() +
+          static_cast<std::ptrdiff_t>(pressure_offset));
   const auto final_solution =
       captureFeOrderedVectorCollectively(
           sim.time_history->u(),
