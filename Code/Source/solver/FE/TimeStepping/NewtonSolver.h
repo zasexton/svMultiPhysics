@@ -187,6 +187,13 @@ struct NewtonOptions {
 
         bool enabled{false};
         int max_iterations{12};
+        // Later outer refreshes may cross a nonsmooth generated-state epoch.
+        // Zero retains the transactional stop-and-restore behavior.  A
+        // positive value permits this many acknowledged restarts on the
+        // newly refreshed frozen problem before stopping.  A discontinuity
+        // in the initial canonicalization is always terminal because no
+        // rollback fingerprint for the new epoch exists yet.
+        int max_discontinuity_restarts{0};
         DynamicRelaxationOptions dynamic_relaxation{};
     };
 
@@ -272,6 +279,19 @@ struct NewtonOptions {
     std::function<bool(StateSynchronizationPoint)>
         external_state_discontinuity{};
 
+    /**
+     * @brief Acknowledge a bounded later-outer generated-state restart.
+     *
+     * This hook runs on every active rank after the collective discontinuity
+     * decision and before solving the newly refreshed frozen problem.  It is
+     * not invoked for an initial discontinuity or after the restart budget is
+     * exhausted.  A generated-state owner can use it to advance only its
+     * current nonlinear-attempt epoch; committed state must remain unchanged
+     * until the enclosing time-step candidate is committed.
+     */
+    std::function<void(StateSynchronizationPoint)>
+        acknowledge_external_state_discontinuity{};
+
     // Set when synchronize_state can change residual-defining external state
     // (for example generated cut geometry, projected curvature, affine
     // constraints, transient MPC histories, or an extended advection
@@ -337,6 +357,7 @@ struct NewtonOptions {
 struct NewtonReport {
     bool converged{false};
     bool external_state_discontinuity{false};
+    int external_state_discontinuity_restarts{0};
     int iterations{0};
     int outer_iterations{0};
     int inner_iterations_total{0};

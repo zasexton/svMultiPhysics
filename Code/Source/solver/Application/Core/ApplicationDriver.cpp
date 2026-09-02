@@ -4814,6 +4814,7 @@ public:
     attempt_active_ = true;
     attempt_tainted_ = false;
     final_candidate_observed_ = false;
+    attempt_topology_key_ = accepted_topology_key_;
     last_observed_topology_key_.reset();
     first_mismatched_topology_key_.reset();
     first_mismatch_provenance_size_ = 0u;
@@ -4843,16 +4844,31 @@ public:
       if (normalized_provenance == "before_physics_solve" &&
           report.topology_key != 0u) {
         accepted_topology_key_ = report.topology_key;
+        attempt_topology_key_ = report.topology_key;
         return;
       }
       taint(report.topology_key, normalized_provenance);
       return;
     }
 
-    if (report.topology_key == 0u ||
-        report.topology_key != *accepted_topology_key_) {
+    if (!attempt_topology_key_.has_value() ||
+        *attempt_topology_key_ == 0u || report.topology_key == 0u ||
+        report.topology_key != *attempt_topology_key_) {
       taint(report.topology_key, normalized_provenance);
     }
+  }
+
+  void acknowledgeNonlinearRestart()
+  {
+    if (!attempt_active_ ||
+        !last_observed_topology_key_.has_value() ||
+        *last_observed_topology_key_ == 0u) {
+      throw std::logic_error(
+          "[svMultiPhysics::Application] A transient cut-topology nonlinear restart lacked a nonzero observed attempt epoch.");
+    }
+    attempt_topology_key_ = last_observed_topology_key_;
+    attempt_tainted_ = false;
+    final_candidate_observed_ = false;
   }
 
   void requireAcceptedBaseline() const
@@ -4868,13 +4884,15 @@ public:
       const std::optional<std::uint64_t>& cached_topology_key) const noexcept
   {
     return !attempt_active_ || !accepted_topology_key_.has_value() ||
-           *accepted_topology_key_ == 0u || attempt_tainted_ ||
+           *accepted_topology_key_ == 0u ||
+           !attempt_topology_key_.has_value() ||
+           *attempt_topology_key_ == 0u || attempt_tainted_ ||
            !final_candidate_observed_ ||
            !last_observed_topology_key_.has_value() ||
            !cached_topology_key.has_value() ||
            *cached_topology_key == 0u ||
            *last_observed_topology_key_ != *cached_topology_key ||
-           *cached_topology_key != *accepted_topology_key_;
+           *cached_topology_key != *attempt_topology_key_;
   }
 
   void completeAttempt(
@@ -4884,6 +4902,8 @@ public:
       throw std::logic_error(
           "[svMultiPhysics::Application] A transient cut-topology candidate reached commit-ready without a fixed accepted topology.");
     }
+    accepted_topology_key_ = *cached_topology_key;
+    attempt_topology_key_ = accepted_topology_key_;
     attempt_active_ = false;
   }
 
@@ -4904,6 +4924,12 @@ public:
   }
 
   [[nodiscard]] const std::optional<std::uint64_t>&
+  attemptTopologyKey() const noexcept
+  {
+    return attempt_topology_key_;
+  }
+
+  [[nodiscard]] const std::optional<std::uint64_t>&
   lastObservedTopologyKey() const noexcept
   {
     return last_observed_topology_key_;
@@ -4920,11 +4946,6 @@ public:
     return std::string_view{
         first_mismatch_provenance_.data(),
         first_mismatch_provenance_size_};
-  }
-
-  void completeVerifiedAttempt() noexcept
-  {
-    attempt_active_ = false;
   }
 
 private:
@@ -4950,6 +4971,7 @@ private:
   }
 
   std::optional<std::uint64_t> accepted_topology_key_{};
+  std::optional<std::uint64_t> attempt_topology_key_{};
   std::optional<std::uint64_t> last_observed_topology_key_{};
   std::optional<std::uint64_t> first_mismatched_topology_key_{};
   std::array<char, 128u> first_mismatch_provenance_{};
@@ -29260,6 +29282,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   opts.newton.external_state_fixed_point.max_iterations = std::max(
       1,
       parseIntEnv("SVMP_GENERATED_STATE_OUTER_MAX_ITERATIONS", 12));
+  opts.newton.external_state_fixed_point.max_discontinuity_restarts =
+      parseIntEnv(
+          "SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS", 0);
   applyGeneratedStateOuterRelaxationEnvOptions(opts.newton);
   const bool refresh_generated_geometry_within_solve =
       has_transient_generated_state &&
@@ -29272,6 +29297,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
            "wet-extension map; solve each inner Newton problem with frozen "
            "generated state), max_outer_iterations="
         << opts.newton.external_state_fixed_point.max_iterations
+        << ", max_discontinuity_restarts="
+        << opts.newton.external_state_fixed_point
+               .max_discontinuity_restarts
         << ", dynamic_relaxation="
         << (opts.newton.external_state_fixed_point.dynamic_relaxation.enabled
                 ? "enabled"
@@ -29989,6 +30017,36 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                  cut_topology_attempt_tracker->attemptActive() &&
                  cut_topology_attempt_tracker->attemptTainted();
         };
+    opts.newton.acknowledge_external_state_discontinuity =
+        [cut_topology_attempt_tracker](TransientStateSyncPoint point) {
+          if (point !=
+              TransientStateSyncPoint::OuterFixedPointState) {
+            throw std::logic_error(
+                "[svMultiPhysics::Application] A transient cut-topology restart was acknowledged outside an outer fixed-point refresh.");
+          }
+          const auto previous_attempt_key =
+              cut_topology_attempt_tracker->attemptTopologyKey()
+                  .value_or(0u);
+          cut_topology_attempt_tracker->acknowledgeNonlinearRestart();
+          oopCout()
+              << "[svMultiPhysics::Application] Transient cut-topology "
+                 "nonlinear restart"
+              << " diagnostic=cut_topology_nonlinear_restart"
+              << " committed_topology_key="
+              << cut_topology_attempt_tracker->acceptedTopologyKey()
+                     .value_or(0u)
+              << " previous_attempt_topology_key="
+              << previous_attempt_key
+              << " restarted_attempt_topology_key="
+              << cut_topology_attempt_tracker->attemptTopologyKey()
+                     .value_or(0u)
+              << " first_mismatched_topology_key="
+              << cut_topology_attempt_tracker
+                     ->firstMismatchedTopologyKey()
+                     .value_or(0u)
+              << " action=continue_on_refreshed_epoch"
+              << std::endl;
+        };
   }
   callbacks.on_before_physics_solve =
       [&](svmp::FE::timestepping::TimeHistory& h, double /*solve_time*/, double /*dt*/) {
@@ -30075,7 +30133,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << " outer_raw_contraction_ratio="
               << nr.outer_raw_contraction_ratio
               << " external_state_discontinuity="
-              << nr.external_state_discontinuity << std::endl;
+              << nr.external_state_discontinuity
+              << " external_state_discontinuity_restarts="
+              << nr.external_state_discontinuity_restarts
+              << std::endl;
   };
   std::function<void(
       const svmp::FE::timestepping::CandidateStageObservation&)>
@@ -31495,6 +31556,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << " accepted_topology_key="
               << cut_topology_attempt_tracker->acceptedTopologyKey()
                      .value_or(0u)
+              << " attempt_topology_key="
+              << cut_topology_attempt_tracker->attemptTopologyKey()
+                     .value_or(0u)
               << " final_topology_key="
               << final_cut_report.topology_key
               << " first_mismatched_topology_key="
@@ -31890,7 +31954,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         accepted_phase_candidate = std::move(pending_phase_candidate);
         pending_phase_candidate = ConservativePhaseCandidateResult{};
         if (track_transient_cut_topology) {
-          cut_topology_attempt_tracker->completeVerifiedAttempt();
+          cut_topology_attempt_tracker->completeAttempt(
+              cut_refresh_cache->topology_key);
         }
   };
   double vtk_total_time = 0.0;
@@ -34501,7 +34566,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << " outer_raw_contraction_ratio="
               << nr.outer_raw_contraction_ratio
               << " external_state_discontinuity="
-              << nr.external_state_discontinuity << std::endl;
+              << nr.external_state_discontinuity
+              << " external_state_discontinuity_restarts="
+              << nr.external_state_discontinuity_restarts
+              << std::endl;
   };
   callbacks.on_dt_updated = [&](double old_dt, double new_dt, int step_index, int attempt_index) {
     if (!oopTraceEnabled()) {

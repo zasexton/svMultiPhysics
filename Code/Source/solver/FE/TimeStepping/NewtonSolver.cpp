@@ -11051,6 +11051,10 @@ NewtonSolver::NewtonSolver(
             options_.external_state_fixed_point.max_iterations <= 0,
             InvalidArgumentException,
             "NewtonSolver: external_state_fixed_point.max_iterations must be > 0");
+        FE_THROW_IF(
+            options_.external_state_fixed_point.max_discontinuity_restarts < 0,
+            InvalidArgumentException,
+            "NewtonSolver: external_state_fixed_point.max_discontinuity_restarts must be >= 0");
         const auto& relaxation =
             options_.external_state_fixed_point.dynamic_relaxation;
         FE_THROW_IF(
@@ -12052,6 +12056,7 @@ NewtonReport NewtonSolver::solveStep(
     inner_options.external_state_fixed_point.enabled = false;
     inner_options.synchronize_state = {};
     inner_options.external_state_discontinuity = {};
+    inner_options.acknowledge_external_state_discontinuity = {};
     inner_options.accepted_state_sync_invalidates_residual = false;
     inner_options.min_iterations = 0;
     inner_options.rel_tolerance = 0.0;
@@ -12065,10 +12070,13 @@ NewtonReport NewtonSolver::solveStep(
     NewtonReport aggregate{};
     backends::SolverReport last_nontrivial_linear{};
     int inner_iterations_total = 0;
+    int external_state_discontinuity_restarts = 0;
     auto stopForExternalStateDiscontinuity =
         [&](int outer_iteration) -> NewtonReport {
         aggregate.converged = false;
         aggregate.external_state_discontinuity = true;
+        aggregate.external_state_discontinuity_restarts =
+            external_state_discontinuity_restarts;
         aggregate.outer_iterations = outer_iteration;
         aggregate.inner_iterations_total = inner_iterations_total;
         aggregate.iterations = inner_iterations_total;
@@ -12257,6 +12265,7 @@ NewtonReport NewtonSolver::solveStep(
         const int max_outer =
             options_.external_state_fixed_point.max_iterations;
         for (int outer = 0; outer < max_outer; ++outer) {
+            bool discontinuity_restart_consumed = false;
             if (outer > 0) {
                 system.rollbackGeometricNonlinearityTrial(/*force=*/true);
                 system.clearLocalCondensedRecovery();
@@ -12268,12 +12277,41 @@ NewtonReport NewtonSolver::solveStep(
                 if (externalStateDiscontinuityDetected(
                         NewtonOptions::StateSynchronizationPoint::
                             OuterFixedPointState)) {
-                    return stopForExternalStateDiscontinuity(outer + 1);
+                    if (external_state_discontinuity_restarts >=
+                        options_.external_state_fixed_point
+                            .max_discontinuity_restarts) {
+                        return stopForExternalStateDiscontinuity(outer + 1);
+                    }
+                    ++external_state_discontinuity_restarts;
+                    discontinuity_restart_consumed = true;
+                    if (options_
+                            .acknowledge_external_state_discontinuity) {
+                        options_.acknowledge_external_state_discontinuity(
+                            NewtonOptions::StateSynchronizationPoint::
+                                OuterFixedPointState);
+                    }
+                    // The just-refreshed generated state is authoritative for
+                    // this attempt epoch.  Discard algebra derived from the
+                    // preceding frozen problem before entering the new one.
+                    system.clearLocalCondensedRecovery();
+                    if (auto* registry =
+                            system.auxiliaryInputRegistryIfPresent()) {
+                        registry->invalidateAll();
+                    }
+                    if (dynamic_relaxation.enabled) {
+                        have_previous_raw_outer_update = false;
+                        previous_raw_outer_update_norm =
+                            std::numeric_limits<double>::quiet_NaN();
+                        outer_relaxation_factor =
+                            dynamic_relaxation.initial_factor;
+                        ++outer_relaxation_resets;
+                    }
                 }
             }
             const auto current_constraint_semantics =
                 constraintSemanticFingerprint(system.constraints());
-            bool relaxation_history_reset = false;
+            bool relaxation_history_reset =
+                discontinuity_restart_consumed;
             if (dynamic_relaxation.enabled &&
                 have_previous_raw_outer_update &&
                 anyRank(current_constraint_semantics !=
@@ -12313,6 +12351,8 @@ NewtonReport NewtonSolver::solveStep(
                 workspace.residual_scratch->norm();
 
             aggregate = inner_report;
+            aggregate.external_state_discontinuity_restarts =
+                external_state_discontinuity_restarts;
             aggregate.outer_iterations = outer + 1;
             aggregate.inner_iterations_total = inner_iterations_total;
             aggregate.iterations = inner_iterations_total;
@@ -12486,6 +12526,9 @@ NewtonReport NewtonSolver::solveStep(
                         relaxation_reason =
                             "small_denominator_initial_factor";
                     }
+                } else if (discontinuity_restart_consumed) {
+                    relaxation_reason =
+                        "external_state_discontinuity_restart_initial_factor";
                 } else if (relaxation_history_reset) {
                     relaxation_reason =
                         "constraint_semantics_reset_initial_factor";

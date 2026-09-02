@@ -2890,6 +2890,66 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
+     TransientCutTopologyRestartAdvancesAttemptEpochOnlyAtCommit)
+{
+  constexpr std::uint64_t accepted_key = 0x51a7u;
+  constexpr std::uint64_t trial_key = 0x91b3u;
+  constexpr std::uint64_t discarded_key = 0xd271u;
+  const auto report = [](std::uint64_t topology_key) {
+    ActiveCutContextRefreshReport result;
+    result.topology_key = topology_key;
+    return result;
+  };
+
+  TransientCutTopologyAttemptTracker tracker;
+  tracker.beginAttempt();
+  tracker.observe(report(accepted_key), "before_physics_solve");
+  ASSERT_TRUE(tracker.acceptedTopologyKey().has_value());
+  ASSERT_TRUE(tracker.attemptTopologyKey().has_value());
+  EXPECT_EQ(*tracker.acceptedTopologyKey(), accepted_key);
+  EXPECT_EQ(*tracker.attemptTopologyKey(), accepted_key);
+
+  tracker.observe(report(trial_key), "outer_fixed_point");
+  ASSERT_TRUE(tracker.attemptTainted());
+  ASSERT_TRUE(tracker.firstMismatchedTopologyKey().has_value());
+  EXPECT_EQ(*tracker.firstMismatchedTopologyKey(), trial_key);
+  EXPECT_EQ(tracker.firstMismatchProvenance(), "outer_fixed_point");
+
+  ASSERT_NO_THROW(tracker.acknowledgeNonlinearRestart());
+  EXPECT_FALSE(tracker.attemptTainted());
+  ASSERT_TRUE(tracker.attemptTopologyKey().has_value());
+  EXPECT_EQ(*tracker.attemptTopologyKey(), trial_key);
+  EXPECT_EQ(*tracker.acceptedTopologyKey(), accepted_key);
+  EXPECT_EQ(*tracker.firstMismatchedTopologyKey(), trial_key);
+  EXPECT_EQ(tracker.firstMismatchProvenance(), "outer_fixed_point");
+  EXPECT_TRUE(tracker.candidateMustReject(trial_key));
+
+  tracker.observe(report(trial_key), "final_candidate_topology_gate");
+  EXPECT_FALSE(tracker.candidateMustReject(trial_key));
+  ASSERT_NO_THROW(tracker.completeAttempt(trial_key));
+  EXPECT_FALSE(tracker.attemptActive());
+  ASSERT_TRUE(tracker.acceptedTopologyKey().has_value());
+  EXPECT_EQ(*tracker.acceptedTopologyKey(), trial_key);
+
+  tracker.beginAttempt();
+  ASSERT_TRUE(tracker.attemptTopologyKey().has_value());
+  EXPECT_EQ(*tracker.attemptTopologyKey(), trial_key);
+  tracker.observe(report(trial_key), "before_physics_solve");
+  tracker.observe(report(discarded_key), "outer_fixed_point");
+  ASSERT_NO_THROW(tracker.acknowledgeNonlinearRestart());
+  ASSERT_TRUE(tracker.attemptTopologyKey().has_value());
+  EXPECT_EQ(*tracker.attemptTopologyKey(), discarded_key);
+  EXPECT_EQ(*tracker.acceptedTopologyKey(), trial_key);
+  tracker.discardAttempt();
+  EXPECT_EQ(*tracker.acceptedTopologyKey(), trial_key);
+
+  tracker.beginAttempt();
+  ASSERT_TRUE(tracker.attemptTopologyKey().has_value());
+  EXPECT_EQ(*tracker.attemptTopologyKey(), trial_key);
+  tracker.discardAttempt();
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
      PostacceptMaintenanceTopologyEvidenceMakesEqualNonzeroKeysCommitEligible)
 {
   constexpr std::uint64_t accepted_topology_key = 0x51a7u;
