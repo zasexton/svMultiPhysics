@@ -57,6 +57,13 @@ namespace darcy {
     /// @param[in] domain Solver domain whose material properties are checked.
     void validate_material_properties(const dmnType& domain);
 
+    /// Reject mesh types that Darcy assembly and flux output do not implement.
+    /// @param[in] mesh Mesh whose element type is checked.
+    /// @note `mshType::lFib` denotes a one-dimensional mesh embedded in the
+    /// ambient geometry, not a myocardial material fiber direction. Darcy is
+    /// currently limited to intrinsic dimensions 2 and 3.
+    void validate_element_support(const mshType& mesh);
+
     /// Assemble a Darcy boundary contribution into the element residual.
     /// @param[in] com_mod Common solver state retained for the common assembly interface.
     /// @param[in] eNoN Number of element nodes.

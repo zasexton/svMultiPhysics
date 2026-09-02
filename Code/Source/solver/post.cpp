@@ -5,6 +5,7 @@
 
 #include "FE/Common/FEException.h"
 #include "all_fun.h"
+#include "darcy.h"
 #include "fluid.h"
 #include "fs.h"
 #include "initialize.h"
@@ -841,6 +842,10 @@ void post(Simulation* simulation, const mshType& lM, Array<double>& res, const S
 
   bool FSIeq = false;
   auto& eq = com_mod.eq[iEq];
+
+  if (outGrp == OutputNameType::outGrp_darcyFlux) {
+    darcy::validate_element_support(lM);
+  }
 
   if (eq.phys == EquationType::phys_FSI) {
     FSIeq = true;

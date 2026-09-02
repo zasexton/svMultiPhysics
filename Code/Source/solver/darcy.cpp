@@ -51,6 +51,15 @@ void validate_material_properties(const dmnType& domain)
            "a value greater than or equal to zero");
 }
 
+void validate_element_support(const mshType& mesh)
+{
+  if (mesh.lFib) {
+    svmp::raise<svmp::NotImplementedException>(
+        "The Darcy equation supports only 2D and 3D meshes; lFib marks an "
+        "embedded one-dimensional mesh, which is not supported.");
+  }
+}
+
 void b_darcy(ComMod& com_mod, const int eNoN, const double w, const Vector<double>& N, const double h, Array<double>& lR)
 {
   for (int a = 0; a < eNoN; a++) {
@@ -60,6 +69,8 @@ void b_darcy(ComMod& com_mod, const int eNoN, const double w, const Vector<doubl
 
 void construct_darcy(ComMod& com_mod, const mshType& lM, const SolutionStates& solutions)
 {
+  validate_element_support(lM);
+
   const auto& Ag = solutions.intermediate.get_acceleration();
   const auto& Yg = solutions.intermediate.get_velocity();
   #define n_debug_construct_darcy
@@ -78,10 +89,7 @@ void construct_darcy(ComMod& com_mod, const mshType& lM, const SolutionStates& s
   auto& cDmn = com_mod.cDmn;
 
   int eNoN = lM.eNoN;
-  int insd = nsd;
-  if (lM.lFib) {
-    insd = 1;
-  }
+  const int insd = nsd;
   #ifdef debug_construct_darcy
   dmsg << "cEq: " << cEq;
   dmsg << "cDmn: " << cDmn;
