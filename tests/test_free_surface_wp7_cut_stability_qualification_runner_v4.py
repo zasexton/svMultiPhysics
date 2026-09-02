@@ -45,9 +45,15 @@ def _load_runner():
     return module
 
 
+def _load_static_runtime(runner):
+    revision = json.loads(_registry_path().read_text(encoding="utf-8"))
+    runner.validate_revision_contract(revision)
+    return runner.build_runtime_registry(revision)
+
+
 def test_wp7_v4_promotes_topology_and_node_crossing_rows():
     runner = _load_runner()
-    registry = runner.load_registry(_registry_path())
+    registry = _load_static_runtime(runner)
 
     assert len(registry["executable_tests"]) == 16
     assert len(registry["prospective_tests"]) == 5
@@ -62,7 +68,7 @@ def test_wp7_v4_promotes_topology_and_node_crossing_rows():
 
 def test_wp7_v4_runtime_contains_no_prospective_test():
     runner = _load_runner()
-    registry = runner.load_registry(_registry_path())
+    registry = _load_static_runtime(runner)
     runtime_tests = {test for group in registry["groups"] for test in group["tests"]}
 
     assert runtime_tests == set(registry["executable_tests"])
@@ -114,16 +120,10 @@ def test_wp7_v4_rejects_scope_or_disposition_drift():
         runner.validate_revision_contract(changed_disposition)
 
 
-def test_wp7_v4_implementation_and_parent_bindings_are_exact():
+def test_wp7_v4_historical_binding_rejects_post_revision_changes():
     runner = _load_runner()
-    observation = runner.validate_implementation_binding()
-
-    assert observation["implementation_source_commit"] == (
-        runner.EXPECTED_IMPLEMENTATION_SOURCE_COMMIT
-    )
-    assert observation["implementation_source_sha256"] == (
-        runner.EXPECTED_IMPLEMENTATION_SOURCE_SHA256
-    )
+    with pytest.raises(ValueError, match="implementation source bytes changed"):
+        runner.validate_implementation_binding()
     assert runner.sha256_file(runner.PARENT_RUNNER_PATH) == (
         runner.EXPECTED_PARENT_RUNNER_SHA256
     )
@@ -142,29 +142,15 @@ def test_wp7_v4_frozen_revision_byte_drift_is_rejected(tmp_path):
         runner.load_registry(changed)
 
 
-def test_wp7_v4_validate_only_reports_blocked_prerequisite():
+def test_wp7_v4_validate_only_fails_closed_after_binding_drift():
     result = subprocess.run(
         [sys.executable, str(_runner_path()), "--validate-only"],
         cwd=_repository(),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        check=True,
+        check=False,
     )
-    summary = json.loads(result.stdout)
-
-    assert summary["outcome"] == "PASS"
-    assert summary["requested_claim"] == (
-        "topology_and_node_crossing_prerequisite"
-    )
-    assert summary["closure_state"] == (
-        "BLOCKED_BY_FIVE_PROSPECTIVE_EVIDENCE_ROWS"
-    )
-    assert summary["group_count"] == 4
-    assert summary["test_count"] == 16
-    assert summary["executable_test_count"] == 16
-    assert summary["prospective_test_count"] == 5
-    assert summary["serial_quantitative_gate_count"] == 67
-    assert summary["fsr07_closed"] is False
-    assert summary["wp7_closed"] is False
-    assert summary["q1_closed"] is False
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "implementation source bytes changed" in result.stderr
