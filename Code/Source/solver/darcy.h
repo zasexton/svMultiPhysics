@@ -40,6 +40,13 @@
  * - \f$s\f$: configured volumetric source provided by `Source_term`; it
  *   defaults to 0 and is constant within each configured domain.
  *
+ * @par Darcy flux output
+ * On supported two- and three-dimensional meshes, the pressure gradient is
+ * reconstructed in the mesh coordinates and the derived Darcy flux is
+ * \f[
+ *   \boldsymbol{q} = -\frac{K}{\mu}\nabla p.
+ * \f]
+ *
  * @par Cardiovascular porous-flow context
  * The following works describe future multi-compartment and microcirculation
  * model extensions than the single-compartment formulation implemented here:
