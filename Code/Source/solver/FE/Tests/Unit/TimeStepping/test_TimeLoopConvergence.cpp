@@ -2450,6 +2450,10 @@ TEST(TimeLoopCallbacks,
                     const svmp::FE::timestepping::NewtonReport& report) {
                     EXPECT_EQ(reason, StepRejectReason::NonlinearSolveFailed);
                     EXPECT_FALSE(report.converged);
+                    EXPECT_EQ(
+                        report.failure_message,
+                        "forced first-attempt nonlinear synchronization "
+                        "failure");
                     ++nonlinear_rejections;
                 };
         },

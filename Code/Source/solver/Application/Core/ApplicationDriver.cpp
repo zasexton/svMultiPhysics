@@ -30136,6 +30136,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << nr.external_state_discontinuity
               << " external_state_discontinuity_restarts="
               << nr.external_state_discontinuity_restarts
+              << " failure_message=" << std::quoted(nr.failure_message)
               << std::endl;
   };
   std::function<void(

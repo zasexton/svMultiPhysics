@@ -3393,11 +3393,12 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 } else {
                     FE_THROW(NotImplementedException, "TimeLoop: unsupported scheme");
                 }
-            } catch (const FEException&) {
+            } catch (const FEException& error) {
                 threw = true;
                 caught_exception = std::current_exception();
                 nr = NewtonReport{};
                 nr.converged = false;
+                nr.failure_message = error.message();
             }
 
             bool callback_converged_on_all_ranks = nr.converged;

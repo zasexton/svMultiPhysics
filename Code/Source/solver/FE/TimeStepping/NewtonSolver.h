@@ -356,6 +356,7 @@ struct NewtonOptions {
 
 struct NewtonReport {
     bool converged{false};
+    std::string failure_message{};
     bool external_state_discontinuity{false};
     int external_state_discontinuity_restarts{0};
     int iterations{0};

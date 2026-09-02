@@ -129,6 +129,13 @@ public:
     }
 
     /**
+     * @brief Get the concise exception message without source diagnostics
+     */
+    const std::string& message() const noexcept {
+        return message_;
+    }
+
+    /**
      * @brief Get error status code
      */
     FEStatus status() const noexcept {
