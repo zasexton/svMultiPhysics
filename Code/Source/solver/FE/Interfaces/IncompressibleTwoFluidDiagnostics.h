@@ -64,12 +64,13 @@ struct IncompressibleTwoFluidCellMeasureEvaluator {
     }
 };
 
-/** Additive phase-volume quantities prior to communicator reduction. */
+/** Reducible phase-volume quantities prior to communicator reduction. */
 struct IncompressibleTwoFluidPhaseDiagnosticAccumulator {
     std::size_t owned_quadrature_point_count{0u};
     Real volume{0.0};
     std::array<Real, 3> velocity_integral{{0.0, 0.0, 0.0}};
     Real velocity_squared_integral{0.0};
+    Real maximum_velocity_squared{0.0};
     Real pressure_integral{0.0};
     Real pressure_squared_integral{0.0};
     std::array<Real, 3> pressure_gradient_integral{{0.0, 0.0, 0.0}};
@@ -77,7 +78,7 @@ struct IncompressibleTwoFluidPhaseDiagnosticAccumulator {
     Real hydrostatic_residual_squared{0.0};
 };
 
-/** Additive interface and phase quantities prior to communicator reduction. */
+/** Reducible interface and phase quantities prior to communicator reduction. */
 struct IncompressibleTwoFluidDiagnosticAccumulator {
     std::uint64_t snapshot_revision_key{0u};
     /** Assembly-stage effective step used only by the transient penalty. */
@@ -121,6 +122,8 @@ struct IncompressibleTwoFluidPhaseDiagnosticState {
     Real volume{0.0};
     Real mass{0.0};
     std::array<Real, 3> momentum{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> mean_velocity{{0.0, 0.0, 0.0}};
+    Real maximum_quadrature_speed{0.0};
     Real kinetic_energy{0.0};
     Real pressure_integral{0.0};
     Real mean_pressure{0.0};
