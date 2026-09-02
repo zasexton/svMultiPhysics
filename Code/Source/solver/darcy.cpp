@@ -32,13 +32,19 @@ namespace darcy {
  *   \boldsymbol{q} = -\frac{K}{\mu}\nabla p.
  * \f]
  *
- * Where:
- *  - \f$ p \f$ is pressure.
- *  - \f$ \rho \f$ is fluid density.
- *  - \f$ \beta \f$ is the porous-media compressibility.
- *  - \f$ K \f$ is intrinsic permeability.
- *  - \f$ \mu \f$ is dynamic viscosity.
- *  - \f$ s \f$ is the volumetric source specified by `Source_term`.
+ * Model quantities and ranges:
+ *  - \f$p\f$: pressure.
+ *  - \f$\boldsymbol{q}\f$: derived Darcy velocity.
+ *  - \f$K\f$: scalar permeability (`Darcy_permeability`, default
+ *    \f$10^{-15}\f$, \f$K > 0\f$).
+ *  - \f$\mu\f$: dynamic viscosity (`Darcy_fluid_viscosity`, default 1,
+ *    \f$\mu > 0\f$).
+ *  - \f$\rho\f$: fluid density (`Fluid_density`, default 0.5,
+ *    \f$\rho > 0\f$).
+ *  - \f$\beta\f$: compressibility (`Darcy_media_compressibility`, default 0,
+ *    \f$\beta \ge 0\f$).
+ *  - \f$s\f$: volumetric source (`Source_term`, default 0), constant per
+ *    domain.
  *
  * The current implementation accepts a positive scalar \f$K\f$ for each
  * solver domain. Spatially heterogeneous or tensor-valued permeability is
@@ -77,6 +83,10 @@ void validate_material_properties(const dmnType& domain)
   const double viscosity =
       domain.prop.at(PhysicalPropertyType::darcy_fluid_viscosity);
   validate("Darcy_fluid_viscosity", viscosity, viscosity > 0.0,
+           "a value greater than zero");
+
+  const double density = domain.prop.at(PhysicalPropertyType::fluid_density);
+  validate("Fluid_density", density, density > 0.0,
            "a value greater than zero");
 
   const double compressibility =
