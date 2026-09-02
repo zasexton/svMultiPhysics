@@ -5696,6 +5696,98 @@ TEST(FreeSurfaceGeometrySnapshot,
 }
 
 TEST(FreeSurfaceGeometrySnapshot,
+     AcceptsAffineLinearCornerArbitrarilyCloseToParentVertex)
+{
+    constexpr int interface_marker = 130;
+    constexpr FE::Real corner_offset = 1.0e-10;
+    const FE::Real y_gradient = std::sqrt(FE::Real{2.0});
+    const SingleQuadBoundaryMesh mesh;
+
+    auto request = interfaceRequest(interface_marker);
+    interfaces::LevelSetCellCutInput input;
+    input.parent_cell = 0;
+    input.element_type = FE::ElementType::Quad4;
+    input.node_coordinates = {
+        {{-1.0, -1.0, 0.0}},
+        {{1.0, -1.0, 0.0}},
+        {{1.0, 1.0, 0.0}},
+        {{-1.0, 1.0, 0.0}},
+    };
+    input.level_set_values = {
+        -corner_offset,
+        FE::Real{2.0} - corner_offset,
+        FE::Real{2.0} + FE::Real{2.0} * y_gradient - corner_offset,
+        FE::Real{2.0} * y_gradient - corner_offset,
+    };
+    auto cut = interfaces::cutLinearLevelSetCell2D(request, input);
+    ASSERT_EQ(cut.fragments.size(), 1u);
+    ASSERT_LT(cut.fragments.front().measure, 1.0e-8);
+    ASSERT_GT(cut.fragments.front().measure, 1.0e-12);
+
+    interfaces::LevelSetInterfaceDomain domain(request);
+    for (auto& fragment : cut.fragments) {
+        domain.addFragment(std::move(fragment));
+    }
+    for (auto& region : cut.volume_regions) {
+        domain.addVolumeRegion(std::move(region));
+    }
+
+    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    scalar.value = [y_gradient](
+                       FE::GlobalIndex,
+                       const std::array<FE::Real, 3>& xi,
+                       const FE::geometry::CutQuadratureProvenance&) {
+        return (xi[0] + FE::Real{1.0}) +
+               y_gradient * (xi[1] + FE::Real{1.0}) - corner_offset;
+    };
+    scalar.reference_gradient = [y_gradient](
+                                    FE::GlobalIndex,
+                                    const std::array<FE::Real, 3>&,
+                                    const FE::geometry::CutQuadratureProvenance&) {
+        return std::array<FE::Real, 3>{{
+            FE::Real{1.0}, y_gradient, FE::Real{0.0}}};
+    };
+
+    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+        std::move(domain),
+        {},
+        {},
+        mesh,
+        snapshotPolicyWithoutBoundary(),
+        std::move(scalar),
+        "near_vertex_linear_corner");
+    ASSERT_NE(snapshot, nullptr);
+    const auto interface_rules = snapshot->retainedRules(
+        interfaces::FreeSurfaceGeometryRuleRole::Interface);
+    ASSERT_EQ(interface_rules.size(), 1u);
+    ASSERT_FALSE(interface_rules.front()->reference_rule.points.empty());
+    ASSERT_EQ(interface_rules.front()->reference_rule.points.size(),
+              interface_rules.front()->physical_rule.points.size());
+    const FE::Real inverse_gradient_norm =
+        FE::Real{1.0} / std::sqrt(FE::Real{3.0});
+    const std::array<FE::Real, 3> expected_unit_normal{{
+        inverse_gradient_norm,
+        y_gradient * inverse_gradient_norm,
+        FE::Real{0.0},
+    }};
+    for (std::size_t point = 0u;
+         point < interface_rules.front()->reference_rule.points.size();
+         ++point) {
+        for (std::size_t component = 0u; component < 3u; ++component) {
+            EXPECT_NEAR(interface_rules.front()
+                            ->reference_rule.points[point].normal[component],
+                        expected_unit_normal[component],
+                        1.0e-14);
+            EXPECT_NEAR(interface_rules.front()
+                            ->physical_rule.points[point].normal[component],
+                        expected_unit_normal[component],
+                        1.0e-14);
+        }
+    }
+    EXPECT_EQ(snapshot->ledger().represented_phase_disagreement_count, 0u);
+}
+
+TEST(FreeSurfaceGeometrySnapshot,
      RejectsDegenerateOrNonFiniteGradientAndNormal)
 {
     constexpr int interface_marker = 129;

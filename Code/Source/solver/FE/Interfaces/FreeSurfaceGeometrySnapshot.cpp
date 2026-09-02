@@ -74,6 +74,17 @@ void mix(std::uint64_t& hash, Real value) noexcept
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
 
+[[nodiscard]] std::array<Real, 3> crossProduct(
+    const std::array<Real, 3>& a,
+    const std::array<Real, 3>& b) noexcept
+{
+    return {{
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    }};
+}
+
 [[nodiscard]] Real norm(const std::array<Real, 3>& point) noexcept
 {
     return std::sqrt(dot(point, point));
@@ -889,12 +900,6 @@ makeLinearCornerAffineRepresentation(
         return std::array<Real, 3>{{
             a[0] - b[0], a[1] - b[1], a[2] - b[2]}};
     };
-    const auto cross = [](const auto& a, const auto& b) {
-        return std::array<Real, 3>{{
-            a[1] * b[2] - a[2] * b[1],
-            a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0]}};
-    };
 
     LinearCornerAffineRepresentation represented;
     Real direction_norm{0.0};
@@ -919,9 +924,7 @@ makeLinearCornerAffineRepresentation(
         represented.origin = vertices[endpoints.first];
         const auto tangent = difference(vertices[endpoints.second],
                                         represented.origin);
-        represented.reference_gradient =
-            {{tangent[1], -tangent[0], Real{0.0}}};
-        direction_norm = norm(represented.reference_gradient);
+        direction_norm = norm(tangent);
     } else if (mesh.dimension() == 3) {
         if (source->kind != CutInterfaceFragmentKind::Polygon ||
             vertices.size() < 3u) {
@@ -935,18 +938,17 @@ makeLinearCornerAffineRepresentation(
                 for (std::size_t k = j + 1u; k < vertices.size(); ++k) {
                     const auto ab = difference(vertices[j], vertices[i]);
                     const auto ac = difference(vertices[k], vertices[i]);
-                    const auto candidate = cross(ab, ac);
+                    const auto candidate = crossProduct(ab, ac);
                     const Real area_squared = dot(candidate, candidate);
                     if (area_squared > maximum_area_squared) {
                         maximum_area_squared = area_squared;
                         plane_vertices = {{i, j, k}};
-                        represented.reference_gradient = candidate;
                     }
                 }
             }
         }
         represented.origin = vertices[plane_vertices[0]];
-        direction_norm = norm(represented.reference_gradient);
+        direction_norm = std::sqrt(maximum_area_squared);
     } else {
         throw std::invalid_argument(
             "LinearCorner affine validation requires a two- or three-dimensional parent mesh");
@@ -958,20 +960,6 @@ makeLinearCornerAffineRepresentation(
         !(direction_norm > minimum_direction_scale)) {
         throw std::invalid_argument(
             "LinearCorner source fragment has degenerate affine geometry");
-    }
-    for (auto& component : represented.reference_gradient) {
-        component /= direction_norm;
-    }
-
-    Real vertex_scale{1.0};
-    for (const auto& vertex : vertices) {
-        vertex_scale = std::max(
-            vertex_scale, norm(difference(vertex, represented.origin)));
-        if (std::abs(represented.value(vertex)) >
-            Real{128.0} * tolerance * vertex_scale) {
-            throw std::invalid_argument(
-                "LinearCorner source vertices do not define one affine chord or plane");
-        }
     }
 
     std::array<Real, 3> centroid{{0.0, 0.0, 0.0}};
@@ -990,32 +978,94 @@ makeLinearCornerAffineRepresentation(
         centroid,
         rule.provenance);
     const Real independent_norm = norm(independent_gradient);
-    const Real orientation =
-        dot(represented.reference_gradient, independent_gradient);
     if (!finitePoint(independent_gradient) ||
         !std::isfinite(independent_norm) ||
-        !(independent_norm > minimum_direction_scale) ||
-        !std::isfinite(orientation)) {
+        !(independent_norm > minimum_direction_scale)) {
         throw std::invalid_argument(
             "LinearCorner source geometry cannot be oriented by the independent scalar gradient");
     }
-    const Real orientation_angle = std::acos(std::clamp(
-        std::abs(orientation) / independent_norm, Real{0.0}, Real{1.0}));
-    if (!std::isfinite(orientation_angle) ||
-        orientation_angle > Real{1.0e-7}) {
+    // The represented P1 gradient defines the affine zero-set plane without
+    // subtracting nearly coincident source vertices.  Retain the source span
+    // and area checks above as independent degeneracy certificates.
+    represented.reference_gradient = independent_gradient;
+    for (auto& component : represented.reference_gradient) {
+        component /= independent_norm;
+    }
+    const Real source_normal_norm = norm(source->normal);
+    const Real source_orientation =
+        dot(source->normal, represented.reference_gradient);
+    if (!finitePoint(source->normal) ||
+        !std::isfinite(source_normal_norm) ||
+        !(source_normal_norm > minimum_direction_scale) ||
+        !std::isfinite(source_orientation) ||
+        !(source_orientation > Real{0.0})) {
         throw std::invalid_argument(
             "LinearCorner source normal disagrees with the independent scalar gradient");
     }
-    if (orientation < Real{0.0}) {
-        for (auto& component : represented.reference_gradient) {
-            component = -component;
+
+    Real vertex_scale{1.0};
+    for (const auto& vertex : vertices) {
+        vertex_scale = std::max(
+            vertex_scale, norm(difference(vertex, represented.origin)));
+        if (std::abs(represented.value(vertex)) >
+            Real{128.0} * tolerance * vertex_scale) {
+            throw std::invalid_argument(
+                "LinearCorner source normal disagrees with the independent scalar gradient");
         }
     }
     return represented;
 }
 
+void canonicalizeLinearCornerRuleGeometry(
+    FreeSurfaceGeometryRuleRecord& record,
+    const LinearCornerAffineRepresentation& represented,
+    const assembly::IMeshAccess& mesh)
+{
+    auto& rule = record.reference_rule;
+    if (rule.frame != geometry::CutGeometryFrame::Reference) {
+        throw std::invalid_argument(
+            "LinearCorner snapshot geometry requires a reference-frame rule");
+    }
+    const int geometric_dimension =
+        rule.geometric_dimension >= 0
+            ? rule.geometric_dimension
+            : (rule.kind == geometry::CutQuadratureKind::Volume
+                   ? mesh.dimension()
+                   : mesh.dimension() - 1);
+    constexpr Real minimum_direction_scale =
+        Real{64.0} * std::numeric_limits<Real>::min();
+    for (auto& point : rule.points) {
+        point.normal = represented.reference_gradient;
+        if (geometric_dimension == mesh.dimension() - 1) {
+            point.boundary_normal = represented.reference_gradient;
+        } else if (mesh.dimension() == 3 &&
+                   geometric_dimension == mesh.dimension() - 2) {
+            auto tangent = crossProduct(point.boundary_normal,
+                                        represented.reference_gradient);
+            const Real tangent_norm = norm(tangent);
+            if (!finitePoint(point.boundary_normal) ||
+                !std::isfinite(tangent_norm) ||
+                !(tangent_norm > minimum_direction_scale)) {
+                throw std::invalid_argument(
+                    "LinearCorner contact rule has degenerate affine geometry");
+            }
+            for (auto& component : tangent) {
+                component /= tangent_norm;
+            }
+            if (dot(tangent, point.tangent) < Real{0.0}) {
+                for (auto& component : tangent) {
+                    component = -component;
+                }
+            }
+            point.tangent = tangent;
+        }
+    }
+    record.physical_rule =
+        geometry::mapCutQuadratureRuleToPhysical(mesh, rule);
+}
+
 void validateRule(
-    const FreeSurfaceGeometryRuleRecord& record,
+    FreeSurfaceGeometryRuleRecord& record,
     const LevelSetInterfaceDomain& interface_domain,
     const assembly::IMeshAccess& mesh,
     const FreeSurfaceGeometryRevision& revision,
@@ -1023,7 +1073,7 @@ void validateRule(
     const FreeSurfaceGeometryScalarEvaluator& scalar,
     FreeSurfaceGeometryValidationLedger& ledger)
 {
-    const auto& rule = record.reference_rule;
+    auto& rule = record.reference_rule;
     const bool interface_or_contact =
         record.role == FreeSurfaceGeometryRuleRole::Interface ||
         record.role == FreeSurfaceGeometryRuleRole::Contact;
@@ -1035,6 +1085,8 @@ void validateRule(
         linear_corner_representation =
             makeLinearCornerAffineRepresentation(
                 record, interface_domain, mesh, scalar, policy.tolerance);
+        canonicalizeLinearCornerRuleGeometry(
+            record, *linear_corner_representation, mesh);
     }
     const int geometric_dimension =
         rule.geometric_dimension >= 0
@@ -4512,7 +4564,7 @@ buildFreeSurfaceGeometrySnapshot(
                         GlobalIndex,
                         std::uint64_t>>
         unique_rules;
-    for (const auto& record : records) {
+    for (auto& record : records) {
         const auto identity = std::make_tuple(
             record.role,
             record.reference_rule.provenance.marker,
