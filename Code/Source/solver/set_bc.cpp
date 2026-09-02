@@ -1421,8 +1421,12 @@ void set_bc_dir_wl(ComMod& com_mod, const bcType& lBc, const mshType& lM, const 
       // Compute Nq of the mesh at the face integration point using
       // Newton method.
       //
-      xi = xi0;
-      nn::get_nnx(nsd, fs[1].eType, fs[1].eNoN, xql, fs[1].xib, fs[1].Nb, xp, xi, Nq, Nqx);
+      if (flag) {
+        Nq = Nw;
+      } else {
+        xi = xi0;
+        nn::get_nnx(nsd, fs[1].eType, fs[1].eNoN, xql, fs[1].xib, fs[1].Nb, xp, xi, Nq, Nqx);
+      }
 
       if (nsd == 3) {
         fluid::bw_fluid_3d(com_mod, fs[0].eNoN, fs[1].eNoN, w, Nw, Nq, Nwx, yl, ub, nV, tauB, lR, lK);
@@ -2102,5 +2106,4 @@ void set_bc_undef_neu_l(ComMod& com_mod, const bcType& lBc, const faceType& lFa)
 }
 
 };
-
 
