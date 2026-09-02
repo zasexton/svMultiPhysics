@@ -14039,6 +14039,72 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
 }
 
 TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       ExactNodeCandidateChangesTopologyAndExactRollbackRestoresIt)
+{
+  const auto make_solution =
+      [&](const std::array<svmp::FE::Real, 3>& vertex_values) {
+        auto solution = initialized_solution_;
+        const auto coefficients = projectWorkflowVertexValues(
+            *sim_.fe_system,
+            phi_,
+            vertex_values,
+            /*components=*/1u,
+            "ApplicationDriver exact-node topology round trip");
+        writeWorkflowFieldSlice(
+            *sim_.fe_system, phi_, coefficients, solution);
+        return solution;
+      };
+
+  const auto exact_state = make_solution({{-1.0, 0.0, 1.0}});
+  const auto moved_state = make_solution({{-1.0, 1.0e-7, 1.0}});
+  const auto baseline =
+      refreshActiveCutIntegrationContextFromSolutionCached(
+          sim_,
+          *params_,
+          exact_state,
+          lifecycle_,
+          refresh_cache_,
+          "before_physics_solve",
+          "staged_fe_solution");
+  const auto candidate =
+      refreshActiveCutIntegrationContextFromSolutionCached(
+          sim_,
+          *params_,
+          moved_state,
+          lifecycle_,
+          refresh_cache_,
+          "outer_fixed_point",
+          "staged_fe_solution");
+  const auto restored =
+      refreshActiveCutIntegrationContextFromSolutionCached(
+          sim_,
+          *params_,
+          exact_state,
+          lifecycle_,
+          refresh_cache_,
+          "restored_outer_fixed_point",
+          "staged_fe_solution");
+
+  EXPECT_TRUE(baseline.refreshed);
+  EXPECT_TRUE(candidate.refreshed);
+  EXPECT_TRUE(restored.refreshed);
+  EXPECT_NE(baseline.topology_key, 0u);
+  EXPECT_NE(candidate.topology_key, baseline.topology_key);
+  EXPECT_EQ(restored.topology_key, baseline.topology_key);
+
+  TransientCutTopologyAttemptTracker tracker;
+  tracker.beginAttempt();
+  tracker.observe(baseline, "before_physics_solve");
+  tracker.observe(candidate, "outer_fixed_point");
+  tracker.observe(restored, "restored_outer_fixed_point");
+  EXPECT_TRUE(tracker.attemptTainted());
+  EXPECT_TRUE(tracker.candidateMustReject(restored.topology_key));
+  ASSERT_TRUE(tracker.firstMismatchedTopologyKey().has_value());
+  EXPECT_EQ(*tracker.firstMismatchedTopologyKey(), candidate.topology_key);
+  EXPECT_EQ(tracker.firstMismatchProvenance(), "outer_fixed_point");
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
        CachedRefreshRebuildsARevisionStaleContextOnBothInputPaths)
 {
   const auto clone_current_context = [&]() {
