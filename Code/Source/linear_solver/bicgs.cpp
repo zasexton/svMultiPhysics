@@ -42,6 +42,14 @@ void bicgsv (fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
   Array<double> P(dof,nNo), Rh(dof,nNo), X(dof,nNo), V(dof,nNo),   
       S(dof,nNo), T(dof,nNo);
 
+  const int vector_size = dof*nNo;
+  auto* const p_data = P.data();
+  auto* const x_data = X.data();
+  auto* const v_data = V.data();
+  auto* const s_data = S.data();
+  auto* const t_data = T.data();
+  auto* const r_data = R.data();
+
   ls.callD = fsi_linear_solver::fsils_cpu_t();
   ls.success = false;
   double err = norm::fsi_ls_normv(dof, mynNo, lhs.commu, R);
@@ -74,14 +82,25 @@ void bicgsv (fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
 
     spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, K, P, V);
     double alpha = rho / dot::fsils_dot_v(dof, mynNo, lhs.commu, Rh, V);
-    S = R - alpha*V;
+    for (int j = 0; j < vector_size; ++j) {
+      volatile double alpha_v = alpha*v_data[j];
+      s_data[j] = r_data[j] - alpha_v;
+    }
 
     spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, K, S, T);
     double omega = norm::fsi_ls_normv(dof, mynNo, lhs.commu, T);
     omega = dot::fsils_dot_v(dof, mynNo, lhs.commu, T, S) / (omega * omega);
 
-    X = X + alpha*P + omega*S;
-    R = S - omega*T;
+    for (int j = 0; j < vector_size; ++j) {
+      volatile double alpha_p = alpha*p_data[j];
+      const double x_plus_alpha_p = x_data[j] + alpha_p;
+      volatile double omega_s = omega*s_data[j];
+      x_data[j] = x_plus_alpha_p + omega_s;
+    }
+    for (int j = 0; j < vector_size; ++j) {
+      volatile double omega_t = omega*t_data[j];
+      r_data[j] = s_data[j] - omega_t;
+    }
 
     errO = err;
     err =  norm::fsi_ls_normv(dof, mynNo, lhs.commu, R);
@@ -96,7 +115,12 @@ void bicgsv (fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
     dmsg << "beta: " << beta;
     #endif
 
-    P = R + beta * (P - omega*V);
+    for (int j = 0; j < vector_size; ++j) {
+      volatile double omega_v = omega*v_data[j];
+      const double p_minus_omega_v = p_data[j] - omega_v;
+      volatile double beta_term = beta*p_minus_omega_v;
+      p_data[j] = r_data[j] + beta_term;
+    }
     i_itr += 1;
   } 
 
@@ -215,6 +239,4 @@ void bicgss(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subL
 }
 
 };
-
-
 
