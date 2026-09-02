@@ -1,0 +1,210 @@
+{
+  "schema_version": 1,
+  "record_id": "free_surface_wp8_exact_node_topology_20260902_41703398",
+  "recorded_at": "2026-09-02T04:48:31-07:00",
+  "outcome": "PASS_PREREQUISITE_NONCLOSURE",
+  "accepted_claim": "physical_exact_node_topology_detection_and_exact_rollback_prerequisite",
+  "work_packages": [
+    "WP-8",
+    "WP-10"
+  ],
+  "fsr08_closed": false,
+  "fsr09_closed": false,
+  "wp8_closed": false,
+  "wp10_closed": false,
+  "implementation_commits": {
+    "early_rejection": "002dad1ba7f744f48b3f341c360b3fd76811f6a9",
+    "rejection_evidence": "f7721f484bc9b626f2143190aeb7a079cda3d260",
+    "exact_node_regression": "478b6dcf79b952425a5c976d156d13393c565945"
+  },
+  "physical_trace_job": {
+    "scheduler": {
+      "job_id": 41703398,
+      "ledger": "/scratch/users/zsexton/svmp-job-ledgers/wp4-primary.tsv",
+      "partition": "amarsden",
+      "account": "amarsden",
+      "nodes": 1,
+      "cpus_per_task": 2,
+      "memory": "8G",
+      "mail_user": "zsexton@stanford.edu",
+      "mail_events": [
+        "BEGIN",
+        "END",
+        "FAIL"
+      ],
+      "state": "COMPLETED",
+      "exit_code": "0:0",
+      "elapsed": "00:00:20",
+      "batch_max_rss_kib": 218016
+    },
+    "campaign": {
+      "script": "/scratch/users/zsexton/wp10-centered-topology-semantic-20260902/run.sbatch",
+      "script_sha256": "d481f2687851c41be551f708bff6654eae0385bf77fdaf985692bb1737840db9",
+      "result_root": "/scratch/users/zsexton/wp10-centered-topology-semantic-20260902/proof-41703398",
+      "artifact_manifest": "/scratch/users/zsexton/wp10-centered-topology-semantic-20260902/proof-41703398/artifacts.sha256",
+      "artifact_manifest_sha256": "bf2cb153dc2571a00d6d0a38be70e4c04468d8820922bd4ed34b5c7a1592f0af",
+      "artifact_manifest_check_passed": true,
+      "runner_output_sha256": "3295f2307c704a13f87b73afa29725d4fe86ffabeab29b60434bbbe1e25786d0",
+      "solver_stdout_sha256": "e6e800dbb67de9f2e006294e9f86d6f095733fde9a74a076cd8e739dfd0373fe",
+      "solver_binary_sha256": "3fb2c9f386430bddb261ce667d3adf8b4c618ca258e2d06e593b0355f213214b",
+      "source_revision": "f7721f484bc9b626f2143190aeb7a079cda3d260",
+      "source_tracked_diff_sha256": "505f27db03b563cf17f5f4a7f5a19b1f266988d12513d22ea579ed43fe4bcd7e",
+      "trace_instrumentation_retained": false,
+      "restored_production_application_driver_sha256": "4a543b02c3b1b4e155f8ba085a734dddf0860c53f1552e0341f02273232d151e"
+    },
+    "scenario": {
+      "case_id": "circle_n8_centered_negative",
+      "description": "centered two-fluid circular static-drop development case with interface nodes exactly on the zero level set",
+      "time_scheme": "BackwardEuler",
+      "time_step": 0.001,
+      "fixed_step": true,
+      "expected_rejection": true,
+      "accepted_step_count": 0,
+      "solver_return_code": 1
+    },
+    "semantic_topology_trace": {
+      "block_count": 4,
+      "baseline": {
+        "rule_count": 192,
+        "topology_key": "3736496254262231059"
+      },
+      "candidate": {
+        "rule_count": 208,
+        "topology_key": "18020919384387365897",
+        "matches_baseline": false,
+        "added_records": 64,
+        "removed_or_replaced_records": 48,
+        "affected_parent_count": 32,
+        "affected_parent_gids": [
+          23,
+          24,
+          25,
+          26,
+          39,
+          40,
+          41,
+          42,
+          51,
+          52,
+          53,
+          54,
+          59,
+          60,
+          61,
+          62,
+          67,
+          68,
+          69,
+          70,
+          75,
+          76,
+          77,
+          78,
+          87,
+          88,
+          89,
+          90,
+          103,
+          104,
+          105,
+          106
+        ],
+        "added_role_counts": {
+          "0": 16,
+          "1": 32,
+          "2": 16
+        },
+        "removed_role_counts": {
+          "0": 16,
+          "1": 24,
+          "2": 8
+        }
+      },
+      "restored_outer_fixed_point": {
+        "rule_count": 192,
+        "topology_key": "3736496254262231059",
+        "exact_semantic_multiset_match_to_baseline": true
+      },
+      "restored_time_step": {
+        "rule_count": 192,
+        "topology_key": "3736496254262231059",
+        "exact_semantic_multiset_match_to_baseline": true
+      }
+    },
+    "early_rejection": {
+      "reason": "CutTopologyChanged",
+      "first_mismatch_provenance": "outer_fixed_point",
+      "external_state_discontinuity": true,
+      "outer_iterations": 2,
+      "completed_inner_iterations": 1,
+      "second_inner_solve_started": false,
+      "completed_linear_iterations": 13,
+      "linear_solver": "BlockSchur",
+      "restored_topology_key": "3736496254262231059",
+      "accepted_state_mutated": false
+    }
+  },
+  "regression_job": {
+    "scheduler": {
+      "job_id": 41703866,
+      "ledger": "/scratch/users/zsexton/svmp-job-ledgers/wp4-primary.tsv",
+      "partition": "amarsden",
+      "account": "amarsden",
+      "nodes": 1,
+      "cpus_per_task": 2,
+      "memory": "8G",
+      "mail_user": "zsexton@stanford.edu",
+      "mail_events": [
+        "BEGIN",
+        "END",
+        "FAIL"
+      ],
+      "state": "COMPLETED",
+      "exit_code": "0:0",
+      "elapsed": "00:07:13",
+      "batch_max_rss_kib": 2616936
+    },
+    "campaign": {
+      "script": "/scratch/users/zsexton/wp10-exact-node-regression-20260902/run.sbatch",
+      "script_sha256": "37e4315c31bf789cae486c267dcdd29e530d9d160cbf4399199084a7d1d6115a",
+      "result_root": "/scratch/users/zsexton/wp10-exact-node-regression-20260902/proof-41703866",
+      "artifact_manifest": "/scratch/users/zsexton/wp10-exact-node-regression-20260902/proof-41703866/artifacts.sha256",
+      "artifact_manifest_sha256": "f3ea444a87ffd42a3ad440cee0f22faa991cfb8e55f0b809e79660a011e30d7c",
+      "artifact_manifest_check_passed": true,
+      "test_binary_sha256": "75cbc13f1f46929ec4ec62f482968a4dd06eccb8f950d07b1c567ae2fc326b93",
+      "focused_output_sha256": "39880bbb2187c1f70f400af5e3b448798c95a413f9aa2ea06f0b9da8ab6efcaf",
+      "full_output_sha256": "342c796ae50363895f022f2aa26ef0553592f998d107be5cca3c63490b027ac8",
+      "test_source_sha256": "a7bc5d68291e4d8cefbbe4d0e1a808918c90cf0b3bf51ad9fb19dcd870a3045c"
+    },
+    "focused_suite": {
+      "test": "ApplicationDriverConservativePhaseCandidatesTest.ExactNodeCandidateChangesTopologyAndExactRollbackRestoresIt",
+      "tests": 1,
+      "passed": 1,
+      "skipped": 0,
+      "failures": 0,
+      "elapsed_seconds": 0.009
+    },
+    "full_application_suite": {
+      "tests": 303,
+      "passed": 299,
+      "skipped": 4,
+      "failures": 0,
+      "elapsed_seconds": 249.536
+    }
+  },
+  "validated_contracts": [
+    "a physical exact-node candidate changes the semantic cut-rule multiset and the production topology key",
+    "the mismatch is detected after the complete outer fixed-point refresh and before a second frozen inner solve",
+    "rollback restores the exact baseline semantic multiset and topology key at both restoration checkpoints",
+    "the attempt remains tainted after restoration and retains the first mismatch key and provenance",
+    "fixed-step execution rejects the attempt without mutating the accepted state"
+  ],
+  "open_requirements": [
+    "demonstrate adaptive time-step reduction or an explicit event restart across exact-node topology changes",
+    "define and qualify physical topology-jump energy accounting",
+    "produce an accepted static-drop equilibrium with convergent pressure-jump and parasitic-current errors",
+    "complete fixed-topology derivative and nonlinear-contraction studies",
+    "complete backward-Euler and generalized-alpha energy campaigns",
+    "complete the remaining WP-8 and WP-10 physical qualification matrices"
+  ]
+}
