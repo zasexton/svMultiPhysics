@@ -551,6 +551,11 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
   Array3<double> lK(dof*dof,eNoN,eNoN);
 
   static constexpr std::array<double,3> zeroUrisValveVelTermTotal{};
+
+  std::array<fsType,2> momentum_fs;
+  std::array<fsType,2> continuity_fs;
+  fs::get_thood_fs(com_mod, momentum_fs, lM, vmsStab, 1);
+  fs::get_thood_fs(com_mod, continuity_fs, lM, vmsStab, 2);
   
   // Loop over all elements of mesh
   //
@@ -592,30 +597,26 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
     // Initialize residual and tangents
     lR = 0.0;
     lK = 0.0;
-    std::array<fsType,2> fs;
-
-    // Set function spaces for velocity and pressure.
-    fs::get_thood_fs(com_mod, fs, lM, vmsStab, 1);
 
     // Define element coordinates appropriate for function spaces
-    Array<double> xwl(nsd,fs[0].eNoN); 
-    Array<double> Nwx(nsd,fs[0].eNoN); 
-    Array<double> Nwxx(l,fs[0].eNoN);
+    Array<double> xwl(nsd,momentum_fs[0].eNoN);
+    Array<double> Nwx(nsd,momentum_fs[0].eNoN);
+    Array<double> Nwxx(l,momentum_fs[0].eNoN);
 
-    Array<double> xql(nsd,fs[1].eNoN); 
-    Array<double> Nqx(nsd,fs[1].eNoN);
+    Array<double> xql(nsd,momentum_fs[1].eNoN);
+    Array<double> Nqx(nsd,momentum_fs[1].eNoN);
 
     #ifdef debug_construct_fluid
     dmsg;
     dmsg << "l: " << l;
-    dmsg << "fs[0].eNoN: " << fs[0].eNoN;
-    dmsg << "fs[1].eNoN: " << fs[1].eNoN;
+    dmsg << "fs[0].eNoN: " << momentum_fs[0].eNoN;
+    dmsg << "fs[1].eNoN: " << momentum_fs[1].eNoN;
     #endif
 
     xwl = xl;
 
     for (int i = 0; i < xql.nrows(); i++) { 
-      for (int j = 0; j < fs[1].eNoN; j++) { 
+      for (int j = 0; j < momentum_fs[1].eNoN; j++) {
         xql(i,j) = xl(i,j);
       }
     }
@@ -625,10 +626,10 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
     #ifdef debug_construct_fluid
     dmsg;
     dmsg << "Gauss integration 1 ... " << "";
-    dmsg << "fs[1].nG: " << fs[0].nG;
-    dmsg << "fs[1].lShpF: " << fs[0].lShpF;
-    dmsg << "fs[2].nG: " << fs[1].nG;
-    dmsg << "fs[2].lShpF: " << fs[1].lShpF;
+    dmsg << "fs[1].nG: " << momentum_fs[0].nG;
+    dmsg << "fs[1].lShpF: " << momentum_fs[0].lShpF;
+    dmsg << "fs[2].nG: " << momentum_fs[1].nG;
+    dmsg << "fs[2].lShpF: " << momentum_fs[1].lShpF;
     #endif
 
     double Jac{0.0};
@@ -638,33 +639,33 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
     Vector<double> urisFactorTotalEl;
     Array<double> urisValveVelTermTotalEl;
     if (com_mod.urisFlag) {
-      uris::eval_uris_ris_factors_quadrature(com_mod, lM, fs[0], e, urisFactorTotalEl, urisValveVelTermTotalEl);
+      uris::eval_uris_ris_factors_quadrature(com_mod, lM, momentum_fs[0], e, urisFactorTotalEl, urisValveVelTermTotalEl);
     }
 
-    for (int g = 0; g < fs[0].nG; g++) {
+    for (int g = 0; g < momentum_fs[0].nG; g++) {
       #ifdef debug_construct_fluid
       dmsg << "===== g: " << g+1;
       #endif
-      if (g == 0 || !fs[1].lShpF) {
-        auto Nx = fs[1].Nx.rslice(g);
-        nn::gnn(fs[1].eNoN, nsd, nsd, Nx, xql, Nqx, Jac, ksix);
+      if (g == 0 || !momentum_fs[1].lShpF) {
+        auto Nx = momentum_fs[1].Nx.rslice(g);
+        nn::gnn(momentum_fs[1].eNoN, nsd, nsd, Nx, xql, Nqx, Jac, ksix);
         if (utils::is_zero(Jac)) {
            throw std::runtime_error("[construct_fluid] Jacobian for element " + std::to_string(e) + " is < 0.");
         }
       }
 
-      if (g == 0 || !fs[0].lShpF) {
-        auto Nx = fs[0].Nx.rslice(g);
-        nn::gnn(fs[0].eNoN, nsd, nsd, Nx, xwl, Nwx, Jac, ksix);
+      if (g == 0 || !momentum_fs[0].lShpF) {
+        auto Nx = momentum_fs[0].Nx.rslice(g);
+        nn::gnn(momentum_fs[0].eNoN, nsd, nsd, Nx, xwl, Nwx, Jac, ksix);
         if (utils::is_zero(Jac)) {
            throw std::runtime_error("[construct_fluid] Jacobian for element " + std::to_string(e) + " is < 0.");
         }
 
-        auto Nxx = fs[0].Nxx.rslice(g);
-        nn::gn_nxx(l, fs[0].eNoN, nsd, nsd, Nx, Nxx, xwl, Nwx, Nwxx); 
+        auto Nxx = momentum_fs[0].Nxx.rslice(g);
+        nn::gn_nxx(l, momentum_fs[0].eNoN, nsd, nsd, Nx, Nxx, xwl, Nwx, Nwxx);
       }
 
-      double w = fs[0].w(g) * Jac;
+      double w = momentum_fs[0].w(g) * Jac;
       #ifdef debug_construct_fluid
       dmsg << "Jac: " << Jac;
       dmsg << "w: " << w;
@@ -673,88 +674,84 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
       // Compute momentum residual and tangent matrix.
       //
       if (nsd == 3) {
-        auto N0 = fs[0].N.rcol(g); 
-        auto N1 = fs[1].N.rcol(g); 
+        auto N0 = momentum_fs[0].N.rcol(g);
+        auto N1 = momentum_fs[1].N.rcol(g);
         double urisFactorTotal = 0.0;
         const double* urisValveVelTermTotalPtr = zeroUrisValveVelTermTotal.data();
         if (com_mod.urisFlag) {
           urisFactorTotal = urisFactorTotalEl(g);
           urisValveVelTermTotalPtr = urisValveVelTermTotalEl.col_data(g);
         }
-        fluid_3d_m_impl(com_mod, vmsStab, fs[0].eNoN, fs[1].eNoN, w, ksix, N0, N1,
+        fluid_3d_m_impl(com_mod, vmsStab, momentum_fs[0].eNoN, momentum_fs[1].eNoN, w, ksix, N0, N1,
             Nwx, Nqx, Nwxx, al, yl, bfl, lR, lK, K_inverse_darcy_permeability, 
             urisFactorTotal, urisValveVelTermTotalPtr);
 
       } else if (nsd == 2) {
-        auto N0 = fs[0].N.rcol(g); 
-        auto N1 = fs[1].N.rcol(g); 
-        fluid_2d_m(com_mod, vmsStab, fs[0].eNoN, fs[1].eNoN, w, ksix, N0, N1, 
+        auto N0 = momentum_fs[0].N.rcol(g);
+        auto N1 = momentum_fs[1].N.rcol(g);
+        fluid_2d_m(com_mod, vmsStab, momentum_fs[0].eNoN, momentum_fs[1].eNoN, w, ksix, N0, N1,
             Nwx, Nqx, Nwxx, al, yl, bfl, lR, lK, K_inverse_darcy_permeability);
       }
     } // g: loop
-
-    // Set function spaces for velocity and pressure.
-    //
-    fs::get_thood_fs(com_mod, fs, lM, vmsStab, 2);
 
     // Gauss integration 2
     //
     #ifdef debug_construct_fluid
     dmsg;
     dmsg << "Gauss integration 2 ... " << "";
-    dmsg << "fs[1].nG: " << fs[0].nG;
-    dmsg << "fs[1].lShpF: " << fs[0].lShpF;
-    dmsg << "fs[2].nG: " << fs[1].nG;
-    dmsg << "fs[2].lShpF: " << fs[1].lShpF;
+    dmsg << "fs[1].nG: " << continuity_fs[0].nG;
+    dmsg << "fs[1].lShpF: " << continuity_fs[0].lShpF;
+    dmsg << "fs[2].nG: " << continuity_fs[1].nG;
+    dmsg << "fs[2].lShpF: " << continuity_fs[1].lShpF;
     #endif
 
     // If the number of quadrature points is different for the continuity and 
     // momentum function spaces, recompute the RIS factor
     if (com_mod.urisFlag) {
-      if (urisFactorTotalEl.size() != fs[1].nG) {
-        uris::eval_uris_ris_factors_quadrature(com_mod, lM, fs[1], e, urisFactorTotalEl, urisValveVelTermTotalEl);
+      if (urisFactorTotalEl.size() != continuity_fs[1].nG) {
+        uris::eval_uris_ris_factors_quadrature(com_mod, lM, continuity_fs[1], e, urisFactorTotalEl, urisValveVelTermTotalEl);
       }
     }
 
-    for (int g = 0; g < fs[1].nG; g++) {
-      if (g == 0 || !fs[0].lShpF) {
-        auto Nx = fs[0].Nx.rslice(g);
-        nn::gnn(fs[0].eNoN, nsd, nsd, Nx, xwl, Nwx, Jac, ksix);
+    for (int g = 0; g < continuity_fs[1].nG; g++) {
+      if (g == 0 || !continuity_fs[0].lShpF) {
+        auto Nx = continuity_fs[0].Nx.rslice(g);
+        nn::gnn(continuity_fs[0].eNoN, nsd, nsd, Nx, xwl, Nwx, Jac, ksix);
 
         if (utils::is_zero(Jac)) {
            throw std::runtime_error("[construct_fluid] Jacobian for element " + std::to_string(e) + " is < 0.");
         }
       }
 
-      if (g == 0 || !fs[1].lShpF) {
-        auto Nx = fs[1].Nx.rslice(g);
-        nn::gnn(fs[1].eNoN, nsd, nsd, Nx, xql, Nqx, Jac, ksix);
+      if (g == 0 || !continuity_fs[1].lShpF) {
+        auto Nx = continuity_fs[1].Nx.rslice(g);
+        nn::gnn(continuity_fs[1].eNoN, nsd, nsd, Nx, xql, Nqx, Jac, ksix);
 
         if (utils::is_zero(Jac)) {
            throw std::runtime_error("[construct_fluid] Jacobian for element " + std::to_string(e) + " is < 0.");
         }
       }
-      double w = fs[1].w(g) * Jac;
+      double w = continuity_fs[1].w(g) * Jac;
 
       // Compute continuity residual and tangent matrix.
       //
       if (nsd == 3) {
-        auto N0 = fs[0].N.rcol(g); 
-        auto N1 = fs[1].N.rcol(g); 
+        auto N0 = continuity_fs[0].N.rcol(g);
+        auto N1 = continuity_fs[1].N.rcol(g);
         double urisFactorTotal = 0.0;
         const double* urisValveVelTermTotalPtr = zeroUrisValveVelTermTotal.data();
         if (com_mod.urisFlag) {
           urisFactorTotal = urisFactorTotalEl(g);
           urisValveVelTermTotalPtr = urisValveVelTermTotalEl.col_data(g);
         }
-        fluid_3d_c_impl(com_mod, vmsStab, fs[0].eNoN, fs[1].eNoN, w, ksix, N0, N1,
+        fluid_3d_c_impl(com_mod, vmsStab, continuity_fs[0].eNoN, continuity_fs[1].eNoN, w, ksix, N0, N1,
               Nwx, Nqx, Nwxx, al, yl, bfl, lR, lK, K_inverse_darcy_permeability, 
               urisFactorTotal, urisValveVelTermTotalPtr);
 
       } else if (nsd == 2) {
-        auto N0 = fs[0].N.rcol(g); 
-        auto N1 = fs[1].N.rcol(g); 
-        fluid_2d_c(com_mod, vmsStab, fs[0].eNoN, fs[1].eNoN, w, ksix, N0, N1, 
+        auto N0 = continuity_fs[0].N.rcol(g);
+        auto N1 = continuity_fs[1].N.rcol(g);
+        fluid_2d_c(com_mod, vmsStab, continuity_fs[0].eNoN, continuity_fs[1].eNoN, w, ksix, N0, N1,
               Nwx, Nqx, Nwxx, al, yl, bfl, lR, lK, K_inverse_darcy_permeability);
       }
 
