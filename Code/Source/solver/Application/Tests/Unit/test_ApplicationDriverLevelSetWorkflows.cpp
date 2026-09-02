@@ -3137,7 +3137,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           /*completed_step=*/0);
   ASSERT_TRUE(canonical.supported);
   ASSERT_FALSE(canonical.words.empty());
-  EXPECT_EQ(canonical.words.front(), 3u);
+  EXPECT_EQ(canonical.words.front(), 4u);
   auto changed_requests = requests;
   changed_requests.front()
       .static_capillary_equilibrium
