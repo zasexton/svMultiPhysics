@@ -653,6 +653,67 @@ bool startsWith(std::string_view value, std::string_view prefix)
 
 } // namespace
 
+TEST(EquationParameters,
+     ParsesConservativePhaseOperationalControlsThroughAliases)
+{
+  struct Fixture {
+    const char* naming;
+    const char* xml;
+    std::map<std::string, std::string> expected;
+  };
+  const std::array fixtures{
+      Fixture{
+          "underscore",
+          R"xml(
+<Add_equation type="level_set">
+  <Conservative_phase_component_activity_tolerance>4e-7</Conservative_phase_component_activity_tolerance>
+  <Conservative_phase_write_flux_artifacts>true</Conservative_phase_write_flux_artifacts>
+  <Conservative_phase_flux_artifact_cadence_steps>3</Conservative_phase_flux_artifact_cadence_steps>
+  <Conservative_phase_classify_nonprimary_components_as_satellites>true</Conservative_phase_classify_nonprimary_components_as_satellites>
+  <Conservative_phase_fixed_flux_regions>film|wall_film|0|1|0|0.1|*|*</Conservative_phase_fixed_flux_regions>
+</Add_equation>
+)xml",
+          {{"Conservative_phase_component_activity_tolerance", "4e-7"},
+           {"Conservative_phase_write_flux_artifacts", "true"},
+           {"Conservative_phase_flux_artifact_cadence_steps", "3"},
+           {"Conservative_phase_classify_nonprimary_components_as_satellites",
+            "true"},
+           {"Conservative_phase_fixed_flux_regions",
+            "film|wall_film|0|1|0|0.1|*|*"}}},
+      Fixture{
+          "compact",
+          R"xml(
+<Add_equation type="level_set">
+  <ConservativePhaseComponentActivityTolerance>8e-8</ConservativePhaseComponentActivityTolerance>
+  <ConservativePhaseWriteFluxArtifacts>false</ConservativePhaseWriteFluxArtifacts>
+  <ConservativePhaseFluxArtifactCadenceSteps>4</ConservativePhaseFluxArtifactCadenceSteps>
+  <ConservativePhaseClassifyNonprimaryComponentsAsSatellites>false</ConservativePhaseClassifyNonprimaryComponentsAsSatellites>
+  <ConservativePhaseFixedFluxRegions>rim|edge|0.8|1|0.5|1|*|*</ConservativePhaseFixedFluxRegions>
+</Add_equation>
+)xml",
+          {{"ConservativePhaseComponentActivityTolerance", "8e-8"},
+           {"ConservativePhaseWriteFluxArtifacts", "false"},
+           {"ConservativePhaseFluxArtifactCadenceSteps", "4"},
+           {"ConservativePhaseClassifyNonprimaryComponentsAsSatellites",
+            "false"},
+           {"ConservativePhaseFixedFluxRegions",
+            "rim|edge|0.8|1|0.5|1|*|*"}}},
+  };
+
+  for (const auto& fixture : fixtures) {
+    SCOPED_TRACE(fixture.naming);
+    std::unique_ptr<EquationParameters> parameters;
+    ASSERT_NO_THROW(parameters = equationParametersFromText(fixture.xml));
+    ASSERT_NE(parameters, nullptr);
+    const auto parsed = parameters->get_parameter_list();
+    for (const auto& [name, value] : fixture.expected) {
+      const auto entry = parsed.find(name);
+      ASSERT_NE(entry, parsed.end()) << name;
+      EXPECT_EQ(entry->second, value) << name;
+    }
+  }
+}
+
 TEST(GeneralSimulationParameters, ParsesOptionalStartTime)
 {
   tinyxml2::XMLDocument doc;
