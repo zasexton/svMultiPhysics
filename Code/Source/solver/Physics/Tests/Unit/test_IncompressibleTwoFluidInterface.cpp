@@ -16,6 +16,7 @@
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Assembly/GlobalSystemView.h"
+#include "FE/Dofs/EntityDofMap.h"
 #include "FE/Interfaces/IncompressibleTwoFluidDiagnostics.h"
 #include "FE/Interfaces/LevelSetInterfaceDomain.h"
 #include "FE/Spaces/H1Space.h"
@@ -421,6 +422,9 @@ TEST(IncompressibleTwoFluidModule,
       },
       "unsupported_two_fluid_nonfinite_body_force");
   expect_rejected(
+      [](auto& options) { options.body_force[2] = FE::Real{1.0}; },
+      "unsupported_two_fluid_out_of_plane_body_force");
+  expect_rejected(
       [](auto& options) {
         options.prescribed_pressure_jump =
             std::numeric_limits<FE::Real>::infinity();
@@ -503,6 +507,25 @@ TEST(IncompressibleTwoFluidModule,
         options.positive_phase.velocity_dirichlet = {boundary, boundary};
       },
       "unsupported_two_fluid_duplicate_velocity_boundary_marker");
+  expect_rejected(
+      [](auto& options) {
+        options.shared_pressure_gauge =
+            ns::IncompressibleTwoFluidSharedPressureGauge{
+                .vertex_gid = -1,
+                .pressure = FE::Real{0.0},
+            };
+      },
+      "unsupported_two_fluid_negative_shared_pressure_gauge_vertex_gid");
+  expect_rejected(
+      [](auto& options) {
+        options.shared_pressure_gauge =
+            ns::IncompressibleTwoFluidSharedPressureGauge{
+                .vertex_gid = 1,
+                .pressure =
+                    std::numeric_limits<FE::Real>::infinity(),
+            };
+      },
+      "unsupported_two_fluid_nonfinite_shared_pressure_gauge_value");
 }
 
 TEST(IncompressibleTwoFluidModule,
@@ -637,6 +660,69 @@ TEST(IncompressibleTwoFluidModule,
     }
   };
   expect_physical_trace();
+#endif
+}
+
+TEST(IncompressibleTwoFluidModule,
+     ExplicitSharedPressureGaugePinsRequestedGlobalVertex) {
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires native mesh support.";
+#else
+  constexpr int wall_marker = 73;
+  auto mesh = makeTwoTriangleTwoFluidBoundaryMesh(wall_marker);
+  mesh->base().set_vertex_gids({101, 102, 103, 104});
+  auto pressure_space =
+      std::make_shared<FE::spaces::H1Space>(FE::ElementType::Triangle3, 1);
+  auto velocity_space =
+      std::make_shared<FE::spaces::ProductSpace>(pressure_space, 2);
+  FE::systems::FESystem system(mesh);
+  (void)system.addField(FE::systems::FieldSpec{
+      .name = "level_set",
+      .space = pressure_space,
+      .components = 1,
+      .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+  });
+
+  ns::IncompressibleTwoFluidOptions options;
+  options.interface_marker = 7301;
+  options.enable_convection = false;
+  options.shared_pressure_gauge =
+      ns::IncompressibleTwoFluidSharedPressureGauge{
+          .vertex_gid = 101,
+          .pressure = FE::Real{4.25},
+      };
+  ns::IncompressibleTwoFluidModule module(
+      velocity_space,
+      pressure_space,
+      velocity_space,
+      pressure_space,
+      std::move(options));
+  ASSERT_NO_THROW(module.registerOn(system));
+
+  const auto artifact = module.effectiveConfigurationArtifact();
+  ASSERT_TRUE(artifact.has_value());
+  EXPECT_NE(
+      artifact->json.find(
+          "\"shared_gauge_policy\":\"explicit_global_vertex_gid\""),
+      std::string::npos);
+  EXPECT_NE(artifact->json.find("\"shared_gauge_vertex_gid\":101"),
+            std::string::npos);
+  EXPECT_NE(artifact->json.find("\"shared_gauge_value\":4.25"),
+            std::string::npos);
+
+  ASSERT_NO_THROW(system.setup({}));
+  const auto pressure = system.findFieldByName("p_negative");
+  ASSERT_NE(pressure, FE::INVALID_FIELD_ID);
+  const auto* entity_map =
+      system.fieldDofHandler(pressure).getEntityDofMap();
+  ASSERT_NE(entity_map, nullptr);
+  const auto vertex_dofs = entity_map->getVertexDofs(0);
+  ASSERT_EQ(vertex_dofs.size(), 1u);
+  const auto constraint = system.constraints().getConstraint(
+      system.fieldDofOffset(pressure) + vertex_dofs.front());
+  ASSERT_TRUE(constraint.has_value());
+  EXPECT_TRUE(constraint->isDirichlet());
+  EXPECT_DOUBLE_EQ(constraint->inhomogeneity, FE::Real{4.25});
 #endif
 }
 
@@ -839,6 +925,12 @@ TEST(IncompressibleTwoFluidDiagnostics,
          const FE::geometry::CutQuadratureProvenance&) {
         return FE::Real{5.0};
       };
+  negative.pressure.reference_gradient =
+      [](FE::GlobalIndex,
+         const std::array<FE::Real, 3>&,
+         const FE::geometry::CutQuadratureProvenance&) {
+        return std::array<FE::Real, 3>{{2.0, -1.0, 0.0}};
+      };
 
   FE::interfaces::IncompressibleTwoFluidPhaseEvaluators positive;
   positive.velocity.value =
@@ -864,6 +956,12 @@ TEST(IncompressibleTwoFluidDiagnostics,
          const FE::geometry::CutQuadratureProvenance&) {
         return FE::Real{2.0};
       };
+  positive.pressure.reference_gradient =
+      [](FE::GlobalIndex,
+         const std::array<FE::Real, 3>&,
+         const FE::geometry::CutQuadratureProvenance&) {
+        return std::array<FE::Real, 3>{{3.0, -1.0, 0.0}};
+      };
 
   FE::interfaces::IncompressibleTwoFluidDiagnosticParameters parameters{
       .dimension = 2,
@@ -876,6 +974,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
       .surface_tension = FE::Real{0.5},
       .include_transient_penalty = true,
       .prescribed_pressure_jump = FE::Real{3.0},
+      .body_force = {{FE::Real{0.5}, FE::Real{-0.25}, FE::Real{0.0}}},
   };
   FE::interfaces::IncompressibleTwoFluidCellMeasureEvaluator cell_measure;
   cell_measure.physical_cell_measure =
@@ -964,6 +1063,24 @@ TEST(IncompressibleTwoFluidDiagnostics,
   EXPECT_NEAR(state.negative_phase.kinetic_energy,
               FE::Real{3.75},
               tolerance);
+  EXPECT_NEAR(state.negative_phase.pressure_integral,
+              FE::Real{1.875},
+              tolerance);
+  EXPECT_NEAR(state.negative_phase.mean_pressure,
+              FE::Real{5.0},
+              tolerance);
+  EXPECT_NEAR(state.negative_phase.pressure_squared_integral,
+              FE::Real{9.375},
+              tolerance);
+  EXPECT_EQ(state.negative_phase.pressure_gradient_integral,
+            (std::array<FE::Real, 3>{{0.75, -0.375, 0.0}}));
+  EXPECT_EQ(state.negative_phase.body_force_density_integral,
+            (std::array<FE::Real, 3>{{0.75, -0.375, 0.0}}));
+  EXPECT_EQ(state.negative_phase.hydrostatic_residual_integral,
+            (std::array<FE::Real, 3>{{0.0, 0.0, 0.0}}));
+  EXPECT_NEAR(state.negative_phase.hydrostatic_residual_squared,
+              FE::Real{0.0},
+              tolerance);
   EXPECT_EQ(state.positive_phase.quadrature_point_count, 1u);
   EXPECT_NEAR(state.positive_phase.volume, FE::Real{0.125}, tolerance);
   EXPECT_NEAR(state.positive_phase.mass, FE::Real{0.25}, tolerance);
@@ -971,6 +1088,24 @@ TEST(IncompressibleTwoFluidDiagnostics,
   EXPECT_NEAR(state.positive_phase.momentum[1], FE::Real{0.25}, tolerance);
   EXPECT_NEAR(state.positive_phase.kinetic_energy,
               FE::Real{0.125},
+              tolerance);
+  EXPECT_NEAR(state.positive_phase.pressure_integral,
+              FE::Real{0.25},
+              tolerance);
+  EXPECT_NEAR(state.positive_phase.mean_pressure,
+              FE::Real{2.0},
+              tolerance);
+  EXPECT_NEAR(state.positive_phase.pressure_squared_integral,
+              FE::Real{0.5},
+              tolerance);
+  EXPECT_EQ(state.positive_phase.pressure_gradient_integral,
+            (std::array<FE::Real, 3>{{0.375, -0.125, 0.0}}));
+  EXPECT_EQ(state.positive_phase.body_force_density_integral,
+            (std::array<FE::Real, 3>{{0.125, -0.0625, 0.0}}));
+  EXPECT_EQ(state.positive_phase.hydrostatic_residual_integral,
+            (std::array<FE::Real, 3>{{0.25, -0.0625, 0.0}}));
+  EXPECT_NEAR(state.positive_phase.hydrostatic_residual_squared,
+              FE::Real{0.53125},
               tolerance);
 
   auto composed_parameters = parameters;
@@ -1007,6 +1142,43 @@ TEST(IncompressibleTwoFluidDiagnostics,
   EXPECT_NEAR(*composed_state.prescribed_stress_jump_residual_squared,
               FE::Real{0.0},
               tolerance);
+
+  auto missing_pressure_gradient = negative;
+  missing_pressure_gradient.pressure.reference_gradient = {};
+  EXPECT_THROW(
+      (void)FE::interfaces::evaluateLocalIncompressibleTwoFluidDiagnostics(
+          *snapshot,
+          parameters,
+          missing_pressure_gradient,
+          positive,
+          cell_measure,
+          FE::Real{0.25}),
+      std::invalid_argument);
+
+  auto nonfinite_body_force = parameters;
+  nonfinite_body_force.body_force[0] =
+      std::numeric_limits<FE::Real>::quiet_NaN();
+  EXPECT_THROW(
+      (void)FE::interfaces::evaluateLocalIncompressibleTwoFluidDiagnostics(
+          *snapshot,
+          nonfinite_body_force,
+          negative,
+          positive,
+          cell_measure,
+          FE::Real{0.25}),
+      std::invalid_argument);
+
+  auto out_of_plane_body_force = parameters;
+  out_of_plane_body_force.body_force[2] = FE::Real{1.0};
+  EXPECT_THROW(
+      (void)FE::interfaces::evaluateLocalIncompressibleTwoFluidDiagnostics(
+          *snapshot,
+          out_of_plane_body_force,
+          negative,
+          positive,
+          cell_measure,
+          FE::Real{0.25}),
+      std::invalid_argument);
 }
 
 TEST(IncompressibleTwoFluidDiagnostics,
@@ -1074,6 +1246,85 @@ TEST(IncompressibleTwoFluidDiagnostics,
   ASSERT_TRUE(state.prescribed_stress_jump_residual_squared.has_value());
   EXPECT_DOUBLE_EQ(
       *state.prescribed_stress_jump_residual_squared, FE::Real{0.0});
+}
+
+TEST(IncompressibleTwoFluidDiagnostics,
+     AcceptsHighContrastHydrostaticIdentityWithinOperandScaledRoundoff) {
+  FE::interfaces::IncompressibleTwoFluidDiagnosticParameters parameters{
+      .dimension = 2,
+      .interface_marker = 71,
+      .negative_density = FE::Real{10000.0},
+      .positive_density = FE::Real{1.0},
+      .negative_viscosity = FE::Real{0.01},
+      .positive_viscosity = FE::Real{0.001},
+      .nitsche_gamma = FE::Real{24.0},
+      .surface_tension = FE::Real{0.0},
+      .include_transient_penalty = false,
+      .body_force = {{FE::Real{-9.81}, FE::Real{0.0}, FE::Real{0.0}}},
+  };
+  FE::interfaces::IncompressibleTwoFluidDiagnosticAccumulator accumulator;
+  accumulator.snapshot_revision_key = 1u;
+  accumulator.owned_interface_quadrature_point_count = 1u;
+  accumulator.interface_measure = FE::Real{1.0};
+  accumulator.negative_phase.owned_quadrature_point_count = 1u;
+  accumulator.negative_phase.volume = FE::Real{0.37};
+  accumulator.positive_phase.owned_quadrature_point_count = 1u;
+  accumulator.positive_phase.volume = FE::Real{0.63};
+
+  const FE::Real negative_body_force_moment =
+      parameters.negative_density * parameters.body_force[0] *
+      accumulator.negative_phase.volume;
+  FE::Real rounded_pressure_gradient_moment = negative_body_force_moment;
+  for (int offset = 0; offset < 8; ++offset) {
+    rounded_pressure_gradient_moment = std::nextafter(
+        rounded_pressure_gradient_moment,
+        std::numeric_limits<FE::Real>::infinity());
+  }
+  accumulator.negative_phase.pressure_gradient_integral[0] =
+      rounded_pressure_gradient_moment;
+
+  const FE::Real positive_body_force_moment =
+      parameters.positive_density * parameters.body_force[0] *
+      accumulator.positive_phase.volume;
+  accumulator.positive_phase.pressure_gradient_integral[0] =
+      positive_body_force_moment;
+
+  EXPECT_NO_THROW(
+      (void)FE::interfaces::finalizeIncompressibleTwoFluidDiagnostics(
+          accumulator, parameters));
+}
+
+TEST(IncompressibleTwoFluidDiagnostics,
+     AcceptsTractionDifferenceWithinPhaseOperandScaledRoundoff) {
+  FE::interfaces::IncompressibleTwoFluidDiagnosticParameters parameters{
+      .dimension = 2,
+      .interface_marker = 71,
+      .negative_density = FE::Real{10000.0},
+      .positive_density = FE::Real{1.0},
+      .negative_viscosity = FE::Real{0.01},
+      .positive_viscosity = FE::Real{0.001},
+      .nitsche_gamma = FE::Real{24.0},
+      .surface_tension = FE::Real{0.0},
+      .include_transient_penalty = false,
+  };
+  FE::interfaces::IncompressibleTwoFluidDiagnosticAccumulator accumulator;
+  accumulator.snapshot_revision_key = 1u;
+  accumulator.owned_interface_quadrature_point_count = 1u;
+  accumulator.interface_measure = FE::Real{1.0};
+  accumulator.negative_phase.owned_quadrature_point_count = 1u;
+  accumulator.negative_phase.volume = FE::Real{0.37};
+  accumulator.positive_phase.owned_quadrature_point_count = 1u;
+  accumulator.positive_phase.volume = FE::Real{0.63};
+
+  constexpr FE::Real hydrostatic_traction = FE::Real{36297.0};
+  accumulator.negative_traction_integral[0] = hydrostatic_traction;
+  accumulator.positive_traction_integral[0] = std::nextafter(
+      hydrostatic_traction,
+      -std::numeric_limits<FE::Real>::infinity());
+
+  EXPECT_NO_THROW(
+      (void)FE::interfaces::finalizeIncompressibleTwoFluidDiagnostics(
+          accumulator, parameters));
 }
 
 TEST(IncompressibleTwoFluidDiagnostics,
@@ -1255,6 +1506,8 @@ TEST(IncompressibleTwoFluidModule,
   TwoFluidRegistrationFixture fixture;
   ns::IncompressibleTwoFluidOptions options;
   options.surface_tension = FE::Real{0.072};
+  options.body_force =
+      {{FE::Real{0.5}, FE::Real{-0.25}, FE::Real{0.0}}};
   auto module = fixture.makeModule(std::move(options));
   module.registerOn(fixture.system);
 
@@ -1315,6 +1568,8 @@ TEST(IncompressibleTwoFluidModule,
   EXPECT_DOUBLE_EQ(
       diagnostic_declarations.front().parameters.positive_density,
       FE::Real{1.0});
+  EXPECT_EQ(diagnostic_declarations.front().parameters.body_force,
+            (std::array<FE::Real, 3>{{0.5, -0.25, 0.0}}));
   EXPECT_FALSE(diagnostic_declarations.front()
                    .parameters.prescribed_pressure_jump.has_value());
   const auto transport_velocity_declarations =
@@ -1374,6 +1629,10 @@ TEST(IncompressibleTwoFluidModule,
             std::string::npos);
   EXPECT_NE(
       artifact->json.find(
+          "\"shared_gauge_policy\":\"automatic_first_unconstrained_pressure_dof\""),
+      std::string::npos);
+  EXPECT_NE(
+      artifact->json.find(
           "\"conservative_graph_velocity\":\"complementary_weighted_every_node\""),
       std::string::npos);
   EXPECT_NE(artifact->json.find("\"compressible_gas\""),
@@ -1394,10 +1653,18 @@ TEST(IncompressibleTwoFluidModule,
       artifact->json.find(
           "\"accepted_stage_evidence\":{\"required\":true"),
       std::string::npos);
+  EXPECT_NE(artifact->json.find("\"body_force\":[0.5,-0.25]"),
+            std::string::npos);
+  EXPECT_NE(
+      artifact->json.find(
+          "\"hydrostatic_balance_diagnostic\":\"phasewise_integrated_pressure_gradient_minus_density_body_force\""),
+      std::string::npos);
 
   TwoFluidRegistrationFixture repeated_fixture;
   ns::IncompressibleTwoFluidOptions repeated_options;
   repeated_options.surface_tension = FE::Real{0.072};
+  repeated_options.body_force =
+      {{FE::Real{0.5}, FE::Real{-0.25}, FE::Real{0.0}}};
   auto repeated_module =
       repeated_fixture.makeModule(std::move(repeated_options));
   repeated_module.registerOn(repeated_fixture.system);
@@ -1547,6 +1814,68 @@ void bindAcceptedTwoFluidStageNumerics(
     FE::systems::FESystem& system,
     const FE::systems::TwoFluidAcceptedStageDiagnosticDeclaration& declaration,
     const FE::systems::AcceptedTwoFluidStageDiagnosticState& state);
+
+TEST(IncompressibleTwoFluidModule,
+     AcceptedStageAllowsTractionDifferenceWithinPhaseOperandRoundoff) {
+  TwoFluidRegistrationFixture fixture;
+  auto module = fixture.makeModule({});
+  module.registerOn(fixture.system);
+  fixture.system.setup({});
+
+  const auto declarations =
+      fixture.system.twoFluidAcceptedStageDiagnosticDeclarations();
+  ASSERT_EQ(declarations.size(), 1u);
+  auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
+  constexpr FE::Real hydrostatic_traction = FE::Real{36297.0};
+  state.diagnostics.negative_traction_integral[0] =
+      hydrostatic_traction;
+  state.diagnostics.positive_traction_integral[0] = std::nextafter(
+      hydrostatic_traction,
+      -std::numeric_limits<FE::Real>::infinity());
+  state.diagnostics.traction_jump_integral[0] = FE::Real{0.0};
+  const std::array states{state};
+
+  EXPECT_NO_THROW(fixture.system.stageTwoFluidAcceptedStageDiagnostics(
+      makeTwoFluidStageMetadata(), states));
+}
+
+TEST(IncompressibleTwoFluidModule,
+     AcceptedStageRejectsMalformedPhasePressureAndHydrostaticMoments) {
+  const auto expect_rejected = [](const auto& mutate) {
+    TwoFluidRegistrationFixture fixture;
+    auto module = fixture.makeModule({});
+    module.registerOn(fixture.system);
+    fixture.system.setup({});
+
+    const auto declarations =
+        fixture.system.twoFluidAcceptedStageDiagnosticDeclarations();
+    ASSERT_EQ(declarations.size(), 1u);
+    auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
+    mutate(state.diagnostics.negative_phase);
+    const std::array states{state};
+
+    EXPECT_THROW(fixture.system.stageTwoFluidAcceptedStageDiagnostics(
+                     makeTwoFluidStageMetadata(), states),
+                 FE::InvalidArgumentException);
+    EXPECT_TRUE(
+        fixture.system.pendingTwoFluidAcceptedStageDiagnostics().empty());
+  };
+
+  expect_rejected([](auto& phase) {
+    phase.pressure_integral =
+        std::numeric_limits<FE::Real>::quiet_NaN();
+  });
+  expect_rejected([](auto& phase) {
+    phase.pressure_integral = FE::Real{0.25};
+    phase.pressure_squared_integral = FE::Real{0.25};
+    phase.mean_pressure = FE::Real{0.0};
+  });
+  expect_rejected([](auto& phase) {
+    phase.pressure_gradient_integral[0] = FE::Real{1.0};
+    phase.hydrostatic_residual_integral[0] = FE::Real{0.0};
+    phase.hydrostatic_residual_squared = FE::Real{4.0};
+  });
+}
 
 TEST(IncompressibleTwoFluidModule,
      AcceptedStageHistoryDiscardsRejectsAndReplaysExactly) {

@@ -3231,6 +3231,7 @@ GeneralSimulationParameters::GeneralSimulationParameters()
   set_parameter("Newton_line_search_max_iterations", 10, !required, newton_line_search_max_iterations, {1,int_inf});
   set_parameter("Newton_absolute_tolerance", 1.0e-10, !required, newton_absolute_tolerance);
   set_parameter("Newton_relative_tolerance", 0.0, !required, newton_relative_tolerance);
+  set_parameter("Newton_max_iterations", 25, !required, newton_max_iterations, {1,int_inf});
 
   set_parameter("Increment_in_saving_restart_files", 0, !required, increment_in_saving_restart_files);
   set_parameter("Increment_in_saving_VTK_files", 0, !required, increment_in_saving_vtk_files);

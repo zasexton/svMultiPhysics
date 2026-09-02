@@ -1548,6 +1548,7 @@ class GeneralSimulationParameters : public ParameterLists
     Parameter<int> adaptive_time_loop_max_retries;
     Parameter<int> adaptive_time_loop_max_steps_multiplier;
     Parameter<int> adaptive_time_loop_target_newton_iterations;
+    Parameter<int> newton_max_iterations;
     Parameter<int> newton_line_search_max_iterations;
     Parameter<int> increment_in_saving_restart_files;
     Parameter<int> increment_in_saving_vtk_files;

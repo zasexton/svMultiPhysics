@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <array>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -97,6 +99,63 @@ std::unique_ptr<EquationParameters> parseEquationXml(const char* xml)
 std::map<std::string, std::shared_ptr<svmp::Mesh>> singleMeshMap(const std::shared_ptr<svmp::Mesh>& mesh)
 {
   return {{"mesh", mesh}};
+}
+
+class ScopedTestFile {
+public:
+  explicit ScopedTestFile(std::filesystem::path path)
+      : path_(std::move(path))
+  {
+  }
+
+  ~ScopedTestFile()
+  {
+    std::error_code error;
+    std::filesystem::remove(path_, error);
+  }
+
+  ScopedTestFile(const ScopedTestFile&) = delete;
+  ScopedTestFile& operator=(const ScopedTestFile&) = delete;
+
+private:
+  std::filesystem::path path_;
+};
+
+void writeTestFile(const std::filesystem::path& path, std::string_view contents)
+{
+  std::ofstream output(path, std::ios::trunc);
+  if (!output) {
+    throw std::runtime_error("could not create translator test input");
+  }
+  output << contents;
+  if (!output) {
+    throw std::runtime_error("could not write translator test input");
+  }
+}
+
+std::unique_ptr<EquationParameters> parseTwoFluidWithGauge(
+    const std::filesystem::path& gauge_path)
+{
+  const std::string xml = std::string(R"xml(
+<Add_equation type="fluid">
+  <Free_surface_physical_model>IncompressibleTwoFluid</Free_surface_physical_model>
+  <Level_set_field_name>level_set</Level_set_field_name>
+  <Generated_interface_domain_id>material_interface</Generated_interface_domain_id>
+  <Material_interface_marker>71</Material_interface_marker>
+  <Negative_phase_density>1000.0</Negative_phase_density>
+  <Negative_phase_dynamic_viscosity>0.01</Negative_phase_dynamic_viscosity>
+  <Positive_phase_density>1.0</Positive_phase_density>
+  <Positive_phase_dynamic_viscosity>0.001</Positive_phase_dynamic_viscosity>
+  <Two_fluid_surface_tension>0.0</Two_fluid_surface_tension>
+  <Two_fluid_interface_nitsche_gamma>24.0</Two_fluid_interface_nitsche_gamma>
+  <Node_pressure_constraints>
+    <Id_type>Global_vertex_gid</Id_type>
+    <Values_file_path>)xml") +
+      gauge_path.string() + R"xml(</Values_file_path>
+  </Node_pressure_constraints>
+</Add_equation>
+)xml";
+  return parseEquationXml(xml.c_str());
 }
 
 } // namespace
@@ -1216,6 +1275,91 @@ TEST(EquationTranslatorFreeSurface,
                  .front()
                  .parameters.prescribed_viscous_traction_jump,
             (std::array<svmp::FE::Real, 3>{{6.0, 7.0, 0.0}}));
+}
+
+TEST(EquationTranslatorFreeSurface,
+     XmlIncompressibleTwoFluidAcceptsExplicitSharedPressureGauge)
+{
+  svmp::Physics::formulations::navier_stokes::
+      forceLink_NavierStokesRegister();
+  const auto gauge_path = std::filesystem::temp_directory_path() /
+      "svmp_two_fluid_single_shared_pressure_gauge.csv";
+  const ScopedTestFile cleanup(gauge_path);
+  writeTestFile(gauge_path, "node_id,pressure\n1,0\n");
+
+  auto mesh = buildTranslatorTriangleMesh();
+  const auto meshes = singleMeshMap(mesh);
+  auto params = parseTwoFluidWithGauge(gauge_path);
+  const auto input =
+      application::translators::EquationTranslator::buildInput(
+          *params, meshes);
+  ASSERT_TRUE(input.node_pressure_constraints.has_value());
+  EXPECT_EQ(input.node_pressure_constraints->id_type,
+            "Global_vertex_gid");
+
+  svmp::FE::systems::FESystem system(mesh);
+  const auto scalar_space =
+      svmp::FE::spaces::SpaceFactory::create_h1(
+          svmp::FE::ElementType::Triangle3, 1);
+  (void)system.addField(svmp::FE::systems::FieldSpec{
+      .name = "level_set",
+      .space = scalar_space,
+      .components = 1,
+  });
+  auto module =
+      application::translators::EquationTranslator::createModule(
+          *params, system, meshes);
+  ASSERT_TRUE(module);
+  const auto artifact = module->effectiveConfigurationArtifact();
+  ASSERT_TRUE(artifact.has_value());
+  EXPECT_NE(
+      artifact->json.find(
+          "\"shared_gauge_policy\":\"explicit_global_vertex_gid\""),
+      std::string::npos);
+  EXPECT_NE(artifact->json.find("\"shared_gauge_vertex_gid\":1"),
+            std::string::npos);
+  EXPECT_NE(artifact->json.find("\"shared_gauge_value\":0"),
+            std::string::npos);
+}
+
+TEST(EquationTranslatorFreeSurface,
+     XmlIncompressibleTwoFluidRequiresOneSharedPressureGauge)
+{
+  svmp::Physics::formulations::navier_stokes::
+      forceLink_NavierStokesRegister();
+  const auto gauge_path = std::filesystem::temp_directory_path() /
+      "svmp_two_fluid_multiple_shared_pressure_gauges.csv";
+  const ScopedTestFile cleanup(gauge_path);
+  writeTestFile(gauge_path, "node_id,pressure\n1,0\n2,0\n");
+
+  auto mesh = buildTranslatorTriangleMesh();
+  const auto meshes = singleMeshMap(mesh);
+  auto params = parseTwoFluidWithGauge(gauge_path);
+  svmp::FE::systems::FESystem system(mesh);
+  const auto scalar_space =
+      svmp::FE::spaces::SpaceFactory::create_h1(
+          svmp::FE::ElementType::Triangle3, 1);
+  (void)system.addField(svmp::FE::systems::FieldSpec{
+      .name = "level_set",
+      .space = scalar_space,
+      .components = 1,
+  });
+
+  try {
+    (void)application::translators::EquationTranslator::createModule(
+        *params, system, meshes);
+    FAIL() << "multiple shared pressure gauge values were accepted";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(
+        std::string_view(error.what()).find(
+            "unsupported_two_fluid_shared_pressure_gauge_count"),
+        std::string_view::npos)
+        << error.what();
+  }
+  EXPECT_EQ(system.findFieldByName("u_negative"),
+            svmp::FE::INVALID_FIELD_ID);
+  EXPECT_EQ(system.findFieldByName("p_positive"),
+            svmp::FE::INVALID_FIELD_ID);
 }
 
 TEST(EquationTranslatorFreeSurface,

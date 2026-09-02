@@ -12,6 +12,7 @@
 
 #include "FE/Constraints/CoupledFieldGaugeConstraint.h"
 #include "FE/Constraints/GaugeRegistry.h"
+#include "FE/Constraints/VertexDirichletConstraint.h"
 #include "FE/Interfaces/LevelSetInterfaceDomain.h"
 #include "FE/Spaces/ProductSpace.h"
 #include "FE/Systems/FESystem.h"
@@ -482,6 +483,16 @@ void addSharedGaugeEvidence(FE::systems::FESystem& system,
         << jsonReal(options.positive_phase.density)
         << ",\"positive_viscosity\":"
         << jsonReal(options.positive_phase.viscosity) << '}'
+        << ",\"body_force\":[";
+    for (int component = 0; component < dimension; ++component) {
+        if (component != 0) {
+            out << ',';
+        }
+        out << jsonReal(
+            options.body_force[static_cast<std::size_t>(component)]);
+    }
+    out << ']'
+        << ",\"hydrostatic_balance_diagnostic\":\"phasewise_integrated_pressure_gradient_minus_density_body_force\""
         << ",\"interface\":{\"marker\":" << interface_marker
         << ",\"domain\":"
         << jsonString(options.generated_interface_domain_id)
@@ -542,7 +553,24 @@ void addSharedGaugeEvidence(FE::systems::FESystem& system,
     }
     out << '}';
     appendVelocityBoundaryArtifact(out, options, dimension);
-    out << ",\"pressure_space\":{\"representation\":\"separate_phase_fields\",\"shared_gauge_count\":1}"
+    out << ",\"pressure_space\":{\"representation\":\"separate_phase_fields\",\"shared_gauge_count\":1";
+    if (options.shared_pressure_gauge.has_value()) {
+        out << ",\"shared_gauge_policy\":\"explicit_global_vertex_gid\""
+            << ",\"shared_gauge_field\":"
+            << jsonString(options.negative_phase.pressure_field_name)
+            << ",\"shared_gauge_id_type\":\"Global_vertex_gid\""
+            << ",\"shared_gauge_vertex_gid\":"
+            << options.shared_pressure_gauge->vertex_gid
+            << ",\"shared_gauge_value\":"
+            << jsonReal(options.shared_pressure_gauge->pressure);
+    } else {
+        out << ",\"shared_gauge_policy\":\"automatic_first_unconstrained_pressure_dof\""
+            << ",\"shared_gauge_field\":null"
+            << ",\"shared_gauge_id_type\":null"
+            << ",\"shared_gauge_vertex_gid\":null"
+            << ",\"shared_gauge_value\":0";
+    }
+    out << '}'
         << ",\"solver_contract\":{\"backend\":\"FSILS\",\"method\":\"BlockSchur\",\"unknown_role_order\":[\"material_interface_level_set\",\"conservative_phase_indicator\",\"negative_velocity\",\"positive_velocity\",\"negative_pressure\",\"positive_pressure\"],\"blocks\":[{\"name\":\"TwoFluidMaterialInterfaceComputationalPrimary\",\"role\":\"primary\"},{\"name\":\"TwoFluidPressureConstraints\",\"role\":\"constraint\"}],\"generic_fallback_allowed\":false}"
         << ",\"phase_transport_coupling\":{\"owner\":\"declared_material_interface_phase_pair\",\"weak_bulk_velocity\":\"sharp_phase_local\",\"weak_interface_trace\":\"complementary_weighted\",\"conservative_graph_velocity\":\"complementary_weighted_every_node\",\"momentum_reconciliation_required\":"
         << jsonBool(
@@ -582,6 +610,18 @@ void validateIncompressibleTwoFluidConfigurationSemantics(
         throw std::invalid_argument(
             "[svMultiPhysics::Physics] "
             "unsupported_two_fluid_nonfinite_prescribed_viscous_traction_jump");
+    }
+    if (options.shared_pressure_gauge.has_value() &&
+        options.shared_pressure_gauge->vertex_gid < 0) {
+        throw std::invalid_argument(
+            "[svMultiPhysics::Physics] "
+            "unsupported_two_fluid_negative_shared_pressure_gauge_vertex_gid");
+    }
+    if (options.shared_pressure_gauge.has_value() &&
+        !std::isfinite(options.shared_pressure_gauge->pressure)) {
+        throw std::invalid_argument(
+            "[svMultiPhysics::Physics] "
+            "unsupported_two_fluid_nonfinite_shared_pressure_gauge_value");
     }
     validateVelocityBoundaryData(
         options.negative_phase.velocity_dirichlet,
@@ -637,6 +677,11 @@ void IncompressibleTwoFluidModule::registerOn(
                           *positive_pressure_space_)) {
         throw std::invalid_argument(
             "IncompressibleTwoFluidModule: both phases must use matching velocity and pressure spaces");
+    }
+    if (dimension == 2 && options_.body_force[2] != FE::Real{0.0}) {
+        throw std::invalid_argument(
+            "[svMultiPhysics::Physics] "
+            "unsupported_two_fluid_out_of_plane_body_force");
     }
     if (options_.prescribed_viscous_traction_jump.has_value() &&
         dimension == 2 &&
@@ -870,9 +915,23 @@ void IncompressibleTwoFluidModule::registerOn(
         forms.residual,
         install);
 
-    system.addSystemConstraint(
-        std::make_unique<FE::constraints::CoupledFieldGaugeConstraint>(
-            p_negative, p_positive));
+    if (options_.shared_pressure_gauge.has_value()) {
+        const auto& gauge = *options_.shared_pressure_gauge;
+        std::vector<FE::constraints::VertexDirichletValue> values{
+            FE::constraints::VertexDirichletValue{
+                .vertex_id = gauge.vertex_gid,
+                .value = gauge.pressure,
+            }};
+        system.addSystemConstraint(
+            std::make_unique<FE::constraints::VertexDirichletConstraint>(
+                p_negative,
+                std::move(values),
+                FE::constraints::VertexIdMode::GlobalVertexGid));
+    } else {
+        system.addSystemConstraint(
+            std::make_unique<FE::constraints::CoupledFieldGaugeConstraint>(
+                p_negative, p_positive));
+    }
     addSharedGaugeEvidence(system, p_negative, p_positive);
 
     system.declareMaterialInterfaceTransportVelocity(
@@ -928,6 +987,7 @@ void IncompressibleTwoFluidModule::registerOn(
                         options_.prescribed_pressure_jump,
                     .prescribed_viscous_traction_jump =
                         options_.prescribed_viscous_traction_jump,
+                    .body_force = options_.body_force,
                 },
             .owner_component = "incompressible_two_fluid",
         });

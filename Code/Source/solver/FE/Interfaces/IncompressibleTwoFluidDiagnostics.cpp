@@ -50,6 +50,19 @@ using Matrix = FreeSurfaceDiscreteFunctionalPhysicalGradient;
     return value;
 }
 
+[[nodiscard]] Vector mapReferenceGradient(
+    const geometry::CutGeometryJacobian& inverse,
+    const Vector& gradient) noexcept
+{
+    Vector value{};
+    for (std::size_t row = 0u; row < 3u; ++row) {
+        for (std::size_t column = 0u; column < 3u; ++column) {
+            value[row] += inverse[column][row] * gradient[column];
+        }
+    }
+    return value;
+}
+
 [[nodiscard]] Vector traction(
     const Matrix& gradient,
     Real pressure,
@@ -91,14 +104,20 @@ void validateParameters(
         (parameters.prescribed_pressure_jump.has_value() &&
          !std::isfinite(*parameters.prescribed_pressure_jump)) ||
         (parameters.prescribed_viscous_traction_jump.has_value() &&
-         !finiteVector(*parameters.prescribed_viscous_traction_jump))) {
+         !finiteVector(*parameters.prescribed_viscous_traction_jump)) ||
+        !finiteVector(parameters.body_force)) {
         throw std::invalid_argument(
-            "incompressible two-fluid diagnostics require a valid marker, dimension, material coefficients, Nitsche coefficient, surface tension, and optional jump targets");
+            "incompressible two-fluid diagnostics require a valid marker, dimension, material coefficients, body force, Nitsche coefficient, surface tension, and optional jump targets");
     }
-    if (parameters.prescribed_viscous_traction_jump.has_value()) {
-        for (int component = parameters.dimension; component < 3; ++component) {
+    for (int component = parameters.dimension; component < 3; ++component) {
+        const auto index = static_cast<std::size_t>(component);
+        if (parameters.body_force[index] != Real{0.0}) {
+            throw std::invalid_argument(
+                "incompressible two-fluid diagnostics body force has an out-of-plane component");
+        }
+        if (parameters.prescribed_viscous_traction_jump.has_value()) {
             if ((*parameters.prescribed_viscous_traction_jump)
-                    [static_cast<std::size_t>(component)] != Real{0.0}) {
+                    [index] != Real{0.0}) {
                 throw std::invalid_argument(
                     "incompressible two-fluid diagnostics prescribed viscous traction has an out-of-plane component");
             }
@@ -112,9 +131,10 @@ void validateEvaluators(
 {
     if (!phase.velocity.canEvaluateValue() ||
         !phase.velocity.canEvaluatePhysicalGradient() ||
-        !phase.pressure.canEvaluateValue()) {
+        !phase.pressure.canEvaluateValue() ||
+        !phase.pressure.reference_gradient) {
         throw std::invalid_argument(
-            std::string("incompressible two-fluid diagnostics require value and physical-gradient evaluators for the ") +
+            std::string("incompressible two-fluid diagnostics require velocity value/physical-gradient and pressure value/reference-gradient evaluators for the ") +
             name + " phase");
     }
 }
@@ -144,32 +164,63 @@ void validateEvaluators(
 
 void accumulatePhasePoint(
     IncompressibleTwoFluidPhaseDiagnosticAccumulator& phase,
-    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity,
+    const IncompressibleTwoFluidPhaseEvaluators& evaluators,
+    const IncompressibleTwoFluidDiagnosticParameters& parameters,
+    Real density,
     const FreeSurfaceGeometryRuleRecord& record,
     std::size_t point_index,
     Real weight)
 {
     const auto& reference = record.reference_rule.points[point_index];
-    const auto value = velocity.value(
+    const auto& physical = record.physical_rule.points[point_index];
+    const auto velocity = evaluators.velocity.value(
         record.reference_rule.provenance.parent_entity,
         reference.parent_coordinate,
         record.reference_rule.provenance);
-    if (!finiteVector(value)) {
+    const Real pressure = evaluators.pressure.value(
+        record.reference_rule.provenance.parent_entity,
+        reference.parent_coordinate,
+        record.reference_rule.provenance);
+    const auto reference_pressure_gradient =
+        evaluators.pressure.reference_gradient(
+            record.reference_rule.provenance.parent_entity,
+            reference.parent_coordinate,
+            record.reference_rule.provenance);
+    const auto pressure_gradient = mapReferenceGradient(
+        physical.inverse_jacobian, reference_pressure_gradient);
+    Vector hydrostatic_residual{};
+    for (int component = 0; component < parameters.dimension; ++component) {
+        const auto index = static_cast<std::size_t>(component);
+        hydrostatic_residual[index] =
+            pressure_gradient[index] - density * parameters.body_force[index];
+    }
+    if (!finiteVector(velocity) || !std::isfinite(pressure) ||
+        !finiteVector(reference_pressure_gradient) ||
+        !finiteVector(pressure_gradient) ||
+        !finiteVector(hydrostatic_residual)) {
         throw std::invalid_argument(
-            "incompressible two-fluid phase velocity evaluator returned a non-finite value");
+            "incompressible two-fluid phase field evaluator returned a non-finite value or gradient");
     }
     ++phase.owned_quadrature_point_count;
     phase.volume += weight;
     for (std::size_t component = 0u; component < 3u; ++component) {
-        phase.velocity_integral[component] += value[component] * weight;
+        phase.velocity_integral[component] += velocity[component] * weight;
+        phase.pressure_gradient_integral[component] +=
+            pressure_gradient[component] * weight;
+        phase.hydrostatic_residual_integral[component] +=
+            hydrostatic_residual[component] * weight;
     }
-    phase.velocity_squared_integral += dot(value, value) * weight;
+    phase.velocity_squared_integral += dot(velocity, velocity) * weight;
+    phase.pressure_integral += pressure * weight;
+    phase.pressure_squared_integral += pressure * pressure * weight;
+    phase.hydrostatic_residual_squared +=
+        dot(hydrostatic_residual, hydrostatic_residual) * weight;
 }
 
 void requireFiniteAccumulator(
     const IncompressibleTwoFluidDiagnosticAccumulator& value)
 {
-    const std::array<Real, 20> scalars{
+    const std::array<Real, 26> scalars{
         value.interface_measure,
         value.velocity_jump_squared,
         value.normal_velocity_jump_squared,
@@ -187,8 +238,14 @@ void requireFiniteAccumulator(
         value.nitsche_penalty_work,
         value.negative_phase.volume,
         value.negative_phase.velocity_squared_integral,
+        value.negative_phase.pressure_integral,
+        value.negative_phase.pressure_squared_integral,
+        value.negative_phase.hydrostatic_residual_squared,
         value.positive_phase.volume,
         value.positive_phase.velocity_squared_integral,
+        value.positive_phase.pressure_integral,
+        value.positive_phase.pressure_squared_integral,
+        value.positive_phase.hydrostatic_residual_squared,
         static_cast<Real>(value.owned_interface_quadrature_point_count)};
     if (!std::all_of(scalars.begin(), scalars.end(), [](Real scalar) {
             return std::isfinite(scalar);
@@ -201,7 +258,11 @@ void requireFiniteAccumulator(
         !finiteVector(value.positive_viscous_traction_integral) ||
         !finiteVector(value.viscous_traction_jump_integral) ||
         !finiteVector(value.negative_phase.velocity_integral) ||
+        !finiteVector(value.negative_phase.pressure_gradient_integral) ||
+        !finiteVector(value.negative_phase.hydrostatic_residual_integral) ||
         !finiteVector(value.positive_phase.velocity_integral) ||
+        !finiteVector(value.positive_phase.pressure_gradient_integral) ||
+        !finiteVector(value.positive_phase.hydrostatic_residual_integral) ||
         (value.prescribed_stress_jump_residual_squared.has_value() &&
          !std::isfinite(*value.prescribed_stress_jump_residual_squared)) ||
         (value.prescribed_pressure_jump_error_squared.has_value() &&
@@ -301,8 +362,10 @@ evaluateLocalIncompressibleTwoFluidDiagnostics(
                 accumulatePhasePoint(
                     negative_volume ? state.negative_phase
                                     : state.positive_phase,
-                    negative_volume ? negative_phase.velocity
-                                    : positive_phase.velocity,
+                    negative_volume ? negative_phase : positive_phase,
+                    parameters,
+                    negative_volume ? parameters.negative_density
+                                    : parameters.positive_density,
                     record,
                     point_index,
                     weight);
@@ -561,7 +624,11 @@ finalizeIncompressibleTwoFluidDiagnostics(
         accumulator.pressure_jump_squared < Real{0.0} ||
         accumulator.nitsche_penalty_work < Real{0.0} ||
         accumulator.negative_phase.velocity_squared_integral < Real{0.0} ||
+        accumulator.negative_phase.pressure_squared_integral < Real{0.0} ||
+        accumulator.negative_phase.hydrostatic_residual_squared < Real{0.0} ||
         accumulator.positive_phase.velocity_squared_integral < Real{0.0} ||
+        accumulator.positive_phase.pressure_squared_integral < Real{0.0} ||
+        accumulator.positive_phase.hydrostatic_residual_squared < Real{0.0} ||
         accumulator.negative_phase.owned_quadrature_point_count == 0u ||
         accumulator.positive_phase.owned_quadrature_point_count == 0u ||
         accumulator.prescribed_pressure_jump_error_squared.has_value() !=
@@ -593,6 +660,15 @@ finalizeIncompressibleTwoFluidDiagnostics(
     const auto moment_tolerance = [](Real lhs, Real rhs) {
         return Real{2048.0} * std::numeric_limits<Real>::epsilon() *
                std::max({Real{1.0}, std::abs(lhs), std::abs(rhs)});
+    };
+    const auto difference_tolerance = [](Real observed,
+                                         Real negative,
+                                         Real positive) {
+        return Real{2048.0} * std::numeric_limits<Real>::epsilon() *
+               std::max({Real{1.0},
+                         std::abs(observed),
+                         std::abs(negative),
+                         std::abs(positive)});
     };
     const Real flux_jump =
         accumulator.negative_normal_flux -
@@ -656,8 +732,10 @@ finalizeIncompressibleTwoFluidDiagnostics(
             accumulator.negative_traction_integral[component] -
             accumulator.positive_traction_integral[component];
         if (std::abs(accumulator.traction_jump_integral[component] - expected) >
-            moment_tolerance(
-                accumulator.traction_jump_integral[component], expected)) {
+            difference_tolerance(
+                accumulator.traction_jump_integral[component],
+                accumulator.negative_traction_integral[component],
+                accumulator.positive_traction_integral[component])) {
             throw std::invalid_argument(
                 "incompressible two-fluid diagnostics traction-jump integral identity failed");
         }
@@ -667,26 +745,70 @@ finalizeIncompressibleTwoFluidDiagnostics(
         if (std::abs(
                 accumulator.viscous_traction_jump_integral[component] -
                 expected_viscous) >
-            moment_tolerance(
+            difference_tolerance(
                 accumulator.viscous_traction_jump_integral[component],
-                expected_viscous)) {
+                accumulator.negative_viscous_traction_integral[component],
+                accumulator.positive_viscous_traction_integral[component])) {
             throw std::invalid_argument(
                 "incompressible two-fluid diagnostics viscous-traction-jump integral identity failed");
         }
     }
-    const auto validate_phase_moment = [&](const auto& phase) {
+    const auto validate_phase_moment = [&](const auto& phase, Real density) {
         const Real velocity_moment_squared =
             dot(phase.velocity_integral, phase.velocity_integral);
         const Real velocity_bound =
             phase.volume * phase.velocity_squared_integral;
-        return velocity_moment_squared <=
-               velocity_bound +
-                   moment_tolerance(velocity_moment_squared, velocity_bound);
+        const Real pressure_moment_squared =
+            phase.pressure_integral * phase.pressure_integral;
+        const Real pressure_bound =
+            phase.volume * phase.pressure_squared_integral;
+        const Real hydrostatic_moment_squared =
+            dot(phase.hydrostatic_residual_integral,
+                phase.hydrostatic_residual_integral);
+        const Real hydrostatic_bound =
+            phase.volume * phase.hydrostatic_residual_squared;
+        if (velocity_moment_squared >
+                velocity_bound +
+                    moment_tolerance(velocity_moment_squared, velocity_bound) ||
+            pressure_moment_squared >
+                pressure_bound +
+                    moment_tolerance(pressure_moment_squared, pressure_bound) ||
+            hydrostatic_moment_squared >
+                hydrostatic_bound +
+                    moment_tolerance(
+                        hydrostatic_moment_squared, hydrostatic_bound)) {
+            return false;
+        }
+        for (std::size_t component = 0u; component < 3u; ++component) {
+            const Real body_force_moment =
+                density * parameters.body_force[component] * phase.volume;
+            const Real expected =
+                phase.pressure_gradient_integral[component] -
+                body_force_moment;
+            const Real identity_tolerance =
+                Real{2048.0} * std::numeric_limits<Real>::epsilon() *
+                std::max(
+                    {Real{1.0},
+                     std::abs(
+                         phase.hydrostatic_residual_integral[component]),
+                     std::abs(expected),
+                     std::abs(phase.pressure_gradient_integral[component]),
+                     std::abs(body_force_moment)});
+            if (std::abs(
+                    phase.hydrostatic_residual_integral[component] -
+                    expected) >
+                identity_tolerance) {
+                return false;
+            }
+        }
+        return true;
     };
-    if (!validate_phase_moment(accumulator.negative_phase) ||
-        !validate_phase_moment(accumulator.positive_phase)) {
+    if (!validate_phase_moment(
+            accumulator.negative_phase, parameters.negative_density) ||
+        !validate_phase_moment(
+            accumulator.positive_phase, parameters.positive_density)) {
         throw std::invalid_argument(
-            "incompressible two-fluid diagnostics phase momentum-energy moment bound failed");
+            "incompressible two-fluid diagnostics phase velocity, pressure, or hydrostatic moment identity failed");
     }
     if (parameters.prescribed_pressure_jump.has_value()) {
         const Real target = *parameters.prescribed_pressure_jump;
@@ -801,9 +923,9 @@ finalizeIncompressibleTwoFluidDiagnostics(
     state.nitsche_adjoint_work = accumulator.nitsche_adjoint_work;
     state.nitsche_penalty_work = accumulator.nitsche_penalty_work;
 
-    const auto finalize_phase = [](const auto& source,
-                                   geometry::CutIntegrationSide side,
-                                   Real density) {
+    const auto finalize_phase = [&](const auto& source,
+                                    geometry::CutIntegrationSide side,
+                                    Real density) {
         IncompressibleTwoFluidPhaseDiagnosticState phase;
         phase.side = side;
         phase.quadrature_point_count = source.owned_quadrature_point_count;
@@ -816,6 +938,18 @@ finalizeIncompressibleTwoFluidDiagnostics(
         }
         phase.kinetic_energy =
             Real{0.5} * density * source.velocity_squared_integral;
+        phase.pressure_integral = source.pressure_integral;
+        phase.mean_pressure = source.pressure_integral / source.volume;
+        phase.pressure_squared_integral = source.pressure_squared_integral;
+        phase.pressure_gradient_integral = source.pressure_gradient_integral;
+        phase.hydrostatic_residual_integral =
+            source.hydrostatic_residual_integral;
+        phase.hydrostatic_residual_squared =
+            source.hydrostatic_residual_squared;
+        for (std::size_t component = 0u; component < 3u; ++component) {
+            phase.body_force_density_integral[component] =
+                density * parameters.body_force[component] * source.volume;
+        }
         return phase;
     };
     state.negative_phase = finalize_phase(
@@ -827,7 +961,7 @@ finalizeIncompressibleTwoFluidDiagnostics(
         geometry::CutIntegrationSide::Positive,
         parameters.positive_density);
 
-    const std::array<Real, 14> derived{
+    const std::array<Real, 20> derived{
         state.normal_flux_jump,
         state.negative_mass_flux,
         state.positive_mass_flux,
@@ -837,14 +971,26 @@ finalizeIncompressibleTwoFluidDiagnostics(
         state.negative_phase.momentum[1],
         state.negative_phase.momentum[2],
         state.negative_phase.kinetic_energy,
+        state.negative_phase.mean_pressure,
+        state.negative_phase.hydrostatic_residual_squared,
         state.positive_phase.mass,
         state.positive_phase.momentum[0],
         state.positive_phase.momentum[1],
         state.positive_phase.momentum[2],
-        state.positive_phase.kinetic_energy};
+        state.positive_phase.kinetic_energy,
+        state.positive_phase.mean_pressure,
+        state.positive_phase.hydrostatic_residual_squared,
+        state.negative_phase.pressure_integral,
+        state.positive_phase.pressure_integral};
     if (!std::all_of(derived.begin(), derived.end(), [](Real value) {
             return std::isfinite(value);
-        })) {
+        }) ||
+        !finiteVector(state.negative_phase.pressure_gradient_integral) ||
+        !finiteVector(state.negative_phase.body_force_density_integral) ||
+        !finiteVector(state.negative_phase.hydrostatic_residual_integral) ||
+        !finiteVector(state.positive_phase.pressure_gradient_integral) ||
+        !finiteVector(state.positive_phase.body_force_density_integral) ||
+        !finiteVector(state.positive_phase.hydrostatic_residual_integral)) {
         throw std::invalid_argument(
             "incompressible two-fluid diagnostics produced a non-finite finalized state");
     }

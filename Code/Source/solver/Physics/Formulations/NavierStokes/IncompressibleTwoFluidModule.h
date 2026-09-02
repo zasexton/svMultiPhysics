@@ -36,6 +36,11 @@ struct IncompressibleTwoFluidPhaseOptions {
         velocity_dirichlet{};
 };
 
+struct IncompressibleTwoFluidSharedPressureGauge {
+    FE::GlobalIndex vertex_gid{-1};
+    FE::Real pressure{0.0};
+};
+
 /**
  * @brief Initial supported envelope for a sharp incompressible two-fluid pair
  *
@@ -66,6 +71,10 @@ struct IncompressibleTwoFluidOptions {
      */
     std::vector<IncompressibleNavierStokesVMSOptions::VelocityDirichletBC>
         shared_velocity_dirichlet{};
+
+    /** Optional partition-invariant anchor for the shared pressure mode. */
+    std::optional<IncompressibleTwoFluidSharedPressureGauge>
+        shared_pressure_gauge{};
 
     std::string operator_tag{"equations"};
     std::string level_set_field_name{"level_set"};

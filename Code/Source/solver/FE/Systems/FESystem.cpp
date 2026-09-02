@@ -2009,6 +2009,10 @@ void appendTwoFluidDiagnosticParameters(
                 tokens, generatedBoundaryTraceRealBits(value));
         }
     }
+    for (const auto value : parameters.body_force) {
+        appendMeshBoundaryToken(
+            tokens, generatedBoundaryTraceRealBits(value));
+    }
 }
 
 void appendTwoFluidDiagnosticDeclaration(
@@ -2094,6 +2098,26 @@ void appendTwoFluidPhaseDiagnosticState(
     }
     appendMeshBoundaryToken(
         tokens, generatedBoundaryTraceRealBits(state.kinetic_energy));
+    appendMeshBoundaryToken(
+        tokens, generatedBoundaryTraceRealBits(state.pressure_integral));
+    appendMeshBoundaryToken(
+        tokens, generatedBoundaryTraceRealBits(state.mean_pressure));
+    appendMeshBoundaryToken(
+        tokens,
+        generatedBoundaryTraceRealBits(state.pressure_squared_integral));
+    for (const auto& vector :
+         {state.pressure_gradient_integral,
+          state.body_force_density_integral,
+          state.hydrostatic_residual_integral}) {
+        for (const auto value : vector) {
+            appendMeshBoundaryToken(
+                tokens, generatedBoundaryTraceRealBits(value));
+        }
+    }
+    appendMeshBoundaryToken(
+        tokens,
+        generatedBoundaryTraceRealBits(
+            state.hydrostatic_residual_squared));
 }
 
 void appendTwoFluidDiagnosticState(
@@ -12290,6 +12314,9 @@ void FESystem::declareTwoFluidAcceptedStageDiagnostics(
                   Real{1.0})) ||
             (parameters.prescribed_pressure_jump.has_value() &&
              !std::isfinite(*parameters.prescribed_pressure_jump)) ||
+            !finite_vector(parameters.body_force) ||
+            (parameters.dimension == 2 &&
+             parameters.body_force[2] != Real{0.0}) ||
             (parameters.prescribed_viscous_traction_jump.has_value() &&
              (!finite_vector(
                   *parameters.prescribed_viscous_traction_jump) ||
@@ -12554,10 +12581,28 @@ void FESystem::stageTwoFluidAcceptedStageDiagnostics(
             });
         };
         const auto near = [](Real lhs, Real rhs) {
+            if (!std::isfinite(lhs) || !std::isfinite(rhs)) {
+                return false;
+            }
             const Real scale = std::max(
                 {Real{1.0}, std::abs(lhs), std::abs(rhs)});
             return std::abs(lhs - rhs) <=
                    Real{1024.0} * std::numeric_limits<Real>::epsilon() * scale;
+        };
+        const auto near_difference = [](Real observed,
+                                        Real negative,
+                                        Real positive) {
+            if (!std::isfinite(observed) || !std::isfinite(negative) ||
+                !std::isfinite(positive)) {
+                return false;
+            }
+            const Real scale = std::max(
+                {Real{1.0},
+                 std::abs(observed),
+                 std::abs(negative),
+                 std::abs(positive)});
+            return std::abs(observed - (negative - positive)) <=
+                   Real{2048.0} * std::numeric_limits<Real>::epsilon() * scale;
         };
         const auto bounded_moment = [](Real moment_squared, Real bound) {
             const Real scale = std::max(
@@ -12729,19 +12774,57 @@ void FESystem::stageTwoFluidAcceptedStageDiagnostics(
             const auto validate_phase = [&](const auto& phase,
                                             geometry::CutIntegrationSide side,
                                             Real density) {
-                return phase.side == side &&
-                       phase.quadrature_point_count != 0u &&
-                       phase.density == density &&
-                       std::isfinite(phase.volume) &&
-                       phase.volume > Real{0.0} &&
-                       std::isfinite(phase.mass) &&
-                       near(phase.mass, density * phase.volume) &&
-                       finite_vector(phase.momentum) &&
-                       std::isfinite(phase.kinetic_energy) &&
-                       phase.kinetic_energy >= Real{0.0} &&
-                       bounded_moment(
-                           squared_norm(phase.momentum),
-                           Real{2.0} * phase.mass * phase.kinetic_energy);
+                if (phase.side != side ||
+                    phase.quadrature_point_count == 0u ||
+                    phase.density != density ||
+                    !std::isfinite(phase.volume) ||
+                    !(phase.volume > Real{0.0}) ||
+                    !std::isfinite(phase.mass) ||
+                    !near(phase.mass, density * phase.volume) ||
+                    !finite_vector(phase.momentum) ||
+                    !std::isfinite(phase.kinetic_energy) ||
+                    phase.kinetic_energy < Real{0.0} ||
+                    !std::isfinite(phase.pressure_integral) ||
+                    !std::isfinite(phase.mean_pressure) ||
+                    !std::isfinite(phase.pressure_squared_integral) ||
+                    phase.pressure_squared_integral < Real{0.0} ||
+                    !finite_vector(phase.pressure_gradient_integral) ||
+                    !finite_vector(phase.body_force_density_integral) ||
+                    !finite_vector(phase.hydrostatic_residual_integral) ||
+                    !std::isfinite(phase.hydrostatic_residual_squared) ||
+                    phase.hydrostatic_residual_squared < Real{0.0} ||
+                    !near(
+                        phase.mean_pressure,
+                        phase.pressure_integral / phase.volume) ||
+                    !bounded_moment(
+                        squared_norm(phase.momentum),
+                        Real{2.0} * phase.mass * phase.kinetic_energy) ||
+                    !bounded_moment(
+                        phase.pressure_integral * phase.pressure_integral,
+                        phase.volume * phase.pressure_squared_integral) ||
+                    !bounded_moment(
+                        squared_norm(
+                            phase.hydrostatic_residual_integral),
+                        phase.volume *
+                            phase.hydrostatic_residual_squared)) {
+                    return false;
+                }
+                for (std::size_t component = 0u; component < 3u;
+                     ++component) {
+                    const Real expected_body_force =
+                        density * parameters.body_force[component] *
+                        phase.volume;
+                    if (!near(
+                            phase.body_force_density_integral[component],
+                            expected_body_force) ||
+                        !near_difference(
+                            phase.hydrostatic_residual_integral[component],
+                            phase.pressure_gradient_integral[component],
+                            phase.body_force_density_integral[component])) {
+                        return false;
+                    }
+                }
+                return true;
             };
             FE_THROW_IF(
                 !validate_phase(
@@ -12774,20 +12857,19 @@ void FESystem::stageTwoFluidAcceptedStageDiagnostics(
                 "phase state or prescribed-target error is invalid");
             for (std::size_t component = 0u; component < 3u; ++component) {
                 FE_THROW_IF(
-                    !near(
+                    !near_difference(
                         state.traction_jump_integral[component],
-                        state.negative_traction_integral[component] -
-                            state.positive_traction_integral[component]),
+                        state.negative_traction_integral[component],
+                        state.positive_traction_integral[component]),
                     InvalidArgumentException,
                     "FESystem::stageTwoFluidAcceptedStageDiagnostics: "
                     "traction-jump integral does not equal the phase "
                     "traction difference");
                 FE_THROW_IF(
-                    !near(
+                    !near_difference(
                         state.viscous_traction_jump_integral[component],
-                        state.negative_viscous_traction_integral[component] -
-                            state.positive_viscous_traction_integral
-                                [component]),
+                        state.negative_viscous_traction_integral[component],
+                        state.positive_viscous_traction_integral[component]),
                     InvalidArgumentException,
                     "FESystem::stageTwoFluidAcceptedStageDiagnostics: "
                     "viscous-traction-jump integral does not equal the phase "
@@ -13694,6 +13776,32 @@ void FESystem::commitPendingTwoFluidAcceptedStageDiagnostics(
                     << state.negative_phase.momentum[2]
                     << " negative_kinetic_energy="
                     << state.negative_phase.kinetic_energy
+                    << " negative_pressure_integral="
+                    << state.negative_phase.pressure_integral
+                    << " negative_mean_pressure="
+                    << state.negative_phase.mean_pressure
+                    << " negative_pressure_squared_integral="
+                    << state.negative_phase.pressure_squared_integral
+                    << " negative_pressure_gradient_integral_0="
+                    << state.negative_phase.pressure_gradient_integral[0]
+                    << " negative_pressure_gradient_integral_1="
+                    << state.negative_phase.pressure_gradient_integral[1]
+                    << " negative_pressure_gradient_integral_2="
+                    << state.negative_phase.pressure_gradient_integral[2]
+                    << " negative_body_force_density_integral_0="
+                    << state.negative_phase.body_force_density_integral[0]
+                    << " negative_body_force_density_integral_1="
+                    << state.negative_phase.body_force_density_integral[1]
+                    << " negative_body_force_density_integral_2="
+                    << state.negative_phase.body_force_density_integral[2]
+                    << " negative_hydrostatic_residual_integral_0="
+                    << state.negative_phase.hydrostatic_residual_integral[0]
+                    << " negative_hydrostatic_residual_integral_1="
+                    << state.negative_phase.hydrostatic_residual_integral[1]
+                    << " negative_hydrostatic_residual_integral_2="
+                    << state.negative_phase.hydrostatic_residual_integral[2]
+                    << " negative_hydrostatic_residual_sq="
+                    << state.negative_phase.hydrostatic_residual_squared
                     << " positive_phase_quadrature_points="
                     << state.positive_phase.quadrature_point_count
                     << " positive_density="
@@ -13709,6 +13817,32 @@ void FESystem::commitPendingTwoFluidAcceptedStageDiagnostics(
                     << state.positive_phase.momentum[2]
                     << " positive_kinetic_energy="
                     << state.positive_phase.kinetic_energy
+                    << " positive_pressure_integral="
+                    << state.positive_phase.pressure_integral
+                    << " positive_mean_pressure="
+                    << state.positive_phase.mean_pressure
+                    << " positive_pressure_squared_integral="
+                    << state.positive_phase.pressure_squared_integral
+                    << " positive_pressure_gradient_integral_0="
+                    << state.positive_phase.pressure_gradient_integral[0]
+                    << " positive_pressure_gradient_integral_1="
+                    << state.positive_phase.pressure_gradient_integral[1]
+                    << " positive_pressure_gradient_integral_2="
+                    << state.positive_phase.pressure_gradient_integral[2]
+                    << " positive_body_force_density_integral_0="
+                    << state.positive_phase.body_force_density_integral[0]
+                    << " positive_body_force_density_integral_1="
+                    << state.positive_phase.body_force_density_integral[1]
+                    << " positive_body_force_density_integral_2="
+                    << state.positive_phase.body_force_density_integral[2]
+                    << " positive_hydrostatic_residual_integral_0="
+                    << state.positive_phase.hydrostatic_residual_integral[0]
+                    << " positive_hydrostatic_residual_integral_1="
+                    << state.positive_phase.hydrostatic_residual_integral[1]
+                    << " positive_hydrostatic_residual_integral_2="
+                    << state.positive_phase.hydrostatic_residual_integral[2]
+                    << " positive_hydrostatic_residual_sq="
+                    << state.positive_phase.hydrostatic_residual_squared
                     << " prescribed_pressure_jump_applicable="
                     << (state.prescribed_pressure_jump_error_squared.has_value()
                             ? "true"

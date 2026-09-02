@@ -3249,6 +3249,20 @@ void applyNewtonToleranceXmlOptions(
   }
 }
 
+void applyNewtonIterationXmlOptions(
+    const GeneralSimulationParameters& general_params,
+    svmp::FE::timestepping::NewtonOptions& opts)
+{
+  if (general_params.newton_max_iterations.defined()) {
+    const int value = general_params.newton_max_iterations.value();
+    if (value < 1) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Newton_max_iterations must be positive.");
+    }
+    opts.max_iterations = value;
+  }
+}
+
 void applyNewtonLineSearchXmlOptions(
     const GeneralSimulationParameters& general_params,
     svmp::FE::timestepping::NewtonOptions& opts)
@@ -9609,17 +9623,12 @@ makeFreeSurfaceScalarValueEvaluator(
   auto* const fe_system = sim.fe_system.get();
   const auto space = record.space;
   const auto context = std::string(diagnostic_context);
-  svmp::FE::interfaces::FreeSurfaceGeometryScalarEvaluator evaluator;
-  evaluator.value =
+  const auto coefficients_for_cell =
       [fe_system,
-       space,
        offset,
        scalar_field,
        solution,
-       context](
-          svmp::FE::GlobalIndex cell,
-          const std::array<svmp::FE::Real, 3>& reference_point,
-          const svmp::FE::geometry::CutQuadratureProvenance&) {
+       context](svmp::FE::GlobalIndex cell) {
         const auto cell_dofs =
             fe_system->fieldDofHandler(scalar_field).getCellDofs(cell);
         std::vector<svmp::FE::Real> coefficients;
@@ -9638,10 +9647,31 @@ makeFreeSurfaceScalarValueEvaluator(
           }
           coefficients.push_back(solution[index]);
         }
+        return coefficients;
+      };
+  svmp::FE::interfaces::FreeSurfaceGeometryScalarEvaluator evaluator;
+  evaluator.value =
+      [space, coefficients_for_cell](
+          svmp::FE::GlobalIndex cell,
+          const std::array<svmp::FE::Real, 3>& reference_point,
+          const svmp::FE::geometry::CutQuadratureProvenance&) {
+        const auto coefficients = coefficients_for_cell(cell);
         const svmp::FE::spaces::FunctionSpace::Value point{
             reference_point[0], reference_point[1], reference_point[2]};
         const auto value = space->evaluate(point, coefficients);
         return value[0];
+      };
+  evaluator.reference_gradient =
+      [space, coefficients_for_cell](
+          svmp::FE::GlobalIndex cell,
+          const std::array<svmp::FE::Real, 3>& reference_point,
+          const svmp::FE::geometry::CutQuadratureProvenance&) {
+        const auto coefficients = coefficients_for_cell(cell);
+        const svmp::FE::spaces::FunctionSpace::Value point{
+            reference_point[0], reference_point[1], reference_point[2]};
+        const auto gradient = space->evaluate_gradient(point, coefficients);
+        return std::array<svmp::FE::Real, 3>{
+            gradient[0], gradient[1], gradient[2]};
       };
   return evaluator;
 }
@@ -9843,8 +9873,19 @@ evaluateCurrentTwoFluidStageDiagnostics(
       phase.volume = global_sum(phase.volume);
       phase.velocity_squared_integral =
           global_sum(phase.velocity_squared_integral);
+      phase.pressure_integral = global_sum(phase.pressure_integral);
+      phase.pressure_squared_integral =
+          global_sum(phase.pressure_squared_integral);
+      phase.hydrostatic_residual_squared =
+          global_sum(phase.hydrostatic_residual_squared);
       for (auto& value : phase.velocity_integral) {
         value = global_sum(value);
+      }
+      for (auto* vector : {&phase.pressure_gradient_integral,
+                           &phase.hydrostatic_residual_integral}) {
+        for (auto& value : *vector) {
+          value = global_sum(value);
+        }
       }
     };
     reduce_phase(global.negative_phase);
@@ -28659,6 +28700,8 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   applyNewtonLineSearchEnvOptions(newton_opts);
   applyNewtonToleranceXmlOptions(params.general_simulation_parameters,
                                  newton_opts);
+  applyNewtonIterationXmlOptions(params.general_simulation_parameters,
+                                 newton_opts);
   applyNewtonToleranceEnvOptions(newton_opts);
   newton_opts.accept_inexact_linear_solutions =
       parseBoolEnv("SVMP_NEWTON_ACCEPT_INEXACT_LINEAR", false);
@@ -29059,6 +29102,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                                   opts.newton);
   applyNewtonLineSearchEnvOptions(opts.newton);
   applyNewtonToleranceXmlOptions(params.general_simulation_parameters,
+                                 opts.newton);
+  applyNewtonIterationXmlOptions(params.general_simulation_parameters,
                                  opts.newton);
   applyNewtonToleranceEnvOptions(opts.newton);
   opts.newton.accept_inexact_linear_solutions =

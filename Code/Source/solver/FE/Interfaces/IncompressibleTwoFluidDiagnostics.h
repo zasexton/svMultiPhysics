@@ -37,6 +37,8 @@ struct IncompressibleTwoFluidDiagnosticParameters {
     std::optional<Real> prescribed_pressure_jump{};
     /** Expected (tau_minus-tau_plus)n in global physical components. */
     std::optional<std::array<Real, 3>> prescribed_viscous_traction_jump{};
+    /** Constant acceleration used by both phase momentum operators. */
+    std::array<Real, 3> body_force{{0.0, 0.0, 0.0}};
 
     [[nodiscard]] friend bool operator==(
         const IncompressibleTwoFluidDiagnosticParameters&,
@@ -68,6 +70,11 @@ struct IncompressibleTwoFluidPhaseDiagnosticAccumulator {
     Real volume{0.0};
     std::array<Real, 3> velocity_integral{{0.0, 0.0, 0.0}};
     Real velocity_squared_integral{0.0};
+    Real pressure_integral{0.0};
+    Real pressure_squared_integral{0.0};
+    std::array<Real, 3> pressure_gradient_integral{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> hydrostatic_residual_integral{{0.0, 0.0, 0.0}};
+    Real hydrostatic_residual_squared{0.0};
 };
 
 /** Additive interface and phase quantities prior to communicator reduction. */
@@ -115,6 +122,13 @@ struct IncompressibleTwoFluidPhaseDiagnosticState {
     Real mass{0.0};
     std::array<Real, 3> momentum{{0.0, 0.0, 0.0}};
     Real kinetic_energy{0.0};
+    Real pressure_integral{0.0};
+    Real mean_pressure{0.0};
+    Real pressure_squared_integral{0.0};
+    std::array<Real, 3> pressure_gradient_integral{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> body_force_density_integral{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> hydrostatic_residual_integral{{0.0, 0.0, 0.0}};
+    Real hydrostatic_residual_squared{0.0};
 };
 
 /**

@@ -4913,10 +4913,6 @@ translate_incompressible_two_fluid_input(
     throw std::runtime_error(
         "[svMultiPhysics::Physics] unsupported_two_fluid_module_options");
   }
-  if (input.node_pressure_constraints.has_value()) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] unsupported_two_fluid_node_pressure_constraints");
-  }
   if (!input.outputs.empty()) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] unsupported_two_fluid_output_configuration");
@@ -4954,6 +4950,23 @@ translate_incompressible_two_fluid_input(
   }
 
   Options options;
+  if (input.node_pressure_constraints.has_value()) {
+    const auto& gauge_input = *input.node_pressure_constraints;
+    (void)parse_node_pressure_constraint_id_type(gauge_input.id_type);
+    const auto values =
+        read_node_pressure_constraints_csv(gauge_input.values_file_path);
+    if (values.size() != 1u) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] "
+          "unsupported_two_fluid_shared_pressure_gauge_count");
+    }
+    options.shared_pressure_gauge =
+        svmp::Physics::formulations::navier_stokes::
+            IncompressibleTwoFluidSharedPressureGauge{
+            .vertex_gid = values.front().node_id,
+            .pressure = values.front().pressure,
+        };
+  }
   options.level_set_field_name = require_two_fluid_string(
       input.equation_params,
       {"Level_set_field_name", "LevelSetFieldName"},

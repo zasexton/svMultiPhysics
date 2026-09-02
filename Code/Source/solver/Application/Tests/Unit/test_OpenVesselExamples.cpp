@@ -747,7 +747,7 @@ TEST(GeneralSimulationParameters, ParsesOptionalTransientTimeIntegrationScheme)
       0.5);
 }
 
-TEST(GeneralSimulationParameters, ParsesOptionalNewtonTolerances)
+TEST(GeneralSimulationParameters, ParsesOptionalNewtonControls)
 {
   tinyxml2::XMLDocument doc;
   const auto status = doc.Parse(R"xml(
@@ -760,6 +760,7 @@ TEST(GeneralSimulationParameters, ParsesOptionalNewtonTolerances)
     <Time_step_size>0.0001</Time_step_size>
     <Newton_absolute_tolerance>5e-10</Newton_absolute_tolerance>
     <Newton_relative_tolerance>0</Newton_relative_tolerance>
+    <Newton_max_iterations>3</Newton_max_iterations>
   </GeneralSimulationParameters>
 </svMultiPhysicsFile>
 )xml");
@@ -771,8 +772,10 @@ TEST(GeneralSimulationParameters, ParsesOptionalNewtonTolerances)
   ASSERT_NO_THROW(general.set_values(root));
   ASSERT_TRUE(general.newton_absolute_tolerance.defined());
   ASSERT_TRUE(general.newton_relative_tolerance.defined());
+  ASSERT_TRUE(general.newton_max_iterations.defined());
   EXPECT_DOUBLE_EQ(general.newton_absolute_tolerance.value(), 5.0e-10);
   EXPECT_DOUBLE_EQ(general.newton_relative_tolerance.value(), 0.0);
+  EXPECT_EQ(general.newton_max_iterations.value(), 3);
 }
 
 TEST(OpenVesselExamples, FittedAleCaseDeclaresRequiredControls)
