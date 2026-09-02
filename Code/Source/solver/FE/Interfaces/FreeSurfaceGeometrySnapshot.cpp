@@ -1646,68 +1646,132 @@ makeMomentCertificateFromSamples(
         static_cast<std::uint8_t>(ambient_dimension + 1)) {
         return false;
     }
-    const auto& a = simplex.vertices[0];
-    const auto ab = subtractPoint(simplex.vertices[1], a);
-    const auto ap = subtractPoint(point, a);
-    const Real coordinate_tolerance = std::max(
+    // A source quadrature point is formed from these same vertices.  Recover
+    // coordinates on a dominant projection and keep the solve wide so a thin
+    // simplex does not square its geometric condition number during the
+    // independent containment certificate.
+    using Wide = long double;
+    using WidePoint = std::array<Wide, 3>;
+    const auto widen = [](const std::array<Real, 3>& value) {
+        return WidePoint{{static_cast<Wide>(value[0]),
+                          static_cast<Wide>(value[1]),
+                          static_cast<Wide>(value[2])}};
+    };
+    const auto subtract_wide = [](const WidePoint& lhs,
+                                  const WidePoint& rhs) {
+        return WidePoint{{lhs[0] - rhs[0],
+                          lhs[1] - rhs[1],
+                          lhs[2] - rhs[2]}};
+    };
+    const auto dot_wide = [](const WidePoint& lhs, const WidePoint& rhs) {
+        return lhs[0] * rhs[0] + lhs[1] * rhs[1] +
+               lhs[2] * rhs[2];
+    };
+    const auto cross_wide = [](const WidePoint& lhs,
+                               const WidePoint& rhs) {
+        return WidePoint{{lhs[1] * rhs[2] - lhs[2] * rhs[1],
+                          lhs[2] * rhs[0] - lhs[0] * rhs[2],
+                          lhs[0] * rhs[1] - lhs[1] * rhs[0]}};
+    };
+    const auto norm_wide = [&](const WidePoint& value) {
+        return std::sqrt(std::max(Wide{0.0}, dot_wide(value, value)));
+    };
+    const auto scaled_wide = [](const WidePoint& value, Wide factor) {
+        return WidePoint{{factor * value[0],
+                          factor * value[1],
+                          factor * value[2]}};
+    };
+    const auto a = widen(simplex.vertices[0]);
+    const auto ab = subtract_wide(widen(simplex.vertices[1]), a);
+    const auto ap = subtract_wide(widen(point), a);
+    const Wide coordinate_tolerance = static_cast<Wide>(std::max(
         tolerance,
-        Real{128.0} * std::numeric_limits<Real>::epsilon());
+        Real{128.0} * std::numeric_limits<Real>::epsilon()));
+    std::array<Wide, 4> wide_coordinates{{Wide{0.0},
+                                          Wide{0.0},
+                                          Wide{0.0},
+                                          Wide{0.0}}};
     if (ambient_dimension == 1) {
-        const Real denominator = dot(ab, ab);
-        if (!(denominator > Real{0.0})) {
+        std::size_t dominant = 0u;
+        for (std::size_t component = 1u; component < 3u; ++component) {
+            if (std::abs(ab[component]) > std::abs(ab[dominant])) {
+                dominant = component;
+            }
+        }
+        const Wide denominator = ab[dominant];
+        if (!(std::abs(denominator) > Wide{0.0}) ||
+            !std::isfinite(denominator)) {
             return false;
         }
-        const Real t = dot(ap, ab) / denominator;
-        const auto residual = subtractPoint(ap, {{t * ab[0],
-                                                   t * ab[1],
-                                                   t * ab[2]}});
-        if (norm(residual) >
-            coordinate_tolerance * std::max(Real{1.0}, norm(ab))) {
+        const Wide t = ap[dominant] / denominator;
+        const auto residual =
+            subtract_wide(ap, scaled_wide(ab, t));
+        if (norm_wide(residual) >
+            coordinate_tolerance * std::max(Wide{1.0}, norm_wide(ab))) {
             return false;
         }
-        coordinates = {{Real{1.0} - t, t, Real{0.0}, Real{0.0}}};
+        wide_coordinates =
+            {{Wide{1.0} - t, t, Wide{0.0}, Wide{0.0}}};
     } else if (ambient_dimension == 2) {
-        const auto ac = subtractPoint(simplex.vertices[2], a);
-        const auto normal = crossPoint(ab, ac);
-        const Real denominator = dot(normal, normal);
-        if (!(denominator > Real{0.0})) {
+        const auto ac = subtract_wide(widen(simplex.vertices[2]), a);
+        const auto normal = cross_wide(ab, ac);
+        std::size_t dominant = 0u;
+        for (std::size_t component = 1u; component < 3u; ++component) {
+            if (std::abs(normal[component]) >
+                std::abs(normal[dominant])) {
+                dominant = component;
+            }
+        }
+        const Wide denominator = normal[dominant];
+        if (!(std::abs(denominator) > Wide{0.0}) ||
+            !std::isfinite(denominator)) {
             return false;
         }
-        const Real b =
-            dot(crossPoint(ap, ac), normal) / denominator;
-        const Real c =
-            dot(crossPoint(ab, ap), normal) / denominator;
-        const auto residual = subtractPoint(
-            ap,
-            {{b * ab[0] + c * ac[0],
-              b * ab[1] + c * ac[1],
-              b * ab[2] + c * ac[2]}});
-        if (norm(residual) >
+        const auto projected_cross = [dominant](const WidePoint& lhs,
+                                                const WidePoint& rhs) {
+            if (dominant == 0u) {
+                return lhs[1] * rhs[2] - lhs[2] * rhs[1];
+            }
+            if (dominant == 1u) {
+                return lhs[2] * rhs[0] - lhs[0] * rhs[2];
+            }
+            return lhs[0] * rhs[1] - lhs[1] * rhs[0];
+        };
+        const Wide b = projected_cross(ap, ac) / denominator;
+        const Wide c = projected_cross(ab, ap) / denominator;
+        const Wide distance_from_plane =
+            std::abs(dot_wide(normal, ap)) / norm_wide(normal);
+        if (distance_from_plane >
             coordinate_tolerance *
-                std::max({Real{1.0}, norm(ab), norm(ac)})) {
+                std::max({Wide{1.0}, norm_wide(ab), norm_wide(ac)})) {
             return false;
         }
-        coordinates = {{Real{1.0} - b - c,
-                        b,
-                        c,
-                        Real{0.0}}};
+        wide_coordinates =
+            {{Wide{1.0} - b - c, b, c, Wide{0.0}}};
     } else if (ambient_dimension == 3) {
-        const auto ac = subtractPoint(simplex.vertices[2], a);
-        const auto ad = subtractPoint(simplex.vertices[3], a);
-        const Real denominator = dot(ab, crossPoint(ac, ad));
-        if (!(std::abs(denominator) > Real{0.0})) {
+        const auto ac = subtract_wide(widen(simplex.vertices[2]), a);
+        const auto ad = subtract_wide(widen(simplex.vertices[3]), a);
+        const Wide denominator = dot_wide(ab, cross_wide(ac, ad));
+        if (!(std::abs(denominator) > Wide{0.0}) ||
+            !std::isfinite(denominator)) {
             return false;
         }
-        const Real b = dot(ap, crossPoint(ac, ad)) / denominator;
-        const Real c = dot(ab, crossPoint(ap, ad)) / denominator;
-        const Real d = dot(ab, crossPoint(ac, ap)) / denominator;
-        coordinates = {{Real{1.0} - b - c - d, b, c, d}};
+        const Wide b = dot_wide(ap, cross_wide(ac, ad)) / denominator;
+        const Wide c = dot_wide(ab, cross_wide(ap, ad)) / denominator;
+        const Wide d = dot_wide(ab, cross_wide(ac, ap)) / denominator;
+        wide_coordinates = {{Wide{1.0} - b - c - d, b, c, d}};
     } else {
         return false;
     }
+    coordinates = {{Real{0.0}, Real{0.0}, Real{0.0}, Real{0.0}}};
     for (std::size_t i = 0u; i < simplex.vertex_count; ++i) {
-        if (coordinates[i] < -coordinate_tolerance ||
-            coordinates[i] > Real{1.0} + coordinate_tolerance) {
+        if (!std::isfinite(wide_coordinates[i]) ||
+            wide_coordinates[i] < -coordinate_tolerance ||
+            wide_coordinates[i] > Wide{1.0} + coordinate_tolerance) {
+            return false;
+        }
+        coordinates[i] = static_cast<Real>(wide_coordinates[i]);
+        if (!std::isfinite(coordinates[i])) {
             return false;
         }
     }

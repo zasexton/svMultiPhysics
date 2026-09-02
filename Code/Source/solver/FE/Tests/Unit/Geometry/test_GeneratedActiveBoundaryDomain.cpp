@@ -3453,6 +3453,92 @@ TEST(FreeSurfaceGeometrySnapshot,
 }
 
 TEST(FreeSurfaceGeometrySnapshot,
+     CertifiesQuadraticPointsInsideThinSourceSlivers)
+{
+    constexpr int interface_marker = 134;
+    constexpr std::array<FE::Real, 3> values{{
+        FE::Real{2.95084945562583967e-2},
+        FE::Real{8.67808552895988977e-10},
+        FE::Real{-7.32233045519685224e-2},
+    }};
+    auto domain = linearTriangleCutDomain(interface_marker, values);
+    ASSERT_EQ(domain.fragments().size(), 1u);
+    ASSERT_EQ(domain.volumeRegions().size(), 2u);
+    const auto positive_region = std::find_if(
+        domain.volumeRegions().begin(),
+        domain.volumeRegions().end(),
+        [](const auto& region) {
+            return region.side ==
+                   FE::geometry::CutIntegrationSide::Positive;
+        });
+    ASSERT_NE(positive_region, domain.volumeRegions().end());
+    ASSERT_EQ(positive_region->reference_subcells.size(), 2u);
+
+    const std::vector<std::array<FE::Real, 3>> coordinates{
+        {{0.0, 0.0, 0.0}},
+        {{1.0, 0.0, 0.0}},
+        {{0.0, 1.0, 0.0}},
+    };
+    const SingleQuadBoundaryMesh mesh(
+        /*marker=*/7,
+        /*rank=*/0,
+        /*size=*/1,
+        /*owner_rank=*/0,
+        /*owned=*/true,
+        FE::ElementType::Triangle3,
+        coordinates);
+
+    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+        std::move(domain),
+        {},
+        {},
+        mesh,
+        snapshotPolicyWithoutBoundary(),
+        affineTriangleScalar(values),
+        "thin_source_sliver_containment");
+    ASSERT_NE(snapshot, nullptr);
+    EXPECT_GT(snapshot->ledger().represented_phase_point_count, 0u);
+    EXPECT_EQ(snapshot->ledger().represented_phase_disagreement_count, 0u);
+}
+
+TEST(FreeSurfaceGeometrySnapshot,
+     CertifiesQuadraticPointsInsideThinSourceTetrahedra)
+{
+    constexpr int interface_marker = 135;
+    constexpr std::array<FE::Real, 4> values{{
+        FE::Real{2.95084945562583967e-2},
+        FE::Real{8.67808552895988977e-10},
+        FE::Real{-7.32233045519685224e-2},
+        FE::Real{-4.1e-2},
+    }};
+    auto domain = linearTetraCutDomain(interface_marker, values);
+    ASSERT_EQ(domain.fragments().size(), 1u);
+    ASSERT_EQ(domain.volumeRegions().size(), 2u);
+    const auto positive_region = std::find_if(
+        domain.volumeRegions().begin(),
+        domain.volumeRegions().end(),
+        [](const auto& region) {
+            return region.side ==
+                   FE::geometry::CutIntegrationSide::Positive;
+        });
+    ASSERT_NE(positive_region, domain.volumeRegions().end());
+    ASSERT_FALSE(positive_region->reference_subcells.empty());
+
+    const SingleTetraBoundaryMesh mesh;
+    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+        std::move(domain),
+        {},
+        {},
+        mesh,
+        snapshotPolicyWithoutBoundary(),
+        affineTetraScalar(values),
+        "thin_source_tetrahedron_containment");
+    ASSERT_NE(snapshot, nullptr);
+    EXPECT_GT(snapshot->ledger().represented_phase_point_count, 0u);
+    EXPECT_EQ(snapshot->ledger().represented_phase_disagreement_count, 0u);
+}
+
+TEST(FreeSurfaceGeometrySnapshot,
      AcceptsCompleteAndDegenerateAuthoritativeFamilies)
 {
     constexpr int interface_marker = 132;
