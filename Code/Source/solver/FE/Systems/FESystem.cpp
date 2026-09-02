@@ -2096,6 +2096,13 @@ void appendTwoFluidPhaseDiagnosticState(
         appendMeshBoundaryToken(
             tokens, generatedBoundaryTraceRealBits(value));
     }
+    for (const auto value : state.mean_velocity) {
+        appendMeshBoundaryToken(
+            tokens, generatedBoundaryTraceRealBits(value));
+    }
+    appendMeshBoundaryToken(
+        tokens,
+        generatedBoundaryTraceRealBits(state.maximum_quadrature_speed));
     appendMeshBoundaryToken(
         tokens, generatedBoundaryTraceRealBits(state.kinetic_energy));
     appendMeshBoundaryToken(
@@ -12782,6 +12789,9 @@ void FESystem::stageTwoFluidAcceptedStageDiagnostics(
                     !std::isfinite(phase.mass) ||
                     !near(phase.mass, density * phase.volume) ||
                     !finite_vector(phase.momentum) ||
+                    !finite_vector(phase.mean_velocity) ||
+                    !std::isfinite(phase.maximum_quadrature_speed) ||
+                    phase.maximum_quadrature_speed < Real{0.0} ||
                     !std::isfinite(phase.kinetic_energy) ||
                     phase.kinetic_energy < Real{0.0} ||
                     !std::isfinite(phase.pressure_integral) ||
@@ -12797,6 +12807,14 @@ void FESystem::stageTwoFluidAcceptedStageDiagnostics(
                         phase.mean_pressure,
                         phase.pressure_integral / phase.volume) ||
                     !bounded_moment(
+                        squared_norm(phase.mean_velocity),
+                        phase.maximum_quadrature_speed *
+                            phase.maximum_quadrature_speed) ||
+                    !bounded_moment(
+                        Real{2.0} * phase.kinetic_energy / density,
+                        phase.volume * phase.maximum_quadrature_speed *
+                            phase.maximum_quadrature_speed) ||
+                    !bounded_moment(
                         squared_norm(phase.momentum),
                         Real{2.0} * phase.mass * phase.kinetic_energy) ||
                     !bounded_moment(
@@ -12811,6 +12829,12 @@ void FESystem::stageTwoFluidAcceptedStageDiagnostics(
                 }
                 for (std::size_t component = 0u; component < 3u;
                      ++component) {
+                    if (!near(
+                            phase.momentum[component],
+                            density * phase.volume *
+                                phase.mean_velocity[component])) {
+                        return false;
+                    }
                     const Real expected_body_force =
                         density * parameters.body_force[component] *
                         phase.volume;
@@ -13774,6 +13798,14 @@ void FESystem::commitPendingTwoFluidAcceptedStageDiagnostics(
                     << state.negative_phase.momentum[1]
                     << " negative_momentum_2="
                     << state.negative_phase.momentum[2]
+                    << " negative_mean_velocity_0="
+                    << state.negative_phase.mean_velocity[0]
+                    << " negative_mean_velocity_1="
+                    << state.negative_phase.mean_velocity[1]
+                    << " negative_mean_velocity_2="
+                    << state.negative_phase.mean_velocity[2]
+                    << " negative_maximum_quadrature_speed="
+                    << state.negative_phase.maximum_quadrature_speed
                     << " negative_kinetic_energy="
                     << state.negative_phase.kinetic_energy
                     << " negative_pressure_integral="
@@ -13815,6 +13847,14 @@ void FESystem::commitPendingTwoFluidAcceptedStageDiagnostics(
                     << state.positive_phase.momentum[1]
                     << " positive_momentum_2="
                     << state.positive_phase.momentum[2]
+                    << " positive_mean_velocity_0="
+                    << state.positive_phase.mean_velocity[0]
+                    << " positive_mean_velocity_1="
+                    << state.positive_phase.mean_velocity[1]
+                    << " positive_mean_velocity_2="
+                    << state.positive_phase.mean_velocity[2]
+                    << " positive_maximum_quadrature_speed="
+                    << state.positive_phase.maximum_quadrature_speed
                     << " positive_kinetic_energy="
                     << state.positive_phase.kinetic_energy
                     << " positive_pressure_integral="

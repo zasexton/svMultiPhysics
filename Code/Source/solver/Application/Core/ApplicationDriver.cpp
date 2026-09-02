@@ -9873,6 +9873,8 @@ evaluateCurrentTwoFluidStageDiagnostics(
       phase.volume = global_sum(phase.volume);
       phase.velocity_squared_integral =
           global_sum(phase.velocity_squared_integral);
+      phase.maximum_velocity_squared =
+          globalMaxDouble(phase.maximum_velocity_squared, comm);
       phase.pressure_integral = global_sum(phase.pressure_integral);
       phase.pressure_squared_integral =
           global_sum(phase.pressure_squared_integral);

@@ -1060,6 +1060,11 @@ TEST(IncompressibleTwoFluidDiagnostics,
   EXPECT_NEAR(state.negative_phase.mass, FE::Real{1.5}, tolerance);
   EXPECT_NEAR(state.negative_phase.momentum[0], FE::Real{1.5}, tolerance);
   EXPECT_NEAR(state.negative_phase.momentum[1], FE::Real{3.0}, tolerance);
+  EXPECT_EQ(state.negative_phase.mean_velocity,
+            (std::array<FE::Real, 3>{{1.0, 2.0, 0.0}}));
+  EXPECT_NEAR(state.negative_phase.maximum_quadrature_speed,
+              std::sqrt(FE::Real{5.0}),
+              tolerance);
   EXPECT_NEAR(state.negative_phase.kinetic_energy,
               FE::Real{3.75},
               tolerance);
@@ -1086,6 +1091,11 @@ TEST(IncompressibleTwoFluidDiagnostics,
   EXPECT_NEAR(state.positive_phase.mass, FE::Real{0.25}, tolerance);
   EXPECT_NEAR(state.positive_phase.momentum[0], FE::Real{0.0}, tolerance);
   EXPECT_NEAR(state.positive_phase.momentum[1], FE::Real{0.25}, tolerance);
+  EXPECT_EQ(state.positive_phase.mean_velocity,
+            (std::array<FE::Real, 3>{{0.0, 1.0, 0.0}}));
+  EXPECT_NEAR(state.positive_phase.maximum_quadrature_speed,
+              FE::Real{1.0},
+              tolerance);
   EXPECT_NEAR(state.positive_phase.kinetic_energy,
               FE::Real{0.125},
               tolerance);
@@ -1874,6 +1884,45 @@ TEST(IncompressibleTwoFluidModule,
     phase.pressure_gradient_integral[0] = FE::Real{1.0};
     phase.hydrostatic_residual_integral[0] = FE::Real{0.0};
     phase.hydrostatic_residual_squared = FE::Real{4.0};
+  });
+}
+
+TEST(IncompressibleTwoFluidModule,
+     AcceptedStageRejectsMalformedPhaseSpeedTelemetry) {
+  const auto expect_rejected = [](const auto& mutate) {
+    TwoFluidRegistrationFixture fixture;
+    auto module = fixture.makeModule({});
+    module.registerOn(fixture.system);
+    fixture.system.setup({});
+
+    const auto declarations =
+        fixture.system.twoFluidAcceptedStageDiagnosticDeclarations();
+    ASSERT_EQ(declarations.size(), 1u);
+    auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
+    mutate(state.diagnostics.negative_phase);
+    const std::array states{state};
+
+    EXPECT_THROW(fixture.system.stageTwoFluidAcceptedStageDiagnostics(
+                     makeTwoFluidStageMetadata(), states),
+                 FE::InvalidArgumentException);
+    EXPECT_TRUE(
+        fixture.system.pendingTwoFluidAcceptedStageDiagnostics().empty());
+  };
+
+  expect_rejected([](auto& phase) {
+    phase.mean_velocity[0] =
+        std::numeric_limits<FE::Real>::quiet_NaN();
+  });
+  expect_rejected([](auto& phase) {
+    phase.maximum_quadrature_speed = FE::Real{-1.0};
+  });
+  expect_rejected([](auto& phase) {
+    phase.mean_velocity[0] = FE::Real{1.0};
+    phase.maximum_quadrature_speed = FE::Real{1.0};
+  });
+  expect_rejected([](auto& phase) {
+    phase.kinetic_energy = FE::Real{1.0};
+    phase.maximum_quadrature_speed = FE::Real{0.0};
   });
 }
 

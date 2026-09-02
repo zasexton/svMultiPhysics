@@ -210,7 +210,10 @@ void accumulatePhasePoint(
         phase.hydrostatic_residual_integral[component] +=
             hydrostatic_residual[component] * weight;
     }
-    phase.velocity_squared_integral += dot(velocity, velocity) * weight;
+    const Real velocity_squared = dot(velocity, velocity);
+    phase.velocity_squared_integral += velocity_squared * weight;
+    phase.maximum_velocity_squared =
+        std::max(phase.maximum_velocity_squared, velocity_squared);
     phase.pressure_integral += pressure * weight;
     phase.pressure_squared_integral += pressure * pressure * weight;
     phase.hydrostatic_residual_squared +=
@@ -220,7 +223,7 @@ void accumulatePhasePoint(
 void requireFiniteAccumulator(
     const IncompressibleTwoFluidDiagnosticAccumulator& value)
 {
-    const std::array<Real, 26> scalars{
+    const std::array<Real, 28> scalars{
         value.interface_measure,
         value.velocity_jump_squared,
         value.normal_velocity_jump_squared,
@@ -238,11 +241,13 @@ void requireFiniteAccumulator(
         value.nitsche_penalty_work,
         value.negative_phase.volume,
         value.negative_phase.velocity_squared_integral,
+        value.negative_phase.maximum_velocity_squared,
         value.negative_phase.pressure_integral,
         value.negative_phase.pressure_squared_integral,
         value.negative_phase.hydrostatic_residual_squared,
         value.positive_phase.volume,
         value.positive_phase.velocity_squared_integral,
+        value.positive_phase.maximum_velocity_squared,
         value.positive_phase.pressure_integral,
         value.positive_phase.pressure_squared_integral,
         value.positive_phase.hydrostatic_residual_squared,
@@ -624,9 +629,11 @@ finalizeIncompressibleTwoFluidDiagnostics(
         accumulator.pressure_jump_squared < Real{0.0} ||
         accumulator.nitsche_penalty_work < Real{0.0} ||
         accumulator.negative_phase.velocity_squared_integral < Real{0.0} ||
+        accumulator.negative_phase.maximum_velocity_squared < Real{0.0} ||
         accumulator.negative_phase.pressure_squared_integral < Real{0.0} ||
         accumulator.negative_phase.hydrostatic_residual_squared < Real{0.0} ||
         accumulator.positive_phase.velocity_squared_integral < Real{0.0} ||
+        accumulator.positive_phase.maximum_velocity_squared < Real{0.0} ||
         accumulator.positive_phase.pressure_squared_integral < Real{0.0} ||
         accumulator.positive_phase.hydrostatic_residual_squared < Real{0.0} ||
         accumulator.negative_phase.owned_quadrature_point_count == 0u ||
@@ -758,6 +765,8 @@ finalizeIncompressibleTwoFluidDiagnostics(
             dot(phase.velocity_integral, phase.velocity_integral);
         const Real velocity_bound =
             phase.volume * phase.velocity_squared_integral;
+        const Real maximum_velocity_bound =
+            phase.volume * phase.maximum_velocity_squared;
         const Real pressure_moment_squared =
             phase.pressure_integral * phase.pressure_integral;
         const Real pressure_bound =
@@ -770,6 +779,11 @@ finalizeIncompressibleTwoFluidDiagnostics(
         if (velocity_moment_squared >
                 velocity_bound +
                     moment_tolerance(velocity_moment_squared, velocity_bound) ||
+            phase.velocity_squared_integral >
+                maximum_velocity_bound +
+                    moment_tolerance(
+                        phase.velocity_squared_integral,
+                        maximum_velocity_bound) ||
             pressure_moment_squared >
                 pressure_bound +
                     moment_tolerance(pressure_moment_squared, pressure_bound) ||
@@ -935,7 +949,11 @@ finalizeIncompressibleTwoFluidDiagnostics(
         for (std::size_t component = 0u; component < 3u; ++component) {
             phase.momentum[component] =
                 density * source.velocity_integral[component];
+            phase.mean_velocity[component] =
+                source.velocity_integral[component] / source.volume;
         }
+        phase.maximum_quadrature_speed =
+            std::sqrt(std::max(Real{0.0}, source.maximum_velocity_squared));
         phase.kinetic_energy =
             Real{0.5} * density * source.velocity_squared_integral;
         phase.pressure_integral = source.pressure_integral;
@@ -961,7 +979,7 @@ finalizeIncompressibleTwoFluidDiagnostics(
         geometry::CutIntegrationSide::Positive,
         parameters.positive_density);
 
-    const std::array<Real, 20> derived{
+    const std::array<Real, 28> derived{
         state.normal_flux_jump,
         state.negative_mass_flux,
         state.positive_mass_flux,
@@ -970,6 +988,10 @@ finalizeIncompressibleTwoFluidDiagnostics(
         state.negative_phase.momentum[0],
         state.negative_phase.momentum[1],
         state.negative_phase.momentum[2],
+        state.negative_phase.mean_velocity[0],
+        state.negative_phase.mean_velocity[1],
+        state.negative_phase.mean_velocity[2],
+        state.negative_phase.maximum_quadrature_speed,
         state.negative_phase.kinetic_energy,
         state.negative_phase.mean_pressure,
         state.negative_phase.hydrostatic_residual_squared,
@@ -977,6 +999,10 @@ finalizeIncompressibleTwoFluidDiagnostics(
         state.positive_phase.momentum[0],
         state.positive_phase.momentum[1],
         state.positive_phase.momentum[2],
+        state.positive_phase.mean_velocity[0],
+        state.positive_phase.mean_velocity[1],
+        state.positive_phase.mean_velocity[2],
+        state.positive_phase.maximum_quadrature_speed,
         state.positive_phase.kinetic_energy,
         state.positive_phase.mean_pressure,
         state.positive_phase.hydrostatic_residual_squared,
