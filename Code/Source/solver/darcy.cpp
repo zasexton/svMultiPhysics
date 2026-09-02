@@ -26,6 +26,12 @@ namespace darcy {
  *   = \rho s.
  * \f]
  *
+ * After pressure is solved, Darcy velocity is
+ * evaluated as the derived field
+ * \f[
+ *   \boldsymbol{q} = -\frac{K}{\mu}\nabla p.
+ * \f]
+ *
  * Where:
  *  - \f$ p \f$ is pressure.
  *  - \f$ \rho \f$ is fluid density.
