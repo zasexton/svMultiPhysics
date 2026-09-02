@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <functional>
 #include <limits>
 #include <map>
@@ -299,9 +300,21 @@ private:
 
 class SingleTetraBoundaryMesh final : public FE::assembly::IMeshAccess {
 public:
-    explicit SingleTetraBoundaryMesh(int marker = 17)
+    explicit SingleTetraBoundaryMesh(
+        int marker = 17,
+        std::vector<std::array<FE::Real, 3>> coordinates = {})
         : marker_(marker)
+        , coordinates_(std::move(coordinates))
     {
+        if (coordinates_.empty()) {
+            coordinates_.resize(4u);
+            for (std::size_t node = 0u; node < coordinates_.size(); ++node) {
+                const auto xi =
+                    FE::basis::ReferenceNodeLayout::get_node_coords(
+                        FE::ElementType::Tetra4, node);
+                coordinates_[node] = {{xi[0], xi[1], xi[2]}};
+            }
+        }
     }
 
     [[nodiscard]] FE::GlobalIndex numCells() const override { return 1; }
@@ -322,21 +335,12 @@ public:
     }
     [[nodiscard]] std::array<FE::Real, 3> getNodeCoordinates(
         FE::GlobalIndex node) const override {
-        const auto xi = FE::basis::ReferenceNodeLayout::get_node_coords(
-            FE::ElementType::Tetra4,
-            static_cast<std::size_t>(node));
-        return {{xi[0], xi[1], xi[2]}};
+        return coordinates_.at(static_cast<std::size_t>(node));
     }
     void getCellCoordinates(
         FE::GlobalIndex,
         std::vector<std::array<FE::Real, 3>>& coordinates) const override {
-        coordinates.resize(4u);
-        for (std::size_t node = 0u; node < coordinates.size(); ++node) {
-            const auto xi =
-                FE::basis::ReferenceNodeLayout::get_node_coords(
-                    FE::ElementType::Tetra4, node);
-            coordinates[node] = {{xi[0], xi[1], xi[2]}};
-        }
+        coordinates = coordinates_;
     }
     [[nodiscard]] FE::LocalIndex getLocalFaceIndex(
         FE::GlobalIndex face,
@@ -376,6 +380,7 @@ public:
 
 private:
     int marker_{17};
+    std::vector<std::array<FE::Real, 3>> coordinates_{};
 };
 
 interfaces::CutInterfaceDomainRequest interfaceRequest(int marker)
@@ -762,6 +767,137 @@ interfaces::LevelSetInterfaceDomain linearQuadCutDomain(
         domain.addVolumeRegion(std::move(region));
     }
     return domain;
+}
+
+interfaces::LevelSetInterfaceDomain linearTriangleCutDomain(
+    int marker,
+    const std::array<FE::Real, 3>& level_set_values,
+    FE::Real tolerance = 1.0e-12)
+{
+    auto request = interfaceRequest(marker);
+    request.tolerance = tolerance;
+    interfaces::LevelSetCellCutInput input;
+    input.parent_cell = 0;
+    input.element_type = FE::ElementType::Triangle3;
+    input.node_coordinates = {
+        {{0.0, 0.0, 0.0}},
+        {{1.0, 0.0, 0.0}},
+        {{0.0, 1.0, 0.0}},
+    };
+    input.level_set_values.assign(level_set_values.begin(),
+                                  level_set_values.end());
+    auto cut = interfaces::cutLinearLevelSetCell2D(request, input);
+    interfaces::LevelSetInterfaceDomain domain(request);
+    for (auto& fragment : cut.fragments) {
+        domain.addFragment(std::move(fragment));
+    }
+    for (auto& region : cut.volume_regions) {
+        domain.addVolumeRegion(std::move(region));
+    }
+    return domain;
+}
+
+interfaces::FreeSurfaceGeometryScalarEvaluator affineTriangleScalar(
+    std::array<FE::Real, 3> values)
+{
+    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    scalar.value =
+        [values](FE::GlobalIndex,
+                 const std::array<FE::Real, 3>& point,
+                 const FE::geometry::CutQuadratureProvenance&) {
+            return values[0] *
+                       (FE::Real{1.0} - point[0] - point[1]) +
+                   values[1] * point[0] + values[2] * point[1];
+        };
+    scalar.reference_gradient =
+        [values](FE::GlobalIndex,
+                 const std::array<FE::Real, 3>&,
+                 const FE::geometry::CutQuadratureProvenance&) {
+            return std::array<FE::Real, 3>{{
+                values[1] - values[0],
+                values[2] - values[0],
+                FE::Real{0.0}}};
+        };
+    return scalar;
+}
+
+interfaces::LevelSetInterfaceDomain linearTetraCutDomain(
+    int marker,
+    const std::array<FE::Real, 4>& level_set_values,
+    FE::Real tolerance = 1.0e-12)
+{
+    auto request = interfaceRequest(marker);
+    request.tolerance = tolerance;
+    request.interface_quadrature_order = 1;
+    interfaces::LevelSetCellCutInput input;
+    input.parent_cell = 0;
+    input.element_type = FE::ElementType::Tetra4;
+    input.node_coordinates.reserve(4u);
+    for (std::size_t node = 0u; node < 4u; ++node) {
+        const auto xi = FE::basis::ReferenceNodeLayout::get_node_coords(
+            FE::ElementType::Tetra4, node);
+        input.node_coordinates.push_back({{xi[0], xi[1], xi[2]}});
+    }
+    input.level_set_values.assign(level_set_values.begin(),
+                                  level_set_values.end());
+    auto cut = interfaces::cutLinearLevelSetCell3D(request, input);
+    interfaces::LevelSetInterfaceDomain domain(request);
+    for (auto& fragment : cut.fragments) {
+        domain.addFragment(std::move(fragment));
+    }
+    for (auto& region : cut.volume_regions) {
+        domain.addVolumeRegion(std::move(region));
+    }
+    return domain;
+}
+
+interfaces::FreeSurfaceGeometryScalarEvaluator affineTetraScalar(
+    std::array<FE::Real, 4> values)
+{
+    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    scalar.value =
+        [values](FE::GlobalIndex,
+                 const std::array<FE::Real, 3>& point,
+                 const FE::geometry::CutQuadratureProvenance&) {
+            return values[0] *
+                       (FE::Real{1.0} - point[0] - point[1] - point[2]) +
+                   values[1] * point[0] + values[2] * point[1] +
+                   values[3] * point[2];
+        };
+    scalar.reference_gradient =
+        [values](FE::GlobalIndex,
+                 const std::array<FE::Real, 3>&,
+                 const FE::geometry::CutQuadratureProvenance&) {
+            return std::array<FE::Real, 3>{{
+                values[1] - values[0],
+                values[2] - values[0],
+                values[3] - values[0]}};
+        };
+    return scalar;
+}
+
+std::size_t expectCanonicalToleranceBandValues(
+    const interfaces::LevelSetInterfaceDomain& domain,
+    FE::Real tolerance)
+{
+    std::size_t tolerance_band_value_count = 0u;
+    for (const auto& region : domain.volumeRegions()) {
+        for (const auto& subcell : region.reference_subcells) {
+            if (!subcell.has_represented_signed_values) {
+                continue;
+            }
+            for (std::size_t vertex = 0u; vertex < subcell.vertex_count;
+                 ++vertex) {
+                const FE::Real value =
+                    subcell.represented_signed_values[vertex];
+                if (std::abs(value) <= tolerance) {
+                    EXPECT_EQ(value, FE::Real{0.0});
+                    ++tolerance_band_value_count;
+                }
+            }
+        }
+    }
+    return tolerance_band_value_count;
 }
 
 interfaces::FreeSurfaceGeometryScalarEvaluator bilinearQuadScalar(
@@ -3149,6 +3285,171 @@ TEST(FreeSurfaceGeometrySnapshot,
     RecordProperty("authoritative_cross_family_marker_rejection_count", 1);
     RecordProperty("authoritative_cut_family_total_rejection_count",
                    rejection_count);
+}
+
+TEST(FreeSurfaceGeometrySnapshot,
+     AcceptsToleranceBandCornerMotionWithoutDegenerateSourceSlivers)
+{
+    constexpr int interface_marker = 132;
+    constexpr FE::Real tolerance = 1.0e-12;
+    constexpr std::array<std::array<FE::Real, 3>, 6> value_orderings{{
+        {{FE::Real{0.029508497187473726},
+          FE::Real{1.0e-17},
+          FE::Real{-0.073223304703363107}}},
+        {{FE::Real{0.029508497187473726},
+          FE::Real{-0.073223304703363107},
+          FE::Real{1.0e-17}}},
+        {{FE::Real{1.0e-17},
+          FE::Real{0.029508497187473726},
+          FE::Real{-0.073223304703363107}}},
+        {{FE::Real{1.0e-17},
+          FE::Real{-0.073223304703363107},
+          FE::Real{0.029508497187473726}}},
+        {{FE::Real{-0.073223304703363107},
+          FE::Real{0.029508497187473726},
+          FE::Real{1.0e-17}}},
+        {{FE::Real{-0.073223304703363107},
+          FE::Real{1.0e-17},
+          FE::Real{0.029508497187473726}}},
+    }};
+    const std::vector<std::array<FE::Real, 3>> coordinates{
+        {{0.375, 0.25, 0.0}},
+        {{0.5, 0.25, 0.0}},
+        {{0.375, 0.375, 0.0}},
+    };
+    const SingleQuadBoundaryMesh mesh(
+        /*marker=*/7,
+        /*rank=*/0,
+        /*size=*/1,
+        /*owner_rank=*/0,
+        /*owned=*/true,
+        FE::ElementType::Triangle3,
+        coordinates);
+
+    std::size_t accepted_sign_reversals = 0u;
+    for (std::size_t ordering = 0u; ordering < value_orderings.size();
+         ++ordering) {
+        SCOPED_TRACE(ordering);
+        const auto& values = value_orderings[ordering];
+        for (const FE::Real sign : {FE::Real{1.0}, FE::Real{-1.0}}) {
+            SCOPED_TRACE(sign);
+            std::array<FE::Real, 3> signed_values{};
+            std::transform(values.begin(),
+                           values.end(),
+                           signed_values.begin(),
+                           [sign](FE::Real value) { return sign * value; });
+            auto domain = linearTriangleCutDomain(
+                interface_marker, signed_values, tolerance);
+            ASSERT_EQ(domain.fragments().size(), 1u);
+            ASSERT_EQ(domain.volumeRegions().size(), 2u);
+            EXPECT_GT(
+                expectCanonicalToleranceBandValues(domain, tolerance), 0u);
+
+            const auto snapshot =
+                interfaces::buildFreeSurfaceGeometrySnapshot(
+                    std::move(domain),
+                    {},
+                    {},
+                    mesh,
+                    snapshotPolicyWithoutBoundary(),
+                    affineTriangleScalar(signed_values),
+                    sign > FE::Real{0.0}
+                        ? "tolerance_band_corner_positive"
+                        : "tolerance_band_corner_negative");
+            ASSERT_TRUE(snapshot);
+            EXPECT_EQ(
+                snapshot->retainedRules(
+                            interfaces::FreeSurfaceGeometryRuleRole::
+                                NegativeVolume)
+                    .size(),
+                1u);
+            EXPECT_EQ(
+                snapshot->retainedRules(
+                            interfaces::FreeSurfaceGeometryRuleRole::
+                                PositiveVolume)
+                    .size(),
+                1u);
+            ++accepted_sign_reversals;
+        }
+    }
+
+    EXPECT_EQ(accepted_sign_reversals, 12u);
+    RecordProperty("tolerance_band_corner_sign_reversal_count",
+                   accepted_sign_reversals);
+}
+
+TEST(FreeSurfaceGeometrySnapshot,
+     AcceptsMappedToleranceBandTetraCornerMotionWithoutDegenerateSourceSlivers)
+{
+    constexpr int interface_marker = 133;
+    constexpr FE::Real tolerance = 1.0e-12;
+    constexpr std::array<FE::Real, 4> base_values{{
+        FE::Real{1.0e-17},
+        FE::Real{0.029508497187473726},
+        FE::Real{-0.073223304703363107},
+        FE::Real{-0.041},
+    }};
+    const std::vector<std::array<FE::Real, 3>> coordinates{
+        {{0.375, 0.25, 0.125}},
+        {{0.5, 0.25, 0.125}},
+        {{0.375, 0.375, 0.125}},
+        {{0.375, 0.25, 0.25}},
+    };
+    const SingleTetraBoundaryMesh mesh(/*marker=*/7, coordinates);
+
+    std::size_t accepted_sign_reversals = 0u;
+    for (std::size_t ordering = 0u; ordering < base_values.size();
+         ++ordering) {
+        SCOPED_TRACE(ordering);
+        auto values = base_values;
+        std::rotate(values.begin(),
+                    values.begin() + static_cast<std::ptrdiff_t>(ordering),
+                    values.end());
+        for (const FE::Real sign : {FE::Real{1.0}, FE::Real{-1.0}}) {
+            SCOPED_TRACE(sign);
+            std::array<FE::Real, 4> signed_values{};
+            std::transform(values.begin(),
+                           values.end(),
+                           signed_values.begin(),
+                           [sign](FE::Real value) { return sign * value; });
+            auto domain = linearTetraCutDomain(
+                interface_marker, signed_values, tolerance);
+            ASSERT_EQ(domain.fragments().size(), 1u);
+            ASSERT_EQ(domain.volumeRegions().size(), 2u);
+            EXPECT_GT(
+                expectCanonicalToleranceBandValues(domain, tolerance), 0u);
+
+            const auto snapshot =
+                interfaces::buildFreeSurfaceGeometrySnapshot(
+                    std::move(domain),
+                    {},
+                    {},
+                    mesh,
+                    snapshotPolicyWithoutBoundary(),
+                    affineTetraScalar(signed_values),
+                    sign > FE::Real{0.0}
+                        ? "mapped_tolerance_band_tetra_corner_positive"
+                        : "mapped_tolerance_band_tetra_corner_negative");
+            ASSERT_TRUE(snapshot);
+            EXPECT_EQ(
+                snapshot->retainedRules(
+                            interfaces::FreeSurfaceGeometryRuleRole::
+                                NegativeVolume)
+                    .size(),
+                1u);
+            EXPECT_EQ(
+                snapshot->retainedRules(
+                            interfaces::FreeSurfaceGeometryRuleRole::
+                                PositiveVolume)
+                    .size(),
+                1u);
+            ++accepted_sign_reversals;
+        }
+    }
+
+    EXPECT_EQ(accepted_sign_reversals, 8u);
+    RecordProperty("mapped_tolerance_band_tetra_sign_reversal_count",
+                   accepted_sign_reversals);
 }
 
 TEST(FreeSurfaceGeometrySnapshot,

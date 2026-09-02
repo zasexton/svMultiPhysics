@@ -74,6 +74,13 @@ struct RegionMoments {
     std::array<Real, 3> centroid{{0.0, 0.0, 0.0}};
 };
 
+[[nodiscard]] Real canonicalSignedValue(Real value, Real tolerance) noexcept
+{
+    // Classification, clipping, and represented source geometry share one
+    // exact representative throughout the declared zero band.
+    return std::abs(value) <= tolerance ? Real{0.0} : value;
+}
+
 [[nodiscard]] Real dot2(const std::array<Real, 3>& a,
                         const std::array<Real, 3>& b) noexcept {
     return a[0] * b[0] + a[1] * b[1];
@@ -1017,10 +1024,12 @@ referenceTetrahedraFromFaces(
             throw std::invalid_argument(
                 "reference tetrahedron source geometry is degenerate");
         }
-        return signed_values[0] +
-               coordinates[0] * (signed_values[1] - signed_values[0]) +
-               coordinates[1] * (signed_values[2] - signed_values[0]) +
-               coordinates[2] * (signed_values[3] - signed_values[0]);
+        const Real value =
+            signed_values[0] +
+            coordinates[0] * (signed_values[1] - signed_values[0]) +
+            coordinates[1] * (signed_values[2] - signed_values[0]) +
+            coordinates[2] * (signed_values[3] - signed_values[0]);
+        return canonicalSignedValue(value, tolerance);
     };
 
     std::vector<std::array<Real, 3>> unique_points;
@@ -1351,9 +1360,11 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
     std::size_t negative_count = 0u;
     std::size_t positive_count = 0u;
     for (std::size_t i = 0; i < count; ++i) {
-        const Real signed_value = input.level_set_values[i] - request.isovalue;
+        const Real signed_value = canonicalSignedValue(
+            input.level_set_values[i] - request.isovalue,
+            request.tolerance);
         signed_values.push_back(signed_value);
-        if (std::abs(signed_value) <= request.tolerance) {
+        if (signed_value == Real{0.0}) {
             ++zero_count;
         } else if (signed_value < Real{0.0}) {
             ++negative_count;
@@ -1732,9 +1743,11 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
     std::size_t negative_count = 0u;
     std::size_t positive_count = 0u;
     for (std::size_t i = 0; i < count; ++i) {
-        const Real signed_value = input.level_set_values[i] - request.isovalue;
+        const Real signed_value = canonicalSignedValue(
+            input.level_set_values[i] - request.isovalue,
+            request.tolerance);
         signed_values.push_back(signed_value);
-        if (std::abs(signed_value) <= request.tolerance) {
+        if (signed_value == Real{0.0}) {
             ++zero_count;
         } else if (signed_value < Real{0.0}) {
             ++negative_count;
