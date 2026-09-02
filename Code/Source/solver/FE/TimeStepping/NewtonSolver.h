@@ -256,6 +256,22 @@ struct NewtonOptions {
     std::function<void(const systems::SystemStateView&, StateSynchronizationPoint)>
         synchronize_state{};
 
+    /**
+     * @brief Detect a nonsmooth generated-state change after synchronization.
+     *
+     * The external-state fixed point invokes this hook after each complete
+     * constraint/projection synchronization and before the corresponding
+     * frozen inner Newton solve.  A true result stops the outer transaction
+     * before that inner solve and restores its entry state.  Rank-local true
+     * results are combined across the active system communicator.
+     *
+     * Every rank must install and invoke the same callback sequence.  The
+     * callback must not publish irreversible state, and any local observation
+     * it uses must be available without leaving peers blocked in a collective.
+     */
+    std::function<bool(StateSynchronizationPoint)>
+        external_state_discontinuity{};
+
     // Set when synchronize_state can change residual-defining external state
     // (for example generated cut geometry, projected curvature, affine
     // constraints, transient MPC histories, or an extended advection
@@ -320,6 +336,7 @@ struct NewtonOptions {
 
 struct NewtonReport {
     bool converged{false};
+    bool external_state_discontinuity{false};
     int iterations{0};
     int outer_iterations{0};
     int inner_iterations_total{0};

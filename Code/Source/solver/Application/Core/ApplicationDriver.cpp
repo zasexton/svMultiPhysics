@@ -29980,6 +29980,16 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                     point,
                     use_transient_external_state_fixed_point));
       };
+  if (track_transient_cut_topology &&
+      use_transient_external_state_fixed_point) {
+    opts.newton.external_state_discontinuity =
+        [cut_topology_attempt_tracker](TransientStateSyncPoint point) {
+          return point ==
+                     TransientStateSyncPoint::OuterFixedPointState &&
+                 cut_topology_attempt_tracker->attemptActive() &&
+                 cut_topology_attempt_tracker->attemptTainted();
+        };
+  }
   callbacks.on_before_physics_solve =
       [&](svmp::FE::timestepping::TimeHistory& h, double /*solve_time*/, double /*dt*/) {
         const auto before_solve_cut_report =
@@ -30063,7 +30073,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << " outer_relaxed_state_change_norm="
               << nr.outer_relaxed_state_change_norm
               << " outer_raw_contraction_ratio="
-              << nr.outer_raw_contraction_ratio << std::endl;
+              << nr.outer_raw_contraction_ratio
+              << " external_state_discontinuity="
+              << nr.external_state_discontinuity << std::endl;
   };
   std::function<void(
       const svmp::FE::timestepping::CandidateStageObservation&)>
@@ -34303,6 +34315,39 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   callbacks.on_step_rejected = [&](const svmp::FE::timestepping::TimeHistory& h,
                                   svmp::FE::timestepping::StepRejectReason reason,
                                   const svmp::FE::timestepping::NewtonReport& nr) {
+    if (nr.external_state_discontinuity) {
+      if (reason != svmp::FE::timestepping::StepRejectReason::
+                        CutTopologyChanged) {
+        throw std::logic_error(
+            "[svMultiPhysics::Application] An external-state discontinuity was not mapped to a cut-topology step rejection.");
+      }
+      oopCout()
+          << "[svMultiPhysics::Application] Transient cut-topology attempt"
+          << " diagnostic=cut_topology_early_step_rejection"
+          << " accepted_topology_key="
+          << cut_topology_attempt_tracker
+                 ->acceptedTopologyKey()
+                 .value_or(0u)
+          << " first_mismatched_topology_key="
+          << cut_topology_attempt_tracker
+                 ->firstMismatchedTopologyKey()
+                 .value_or(0u)
+          << " last_observed_topology_key="
+          << cut_topology_attempt_tracker
+                 ->lastObservedTopologyKey()
+                 .value_or(0u)
+          << " restored_topology_key="
+          << cut_refresh_cache->topology_key.value_or(0u)
+          << " first_mismatch_provenance="
+          << (cut_topology_attempt_tracker
+                      ->firstMismatchProvenance()
+                      .empty()
+                  ? "unknown"
+                  : cut_topology_attempt_tracker
+                        ->firstMismatchProvenance())
+          << " action=invalidate_and_retry" << std::endl;
+      invalidate_transient_cut_topology_dependent_state();
+    }
     if (complete_free_surface_energy_connector_available &&
         free_surface_energy_history_contiguous) {
       const auto functional_history =
@@ -34454,7 +34499,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << " outer_relaxed_state_change_norm="
               << nr.outer_relaxed_state_change_norm
               << " outer_raw_contraction_ratio="
-              << nr.outer_raw_contraction_ratio << std::endl;
+              << nr.outer_raw_contraction_ratio
+              << " external_state_discontinuity="
+              << nr.external_state_discontinuity << std::endl;
   };
   callbacks.on_dt_updated = [&](double old_dt, double new_dt, int step_index, int attempt_index) {
     if (!oopTraceEnabled()) {

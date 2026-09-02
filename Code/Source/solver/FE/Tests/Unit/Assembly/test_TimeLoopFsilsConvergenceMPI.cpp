@@ -2489,6 +2489,173 @@ TEST(TimeLoopFsilsConvergenceMPI,
 }
 
 TEST(TimeLoopFsilsConvergenceMPI,
+     RankLocalExternalStateDiscontinuityRejectsCollectivelyAndRestores)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "FSILS backend is not enabled in this build";
+#else
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size != 2) {
+        GTEST_SKIP() << "Run with exactly 2 MPI ranks to enable this test";
+    }
+
+    auto mesh = std::make_shared<RankLocalOwnedQuadMeshAccess>(rank);
+    const auto space = spaces::Space(spaces::SpaceType::H1,
+                                     ElementType::Quad4,
+                                     /*order=*/1,
+                                     /*components=*/1);
+    ASSERT_TRUE(space);
+
+    systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        systems::FieldSpec{.name = "u",
+                           .space = space,
+                           .components = 1});
+    sys.addOperator("op");
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::TestFunction(*space, "v");
+    (void)systems::installFormulation(sys, "op", {u_field}, (u * v).dx());
+
+    systems::SetupOptions setup_opts;
+    setup_opts.assembler_name = "StandardAssembler";
+    setup_opts.assembly_options.ghost_policy = GhostPolicy::ReverseScatter;
+    setup_opts.assembly_options.deterministic = true;
+    setup_opts.assembly_options.overlap_communication = false;
+    setup_opts.dof_options.global_numbering =
+        dofs::GlobalNumberingMode::OwnerContiguous;
+    setup_opts.dof_options.ownership = dofs::OwnershipStrategy::CellOwner;
+    setup_opts.dof_options.my_rank = rank;
+    setup_opts.dof_options.world_size = size;
+    setup_opts.dof_options.mpi_comm = comm;
+
+    systems::SetupInputs inputs;
+    inputs.topology_override = buildRankLocalOwnedQuadTopology(rank);
+    ASSERT_NO_THROW(sys.setup(setup_opts, inputs));
+    ASSERT_TRUE(sys.isSetup());
+
+    const auto n_dofs = sys.dofHandler().getNumDofs();
+    ASSERT_EQ(n_dofs, 4 * size);
+    backends::FsilsFactory factory(
+        /*dof_per_node=*/1, sys.dofPermutation(), comm);
+    auto linear = factory.createLinearSolver(fsilsGmresDiagOptions());
+    ASSERT_TRUE(linear);
+
+    auto history = timestepping::TimeHistory::allocate(
+        factory,
+        n_dofs,
+        /*history_depth=*/2,
+        /*allocate_second_order_state=*/false);
+    constexpr double dt = 0.1;
+    history.setTime(0.0);
+    history.setDt(dt);
+    history.setPrevDt(dt);
+    history.setStepIndex(0);
+    auto fill_initial = [](backends::GenericVector& vector) {
+        auto values = vector.localSpan();
+        std::fill(values.begin(), values.end(), Real{1});
+    };
+    fill_initial(history.uPrev());
+    fill_initial(history.uPrev2());
+    history.resetCurrentToPrevious();
+
+    auto integrator =
+        std::make_shared<systems::BackwardDifferenceIntegrator>();
+    systems::TransientSystem transient(sys, std::move(integrator));
+
+    using SyncPoint =
+        timestepping::NewtonOptions::StateSynchronizationPoint;
+    const bool local_discontinuity = rank == 1;
+    int outer_syncs = 0;
+    int restored_syncs = 0;
+    int discontinuity_checks = 0;
+    timestepping::NewtonOptions newton_opts;
+    newton_opts.residual_op = "op";
+    newton_opts.jacobian_op = "op";
+    newton_opts.max_iterations = 2;
+    newton_opts.abs_tolerance = 1e-11;
+    newton_opts.rel_tolerance = 0.0;
+    newton_opts.use_line_search = false;
+    newton_opts.external_state_fixed_point.enabled = true;
+    newton_opts.external_state_fixed_point.max_iterations = 2;
+    newton_opts.synchronize_state =
+        [&](const systems::SystemStateView&, SyncPoint point) {
+            if (point == SyncPoint::OuterFixedPointState) {
+                ++outer_syncs;
+            } else if (point == SyncPoint::RestoredOuterFixedPointState) {
+                ++restored_syncs;
+            }
+        };
+    newton_opts.external_state_discontinuity =
+        [&](SyncPoint point) {
+            EXPECT_EQ(point, SyncPoint::OuterFixedPointState);
+            ++discontinuity_checks;
+            return local_discontinuity;
+        };
+
+    timestepping::NewtonSolver newton(newton_opts);
+    timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(sys, factory, workspace);
+    history.repack(factory);
+
+    auto snapshot = [](const backends::GenericVector& vector) {
+        const auto values = vector.localSpan();
+        return std::vector<Real>(values.begin(), values.end());
+    };
+    const auto entry_u = snapshot(history.u());
+    const auto entry_u_prev = snapshot(history.uPrev());
+    const auto entry_u_prev2 = snapshot(history.uPrev2());
+
+    timestepping::NewtonReport report{};
+    ASSERT_NO_THROW(report = newton.solveStep(
+                        transient,
+                        *linear,
+                        /*solve_time=*/dt,
+                        history,
+                        workspace));
+
+    EXPECT_FALSE(report.converged);
+    EXPECT_TRUE(report.external_state_discontinuity);
+    EXPECT_EQ(report.outer_iterations, 1);
+    EXPECT_EQ(report.inner_iterations_total, 0);
+    EXPECT_EQ(report.iterations, 0);
+    EXPECT_EQ(outer_syncs, 1);
+    EXPECT_EQ(restored_syncs, 1);
+    EXPECT_EQ(discontinuity_checks, 1);
+    if (rank == 0) {
+        EXPECT_FALSE(local_discontinuity);
+    } else {
+        EXPECT_TRUE(local_discontinuity);
+    }
+
+    const int local_reported =
+        report.external_state_discontinuity ? 1 : 0;
+    int reported_min = 0;
+    int reported_max = 0;
+    MPI_Allreduce(&local_reported,
+                  &reported_min,
+                  1,
+                  MPI_INT,
+                  MPI_MIN,
+                  comm);
+    MPI_Allreduce(&local_reported,
+                  &reported_max,
+                  1,
+                  MPI_INT,
+                  MPI_MAX,
+                  comm);
+    EXPECT_EQ(reported_min, 1);
+    EXPECT_EQ(reported_max, 1);
+
+    EXPECT_EQ(snapshot(history.u()), entry_u);
+    EXPECT_EQ(snapshot(history.uPrev()), entry_u_prev);
+    EXPECT_EQ(snapshot(history.uPrev2()), entry_u_prev2);
+#endif
+}
+
+TEST(TimeLoopFsilsConvergenceMPI,
      ConcurrentSplitSubcommunicatorsIsolateNewtonCollectives)
 {
 #if !defined(FE_HAS_FSILS)

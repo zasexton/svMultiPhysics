@@ -2995,6 +2995,156 @@ TEST(NewtonSolverExternalStateFixedPoint,
 }
 
 TEST(NewtonSolverExternalStateFixedPoint,
+     InitialExternalStateDiscontinuityStopsBeforeAnyInnerSolveAndRestores)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    double generated_measure = 1.0;
+    auto problem = makeRefreshedGeometryRootProblem(
+        /*target=*/1.0,
+        /*dt=*/0.1,
+        /*u0=*/{2.0},
+        &generated_measure);
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    int outer_refreshes = 0;
+    int discontinuity_checks = 0;
+    bool restored_generated_state = false;
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 3;
+    options.abs_tolerance = 1e-13;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+    options.external_state_fixed_point.enabled = true;
+    options.external_state_fixed_point.max_iterations = 5;
+    options.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView& state,
+            SyncPoint point) {
+            ASSERT_FALSE(state.u.empty());
+            const auto u = static_cast<double>(state.u.front());
+            generated_measure = u <= 1.0 ? 2.0 : 1.0;
+            if (point == SyncPoint::OuterFixedPointState) {
+                ++outer_refreshes;
+            } else if (point ==
+                       SyncPoint::RestoredOuterFixedPointState) {
+                restored_generated_state = true;
+                EXPECT_NEAR(u, 2.0, 1e-13);
+                EXPECT_DOUBLE_EQ(generated_measure, 1.0);
+            }
+        };
+    options.external_state_discontinuity =
+        [&](SyncPoint point) {
+            EXPECT_EQ(point, SyncPoint::OuterFixedPointState);
+            ++discontinuity_checks;
+            return true;
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+
+    EXPECT_FALSE(report.converged);
+    EXPECT_TRUE(report.external_state_discontinuity);
+    EXPECT_EQ(report.outer_iterations, 1);
+    EXPECT_EQ(report.inner_iterations_total, 0);
+    EXPECT_EQ(report.iterations, 0);
+    EXPECT_EQ(outer_refreshes, 1);
+    EXPECT_EQ(discontinuity_checks, 1);
+    EXPECT_TRUE(restored_generated_state);
+    EXPECT_NEAR(
+        scalarFromDofVector(problem.history.u()), 2.0, 1e-13);
+}
+
+TEST(NewtonSolverExternalStateFixedPoint,
+     ExternalStateDiscontinuityStopsBeforeRefreshedInnerSolveAndRestores)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    double generated_measure = 1.0;
+    auto problem = makeRefreshedGeometryRootProblem(
+        /*target=*/1.0,
+        /*dt=*/0.1,
+        /*u0=*/{2.0},
+        &generated_measure);
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    int outer_refreshes = 0;
+    int discontinuity_checks = 0;
+    bool restored_generated_state = false;
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 3;
+    options.abs_tolerance = 1e-13;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+    options.external_state_fixed_point.enabled = true;
+    options.external_state_fixed_point.max_iterations = 5;
+    options.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView& state,
+            SyncPoint point) {
+            ASSERT_FALSE(state.u.empty());
+            const auto u = static_cast<double>(state.u.front());
+            generated_measure = u <= 1.0 ? 2.0 : 1.0;
+            if (point == SyncPoint::OuterFixedPointState) {
+                ++outer_refreshes;
+            } else if (point ==
+                       SyncPoint::RestoredOuterFixedPointState) {
+                restored_generated_state = true;
+                EXPECT_NEAR(u, 2.0, 1e-13);
+                EXPECT_DOUBLE_EQ(generated_measure, 1.0);
+            }
+        };
+    options.external_state_discontinuity =
+        [&](SyncPoint point) {
+            EXPECT_EQ(point, SyncPoint::OuterFixedPointState);
+            ++discontinuity_checks;
+            return outer_refreshes == 2;
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+
+    EXPECT_FALSE(report.converged);
+    EXPECT_TRUE(report.external_state_discontinuity);
+    EXPECT_EQ(report.outer_iterations, 2);
+    EXPECT_EQ(report.inner_iterations_total, 1);
+    EXPECT_EQ(report.iterations, 1);
+    EXPECT_EQ(outer_refreshes, 2);
+    EXPECT_EQ(discontinuity_checks, 2);
+    EXPECT_TRUE(restored_generated_state);
+    EXPECT_NEAR(
+        scalarFromDofVector(problem.history.u()), 2.0, 1e-13);
+}
+
+TEST(NewtonSolverExternalStateFixedPoint,
      DynamicRelaxationReachesFreshCertificateWithinBoundedBudget)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN

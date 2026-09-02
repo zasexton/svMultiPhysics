@@ -2856,6 +2856,192 @@ TEST(TimeLoopCallbacks,
 }
 
 TEST(TimeLoopCallbacks,
+     ExternalStateDiscontinuityUsesCutTopologyRejectionAndRetries)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using svmp::FE::timestepping::StepRejectReason;
+    using StateSyncPoint = svmp::FE::timestepping::NewtonOptions::
+        StateSynchronizationPoint;
+
+    auto controller =
+        std::make_shared<RecordingAcceptanceGateController>();
+    bool request_discontinuity = true;
+    int outer_state_callbacks = 0;
+    int discontinuity_checks = 0;
+    int rejected_callbacks = 0;
+
+    const auto final_values = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::BackwardEuler,
+        /*dt=*/0.1,
+        /*t_end=*/0.1,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        controller,
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory&) {
+            callbacks.on_step_rejected =
+                [&](const svmp::FE::timestepping::TimeHistory& history,
+                    StepRejectReason reason,
+                    const svmp::FE::timestepping::NewtonReport& report) {
+                    ++rejected_callbacks;
+                    EXPECT_EQ(reason,
+                              StepRejectReason::CutTopologyChanged);
+                    EXPECT_TRUE(report.external_state_discontinuity);
+                    EXPECT_FALSE(report.converged);
+                    EXPECT_EQ(history.stepIndex(), 0);
+                };
+        },
+        /*inspect_expected_exception=*/{},
+        [&](svmp::FE::timestepping::TimeLoopOptions& options,
+            svmp::FE::FieldId) {
+            options.newton.external_state_fixed_point.enabled = true;
+            options.newton.external_state_fixed_point.max_iterations = 4;
+            options.newton.synchronize_state =
+                [&](const svmp::FE::systems::SystemStateView&,
+                    StateSyncPoint point) {
+                    if (point == StateSyncPoint::OuterFixedPointState) {
+                        ++outer_state_callbacks;
+                    }
+                };
+            options.newton.external_state_discontinuity =
+                [&](StateSyncPoint point) {
+                    EXPECT_EQ(
+                        point, StateSyncPoint::OuterFixedPointState);
+                    ++discontinuity_checks;
+                    if (request_discontinuity &&
+                        outer_state_callbacks == 2) {
+                        request_discontinuity = false;
+                        return true;
+                    }
+                    return false;
+                };
+        });
+
+    ASSERT_EQ(final_values.size(), 4u);
+    EXPECT_EQ(rejected_callbacks, 1);
+    ASSERT_EQ(controller->rejected.size(), 1u);
+    EXPECT_EQ(controller->rejected.front().second,
+              StepRejectReason::CutTopologyChanged);
+    EXPECT_TRUE(
+        controller->rejected.front().first.newton
+            .external_state_discontinuity);
+    EXPECT_EQ(controller->accepted.size(), 2u);
+    EXPECT_FALSE(request_discontinuity);
+    EXPECT_GE(outer_state_callbacks, 4);
+    EXPECT_GE(discontinuity_checks, 4);
+}
+
+TEST(TimeLoopCallbacks,
+     FixedStepExternalStateDiscontinuityRestoresReportsAndFails)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using svmp::FE::timestepping::StepRejectReason;
+    using StateSyncPoint = svmp::FE::timestepping::NewtonOptions::
+        StateSynchronizationPoint;
+
+    int outer_state_callbacks = 0;
+    int discontinuity_checks = 0;
+    int rejected_callbacks = 0;
+    int accepted_callbacks = 0;
+
+    const auto final_values = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::BackwardEuler,
+        /*dt=*/0.1,
+        /*t_end=*/0.1,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory&) {
+            callbacks.on_step_rejected =
+                [&](const svmp::FE::timestepping::TimeHistory& history,
+                    StepRejectReason reason,
+                    const svmp::FE::timestepping::NewtonReport& report) {
+                    ++rejected_callbacks;
+                    EXPECT_EQ(reason,
+                              StepRejectReason::CutTopologyChanged);
+                    EXPECT_TRUE(report.external_state_discontinuity);
+                    EXPECT_FALSE(report.converged);
+                    EXPECT_EQ(history.stepIndex(), 0);
+                    EXPECT_NEAR(history.time(), 0.0, 1e-15);
+                };
+            callbacks.on_step_accepted =
+                [&](svmp::FE::timestepping::TimeHistory&) {
+                    ++accepted_callbacks;
+                };
+        },
+        [&](const svmp::FE::timestepping::TimeHistory& history,
+            const svmp::FE::FEException& error) {
+            EXPECT_NE(
+                std::string(error.what()).find(
+                    "external-state discontinuity requires an adaptive "
+                    "step controller"),
+                std::string::npos);
+            EXPECT_EQ(history.stepIndex(), 0);
+            EXPECT_NEAR(history.time(), 0.0, 1e-15);
+            ASSERT_EQ(history.uSpan().size(),
+                      history.uPrevSpan().size());
+            EXPECT_TRUE(std::equal(
+                history.uSpan().begin(),
+                history.uSpan().end(),
+                history.uPrevSpan().begin()));
+        },
+        [&](svmp::FE::timestepping::TimeLoopOptions& options,
+            svmp::FE::FieldId) {
+            options.newton.external_state_fixed_point.enabled = true;
+            options.newton.external_state_fixed_point.max_iterations = 4;
+            options.newton.synchronize_state =
+                [&](const svmp::FE::systems::SystemStateView&,
+                    StateSyncPoint point) {
+                    if (point == StateSyncPoint::OuterFixedPointState) {
+                        ++outer_state_callbacks;
+                    }
+                };
+            options.newton.external_state_discontinuity =
+                [&](StateSyncPoint point) {
+                    EXPECT_EQ(
+                        point, StateSyncPoint::OuterFixedPointState);
+                    ++discontinuity_checks;
+                    return outer_state_callbacks == 2;
+                };
+        });
+
+    EXPECT_TRUE(final_values.empty());
+    EXPECT_EQ(outer_state_callbacks, 2);
+    EXPECT_EQ(discontinuity_checks, 2);
+    EXPECT_EQ(rejected_callbacks, 1);
+    EXPECT_EQ(accepted_callbacks, 0);
+}
+
+TEST(TimeLoopCallbacks,
      FixedStepFinalCandidateGateRejectsWithoutCommit)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN

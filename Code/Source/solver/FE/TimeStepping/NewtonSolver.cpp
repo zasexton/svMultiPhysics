@@ -11834,6 +11834,14 @@ NewtonReport NewtonSolver::solveStep(
         return local_value;
     };
 
+    auto externalStateDiscontinuityDetected =
+        [&, this](NewtonOptions::StateSynchronizationPoint point) {
+            if (!options_.external_state_discontinuity) {
+                return false;
+            }
+            return anyRank(options_.external_state_discontinuity(point));
+        };
+
     auto restoreEntryHistoryAndRates = [&]() {
         FE_THROW_IF(
             entry_history.size() !=
@@ -12043,6 +12051,7 @@ NewtonReport NewtonSolver::solveStep(
     NewtonOptions inner_options = options_;
     inner_options.external_state_fixed_point.enabled = false;
     inner_options.synchronize_state = {};
+    inner_options.external_state_discontinuity = {};
     inner_options.accepted_state_sync_invalidates_residual = false;
     inner_options.min_iterations = 0;
     inner_options.rel_tolerance = 0.0;
@@ -12056,6 +12065,16 @@ NewtonReport NewtonSolver::solveStep(
     NewtonReport aggregate{};
     backends::SolverReport last_nontrivial_linear{};
     int inner_iterations_total = 0;
+    auto stopForExternalStateDiscontinuity =
+        [&](int outer_iteration) -> NewtonReport {
+        aggregate.converged = false;
+        aggregate.external_state_discontinuity = true;
+        aggregate.outer_iterations = outer_iteration;
+        aggregate.inner_iterations_total = inner_iterations_total;
+        aggregate.iterations = inner_iterations_total;
+        restoreEntryState();
+        return aggregate;
+    };
     auto applyDeferredPressureRepresentabilityDistanceGate =
         [&](NewtonReport& candidate, int outer_iteration) {
             const auto threshold = options_
@@ -12222,6 +12241,12 @@ NewtonReport NewtonSolver::solveStep(
         synchronizeOuterState(
             NewtonOptions::StateSynchronizationPoint::
                 OuterFixedPointState);
+        if (externalStateDiscontinuityDetected(
+                NewtonOptions::StateSynchronizationPoint::
+                    OuterFixedPointState)) {
+            return stopForExternalStateDiscontinuity(
+                /*outer_iteration=*/1);
+        }
         entry_u->copyFrom(history.u());
         entry_auxiliary_state = system.checkpointAuxiliaryState();
         entry_bordered_state = system.borderedCoupling();
@@ -12240,6 +12265,11 @@ NewtonReport NewtonSolver::solveStep(
                 synchronizeOuterState(
                     NewtonOptions::StateSynchronizationPoint::
                         OuterFixedPointState);
+                if (externalStateDiscontinuityDetected(
+                        NewtonOptions::StateSynchronizationPoint::
+                            OuterFixedPointState)) {
+                    return stopForExternalStateDiscontinuity(outer + 1);
+                }
             }
             const auto current_constraint_semantics =
                 constraintSemanticFingerprint(system.constraints());

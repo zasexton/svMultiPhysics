@@ -4238,8 +4238,18 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 break;
             }
 
+            const auto solve_rejection_reason =
+                nr.external_state_discontinuity
+                    ? StepRejectReason::CutTopologyChanged
+                    : StepRejectReason::NonlinearSolveFailed;
+
             if (!adaptive) {
                 restoreAcceptedGeneratedState();
+                if (nr.external_state_discontinuity &&
+                    callbacks.on_step_rejected) {
+                    callbacks.on_step_rejected(
+                        history, solve_rejection_reason, nr);
+                }
                 if (threw && caught_exception) {
                     try {
                         std::rethrow_exception(caught_exception);
@@ -4248,17 +4258,24 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         throw;
                     }
                 }
+                if (nr.external_state_discontinuity) {
+                    FE_THROW(
+                        FEException,
+                        "TimeLoop: external-state discontinuity requires an adaptive step controller");
+                }
                 FE_THROW(FEException, "TimeLoop: nonlinear solve did not converge");
             }
 
             restoreAcceptedGeneratedState();
             if (callbacks.on_step_rejected) {
-                callbacks.on_step_rejected(history, StepRejectReason::NonlinearSolveFailed, nr);
+                callbacks.on_step_rejected(
+                    history, solve_rejection_reason, nr);
             }
 
             const auto info = make_step_attempt_info(/*nonlinear_converged=*/false);
 
-            const auto decision = options_.step_controller->onRejected(info, StepRejectReason::NonlinearSolveFailed);
+            const auto decision = options_.step_controller->onRejected(
+                info, solve_rejection_reason);
             if (!decision.retry) {
                 report.success = false;
                 report.steps_taken = step;
