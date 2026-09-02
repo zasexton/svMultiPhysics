@@ -6326,12 +6326,62 @@ public:
         const auto trace_records =
             system_
                 .generatedBoundaryNitscheTraceCertificates();
-        if (trace_records.size() != 1u) {
+        const auto residual_work =
+            system_.freeSurfaceResidualWorkDeclarations();
+        const auto weak_boundary_work = std::find_if(
+            residual_work.begin(),
+            residual_work.end(),
+            [](const auto& declaration) {
+                return declaration.channel ==
+                    FE::systems::FreeSurfaceResidualWorkChannel::
+                        WeakBoundary;
+            });
+        if (trace_records.size() != 2u ||
+            weak_boundary_work == residual_work.end() ||
+            weak_boundary_work->applicability !=
+                FE::systems::
+                    FreeSurfaceResidualWorkApplicability::Produced ||
+            weak_boundary_work->operator_tag.empty()) {
             throw std::runtime_error(
-                "Nitsche energy fixture requires exactly one eager "
-                "generated-boundary trace certificate");
+                "Nitsche energy fixture requires eager production and "
+                "weak-boundary-work trace certificates");
         }
-        const auto& trace_record = trace_records.front();
+        const auto production_trace = std::find_if(
+            trace_records.begin(),
+            trace_records.end(),
+            [](const auto& record) {
+                return record.policy.op == "equations";
+            });
+        const auto work_trace = std::find_if(
+            trace_records.begin(),
+            trace_records.end(),
+            [&](const auto& record) {
+                return record.policy.op ==
+                    weak_boundary_work->operator_tag;
+            });
+        if (production_trace == trace_records.end() ||
+            work_trace == trace_records.end() ||
+            production_trace->policy.velocity_field !=
+                work_trace->policy.velocity_field ||
+            production_trace->policy.physical_boundary_marker !=
+                work_trace->policy.physical_boundary_marker ||
+            production_trace->policy.volume_interface_marker !=
+                work_trace->policy.volume_interface_marker ||
+            production_trace->policy.generated_active_boundary_marker !=
+                work_trace->policy.generated_active_boundary_marker ||
+            production_trace->certificate.canonical_certificate_digest !=
+                work_trace->certificate.canonical_certificate_digest ||
+            production_trace->certificate.aggregation_content_digest !=
+                work_trace->certificate.aggregation_content_digest ||
+            production_trace->trace_to_penalty_ratio !=
+                work_trace->trace_to_penalty_ratio ||
+            production_trace->symmetric_energy_ratio_lower_bound !=
+                work_trace->symmetric_energy_ratio_lower_bound) {
+            throw std::runtime_error(
+                "Nitsche energy production and weak-boundary-work trace "
+                "certificates disagree");
+        }
+        const auto& trace_record = *production_trace;
         if (trace_record.policy.op != "equations" ||
             trace_record.policy.velocity_field != velocity_ ||
             trace_record.policy.physical_boundary_marker !=
@@ -12663,7 +12713,7 @@ TEST(FreeSurfaceCutStability,
                             .trace_exact_common_kernel_quotient_patch_count;
 
                     EXPECT_EQ(
-                        sample.trace_certificate_count, 1u);
+                        sample.trace_certificate_count, 2u);
                     EXPECT_NE(
                         sample.trace_certificate_digest, 0u);
                     EXPECT_NE(
