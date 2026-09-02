@@ -12,45 +12,33 @@
 
 namespace darcy {
 /*
- This code implements the Darcy Equation for 2D and 3D
- problems in perfusion of porous media.
+ This code implements the Darcy equation for perfusion of porous media.
  -------------------------------------------------------------
  Assumptions:
-    - Homogeneous Permeability
-    - Homogeneous Density
+    - Material coefficients are homogeneous within each solver domain
     - Isotropic Permeability
     - Assumptions of Stokes Flow
-    - Steady-State
  -------------------------------------------------------------
- * Strong form of the Single-Compartment Darcy equation:
- * \f[ u = -K\nabla P \f]
- * \f[ \nabla \cdot u = \beta_0(P_{source} - P) - \beta_1(P - P_{sink}) \f]
- * Note: See equations 8(a)/(b) in https://doi.org/10.1007/s10439-020-02681-z
- * 
- * Combined Strong form:
- * \f[ -\nabla \cdot (K \nabla P) - \beta_0(P_{source} - P) + \beta_1(P - P_{sink}) = 0 \f]
- * 
+ * Strong form of the Darcy equation assembled by these kernels:
+ * \f[
+ *   \rho \beta \frac{\partial p}{\partial t}
+ *   - \nabla \cdot \left(\frac{\rho K}{\mu}\nabla p\right)
+ *   = \rho s.
+ * \f]
+ *
  * Where:
- *  - \f$ u \f$ : Darcy flux
- *  - \f$ K \f$ : Permeability tensor
- *  - \f$ P \f$ : Pressure
- *  - \f$ P_{source} \f$ : Source pressure (e.g., arterial pressure) 
- *  - \f$ P_{sink} \f$ : Sink pressure (e.g., venous/extraction pressure)
- *  - \f$ \beta_0 \f$ : Source coupling term (describes conductance of flow entering myocardium)
- *  - \f$ \beta_1 \f$ : Sink coupling term (describes conductance of flow exiting myocardium)
- * 
- * -------------------------------------------------------------
- * 
- * Weak form of the Single-Compartment Darcy equation:
- * \f[ -\int_{\Omega} (\nabla q \cdot \nabla P) d\Omega - \lambda \int_{\Omega} q P d\Omega = \int_{\Omega} q F d\Omega - \int_{\Gamma} q (\nabla P \cdot n) d\Gamma \f]
- * 
- * Where:
- *  - \f$ q \f$ : Test function
- *  - \f$ \lambda \f$ : \f$ \frac{\beta_0 + \beta_1}{K} \f$
- *  - \f$ F \f$ : \f$ -\frac{\beta_0 P_{source} + \beta_1 P_{sink}}{K} \f$
- *  - \f$ n \f$ : Normal vector to the boundary
- *  - \f$ \Omega \f$ : Computational domain
- *  - \f$ \Gamma \f$ : Domain boundary
+ *  - \f$ p \f$ is pressure.
+ *  - \f$ \rho \f$ is fluid density.
+ *  - \f$ \beta \f$ is the porous-media compressibility.
+ *  - \f$ K \f$ is intrinsic permeability.
+ *  - \f$ \mu \f$ is dynamic viscosity.
+ *  - \f$ s \f$ is the volumetric source specified by `Source_term`.
+ *
+ * Density is retained in the mass-conservation form because it may differ
+ * between solver domains, although it cancels after normalization within a
+ * single homogeneous domain. Viscosity is retained because \f$K/\mu\f$ is
+ * mobility; folding \f$\mu\f$ into \f$K\f$ would change the meaning and units
+ * of the permeability input.
 */
 
 void validate_material_properties(const dmnType& domain)
