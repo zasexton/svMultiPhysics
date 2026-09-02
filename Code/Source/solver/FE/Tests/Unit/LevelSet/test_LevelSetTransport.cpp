@@ -1562,6 +1562,11 @@ TEST(LevelSetTransport,
         options.conservative_phase.momentum_relative_tolerance = 0.0;
     });
     expect_rejected_without_fields([](auto& options) {
+        options.conservative_phase.boundary_flux_policy =
+            static_cast<level_set::
+                LevelSetConservativePhaseBoundaryFluxPolicy>(99);
+    });
+    expect_rejected_without_fields([](auto& options) {
         options.conservative_phase
             .pointwise_impermeable_velocity_tolerance_explicitly_requested =
             true;

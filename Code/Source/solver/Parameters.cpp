@@ -246,6 +246,8 @@ bool is_oop_equation_extension_parameter(const std::string& name)
     "ConservativePhaseRequireConstantPreservation",
     "Conservative_phase_momentum_relative_tolerance",
     "ConservativePhaseMomentumRelativeTolerance",
+    "Conservative_phase_boundary_flux_policy",
+    "ConservativePhaseBoundaryFluxPolicy",
     "Conservative_phase_impermeable_normal_velocity_tolerance",
     "ConservativePhaseImpermeableNormalVelocityTolerance",
     "Conservative_phase_reconcile_geometry",
@@ -3227,6 +3229,8 @@ GeneralSimulationParameters::GeneralSimulationParameters()
   set_parameter("Adaptive_time_loop_max_steps_multiplier", 8, !required, adaptive_time_loop_max_steps_multiplier, {1,int_inf});
   set_parameter("Newton_line_search_fail_on_no_reduction", false, !required, newton_line_search_fail_on_no_reduction);
   set_parameter("Newton_line_search_max_iterations", 10, !required, newton_line_search_max_iterations, {1,int_inf});
+  set_parameter("Newton_absolute_tolerance", 1.0e-10, !required, newton_absolute_tolerance);
+  set_parameter("Newton_relative_tolerance", 0.0, !required, newton_relative_tolerance);
 
   set_parameter("Increment_in_saving_restart_files", 0, !required, increment_in_saving_restart_files);
   set_parameter("Increment_in_saving_VTK_files", 0, !required, increment_in_saving_vtk_files);

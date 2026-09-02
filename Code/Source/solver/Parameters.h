@@ -1539,6 +1539,8 @@ class GeneralSimulationParameters : public ParameterLists
     Parameter<double> adaptive_time_loop_increase_factor;
     Parameter<double> adaptive_time_loop_max_dt;
     Parameter<double> adaptive_time_loop_min_dt;
+    Parameter<double> newton_absolute_tolerance;
+    Parameter<double> newton_relative_tolerance;
     Parameter<double> spectral_radius_of_infinite_time_step;
     Parameter<double> start_time;
     Parameter<double> time_step_size;

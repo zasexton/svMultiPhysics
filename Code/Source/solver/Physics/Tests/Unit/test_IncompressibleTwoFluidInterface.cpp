@@ -550,6 +550,31 @@ TEST(IncompressibleTwoFluidModule,
 }
 
 TEST(IncompressibleTwoFluidModule,
+     EffectiveArtifactDistinguishesStokesAndConvectiveMomentum) {
+  TwoFluidRegistrationFixture stokes_fixture;
+  ns::IncompressibleTwoFluidOptions stokes_options;
+  stokes_options.enable_convection = false;
+  auto stokes_module = stokes_fixture.makeModule(std::move(stokes_options));
+  stokes_module.registerOn(stokes_fixture.system);
+  const auto stokes_artifact =
+      stokes_module.effectiveConfigurationArtifact();
+  ASSERT_TRUE(stokes_artifact.has_value());
+  EXPECT_NE(stokes_artifact->json.find("\"momentum_operator\":\"stokes\""),
+            std::string::npos);
+
+  TwoFluidRegistrationFixture convective_fixture;
+  auto convective_module = convective_fixture.makeModule({});
+  convective_module.registerOn(convective_fixture.system);
+  const auto convective_artifact =
+      convective_module.effectiveConfigurationArtifact();
+  ASSERT_TRUE(convective_artifact.has_value());
+  EXPECT_NE(
+      convective_artifact->json.find(
+          "\"momentum_operator\":\"navier_stokes\""),
+      std::string::npos);
+}
+
+TEST(IncompressibleTwoFluidModule,
      SharedNonhomogeneousVelocityBoundaryOwnsInactiveExteriorTraceDofs) {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires native mesh support.";

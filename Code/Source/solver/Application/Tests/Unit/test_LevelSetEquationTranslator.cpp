@@ -534,6 +534,10 @@ TEST(LevelSetEquationTranslator, TranslatesConservativePhaseControls)
       "Conservative_phase_momentum_relative_tolerance"] =
       svmp::Physics::ParameterValue{true, "7.5e-9"};
   input.equation_params[
+      "Conservative_phase_boundary_flux_policy"] =
+      svmp::Physics::ParameterValue{
+          true, "globally_balanced_discrete_q_flux"};
+  input.equation_params[
       "Conservative_phase_write_flux_artifacts"] =
       svmp::Physics::ParameterValue{true, "true"};
   input.equation_params[
@@ -622,11 +626,54 @@ TEST(LevelSetEquationTranslator, TranslatesConservativePhaseControls)
                 "\"pointwise_impermeable_velocity_contract\":\"unsupported_fail_closed_when_explicit\""),
             std::string::npos);
   EXPECT_NE(artifact->json.find(
-                "\"boundary_flux_policy\":\"closed_domain_discrete_q_flux_only\""),
+                "\"boundary_flux_policy\":\"globally_balanced_discrete_q_flux\""),
             std::string::npos);
   EXPECT_NE(artifact->json.find(
                 "\"ordering\":\"conservative_phase_transport_then_raw_geometry_rebuild_then_wall_aware_reinitialization_then_local_geometry_reconciliation_then_validation_then_commit\""),
             std::string::npos);
+#endif
+}
+
+TEST(LevelSetEquationTranslator,
+     RejectsUnknownConservativePhaseBoundaryFluxPolicyBeforeRegistration)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryQuadMesh();
+  svmp::Physics::EquationModuleInput input{};
+  input.equation_type = "level_set";
+  input.mesh_name = "quad";
+  input.mesh = mesh->local_mesh_ptr();
+  input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi"};
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "constant"};
+  input.equation_params["Constant_velocity"] =
+      svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
+  input.equation_params["Enable_conservative_phase_transport"] =
+      svmp::Physics::ParameterValue{true, "true"};
+  input.equation_params[
+      "Conservative_phase_boundary_flux_policy"] =
+      svmp::Physics::ParameterValue{true, "unbounded_boundary_flux"};
+
+  svmp::FE::systems::FESystem system(mesh);
+  try {
+    static_cast<void>(
+        application::translators::level_set::createModule(input, system));
+    FAIL() << "Expected an unknown boundary-flux policy to fail closed";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string{error.what()}.find(
+                  "Conservative_phase_boundary_flux_policy"),
+              std::string::npos);
+    EXPECT_NE(std::string{error.what()}.find(
+                  "globally_balanced_discrete_q_flux"),
+              std::string::npos);
+  }
+  EXPECT_EQ(system.findFieldByName("phi"), svmp::FE::INVALID_FIELD_ID);
+  EXPECT_EQ(system.findFieldByName("liquid_indicator"),
+            svmp::FE::INVALID_FIELD_ID);
+  EXPECT_FALSE(system.hasOperator("level_set"));
 #endif
 }
 

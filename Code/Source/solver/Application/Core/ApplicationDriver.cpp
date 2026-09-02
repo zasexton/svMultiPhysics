@@ -3227,6 +3227,28 @@ void applyNewtonToleranceEnvOptions(svmp::FE::timestepping::NewtonOptions& opts)
   }
 }
 
+void applyNewtonToleranceXmlOptions(
+    const GeneralSimulationParameters& general_params,
+    svmp::FE::timestepping::NewtonOptions& opts)
+{
+  if (general_params.newton_absolute_tolerance.defined()) {
+    const double value = general_params.newton_absolute_tolerance.value();
+    if (!std::isfinite(value) || value < 0.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Newton_absolute_tolerance must be finite and nonnegative.");
+    }
+    opts.abs_tolerance = value;
+  }
+  if (general_params.newton_relative_tolerance.defined()) {
+    const double value = general_params.newton_relative_tolerance.value();
+    if (!std::isfinite(value) || value < 0.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Newton_relative_tolerance must be finite and nonnegative.");
+    }
+    opts.rel_tolerance = value;
+  }
+}
+
 void applyNewtonLineSearchXmlOptions(
     const GeneralSimulationParameters& general_params,
     svmp::FE::timestepping::NewtonOptions& opts)
@@ -3487,6 +3509,23 @@ parseLevelSetPhaseSide(const std::string& raw)
   throw std::runtime_error(
       "[svMultiPhysics::Application] Conservative_phase_liquid_side must be "
       "'negative' or 'positive'.");
+}
+
+svmp::FE::level_set::LevelSetConservativePhaseBoundaryFluxPolicy
+parseLevelSetConservativePhaseBoundaryFluxPolicy(
+    const std::string& raw)
+{
+  const auto value = normalized_token(raw);
+  using Policy = svmp::FE::level_set::
+      LevelSetConservativePhaseBoundaryFluxPolicy;
+  if (value == "closeddomaindiscreteqfluxonly") {
+    return Policy::ClosedDomainDiscreteQFluxOnly;
+  }
+  if (value == "globallybalanceddiscreteqflux") {
+    return Policy::GloballyBalancedDiscreteQFlux;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] Conservative_phase_boundary_flux_policy must be 'closed_domain_discrete_q_flux_only' or 'globally_balanced_discrete_q_flux'.");
 }
 
 std::array<svmp::FE::Real, 3> parseLevelSetVector3(
@@ -4063,6 +4102,9 @@ canonicalLevelSetMaintenanceRequestSchedule(
         words,
         request.conservative_phase
             .classify_nonprimary_components_as_satellites);
+    appendMaintenanceScheduleEnum(
+        words,
+        request.conservative_phase.boundary_flux_policy);
     appendMaintenanceScheduleWord(
         words,
         static_cast<std::uint64_t>(
@@ -7167,6 +7209,13 @@ std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parame
              "ConservativePhaseClassifyNonprimaryComponentsAsSatellites"})) {
       request.conservative_phase
           .classify_nonprimary_components_as_satellites = *classify;
+    }
+    if (const auto policy = first_defined_parameter(
+            eq_params,
+            {"Conservative_phase_boundary_flux_policy",
+             "ConservativePhaseBoundaryFluxPolicy"})) {
+      request.conservative_phase.boundary_flux_policy =
+          parseLevelSetConservativePhaseBoundaryFluxPolicy(*policy);
     }
     if (const auto regions = first_defined_parameter(
             eq_params,
@@ -23505,9 +23554,15 @@ struct ConservativePhaseMaintenanceStageLedger {
   svmp::FE::Real post_limit_phase_measure{0.0};
   svmp::FE::Real raw_post_transport_geometry_measure{0.0};
   svmp::FE::Real post_reinitialization_geometry_measure{0.0};
+  svmp::FE::Real post_correction_phase_measure{0.0};
   svmp::FE::Real post_correction_geometry_measure{0.0};
   svmp::FE::Real maximum_nodal_boundary_mass_transfer{0.0};
   svmp::FE::Real boundary_mass_tolerance{0.0};
+  svmp::FE::level_set::LevelSetConservativePhaseBoundaryFluxPolicy
+      boundary_flux_policy{
+          svmp::FE::level_set::
+              LevelSetConservativePhaseBoundaryFluxPolicy::
+                  ClosedDomainDiscreteQFluxOnly};
   ConservativePhaseMomentMismatch post_reinitialization_mismatch{};
   ConservativePhaseMomentMismatch post_correction_mismatch{};
   svmp::FE::level_set::LevelSetP1PhaseTransportStageResult
@@ -24348,6 +24403,8 @@ std::uint64_t conservativePhaseArtifactFingerprint(
   mixConservativePhaseArtifactFingerprint(
       fingerprint, ledger.post_limit_phase_measure);
   mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.post_correction_phase_measure);
+  mixConservativePhaseArtifactFingerprint(
       fingerprint, ledger.raw_post_transport_geometry_measure);
   mixConservativePhaseArtifactFingerprint(
       fingerprint, ledger.post_reinitialization_geometry_measure);
@@ -24368,13 +24425,17 @@ std::uint64_t conservativePhaseArtifactFingerprint(
   mixConservativePhaseArtifactFingerprint(
       fingerprint, ledger.post_correction_mismatch.total_residual);
   mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.boundary_flux_policy);
+  mixConservativePhaseArtifactFingerprint(
       fingerprint, ledger.maximum_nodal_boundary_mass_transfer);
   mixConservativePhaseArtifactFingerprint(
       fingerprint, ledger.boundary_mass_tolerance);
   mixConservativePhaseArtifactFingerprint(
       fingerprint,
       std::string_view{
-          "discrete_q_flux_not_pointwise_velocity_normal"});
+          svmp::FE::level_set::
+              levelSetConservativePhaseBoundaryFluxScope(
+                  ledger.boundary_flux_policy)});
 
   mixConservativePhaseArtifactFingerprint(
       fingerprint, ledger.region_ledger.success);
@@ -24676,14 +24737,19 @@ void writeAcceptedConservativePhaseArtifacts(
             candidate.maintenance_ledgers[index]
                     .boundary_mass_tolerance >= svmp::FE::Real{0.0} &&
             candidate.maintenance_ledgers[index]
-                    .maximum_nodal_boundary_mass_transfer <=
-                candidate.maintenance_ledgers[index]
-                    .boundary_mass_tolerance &&
-            std::abs(candidate.maintenance_ledgers[index]
-                         .transport_stage.correction
-                         .total_physical_boundary_mass_transfer) <=
-                candidate.maintenance_ledgers[index]
-                    .boundary_mass_tolerance &&
+                    .boundary_flux_policy ==
+                request.conservative_phase.boundary_flux_policy &&
+            svmp::FE::level_set::
+                levelSetConservativePhaseBoundaryFluxSatisfied(
+                    candidate.maintenance_ledgers[index]
+                        .boundary_flux_policy,
+                    candidate.maintenance_ledgers[index]
+                        .maximum_nodal_boundary_mass_transfer,
+                    candidate.maintenance_ledgers[index]
+                        .transport_stage.correction
+                        .total_physical_boundary_mass_transfer,
+                    candidate.maintenance_ledgers[index]
+                        .boundary_mass_tolerance) &&
             candidate.maintenance_ledgers[index].transport_stage.success &&
             candidate.maintenance_ledgers[index].region_ledger.success;
         if (local_ledger_ready) {
@@ -24778,8 +24844,12 @@ void writeAcceptedConservativePhaseArtifacts(
             ledger.maximum_nodal_boundary_mass_transfer;
         context.boundary_mass_tolerance =
             ledger.boundary_mass_tolerance;
+        context.boundary_flux_policy =
+            ledger.boundary_flux_policy;
         context.boundary_flux_scope =
-            "discrete_q_flux_not_pointwise_velocity_normal";
+            svmp::FE::level_set::
+                levelSetConservativePhaseBoundaryFluxScope(
+                    ledger.boundary_flux_policy);
         context.geometry_validated_before_commit = true;
         context.reinitialization_due = ledger.reinitialization_due;
         context.reinitialization_applied =
@@ -24836,7 +24906,7 @@ void writeAcceptedConservativePhaseArtifacts(
         context.post_reinitialization_mismatch.total_residual =
             ledger.post_reinitialization_mismatch.total_residual;
         context.post_correction_phase_measure =
-            ledger.post_limit_phase_measure;
+            ledger.post_correction_phase_measure;
         context.post_correction_geometry_measure =
             ledger.post_correction_geometry_measure;
         context.post_correction_mismatch.maximum_nodal_residual =
@@ -25572,16 +25642,27 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
             std::abs(stage.correction.total_previous_liquid_measure));
     const bool local_boundary_flux_satisfied =
         local_nodal_boundary_flux_finite &&
-        std::isfinite(total_boundary_mass_transfer) &&
-        std::isfinite(boundary_mass_tolerance) &&
-        boundary_mass_tolerance >= svmp::FE::Real{0.0} &&
-        maximum_nodal_boundary_mass_transfer <= boundary_mass_tolerance &&
-        std::abs(total_boundary_mass_transfer) <= boundary_mass_tolerance;
+        svmp::FE::level_set::
+            levelSetConservativePhaseBoundaryFluxSatisfied(
+                request.conservative_phase.boundary_flux_policy,
+                maximum_nodal_boundary_mass_transfer,
+                total_boundary_mass_transfer,
+                boundary_mass_tolerance);
     if (globalAnyBool(!local_boundary_flux_satisfied, comm)) {
+      const bool closed_domain_policy =
+          request.conservative_phase.boundary_flux_policy ==
+          svmp::FE::level_set::
+              LevelSetConservativePhaseBoundaryFluxPolicy::
+                  ClosedDomainDiscreteQFluxOnly;
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Conservative phase closed-domain policy rejected discrete q boundary flux above its invariant tolerance for field '" +
+          std::string{
+              "[svMultiPhysics::Application] Conservative phase "} +
+          (closed_domain_policy
+               ? "closed-domain policy rejected discrete q boundary flux above its invariant tolerance"
+               : "globally balanced policy rejected non-finite or nonzero net discrete q boundary flux above its invariant tolerance") +
+          " for field '" +
           request.conservative_phase.liquid_indicator.field_name +
-          "'; this is a nodal/total phase-mass-flux gate, not a pointwise velocity-normal test.");
+          "'; this is a phase-mass-flux gate, not a pointwise velocity-normal test.");
     }
     const svmp::FE::level_set::LevelSetP1PhaseSplitStageProvenance
         split_stage_provenance{
@@ -25679,6 +25760,8 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           maximum_nodal_boundary_mass_transfer;
       maintenance_ledger.boundary_mass_tolerance =
           boundary_mass_tolerance;
+      maintenance_ledger.boundary_flux_policy =
+          request.conservative_phase.boundary_flux_policy;
       maintenance_ledger.raw_post_transport_phase_measure =
           stage.correction.total_raw_target_liquid_measure;
       maintenance_ledger.post_limit_phase_measure = phase_measure;
@@ -25744,7 +25827,14 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         << " maximum_nodal_boundary_mass_transfer="
         << maximum_nodal_boundary_mass_transfer
         << " boundary_mass_tolerance=" << boundary_mass_tolerance
-        << " boundary_safety_scope=discrete_q_flux_not_pointwise_velocity_normal"
+        << " boundary_flux_policy="
+        << svmp::FE::level_set::
+               levelSetConservativePhaseBoundaryFluxPolicyName(
+                   request.conservative_phase.boundary_flux_policy)
+        << " boundary_safety_scope="
+        << svmp::FE::level_set::
+               levelSetConservativePhaseBoundaryFluxScope(
+                   request.conservative_phase.boundary_flux_policy)
         << " boundary_safety_limitation=blind_where_q_is_zero"
         << " divergence_source="
         << stage.correction.total_discrete_divergence_mass_source
@@ -26004,17 +26094,129 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         continue;
       }
       any_reconciliation = true;
-      auto reconciliation = reconcileConservativePhaseGeometry(
-          sim,
-          request,
-          params,
-          accepted_phase_masses[request_index],
-          candidate,
-          *transaction,
-          contact_protected_nodes[request_index]);
+      auto& maintenance_ledger =
+          result.maintenance_ledgers[request_index];
+      auto& graph = requireCurrentConservativePhaseGraph(
+          system, request, /*allow_graph_rebuild=*/false);
+      const auto projection = projectCurrentConservativePhaseGeometry(
+          system, request, /*allow_graph_rebuild=*/false);
+      if (!projection.success) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase stationary-equilibrium projection failed for field '" +
+            request.conservative_phase.liquid_indicator.field_name +
+            "': " + projection.diagnostic);
+      }
+      const auto& transport_nodes =
+          maintenance_ledger.transport_stage.correction.nodes;
+      if (transport_nodes.size() != graph.nodes ||
+          projection.liquid_phase_mass.size() != graph.nodes ||
+          projection.liquid_indicator.size() != graph.nodes) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase stationary-equilibrium reconciliation found incompatible transport and geometry layouts.");
+      }
+      std::vector<svmp::FE::Real> previous_phase_masses(
+          graph.nodes, svmp::FE::Real{0.0});
+      for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        if (transport_nodes[node].node !=
+                static_cast<svmp::FE::GlobalIndex>(node) ||
+            !std::isfinite(
+                transport_nodes[node].previous_liquid_indicator)) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Conservative phase stationary-equilibrium reconciliation found a malformed previous-phase ledger.");
+        }
+        previous_phase_masses[node] =
+            graph.lumped_control_volume[node] *
+            transport_nodes[node].previous_liquid_indicator;
+      }
+      const auto stationary_geometry_mismatch =
+          conservativePhaseMomentMismatch(
+              projection.liquid_phase_mass, previous_phase_masses);
+      const auto transported_geometry_mismatch =
+          conservativePhaseMomentMismatch(
+              projection.liquid_phase_mass,
+              accepted_phase_masses[request_index]);
+      const auto equilibrium_tolerance =
+          request.conservative_phase.geometry_measure_tolerance *
+          std::max(
+              {svmp::FE::Real{1.0}, graph.physical_measure,
+               std::abs(projection.retained_liquid_measure),
+               std::abs(accepted_phase_measures[request_index]),
+               std::abs(maintenance_ledger.transport_stage.correction
+                            .total_previous_liquid_measure)});
+      const bool stationary_geometry =
+          stationary_geometry_mismatch.maximum_nodal_residual <=
+              equilibrium_tolerance &&
+          std::abs(stationary_geometry_mismatch.total_residual) <=
+              equilibrium_tolerance;
+      const bool transported_total_compatible =
+          std::abs(transported_geometry_mismatch.total_residual) <=
+              equilibrium_tolerance &&
+          std::abs(projection.retained_liquid_measure -
+                   accepted_phase_measures[request_index]) <=
+              equilibrium_tolerance;
+      const bool phase_projection_needed =
+          transported_geometry_mismatch.maximum_nodal_residual >
+          svmp::FE::Real{0.0};
+
+      ConservativePhaseGeometryReconciliationResult reconciliation;
+      // A stationary cut geometry is the authoritative equilibrium for q.
+      // Tangential graph fluxes can redistribute projected nodal moments
+      // while leaving their total unchanged; moving phi to reproduce that
+      // null-mode redistribution would create a spurious normal motion.
+      // Restore q from the unchanged geometry and retain the transport stage
+      // unchanged as the flux provenance for this accepted step.
+      if (stationary_geometry && transported_total_compatible &&
+          phase_projection_needed) {
+        const auto phase_field = system.findFieldByName(
+            request.conservative_phase.liquid_indicator.field_name);
+        if (phase_field == svmp::FE::INVALID_FIELD_ID) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Conservative phase stationary-equilibrium reconciliation could not resolve its phase field.");
+        }
+        assignConservativePhaseSlice(
+            system, phase_field, projection.liquid_indicator, candidate);
+        accepted_phase_masses[request_index] =
+            projection.liquid_phase_mass;
+        accepted_phase_measures[request_index] =
+            projection.retained_liquid_measure;
+        reconciliation.success = true;
+        reconciliation.target_reached = true;
+        reconciliation.initial_residual_norm =
+            transported_geometry_mismatch.residual_norm;
+        reconciliation.final_residual_norm = svmp::FE::Real{0.0};
+        reconciliation.maximum_final_nodal_residual =
+            svmp::FE::Real{0.0};
+        reconciliation.final_total_residual = svmp::FE::Real{0.0};
+        reconciliation.diagnostic =
+            "stationary_geometry_equilibrium_projection";
+        application::core::oopCout()
+            << "[svMultiPhysics::Application] Conservative phase stationary geometry equilibrium preserved"
+            << " diagnostic=" << reconciliation.diagnostic
+            << " field='"
+            << request.conservative_phase.liquid_indicator.field_name
+            << "' initial_local_residual_norm="
+            << transported_geometry_mismatch.residual_norm
+            << " maximum_initial_nodal_residual="
+            << transported_geometry_mismatch.maximum_nodal_residual
+            << " initial_total_residual="
+            << transported_geometry_mismatch.total_residual
+            << " stationary_geometry_maximum_nodal_residual="
+            << stationary_geometry_mismatch.maximum_nodal_residual
+            << " stationary_geometry_total_residual="
+            << stationary_geometry_mismatch.total_residual
+            << " tolerance=" << equilibrium_tolerance << std::endl;
+      } else {
+        reconciliation = reconcileConservativePhaseGeometry(
+            sim,
+            request,
+            params,
+            accepted_phase_masses[request_index],
+            candidate,
+            *transaction,
+            contact_protected_nodes[request_index]);
+      }
       reconciliation_reports[request_index] = reconciliation;
-      result.maintenance_ledgers[request_index].reconciliation =
-          reconciliation;
+      maintenance_ledger.reconciliation = reconciliation;
       if (!reconciliation.success || !reconciliation.target_reached) {
         application::core::oopCout()
             << "[svMultiPhysics::Application] Conservative phase candidate rejected"
@@ -26091,6 +26293,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           accepted_phase_masses[request_index]);
       auto& maintenance_ledger =
           result.maintenance_ledgers[request_index];
+      maintenance_ledger.post_correction_phase_measure = phase_measure;
       maintenance_ledger.post_correction_geometry_measure =
           projection.retained_liquid_measure;
       maintenance_ledger.post_correction_mismatch = local_mismatch;
@@ -26128,6 +26331,12 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           << reconciliation.geometry_rebuilds
           << " reconciliation_rejected_geometry_trials="
           << reconciliation.rejected_geometry_trials
+          << " reconciliation_initial_residual_norm="
+          << reconciliation.initial_residual_norm
+          << " reconciliation_final_residual_norm="
+          << reconciliation.final_residual_norm
+          << " reconciliation_diagnostic='"
+          << reconciliation.diagnostic << "'"
           << " interface_displacement_bound="
           << reconciliation.accumulated_interface_displacement_bound
           << " interface_displacement_limit="
@@ -26182,7 +26391,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           << maintenance_ledger.post_reinitialization_mismatch
                  .maximum_nodal_residual
           << " post_correction_phase_measure="
-          << maintenance_ledger.post_limit_phase_measure
+          << maintenance_ledger.post_correction_phase_measure
           << " post_correction_geometry_measure="
           << maintenance_ledger.post_correction_geometry_measure
           << " post_correction_max_nodal_mismatch="
@@ -26231,7 +26440,14 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           << ledger_maximum_nodal_boundary_transfer
           << " boundary_mass_tolerance="
           << maintenance_ledger.boundary_mass_tolerance
-          << " boundary_safety_scope=discrete_q_flux_not_pointwise_velocity_normal"
+          << " boundary_flux_policy="
+          << svmp::FE::level_set::
+                 levelSetConservativePhaseBoundaryFluxPolicyName(
+                     maintenance_ledger.boundary_flux_policy)
+          << " boundary_safety_scope="
+          << svmp::FE::level_set::
+                 levelSetConservativePhaseBoundaryFluxScope(
+                     maintenance_ledger.boundary_flux_policy)
           << " boundary_safety_limitation=blind_where_q_is_zero"
           << " transport_nodes="
           << transport.correction.nodes.size()
@@ -26292,6 +26508,12 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           << reconciliation.contact_protected_nodes
           << " reconciliation_maximum_removed_contact_increment="
           << reconciliation.maximum_removed_contact_increment
+          << " reconciliation_initial_residual_norm="
+          << reconciliation.initial_residual_norm
+          << " reconciliation_final_residual_norm="
+          << reconciliation.final_residual_norm
+          << " reconciliation_diagnostic='"
+          << reconciliation.diagnostic << "'"
           << std::endl;
       const auto emit_component_ledger =
           [&](const auto& component, std::string_view classification) {
@@ -28435,6 +28657,8 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   applyNewtonLineSearchXmlOptions(params.general_simulation_parameters,
                                   newton_opts);
   applyNewtonLineSearchEnvOptions(newton_opts);
+  applyNewtonToleranceXmlOptions(params.general_simulation_parameters,
+                                 newton_opts);
   applyNewtonToleranceEnvOptions(newton_opts);
   newton_opts.accept_inexact_linear_solutions =
       parseBoolEnv("SVMP_NEWTON_ACCEPT_INEXACT_LINEAR", false);
@@ -28834,6 +29058,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   applyNewtonLineSearchXmlOptions(params.general_simulation_parameters,
                                   opts.newton);
   applyNewtonLineSearchEnvOptions(opts.newton);
+  applyNewtonToleranceXmlOptions(params.general_simulation_parameters,
+                                 opts.newton);
   applyNewtonToleranceEnvOptions(opts.newton);
   opts.newton.accept_inexact_linear_solutions =
       parseBoolEnv("SVMP_NEWTON_ACCEPT_INEXACT_LINEAR", false);
@@ -29123,7 +29349,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   }
   if (maximum_pointwise_wall_contract_requested != 0u) {
     throw std::runtime_error(
-        "[svMultiPhysics::Application] Conservative_phase_impermeable_normal_velocity_tolerance requests a pointwise velocity-normal wall contract that the current conservative-phase split does not implement; the supported closed-domain gate enforces only discrete q-flux and can be blind where q=0.");
+        "[svMultiPhysics::Application] Conservative_phase_impermeable_normal_velocity_tolerance requests a pointwise velocity-normal wall contract that the current conservative-phase split does not implement; the configured boundary policy enforces only discrete q-flux and can be blind where q=0.");
   }
   const bool local_conservative_phase_scheme_supported =
       !local_has_conservative_phase ||
@@ -31420,6 +31646,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               appendMaintenanceScheduleReal(
                   commit_state_words,
                   ledger.boundary_mass_tolerance);
+              appendMaintenanceScheduleEnum(
+                  commit_state_words,
+                  ledger.boundary_flux_policy);
               const auto* provenance =
                   ledger.split_stage_provenance.has_value()
                       ? &*ledger.split_stage_provenance
@@ -31464,12 +31693,16 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   std::isfinite(ledger.boundary_mass_tolerance) &&
                   ledger.boundary_mass_tolerance >=
                       svmp::FE::Real{0.0} &&
-                  ledger.maximum_nodal_boundary_mass_transfer <=
-                      ledger.boundary_mass_tolerance &&
-                  std::abs(
-                      ledger.transport_stage.correction
-                          .total_physical_boundary_mass_transfer) <=
-                      ledger.boundary_mass_tolerance &&
+                  ledger.boundary_flux_policy ==
+                      request.conservative_phase
+                          .boundary_flux_policy &&
+                  svmp::FE::level_set::
+                      levelSetConservativePhaseBoundaryFluxSatisfied(
+                          ledger.boundary_flux_policy,
+                          ledger.maximum_nodal_boundary_mass_transfer,
+                          ledger.transport_stage.correction
+                              .total_physical_boundary_mass_transfer,
+                          ledger.boundary_mass_tolerance) &&
                   sameConservativePhaseStageRealBits(
                       provenance->stage_options.invariant_tolerance,
                       ledger.transport_stage.executed_options

@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <variant>
 
 namespace level_set = svmp::FE::level_set;
@@ -75,6 +76,14 @@ TEST(LevelSetOptions, DefaultsAreNeutral)
     EXPECT_FALSE(options.conservative_phase
                      .classify_nonprimary_components_as_satellites);
     EXPECT_TRUE(options.conservative_phase.fixed_flux_regions.empty());
+    EXPECT_EQ(
+        options.conservative_phase.boundary_flux_policy,
+        level_set::LevelSetConservativePhaseBoundaryFluxPolicy::
+            ClosedDomainDiscreteQFluxOnly);
+    EXPECT_STREQ(
+        level_set::levelSetConservativePhaseBoundaryFluxPolicyName(
+            options.conservative_phase.boundary_flux_policy),
+        "closed_domain_discrete_q_flux_only");
     EXPECT_DOUBLE_EQ(
         options.conservative_phase.impermeable_normal_velocity_tolerance,
         1.0e-10);
@@ -88,6 +97,42 @@ TEST(LevelSetOptions, DefaultsAreNeutral)
     EXPECT_DOUBLE_EQ(
         options.conservative_phase.maximum_geometry_displacement_fraction,
         0.1);
+}
+
+TEST(LevelSetOptions, ConservativePhaseBoundaryFluxPoliciesAreFailClosed)
+{
+    using Policy =
+        level_set::LevelSetConservativePhaseBoundaryFluxPolicy;
+
+    EXPECT_TRUE(level_set::levelSetConservativePhaseBoundaryFluxSatisfied(
+        Policy::ClosedDomainDiscreteQFluxOnly,
+        5.0e-13,
+        2.0e-13,
+        1.0e-12));
+    EXPECT_FALSE(level_set::levelSetConservativePhaseBoundaryFluxSatisfied(
+        Policy::ClosedDomainDiscreteQFluxOnly,
+        2.0e-6,
+        2.0e-13,
+        1.0e-12));
+    EXPECT_TRUE(level_set::levelSetConservativePhaseBoundaryFluxSatisfied(
+        Policy::GloballyBalancedDiscreteQFlux,
+        2.0e-6,
+        2.0e-13,
+        1.0e-12));
+    EXPECT_FALSE(level_set::levelSetConservativePhaseBoundaryFluxSatisfied(
+        Policy::GloballyBalancedDiscreteQFlux,
+        2.0e-6,
+        2.0e-12,
+        1.0e-12));
+    EXPECT_FALSE(level_set::levelSetConservativePhaseBoundaryFluxSatisfied(
+        Policy::GloballyBalancedDiscreteQFlux,
+        std::numeric_limits<double>::infinity(),
+        0.0,
+        1.0e-12));
+    EXPECT_STREQ(
+        level_set::levelSetConservativePhaseBoundaryFluxPolicyName(
+            Policy::GloballyBalancedDiscreteQFlux),
+        "globally_balanced_discrete_q_flux");
 }
 
 TEST(LevelSetOptions, ExplicitTransportOptions)

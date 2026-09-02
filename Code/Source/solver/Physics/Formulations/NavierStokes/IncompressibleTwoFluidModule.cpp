@@ -461,6 +461,8 @@ void addSharedGaugeEvidence(FE::systems::FESystem& system,
     out << "{\"artifact_schema_version\":3"
         << ",\"component\":\"incompressible_two_fluid\""
         << ",\"capability_label\":\"incompressible_two_phase_sharp_interface_initial_envelope\""
+        << ",\"momentum_operator\":"
+        << jsonString(options.enable_convection ? "navier_stokes" : "stokes")
         << ",\"fields\":{\"negative_velocity\":"
         << jsonString(options.negative_phase.velocity_field_name)
         << ",\"negative_pressure\":"

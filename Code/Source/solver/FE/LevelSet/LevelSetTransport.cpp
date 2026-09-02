@@ -695,6 +695,15 @@ void validateConservativePhaseOptions(
         throw std::invalid_argument(
             "installLevelSetTransport: conservative phase field must be an unknown state");
     }
+    if (phase.boundary_flux_policy !=
+            LevelSetConservativePhaseBoundaryFluxPolicy::
+                ClosedDomainDiscreteQFluxOnly &&
+        phase.boundary_flux_policy !=
+            LevelSetConservativePhaseBoundaryFluxPolicy::
+                GloballyBalancedDiscreteQFlux) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: conservative phase boundary-flux policy is unsupported");
+    }
     if (!std::isfinite(phase.invariant_tolerance) ||
         phase.invariant_tolerance < Real{0.0}) {
         throw std::invalid_argument(
@@ -739,7 +748,7 @@ void validateConservativePhaseOptions(
     if (phase
             .pointwise_impermeable_velocity_tolerance_explicitly_requested) {
         throw std::invalid_argument(
-            "installLevelSetTransport: conservative phase pointwise velocity-normal wall enforcement is unsupported; the available closed-domain contract checks only discrete q-flux at invariant_tolerance and can be blind where q=0");
+            "installLevelSetTransport: conservative phase pointwise velocity-normal wall enforcement is unsupported; the configured boundary policy checks only discrete q-flux at invariant_tolerance and can be blind where q=0");
     }
     if (!std::isfinite(phase.geometry_measure_tolerance) ||
         !(phase.geometry_measure_tolerance > Real{0.0})) {
@@ -759,7 +768,7 @@ void validateConservativePhaseOptions(
     if (!options.boundaries.inflow.empty() ||
         !options.boundaries.outflow.empty()) {
         throw std::invalid_argument(
-            "installLevelSetTransport: conservative phase transport currently requires a closed boundary; conservative phase boundary flux data are not configured");
+            "installLevelSetTransport: conservative phase transport does not support declared inflow or outflow data; only its configured discrete q-flux policy is available");
     }
     if (options.bound_preserving.enabled) {
         throw std::invalid_argument(
@@ -1660,7 +1669,7 @@ systems::CoupledResidualKernels installLevelSetTransport(
          !options.boundaries.inflow.empty() ||
          !options.boundaries.outflow.empty())) {
         throw std::invalid_argument(
-            "installLevelSetTransport: material-interface phase-pair velocity requires an existing level-set field, one matching interface marker, advective-form conservative phase transport with geometry reconciliation, interface kinematic enforcement, no legacy bound projection, no separate velocity registration or extension, and a closed physical boundary");
+            "installLevelSetTransport: material-interface phase-pair velocity requires an existing level-set field, one matching interface marker, advective-form conservative phase transport with geometry reconciliation, interface kinematic enforcement, no legacy bound projection, no separate velocity registration or extension, and no declared inflow or outflow boundary");
     }
 
     std::optional<PendingTransportField> pending_phase;

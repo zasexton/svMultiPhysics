@@ -747,6 +747,34 @@ TEST(GeneralSimulationParameters, ParsesOptionalTransientTimeIntegrationScheme)
       0.5);
 }
 
+TEST(GeneralSimulationParameters, ParsesOptionalNewtonTolerances)
+{
+  tinyxml2::XMLDocument doc;
+  const auto status = doc.Parse(R"xml(
+<svMultiPhysicsFile>
+  <GeneralSimulationParameters>
+    <Continue_previous_simulation>false</Continue_previous_simulation>
+    <Number_of_time_steps>1</Number_of_time_steps>
+    <Save_results_to_VTK_format>false</Save_results_to_VTK_format>
+    <Start_saving_after_time_step>1</Start_saving_after_time_step>
+    <Time_step_size>0.0001</Time_step_size>
+    <Newton_absolute_tolerance>5e-10</Newton_absolute_tolerance>
+    <Newton_relative_tolerance>0</Newton_relative_tolerance>
+  </GeneralSimulationParameters>
+</svMultiPhysicsFile>
+)xml");
+  ASSERT_EQ(status, tinyxml2::XML_SUCCESS) << doc.ErrorStr();
+
+  auto* root = doc.FirstChildElement("svMultiPhysicsFile");
+  ASSERT_NE(root, nullptr);
+  GeneralSimulationParameters general;
+  ASSERT_NO_THROW(general.set_values(root));
+  ASSERT_TRUE(general.newton_absolute_tolerance.defined());
+  ASSERT_TRUE(general.newton_relative_tolerance.defined());
+  EXPECT_DOUBLE_EQ(general.newton_absolute_tolerance.value(), 5.0e-10);
+  EXPECT_DOUBLE_EQ(general.newton_relative_tolerance.value(), 0.0);
+}
+
 TEST(OpenVesselExamples, FittedAleCaseDeclaresRequiredControls)
 {
   const auto case_dir = openVesselCaseDir("fitted_ale");

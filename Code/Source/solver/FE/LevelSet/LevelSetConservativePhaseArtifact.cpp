@@ -227,9 +227,9 @@ template <typename... Values>
     const LevelSetConservativePhaseArtifactContext& context,
     const LevelSetP1PhaseTransportStageResult& stage) noexcept
 {
-    constexpr std::string_view expected_scope{
-        "discrete_q_flux_not_pointwise_velocity_normal"};
-    if (context.boundary_flux_scope != expected_scope) {
+    if (context.boundary_flux_scope !=
+        levelSetConservativePhaseBoundaryFluxScope(
+            context.boundary_flux_policy)) {
         return false;
     }
     Real maximum_nodal_transfer{0.0};
@@ -248,9 +248,11 @@ template <typename... Values>
            sameArtifactRealBits(
                stage.correction.total_physical_boundary_mass_transfer,
                total_nodal_transfer) &&
-           maximum_nodal_transfer <= context.boundary_mass_tolerance &&
-           std::abs(total_nodal_transfer) <=
-               context.boundary_mass_tolerance;
+           levelSetConservativePhaseBoundaryFluxSatisfied(
+               context.boundary_flux_policy,
+               maximum_nodal_transfer,
+               total_nodal_transfer,
+               context.boundary_mass_tolerance);
 }
 
 [[nodiscard]] bool finiteComponent(
@@ -845,8 +847,17 @@ void writeArtifact(
            << ",\"boundary_mass_tolerance\":"
            << context.boundary_mass_tolerance
            << ",\"limitation\":\"blind_to_velocity_normal_where_q_is_zero\""
-           << ",\"maximum_nodal_within_tolerance\":true"
-           << ",\"absolute_total_within_tolerance\":true}"
+           << ",\"maximum_nodal_within_tolerance\":";
+    writeBool(
+        output,
+        context.maximum_nodal_boundary_mass_transfer <=
+            context.boundary_mass_tolerance);
+    output << ",\"absolute_total_within_tolerance\":";
+    writeBool(
+        output,
+        std::abs(correction.total_physical_boundary_mass_transfer) <=
+            context.boundary_mass_tolerance);
+    output << '}'
            << ",\"graph_revisions\":{\"geometry\":"
            << context.graph_geometry_revision
            << ",\"topology\":" << context.graph_topology_revision

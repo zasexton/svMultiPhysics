@@ -9,6 +9,7 @@
 #include "Core/Types.h"
 #include "LevelSet/LevelSetConservativePhaseOperator.h"
 #include "LevelSet/LevelSetConservativePhaseRegions.h"
+#include "LevelSet/LevelSetOptions.h"
 #include "LevelSet/LevelSetReinitialization.h"
 
 #include <cstddef>
@@ -89,6 +90,9 @@ struct LevelSetConservativePhaseArtifactContext {
      */
     Real maximum_nodal_boundary_mass_transfer{0.0};
     Real boundary_mass_tolerance{0.0};
+    LevelSetConservativePhaseBoundaryFluxPolicy boundary_flux_policy{
+        LevelSetConservativePhaseBoundaryFluxPolicy::
+            ClosedDomainDiscreteQFluxOnly};
     std::string boundary_flux_scope{};
     bool geometry_validated_before_commit{false};
     bool reinitialization_due{false};

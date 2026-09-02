@@ -12,6 +12,7 @@
 #include "Spaces/FunctionSpace.h"
 
 #include <array>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -187,6 +188,69 @@ struct LevelSetBoundaryOptions {
     std::vector<LevelSetOutflowBoundary> outflow{};
 };
 
+enum class LevelSetConservativePhaseBoundaryFluxPolicy {
+    ClosedDomainDiscreteQFluxOnly,
+    GloballyBalancedDiscreteQFlux
+};
+
+[[nodiscard]] constexpr const char*
+levelSetConservativePhaseBoundaryFluxPolicyName(
+    LevelSetConservativePhaseBoundaryFluxPolicy policy) noexcept
+{
+    switch (policy) {
+        case LevelSetConservativePhaseBoundaryFluxPolicy::
+            ClosedDomainDiscreteQFluxOnly:
+            return "closed_domain_discrete_q_flux_only";
+        case LevelSetConservativePhaseBoundaryFluxPolicy::
+            GloballyBalancedDiscreteQFlux:
+            return "globally_balanced_discrete_q_flux";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] constexpr const char*
+levelSetConservativePhaseBoundaryFluxScope(
+    LevelSetConservativePhaseBoundaryFluxPolicy policy) noexcept
+{
+    switch (policy) {
+        case LevelSetConservativePhaseBoundaryFluxPolicy::
+            ClosedDomainDiscreteQFluxOnly:
+            return "discrete_q_flux_not_pointwise_velocity_normal";
+        case LevelSetConservativePhaseBoundaryFluxPolicy::
+            GloballyBalancedDiscreteQFlux:
+            return "globally_balanced_discrete_q_flux_not_pointwise_velocity_normal";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] inline bool
+levelSetConservativePhaseBoundaryFluxSatisfied(
+    LevelSetConservativePhaseBoundaryFluxPolicy policy,
+    Real maximum_nodal_boundary_mass_transfer,
+    Real total_boundary_mass_transfer,
+    Real boundary_mass_tolerance) noexcept
+{
+    if (!std::isfinite(maximum_nodal_boundary_mass_transfer) ||
+        !std::isfinite(total_boundary_mass_transfer) ||
+        !std::isfinite(boundary_mass_tolerance) ||
+        maximum_nodal_boundary_mass_transfer < Real{0.0} ||
+        boundary_mass_tolerance < Real{0.0} ||
+        std::abs(total_boundary_mass_transfer) >
+            boundary_mass_tolerance) {
+        return false;
+    }
+    switch (policy) {
+        case LevelSetConservativePhaseBoundaryFluxPolicy::
+            ClosedDomainDiscreteQFluxOnly:
+            return maximum_nodal_boundary_mass_transfer <=
+                   boundary_mass_tolerance;
+        case LevelSetConservativePhaseBoundaryFluxPolicy::
+            GloballyBalancedDiscreteQFlux:
+            return true;
+    }
+    return false;
+}
+
 /**
  * @brief Explicit conservative P1 phase state coupled to level-set geometry.
  *
@@ -215,6 +279,9 @@ struct LevelSetConservativePhaseOptions {
     int flux_artifact_cadence_steps{1};
     bool classify_nonprimary_components_as_satellites{false};
     std::vector<LevelSetPhaseRegionBox> fixed_flux_regions{};
+    LevelSetConservativePhaseBoundaryFluxPolicy boundary_flux_policy{
+        LevelSetConservativePhaseBoundaryFluxPolicy::
+            ClosedDomainDiscreteQFluxOnly};
     Real impermeable_normal_velocity_tolerance{1.0e-10};
     // The current conservative split does not implement a pointwise u.n wall
     // check. Translators retain this bit so an explicit legacy request can

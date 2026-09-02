@@ -564,7 +564,10 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
       << ",\"maximum_geometry_displacement_fraction\":"
       << json_real(options.conservative_phase
                        .maximum_geometry_displacement_fraction)
-      << ",\"boundary_flux_policy\":\"closed_domain_discrete_q_flux_only\""
+      << ",\"boundary_flux_policy\":"
+      << json_string(
+             ls::levelSetConservativePhaseBoundaryFluxPolicyName(
+                 options.conservative_phase.boundary_flux_policy))
       << ",\"boundary_flux_tolerance_source\":\"invariant_tolerance\""
       << ",\"boundary_flux_blind_where_q_zero\":true"
       << ",\"newton_policy\":\"held_at_previous_accepted_endpoint\"}"
@@ -1228,6 +1231,22 @@ ls::LevelSetPhaseSide parse_phase_side(std::string_view raw)
       "[svMultiPhysics::Application] Conservative_phase_liquid_side must be 'negative' or 'positive'.");
 }
 
+ls::LevelSetConservativePhaseBoundaryFluxPolicy
+parse_conservative_phase_boundary_flux_policy(std::string_view raw)
+{
+  const auto value = normalized_token(std::string(raw));
+  if (value == "closeddomaindiscreteqfluxonly") {
+    return ls::LevelSetConservativePhaseBoundaryFluxPolicy::
+        ClosedDomainDiscreteQFluxOnly;
+  }
+  if (value == "globallybalanceddiscreteqflux") {
+    return ls::LevelSetConservativePhaseBoundaryFluxPolicy::
+        GloballyBalancedDiscreteQFlux;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] Conservative_phase_boundary_flux_policy must be 'closed_domain_discrete_q_flux_only' or 'globally_balanced_discrete_q_flux'.");
+}
+
 ls::LevelSetReinitializationMethod parse_reinitialization_method(std::string_view raw)
 {
   const auto value = normalized_token(std::string(raw));
@@ -1369,6 +1388,13 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
            "ConservativePhaseClassifyNonprimaryComponentsAsSatellites"})) {
     options.conservative_phase
         .classify_nonprimary_components_as_satellites = *value;
+  }
+  if (const auto value = get_defined_string(
+          params,
+          {"Conservative_phase_boundary_flux_policy",
+           "ConservativePhaseBoundaryFluxPolicy"})) {
+    options.conservative_phase.boundary_flux_policy =
+        parse_conservative_phase_boundary_flux_policy(*value);
   }
   if (const auto value = get_defined_string(
           params,
@@ -1951,7 +1977,7 @@ translate_level_set_transport_input(
         !options.boundaries.inflow.empty() ||
         !options.boundaries.outflow.empty()) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Material-interface phase-pair velocity requires advective-form conservative phase transport with geometry reconciliation, interface kinematic enforcement, no legacy bound projection, no separate velocity registration or extension, and a closed physical boundary.");
+          "[svMultiPhysics::Application] Material-interface phase-pair velocity requires advective-form conservative phase transport with geometry reconciliation, interface kinematic enforcement, no legacy bound projection, no separate velocity registration or extension, and no declared inflow or outflow boundary.");
     }
   }
 
@@ -1959,7 +1985,7 @@ translate_level_set_transport_input(
       options.conservative_phase
           .pointwise_impermeable_velocity_tolerance_explicitly_requested) {
     throw std::runtime_error(
-        "[svMultiPhysics::Application] Conservative_phase_impermeable_normal_velocity_tolerance requests a pointwise velocity-normal wall contract that the current conservative-phase split does not implement; the supported closed-domain gate enforces only discrete q-flux at invariant_tolerance and can be blind where q=0.");
+        "[svMultiPhysics::Application] Conservative_phase_impermeable_normal_velocity_tolerance requests a pointwise velocity-normal wall contract that the current conservative-phase split does not implement; the configured boundary policy enforces only discrete q-flux at invariant_tolerance and can be blind where q=0.");
   }
 
   const bool wet_extension_enabled =

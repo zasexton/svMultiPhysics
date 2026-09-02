@@ -13561,6 +13561,18 @@ void FESystem::commitPendingTwoFluidAcceptedStageDiagnostics(
     pending_two_fluid_accepted_stage_diagnostics_.clear();
     two_fluid_accepted_stage_transaction_active_ = false;
 
+    bool emit_diagnostics = true;
+#if FE_HAS_MPI
+    if (collective.size > 1) {
+        int rank = 0;
+        MPI_Comm_rank(collective.communicator, &rank);
+        emit_diagnostics = rank == 0;
+    }
+#endif
+    if (!emit_diagnostics) {
+        return;
+    }
+
     try {
         for (std::size_t index = history_size;
              index < two_fluid_accepted_stage_diagnostic_history_.size();
@@ -13780,6 +13792,10 @@ void FESystem::commitPendingTwoFluidAcceptedStageDiagnostics(
                                                            : "false")
                     << " nonlinear_iterations="
                     << numerics.solve.nonlinear.iterations
+                    << " nonlinear_initial_residual_norm="
+                    << numerics.solve.nonlinear.initial_residual_norm
+                    << " nonlinear_final_residual_norm="
+                    << numerics.solve.nonlinear.final_residual_norm
                     << " nonlinear_reason='"
                     << numerics.solve.nonlinear.reason << "'"
                     << " linear_converged="

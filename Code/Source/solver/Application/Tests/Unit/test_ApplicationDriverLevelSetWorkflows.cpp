@@ -13524,6 +13524,44 @@ TEST(ApplicationDriverLevelSetWorkflows,
 #endif
 }
 
+TEST(ApplicationDriverLevelSetMaintenance,
+     ParsesAndSchedulesConservativePhaseBoundaryFluxPolicy)
+{
+  auto params = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Enable_conservative_phase_transport>true</Enable_conservative_phase_transport>
+    <Conservative_phase_boundary_flux_policy>globally_balanced_discrete_q_flux</Conservative_phase_boundary_flux_policy>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+
+  const auto requests = levelSetMaintenanceRequests(*params);
+  ASSERT_EQ(requests.size(), 1u);
+  EXPECT_EQ(
+      requests.front().conservative_phase.boundary_flux_policy,
+      svmp::FE::level_set::
+          LevelSetConservativePhaseBoundaryFluxPolicy::
+              GloballyBalancedDiscreteQFlux);
+  const auto canonical = canonicalLevelSetMaintenanceRequestSchedule(
+      requests,
+      LevelSetMaintenanceScheduleStage::TransientInitialization,
+      /*completed_step=*/0);
+  ASSERT_TRUE(canonical.supported);
+  auto changed = requests;
+  changed.front().conservative_phase.boundary_flux_policy =
+      svmp::FE::level_set::
+          LevelSetConservativePhaseBoundaryFluxPolicy::
+              ClosedDomainDiscreteQFluxOnly;
+  const auto changed_canonical =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          changed,
+          LevelSetMaintenanceScheduleStage::TransientInitialization,
+          /*completed_step=*/0);
+  EXPECT_NE(canonical.words, changed_canonical.words);
+}
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 namespace {
 
@@ -14466,6 +14504,55 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   EXPECT_EQ(gatherFeOrderedSolution(history().u()), before);
   EXPECT_FALSE(sim_.fe_system->cutIntegrationContextTransactionActive());
   EXPECT_FALSE(lifecycle_.transactionActive());
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       GloballyBalancedPolicyPreservesStationaryTangentialPhaseGeometry)
+{
+  requests_.front().reinitialization.enabled = false;
+  requests_.front().conservative_phase.reconcile_geometry = true;
+  requests_.front().conservative_phase.enforce_courant_limit = false;
+  requests_.front().conservative_phase.boundary_flux_policy =
+      svmp::FE::level_set::
+          LevelSetConservativePhaseBoundaryFluxPolicy::
+              GloballyBalancedDiscreteQFlux;
+  requests_.front().velocity.constant_value = {
+      svmp::FE::Real{0.0}, svmp::FE::Real{0.25}, svmp::FE::Real{0.0}};
+
+  auto result = applyPreparedConservativePhaseCandidate();
+
+  ASSERT_TRUE(result.accept_step);
+  ASSERT_EQ(result.maintenance_ledgers.size(), 1u);
+  const auto& ledger = result.maintenance_ledgers.front();
+  EXPECT_EQ(
+      ledger.boundary_flux_policy,
+      svmp::FE::level_set::
+          LevelSetConservativePhaseBoundaryFluxPolicy::
+              GloballyBalancedDiscreteQFlux);
+  EXPECT_GT(ledger.maximum_nodal_boundary_mass_transfer,
+            ledger.boundary_mass_tolerance);
+  EXPECT_LE(
+      std::abs(ledger.transport_stage.correction
+                   .total_physical_boundary_mass_transfer),
+      ledger.boundary_mass_tolerance);
+  EXPECT_EQ(ledger.reconciliation.diagnostic,
+            "stationary_geometry_equilibrium_projection");
+  EXPECT_EQ(ledger.reconciliation.iterations, 0);
+  EXPECT_GT(ledger.reconciliation.initial_residual_norm,
+            svmp::FE::Real{0.0});
+  EXPECT_EQ(ledger.reconciliation.final_residual_norm,
+            svmp::FE::Real{0.0});
+  EXPECT_LE(ledger.post_correction_mismatch.maximum_nodal_residual,
+            requests_.front().conservative_phase
+                .geometry_measure_tolerance);
+  EXPECT_DOUBLE_EQ(ledger.post_correction_phase_measure,
+                   ledger.post_correction_geometry_measure);
+  EXPECT_EQ(fieldSlice(gatherFeOrderedSolution(history().u()), phase_),
+            fieldSlice(initialized_solution_, phase_));
+  EXPECT_FALSE(result.changed);
+  ASSERT_NE(result.geometry_transaction, nullptr);
+  ASSERT_NO_THROW(result.geometry_transaction->commit());
+  result.geometry_transaction.reset();
 }
 
 TEST_F(ApplicationDriverConservativePhaseCandidatesTest,

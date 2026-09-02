@@ -243,6 +243,71 @@ TEST(LevelSetConservativePhaseArtifact,
                   "\"reinitialization_max_prescribed_contact_angle_error_radians\":"),
               std::string::npos);
 
+    const std::array<FE::Real, 2> balanced_boundary_transfer{
+        0.01, -0.01};
+    auto balanced_correction =
+        level_set::applyLevelSetConservativePhaseFluxCorrection(
+            level_set::LevelSetPhaseFluxStageView{
+                .lumped_control_volume = volumes,
+                .previous_liquid_indicator = previous,
+                .lower_liquid_indicator = lower,
+                .upper_liquid_indicator = upper,
+                .interior_edges = edges,
+                .physical_boundary_mass_transfer =
+                    balanced_boundary_transfer,
+            });
+    ASSERT_TRUE(balanced_correction.success)
+        << balanced_correction.diagnostic;
+    auto balanced_stage = stage;
+    balanced_stage.physical_boundary_mass_transfer.assign(
+        balanced_boundary_transfer.begin(),
+        balanced_boundary_transfer.end());
+    balanced_stage.correction = std::move(balanced_correction);
+    auto balanced_context = context;
+    balanced_context.accepted_step = 19u;
+    balanced_context.boundary_flux_policy =
+        level_set::LevelSetConservativePhaseBoundaryFluxPolicy::
+            GloballyBalancedDiscreteQFlux;
+    balanced_context.boundary_mass_tolerance = 0.005;
+    balanced_context.boundary_flux_scope =
+        "globally_balanced_discrete_q_flux_not_pointwise_velocity_normal";
+    balanced_context.raw_post_transport_phase_measure =
+        balanced_stage.correction.total_raw_target_liquid_measure;
+    balanced_context.post_limit_phase_measure =
+        balanced_stage.correction.total_limited_liquid_measure;
+    balanced_context.post_reinitialization_phase_measure =
+        balanced_stage.correction.total_limited_liquid_measure;
+    balanced_context.post_correction_phase_measure =
+        balanced_stage.correction.total_limited_liquid_measure;
+    balanced_context.region_ledger =
+        level_set::buildLevelSetPhaseRegionLedgers(
+            balanced_stage.correction, regions);
+    ASSERT_TRUE(balanced_context.region_ledger->success)
+        << balanced_context.region_ledger->diagnostic;
+    balanced_context.split_stage_provenance->prospective_step = 19u;
+    balanced_context.split_stage_provenance->final_flux_ledger_digest =
+        level_set::levelSetP1PhaseFluxLedgerDigest(balanced_stage);
+
+    const auto balanced_artifact =
+        level_set::writeLevelSetConservativePhaseArtifact(
+            output_directory, balanced_context, balanced_stage);
+    ASSERT_TRUE(balanced_artifact.success)
+        << balanced_artifact.diagnostic;
+    std::ifstream balanced_input(balanced_artifact.path);
+    ASSERT_TRUE(balanced_input.is_open());
+    const std::string balanced_contents{
+        std::istreambuf_iterator<char>{balanced_input},
+        std::istreambuf_iterator<char>{}};
+    EXPECT_NE(balanced_contents.find(
+                  "\"scope\":\"globally_balanced_discrete_q_flux_not_pointwise_velocity_normal\""),
+              std::string::npos);
+    EXPECT_NE(balanced_contents.find(
+                  "\"maximum_nodal_within_tolerance\":false"),
+              std::string::npos);
+    EXPECT_NE(balanced_contents.find(
+                  "\"absolute_total_within_tolerance\":true"),
+              std::string::npos);
+
     const auto replacement =
         level_set::writeLevelSetConservativePhaseArtifact(
             output_directory, context, stage);
