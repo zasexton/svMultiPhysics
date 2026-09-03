@@ -146,7 +146,8 @@ enum class FreeSurfaceSurfaceTensionForm : std::uint8_t {
  *
  * These diagnostic operators are installed only when
  * `SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC` is enabled and the
- * active free-surface configuration uses constant-gamma `SurfaceStress`.
+ * active free-surface configuration uses constant-gamma `SurfaceStress` or
+ * `KinematicAreaGradientTraction`.
  * Their residual vectors satisfy `physical_potential_virtual_work =
  * surface_energy_virtual_work + gravitational_potential_virtual_work`,
  * `pressure_representability_load_virtual_work = prescribed exterior-

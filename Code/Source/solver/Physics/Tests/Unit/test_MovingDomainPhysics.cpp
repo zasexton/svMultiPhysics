@@ -33,6 +33,7 @@
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
+#include "FE/LevelSet/LevelSetCurvatureProjection.h"
 #include "FE/Quadrature/QuadratureFactory.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
@@ -12552,6 +12553,301 @@ TEST(MovingDomainPhysics,
                    "equilibrium Young wall variation";
         }
     }
+}
+
+TEST(MovingDomainPhysics,
+     KinematicAreaGradientTractionIsEnergyAdjointOnQuadraticTetraCut)
+{
+    ScopedEnvVar conservative_balance_diagnostics(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
+        std::string("1"));
+    constexpr int interface_marker = 224;
+    constexpr FE::Real gamma = FE::Real{0.8};
+    constexpr std::array<FE::Real, 4> phi_values{
+        FE::Real{-1.0}, FE::Real{-1.0}, FE::Real{1.0}, FE::Real{1.0}};
+    constexpr std::array<std::array<FE::Real, 3>, 4> velocity_values{{
+        {{FE::Real{0.25}, FE::Real{-0.30}, FE::Real{0.40}}},
+        {{FE::Real{-0.60}, FE::Real{0.20}, FE::Real{0.10}}},
+        {{FE::Real{0.40}, FE::Real{0.75}, FE::Real{-0.20}}},
+        {{FE::Real{-0.15}, FE::Real{-0.45}, FE::Real{0.90}}},
+    }};
+    constexpr std::array<FE::Real, 3> level_set_gradient{
+        FE::Real{0.0}, FE::Real{2.0}, FE::Real{2.0}};
+
+    const auto mesh = makeMesh();
+    auto velocity_space = makeVelocitySpace(mesh);
+    auto scalar_space = makePressureSpace(mesh);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi_energy_adjoint",
+        .space = scalar_space,
+        .components = 1,
+    });
+    const auto kappa = system.addField(FE::systems::FieldSpec{
+        .name = "kappa_energy_adjoint",
+        .space = scalar_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+    system.addOperator("equations");
+    const auto phi_state = FE::forms::StateField(
+        phi, *scalar_space, "phi_energy_adjoint_owner");
+    const auto eta = FE::forms::TestField(
+        phi, *scalar_space, "eta_energy_adjoint_owner");
+    (void)FE::systems::installFormulation(
+        system,
+        "equations",
+        {phi},
+        (FE::forms::dt(phi_state) * eta).dx());
+    system.gaugeRegistry().addAnchoring(FE::gauge::AnchoringEvidence{
+        .field = phi,
+        .component = -1,
+        .region = -1,
+        .family = FE::gauge::NullspaceModeFamily::ScalarConstant,
+        .verdict = FE::gauge::AnchoringVerdict::Anchored,
+        .source = "Transient level-set owner in energy-adjoint fixture",
+    });
+
+    auto options = baseNavierStokesOptions();
+    options.enable_convection = false;
+    options.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation =
+                ns::FreeSurfaceImplementation::UnfittedLevelSet,
+            .interface_marker = interface_marker,
+            .level_set_field_name = "phi_energy_adjoint",
+            .active_domain =
+                ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            .active_domain_method =
+                ns::FreeSurfaceActiveDomainMethod::CutVolume,
+            .active_domain_smoothing_width = FE::Real{0.0},
+            .external_pressure = FE::Real{0.0},
+            .surface_tension = gamma,
+            .surface_tension_form = ns::FreeSurfaceSurfaceTensionForm::
+                KinematicAreaGradientTraction,
+            .curvature_field_name = "kappa_energy_adjoint",
+            .use_level_set_curvature = false,
+            .small_cut_aggregation = false,
+        });
+    ns::IncompressibleNavierStokesVMSModule module(
+        velocity_space, scalar_space, options);
+    module.registerOn(system);
+    const auto velocity = system.findFieldByName("u");
+    ASSERT_NE(velocity, FE::INVALID_FIELD_ID);
+    system.gaugeRegistry().addAnchoring(FE::gauge::AnchoringEvidence{
+        .field = velocity,
+        .component = -1,
+        .region = -1,
+        .family = FE::gauge::NullspaceModeFamily::ComponentwiseConstant,
+        .verdict = FE::gauge::AnchoringVerdict::Anchored,
+        .source = "Prescribed virtual velocity in energy-adjoint fixture",
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()),
+        FE::Real{0.0});
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto index = static_cast<std::size_t>(vertex);
+        setFieldComponentValue(
+            solution, system, phi, vertex, 0, phi_values[index]);
+        for (int component = 0; component < 3; ++component) {
+            setFieldComponentValue(solution,
+                                   system,
+                                   velocity,
+                                   vertex,
+                                   component,
+                                   velocity_values[index]
+                                                  [static_cast<std::size_t>(
+                                                      component)]);
+        }
+    }
+
+    FE::level_set::LevelSetGeneratedInterfaceOptions cut_options{};
+    cut_options.level_set_field_name = "phi_energy_adjoint";
+    cut_options.domain_id = "free_surface";
+    cut_options.requested_interface_marker = interface_marker;
+    cut_options.geometry_mode =
+        FE::level_set::GeneratedInterfaceGeometryMode::LinearCorner;
+    cut_options.implicit_cut_quadrature_backend =
+        FE::level_set::ImplicitCutQuadratureBackend::LinearCorner;
+    cut_options.interface_quadrature_order = 2;
+    cut_options.volume_quadrature_order = 2;
+    FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto generated = lifecycle.build(system, cut_options, solution);
+    ASSERT_TRUE(generated.success) << generated.diagnostic;
+    EXPECT_EQ(generated.achieved_interface_quadrature_order, 2);
+    const auto quadratic_rules = generated.domain.interfaceQuadratureRules();
+    ASSERT_EQ(quadratic_rules.size(), 1u);
+    ASSERT_EQ(quadratic_rules.front().points.size(), 6u);
+    EXPECT_EQ(quadratic_rules.front().exact_polynomial_order, 2);
+
+    auto context =
+        std::make_shared<FE::assembly::CutIntegrationContext>();
+    context->addGeneratedInterfaceDomain(
+        generated.domain,
+        FE::geometry::CutIntegrationSide::Negative);
+    ASSERT_NO_THROW(system.setCutIntegrationContext(std::move(context)));
+
+    FE::level_set::LevelSetCurvatureProjectionOptions recovery_options;
+    recovery_options.recovery_mode = FE::level_set::
+        LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
+    recovery_options.kinematic_area_gradient_filter_coefficient =
+        FE::Real{0.0};
+    recovery_options.kinematic_area_gradient_negative_liquid_side = true;
+    std::vector<FE::Real> curvature;
+    const auto recovery =
+        FE::level_set::projectLevelSetMeanCurvatureToVertices(
+            *mesh, phi_values, recovery_options, curvature);
+    ASSERT_TRUE(recovery.success) << recovery.diagnostic;
+    ASSERT_EQ(curvature.size(), phi_values.size());
+    ASSERT_EQ(
+        recovery.kinematic_area_gradient_total_energy_derivative.size(),
+        phi_values.size());
+    EXPECT_DOUBLE_EQ(
+        recovery.kinematic_area_gradient_filter_coefficient,
+        FE::Real{0.0});
+    system.setPrescribedFieldCoefficients(kappa, curvature);
+
+    std::array<FE::Real, 4> level_set_direction{};
+    FE::Real energy_directional_derivative = FE::Real{0.0};
+    for (std::size_t vertex = 0; vertex < phi_values.size(); ++vertex) {
+        level_set_direction[vertex] = -(
+            velocity_values[vertex][0] * level_set_gradient[0] +
+            velocity_values[vertex][1] * level_set_gradient[1] +
+            velocity_values[vertex][2] * level_set_gradient[2]);
+        energy_directional_derivative +=
+            gamma * recovery
+                        .kinematic_area_gradient_total_energy_derivative
+                            [vertex] *
+            level_set_direction[vertex];
+    }
+
+    const std::vector<FE::Real> previous_solution = solution;
+    FE::systems::SystemStateView state;
+    state.dt = FE::Real{1.0};
+    state.u = std::span<const FE::Real>(solution);
+    state.u_prev = std::span<const FE::Real>(previous_solution);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context =
+        integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+    const auto surface_residual = residualVector(
+        system,
+        state,
+        ns::FreeSurfaceConservativeBalanceDiagnosticOperators::
+            surface_energy_virtual_work);
+
+    const auto* velocity_entity_map =
+        system.fieldDofHandler(velocity).getEntityDofMap();
+    ASSERT_NE(velocity_entity_map, nullptr);
+    const auto velocity_offset = system.fieldDofOffset(velocity);
+    const auto contract_velocity = [&](std::span<const FE::Real> residual) {
+        FE::Real work = FE::Real{0.0};
+        for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+            const auto vertex_dofs =
+                velocity_entity_map->getVertexDofs(vertex);
+            if (vertex_dofs.size() != 3u) {
+                ADD_FAILURE() << "Unexpected velocity vertex layout";
+                return FE::Real{0.0};
+            }
+            for (std::size_t component = 0; component < 3u;
+                 ++component) {
+                const auto row = static_cast<std::size_t>(
+                    velocity_offset + vertex_dofs[component]);
+                work += velocity_values[
+                            static_cast<std::size_t>(vertex)][component] *
+                        residual[row];
+            }
+        }
+        return work;
+    };
+    const FE::Real production_surface_work =
+        contract_velocity(surface_residual);
+
+    cut_options.interface_quadrature_order = 1;
+    FE::level_set::LevelSetGeneratedInterfaceLifecycle linear_lifecycle;
+    const auto linear_generated =
+        linear_lifecycle.build(system, cut_options, solution);
+    ASSERT_TRUE(linear_generated.success) << linear_generated.diagnostic;
+    EXPECT_EQ(linear_generated.achieved_interface_quadrature_order, 1);
+    const auto linear_rules =
+        linear_generated.domain.interfaceQuadratureRules();
+    ASSERT_EQ(linear_rules.size(), 1u);
+    ASSERT_EQ(linear_rules.front().points.size(), 1u);
+    const auto& quadratic_fragments = generated.domain.fragments();
+    const auto& linear_fragments = linear_generated.domain.fragments();
+    ASSERT_EQ(quadratic_fragments.size(), linear_fragments.size());
+    ASSERT_EQ(quadratic_fragments.size(), 1u);
+    ASSERT_EQ(quadratic_fragments.front().vertices.size(),
+              linear_fragments.front().vertices.size());
+    for (std::size_t vertex = 0;
+         vertex < quadratic_fragments.front().vertices.size(); ++vertex) {
+        for (std::size_t component = 0; component < 3u; ++component) {
+            EXPECT_DOUBLE_EQ(
+                quadratic_fragments.front().vertices[vertex]
+                    .point[component],
+                linear_fragments.front().vertices[vertex]
+                    .point[component]);
+        }
+    }
+    for (std::size_t component = 0; component < 3u; ++component) {
+        EXPECT_DOUBLE_EQ(quadratic_fragments.front().normal[component],
+                         linear_fragments.front().normal[component]);
+    }
+    EXPECT_DOUBLE_EQ(quadratic_fragments.front().measure,
+                     linear_fragments.front().measure);
+    const auto total_rule_weight = [](const auto& rules) {
+        FE::Real total = FE::Real{0.0};
+        for (const auto& rule : rules) {
+            for (const auto& point : rule.points) {
+                total += point.weight;
+            }
+        }
+        return total;
+    };
+    EXPECT_DOUBLE_EQ(total_rule_weight(quadratic_rules),
+                     total_rule_weight(linear_rules));
+    auto linear_context =
+        std::make_shared<FE::assembly::CutIntegrationContext>();
+    linear_context->addGeneratedInterfaceDomain(
+        linear_generated.domain,
+        FE::geometry::CutIntegrationSide::Negative);
+    ASSERT_NO_THROW(
+        system.setCutIntegrationContext(std::move(linear_context)));
+    const auto linear_surface_residual = residualVector(
+        system,
+        state,
+        ns::FreeSurfaceConservativeBalanceDiagnosticOperators::
+            surface_energy_virtual_work);
+    const FE::Real linear_rule_work =
+        contract_velocity(linear_surface_residual);
+
+    const FE::Real scale = std::max(
+        {FE::Real{1.0},
+         std::abs(energy_directional_derivative),
+         std::abs(production_surface_work)});
+    const FE::Real quadratic_mismatch =
+        std::abs(production_surface_work -
+                 energy_directional_derivative);
+    const FE::Real linear_mismatch =
+        std::abs(linear_rule_work - energy_directional_derivative);
+    EXPECT_NEAR(production_surface_work,
+                energy_directional_derivative,
+                FE::Real{1.0e-12} * scale);
+    EXPECT_GT(linear_mismatch, FE::Real{1.0e-3} * scale)
+        << "the centroid rule must not integrate the quadratic "
+           "curvature-velocity product";
+    RecordProperty("kinematic_energy_adjoint_derivative",
+                   energy_directional_derivative);
+    RecordProperty("kinematic_energy_adjoint_surface_work",
+                   production_surface_work);
+    RecordProperty("kinematic_energy_adjoint_quadratic_mismatch",
+                   quadratic_mismatch);
+    RecordProperty("kinematic_energy_adjoint_linear_mismatch",
+                   linear_mismatch);
+    RecordProperty("kinematic_energy_adjoint_scaled_tolerance",
+                   FE::Real{1.0e-12} * scale);
 }
 
 TEST(MovingDomainPhysics,

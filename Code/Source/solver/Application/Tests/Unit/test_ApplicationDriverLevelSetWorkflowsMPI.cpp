@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -493,6 +494,51 @@ makePartitionedFlatCapillaryFanMesh(int normal_axis)
   triangle.order = 1;
   const std::vector<svmp::CellShape> shapes(4u, triangle);
 
+  auto mesh = std::make_shared<svmp::Mesh>(
+      svmp::MeshComm(MPI_COMM_WORLD));
+  mesh->build_from_arrays_global_and_partition(
+      /*spatial_dim=*/2,
+      coordinates,
+      offsets,
+      connectivity,
+      shapes,
+      svmp::PartitionHint::Cells,
+      /*ghost_layers=*/1,
+      {{"partition_method", "block"}});
+  return mesh;
+}
+
+[[nodiscard]] std::shared_ptr<svmp::Mesh>
+makePartitionedBalancedRadialMesh(bool sessile)
+{
+  constexpr svmp::FE::Real pi =
+      svmp::FE::Real{3.141592653589793238462643383279502884};
+  const int segment_count = sessile ? 8 : 12;
+  const int outer_vertex_count =
+      sessile ? segment_count + 1 : segment_count;
+  const auto angular_extent =
+      sessile ? pi : svmp::FE::Real{2.0} * pi;
+  std::vector<svmp::real_t> coordinates{0.0, 0.0};
+  for (int segment = 0; segment < outer_vertex_count; ++segment) {
+    const auto angle = angular_extent *
+                       static_cast<svmp::FE::Real>(segment) /
+                       static_cast<svmp::FE::Real>(segment_count);
+    coordinates.push_back(std::cos(angle));
+    coordinates.push_back(std::sin(angle));
+  }
+  std::vector<svmp::offset_t> offsets{0};
+  std::vector<svmp::index_t> connectivity;
+  std::vector<svmp::CellShape> shapes;
+  for (int cell = 0; cell < segment_count; ++cell) {
+    const auto first = static_cast<svmp::index_t>(cell + 1);
+    const auto second = static_cast<svmp::index_t>(
+        sessile ? cell + 2 : (cell + 1) % segment_count + 1);
+    connectivity.insert(connectivity.end(), {0, first, second});
+    offsets.push_back(
+        static_cast<svmp::offset_t>(connectivity.size()));
+    shapes.push_back(
+        svmp::CellShape{svmp::CellFamily::Triangle, 3, 1});
+  }
   auto mesh = std::make_shared<svmp::Mesh>(
       svmp::MeshComm(MPI_COMM_WORLD));
   mesh->build_from_arrays_global_and_partition(
@@ -2832,6 +2878,980 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           *refresh_cache.topology_key,
           svmp::MeshComm(MPI_COMM_WORLD));
   EXPECT_EQ(minimum_topology, maximum_topology);
+}
+
+struct MpiBalancedCapillaryResult {
+  bool minimized{false};
+  bool pressure_available{false};
+  bool pressure_converged{false};
+  bool pressure_breakdown{false};
+  bool pressure_distance_gate_applied{false};
+  bool pressure_distance_gate_passed{false};
+  bool constant_pressure_available{false};
+  bool constant_pressure_represents_constant{false};
+  bool constant_pressure_constraints_preserve_constants{false};
+  bool constant_pressure_distance_gate_applied{false};
+  bool constant_pressure_distance_gate_passed{false};
+  bool constant_pressure_thresholds_satisfied{false};
+  bool curvature_finite{false};
+  int requested_interface_order{-1};
+  int achieved_interface_order{-1};
+  std::uint64_t active_contact_fragment_count{0u};
+  std::uint64_t topology_fingerprint{0u};
+  std::uint64_t source_semantic_digest{1469598103934665603ull};
+  std::uint64_t volume_fraction_digest{1469598103934665603ull};
+  svmp::FE::Real pressure_jump{0.0};
+  svmp::FE::Real pressure_distance{0.0};
+  svmp::FE::Real force_residual{0.0};
+  svmp::FE::Real constant_pressure_direction_norm{0.0};
+  svmp::FE::Real constant_pressure_relative_distance{0.0};
+  svmp::FE::Real production_residual{0.0};
+  svmp::FE::Real projected_gradient_norm{0.0};
+  svmp::FE::Real volume{0.0};
+  svmp::FE::Real interface_energy{0.0};
+  svmp::FE::Real parasitic_capillary_number{0.0};
+  svmp::FE::Real kinetic_energy{0.0};
+  std::vector<std::array<svmp::FE::Real, 4>> source_semantics{};
+  std::vector<svmp::FE::Real> negative_volume_fractions{};
+  std::vector<svmp::FE::GlobalIndex> locally_owned_rows{};
+};
+
+[[nodiscard]] MpiBalancedCapillaryResult
+runMpiBalancedCapillaryCase(bool sessile,
+                            bool alternate_dof_layout,
+                            int rank,
+                            int size)
+{
+  constexpr int interface_marker = 735;
+  constexpr int wall_marker = 7351;
+  constexpr int anchor_marker = 7352;
+  constexpr int free_marker = 7353;
+  constexpr svmp::FE::Real radius = 0.55;
+  constexpr svmp::FE::Real surface_tension = 0.75;
+  constexpr svmp::FE::Real viscosity = 0.02;
+  constexpr svmp::FE::Real external_pressure = 0.125;
+  constexpr svmp::FE::Real pi =
+      svmp::FE::Real{3.141592653589793238462643383279502884};
+
+  auto mesh = makePartitionedBalancedRadialMesh(sessile);
+  if (mesh->n_ghost_vertices() == 0u) {
+    throw std::runtime_error(
+        "balanced capillary MPI fixture has no ghost vertices");
+  }
+  auto& local_mesh = mesh->local_mesh();
+  std::array<int, 3> local_markers{};
+  for (const auto face : local_mesh.boundary_faces()) {
+    bool on_wall = sessile;
+    bool on_anchor = true;
+    for (const auto vertex : local_mesh.face_vertices(face)) {
+      const auto point = local_mesh.get_vertex_coords(vertex);
+      on_wall = on_wall && std::abs(point[1]) <= 1.0e-12;
+      on_anchor = on_anchor && point[0] >= 0.8 - 1.0e-12 &&
+                  point[1] >= -1.0e-12;
+    }
+    if (on_wall) {
+      mesh->set_boundary_label(face, wall_marker);
+      local_markers[0] = 1;
+    } else if (on_anchor) {
+      mesh->set_boundary_label(face, anchor_marker);
+      local_markers[1] = 1;
+    } else {
+      mesh->set_boundary_label(face, free_marker);
+      local_markers[2] = 1;
+    }
+  }
+  std::array<int, 3> global_markers{};
+  if (MPI_Allreduce(local_markers.data(),
+                    global_markers.data(),
+                    static_cast<int>(local_markers.size()),
+                    MPI_INT,
+                    MPI_MAX,
+                    MPI_COMM_WORLD) != MPI_SUCCESS ||
+      global_markers[1] != 1 || global_markers[2] != 1 ||
+      (sessile && global_markers[0] != 1)) {
+    throw std::runtime_error(
+        "balanced capillary MPI boundary classification failed");
+  }
+
+  (void)svmp::MeshFields::attach_field(
+      local_mesh,
+      svmp::EntityKind::Vertex,
+      "phi_balanced_mpi",
+      svmp::FieldScalarType::Float64,
+      1);
+  auto scalar_space = svmp::FE::spaces::SpaceFactory::create_h1(
+      svmp::FE::ElementType::Triangle3, /*order=*/1);
+  auto velocity_space =
+      svmp::FE::spaces::SpaceFactory::create_vector_h1(
+          svmp::FE::ElementType::Triangle3,
+          /*order=*/1,
+          /*components=*/2);
+  auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
+  const auto phi = system->addField(
+      svmp::FE::systems::FieldSpec{
+          .name = "phi_balanced_mpi",
+          .space = scalar_space,
+          .components = 1});
+  const auto kappa = system->addField(
+      svmp::FE::systems::FieldSpec{
+          .name = "kappa_balanced_mpi",
+          .space = scalar_space,
+          .components = 1,
+          .source_kind =
+              svmp::FE::systems::FieldSourceKind::PrescribedData});
+
+  channel_ns::IncompressibleNavierStokesVMSOptions options;
+  options.velocity_field_name = "u_balanced_mpi";
+  options.pressure_field_name = "p_balanced_mpi";
+  options.density = 1.0;
+  options.viscosity = viscosity;
+  options.enable_convection = false;
+  options.enable_vms = false;
+  options.jit_policy.enable = false;
+  options.velocity_dirichlet.push_back(
+      channel_ns::IncompressibleNavierStokesVMSOptions::
+          VelocityDirichletBC{
+              .boundary_marker = anchor_marker,
+              .value = {0.0, 0.0, 0.0}});
+  if (sessile) {
+    options.velocity_dirichlet.push_back(
+        channel_ns::IncompressibleNavierStokesVMSOptions::
+            VelocityDirichletBC{
+                .boundary_marker = wall_marker,
+                .value = {0.0, 0.0, 0.0},
+                .active_components = {false, true, false}});
+  }
+  using ContactLine = channel_ns::IncompressibleNavierStokesVMSOptions::
+      FreeSurfaceContactLine;
+  auto free_surface =
+      channel_ns::IncompressibleNavierStokesVMSOptions::
+          FreeSurfaceBoundary{
+              .implementation =
+                  channel_ns::FreeSurfaceImplementation::UnfittedLevelSet,
+              .interface_marker = interface_marker,
+              .level_set_field_name = "phi_balanced_mpi",
+              .generated_interface_domain_id = "balanced_capillary_mpi",
+              .generated_interface_geometry = "LinearCorner",
+              .active_domain = channel_ns::FreeSurfaceActiveDomain::
+                  LevelSetNegative,
+              .active_domain_method =
+                  channel_ns::FreeSurfaceActiveDomainMethod::CutVolume,
+              .external_pressure = external_pressure,
+              .surface_tension = surface_tension,
+              .surface_tension_form = channel_ns::
+                  FreeSurfaceSurfaceTensionForm::
+                      KinematicAreaGradientTraction,
+              .curvature = 0.0,
+              .curvature_field_name = "kappa_balanced_mpi",
+              .use_level_set_curvature = false,
+              .small_cut_aggregation = false};
+  if (sessile) {
+    free_surface.contact_lines.push_back(
+        ContactLine{.configuration = ContactLine::DynamicRenE{
+                        .wall_boundary_marker = wall_marker,
+                        .contact_line_marker = -1,
+                        .equilibrium_contact_angle_radians = pi / 2.0,
+                        .wall_normal = {0.0, -1.0, 0.0},
+                        .mobility = 1.0,
+                        .slip_length = 1.0}});
+  }
+  options.free_surface.push_back(std::move(free_surface));
+  channel_ns::IncompressibleNavierStokesVMSModule module(
+      velocity_space, scalar_space, std::move(options));
+  module.registerOn(*system);
+
+  svmp::FE::systems::SetupOptions setup_options;
+  setup_options.assembler_name = "StandardAssembler";
+  setup_options.assembly_options.ghost_policy =
+      svmp::FE::assembly::GhostPolicy::ReverseScatter;
+  setup_options.assembly_options.deterministic = true;
+  setup_options.assembly_options.overlap_communication = false;
+  setup_options.dof_options.global_numbering =
+      alternate_dof_layout
+          ? svmp::FE::dofs::GlobalNumberingMode::DenseGlobalIds
+          : svmp::FE::dofs::GlobalNumberingMode::OwnerContiguous;
+  setup_options.dof_options.ownership =
+      alternate_dof_layout
+          ? svmp::FE::dofs::OwnershipStrategy::HighestRank
+          : svmp::FE::dofs::OwnershipStrategy::LowestRank;
+  setup_options.dof_options.my_rank = rank;
+  setup_options.dof_options.world_size = size;
+  setup_options.dof_options.mpi_comm = MPI_COMM_WORLD;
+  setup_options.use_backend_row_ownership_for_assembly = true;
+  setup_options.retain_serial_sparsity = false;
+  system->setup(setup_options);
+  if (!system->dofPermutation()) {
+    throw std::runtime_error(
+        "balanced capillary MPI setup omitted its DOF permutation");
+  }
+  system->setPrescribedFieldCoefficients(
+      kappa,
+      std::vector<svmp::FE::Real>(
+          static_cast<std::size_t>(
+              system->fieldDofHandler(kappa).getNumDofs()),
+          0.0));
+  const auto velocity = system->findFieldByName("u_balanced_mpi");
+  const auto pressure = system->findFieldByName("p_balanced_mpi");
+  if (velocity == svmp::FE::INVALID_FIELD_ID ||
+      pressure == svmp::FE::INVALID_FIELD_ID) {
+    throw std::runtime_error(
+        "balanced capillary MPI fields were not registered");
+  }
+
+  const auto solution_size = static_cast<std::size_t>(
+      system->dofHandler().getNumDofs());
+  std::vector<svmp::FE::Real> local_solution(solution_size, 0.0);
+  std::vector<svmp::FE::Real> solution(solution_size, 0.0);
+  const auto& phi_handler = system->fieldDofHandler(phi);
+  const auto* phi_entity_map = phi_handler.getEntityDofMap();
+  if (phi_entity_map == nullptr) {
+    throw std::runtime_error(
+        "balanced capillary MPI level set has no entity map");
+  }
+  const auto phi_offset = system->fieldDofOffset(phi);
+  const auto& coordinates = mesh->X_ref();
+  for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
+    const auto dofs = phi_entity_map->getVertexDofs(
+        static_cast<svmp::FE::GlobalIndex>(vertex));
+    if (dofs.size() != 1u) {
+      throw std::runtime_error(
+          "balanced capillary MPI level-set vertex layout is not scalar");
+    }
+    if (!phi_handler.getDofMap().isOwnedDof(dofs.front())) {
+      continue;
+    }
+    const auto x = static_cast<svmp::FE::Real>(coordinates[2u * vertex]);
+    const auto y = static_cast<svmp::FE::Real>(
+        coordinates[2u * vertex + 1u]);
+    const auto center_y = svmp::FE::Real{0.0};
+    local_solution[static_cast<std::size_t>(phi_offset + dofs.front())] =
+        std::sqrt(x * x +
+                  (y - center_y) * (y - center_y)) -
+        radius;
+  }
+  if (solution.size() >
+          static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+      MPI_Allreduce(local_solution.data(),
+                    solution.data(),
+                    static_cast<int>(solution.size()),
+                    MPI_DOUBLE,
+                    MPI_SUM,
+                    MPI_COMM_WORLD) != MPI_SUCCESS) {
+    throw std::runtime_error(
+        "balanced capillary MPI initial field reduction failed");
+  }
+
+  application::core::SimulationComponents simulation;
+  simulation.primary_mesh = mesh;
+  simulation.fe_system = std::move(system);
+  simulation.backend =
+      std::make_unique<svmp::FE::backends::FsilsFactory>(
+          /*dofs_per_node=*/4,
+          simulation.fe_system->dofPermutation(),
+          MPI_COMM_WORLD);
+  const auto* distributed_equations =
+      simulation.fe_system->distributedSparsityIfAvailable("equations");
+  if (distributed_equations == nullptr ||
+      simulation.backend->createMatrix(*distributed_equations) == nullptr) {
+    throw std::runtime_error(
+        "balanced capillary MPI distributed operator layout is unavailable");
+  }
+  svmp::FE::backends::SolverOptions linear_options;
+  linear_options.method = svmp::FE::backends::SolverMethod::GMRES;
+  linear_options.preconditioner =
+      svmp::FE::backends::PreconditionerType::Diagonal;
+  linear_options.rel_tol = 1.0e-12;
+  linear_options.abs_tol = 1.0e-13;
+  linear_options.max_iter = 500;
+  simulation.linear_solver =
+      simulation.backend->createLinearSolver(linear_options);
+  auto history = svmp::FE::timestepping::TimeHistory::allocate(
+      *simulation.backend,
+      simulation.fe_system->dofHandler().getNumDofs(),
+      /*history_depth=*/2,
+      /*allocate_second_order_state=*/true);
+  simulation.time_history =
+      std::make_unique<svmp::FE::timestepping::TimeHistory>(
+          std::move(history));
+  simulation.time_history->setTime(0.0);
+  simulation.time_history->setDt(0.01);
+  simulation.time_history->setPrevDt(0.01);
+  scatterFeOrderedSolution(simulation.time_history->u(), solution);
+  scatterFeOrderedSolution(simulation.time_history->uPrev(), solution);
+  scatterFeOrderedSolution(simulation.time_history->uPrev2(), solution);
+  simulation.time_history->uDot().zero();
+  simulation.time_history->uDDot().zero();
+  simulation.time_history->updateGhosts();
+
+  std::ostringstream xml;
+  xml << std::setprecision(17) << R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi_balanced_mpi</Level_set_field_name>
+    <Enable_static_capillary_equilibrium_initialization>true</Enable_static_capillary_equilibrium_initialization>
+    <Static_capillary_volume_tolerance>1.0e-8</Static_capillary_volume_tolerance>
+    <Static_capillary_projected_gradient_tolerance>1.0e-8</Static_capillary_projected_gradient_tolerance>
+    <Static_capillary_pressure_representability_max_residual_norm>1.0e-8</Static_capillary_pressure_representability_max_residual_norm>
+    <Static_capillary_pressure_representability_max_relative_distance>1.0e-8</Static_capillary_pressure_representability_max_relative_distance>
+    <Static_capillary_physical_equilibrium_max_residual_norm>1.0e-8</Static_capillary_physical_equilibrium_max_residual_norm>
+    <Static_capillary_constant_pressure_kkt_max_residual_norm>1.0e-8</Static_capillary_constant_pressure_kkt_max_residual_norm>
+    <Static_capillary_constant_pressure_kkt_max_relative_distance>1.0e-8</Static_capillary_constant_pressure_kkt_max_relative_distance>
+    <Static_capillary_max_iterations>80</Static_capillary_max_iterations>
+    <Static_capillary_max_topology_epoch_transitions>12</Static_capillary_max_topology_epoch_transitions>
+    <Static_capillary_tangent_trust_radius>0.025</Static_capillary_tangent_trust_radius>
+    <Static_capillary_maximum_coefficient_update_linf>0.1</Static_capillary_maximum_coefficient_update_linf>
+    <Enable_curvature_projection>true</Enable_curvature_projection>
+    <Curvature_field_name>kappa_balanced_mpi</Curvature_field_name>
+    <Curvature_projection_recovery_mode>KinematicAreaGradient</Curvature_projection_recovery_mode>
+    <Curvature_projection_kinematic_area_gradient_filter_coefficient>0.0</Curvature_projection_kinematic_area_gradient_filter_coefficient>
+  </Add_equation>
+  <Add_equation type="fluid">
+    <Add_BC name="balanced_capillary_mpi">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi_balanced_mpi</Level_set_field_name>
+      <Generated_interface_domain_id>balanced_capillary_mpi</Generated_interface_domain_id>
+      <Interface_marker>)xml"
+      << interface_marker << R"xml(</Interface_marker>
+      <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
+      <Geometry_tangent_policy>RefreshedFrozenQuadrature</Geometry_tangent_policy>
+      <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
+      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+      <Small_cut_aggregation>false</Small_cut_aggregation>
+      <External_pressure>)xml"
+      << external_pressure << R"xml(</External_pressure>
+      <Surface_tension>)xml"
+      << surface_tension << R"xml(</Surface_tension>
+      <Surface_tension_form>KinematicAreaGradientTraction</Surface_tension_form>
+      <Interface_quadrature_order>2</Interface_quadrature_order>
+      <Volume_quadrature_order>2</Volume_quadrature_order>
+      <Curvature_field_name>kappa_balanced_mpi</Curvature_field_name>
+      <Use_level_set_curvature>false</Use_level_set_curvature>)xml";
+  if (sessile) {
+    xml << R"xml(
+      <Contact_line_model>DynamicContactAngle</Contact_line_model>
+      <Contact_angle_degrees>90.0</Contact_angle_degrees>
+      <Contact_line_wall_markers>)xml"
+        << wall_marker << R"xml(</Contact_line_wall_markers>
+      <Contact_line_wall_normals>0.0 -1.0 0.0</Contact_line_wall_normals>
+      <Contact_line_mobility>1.0</Contact_line_mobility>
+      <Wall_slip_model>Navier</Wall_slip_model>
+      <Wall_slip_length>1.0</Wall_slip_length>)xml";
+  }
+  xml << R"xml(
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>)xml";
+  auto parameters = parseMpiWorkflowParametersXml(xml.str().c_str());
+  auto requests = levelSetMaintenanceRequests(*parameters);
+  if (requests.size() != 1u) {
+    throw std::runtime_error(
+        "balanced capillary MPI did not create one maintenance request");
+  }
+  bindKinematicAreaGradientTractionMaintenance(
+      *simulation.fe_system, requests);
+  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+  ActiveCutContextRefreshCache refresh_cache;
+  const auto initial_refresh = refreshActiveCutIntegrationContextCached(
+      simulation,
+      *parameters,
+      simulation.time_history->u(),
+      lifecycle,
+      refresh_cache,
+      "balanced_capillary_mpi_initial");
+  if (!initial_refresh.refreshed || initial_refresh.topology_key == 0u) {
+    throw std::runtime_error(
+        "balanced capillary MPI initial cut refresh failed");
+  }
+  const bool initialized = initializeDiscreteStaticCapillaryEquilibrium(
+      simulation,
+      *parameters,
+      requests,
+      lifecycle,
+      refresh_cache);
+  if (!initialized ||
+      !requests.front().static_capillary_equilibrium_initialized) {
+    throw std::runtime_error(
+        "balanced capillary MPI minimizer did not publish its state");
+  }
+
+  MpiBalancedCapillaryResult result;
+  result.minimized = true;
+  const auto accepted_curvature =
+      simulation.fe_system->prescribedFieldCoefficients(kappa);
+  result.curvature_finite =
+      !accepted_curvature.empty() &&
+      std::all_of(accepted_curvature.begin(),
+                  accepted_curvature.end(),
+                  [](svmp::FE::Real value) {
+                    return std::isfinite(value);
+                  });
+  const auto accepted_solution =
+      capturePostacceptMaintenanceVectorCollectively(
+          simulation.time_history->u(),
+          activeFESystemCommunicator(*simulation.fe_system));
+  const auto certificate = evaluateStaticCapillaryPressureCertificate(
+      simulation,
+      accepted_solution,
+      requests.front().static_capillary_equilibrium,
+      /*initialize_compatible_pressure=*/false);
+  result.pressure_available =
+      certificate.report.pressure_representability_available;
+  result.pressure_converged =
+      certificate.report.pressure_representability_converged;
+  result.pressure_breakdown =
+      certificate.report.pressure_representability_breakdown;
+  result.pressure_distance_gate_applied =
+      certificate.report.pressure_representability_distance_gate_applied;
+  result.pressure_distance_gate_passed =
+      certificate.report.pressure_representability_distance_gate_passed;
+  result.constant_pressure_available =
+      certificate.report.constant_pressure_kkt_available;
+  result.constant_pressure_represents_constant = certificate.report
+      .constant_pressure_unit_coefficients_represent_constant;
+  result.constant_pressure_constraints_preserve_constants = certificate.report
+      .constant_pressure_constraints_preserve_constants;
+  result.constant_pressure_distance_gate_applied = certificate.report
+      .constant_pressure_kkt_distance_gate_applied;
+  result.constant_pressure_distance_gate_passed = certificate.report
+      .constant_pressure_kkt_distance_gate_passed;
+  result.pressure_jump = static_cast<svmp::FE::Real>(
+      certificate.report.constant_pressure_kkt_pressure_jump);
+  result.pressure_distance = static_cast<svmp::FE::Real>(
+      certificate.report.pressure_representability_relative_distance);
+  result.force_residual = static_cast<svmp::FE::Real>(
+      certificate.report.constant_pressure_kkt_residual_norm);
+  result.constant_pressure_direction_norm = static_cast<svmp::FE::Real>(
+      certificate.report.constant_pressure_kkt_direction_norm);
+  result.constant_pressure_relative_distance =
+      static_cast<svmp::FE::Real>(
+          certificate.report.constant_pressure_kkt_relative_distance);
+  result.constant_pressure_thresholds_satisfied =
+      result.constant_pressure_available &&
+      result.constant_pressure_represents_constant &&
+      result.constant_pressure_constraints_preserve_constants &&
+      std::isfinite(result.force_residual) &&
+      std::isfinite(result.constant_pressure_relative_distance) &&
+      result.force_residual <= 1.0e-8 &&
+      result.constant_pressure_relative_distance <= 1.0e-8;
+  result.production_residual = static_cast<svmp::FE::Real>(
+      certificate.report.residual_norm);
+
+  auto functionals = evaluateCurrentFreeSurfaceDiscreteFunctionals(
+      simulation);
+  if (functionals.size() != 1u) {
+    throw std::runtime_error(
+        "balanced capillary MPI found no free-surface functional");
+  }
+  attachAcceptedFreeSurfaceActiveVolumeEnergies(
+      simulation, accepted_solution, functionals);
+  if (!functionals.front().active_volume_energy.has_value()) {
+    throw std::runtime_error(
+        "balanced capillary MPI found no active-volume energy");
+  }
+  result.volume = functionals.front().state.owned_liquid_volume;
+  result.interface_energy =
+      functionals.front().state.liquid_gas_surface_energy +
+      functionals.front().state.young_wall_energy;
+  result.kinetic_energy =
+      functionals.front().active_volume_energy->kinetic_energy;
+  const auto velocity_offset = static_cast<std::size_t>(
+      simulation.fe_system->fieldDofOffset(velocity));
+  const auto velocity_count = static_cast<std::size_t>(
+      simulation.fe_system->fieldDofHandler(velocity).getNumDofs());
+  svmp::FE::Real maximum_velocity = 0.0;
+  for (std::size_t index = 0u; index < velocity_count; ++index) {
+    maximum_velocity = std::max(
+        maximum_velocity,
+        std::abs(accepted_solution[velocity_offset + index]));
+  }
+  result.parasitic_capillary_number =
+      viscosity * maximum_velocity / surface_tension;
+
+  const auto final_refresh = refreshActiveCutIntegrationContextCached(
+      simulation,
+      *parameters,
+      simulation.time_history->u(),
+      lifecycle,
+      refresh_cache,
+      "balanced_capillary_mpi_final");
+  result.topology_fingerprint = final_refresh.topology_key;
+  const auto* context = simulation.fe_system->cutIntegrationContext();
+  if (context == nullptr) {
+    throw std::runtime_error(
+        "balanced capillary MPI found no final cut context");
+  }
+  const auto bound_revision =
+      context->freeSurfaceGeometrySnapshotRevisionForMarker(
+          interface_marker);
+  const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+  const auto snapshot = std::find_if(
+      snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
+        return candidate != nullptr &&
+               candidate->revision().interface_marker == interface_marker &&
+               candidate->revision().snapshot_revision_key ==
+                   bound_revision;
+      });
+  if (snapshot == snapshots.end()) {
+    throw std::runtime_error(
+        "balanced capillary MPI could not bind its final snapshot");
+  }
+  result.requested_interface_order =
+      (*snapshot)->interfaceDomain().request().interface_quadrature_order;
+  result.achieved_interface_order = (*snapshot)
+                                          ->interfaceDomain()
+                                          .request()
+                                          .achieved_interface_quadrature_order;
+  std::uint64_t local_active_contact_fragment_count = 0u;
+  for (const auto& contact_domain : (*snapshot)->contactDomains()) {
+    for (const auto& fragment : contact_domain.fragments()) {
+      if (!fragment.active()) {
+        continue;
+      }
+      const auto owner = fragment.owner_rank >= 0
+                             ? fragment.owner_rank
+                             : mesh->owner_rank_cell(fragment.parent_cell);
+      if (owner == rank) {
+        ++local_active_contact_fragment_count;
+      }
+    }
+  }
+  if (MPI_Allreduce(&local_active_contact_fragment_count,
+                    &result.active_contact_fragment_count,
+                    1,
+                    MPI_UINT64_T,
+                    MPI_SUM,
+                    MPI_COMM_WORLD) != MPI_SUCCESS) {
+    throw std::runtime_error(
+        "balanced capillary MPI contact-fragment reduction failed");
+  }
+
+  auto state = stateViewForHistory(*simulation.time_history);
+  const auto phi_vertices = evaluateVertexField(
+      *simulation.fe_system,
+      *mesh,
+      phi,
+      state,
+      1u,
+      "balanced capillary MPI source semantics");
+  const std::vector<
+      svmp::FE::level_set::LevelSetCurvatureProjectionSample>
+      no_supplemental_samples;
+  std::vector<svmp::FE::Real> recovered_curvature;
+  const auto projection =
+      svmp::FE::level_set::projectLevelSetMeanCurvatureToVertices(
+          *simulation.fe_system,
+          phi,
+          phi_vertices,
+          no_supplemental_samples,
+          requests.front().curvature_projection,
+          recovered_curvature);
+  if (!projection.success ||
+      !projection.kinematic_area_gradient_derivatives_global_dof_order) {
+    throw std::runtime_error(
+        "balanced capillary MPI derivative recovery failed");
+  }
+  const auto& energy_derivative =
+      projection.kinematic_area_gradient_total_energy_derivative;
+  const auto& volume_derivative =
+      projection.kinematic_area_gradient_liquid_volume_derivative;
+  svmp::FE::Real energy_volume_dot = 0.0;
+  svmp::FE::Real volume_squared = 0.0;
+  for (std::size_t index = 0u;
+       index < energy_derivative.size(); ++index) {
+    energy_volume_dot += surface_tension * energy_derivative[index] *
+                         volume_derivative[index];
+    volume_squared += volume_derivative[index] *
+                      volume_derivative[index];
+  }
+  if (!(volume_squared > 0.0)) {
+    throw std::runtime_error(
+        "balanced capillary MPI volume derivative is degenerate");
+  }
+  const auto multiplier = -energy_volume_dot / volume_squared;
+  svmp::FE::Real projected_squared = 0.0;
+  for (std::size_t index = 0u;
+       index < energy_derivative.size(); ++index) {
+    const auto projected = surface_tension * energy_derivative[index] +
+                           multiplier * volume_derivative[index];
+    projected_squared += projected * projected;
+  }
+  result.projected_gradient_norm = std::sqrt(projected_squared);
+
+  const auto gather_doubles = [size](
+                                  const std::vector<double>& local) {
+    if (local.size() >
+        static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+      throw std::runtime_error(
+          "balanced capillary MPI semantic payload is too large");
+    }
+    const int local_count = static_cast<int>(local.size());
+    std::vector<int> counts(static_cast<std::size_t>(size), 0);
+    if (MPI_Allgather(&local_count,
+                      1,
+                      MPI_INT,
+                      counts.data(),
+                      1,
+                      MPI_INT,
+                      MPI_COMM_WORLD) != MPI_SUCCESS) {
+      throw std::runtime_error(
+          "balanced capillary MPI semantic count gather failed");
+    }
+    std::vector<int> displacements(static_cast<std::size_t>(size), 0);
+    int total = 0;
+    for (int peer = 0; peer < size; ++peer) {
+      displacements[static_cast<std::size_t>(peer)] = total;
+      total += counts[static_cast<std::size_t>(peer)];
+    }
+    std::vector<double> gathered(static_cast<std::size_t>(total), 0.0);
+    if (MPI_Allgatherv(local.data(),
+                       local_count,
+                       MPI_DOUBLE,
+                       gathered.data(),
+                       counts.data(),
+                       displacements.data(),
+                       MPI_DOUBLE,
+                       MPI_COMM_WORLD) != MPI_SUCCESS) {
+      throw std::runtime_error(
+          "balanced capillary MPI semantic value gather failed");
+    }
+    return gathered;
+  };
+
+  std::vector<double> local_source_semantics;
+  for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
+    if (mesh->owner_rank_vertex(static_cast<svmp::index_t>(vertex)) !=
+        rank) {
+      continue;
+    }
+    local_source_semantics.push_back(
+        static_cast<double>(coordinates[2u * vertex]));
+    local_source_semantics.push_back(
+        static_cast<double>(coordinates[2u * vertex + 1u]));
+    local_source_semantics.push_back(0.0);
+    local_source_semantics.push_back(
+        static_cast<double>(phi_vertices[vertex]));
+  }
+  const auto gathered_source = gather_doubles(local_source_semantics);
+  if (gathered_source.size() % 4u != 0u) {
+    throw std::runtime_error(
+        "balanced capillary MPI source semantics are incomplete");
+  }
+  result.source_semantics.reserve(gathered_source.size() / 4u);
+  for (std::size_t index = 0u;
+       index < gathered_source.size(); index += 4u) {
+    result.source_semantics.push_back(
+        {{gathered_source[index],
+          gathered_source[index + 1u],
+          gathered_source[index + 2u],
+          gathered_source[index + 3u]}});
+  }
+  std::sort(result.source_semantics.begin(),
+            result.source_semantics.end());
+  for (const auto& record : result.source_semantics) {
+    for (const auto value : record) {
+      result.source_semantic_digest ^=
+          std::bit_cast<std::uint64_t>(value);
+      result.source_semantic_digest *= 1099511628211ull;
+    }
+  }
+
+  std::vector<double> local_fractions;
+  for (const auto& fragment : (*snapshot)->interfaceDomain().fragments()) {
+    if (!fragment.active()) {
+      continue;
+    }
+    const auto owner = fragment.owner_rank >= 0
+                           ? fragment.owner_rank
+                           : mesh->owner_rank_cell(fragment.parent_cell);
+    if (owner == rank) {
+      local_fractions.push_back(fragment.negative_volume_fraction);
+    }
+  }
+  const auto gathered_fractions = gather_doubles(local_fractions);
+  result.negative_volume_fractions.assign(gathered_fractions.begin(),
+                                          gathered_fractions.end());
+  std::sort(result.negative_volume_fractions.begin(),
+            result.negative_volume_fractions.end());
+  for (const auto fraction : result.negative_volume_fractions) {
+    result.volume_fraction_digest ^=
+        std::bit_cast<std::uint64_t>(fraction);
+    result.volume_fraction_digest *= 1099511628211ull;
+  }
+  const auto owned_rows = simulation.time_history->u().ownedGlobalRows();
+  result.locally_owned_rows.assign(owned_rows.begin(), owned_rows.end());
+  return result;
+}
+
+TEST(ApplicationDriverLevelSetWorkflowsMPI,
+     MinimizedCurvedCapillaryParityAcrossTwoOwnershipLayouts)
+{
+  int rank = 0;
+  int size = 1;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  if (size != 2) {
+    GTEST_SKIP()
+        << "This balanced curved-capillary fixture requires two ranks.";
+  }
+  MpiWorkflowScopedEnvVar conservative_balance_diagnostic(
+      "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
+      std::string("1"));
+  const auto expect_global_flag_consensus = [&](bool flag) {
+    const auto [minimum, maximum] = globalMinMaxUint64(
+        flag ? 1u : 0u, svmp::MeshComm(MPI_COMM_WORLD));
+    EXPECT_EQ(minimum, maximum);
+  };
+
+  std::array<std::array<MpiBalancedCapillaryResult, 2>, 2> results;
+  for (std::size_t shape = 0u; shape < results.size(); ++shape) {
+    const bool sessile = shape == 1u;
+    for (std::size_t layout = 0u;
+         layout < results[shape].size(); ++layout) {
+      SCOPED_TRACE(::testing::Message()
+                   << "rank=" << rank
+                   << " shape=" << (sessile ? "sessile" : "closed")
+                   << " layout=" << layout);
+      ASSERT_NO_THROW(
+          results[shape][layout] = runMpiBalancedCapillaryCase(
+              sessile,
+              /*alternate_dof_layout=*/layout == 1u,
+              rank,
+              size));
+      const auto& value = results[shape][layout];
+      EXPECT_TRUE(value.minimized);
+      EXPECT_TRUE(value.pressure_available);
+      EXPECT_TRUE(value.pressure_converged);
+      EXPECT_FALSE(value.pressure_breakdown);
+      EXPECT_TRUE(value.pressure_distance_gate_applied);
+      EXPECT_TRUE(value.pressure_distance_gate_passed);
+      EXPECT_TRUE(value.constant_pressure_available);
+      EXPECT_TRUE(value.constant_pressure_represents_constant);
+      EXPECT_TRUE(value.constant_pressure_constraints_preserve_constants);
+      if (value.constant_pressure_distance_gate_applied) {
+        EXPECT_TRUE(value.constant_pressure_distance_gate_passed);
+      }
+      EXPECT_TRUE(value.constant_pressure_thresholds_satisfied);
+      EXPECT_TRUE(value.curvature_finite);
+      EXPECT_GE(value.requested_interface_order, 2);
+      EXPECT_GE(value.achieved_interface_order, 2);
+      if (sessile) {
+        EXPECT_GT(value.active_contact_fragment_count, 0u);
+      } else {
+        EXPECT_EQ(value.active_contact_fragment_count, 0u);
+      }
+      EXPECT_NE(value.topology_fingerprint, 0u);
+      EXPECT_LE(value.projected_gradient_norm, 1.0e-8);
+      EXPECT_LE(value.pressure_distance, 1.0e-8);
+      EXPECT_LE(value.force_residual, 1.0e-8);
+      EXPECT_GT(value.constant_pressure_direction_norm, 1.0e-12);
+      EXPECT_LE(value.constant_pressure_relative_distance, 1.0e-8);
+      EXPECT_LE(value.production_residual, 1.0e-8);
+      EXPECT_LE(value.parasitic_capillary_number, 1.0e-8);
+      EXPECT_LE(value.kinetic_energy, 1.0e-8);
+      EXPECT_GT(value.volume, 0.0);
+      EXPECT_GT(value.interface_energy, 0.0);
+      EXPECT_FALSE(value.source_semantics.empty());
+      EXPECT_FALSE(value.negative_volume_fractions.empty());
+      expect_global_flag_consensus(value.minimized);
+      expect_global_flag_consensus(value.pressure_available);
+      expect_global_flag_consensus(value.pressure_converged);
+      expect_global_flag_consensus(value.pressure_breakdown);
+      expect_global_flag_consensus(
+          value.pressure_distance_gate_applied);
+      expect_global_flag_consensus(
+          value.pressure_distance_gate_passed);
+      expect_global_flag_consensus(value.constant_pressure_available);
+      expect_global_flag_consensus(
+          value.constant_pressure_represents_constant);
+      expect_global_flag_consensus(
+          value.constant_pressure_constraints_preserve_constants);
+      expect_global_flag_consensus(
+          value.constant_pressure_distance_gate_applied);
+      expect_global_flag_consensus(
+          value.constant_pressure_distance_gate_passed);
+      expect_global_flag_consensus(
+          value.constant_pressure_thresholds_satisfied);
+      EXPECT_EQ(globalMinDouble(value.pressure_jump,
+                                svmp::MeshComm(MPI_COMM_WORLD)),
+                globalMaxDouble(value.pressure_jump,
+                                svmp::MeshComm(MPI_COMM_WORLD)));
+      EXPECT_EQ(globalMinDouble(value.production_residual,
+                                svmp::MeshComm(MPI_COMM_WORLD)),
+                globalMaxDouble(value.production_residual,
+                                svmp::MeshComm(MPI_COMM_WORLD)));
+      const auto [minimum_topology, maximum_topology] =
+          globalMinMaxUint64(value.topology_fingerprint,
+                             svmp::MeshComm(MPI_COMM_WORLD));
+      EXPECT_EQ(minimum_topology, maximum_topology);
+      const auto [minimum_source_digest, maximum_source_digest] =
+          globalMinMaxUint64(value.source_semantic_digest,
+                             svmp::MeshComm(MPI_COMM_WORLD));
+      EXPECT_EQ(minimum_source_digest, maximum_source_digest);
+      const auto [minimum_fraction_digest, maximum_fraction_digest] =
+          globalMinMaxUint64(value.volume_fraction_digest,
+                             svmp::MeshComm(MPI_COMM_WORLD));
+      EXPECT_EQ(minimum_fraction_digest, maximum_fraction_digest);
+    }
+
+    const auto& standard = results[shape][0];
+    const auto& alternate = results[shape][1];
+    int local_layout_differs =
+        standard.locally_owned_rows != alternate.locally_owned_rows ? 1 : 0;
+    int layout_differs = 0;
+    ASSERT_EQ(MPI_Allreduce(&local_layout_differs,
+                            &layout_differs,
+                            1,
+                            MPI_INT,
+                            MPI_MAX,
+                            MPI_COMM_WORLD),
+              MPI_SUCCESS);
+    EXPECT_EQ(layout_differs, 1);
+    EXPECT_EQ(standard.minimized, alternate.minimized);
+    EXPECT_EQ(standard.pressure_available,
+              alternate.pressure_available);
+    EXPECT_EQ(standard.pressure_converged,
+              alternate.pressure_converged);
+    EXPECT_EQ(standard.pressure_breakdown,
+              alternate.pressure_breakdown);
+    EXPECT_EQ(standard.pressure_distance_gate_applied,
+              alternate.pressure_distance_gate_applied);
+    EXPECT_EQ(standard.pressure_distance_gate_passed,
+              alternate.pressure_distance_gate_passed);
+    EXPECT_EQ(standard.constant_pressure_available,
+              alternate.constant_pressure_available);
+    EXPECT_EQ(standard.constant_pressure_represents_constant,
+              alternate.constant_pressure_represents_constant);
+    EXPECT_EQ(standard.constant_pressure_constraints_preserve_constants,
+              alternate.constant_pressure_constraints_preserve_constants);
+    EXPECT_EQ(standard.constant_pressure_distance_gate_applied,
+              alternate.constant_pressure_distance_gate_applied);
+    EXPECT_EQ(standard.constant_pressure_distance_gate_passed,
+              alternate.constant_pressure_distance_gate_passed);
+    EXPECT_EQ(standard.constant_pressure_thresholds_satisfied,
+              alternate.constant_pressure_thresholds_satisfied);
+    EXPECT_EQ(standard.requested_interface_order,
+              alternate.requested_interface_order);
+    EXPECT_EQ(standard.achieved_interface_order,
+              alternate.achieved_interface_order);
+    EXPECT_EQ(standard.active_contact_fragment_count,
+              alternate.active_contact_fragment_count);
+    EXPECT_EQ(standard.topology_fingerprint,
+              alternate.topology_fingerprint);
+    EXPECT_EQ(standard.source_semantics.size(),
+              alternate.source_semantics.size());
+    for (std::size_t index = 0u;
+         index < standard.source_semantics.size() &&
+         index < alternate.source_semantics.size();
+         ++index) {
+      for (std::size_t component = 0u; component < 4u; ++component) {
+        EXPECT_NEAR(standard.source_semantics[index][component],
+                    alternate.source_semantics[index][component],
+                    1.0e-10);
+      }
+    }
+    EXPECT_EQ(standard.negative_volume_fractions.size(),
+              alternate.negative_volume_fractions.size());
+    for (std::size_t index = 0u;
+         index < standard.negative_volume_fractions.size() &&
+         index < alternate.negative_volume_fractions.size();
+         ++index) {
+      EXPECT_NEAR(standard.negative_volume_fractions[index],
+                  alternate.negative_volume_fractions[index],
+                  1.0e-10);
+    }
+    const auto expect_physical_parity = [&](const char* label,
+                                            svmp::FE::Real standard_value,
+                                            svmp::FE::Real alternate_value) {
+      SCOPED_TRACE(label);
+      EXPECT_NEAR(standard_value, alternate_value, 1.0e-9);
+    };
+    expect_physical_parity(
+        "pressure jump", standard.pressure_jump, alternate.pressure_jump);
+    expect_physical_parity("pressure distance",
+                           standard.pressure_distance,
+                           alternate.pressure_distance);
+    expect_physical_parity(
+        "force residual", standard.force_residual, alternate.force_residual);
+    expect_physical_parity(
+        "constant-pressure distance",
+        standard.constant_pressure_relative_distance,
+        alternate.constant_pressure_relative_distance);
+    expect_physical_parity("production residual",
+                           standard.production_residual,
+                           alternate.production_residual);
+    expect_physical_parity("projected gradient",
+                           standard.projected_gradient_norm,
+                           alternate.projected_gradient_norm);
+    expect_physical_parity(
+        "liquid volume", standard.volume, alternate.volume);
+    expect_physical_parity("interface energy",
+                           standard.interface_energy,
+                           alternate.interface_energy);
+    const std::string prefix = sessile
+                                   ? "wp4_mpi_minimized_sessile_"
+                                   : "wp4_mpi_minimized_closed_";
+    RecordProperty(prefix + "initialization", "minimized");
+    RecordProperty(prefix + "rank_count", size);
+    RecordProperty(prefix + "ownership_numbering_layout_count", 2);
+    RecordProperty(prefix + "layouts_genuinely_differ", layout_differs);
+    RecordProperty(prefix + "topology_fingerprint",
+                   std::to_string(standard.topology_fingerprint));
+    RecordProperty(prefix + "source_semantic_digest",
+                   std::to_string(standard.source_semantic_digest));
+    RecordProperty(prefix + "volume_fraction_digest",
+                   std::to_string(standard.volume_fraction_digest));
+    RecordProperty(prefix + "requested_interface_order",
+                   standard.requested_interface_order);
+    RecordProperty(prefix + "achieved_interface_order",
+                   standard.achieved_interface_order);
+    RecordProperty(prefix + "active_contact_fragment_count",
+                   std::to_string(
+                       standard.active_contact_fragment_count));
+    RecordProperty(prefix + "pressure_jump_p_liquid_minus_p_external",
+                   standard.pressure_jump);
+    RecordProperty(prefix + "pressure_space_relative_distance",
+                   standard.pressure_distance);
+    RecordProperty(prefix + "pressure_representability_available",
+                   standard.pressure_available ? 1 : 0);
+    RecordProperty(prefix + "pressure_representability_converged",
+                   standard.pressure_converged ? 1 : 0);
+    RecordProperty(prefix + "pressure_representability_breakdown",
+                   standard.pressure_breakdown ? 1 : 0);
+    RecordProperty(prefix + "pressure_distance_gate_applied",
+                   standard.pressure_distance_gate_applied ? 1 : 0);
+    RecordProperty(prefix + "pressure_distance_gate_passed",
+                   standard.pressure_distance_gate_passed ? 1 : 0);
+    RecordProperty(prefix + "force_residual", standard.force_residual);
+    RecordProperty(prefix + "constant_pressure_direction_norm",
+                   standard.constant_pressure_direction_norm);
+    RecordProperty(prefix + "constant_pressure_kkt_available",
+                   standard.constant_pressure_available ? 1 : 0);
+    RecordProperty(prefix + "constant_pressure_relative_distance",
+                   standard.constant_pressure_relative_distance);
+    RecordProperty(prefix + "constant_pressure_represents_constant",
+                   standard.constant_pressure_represents_constant ? 1 : 0);
+    RecordProperty(
+        prefix + "constant_pressure_constraints_preserve_constants",
+        standard.constant_pressure_constraints_preserve_constants ? 1 : 0);
+    RecordProperty(prefix + "constant_pressure_distance_gate_applied",
+                   standard.constant_pressure_distance_gate_applied ? 1 : 0);
+    RecordProperty(prefix + "constant_pressure_distance_gate_passed",
+                   standard.constant_pressure_distance_gate_passed ? 1 : 0);
+    RecordProperty(prefix + "constant_pressure_thresholds_satisfied",
+                   standard.constant_pressure_thresholds_satisfied ? 1 : 0);
+    RecordProperty(prefix + "production_residual",
+                   standard.production_residual);
+    RecordProperty(prefix + "projected_gradient_norm",
+                   standard.projected_gradient_norm);
+    RecordProperty(prefix + "parasitic_capillary_number",
+                   standard.parasitic_capillary_number);
+    RecordProperty(prefix + "kinetic_energy", standard.kinetic_energy);
+    RecordProperty(prefix + "volume", standard.volume);
+    RecordProperty(prefix + "interface_energy",
+                   standard.interface_energy);
+  }
 }
 
 TEST(ApplicationDriverLevelSetWorkflowsMPI,

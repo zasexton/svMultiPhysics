@@ -10,6 +10,7 @@
 #include "FE/Assembly/AssemblyKernel.h"
 #include "FE/Backends/Interfaces/BackendFactory.h"
 #include "FE/Backends/Interfaces/BackendKind.h"
+#include "FE/Geometry/CutQuadratureMapping.h"
 #include "FE/Interfaces/LevelSetInterfaceBuilder.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
@@ -23,6 +24,8 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -30,6 +33,7 @@
 #include <iomanip>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <numeric>
 #include <optional>
@@ -504,6 +508,303 @@ std::shared_ptr<svmp::Mesh> makeWorkflowHydrostaticPressureMesh3D(
       cell_shapes);
   base->finalize();
   return svmp::create_mesh(std::move(base));
+}
+
+struct WorkflowRadialSimplexMesh {
+  std::shared_ptr<svmp::Mesh> mesh{};
+  int dimension{0};
+  int wall_marker{-1};
+  int anchor_marker{-1};
+  int free_boundary_marker{-1};
+  std::array<svmp::FE::Real, 3> wall_origin{{0.0, 0.0, 0.0}};
+  std::array<svmp::FE::Real, 3> wall_normal{{0.0, 0.0, 0.0}};
+};
+
+WorkflowRadialSimplexMesh makeWorkflowRadialCapillaryMesh(
+    int dimension,
+    bool sessile,
+    int wall_marker,
+    int anchor_marker,
+    int free_boundary_marker,
+    bool anchor_entire_exterior,
+    int resolution,
+    svmp::FE::Real rotation_radians,
+    const std::array<svmp::FE::Real, 3>& translation)
+{
+  if ((dimension != 2 && dimension != 3) ||
+      (sessile && wall_marker < 0) || anchor_marker < 0 ||
+      free_boundary_marker < 0 || resolution < 1) {
+    throw std::invalid_argument("invalid radial capillary mesh request");
+  }
+
+  std::vector<svmp::real_t> coordinates;
+  std::vector<svmp::offset_t> cell_offsets{0};
+  std::vector<svmp::index_t> cell_vertices;
+  std::vector<svmp::CellShape> cell_shapes;
+  if (dimension == 2) {
+    constexpr svmp::FE::Real pi =
+        svmp::FE::Real{3.141592653589793238462643383279502884};
+    const int segment_count =
+        (sessile ? 8 : 12) * resolution;
+    coordinates.insert(coordinates.end(), {0.0, 0.0});
+    const svmp::FE::Real angular_extent =
+        sessile ? pi : svmp::FE::Real{2.0} * pi;
+    const int outer_vertex_count =
+        sessile ? segment_count + 1 : segment_count;
+    for (int segment = 0; segment < outer_vertex_count; ++segment) {
+      const auto angle = angular_extent *
+                         static_cast<svmp::FE::Real>(segment) /
+                         static_cast<svmp::FE::Real>(segment_count);
+      coordinates.push_back(std::cos(angle));
+      coordinates.push_back(std::sin(angle));
+    }
+    const int cell_count = segment_count;
+    for (int cell = 0; cell < cell_count; ++cell) {
+      const auto first = static_cast<svmp::index_t>(cell + 1);
+      const auto second = static_cast<svmp::index_t>(
+          sessile ? cell + 2 : (cell + 1) % segment_count + 1);
+      cell_vertices.insert(cell_vertices.end(), {0, first, second});
+      cell_offsets.push_back(
+          static_cast<svmp::offset_t>(cell_vertices.size()));
+      cell_shapes.push_back(
+          svmp::CellShape{svmp::CellFamily::Triangle, 3, 1});
+    }
+  } else {
+    if (resolution > 1) {
+      using Point = std::array<svmp::FE::Real, 3>;
+      constexpr std::array<Point, 6> outer_vertices{{
+          {{1.0, 0.0, 0.0}},
+          {{0.0, 1.0, 0.0}},
+          {{-1.0, 0.0, 0.0}},
+          {{0.0, -1.0, 0.0}},
+          {{0.0, 0.0, 1.0}},
+          {{0.0, 0.0, -1.0}},
+      }};
+      constexpr std::array<std::array<int, 3>, 8> faces{{
+          {{0, 1, 4}},
+          {{1, 2, 4}},
+          {{2, 3, 4}},
+          {{3, 0, 4}},
+          {{1, 0, 5}},
+          {{2, 1, 5}},
+          {{3, 2, 5}},
+          {{0, 3, 5}},
+      }};
+      coordinates = {0.0, 0.0, 0.0};
+      std::map<std::array<long long, 3>, svmp::index_t> vertex_by_point;
+      const auto add_outer_vertex = [&](Point point) {
+        const auto norm = std::sqrt(
+            point[0] * point[0] + point[1] * point[1] +
+            point[2] * point[2]);
+        for (auto& value : point) {
+          value /= norm;
+        }
+        const std::array<long long, 3> key{{
+            std::llround(point[0] * 1.0e12),
+            std::llround(point[1] * 1.0e12),
+            std::llround(point[2] * 1.0e12),
+        }};
+        const auto found = vertex_by_point.find(key);
+        if (found != vertex_by_point.end()) {
+          return found->second;
+        }
+        const auto vertex = static_cast<svmp::index_t>(
+            coordinates.size() / 3u);
+        coordinates.insert(coordinates.end(), point.begin(), point.end());
+        vertex_by_point.emplace(key, vertex);
+        return vertex;
+      };
+      const int face_count = sessile ? 4 : 8;
+      for (int face_index = 0; face_index < face_count; ++face_index) {
+        const auto& face = faces[static_cast<std::size_t>(face_index)];
+        const auto& a = outer_vertices[static_cast<std::size_t>(face[0])];
+        const auto& b = outer_vertices[static_cast<std::size_t>(face[1])];
+        const auto& c = outer_vertices[static_cast<std::size_t>(face[2])];
+        std::vector<svmp::index_t> local_vertices(
+            static_cast<std::size_t>((resolution + 1) * (resolution + 1)),
+            svmp::index_t{-1});
+        const auto local_index = [&](int i, int j) {
+          return static_cast<std::size_t>(i * (resolution + 1) + j);
+        };
+        for (int i = 0; i <= resolution; ++i) {
+          for (int j = 0; j <= resolution - i; ++j) {
+            const auto wa = static_cast<svmp::FE::Real>(
+                                resolution - i - j) /
+                            static_cast<svmp::FE::Real>(resolution);
+            const auto wb = static_cast<svmp::FE::Real>(i) /
+                            static_cast<svmp::FE::Real>(resolution);
+            const auto wc = static_cast<svmp::FE::Real>(j) /
+                            static_cast<svmp::FE::Real>(resolution);
+            Point point{{
+                wa * a[0] + wb * b[0] + wc * c[0],
+                wa * a[1] + wb * b[1] + wc * c[1],
+                wa * a[2] + wb * b[2] + wc * c[2],
+            }};
+            local_vertices[local_index(i, j)] = add_outer_vertex(point);
+          }
+        }
+        const auto add_tetrahedron =
+            [&](svmp::index_t first,
+                svmp::index_t second,
+                svmp::index_t third) {
+              cell_vertices.insert(
+                  cell_vertices.end(), {0, first, second, third});
+              cell_offsets.push_back(
+                  static_cast<svmp::offset_t>(cell_vertices.size()));
+              cell_shapes.push_back(
+                  svmp::CellShape{svmp::CellFamily::Tetra, 4, 1});
+            };
+        for (int i = 0; i < resolution; ++i) {
+          for (int j = 0; j < resolution - i; ++j) {
+            const auto v00 = local_vertices[local_index(i, j)];
+            const auto v10 = local_vertices[local_index(i + 1, j)];
+            const auto v01 = local_vertices[local_index(i, j + 1)];
+            add_tetrahedron(v00, v10, v01);
+            if (i + j < resolution - 1) {
+              const auto v11 =
+                  local_vertices[local_index(i + 1, j + 1)];
+              add_tetrahedron(v10, v11, v01);
+            }
+          }
+        }
+      }
+    } else if (sessile) {
+      coordinates = {
+          0.0, 0.0, 0.0,
+          1.0, 0.0, 0.0,
+          0.0, 1.0, 0.0,
+          -1.0, 0.0, 0.0,
+          0.0, -1.0, 0.0,
+          0.0, 0.0, 1.0,
+          0.0, 0.0, 0.25,
+      };
+      constexpr std::array<std::array<svmp::index_t, 4>, 8> tetrahedra{{
+          {{0, 1, 2, 6}},
+          {{6, 1, 2, 5}},
+          {{0, 2, 3, 6}},
+          {{6, 2, 3, 5}},
+          {{0, 3, 4, 6}},
+          {{6, 3, 4, 5}},
+          {{0, 4, 1, 6}},
+          {{6, 4, 1, 5}},
+      }};
+      for (const auto& tetrahedron : tetrahedra) {
+        cell_vertices.insert(
+            cell_vertices.end(), tetrahedron.begin(), tetrahedron.end());
+        cell_offsets.push_back(
+            static_cast<svmp::offset_t>(cell_vertices.size()));
+        cell_shapes.push_back(
+            svmp::CellShape{svmp::CellFamily::Tetra, 4, 1});
+      }
+    } else {
+      coordinates = {
+          0.0, 0.0, 0.0,
+          1.0, 0.0, 0.0,
+          0.0, 1.0, 0.0,
+          -1.0, 0.0, 0.0,
+          0.0, -1.0, 0.0,
+          0.0, 0.0, 1.0,
+          0.0, 0.0, -1.0,
+      };
+      constexpr std::array<std::array<svmp::index_t, 4>, 8> tetrahedra{{
+          {{0, 1, 2, 5}},
+          {{0, 2, 3, 5}},
+          {{0, 3, 4, 5}},
+          {{0, 4, 1, 5}},
+          {{0, 2, 1, 6}},
+          {{0, 3, 2, 6}},
+          {{0, 4, 3, 6}},
+          {{0, 1, 4, 6}},
+      }};
+      for (const auto& tetrahedron : tetrahedra) {
+        cell_vertices.insert(
+            cell_vertices.end(), tetrahedron.begin(), tetrahedron.end());
+        cell_offsets.push_back(
+            static_cast<svmp::offset_t>(cell_vertices.size()));
+        cell_shapes.push_back(
+            svmp::CellShape{svmp::CellFamily::Tetra, 4, 1});
+      }
+    }
+  }
+
+  const auto cosine = std::cos(rotation_radians);
+  const auto sine = std::sin(rotation_radians);
+  std::array<svmp::FE::Real, 3> wall_normal{{0.0, 0.0, 0.0}};
+  if (dimension == 2) {
+    wall_normal = {{sine, -cosine, 0.0}};
+    for (std::size_t vertex = 0u;
+         vertex < coordinates.size() / 2u;
+         ++vertex) {
+      const auto x = coordinates[2u * vertex];
+      const auto y = coordinates[2u * vertex + 1u];
+      coordinates[2u * vertex] =
+          cosine * x - sine * y + translation[0];
+      coordinates[2u * vertex + 1u] =
+          sine * x + cosine * y + translation[1];
+    }
+  } else {
+    wall_normal = {{-sine, 0.0, -cosine}};
+    for (std::size_t vertex = 0u;
+         vertex < coordinates.size() / 3u;
+         ++vertex) {
+      const auto x = coordinates[3u * vertex];
+      const auto y = coordinates[3u * vertex + 1u];
+      const auto z = coordinates[3u * vertex + 2u];
+      coordinates[3u * vertex] =
+          cosine * x + sine * z + translation[0];
+      coordinates[3u * vertex + 1u] = y + translation[1];
+      coordinates[3u * vertex + 2u] =
+          -sine * x + cosine * z + translation[2];
+    }
+  }
+
+  auto base = std::make_shared<svmp::MeshBase>();
+  base->build_from_arrays(
+      dimension, coordinates, cell_offsets, cell_vertices, cell_shapes);
+  base->finalize();
+  auto mesh = svmp::create_mesh(std::move(base));
+  std::size_t wall_faces = 0u;
+  std::size_t anchor_faces = 0u;
+  std::size_t free_faces = 0u;
+  for (const auto face : mesh->local_mesh().boundary_faces()) {
+    bool on_wall = sessile;
+    for (const auto vertex : mesh->local_mesh().face_vertices(face)) {
+      const auto point = mesh->local_mesh().get_vertex_coords(vertex);
+      svmp::FE::Real wall_distance = 0.0;
+      for (int component = 0; component < dimension; ++component) {
+        wall_distance +=
+            (point[static_cast<std::size_t>(component)] -
+             translation[static_cast<std::size_t>(component)]) *
+            wall_normal[static_cast<std::size_t>(component)];
+      }
+      on_wall = on_wall &&
+                std::abs(wall_distance) <= svmp::FE::Real{1.0e-12};
+    }
+    if (on_wall) {
+      mesh->set_boundary_label(face, wall_marker);
+      ++wall_faces;
+    } else if (anchor_entire_exterior || anchor_faces == 0u) {
+      mesh->set_boundary_label(face, anchor_marker);
+      ++anchor_faces;
+    } else {
+      mesh->set_boundary_label(face, free_boundary_marker);
+      ++free_faces;
+    }
+  }
+  if (anchor_faces == 0u || (sessile && wall_faces == 0u) ||
+      (!anchor_entire_exterior && free_faces == 0u)) {
+    throw std::runtime_error(
+        "radial capillary mesh boundary classification failed");
+  }
+  WorkflowRadialSimplexMesh result;
+  result.mesh = std::move(mesh);
+  result.dimension = dimension;
+  result.wall_marker = sessile ? wall_marker : -1;
+  result.anchor_marker = anchor_marker;
+  result.free_boundary_marker = free_boundary_marker;
+  result.wall_origin = translation;
+  result.wall_normal = wall_normal;
+  return result;
 }
 
 std::shared_ptr<svmp::Mesh> makeWorkflowFourQuadStripMesh(
@@ -1027,6 +1328,912 @@ private:
   const char* key_;
   std::optional<std::string> original_{};
 };
+
+struct WorkflowBalancedCapillaryFixture {
+  WorkflowRadialSimplexMesh geometry{};
+  application::core::SimulationComponents simulation{};
+  std::unique_ptr<Parameters> parameters{};
+  std::vector<LevelSetMaintenanceRequest> requests{};
+  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle{};
+  ActiveCutContextRefreshCache refresh_cache{};
+  svmp::FE::FieldId level_set_field{svmp::FE::INVALID_FIELD_ID};
+  svmp::FE::FieldId curvature_field{svmp::FE::INVALID_FIELD_ID};
+  svmp::FE::FieldId velocity_field{svmp::FE::INVALID_FIELD_ID};
+  svmp::FE::FieldId pressure_field{svmp::FE::INVALID_FIELD_ID};
+  int interface_marker{-1};
+  bool sessile{false};
+  bool positive_liquid{false};
+  bool level_set_transport_installed{false};
+  svmp::FE::Real surface_tension{0.0};
+  svmp::FE::Real viscosity{0.0};
+  svmp::FE::Real contact_angle_radians{0.0};
+  std::vector<svmp::FE::Real> initial_solution{};
+};
+
+std::unique_ptr<WorkflowBalancedCapillaryFixture>
+makeWorkflowBalancedCapillaryFixture(
+    int dimension,
+    bool sessile,
+    bool positive_liquid,
+    svmp::FE::Real contact_angle_degrees,
+    bool anchor_entire_exterior = false,
+    int resolution = 1,
+    svmp::FE::Real rotation_radians = 0.0,
+    std::array<svmp::FE::Real, 3> translation = {{0.0, 0.0, 0.0}},
+    bool install_level_set_transport = false)
+{
+  constexpr int interface_marker = 846;
+  constexpr int wall_marker = 8461;
+  constexpr int anchor_marker = 8462;
+  constexpr int free_boundary_marker = 8463;
+  constexpr svmp::FE::Real pi =
+      svmp::FE::Real{3.141592653589793238462643383279502884};
+  constexpr svmp::FE::Real surface_tension = 0.75;
+  constexpr svmp::FE::Real viscosity = 0.02;
+  constexpr svmp::FE::Real target_radius = 0.55;
+
+  auto fixture = std::make_unique<WorkflowBalancedCapillaryFixture>();
+  fixture->geometry = makeWorkflowRadialCapillaryMesh(
+      dimension,
+      sessile,
+      wall_marker,
+      anchor_marker,
+      free_boundary_marker,
+      anchor_entire_exterior,
+      resolution,
+      rotation_radians,
+      translation);
+  fixture->interface_marker = interface_marker;
+  fixture->sessile = sessile;
+  fixture->positive_liquid = positive_liquid;
+  fixture->level_set_transport_installed = install_level_set_transport;
+  fixture->surface_tension = surface_tension;
+  fixture->viscosity = viscosity;
+  fixture->contact_angle_radians =
+      contact_angle_degrees * pi / svmp::FE::Real{180.0};
+  auto mesh = fixture->geometry.mesh;
+  auto& local_mesh = mesh->local_mesh();
+  (void)svmp::MeshFields::attach_field(
+      local_mesh,
+      svmp::EntityKind::Vertex,
+      "phi_balanced_curved",
+      svmp::FieldScalarType::Float64,
+      1);
+
+  const auto element = dimension == 2
+                           ? svmp::FE::ElementType::Triangle3
+                           : svmp::FE::ElementType::Tetra4;
+  auto scalar_space = svmp::FE::spaces::SpaceFactory::create_h1(
+      element, /*order=*/1);
+  auto velocity_space = svmp::FE::spaces::SpaceFactory::create_vector_h1(
+      element, /*order=*/1, /*components=*/dimension);
+  auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
+  fixture->level_set_field = system->addField(
+      svmp::FE::systems::FieldSpec{
+          .name = "phi_balanced_curved",
+          .space = scalar_space,
+          .components = 1,
+      });
+  fixture->curvature_field = system->addField(
+      svmp::FE::systems::FieldSpec{
+          .name = "kappa_balanced_curved",
+          .space = scalar_space,
+          .components = 1,
+          .source_kind =
+              svmp::FE::systems::FieldSourceKind::PrescribedData,
+      });
+
+  channel_ns::IncompressibleNavierStokesVMSOptions options;
+  options.velocity_field_name = "u_balanced_curved";
+  options.pressure_field_name = "p_balanced_curved";
+  options.density = 1.0;
+  options.viscosity = viscosity;
+  options.enable_convection = false;
+  options.enable_vms = false;
+  options.jit_policy.enable = false;
+  options.velocity_dirichlet.push_back(
+      channel_ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
+          .boundary_marker = anchor_marker,
+          .value = {0.0, 0.0, 0.0},
+      });
+  if (sessile) {
+    const std::array<bool, 3> wall_normal_components{{
+        std::abs(fixture->geometry.wall_normal[0]) > 0.5,
+        std::abs(fixture->geometry.wall_normal[1]) > 0.5,
+        std::abs(fixture->geometry.wall_normal[2]) > 0.5,
+    }};
+    options.velocity_dirichlet.push_back(
+        channel_ns::IncompressibleNavierStokesVMSOptions::
+            VelocityDirichletBC{
+                .boundary_marker = wall_marker,
+                .value = {0.0, 0.0, 0.0},
+                .active_components = wall_normal_components,
+            });
+  }
+
+  using ContactLine = channel_ns::IncompressibleNavierStokesVMSOptions::
+      FreeSurfaceContactLine;
+  auto free_surface =
+      channel_ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+          .implementation =
+              channel_ns::FreeSurfaceImplementation::UnfittedLevelSet,
+          .interface_marker = interface_marker,
+          .level_set_field_name = "phi_balanced_curved",
+          .generated_interface_domain_id = "balanced_curved_capillary",
+          .generated_interface_geometry = "LinearCorner",
+          .active_domain =
+              positive_liquid
+                  ? channel_ns::FreeSurfaceActiveDomain::LevelSetPositive
+                  : channel_ns::FreeSurfaceActiveDomain::LevelSetNegative,
+          .active_domain_method =
+              channel_ns::FreeSurfaceActiveDomainMethod::CutVolume,
+          .external_pressure = 0.125,
+          .surface_tension = surface_tension,
+          .surface_tension_form = channel_ns::
+              FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction,
+          .curvature = 0.0,
+          .curvature_field_name = "kappa_balanced_curved",
+          .use_level_set_curvature = false,
+          .small_cut_aggregation = false,
+      };
+  if (sessile) {
+    free_surface.contact_lines.push_back(
+        ContactLine{.configuration = ContactLine::DynamicRenE{
+                        .wall_boundary_marker = wall_marker,
+                        .contact_line_marker = -1,
+                        .equilibrium_contact_angle_radians =
+                            fixture->contact_angle_radians,
+                        .wall_normal = {
+                            fixture->geometry.wall_normal[0],
+                            fixture->geometry.wall_normal[1],
+                            fixture->geometry.wall_normal[2],
+                        },
+                        .mobility = 1.0,
+                        .slip_length = 1.0,
+                    }});
+  }
+  options.free_surface.push_back(std::move(free_surface));
+
+  channel_ns::IncompressibleNavierStokesVMSModule module(
+      velocity_space, scalar_space, std::move(options));
+  module.registerOn(*system);
+  if (install_level_set_transport) {
+    svmp::FE::level_set::LevelSetTransportOptions transport{};
+    transport.operator_tag = "equations";
+    transport.level_set.field_name = "phi_balanced_curved";
+    transport.level_set.auto_register_field = false;
+    transport.velocity.field_name = "u_balanced_curved";
+    transport.velocity.source =
+        svmp::FE::level_set::LevelSetVelocitySource::CoupledField;
+    transport.velocity.auto_register_field = false;
+    transport.velocity.space = velocity_space;
+    transport.supg.enabled = false;
+    (void)svmp::FE::level_set::installLevelSetTransport(
+        *system, scalar_space, transport);
+  }
+  system->setup({});
+  fixture->velocity_field =
+      system->findFieldByName("u_balanced_curved");
+  fixture->pressure_field =
+      system->findFieldByName("p_balanced_curved");
+  if (fixture->velocity_field == svmp::FE::INVALID_FIELD_ID ||
+      fixture->pressure_field == svmp::FE::INVALID_FIELD_ID) {
+    throw std::runtime_error(
+        "balanced curved fixture did not register velocity and pressure");
+  }
+
+  std::vector<svmp::FE::Real> phi_vertex_values(
+      mesh->n_vertices(), svmp::FE::Real{0.0});
+  for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
+    const auto point = workflowVertexPoint(*mesh, vertex);
+    svmp::FE::Real radius_squared = 0.0;
+    for (int component = 0; component < dimension; ++component) {
+      const auto relative =
+          point[static_cast<std::size_t>(component)] -
+          translation[static_cast<std::size_t>(component)];
+      radius_squared += relative * relative;
+    }
+    const auto signed_distance =
+        std::sqrt(radius_squared) - target_radius;
+    phi_vertex_values[vertex] =
+        positive_liquid ? -signed_distance : signed_distance;
+  }
+  const auto phi_coefficients = projectWorkflowVertexValues(
+      *system,
+      fixture->level_set_field,
+      phi_vertex_values,
+      /*components=*/1u,
+      "balanced curved level-set projection");
+  fixture->initial_solution.assign(
+      static_cast<std::size_t>(system->dofHandler().getNumDofs()),
+      svmp::FE::Real{0.0});
+  writeWorkflowFieldSlice(
+      *system,
+      fixture->level_set_field,
+      phi_coefficients,
+      fixture->initial_solution);
+  system->setPrescribedFieldCoefficients(
+      fixture->curvature_field,
+      std::vector<svmp::FE::Real>(
+          static_cast<std::size_t>(
+              system->fieldDofHandler(fixture->curvature_field).getNumDofs()),
+          svmp::FE::Real{0.0}));
+
+  fixture->simulation.primary_mesh = mesh;
+  fixture->simulation.fe_system = std::move(system);
+  fixture->simulation.backend = svmp::FE::backends::BackendFactory::create(
+      svmp::FE::backends::BackendKind::FSILS);
+  svmp::FE::backends::SolverOptions linear_options;
+  linear_options.method = svmp::FE::backends::SolverMethod::GMRES;
+  linear_options.preconditioner =
+      svmp::FE::backends::PreconditionerType::Diagonal;
+  fixture->simulation.linear_solver =
+      fixture->simulation.backend->createLinearSolver(linear_options);
+  auto allocated_history = svmp::FE::timestepping::TimeHistory::allocate(
+      *fixture->simulation.backend,
+      fixture->simulation.fe_system->dofHandler().getNumDofs(),
+      /*history_depth=*/2,
+      /*allocate_second_order_state=*/true);
+  fixture->simulation.time_history =
+      std::make_unique<svmp::FE::timestepping::TimeHistory>(
+          std::move(allocated_history));
+  auto& history = *fixture->simulation.time_history;
+  history.setTime(0.0);
+  history.setDt(0.01);
+  history.setPrevDt(0.01);
+  scatterFeOrderedSolution(history.u(), fixture->initial_solution);
+  scatterFeOrderedSolution(history.uPrev(), fixture->initial_solution);
+  scatterFeOrderedSolution(history.uPrev2(), fixture->initial_solution);
+  history.uDot().zero();
+  history.uDDot().zero();
+  history.updateGhosts();
+
+  std::ostringstream xml;
+  xml << std::setprecision(17)
+      << R"xml(<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi_balanced_curved</Level_set_field_name>
+    <Enable_static_capillary_equilibrium_initialization>true</Enable_static_capillary_equilibrium_initialization>
+    <Static_capillary_volume_tolerance>1.0e-8</Static_capillary_volume_tolerance>
+    <Static_capillary_projected_gradient_tolerance>1.0e-8</Static_capillary_projected_gradient_tolerance>
+    <Static_capillary_pressure_representability_max_residual_norm>1.0e-8</Static_capillary_pressure_representability_max_residual_norm>
+    <Static_capillary_pressure_representability_max_relative_distance>1.0e-8</Static_capillary_pressure_representability_max_relative_distance>
+    <Static_capillary_physical_equilibrium_max_residual_norm>1.0e-8</Static_capillary_physical_equilibrium_max_residual_norm>
+    <Static_capillary_constant_pressure_kkt_max_residual_norm>1.0e-8</Static_capillary_constant_pressure_kkt_max_residual_norm>
+    <Static_capillary_constant_pressure_kkt_max_relative_distance>1.0e-8</Static_capillary_constant_pressure_kkt_max_relative_distance>
+    <Static_capillary_max_iterations>80</Static_capillary_max_iterations>
+    <Static_capillary_max_topology_epoch_transitions>12</Static_capillary_max_topology_epoch_transitions>
+    <Static_capillary_tangent_trust_radius>0.025</Static_capillary_tangent_trust_radius>
+    <Static_capillary_maximum_coefficient_update_linf>0.1</Static_capillary_maximum_coefficient_update_linf>
+    <Enable_curvature_projection>true</Enable_curvature_projection>
+    <Curvature_field_name>kappa_balanced_curved</Curvature_field_name>
+    <Curvature_projection_recovery_mode>KinematicAreaGradient</Curvature_projection_recovery_mode>
+    <Curvature_projection_kinematic_area_gradient_filter_coefficient>0.0</Curvature_projection_kinematic_area_gradient_filter_coefficient>
+  </Add_equation>
+  <Add_equation type="fluid">
+    <Add_BC name="balanced_curved_capillary">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi_balanced_curved</Level_set_field_name>
+      <Generated_interface_domain_id>balanced_curved_capillary</Generated_interface_domain_id>
+      <Interface_marker>)xml"
+      << interface_marker << R"xml(</Interface_marker>
+      <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
+      <Geometry_tangent_policy>RefreshedFrozenQuadrature</Geometry_tangent_policy>
+      <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
+      <Active_domain>)xml"
+      << (positive_liquid ? "LevelSetPositive" : "LevelSetNegative")
+      << R"xml(</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+      <Small_cut_aggregation>false</Small_cut_aggregation>
+      <Surface_tension>)xml"
+      << surface_tension << R"xml(</Surface_tension>
+      <Surface_tension_form>KinematicAreaGradientTraction</Surface_tension_form>
+      <Interface_quadrature_order>2</Interface_quadrature_order>
+      <Volume_quadrature_order>2</Volume_quadrature_order>
+      <Curvature_field_name>kappa_balanced_curved</Curvature_field_name>
+      <Use_level_set_curvature>false</Use_level_set_curvature>)xml";
+  if (sessile) {
+    xml << R"xml(
+      <Contact_line_model>DynamicContactAngle</Contact_line_model>
+      <Contact_angle_degrees>)xml"
+        << contact_angle_degrees << R"xml(</Contact_angle_degrees>
+      <Contact_line_wall_markers>)xml"
+        << wall_marker << R"xml(</Contact_line_wall_markers>
+      <Contact_line_wall_normals>)xml"
+        << fixture->geometry.wall_normal[0] << " "
+        << fixture->geometry.wall_normal[1] << " "
+        << fixture->geometry.wall_normal[2]
+        << R"xml(</Contact_line_wall_normals>
+      <Contact_line_mobility>1.0</Contact_line_mobility>
+      <Wall_slip_model>Navier</Wall_slip_model>
+      <Wall_slip_length>1.0</Wall_slip_length>)xml";
+  }
+  xml << R"xml(
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>)xml";
+  fixture->parameters = parseWorkflowParametersXml(xml.str().c_str());
+  fixture->requests = levelSetMaintenanceRequests(*fixture->parameters);
+  if (fixture->requests.size() != 1u) {
+    throw std::runtime_error(
+        "balanced curved fixture did not create one maintenance request");
+  }
+  bindKinematicAreaGradientTractionMaintenance(
+      *fixture->simulation.fe_system, fixture->requests);
+  const auto refresh = refreshActiveCutIntegrationContextCached(
+      fixture->simulation,
+      *fixture->parameters,
+      history.u(),
+      fixture->lifecycle,
+      fixture->refresh_cache,
+      "balanced_curved_initial");
+  if (!refresh.refreshed || refresh.topology_key == 0u) {
+    throw std::runtime_error(
+        "balanced curved fixture did not publish initial cut geometry");
+  }
+  return fixture;
+}
+
+struct WorkflowBalancedCapillaryDerivatives {
+  svmp::FE::level_set::LevelSetCurvatureProjectionResult projection{};
+  std::vector<svmp::FE::Real> curvature{};
+  std::vector<svmp::FE::Real> curvature_coefficients{};
+  svmp::FE::Real projected_gradient_norm{0.0};
+  svmp::FE::Real volume_multiplier{0.0};
+};
+
+WorkflowBalancedCapillaryDerivatives
+evaluateWorkflowBalancedCapillaryDerivatives(
+    WorkflowBalancedCapillaryFixture& fixture)
+{
+  auto& simulation = fixture.simulation;
+  const auto solution = gatherFeOrderedSolution(simulation.time_history->u());
+  svmp::FE::systems::SystemStateView state;
+  state.time = simulation.time_history->time();
+  state.dt = simulation.time_history->dt();
+  state.effective_dt = state.dt;
+  state.dt_prev = simulation.time_history->dtPrev();
+  state.u = solution;
+  const auto phi_values = evaluateVertexField(
+      *simulation.fe_system,
+      *simulation.primary_mesh,
+      fixture.level_set_field,
+      state,
+      1u,
+      "balanced curved derivative evaluation");
+  const std::vector<
+      svmp::FE::level_set::LevelSetCurvatureProjectionSample>
+      no_supplemental_samples;
+  WorkflowBalancedCapillaryDerivatives result;
+  result.projection =
+      svmp::FE::level_set::projectLevelSetMeanCurvatureToVertices(
+          *simulation.fe_system,
+          fixture.level_set_field,
+          phi_values,
+          no_supplemental_samples,
+          fixture.requests.front().curvature_projection,
+          result.curvature);
+  if (!result.projection.success ||
+      !result.projection
+           .kinematic_area_gradient_derivatives_global_dof_order) {
+    throw std::runtime_error(
+        "balanced curved exact derivative recovery failed: " +
+        result.projection.diagnostic);
+  }
+  result.curvature_coefficients = projectWorkflowVertexValues(
+      *simulation.fe_system,
+      fixture.curvature_field,
+      result.curvature,
+      /*components=*/1u,
+      "balanced curved curvature comparison projection");
+  const auto& energy =
+      result.projection.kinematic_area_gradient_total_energy_derivative;
+  const auto& volume =
+      result.projection.kinematic_area_gradient_liquid_volume_derivative;
+  if (energy.size() != volume.size() || energy.empty()) {
+    throw std::runtime_error(
+        "balanced curved derivative arrays have inconsistent layouts");
+  }
+  svmp::FE::Real energy_volume_dot = 0.0;
+  svmp::FE::Real volume_squared = 0.0;
+  for (std::size_t index = 0u; index < energy.size(); ++index) {
+    energy_volume_dot += fixture.surface_tension * energy[index] *
+                         volume[index];
+    volume_squared += volume[index] * volume[index];
+  }
+  if (!(volume_squared > 0.0)) {
+    throw std::runtime_error(
+        "balanced curved volume derivative is degenerate");
+  }
+  result.volume_multiplier = -energy_volume_dot / volume_squared;
+  svmp::FE::Real projected_squared = 0.0;
+  for (std::size_t index = 0u; index < energy.size(); ++index) {
+    const auto projected = fixture.surface_tension * energy[index] +
+                           result.volume_multiplier * volume[index];
+    projected_squared += projected * projected;
+  }
+  result.projected_gradient_norm = std::sqrt(projected_squared);
+  return result;
+}
+
+void setWorkflowSampledCapillaryState(
+    WorkflowBalancedCapillaryFixture& fixture,
+    svmp::FE::Real radius,
+    svmp::FE::Real first_tangent_offset = 0.0,
+    svmp::FE::Real second_tangent_offset = 0.0)
+{
+  if (!(radius > 0.0)) {
+    throw std::invalid_argument(
+        "sampled capillary radius must be positive");
+  }
+  const int dimension = fixture.geometry.dimension;
+  const auto& wall_normal = fixture.geometry.wall_normal;
+  const std::array<svmp::FE::Real, 3> inward{{
+      -wall_normal[0], -wall_normal[1], -wall_normal[2]}};
+  std::array<svmp::FE::Real, 3> first_tangent{};
+  std::array<svmp::FE::Real, 3> second_tangent{};
+  if (dimension == 2) {
+    first_tangent = {{-wall_normal[1], wall_normal[0], 0.0}};
+  } else {
+    first_tangent = {{-wall_normal[2], 0.0, wall_normal[0]}};
+    second_tangent = {{0.0, 1.0, 0.0}};
+  }
+  auto center = fixture.geometry.wall_origin;
+  for (int component = 0; component < dimension; ++component) {
+    center[static_cast<std::size_t>(component)] +=
+        first_tangent_offset *
+            first_tangent[static_cast<std::size_t>(component)] +
+        second_tangent_offset *
+            second_tangent[static_cast<std::size_t>(component)];
+    if (fixture.sessile) {
+      center[static_cast<std::size_t>(component)] -=
+          radius * std::cos(fixture.contact_angle_radians) *
+          inward[static_cast<std::size_t>(component)];
+    }
+  }
+
+  std::vector<svmp::FE::Real> vertex_values(
+      fixture.geometry.mesh->n_vertices(), svmp::FE::Real{0.0});
+  for (std::size_t vertex = 0u;
+       vertex < fixture.geometry.mesh->n_vertices();
+       ++vertex) {
+    const auto point = workflowVertexPoint(*fixture.geometry.mesh, vertex);
+    svmp::FE::Real distance_squared = 0.0;
+    for (int component = 0; component < dimension; ++component) {
+      const auto delta =
+          point[static_cast<std::size_t>(component)] -
+          center[static_cast<std::size_t>(component)];
+      distance_squared += delta * delta;
+    }
+    const auto signed_distance = std::sqrt(distance_squared) - radius;
+    vertex_values[vertex] =
+        fixture.positive_liquid ? -signed_distance : signed_distance;
+  }
+  const auto coefficients = projectWorkflowVertexValues(
+      *fixture.simulation.fe_system,
+      fixture.level_set_field,
+      vertex_values,
+      /*components=*/1u,
+      "sampled capillary level-set projection");
+  auto solution = gatherFeOrderedSolution(
+      fixture.simulation.time_history->u());
+  writeWorkflowFieldSlice(
+      *fixture.simulation.fe_system,
+      fixture.level_set_field,
+      coefficients,
+      solution);
+  scatterFeOrderedSolution(fixture.simulation.time_history->u(), solution);
+  scatterFeOrderedSolution(
+      fixture.simulation.time_history->uPrev(), solution);
+  scatterFeOrderedSolution(
+      fixture.simulation.time_history->uPrev2(), solution);
+  fixture.simulation.time_history->uDot().zero();
+  fixture.simulation.time_history->uDDot().zero();
+  fixture.simulation.time_history->updateGhosts();
+  fixture.refresh_cache.invalidateGeneratedState();
+  const auto refresh = refreshActiveCutIntegrationContextCached(
+      fixture.simulation,
+      *fixture.parameters,
+      fixture.simulation.time_history->u(),
+      fixture.lifecycle,
+      fixture.refresh_cache,
+      "balanced_curved_sampled_state");
+  if (!refresh.refreshed || refresh.topology_key == 0u) {
+    throw std::runtime_error(
+        "sampled capillary state did not refresh its cut geometry");
+  }
+  const auto derivatives =
+      evaluateWorkflowBalancedCapillaryDerivatives(fixture);
+  fixture.simulation.fe_system->setPrescribedFieldCoefficients(
+      fixture.curvature_field, derivatives.curvature_coefficients);
+}
+
+struct WorkflowBalancedCapillaryObservables {
+  svmp::FE::Real pressure_jump{0.0};
+  svmp::FE::Real pressure_distance{0.0};
+  svmp::FE::Real force_residual{0.0};
+  svmp::FE::Real production_residual{0.0};
+  svmp::FE::Real parasitic_capillary_number{0.0};
+  svmp::FE::Real kinetic_energy{0.0};
+  svmp::FE::Real volume{0.0};
+  svmp::FE::Real interface_energy{0.0};
+  svmp::FE::Real base_radius{0.0};
+  svmp::FE::Real apex_height{0.0};
+  svmp::FE::Real contact_angle_degrees{0.0};
+  int requested_interface_order{-1};
+  int achieved_interface_order{-1};
+  std::uint64_t source_value_revision{0u};
+  std::uint64_t source_topology_key{0u};
+  bool pressure_available{false};
+  bool constant_pressure_available{false};
+};
+
+struct WorkflowBalancedCapillaryCutSemantics {
+  std::vector<std::uint64_t> source_topology_keys{};
+  std::vector<svmp::FE::Real> negative_volume_fractions{};
+  std::uint64_t source_topology_digest{1469598103934665603ull};
+  std::uint64_t volume_fraction_digest{1469598103934665603ull};
+  std::uint64_t combined_semantics_digest{1469598103934665603ull};
+};
+
+WorkflowBalancedCapillaryCutSemantics
+workflowBalancedCapillaryCutSemantics(
+    const WorkflowBalancedCapillaryFixture& fixture)
+{
+  const auto* context =
+      fixture.simulation.fe_system->cutIntegrationContext();
+  if (context == nullptr) {
+    throw std::runtime_error(
+        "balanced curved cut semantics found no context");
+  }
+  const auto bound =
+      context->freeSurfaceGeometrySnapshotRevisionForMarker(
+          fixture.interface_marker);
+  const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+  const auto snapshot = std::find_if(
+      snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
+        return candidate != nullptr &&
+               candidate->revision().interface_marker ==
+                   fixture.interface_marker &&
+               candidate->revision().snapshot_revision_key == bound;
+      });
+  if (snapshot == snapshots.end()) {
+    throw std::runtime_error(
+        "balanced curved cut semantics could not bind its snapshot");
+  }
+  WorkflowBalancedCapillaryCutSemantics result;
+  for (const auto* record : (*snapshot)->retainedRules(
+           svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::Interface)) {
+    if (record != nullptr) {
+      result.source_topology_keys.push_back(record->source_topology_key);
+    }
+  }
+  for (const auto& fragment : (*snapshot)->interfaceDomain().fragments()) {
+    if (fragment.active()) {
+      result.negative_volume_fractions.push_back(
+          fragment.negative_volume_fraction);
+    }
+  }
+  std::sort(result.source_topology_keys.begin(),
+            result.source_topology_keys.end());
+  std::sort(result.negative_volume_fractions.begin(),
+            result.negative_volume_fractions.end());
+  for (const auto key : result.source_topology_keys) {
+    result.source_topology_digest ^= key;
+    result.source_topology_digest *= 1099511628211ull;
+  }
+  static_assert(sizeof(svmp::FE::Real) == sizeof(std::uint64_t));
+  for (const auto fraction : result.negative_volume_fractions) {
+    result.volume_fraction_digest ^=
+        std::bit_cast<std::uint64_t>(fraction);
+    result.volume_fraction_digest *= 1099511628211ull;
+  }
+  result.combined_semantics_digest ^= result.source_topology_digest;
+  result.combined_semantics_digest *= 1099511628211ull;
+  result.combined_semantics_digest ^= result.volume_fraction_digest;
+  result.combined_semantics_digest *= 1099511628211ull;
+  return result;
+}
+
+WorkflowBalancedCapillaryObservables
+evaluateWorkflowBalancedCapillaryObservables(
+    WorkflowBalancedCapillaryFixture& fixture)
+{
+  const auto solution =
+      gatherFeOrderedSolution(fixture.simulation.time_history->u());
+  const auto certificate = evaluateStaticCapillaryPressureCertificate(
+      fixture.simulation,
+      solution,
+      fixture.requests.front().static_capillary_equilibrium,
+      /*initialize_compatible_pressure=*/false);
+  auto functionals =
+      evaluateCurrentFreeSurfaceDiscreteFunctionals(fixture.simulation);
+  if (functionals.size() != 1u) {
+    throw std::runtime_error(
+        "balanced curved observable evaluation found no functional");
+  }
+  attachAcceptedFreeSurfaceActiveVolumeEnergies(
+      fixture.simulation, solution, functionals);
+  if (!functionals.front().active_volume_energy.has_value()) {
+    throw std::runtime_error(
+        "balanced curved observable evaluation found no volume energy");
+  }
+
+  WorkflowBalancedCapillaryObservables result;
+  const auto& report = certificate.report;
+  result.pressure_available = report.pressure_representability_available;
+  result.constant_pressure_available =
+      report.constant_pressure_kkt_available;
+  result.pressure_jump = static_cast<svmp::FE::Real>(
+      report.constant_pressure_kkt_pressure_jump);
+  result.pressure_distance = static_cast<svmp::FE::Real>(
+      report.pressure_representability_relative_distance);
+  result.force_residual = static_cast<svmp::FE::Real>(
+      report.constant_pressure_kkt_residual_norm);
+  result.production_residual =
+      static_cast<svmp::FE::Real>(report.residual_norm);
+  result.kinetic_energy =
+      functionals.front().active_volume_energy->kinetic_energy;
+  result.volume = functionals.front().state.owned_liquid_volume;
+  result.interface_energy =
+      functionals.front().state.liquid_gas_surface_energy;
+
+  const auto velocity_offset = static_cast<std::size_t>(
+      fixture.simulation.fe_system->fieldDofOffset(fixture.velocity_field));
+  const auto velocity_count = static_cast<std::size_t>(
+      fixture.simulation.fe_system
+          ->fieldDofHandler(fixture.velocity_field)
+          .getNumDofs());
+  svmp::FE::Real maximum_velocity = 0.0;
+  for (std::size_t index = 0u; index < velocity_count; ++index) {
+    maximum_velocity = std::max(
+        maximum_velocity, std::abs(solution[velocity_offset + index]));
+  }
+  result.parasitic_capillary_number =
+      fixture.viscosity * maximum_velocity / fixture.surface_tension;
+
+  const auto* context =
+      fixture.simulation.fe_system->cutIntegrationContext();
+  if (context == nullptr ||
+      !context->hasFreeSurfaceGeometrySnapshotForMarker(
+          fixture.interface_marker)) {
+    throw std::runtime_error(
+        "balanced curved observable evaluation found no geometry snapshot");
+  }
+  const auto bound_revision =
+      context->freeSurfaceGeometrySnapshotRevisionForMarker(
+          fixture.interface_marker);
+  const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+  const auto snapshot = std::find_if(
+      snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
+        return candidate != nullptr &&
+               candidate->revision().interface_marker ==
+                   fixture.interface_marker &&
+               candidate->revision().snapshot_revision_key == bound_revision;
+      });
+  if (snapshot == snapshots.end()) {
+    throw std::runtime_error(
+        "balanced curved observable evaluation could not bind its snapshot");
+  }
+  const auto& domain_request = (*snapshot)->interfaceDomain().request();
+  result.requested_interface_order =
+      domain_request.interface_quadrature_order;
+  result.achieved_interface_order =
+      domain_request.achieved_interface_quadrature_order;
+  result.source_value_revision = (*snapshot)->revision().source_value_revision;
+
+  std::vector<std::array<svmp::FE::Real, 3>> interface_points;
+  for (const auto& fragment : (*snapshot)->interfaceDomain().fragments()) {
+    if (!fragment.active()) {
+      continue;
+    }
+    const auto mapping =
+        svmp::FE::geometry::makeCutCellGeometryMapping(
+            fixture.simulation.fe_system->meshAccess(),
+            fragment.parent_cell);
+    for (const auto& vertex : fragment.vertices) {
+      const auto physical = mapping->map_to_physical(
+          svmp::FE::math::Vector<svmp::FE::Real, 3>{
+              vertex.parent_coordinate[0],
+              vertex.parent_coordinate[1],
+              vertex.parent_coordinate[2]});
+      interface_points.push_back(
+          {{physical[0], physical[1], physical[2]}});
+    }
+  }
+  const auto interface_rules = (*snapshot)->retainedRules(
+      svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::Interface);
+  for (const auto* record : interface_rules) {
+    if (record == nullptr) {
+      continue;
+    }
+    result.source_topology_key ^= record->source_topology_key;
+  }
+  if (interface_points.empty()) {
+    throw std::runtime_error(
+        "balanced curved observable evaluation found no interface vertices");
+  }
+
+  std::vector<std::array<svmp::FE::Real, 3>> contact_points;
+  for (const auto& domain : (*snapshot)->contactDomains()) {
+    for (const auto& fragment : domain.fragments()) {
+      if (!fragment.active()) {
+        continue;
+      }
+      const auto mapping =
+          svmp::FE::geometry::makeCutCellGeometryMapping(
+              fixture.simulation.fe_system->meshAccess(),
+              fragment.parent_cell);
+      for (const auto& vertex : fragment.vertices) {
+        const auto physical = mapping->map_to_physical(
+            svmp::FE::math::Vector<svmp::FE::Real, 3>{
+                vertex[0], vertex[1], vertex[2]});
+        contact_points.push_back(
+            {{physical[0], physical[1], physical[2]}});
+      }
+    }
+  }
+  svmp::FE::Real angle_weight = 0.0;
+  svmp::FE::Real weighted_angle = 0.0;
+  const auto contact_rules = (*snapshot)->retainedRules(
+      svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::Contact);
+  for (const auto* record : contact_rules) {
+    if (record == nullptr) {
+      continue;
+    }
+    result.source_topology_key ^= record->source_topology_key;
+    for (const auto& point : record->physical_rule.points) {
+      auto interface_normal = point.normal;
+      svmp::FE::Real interface_normal_squared = 0.0;
+      for (int component = 0;
+           component < fixture.geometry.dimension;
+           ++component) {
+        interface_normal_squared +=
+            interface_normal[static_cast<std::size_t>(component)] *
+            interface_normal[static_cast<std::size_t>(component)];
+      }
+      if (!(interface_normal_squared > svmp::FE::Real{0.0})) {
+        continue;
+      }
+      const auto interface_normal_norm =
+          std::sqrt(interface_normal_squared);
+      for (int component = 0;
+           component < fixture.geometry.dimension;
+           ++component) {
+        interface_normal[static_cast<std::size_t>(component)] /=
+            interface_normal_norm;
+        if (fixture.positive_liquid) {
+          interface_normal[static_cast<std::size_t>(component)] *=
+              svmp::FE::Real{-1.0};
+        }
+      }
+      svmp::FE::Real normal_dot = 0.0;
+      for (int component = 0;
+           component < fixture.geometry.dimension;
+           ++component) {
+        normal_dot +=
+            interface_normal[static_cast<std::size_t>(component)] *
+            fixture.geometry.wall_normal[static_cast<std::size_t>(component)];
+      }
+      const auto through_liquid_angle = std::acos(
+          std::clamp(-normal_dot,
+                     svmp::FE::Real{-1.0},
+                     svmp::FE::Real{1.0}));
+      const auto weight = std::max(
+          point.physical_weight,
+          std::numeric_limits<svmp::FE::Real>::epsilon());
+      weighted_angle += weight * through_liquid_angle;
+      angle_weight += weight;
+    }
+  }
+  constexpr svmp::FE::Real radians_to_degrees =
+      svmp::FE::Real{180.0} /
+      svmp::FE::Real{3.141592653589793238462643383279502884};
+  if (angle_weight > 0.0) {
+    result.contact_angle_degrees =
+        weighted_angle / angle_weight * radians_to_degrees;
+  }
+
+  if (fixture.sessile) {
+    const std::array<svmp::FE::Real, 3> inward{{
+        -fixture.geometry.wall_normal[0],
+        -fixture.geometry.wall_normal[1],
+        -fixture.geometry.wall_normal[2]}};
+    for (const auto& point : interface_points) {
+      svmp::FE::Real height = 0.0;
+      for (int component = 0;
+           component < fixture.geometry.dimension;
+           ++component) {
+        height +=
+            (point[static_cast<std::size_t>(component)] -
+             fixture.geometry.wall_origin[static_cast<std::size_t>(component)]) *
+            inward[static_cast<std::size_t>(component)];
+      }
+      result.apex_height = std::max(result.apex_height, height);
+    }
+    for (std::size_t first = 0u;
+         first < contact_points.size(); ++first) {
+      for (std::size_t second = first + 1u;
+           second < contact_points.size(); ++second) {
+        svmp::FE::Real distance_squared = 0.0;
+        svmp::FE::Real normal_distance = 0.0;
+        for (int component = 0;
+             component < fixture.geometry.dimension;
+             ++component) {
+          const auto delta =
+              contact_points[first][static_cast<std::size_t>(component)] -
+              contact_points[second][static_cast<std::size_t>(component)];
+          distance_squared += delta * delta;
+          normal_distance +=
+              delta * inward[static_cast<std::size_t>(component)];
+        }
+        result.base_radius = std::max(
+            result.base_radius,
+            svmp::FE::Real{0.5} * std::sqrt(std::max(
+                svmp::FE::Real{0.0},
+                distance_squared - normal_distance * normal_distance)));
+      }
+    }
+  } else {
+    for (std::size_t first = 0u;
+         first < interface_points.size(); ++first) {
+      for (std::size_t second = first + 1u;
+           second < interface_points.size(); ++second) {
+        svmp::FE::Real distance_squared = 0.0;
+        for (int component = 0;
+             component < fixture.geometry.dimension;
+             ++component) {
+          const auto delta =
+              interface_points[first][static_cast<std::size_t>(component)] -
+              interface_points[second][static_cast<std::size_t>(component)];
+          distance_squared += delta * delta;
+        }
+        result.base_radius = std::max(
+            result.base_radius,
+            svmp::FE::Real{0.5} * std::sqrt(distance_squared));
+      }
+    }
+    result.apex_height = result.base_radius;
+  }
+  return result;
+}
+
+void recordWorkflowBalancedCapillaryObservables(
+    std::string_view prefix,
+    std::string_view initialization,
+    const WorkflowBalancedCapillaryObservables& value)
+{
+  const std::string key(prefix);
+  ::testing::Test::RecordProperty(
+      key + "initialization", std::string(initialization));
+  ::testing::Test::RecordProperty(
+      key + "pressure_jump_p_liquid_minus_p_external",
+      value.pressure_jump);
+  ::testing::Test::RecordProperty(
+      key + "pressure_space_relative_distance", value.pressure_distance);
+  ::testing::Test::RecordProperty(
+      key + "force_residual", value.force_residual);
+  ::testing::Test::RecordProperty(
+      key + "production_residual", value.production_residual);
+  ::testing::Test::RecordProperty(
+      key + "parasitic_capillary_number",
+      value.parasitic_capillary_number);
+  ::testing::Test::RecordProperty(
+      key + "kinetic_energy", value.kinetic_energy);
+  ::testing::Test::RecordProperty(key + "volume", value.volume);
+  ::testing::Test::RecordProperty(
+      key + "base_radius", value.base_radius);
+  ::testing::Test::RecordProperty(
+      key + "apex_height", value.apex_height);
+  ::testing::Test::RecordProperty(
+      key + "measured_contact_angle_degrees",
+      value.contact_angle_degrees);
+  ::testing::Test::RecordProperty(
+      key + "requested_interface_order", value.requested_interface_order);
+  ::testing::Test::RecordProperty(
+      key + "achieved_interface_order", value.achieved_interface_order);
+}
 
 struct NativeManufacturedChannelSample {
   svmp::FE::Real target_wet_fraction{0.0};
@@ -7246,6 +8453,1243 @@ TEST(ApplicationDriverLevelSetWorkflows,
   RecordProperty(
       "wp4_area_gradient_static_constant_pressure_kkt_relative_distance",
       certificate.constant_pressure_kkt_relative_distance);
+#endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     MinimizedCircleSphereAndSessileCapsMeetProductionCertificates)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  WorkflowScopedEnvVar conservative_balance_diagnostic(
+      "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
+      std::string("1"));
+  struct Case {
+    int dimension;
+    bool sessile;
+    bool positive_liquid;
+    const char* label;
+  };
+  constexpr std::array<Case, 4> cases{{
+      {2, false, false, "circle"},
+      {2, true, true, "sessile_circle"},
+      {3, false, true, "sphere"},
+      {3, true, false, "sessile_sphere"},
+  }};
+
+  auto fully_anchored = makeWorkflowBalancedCapillaryFixture(
+      /*dimension=*/2,
+      /*sessile=*/false,
+      /*positive_liquid=*/false,
+      svmp::FE::Real{90.0},
+      /*anchor_entire_exterior=*/true);
+  const auto fully_anchored_derivatives =
+      evaluateWorkflowBalancedCapillaryDerivatives(*fully_anchored);
+  fully_anchored->simulation.fe_system->setPrescribedFieldCoefficients(
+      fully_anchored->curvature_field,
+      fully_anchored_derivatives.curvature_coefficients);
+  const auto fully_anchored_certificate =
+      evaluateStaticCapillaryPressureCertificate(
+          fully_anchored->simulation,
+          gatherFeOrderedSolution(
+              fully_anchored->simulation.time_history->u()),
+          fully_anchored->requests.front().static_capillary_equilibrium,
+          /*initialize_compatible_pressure=*/false);
+  EXPECT_LE(
+      fully_anchored_certificate.report.constant_pressure_kkt_direction_norm,
+      1.0e-12);
+  RecordProperty(
+      "wp4_curved_full_shell_negative_control_kkt_available",
+      fully_anchored_certificate.report.constant_pressure_kkt_available
+          ? 1
+          : 0);
+  RecordProperty(
+      "wp4_curved_full_shell_negative_control_pressure_direction_norm",
+      fully_anchored_certificate.report.constant_pressure_kkt_direction_norm);
+
+  svmp::FE::Real maximum_projected_gradient = 0.0;
+  svmp::FE::Real maximum_volume_error = 0.0;
+  svmp::FE::Real maximum_pressure_distance = 0.0;
+  svmp::FE::Real maximum_conservative_balance = 0.0;
+  svmp::FE::Real maximum_production_residual = 0.0;
+  double total_runtime_seconds = 0.0;
+  for (const auto& current_case : cases) {
+    SCOPED_TRACE(::testing::Message()
+                 << "case=" << current_case.label
+                 << " positive_liquid=" << current_case.positive_liquid);
+    auto fixture = makeWorkflowBalancedCapillaryFixture(
+        current_case.dimension,
+        current_case.sessile,
+        current_case.positive_liquid,
+        svmp::FE::Real{90.0});
+    const auto declarations = fixture->simulation.fe_system
+                                  ->freeSurfaceDiscreteFunctionalDeclarations();
+    ASSERT_EQ(declarations.size(), 1u);
+    EXPECT_EQ(
+        declarations.front().capillary_balance_method,
+        svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
+            KinematicAreaGradientEnergyTraction);
+    EXPECT_EQ(
+        fixture->requests.front()
+            .curvature_projection
+            .kinematic_area_gradient_filter_coefficient,
+        svmp::FE::Real{0.0});
+    ASSERT_TRUE(fixture->requests.front().volume_cut_request.has_value());
+    EXPECT_GE(
+        requestedTotalEnergyTractionInterfaceQuadratureOrder(
+            *fixture->requests.front().volume_cut_request),
+        2);
+
+    const auto started = std::chrono::steady_clock::now();
+    bool initialized = false;
+    ASSERT_NO_THROW(
+        initialized = initializeDiscreteStaticCapillaryEquilibrium(
+            fixture->simulation,
+            *fixture->parameters,
+            fixture->requests,
+            fixture->lifecycle,
+            fixture->refresh_cache));
+    const auto elapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - started);
+    total_runtime_seconds += elapsed.count();
+    ASSERT_TRUE(initialized);
+    ASSERT_TRUE(
+        fixture->requests.front().static_capillary_equilibrium_initialized);
+
+    const std::vector<svmp::FE::Real> accepted_curvature(
+        fixture->simulation.fe_system
+            ->prescribedFieldCoefficients(fixture->curvature_field)
+            .begin(),
+        fixture->simulation.fe_system
+            ->prescribedFieldCoefficients(fixture->curvature_field)
+            .end());
+    const auto derivatives =
+        evaluateWorkflowBalancedCapillaryDerivatives(*fixture);
+    ASSERT_EQ(accepted_curvature.size(),
+              derivatives.curvature_coefficients.size());
+    for (std::size_t index = 0u;
+         index < accepted_curvature.size();
+         ++index) {
+      const auto scale = std::max(
+          {svmp::FE::Real{1.0},
+           std::abs(accepted_curvature[index]),
+           std::abs(derivatives.curvature_coefficients[index])});
+      EXPECT_NEAR(accepted_curvature[index],
+                  derivatives.curvature_coefficients[index],
+                  svmp::FE::Real{1.0e-12} * scale);
+    }
+    EXPECT_LE(derivatives.projected_gradient_norm,
+              svmp::FE::Real{1.0e-8});
+    const auto certified_solution =
+        gatherFeOrderedSolution(fixture->simulation.time_history->u());
+    const auto pressure_certificate =
+        evaluateStaticCapillaryPressureCertificate(
+            fixture->simulation,
+            certified_solution,
+            fixture->requests.front().static_capillary_equilibrium,
+            /*initialize_compatible_pressure=*/false);
+    const auto& certificate = pressure_certificate.report;
+    ASSERT_TRUE(certificate.pressure_representability_diagnostic_sampled);
+    ASSERT_TRUE(certificate.pressure_representability_available)
+        << certificate.pressure_representability_reason;
+    EXPECT_TRUE(certificate.pressure_representability_converged);
+    EXPECT_FALSE(certificate.pressure_representability_breakdown);
+    ASSERT_TRUE(certificate.constant_pressure_kkt_available)
+        << certificate.constant_pressure_kkt_reason;
+    EXPECT_TRUE(
+        certificate.constant_pressure_unit_coefficients_represent_constant);
+    EXPECT_TRUE(certificate.constant_pressure_constraints_preserve_constants);
+    EXPECT_GT(certificate.constant_pressure_kkt_direction_norm, 1.0e-10);
+    EXPECT_LE(certificate.pressure_representability_relative_distance,
+              1.0e-8);
+    EXPECT_LE(certificate.constant_pressure_kkt_residual_norm, 1.0e-8);
+    EXPECT_LE(certificate.residual_norm, 1.0e-8);
+
+    auto functionals =
+        evaluateCurrentFreeSurfaceDiscreteFunctionals(fixture->simulation);
+    ASSERT_EQ(functionals.size(), 1u);
+    attachAcceptedFreeSurfaceActiveVolumeEnergies(
+        fixture->simulation, certified_solution, functionals);
+    ASSERT_TRUE(functionals.front().active_volume_energy.has_value());
+    const auto volume_error = std::abs(
+        functionals.front().state.owned_liquid_volume -
+        fixture->requests.front()
+            .static_capillary_equilibrium
+            .target_liquid_volume);
+    EXPECT_LE(volume_error, svmp::FE::Real{1.0e-8});
+    EXPECT_LE(functionals.front().active_volume_energy->kinetic_energy,
+              svmp::FE::Real{1.0e-14});
+
+    const auto* context =
+        fixture->simulation.fe_system->cutIntegrationContext();
+    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(context->hasFreeSurfaceGeometrySnapshotForMarker(
+        fixture->interface_marker));
+    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto snapshot = std::find_if(
+        snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
+          return candidate != nullptr &&
+                 candidate->revision().interface_marker ==
+                     fixture->interface_marker;
+        });
+    ASSERT_NE(snapshot, snapshots.end());
+    EXPECT_GE((*snapshot)
+                  ->interfaceDomain()
+                  .request()
+                  .achieved_interface_quadrature_order,
+              2);
+
+    const std::string prefix =
+        std::string("wp4_minimized_") + current_case.label + "_";
+    const auto observables =
+        evaluateWorkflowBalancedCapillaryObservables(*fixture);
+    EXPECT_TRUE(observables.pressure_available);
+    EXPECT_TRUE(observables.constant_pressure_available);
+    EXPECT_GE(observables.requested_interface_order, 2);
+    EXPECT_GE(observables.achieved_interface_order, 2);
+    RecordProperty(prefix + "initialization", "minimized");
+    RecordProperty(prefix + "spatial_dimension", current_case.dimension);
+    RecordProperty(prefix + "positive_liquid",
+                   current_case.positive_liquid ? 1 : 0);
+    RecordProperty(prefix + "pressure_jump_p_liquid_minus_p_external",
+                   certificate.constant_pressure_kkt_pressure_jump);
+    RecordProperty(prefix + "pressure_space_relative_distance",
+                   certificate.pressure_representability_relative_distance);
+    RecordProperty(prefix + "pressure_representability_available",
+                   certificate.pressure_representability_available ? 1 : 0);
+    RecordProperty(prefix + "pressure_representability_converged",
+                   certificate.pressure_representability_converged ? 1 : 0);
+    RecordProperty(prefix + "pressure_representability_breakdown",
+                   certificate.pressure_representability_breakdown ? 1 : 0);
+    RecordProperty(prefix + "force_residual",
+                   certificate.constant_pressure_kkt_residual_norm);
+    RecordProperty(prefix + "constant_pressure_kkt_available",
+                   certificate.constant_pressure_kkt_available ? 1 : 0);
+    RecordProperty(
+        prefix + "constant_pressure_unit_coefficients_represent_constant",
+        certificate.constant_pressure_unit_coefficients_represent_constant
+            ? 1
+            : 0);
+    RecordProperty(
+        prefix + "constant_pressure_constraints_preserve_constants",
+        certificate.constant_pressure_constraints_preserve_constants ? 1
+                                                                     : 0);
+    RecordProperty(prefix + "production_residual",
+                   certificate.residual_norm);
+    RecordProperty(prefix + "parasitic_capillary_number", 0.0);
+    RecordProperty(prefix + "kinetic_energy",
+                   functionals.front().active_volume_energy->kinetic_energy);
+    RecordProperty(prefix + "volume",
+                   functionals.front().state.owned_liquid_volume);
+    RecordProperty(prefix + "base_radius", observables.base_radius);
+    RecordProperty(prefix + "apex_height", observables.apex_height);
+    RecordProperty(prefix + "measured_contact_angle_degrees",
+                   observables.contact_angle_degrees);
+    RecordProperty(prefix + "projected_gradient_norm",
+                   derivatives.projected_gradient_norm);
+    RecordProperty(prefix + "runtime_seconds", elapsed.count());
+
+    maximum_projected_gradient = std::max(
+        maximum_projected_gradient, derivatives.projected_gradient_norm);
+    maximum_volume_error = std::max(maximum_volume_error, volume_error);
+    maximum_pressure_distance = std::max(
+        maximum_pressure_distance,
+        static_cast<svmp::FE::Real>(
+            certificate.pressure_representability_relative_distance));
+    maximum_conservative_balance = std::max(
+        maximum_conservative_balance,
+        static_cast<svmp::FE::Real>(
+            certificate.constant_pressure_kkt_residual_norm));
+    maximum_production_residual = std::max(
+        maximum_production_residual,
+        static_cast<svmp::FE::Real>(certificate.residual_norm));
+  }
+  EXPECT_EQ(cases.size(), 4u);
+  RecordProperty("wp4_minimized_curved_case_count", cases.size());
+  RecordProperty("wp4_minimized_curved_maximum_projected_gradient",
+                 maximum_projected_gradient);
+  RecordProperty("wp4_minimized_curved_maximum_volume_error",
+                 maximum_volume_error);
+  RecordProperty("wp4_minimized_curved_maximum_pressure_distance",
+                 maximum_pressure_distance);
+  RecordProperty("wp4_minimized_curved_maximum_conservative_balance",
+                 maximum_conservative_balance);
+  RecordProperty("wp4_minimized_curved_maximum_production_residual",
+                 maximum_production_residual);
+  RecordProperty("wp4_minimized_curved_runtime_seconds",
+                 total_runtime_seconds);
+#endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     SampledCircleSphereAndSessileControlsConvergeWithGci)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  WorkflowScopedEnvVar conservative_balance_diagnostic(
+      "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
+      std::string("1"));
+  constexpr svmp::FE::Real pi =
+      svmp::FE::Real{3.141592653589793238462643383279502884};
+  constexpr svmp::FE::Real radius = 0.55;
+  struct Case {
+    int dimension;
+    bool sessile;
+    bool positive_liquid;
+    const char* label;
+  };
+  constexpr std::array<Case, 4> cases{{
+      {2, false, true, "circle"},
+      {2, true, false, "sessile_circle"},
+      {3, false, false, "sphere"},
+      {3, true, true, "sessile_sphere"},
+  }};
+  constexpr std::array<int, 3> resolutions{{1, 2, 4}};
+
+  for (const auto& current_case : cases) {
+    SCOPED_TRACE(::testing::Message() << "case=" << current_case.label);
+    std::array<svmp::FE::Real, 3> errors{};
+    for (std::size_t level = 0u; level < resolutions.size(); ++level) {
+      auto fixture = makeWorkflowBalancedCapillaryFixture(
+          current_case.dimension,
+          current_case.sessile,
+          current_case.positive_liquid,
+          svmp::FE::Real{90.0},
+          /*anchor_entire_exterior=*/false,
+          resolutions[level]);
+      ASSERT_NO_THROW(setWorkflowSampledCapillaryState(*fixture, radius));
+      const auto observables =
+          evaluateWorkflowBalancedCapillaryObservables(*fixture);
+      EXPECT_TRUE(observables.pressure_available);
+      EXPECT_TRUE(observables.constant_pressure_available);
+      EXPECT_GE(observables.requested_interface_order, 2);
+      EXPECT_GE(observables.achieved_interface_order, 2);
+      EXPECT_TRUE(std::isfinite(observables.pressure_jump));
+      EXPECT_TRUE(std::isfinite(observables.pressure_distance));
+      EXPECT_TRUE(std::isfinite(observables.force_residual));
+      EXPECT_TRUE(std::isfinite(observables.production_residual));
+
+      svmp::FE::Real analytic_volume = 0.0;
+      svmp::FE::Real analytic_interface_measure = 0.0;
+      if (current_case.dimension == 2) {
+        analytic_volume = pi * radius * radius;
+        analytic_interface_measure =
+            svmp::FE::Real{2.0} * pi * radius;
+      } else {
+        analytic_volume = svmp::FE::Real{4.0} * pi * radius * radius *
+                          radius / svmp::FE::Real{3.0};
+        analytic_interface_measure =
+            svmp::FE::Real{4.0} * pi * radius * radius;
+      }
+      if (current_case.sessile) {
+        analytic_volume *= svmp::FE::Real{0.5};
+        analytic_interface_measure *= svmp::FE::Real{0.5};
+      }
+      const auto analytic_interface_energy =
+          fixture->surface_tension * analytic_interface_measure;
+      const auto volume_error =
+          std::abs(observables.volume - analytic_volume) / analytic_volume;
+      const auto interface_error =
+          std::abs(observables.interface_energy -
+                   analytic_interface_energy) /
+          analytic_interface_energy;
+      errors[level] = std::hypot(volume_error, interface_error);
+      const std::string prefix =
+          std::string("wp4_sampled_") + current_case.label + "_r" +
+          std::to_string(resolutions[level]) + "_";
+      recordWorkflowBalancedCapillaryObservables(
+          prefix, "sampled", observables);
+      RecordProperty(prefix + "relative_volume_error", volume_error);
+      RecordProperty(prefix + "relative_interface_error", interface_error);
+      RecordProperty(prefix + "combined_analytic_error", errors[level]);
+    }
+    EXPECT_GT(errors[0], errors[1]);
+    EXPECT_GT(errors[1], errors[2]);
+    const auto first_order =
+        std::log(errors[0] / errors[1]) / std::log(svmp::FE::Real{2.0});
+    const auto second_order =
+        std::log(errors[1] / errors[2]) / std::log(svmp::FE::Real{2.0});
+    const auto observed_order = std::min(first_order, second_order);
+    const auto gci = svmp::FE::Real{1.25} * errors[2] /
+                     (std::pow(svmp::FE::Real{2.0}, observed_order) -
+                      svmp::FE::Real{1.0});
+    EXPECT_GT(observed_order, svmp::FE::Real{0.0});
+    EXPECT_TRUE(std::isfinite(gci));
+    EXPECT_GT(gci, svmp::FE::Real{0.0});
+    const std::string prefix =
+        std::string("wp4_sampled_") + current_case.label + "_";
+    RecordProperty(prefix + "observed_order", observed_order);
+    RecordProperty(prefix + "fine_grid_gci", gci);
+  }
+#endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     SampledSessileFiveAngleTransformMatrixReportsPhysicalObservables)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  WorkflowScopedEnvVar conservative_balance_diagnostic(
+      "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
+      std::string("1"));
+  constexpr svmp::FE::Real pi =
+      svmp::FE::Real{3.141592653589793238462643383279502884};
+  constexpr svmp::FE::Real radius = 0.48;
+  struct Case {
+    int angle_degrees;
+    int dimension;
+    bool positive_liquid;
+    int resolution;
+    svmp::FE::Real rotation_radians;
+    std::array<svmp::FE::Real, 3> world_translation;
+    svmp::FE::Real first_tangent_offset;
+    svmp::FE::Real second_tangent_offset;
+  };
+  const std::array<Case, 5> cases{{
+      {30, 2, false, 4, 0.0, {{0.13, -0.08, 0.0}}, 0.041, 0.0},
+      {60, 3, true, 3, pi / 2.0, {{-0.09, 0.07, 0.11}}, -0.037, 0.029},
+      {90, 2, true, 4, pi / 2.0, {{0.05, -0.12, 0.0}}, 0.083, 0.0},
+      {120, 3, false, 3, 0.0, {{0.08, -0.04, 0.06}}, 0.052, -0.031},
+      {150, 2, false, 4, 0.0, {{-0.11, 0.09, 0.0}}, -0.067, 0.0},
+  }};
+
+  std::size_t positive_count = 0u;
+  std::size_t rotated_count = 0u;
+  std::size_t two_dimensional_count = 0u;
+  std::size_t three_dimensional_count = 0u;
+  for (const auto& current_case : cases) {
+    SCOPED_TRACE(::testing::Message()
+                 << "angle=" << current_case.angle_degrees
+                 << " dimension=" << current_case.dimension);
+    auto fixture = makeWorkflowBalancedCapillaryFixture(
+        current_case.dimension,
+        /*sessile=*/true,
+        current_case.positive_liquid,
+        static_cast<svmp::FE::Real>(current_case.angle_degrees),
+        /*anchor_entire_exterior=*/false,
+        current_case.resolution,
+        current_case.rotation_radians,
+        current_case.world_translation);
+    ASSERT_NO_THROW(setWorkflowSampledCapillaryState(
+        *fixture,
+        radius,
+        current_case.first_tangent_offset,
+        current_case.second_tangent_offset));
+    const auto cut_semantics =
+        workflowBalancedCapillaryCutSemantics(*fixture);
+    EXPECT_FALSE(cut_semantics.source_topology_keys.empty());
+    EXPECT_FALSE(cut_semantics.negative_volume_fractions.empty());
+    if (current_case.angle_degrees == 90) {
+      auto centered = makeWorkflowBalancedCapillaryFixture(
+          current_case.dimension,
+          /*sessile=*/true,
+          current_case.positive_liquid,
+          static_cast<svmp::FE::Real>(current_case.angle_degrees),
+          /*anchor_entire_exterior=*/false,
+          current_case.resolution,
+          current_case.rotation_radians,
+          current_case.world_translation);
+      ASSERT_NO_THROW(setWorkflowSampledCapillaryState(
+          *centered, radius, /*first_tangent_offset=*/0.0,
+          /*second_tangent_offset=*/0.0));
+      const auto centered_semantics =
+          workflowBalancedCapillaryCutSemantics(*centered);
+      EXPECT_TRUE(
+          cut_semantics.source_topology_keys !=
+              centered_semantics.source_topology_keys ||
+          cut_semantics.negative_volume_fractions !=
+              centered_semantics.negative_volume_fractions)
+          << "a relative cap offset must change cut fractions or topology";
+      RecordProperty(
+          "wp4_sampled_relative_offset_centered_topology_digest",
+          std::to_string(centered_semantics.source_topology_digest));
+      RecordProperty(
+          "wp4_sampled_relative_offset_shifted_topology_digest",
+          std::to_string(cut_semantics.source_topology_digest));
+      RecordProperty(
+          "wp4_sampled_relative_offset_centered_fraction_digest",
+          std::to_string(centered_semantics.volume_fraction_digest));
+      RecordProperty(
+          "wp4_sampled_relative_offset_shifted_fraction_digest",
+          std::to_string(cut_semantics.volume_fraction_digest));
+      RecordProperty(
+          "wp4_sampled_relative_offset_centered_semantics_digest",
+          std::to_string(centered_semantics.combined_semantics_digest));
+      RecordProperty(
+          "wp4_sampled_relative_offset_shifted_semantics_digest",
+          std::to_string(cut_semantics.combined_semantics_digest));
+    }
+    const auto observables =
+        evaluateWorkflowBalancedCapillaryObservables(*fixture);
+    EXPECT_TRUE(observables.pressure_available);
+    EXPECT_TRUE(observables.constant_pressure_available);
+    EXPECT_GE(observables.requested_interface_order, 2);
+    EXPECT_GE(observables.achieved_interface_order, 2);
+    EXPECT_TRUE(std::isfinite(observables.pressure_jump));
+    EXPECT_TRUE(std::isfinite(observables.pressure_distance));
+    EXPECT_TRUE(std::isfinite(observables.force_residual));
+    EXPECT_TRUE(std::isfinite(observables.production_residual));
+    EXPECT_GT(observables.volume, svmp::FE::Real{0.0});
+    EXPECT_GT(observables.base_radius, svmp::FE::Real{0.0});
+    EXPECT_GT(observables.apex_height, svmp::FE::Real{0.0});
+    EXPECT_GT(observables.contact_angle_degrees, svmp::FE::Real{0.0});
+    EXPECT_LT(observables.contact_angle_degrees, svmp::FE::Real{180.0});
+
+    const std::string prefix =
+        "wp4_sampled_angle_" +
+        std::to_string(current_case.angle_degrees) + "_";
+    recordWorkflowBalancedCapillaryObservables(
+        prefix, "sampled", observables);
+    RecordProperty(prefix + "spatial_dimension", current_case.dimension);
+    RecordProperty(prefix + "positive_liquid",
+                   current_case.positive_liquid ? 1 : 0);
+    RecordProperty(prefix + "world_translation_x",
+                   current_case.world_translation[0]);
+    RecordProperty(prefix + "world_translation_y",
+                   current_case.world_translation[1]);
+    RecordProperty(prefix + "world_translation_z",
+                   current_case.world_translation[2]);
+    RecordProperty(prefix + "wall_rotation_radians",
+                   current_case.rotation_radians);
+    RecordProperty(prefix + "relative_first_tangent_offset",
+                   current_case.first_tangent_offset);
+    RecordProperty(prefix + "relative_second_tangent_offset",
+                   current_case.second_tangent_offset);
+    RecordProperty(prefix + "source_topology_digest",
+                   std::to_string(cut_semantics.source_topology_digest));
+    RecordProperty(prefix + "volume_fraction_digest",
+                   std::to_string(cut_semantics.volume_fraction_digest));
+    RecordProperty(prefix + "combined_semantics_digest",
+                   std::to_string(cut_semantics.combined_semantics_digest));
+    positive_count += current_case.positive_liquid ? 1u : 0u;
+    rotated_count += current_case.rotation_radians != 0.0 ? 1u : 0u;
+    two_dimensional_count += current_case.dimension == 2 ? 1u : 0u;
+    three_dimensional_count += current_case.dimension == 3 ? 1u : 0u;
+  }
+  EXPECT_EQ(cases.size(), 5u);
+  EXPECT_GT(positive_count, 0u);
+  EXPECT_LT(positive_count, cases.size());
+  EXPECT_GT(rotated_count, 0u);
+  EXPECT_GT(two_dimensional_count, 0u);
+  EXPECT_GT(three_dimensional_count, 0u);
+
+  const auto& phase_reference = cases[1];
+  auto opposite_phase = makeWorkflowBalancedCapillaryFixture(
+      phase_reference.dimension,
+      /*sessile=*/true,
+      /*positive_liquid=*/false,
+      static_cast<svmp::FE::Real>(phase_reference.angle_degrees),
+      /*anchor_entire_exterior=*/false,
+      phase_reference.resolution,
+      phase_reference.rotation_radians,
+      phase_reference.world_translation);
+  ASSERT_NO_THROW(setWorkflowSampledCapillaryState(
+      *opposite_phase,
+      radius,
+      phase_reference.first_tangent_offset,
+      phase_reference.second_tangent_offset));
+  const auto opposite_phase_observables =
+      evaluateWorkflowBalancedCapillaryObservables(*opposite_phase);
+  auto reference_phase = makeWorkflowBalancedCapillaryFixture(
+      phase_reference.dimension,
+      /*sessile=*/true,
+      /*positive_liquid=*/true,
+      static_cast<svmp::FE::Real>(phase_reference.angle_degrees),
+      /*anchor_entire_exterior=*/false,
+      phase_reference.resolution,
+      phase_reference.rotation_radians,
+      phase_reference.world_translation);
+  ASSERT_NO_THROW(setWorkflowSampledCapillaryState(
+      *reference_phase,
+      radius,
+      phase_reference.first_tangent_offset,
+      phase_reference.second_tangent_offset));
+  const auto reference_phase_observables =
+      evaluateWorkflowBalancedCapillaryObservables(*reference_phase);
+  EXPECT_NEAR(opposite_phase_observables.contact_angle_degrees,
+              reference_phase_observables.contact_angle_degrees,
+              svmp::FE::Real{1.0e-10});
+  RecordProperty("wp4_sampled_five_angle_case_count", cases.size());
+  RecordProperty("wp4_sampled_five_angle_positive_liquid_count",
+                 positive_count);
+  RecordProperty("wp4_sampled_five_angle_rotated_wall_count",
+                 rotated_count);
+  RecordProperty("wp4_sampled_five_angle_relative_offset_count",
+                 cases.size());
+  RecordProperty("wp4_sampled_phase_equivalent_angle_negative_degrees",
+                 opposite_phase_observables.contact_angle_degrees);
+  RecordProperty("wp4_sampled_phase_equivalent_angle_positive_degrees",
+                 reference_phase_observables.contact_angle_degrees);
+  RecordProperty("wp4_sampled_five_angle_wall_radial_refined", 0);
+  RecordProperty("wp4_sampled_five_angle_is_angle_qualification", 0);
+#endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     MinimizedCapillaryStateHasVolumeOrthogonalRestoringResponse)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  WorkflowScopedEnvVar conservative_balance_diagnostic(
+      "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
+      std::string("1"));
+  auto fixture = makeWorkflowBalancedCapillaryFixture(
+      /*dimension=*/2,
+      /*sessile=*/false,
+      /*positive_liquid=*/false,
+      svmp::FE::Real{90.0});
+  bool initialized = false;
+  ASSERT_NO_THROW(
+      initialized = initializeDiscreteStaticCapillaryEquilibrium(
+          fixture->simulation,
+          *fixture->parameters,
+          fixture->requests,
+          fixture->lifecycle,
+          fixture->refresh_cache));
+  ASSERT_TRUE(initialized);
+  ASSERT_TRUE(
+      fixture->requests.front().static_capillary_equilibrium_initialized);
+
+  const auto base_solution =
+      gatherFeOrderedSolution(fixture->simulation.time_history->u());
+  const auto phi_offset = static_cast<std::size_t>(
+      fixture->simulation.fe_system->fieldDofOffset(
+          fixture->level_set_field));
+  const auto phi_count = static_cast<std::size_t>(
+      fixture->simulation.fe_system
+          ->fieldDofHandler(fixture->level_set_field)
+          .getNumDofs());
+  std::vector<svmp::FE::Real> base_phi(
+      base_solution.begin() + static_cast<std::ptrdiff_t>(phi_offset),
+      base_solution.begin() +
+          static_cast<std::ptrdiff_t>(phi_offset + phi_count));
+  const auto base_derivatives =
+      evaluateWorkflowBalancedCapillaryDerivatives(*fixture);
+  const auto& volume_derivative =
+      base_derivatives.projection
+          .kinematic_area_gradient_liquid_volume_derivative;
+  ASSERT_EQ(volume_derivative.size(), phi_count);
+
+  std::vector<svmp::FE::Real> raw_vertex_direction(
+      fixture->geometry.mesh->n_vertices(), svmp::FE::Real{0.0});
+  for (std::size_t vertex = 0u;
+       vertex < fixture->geometry.mesh->n_vertices();
+       ++vertex) {
+    const auto point = workflowVertexPoint(*fixture->geometry.mesh, vertex);
+    const auto radius_squared =
+        point[0] * point[0] + point[1] * point[1];
+    if (radius_squared > svmp::FE::Real{0.25}) {
+      raw_vertex_direction[vertex] =
+          (point[0] * point[0] - point[1] * point[1]) /
+          radius_squared;
+    }
+  }
+  auto direction = projectWorkflowVertexValues(
+      *fixture->simulation.fe_system,
+      fixture->level_set_field,
+      raw_vertex_direction,
+      /*components=*/1u,
+      "restoring mode projection");
+  ASSERT_EQ(direction.size(), volume_derivative.size());
+  svmp::FE::Real direction_volume_dot = 0.0;
+  svmp::FE::Real volume_squared = 0.0;
+  for (std::size_t index = 0u; index < direction.size(); ++index) {
+    direction_volume_dot += direction[index] * volume_derivative[index];
+    volume_squared += volume_derivative[index] * volume_derivative[index];
+  }
+  ASSERT_GT(volume_squared, svmp::FE::Real{0.0});
+  for (std::size_t index = 0u; index < direction.size(); ++index) {
+    direction[index] -= direction_volume_dot / volume_squared *
+                        volume_derivative[index];
+  }
+  svmp::FE::Real direction_squared = 0.0;
+  direction_volume_dot = 0.0;
+  for (std::size_t index = 0u; index < direction.size(); ++index) {
+    direction_squared += direction[index] * direction[index];
+    direction_volume_dot += direction[index] * volume_derivative[index];
+  }
+  ASSERT_GT(direction_squared, svmp::FE::Real{0.0});
+  const auto direction_norm = std::sqrt(direction_squared);
+  for (auto& value : direction) {
+    value /= direction_norm;
+  }
+  direction_volume_dot = 0.0;
+  for (std::size_t index = 0u; index < direction.size(); ++index) {
+    direction_volume_dot += direction[index] * volume_derivative[index];
+  }
+  const auto orthogonality_scale = std::max(
+      svmp::FE::Real{1.0}, std::sqrt(volume_squared));
+  EXPECT_NEAR(direction_volume_dot,
+              svmp::FE::Real{0.0},
+              svmp::FE::Real{1.0e-13} * orthogonality_scale);
+
+  struct Evaluation {
+    svmp::FE::Real energy{0.0};
+    svmp::FE::Real volume{0.0};
+    svmp::FE::Real energy_derivative{0.0};
+    svmp::FE::Real volume_derivative{0.0};
+    std::uint64_t topology_key{0u};
+  };
+  const auto evaluate_parameter = [&](svmp::FE::Real parameter) {
+    auto candidate = base_solution;
+    for (std::size_t index = 0u; index < phi_count; ++index) {
+      candidate[phi_offset + index] =
+          base_phi[index] + parameter * direction[index];
+    }
+    scatterFeOrderedSolution(
+        fixture->simulation.time_history->u(), candidate);
+    fixture->simulation.time_history->updateGhosts();
+    fixture->refresh_cache.invalidateGeneratedState();
+    const auto refresh = refreshActiveCutIntegrationContextCached(
+        fixture->simulation,
+        *fixture->parameters,
+        fixture->simulation.time_history->u(),
+        fixture->lifecycle,
+        fixture->refresh_cache,
+        "balanced_restoring_parameter_state");
+    if (!refresh.refreshed || refresh.topology_key == 0u) {
+      throw std::runtime_error(
+          "restoring response did not refresh a topology key");
+    }
+    const auto derivatives =
+        evaluateWorkflowBalancedCapillaryDerivatives(*fixture);
+    fixture->simulation.fe_system->setPrescribedFieldCoefficients(
+        fixture->curvature_field, derivatives.curvature_coefficients);
+    const auto functionals =
+        evaluateCurrentFreeSurfaceDiscreteFunctionals(fixture->simulation);
+    if (functionals.size() != 1u) {
+      throw std::runtime_error(
+          "restoring response found no capillary functional");
+    }
+    svmp::FE::Real directional_derivative = 0.0;
+    svmp::FE::Real directional_volume_derivative = 0.0;
+    const auto& energy_derivative =
+        derivatives.projection
+            .kinematic_area_gradient_total_energy_derivative;
+    const auto& current_volume_derivative =
+        derivatives.projection
+            .kinematic_area_gradient_liquid_volume_derivative;
+    if (energy_derivative.size() != direction.size()) {
+      throw std::runtime_error(
+          "restoring response derivative layout changed");
+    }
+    for (std::size_t index = 0u; index < direction.size(); ++index) {
+      directional_derivative += fixture->surface_tension *
+                                energy_derivative[index] * direction[index];
+      directional_volume_derivative +=
+          current_volume_derivative[index] * direction[index];
+    }
+    return Evaluation{
+        .energy =
+            functionals.front().state.liquid_gas_surface_energy +
+            functionals.front().state.young_wall_energy,
+        .volume = functionals.front().state.owned_liquid_volume,
+        .energy_derivative = directional_derivative,
+        .volume_derivative = directional_volume_derivative,
+        .topology_key = refresh.topology_key,
+    };
+  };
+
+  constexpr svmp::FE::Real epsilon = 1.0e-3;
+  const auto base = evaluate_parameter(0.0);
+  const auto plus = evaluate_parameter(epsilon);
+  const auto minus = evaluate_parameter(-epsilon);
+  EXPECT_EQ(plus.topology_key, base.topology_key);
+  EXPECT_EQ(minus.topology_key, base.topology_key);
+  const auto plus_volume_defect = plus.volume - base.volume;
+  const auto minus_volume_defect = minus.volume - base.volume;
+  const auto volume_defect_scale =
+      epsilon * epsilon *
+      std::max(svmp::FE::Real{1.0}, std::abs(base.volume));
+  EXPECT_LE(std::abs(plus_volume_defect), volume_defect_scale);
+  EXPECT_LE(std::abs(minus_volume_defect), volume_defect_scale);
+  const auto lagrange_multiplier = base_derivatives.volume_multiplier;
+  const auto plus_lagrangian =
+      plus.energy + lagrange_multiplier * plus_volume_defect;
+  const auto minus_lagrangian =
+      minus.energy + lagrange_multiplier * minus_volume_defect;
+  const auto second_lagrangian_difference =
+      plus_lagrangian + minus_lagrangian -
+      svmp::FE::Real{2.0} * base.energy;
+  EXPECT_GT(second_lagrangian_difference, svmp::FE::Real{0.0});
+  const auto plus_lagrangian_derivative =
+      plus.energy_derivative +
+      lagrange_multiplier * plus.volume_derivative;
+  const auto minus_lagrangian_derivative =
+      minus.energy_derivative +
+      lagrange_multiplier * minus.volume_derivative;
+  const auto plus_capillary_work =
+      -epsilon * plus_lagrangian_derivative;
+  const auto minus_capillary_work =
+      epsilon * minus_lagrangian_derivative;
+  EXPECT_LT(plus_capillary_work, svmp::FE::Real{0.0});
+  EXPECT_LT(minus_capillary_work, svmp::FE::Real{0.0});
+
+  struct Trajectory {
+    bool success{false};
+    svmp::FE::Real initial_acceleration{0.0};
+    svmp::FE::Real first_velocity{0.0};
+    svmp::FE::Real final_velocity{0.0};
+    svmp::FE::Real final_parameter{0.0};
+    svmp::FE::Real maximum_physical_velocity{0.0};
+    svmp::FE::Real maximum_pressure_change{0.0};
+    svmp::FE::Real projected_gradient_norm{0.0};
+    WorkflowBalancedCapillaryObservables observables{};
+    int accepted_steps{0};
+    int maximum_newton_iterations{0};
+    int generated_state_synchronizations{0};
+    double final_time{0.0};
+    std::uint64_t initial_topology_key{0u};
+    bool topology_fixed{true};
+  };
+  const auto advance = [&](svmp::FE::Real initial_parameter,
+                           svmp::FE::Real time_step,
+                           int step_count) {
+    auto moving_fixture = makeWorkflowBalancedCapillaryFixture(
+        /*dimension=*/2,
+        /*sessile=*/false,
+        /*positive_liquid=*/false,
+        svmp::FE::Real{90.0},
+        /*anchor_entire_exterior=*/false,
+        /*resolution=*/1,
+        /*rotation_radians=*/0.0,
+        {{0.0, 0.0, 0.0}},
+        /*install_level_set_transport=*/true);
+    if (!moving_fixture->level_set_transport_installed) {
+      throw std::runtime_error(
+          "restoring trajectory omitted production level-set transport");
+    }
+    const bool moving_initialized =
+        initializeDiscreteStaticCapillaryEquilibrium(
+            moving_fixture->simulation,
+            *moving_fixture->parameters,
+            moving_fixture->requests,
+            moving_fixture->lifecycle,
+            moving_fixture->refresh_cache);
+    if (!moving_initialized) {
+      throw std::runtime_error(
+          "restoring trajectory did not initialize its production base");
+    }
+    auto& moving_history = *moving_fixture->simulation.time_history;
+    const auto moving_base = gatherFeOrderedSolution(moving_history.u());
+    const auto moving_phi_offset = static_cast<std::size_t>(
+        moving_fixture->simulation.fe_system->fieldDofOffset(
+            moving_fixture->level_set_field));
+    const auto moving_phi_count = static_cast<std::size_t>(
+        moving_fixture->simulation.fe_system
+            ->fieldDofHandler(moving_fixture->level_set_field)
+            .getNumDofs());
+    if (moving_phi_count != direction.size()) {
+      throw std::runtime_error(
+          "restoring trajectory level-set layout changed");
+    }
+    const auto moving_pressure_offset = static_cast<std::size_t>(
+        moving_fixture->simulation.fe_system->fieldDofOffset(
+            moving_fixture->pressure_field));
+    const auto moving_pressure_count = static_cast<std::size_t>(
+        moving_fixture->simulation.fe_system
+            ->fieldDofHandler(moving_fixture->pressure_field)
+            .getNumDofs());
+    const auto moving_velocity_offset = static_cast<std::size_t>(
+        moving_fixture->simulation.fe_system->fieldDofOffset(
+            moving_fixture->velocity_field));
+    const auto moving_velocity_count = static_cast<std::size_t>(
+        moving_fixture->simulation.fe_system
+            ->fieldDofHandler(moving_fixture->velocity_field)
+            .getNumDofs());
+    auto perturbed = moving_base;
+    for (std::size_t index = 0u; index < moving_phi_count; ++index) {
+      perturbed[moving_phi_offset + index] +=
+          initial_parameter * direction[index];
+    }
+    scatterFeOrderedSolution(moving_history.u(), perturbed);
+    scatterFeOrderedSolution(moving_history.uPrev(), perturbed);
+    scatterFeOrderedSolution(moving_history.uPrev2(), perturbed);
+    moving_history.uDot().zero();
+    moving_history.uDDot().zero();
+    moving_history.setTime(0.0);
+    moving_history.setDt(time_step);
+    moving_history.setPrevDt(time_step);
+    moving_history.setStepIndex(0);
+    moving_history.updateGhosts();
+
+    Trajectory result;
+    const auto modal_parameter = [&](std::span<const svmp::FE::Real> state) {
+      svmp::FE::Real parameter = 0.0;
+      for (std::size_t index = 0u; index < moving_phi_count; ++index) {
+        parameter += direction[index] *
+                     (state[moving_phi_offset + index] -
+                      moving_base[moving_phi_offset + index]);
+      }
+      return parameter;
+    };
+    result.final_parameter = modal_parameter(perturbed);
+    moving_fixture->refresh_cache.invalidateGeneratedState();
+    const auto initial_refresh = refreshActiveCutIntegrationContextCached(
+        moving_fixture->simulation,
+        *moving_fixture->parameters,
+        moving_history.u(),
+        moving_fixture->lifecycle,
+        moving_fixture->refresh_cache,
+        "balanced_restoring_transient_initial");
+    if (!initial_refresh.refreshed || initial_refresh.topology_key == 0u) {
+      throw std::runtime_error(
+          "restoring trajectory did not publish initial geometry");
+    }
+    result.initial_topology_key = initial_refresh.topology_key;
+    CurvatureProjectionCache curvature_cache;
+    (void)projectLevelSetCurvatureFieldsFromState(
+        moving_fixture->simulation,
+        stateViewForHistory(moving_history),
+        initial_refresh.evaluated_state_source_revisions,
+        moving_fixture->requests,
+        moving_history.stepIndex(),
+        "balanced_restoring_transient_initial",
+        /*honor_cadence=*/false,
+        &curvature_cache,
+        /*reuse_cached_on_projection_failure=*/false);
+
+    auto integrator = std::make_shared<
+        svmp::FE::systems::BackwardDifferenceIntegrator>();
+    svmp::FE::systems::TransientSystem transient(
+        *moving_fixture->simulation.fe_system, integrator);
+    svmp::FE::timestepping::TimeLoopOptions options;
+    options.t0 = 0.0;
+    options.t_end = static_cast<double>(step_count) * time_step;
+    options.dt = time_step;
+    options.max_steps = step_count;
+    options.adjust_last_step = false;
+    options.scheme = svmp::FE::timestepping::SchemeKind::BackwardEuler;
+    options.newton.residual_op = "equations";
+    options.newton.jacobian_op = "equations";
+    options.newton.max_iterations = 20;
+    options.newton.abs_tolerance = 1.0e-10;
+    options.newton.rel_tolerance = 1.0e-10;
+    options.newton.step_tolerance = 0.0;
+    options.newton.stagnation_tolerance = 0.0;
+    options.newton.use_line_search = true;
+    options.newton.line_search_max_iterations = 12;
+    options.newton.external_state_fixed_point.enabled = true;
+    options.newton.external_state_fixed_point.max_iterations = 20;
+    options.newton.accepted_state_sync_invalidates_residual = true;
+
+    using SyncPoint = svmp::FE::timestepping::NewtonOptions::
+        StateSynchronizationPoint;
+    options.newton.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView& state,
+            SyncPoint point) {
+          const auto refresh = refreshActiveCutIntegrationContextCached(
+              moving_fixture->simulation,
+              *moving_fixture->parameters,
+              state,
+              moving_fixture->lifecycle,
+              moving_fixture->refresh_cache,
+              stateSyncPointName(point));
+          ++result.generated_state_synchronizations;
+          if (refresh.topology_key != 0u &&
+              refresh.topology_key != result.initial_topology_key) {
+            result.topology_fixed = false;
+          }
+          const bool constraint_construction =
+              point == SyncPoint::OuterFixedPointState ||
+              point == SyncPoint::RestoredOuterFixedPointState ||
+              point == SyncPoint::EndpointCandidateState ||
+              point == SyncPoint::RestoredTimeStepState;
+          if (constraint_construction) {
+            return;
+          }
+          (void)projectLevelSetCurvatureFieldsFromState(
+              moving_fixture->simulation,
+              state,
+              refresh.evaluated_state_source_revisions,
+              moving_fixture->requests,
+              -1,
+              stateSyncPointName(point),
+              /*honor_cadence=*/false,
+              &curvature_cache,
+              /*reuse_cached_on_projection_failure=*/false);
+        };
+
+    svmp::FE::timestepping::TimeLoopCallbacks callbacks;
+    callbacks.on_before_physics_solve =
+        [&](svmp::FE::timestepping::TimeHistory& history,
+            double,
+            double) {
+          const auto refresh = refreshActiveCutIntegrationContextCached(
+              moving_fixture->simulation,
+              *moving_fixture->parameters,
+              history.u(),
+              moving_fixture->lifecycle,
+              moving_fixture->refresh_cache,
+              "balanced_restoring_before_physics_solve");
+          (void)projectLevelSetCurvatureFieldsFromState(
+              moving_fixture->simulation,
+              stateViewForHistory(history),
+              refresh.evaluated_state_source_revisions,
+              moving_fixture->requests,
+              history.stepIndex(),
+              "balanced_restoring_before_physics_solve",
+              /*honor_cadence=*/false,
+              &curvature_cache,
+              /*reuse_cached_on_projection_failure=*/false);
+          return true;
+        };
+    callbacks.on_nonlinear_done =
+        [&](const svmp::FE::timestepping::TimeHistory&,
+            const svmp::FE::timestepping::NewtonReport& report) {
+          result.maximum_newton_iterations = std::max(
+              result.maximum_newton_iterations,
+              report.inner_iterations_total > 0
+                  ? report.inner_iterations_total
+                  : report.iterations);
+        };
+    callbacks.on_step_accepted =
+        [&](svmp::FE::timestepping::TimeHistory& history) {
+          const auto refresh = refreshActiveCutIntegrationContextCached(
+              moving_fixture->simulation,
+              *moving_fixture->parameters,
+              history.u(),
+              moving_fixture->lifecycle,
+              moving_fixture->refresh_cache,
+              "balanced_restoring_accepted");
+          if (refresh.topology_key != result.initial_topology_key) {
+            result.topology_fixed = false;
+          }
+          (void)projectLevelSetCurvatureFieldsFromState(
+              moving_fixture->simulation,
+              stateViewForHistory(history),
+              refresh.evaluated_state_source_revisions,
+              moving_fixture->requests,
+              history.stepIndex(),
+              "balanced_restoring_accepted",
+              /*honor_cadence=*/false,
+              &curvature_cache,
+              /*reuse_cached_on_projection_failure=*/false);
+          const auto accepted = gatherFeOrderedSolution(history.u());
+          const auto parameter = modal_parameter(accepted);
+          const auto previous_parameter = result.final_parameter;
+          result.final_velocity =
+              (parameter - previous_parameter) /
+              static_cast<svmp::FE::Real>(history.dt());
+          if (result.accepted_steps == 0) {
+            result.first_velocity = result.final_velocity;
+            result.initial_acceleration =
+                result.first_velocity /
+                static_cast<svmp::FE::Real>(history.dt());
+          }
+          result.final_parameter = parameter;
+          for (std::size_t index = 0u;
+               index < moving_velocity_count; ++index) {
+            result.maximum_physical_velocity = std::max(
+                result.maximum_physical_velocity,
+                std::abs(accepted[moving_velocity_offset + index]));
+          }
+          for (std::size_t index = 0u;
+               index < moving_pressure_count; ++index) {
+            result.maximum_pressure_change = std::max(
+                result.maximum_pressure_change,
+                std::abs(accepted[moving_pressure_offset + index] -
+                         moving_base[moving_pressure_offset + index]));
+          }
+          ++result.accepted_steps;
+        };
+
+    svmp::FE::timestepping::TimeLoop loop(options);
+    const auto report = loop.run(
+        transient,
+        *moving_fixture->simulation.backend,
+        *moving_fixture->simulation.linear_solver,
+        moving_history,
+        callbacks);
+    result.success = report.success;
+    result.final_time = report.final_time;
+    if (report.steps_taken != result.accepted_steps) {
+      throw std::runtime_error(
+          "restoring trajectory callback count differs from TimeLoop");
+    }
+    if (initial_parameter == svmp::FE::Real{0.0}) {
+      const auto final_derivatives =
+          evaluateWorkflowBalancedCapillaryDerivatives(*moving_fixture);
+      result.projected_gradient_norm =
+          final_derivatives.projected_gradient_norm;
+      result.observables =
+          evaluateWorkflowBalancedCapillaryObservables(*moving_fixture);
+    }
+    return result;
+  };
+  constexpr svmp::FE::Real physical_horizon = 4.0e-3;
+  constexpr std::array<svmp::FE::Real, 2> time_steps{{1.0e-3, 5.0e-4}};
+  constexpr std::array<int, 2> step_counts{{4, 8}};
+  std::array<Trajectory, 2> plus_trajectories;
+  std::array<Trajectory, 2> minus_trajectories;
+  std::array<Trajectory, 2> controls;
+  for (std::size_t level = 0u; level < time_steps.size(); ++level) {
+    EXPECT_NEAR(time_steps[level] * step_counts[level],
+                physical_horizon,
+                svmp::FE::Real{1.0e-16});
+    plus_trajectories[level] =
+        advance(epsilon, time_steps[level], step_counts[level]);
+    minus_trajectories[level] =
+        advance(-epsilon, time_steps[level], step_counts[level]);
+    controls[level] =
+        advance(0.0, time_steps[level], step_counts[level]);
+    EXPECT_TRUE(plus_trajectories[level].success);
+    EXPECT_TRUE(minus_trajectories[level].success);
+    EXPECT_TRUE(controls[level].success);
+    EXPECT_EQ(plus_trajectories[level].accepted_steps,
+              step_counts[level]);
+    EXPECT_EQ(minus_trajectories[level].accepted_steps,
+              step_counts[level]);
+    EXPECT_EQ(controls[level].accepted_steps, step_counts[level]);
+    EXPECT_NEAR(plus_trajectories[level].final_time,
+                physical_horizon,
+                svmp::FE::Real{1.0e-15});
+    EXPECT_NEAR(minus_trajectories[level].final_time,
+                physical_horizon,
+                svmp::FE::Real{1.0e-15});
+    EXPECT_NEAR(controls[level].final_time,
+                physical_horizon,
+                svmp::FE::Real{1.0e-15});
+    EXPECT_TRUE(plus_trajectories[level].topology_fixed);
+    EXPECT_TRUE(minus_trajectories[level].topology_fixed);
+    EXPECT_TRUE(controls[level].topology_fixed);
+    EXPECT_LT(epsilon * plus_trajectories[level].initial_acceleration,
+              svmp::FE::Real{0.0});
+    EXPECT_LT(epsilon * plus_trajectories[level].first_velocity,
+              svmp::FE::Real{0.0});
+    EXPECT_GT(epsilon * minus_trajectories[level].initial_acceleration,
+              svmp::FE::Real{0.0});
+    EXPECT_GT(epsilon * minus_trajectories[level].first_velocity,
+              svmp::FE::Real{0.0});
+    EXPECT_LT(epsilon * plus_trajectories[level].final_velocity,
+              svmp::FE::Real{0.0});
+    EXPECT_GT(epsilon * minus_trajectories[level].final_velocity,
+              svmp::FE::Real{0.0});
+    EXPECT_GT(plus_trajectories[level].maximum_physical_velocity,
+              svmp::FE::Real{0.0});
+    EXPECT_GT(minus_trajectories[level].maximum_physical_velocity,
+              svmp::FE::Real{0.0});
+    EXPECT_GT(plus_trajectories[level].maximum_pressure_change,
+              svmp::FE::Real{0.0});
+    EXPECT_GT(minus_trajectories[level].maximum_pressure_change,
+              svmp::FE::Real{0.0});
+    EXPECT_LE(std::abs(controls[level].final_velocity),
+              svmp::FE::Real{1.0e-10});
+    EXPECT_LE(std::abs(controls[level].final_parameter),
+              svmp::FE::Real{1.0e-10});
+  }
+  EXPECT_LT(
+      std::abs(plus_trajectories[1].final_velocity -
+               plus_trajectories[0].final_velocity),
+      svmp::FE::Real{0.1} *
+          std::abs(plus_trajectories[1].final_velocity));
+  EXPECT_LT(
+      std::abs(minus_trajectories[1].final_velocity -
+               minus_trajectories[0].final_velocity),
+      svmp::FE::Real{0.1} *
+          std::abs(minus_trajectories[1].final_velocity));
+
+  const auto& control_observables = controls[1].observables;
+  EXPECT_LE(controls[1].projected_gradient_norm,
+            svmp::FE::Real{1.0e-8});
+  EXPECT_LE(control_observables.pressure_distance,
+            svmp::FE::Real{1.0e-8});
+  EXPECT_LE(control_observables.force_residual,
+            svmp::FE::Real{1.0e-8});
+  EXPECT_LE(control_observables.production_residual,
+            svmp::FE::Real{1.0e-8});
+  EXPECT_LE(control_observables.parasitic_capillary_number,
+            svmp::FE::Real{1.0e-8});
+  EXPECT_LE(control_observables.kinetic_energy,
+            svmp::FE::Real{1.0e-8});
+
+  RecordProperty("wp4_restoring_direction_volume_dot",
+                 direction_volume_dot);
+  RecordProperty("wp4_restoring_topology_key",
+                 std::to_string(base.topology_key));
+  RecordProperty("wp4_restoring_plus_volume_defect",
+                 plus_volume_defect);
+  RecordProperty("wp4_restoring_minus_volume_defect",
+                 minus_volume_defect);
+  RecordProperty("wp4_restoring_volume_defect_scaled_limit",
+                 volume_defect_scale);
+  RecordProperty("wp4_restoring_volume_lagrange_multiplier",
+                 lagrange_multiplier);
+  RecordProperty("wp4_restoring_second_lagrangian_difference",
+                 second_lagrangian_difference);
+  RecordProperty("wp4_restoring_plus_capillary_work",
+                 plus_capillary_work);
+  RecordProperty("wp4_restoring_minus_capillary_work",
+                 minus_capillary_work);
+  RecordProperty("wp4_restoring_physical_horizon", physical_horizon);
+  RecordProperty("wp4_restoring_coarse_time_step", time_steps[0]);
+  RecordProperty("wp4_restoring_fine_time_step", time_steps[1]);
+  RecordProperty("wp4_restoring_coarse_step_count", step_counts[0]);
+  RecordProperty("wp4_restoring_fine_step_count", step_counts[1]);
+  RecordProperty("wp4_restoring_coarse_plus_final_velocity",
+                 plus_trajectories[0].final_velocity);
+  RecordProperty("wp4_restoring_fine_plus_final_velocity",
+                 plus_trajectories[1].final_velocity);
+  RecordProperty("wp4_restoring_coarse_minus_final_velocity",
+                 minus_trajectories[0].final_velocity);
+  RecordProperty("wp4_restoring_fine_minus_final_velocity",
+                 minus_trajectories[1].final_velocity);
+  for (std::size_t level = 0u; level < time_steps.size(); ++level) {
+    const std::string level_prefix =
+        level == 0u ? "wp4_restoring_coarse_"
+                    : "wp4_restoring_fine_";
+    const auto record_trajectory =
+        [&](std::string_view sign, const Trajectory& trajectory) {
+          const auto prefix = level_prefix + std::string(sign) + "_";
+          RecordProperty(prefix + "time_loop_success",
+                         trajectory.success ? 1 : 0);
+          RecordProperty(prefix + "accepted_step_count",
+                         trajectory.accepted_steps);
+          RecordProperty(prefix + "maximum_newton_iterations",
+                         trajectory.maximum_newton_iterations);
+          RecordProperty(prefix + "initial_acceleration",
+                         trajectory.initial_acceleration);
+          RecordProperty(prefix + "first_velocity",
+                         trajectory.first_velocity);
+          RecordProperty(prefix + "final_velocity",
+                         trajectory.final_velocity);
+          RecordProperty(prefix + "final_parameter",
+                         trajectory.final_parameter);
+          RecordProperty(prefix + "topology_fixed",
+                         trajectory.topology_fixed ? 1 : 0);
+        };
+    record_trajectory("plus", plus_trajectories[level]);
+    record_trajectory("minus", minus_trajectories[level]);
+    record_trajectory("control", controls[level]);
+  }
+  RecordProperty("wp4_restoring_coarse_plus_maximum_physical_velocity",
+                 plus_trajectories[0].maximum_physical_velocity);
+  RecordProperty("wp4_restoring_fine_plus_maximum_physical_velocity",
+                 plus_trajectories[1].maximum_physical_velocity);
+  RecordProperty("wp4_restoring_coarse_minus_maximum_physical_velocity",
+                 minus_trajectories[0].maximum_physical_velocity);
+  RecordProperty("wp4_restoring_fine_minus_maximum_physical_velocity",
+                 minus_trajectories[1].maximum_physical_velocity);
+  RecordProperty("wp4_restoring_coarse_plus_maximum_pressure_change",
+                 plus_trajectories[0].maximum_pressure_change);
+  RecordProperty("wp4_restoring_fine_plus_maximum_pressure_change",
+                 plus_trajectories[1].maximum_pressure_change);
+  RecordProperty("wp4_restoring_coarse_minus_maximum_pressure_change",
+                 minus_trajectories[0].maximum_pressure_change);
+  RecordProperty("wp4_restoring_fine_minus_maximum_pressure_change",
+                 minus_trajectories[1].maximum_pressure_change);
+  RecordProperty("wp4_restoring_coarse_generated_state_syncs",
+                 plus_trajectories[0].generated_state_synchronizations);
+  RecordProperty("wp4_restoring_fine_generated_state_syncs",
+                 plus_trajectories[1].generated_state_synchronizations);
+  RecordProperty("wp4_restoring_production_level_set_transport", 1);
+  RecordProperty("wp4_restoring_production_coupled_momentum_pressure", 1);
+  recordWorkflowBalancedCapillaryObservables(
+      "wp4_restoring_unperturbed_", "minimized", control_observables);
 #endif
 }
 
