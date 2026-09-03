@@ -879,6 +879,14 @@ def configure_solver(solver_xml: Path,
         set_text(free_surface, "Implicit_cut_max_subdivision_depth", str(implicit_cut_max_subdivision_depth))
     if generated_interface_quadrature_order is not None:
         set_text(free_surface, "Generated_interface_quadrature_order", str(generated_interface_quadrature_order))
+    if (capillary_force_form == "kinematic_area_gradient_traction" and
+            surface_tension is not None and surface_tension > 0.0):
+        if interface_quadrature_order is None:
+            interface_quadrature_order = 2
+        elif interface_quadrature_order < 2:
+            raise ValueError(
+                "kinematic area-gradient traction requires interface "
+                "quadrature order at least two")
     if interface_quadrature_order is not None:
         set_text(free_surface, "Interface_quadrature_order", str(interface_quadrature_order))
     if volume_quadrature_order is not None:

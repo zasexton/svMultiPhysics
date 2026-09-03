@@ -1999,6 +1999,7 @@ def test_kinematic_area_gradient_traction_configuration_is_explicit_and_unfilter
         free_surface = runner.free_surface_bc(root)
         assert free_surface.findtext(
             "Surface_tension_form") == "KinematicAreaGradientTraction"
+        assert free_surface.findtext("Interface_quadrature_order") == "2"
         assert free_surface.findtext(
             "Curvature_field") == "kappa_area_gradient"
         assert free_surface.findtext("Use_level_set_curvature") == "false"
@@ -2019,6 +2020,18 @@ def test_kinematic_area_gradient_traction_configuration_is_explicit_and_unfilter
             "Static_capillary_limited_memory_curvature_tolerance") == "3e-11"
         assert level_set.findtext(
             "Static_capillary_max_topology_epoch_transitions") == "24"
+
+        with pytest.raises(ValueError, match="quadrature order at least two"):
+            runner.configure_solver(
+                solver,
+                steps=1,
+                surface_tension=0.5,
+                capillary_force_form="kinematic_area_gradient_traction",
+                interface_quadrature_order=1,
+                projected_curvature_field="kappa_area_gradient",
+                curvature_projection_recovery_mode="kinematic_area_gradient",
+                curvature_projection_kinematic_area_gradient_filter_coefficient=0.0,
+            )
 
 
 def test_static_capillary_minimizer_configuration_rejects_invalid_controls():

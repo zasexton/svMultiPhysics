@@ -3355,12 +3355,56 @@ TEST(ApplicationDriverLevelSetWorkflows,
           KinematicAreaGradient;
   request.curvature_projection
       .kinematic_area_gradient_filter_coefficient = 0.0;
+  request.curvature_projection
+      .kinematic_area_gradient_negative_liquid_side = false;
   request.volume_cut_request = application::core::ActiveCutVolumeRequest{
       .level_set_field_name = "phi_total_energy_binding",
       .domain_id = "total_energy_binding",
       .requested_interface_marker = interface_marker,
+      .interface_quadrature_order = 2,
       .active_side = application::core::LevelSetActiveSide::Positive,
   };
+  const auto bind_one = [&system](
+                            std::vector<LevelSetMaintenanceRequest>& candidates) {
+    bindKinematicAreaGradientTractionMaintenance(system, candidates);
+  };
+  auto default_order = request;
+  default_order.volume_cut_request->interface_quadrature_order.reset();
+  default_order.volume_cut_request->quadrature_order.reset();
+  std::vector<LevelSetMaintenanceRequest> default_orders{default_order};
+  EXPECT_THROW(bind_one(default_orders), std::runtime_error);
+  EXPECT_FALSE(default_orders.front().curvature_projection
+                   .kinematic_area_gradient_negative_liquid_side);
+  EXPECT_TRUE(default_orders.front().curvature_projection
+                  .kinematic_area_gradient_young_walls.empty());
+
+  auto linear_order = request;
+  linear_order.volume_cut_request->interface_quadrature_order = 1;
+  std::vector<LevelSetMaintenanceRequest> linear_orders{linear_order};
+  EXPECT_THROW(bind_one(linear_orders), std::runtime_error);
+  EXPECT_FALSE(linear_orders.front().curvature_projection
+                   .kinematic_area_gradient_negative_liquid_side);
+  EXPECT_TRUE(linear_orders.front().curvature_projection
+                  .kinematic_area_gradient_young_walls.empty());
+
+  auto quadratic_order = request;
+  quadratic_order.volume_cut_request->interface_quadrature_order = 2;
+  std::vector<LevelSetMaintenanceRequest> quadratic_orders{quadratic_order};
+  EXPECT_NO_THROW(bind_one(quadratic_orders));
+
+  auto generic_quadratic_order = request;
+  generic_quadratic_order.volume_cut_request->interface_quadrature_order.reset();
+  generic_quadratic_order.volume_cut_request->quadrature_order = 2;
+  std::vector<LevelSetMaintenanceRequest> generic_quadratic_orders{
+      generic_quadratic_order};
+  EXPECT_NO_THROW(bind_one(generic_quadratic_orders));
+
+  auto explicit_linear_order = generic_quadratic_order;
+  explicit_linear_order.volume_cut_request->interface_quadrature_order = 1;
+  std::vector<LevelSetMaintenanceRequest> explicit_linear_orders{
+      explicit_linear_order};
+  EXPECT_THROW(bind_one(explicit_linear_orders), std::runtime_error);
+
   std::vector<LevelSetMaintenanceRequest> requests{request};
   ASSERT_NO_THROW(bindKinematicAreaGradientTractionMaintenance(
       system, requests));
@@ -3438,6 +3482,96 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_THROW(
       bindKinematicAreaGradientTractionMaintenance(
           system, wrong_recovery),
+      std::runtime_error);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     CurvatureProjectionCutRequestSignatureDistinguishesOptionalOrderStates)
+{
+  LevelSetMaintenanceRequest request;
+  request.volume_cut_request = ActiveCutVolumeRequest{};
+  const auto unset = curvatureProjectionCutRequestSignature(request);
+
+  auto generic_negative = request;
+  generic_negative.volume_cut_request->quadrature_order = -1;
+  auto generic_zero = request;
+  generic_zero.volume_cut_request->quadrature_order = 0;
+  EXPECT_NE(unset, curvatureProjectionCutRequestSignature(generic_negative));
+  EXPECT_NE(unset, curvatureProjectionCutRequestSignature(generic_zero));
+  EXPECT_NE(curvatureProjectionCutRequestSignature(generic_negative),
+            curvatureProjectionCutRequestSignature(generic_zero));
+
+  auto interface_negative = request;
+  interface_negative.volume_cut_request->interface_quadrature_order = -1;
+  auto interface_zero = request;
+  interface_zero.volume_cut_request->interface_quadrature_order = 0;
+  EXPECT_NE(unset, curvatureProjectionCutRequestSignature(interface_zero));
+  EXPECT_NE(
+      curvatureProjectionCutRequestSignature(interface_negative),
+      curvatureProjectionCutRequestSignature(interface_zero));
+
+  auto volume_negative = request;
+  volume_negative.volume_cut_request->volume_quadrature_order = -1;
+  auto volume_zero = request;
+  volume_zero.volume_cut_request->volume_quadrature_order = 0;
+  EXPECT_NE(unset, curvatureProjectionCutRequestSignature(volume_zero));
+  EXPECT_NE(curvatureProjectionCutRequestSignature(volume_negative),
+            curvatureProjectionCutRequestSignature(volume_zero));
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     TotalEnergyTractionRuleValidatorFailsClosedBeforeProjection)
+{
+  using Rule = svmp::FE::geometry::CutQuadratureRule;
+  const auto valid_rule = [] {
+    Rule rule;
+    rule.kind = svmp::FE::geometry::CutQuadratureKind::Interface;
+    rule.exact_polynomial_order = 2;
+    rule.policy.polynomial_order = 2;
+    rule.provenance.requested_quadrature_order = 2;
+    rule.provenance.achieved_quadrature_order = 2;
+    return rule;
+  };
+  const std::vector<const Rule*> empty;
+  EXPECT_THROW(
+      validateQuadraticTotalEnergyTractionInterfaceRules(empty),
+      std::runtime_error);
+
+  const std::vector<const Rule*> null_rule{nullptr};
+  EXPECT_THROW(
+      validateQuadraticTotalEnergyTractionInterfaceRules(null_rule),
+      std::runtime_error);
+
+  auto rule = valid_rule();
+  std::vector<const Rule*> rules{&rule};
+  EXPECT_NO_THROW(validateQuadraticTotalEnergyTractionInterfaceRules(rules));
+
+  rule.exact_polynomial_order = 1;
+  EXPECT_THROW(
+      validateQuadraticTotalEnergyTractionInterfaceRules(rules),
+      std::runtime_error);
+  rule = valid_rule();
+  rule.policy.polynomial_order = 1;
+  EXPECT_THROW(
+      validateQuadraticTotalEnergyTractionInterfaceRules(rules),
+      std::runtime_error);
+  rule = valid_rule();
+  rule.provenance.requested_quadrature_order = 1;
+  EXPECT_THROW(
+      validateQuadraticTotalEnergyTractionInterfaceRules(rules),
+      std::runtime_error);
+  rule = valid_rule();
+  rule.provenance.achieved_quadrature_order = 1;
+  EXPECT_THROW(
+      validateQuadraticTotalEnergyTractionInterfaceRules(rules),
+      std::runtime_error);
+
+  rule = valid_rule();
+  auto mixed_rule = valid_rule();
+  mixed_rule.provenance.achieved_quadrature_order = 3;
+  const std::vector<const Rule*> mixed_rules{&rule, &mixed_rule};
+  EXPECT_THROW(
+      validateQuadraticTotalEnergyTractionInterfaceRules(mixed_rules),
       std::runtime_error);
 }
 
@@ -6943,6 +7077,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Small_cut_aggregation>false</Small_cut_aggregation>
       <Surface_tension>1.0</Surface_tension>
       <Surface_tension_form>KinematicAreaGradientTraction</Surface_tension_form>
+      <Interface_quadrature_order>2</Interface_quadrature_order>
       <Curvature_field_name>kappa_area_gradient_static</Curvature_field_name>
       <Use_level_set_curvature>false</Use_level_set_curvature>
       <Contact_line_model>DynamicContactAngle</Contact_line_model>

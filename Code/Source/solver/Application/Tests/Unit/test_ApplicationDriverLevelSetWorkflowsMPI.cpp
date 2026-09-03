@@ -3293,6 +3293,11 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
             uses_area_gradient_traction
                 ? "KinematicAreaGradientTraction"
                 : "SurfaceStress";
+        const std::string traction_quadrature_parameters =
+            uses_area_gradient_traction
+                ? R"xml(
+      <Interface_quadrature_order>2</Interface_quadrature_order>)xml"
+                : std::string{};
         const std::string traction_curvature_parameters =
             uses_area_gradient_traction
                 ? R"xml(
@@ -3327,6 +3332,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       <Surface_tension>1.0</Surface_tension>
       <Surface_tension_form>)xml" + surface_tension_form_name +
             R"xml(</Surface_tension_form>)xml" +
+            traction_quadrature_parameters +
             traction_curvature_parameters + R"xml(
       <Contact_line_model>DynamicContactAngle</Contact_line_model>
       <Contact_angle_degrees>90.0</Contact_angle_degrees>
@@ -7363,8 +7369,16 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       .level_set_field_name = "phi_total_energy_collective",
       .domain_id = "total_energy_collective",
       .requested_interface_marker = interface_marker,
+      .interface_quadrature_order = 2,
       .active_side = application::core::LevelSetActiveSide::Negative,
   };
+  auto missing_order = request;
+  missing_order.volume_cut_request->interface_quadrature_order.reset();
+  missing_order.volume_cut_request->quadrature_order.reset();
+  std::vector<LevelSetMaintenanceRequest> missing_orders{missing_order};
+  EXPECT_THROW(
+      bindKinematicAreaGradientTractionMaintenance(*system, missing_orders),
+      std::runtime_error);
   std::vector<LevelSetMaintenanceRequest> requests{request};
   ASSERT_NO_THROW(bindKinematicAreaGradientTractionMaintenance(
       *system, requests));
@@ -7375,15 +7389,103 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                   .curvature_projection
                   .kinematic_area_gradient_young_walls.empty());
 
+  const auto& field_dofs = system->fieldDofHandler(phi);
+  const auto* entity_map = field_dofs.getEntityDofMap();
+  ASSERT_NE(entity_map, nullptr);
+  const auto field_offset = system->fieldDofOffset(phi);
+  ASSERT_GE(field_offset, 0);
+  const auto solution_size =
+      static_cast<std::size_t>(system->dofHandler().getNumDofs());
+  std::vector<svmp::FE::Real> local_solution(solution_size, 0.0);
+  std::vector<svmp::FE::Real> generated_context_state(solution_size, 0.0);
+  for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
+    const auto dofs = entity_map->getVertexDofs(
+        static_cast<svmp::FE::GlobalIndex>(vertex));
+    ASSERT_EQ(dofs.size(), 1u);
+    const auto dof = dofs.front();
+    ASSERT_GE(dof, 0);
+    if (field_dofs.getDofMap().isOwnedDof(dof)) {
+      local_solution[static_cast<std::size_t>(field_offset + dof)] =
+          phi_vertex_values[vertex];
+    }
+  }
+  ASSERT_EQ(MPI_Allreduce(local_solution.data(), generated_context_state.data(),
+                          static_cast<int>(generated_context_state.size()),
+                          MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD), MPI_SUCCESS);
+
   application::core::SimulationComponents sim;
   sim.primary_mesh = mesh;
   sim.fe_system = std::move(system);
+  auto params = parseMpiWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi_total_energy_collective</Level_set_field_name>
+    <Enable_curvature_projection>true</Enable_curvature_projection>
+    <Curvature_field_name>kappa_total_energy_collective</Curvature_field_name>
+    <Curvature_projection_recovery_mode>KinematicAreaGradient</Curvature_projection_recovery_mode>
+    <Curvature_projection_kinematic_area_gradient_filter_coefficient>0.0</Curvature_projection_kinematic_area_gradient_filter_coefficient>
+  </Add_equation>
+  <Add_equation type="fluid">
+    <Add_BC name="total_energy_collective">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi_total_energy_collective</Level_set_field_name>
+      <Generated_interface_domain_id>total_energy_collective</Generated_interface_domain_id>
+      <Interface_marker>733</Interface_marker>
+      <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
+      <Geometry_tangent_policy>RefreshedFrozenQuadrature</Geometry_tangent_policy>
+      <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
+      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+      <Interface_quadrature_order>2</Interface_quadrature_order>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+  ActiveCutContextRefreshCache refresh_cache;
+  const auto refresh_report = refreshActiveCutIntegrationContextFromSolutionCached(
+      sim, *params,
+      std::span<const svmp::FE::Real>(generated_context_state.data(),
+                                      generated_context_state.size()),
+      lifecycle, refresh_cache,
+      "application-driver-mpi-total-energy-order-two");
+  ASSERT_TRUE(refresh_report.refreshed);
+  const auto* cut_context = sim.fe_system->cutIntegrationContext();
+  ASSERT_NE(cut_context, nullptr);
+  const auto interface_rules =
+      cut_context->interfaceRulesForMarker(interface_marker);
+  ASSERT_FALSE(interface_rules.empty());
+  int local_minimum_order = std::numeric_limits<int>::max();
+  int local_maximum_order = std::numeric_limits<int>::lowest();
+  for (const auto* rule : interface_rules) {
+    ASSERT_NE(rule, nullptr);
+    EXPECT_EQ(rule->exact_polynomial_order, 2);
+    EXPECT_EQ(rule->policy.polynomial_order, 2);
+    EXPECT_EQ(rule->provenance.requested_quadrature_order, 2);
+    EXPECT_EQ(rule->provenance.achieved_quadrature_order, 2);
+    for (const int order : {rule->exact_polynomial_order,
+                            rule->policy.polynomial_order,
+                            rule->provenance.requested_quadrature_order,
+                            rule->provenance.achieved_quadrature_order}) {
+      local_minimum_order = std::min(local_minimum_order, order);
+      local_maximum_order = std::max(local_maximum_order, order);
+    }
+  }
+  int global_minimum_order = 0;
+  int global_maximum_order = 0;
+  ASSERT_EQ(MPI_Allreduce(&local_minimum_order, &global_minimum_order, 1,
+                          MPI_INT, MPI_MIN, MPI_COMM_WORLD), MPI_SUCCESS);
+  ASSERT_EQ(MPI_Allreduce(&local_maximum_order, &global_maximum_order, 1,
+                          MPI_INT, MPI_MAX, MPI_COMM_WORLD), MPI_SUCCESS);
+  EXPECT_EQ(global_minimum_order, 2);
+  EXPECT_EQ(global_maximum_order, 2);
   svmp::FE::systems::SystemStateView state{};
   CurvatureProjectionCache curvature_cache;
   ASSERT_EQ(projectLevelSetCurvatureFieldsFromState(
                 sim,
                 state,
-                {},
+                refresh_report.evaluated_state_source_revisions,
                 requests,
                 /*step=*/0,
                 "collective_total_energy_traction",

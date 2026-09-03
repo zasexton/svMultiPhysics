@@ -17236,6 +17236,17 @@ void mixCurvatureSignatureReal(std::uint64_t& seed,
   mixCurvatureSignature(seed, realBitsForSignature(value));
 }
 
+void mixCurvatureSignatureOptionalInt(
+    std::uint64_t& seed,
+    const std::optional<int>& value) noexcept
+{
+  mixCurvatureSignature(seed, value.has_value() ? 1u : 0u);
+  mixCurvatureSignature(
+      seed,
+      static_cast<std::uint64_t>(
+          static_cast<std::int64_t>(value.value_or(0))));
+}
+
 void mixCurvatureProjectionOptionsSignature(
     std::uint64_t& seed,
     const svmp::FE::level_set::LevelSetCurvatureProjectionOptions& options)
@@ -17358,6 +17369,70 @@ std::optional<int> generatedCutContextMarkerForMaintenance(
       system, cut_request);
 }
 
+int requestedTotalEnergyTractionInterfaceQuadratureOrder(
+    const ActiveCutVolumeRequest& request) noexcept
+{
+  return request.interface_quadrature_order.value_or(
+      request.quadrature_order.value_or(1));
+}
+
+void validateQuadraticTotalEnergyTractionInterfaceRules(
+    std::span<const svmp::FE::geometry::CutQuadratureRule* const> rules)
+{
+  if (rules.empty()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Total-energy traction requires nonempty generated interface rules.");
+  }
+  std::optional<std::array<int, 4>> expected_orders;
+  for (const auto* rule : rules) {
+    if (rule == nullptr ||
+        rule->kind != svmp::FE::geometry::CutQuadratureKind::Interface) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Total-energy traction received an invalid generated interface rule.");
+    }
+    const std::array<int, 4> orders{
+        rule->exact_polynomial_order,
+        rule->policy.polynomial_order,
+        rule->provenance.requested_quadrature_order,
+        rule->provenance.achieved_quadrature_order};
+    if (std::any_of(orders.begin(), orders.end(),
+                    [](int order) { return order < 2; })) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Total-energy traction requires generated interface rules with exact, policy, requested, and achieved order >= 2.");
+    }
+    if (expected_orders.has_value() && *expected_orders != orders) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Total-energy traction rejects mixed generated interface rule orders.");
+    }
+    expected_orders = orders;
+  }
+}
+
+bool requiresQuadraticTotalEnergyTractionInterfaceRules(
+    const svmp::FE::systems::FESystem& system,
+    const LevelSetMaintenanceRequest& request)
+{
+  if (!request.volume_cut_request.has_value()) {
+    return false;
+  }
+  const auto level_set_field =
+      system.findFieldByName(request.level_set_field_name);
+  const auto curvature_field =
+      system.findFieldByName(request.curvature_field_name);
+  const auto declarations =
+      system.freeSurfaceDiscreteFunctionalDeclarations();
+  return std::any_of(
+      declarations.begin(),
+      declarations.end(),
+      [&](const auto& declaration) {
+        return declaration.capillary_balance_method ==
+                   svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
+                       KinematicAreaGradientEnergyTraction &&
+               declaration.level_set_field == level_set_field &&
+               declaration.curvature_field == curvature_field;
+      });
+}
+
 void bindKinematicAreaGradientTractionMaintenance(
     svmp::FE::systems::FESystem& system,
     std::vector<LevelSetMaintenanceRequest>& requests)
@@ -17454,6 +17529,11 @@ void bindKinematicAreaGradientTractionMaintenance(
                 RefreshedFrozenQuadrature) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Kinematic-area-gradient recovery is not bound to the same prerequisite-only endpoint total-energy traction, level-set isovalue, curvature field, domain, liquid side, and frozen LinearCorner geometry.");
+    }
+    if (requestedTotalEnergyTractionInterfaceQuadratureOrder(cut_request) <
+        2) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Total-energy traction requires interface quadrature order >= 2.");
     }
     if (matched[declaration_index] != 0u) {
       throw std::runtime_error(
@@ -17581,6 +17661,11 @@ std::uint64_t curvatureProjectionCutRequestSignature(
   mixCurvatureSignatureString(seed, cut_request.domain_id);
   mixCurvatureSignatureReal(
       seed, static_cast<svmp::FE::Real>(cut_request.isovalue));
+  mixCurvatureSignatureOptionalInt(seed, cut_request.quadrature_order);
+  mixCurvatureSignatureOptionalInt(
+      seed, cut_request.interface_quadrature_order);
+  mixCurvatureSignatureOptionalInt(
+      seed, cut_request.volume_quadrature_order);
   mixCurvatureSignature(seed,
                         static_cast<std::uint64_t>(
                             std::max(0, cut_request.requested_interface_marker)));
@@ -17624,8 +17709,14 @@ std::uint64_t curvatureProjectionCutContextSignature(
   std::uint64_t seed = curvatureProjectionCutRequestSignature(request);
 
   const auto* cut_context = system.cutIntegrationContext();
+  const bool requires_quadratic_interface_rules =
+      requiresQuadraticTotalEnergyTractionInterfaceRules(system, request);
   mixCurvatureSignature(seed, cut_context != nullptr ? 1u : 0u);
   if (cut_context == nullptr) {
+    if (requires_quadratic_interface_rules) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Total-energy traction has no generated cut context for curvature projection.");
+    }
     if (cache_hit != nullptr) {
       *cache_hit = false;
     }
@@ -17634,11 +17725,19 @@ std::uint64_t curvatureProjectionCutContextSignature(
 
   const auto marker = generatedCutContextMarkerForMaintenance(system, request);
   if (!marker.has_value()) {
+    if (requires_quadratic_interface_rules) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Total-energy traction could not resolve its generated interface marker for curvature projection.");
+    }
     mixCurvatureSignature(seed, 0u);
     if (cache_hit != nullptr) {
       *cache_hit = false;
     }
     return seed;
+  }
+  const auto interface_rules = cut_context->interfaceRulesForMarker(*marker);
+  if (requires_quadratic_interface_rules) {
+    validateQuadraticTotalEnergyTractionInterfaceRules(interface_rules);
   }
   mixCurvatureSignature(seed, 1u);
   mixCurvatureSignature(seed,
@@ -17679,7 +17778,6 @@ std::uint64_t curvatureProjectionCutContextSignature(
     }
   }
 
-  const auto interface_rules = cut_context->interfaceRulesForMarker(*marker);
   mixCurvatureSignature(seed,
                         static_cast<std::uint64_t>(interface_rules.size()));
   for (const auto* rule : interface_rules) {
