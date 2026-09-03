@@ -57,6 +57,18 @@ Real integrateMonomial2D(const CutQuadratureRule& rule, int px, int py)
     return value;
 }
 
+Real integrateMonomial3D(const CutQuadratureRule& rule, int px, int py, int pz)
+{
+    Real value = 0.0;
+    for (const auto& point : rule.points) {
+        value += point.weight *
+                 std::pow(point.point[0], static_cast<Real>(px)) *
+                 std::pow(point.point[1], static_cast<Real>(py)) *
+                 std::pow(point.point[2], static_cast<Real>(pz));
+    }
+    return value;
+}
+
 Real integrateQuadraticCutVolumeOnUnitTriangle(int cells_per_axis)
 {
     CutInterfaceDomainRequest request;
@@ -893,6 +905,108 @@ TEST(LevelSetInterfaceDomain, CutVolumeRulesConserveConstantsForSupportedElement
         EXPECT_NEAR(measure_sum, c.parent_measure, 1.0e-14);
         EXPECT_NEAR(weight_sum, c.parent_measure, 1.0e-14);
     }
+}
+
+TEST(LevelSetInterfaceDomain, PlanarPolygonQuadraticRuleIntegratesTetrahedralCuts)
+{
+    const std::vector<std::array<Real, 3>> unit_tetrahedron{
+        {{0.0, 0.0, 0.0}},
+        {{1.0, 0.0, 0.0}},
+        {{0.0, 1.0, 0.0}},
+        {{0.0, 0.0, 1.0}}};
+
+    CutInterfaceDomainRequest triangle_request;
+    triangle_request.source =
+        LevelSetInterfaceSource::fromEvaluator("planar-triangle-order-two");
+    triangle_request.interface_marker = 189;
+    triangle_request.interface_quadrature_order = 2;
+    LevelSetInterfaceDomain triangle_domain(triangle_request);
+    appendLinearLevelSetCellCut3D(
+        triangle_domain,
+        LevelSetCellCutInput{.parent_cell = 23,
+                             .element_type = ElementType::Tetra4,
+                             .node_coordinates = unit_tetrahedron,
+                             .level_set_values = {-1.0, 1.0, 1.0, 1.0}});
+
+    const auto triangle_rules = triangle_domain.interfaceQuadratureRules();
+    ASSERT_EQ(triangle_rules.size(), 1u);
+    const auto& triangle_rule = triangle_rules.front();
+    ASSERT_EQ(triangle_rule.points.size(), 3u);
+    EXPECT_EQ(triangle_rule.exact_polynomial_order, 2);
+    EXPECT_EQ(triangle_rule.policy.polynomial_order, 2);
+    EXPECT_EQ(triangle_rule.provenance.achieved_quadrature_order, 2);
+    EXPECT_NEAR(integrateWeight(triangle_rule), std::sqrt(3.0) / 8.0, 1.0e-14);
+    EXPECT_NEAR(integrateMonomial3D(triangle_rule, 2, 0, 0),
+                std::sqrt(3.0) / 192.0, 2.0e-15);
+    EXPECT_NEAR(integrateMonomial3D(triangle_rule, 1, 1, 0),
+                std::sqrt(3.0) / 384.0, 2.0e-15);
+    for (const auto& point : triangle_rule.points) {
+        EXPECT_GT(point.weight, 0.0);
+        EXPECT_NEAR(point.weight, point.reference_measure_factor / 6.0, 1.0e-14);
+        EXPECT_NEAR(point.normal[0], 1.0 / std::sqrt(3.0), 1.0e-14);
+        EXPECT_NEAR(point.normal[1], 1.0 / std::sqrt(3.0), 1.0e-14);
+        EXPECT_NEAR(point.normal[2], 1.0 / std::sqrt(3.0), 1.0e-14);
+    }
+
+    CutInterfaceDomainRequest quad_request;
+    quad_request.source =
+        LevelSetInterfaceSource::fromEvaluator("planar-quadrilateral-order-two");
+    quad_request.interface_marker = 190;
+    quad_request.interface_quadrature_order = 2;
+    LevelSetInterfaceDomain quad_domain(quad_request);
+    const LevelSetCellCutInput quad_input{
+        .parent_cell = 24,
+        .element_type = ElementType::Tetra4,
+        .node_coordinates = unit_tetrahedron,
+        .level_set_values = {-1.0, -1.0, 1.0, 1.0}};
+    appendLinearLevelSetCellCut3D(quad_domain, quad_input);
+
+    const auto quad_rules = quad_domain.interfaceQuadratureRules();
+    ASSERT_EQ(quad_rules.size(), 1u);
+    const auto& quad_rule = quad_rules.front();
+    ASSERT_EQ(quad_rule.points.size(), 6u);
+    EXPECT_EQ(quad_rule.exact_polynomial_order, 2);
+    EXPECT_EQ(quad_rule.policy.polynomial_order, 2);
+    EXPECT_EQ(quad_rule.provenance.achieved_quadrature_order, 2);
+    EXPECT_NEAR(integrateWeight(quad_rule), std::sqrt(2.0) / 4.0, 1.0e-14);
+    EXPECT_NEAR(integrateMonomial3D(quad_rule, 2, 0, 0),
+                std::sqrt(2.0) / 48.0, 2.0e-15);
+    EXPECT_NEAR(integrateMonomial3D(quad_rule, 1, 1, 0),
+                std::sqrt(2.0) / 64.0, 2.0e-15);
+    EXPECT_NEAR(integrateMonomial3D(quad_rule, 0, 1, 1),
+                std::sqrt(2.0) / 96.0, 2.0e-15);
+    for (const auto& point : quad_rule.points) {
+        EXPECT_GT(point.weight, 0.0);
+        EXPECT_NEAR(point.weight, point.reference_measure_factor / 6.0, 1.0e-14);
+        EXPECT_NEAR(point.normal[0], 0.0, 1.0e-14);
+        EXPECT_NEAR(point.normal[1], 1.0 / std::sqrt(2.0), 1.0e-14);
+        EXPECT_NEAR(point.normal[2], 1.0 / std::sqrt(2.0), 1.0e-14);
+    }
+
+    CutInterfaceDomainRequest quad_order_one_request = quad_request;
+    quad_order_one_request.interface_quadrature_order = 1;
+    LevelSetInterfaceDomain quad_order_one_domain(quad_order_one_request);
+    appendLinearLevelSetCellCut3D(quad_order_one_domain, quad_input);
+    const auto quad_order_one_rules = quad_order_one_domain.interfaceQuadratureRules();
+    ASSERT_EQ(quad_order_one_rules.size(), 1u);
+    const auto& quad_order_one_rule = quad_order_one_rules.front();
+    ASSERT_EQ(quad_order_one_rule.points.size(), 1u);
+    EXPECT_EQ(quad_order_one_rule.exact_polynomial_order, 1);
+    EXPECT_EQ(quad_order_one_rule.policy.name, "linear-level-set-interface");
+    EXPECT_NEAR(quad_order_one_rule.points.front().point[0], 0.25, 1.0e-14);
+    EXPECT_NEAR(quad_order_one_rule.points.front().point[1], 0.25, 1.0e-14);
+    EXPECT_NEAR(quad_order_one_rule.points.front().point[2], 0.25, 1.0e-14);
+    EXPECT_NEAR(quad_order_one_rule.points.front().weight,
+                std::sqrt(2.0) / 4.0,
+                1.0e-14);
+
+    CutInterfaceDomainRequest unsupported_order_request = quad_request;
+    unsupported_order_request.interface_quadrature_order = 3;
+    unsupported_order_request.achieved_interface_quadrature_order = 2;
+    LevelSetInterfaceDomain unsupported_order_domain(unsupported_order_request);
+    appendLinearLevelSetCellCut3D(unsupported_order_domain, quad_input);
+    EXPECT_THROW(unsupported_order_domain.interfaceQuadratureRules(),
+                 std::invalid_argument);
 }
 
 TEST(LevelSetInterfaceDomain, PlanarCutVolumeSupportsPositiveOrderFiveRules)

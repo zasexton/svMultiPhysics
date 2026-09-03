@@ -7375,7 +7375,7 @@ implicitCutQuadratureBackendCapability(ImplicitCutQuadratureBackend backend,
             return capability;
         }
         capability.maximum_reported_interface_order =
-            mesh_dimension == 2 ? 5 : 1;
+            mesh_dimension == 2 ? 5 : 2;
         capability.maximum_reported_volume_order =
             mesh_dimension == 2 ? 5 : 2;
         return capability;

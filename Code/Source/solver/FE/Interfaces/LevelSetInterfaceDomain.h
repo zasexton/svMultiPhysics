@@ -569,6 +569,7 @@ struct CutInterfaceFragment {
     [[nodiscard]] std::size_t quadraturePointCount(
         const CutInterfaceDomainRequest& request) const noexcept {
         if ((kind != CutInterfaceFragmentKind::Segment &&
+             kind != CutInterfaceFragmentKind::Polygon &&
              kind != CutInterfaceFragmentKind::CurvedPatch) ||
             measure <= Real{0.0}) {
             return quadraturePointCount();
@@ -585,6 +586,11 @@ struct CutInterfaceFragment {
         if (quadrature_order <= 1) {
             return quadraturePointCount();
         }
+        if (kind == CutInterfaceFragmentKind::Polygon) {
+            return quadrature_order == 2 && vertices.size() >= 3u
+                       ? 3u * (vertices.size() - 2u)
+                       : quadraturePointCount();
+        }
         return quadrature_order <= 3 ? 2u : 3u;
     }
 
@@ -593,14 +599,25 @@ struct CutInterfaceFragment {
         const bool has_stored_curved_quadrature =
             kind == CutInterfaceFragmentKind::CurvedPatch &&
             !quadrature_points.empty();
+        const bool supports_quadratic_planar_polygon =
+            kind == CutInterfaceFragmentKind::Polygon &&
+            vertices.size() >= 3u &&
+            std::isfinite(measure) &&
+            measure > Real{0.0};
         const int supported_order =
             (kind == CutInterfaceFragmentKind::Segment ||
              has_stored_curved_quadrature)
                 ? 5
-                : (kind == CutInterfaceFragmentKind::CurvedPatch ? 0 : 1);
+                : (supports_quadratic_planar_polygon
+                       ? 2
+                       : (kind == CutInterfaceFragmentKind::CurvedPatch ? 0 : 1));
         const int requested_order = request.resolvedInterfaceQuadratureOrder();
         if (requested_order < 0) {
             throw std::invalid_argument("cut-interface quadrature order must be nonnegative");
+        }
+        if (kind == CutInterfaceFragmentKind::Polygon && requested_order > 2) {
+            throw std::invalid_argument(
+                "planar polygon cut-interface quadrature supports orders through two");
         }
         int quadrature_order = requested_order;
         if (request.achieved_interface_quadrature_order >= 0) {
@@ -613,8 +630,12 @@ struct CutInterfaceFragment {
             kind == CutInterfaceFragmentKind::Segment && quadrature_order > 1;
         const bool curved_patch_high_order =
             kind == CutInterfaceFragmentKind::CurvedPatch && quadrature_order > 1;
+        const bool planar_polygon_high_order =
+            kind == CutInterfaceFragmentKind::Polygon && quadrature_order > 1;
         const bool can_generate_segment_quadrature =
             segment_high_order && vertices.size() >= 2u && measure > Real{0.0};
+        const bool can_generate_planar_polygon_quadrature =
+            planar_polygon_high_order && supports_quadratic_planar_polygon;
         const bool use_stored_segment_quadrature =
             segment_high_order &&
             quadrature_points.size() >= requested_point_count;
@@ -625,6 +646,8 @@ struct CutInterfaceFragment {
             (segment_high_order &&
              !use_stored_segment_quadrature &&
              !can_generate_segment_quadrature) ||
+            (planar_polygon_high_order &&
+             !can_generate_planar_polygon_quadrature) ||
             (curved_patch_high_order &&
              !use_stored_curved_quadrature)) {
             throw std::invalid_argument("cut-interface quadrature order is not supported for this fragment");
@@ -650,7 +673,9 @@ struct CutInterfaceFragment {
                                       ? "constant-level-set-interface"
                                       : (quadrature_order == 1
                                              ? "linear-level-set-interface"
-                                             : "gauss-segment-level-set-interface"));
+                                             : (kind == CutInterfaceFragmentKind::Polygon
+                                                    ? "quadratic-planar-polygon-level-set-interface"
+                                                    : "gauss-segment-level-set-interface")));
         rule.provenance.embedded_geometry_id = request.source.identifier();
         rule.provenance.cut_topology_id = topology_id;
         rule.provenance.parent_entity = parent_cell;
@@ -693,7 +718,64 @@ struct CutInterfaceFragment {
         rule.curved_geometry =
             kind == CutInterfaceFragmentKind::CurvedPatch ||
             use_stored_segment_quadrature;
-        if (kind == CutInterfaceFragmentKind::Segment &&
+        if (kind == CutInterfaceFragmentKind::Polygon && quadrature_order == 2) {
+            constexpr std::array<std::array<Real, 3>, 3> barycentric{{
+                {{Real{2.0} / Real{3.0}, Real{1.0} / Real{6.0}, Real{1.0} / Real{6.0}}},
+                {{Real{1.0} / Real{6.0}, Real{2.0} / Real{3.0}, Real{1.0} / Real{6.0}}},
+                {{Real{1.0} / Real{6.0}, Real{1.0} / Real{6.0}, Real{2.0} / Real{3.0}}},
+            }};
+            const std::size_t expected_point_count = 3u * (vertices.size() - 2u);
+            rule.points.reserve(expected_point_count);
+            Real fan_measure = Real{0.0};
+            for (std::size_t i = 1u; i + 1u < vertices.size(); ++i) {
+                const auto& a = vertices[0];
+                const auto& b = vertices[i];
+                const auto& c = vertices[i + 1u];
+                const std::array<Real, 3> ab{{b.point[0] - a.point[0],
+                                               b.point[1] - a.point[1],
+                                               b.point[2] - a.point[2]}};
+                const std::array<Real, 3> ac{{c.point[0] - a.point[0],
+                                               c.point[1] - a.point[1],
+                                               c.point[2] - a.point[2]}};
+                const std::array<Real, 3> cross{{ab[1] * ac[2] - ab[2] * ac[1],
+                                                  ab[2] * ac[0] - ab[0] * ac[2],
+                                                  ab[0] * ac[1] - ab[1] * ac[0]}};
+                const Real triangle_measure =
+                    Real{0.5} * std::sqrt(cross[0] * cross[0] +
+                                           cross[1] * cross[1] +
+                                           cross[2] * cross[2]);
+                if (!std::isfinite(triangle_measure) || triangle_measure <= Real{0.0}) {
+                    continue;
+                }
+                fan_measure += triangle_measure;
+                for (const auto& lambda : barycentric) {
+                    geometry::CutQuadraturePoint qp;
+                    for (std::size_t component = 0u; component < 3u; ++component) {
+                        qp.point[component] = lambda[0] * a.point[component] +
+                                              lambda[1] * b.point[component] +
+                                              lambda[2] * c.point[component];
+                        qp.parent_coordinate[component] =
+                            lambda[0] * a.parent_coordinate[component] +
+                            lambda[1] * b.parent_coordinate[component] +
+                            lambda[2] * c.parent_coordinate[component];
+                    }
+                    qp.normal = normal;
+                    qp.weight = triangle_measure / Real{3.0};
+                    qp.reference_measure_factor = Real{2.0} * triangle_measure;
+                    rule.points.push_back(qp);
+                }
+            }
+            if (!std::isfinite(fan_measure) || fan_measure <= Real{0.0} ||
+                rule.points.size() != expected_point_count) {
+                throw std::invalid_argument(
+                    "planar polygon cut-interface quadrature fan is degenerate");
+            }
+            const Real normalization = measure / fan_measure;
+            for (auto& point : rule.points) {
+                point.weight *= normalization;
+                point.reference_measure_factor *= normalization;
+            }
+        } else if (kind == CutInterfaceFragmentKind::Segment &&
             vertices.size() >= 2u &&
             quadrature_order > 1 &&
             measure > Real{0.0} &&

@@ -5433,7 +5433,7 @@ TEST(LevelSetInterfaceLifecycle, LinearBackendDriverReportsSupportAndOrders)
               3);
     EXPECT_EQ(backend.achievedInterfaceQuadratureOrder(
                   3, FE::ElementType::Tetra4, request),
-              1);
+              2);
     EXPECT_EQ(backend.achievedVolumeQuadratureOrder(
                   3, FE::ElementType::Tetra4, request),
               2);
@@ -5465,6 +5465,32 @@ TEST(LevelSetInterfaceLifecycle, LinearBackendDriverReportsSupportAndOrders)
     EXPECT_GT(result.volume_quadrature_point_count, 0u);
     EXPECT_GT(result.interface_quadrature_point_count, 0u);
     EXPECT_GE(result.backend_elapsed_seconds, 0.0);
+
+    backend_input.linearized_input.element_type = FE::ElementType::Tetra4;
+    backend_input.linearized_input.node_coordinates = {
+        std::array<FE::Real, 3>{0.0, 0.0, 0.0},
+        std::array<FE::Real, 3>{1.0, 0.0, 0.0},
+        std::array<FE::Real, 3>{0.0, 1.0, 0.0},
+        std::array<FE::Real, 3>{0.0, 0.0, 1.0},
+    };
+    backend_input.linearized_input.level_set_values = {-1.0, -1.0, 1.0, 1.0};
+
+    const auto tetra_result =
+        backend.cut(/*mesh_dimension=*/3, request, backend_input);
+    ASSERT_TRUE(tetra_result.cut.supported) << tetra_result.cut.diagnostic;
+    EXPECT_EQ(tetra_result.requested_interface_quadrature_order, 2);
+    EXPECT_EQ(tetra_result.possible_interface_quadrature_order, 2);
+    EXPECT_EQ(tetra_result.achieved_interface_quadrature_order, 2);
+    EXPECT_EQ(tetra_result.verified_interface_quadrature_order, 2);
+    EXPECT_EQ(tetra_result.interface_quadrature_point_count, 6u);
+    ASSERT_EQ(tetra_result.cut.fragments.size(), 1u);
+    const auto tetra_rule =
+        tetra_result.cut.fragments.front().toCutQuadratureRule(request);
+    EXPECT_EQ(tetra_rule.exact_polynomial_order, 2);
+    EXPECT_EQ(tetra_rule.policy.polynomial_order, 2);
+    EXPECT_EQ(tetra_rule.provenance.requested_quadrature_order, 2);
+    EXPECT_EQ(tetra_rule.provenance.achieved_quadrature_order, 2);
+    EXPECT_EQ(tetra_rule.points.size(), 6u);
 }
 
 TEST(LevelSetInterfaceLifecycle, AutoBackendDriverReportsDispatchSupport)
@@ -5540,7 +5566,7 @@ TEST(LevelSetInterfaceLifecycle, BackendCapabilityReportsMilestoneContract)
             3,
             FE::ElementType::Tetra4);
     EXPECT_TRUE(linear_tet.supports_element_type);
-    EXPECT_EQ(linear_tet.maximum_reported_interface_order, 1);
+    EXPECT_EQ(linear_tet.maximum_reported_interface_order, 2);
     EXPECT_EQ(linear_tet.maximum_reported_volume_order, 2);
 
     const auto linear_hex =
@@ -5822,7 +5848,7 @@ TEST(LevelSetInterfaceLifecycle, BackendCapabilityCoversAllElementFamilies)
                       3,
                       expected.type,
                       expected.linear_3d,
-                      1,
+                      2,
                       2);
         check_backend(level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle,
                       2,
