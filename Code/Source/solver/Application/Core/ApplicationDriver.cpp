@@ -8502,6 +8502,26 @@ std::pair<std::uint64_t, std::uint64_t> globalMinMaxUint64(
   return {local, local};
 }
 
+std::pair<int, int> globalMinMaxInt(int local,
+                                    const svmp::MeshComm& comm)
+{
+#ifdef MESH_HAS_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (initialized && comm.size() > 1) {
+    int minimum = 0;
+    int maximum = 0;
+    MPI_Allreduce(&local, &minimum, 1, MPI_INT, MPI_MIN, comm.native());
+    MPI_Allreduce(&local, &maximum, 1, MPI_INT, MPI_MAX, comm.native());
+    return {minimum, maximum};
+  }
+#else
+  (void)comm;
+#endif
+
+  return {local, local};
+}
+
 std::uint64_t requireActiveCutRequestConsensus(
     const svmp::FE::systems::FESystem& system,
     const std::vector<ActiveCutVolumeRequest>& requests)
@@ -17408,6 +17428,69 @@ void validateQuadraticTotalEnergyTractionInterfaceRules(
   }
 }
 
+void validateQuadraticTotalEnergyTractionInterfaceRulesCollectively(
+    std::span<const svmp::FE::geometry::CutQuadratureRule* const> rules,
+    const svmp::MeshComm& comm)
+{
+  bool local_invalid = false;
+  std::array<int, 4> local_minimum_orders;
+  std::array<int, 4> local_maximum_orders;
+  local_minimum_orders.fill(std::numeric_limits<int>::max());
+  local_maximum_orders.fill(std::numeric_limits<int>::lowest());
+  for (const auto* rule : rules) {
+    if (rule == nullptr ||
+        rule->kind != svmp::FE::geometry::CutQuadratureKind::Interface) {
+      local_invalid = true;
+      continue;
+    }
+    const std::array<int, 4> orders{
+        rule->exact_polynomial_order,
+        rule->policy.polynomial_order,
+        rule->provenance.requested_quadrature_order,
+        rule->provenance.achieved_quadrature_order};
+    for (std::size_t index = 0u; index < orders.size(); ++index) {
+      local_minimum_orders[index] = std::min(
+          local_minimum_orders[index], orders[index]);
+      local_maximum_orders[index] = std::max(
+          local_maximum_orders[index], orders[index]);
+    }
+    if (std::any_of(orders.begin(), orders.end(),
+                    [](int order) { return order < 2; })) {
+      local_invalid = true;
+    }
+  }
+
+  const auto global_rule_count = globalSumSize(rules.size(), comm);
+  const bool global_invalid = globalAnyBool(local_invalid, comm);
+  std::array<std::pair<int, int>, 4> global_order_ranges;
+  for (std::size_t index = 0u; index < global_order_ranges.size(); ++index) {
+    global_order_ranges[index] = globalMinMaxInt(
+        local_minimum_orders[index], comm);
+    const auto global_maximum_range = globalMinMaxInt(
+        local_maximum_orders[index], comm);
+    global_order_ranges[index].second = global_maximum_range.second;
+  }
+
+  const bool globally_mixed = std::any_of(
+      global_order_ranges.begin(),
+      global_order_ranges.end(),
+      [](const std::pair<int, int>& range) {
+        return range.first != range.second;
+      });
+  if (global_rule_count == 0u) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Total-energy traction requires nonempty generated interface rules collectively.");
+  }
+  if (global_invalid) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Total-energy traction received an invalid generated interface rule collectively.");
+  }
+  if (globally_mixed) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Total-energy traction rejects mixed generated interface rule orders collectively.");
+  }
+}
+
 bool requiresQuadraticTotalEnergyTractionInterfaceRules(
     const svmp::FE::systems::FESystem& system,
     const LevelSetMaintenanceRequest& request)
@@ -17737,7 +17820,8 @@ std::uint64_t curvatureProjectionCutContextSignature(
   }
   const auto interface_rules = cut_context->interfaceRulesForMarker(*marker);
   if (requires_quadratic_interface_rules) {
-    validateQuadraticTotalEnergyTractionInterfaceRules(interface_rules);
+    validateQuadraticTotalEnergyTractionInterfaceRulesCollectively(
+        interface_rules, activeFESystemCommunicator(system));
   }
   mixCurvatureSignature(seed, 1u);
   mixCurvatureSignature(seed,

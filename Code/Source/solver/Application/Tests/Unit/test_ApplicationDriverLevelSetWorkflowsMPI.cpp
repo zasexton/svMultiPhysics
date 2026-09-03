@@ -7272,6 +7272,69 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
 }
 
 TEST(ApplicationDriverLevelSetWorkflowsMPI,
+     TotalEnergyTractionRuleValidatorIsCollective)
+{
+  int rank = 0;
+  int size = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  if (size != 2) {
+    GTEST_SKIP() << "This collective validator fixture requires two ranks.";
+  }
+
+  using Rule = svmp::FE::geometry::CutQuadratureRule;
+  const auto valid_rule = [] {
+    Rule rule;
+    rule.kind = svmp::FE::geometry::CutQuadratureKind::Interface;
+    rule.exact_polynomial_order = 2;
+    rule.policy.polynomial_order = 2;
+    rule.provenance.requested_quadrature_order = 2;
+    rule.provenance.achieved_quadrature_order = 2;
+    return rule;
+  };
+  const auto comm = svmp::MeshComm(MPI_COMM_WORLD);
+  auto rank_one_rule = valid_rule();
+  const std::vector<const Rule*> rank_local_rules =
+      rank == 0 ? std::vector<const Rule*>{}
+                : std::vector<const Rule*>{&rank_one_rule};
+  EXPECT_NO_THROW(
+      validateQuadraticTotalEnergyTractionInterfaceRulesCollectively(
+          rank_local_rules, comm));
+
+  auto mixed_rule = valid_rule();
+  if (rank == 1) {
+    mixed_rule.provenance.achieved_quadrature_order = 3;
+  }
+  const std::vector<const Rule*> mixed_rules{&mixed_rule};
+  bool local_threw = false;
+  try {
+    validateQuadraticTotalEnergyTractionInterfaceRulesCollectively(
+        mixed_rules, comm);
+  } catch (const std::runtime_error&) {
+    local_threw = true;
+  }
+  int local_throw_value = local_threw ? 1 : 0;
+  int minimum_throw_value = 0;
+  int maximum_throw_value = 0;
+  ASSERT_EQ(MPI_Allreduce(&local_throw_value,
+                          &minimum_throw_value,
+                          1,
+                          MPI_INT,
+                          MPI_MIN,
+                          MPI_COMM_WORLD),
+            MPI_SUCCESS);
+  ASSERT_EQ(MPI_Allreduce(&local_throw_value,
+                          &maximum_throw_value,
+                          1,
+                          MPI_INT,
+                          MPI_MAX,
+                          MPI_COMM_WORLD),
+            MPI_SUCCESS);
+  EXPECT_EQ(minimum_throw_value, 1);
+  EXPECT_EQ(maximum_throw_value, 1);
+}
+
+TEST(ApplicationDriverLevelSetWorkflowsMPI,
      KinematicAreaGradientTractionDispatchesCollectiveCurvatureRecovery)
 {
   int rank = 0;

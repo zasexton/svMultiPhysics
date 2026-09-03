@@ -3505,6 +3505,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   interface_negative.volume_cut_request->interface_quadrature_order = -1;
   auto interface_zero = request;
   interface_zero.volume_cut_request->interface_quadrature_order = 0;
+  EXPECT_NE(unset, curvatureProjectionCutRequestSignature(interface_negative));
   EXPECT_NE(unset, curvatureProjectionCutRequestSignature(interface_zero));
   EXPECT_NE(
       curvatureProjectionCutRequestSignature(interface_negative),
@@ -3514,6 +3515,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   volume_negative.volume_cut_request->volume_quadrature_order = -1;
   auto volume_zero = request;
   volume_zero.volume_cut_request->volume_quadrature_order = 0;
+  EXPECT_NE(unset, curvatureProjectionCutRequestSignature(volume_negative));
   EXPECT_NE(unset, curvatureProjectionCutRequestSignature(volume_zero));
   EXPECT_NE(curvatureProjectionCutRequestSignature(volume_negative),
             curvatureProjectionCutRequestSignature(volume_zero));
@@ -3540,6 +3542,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
   const std::vector<const Rule*> null_rule{nullptr};
   EXPECT_THROW(
       validateQuadraticTotalEnergyTractionInterfaceRules(null_rule),
+      std::runtime_error);
+
+  auto non_interface_rule = valid_rule();
+  non_interface_rule.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
+  const std::vector<const Rule*> non_interface_rules{&non_interface_rule};
+  EXPECT_THROW(
+      validateQuadraticTotalEnergyTractionInterfaceRules(non_interface_rules),
       std::runtime_error);
 
   auto rule = valid_rule();
