@@ -1,14 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) Stanford University, The Regents of the
 // University of California, and others. SPDX-License-Identifier: BSD-3-Clause
 
-#include "active_stress_regazzoni.h"
+#include "ActiveStressRegazzoni.h"
 
 #include "eigen3/Eigen/Dense"
 
 #include <algorithm>
 #include <cmath>
 
-void RegazzoniActiveStress::read_model_specific_parameters(
+void ActiveStressRegazzoni::read_model_specific_parameters(
     const ActiveStressModelParameters &params) {
   Kbasic = params.get_scalar("Kbasic");
   Koff = params.get_scalar("Koff");
@@ -19,13 +19,15 @@ void RegazzoniActiveStress::read_model_specific_parameters(
   alphaKd = params.get_scalar("alphaKd");
   if (alphaKd > 0.0)
     svmp::raise<svmp::ParseException>(
-        "RegazzoniActiveStress: alphaKd must be <= 0 (positive values reduce calcium "
+        "ActiveStressRegazzoni: alphaKd must be <= 0 (positive values reduce "
+        "calcium "
         "sensitivity with stretch, reversing length-dependent activation, "
         "and can produce a zero dissociation constant at physiological "
         "sarcomere lengths).");
   SL0 = params.get_scalar("SL0");
   ru_substep = params.get_scalar("ru_substep");
-  kd_reference_sarcomere_length = params.get_scalar("kd_reference_sarcomere_length");
+  kd_reference_sarcomere_length =
+      params.get_scalar("kd_reference_sarcomere_length");
 
   r0 = params.get_scalar("r0");
   alpha = params.get_scalar("alpha");
@@ -44,7 +46,7 @@ void RegazzoniActiveStress::read_model_specific_parameters(
   needs_fiber_stretch_rate_ = !disable_force_strain_rate_feedback_;
 }
 
-void RegazzoniActiveStress::distribute_model_specific_parameters(
+void ActiveStressRegazzoni::distribute_model_specific_parameters(
     const CmMod &cm_mod, const cmType &cm) {
   cm.bcast(cm_mod, &Kbasic);
   cm.bcast(cm_mod, &Koff);
@@ -70,14 +72,14 @@ void RegazzoniActiveStress::distribute_model_specific_parameters(
   cm.bcast(cm_mod, &needs_fiber_stretch_rate_);
 }
 
-void RegazzoniActiveStress::init_local(Vector<double> &state) const {
+void ActiveStressRegazzoni::init_local(Vector<double> &state) const {
   for (unsigned int i = 0; i < n_state_variables; ++i)
     state[i] = 0.0;
 
   state[ru_index(0, 0, 0, 0)] = 1.0; // == state[0]
 }
 
-void RegazzoniActiveStress::advance_time_step_local(
+void ActiveStressRegazzoni::advance_time_step_local(
     const double t, const double dt, const double calcium,
     const double fiber_stretch, const double fiber_stretch_rate,
     Vector<double> &state) const {
@@ -118,7 +120,8 @@ void RegazzoniActiveStress::advance_time_step_local(
   }
 
   // Advance the crossbridge moments (entries 16-19) from the updated RU state.
-  // The velocity v = -dSL/dt / SL0 reduces to -d(lambda)/dt because SL = SL0 * lambda.
+  // The velocity v = -dSL/dt / SL0 reduces to -d(lambda)/dt because SL = SL0 *
+  // lambda.
   const double velocity =
       disable_force_strain_rate_feedback_ ? 0.0 : -fiber_stretch_rate;
   XBArray state_XB;
@@ -138,7 +141,7 @@ void RegazzoniActiveStress::advance_time_step_local(
     state[xb_index(i)] = state_XB[i];
 }
 
-double RegazzoniActiveStress::compute_active_tension_local(
+double ActiveStressRegazzoni::compute_active_tension_local(
     const Vector<double> &state, const double fiber_stretch) const {
   const double sarcomere_length = SL0 * fiber_stretch;
 
@@ -149,8 +152,8 @@ double RegazzoniActiveStress::compute_active_tension_local(
          fraction_single_overlap(sarcomere_length);
 }
 
-RegazzoniActiveStress::RUArray
-RegazzoniActiveStress::ru_transition_rates_tropomyosin() const {
+ActiveStressRegazzoni::RUArray
+ActiveStressRegazzoni::ru_transition_rates_tropomyosin() const {
   RUArray rates_T;
   for (int TL = 0; TL < 2; ++TL)
     for (int TR = 0; TR < 2; ++TR) {
@@ -171,9 +174,9 @@ RegazzoniActiveStress::ru_transition_rates_tropomyosin() const {
   return rates_T;
 }
 
-void RegazzoniActiveStress::ru_forward_euler_substep(
-    double dt, const RUArray &rates_T,
-    const BinaryPairArray &rates_C, RUArray &state_RU) const {
+void ActiveStressRegazzoni::ru_forward_euler_substep(
+    double dt, const RUArray &rates_T, const BinaryPairArray &rates_C,
+    RUArray &state_RU) const {
   // Probability fluxes from central-unit transitions.
   RUArray flux_TC; // central tropomyosin
   RUArray flux_CC; // central troponin
@@ -183,8 +186,7 @@ void RegazzoniActiveStress::ru_forward_euler_substep(
         for (int CC = 0; CC < 2; ++CC) {
           flux_TC[TL][TC][TR][CC] =
               state_RU[TL][TC][TR][CC] * rates_T[TL][TC][TR][CC];
-          flux_CC[TL][TC][TR][CC] =
-              state_RU[TL][TC][TR][CC] * rates_C[CC][TC];
+          flux_CC[TL][TC][TR][CC] = state_RU[TL][TC][TR][CC] * rates_C[CC][TC];
         }
 
   // Effective transition rates of the boundary neighbours, obtained from the
@@ -244,10 +246,8 @@ void RegazzoniActiveStress::ru_forward_euler_substep(
                     flux_CC[TL][TC][TR][CC] + flux_CC[TL][TC][TR][1 - CC]);
 }
 
-RegazzoniActiveStress::XBArray RegazzoniActiveStress::xb_implicit_update(
-    double dt, double velocity,
-    const RUArray &rates_T,
-    const RUArray &state_RU,
+ActiveStressRegazzoni::XBArray ActiveStressRegazzoni::xb_implicit_update(
+    double dt, double velocity, const RUArray &rates_T, const RUArray &state_RU,
     const XBArray &state_XB) const {
   // Permissivity and the permissive/non-permissive probability fluxes from the
   // updated RU state.
@@ -306,7 +306,8 @@ RegazzoniActiveStress::XBArray RegazzoniActiveStress::xb_implicit_update(
   return result;
 }
 
-double RegazzoniActiveStress::fraction_single_overlap(double sarcomere_length) const {
+double
+ActiveStressRegazzoni::fraction_single_overlap(double sarcomere_length) const {
   const double SL = sarcomere_length;
   const double half_single_overlap = (LM - LB) * 0.5;
 
@@ -321,4 +322,4 @@ double RegazzoniActiveStress::fraction_single_overlap(double sarcomere_length) c
   return 0.0;
 }
 
-REGISTER_ACTIVE_STRESS_MODEL("Regazzoni", RegazzoniActiveStress);
+REGISTER_ACTIVE_STRESS_MODEL("Regazzoni", ActiveStressRegazzoni);

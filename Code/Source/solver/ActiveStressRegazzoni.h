@@ -4,22 +4,23 @@
 #ifndef ACTIVE_STRESS_REGAZZONI_H
 #define ACTIVE_STRESS_REGAZZONI_H
 
-#include "active_stress.h"
+#include "ActiveStress.h"
 
 #include <array>
 
 /**
  * @brief Mean-field active stress model (implements the RDQ20-MF formulation).
  *
- * This class implements the mean-field RDQ20-MF sarcomere model of cardiomyocyte
- * force generation of Regazzoni, Dede', and Quarteroni (2020), described in [1]
- * and validated against the authors' reference implementation [2]. The node-local state has 20 variables: 16
- * regulatory-unit (RU) probabilities (entries 0-15) describing the
- * tropomyosin/troponin configuration of a triplet of neighbouring units, and 4
- * crossbridge (XB) moments (entries 16-19). The RU probabilities are advanced
- * with an explicit forward-Euler substepping scheme — for every macro time step,
- * a number of smaller sub-steps are taken to update the RU states — and the XB
- * moments with one implicit-Euler step per time step; the active tension is then
+ * This class implements the mean-field RDQ20-MF sarcomere model of
+ * cardiomyocyte force generation of Regazzoni, Dede', and Quarteroni (2020),
+ * described in [1] and validated against the authors' reference implementation
+ * [2]. The node-local state has 20 variables: 16 regulatory-unit (RU)
+ * probabilities (entries 0-15) describing the tropomyosin/troponin
+ * configuration of a triplet of neighbouring units, and 4 crossbridge (XB)
+ * moments (entries 16-19). The RU probabilities are advanced with an explicit
+ * forward-Euler substepping scheme — for every macro time step, a number of
+ * smaller sub-steps are taken to update the RU states — and the XB moments with
+ * one implicit-Euler step per time step; the active tension is then
  * reconstructed from the XB first moments.
  *
  * The returned scalar active tension is
@@ -27,24 +28,27 @@
  *   \Tact = a_\text{XB} \, (\mu_P^1 + \mu_N^1) \, \phi(SL)\;,
  * @f]
  * where @f$\mu_P^1@f$ and @f$\mu_N^1@f$ are the permissive and non-permissive
- * first XB moments (state entries 17 and 19), @f$\phi(SL)@f$ is the single-overlap
- * fraction of the sarcomere at sarcomere length @f$SL = SL_0 \, \fiberstretch@f$
- * (with @f$\fiberstretch@f$ the fiber stretch), and @f$a_\text{XB}@f$ is the tension
- * upscaling factor. Because @f$\mu_P^1 + \mu_N^1@f$ and @f$\phi(SL)@f$ are
- * dimensionless, @f$a_\text{XB}@f$ sets the units of the returned active tension.
+ * first XB moments (state entries 17 and 19), @f$\phi(SL)@f$ is the
+ * single-overlap fraction of the sarcomere at sarcomere length @f$SL = SL_0 \,
+ * \fiberstretch@f$ (with @f$\fiberstretch@f$ the fiber stretch), and
+ * @f$a_\text{XB}@f$ is the tension upscaling factor. Because @f$\mu_P^1 +
+ * \mu_N^1@f$ and @f$\phi(SL)@f$ are dimensionless, @f$a_\text{XB}@f$ sets the
+ * units of the returned active tension.
  *
  * **References**:
- * 1. [Regazzoni, Dede', Quarteroni (2020)](https://doi.org/10.1371/journal.pcbi.1008294)
- * 2. [F. Regazzoni, cardiac-activation reference implementation](https://github.com/FrancescoRegazzoni/cardiac-activation)
+ * 1. [Regazzoni, Dede', Quarteroni
+ * (2020)](https://doi.org/10.1371/journal.pcbi.1008294)
+ * 2. [F. Regazzoni, cardiac-activation reference
+ * implementation](https://github.com/FrancescoRegazzoni/cardiac-activation)
  *
  * @note Although this model is governed by a system of ODEs, it inherits from
- * @c ActiveStress rather than @c ActiveStressODE because it requires a customized
- * time-stepping scheme to handle the stiffness of the model.
+ * @c ActiveStress rather than @c ActiveStressODE because it requires a
+ * customized time-stepping scheme to handle the stiffness of the model.
  *
  * @todo Force-strain-rate feedback requires a stabilization strategy for robust
  * use in coupled electromechanics. This will be addressed in a follow-up PR.
  */
-class RegazzoniActiveStress : public ActiveStress {
+class ActiveStressRegazzoni : public ActiveStress {
 public:
   /// Model label, used for factory registration and XML selection.
   static inline const std::string label = "Regazzoni";
@@ -123,9 +127,10 @@ public:
   /**
    * @brief Constructor.
    */
-  RegazzoniActiveStress() : ActiveStress(/* n_state_variables = */ n_state_variables,
-                                        /* needs_fiber_stretch = */ true,
-                                        /* needs_fiber_stretch_rate = */ true) {}
+  ActiveStressRegazzoni()
+      : ActiveStress(/* n_state_variables = */ n_state_variables,
+                     /* needs_fiber_stretch = */ true,
+                     /* needs_fiber_stretch_rate = */ true) {}
 
   /**
    * @brief Construct an instance of model parameters.
@@ -164,8 +169,8 @@ protected:
    *
    * Advances the RU probabilities (entries 0-15) with the forward-Euler
    * substepping scheme and then the XB moments (entries 16-19) with one
-   * implicit-Euler step, using the calcium, fiber stretch and fiber-stretch rate
-   * at the node.
+   * implicit-Euler step, using the calcium, fiber stretch and fiber-stretch
+   * rate at the node.
    */
   virtual void advance_time_step_local(const double t, const double dt,
                                        const double calcium,
@@ -186,7 +191,8 @@ protected:
                                const double fiber_stretch) const override;
 
 private:
-  /// Array indexed over the four binary RU configuration variables (TL, TC, TR, CC).
+  /// Array indexed over the four binary RU configuration variables (TL, TC, TR,
+  /// CC).
   using RUArray =
       std::array<std::array<std::array<std::array<double, 2>, 2>, 2>, 2>;
 
@@ -227,8 +233,7 @@ private:
    * @param[in,out] state_RU The 16 RU-state probabilities,
    *   indexed @c state_RU[TL][TC][TR][CC].
    */
-  void ru_forward_euler_substep(double dt,
-                                const RUArray &rates_T,
+  void ru_forward_euler_substep(double dt, const RUArray &rates_T,
                                 const BinaryPairArray &rates_C,
                                 RUArray &state_RU) const;
 
@@ -250,8 +255,7 @@ private:
    * @return Updated crossbridge moments, ordered
    *   @f$[\mu_P^0, \mu_P^1, \mu_N^0, \mu_N^1]@f$.
    */
-  XBArray xb_implicit_update(double dt, double velocity,
-                             const RUArray &rates_T,
+  XBArray xb_implicit_update(double dt, double velocity, const RUArray &rates_T,
                              const RUArray &state_RU,
                              const XBArray &state_XB) const;
 
@@ -271,24 +275,27 @@ private:
   /// @name RU model parameters
   /// @{
 
-  double Kbasic;  ///< Basic tropomyosin transition rate [1/time].
-  double Koff;    ///< Troponin unbinding rate [1/time].
-  double Q;       ///< Tropomyosin transition-rate asymmetry factor [-].
-  double mu;      ///< Calcium-binding cooperativity factor [-].
-  double gamma;   ///< Nearest-neighbour cooperativity factor [-].
-  double Kd0;     ///< Calcium dissociation constant at reference length [calcium].
-  double alphaKd; ///< Length dependence of the dissociation constant [calcium/length].
-  double SL0;     ///< Reference sarcomere length [length]; maps stretch to length.
+  double Kbasic; ///< Basic tropomyosin transition rate [1/time].
+  double Koff;   ///< Troponin unbinding rate [1/time].
+  double Q;      ///< Tropomyosin transition-rate asymmetry factor [-].
+  double mu;     ///< Calcium-binding cooperativity factor [-].
+  double gamma;  ///< Nearest-neighbour cooperativity factor [-].
+  double Kd0; ///< Calcium dissociation constant at reference length [calcium].
+  double alphaKd; ///< Length dependence of the dissociation constant
+                  ///< [calcium/length].
+  double SL0; ///< Reference sarcomere length [length]; maps stretch to length.
   double ru_substep; ///< RU forward-Euler substep size [time].
 
   /// Reference sarcomere length [length] used in the length-dependent
   /// dissociation constant (distinct from the parameter SL0).
   double kd_reference_sarcomere_length;
 
-  double r0;     ///< Combined attachment-detachment rate at zero velocity [1/time].
+  double r0; ///< Combined attachment-detachment rate at zero velocity [1/time].
   double alpha;  ///< Coefficient of |v| in r(v) = r0 + alpha * |v| [-].
-  double mu0_fP; ///< Permissive influx into the zeroth-moment crossbridge state [1/time].
-  double mu1_fP; ///< Permissive influx into the first-moment crossbridge state [1/time].
+  double mu0_fP; ///< Permissive influx into the zeroth-moment crossbridge state
+                 ///< [1/time].
+  double mu1_fP; ///< Permissive influx into the first-moment crossbridge state
+                 ///< [1/time].
 
   double LA; ///< Thin-filament (actin) length [length].
   double LM; ///< Thick-filament (myosin) length [length].
@@ -296,9 +303,10 @@ private:
 
   /// Tension upscaling factor [stress].
   ///
-  /// Because the crossbridge moments and the overlap fraction are dimensionless,
-  /// a_XB sets the stress unit of the returned active tension. It must be
-  /// expressed in the same stress unit as the mechanical configuration.
+  /// Because the crossbridge moments and the overlap fraction are
+  /// dimensionless, a_XB sets the stress unit of the returned active tension.
+  /// It must be expressed in the same stress unit as the mechanical
+  /// configuration.
   double a_XB;
 
   /// Controls force–strain-rate feedback in the XB update.
