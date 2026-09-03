@@ -10,6 +10,7 @@
 #include "utils.h"
 
 #include <math.h>
+#include <optional>
 
 namespace cep {
 
@@ -83,14 +84,49 @@ void cep_1d(ComMod& com_mod, CepMod& cep_mod, const int eNoN, const int nFn, con
 // cep_2d
 //--------
 // Reproduces Fortran 'CEP2D' subroutine.
-// 
-void cep_2d(ComMod& com_mod, CepMod& cep_mod, const int eNoN, const int nFn, const double w,
+//
+namespace {
+
+struct Cep2dWorkspace
+{
+  Vector<double> Dani;
+  Vector<double> Vx;
+  Vector<double> Ls;
+  Vector<double> DVx;
+  Array<double> F;
+  Array<double> C;
+  Array<double> fl;
+  Array<double> D;
+  Array<double> DNx;
+
+  Cep2dWorkspace(const int eNoN, const int nFn)
+    : Dani(nFn), Vx(2), Ls(nFn), DVx(2), F(2,2), C(2,2),
+      fl(2,nFn), D(2,2), DNx(2,eNoN)
+  {
+  }
+
+  void reset()
+  {
+    Dani = 0.0;
+    Vx = 0.0;
+    Ls = 0.0;
+    DVx = 0.0;
+    F = 0.0;
+    C = 0.0;
+    fl = 0.0;
+    D = 0.0;
+    DNx = 0.0;
+  }
+};
+
+void cep_2d_impl(ComMod& com_mod, CepMod& cep_mod, const int eNoN, const int nFn, const double w,
     const Vector<double>& N, const Array<double>& Nx, const Array<double>& al, const Array<double>& yl,
-    const Array<double>& dl, const Array<double>& fN, Array<double>& lR, Array3<double>& lK)
+    const Array<double>& dl, const Array<double>& fN, Array<double>& lR, Array3<double>& lK,
+    Cep2dWorkspace& workspace)
 {
   #define n_debug_cep_2d 
   #ifdef debug_cep_2d 
-  DebugMsg dmsg(__func__, com_mod.cm.idcm());
+  DebugMsg dmsg("cep_2d", com_mod.cm.idcm());
   dmsg.banner();
   #endif
 
@@ -107,8 +143,17 @@ void cep_2d(ComMod& com_mod, CepMod& cep_mod, const int eNoN, const int nFn, con
   const double dt = com_mod.dt;
   const auto& cem = cep_mod.cem;
 
-  Vector<double> Dani(nFn), Vx(2), Ls(nFn), DVx(2);
-  Array<double> F(2,2), C(2,2), fl(2,nFn), D(2,2), DNx(2,eNoN);
+  auto& Dani = workspace.Dani;
+  auto& Vx = workspace.Vx;
+  auto& Ls = workspace.Ls;
+  auto& DVx = workspace.DVx;
+  auto& F = workspace.F;
+  auto& C = workspace.C;
+  auto& fl = workspace.fl;
+  auto& D = workspace.D;
+  auto& DNx = workspace.DNx;
+
+  workspace.reset();
 
   if (nFn < dmn.cep.nFn) { 
     throw std::runtime_error("[cep_2d] No. of anisotropic conductivies exceed mesh fibers.");
@@ -222,6 +267,16 @@ void cep_2d(ComMod& com_mod, CepMod& cep_mod, const int eNoN, const int nFn, con
       lK(0,a,b) = lK(0,a,b) + wl*(N(a)*N(b)*amd + Nx(0,a)*DNx(0,b) + Nx(1,a)*DNx(1,b));
     }
   }
+}
+
+} // namespace
+
+void cep_2d(ComMod& com_mod, CepMod& cep_mod, const int eNoN, const int nFn, const double w,
+    const Vector<double>& N, const Array<double>& Nx, const Array<double>& al, const Array<double>& yl,
+    const Array<double>& dl, const Array<double>& fN, Array<double>& lR, Array3<double>& lK)
+{
+  Cep2dWorkspace workspace(eNoN, nFn);
+  cep_2d_impl(com_mod, cep_mod, eNoN, nFn, w, N, Nx, al, yl, dl, fN, lR, lK, workspace);
 }
 
 //--------
@@ -433,6 +488,7 @@ void construct_cep(ComMod& com_mod, CepMod& cep_mod, const mshType& lM, const So
       fN(nsd,nFn), Nx(insd,eNoN), lR(dof,eNoN);
   Array3<double> lK(dof*dof,eNoN,eNoN);
   Vector<double>  N(eNoN); 
+  std::optional<Cep2dWorkspace> cep_2d_workspace;
   
   // ECG computation
   Vector<double> pseudo_ECG_proc(cep_mod.ecgleads.num_leads);
@@ -512,7 +568,11 @@ void construct_cep(ComMod& com_mod, CepMod& cep_mod, const mshType& lM, const So
         cep_3d(com_mod, cep_mod, eNoN, nFn, w, N, Nx, al, yl, dl, fN, lR, lK);
 
       } else if (insd == 2) {
-        cep_2d(com_mod, cep_mod, eNoN, nFn, w, N, Nx, al, yl, dl, fN, lR, lK);
+        if (!cep_2d_workspace) {
+          cep_2d_workspace.emplace(eNoN, nFn);
+        }
+        cep_2d_impl(com_mod, cep_mod, eNoN, nFn, w, N, Nx, al, yl, dl, fN, lR, lK,
+            *cep_2d_workspace);
 
       } else if (insd == 1) {
         cep_1d(com_mod, cep_mod, eNoN, nFn, w, N, Nx, al, yl, lR, lK);
