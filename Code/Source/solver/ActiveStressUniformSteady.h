@@ -4,7 +4,7 @@
 #ifndef ACTIVE_STRESS_UNIFORM_STEADY_H
 #define ACTIVE_STRESS_UNIFORM_STEADY_H
 
-#include "active_stress.h"
+#include "ActiveStress.h"
 
 /**
  * @brief Uniform and steady active stress model.
@@ -15,7 +15,7 @@
  * @f]
  * where @f$g@f$ is a user-defined constant value.
  */
-class UniformSteadyActiveStress : public ActiveStress {
+class ActiveStressUniformSteady : public ActiveStress {
 public:
   /// Model label.
   static inline const std::string label = "UniformSteady";
@@ -33,7 +33,8 @@ public:
   /**
    * @brief Constructor.
    */
-  UniformSteadyActiveStress() : ActiveStress(/* n_states = */ 0,
+  ActiveStressUniformSteady()
+      : ActiveStress(/* n_states = */ 0,
                      /* needs_fiber_stretch = */ false,
                      /* needs_fiber_stretch_rate = */ false) {}
 
