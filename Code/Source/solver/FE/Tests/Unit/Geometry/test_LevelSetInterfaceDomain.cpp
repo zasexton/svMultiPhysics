@@ -1009,6 +1009,67 @@ TEST(LevelSetInterfaceDomain, PlanarPolygonQuadraticRuleIntegratesTetrahedralCut
                  std::invalid_argument);
 }
 
+TEST(LevelSetInterfaceDomain,
+     PlanarPolygonQuadraticRuleInterpolatesParentCoordinatesAndNormalizesMeasure)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromEvaluator(
+        "planar-polygon-parent-coordinate-normalization");
+    request.interface_marker = 191;
+    request.interface_quadrature_order = 2;
+
+    CutInterfaceFragment fragment;
+    fragment.kind = CutInterfaceFragmentKind::Polygon;
+    fragment.parent_cell = 25;
+    fragment.measure = 2.5;
+    fragment.normal = {{0.0, 0.0, 1.0}};
+    fragment.vertices = {
+        CutInterfaceVertex{.point = {{0.0, 0.0, 0.0}},
+                           .parent_coordinate = {{10.0, 20.0, 30.0}}},
+        CutInterfaceVertex{.point = {{2.0, 0.0, 0.0}},
+                           .parent_coordinate = {{14.0, 20.0, 30.0}}},
+        CutInterfaceVertex{.point = {{0.0, 1.0, 0.0}},
+                           .parent_coordinate = {{10.0, 23.0, 30.0}}},
+    };
+
+    LevelSetInterfaceDomain domain(request);
+    domain.addFragment(std::move(fragment));
+    const auto rules = domain.interfaceQuadratureRules();
+    ASSERT_EQ(rules.size(), 1u);
+    const auto& rule = rules.front();
+    ASSERT_EQ(rule.points.size(), 3u);
+    EXPECT_NEAR(integrateWeight(rule), 2.5, 1.0e-14);
+
+    const std::array<std::array<Real, 3>, 3> expected_points{{
+        {{1.0 / 3.0, 1.0 / 6.0, 0.0}},
+        {{4.0 / 3.0, 1.0 / 6.0, 0.0}},
+        {{1.0 / 3.0, 2.0 / 3.0, 0.0}},
+    }};
+    const std::array<std::array<Real, 3>, 3> expected_parent_coordinates{{
+        {{32.0 / 3.0, 20.5, 30.0}},
+        {{38.0 / 3.0, 20.5, 30.0}},
+        {{32.0 / 3.0, 22.0, 30.0}},
+    }};
+    for (std::size_t point_index = 0; point_index < rule.points.size(); ++point_index) {
+        const auto& point = rule.points[point_index];
+        EXPECT_GT(point.weight, 0.0);
+        EXPECT_GT(point.reference_measure_factor, 0.0);
+        EXPECT_NEAR(point.weight, 5.0 / 6.0, 1.0e-14);
+        EXPECT_NEAR(point.reference_measure_factor, 5.0, 1.0e-14);
+        for (std::size_t component = 0; component < 3u; ++component) {
+            EXPECT_NEAR(point.point[component],
+                        expected_points[point_index][component],
+                        1.0e-14);
+            EXPECT_NEAR(point.parent_coordinate[component],
+                        expected_parent_coordinates[point_index][component],
+                        1.0e-14);
+        }
+        EXPECT_NEAR(point.normal[0], 0.0, 1.0e-14);
+        EXPECT_NEAR(point.normal[1], 0.0, 1.0e-14);
+        EXPECT_NEAR(point.normal[2], 1.0, 1.0e-14);
+    }
+}
+
 TEST(LevelSetInterfaceDomain, PlanarCutVolumeSupportsPositiveOrderFiveRules)
 {
     CutInterfaceDomainRequest request;

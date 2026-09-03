@@ -5488,6 +5488,12 @@ TEST(LevelSetInterfaceLifecycle, LinearBackendDriverReportsSupportAndOrders)
         tetra_result.cut.fragments.front().toCutQuadratureRule(request);
     EXPECT_EQ(tetra_rule.exact_polynomial_order, 2);
     EXPECT_EQ(tetra_rule.policy.polynomial_order, 2);
+    EXPECT_EQ(tetra_rule.policy.name,
+              "quadratic-planar-polygon-level-set-interface");
+    EXPECT_EQ(tetra_rule.policy.kind,
+              FE::geometry::CutQuadratureConstructionKind::TopologySubdivision);
+    EXPECT_EQ(tetra_rule.provenance.construction,
+              FE::geometry::CutQuadratureConstructionKind::TopologySubdivision);
     EXPECT_EQ(tetra_rule.provenance.requested_quadrature_order, 2);
     EXPECT_EQ(tetra_rule.provenance.achieved_quadrature_order, 2);
     EXPECT_EQ(tetra_rule.points.size(), 6u);
