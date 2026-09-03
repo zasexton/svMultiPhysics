@@ -7293,6 +7293,35 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
     return rule;
   };
   const auto comm = svmp::MeshComm(MPI_COMM_WORLD);
+  const auto expect_uniform_throw = [&comm](
+                                        std::span<const Rule* const> rules) {
+    bool local_threw = false;
+    try {
+      validateQuadraticTotalEnergyTractionInterfaceRulesCollectively(
+          rules, comm);
+    } catch (const std::runtime_error&) {
+      local_threw = true;
+    }
+    int local_throw_value = local_threw ? 1 : 0;
+    int minimum_throw_value = 0;
+    int maximum_throw_value = 0;
+    ASSERT_EQ(MPI_Allreduce(&local_throw_value,
+                            &minimum_throw_value,
+                            1,
+                            MPI_INT,
+                            MPI_MIN,
+                            MPI_COMM_WORLD),
+              MPI_SUCCESS);
+    ASSERT_EQ(MPI_Allreduce(&local_throw_value,
+                            &maximum_throw_value,
+                            1,
+                            MPI_INT,
+                            MPI_MAX,
+                            MPI_COMM_WORLD),
+              MPI_SUCCESS);
+    EXPECT_EQ(minimum_throw_value, 1);
+    EXPECT_EQ(maximum_throw_value, 1);
+  };
   auto rank_one_rule = valid_rule();
   const std::vector<const Rule*> rank_local_rules =
       rank == 0 ? std::vector<const Rule*>{}
@@ -7306,32 +7335,14 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
     mixed_rule.provenance.achieved_quadrature_order = 3;
   }
   const std::vector<const Rule*> mixed_rules{&mixed_rule};
-  bool local_threw = false;
-  try {
-    validateQuadraticTotalEnergyTractionInterfaceRulesCollectively(
-        mixed_rules, comm);
-  } catch (const std::runtime_error&) {
-    local_threw = true;
+  expect_uniform_throw(mixed_rules);
+
+  auto non_interface_rule = valid_rule();
+  if (rank == 0) {
+    non_interface_rule.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
   }
-  int local_throw_value = local_threw ? 1 : 0;
-  int minimum_throw_value = 0;
-  int maximum_throw_value = 0;
-  ASSERT_EQ(MPI_Allreduce(&local_throw_value,
-                          &minimum_throw_value,
-                          1,
-                          MPI_INT,
-                          MPI_MIN,
-                          MPI_COMM_WORLD),
-            MPI_SUCCESS);
-  ASSERT_EQ(MPI_Allreduce(&local_throw_value,
-                          &maximum_throw_value,
-                          1,
-                          MPI_INT,
-                          MPI_MAX,
-                          MPI_COMM_WORLD),
-            MPI_SUCCESS);
-  EXPECT_EQ(minimum_throw_value, 1);
-  EXPECT_EQ(maximum_throw_value, 1);
+  const std::vector<const Rule*> non_interface_rules{&non_interface_rule};
+  expect_uniform_throw(non_interface_rules);
 }
 
 TEST(ApplicationDriverLevelSetWorkflowsMPI,
