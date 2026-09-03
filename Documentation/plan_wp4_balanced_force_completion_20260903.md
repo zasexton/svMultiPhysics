@@ -20,7 +20,7 @@
 - Every commit has author and committer `Zachary Sexton <zsexton@stanford.edu>`.
 - Before each commit and push, scan every added/staged byte and the proposed message for the repository-prohibited vocabulary; a nonempty scan blocks the commit.
 - Put disposable builds, scripts, logs, caches, and runner output below `/scratch/users/zsexton`.
-- At most three owned `amarsden` nodes and 30 GiB total may run concurrently. Every submitted job declares `--mail-user=zsexton@stanford.edu` and `--mail-type=BEGIN,END,FAIL` in the submitted script from its first submission.
+- At most four owned `amarsden` nodes and 40 GiB total may run concurrently. Every submitted job declares `--mail-user=zsexton@stanford.edu` and `--mail-type=BEGIN,END,FAIL` in the submitted script from its first submission.
 - Preserve the inherited module environment for launched work; do not invoke `bash -lc` inside `srun`.
 - Touch only jobs recorded in this plan's scratch ledger.
 - Do not launch the qualification runner until the source is a clean frozen commit, all LFS objects are hydrated, caches/worktrees are fresh, and matrix plus runner hashes are final.
@@ -230,7 +230,7 @@ Run one nontrivial minimized sessile case and one closed-surface case under two 
 
 - [ ] **Step 6: Add a moving restoring-force test**
 
-Apply a small volume-orthogonal perturbation to a minimized state, evaluate both signs of the perturbation, and require positive second energy difference plus capillary work opposing the displacement. Advance a fixed short physical horizon with the same step count after time-step refinement; require initial acceleration/velocity to have the restoring sign and require the unperturbed minimized control to remain under the algebraic/parasitic gates.
+Apply a small volume-orthogonal perturbation to a minimized state, evaluate both signs of the perturbation, and require positive second energy difference plus capillary work opposing the displacement. Advance a fixed short physical horizon, increasing the step count as the time step is refined; keep the step count equal among the positive, negative, and unperturbed runs at each refinement. Require initial acceleration/velocity to have the restoring sign and require the unperturbed minimized control to remain under the algebraic/parasitic gates.
 
 - [ ] **Step 7: Run focused FE, Physics, and Application suites**
 
@@ -273,7 +273,7 @@ Commit and push the reviewed V3 inputs with the required identity. Create a deta
 
 - [ ] **Step 5: Submit bounded independent builds and qualification groups**
 
-Use no more than three concurrent one-node jobs totaling 30 GiB on `amarsden`, with mail on begin/end/fail in every original script. Build FE, Physics, and Application independently, then launch only hash-bound groups with dependencies. Record every owned job in the scratch ledger before/at submission; leave all unrelated jobs untouched.
+Use no more than four concurrent one-node jobs totaling 40 GiB on `amarsden`, with mail on begin/end/fail in every original script. Build FE, Physics, and Application independently, then launch only hash-bound groups with dependencies. Record every owned job in the scratch ledger before/at submission; leave all unrelated jobs untouched.
 
 - [ ] **Step 6: Independently validate immutable evidence**
 
