@@ -99,11 +99,6 @@ void construct_darcy(ComMod& com_mod, const mshType& lM, const SolutionStates& s
       continue;
     }
 
-    // Update shape function for NURBS
-    if (lM.eType == ElementType::NRB) {
-      //CALL NRMNNX(lm, e)
-    }
-
     // Create local copies
     for (int a = 0; a < eNoN; a++) {
       int Ac = lM.IEN(a, e);
