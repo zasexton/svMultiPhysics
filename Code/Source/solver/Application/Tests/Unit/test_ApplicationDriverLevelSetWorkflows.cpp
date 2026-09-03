@@ -8677,7 +8677,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
                                                                      : 0);
     RecordProperty(prefix + "production_residual",
                    certificate.residual_norm);
-    RecordProperty(prefix + "parasitic_capillary_number", 0.0);
+    RecordProperty(prefix + "parasitic_capillary_number",
+                   observables.parasitic_capillary_number);
     RecordProperty(prefix + "kinetic_energy",
                    functionals.front().active_volume_energy->kinetic_energy);
     RecordProperty(prefix + "volume",
@@ -8746,12 +8747,20 @@ TEST(ApplicationDriverLevelSetWorkflows,
       {3, false, false, "sphere"},
       {3, true, true, "sessile_sphere"},
   }};
-  constexpr std::array<int, 3> resolutions{{1, 2, 4}};
+  constexpr std::array<int, 3> planar_resolutions{{1, 2, 4}};
+  constexpr std::array<int, 3> spatial_resolutions{{2, 4, 8}};
 
   for (const auto& current_case : cases) {
     SCOPED_TRACE(::testing::Message() << "case=" << current_case.label);
+    const auto& resolutions = current_case.dimension == 3
+                                  ? spatial_resolutions
+                                  : planar_resolutions;
     std::array<svmp::FE::Real, 3> errors{};
     for (std::size_t level = 0u; level < resolutions.size(); ++level) {
+      if (current_case.dimension == 3 && current_case.sessile) {
+        ASSERT_GT(resolutions[level], 1)
+            << "sessile-sphere GCI levels must use one refinement family";
+      }
       auto fixture = makeWorkflowBalancedCapillaryFixture(
           current_case.dimension,
           current_case.sessile,
@@ -9581,6 +9590,19 @@ TEST(ApplicationDriverLevelSetWorkflows,
               svmp::FE::Real{1.0e-10});
     EXPECT_LE(std::abs(controls[level].final_parameter),
               svmp::FE::Real{1.0e-10});
+    const auto& control_observables = controls[level].observables;
+    EXPECT_LE(controls[level].projected_gradient_norm,
+              svmp::FE::Real{1.0e-8});
+    EXPECT_LE(control_observables.pressure_distance,
+              svmp::FE::Real{1.0e-8});
+    EXPECT_LE(control_observables.force_residual,
+              svmp::FE::Real{1.0e-8});
+    EXPECT_LE(control_observables.production_residual,
+              svmp::FE::Real{1.0e-8});
+    EXPECT_LE(control_observables.parasitic_capillary_number,
+              svmp::FE::Real{1.0e-8});
+    EXPECT_LE(control_observables.kinetic_energy,
+              svmp::FE::Real{1.0e-8});
   }
   EXPECT_LT(
       std::abs(plus_trajectories[1].final_velocity -
@@ -9594,18 +9616,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
           std::abs(minus_trajectories[1].final_velocity));
 
   const auto& control_observables = controls[1].observables;
-  EXPECT_LE(controls[1].projected_gradient_norm,
-            svmp::FE::Real{1.0e-8});
-  EXPECT_LE(control_observables.pressure_distance,
-            svmp::FE::Real{1.0e-8});
-  EXPECT_LE(control_observables.force_residual,
-            svmp::FE::Real{1.0e-8});
-  EXPECT_LE(control_observables.production_residual,
-            svmp::FE::Real{1.0e-8});
-  EXPECT_LE(control_observables.parasitic_capillary_number,
-            svmp::FE::Real{1.0e-8});
-  EXPECT_LE(control_observables.kinetic_energy,
-            svmp::FE::Real{1.0e-8});
 
   RecordProperty("wp4_restoring_direction_volume_dot",
                  direction_volume_dot);
