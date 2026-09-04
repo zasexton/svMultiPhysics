@@ -1406,6 +1406,17 @@ class risFaceType
 {
   public:
 
+    /// @brief Generation metadata for the rank-local RIS lookup cache.
+    int firstLocationRemeshCounter = -1;
+    int firstLocationTotalNodeCount = -1;
+    int firstLocationProjectionCount = -1;
+
+    /// @brief Dimensions of the source map used for each cached projection.
+    std::vector<std::array<int, 2>> firstLocationMapShapes;
+
+    /// @brief First logical row/column location of each rank-local node ID.
+    std::vector<std::vector<std::array<int, 2>>> firstLocation;
+
     /// @brief Number of RIS surface
     int nbrRIS = 0;
 

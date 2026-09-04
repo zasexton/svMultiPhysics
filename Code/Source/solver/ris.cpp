@@ -12,6 +12,97 @@
 
 namespace ris {
 
+namespace {
+
+bool ris_first_location_cache_is_current(const ComMod& com_mod)
+{
+  const auto& RIS = com_mod.ris;
+  const int nPrj = RIS.nbrRIS;
+
+  if (nPrj < 0 || com_mod.tnNo < 0) {
+    return false;
+  }
+  if (RIS.firstLocationRemeshCounter != com_mod.rmsh.cntr ||
+      RIS.firstLocationTotalNodeCount != com_mod.tnNo ||
+      RIS.firstLocationProjectionCount != nPrj ||
+      RIS.firstLocationMapShapes.size() != static_cast<size_t>(nPrj) ||
+      RIS.firstLocation.size() != static_cast<size_t>(nPrj) ||
+      com_mod.grisMapList.size() < static_cast<size_t>(nPrj)) {
+    return false;
+  }
+
+  for (int iProj = 0; iProj < nPrj; ++iProj) {
+    const auto& map = com_mod.grisMapList[iProj].map;
+    const auto& shape = RIS.firstLocationMapShapes[iProj];
+    if (shape[0] != map.nrows() || shape[1] != map.ncols() ||
+        RIS.firstLocation[iProj].size() != static_cast<size_t>(com_mod.tnNo)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+void rebuild_ris_first_location_cache(ComMod& com_mod)
+{
+  auto& RIS = com_mod.ris;
+  const int nPrj = RIS.nbrRIS;
+
+  RIS.firstLocationProjectionCount = -1;
+  RIS.firstLocationMapShapes.clear();
+  RIS.firstLocation.clear();
+
+  if (nPrj < 0 || com_mod.tnNo < 0 ||
+      com_mod.grisMapList.size() < static_cast<size_t>(nPrj)) {
+    return;
+  }
+
+  RIS.firstLocationMapShapes.reserve(nPrj);
+  RIS.firstLocation.resize(nPrj);
+  for (int iProj = 0; iProj < nPrj; ++iProj) {
+    const auto& map = com_mod.grisMapList[iProj].map;
+    RIS.firstLocationMapShapes.push_back({map.nrows(), map.ncols()});
+
+    auto& locations = RIS.firstLocation[iProj];
+    locations.resize(com_mod.tnNo, std::array<int, 2>{-1, -1});
+    for (int row = 0; row < map.nrows(); ++row) {
+      for (int col = 0; col < map.ncols(); ++col) {
+        const int node = map(row, col);
+        if (node >= 0 && node < com_mod.tnNo) {
+          auto& first = locations[node];
+          if (first[0] == -1) {
+            first = {row, col};
+          }
+        }
+      }
+    }
+  }
+
+  RIS.firstLocationRemeshCounter = com_mod.rmsh.cntr;
+  RIS.firstLocationTotalNodeCount = com_mod.tnNo;
+  RIS.firstLocationProjectionCount = nPrj;
+}
+
+void ensure_ris_first_location_cache(ComMod& com_mod)
+{
+  if (!ris_first_location_cache_is_current(com_mod)) {
+    rebuild_ris_first_location_cache(com_mod);
+  }
+}
+
+void find_ris_map_location(const ComMod& com_mod, const int iProj,
+    const int value, std::array<int, 2>& location)
+{
+  if (value >= 0 && value < com_mod.tnNo) {
+    location = com_mod.ris.firstLocation[iProj][value];
+    return;
+  }
+
+  utils::find_loc(com_mod.grisMapList[iProj].map, value, location);
+}
+
+} // namespace
+
 /// @brief This subroutine computes the mean pressure and flux on the ris surface 
 void ris_meanq(ComMod& com_mod, CmMod& cm_mod, const SolutionStates& solutions)
 {
@@ -287,6 +378,8 @@ void doassem_ris(ComMod& com_mod, const int d, const Vector<int>& eqN,
   int rowNadj = 0;
   double val_sum;
 
+  ensure_ris_first_location_cache(com_mod);
+
   for (int iProj = 0; iProj < nPrj; iProj++) {
     if (RIS.clsFlg[iProj]) {continue;}
 
@@ -295,7 +388,7 @@ void doassem_ris(ComMod& com_mod, const int d, const Vector<int>& eqN,
       if (rowN == -1) {continue;}
 
       std::array<int, 2> mapIdx;
-      utils::find_loc(com_mod.grisMapList[iProj].map, rowN, mapIdx);
+      find_ris_map_location(com_mod, iProj, rowN, mapIdx);
 
       if (mapIdx[0] == -1) {continue;}
 
@@ -314,7 +407,7 @@ void doassem_ris(ComMod& com_mod, const int d, const Vector<int>& eqN,
       for (int b = 0; b < d; b++) {
         int colN = eqN(b);
         std::array<int, 2> mapIdxC;
-        utils::find_loc(com_mod.grisMapList[iProj].map, colN, mapIdxC);
+        find_ris_map_location(com_mod, iProj, colN, mapIdxC);
 
         if (mapIdxC[0] != -1) {
           for (int jM = 0; jM < 2; jM++) {
