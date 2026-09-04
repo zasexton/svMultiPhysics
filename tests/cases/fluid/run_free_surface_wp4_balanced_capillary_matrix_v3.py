@@ -1,0 +1,1877 @@
+#!/usr/bin/env python3
+"""Validate, expand, run, and analyze the frozen WP-4 V3 matrix."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import hashlib
+import importlib.util
+import json
+import math
+import os
+import re
+import sys
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Iterator, Sequence
+
+
+SCRIPT_PATH = Path(__file__).resolve()
+SCRIPT_DIRECTORY = SCRIPT_PATH.parent
+DEFAULT_REGISTRY = SCRIPT_PATH.with_name(
+    "free_surface_wp4_balanced_capillary_matrix_v3.json"
+)
+PARENT_RUNNER_PATH = SCRIPT_PATH.with_name(
+    "run_free_surface_wp4_balanced_capillary_matrix_v2.py"
+)
+PARENT_REGISTRY_PATH = SCRIPT_PATH.with_name(
+    "free_surface_wp4_balanced_capillary_matrix_v2.json"
+)
+PHYSICAL_RUNNER = (
+    SCRIPT_DIRECTORY
+    / "open_vessel_free_surface/run_test05_velocity_growth_smoke.py"
+)
+EXPECTED_REGISTRY_SHA256 = (
+    "6c0d2e6f540cca78bf9e6fd1921997548421a99b21948e494e423e3aba3139fa"
+)
+EXPECTED_PARENT_RUNNER_SHA256 = (
+    "480c0441a4da62dd7d5f16133c9dde7b16df90772c06f851bed6ff233f69d4c3"
+)
+EXPECTED_PARENT_REGISTRY_SHA256 = (
+    "7605f4458191112bf0f03c38299b9b46838a11e9dcbf61c7196fecb0f89d7918"
+)
+EXPECTED_PHYSICAL_RUNNER_SHA256 = (
+    "cb282678e86d4fee6a8ac99b577aa14631e060e63e6780c102d54b4f69f612b0"
+)
+EXPECTED_MATRIX_ID = "free_surface_wp4_balanced_capillary_v3"
+EXPECTED_STATUS = "FROZEN_BEFORE_EXECUTION"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _load_parent() -> Any:
+    if _sha256_file(PARENT_RUNNER_PATH) != EXPECTED_PARENT_RUNNER_SHA256:
+        raise RuntimeError("frozen V2 runner bytes changed")
+    if _sha256_file(PARENT_REGISTRY_PATH) != EXPECTED_PARENT_REGISTRY_SHA256:
+        raise RuntimeError("frozen V2 registry bytes changed")
+    spec = importlib.util.spec_from_file_location(
+        "free_surface_wp4_balanced_capillary_matrix_v2_parent",
+        PARENT_RUNNER_PATH,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load frozen V2 runner")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_v2 = _load_parent()
+MatrixError = _v2.MatrixError
+sha256_file = _v2.sha256_file
+read_json = _v2.read_json
+write_json = _v2.write_json
+finite_number = _v2.finite_number
+nonempty_string = _v2.nonempty_string
+select_cases = _v2.select_cases
+extract_metric = _v2.extract_metric
+evaluate_exact_property_gate = _v2.evaluate_exact_property_gate
+exact_rank_properties_identical = _v2.exact_rank_properties_identical
+exact_mpi_launcher_arguments = _v2.exact_mpi_launcher_arguments
+
+_V2_EXPAND_CASES = _v2.expand_cases
+_V2_PHYSICAL_CASE_ARGUMENTS = _v2.physical_case_arguments
+_V2_RUN_PHYSICAL_CASES = _v2.run_physical_cases
+_V2_EVALUATE_EXACT_DOCUMENT = _v2.evaluate_exact_document
+_V2_RUN_EXACT_GROUPS = _v2.run_exact_groups
+_V2_ANALYZE_EVIDENCE = _v2.analyze_evidence
+
+SUPPORTED_CASE_DIMENSIONS = dict(_v2.SUPPORTED_CASE_DIMENSIONS)
+SUPPORTED_INITIALIZATIONS = set(_v2.SUPPORTED_INITIALIZATIONS)
+REQUIRED_WALLS = {
+    dimension: set(walls)
+    for dimension, walls in _v2.REQUIRED_WALLS.items()
+}
+REQUIRED_ACTIVE_DOMAINS = set(_v2.REQUIRED_ACTIVE_DOMAINS)
+REQUIRED_ANGLES = set(_v2.REQUIRED_ANGLES)
+SUPPORTED_EXACT_PROPERTY_COMPARISONS = set(
+    _v2.SUPPORTED_EXACT_PROPERTY_COMPARISONS
+)
+
+TOP_LEVEL_FIELDS = {
+    "schema_version",
+    "matrix_id",
+    "status",
+    "work_package",
+    "findings",
+    "qualification_scope",
+    "model_envelope",
+    "closure_policy",
+    "maintenance_contract",
+    "required_report_metrics",
+    "resources",
+    "refinement",
+    "gates",
+    "exact_groups",
+    "common_runner_arguments",
+    "literature_adaptations",
+    "studies",
+    "artifact_contract",
+    "provenance_contract",
+}
+GATE_FIELDS = {
+    "exact_flat_scaled_residual_factor",
+    "static_initializer",
+    "finest_level",
+    "convergence",
+    "energy_variation",
+    "invariance",
+}
+RESOURCE_FIELDS = {
+    "partition",
+    "maximum_concurrent_nodes",
+    "maximum_total_memory_mib",
+    "nodes_per_case",
+    "memory_mib_per_node",
+    "memory_model",
+    "profiles",
+}
+MEMORY_MODEL_FIELDS = {
+    "formula_version",
+    "formula",
+    "generated_vertex_formula",
+    "simplex_count_by_dimension",
+    "coupled_unknown_components_by_dimension",
+    "stored_field_components_by_dimension",
+    "adjacency_upper_bound_by_dimension",
+    "fixed_mib",
+    "vertex_bytes",
+    "simplex_bytes",
+    "sparse_entry_bytes",
+    "sparse_operator_copies",
+    "field_vector_copies",
+    "scalar_bytes",
+}
+PROFILE_FIELDS = {
+    "nodes",
+    "tasks",
+    "threads_per_task",
+    "memory_mib",
+    "wall_time_seconds",
+    "output_mib",
+}
+REFINEMENT_FIELDS = {
+    "spatial_levels_cells_per_radius",
+    "conditional_spatial_level_cells_per_radius",
+    "conditional_level_trigger",
+    "conditional_level_by_dimension",
+    "uniform_resolution_rule",
+    "reported_mesh_coordinate",
+    "uniform_ratio",
+    "ratio_relative_tolerance",
+    "safety_factor",
+    "minimum_observed_order",
+    "nonmonotone_three_level_disposition",
+    "nonasymptotic_four_level_disposition",
+}
+COMMON_STUDY_FIELDS = {
+    "id",
+    "case",
+    "dimension",
+    "initialization",
+    "refinement_axis",
+    "steps",
+    "axes",
+    "metrics",
+    "arguments",
+    "resource_profile",
+    "scope",
+}
+STUDY_FIELDS_BY_AXIS = {
+    "resolution": COMMON_STUDY_FIELDS | {"time_step", "radius"},
+    "phi_scale": COMMON_STUDY_FIELDS
+    | {"time_step", "radius", "resolution", "refinement_levels"},
+    "physical_scale": COMMON_STUDY_FIELDS
+    | {"time_step", "cells_per_radius", "refinement_levels"},
+    "time_step": COMMON_STUDY_FIELDS
+    | {
+        "radius",
+        "resolution",
+        "refinement_levels",
+        "level_step_counts",
+        "physical_horizon",
+    },
+    "bulk_redistance_cadence": COMMON_STUDY_FIELDS
+    | {"time_step", "radius", "resolution", "refinement_levels"},
+}
+EXACT_CATEGORIES = {
+    "focused_algebra",
+    "sampled_convergence",
+    "minimized_equilibrium",
+    "restoring_motion",
+    "mpi_parity",
+}
+REQUIRED_EXACT_TESTS = {
+    "LevelSetInterfaceDomain.PlanarPolygonQuadraticRuleIntegratesTetrahedralCuts",
+    "LevelSetInterfaceLifecycle.LinearBackendDriverReportsSupportAndOrders",
+    "LevelSetInterfaceLifecycle.BackendCapabilityReportsMilestoneContract",
+    "ApplicationDriverLevelSetWorkflows.KinematicAreaGradientMaintenanceBindsTotalEnergyDeclaration",
+    "ApplicationDriverLevelSetWorkflows.TotalEnergyTractionRuleValidatorFailsClosedBeforeProjection",
+    "ApplicationDriverLevelSetWorkflowsMPI.TotalEnergyTractionRuleValidatorIsCollective",
+    "MovingDomainPhysics.KinematicAreaGradientTractionIsEnergyAdjointOnQuadraticTetraCut",
+    "ApplicationDriverLevelSetWorkflows.MinimizedCircleSphereAndSessileCapsMeetProductionCertificates",
+    "ApplicationDriverLevelSetWorkflows.SampledCircleSphereAndSessileControlsConvergeWithGci",
+    "ApplicationDriverLevelSetWorkflows.SampledSessileFiveAngleTransformMatrixReportsPhysicalObservables",
+    "ApplicationDriverLevelSetWorkflows.MinimizedCapillaryStateHasVolumeOrthogonalRestoringResponse",
+    "ApplicationDriverLevelSetWorkflowsMPI.MinimizedCurvedCapillaryParityAcrossTwoOwnershipLayouts",
+}
+REQUIRED_MAIN_STUDIES = set(_v2.REQUIRED_MAIN_STUDIES)
+REQUIRED_MAIN_METRICS = set(_v2.REQUIRED_METRICS)
+REQUIRED_SESSILE_METRICS = set(_v2.REQUIRED_SESSILE_METRICS)
+
+
+def _require_fields(value: Any, expected: set[str], context: str) -> None:
+    if not isinstance(value, dict) or set(value) != expected:
+        observed = sorted(value) if isinstance(value, dict) else type(value).__name__
+        raise MatrixError(
+            f"{context} changed: expected={sorted(expected)}, observed={observed}"
+        )
+
+
+def _unique_strings(value: Any, context: str) -> list[str]:
+    if (
+        not isinstance(value, list)
+        or not value
+        or any(not isinstance(item, str) or not item for item in value)
+    ):
+        raise MatrixError(f"{context} must contain nonempty strings")
+    if len(value) != len(set(value)):
+        raise MatrixError(f"{context} contains duplicates")
+    return list(value)
+
+
+def _validate_number_list(
+    value: Any, context: str, *, count: int | None = None, positive: bool = False
+) -> list[float]:
+    if not isinstance(value, list) or (count is not None and len(value) != count):
+        raise MatrixError(f"{context} has invalid length")
+    return [
+        finite_number(item, f"{context} value", positive=positive) for item in value
+    ]
+
+
+def _option_values(arguments: Sequence[str], option: str) -> list[str]:
+    return [
+        arguments[index + 1]
+        for index, value in enumerate(arguments[:-1])
+        if value == option
+    ]
+
+
+def _validate_resources(resources: Any) -> None:
+    _require_fields(resources, RESOURCE_FIELDS, "resource fields")
+    if resources["partition"] != "amarsden":
+        raise MatrixError("resource partition must be amarsden")
+    if resources["maximum_concurrent_nodes"] != 4:
+        raise MatrixError("resource maximum concurrent nodes must be four")
+    if resources["maximum_total_memory_mib"] != 40960:
+        raise MatrixError("resource total memory must be 40960 MiB")
+    if resources["nodes_per_case"] != 1:
+        raise MatrixError("every physical case must use one node")
+    if resources["memory_mib_per_node"] != 10240:
+        raise MatrixError("one-node memory limit must be 10240 MiB")
+    model = resources["memory_model"]
+    _require_fields(model, MEMORY_MODEL_FIELDS, "memory-model fields")
+    if model["formula_version"] != 1:
+        raise MatrixError("memory formula version changed")
+    expected_formula = (
+        "ceil((fixed_bytes + generated_vertices*vertex_bytes + "
+        "simplices*simplex_bytes + "
+        "generated_vertices*coupled_components*adjacency_upper_bound*"
+        "coupled_components*sparse_entry_bytes*sparse_operator_copies + "
+        "generated_vertices*stored_field_components*scalar_bytes*"
+        "field_vector_copies)/1048576)"
+    )
+    if model["formula"] != expected_formula:
+        raise MatrixError("memory formula changed")
+    if model["generated_vertex_formula"] != "(resolution + 1)^dimension":
+        raise MatrixError("generated-vertex memory formula changed")
+    expected_dimensions = {"2", "3"}
+    for key in (
+        "simplex_count_by_dimension",
+        "coupled_unknown_components_by_dimension",
+        "stored_field_components_by_dimension",
+        "adjacency_upper_bound_by_dimension",
+    ):
+        table = model[key]
+        if not isinstance(table, dict) or set(table) != expected_dimensions:
+            raise MatrixError(f"memory-model table {key!r} changed")
+        for dimension, amount in table.items():
+            if not isinstance(amount, int) or isinstance(amount, bool) or amount < 1:
+                raise MatrixError(f"memory-model table {key!r}[{dimension}] is invalid")
+    expected_tables = {
+        "simplex_count_by_dimension": {"2": 2, "3": 6},
+        "coupled_unknown_components_by_dimension": {"2": 4, "3": 5},
+        "stored_field_components_by_dimension": {"2": 5, "3": 6},
+        "adjacency_upper_bound_by_dimension": {"2": 9, "3": 15},
+    }
+    if any(model[key] != value for key, value in expected_tables.items()):
+        raise MatrixError("conservative memory-model tables changed")
+    for key in (
+        "fixed_mib",
+        "vertex_bytes",
+        "simplex_bytes",
+        "sparse_entry_bytes",
+        "sparse_operator_copies",
+        "field_vector_copies",
+        "scalar_bytes",
+    ):
+        amount = model[key]
+        if not isinstance(amount, int) or isinstance(amount, bool) or amount < 1:
+            raise MatrixError(f"memory-model value {key!r} is invalid")
+    expected_storage = {
+        "fixed_mib": 1024,
+        "vertex_bytes": 128,
+        "simplex_bytes": 256,
+        "sparse_entry_bytes": 16,
+        "sparse_operator_copies": 2,
+        "field_vector_copies": 24,
+        "scalar_bytes": 8,
+    }
+    if any(model[key] != value for key, value in expected_storage.items()):
+        raise MatrixError("conservative memory-model storage factors changed")
+    profiles = resources["profiles"]
+    if not isinstance(profiles, dict) or not profiles:
+        raise MatrixError("resource profiles are missing")
+    for profile_id, profile in profiles.items():
+        nonempty_string(profile_id, "resource profile id")
+        _require_fields(profile, PROFILE_FIELDS, "resource-profile fields")
+        for key, amount in profile.items():
+            if not isinstance(amount, int) or isinstance(amount, bool) or amount < 1:
+                raise MatrixError(f"resource profile {profile_id!r} {key!r} is invalid")
+        if profile["nodes"] != 1:
+            raise MatrixError("each resource profile must use one node")
+        if profile["memory_mib"] > resources["memory_mib_per_node"]:
+            raise MatrixError("resource profile exceeds one-node memory")
+
+
+def _validate_refinement(refinement: Any) -> None:
+    _require_fields(refinement, REFINEMENT_FIELDS, "refinement fields")
+    if refinement["spatial_levels_cells_per_radius"] != [8, 16, 32]:
+        raise MatrixError("required spatial levels must be R/h = 8, 16, 32")
+    if refinement["conditional_spatial_level_cells_per_radius"] != 64:
+        raise MatrixError("conditional spatial level must be R/h = 64")
+    if refinement["conditional_level_trigger"] != (
+        "nonmonotone_three_level_sequence_only"
+    ):
+        raise MatrixError("conditional spatial trigger changed")
+    conditional = refinement["conditional_level_by_dimension"]
+    _require_fields(conditional, {"2", "3"}, "conditional dimension fields")
+    _require_fields(
+        conditional["2"],
+        {"cells_per_radius", "availability", "disposition_when_required"},
+        "conditional 2D fields",
+    )
+    _require_fields(
+        conditional["3"],
+        {"cells_per_radius", "availability", "disposition_when_required"},
+        "conditional 3D fields",
+    )
+    if conditional["2"] != {
+        "cells_per_radius": 64,
+        "availability": "AVAILABLE",
+        "disposition_when_required": "EXECUTE",
+    }:
+        raise MatrixError("2D conditional-level contract changed")
+    if conditional["3"] != {
+        "cells_per_radius": 64,
+        "availability": "UNAVAILABLE_ONE_NODE_MEMORY_LIMIT",
+        "disposition_when_required": "INCONCLUSIVE",
+    }:
+        raise MatrixError("3D conditional-level contract changed")
+    if finite_number(refinement["uniform_ratio"], "uniform ratio", positive=True) != 2:
+        raise MatrixError("uniform refinement ratio must be two")
+    for key in (
+        "ratio_relative_tolerance",
+        "safety_factor",
+        "minimum_observed_order",
+    ):
+        finite_number(refinement[key], key, positive=True)
+    if refinement["nonmonotone_three_level_disposition"] != (
+        "ADDITIONAL_LEVEL_REQUIRED"
+    ):
+        raise MatrixError("nonmonotone triplet disposition changed")
+    if refinement["nonasymptotic_four_level_disposition"] != "FAIL":
+        raise MatrixError("nonasymptotic quartet disposition changed")
+
+
+def _validate_gates(gates: Any) -> None:
+    _require_fields(gates, GATE_FIELDS, "gate fields")
+    if gates["exact_flat_scaled_residual_factor"] != 256.0:
+        raise MatrixError("exact scaled-roundoff factor changed")
+    initializer_fields = {
+        "volume_tolerance",
+        "projected_gradient_tolerance",
+        "pressure_representability_max_residual_norm",
+        "pressure_representability_max_relative_distance",
+        "physical_equilibrium_max_residual_norm",
+        "constant_pressure_kkt_max_residual_norm",
+        "constant_pressure_kkt_max_relative_distance",
+        "maximum_iterations",
+        "maximum_topology_epoch_transitions",
+    }
+    _require_fields(gates["static_initializer"], initializer_fields, "initializer gate fields")
+    finest_fields = {
+        "pressure_jump_relative_error",
+        "contact_angle_absolute_error_degrees",
+        "base_radius_relative_error",
+        "apex_height_relative_error",
+        "liquid_volume_relative_error",
+        "parasitic_capillary_number",
+        "kinetic_energy_proxy",
+    }
+    _require_fields(gates["finest_level"], finest_fields, "finest gate fields")
+    finest = gates["finest_level"]
+    if (
+        finite_number(finest["pressure_jump_relative_error"], "pressure gate", positive=True) > 0.01
+        or finite_number(finest["contact_angle_absolute_error_degrees"], "angle gate", positive=True) > 1.0
+        or finite_number(finest["base_radius_relative_error"], "base gate", positive=True) > 0.01
+        or finite_number(finest["apex_height_relative_error"], "apex gate", positive=True) > 0.01
+        or finite_number(finest["parasitic_capillary_number"], "capillary-number gate", positive=True) > 1.0e-6
+    ):
+        raise MatrixError("predeclared finest-level gates were weakened")
+    convergence = gates["convergence"]
+    if not isinstance(convergence, dict) or not REQUIRED_MAIN_METRICS.issubset(convergence):
+        raise MatrixError("convergence gates are incomplete")
+    convergence_fields = {
+        "reference",
+        "normalization",
+        "finest_error_limit",
+        "finest_gci_limit",
+    }
+    for metric, limits in convergence.items():
+        _require_fields(limits, convergence_fields, f"convergence gate {metric!r} fields")
+        finite_number(limits["reference"], f"{metric} reference")
+        for key in convergence_fields - {"reference"}:
+            finite_number(limits[key], f"{metric} {key}", positive=True)
+    energy = gates["energy_variation"]
+    _require_fields(
+        energy,
+        {
+            "analytic_derivatives_required",
+            "finite_difference_components",
+            "maximum_relative_directional_derivative_error",
+        },
+        "energy-variation gate fields",
+    )
+    components = energy["finite_difference_components"]
+    if not isinstance(components, int) or isinstance(components, bool) or components < 1:
+        raise MatrixError("finite-difference component count must be positive")
+    if energy["analytic_derivatives_required"] is not True:
+        raise MatrixError("analytic energy derivatives are required")
+    finite_number(
+        energy["maximum_relative_directional_derivative_error"],
+        "energy derivative gate",
+        positive=True,
+    )
+    invariance = gates["invariance"]
+    _require_fields(invariance, {"phi_scale", "physical_scale"}, "invariance gate fields")
+    for axis, metric_gates in invariance.items():
+        if not isinstance(metric_gates, dict) or not metric_gates:
+            raise MatrixError(f"{axis} invariance gates are missing")
+        for metric, limits in metric_gates.items():
+            _require_fields(limits, {"maximum_value", "maximum_spread"}, f"{axis} {metric} fields")
+            finite_number(limits["maximum_value"], f"{axis} {metric} maximum", positive=True)
+            finite_number(limits["maximum_spread"], f"{axis} {metric} spread", positive=True)
+
+
+def _validate_property_gates(
+    test: str, gates: Any, *, context: str
+) -> list[dict[str, Any]]:
+    if not isinstance(gates, list) or not gates:
+        raise MatrixError(f"{context} exact test {test!r} has no property gates")
+    seen: set[tuple[str, str]] = set()
+    for gate_index, gate in enumerate(gates):
+        gate_context = f"{context} test {test!r} gate {gate_index}"
+        if not isinstance(gate, dict):
+            raise MatrixError(f"{gate_context} must be an object")
+        comparison = gate.get("comparison")
+        if comparison not in SUPPORTED_EXACT_PROPERTY_COMPARISONS:
+            raise MatrixError(f"{gate_context} comparison is invalid")
+        expected_fields = {"property", "comparison"}
+        if comparison in {"equal", "at_least", "at_most"}:
+            expected_fields.add("expected")
+        elif comparison == "scaled_roundoff":
+            expected_fields.add("scale")
+        _require_fields(gate, expected_fields, f"{gate_context} fields")
+        property_name = nonempty_string(gate["property"], f"{gate_context} property")
+        key = (property_name, comparison)
+        if key in seen:
+            raise MatrixError(f"{gate_context} is duplicated")
+        seen.add(key)
+        if "expected" in gate:
+            finite_number(gate["expected"], f"{gate_context} expected")
+        if "scale" in gate:
+            finite_number(gate["scale"], f"{gate_context} scale", positive=True)
+    return gates
+
+
+def _validate_exact_groups(groups: Any, energy: dict[str, Any]) -> None:
+    if not isinstance(groups, list) or not groups:
+        raise MatrixError("exact groups are missing")
+    category_ids: set[str] = set()
+    invocation_ids: set[str] = set()
+    all_tests: set[str] = set()
+    energy_count_tests = {
+        "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+        "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesThreeDimensionalCentralDifference",
+    }
+    observed_count_tests: set[str] = set()
+    observed_error_tests: set[str] = set()
+    for group_index, group in enumerate(groups):
+        context = f"exact group {group_index}"
+        _require_fields(group, {"id", "purpose", "invocations"}, f"{context} fields")
+        category_id = nonempty_string(group["id"], f"{context} id")
+        if category_id in category_ids:
+            raise MatrixError(f"duplicate exact category {category_id!r}")
+        category_ids.add(category_id)
+        nonempty_string(group["purpose"], f"{context} purpose")
+        invocations = group["invocations"]
+        if not isinstance(invocations, list) or not invocations:
+            raise MatrixError(f"exact category {category_id!r} has no invocations")
+        for invocation_index, invocation in enumerate(invocations):
+            invocation_context = (
+                f"exact category {category_id!r} invocation {invocation_index}"
+            )
+            _require_fields(
+                invocation,
+                {
+                    "id",
+                    "binary",
+                    "mpi_ranks",
+                    "require_identical_rank_properties",
+                    "resource_profile",
+                    "tests",
+                    "property_gates",
+                },
+                f"{invocation_context} fields",
+            )
+            invocation_id = nonempty_string(
+                invocation["id"], f"{invocation_context} id"
+            )
+            qualified_id = f"{category_id}--{invocation_id}"
+            if qualified_id in invocation_ids:
+                raise MatrixError(f"duplicate exact invocation {qualified_id!r}")
+            invocation_ids.add(qualified_id)
+            nonempty_string(invocation["binary"], f"{invocation_context} binary")
+            nonempty_string(
+                invocation["resource_profile"], f"{invocation_context} resource profile"
+            )
+            ranks = invocation["mpi_ranks"]
+            if not isinstance(ranks, int) or isinstance(ranks, bool) or ranks < 1:
+                raise MatrixError(f"{invocation_context} rank count is invalid")
+            expected_ranks = 2 if category_id == "mpi_parity" else 1
+            if ranks != expected_ranks:
+                raise MatrixError(f"{invocation_context} rank count changed")
+            if invocation["require_identical_rank_properties"] is not (ranks > 1):
+                raise MatrixError(f"{invocation_context} rank property policy changed")
+            tests = _unique_strings(invocation["tests"], f"{invocation_context} tests")
+            duplicates = all_tests.intersection(tests)
+            if duplicates:
+                raise MatrixError(f"exact tests appear in multiple invocations: {sorted(duplicates)}")
+            all_tests.update(tests)
+            property_gates = invocation["property_gates"]
+            if not isinstance(property_gates, dict) or set(property_gates) != set(tests):
+                raise MatrixError(f"{invocation_context} must gate every exact test")
+            for test in tests:
+                test_gates = _validate_property_gates(
+                    test, property_gates[test], context=invocation_context
+                )
+                properties = {gate["property"] for gate in test_gates}
+                if test in energy_count_tests:
+                    count_gates = [
+                        gate
+                        for gate in test_gates
+                        if gate["property"].endswith("fd_case_count")
+                        and gate["comparison"] == "equal"
+                        and gate.get("expected")
+                        == energy["finite_difference_components"]
+                    ]
+                    if count_gates:
+                        observed_count_tests.add(test)
+                    error_gates = [
+                        gate
+                        for gate in test_gates
+                        if gate["property"].endswith("max_relative_error")
+                        and gate["comparison"] == "at_most"
+                        and float(gate.get("expected", math.inf))
+                        <= float(
+                            energy[
+                                "maximum_relative_directional_derivative_error"
+                            ]
+                        )
+                    ]
+                    if error_gates:
+                        observed_error_tests.add(test)
+                if not properties:
+                    raise MatrixError(f"exact test {test!r} has no gated properties")
+    if category_ids != EXACT_CATEGORIES:
+        raise MatrixError("exact evidence categories changed")
+    if observed_count_tests != energy_count_tests:
+        raise MatrixError("energy finite-difference count gates are incomplete")
+    if observed_error_tests != energy_count_tests:
+        raise MatrixError("energy finite-difference error gates are incomplete")
+    if not REQUIRED_EXACT_TESTS.issubset(all_tests):
+        raise MatrixError("required Task 1-3 exact tests are missing")
+
+
+def _validate_parent_exact_preservation(registry: dict[str, Any]) -> None:
+    parent = read_json(PARENT_REGISTRY_PATH)
+    parent_gates = {
+        test: group["property_gates"][test]
+        for group in parent["exact_groups"]
+        for test in group["tests"]
+    }
+    current_gates = {
+        test: invocation["property_gates"][test]
+        for invocation in exact_invocations(registry)
+        for test in invocation["tests"]
+    }
+    missing = set(parent_gates) - set(current_gates)
+    if missing:
+        raise MatrixError(f"V2 exact tests are missing: {sorted(missing)}")
+    weakened = {
+        test: [gate for gate in gates if gate not in current_gates[test]]
+        for test, gates in parent_gates.items()
+        if any(gate not in current_gates[test] for gate in gates)
+    }
+    if weakened:
+        raise MatrixError(
+            f"V2 exact property gates were weakened: {sorted(weakened)}"
+        )
+
+
+def _validate_studies(
+    studies_value: Any,
+    resources: dict[str, Any],
+    report_metrics: set[str],
+) -> None:
+    if not isinstance(studies_value, list) or not studies_value:
+        raise MatrixError("physical studies are missing")
+    ids: set[str] = set()
+    for index, study in enumerate(studies_value):
+        if not isinstance(study, dict):
+            raise MatrixError(f"study {index} must be an object")
+        axis = study.get("refinement_axis")
+        expected_fields = STUDY_FIELDS_BY_AXIS.get(axis)
+        if expected_fields is None:
+            raise MatrixError(f"study {index} refinement axis is invalid")
+        _require_fields(study, expected_fields, "study fields")
+        study_id = nonempty_string(study["id"], f"study {index} id")
+        if study_id in ids:
+            raise MatrixError(f"duplicate study id {study_id!r}")
+        ids.add(study_id)
+        case_name = study["case"]
+        if case_name not in SUPPORTED_CASE_DIMENSIONS:
+            raise MatrixError(f"study {study_id!r} case is unsupported")
+        dimension = study["dimension"]
+        if dimension != SUPPORTED_CASE_DIMENSIONS[case_name]:
+            raise MatrixError(f"study {study_id!r} dimension is inconsistent")
+        if study["initialization"] not in SUPPORTED_INITIALIZATIONS:
+            raise MatrixError(f"study {study_id!r} initialization is invalid")
+        steps = study["steps"]
+        if not isinstance(steps, int) or isinstance(steps, bool) or steps < 1:
+            raise MatrixError(f"study {study_id!r} step count is invalid")
+        if study["resource_profile"] not in resources["profiles"]:
+            raise MatrixError(f"study {study_id!r} resource profile is unknown")
+        scope = study["scope"]
+        _require_fields(
+            scope,
+            {"balanced_force_closure_evidence", "fsr04_closure_evidence", "purpose"},
+            f"study {study_id!r} scope fields",
+        )
+        if scope["balanced_force_closure_evidence"] is not True:
+            raise MatrixError(f"study {study_id!r} is not balanced-force evidence")
+        if scope["fsr04_closure_evidence"] is not False:
+            raise MatrixError(f"study {study_id!r} cannot close FSR-04")
+        nonempty_string(scope["purpose"], f"study {study_id!r} purpose")
+        arguments = study["arguments"]
+        if not isinstance(arguments, list) or any(not isinstance(value, str) for value in arguments):
+            raise MatrixError(f"study {study_id!r} arguments are invalid")
+        if "--interface-quadrature-order" in arguments:
+            raise MatrixError("study interface quadrature override is forbidden")
+        axes = study["axes"]
+        expected_axes = (
+            {"active_domain", "offset_h"}
+            if case_name in {"droplet2d", "sphere3d"}
+            else {"active_domain", "contact_angle", "wall", "offset_h"}
+        )
+        _require_fields(axes, expected_axes, "axis fields")
+        for axis_name, values in axes.items():
+            if not isinstance(values, list) or not values:
+                raise MatrixError(f"study {study_id!r} axis {axis_name!r} is empty")
+        if set(axes["active_domain"]) != REQUIRED_ACTIVE_DOMAINS:
+            raise MatrixError(f"study {study_id!r} active-domain signs changed")
+        if len(axes["offset_h"]) < 2:
+            raise MatrixError(f"study {study_id!r} needs at least two offsets")
+        if "wall" in axes:
+            if set(axes["wall"]) - REQUIRED_WALLS[dimension]:
+                raise MatrixError(f"study {study_id!r} wall axis is invalid")
+            if set(axes["contact_angle"]) - REQUIRED_ANGLES:
+                raise MatrixError(f"study {study_id!r} angle axis is invalid")
+            if study_id in REQUIRED_MAIN_STUDIES:
+                if set(axes["wall"]) != REQUIRED_WALLS[dimension]:
+                    raise MatrixError(f"study {study_id!r} wall coverage is incomplete")
+                if set(axes["contact_angle"]) != REQUIRED_ANGLES:
+                    raise MatrixError(f"study {study_id!r} angle coverage is incomplete")
+        metrics = set(_unique_strings(study["metrics"], f"study {study_id!r} metrics"))
+        if study_id in REQUIRED_MAIN_STUDIES:
+            required = REQUIRED_MAIN_METRICS | report_metrics
+            if case_name.startswith("sessile"):
+                required |= REQUIRED_SESSILE_METRICS
+            if not required.issubset(metrics | report_metrics):
+                raise MatrixError(f"study {study_id!r} metrics are incomplete")
+        if axis == "resolution":
+            finite_number(study["radius"], f"study {study_id!r} radius", positive=True)
+            finite_number(study["time_step"], f"study {study_id!r} time step", positive=True)
+        elif axis == "physical_scale":
+            levels = study["refinement_levels"]
+            if not isinstance(levels, list) or len(levels) != 3:
+                raise MatrixError(f"study {study_id!r} needs three physical scales")
+            for level in levels:
+                _require_fields(level, {"label", "radius", "surface_tension"}, "physical-scale level fields")
+                nonempty_string(level["label"], "physical-scale label")
+                finite_number(level["radius"], "physical-scale radius", positive=True)
+                finite_number(level["surface_tension"], "physical-scale tension", positive=True)
+            cells = study["cells_per_radius"]
+            if not isinstance(cells, int) or isinstance(cells, bool) or cells < 2:
+                raise MatrixError(f"study {study_id!r} cells-per-radius is invalid")
+        else:
+            levels = _validate_number_list(
+                study["refinement_levels"],
+                f"study {study_id!r} refinement levels",
+                count=3,
+                positive=True,
+            )
+            resolution = study["resolution"]
+            if not isinstance(resolution, int) or isinstance(resolution, bool) or resolution < 2:
+                raise MatrixError(f"study {study_id!r} resolution is invalid")
+            finite_number(study["radius"], f"study {study_id!r} radius", positive=True)
+            if axis == "time_step":
+                counts = study["level_step_counts"]
+                if (
+                    not isinstance(counts, list)
+                    or len(counts) != len(levels)
+                    or any(
+                        not isinstance(value, int)
+                        or isinstance(value, bool)
+                        or value < 1
+                        for value in counts
+                    )
+                ):
+                    raise MatrixError(f"study {study_id!r} level step counts are invalid")
+                horizon = finite_number(
+                    study["physical_horizon"],
+                    f"study {study_id!r} physical horizon",
+                    positive=True,
+                )
+                products = [level * count for level, count in zip(levels, counts)]
+                if any(product != horizon for product in products):
+                    raise MatrixError(f"study {study_id!r} does not preserve its physical horizon")
+                if counts != sorted(counts):
+                    raise MatrixError(f"study {study_id!r} step counts do not increase under refinement")
+            else:
+                finite_number(study["time_step"], f"study {study_id!r} time step", positive=True)
+            if axis == "phi_scale":
+                if any(level <= 0 for level in levels):
+                    raise MatrixError("positive level-set scaling requires positive levels")
+                if arguments.count("--enable-level-set-reinitialization") != 1:
+                    raise MatrixError("positive scaling must enable wall maintenance")
+                if _option_values(arguments, "--reinitialization-cadence-steps") != ["1"]:
+                    raise MatrixError("positive scaling wall maintenance cadence changed")
+            if axis == "bulk_redistance_cadence":
+                if levels != [4.0, 2.0, 1.0]:
+                    raise MatrixError("bulk-redistance cadence levels changed")
+                if arguments.count("--enable-level-set-reinitialization") != 1:
+                    raise MatrixError("bulk-redistance study must enable reinitialization")
+    if not REQUIRED_MAIN_STUDIES.issubset(ids):
+        raise MatrixError("required curved physical studies are missing")
+
+
+def _validate_literature(adaptations: Any, registry: dict[str, Any]) -> None:
+    if not isinstance(adaptations, list) or not adaptations:
+        raise MatrixError("literature adaptations are missing")
+    category_ids = {group["id"] for group in registry["exact_groups"]}
+    category_tests = {
+        group["id"]: {
+            test
+            for invocation in group["invocations"]
+            for test in invocation["tests"]
+        }
+        for group in registry["exact_groups"]
+    }
+    study_ids = {study["id"] for study in registry["studies"]}
+    seen: set[str] = set()
+    for index, adaptation in enumerate(adaptations):
+        if not isinstance(adaptation, dict):
+            raise MatrixError(f"literature adaptation {index} is invalid")
+        expected = {"id", "source", "limitations"}
+        if "adapted_study" in adaptation:
+            expected.add("adapted_study")
+        else:
+            expected |= {"adapted_evidence_group", "adapted_test"}
+        _require_fields(adaptation, expected, "literature-adaptation fields")
+        adaptation_id = nonempty_string(adaptation["id"], "literature adaptation id")
+        if adaptation_id in seen:
+            raise MatrixError(f"duplicate literature adaptation {adaptation_id!r}")
+        seen.add(adaptation_id)
+        _require_fields(adaptation["source"], {"authors", "year", "doi"}, "literature-source fields")
+        nonempty_string(adaptation["source"]["doi"], "literature DOI")
+        _unique_strings(adaptation["limitations"], "literature limitations")
+        if "adapted_study" in adaptation:
+            if adaptation["adapted_study"] not in study_ids:
+                raise MatrixError("literature adaptation names unknown study")
+        else:
+            category_id = adaptation["adapted_evidence_group"]
+            if category_id not in category_ids:
+                raise MatrixError("literature adaptation names unknown exact category")
+            if adaptation["adapted_test"] not in category_tests[category_id]:
+                raise MatrixError("literature adaptation names unknown exact test")
+
+
+def validate_contract(registry: Any) -> dict[str, Any]:
+    _require_fields(registry, TOP_LEVEL_FIELDS, "top-level fields")
+    if registry["schema_version"] != 3:
+        raise MatrixError("V3 schema version changed")
+    if registry["matrix_id"] != EXPECTED_MATRIX_ID:
+        raise MatrixError("V3 matrix id changed")
+    if registry["status"] != EXPECTED_STATUS:
+        raise MatrixError("V3 freeze status changed")
+    if registry["work_package"] != "WP-4":
+        raise MatrixError("V3 work-package id changed")
+    if registry["findings"] != ["FSR-03", "FSR-04"]:
+        raise MatrixError("V3 finding list changed")
+    nonempty_string(registry["qualification_scope"], "qualification scope")
+    _require_fields(
+        registry["model_envelope"],
+        {
+            "phase_model",
+            "exterior_model",
+            "mesh_and_geometry",
+            "capillary_force",
+            "pressure_stabilization",
+            "interface_quadrature_order",
+            "force_projection_applied",
+            "higher_order_claimed",
+            "two_phase_claimed",
+            "gas_sensitive_claimed",
+        },
+        "model-envelope fields",
+    )
+    model = registry["model_envelope"]
+    if (
+        model["capillary_force"] != "kinematic_area_gradient_energy_traction"
+        or model["interface_quadrature_order"] < 2
+        or model["force_projection_applied"] is not False
+        or model["higher_order_claimed"] is not False
+        or model["two_phase_claimed"] is not False
+        or model["gas_sensitive_claimed"] is not False
+    ):
+        raise MatrixError("V3 model envelope changed")
+    closure_fields = {
+        "requested_claim",
+        "requires_every_exact_group",
+        "requires_every_required_case",
+        "requires_every_convergence_sequence",
+        "requires_conditional_level_when_available_and_triggered",
+        "unavailable_conditional_level_disposition",
+        "worst_offset_controls_disposition",
+        "failed_and_inconclusive_runs_are_retained",
+        "fsr03_closed_on_pass",
+        "fsr04_closed_on_pass",
+        "wp4_closed_on_pass",
+        "q2_closed_on_pass",
+    }
+    _require_fields(registry["closure_policy"], closure_fields, "closure-policy fields")
+    closure = registry["closure_policy"]
+    if (
+        closure["fsr03_closed_on_pass"] is not True
+        or closure["fsr04_closed_on_pass"] is not False
+        or closure["wp4_closed_on_pass"] is not False
+        or closure["q2_closed_on_pass"] is not False
+        or closure["failed_and_inconclusive_runs_are_retained"] is not True
+    ):
+        raise MatrixError("V3 closure policy overclaims qualification")
+    maintenance = registry["maintenance_contract"]
+    _require_fields(
+        maintenance,
+        {
+            "prescribed_wall_maintenance",
+            "bulk_redistance",
+            "schedules_independent",
+            "schedule_relationship",
+            "qualification_note",
+        },
+        "maintenance-contract fields",
+    )
+    _require_fields(
+        maintenance["prescribed_wall_maintenance"],
+        {
+            "enabled",
+            "contact_model",
+            "execution_stage",
+            "enable_argument",
+            "cadence_argument",
+            "fsr04_closure_evidence",
+        },
+        "prescribed-maintenance fields",
+    )
+    _require_fields(
+        maintenance["bulk_redistance"],
+        {"enabled", "refinement_axis", "execution_stage", "cadence_argument"},
+        "bulk-redistance fields",
+    )
+    if (
+        maintenance["prescribed_wall_maintenance"]["enabled"] is not True
+        or maintenance["prescribed_wall_maintenance"]["fsr04_closure_evidence"] is not False
+        or maintenance["bulk_redistance"]["enabled"] is not True
+        or maintenance["bulk_redistance"]["refinement_axis"]
+        != "bulk_redistance_cadence"
+        or maintenance["schedules_independent"] is not False
+        or maintenance["schedule_relationship"]
+        != "shared_projection_reinitialization_event_and_cadence"
+    ):
+        raise MatrixError("maintenance schedule contract changed")
+    report_metrics = set(
+        _unique_strings(registry["required_report_metrics"], "required report metrics")
+    )
+    if report_metrics != {"kinetic_energy_proxy", "liquid_volume_relative_error"}:
+        raise MatrixError("required report metrics changed")
+    _validate_resources(registry["resources"])
+    _validate_refinement(registry["refinement"])
+    _validate_gates(registry["gates"])
+    _validate_exact_groups(registry["exact_groups"], registry["gates"]["energy_variation"])
+    _validate_parent_exact_preservation(registry)
+    _validate_studies(registry["studies"], registry["resources"], report_metrics)
+    for invocation in exact_invocations(registry):
+        if invocation["resource_profile"] not in registry["resources"]["profiles"]:
+            raise MatrixError(
+                f"exact invocation {invocation['id']!r} resource profile is unknown"
+            )
+    for study in registry["studies"]:
+        axis = study["refinement_axis"]
+        if axis in registry["gates"]["invariance"]:
+            observed_metrics = set(study["metrics"]) | report_metrics
+            expected_metrics = set(registry["gates"]["invariance"][axis])
+            if observed_metrics != expected_metrics:
+                raise MatrixError(f"study {study['id']!r} invariance metrics changed")
+    common = registry["common_runner_arguments"]
+    if not isinstance(common, list) or any(not isinstance(value, str) for value in common):
+        raise MatrixError("common runner arguments are invalid")
+    required_common = {
+        "--capillary-force-form",
+        "kinematic_area_gradient_traction",
+        "--projected-curvature-field",
+        "kappa_area_gradient",
+        "--cut-cell-pressure-stabilization-policy",
+        "incremental",
+        "--defer-static-physical-gates-to-matrix",
+        "--require-free-surface-energy-history",
+    }
+    if not required_common.issubset(common):
+        raise MatrixError("common balanced-capillary arguments changed")
+    orders = _option_values(common, "--interface-quadrature-order")
+    if len(orders) != 1 or int(orders[0]) < 2:
+        raise MatrixError("V3 requires exactly one quadratic interface order")
+    _validate_literature(registry["literature_adaptations"], registry)
+    _validate_artifact_and_provenance(registry)
+    cases = _expand_cases_unchecked(registry, include_conditional_level=True)
+    validate_case_resources(registry, cases)
+    for dimension in (2, 3):
+        availability = registry["refinement"]["conditional_level_by_dimension"][
+            str(dimension)
+        ]["availability"]
+        for study in registry["studies"]:
+            if study["dimension"] != dimension or study["refinement_axis"] != "resolution":
+                continue
+            radius = float(study["radius"])
+            base = math.ceil(8.0 / radius - 1.0e-14)
+            conditional_case = {
+                "case_id": f"{study['id']}--conditional-memory-check",
+                "dimension": dimension,
+                "resolution": base * 8,
+            }
+            estimate = estimate_case_memory_mib(registry, conditional_case)
+            fits = estimate <= registry["resources"]["memory_mib_per_node"]
+            if (availability == "AVAILABLE") is not fits:
+                raise MatrixError(
+                    f"study {study['id']!r} conditional-level availability "
+                    "contradicts the frozen memory model"
+                )
+    return registry
+
+
+def load_registry(path: Path = DEFAULT_REGISTRY) -> dict[str, Any]:
+    resolved = path.resolve()
+    if sha256_file(resolved) != EXPECTED_REGISTRY_SHA256:
+        raise MatrixError("V3 frozen registry bytes changed")
+    if sha256_file(PARENT_RUNNER_PATH) != EXPECTED_PARENT_RUNNER_SHA256:
+        raise MatrixError("frozen V2 runner bytes changed")
+    if sha256_file(PARENT_REGISTRY_PATH) != EXPECTED_PARENT_REGISTRY_SHA256:
+        raise MatrixError("frozen V2 registry bytes changed")
+    if sha256_file(PHYSICAL_RUNNER) != EXPECTED_PHYSICAL_RUNNER_SHA256:
+        raise MatrixError("physical runner changed after V3 freeze")
+    return validate_contract(read_json(resolved))
+
+
+def _validate_artifact_and_provenance(registry: dict[str, Any]) -> None:
+    artifact = registry["artifact_contract"]
+    _require_fields(
+        artifact,
+        {
+            "physical_case_files",
+            "serial_exact_files",
+            "mpi_exact_rank_file_template",
+            "mpi_exact_common_files",
+            "summary_files",
+        },
+        "artifact-contract fields",
+    )
+    for key in (
+        "physical_case_files",
+        "serial_exact_files",
+        "mpi_exact_common_files",
+        "summary_files",
+    ):
+        _unique_strings(artifact[key], f"artifact contract {key}")
+    if artifact["mpi_exact_rank_file_template"] != "gtest_rank_{rank}.json":
+        raise MatrixError("MPI exact rank artifact template changed")
+    provenance = registry["provenance_contract"]
+    _require_fields(
+        provenance,
+        {
+            "manifest_schema_version",
+            "required_dependency_keys",
+            "required_binary_keys",
+            "required_hash_bindings",
+            "source_commit_format",
+            "dry_manifest_required_before_execution",
+        },
+        "provenance-contract fields",
+    )
+    if provenance["manifest_schema_version"] != 1:
+        raise MatrixError("dry manifest schema version changed")
+    dependencies = set(
+        _unique_strings(
+            provenance["required_dependency_keys"],
+            "required dependency keys",
+        )
+    )
+    if dependencies != {"openblas", "vtk", "ncurses", "libxml2"}:
+        raise MatrixError("required dependency hash union changed")
+    binaries = set(
+        _unique_strings(provenance["required_binary_keys"], "required binary keys")
+    )
+    invocation_binaries = {
+        invocation["binary"] for invocation in exact_invocations(registry)
+    }
+    if binaries != invocation_binaries:
+        raise MatrixError("required binary hash union changed")
+    bindings = set(
+        _unique_strings(provenance["required_hash_bindings"], "required hash bindings")
+    )
+    if bindings != {
+        "matrix",
+        "runner",
+        "physical_runner",
+        "source_commit",
+        "compiler",
+        "mpi",
+        "dependencies",
+        "binaries",
+    }:
+        raise MatrixError("required manifest hash bindings changed")
+    if (
+        provenance["source_commit_format"] != "lowercase_40_hex"
+        or provenance["dry_manifest_required_before_execution"] is not True
+    ):
+        raise MatrixError("dry manifest provenance policy changed")
+
+
+def exact_invocations(registry: dict[str, Any]) -> list[dict[str, Any]]:
+    invocations: list[dict[str, Any]] = []
+    for category in registry["exact_groups"]:
+        for invocation in category["invocations"]:
+            record = copy.deepcopy(invocation)
+            record["category_id"] = category["id"]
+            record["category_purpose"] = category["purpose"]
+            record["id"] = f"{category['id']}--{invocation['id']}"
+            record["required_matrix_case_count"] = 0
+            invocations.append(record)
+    return invocations
+
+
+def _parent_registry(registry: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(registry)
+    result["exact_groups"] = exact_invocations(registry)
+    result["resources"]["wall_time_seconds_per_case"] = max(
+        profile["wall_time_seconds"]
+        for profile in registry["resources"]["profiles"].values()
+    )
+    return result
+
+
+def _expand_cases_unchecked(
+    registry: dict[str, Any], *, include_conditional_level: bool = False
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for study_index, study in enumerate(registry["studies"]):
+        local = copy.deepcopy(registry)
+        local["studies"] = [copy.deepcopy(study)]
+        include_study_conditional = include_conditional_level
+        if study["refinement_axis"] == "resolution":
+            disposition = registry["refinement"]["conditional_level_by_dimension"][
+                str(study["dimension"])
+            ]
+            include_study_conditional = (
+                include_conditional_level
+                and disposition["availability"] == "AVAILABLE"
+                and disposition["disposition_when_required"] == "EXECUTE"
+            )
+        expanded = _V2_EXPAND_CASES(
+            local,
+            include_conditional_level=include_study_conditional,
+        )
+        for case in expanded:
+            case["study_index"] = study_index
+            if study["refinement_axis"] == "time_step":
+                level_index = next(
+                    index
+                    for index, value in enumerate(study["refinement_levels"])
+                    if float(value) == float(case["level"]["value"])
+                )
+                case["step_count"] = int(study["level_step_counts"][level_index])
+            else:
+                case["step_count"] = int(study["steps"])
+            case["time_step"] = (
+                float(case["level"]["value"])
+                if study["refinement_axis"] == "time_step"
+                else float(study["time_step"])
+            )
+            case["physical_horizon"] = case["time_step"] * case["step_count"]
+            case["resource_profile"] = study["resource_profile"]
+            case["estimated_memory_mib"] = estimate_case_memory_mib(registry, case)
+            result.append(case)
+    ids = [case["case_id"] for case in result]
+    digests = [case["case_digest"] for case in result]
+    if len(ids) != len(set(ids)):
+        raise MatrixError("expanded physical case ids are not unique")
+    if len(digests) != len(set(digests)):
+        raise MatrixError("expanded physical case digests are not unique")
+    for index, case in enumerate(result):
+        case["index"] = index
+    return result
+
+
+def expand_cases(
+    registry: dict[str, Any], *, include_conditional_level: bool = False
+) -> list[dict[str, Any]]:
+    cases = _expand_cases_unchecked(
+        registry, include_conditional_level=include_conditional_level
+    )
+    validate_case_resources(registry, cases)
+    return cases
+
+
+def estimate_case_memory_mib(
+    registry: dict[str, Any], case: dict[str, Any]
+) -> int:
+    model = registry["resources"]["memory_model"]
+    dimension = int(case["dimension"])
+    resolution = int(case["resolution"])
+    if dimension not in {2, 3} or resolution < 1:
+        raise MatrixError("case dimension or resolution is invalid for memory estimate")
+    dimension_key = str(dimension)
+    vertices = (resolution + 1) ** dimension
+    simplices = (
+        int(model["simplex_count_by_dimension"][dimension_key])
+        * resolution**dimension
+    )
+    coupled = int(model["coupled_unknown_components_by_dimension"][dimension_key])
+    stored = int(model["stored_field_components_by_dimension"][dimension_key])
+    adjacency = int(model["adjacency_upper_bound_by_dimension"][dimension_key])
+    fixed_bytes = int(model["fixed_mib"]) * 1024 * 1024
+    generated_bytes = vertices * int(model["vertex_bytes"])
+    simplex_bytes = simplices * int(model["simplex_bytes"])
+    sparse_bytes = (
+        vertices
+        * coupled
+        * adjacency
+        * coupled
+        * int(model["sparse_entry_bytes"])
+        * int(model["sparse_operator_copies"])
+    )
+    vector_bytes = (
+        vertices
+        * stored
+        * int(model["scalar_bytes"])
+        * int(model["field_vector_copies"])
+    )
+    return math.ceil(
+        (fixed_bytes + generated_bytes + simplex_bytes + sparse_bytes + vector_bytes)
+        / (1024 * 1024)
+    )
+
+
+def validate_case_resources(
+    registry: dict[str, Any], cases: Sequence[dict[str, Any]]
+) -> None:
+    one_node_limit = int(registry["resources"]["memory_mib_per_node"])
+    profiles = registry["resources"]["profiles"]
+    for case in cases:
+        estimate = estimate_case_memory_mib(registry, case)
+        recorded = case.get("estimated_memory_mib")
+        if recorded is not None and recorded != estimate:
+            raise MatrixError(
+                f"case {case.get('case_id')!r} memory estimate does not match formula"
+            )
+        if estimate > one_node_limit:
+            raise MatrixError(
+                f"case {case.get('case_id')!r} exceeds one-node memory: "
+                f"{estimate} MiB > {one_node_limit} MiB"
+            )
+        profile_id = case.get("resource_profile")
+        if profile_id is not None:
+            if profile_id not in profiles:
+                raise MatrixError(f"case {case.get('case_id')!r} has unknown resource profile")
+            if estimate > int(profiles[profile_id]["memory_mib"]):
+                raise MatrixError(
+                    f"case {case.get('case_id')!r} exceeds its resource profile memory"
+                )
+
+
+def physical_case_arguments(
+    registry: dict[str, Any],
+    case: dict[str, Any],
+    *,
+    solver: Path,
+    qualification_log: Path,
+) -> list[str]:
+    adapted = _parent_registry(registry)
+    study = adapted["studies"][case["study_index"]]
+    study["steps"] = int(case["step_count"])
+    arguments = _V2_PHYSICAL_CASE_ARGUMENTS(
+        adapted,
+        case,
+        solver=solver,
+        qualification_log=qualification_log,
+    )
+    if case["refinement_axis"] == "bulk_redistance_cadence":
+        arguments.extend(
+            ["--reinitialization-cadence-steps", str(int(case["level"]["value"]))]
+        )
+    orders = _option_values(arguments, "--interface-quadrature-order")
+    if len(orders) != 1 or int(orders[0]) < 2:
+        raise MatrixError(
+            f"case {case['case_id']!r} does not select one quadratic interface rule"
+        )
+    if float(case["surface_tension"]) > 0.0:
+        if _option_values(arguments, "--capillary-force-form") != [
+            "kinematic_area_gradient_traction"
+        ]:
+            raise MatrixError(
+                f"case {case['case_id']!r} does not select energy traction"
+            )
+    return arguments
+
+
+def _completion_property(payload: Any, test: str) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    for suite in payload.get("testsuites", []):
+        if not isinstance(suite, dict):
+            continue
+        suite_name = suite.get("name")
+        for case in suite.get("testsuite", []):
+            if not isinstance(case, dict):
+                continue
+            classname = case.get("classname", suite_name)
+            if f"{classname}.{case.get('name')}" != test:
+                continue
+            failures = case.get("failures")
+            return int(
+                case.get("status") == "RUN"
+                and case.get("result") == "COMPLETED"
+                and failures in (None, [])
+            )
+    return 0
+
+
+def evaluate_exact_document(
+    payload: Any,
+    group: dict[str, Any],
+    *,
+    roundoff_factor: float,
+    context: str,
+) -> dict[str, Any]:
+    enriched = copy.deepcopy(payload)
+    if isinstance(enriched, dict):
+        for suite in enriched.get("testsuites", []):
+            if not isinstance(suite, dict):
+                continue
+            suite_name = suite.get("name")
+            for case in suite.get("testsuite", []):
+                if not isinstance(case, dict):
+                    continue
+                classname = case.get("classname", suite_name)
+                full_name = f"{classname}.{case.get('name')}"
+                gates = group.get("property_gates", {}).get(full_name, [])
+                if any(
+                    gate.get("property") == "wp4_exact_test_completed"
+                    for gate in gates
+                    if isinstance(gate, dict)
+                ):
+                    case["wp4_exact_test_completed"] = _completion_property(
+                        enriched, full_name
+                    )
+    return _V2_EVALUATE_EXACT_DOCUMENT(
+        enriched,
+        group,
+        roundoff_factor=roundoff_factor,
+        context=context,
+    )
+
+
+@contextmanager
+def _parent_overrides(**values: Any) -> Iterator[None]:
+    previous = {name: getattr(_v2, name) for name in values}
+    try:
+        for name, value in values.items():
+            setattr(_v2, name, value)
+        yield
+    finally:
+        for name, value in previous.items():
+            setattr(_v2, name, value)
+
+
+def run_physical_cases(
+    registry: dict[str, Any],
+    cases: Sequence[dict[str, Any]],
+    *,
+    solver: Path,
+    output_root: Path,
+    rerun: bool,
+) -> dict[str, Any]:
+    validate_case_resources(registry, cases)
+    adapted = _parent_registry(registry)
+
+    def mapped_arguments(
+        unused_registry: dict[str, Any],
+        case: dict[str, Any],
+        *,
+        solver: Path,
+        qualification_log: Path,
+    ) -> list[str]:
+        del unused_registry
+        return physical_case_arguments(
+            registry,
+            case,
+            solver=solver,
+            qualification_log=qualification_log,
+        )
+
+    with _parent_overrides(
+        DEFAULT_REGISTRY=DEFAULT_REGISTRY,
+        PHYSICAL_RUNNER=PHYSICAL_RUNNER,
+        physical_case_arguments=mapped_arguments,
+    ):
+        return _V2_RUN_PHYSICAL_CASES(
+            adapted,
+            cases,
+            solver=solver,
+            output_root=output_root,
+            rerun=rerun,
+        )
+
+
+def run_exact_groups(
+    registry: dict[str, Any],
+    *,
+    binaries: dict[str, Path],
+    mpi_launcher: Path,
+    mpi_launcher_mode: str,
+    output_root: Path,
+) -> dict[str, Any]:
+    adapted = _parent_registry(registry)
+    with _parent_overrides(
+        DEFAULT_REGISTRY=DEFAULT_REGISTRY,
+        PHYSICAL_RUNNER=PHYSICAL_RUNNER,
+        evaluate_exact_document=evaluate_exact_document,
+    ):
+        return _V2_RUN_EXACT_GROUPS(
+            adapted,
+            binaries=binaries,
+            mpi_launcher=mpi_launcher,
+            mpi_launcher_mode=mpi_launcher_mode,
+            output_root=output_root,
+        )
+
+
+def _analysis_cases(
+    registry: dict[str, Any], *, include_conditional_level: bool = False
+) -> list[dict[str, Any]]:
+    cases = expand_cases(
+        registry, include_conditional_level=include_conditional_level
+    )
+    for case in cases:
+        if case["refinement_axis"] == "bulk_redistance_cadence":
+            case["refinement_axis"] = "reinitialization_cadence"
+    return cases
+
+
+def analyze_evidence(
+    registry: dict[str, Any],
+    *,
+    roots: Sequence[Path],
+    output_root: Path,
+    include_conditional_level: bool,
+    exact_summary_path: Path | None,
+) -> dict[str, Any]:
+    adapted = _parent_registry(registry)
+    for study in adapted["studies"]:
+        if study["refinement_axis"] == "bulk_redistance_cadence":
+            study["refinement_axis"] = "reinitialization_cadence"
+
+    def adapted_expansion(
+        unused_registry: dict[str, Any], *, include_conditional_level: bool = False
+    ) -> list[dict[str, Any]]:
+        del unused_registry
+        return _analysis_cases(
+            registry, include_conditional_level=include_conditional_level
+        )
+
+    with _parent_overrides(
+        DEFAULT_REGISTRY=DEFAULT_REGISTRY,
+        PHYSICAL_RUNNER=PHYSICAL_RUNNER,
+        expand_cases=adapted_expansion,
+    ):
+        summary = _V2_ANALYZE_EVIDENCE(
+            adapted,
+            roots=roots,
+            output_root=output_root,
+            include_conditional_level=include_conditional_level,
+            exact_summary_path=exact_summary_path,
+        )
+    study_index = {study["id"]: study for study in registry["studies"]}
+    conditional_dispositions = []
+    convergence_studies = summary.get("convergence", {}).get("studies", {})
+    if isinstance(convergence_studies, dict):
+        for study_id, analysis in convergence_studies.items():
+            study = study_index.get(study_id)
+            if (
+                study is None
+                or study["refinement_axis"] != "resolution"
+                or not isinstance(analysis, dict)
+                or analysis.get("status") != "ADDITIONAL_LEVEL_REQUIRED"
+            ):
+                continue
+            conditional = registry["refinement"]["conditional_level_by_dimension"][
+                str(study["dimension"])
+            ]
+            conditional_dispositions.append(
+                {
+                    "study_id": study_id,
+                    "dimension": study["dimension"],
+                    "trigger": registry["refinement"]["conditional_level_trigger"],
+                    "availability": conditional["availability"],
+                    "disposition": conditional["disposition_when_required"],
+                }
+            )
+    summary["conditional_level_dispositions"] = conditional_dispositions
+    passed = summary.get("passed") is True and not conditional_dispositions
+    summary["passed"] = passed
+    failure_status = any(
+        isinstance(summary.get(section), dict)
+        and summary[section].get("status") == "FAIL"
+        for section in ("convergence", "invariance", "finest_level")
+    )
+    if summary.get("exact_groups_passed") is False:
+        failure_status = True
+    nonconditional_errors = [
+        error
+        for error in summary.get("errors", [])
+        if error != "convergence disposition is ADDITIONAL_LEVEL_REQUIRED"
+    ]
+    if nonconditional_errors:
+        failure_status = True
+    available_conditional_required = any(
+        record["disposition"] == "EXECUTE"
+        for record in conditional_dispositions
+    )
+    unavailable_conditional_required = any(
+        record["disposition"] == "INCONCLUSIVE"
+        for record in conditional_dispositions
+    )
+    summary["qualification_outcome"] = (
+        "PASS"
+        if passed
+        else "FAIL"
+        if failure_status
+        else "ADDITIONAL_LEVEL_REQUIRED"
+        if available_conditional_required
+        else "INCONCLUSIVE"
+        if unavailable_conditional_required
+        else "FAIL"
+    )
+    if unavailable_conditional_required:
+        errors = summary.setdefault("errors", [])
+        errors.append(
+            "a triggered three-dimensional conditional level is unavailable "
+            "within the frozen one-node memory bound"
+        )
+    summary["disposition"] = {
+        "fsr03_closed": passed,
+        "fsr04_closed": False,
+        "wp4_closed": False,
+        "q2_closed": False,
+    }
+    summary["scope_exclusions"] = [
+        "prescribed-angle maintenance does not close FSR-04",
+        "two-phase and gas-sensitive behavior are outside this matrix",
+        "higher-order and projected-force behavior are outside this matrix",
+    ]
+    write_json(output_root / "summary.json", summary)
+    manifest_lines = []
+    for path in sorted(output_root.rglob("*")):
+        if path.is_file() and path.name != "manifest.sha256":
+            manifest_lines.append(
+                f"{sha256_file(path)}  {path.relative_to(output_root)}"
+            )
+    (output_root / "manifest.sha256").write_text(
+        "\n".join(manifest_lines) + "\n", encoding="utf-8"
+    )
+    return summary
+
+
+def expected_artifact_paths(
+    registry: dict[str, Any], cases: Sequence[dict[str, Any]]
+) -> list[str]:
+    contract = registry["artifact_contract"]
+    paths: set[str] = set()
+    for case in cases:
+        for name in contract["physical_case_files"]:
+            paths.add(f"cases/{case['case_id']}/{name}")
+    for invocation in exact_invocations(registry):
+        directory = f"exact/{invocation['id']}"
+        if invocation["mpi_ranks"] == 1:
+            for name in contract["serial_exact_files"]:
+                paths.add(f"{directory}/{name}")
+        else:
+            for rank in range(invocation["mpi_ranks"]):
+                name = contract["mpi_exact_rank_file_template"].format(rank=rank)
+                paths.add(f"{directory}/{name}")
+            for name in contract["mpi_exact_common_files"]:
+                paths.add(f"{directory}/{name}")
+    paths.update(contract["summary_files"])
+    return sorted(paths)
+
+
+def _hash_binding(path: Path, context: str) -> dict[str, str]:
+    resolved = path.resolve()
+    if not resolved.is_file():
+        raise MatrixError(f"{context} hash input is not a file: {resolved}")
+    return {"path": str(resolved), "sha256": sha256_file(resolved)}
+
+
+def _validate_hash_map(
+    values: dict[str, Path], expected: set[str], context: str
+) -> dict[str, dict[str, str]]:
+    if set(values) != expected:
+        raise MatrixError(
+            f"{context} hash keys changed: expected={sorted(expected)}, "
+            f"observed={sorted(values)}"
+        )
+    return {
+        key: _hash_binding(values[key], f"{context} {key!r}")
+        for key in sorted(values)
+    }
+
+
+def build_dry_run_manifest(
+    registry: dict[str, Any],
+    cases: Sequence[dict[str, Any]],
+    *,
+    source_commit: str,
+    compiler: Path,
+    mpi: Path,
+    dependencies: dict[str, Path],
+    binaries: dict[str, Path],
+    include_conditional_level: bool,
+) -> dict[str, Any]:
+    if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+        raise MatrixError("source commit must be lowercase 40-hex")
+    validate_case_resources(registry, cases)
+    provenance = registry["provenance_contract"]
+    dependency_keys = set(provenance["required_dependency_keys"])
+    binary_keys = set(provenance["required_binary_keys"])
+    artifacts = expected_artifact_paths(registry, cases)
+    artifact_payload = json.dumps(
+        artifacts, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("ascii")
+    tests = sorted(
+        {
+            test
+            for invocation in exact_invocations(registry)
+            for test in invocation["tests"]
+        }
+    )
+    resources = sorted(
+        {study["resource_profile"] for study in registry["studies"]}
+        | {
+            invocation["resource_profile"]
+            for invocation in exact_invocations(registry)
+        }
+    )
+    return {
+        "schema_version": provenance["manifest_schema_version"],
+        "matrix_id": registry["matrix_id"],
+        "matrix_path": str(DEFAULT_REGISTRY),
+        "matrix_sha256": sha256_file(DEFAULT_REGISTRY),
+        "runner_path": str(SCRIPT_PATH),
+        "runner_sha256": sha256_file(SCRIPT_PATH),
+        "physical_runner_path": str(PHYSICAL_RUNNER),
+        "physical_runner_sha256": sha256_file(PHYSICAL_RUNNER),
+        "parent_matrix_sha256": sha256_file(PARENT_REGISTRY_PATH),
+        "parent_runner_sha256": sha256_file(PARENT_RUNNER_PATH),
+        "source_commit": source_commit,
+        "compiler": _hash_binding(compiler, "compiler"),
+        "mpi": _hash_binding(mpi, "MPI"),
+        "dependencies": _validate_hash_map(
+            dependencies, dependency_keys, "dependency"
+        ),
+        "binaries": _validate_hash_map(binaries, binary_keys, "binary"),
+        "include_conditional_level": include_conditional_level,
+        "physical_case_count": len(cases),
+        "physical_case_ids": [case["case_id"] for case in cases],
+        "physical_case_digests": [case["case_digest"] for case in cases],
+        "maximum_estimated_memory_mib": max(
+            (case["estimated_memory_mib"] for case in cases), default=0
+        ),
+        "required_test_union": tests,
+        "required_resource_union": resources,
+        "expected_artifact_union": artifacts,
+        "expected_artifact_count": len(artifacts),
+        "expected_artifact_union_sha256": hashlib.sha256(
+            artifact_payload
+        ).hexdigest(),
+        "conditional_level_by_dimension": copy.deepcopy(
+            registry["refinement"]["conditional_level_by_dimension"]
+        ),
+        "numerical_execution_performed": False,
+    }
+
+
+def _parse_binding(value: str) -> tuple[str, Path]:
+    if "=" not in value:
+        raise argparse.ArgumentTypeError("hash binding must be KEY=PATH")
+    key, path = value.split("=", 1)
+    if not key or not path:
+        raise argparse.ArgumentTypeError("hash binding must be KEY=PATH")
+    return key, Path(path)
+
+
+def _binding_map(
+    values: Sequence[tuple[str, Path]], context: str
+) -> dict[str, Path]:
+    result = dict(values)
+    if len(result) != len(values):
+        raise MatrixError(f"duplicate {context} keys")
+    return result
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
+    parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--list-cases", action="store_true")
+    parser.add_argument("--include-conditional-level", action="store_true")
+    parser.add_argument("--study", action="append", default=[])
+    parser.add_argument("--case-index", type=int)
+    parser.add_argument("--shard-index", type=int)
+    parser.add_argument("--shard-count", type=int)
+    parser.add_argument("--dry-manifest", type=Path)
+    parser.add_argument("--source-commit")
+    parser.add_argument("--compiler", type=Path)
+    parser.add_argument("--mpi", type=Path)
+    parser.add_argument(
+        "--dependency", type=_parse_binding, action="append", default=[]
+    )
+    parser.add_argument("--binary", type=_parse_binding, action="append", default=[])
+    parser.add_argument("--run-physical", action="store_true")
+    parser.add_argument("--run-exact", action="store_true")
+    parser.add_argument("--analyze", action="store_true")
+    parser.add_argument("--solver", type=Path)
+    parser.add_argument("--output-root", type=Path)
+    parser.add_argument("--results-root", type=Path, action="append", default=[])
+    parser.add_argument("--exact-summary", type=Path)
+    parser.add_argument(
+        "--mpi-launcher", type=Path, default=Path("/usr/bin/mpiexec")
+    )
+    parser.add_argument(
+        "--mpi-launcher-mode", choices=("mpiexec", "srun"), default="mpiexec"
+    )
+    parser.add_argument("--rerun", action="store_true")
+    return parser
+
+
+def _require_dry_inputs(args: argparse.Namespace) -> None:
+    missing = [
+        name
+        for name in ("source_commit", "compiler", "mpi")
+        if getattr(args, name) is None
+    ]
+    if missing:
+        raise MatrixError(f"dry manifest is missing inputs: {missing}")
+
+
+def main(arguments: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(arguments)
+    registry = load_registry(args.registry)
+    cases = expand_cases(
+        registry, include_conditional_level=args.include_conditional_level
+    )
+    selected = select_cases(
+        cases,
+        studies=args.study,
+        case_index=args.case_index,
+        shard_index=args.shard_index,
+        shard_count=args.shard_count,
+    )
+    numerical_actions = args.run_physical or args.run_exact or args.analyze
+    if args.validate_only:
+        if args.list_cases or args.dry_manifest is not None or numerical_actions:
+            raise MatrixError("--validate-only cannot be combined with other actions")
+        print(
+            json.dumps(
+                {
+                    "matrix_id": registry["matrix_id"],
+                    "status": registry["status"],
+                    "exact_category_count": len(registry["exact_groups"]),
+                    "exact_invocation_count": len(exact_invocations(registry)),
+                    "study_count": len(registry["studies"]),
+                    "physical_case_count": len(cases),
+                    "conditional_level_included": args.include_conditional_level,
+                    "maximum_estimated_memory_mib": max(
+                        case["estimated_memory_mib"] for case in cases
+                    ),
+                    "outcome": "PASS",
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if args.list_cases:
+        if args.dry_manifest is not None or numerical_actions:
+            raise MatrixError("--list-cases cannot be combined with other actions")
+        for case in selected:
+            print(json.dumps(case, sort_keys=True))
+        return 0
+
+    dependencies = _binding_map(args.dependency, "dependency")
+    binaries = _binding_map(args.binary, "binary")
+    manifest: dict[str, Any] | None = None
+    if args.dry_manifest is not None:
+        _require_dry_inputs(args)
+        manifest = build_dry_run_manifest(
+            registry,
+            cases,
+            source_commit=args.source_commit,
+            compiler=args.compiler,
+            mpi=args.mpi,
+            dependencies=dependencies,
+            binaries=binaries,
+            include_conditional_level=args.include_conditional_level,
+        )
+        write_json(args.dry_manifest.resolve(), manifest)
+        if not numerical_actions:
+            print(
+                json.dumps(
+                    {
+                        "matrix_id": registry["matrix_id"],
+                        "physical_case_count": len(cases),
+                        "expected_artifact_count": manifest[
+                            "expected_artifact_count"
+                        ],
+                        "maximum_estimated_memory_mib": manifest[
+                            "maximum_estimated_memory_mib"
+                        ],
+                        "manifest": str(args.dry_manifest.resolve()),
+                        "outcome": "PASS",
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
+    if not numerical_actions:
+        raise MatrixError(
+            "select --validate-only, --list-cases, --dry-manifest, or an execution action"
+        )
+    if manifest is None:
+        raise MatrixError("execution requires a freshly generated dry manifest")
+    if args.output_root is None:
+        raise MatrixError("execution and analysis require --output-root")
+    output_root = args.output_root.resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    if args.run_physical:
+        if args.solver is None:
+            raise MatrixError("--run-physical requires --solver")
+        run_physical_cases(
+            registry,
+            selected,
+            solver=args.solver,
+            output_root=output_root,
+            rerun=args.rerun,
+        )
+    exact_summary = None
+    if args.run_exact:
+        exact_summary = run_exact_groups(
+            registry,
+            binaries=binaries,
+            mpi_launcher=args.mpi_launcher.resolve(),
+            mpi_launcher_mode=args.mpi_launcher_mode,
+            output_root=output_root,
+        )
+        if exact_summary["passed"] is not True and not args.analyze:
+            return 1
+    if args.analyze:
+        roots = args.results_root or [output_root]
+        summary = analyze_evidence(
+            registry,
+            roots=[path.resolve() for path in roots],
+            output_root=output_root,
+            include_conditional_level=args.include_conditional_level,
+            exact_summary_path=(
+                args.exact_summary.resolve()
+                if args.exact_summary is not None
+                else output_root / "exact_summary.json"
+                if exact_summary is not None
+                else None
+            ),
+        )
+        return 0 if summary["passed"] else 1
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (MatrixError, OSError, RuntimeError, KeyError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        raise SystemExit(2)
