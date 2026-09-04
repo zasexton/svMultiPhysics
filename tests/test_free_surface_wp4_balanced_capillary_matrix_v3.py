@@ -363,6 +363,24 @@ def test_selected_traction_commands_have_one_explicit_quadratic_interface_order(
         assert int(orders[0]) >= 2
 
 
+def test_closed_circle_commands_propagate_the_declared_radius(tmp_path):
+    value = registry()
+    cases = [
+        case
+        for case in runner.expand_cases(value)
+        if case["study_id"] == "closed_circle_sampled_analytic"
+    ]
+    assert cases
+    for case in cases:
+        arguments = runner.physical_case_arguments(
+            value,
+            case,
+            solver=tmp_path / "solver",
+            qualification_log=tmp_path / f"{case['case_id']}.json",
+        )
+        assert option_values(arguments, "--capillary-droplet-radius") == ["0.2"]
+
+
 def test_conflicting_study_interface_order_override_is_rejected():
     value = copy.deepcopy(registry())
     value["studies"][0]["arguments"].extend(

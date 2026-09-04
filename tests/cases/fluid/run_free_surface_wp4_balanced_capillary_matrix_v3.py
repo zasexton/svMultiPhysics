@@ -45,7 +45,7 @@ EXPECTED_PARENT_REGISTRY_SHA256 = (
     "7605f4458191112bf0f03c38299b9b46838a11e9dcbf61c7196fecb0f89d7918"
 )
 EXPECTED_PHYSICAL_RUNNER_SHA256 = (
-    "cb282678e86d4fee6a8ac99b577aa14631e060e63e6780c102d54b4f69f612b0"
+    "201d2b7f5451cc4d53b460578effb338bb7e31ae447fe0c60e5eb6cfedd3d1cc"
 )
 EXPECTED_MATRIX_ID = "free_surface_wp4_balanced_capillary_v3"
 EXPECTED_STATUS = "FROZEN_BEFORE_EXECUTION"
@@ -1660,6 +1660,10 @@ def physical_case_arguments(
         solver=solver,
         qualification_log=qualification_log,
     )
+    if case["case"] == "droplet2d":
+        arguments.extend(
+            ["--capillary-droplet-radius", str(case["radius"])]
+        )
     if case["refinement_axis"] == "bulk_redistance_cadence":
         arguments.extend(
             ["--reinitialization-cadence-steps", str(int(case["level"]["value"]))]

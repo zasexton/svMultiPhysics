@@ -2392,6 +2392,21 @@ def test_sessile_case_uses_monolithic_fsils_gmres_linear_budget():
     assert configured.linear_relative_tolerance == 1.0e-8
     assert configured.linear_absolute_tolerance == 1.0e-10
 
+    droplet = runner.case_args_for_run(
+        "droplet2d", runner.argparse.Namespace(**vars(args)))
+    assert droplet.linear_solver_type == "gmres"
+    assert droplet.linear_algebra_backend == "fsils"
+    assert droplet.linear_preconditioner == "rcs"
+    assert droplet.linear_max_iterations == 100
+    assert droplet.linear_krylov_space_dimension == 50
+    assert droplet.linear_relative_tolerance == 1.0e-8
+    assert droplet.linear_absolute_tolerance == 1.0e-10
+    assert getattr(
+        droplet,
+        "require_free_surface_pressure_representability_diagnostic",
+        None,
+    ) is None
+
     area_gradient_args = runner.argparse.Namespace(**vars(args))
     area_gradient_args.capillary_force_form = (
         "kinematic_area_gradient_traction")
@@ -2489,12 +2504,27 @@ def test_sessile_case_uses_monolithic_fsils_gmres_linear_budget():
     args.linear_solver_type = "ns"
     args.linear_algebra_backend = "fsils"
     args.linear_preconditioner = "fsils"
+    args.linear_max_iterations = 71
     args.linear_krylov_space_dimension = 17
+    args.linear_relative_tolerance = 2.0e-7
+    args.linear_absolute_tolerance = 3.0e-11
     overridden = runner.case_args_for_run("sessile2d", args)
     assert overridden.linear_solver_type == "ns"
     assert overridden.linear_algebra_backend == "fsils"
     assert overridden.linear_preconditioner == "fsils"
+    assert overridden.linear_max_iterations == 71
     assert overridden.linear_krylov_space_dimension == 17
+    assert overridden.linear_relative_tolerance == 2.0e-7
+    assert overridden.linear_absolute_tolerance == 3.0e-11
+
+    overridden_droplet = runner.case_args_for_run("droplet2d", args)
+    assert overridden_droplet.linear_solver_type == "ns"
+    assert overridden_droplet.linear_algebra_backend == "fsils"
+    assert overridden_droplet.linear_preconditioner == "fsils"
+    assert overridden_droplet.linear_max_iterations == 71
+    assert overridden_droplet.linear_krylov_space_dimension == 17
+    assert overridden_droplet.linear_relative_tolerance == 2.0e-7
+    assert overridden_droplet.linear_absolute_tolerance == 3.0e-11
 
     area_gradient_args.cut_cell_pressure_stabilization_policy = "enabled"
     absolute_pressure_penalty = runner.case_args_for_run(

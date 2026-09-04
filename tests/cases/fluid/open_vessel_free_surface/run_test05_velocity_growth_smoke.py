@@ -2518,10 +2518,14 @@ def write_capillary_arc2d_case(case_dir: Path,
         encoding="utf-8")
 
 
-def capillary_droplet2d_phi(points: np.ndarray) -> np.ndarray:
+def capillary_droplet2d_phi(
+        points: np.ndarray,
+        radius: float = CAPILLARY_DROPLET_RADIUS) -> np.ndarray:
+    if not math.isfinite(radius) or radius <= 0.0:
+        raise ValueError("capillary droplet radius must be positive and finite")
     return np.sqrt((points[:, 0] - CAPILLARY_DROPLET_CENTER_X) ** 2 +
                    (points[:, 1] - CAPILLARY_DROPLET_CENTER_Y) ** 2) - (
-                       CAPILLARY_DROPLET_RADIUS)
+                       radius)
 
 
 def write_capillary_droplet2d_case(case_dir: Path,
@@ -2533,8 +2537,12 @@ def write_capillary_droplet2d_case(case_dir: Path,
                                    active_domain: str = "LevelSetNegative",
                                    center_offset: Sequence[float] = (0.0, 0.0),
                                    surface_tension: float | None = None,
+                                   radius: float = CAPILLARY_DROPLET_RADIUS,
                                    ) -> None:
     active_domain = normalized_active_domain(active_domain)
+    radius = float(radius)
+    if not math.isfinite(radius) or radius <= 0.0:
+        raise ValueError("capillary droplet radius must be positive and finite")
     center_offset = np.asarray(center_offset, dtype=float).reshape(-1)
     if center_offset.shape != (2,) or not np.isfinite(center_offset).all():
         raise ValueError(
@@ -2546,8 +2554,8 @@ def write_capillary_droplet2d_case(case_dir: Path,
         CAPILLARY_DROPLET_CENTER_X,
         CAPILLARY_DROPLET_CENTER_Y,
     ], dtype=float) + center_offset
-    if (np.any(center - CAPILLARY_DROPLET_RADIUS <= 0.0) or
-            np.any(center + CAPILLARY_DROPLET_RADIUS >= 1.0)):
+    if (np.any(center - radius <= 0.0) or
+            np.any(center + radius >= 1.0)):
         raise ValueError(
             "closed capillary droplet must remain strictly inside the tank")
     write_mini_case(
@@ -2561,7 +2569,7 @@ def write_capillary_droplet2d_case(case_dir: Path,
     points = np.asarray(grid.points, dtype=float)
     phi = oriented_level_set(
         np.linalg.norm(points[:, :2] - center, axis=1) -
-        CAPILLARY_DROPLET_RADIUS,
+        radius,
         active_domain,
         1.0,
     )
@@ -2591,7 +2599,7 @@ def write_capillary_droplet2d_case(case_dir: Path,
         "spatial_dimension": 2,
         "density": 1.0,
         "capillary_geometry": "droplet2d",
-        "capillary_radius": CAPILLARY_DROPLET_RADIUS,
+        "capillary_radius": radius,
         "circle_center": center.tolist(),
         "circle_center_offset": center_offset.tolist(),
         "initial_active_pressure": pressure_jump,
@@ -12603,7 +12611,8 @@ def case_args_for_run(case_name: str,
         set_default(case_args, "linear_relative_tolerance", 1.0e-8)
         set_default(case_args, "linear_absolute_tolerance", 1.0e-10)
     if case_name in {
-            "sessile2d", "sessile3d", "sphere3d", "dynamiccontact2d"}:
+            "droplet2d", "sessile2d", "sessile3d", "sphere3d",
+            "dynamiccontact2d"}:
         if case_args.steps is None:
             case_args.steps = 10 if case_name == "dynamiccontact2d" else 3
         if case_args.time_step_size is None:
@@ -12815,7 +12824,7 @@ def case_args_for_run(case_name: str,
                     "max_sessile_parasitic_capillary_number",
                     1.0e-2,
                 )
-        else:
+        elif case_name == "dynamiccontact2d":
             set_default(
                 case_args, "initialize_static_compatible_pressure", False)
             # The continuum Ren--E law supplies a deliberately strict target.
@@ -13094,10 +13103,15 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                     uses_kinematic_area_gradient_traction,
                     active_domain)
             elif case_name == "droplet2d":
+                droplet_radius = float(getattr(
+                    args,
+                    "capillary_droplet_radius",
+                    CAPILLARY_DROPLET_RADIUS,
+                ))
                 pressure_jump = 0.0
                 if getattr(args, "high_order_capillary_droplet_equilibrium_smoke", False):
                     pressure_jump = (
-                        float(args.surface_tension) / CAPILLARY_DROPLET_RADIUS
+                        float(args.surface_tension) / droplet_radius
                     )
                 write_capillary_droplet2d_case(
                     run_dir, args.steps, pressure_jump,
@@ -13111,7 +13125,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                     ),
                     surface_tension=(
                         None if args.surface_tension is None else
-                        float(args.surface_tension)))
+                        float(args.surface_tension)),
+                    radius=droplet_radius)
             elif case_name == "sphere3d":
                 if not (
                         args.synthetic_nx == args.synthetic_ny ==
@@ -15082,7 +15097,14 @@ def add_linear_solver_control_arguments(
     parser.add_argument("--linear-preconditioner")
 
 
-def main() -> int:
+def positive_finite_float(value: str) -> float:
+    result = float(value)
+    if not math.isfinite(result) or result <= 0.0:
+        raise argparse.ArgumentTypeError("must be positive and finite")
+    return result
+
+
+def main(arguments: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--solver", type=Path)
     parser.add_argument("--mpiexec", type=Path, default=Path("mpiexec"))
@@ -15219,6 +15241,12 @@ def main() -> int:
         default=(0.0, 0.0),
         metavar=("DX", "DY"),
         help="translation of the synthetic two-dimensional closed droplet",
+    )
+    parser.add_argument(
+        "--capillary-droplet-radius",
+        type=positive_finite_float,
+        default=CAPILLARY_DROPLET_RADIUS,
+        help="radius of the synthetic two-dimensional closed droplet",
     )
     parser.add_argument(
         "--capillary-sphere-center-offset",
@@ -15764,7 +15792,7 @@ def main() -> int:
     parser.add_argument("--adaptive-time-loop-increase-factor", type=float)
     parser.add_argument("--adaptive-time-loop-target-newton-iterations", type=int)
     parser.add_argument("--adaptive-time-loop-max-steps-multiplier", type=int)
-    args = parser.parse_args()
+    args = parser.parse_args(arguments)
     remember_explicit_cli_overrides(args)
     apply_high_order_production_qualification_defaults(args)
     apply_high_order_mpi_production_qualification_defaults(args)

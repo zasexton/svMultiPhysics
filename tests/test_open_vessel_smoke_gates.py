@@ -912,7 +912,7 @@ def test_write_capillary_droplet2d_case_records_equilibrium_benchmark():
 
         benchmark = json.loads((case_dir / "benchmark.json").read_text())
         assert benchmark["capillary_geometry"] == "droplet2d"
-        assert benchmark["capillary_radius"] == smoke.CAPILLARY_DROPLET_RADIUS
+        assert benchmark["capillary_radius"] == 0.3
         assert benchmark["initial_active_pressure"] == 1.25
 
         grid = smoke.pv.read(case_dir / "mesh/background/mesh-complete.mesh.vtu")
@@ -924,6 +924,144 @@ def test_write_capillary_droplet2d_case_records_equilibrium_benchmark():
         assert smoke.np.allclose(pressure, 1.25)
         assert benchmark["initial_pressure_extension"].startswith(
             "constant gamma/R on background support")
+
+
+def test_write_capillary_droplet2d_case_uses_an_alternate_radius():
+    smoke = _load_smoke_module()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        case_dir = Path(temp_dir) / "droplet2d"
+        smoke.write_capillary_droplet2d_case(
+            case_dir,
+            steps=1,
+            pressure_jump=2.5,
+            nx=10,
+            ny=10,
+            radius=0.2,
+        )
+
+        benchmark = json.loads((case_dir / "benchmark.json").read_text())
+        grid = smoke.pv.read(case_dir / "mesh/background/mesh-complete.mesh.vtu")
+        center_node = smoke.np.flatnonzero(
+            smoke.np.all(
+                smoke.np.isclose(grid.points[:, :2], [0.5, 0.5]), axis=1
+            )
+        )
+
+        assert benchmark["capillary_radius"] == 0.2
+        assert center_node.size == 1
+        assert grid.point_data["phi"][center_node[0]] == pytest.approx(-0.2)
+        assert smoke.np.allclose(grid.point_data["Pressure"], 2.5)
+
+
+@pytest.mark.parametrize("radius", [0.0, -0.1, math.inf, math.nan])
+def test_write_capillary_droplet2d_case_rejects_invalid_radius(radius):
+    smoke = _load_smoke_module()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        with pytest.raises(ValueError, match="radius must be positive and finite"):
+            smoke.write_capillary_droplet2d_case(
+                Path(temp_dir) / "droplet2d",
+                steps=1,
+                radius=radius,
+            )
+
+
+@pytest.mark.parametrize(
+    ("radius", "center_offset"),
+    [(0.5, (0.0, 0.0)), (0.2, (0.3, 0.0))],
+)
+def test_write_capillary_droplet2d_case_rejects_touching_container(
+    radius, center_offset
+):
+    smoke = _load_smoke_module()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        with pytest.raises(ValueError, match="strictly inside the tank"):
+            smoke.write_capillary_droplet2d_case(
+                Path(temp_dir) / "droplet2d",
+                steps=1,
+                radius=radius,
+                center_offset=center_offset,
+            )
+
+
+@pytest.mark.parametrize("radius", ["0", "-0.1", "inf", "nan"])
+def test_capillary_droplet_radius_cli_rejects_invalid_values(radius, capsys):
+    smoke = _load_smoke_module()
+
+    with pytest.raises(SystemExit) as error:
+        smoke.main(["--capillary-droplet-radius", radius])
+
+    assert error.value.code == 2
+    assert "must be positive and finite" in capsys.readouterr().err
+
+
+def test_droplet_cli_generates_radius_bound_mesh_and_solver_xml(monkeypatch):
+    smoke = _load_smoke_module()
+    observed = {}
+
+    class GeneratedInputsInspected(Exception):
+        pass
+
+    def inspect_generated_inputs(command, run_dir, args):
+        benchmark = json.loads((run_dir / "benchmark.json").read_text())
+        grid = smoke.pv.read(run_dir / "mesh/background/mesh-complete.mesh.vtu")
+        center_node = smoke.np.flatnonzero(
+            smoke.np.all(
+                smoke.np.isclose(grid.points[:, :2], [0.5, 0.5]), axis=1
+            )
+        )
+        root = smoke.ET.parse(run_dir / "solver.xml").getroot()
+        linear_solver = smoke.navier_stokes_linear_solver(root)
+        linear_algebra = linear_solver.find("Linear_algebra")
+
+        observed.update(
+            radius=benchmark["capillary_radius"],
+            initial_pressure=benchmark["initial_active_pressure"],
+            center_phi=float(grid.point_data["phi"][center_node[0]]),
+            pressure=smoke.np.asarray(grid.point_data["Pressure"]).tolist(),
+            solver_type=linear_solver.attrib["type"],
+            backend=linear_algebra.attrib["type"],
+            preconditioner=linear_algebra.findtext("Preconditioner"),
+            max_iterations=linear_solver.findtext("Max_iterations"),
+            restart=linear_solver.findtext("Krylov_space_dimension"),
+            relative_tolerance=linear_solver.findtext("Tolerance"),
+            absolute_tolerance=linear_solver.findtext("Absolute_tolerance"),
+        )
+        raise GeneratedInputsInspected
+
+    monkeypatch.setattr(smoke, "run_solver_command", inspect_generated_inputs)
+
+    with pytest.raises(GeneratedInputsInspected):
+        smoke.main(
+            [
+                "--solver",
+                "/bin/true",
+                "--case",
+                "droplet2d",
+                "--high-order-capillary-droplet-equilibrium-smoke",
+                "--steps",
+                "1",
+                "--synthetic-nx",
+                "10",
+                "--synthetic-ny",
+                "10",
+                "--surface-tension",
+                "0.5",
+                "--capillary-droplet-radius",
+                "0.2",
+            ]
+        )
+
+    assert observed["radius"] == 0.2
+    assert observed["initial_pressure"] == 2.5
+    assert observed["center_phi"] == pytest.approx(-0.2)
+    assert observed["pressure"] == pytest.approx([2.5] * 121)
+    assert observed["solver_type"] == "gmres"
+    assert observed["backend"] == "fsils"
+    assert observed["preconditioner"] == "rcs"
+    assert observed["max_iterations"] == "100"
+    assert observed["restart"] == "50"
+    assert observed["relative_tolerance"] == "1e-08"
+    assert observed["absolute_tolerance"] == "1e-10"
 
 
 def test_write_capillary_wave2d_case_records_reference_profile():
