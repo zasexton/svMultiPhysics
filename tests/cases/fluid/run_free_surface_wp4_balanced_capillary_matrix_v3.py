@@ -11,8 +11,11 @@ import json
 import math
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence
@@ -36,7 +39,7 @@ PHYSICAL_RUNNER = (
     / "open_vessel_free_surface/run_test05_velocity_growth_smoke.py"
 )
 EXPECTED_REGISTRY_SHA256 = (
-    "f4e7895b102c6e7d378922db64c6acabd708c84f838501261693129ed5fc0548"
+    "9b07b2b5dbf98e3b3c115f6ad11499454e7f13718eaf85ae28142bc338eb2fbe"
 )
 EXPECTED_PARENT_RUNNER_SHA256 = (
     "480c0441a4da62dd7d5f16133c9dde7b16df90772c06f851bed6ff233f69d4c3"
@@ -49,6 +52,11 @@ EXPECTED_PHYSICAL_RUNNER_SHA256 = (
 )
 EXPECTED_MATRIX_ID = "free_surface_wp4_balanced_capillary_v3"
 EXPECTED_STATUS = "FROZEN_BEFORE_EXECUTION"
+EXACT_INVOCATION_WATCHDOG_SECONDS = 900
+EXACT_TERMINATION_GRACE_SECONDS = 2.0
+EXACT_DIAGNOSTIC_CAPTURE_SECONDS = 2.0
+EXACT_DIAGNOSTIC_OUTPUT_BYTES = 65536
+EXACT_DIAGNOSTIC_PROCESS_LIMIT = 64
 
 
 def _sha256_file(path: Path) -> str:
@@ -146,7 +154,9 @@ RESOURCE_FIELDS = {
     "memory_mib_per_node",
     "memory_model",
     "profiles",
+    "exact_invocation_lifecycle",
 }
+EXACT_INVOCATION_LIFECYCLE_FIELDS = {"watchdog_seconds"}
 MEMORY_MODEL_FIELDS = {
     "formula_version",
     "formula",
@@ -281,6 +291,28 @@ def _option_values(arguments: Sequence[str], option: str) -> list[str]:
     ]
 
 
+def _exact_invocation_watchdog(resources: Any) -> float:
+    if (
+        not isinstance(resources, dict)
+        or "exact_invocation_lifecycle" not in resources
+    ):
+        raise MatrixError("exact-invocation lifecycle is missing")
+    lifecycle = resources["exact_invocation_lifecycle"]
+    _require_fields(
+        lifecycle,
+        EXACT_INVOCATION_LIFECYCLE_FIELDS,
+        "exact-invocation lifecycle fields",
+    )
+    watchdog = finite_number(
+        lifecycle["watchdog_seconds"],
+        "exact-invocation watchdog",
+        positive=True,
+    )
+    if watchdog != EXACT_INVOCATION_WATCHDOG_SECONDS:
+        raise MatrixError("exact-invocation watchdog must be 900 seconds")
+    return watchdog
+
+
 def _validate_resources(resources: Any) -> None:
     _require_fields(resources, RESOURCE_FIELDS, "resource fields")
     if resources["partition"] != "amarsden":
@@ -293,6 +325,7 @@ def _validate_resources(resources: Any) -> None:
         raise MatrixError("every physical case must use one node")
     if resources["memory_mib_per_node"] != 10240:
         raise MatrixError("one-node memory limit must be 10240 MiB")
+    _exact_invocation_watchdog(resources)
     model = resources["memory_model"]
     _require_fields(model, MEMORY_MODEL_FIELDS, "memory-model fields")
     if model["formula_version"] != 1:
@@ -1140,6 +1173,7 @@ def _validate_artifact_and_provenance(registry: dict[str, Any]) -> None:
         "binaries",
         "solver",
         "conditional_trigger",
+        "exact_invocation_lifecycle",
     }:
         raise MatrixError("required manifest hash bindings changed")
     if (
@@ -1764,6 +1798,428 @@ def _command_with_guard(guard: Callable[[], None] | None) -> Callable[..., Any]:
     return guarded
 
 
+def _positive_finite_seconds(value: Any, context: str) -> float:
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+        or float(value) <= 0.0
+    ):
+        raise MatrixError(f"{context} must be a positive finite number")
+    return float(value)
+
+
+def _process_session_records(session_id: int) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    try:
+        process_directories = list(Path("/proc").iterdir())
+    except OSError:
+        return records
+    for process_directory in process_directories:
+        if not process_directory.name.isdigit():
+            continue
+        try:
+            stat = (process_directory / "stat").read_text(
+                encoding="utf-8", errors="replace"
+            )
+            closing_parenthesis = stat.rfind(")")
+            if closing_parenthesis < 0:
+                continue
+            fields = stat[closing_parenthesis + 2 :].split()
+            if len(fields) < 4 or int(fields[3]) != session_id:
+                continue
+            try:
+                command_bytes = (process_directory / "cmdline").read_bytes()[
+                    :EXACT_DIAGNOSTIC_OUTPUT_BYTES
+                ]
+                command_status = "captured"
+            except PermissionError:
+                command_bytes = b""
+                command_status = "permission_denied"
+            except OSError:
+                command_bytes = b""
+                command_status = "unavailable"
+            records.append(
+                {
+                    "pid": int(process_directory.name),
+                    "parent_pid": int(fields[1]),
+                    "process_group_id": int(fields[2]),
+                    "session_id": int(fields[3]),
+                    "state": fields[0],
+                    "command_status": command_status,
+                    "command": command_bytes.replace(b"\0", b" ").decode(
+                        encoding="utf-8", errors="replace"
+                    ),
+                }
+            )
+        except (FileNotFoundError, OSError, ValueError):
+            continue
+    return sorted(records, key=lambda record: record["pid"])
+
+
+def _bounded_proc_read(path: Path) -> dict[str, Any]:
+    try:
+        payload = path.read_bytes()[:EXACT_DIAGNOSTIC_OUTPUT_BYTES]
+    except PermissionError as error:
+        return {"status": "permission_denied", "error": type(error).__name__}
+    except FileNotFoundError as error:
+        return {"status": "unavailable", "error": type(error).__name__}
+    except OSError as error:
+        return {"status": "read_failed", "error": type(error).__name__}
+    return {
+        "status": "captured",
+        "content": payload.decode(encoding="utf-8", errors="replace"),
+        "truncated": len(payload) == EXACT_DIAGNOSTIC_OUTPUT_BYTES,
+    }
+
+
+def _capture_stack_tool(
+    processes: Sequence[dict[str, Any]], *, deadline: float
+) -> dict[str, Any]:
+    selected = None
+    for name in ("gstack", "pstack"):
+        selected = shutil.which(name)
+        if selected is not None:
+            break
+    if selected is None:
+        return {
+            "status": "unavailable",
+            "diagnostic": "gstack and pstack are unavailable on PATH",
+            "captures": [],
+        }
+    captures: list[dict[str, Any]] = []
+    for record in processes:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            captures.append(
+                {
+                    "pid": record["pid"],
+                    "status": "capture_budget_exhausted",
+                }
+            )
+            break
+        try:
+            completed = subprocess.run(
+                [selected, str(record["pid"])],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=min(0.25, remaining),
+            )
+            captures.append(
+                {
+                    "pid": record["pid"],
+                    "status": (
+                        "captured" if completed.returncode == 0 else "attach_failed"
+                    ),
+                    "returncode": completed.returncode,
+                    "stdout": completed.stdout[:EXACT_DIAGNOSTIC_OUTPUT_BYTES].decode(
+                        encoding="utf-8", errors="replace"
+                    ),
+                    "stderr": completed.stderr[:EXACT_DIAGNOSTIC_OUTPUT_BYTES].decode(
+                        encoding="utf-8", errors="replace"
+                    ),
+                }
+            )
+        except subprocess.TimeoutExpired as error:
+            captures.append(
+                {
+                    "pid": record["pid"],
+                    "status": "capture_timed_out",
+                    "stdout": (error.stdout or b"")[:EXACT_DIAGNOSTIC_OUTPUT_BYTES].decode(
+                        encoding="utf-8", errors="replace"
+                    ),
+                    "stderr": (error.stderr or b"")[:EXACT_DIAGNOSTIC_OUTPUT_BYTES].decode(
+                        encoding="utf-8", errors="replace"
+                    ),
+                }
+            )
+        except (OSError, ValueError) as error:
+            captures.append(
+                {
+                    "pid": record["pid"],
+                    "status": "capture_failed",
+                    "error": type(error).__name__,
+                }
+            )
+    return {"status": "attempted", "tool": selected, "captures": captures}
+
+
+def _capture_timeout_diagnostics(
+    command: Sequence[str],
+    *,
+    process: subprocess.Popen[Any],
+    launcher_mode: str,
+    ranks: int,
+    elapsed_seconds: float,
+) -> dict[str, Any]:
+    all_processes = _process_session_records(process.pid)
+    processes = all_processes[:EXACT_DIAGNOSTIC_PROCESS_LIMIT]
+    capture_deadline = time.monotonic() + EXACT_DIAGNOSTIC_CAPTURE_SECONDS
+    proc_captures = [
+        {
+            "pid": record["pid"],
+            "stack": _bounded_proc_read(Path(f"/proc/{record['pid']}/stack")),
+            "system_call": _bounded_proc_read(
+                Path(f"/proc/{record['pid']}/syscall")
+            ),
+        }
+        for record in processes
+    ]
+    return {
+        "schema_version": 1,
+        "command": list(command),
+        "launcher_mode": launcher_mode,
+        "ranks": ranks,
+        "elapsed_seconds": elapsed_seconds,
+        "launcher_pid": process.pid,
+        "process_group_id": process.pid,
+        "session_id": process.pid,
+        "processes_before_termination": processes,
+        "process_count_before_termination": len(all_processes),
+        "process_capture_truncated": len(processes) != len(all_processes),
+        "proc_captures": proc_captures,
+        "stack_tool": _capture_stack_tool(processes, deadline=capture_deadline),
+        "termination": None,
+    }
+
+
+def _signal_exact_session(session_id: int, signal_number: int) -> list[int]:
+    runner_process_group = os.getpgrp()
+    process_groups = sorted(
+        {
+            record["process_group_id"]
+            for record in _process_session_records(session_id)
+            if record["process_group_id"] != runner_process_group
+            and record["state"] != "Z"
+        }
+    )
+    signaled: list[int] = []
+    for process_group in process_groups:
+        try:
+            os.killpg(process_group, signal_number)
+        except ProcessLookupError:
+            continue
+        signaled.append(process_group)
+    return signaled
+
+
+def _terminate_exact_session(
+    process: subprocess.Popen[Any], *, grace_seconds: float
+) -> dict[str, Any]:
+    grace = _positive_finite_seconds(grace_seconds, "exact termination grace")
+    terminated_groups = set(_signal_exact_session(process.pid, signal.SIGTERM))
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        process.poll()
+        living = [
+            record
+            for record in _process_session_records(process.pid)
+            if record["state"] != "Z"
+        ]
+        if not living:
+            break
+        time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+    killed_groups = set(_signal_exact_session(process.pid, signal.SIGKILL))
+    try:
+        process.wait(timeout=max(0.05, grace))
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            killed_groups.add(process.pid)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=max(0.05, grace))
+        except subprocess.TimeoutExpired:
+            pass
+    remaining = _process_session_records(process.pid)
+    living = [record for record in remaining if record["state"] != "Z"]
+    return {
+        "terminate_process_group_ids": sorted(terminated_groups),
+        "kill_process_group_ids": sorted(killed_groups),
+        "remaining_processes": remaining,
+        "all_session_processes_terminated": process.poll() is not None and not living,
+    }
+
+
+def _run_bounded_exact_command(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+    environment: dict[str, str] | None = None,
+    timeout_seconds: Any,
+    termination_grace_seconds: Any,
+    launcher_mode: str,
+    ranks: int,
+) -> dict[str, Any]:
+    watchdog = _positive_finite_seconds(
+        timeout_seconds, "exact-invocation watchdog"
+    )
+    grace = _positive_finite_seconds(
+        termination_grace_seconds, "exact termination grace"
+    )
+    if launcher_mode not in {"mpiexec", "srun"}:
+        raise MatrixError("exact MPI launcher mode is invalid")
+    if not isinstance(ranks, int) or isinstance(ranks, bool) or ranks < 1:
+        raise MatrixError("exact invocation rank count is invalid")
+    started = time.monotonic()
+    timed_out = False
+    diagnostics_path: Path | None = None
+    termination: dict[str, Any] | None = None
+    with stdout_path.open("w", encoding="utf-8") as stdout_stream:
+        with stderr_path.open("w", encoding="utf-8") as stderr_stream:
+            process = subprocess.Popen(
+                list(command),
+                cwd=cwd,
+                env=environment,
+                stdout=stdout_stream,
+                stderr=stderr_stream,
+                text=True,
+                start_new_session=True,
+            )
+            try:
+                deadline = started + watchdog
+                while True:
+                    process.poll()
+                    living = [
+                        record
+                        for record in _process_session_records(process.pid)
+                        if record["state"] != "Z"
+                    ]
+                    if process.returncode is not None and not living:
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0.0:
+                        timed_out = True
+                        break
+                    time.sleep(min(0.02, remaining))
+                if timed_out:
+                    diagnostics_path = stdout_path.parent / "timeout_diagnostics.json"
+                    try:
+                        diagnostics = _capture_timeout_diagnostics(
+                            command,
+                            process=process,
+                            launcher_mode=launcher_mode,
+                            ranks=ranks,
+                            elapsed_seconds=time.monotonic() - started,
+                        )
+                    except BaseException as error:
+                        diagnostics = {
+                            "schema_version": 1,
+                            "command": list(command),
+                            "launcher_mode": launcher_mode,
+                            "ranks": ranks,
+                            "elapsed_seconds": time.monotonic() - started,
+                            "launcher_pid": process.pid,
+                            "capture_status": "failed",
+                            "capture_error": type(error).__name__,
+                            "termination": None,
+                        }
+                    write_json(diagnostics_path, diagnostics)
+                    termination = _terminate_exact_session(
+                        process, grace_seconds=grace
+                    )
+                    diagnostics["termination"] = termination
+                    write_json(diagnostics_path, diagnostics)
+            except BaseException:
+                _terminate_exact_session(process, grace_seconds=grace)
+                raise
+    return {
+        "command": list(command),
+        "returncode": process.returncode,
+        "timed_out": timed_out,
+        "terminal": process.poll() is not None,
+        "elapsed_seconds": time.monotonic() - started,
+        "stdout": str(stdout_path),
+        "stderr": str(stderr_path),
+        "process_id": process.pid,
+        "process_group_id": process.pid,
+        "session_id": process.pid,
+        "launcher_mode": launcher_mode,
+        "mpi_ranks": ranks,
+        "watchdog_seconds": watchdog,
+        "timeout_diagnostics": (
+            str(diagnostics_path) if diagnostics_path is not None else None
+        ),
+        "termination": termination,
+    }
+
+
+def _explicit_exact_command(
+    parent_command: Sequence[str],
+    *,
+    launcher: Path,
+    launcher_mode: str,
+    ranks: int,
+) -> list[str]:
+    if launcher_mode not in {"mpiexec", "srun"}:
+        raise MatrixError("exact MPI launcher mode is invalid")
+    if not isinstance(ranks, int) or isinstance(ranks, bool) or ranks < 1:
+        raise MatrixError("exact invocation rank count is invalid")
+    launcher_path = launcher.resolve()
+    launcher_arguments = _v2.exact_mpi_launcher_arguments(launcher_mode, ranks)
+    command = list(parent_command)
+    if ranks == 1:
+        return [str(launcher_path), *launcher_arguments, *command]
+    prefix_length = 1 + len(launcher_arguments)
+    if (
+        len(command) <= prefix_length
+        or Path(command[0]).resolve() != launcher_path
+        or command[1:prefix_length] != launcher_arguments
+    ):
+        raise MatrixError("parent exact command changed its declared rank route")
+    return [str(launcher_path), *command[1:]]
+
+
+def _exact_command_adapter(
+    *,
+    launcher: Path,
+    launcher_mode: str,
+    invocation_ranks: Sequence[int],
+    watchdog_seconds: Any,
+    termination_grace_seconds: Any,
+    pre_execution_guard: Callable[[], None] | None,
+) -> Callable[..., Any]:
+    ranks_by_call = list(invocation_ranks)
+    invocation_index = 0
+
+    def run(command: Sequence[str], **options: Any) -> dict[str, Any]:
+        nonlocal invocation_index
+        if invocation_index >= len(ranks_by_call):
+            raise MatrixError("parent exact runner issued an unexpected command")
+        if options.get("timeout") is not None:
+            raise MatrixError("exact invocation cannot override the frozen watchdog")
+        options.pop("timeout", None)
+        if pre_execution_guard is not None:
+            pre_execution_guard()
+        resolved_launcher = launcher.resolve()
+        if not resolved_launcher.is_file() or not os.access(
+            resolved_launcher, os.X_OK
+        ):
+            raise MatrixError("exact MPI launcher is not executable after provenance guard")
+        ranks = ranks_by_call[invocation_index]
+        invocation_index += 1
+        explicit_command = _explicit_exact_command(
+            command,
+            launcher=resolved_launcher,
+            launcher_mode=launcher_mode,
+            ranks=ranks,
+        )
+        return _run_bounded_exact_command(
+            explicit_command,
+            timeout_seconds=watchdog_seconds,
+            termination_grace_seconds=termination_grace_seconds,
+            launcher_mode=launcher_mode,
+            ranks=ranks,
+            **options,
+        )
+
+    return run
+
+
 def run_physical_cases(
     registry: dict[str, Any],
     cases: Sequence[dict[str, Any]],
@@ -1831,11 +2287,22 @@ def run_exact_groups(
     pre_execution_guard: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     adapted = _parent_registry(registry)
+    watchdog_seconds = _exact_invocation_watchdog(registry.get("resources"))
+    command_adapter = _exact_command_adapter(
+        launcher=mpi,
+        launcher_mode=mpi_launcher_mode,
+        invocation_ranks=[
+            invocation["mpi_ranks"] for invocation in exact_invocations(registry)
+        ],
+        watchdog_seconds=watchdog_seconds,
+        termination_grace_seconds=EXACT_TERMINATION_GRACE_SECONDS,
+        pre_execution_guard=pre_execution_guard,
+    )
     with _parent_overrides(
         DEFAULT_REGISTRY=DEFAULT_REGISTRY,
         PHYSICAL_RUNNER=PHYSICAL_RUNNER,
         evaluate_exact_document=evaluate_exact_document,
-        _run_command=_command_with_guard(pre_execution_guard),
+        _run_command=command_adapter,
     ):
         return _V2_RUN_EXACT_GROUPS(
             adapted,
@@ -2225,6 +2692,7 @@ def build_pre_execution_manifest(
 ) -> dict[str, Any]:
     if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
         raise MatrixError("source commit must be lowercase 40-hex")
+    _exact_invocation_watchdog(registry.get("resources"))
     source = collect_source_provenance(source_root)
     validate_source_provenance(source, declared_commit=source_commit)
     conditional_record, conditional_binding = _conditional_trigger_binding(
@@ -2278,6 +2746,9 @@ def build_pre_execution_manifest(
         "binaries": _validate_hash_map(binaries, binary_keys, "binary"),
         "solver": _hash_binding(solver, "solver"),
         "conditional_trigger": conditional_binding,
+        "exact_invocation_lifecycle": copy.deepcopy(
+            registry["resources"]["exact_invocation_lifecycle"]
+        ),
         "physical_case_count": len(cases),
         "physical_case_ids": [case["case_id"] for case in cases],
         "physical_case_digests": [case["case_digest"] for case in cases],

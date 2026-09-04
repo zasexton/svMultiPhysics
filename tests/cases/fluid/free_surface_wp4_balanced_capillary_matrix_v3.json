@@ -63,6 +63,9 @@
     "maximum_total_memory_mib": 40960,
     "nodes_per_case": 1,
     "memory_mib_per_node": 10240,
+    "exact_invocation_lifecycle": {
+      "watchdog_seconds": 900
+    },
     "memory_model": {
       "formula_version": 1,
       "formula": "ceil((fixed_bytes + generated_vertices*vertex_bytes + simplices*simplex_bytes + generated_vertices*coupled_components*adjacency_upper_bound*coupled_components*sparse_entry_bytes*sparse_operator_copies + generated_vertices*stored_field_components*scalar_bytes*field_vector_copies)/1048576)",
@@ -927,7 +930,7 @@
     "manifest_schema_version": 1,
     "required_dependency_keys": ["openblas", "vtk", "ncurses", "libxml2"],
     "required_binary_keys": ["geometry", "level_set", "level_set_mpi", "physics", "application", "application_mpi"],
-    "required_hash_bindings": ["matrix", "runner", "physical_runner", "source_commit", "source_tree", "tracked_source", "compiler", "mpi", "dependencies", "binaries", "solver", "conditional_trigger"],
+    "required_hash_bindings": ["matrix", "runner", "physical_runner", "source_commit", "source_tree", "tracked_source", "compiler", "mpi", "dependencies", "binaries", "solver", "conditional_trigger", "exact_invocation_lifecycle"],
     "source_commit_format": "lowercase_40_hex",
     "dry_manifest_required_before_execution": true,
     "source_worktree_requires_clean": true,

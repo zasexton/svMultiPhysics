@@ -2,8 +2,12 @@ import copy
 import hashlib
 import importlib.util
 import json
+import math
 import os
+import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -161,6 +165,12 @@ def bound_files(tmp_path, names, prefix=""):
     for name, path in result.items():
         path.write_bytes(name.encode())
     return result
+
+
+def write_executable(path, source):
+    path.write_text(source, encoding="utf-8")
+    path.chmod(0o755)
+    return path
 
 
 def provenance_inputs(tmp_path, value):
@@ -1181,6 +1191,367 @@ def test_exact_execution_adapter_flattens_categories_and_injects_completion(
     assert observed["mpi_launcher"] == tmp_path / "mpiexec"
 
 
+def test_exact_invocation_lifecycle_is_frozen_and_manifest_bound(
+    monkeypatch, tmp_path
+):
+    value = registry()
+    assert value["resources"]["exact_invocation_lifecycle"] == {
+        "watchdog_seconds": 900
+    }
+    assert "exact_invocation_lifecycle" in value["provenance_contract"][
+        "required_hash_bindings"
+    ]
+    _cases, manifest, _options, _source = build_manifest_fixture(
+        monkeypatch, tmp_path, value
+    )
+    assert manifest["exact_invocation_lifecycle"] == {"watchdog_seconds": 900}
+
+
+@pytest.mark.parametrize(
+    "lifecycle",
+    [
+        None,
+        {},
+        {"watchdog_seconds": 0},
+        {"watchdog_seconds": -1},
+        {"watchdog_seconds": math.inf},
+        {"watchdog_seconds": math.nan},
+        {"watchdog_seconds": True},
+        {"watchdog_seconds": 899},
+        {"watchdog_seconds": 900, "grace_seconds": 1},
+    ],
+)
+def test_exact_invocation_lifecycle_rejects_missing_invalid_or_extra_fields(
+    lifecycle,
+):
+    value = registry()
+    if lifecycle is None:
+        value["resources"].pop("exact_invocation_lifecycle")
+    else:
+        value["resources"]["exact_invocation_lifecycle"] = lifecycle
+    with pytest.raises(runner.MatrixError):
+        runner.validate_contract(value)
+
+
+def test_exact_invocation_rejects_a_local_lifecycle_override():
+    value = registry()
+    value["exact_groups"][0]["invocations"][0]["watchdog_seconds"] = 1
+    with pytest.raises(runner.MatrixError, match="invocation 0 fields"):
+        runner.validate_contract(value)
+
+
+def test_exact_execution_independently_rejects_changed_watchdog(
+    monkeypatch, tmp_path
+):
+    value = registry()
+    value["resources"]["exact_invocation_lifecycle"]["watchdog_seconds"] = 899
+    delegated = False
+
+    def delegate(*args, **options):
+        nonlocal delegated
+        del args, options
+        delegated = True
+        return {"passed": True}
+
+    monkeypatch.setattr(runner, "_V2_RUN_EXACT_GROUPS", delegate)
+    with pytest.raises(runner.MatrixError, match="900 seconds"):
+        runner.run_exact_groups(
+            value,
+            binaries={},
+            mpi=tmp_path / "mpi",
+            mpi_launcher_mode="mpiexec",
+            output_root=tmp_path / "exact",
+        )
+    assert delegated is False
+
+
+@pytest.mark.parametrize("mode", ["mpiexec", "srun"])
+@pytest.mark.parametrize("ranks", [1, 2])
+def test_exact_command_uses_selected_launcher_with_declared_rank_count(
+    tmp_path, mode, ranks
+):
+    launcher = tmp_path / mode
+    direct = [
+        "/binary/test_application",
+        "--gtest_filter=Suite.Case",
+        "--gtest_color=no",
+        "--gtest_output=json:/evidence/gtest.json",
+    ]
+    if ranks == 1:
+        parent_command = direct
+    else:
+        parent_command = [
+            str(launcher),
+            *runner._v2.exact_mpi_launcher_arguments(mode, ranks),
+            "/bin/sh",
+            "-c",
+            runner._v2._rank_wrapper(),
+            "wp4-v2-rank",
+            direct[0],
+            direct[1],
+            direct[2],
+            "/evidence",
+        ]
+    command = runner._explicit_exact_command(
+        parent_command,
+        launcher=launcher,
+        launcher_mode=mode,
+        ranks=ranks,
+    )
+    prefix_length = 1 + len(
+        runner._v2.exact_mpi_launcher_arguments(mode, ranks)
+    )
+    assert command[:prefix_length] == [
+        str(launcher.resolve()),
+        *runner._v2.exact_mpi_launcher_arguments(mode, ranks),
+    ]
+    if ranks == 1:
+        assert command[-len(direct) :] == direct
+    else:
+        assert command[-7:] == parent_command[-7:]
+        assert command.count("/bin/sh") == 1
+        assert "-l" not in command
+
+
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_bounded_exact_command_preserves_streams_and_terminal_status(
+    tmp_path, exit_code
+):
+    stdout_path = tmp_path / "stdout.txt"
+    stderr_path = tmp_path / "stderr.txt"
+    execution = runner._run_bounded_exact_command(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; print('captured-out', flush=True); "
+                "print('captured-err', file=sys.stderr, flush=True); "
+                f"raise SystemExit({exit_code})"
+            ),
+        ],
+        cwd=tmp_path,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        environment=os.environ.copy(),
+        timeout_seconds=0.5,
+        termination_grace_seconds=0.1,
+        launcher_mode="mpiexec",
+        ranks=1,
+    )
+    assert execution["returncode"] == exit_code
+    assert execution["timed_out"] is False
+    assert execution["terminal"] is True
+    assert stdout_path.read_text(encoding="utf-8") == "captured-out\n"
+    assert stderr_path.read_text(encoding="utf-8") == "captured-err\n"
+
+
+@pytest.mark.parametrize(
+    "timeout_seconds", [None, 0, -1, math.inf, math.nan, True, "0.2"]
+)
+def test_bounded_exact_command_rejects_invalid_timeouts(
+    tmp_path, timeout_seconds
+):
+    with pytest.raises(runner.MatrixError, match="watchdog"):
+        runner._run_bounded_exact_command(
+            [sys.executable, "-c", "raise SystemExit(0)"],
+            cwd=tmp_path,
+            stdout_path=tmp_path / "stdout.txt",
+            stderr_path=tmp_path / "stderr.txt",
+            environment=os.environ.copy(),
+            timeout_seconds=timeout_seconds,
+            termination_grace_seconds=0.1,
+            launcher_mode="mpiexec",
+            ranks=1,
+        )
+
+
+def test_timeout_terminates_invocation_tree_and_preserves_diagnostics(
+    monkeypatch, tmp_path
+):
+    child_pid_path = tmp_path / "child.pid"
+    script = tmp_path / "hang.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import pathlib, signal, subprocess, sys, time",
+                "child = subprocess.Popen([sys.executable, '-c', "
+                "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'])",
+                f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid))",
+                "print('before-timeout-out', flush=True)",
+                "print('before-timeout-err', file=sys.stderr, flush=True)",
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+                "time.sleep(30)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    control = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+    )
+    monkeypatch.setenv("PATH", str(tmp_path / "no-tools"))
+    try:
+        execution = runner._run_bounded_exact_command(
+            [sys.executable, str(script)],
+            cwd=tmp_path,
+            stdout_path=tmp_path / "stdout.txt",
+            stderr_path=tmp_path / "stderr.txt",
+            environment=os.environ.copy(),
+            timeout_seconds=0.25,
+            termination_grace_seconds=0.1,
+            launcher_mode="srun",
+            ranks=2,
+        )
+        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+        diagnostics = runner.read_json(tmp_path / "timeout_diagnostics.json")
+        assert execution["timed_out"] is True
+        assert execution["returncode"] != 0
+        assert execution["terminal"] is True
+        assert execution["timeout_diagnostics"] == str(
+            tmp_path / "timeout_diagnostics.json"
+        )
+        assert diagnostics["launcher_mode"] == "srun"
+        assert diagnostics["ranks"] == 2
+        assert diagnostics["elapsed_seconds"] >= 0.2
+        assert diagnostics["processes_before_termination"]
+        assert diagnostics["stack_tool"]["status"] == "unavailable"
+        assert diagnostics["termination"]["all_session_processes_terminated"] is True
+        assert (tmp_path / "stdout.txt").read_text(encoding="utf-8") == (
+            "before-timeout-out\n"
+        )
+        assert (tmp_path / "stderr.txt").read_text(encoding="utf-8") == (
+            "before-timeout-err\n"
+        )
+        deadline = time.monotonic() + 1.0
+        while Path(f"/proc/{child_pid}").exists() and time.monotonic() < deadline:
+            try:
+                state = (
+                    Path(f"/proc/{child_pid}/stat")
+                    .read_text()
+                    .split(") ", 1)[1][0]
+                )
+            except FileNotFoundError:
+                break
+            if state == "Z":
+                break
+            time.sleep(0.01)
+        if Path(f"/proc/{child_pid}").exists():
+            try:
+                state = (
+                    Path(f"/proc/{child_pid}/stat")
+                    .read_text()
+                    .split(") ", 1)[1][0]
+                )
+            except FileNotFoundError:
+                state = "Z"
+            assert state == "Z"
+        assert control.poll() is None
+    finally:
+        if control.poll() is None:
+            os.killpg(control.pid, signal.SIGKILL)
+        control.wait()
+
+
+def test_timeout_cannot_pass_when_child_wrote_passing_json(tmp_path):
+    value = registry()
+    invocation = copy.deepcopy(value["exact_groups"][0]["invocations"][3])
+    test_name = invocation["tests"][0]
+    invocation["tests"] = [test_name]
+    invocation["property_gates"] = {
+        test_name: invocation["property_gates"][test_name]
+    }
+    value["exact_groups"] = [
+        {
+            "id": "focused_algebra",
+            "purpose": "controlled timeout evidence",
+            "invocations": [invocation],
+        }
+    ]
+    launcher = write_executable(
+        tmp_path / "mpiexec",
+        "#!/usr/bin/env python3\n"
+        "import os, sys\n"
+        "arguments = sys.argv[1:]\n"
+        "os.execv(arguments[3], arguments[3:])\n",
+    )
+    binary = write_executable(
+        tmp_path / "exact_binary",
+        "#!/usr/bin/env python3\n"
+        "import json, pathlib, signal, subprocess, sys, time\n"
+        "output = next(value.split('=json:', 1)[1] for value in sys.argv "
+        "if value.startswith('--gtest_output='))\n"
+        f"test_name = {test_name!r}\n"
+        "suite, name = test_name.rsplit('.', 1)\n"
+        "payload = {'tests': 1, 'failures': 0, 'disabled': 0, "
+        "'testsuites': [{'name': suite, 'testsuite': [{'name': name, "
+        "'classname': suite, 'status': 'RUN', 'result': 'COMPLETED'}]}]}\n"
+        "pathlib.Path(output).write_text(json.dumps(payload))\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "time.sleep(30)\n",
+    )
+    adapted = runner._parent_registry(value)
+    command_runner = runner._exact_command_adapter(
+        launcher=launcher,
+        launcher_mode="mpiexec",
+        invocation_ranks=[1],
+        watchdog_seconds=0.25,
+        termination_grace_seconds=0.1,
+        pre_execution_guard=None,
+    )
+    with runner._parent_overrides(
+        DEFAULT_REGISTRY=runner.DEFAULT_REGISTRY,
+        PHYSICAL_RUNNER=runner.PHYSICAL_RUNNER,
+        evaluate_exact_document=runner.evaluate_exact_document,
+        _run_command=command_runner,
+    ):
+        summary = runner._V2_RUN_EXACT_GROUPS(
+            adapted,
+            binaries={invocation["binary"]: binary},
+            mpi_launcher=launcher,
+            mpi_launcher_mode="mpiexec",
+            output_root=tmp_path / "evidence",
+        )
+    group = summary["groups"][0]
+    assert group["documents"][0]["passed"] is True
+    assert group["execution"]["timed_out"] is True
+    assert group["passed"] is False
+    assert summary["passed"] is False
+
+
+def test_exact_guard_runs_before_launcher_revalidation(tmp_path):
+    marker = tmp_path / "launched"
+    launcher = write_executable(
+        tmp_path / "mpiexec",
+        f"#!/bin/sh\nprintf launched > {marker}\n",
+    )
+    calls = []
+
+    def guard():
+        calls.append("guard")
+        launcher.chmod(0o644)
+
+    command_runner = runner._exact_command_adapter(
+        launcher=launcher,
+        launcher_mode="mpiexec",
+        invocation_ranks=[1],
+        watchdog_seconds=0.5,
+        termination_grace_seconds=0.1,
+        pre_execution_guard=guard,
+    )
+    with pytest.raises(runner.MatrixError, match="launcher"):
+        command_runner(
+            ["/bin/true"],
+            cwd=tmp_path,
+            stdout_path=tmp_path / "stdout.txt",
+            stderr_path=tmp_path / "stderr.txt",
+            environment=os.environ.copy(),
+        )
+    assert calls == ["guard"]
+    assert not marker.exists()
+
+
 def test_cli_rejects_a_second_mpi_launcher_path():
     with pytest.raises(SystemExit):
         runner._parser().parse_args(
@@ -1237,8 +1608,18 @@ def test_execution_adapters_guard_each_delegated_numerical_command(
 
     def delegated(*args, **options):
         del args, options
-        runner._v2._run_command("first")
-        runner._v2._run_command("second")
+        if action == "physical":
+            runner._v2._run_command("first")
+            runner._v2._run_command("second")
+        else:
+            for index in range(2):
+                runner._v2._run_command(
+                    ["/bin/true"],
+                    cwd=tmp_path,
+                    stdout_path=tmp_path / f"exact-{index}.out",
+                    stderr_path=tmp_path / f"exact-{index}.err",
+                    environment=os.environ.copy(),
+                )
         return {"passed": True}
 
     monkeypatch.setattr(runner._v2, "_run_command", parent_command)
@@ -1253,11 +1634,12 @@ def test_execution_adapters_guard_each_delegated_numerical_command(
             pre_execution_guard=lambda: guard_calls.append(action),
         )
     else:
+        mpi = write_executable(tmp_path / "mpi", "#!/bin/sh\nexit 0\n")
         monkeypatch.setattr(runner, "_V2_RUN_EXACT_GROUPS", delegated)
         runner.run_exact_groups(
             value,
             binaries={},
-            mpi=tmp_path / "mpi",
+            mpi=mpi,
             mpi_launcher_mode="srun",
             output_root=tmp_path / "exact",
             pre_execution_guard=lambda: guard_calls.append(action),
