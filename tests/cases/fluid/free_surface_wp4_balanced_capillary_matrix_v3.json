@@ -134,6 +134,8 @@
     ],
     "conditional_spatial_level_cells_per_radius": 64,
     "conditional_level_trigger": "nonmonotone_three_level_sequence_only",
+    "conditional_trigger_record_policy": "hash_bound_prior_three_level_analysis",
+    "conditional_trigger_record_schema_version": 1,
     "conditional_level_by_dimension": {
       "2": {
         "cells_per_radius": 64,
@@ -905,19 +907,37 @@
       "scope": {"balanced_force_closure_evidence": true, "fsr04_closure_evidence": false, "purpose": "bulk-redistance cadence with coupled prescribed wall repair"}
     }
   ],
+  "execution_contract": {
+    "output_root_creation": "exclusive",
+    "physical_retry_policy": "reject_nonempty_target",
+    "rerun_allowed": false,
+    "revalidate_before_each_numerical_action": true,
+    "operational_setup_phase": "Task4B"
+  },
   "artifact_contract": {
     "physical_case_files": ["case.json", "command.json", "execution.json", "qualification.json", "stdout.txt", "stderr.txt"],
     "serial_exact_files": ["gtest.json", "group_summary.json", "stdout.txt", "stderr.txt"],
     "mpi_exact_rank_file_template": "gtest_rank_{rank}.json",
     "mpi_exact_common_files": ["group_summary.json", "stdout.txt", "stderr.txt"],
+    "pre_execution_manifest_file": "pre_execution_manifest.json",
+    "conditional_trigger_record_file": "conditional_trigger_record.json",
     "summary_files": ["physical_execution_manifest.json", "exact_summary.json", "summary.json", "manifest.sha256"]
   },
   "provenance_contract": {
     "manifest_schema_version": 1,
     "required_dependency_keys": ["openblas", "vtk", "ncurses", "libxml2"],
     "required_binary_keys": ["geometry", "level_set", "level_set_mpi", "physics", "application", "application_mpi"],
-    "required_hash_bindings": ["matrix", "runner", "physical_runner", "source_commit", "compiler", "mpi", "dependencies", "binaries"],
+    "required_hash_bindings": ["matrix", "runner", "physical_runner", "source_commit", "source_tree", "tracked_source", "compiler", "mpi", "dependencies", "binaries", "solver", "conditional_trigger"],
     "source_commit_format": "lowercase_40_hex",
-    "dry_manifest_required_before_execution": true
+    "dry_manifest_required_before_execution": true,
+    "source_worktree_requires_clean": true,
+    "source_head_requires_detached": true,
+    "source_head_must_equal_declared_commit": true,
+    "tracked_source_digest_required": true,
+    "required_missing_lfs_object_count": 0,
+    "required_lfs_tracked_object_count": 955,
+    "solver_hash_required": true,
+    "mpi_launcher_must_match_bound_executable": true,
+    "pre_execution_manifest_inside_output_root": true
   }
 }

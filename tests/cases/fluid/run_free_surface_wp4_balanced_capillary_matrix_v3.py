@@ -11,14 +11,17 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
 
 SCRIPT_PATH = Path(__file__).resolve()
 SCRIPT_DIRECTORY = SCRIPT_PATH.parent
+REPOSITORY_ROOT = SCRIPT_PATH.parents[3]
+EXPECTED_LFS_TRACKED_OBJECT_COUNT = 955
 DEFAULT_REGISTRY = SCRIPT_PATH.with_name(
     "free_surface_wp4_balanced_capillary_matrix_v3.json"
 )
@@ -33,7 +36,7 @@ PHYSICAL_RUNNER = (
     / "open_vessel_free_surface/run_test05_velocity_growth_smoke.py"
 )
 EXPECTED_REGISTRY_SHA256 = (
-    "6c0d2e6f540cca78bf9e6fd1921997548421a99b21948e494e423e3aba3139fa"
+    "f4e7895b102c6e7d378922db64c6acabd708c84f838501261693129ed5fc0548"
 )
 EXPECTED_PARENT_RUNNER_SHA256 = (
     "480c0441a4da62dd7d5f16133c9dde7b16df90772c06f851bed6ff233f69d4c3"
@@ -84,7 +87,7 @@ select_cases = _v2.select_cases
 extract_metric = _v2.extract_metric
 evaluate_exact_property_gate = _v2.evaluate_exact_property_gate
 exact_rank_properties_identical = _v2.exact_rank_properties_identical
-exact_mpi_launcher_arguments = _v2.exact_mpi_launcher_arguments
+_canonical_sha256 = _v2._canonical_digest
 
 _V2_EXPAND_CASES = _v2.expand_cases
 _V2_PHYSICAL_CASE_ARGUMENTS = _v2.physical_case_arguments
@@ -123,6 +126,7 @@ TOP_LEVEL_FIELDS = {
     "common_runner_arguments",
     "literature_adaptations",
     "studies",
+    "execution_contract",
     "artifact_contract",
     "provenance_contract",
 }
@@ -171,6 +175,8 @@ REFINEMENT_FIELDS = {
     "spatial_levels_cells_per_radius",
     "conditional_spatial_level_cells_per_radius",
     "conditional_level_trigger",
+    "conditional_trigger_record_policy",
+    "conditional_trigger_record_schema_version",
     "conditional_level_by_dimension",
     "uniform_resolution_rule",
     "reported_mesh_coordinate",
@@ -372,6 +378,12 @@ def _validate_refinement(refinement: Any) -> None:
         "nonmonotone_three_level_sequence_only"
     ):
         raise MatrixError("conditional spatial trigger changed")
+    if (
+        refinement["conditional_trigger_record_policy"]
+        != "hash_bound_prior_three_level_analysis"
+        or refinement["conditional_trigger_record_schema_version"] != 1
+    ):
+        raise MatrixError("conditional trigger record contract changed")
     conditional = refinement["conditional_level_by_dimension"]
     _require_fields(conditional, {"2", "3"}, "conditional dimension fields")
     _require_fields(
@@ -777,6 +789,18 @@ def _validate_studies(
                     )
                 ):
                     raise MatrixError(f"study {study_id!r} level step counts are invalid")
+                if any(
+                    coarse <= fine for coarse, fine in zip(levels[:-1], levels[1:])
+                ):
+                    raise MatrixError(
+                        f"study {study_id!r} time steps must be strictly decreasing"
+                    )
+                if any(
+                    coarse >= fine for coarse, fine in zip(counts[:-1], counts[1:])
+                ):
+                    raise MatrixError(
+                        f"study {study_id!r} step counts must be strictly increasing"
+                    )
                 horizon = finite_number(
                     study["physical_horizon"],
                     f"study {study_id!r} physical horizon",
@@ -785,8 +809,6 @@ def _validate_studies(
                 products = [level * count for level, count in zip(levels, counts)]
                 if any(product != horizon for product in products):
                     raise MatrixError(f"study {study_id!r} does not preserve its physical horizon")
-                if counts != sorted(counts):
-                    raise MatrixError(f"study {study_id!r} step counts do not increase under refinement")
             else:
                 finite_number(study["time_step"], f"study {study_id!r} time step", positive=True)
             if axis == "phi_scale":
@@ -992,7 +1014,8 @@ def validate_contract(registry: Any) -> dict[str, Any]:
         raise MatrixError("V3 requires exactly one quadratic interface order")
     _validate_literature(registry["literature_adaptations"], registry)
     _validate_artifact_and_provenance(registry)
-    cases = _expand_cases_unchecked(registry, include_conditional_level=True)
+    _validate_execution_contract(registry)
+    cases = _expand_cases_unchecked(registry)
     validate_case_resources(registry, cases)
     for dimension in (2, 3):
         availability = registry["refinement"]["conditional_level_by_dimension"][
@@ -1040,6 +1063,8 @@ def _validate_artifact_and_provenance(registry: dict[str, Any]) -> None:
             "serial_exact_files",
             "mpi_exact_rank_file_template",
             "mpi_exact_common_files",
+            "pre_execution_manifest_file",
+            "conditional_trigger_record_file",
             "summary_files",
         },
         "artifact-contract fields",
@@ -1053,6 +1078,12 @@ def _validate_artifact_and_provenance(registry: dict[str, Any]) -> None:
         _unique_strings(artifact[key], f"artifact contract {key}")
     if artifact["mpi_exact_rank_file_template"] != "gtest_rank_{rank}.json":
         raise MatrixError("MPI exact rank artifact template changed")
+    if (
+        artifact["pre_execution_manifest_file"] != "pre_execution_manifest.json"
+        or artifact["conditional_trigger_record_file"]
+        != "conditional_trigger_record.json"
+    ):
+        raise MatrixError("named pre-execution artifacts changed")
     provenance = registry["provenance_contract"]
     _require_fields(
         provenance,
@@ -1063,6 +1094,15 @@ def _validate_artifact_and_provenance(registry: dict[str, Any]) -> None:
             "required_hash_bindings",
             "source_commit_format",
             "dry_manifest_required_before_execution",
+            "source_worktree_requires_clean",
+            "source_head_requires_detached",
+            "source_head_must_equal_declared_commit",
+            "tracked_source_digest_required",
+            "required_missing_lfs_object_count",
+            "required_lfs_tracked_object_count",
+            "solver_hash_required",
+            "mpi_launcher_must_match_bound_executable",
+            "pre_execution_manifest_inside_output_root",
         },
         "provenance-contract fields",
     )
@@ -1092,17 +1132,43 @@ def _validate_artifact_and_provenance(registry: dict[str, Any]) -> None:
         "runner",
         "physical_runner",
         "source_commit",
+        "source_tree",
+        "tracked_source",
         "compiler",
         "mpi",
         "dependencies",
         "binaries",
+        "solver",
+        "conditional_trigger",
     }:
         raise MatrixError("required manifest hash bindings changed")
     if (
         provenance["source_commit_format"] != "lowercase_40_hex"
         or provenance["dry_manifest_required_before_execution"] is not True
+        or provenance["source_worktree_requires_clean"] is not True
+        or provenance["source_head_requires_detached"] is not True
+        or provenance["source_head_must_equal_declared_commit"] is not True
+        or provenance["tracked_source_digest_required"] is not True
+        or provenance["required_missing_lfs_object_count"] != 0
+        or provenance["required_lfs_tracked_object_count"]
+        != EXPECTED_LFS_TRACKED_OBJECT_COUNT
+        or provenance["solver_hash_required"] is not True
+        or provenance["mpi_launcher_must_match_bound_executable"] is not True
+        or provenance["pre_execution_manifest_inside_output_root"] is not True
     ):
         raise MatrixError("dry manifest provenance policy changed")
+
+
+def _validate_execution_contract(registry: dict[str, Any]) -> None:
+    expected = {
+        "output_root_creation": "exclusive",
+        "physical_retry_policy": "reject_nonempty_target",
+        "rerun_allowed": False,
+        "revalidate_before_each_numerical_action": True,
+        "operational_setup_phase": "Task4B",
+    }
+    if registry["execution_contract"] != expected:
+        raise MatrixError("immutable execution contract changed")
 
 
 def exact_invocations(registry: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1128,28 +1194,349 @@ def _parent_registry(registry: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _base_case_set_sha256(cases: Sequence[dict[str, Any]]) -> str:
+    return _canonical_sha256(
+        [
+            {"case_id": case["case_id"], "case_digest": case["case_digest"]}
+            for case in cases
+        ]
+    )
+
+
+def _conditional_record_header(
+    registry: dict[str, Any], base_cases: Sequence[dict[str, Any]]
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "matrix_id": registry["matrix_id"],
+        "matrix_sha256": sha256_file(DEFAULT_REGISTRY),
+        "runner_sha256": sha256_file(SCRIPT_PATH),
+        "physical_runner_sha256": sha256_file(PHYSICAL_RUNNER),
+        "trigger_policy": "nonmonotone_three_level_sequence_only",
+        "prior_analysis_file": "summary.json",
+        "prior_pre_execution_manifest_file": registry["artifact_contract"][
+            "pre_execution_manifest_file"
+        ],
+        "base_case_count": len(base_cases),
+        "base_case_set_sha256": _base_case_set_sha256(base_cases),
+    }
+
+
+def _conditional_identity(
+    base_cases: Sequence[dict[str, Any]],
+    study: dict[str, Any],
+    metric: str,
+    axes: Any,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    if (
+        metric not in study["metrics"]
+        or not isinstance(axes, dict)
+        or set(axes) != set(study["axes"])
+        or any(value not in study["axes"][name] for name, value in axes.items())
+    ):
+        raise MatrixError("conditional sequence axes or metric are undeclared")
+    matching = sorted(
+        (
+            case
+            for case in base_cases
+            if case["study_id"] == study["id"] and case["axes"] == axes
+        ),
+        key=lambda case: float(case["level"]["value"]),
+    )
+    if [case["level"]["value"] for case in matching] != [8.0, 16.0, 32.0]:
+        raise MatrixError("conditional base sequence identity is incomplete")
+    identity = {
+        "study_id": study["id"],
+        "dimension": study["dimension"],
+        "metric": metric,
+        "refinement_axis": "resolution",
+        "axes": axes,
+        "base_case_ids": [case["case_id"] for case in matching],
+        "base_case_digests": [case["case_digest"] for case in matching],
+    }
+    return identity, matching
+
+
+def _validate_prior_analysis_header(
+    registry: dict[str, Any], analysis: dict[str, Any]
+) -> None:
+    base_cases = _expand_cases_unchecked(registry)
+    frozen = {
+        "matrix_id": registry["matrix_id"],
+        "registry_sha256": sha256_file(DEFAULT_REGISTRY),
+        "runner_sha256": sha256_file(SCRIPT_PATH),
+        "physical_runner_sha256": sha256_file(PHYSICAL_RUNNER),
+        "expected_case_count": len(base_cases),
+    }
+    if any(analysis.get(key) != expected for key, expected in frozen.items()):
+        raise MatrixError("conditional prior analysis frozen identity changed")
+    if analysis.get("conditional_trigger_record_sha256") is not None:
+        raise MatrixError("conditional trigger must come from a three-level base analysis")
+    if not re.fullmatch(
+        r"[0-9a-f]{64}", str(analysis.get("pre_execution_manifest_sha256"))
+    ):
+        raise MatrixError("conditional prior provenance manifest hash is missing")
+    if (
+        analysis.get("qualification_outcome")
+        not in {"PASS", "ADDITIONAL_LEVEL_REQUIRED", "INCONCLUSIVE"}
+        or analysis.get("exact_groups_passed") is not True
+        or not isinstance(analysis.get("invariance"), dict)
+        or analysis["invariance"].get("status") != "PASS"
+        or not isinstance(analysis.get("finest_level"), dict)
+        or analysis["finest_level"].get("status") != "PASS"
+    ):
+        raise MatrixError("conditional prior analysis contains an actual failure")
+
+
+def _dict_member(value: Any, key: str, context: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or not isinstance(value.get(key), dict):
+        raise MatrixError(f"{context} is malformed")
+    return value[key]
+
+
+def _json_object(value: Any, context: str) -> dict[str, Any]:
+    try:
+        result = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise MatrixError(f"{context} is malformed") from error
+    if not isinstance(result, dict):
+        raise MatrixError(f"{context} must be an object")
+    return result
+
+
+def _conditional_sequence_records(
+    registry: dict[str, Any], analysis: dict[str, Any]
+) -> list[dict[str, Any]]:
+    base_cases = _expand_cases_unchecked(registry)
+    analyzed_studies = _dict_member(
+        _dict_member(analysis, "convergence", "conditional prior convergence"),
+        "studies",
+        "conditional prior convergence studies",
+    )
+    studies = {study["id"]: study for study in registry["studies"]}
+    records: list[dict[str, Any]] = []
+    for study_id, study_analysis in analyzed_studies.items():
+        study = studies.get(study_id)
+        if study is None or study["refinement_axis"] != "resolution":
+            continue
+        groups = _dict_member(study_analysis, "groups", "conditional study analysis")
+        for group_key, group_analysis in groups.items():
+            group_axes = _json_object(group_key, "conditional group identity")
+            metrics = _dict_member(
+                group_analysis, "metrics", "conditional group analysis"
+            )
+            for metric, metric_analysis in metrics.items():
+                sequences = _dict_member(
+                    metric_analysis, "sequences", "conditional metric analysis"
+                )
+                for offset_key, sequence in sequences.items():
+                    if not isinstance(sequence, dict):
+                        raise MatrixError("conditional sequence analysis is malformed")
+                    if sequence.get("status") != "ADDITIONAL_LEVEL_REQUIRED":
+                        continue
+                    if (
+                        sequence.get("sample_count") != 3
+                        or sequence.get("monotone_to_reference") is not False
+                        or sequence.get("gate_failures")
+                        != ["asymptotic_tail_not_established"]
+                    ):
+                        raise MatrixError(
+                            "conditional trigger is not a nonmonotone three-level sequence"
+                        )
+                    samples = sequence.get("samples")
+                    if not isinstance(samples, list) or len(samples) != 3:
+                        raise MatrixError("conditional sequence samples are malformed")
+                    try:
+                        offset = json.loads(offset_key)
+                    except (TypeError, json.JSONDecodeError) as error:
+                        raise MatrixError(
+                            "conditional offset identity is malformed"
+                        ) from error
+                    axes = {**group_axes, "offset_h": offset}
+                    identity, matching = _conditional_identity(
+                        base_cases, study, metric, axes
+                    )
+                    expected_labels = [case["level"]["label"] for case in matching]
+                    observed_labels = [sample.get("label") for sample in samples]
+                    if observed_labels != expected_labels:
+                        raise MatrixError("conditional base sequence labels changed")
+                    conditional = registry["refinement"][
+                        "conditional_level_by_dimension"
+                    ][str(study["dimension"])]
+                    records.append(
+                        {
+                            "sequence_id": _canonical_sha256(identity),
+                            **identity,
+                            "prior_status": "ADDITIONAL_LEVEL_REQUIRED",
+                            "trigger_reason": "nonmonotone_three_level_sequence",
+                            "availability": conditional["availability"],
+                            "disposition": conditional["disposition_when_required"],
+                        }
+                    )
+    sequence_ids = [record["sequence_id"] for record in records]
+    if len(sequence_ids) != len(set(sequence_ids)):
+        raise MatrixError("conditional sequence identities are duplicated")
+    return sorted(records, key=lambda record: record["sequence_id"])
+
+
+def build_conditional_trigger_record(
+    registry: dict[str, Any], prior_analysis_path: Path
+) -> dict[str, Any]:
+    prior_analysis_path = prior_analysis_path.resolve()
+    if prior_analysis_path.name != "summary.json":
+        raise MatrixError("conditional prior analysis must be the named summary")
+    analysis = read_json(prior_analysis_path)
+    if not isinstance(analysis, dict):
+        raise MatrixError("conditional prior analysis must be an object")
+    _validate_prior_analysis_header(registry, analysis)
+    base_cases = _expand_cases_unchecked(registry)
+    prior_manifest_path = prior_analysis_path.with_name(
+        registry["artifact_contract"]["pre_execution_manifest_file"]
+    )
+    if (
+        not prior_manifest_path.is_file()
+        or sha256_file(prior_manifest_path)
+        != analysis["pre_execution_manifest_sha256"]
+    ):
+        raise MatrixError("conditional prior provenance manifest changed")
+    return {
+        **_conditional_record_header(registry, base_cases),
+        "prior_analysis_sha256": sha256_file(prior_analysis_path),
+        "prior_pre_execution_manifest_sha256": sha256_file(prior_manifest_path),
+        "sequences": _conditional_sequence_records(registry, analysis),
+    }
+
+
+def load_conditional_trigger_record(
+    registry: dict[str, Any], path: Path
+) -> dict[str, Any]:
+    resolved = path.resolve()
+    record = read_json(resolved)
+    if not isinstance(record, dict) or record.get("prior_analysis_file") != "summary.json":
+        raise MatrixError("conditional trigger record is malformed")
+    expected = build_conditional_trigger_record(
+        registry, resolved.parent / record["prior_analysis_file"]
+    )
+    if record != expected:
+        raise MatrixError("conditional trigger record is stale or malformed")
+    return record
+
+
+def _conditional_expansion_keys(
+    registry: dict[str, Any], record: dict[str, Any] | None
+) -> dict[str, set[str]]:
+    if record is None:
+        return {}
+    base_cases = _expand_cases_unchecked(registry)
+    expected_header = _conditional_record_header(registry, base_cases)
+    digest_fields = {"prior_analysis_sha256", "prior_pre_execution_manifest_sha256"}
+    _require_fields(
+        record,
+        set(expected_header) | digest_fields | {"sequences"},
+        "conditional-trigger fields",
+    )
+    if (
+        any(record[key] != value for key, value in expected_header.items())
+        or any(not re.fullmatch(r"[0-9a-f]{64}", str(record[key]))
+               for key in digest_fields)
+    ):
+        raise MatrixError("conditional trigger frozen provenance changed")
+    if not isinstance(record["sequences"], list):
+        raise MatrixError("conditional trigger sequences are malformed")
+    if not record["sequences"]:
+        raise MatrixError("conditional trigger declares no sequences")
+    studies = {study["id"]: study for study in registry["studies"]}
+    sequence_fields = {
+        "sequence_id",
+        "study_id",
+        "dimension",
+        "metric",
+        "refinement_axis",
+        "axes",
+        "base_case_ids",
+        "base_case_digests",
+        "prior_status",
+        "trigger_reason",
+        "availability",
+        "disposition",
+    }
+    keys: dict[str, set[str]] = {}
+    sequence_ids: set[str] = set()
+    for sequence in record["sequences"]:
+        if not isinstance(sequence, dict):
+            raise MatrixError("conditional trigger sequence is malformed")
+        if set(sequence) != sequence_fields:
+            raise MatrixError("conditional trigger sequence fields changed")
+        if sequence["sequence_id"] in sequence_ids:
+            raise MatrixError("conditional trigger sequence is duplicated")
+        sequence_ids.add(sequence["sequence_id"])
+        study = studies.get(sequence["study_id"])
+        if (
+            study is None
+            or sequence["dimension"] != study["dimension"]
+            or sequence["refinement_axis"] != "resolution"
+            or study["refinement_axis"] != "resolution"
+            or sequence["prior_status"] != "ADDITIONAL_LEVEL_REQUIRED"
+            or sequence["trigger_reason"] != "nonmonotone_three_level_sequence"
+        ):
+            raise MatrixError("conditional trigger sequence is undeclared")
+        identity, _ = _conditional_identity(
+            base_cases, study, sequence["metric"], sequence["axes"]
+        )
+        conditional = registry["refinement"]["conditional_level_by_dimension"][
+            str(study["dimension"])
+        ]
+        if (
+            sequence["sequence_id"] != _canonical_sha256(identity)
+            or sequence["base_case_ids"] != identity["base_case_ids"]
+            or sequence["base_case_digests"] != identity["base_case_digests"]
+            or sequence["availability"] != conditional["availability"]
+            or sequence["disposition"] != conditional["disposition_when_required"]
+        ):
+            raise MatrixError("conditional trigger sequence identity changed")
+        if sequence.get("disposition") != "EXECUTE":
+            continue
+        if sequence.get("dimension") != 2 or sequence.get("availability") != "AVAILABLE":
+            raise MatrixError("unavailable conditional sequence cannot be expanded")
+        keys.setdefault(study["id"], set()).add(_canonical_sha256(sequence["axes"]))
+    if not keys:
+        raise MatrixError("conditional trigger contains no executable sequences")
+    return keys
+
+
 def _expand_cases_unchecked(
-    registry: dict[str, Any], *, include_conditional_level: bool = False
+    registry: dict[str, Any], *, conditional_trigger_record: dict[str, Any] | None = None
 ) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
+    conditional_keys = _conditional_expansion_keys(
+        registry, conditional_trigger_record
+    )
     for study_index, study in enumerate(registry["studies"]):
         local = copy.deepcopy(registry)
         local["studies"] = [copy.deepcopy(study)]
-        include_study_conditional = include_conditional_level
-        if study["refinement_axis"] == "resolution":
-            disposition = registry["refinement"]["conditional_level_by_dimension"][
-                str(study["dimension"])
-            ]
-            include_study_conditional = (
-                include_conditional_level
-                and disposition["availability"] == "AVAILABLE"
-                and disposition["disposition_when_required"] == "EXECUTE"
-            )
+        include_study_conditional = (
+            study["refinement_axis"] == "resolution"
+            and study["dimension"] == 2
+            and study["id"] in conditional_keys
+        )
         expanded = _V2_EXPAND_CASES(
             local,
             include_conditional_level=include_study_conditional,
         )
         for case in expanded:
+            is_conditional = (
+                study["refinement_axis"] == "resolution"
+                and float(case["level"]["value"])
+                == float(
+                    registry["refinement"][
+                        "conditional_spatial_level_cells_per_radius"
+                    ]
+                )
+            )
+            if is_conditional and _canonical_sha256(case["axes"]) not in (
+                conditional_keys.get(study["id"], set())
+            ):
+                continue
             case["study_index"] = study_index
             if study["refinement_axis"] == "time_step":
                 level_index = next(
@@ -1181,10 +1568,10 @@ def _expand_cases_unchecked(
 
 
 def expand_cases(
-    registry: dict[str, Any], *, include_conditional_level: bool = False
+    registry: dict[str, Any], *, conditional_trigger_record: dict[str, Any] | None = None
 ) -> list[dict[str, Any]]:
     cases = _expand_cases_unchecked(
-        registry, include_conditional_level=include_conditional_level
+        registry, conditional_trigger_record=conditional_trigger_record
     )
     validate_case_resources(registry, cases)
     return cases
@@ -1361,6 +1748,18 @@ def _parent_overrides(**values: Any) -> Iterator[None]:
             setattr(_v2, name, value)
 
 
+def _command_with_guard(guard: Callable[[], None] | None) -> Callable[..., Any]:
+    parent_command = _v2._run_command
+    if guard is None:
+        return parent_command
+
+    def guarded(*args: Any, **options: Any) -> Any:
+        guard()
+        return parent_command(*args, **options)
+
+    return guarded
+
+
 def run_physical_cases(
     registry: dict[str, Any],
     cases: Sequence[dict[str, Any]],
@@ -1368,8 +1767,24 @@ def run_physical_cases(
     solver: Path,
     output_root: Path,
     rerun: bool,
+    pre_execution_guard: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     validate_case_resources(registry, cases)
+    if rerun:
+        raise MatrixError(
+            "V3 immutable physical evidence requires a fresh output root; "
+            "rerun is not permitted"
+        )
+    immutable_targets = [
+        output_root / "physical_execution_manifest.json",
+        *(output_root / "cases" / case["case_id"] for case in cases),
+    ]
+    existing_targets = [path for path in immutable_targets if path.exists()]
+    if existing_targets:
+        raise MatrixError(
+            "immutable physical evidence target already exists: "
+            f"{existing_targets[0]}"
+        )
     adapted = _parent_registry(registry)
 
     def mapped_arguments(
@@ -1391,13 +1806,14 @@ def run_physical_cases(
         DEFAULT_REGISTRY=DEFAULT_REGISTRY,
         PHYSICAL_RUNNER=PHYSICAL_RUNNER,
         physical_case_arguments=mapped_arguments,
+        _run_command=_command_with_guard(pre_execution_guard),
     ):
         return _V2_RUN_PHYSICAL_CASES(
             adapted,
             cases,
             solver=solver,
             output_root=output_root,
-            rerun=rerun,
+            rerun=False,
         )
 
 
@@ -1405,30 +1821,32 @@ def run_exact_groups(
     registry: dict[str, Any],
     *,
     binaries: dict[str, Path],
-    mpi_launcher: Path,
+    mpi: Path,
     mpi_launcher_mode: str,
     output_root: Path,
+    pre_execution_guard: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     adapted = _parent_registry(registry)
     with _parent_overrides(
         DEFAULT_REGISTRY=DEFAULT_REGISTRY,
         PHYSICAL_RUNNER=PHYSICAL_RUNNER,
         evaluate_exact_document=evaluate_exact_document,
+        _run_command=_command_with_guard(pre_execution_guard),
     ):
         return _V2_RUN_EXACT_GROUPS(
             adapted,
             binaries=binaries,
-            mpi_launcher=mpi_launcher,
+            mpi_launcher=mpi,
             mpi_launcher_mode=mpi_launcher_mode,
             output_root=output_root,
         )
 
 
 def _analysis_cases(
-    registry: dict[str, Any], *, include_conditional_level: bool = False
+    registry: dict[str, Any], *, conditional_trigger_record: dict[str, Any] | None
 ) -> list[dict[str, Any]]:
     cases = expand_cases(
-        registry, include_conditional_level=include_conditional_level
+        registry, conditional_trigger_record=conditional_trigger_record
     )
     for case in cases:
         if case["refinement_axis"] == "bulk_redistance_cadence":
@@ -1441,9 +1859,14 @@ def analyze_evidence(
     *,
     roots: Sequence[Path],
     output_root: Path,
-    include_conditional_level: bool,
+    conditional_trigger_record_path: Path | None,
     exact_summary_path: Path | None,
 ) -> dict[str, Any]:
+    conditional_trigger_record = (
+        load_conditional_trigger_record(registry, conditional_trigger_record_path)
+        if conditional_trigger_record_path is not None
+        else None
+    )
     adapted = _parent_registry(registry)
     for study in adapted["studies"]:
         if study["refinement_axis"] == "bulk_redistance_cadence":
@@ -1452,9 +1875,9 @@ def analyze_evidence(
     def adapted_expansion(
         unused_registry: dict[str, Any], *, include_conditional_level: bool = False
     ) -> list[dict[str, Any]]:
-        del unused_registry
+        del unused_registry, include_conditional_level
         return _analysis_cases(
-            registry, include_conditional_level=include_conditional_level
+            registry, conditional_trigger_record=conditional_trigger_record
         )
 
     with _parent_overrides(
@@ -1466,37 +1889,23 @@ def analyze_evidence(
             adapted,
             roots=roots,
             output_root=output_root,
-            include_conditional_level=include_conditional_level,
+            include_conditional_level=False,
             exact_summary_path=exact_summary_path,
         )
-    study_index = {study["id"]: study for study in registry["studies"]}
-    conditional_dispositions = []
-    convergence_studies = summary.get("convergence", {}).get("studies", {})
-    if isinstance(convergence_studies, dict):
-        for study_id, analysis in convergence_studies.items():
-            study = study_index.get(study_id)
-            if (
-                study is None
-                or study["refinement_axis"] != "resolution"
-                or not isinstance(analysis, dict)
-                or analysis.get("status") != "ADDITIONAL_LEVEL_REQUIRED"
-            ):
-                continue
-            conditional = registry["refinement"]["conditional_level_by_dimension"][
-                str(study["dimension"])
-            ]
-            conditional_dispositions.append(
-                {
-                    "study_id": study_id,
-                    "dimension": study["dimension"],
-                    "trigger": registry["refinement"]["conditional_level_trigger"],
-                    "availability": conditional["availability"],
-                    "disposition": conditional["disposition_when_required"],
-                }
-            )
-    summary["conditional_level_dispositions"] = conditional_dispositions
-    passed = summary.get("passed") is True and not conditional_dispositions
-    summary["passed"] = passed
+    summary["runner_sha256"] = sha256_file(SCRIPT_PATH)
+    summary["conditional_trigger_record_sha256"] = (
+        sha256_file(conditional_trigger_record_path)
+        if conditional_trigger_record_path is not None
+        else None
+    )
+    pre_execution_manifest_path = output_root / registry["artifact_contract"][
+        "pre_execution_manifest_file"
+    ]
+    summary["pre_execution_manifest_sha256"] = (
+        sha256_file(pre_execution_manifest_path)
+        if pre_execution_manifest_path.is_file()
+        else None
+    )
     failure_status = any(
         isinstance(summary.get(section), dict)
         and summary[section].get("status") == "FAIL"
@@ -1511,6 +1920,14 @@ def analyze_evidence(
     ]
     if nonconditional_errors:
         failure_status = True
+    conditional_dispositions = _conditional_sequence_records(registry, summary)
+    summary["conditional_level_dispositions"] = conditional_dispositions
+    passed = (
+        summary.get("passed") is True
+        and not conditional_dispositions
+        and not failure_status
+    )
+    summary["passed"] = passed
     available_conditional_required = any(
         record["disposition"] == "EXECUTE"
         for record in conditional_dispositions
@@ -1548,6 +1965,13 @@ def analyze_evidence(
         "higher-order and projected-force behavior are outside this matrix",
     ]
     write_json(output_root / "summary.json", summary)
+    if conditional_trigger_record_path is None and not failure_status:
+        trigger = build_conditional_trigger_record(
+            registry, output_root / "summary.json"
+        )
+        _write_json_exclusive(
+            output_root / "conditional_trigger_record.json", trigger
+        )
     manifest_lines = []
     for path in sorted(output_root.rglob("*")):
         if path.is_file() and path.name != "manifest.sha256":
@@ -1579,8 +2003,169 @@ def expected_artifact_paths(
                 paths.add(f"{directory}/{name}")
             for name in contract["mpi_exact_common_files"]:
                 paths.add(f"{directory}/{name}")
+    paths.add(contract["pre_execution_manifest_file"])
+    paths.add(contract["conditional_trigger_record_file"])
     paths.update(contract["summary_files"])
     return sorted(paths)
+
+
+def _git_command(
+    source_root: Path, arguments: Sequence[str], *, check: bool = True
+) -> subprocess.CompletedProcess[bytes]:
+    result = subprocess.run(
+        ["git", "-C", str(source_root), *arguments],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if check and result.returncode != 0:
+        raise MatrixError(
+            f"source Git command failed: {' '.join(arguments)}"
+        )
+    return result
+
+
+def validate_source_provenance(
+    record: Any, *, declared_commit: str
+) -> dict[str, Any]:
+    _require_fields(record, {
+        "source_root", "git_top_level", "head_commit", "head_tree",
+        "head_detached", "worktree_clean", "status_sha256",
+        "tracked_path_count", "tracked_source_digest_semantics",
+        "tracked_source_sha256", "lfs",
+    }, "source-provenance fields")
+    _require_fields(
+        record["lfs"],
+        {"fsck_passed", "tracked_object_count", "missing_object_count",
+         "pointer_checkout_count"},
+        "source LFS fields",
+    )
+    source_root = Path(record["source_root"]).resolve()
+    checks = (
+        (source_root != Path(record["git_top_level"]).resolve(),
+         "source root does not match its Git top level"),
+        (source_root != REPOSITORY_ROOT.resolve(),
+         "source root is not the running V3 repository"),
+        (not re.fullmatch(r"[0-9a-f]{40}", declared_commit),
+         "declared source commit must be lowercase 40-hex"),
+        (record["head_commit"] != declared_commit,
+         "source HEAD does not equal the declared commit"),
+        (not re.fullmatch(r"[0-9a-f]{40}", str(record["head_tree"])),
+         "source tree id is invalid"),
+        (record["head_detached"] is not True,
+         "qualification requires a detached source HEAD"),
+        (record["worktree_clean"] is not True,
+         "qualification requires a clean source worktree"),
+        (not re.fullmatch(r"[0-9a-f]{64}", str(record["status_sha256"])),
+         "source status digest is invalid"),
+        (record["tracked_source_digest_semantics"] != "git_ls_files_stage_z_sha256"
+         or not isinstance(record["tracked_path_count"], int)
+         or isinstance(record["tracked_path_count"], bool)
+         or record["tracked_path_count"] < 1
+         or not re.fullmatch(r"[0-9a-f]{64}", str(record["tracked_source_sha256"])),
+         "tracked source digest is invalid"),
+    )
+    for failed, message in checks:
+        if failed:
+            raise MatrixError(message)
+    lfs = record["lfs"]
+    counts = ("tracked_object_count", "missing_object_count", "pointer_checkout_count")
+    if any(not isinstance(lfs[key], int) or isinstance(lfs[key], bool)
+           or lfs[key] < 0 for key in counts):
+        raise MatrixError("source LFS counts are invalid")
+    if (
+        lfs["fsck_passed"] is not True
+        or lfs["tracked_object_count"] != EXPECTED_LFS_TRACKED_OBJECT_COUNT
+        or lfs["missing_object_count"] != 0
+        or lfs["pointer_checkout_count"] != 0
+    ):
+        raise MatrixError("qualification source LFS objects are not fully available")
+    return record
+
+
+def _lfs_inventory(
+    source_root: Path,
+    lfs_check: subprocess.CompletedProcess[bytes],
+    lfs_list: subprocess.CompletedProcess[bytes],
+) -> dict[str, Any]:
+    if (
+        lfs_check.returncode != 0
+        or lfs_check.stderr.strip()
+        or b"Git LFS fsck OK" not in lfs_check.stdout
+        or lfs_list.returncode != 0
+        or lfs_list.stderr.strip()
+    ):
+        raise MatrixError("qualification source LFS verification failed")
+    lfs_entries: list[tuple[str, bytes]] = []
+    for line in lfs_list.stdout.splitlines():
+        if not line:
+            continue
+        fields = line.split(maxsplit=2)
+        if len(fields) != 3 or not re.fullmatch(rb"[0-9a-f]{64}", fields[0]):
+            raise MatrixError("qualification source LFS listing is malformed")
+        lfs_entries.append((os.fsdecode(fields[2]), fields[1]))
+    pointer_prefix = b"version https://git-lfs.github.com/spec/v1"
+    pointer_checkouts = 0
+    missing_objects = 0
+    for relative, status_marker in lfs_entries:
+        path = source_root / relative
+        if status_marker != b"*":
+            missing_objects += 1
+        prefix = b""
+        if path.is_file() and not path.is_symlink():
+            with path.open("rb") as stream:
+                prefix = stream.read(len(pointer_prefix))
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or prefix == pointer_prefix
+            or status_marker != b"*"
+        ):
+            pointer_checkouts += 1
+    return {
+        "fsck_passed": True,
+        "tracked_object_count": len(lfs_entries),
+        "missing_object_count": missing_objects,
+        "pointer_checkout_count": pointer_checkouts,
+    }
+
+
+def collect_source_provenance(source_root: Path) -> dict[str, Any]:
+    source_root = source_root.resolve()
+
+    def output(*arguments: str) -> bytes:
+        return _git_command(source_root, list(arguments)).stdout
+
+    top_level = Path(output("rev-parse", "--show-toplevel").decode().strip()).resolve()
+    head_commit = output("rev-parse", "HEAD").decode("ascii").strip()
+    head_tree = output("rev-parse", "HEAD^{tree}").decode("ascii").strip()
+    status = output(
+        "status", "--porcelain=v1", "-z", "--untracked-files=all"
+    )
+    detached = _git_command(
+        source_root, ["symbolic-ref", "--quiet", "HEAD"], check=False
+    )
+    if detached.returncode not in {0, 1}:
+        raise MatrixError("unable to determine whether source HEAD is detached")
+    tracked = output("ls-files", "--stage", "-z")
+    record = {
+        "source_root": str(source_root),
+        "git_top_level": str(top_level),
+        "head_commit": head_commit,
+        "head_tree": head_tree,
+        "head_detached": detached.returncode == 1,
+        "worktree_clean": not status,
+        "status_sha256": hashlib.sha256(status).hexdigest(),
+        "tracked_path_count": len([item for item in tracked.split(b"\0") if item]),
+        "tracked_source_digest_semantics": "git_ls_files_stage_z_sha256",
+        "tracked_source_sha256": hashlib.sha256(tracked).hexdigest(),
+        "lfs": _lfs_inventory(
+            source_root,
+            _git_command(source_root, ["lfs", "fsck"], check=False),
+            _git_command(source_root, ["lfs", "ls-files", "-l"], check=False),
+        ),
+    }
+    return validate_source_provenance(record, declared_commit=head_commit)
 
 
 def _hash_binding(path: Path, context: str) -> dict[str, str]:
@@ -1604,19 +2189,48 @@ def _validate_hash_map(
     }
 
 
-def build_dry_run_manifest(
+def _conditional_trigger_binding(
+    registry: dict[str, Any], path: Path | None
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if path is None:
+        return None, None
+    resolved = path.resolve()
+    record = load_conditional_trigger_record(registry, resolved)
+    prior_path = resolved.parent / record["prior_analysis_file"]
+    return record, {
+        "path": str(resolved),
+        "sha256": sha256_file(resolved),
+        "prior_analysis_path": str(prior_path.resolve()),
+        "prior_analysis_sha256": sha256_file(prior_path),
+        "sequence_ids": [item["sequence_id"] for item in record["sequences"]],
+    }
+
+
+def build_pre_execution_manifest(
     registry: dict[str, Any],
     cases: Sequence[dict[str, Any]],
     *,
     source_commit: str,
+    source_root: Path,
     compiler: Path,
     mpi: Path,
     dependencies: dict[str, Path],
     binaries: dict[str, Path],
-    include_conditional_level: bool,
+    solver: Path,
+    conditional_trigger_record_path: Path | None,
 ) -> dict[str, Any]:
     if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
         raise MatrixError("source commit must be lowercase 40-hex")
+    source = collect_source_provenance(source_root)
+    validate_source_provenance(source, declared_commit=source_commit)
+    conditional_record, conditional_binding = _conditional_trigger_binding(
+        registry, conditional_trigger_record_path
+    )
+    expected_cases = expand_cases(
+        registry, conditional_trigger_record=conditional_record
+    )
+    if list(cases) != expected_cases:
+        raise MatrixError("pre-execution physical case set changed")
     validate_case_resources(registry, cases)
     provenance = registry["provenance_contract"]
     dependency_keys = set(provenance["required_dependency_keys"])
@@ -1651,13 +2265,15 @@ def build_dry_run_manifest(
         "parent_matrix_sha256": sha256_file(PARENT_REGISTRY_PATH),
         "parent_runner_sha256": sha256_file(PARENT_RUNNER_PATH),
         "source_commit": source_commit,
+        "source": source,
         "compiler": _hash_binding(compiler, "compiler"),
         "mpi": _hash_binding(mpi, "MPI"),
         "dependencies": _validate_hash_map(
             dependencies, dependency_keys, "dependency"
         ),
         "binaries": _validate_hash_map(binaries, binary_keys, "binary"),
-        "include_conditional_level": include_conditional_level,
+        "solver": _hash_binding(solver, "solver"),
+        "conditional_trigger": conditional_binding,
         "physical_case_count": len(cases),
         "physical_case_ids": [case["case_id"] for case in cases],
         "physical_case_digests": [case["case_digest"] for case in cases],
@@ -1678,6 +2294,46 @@ def build_dry_run_manifest(
     }
 
 
+def revalidate_pre_execution_manifest(
+    manifest_path: Path,
+    registry: dict[str, Any],
+    cases: Sequence[dict[str, Any]],
+    *,
+    output_root: Path,
+    source_commit: str,
+    source_root: Path,
+    compiler: Path,
+    mpi: Path,
+    dependencies: dict[str, Path],
+    binaries: dict[str, Path],
+    solver: Path,
+    conditional_trigger_record_path: Path | None,
+) -> dict[str, Any]:
+    resolved = manifest_path.resolve()
+    expected_name = registry["artifact_contract"]["pre_execution_manifest_file"]
+    declared_path = output_root.resolve() / expected_name
+    if resolved != declared_path or not resolved.is_file():
+        raise MatrixError(
+            "pre-execution manifest is not the declared output-root artifact"
+        )
+    observed = read_json(resolved)
+    expected = build_pre_execution_manifest(
+        registry,
+        cases,
+        source_commit=source_commit,
+        source_root=source_root,
+        compiler=compiler,
+        mpi=mpi,
+        dependencies=dependencies,
+        binaries=binaries,
+        solver=solver,
+        conditional_trigger_record_path=conditional_trigger_record_path,
+    )
+    if observed != expected:
+        raise MatrixError("pre-execution manifest drift detected")
+    return expected
+
+
 def _parse_binding(value: str) -> tuple[str, Path]:
     if "=" not in value:
         raise argparse.ArgumentTypeError("hash binding must be KEY=PATH")
@@ -1696,18 +2352,35 @@ def _binding_map(
     return result
 
 
+def _write_bytes_exclusive(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("xb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except FileExistsError as error:
+        raise MatrixError(f"refusing to replace immutable artifact: {path}") from error
+
+
+def _write_json_exclusive(path: Path, value: Any) -> None:
+    payload = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    _write_bytes_exclusive(path, payload)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--list-cases", action="store_true")
-    parser.add_argument("--include-conditional-level", action="store_true")
+    parser.add_argument("--conditional-trigger-record", type=Path)
     parser.add_argument("--study", action="append", default=[])
     parser.add_argument("--case-index", type=int)
     parser.add_argument("--shard-index", type=int)
     parser.add_argument("--shard-count", type=int)
-    parser.add_argument("--dry-manifest", type=Path)
+    parser.add_argument("--dry-manifest", action="store_true")
     parser.add_argument("--source-commit")
+    parser.add_argument("--source-root", type=Path)
     parser.add_argument("--compiler", type=Path)
     parser.add_argument("--mpi", type=Path)
     parser.add_argument(
@@ -1722,30 +2395,32 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--results-root", type=Path, action="append", default=[])
     parser.add_argument("--exact-summary", type=Path)
     parser.add_argument(
-        "--mpi-launcher", type=Path, default=Path("/usr/bin/mpiexec")
-    )
-    parser.add_argument(
         "--mpi-launcher-mode", choices=("mpiexec", "srun"), default="mpiexec"
     )
     parser.add_argument("--rerun", action="store_true")
     return parser
 
 
-def _require_dry_inputs(args: argparse.Namespace) -> None:
+def _require_pre_execution_inputs(args: argparse.Namespace) -> None:
     missing = [
         name
-        for name in ("source_commit", "compiler", "mpi")
+        for name in ("source_commit", "source_root", "compiler", "mpi", "solver")
         if getattr(args, name) is None
     ]
     if missing:
-        raise MatrixError(f"dry manifest is missing inputs: {missing}")
+        raise MatrixError(f"pre-execution manifest is missing inputs: {missing}")
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(arguments)
     registry = load_registry(args.registry)
+    conditional_trigger = (
+        load_conditional_trigger_record(registry, args.conditional_trigger_record)
+        if args.conditional_trigger_record is not None
+        else None
+    )
     cases = expand_cases(
-        registry, include_conditional_level=args.include_conditional_level
+        registry, conditional_trigger_record=conditional_trigger
     )
     selected = select_cases(
         cases,
@@ -1756,7 +2431,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
     )
     numerical_actions = args.run_physical or args.run_exact or args.analyze
     if args.validate_only:
-        if args.list_cases or args.dry_manifest is not None or numerical_actions:
+        if args.list_cases or args.dry_manifest or numerical_actions:
             raise MatrixError("--validate-only cannot be combined with other actions")
         print(
             json.dumps(
@@ -1767,7 +2442,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     "exact_invocation_count": len(exact_invocations(registry)),
                     "study_count": len(registry["studies"]),
                     "physical_case_count": len(cases),
-                    "conditional_level_included": args.include_conditional_level,
+                    "conditional_sequence_count": (
+                        len(conditional_trigger["sequences"])
+                        if conditional_trigger is not None
+                        else 0
+                    ),
                     "maximum_estimated_memory_mib": max(
                         case["estimated_memory_mib"] for case in cases
                     ),
@@ -1778,85 +2457,112 @@ def main(arguments: Sequence[str] | None = None) -> int:
         )
         return 0
     if args.list_cases:
-        if args.dry_manifest is not None or numerical_actions:
+        if args.dry_manifest or numerical_actions:
             raise MatrixError("--list-cases cannot be combined with other actions")
         for case in selected:
             print(json.dumps(case, sort_keys=True))
         return 0
 
-    dependencies = _binding_map(args.dependency, "dependency")
-    binaries = _binding_map(args.binary, "binary")
-    manifest: dict[str, Any] | None = None
-    if args.dry_manifest is not None:
-        _require_dry_inputs(args)
-        manifest = build_dry_run_manifest(
-            registry,
-            cases,
-            source_commit=args.source_commit,
-            compiler=args.compiler,
-            mpi=args.mpi,
-            dependencies=dependencies,
-            binaries=binaries,
-            include_conditional_level=args.include_conditional_level,
-        )
-        write_json(args.dry_manifest.resolve(), manifest)
-        if not numerical_actions:
-            print(
-                json.dumps(
-                    {
-                        "matrix_id": registry["matrix_id"],
-                        "physical_case_count": len(cases),
-                        "expected_artifact_count": manifest[
-                            "expected_artifact_count"
-                        ],
-                        "maximum_estimated_memory_mib": manifest[
-                            "maximum_estimated_memory_mib"
-                        ],
-                        "manifest": str(args.dry_manifest.resolve()),
-                        "outcome": "PASS",
-                    },
-                    sort_keys=True,
-                )
-            )
-            return 0
-    if not numerical_actions:
+    if not numerical_actions and not args.dry_manifest:
         raise MatrixError(
             "select --validate-only, --list-cases, --dry-manifest, or an execution action"
         )
-    if manifest is None:
-        raise MatrixError("execution requires a freshly generated dry manifest")
     if args.output_root is None:
-        raise MatrixError("execution and analysis require --output-root")
+        raise MatrixError("manifest preparation and execution require --output-root")
+    if args.rerun:
+        raise MatrixError("immutable V3 evidence does not permit --rerun")
+    _require_pre_execution_inputs(args)
+    dependencies = _binding_map(args.dependency, "dependency")
+    binaries = _binding_map(args.binary, "binary")
     output_root = args.output_root.resolve()
-    output_root.mkdir(parents=True, exist_ok=True)
+    manifest_options = {
+        "source_commit": args.source_commit,
+        "source_root": args.source_root,
+        "compiler": args.compiler,
+        "mpi": args.mpi,
+        "dependencies": dependencies,
+        "binaries": binaries,
+        "solver": args.solver,
+        "conditional_trigger_record_path": args.conditional_trigger_record,
+    }
+    manifest = build_pre_execution_manifest(
+        registry,
+        cases,
+        **manifest_options,
+    )
+    try:
+        output_root.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as error:
+        raise MatrixError(
+            f"immutable output root already exists: {output_root}"
+        ) from error
+    if args.conditional_trigger_record is not None:
+        trigger_artifact = output_root / registry["artifact_contract"][
+            "conditional_trigger_record_file"
+        ]
+        _write_bytes_exclusive(
+            trigger_artifact, args.conditional_trigger_record.resolve().read_bytes()
+        )
+    manifest_path = output_root / registry["artifact_contract"][
+        "pre_execution_manifest_file"
+    ]
+    _write_json_exclusive(manifest_path, manifest)
+    if not numerical_actions:
+        print(
+            json.dumps(
+                {
+                    "matrix_id": registry["matrix_id"],
+                    "physical_case_count": len(cases),
+                    "expected_artifact_count": manifest["expected_artifact_count"],
+                    "maximum_estimated_memory_mib": manifest[
+                        "maximum_estimated_memory_mib"
+                    ],
+                    "manifest": str(manifest_path),
+                    "outcome": "PASS",
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    def revalidate() -> None:
+        revalidate_pre_execution_manifest(
+            manifest_path,
+            registry,
+            cases,
+            output_root=output_root,
+            **manifest_options,
+        )
+
     if args.run_physical:
-        if args.solver is None:
-            raise MatrixError("--run-physical requires --solver")
         run_physical_cases(
             registry,
             selected,
             solver=args.solver,
             output_root=output_root,
             rerun=args.rerun,
+            pre_execution_guard=revalidate,
         )
     exact_summary = None
     if args.run_exact:
         exact_summary = run_exact_groups(
             registry,
             binaries=binaries,
-            mpi_launcher=args.mpi_launcher.resolve(),
+            mpi=args.mpi.resolve(),
             mpi_launcher_mode=args.mpi_launcher_mode,
             output_root=output_root,
+            pre_execution_guard=revalidate,
         )
         if exact_summary["passed"] is not True and not args.analyze:
             return 1
     if args.analyze:
+        revalidate()
         roots = args.results_root or [output_root]
         summary = analyze_evidence(
             registry,
             roots=[path.resolve() for path in roots],
             output_root=output_root,
-            include_conditional_level=args.include_conditional_level,
+            conditional_trigger_record_path=args.conditional_trigger_record,
             exact_summary_path=(
                 args.exact_summary.resolve()
                 if args.exact_summary is not None
