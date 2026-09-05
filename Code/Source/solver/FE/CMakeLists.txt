@@ -1181,6 +1181,7 @@ set(FE_FORMS_HEADERS
 	    Forms/AffineAnalysis.h
 	    Forms/FormExpr.h
     Forms/CutCellForms.h
+    Forms/IntegrationDomain.h
     Forms/FiniteDeformationForms.h
     Forms/GeometrySensitivityEval.h
     Forms/MovingFrameForms.h
