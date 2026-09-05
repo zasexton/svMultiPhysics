@@ -1383,6 +1383,8 @@ WP-3 formal scoped closure recorded on 2026-08-26:
 
 **Findings addressed:** FSR-03 and FSR-04.
 
+Coordination roadmap added on 2026-09-05: [remaining WP4 critical path and delegation](plan_wp4_balanced_force_completion_20260903.md#remaining-wp4-critical-path-and-delegation) connects the existing designs to bounded ownership, dependency gates and the corrected production-case milestone before qualification. This documentation-only addition creates no worker assignment or compute reservation and changes no accepted evidence, qualification threshold or WP4/FSR-03/FSR-04/Q2 status.
+
 Implementation notes:
 
 - Make the distance of the capillary load to the discrete pressure-gradient range a required physical diagnostic, not just an LSQR solver-convergence statistic.

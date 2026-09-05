@@ -28,6 +28,47 @@
 
 ---
 
+## Remaining WP4 critical path and delegation
+
+Coordination addition dated 2026-09-05. This maps the remaining work to existing designs; it does not replace Tasks 1-4, dispatch workers, reserve compute, or grant qualification credit. The prescribed-angle stream below is separately required for full WP4/Q2 closure, beyond this plan's balanced-force goal. Initial states reflect the 18:42 UTC continuation checkpoint; the coordinator must reconcile current ownership, source/cache guards and accepted evidence before assigning anything.
+
+The balanced-force critical path is **A -> B/C -> E -> F**: B and C can have independent preparation, but production derivative use requires their joint acceptance. D can progress independently where ownership permits; full WP4/Q2 closure additionally requires D and the complete audit matrix.
+
+| Package | Initial state | Ownership boundary for the next packet | Deliverable and acceptance dependency |
+| --- | --- | --- | --- |
+| A. Arithmetic kernel and producer adapters | Kernel active; adapters blocked on accepted kernel | Existing kernel owner; then one owner for the cell/boundary producer files and their geometry tests | Finish the current report and scoped review, centrally integrate the kernel, then execute the existing adapter brief. Require real repeat-margin controls, unchanged geometry outputs and preserved unrelated failure observations. Do not replan or restart this work. |
+| B. Remaining geometry and scalar certificates | Conditional designs available; implementation blocked on an explicit scoped packet and required A interfaces | FE interface producers and functional evaluation; serialize overlaps with A | Convert accepted normal/incidence results into tested bounds for the actual emitted support, normals, moments, weights and scalar quantities. Assess the auxiliary gradient separately where it affects area. Each slice must identify the derivative-eligibility requirement it establishes; root/dedup success alone is insufficient. |
+| C. Authoritative derivative and kinematic binding | Ready for packet preparation; production use blocked on required B evidence | FE projection/lifecycle interfaces and the current Application candidate owner | Reuse the accepted binding design. Validate current coefficients, source, field mapping, cache reuse and collective order; reject stale/mismatched linkage. Demonstrate surface, wall and volume variation with the actual production mapping. Independent API/precondition work may overlap B only on disjoint, reserved files. |
+| D. Prescribed-angle completion | Gap map and scaling design available; implementation requires the remaining explicit contracts | FE reinitialization/options plus current Application maintenance owners | Resolve only unanswered stage/anchor and wall-strip contracts. Follow the existing sequence: scale invariance and fixed point; independent wall schedule; stage consistency; curved 3D shared-DOF strip; production work/convergence evidence. Reconcile refactoring moves before naming writable files. |
+| E. Corrected production pilot | Blocked on the relevant B/C repair and its regression evidence | Production evaluator/minimizer integration and a separately assigned immutable pilot lane | Establish the production-case milestone below before expanding balanced-force qualification. Preserve earlier failed runs and unchanged physical/minimizer gates. A diagnostic or an unavailable derivative is not a passing pilot. |
+| F. Integrated validation and qualification | Regression preparation ready; qualification blocked on accepted pilot and a new freeze | Coordinator-owned source/matrix freeze; separately reserved FE, Physics and Application lanes; read-only evidence reviewer | Justified integrated regressions may overlap E once their frozen inputs, binaries and reservations permit. Reuse accepted runner work and correct remaining contract mismatches before the full immutable qualification matrix. Validate and archive raw evidence centrally. Balanced-force acceptance closes only its documented scope; WP4/Q2 and FSR-04 additionally require prescribed-angle and full audit acceptance. |
+
+### Assignment and parallel-work rules
+
+- Use at most three workers, including existing workers. Reuse an implementer for supported fixes; allow one writer per overlapping source area. A scientific worker resolves one genuinely unanswered premise on immutable inputs. A reviewer inspects the exact frozen patch and evidence; test execution requires an explicit justified lane. Workers do not spawn helpers.
+- Every dispatch uses the packet in `/scratch/users/zsexton/wp4-delegation-briefs-20260905-Z6OoSG/README.md` and the matching role brief: precise deliverable/non-goals; source and participating-input identities including untracked inputs; exact writable/protected paths and named owner; accepted evidence and dependencies; commands, expected outcomes and timeouts; source/cache and scheduler reservations; allowed actions; report path and next acceptance check. A roadmap row alone is not an executable assignment.
+- Name live owners and actual reservations in the existing `delegation-checkpoint.md`, not a second status ledger here. Use **ready**, **blocked**, **active** and **accepted**, with the blocking dependency or accepted evidence named. Preparation readiness does not authorize dependent production use.
+- Parallel preparation is useful only with independent deliverables. Reviews may overlap other work using immutable review inputs; numerical lanes need separate caches and frozen participating sources. A separate worktree alone does not remove shared repository/cache conflicts. Preserve all current resource limits, inherited modules, protected files and submission-time mail requirements; no new allocation is implied by this roadmap.
+- The coordinator alone handles integration, shared audit edits, staging, commits and pushes under existing identity/content rules. Resolve current paths against `free_surface_architecture_refactoring_plan_20260904.md`; historical source locations in design reports are not current write reservations.
+
+### Required production-case milestone
+
+Before expanding the physical campaign, a relevant tested repair must demonstrate that the actual production evaluator's energy/volume variations and returned model agree under the declared derivative and kinematic contract, with current candidate/source binding and rollback intact. Reuse the captured failure and its mapped coefficients as the regression target; do not repeat an unchanged diagnostic to recreate accepted evidence. Any directional comparison must distinguish a genuine same-branch sample from a topology/canonicalization change and account for its declared error bounds.
+
+Then require the previously failing production minimization case to reach its unchanged convergence/publication gates. Preserve its input identity and report any scientifically necessary change explicitly before comparison. Helper tests, conservative rejection, a higher iteration cap, altered tolerances or a conditional theorem do not substitute for this outcome. At each accepted prerequisite, record which remaining failure or eligibility condition it removes; if a new obstruction appears, assign that specific question rather than restarting the completed investigation.
+
+### Reuse and continuation index
+
+Local coordination artifacts are under `.superpowers/sdd/plan_wp4_balanced_force_completion_20260903/` in the existing worktree; they are not published qualification evidence. Reuse:
+
+- A: `task-4-producer-arithmetic-implementation-plan.md`, the current kernel assignment/report, and `task-4-producer-arithmetic-adapters-brief.md`.
+- B: `task-4-producer-margin-design-report.md`, its accepted review, and `task-4-affine-normal-premise-report.md`. Their conditional results still require the named executable premises; do not reprove unchanged results.
+- C: `task-4-authoritative-derivative-contract-design-report.md`, `task-4-authoritative-derivative-binding-seam-report.md` and `task-4-authoritative-derivative-eligibility-seam-report.md`.
+- D: `task-4-prescribed-angle-gap-map.md` and `task-4-prescribed-scaling-design-report.md`; retain their explicit unresolved contracts and resolve moved owners before implementation.
+- E/F: the audit's accepted terminal capture/replay/probe records, preserved rejected qualification, and Task 4's corrected-runner, freeze and acceptance steps. Repeat verification only for changed inputs, an actual failure, missing evidence or a named unresolved concern.
+
+Maintain the existing concise checkpoint outside guarded paths after each phase: owner, exact source/evidence identity, live job/process route, active source/cache guards, blocking dependency and next action. Resume from that record without duplicate submissions. Keep detailed logs in their existing evidence directories and the public audit limited to accepted results and honest open gates.
+
 ## File Structure
 
 - `Code/Source/solver/FE/Interfaces/LevelSetInterfaceDomain.h`: generate degree-two planar polygon rules while retaining stored centroid rules for orders zero and one.
