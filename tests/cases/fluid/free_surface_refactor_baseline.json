@@ -461,6 +461,278 @@
         "Code/Source/solver/Application/Tests/Unit/test_OpenVesselExamples.cpp": "3221b035d91502c95484d251997e2a5118d7eb7be7fbc780b0a6eaec2f22db8e"
       },
       "state": "COMPLETED"
+    },
+    {
+      "acceptance_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-acceptance/acceptance.json",
+        "sha256": "bebea6ca6bb4da3ebc46c70313b165fccdec0cf2eabf4c6f4567cdd8ee95842e",
+        "size_bytes": 12674
+      },
+      "accounting": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-acceptance/accounting.txt",
+        "sha256": "626f2d999c011e708ed8b92a7683d5d0abdc26cc5dfd352860cac80e41e93c43",
+        "size_bytes": 782
+      },
+      "binaries": [
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-r1/binaries/test_application",
+          "sha256": "e42314d42dd7613ce6375c03b9a6af4ee292d424b914defc1958633c032597f2",
+          "size_bytes": 88887584
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-r1/binaries/test_application_mpi",
+          "sha256": "3565e34840c21c382704516fdb40fb3d785a475c389f966f0425a32f83747469",
+          "size_bytes": 84556104
+        }
+      ],
+      "execution_evidence": [
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-r1/results.json",
+          "sha256": "cce3d3ca98d685a23e82dfb363a68b262bab25d1ec3f925189d1abf02465ff98",
+          "size_bytes": 6052
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-r1/terminal.txt",
+          "sha256": "ec3d54a97b5117b3184ef34b421ed3aaa69e57ba88eb0d058267beccb38ef333",
+          "size_bytes": 27
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-r1/compile_commands.json",
+          "sha256": "3c9ec6fc630e504fcfbd2d004aa137d9c958d0ff43abfe1f751781f31e750a59",
+          "size_bytes": 9578870
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-r1/CMakeCache.txt",
+          "sha256": "b616f72083d02a6c99223d4801e779b271c8090a8ffb7909bd191b7ef061c238",
+          "size_bytes": 82338
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-r1/build.out",
+          "sha256": "84fba930d11180709dd1d532bb4187fed4d52ce4fc0d3845008ecdf6f6e6f7a8",
+          "size_bytes": 1210
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-r1/build.resources",
+          "sha256": "2e634fb23503a1f06881be548d96c96589f9d15d10e22e0a84bdd803bbb3ad74",
+          "size_bytes": 952
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-r1/input-verification-before.json",
+          "sha256": "d98acf2f57b2b2de88a076b7c983d6f96145f40fcf9018996176214cd77db654",
+          "size_bytes": 362
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-r1/input-verification-after.json",
+          "sha256": "d98acf2f57b2b2de88a076b7c983d6f96145f40fcf9018996176214cd77db654",
+          "size_bytes": 362
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-r1/input-verification-final.json",
+          "sha256": "d98acf2f57b2b2de88a076b7c983d6f96145f40fcf9018996176214cd77db654",
+          "size_bytes": 362
+        }
+      ],
+      "groups": [
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "--oversubscribe",
+            "--bind-to",
+            "none",
+            "-n",
+            "1",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-build/bin/test_application",
+            "--gtest_filter=*.MaintenanceCompatibility*"
+          ],
+          "exit_code": 0,
+          "name": "Maintenance_characterization",
+          "rank_results": [
+            {
+              "failed_cases": [],
+              "passed": 17,
+              "rank": 0,
+              "selected": 17,
+              "skipped_cases": [],
+              "xml": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-r1/Maintenance_characterization/rank-0.xml",
+              "xml_sha256": "74a2279636d167b8508e6ef89b7a046914d348e8f790115a203e8201ee632048"
+            }
+          ],
+          "timeout": false,
+          "working_directory": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-source"
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "--oversubscribe",
+            "--bind-to",
+            "none",
+            "-n",
+            "1",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-build/bin/test_application",
+            "--gtest_filter=*"
+          ],
+          "exit_code": 0,
+          "name": "Application_serial",
+          "rank_results": [
+            {
+              "failed_cases": [],
+              "passed": 335,
+              "rank": 0,
+              "selected": 335,
+              "skipped_cases": [],
+              "xml": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-r1/Application_serial/rank-0.xml",
+              "xml_sha256": "eed690ca864b0cfb4752e9e3f95d7f3876ed19e57db024a06c753b52846f19b9"
+            }
+          ],
+          "timeout": false,
+          "working_directory": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-source"
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "--oversubscribe",
+            "--bind-to",
+            "none",
+            "-n",
+            "2",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-build/bin/test_application_mpi",
+            "--gtest_filter=LevelSetMaintenanceTransactionConsensusMPI.TwoRankCommitRejectAndContentRevisionAgreement"
+          ],
+          "exit_code": 0,
+          "name": "Application_consensus_2",
+          "rank_results": [
+            {
+              "failed_cases": [],
+              "passed": 1,
+              "rank": 0,
+              "selected": 1,
+              "skipped_cases": [],
+              "xml": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-r1/Application_consensus_2/rank-0.xml",
+              "xml_sha256": "8a05b9c95c1d9198965f7310d186584352dccf64a08bf30fec90c9fda9e9273d"
+            },
+            {
+              "failed_cases": [],
+              "passed": 1,
+              "rank": 1,
+              "selected": 1,
+              "skipped_cases": [],
+              "xml": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-r1/Application_consensus_2/rank-1.xml",
+              "xml_sha256": "e45606f89320929c3eae4e42da565c97c19493b617cefdf4bf63f06e1146a32c"
+            }
+          ],
+          "timeout": false,
+          "working_directory": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-source"
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "--oversubscribe",
+            "--bind-to",
+            "none",
+            "-n",
+            "4",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-build/bin/test_application_mpi",
+            "--gtest_filter=LevelSetMaintenanceTransactionConsensusMPI.FourRankCommitRejectAndContentRevisionAgreement"
+          ],
+          "exit_code": 0,
+          "name": "Application_consensus_4",
+          "rank_results": [
+            {
+              "failed_cases": [],
+              "passed": 1,
+              "rank": 0,
+              "selected": 1,
+              "skipped_cases": [],
+              "xml": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-r1/Application_consensus_4/rank-0.xml",
+              "xml_sha256": "090e541033d2ac45a135180ee3f3809ba3d39f23f61230eb0a22d06a3c09b28e"
+            },
+            {
+              "failed_cases": [],
+              "passed": 1,
+              "rank": 1,
+              "selected": 1,
+              "skipped_cases": [],
+              "xml": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-r1/Application_consensus_4/rank-1.xml",
+              "xml_sha256": "ba53f7e492af5ca82c0b2943778d4fcbb7468b9ee0d08f9ed62a09fb65fbb37f"
+            },
+            {
+              "failed_cases": [],
+              "passed": 1,
+              "rank": 2,
+              "selected": 1,
+              "skipped_cases": [],
+              "xml": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-r1/Application_consensus_4/rank-2.xml",
+              "xml_sha256": "090e541033d2ac45a135180ee3f3809ba3d39f23f61230eb0a22d06a3c09b28e"
+            },
+            {
+              "failed_cases": [],
+              "passed": 1,
+              "rank": 3,
+              "selected": 1,
+              "skipped_cases": [],
+              "xml": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-r1/Application_consensus_4/rank-3.xml",
+              "xml_sha256": "090e541033d2ac45a135180ee3f3809ba3d39f23f61230eb0a22d06a3c09b28e"
+            }
+          ],
+          "timeout": false,
+          "working_directory": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-source"
+        }
+      ],
+      "id": "r1-maintenance-characterization",
+      "job_step": "42093152.14",
+      "limitations": [
+        "Characterization only; installation and maintenance still differ intentionally.",
+        "Input snapshot retention, shared lexical policies and maintenance/state extraction are not implemented by this slice.",
+        "Full R1/R0 and broader physical qualification remain open."
+      ],
+      "outcome": "17 characterization passes; complete Application 335 passes; both consensus cases passed on every two/four-rank participant; no failures or skips.",
+      "scope": "Seventeen current installation/maintenance behavior characterizations, followed by full Application and two/four-rank consensus before input ownership or maintenance producer extraction. Includes WP-4 through f18c93c1.",
+      "source_commit": "4b2ee16b288a2bae2ab9fd569e4236ad014cb19c",
+      "source_hashes": {
+        "Code/Source/solver/Application/Tests/Unit/test_ApplicationDriverLevelSetWorkflows.cpp": "b7b1832581af12e82158b37e8cc6854ae75f16a3fa7e73cd4df56cc455f6ecbc",
+        "Code/Source/solver/Application/Tests/Unit/test_LevelSetEquationTranslator.cpp": "63fa7eeba9033c323fe5f55f52299f8c3df7debe176ca2c8a28eedceb82fdfe7"
+      },
+      "source_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/verification-snapshots/r1-maintenance-characterization-r1/source-record.json",
+        "sha256": "74a3be9fc829010699db6198d57c6365570651d915a2564b9e595dc6b069a012",
+        "size_bytes": 1379
+      },
+      "source_reviews": [
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-acceptance/r1-maintenance-characterization-report.md",
+          "sha256": "3f011d1095d0bc5ec6b471087e0d1794e3297a3552c5eaa2449b12d0bb3831a6",
+          "size_bytes": 7855
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-acceptance/r1-maintenance-characterization-review.md",
+          "sha256": "0425572b3e9d737a66179cf6d75ebec0298cebc9cd1d720f916495bce3e871f8",
+          "size_bytes": 7696
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-acceptance/r1-maintenance-characterization-fix-report.md",
+          "sha256": "c3ce9d6b52f027b02b8cf386da2c0d2698d2e6b4a25b6b48194d4570b4a8d847",
+          "size_bytes": 2254
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-characterization-acceptance/r1-maintenance-characterization-fix-review.md",
+          "sha256": "4622629997135f4cbf558ba7e3521a4a7bdb1e0f761acd754189ad511c12241a",
+          "size_bytes": 2816
+        }
+      ],
+      "state": "COMPLETED",
+      "step_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/r1-maintenance-characterization-r1-step.json",
+        "sha256": "d9d8ae312c4121a386ad99a5100f1b5c58267ccee7de685e0d2f47f09c015585",
+        "size_bytes": 1246
+      }
     }
   ],
   "captured_references": [

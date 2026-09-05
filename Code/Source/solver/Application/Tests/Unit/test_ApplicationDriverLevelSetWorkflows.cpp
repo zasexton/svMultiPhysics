@@ -1303,6 +1303,24 @@ std::unique_ptr<Parameters> parseWorkflowParametersXml(const char* xml)
   return params;
 }
 
+template <typename ExpectedException, typename Action>
+std::string maintenanceCompatibilityExceptionMessage(Action&& action)
+{
+  try {
+    std::forward<Action>(action)();
+  } catch (const ExpectedException& error) {
+    return error.what();
+  } catch (const std::exception& error) {
+    ADD_FAILURE() << "Unexpected exception category: " << error.what();
+    return {};
+  } catch (...) {
+    ADD_FAILURE() << "Unexpected non-standard exception category.";
+    return {};
+  }
+  ADD_FAILURE() << "Expected an exception.";
+  return {};
+}
+
 class WorkflowScopedEnvVar {
 public:
   WorkflowScopedEnvVar(const char* key, std::optional<std::string> value)
@@ -5324,6 +5342,411 @@ TEST(ApplicationDriverLevelSetWorkflows,
           svmp::MeshComm::self(),
           "static-capillary serial invalid support"),
       std::runtime_error);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     MaintenanceCompatibilityReadsOnlyTheEquationParameterLayer)
+{
+  auto params = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi_equation</Level_set_field_name>
+    <Transport_form>advective</Transport_form>
+    <Enable_reinitialization>true</Enable_reinitialization>
+    <Reinitialization_cadence_steps>2</Reinitialization_cadence_steps>
+    <Projected_curvature_field>k_equation</Projected_curvature_field>
+    <Domain id="liquid">
+      <Level_set_field_name>phi_domain</Level_set_field_name>
+      <Transport_form>conservative_divergence</Transport_form>
+      <Reinitialization_cadence_steps>7</Reinitialization_cadence_steps>
+      <Projected_curvature_field>k_domain</Projected_curvature_field>
+    </Domain>
+  </Add_equation>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi_domain_only</Level_set_field_name>
+    <Domain id="liquid">
+      <Enable_curvature_projection>true</Enable_curvature_projection>
+      <Projected_curvature_field>k_domain_only</Projected_curvature_field>
+    </Domain>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+
+  const auto requests = levelSetMaintenanceRequests(*params);
+
+  ASSERT_EQ(requests.size(), 1u);
+  const auto& request = requests.front();
+  EXPECT_EQ(request.level_set_field_name, "phi_equation");
+  EXPECT_EQ(request.transport_form,
+            svmp::FE::level_set::LevelSetTransportForm::Advective);
+  EXPECT_TRUE(request.reinitialization.enabled);
+  EXPECT_EQ(request.reinitialization.cadence_steps, 2);
+  EXPECT_TRUE(request.curvature_projection_enabled);
+  EXPECT_EQ(request.curvature_field_name, "k_equation");
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     MaintenanceCompatibilityUsesUndefinedNonemptyGetterDefaults)
+{
+  Parameters params;
+  auto* equation = new EquationParameters();
+  equation->type.set("level_set");
+  params.equation_parameters.push_back(equation);
+  Parameter<std::string> undefined_enable("Enable_reinitialization", "true",
+                                          false);
+  Parameter<double> undefined_tolerance(
+      "Reinitialization_signed_distance_tolerance", 1.2345678901234567, false);
+  equation->params_map[undefined_enable.name()] = &undefined_enable;
+  equation->params_map[undefined_tolerance.name()] = &undefined_tolerance;
+
+  const auto getter_text = equation->get_parameter_list();
+  const auto requests = levelSetMaintenanceRequests(params);
+
+  ASSERT_EQ(getter_text.at("Reinitialization_signed_distance_tolerance"),
+            "1.23457");
+  EXPECT_FALSE(undefined_enable.defined());
+  EXPECT_FALSE(undefined_tolerance.defined());
+  ASSERT_EQ(requests.size(), 1u);
+  EXPECT_TRUE(requests.front().reinitialization.enabled);
+  EXPECT_DOUBLE_EQ(requests.front().reinitialization.signed_distance_tolerance,
+                   1.23457);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     MaintenanceCompatibilityRetainsLegacyLexicalAcceptance)
+{
+  auto params = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi_comma</Level_set_field_name>
+    <Velocity_source>constant</Velocity_source>
+    <Constant_velocity>1.25, -0.5, 3.0</Constant_velocity>
+    <Enable_reinitialization>true</Enable_reinitialization>
+    <Reinitialization_cadence_steps>-1</Reinitialization_cadence_steps>
+    <Reinitialization_max_iterations>2tail</Reinitialization_max_iterations>
+    <Reinitialization_signed_distance_tolerance>1.25tail</Reinitialization_signed_distance_tolerance>
+    <Enable_volume_correction>unrecognized</Enable_volume_correction>
+    <Volume_correction_tolerance>nan</Volume_correction_tolerance>
+  </Add_equation>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi_whitespace</Level_set_field_name>
+    <Velocity_source>constant</Velocity_source>
+    <Constant_velocity>4.0 5.0 6.0</Constant_velocity>
+    <Enable_reinitialization>true</Enable_reinitialization>
+    <ReinitializationCadenceSteps>8</ReinitializationCadenceSteps>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+
+  // Set the whitespace-only first alias at the direct parameter boundary;
+  // the XML reader rejects whitespace-only elements.
+  params->equation_parameters[1]->set_extra_parameter_value(
+      "Reinitialization_cadence_steps", "   ");
+
+  const auto requests = levelSetMaintenanceRequests(*params);
+
+  ASSERT_EQ(requests.size(), 2u);
+  EXPECT_EQ(requests[0].velocity.constant_value,
+            (std::array<svmp::FE::Real, 3>{1.25, -0.5, 3.0}));
+  EXPECT_EQ(requests[0].reinitialization.cadence_steps, -1);
+  EXPECT_EQ(requests[0].reinitialization.max_iterations, 2);
+  EXPECT_DOUBLE_EQ(requests[0].reinitialization.signed_distance_tolerance,
+                   1.25);
+  EXPECT_FALSE(requests[0].volume_correction.enabled);
+  EXPECT_TRUE(std::isnan(requests[0].volume_correction.volume_tolerance));
+  EXPECT_EQ(requests[1].velocity.constant_value,
+            (std::array<svmp::FE::Real, 3>{4.0, 5.0, 6.0}));
+  EXPECT_EQ(requests[1].reinitialization.cadence_steps, 8);
+
+  params->equation_parameters[1]->set_extra_parameter_value(
+      "Reinitialization_cadence_steps", "3");
+  const auto first_alias_requests = levelSetMaintenanceRequests(*params);
+  ASSERT_EQ(first_alias_requests.size(), 2u);
+  EXPECT_EQ(first_alias_requests[1].reinitialization.cadence_steps, 3);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     MaintenanceCompatibilityReportsLegacyLexicalFailureCategories)
+{
+  const auto make_params = [] {
+    return parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Velocity_source>constant</Velocity_source>
+    <Constant_velocity>0.0 0.0 0.0</Constant_velocity>
+    <Enable_reinitialization>true</Enable_reinitialization>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  };
+
+  const auto expect_vector_error = [&](std::string value) {
+    auto invalid = make_params();
+    invalid->equation_parameters.front()->set_extra_parameter_value(
+        "Constant_velocity", value);
+    EXPECT_EQ((maintenanceCompatibilityExceptionMessage<std::runtime_error>(
+                  [&] { (void)levelSetMaintenanceRequests(*invalid); })),
+              "[svMultiPhysics::Application] Constant_velocity must contain "
+              "exactly three finite numeric components.");
+  };
+  expect_vector_error("1.0 2.0");
+  expect_vector_error("1.0 2.0 3.0 4.0");
+  expect_vector_error("1.0 nan 3.0");
+
+  auto invalid_real = make_params();
+  invalid_real->equation_parameters.front()->set_extra_parameter_value(
+      "Reinitialization_signed_distance_tolerance", "invalid");
+  EXPECT_EQ((maintenanceCompatibilityExceptionMessage<std::invalid_argument>(
+                [&] { (void)levelSetMaintenanceRequests(*invalid_real); })),
+            "stod");
+
+  auto overflow_real = make_params();
+  overflow_real->equation_parameters.front()->set_extra_parameter_value(
+      "Reinitialization_signed_distance_tolerance", "1e9999");
+  EXPECT_EQ((maintenanceCompatibilityExceptionMessage<std::out_of_range>(
+                [&] { (void)levelSetMaintenanceRequests(*overflow_real); })),
+            "stod");
+
+  auto overflow_count = make_params();
+  overflow_count->equation_parameters.front()->set_extra_parameter_value(
+      "Reinitialization_cadence_steps", "999999999999999999999");
+  EXPECT_EQ((maintenanceCompatibilityExceptionMessage<std::out_of_range>(
+                [&] { (void)levelSetMaintenanceRequests(*overflow_count); })),
+            "stoi");
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     MaintenanceCompatibilityKeepsVelocityPromotionAndIgnoredKeys)
+{
+  auto wet_extension = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Velocity_field_name>extended_velocity</Velocity_field_name>
+    <Velocity_source>prescribed_data</Velocity_source>
+    <Advection_velocity_from_field>physical_velocity</Advection_velocity_from_field>
+    <Enable_reinitialization>true</Enable_reinitialization>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  auto requests = levelSetMaintenanceRequests(*wet_extension);
+  ASSERT_EQ(requests.size(), 1u);
+  EXPECT_EQ(requests.front().velocity.source,
+            svmp::FE::level_set::LevelSetVelocitySource::CoupledField);
+  EXPECT_FALSE(requests.front().velocity.auto_register_field);
+  EXPECT_TRUE(
+      requests.front().velocity.algebraic_extension_source_field_name.empty());
+  EXPECT_EQ(requests.front().velocity.space, nullptr);
+
+  wet_extension->equation_parameters.front()->set_extra_parameter_value(
+      "Constant_velocity", "7.0, 8.0, 9.0");
+  requests = levelSetMaintenanceRequests(*wet_extension);
+  ASSERT_EQ(requests.size(), 1u);
+  EXPECT_EQ(requests.front().velocity.source,
+            svmp::FE::level_set::LevelSetVelocitySource::ConstantVector);
+  EXPECT_EQ(requests.front().velocity.constant_value,
+            (std::array<svmp::FE::Real, 3>{7.0, 8.0, 9.0}));
+
+  auto ignored = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Enable_reinitialization>true</Enable_reinitialization>
+    <Operator_tag>ignored_operator</Operator_tag>
+    <Level_set_source>invalid_source</Level_set_source>
+    <SUPG_tau_scale>invalid_number</SUPG_tau_scale>
+    <Interface_kinematic_marker>invalid_marker</Interface_kinematic_marker>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  requests = levelSetMaintenanceRequests(*ignored);
+  ASSERT_EQ(requests.size(), 1u);
+  EXPECT_TRUE(requests.front().reinitialization.enabled);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     MaintenanceCompatibilityRejectsNavierStokesVelocityToken)
+{
+  auto params = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Velocity_source>navier_stokes</Velocity_source>
+    <Enable_reinitialization>true</Enable_reinitialization>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+
+  EXPECT_EQ(
+      (maintenanceCompatibilityExceptionMessage<std::runtime_error>(
+          [&] { (void)levelSetMaintenanceRequests(*params); })),
+      "[svMultiPhysics::Application] Level-set Velocity_source must be one of "
+      "'coupled_field', 'prescribed_data', 'constant_vector', or "
+      "'material_interface_phase_pair'.");
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     MaintenanceCompatibilityPreservesLegacyValidationOrder)
+{
+  auto velocity_before_phase = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Velocity_source>invalid_velocity</Velocity_source>
+    <Conservative_phase_liquid_side>invalid_phase</Conservative_phase_liquid_side>
+    <Enable_reinitialization>true</Enable_reinitialization>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  EXPECT_EQ(
+      (maintenanceCompatibilityExceptionMessage<std::runtime_error>(
+          [&] { (void)levelSetMaintenanceRequests(*velocity_before_phase); })),
+      "[svMultiPhysics::Application] Level-set Velocity_source must be one of "
+      "'coupled_field', 'prescribed_data', 'constant_vector', or "
+      "'material_interface_phase_pair'.");
+
+  auto boundary_before_reinitialization = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Enable_reinitialization>true</Enable_reinitialization>
+    <Reinitialization_method>FastMarching</Reinitialization_method>
+    <Add_BC name="inlet">
+      <Type>LevelSetInflow</Type>
+      <Value>0.0</Value>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  boundary_before_reinitialization->equation_parameters.front()
+      ->boundary_conditions.front()
+      ->set_extra_parameter_value("Value", "invalid");
+  EXPECT_EQ(
+      (maintenanceCompatibilityExceptionMessage<std::invalid_argument>([&] {
+        (void)levelSetMaintenanceRequests(*boundary_before_reinitialization);
+      })),
+      "stod");
+
+  auto disabled_curvature = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Enable_curvature_projection>false</Enable_curvature_projection>
+    <Curvature_projection_recovery_mode>invalid_recovery</Curvature_projection_recovery_mode>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  EXPECT_EQ(
+      (maintenanceCompatibilityExceptionMessage<std::invalid_argument>(
+          [&] { (void)levelSetMaintenanceRequests(*disabled_curvature); })),
+      "level-set curvature recovery mode 'invalid_recovery' must be "
+      "level_set_quadratic, generated_interface_patch, or "
+      "kinematic_area_gradient");
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     MaintenanceCompatibilityUsesInputEquationOrderForFailures)
+{
+  auto velocity_first = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Velocity_source>invalid_velocity</Velocity_source>
+    <Enable_reinitialization>true</Enable_reinitialization>
+  </Add_equation>
+  <Add_equation type="level_set">
+    <Conservative_phase_liquid_side>invalid_phase</Conservative_phase_liquid_side>
+    <Enable_reinitialization>true</Enable_reinitialization>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  EXPECT_EQ(
+      (maintenanceCompatibilityExceptionMessage<std::runtime_error>(
+          [&] { (void)levelSetMaintenanceRequests(*velocity_first); })),
+      "[svMultiPhysics::Application] Level-set Velocity_source must be one of "
+      "'coupled_field', 'prescribed_data', 'constant_vector', or "
+      "'material_interface_phase_pair'.");
+
+  auto phase_first = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Conservative_phase_liquid_side>invalid_phase</Conservative_phase_liquid_side>
+    <Enable_reinitialization>true</Enable_reinitialization>
+  </Add_equation>
+  <Add_equation type="level_set">
+    <Velocity_source>invalid_velocity</Velocity_source>
+    <Enable_reinitialization>true</Enable_reinitialization>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  EXPECT_EQ(
+      (maintenanceCompatibilityExceptionMessage<std::runtime_error>(
+          [&] { (void)levelSetMaintenanceRequests(*phase_first); })),
+      "[svMultiPhysics::Application] Conservative_phase_liquid_side must be "
+      "'negative' or 'positive'.");
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     MaintenanceCompatibilityValidatesActiveCutBeforeMaintenance)
+{
+  auto params = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Enable_level_set_cut_domain>true</Enable_level_set_cut_domain>
+    <Level_set_field_name>phi</Level_set_field_name>
+  </Add_equation>
+  <Add_equation type="level_set">
+    <Velocity_source>invalid_velocity</Velocity_source>
+    <Enable_reinitialization>true</Enable_reinitialization>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+
+  EXPECT_EQ(
+      (maintenanceCompatibilityExceptionMessage<std::runtime_error>(
+          [&] { (void)levelSetMaintenanceRequests(*params); })),
+      "[svMultiPhysics::Application] Level-set cut-domain request requires "
+      "Active_domain.");
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     MaintenanceCompatibilityPreservesBoundaryAliasesAndLiteralOrder)
+{
+  auto params = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Enable_reinitialization>true</Enable_reinitialization>
+    <Add_BC name="inlet">
+      <Type>LevelSetDirichlet</Type>
+      <Value>0.0</Value>
+      <Level_set_value>9.0</Level_set_value>
+    </Add_BC>
+    <Add_BC name="outlet">
+      <Type>outflow</Type>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  auto* equation = params->equation_parameters.front();
+  equation->boundary_conditions.insert(equation->boundary_conditions.begin(),
+                                       nullptr);
+  equation->boundary_conditions.insert(equation->boundary_conditions.begin() +
+                                           1,
+                                       new BoundaryConditionParameters());
+  auto* inflow = equation->boundary_conditions[2];
+  auto* outflow = equation->boundary_conditions[3];
+  inflow->name.set_raw_value("  inlet  ");
+  inflow->set_extra_parameter_value("Value", "1.25tail");
+  outflow->set_extra_parameter_value("Value", "invalid");
+
+  const auto requests = levelSetMaintenanceRequests(*params);
+
+  ASSERT_EQ(requests.size(), 1u);
+  ASSERT_EQ(requests.front().open_boundaries.size(), 2u);
+  EXPECT_EQ(requests.front().open_boundaries[0].face_name, "inlet");
+  EXPECT_TRUE(requests.front().open_boundaries[0].inflow);
+  ASSERT_TRUE(
+      requests.front().open_boundaries[0].literal_inflow_value.has_value());
+  EXPECT_DOUBLE_EQ(*requests.front().open_boundaries[0].literal_inflow_value,
+                   1.25);
+  EXPECT_EQ(requests.front().open_boundaries[1].face_name, "outlet");
+  EXPECT_FALSE(requests.front().open_boundaries[1].inflow);
+  EXPECT_FALSE(
+      requests.front().open_boundaries[1].literal_inflow_value.has_value());
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
