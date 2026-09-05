@@ -9,6 +9,7 @@
 #include "Spaces/H1Space.h"
 #include "tinyxml2.h"
 
+#include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
@@ -16,12 +17,247 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
 
 namespace fs = std::filesystem;
 namespace level_set = svmp::FE::level_set;
+
+using ActiveCutRequest = application::core::ActiveCutVolumeRequest;
+using ActiveSide = application::core::LevelSetActiveSide;
+using CutSide = svmp::FE::geometry::CutIntegrationSide;
+using GeneratedOptions = level_set::LevelSetGeneratedInterfaceOptions;
+using VolumeOptions = level_set::LevelSetVolumeOptions;
+
+void expectGeneratedInterfaceOptionsEqual(
+    const GeneratedOptions& actual, const GeneratedOptions& expected)
+{
+  EXPECT_EQ(actual.level_set_field_name, expected.level_set_field_name);
+  EXPECT_EQ(actual.domain_id, expected.domain_id);
+  EXPECT_EQ(actual.requested_interface_marker, expected.requested_interface_marker);
+  EXPECT_EQ(actual.isovalue, expected.isovalue);
+  EXPECT_EQ(actual.tolerance, expected.tolerance);
+  EXPECT_EQ(actual.quadrature_order, expected.quadrature_order);
+  EXPECT_EQ(actual.interface_quadrature_order, expected.interface_quadrature_order);
+  EXPECT_EQ(actual.volume_quadrature_order, expected.volume_quadrature_order);
+  EXPECT_EQ(actual.geometry_mode, expected.geometry_mode);
+  EXPECT_EQ(actual.implicit_cut_quadrature_backend,
+            expected.implicit_cut_quadrature_backend);
+  EXPECT_EQ(actual.implicit_cut_fallback_policy, expected.implicit_cut_fallback_policy);
+  EXPECT_EQ(actual.implicit_cut_root_tolerance, expected.implicit_cut_root_tolerance);
+  EXPECT_EQ(actual.implicit_cut_root_coordinate_tolerance,
+            expected.implicit_cut_root_coordinate_tolerance);
+  EXPECT_EQ(actual.implicit_cut_root_max_iterations,
+            expected.implicit_cut_root_max_iterations);
+  EXPECT_EQ(actual.implicit_cut_max_subdivision_depth,
+            expected.implicit_cut_max_subdivision_depth);
+  EXPECT_EQ(actual.keep_degenerate_fragments, expected.keep_degenerate_fragments);
+  EXPECT_EQ(actual.aligned_zero_interface_parent_side,
+            expected.aligned_zero_interface_parent_side);
+  EXPECT_EQ(actual.allow_corner_linearized_geometry,
+            expected.allow_corner_linearized_geometry);
+  EXPECT_EQ(actual.require_production_qualified_implicit_cut_backend,
+            expected.require_production_qualified_implicit_cut_backend);
+  EXPECT_EQ(actual.affected_cell_neighborhood_layers,
+            expected.affected_cell_neighborhood_layers);
+  EXPECT_EQ(actual.geometry_tangent_policy, expected.geometry_tangent_policy);
+}
+
+void expectVolumeOptionsEqual(
+    const VolumeOptions& actual, const VolumeOptions& expected)
+{
+  EXPECT_EQ(actual.isovalue, expected.isovalue);
+  EXPECT_EQ(actual.tolerance, expected.tolerance);
+  EXPECT_EQ(actual.use_generated_interface_quadrature,
+            expected.use_generated_interface_quadrature);
+  EXPECT_EQ(actual.level_set_field_name, expected.level_set_field_name);
+  EXPECT_EQ(actual.generated_domain_id, expected.generated_domain_id);
+  EXPECT_EQ(actual.requested_interface_marker, expected.requested_interface_marker);
+  EXPECT_EQ(actual.quadrature_order, expected.quadrature_order);
+  EXPECT_EQ(actual.interface_quadrature_order, expected.interface_quadrature_order);
+  EXPECT_EQ(actual.volume_quadrature_order, expected.volume_quadrature_order);
+  EXPECT_EQ(actual.geometry_mode, expected.geometry_mode);
+  EXPECT_EQ(actual.implicit_cut_quadrature_backend,
+            expected.implicit_cut_quadrature_backend);
+  EXPECT_EQ(actual.implicit_cut_fallback_policy, expected.implicit_cut_fallback_policy);
+  EXPECT_EQ(actual.geometry_tangent_policy, expected.geometry_tangent_policy);
+  EXPECT_EQ(actual.implicit_cut_root_tolerance, expected.implicit_cut_root_tolerance);
+  EXPECT_EQ(actual.implicit_cut_root_coordinate_tolerance,
+            expected.implicit_cut_root_coordinate_tolerance);
+  EXPECT_EQ(actual.implicit_cut_root_max_iterations,
+            expected.implicit_cut_root_max_iterations);
+  EXPECT_EQ(actual.implicit_cut_max_subdivision_depth,
+            expected.implicit_cut_max_subdivision_depth);
+  EXPECT_EQ(actual.affected_cell_neighborhood_layers,
+            expected.affected_cell_neighborhood_layers);
+  EXPECT_EQ(actual.allow_corner_linearized_geometry,
+            expected.allow_corner_linearized_geometry);
+  EXPECT_EQ(actual.require_production_qualified_implicit_cut_backend,
+            expected.require_production_qualified_implicit_cut_backend);
+}
+
+ActiveCutRequest makeCutOptionRequest(
+    std::string field_name, std::string domain_id, ActiveSide active_side)
+{
+  ActiveCutRequest request{};
+  request.level_set_field_name = std::move(field_name);
+  request.domain_id = std::move(domain_id);
+  request.equation_type = "fluid";
+  request.origin =
+      application::core::ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary;
+  request.active_side = active_side;
+  request.volume_retention =
+      application::core::ActiveCutVolumeRetention::ActiveOnly;
+  return request;
+}
+
+ActiveCutRequest makeCompleteCutOptionRequest(
+    std::string field_name,
+    std::string domain_id,
+    level_set::GeneratedInterfaceGeometryMode geometry_mode,
+    ActiveSide active_side)
+{
+  auto request = makeCutOptionRequest(
+      std::move(field_name), std::move(domain_id), active_side);
+  request.requested_interface_marker = 77;
+  request.isovalue = 0.25;
+  request.quadrature_order = 5;
+  request.interface_quadrature_order = 4;
+  request.volume_quadrature_order = 6;
+  request.geometry_mode = geometry_mode;
+  request.implicit_cut_backend =
+      geometry_mode == level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit
+          ? level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle
+          : level_set::ImplicitCutQuadratureBackend::LinearCorner;
+  request.implicit_cut_fallback_policy =
+      level_set::ImplicitCutFallbackPolicy::LinearCorner;
+  request.geometry_tangent_policy =
+      geometry_mode == level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit
+          ? level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature
+          : level_set::GeometryTangentPolicy::DifferentiatedQuadrature;
+  request.geometry_tangent_policy_explicit = true;
+  request.implicit_cut_root_tolerance = 2.5e-11;
+  request.implicit_cut_root_coordinate_tolerance = 4.0e-12;
+  request.implicit_cut_root_max_iterations = 31;
+  request.implicit_cut_max_subdivision_depth = 12;
+  request.affected_cell_neighborhood_layers = 1;
+  request.allow_corner_linearized_geometry = true;
+  request.require_production_qualified_implicit_cut_backend = true;
+  return request;
+}
+
+GeneratedOptions expectedDefaultGeneratedOptions(
+    std::string domain_id,
+    int interface_order,
+    CutSide aligned_side,
+    int requested_marker = -1,
+    bool allow_corner_geometry = false,
+    level_set::GeometryTangentPolicy tangent_policy =
+        level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature)
+{
+  return GeneratedOptions{
+      .level_set_field_name = "phi_cut_reference", .domain_id = std::move(domain_id),
+      .requested_interface_marker = requested_marker, .isovalue = 0.0,
+      .tolerance = 1.0e-12, .quadrature_order = 1,
+      .interface_quadrature_order = interface_order, .volume_quadrature_order = 2,
+      .geometry_mode = level_set::GeneratedInterfaceGeometryMode::LinearCorner,
+      .implicit_cut_quadrature_backend =
+          level_set::ImplicitCutQuadratureBackend::LinearCorner,
+      .implicit_cut_fallback_policy = level_set::ImplicitCutFallbackPolicy::Fail,
+      .implicit_cut_root_tolerance = 1.0e-10,
+      .implicit_cut_root_coordinate_tolerance = 1.0e-12,
+      .implicit_cut_root_max_iterations = 48,
+      .implicit_cut_max_subdivision_depth = 16,
+      .keep_degenerate_fragments = false,
+      .aligned_zero_interface_parent_side = aligned_side,
+      .allow_corner_linearized_geometry = allow_corner_geometry,
+      .require_production_qualified_implicit_cut_backend = false,
+      .affected_cell_neighborhood_layers = 0,
+      .geometry_tangent_policy = tangent_policy,
+  };
+}
+
+GeneratedOptions expectedCompleteGeneratedOptions(CutSide aligned_side)
+{
+  return GeneratedOptions{
+      .level_set_field_name = "phi_cut_reference", .domain_id = "water_air",
+      .requested_interface_marker = 77, .isovalue = 0.25,
+      .tolerance = 1.0e-12, .quadrature_order = 5,
+      .interface_quadrature_order = 4, .volume_quadrature_order = 6,
+      .geometry_mode =
+          level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit,
+      .implicit_cut_quadrature_backend =
+          level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle,
+      .implicit_cut_fallback_policy =
+          level_set::ImplicitCutFallbackPolicy::LinearCorner,
+      .implicit_cut_root_tolerance = 2.5e-11,
+      .implicit_cut_root_coordinate_tolerance = 4.0e-12,
+      .implicit_cut_root_max_iterations = 31,
+      .implicit_cut_max_subdivision_depth = 12,
+      .keep_degenerate_fragments = false,
+      .aligned_zero_interface_parent_side = aligned_side,
+      .allow_corner_linearized_geometry = true,
+      .require_production_qualified_implicit_cut_backend = true,
+      .affected_cell_neighborhood_layers = 1,
+      .geometry_tangent_policy =
+          level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature,
+  };
+}
+
+VolumeOptions expectedDefaultVolumeOptions()
+{
+  return VolumeOptions{
+      .isovalue = 0.375, .tolerance = 1.0e-12,
+      .use_generated_interface_quadrature = false, .level_set_field_name = "",
+      .generated_domain_id = "volume_correction", .requested_interface_marker = -1,
+      .quadrature_order = std::nullopt,
+      .interface_quadrature_order = std::nullopt,
+      .volume_quadrature_order = std::nullopt,
+      .geometry_mode = level_set::GeneratedInterfaceGeometryMode::LinearCorner,
+      .implicit_cut_quadrature_backend =
+          level_set::ImplicitCutQuadratureBackend::LinearCorner,
+      .implicit_cut_fallback_policy = level_set::ImplicitCutFallbackPolicy::Fail,
+      .geometry_tangent_policy =
+          level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature,
+      .implicit_cut_root_tolerance = 1.0e-10,
+      .implicit_cut_root_coordinate_tolerance = 1.0e-12,
+      .implicit_cut_root_max_iterations = 48,
+      .implicit_cut_max_subdivision_depth = 16,
+      .affected_cell_neighborhood_layers = 0,
+      .allow_corner_linearized_geometry = false,
+      .require_production_qualified_implicit_cut_backend = false,
+  };
+}
+
+VolumeOptions expectedCompleteVolumeOptions(std::string generated_domain_id)
+{
+  return VolumeOptions{
+      .isovalue = 0.375, .tolerance = 1.0e-12,
+      .use_generated_interface_quadrature = true,
+      .level_set_field_name = "phi_maintenance",
+      .generated_domain_id = std::move(generated_domain_id),
+      .requested_interface_marker = 77,
+      .quadrature_order = 5, .interface_quadrature_order = 4,
+      .volume_quadrature_order = 6,
+      .geometry_mode =
+          level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit,
+      .implicit_cut_quadrature_backend =
+          level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle,
+      .implicit_cut_fallback_policy =
+          level_set::ImplicitCutFallbackPolicy::LinearCorner,
+      .geometry_tangent_policy =
+          level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature,
+      .implicit_cut_root_tolerance = 2.5e-11,
+      .implicit_cut_root_coordinate_tolerance = 4.0e-12,
+      .implicit_cut_root_max_iterations = 31,
+      .implicit_cut_max_subdivision_depth = 12,
+      .affected_cell_neighborhood_layers = 1,
+      .allow_corner_linearized_geometry = true,
+      .require_production_qualified_implicit_cut_backend = true,
+  };
+}
 
 class ScopedEnvironmentVariable {
 public:
@@ -126,6 +362,245 @@ std::shared_ptr<svmp::Mesh> buildSingleQuadMesh()
 }
 
 } // namespace
+
+TEST(LevelSetCutConfiguration,
+     GeneratedInterfaceOptionsMatchCapturedProjectionValues)
+{
+  struct Case {
+    const char* label;
+    ActiveCutRequest request;
+    int dimension;
+    GeneratedOptions expected;
+  };
+
+  std::vector<Case> cases;
+  cases.push_back({
+      "2d_default_negative",
+      makeCutOptionRequest(
+          "phi_cut_reference", "cut_option_2d_default_negative",
+          ActiveSide::Negative),
+      2,
+      expectedDefaultGeneratedOptions(
+          "cut_option_2d_default_negative", 2, CutSide::Negative)});
+  cases.push_back({
+      "2d_default_positive",
+      makeCutOptionRequest(
+          "phi_cut_reference", "cut_option_2d_default_positive",
+          ActiveSide::Positive),
+      2,
+      expectedDefaultGeneratedOptions(
+          "cut_option_2d_default_positive", 2, CutSide::Positive)});
+  cases.push_back({
+      "3d_default_negative",
+      makeCutOptionRequest(
+          "phi_cut_reference", "cut_option_3d_default_negative",
+          ActiveSide::Negative),
+      3,
+      expectedDefaultGeneratedOptions(
+          "cut_option_3d_default_negative", -1, CutSide::Negative)});
+  cases.push_back({
+      "3d_default_positive",
+      makeCutOptionRequest(
+          "phi_cut_reference", "cut_option_3d_default_positive",
+          ActiveSide::Positive),
+      3,
+      expectedDefaultGeneratedOptions(
+          "cut_option_3d_default_positive", -1, CutSide::Positive)});
+
+  const auto complete_negative = makeCompleteCutOptionRequest(
+      "phi_cut_reference", "water_air",
+      level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit,
+      ActiveSide::Negative);
+  const auto complete_positive = makeCompleteCutOptionRequest(
+      "phi_cut_reference", "water_air",
+      level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit,
+      ActiveSide::Positive);
+  cases.push_back({"2d_nondefault_negative", complete_negative, 2,
+                   expectedCompleteGeneratedOptions(CutSide::Negative)});
+  cases.push_back({"2d_nondefault_positive", complete_positive, 2,
+                   expectedCompleteGeneratedOptions(CutSide::Positive)});
+  cases.push_back({"3d_nondefault_negative", complete_negative, 3,
+                   expectedCompleteGeneratedOptions(CutSide::Negative)});
+  cases.push_back({"3d_nondefault_positive", complete_positive, 3,
+                   expectedCompleteGeneratedOptions(CutSide::Positive)});
+
+  auto differentiated = makeCutOptionRequest(
+      "phi_cut_reference", "cut_option_2d_linear_differentiated",
+      ActiveSide::Negative);
+  differentiated.requested_interface_marker = 78;
+  differentiated.geometry_tangent_policy =
+      level_set::GeometryTangentPolicy::DifferentiatedQuadrature;
+  differentiated.geometry_tangent_policy_explicit = true;
+  differentiated.allow_corner_linearized_geometry = true;
+  cases.push_back({
+      "2d_linear_differentiated",
+      differentiated,
+      2,
+      expectedDefaultGeneratedOptions(
+          "cut_option_2d_linear_differentiated",
+          2,
+          CutSide::Negative,
+          78,
+          true,
+          level_set::GeometryTangentPolicy::DifferentiatedQuadrature)});
+
+  ASSERT_EQ(cases.size(), 9u);
+  for (const auto& current_case : cases) {
+    SCOPED_TRACE(current_case.label);
+    const auto actual =
+        application::core::generatedInterfaceOptionsForActiveCut(
+            current_case.request, current_case.dimension);
+    expectGeneratedInterfaceOptionsEqual(actual, current_case.expected);
+  }
+}
+
+TEST(LevelSetCutConfiguration, VolumeOptionsMatchCapturedMaintenanceValues)
+{
+  struct Case {
+    const char* label;
+    std::optional<ActiveCutRequest> request;
+    VolumeOptions expected;
+  };
+
+  std::vector<Case> cases;
+  cases.push_back({"no_association", std::nullopt,
+                   expectedDefaultVolumeOptions()});
+  for (const auto side : {ActiveSide::Negative, ActiveSide::Positive}) {
+    const bool negative = side == ActiveSide::Negative;
+    cases.push_back({negative ? "linear_negative" : "linear_positive",
+                     makeCompleteCutOptionRequest(
+                         "phi_request", "water_air",
+                         level_set::GeneratedInterfaceGeometryMode::LinearCorner,
+                         side),
+                     expectedDefaultVolumeOptions()});
+    cases.push_back({negative ? "high_order_empty_domain_negative"
+                              : "high_order_empty_domain_positive",
+                     makeCompleteCutOptionRequest(
+                         "phi_request", "",
+                         level_set::GeneratedInterfaceGeometryMode::
+                             HighOrderImplicit,
+                         side),
+                     expectedCompleteVolumeOptions("volume_correction")});
+    cases.push_back({negative ? "high_order_water_air_negative"
+                              : "high_order_water_air_positive",
+                     makeCompleteCutOptionRequest(
+                         "phi_request", "water_air",
+                         level_set::GeneratedInterfaceGeometryMode::
+                             HighOrderImplicit,
+                         side),
+                     expectedCompleteVolumeOptions(
+                         "water_air_volume_correction")});
+  }
+
+  ASSERT_EQ(cases.size(), 7u);
+  for (const auto& current_case : cases) {
+    SCOPED_TRACE(current_case.label);
+    const auto actual = application::core::volumeOptionsForCutMaintenance(
+        current_case.request, "phi_maintenance", 0.375);
+    expectVolumeOptionsEqual(actual, current_case.expected);
+  }
+}
+
+TEST(LevelSetCutConfiguration,
+     CutOptionConversionsPreserveExplicitAndOmittedOrders)
+{
+  struct Case {
+    const char* label;
+    std::optional<int> generic;
+    std::optional<int> interface;
+    std::optional<int> volume;
+    std::array<int, 3> expected_2d;
+    std::array<int, 3> expected_3d;
+  };
+  const std::array<Case, 7> cases{{
+      {"omitted_omitted_omitted", std::nullopt, std::nullopt,
+       std::nullopt, {1, 2, 2}, {1, -1, 2}},
+      {"generic_5", 5, std::nullopt, std::nullopt,
+       {5, 2, 2}, {5, -1, 2}},
+      {"volume_6", std::nullopt, std::nullopt, 6,
+       {1, 6, 6}, {1, -1, 6}},
+      {"interface_negative_1", std::nullopt, -1, std::nullopt,
+       {1, -1, 2}, {1, -1, 2}},
+      {"interface_0", std::nullopt, 0, std::nullopt,
+       {1, 0, 2}, {1, 0, 2}},
+      {"generic_5_volume_negative_1", 5, std::nullopt, -1,
+       {5, -1, -1}, {5, -1, -1}},
+      {"generic_negative_1_specialized_2", -1, 2, 2,
+       {-1, 2, 2}, {-1, 2, 2}},
+  }};
+
+  for (const auto& current_case : cases) {
+    SCOPED_TRACE(current_case.label);
+    auto active = makeCutOptionRequest(
+        "phi_cut_reference", "cut_option_order_contract",
+        ActiveSide::Negative);
+    active.quadrature_order = current_case.generic;
+    active.interface_quadrature_order = current_case.interface;
+    active.volume_quadrature_order = current_case.volume;
+
+    const auto active_2d =
+        application::core::generatedInterfaceOptionsForActiveCut(active, 2);
+    const auto active_3d =
+        application::core::generatedInterfaceOptionsForActiveCut(active, 3);
+    EXPECT_EQ((std::array<int, 3>{active_2d.quadrature_order,
+                                  active_2d.interface_quadrature_order,
+                                  active_2d.volume_quadrature_order}),
+              current_case.expected_2d);
+    EXPECT_EQ((std::array<int, 3>{active_3d.quadrature_order,
+                                  active_3d.interface_quadrature_order,
+                                  active_3d.volume_quadrature_order}),
+              current_case.expected_3d);
+
+    auto maintenance_request = makeCompleteCutOptionRequest(
+        "phi_request", "water_air",
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit,
+        ActiveSide::Negative);
+    maintenance_request.quadrature_order = current_case.generic;
+    maintenance_request.interface_quadrature_order = current_case.interface;
+    maintenance_request.volume_quadrature_order = current_case.volume;
+    const auto maintenance =
+        application::core::volumeOptionsForCutMaintenance(
+            maintenance_request, "phi_maintenance", 0.375);
+    EXPECT_EQ(maintenance.quadrature_order, current_case.generic);
+    EXPECT_EQ(maintenance.interface_quadrature_order,
+              current_case.interface);
+    EXPECT_EQ(maintenance.volume_quadrature_order, current_case.volume);
+  }
+}
+
+TEST(LevelSetCutConfiguration,
+     CutOptionConversionsDeferInvalidControlValidation)
+{
+  struct Case {
+    const char* label;
+    int generic_order;
+  };
+  const std::array<Case, 2> cases{{
+      {"invalid_generic_and_root", -1},
+      {"valid_generic_invalid_root", 1},
+  }};
+
+  for (const auto& current_case : cases) {
+    SCOPED_TRACE(current_case.label);
+    auto request = makeCutOptionRequest(
+        "phi_cut_reference", "cut_option_invalid_control",
+        ActiveSide::Negative);
+    request.quadrature_order = current_case.generic_order;
+    request.interface_quadrature_order = 2;
+    request.volume_quadrature_order = 2;
+    request.implicit_cut_root_coordinate_tolerance = 0.0;
+
+    std::optional<GeneratedOptions> actual;
+    EXPECT_NO_THROW(
+        actual = application::core::generatedInterfaceOptionsForActiveCut(
+            request, 2));
+    ASSERT_TRUE(actual.has_value());
+    EXPECT_EQ(actual->quadrature_order, current_case.generic_order);
+    EXPECT_EQ(actual->interface_quadrature_order, 2);
+    EXPECT_EQ(actual->volume_quadrature_order, 2);
+    EXPECT_EQ(actual->implicit_cut_root_coordinate_tolerance, 0.0);
+  }
+}
 
 TEST(LevelSetCutConfiguration, DefaultsUseLinearCornerPath)
 {

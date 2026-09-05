@@ -947,6 +947,48 @@
         "Code/Source/solver/Application/Tests/Unit/test_ApplicationDriverLevelSetWorkflowsMPI.cpp": "7917209973050f654e97be49d0f4d6ff9cc4170719cca5eaf5ed4031ccf51fcb"
       },
       "state": "ACCEPTED_BOUNDED_DRIVER_STATE_MIGRATION"
+    },
+    {
+      "acceptance_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-cut-option-final-cleanup/acceptance.json",
+        "sha256": "da5061e9c92d87c4659a2849476695786be3d1bab0e9b248ec8cf30db9c09cd0",
+        "size_bytes": 21510
+      },
+      "id": "r1-cut-option-conversion-final-cleanup",
+      "limitations": [
+        "Full R1 canonical compatibility reconciliation, physical input adapters, public option storage/default consolidation and effective-policy provenance remain open.",
+        "The exact old-to-new four-property comparison is retained in Phase 3; final production and tests intentionally contain no temporary cut-option property machinery.",
+        "The pre-existing FE release-matrix skip remains unavailable qualification; no full physical, transient, capillary or distributed accuracy claim follows.",
+        "Mesh-disabled guard coherence was reviewed at source level; this final owned build uses the enabled Mesh/LLVM/Eigen profile."
+      ],
+      "outcome": {
+        "all_two_four_rank_consensus_participants": "passed",
+        "driver_lines_removed_from_prior_checkpoint": 84,
+        "exact_before_data_projection_records": 25,
+        "fe_levelset_passed": 345,
+        "fe_levelset_selected": 346,
+        "fe_levelset_skipped_cases": [
+          "LevelSetConservativePhaseQualification.RunsOneExplicitReleaseMatrixPoint"
+        ],
+        "focused_cases": 6,
+        "full_application": 374,
+        "materialized_inputs_verified": 4670,
+        "retained_binaries": 4,
+        "temporary_driver_hooks_removed": 2,
+        "two_rank_schedule_drift": "passed",
+        "xml_file_count": 11
+      },
+      "reviewed_source_hashes_match": true,
+      "scope": "Two pure Application-to-FE option conversions with Driver delegation, complete typed owner contracts, real refresh/failure checks and removal of the temporary observation overlay.",
+      "source_commit": "c58593d83242dc916017a697c97181189a2e51a2",
+      "source_hashes": {
+        "Code/Source/solver/Application/Core/ApplicationDriver.cpp": "c02fbbac6eb6a403ff2f6beecbfa20514c63938b0fcf68d687969cc689d45d9b",
+        "Code/Source/solver/Application/Core/LevelSetCutConfiguration.cpp": "589dc709db3425ea97ce736c4b80718bbc482ea8eb3ddddab3e53b1e65c3cc15",
+        "Code/Source/solver/Application/Core/LevelSetCutConfiguration.h": "b72c00d56aa348e87798f52095c8f413733071281738fe0ed9bf72d260fd44ed",
+        "Code/Source/solver/Application/Tests/Unit/test_ApplicationDriverLevelSetWorkflows.cpp": "461af041a41cf6d42c8eae6a12e7fc6fb18bdde2033b9cfe4347cbb49a1083d3",
+        "Code/Source/solver/Application/Tests/Unit/test_LevelSetCutConfiguration.cpp": "c7a927e681929b674c9a0d53302969f9278b1a90d4bcf585a978c24e1758c00f"
+      },
+      "state": "ACCEPTED_BOUNDED_CUT_OPTION_CONVERSION_AND_FINAL_CLEANUP"
     }
   ],
   "captured_references": [

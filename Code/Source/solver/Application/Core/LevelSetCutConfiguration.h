@@ -1,6 +1,7 @@
 #pragma once
 
 #include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
+#include "FE/LevelSet/LevelSetVolume.h"
 
 #include <cstdint>
 #include <optional>
@@ -62,6 +63,16 @@ struct ActiveCutVolumeRequest {
   bool allow_corner_linearized_geometry{false};
   bool require_production_qualified_implicit_cut_backend{false};
 };
+
+[[nodiscard]] svmp::FE::level_set::LevelSetGeneratedInterfaceOptions
+generatedInterfaceOptionsForActiveCut(
+    const ActiveCutVolumeRequest& request, int mesh_dimension);
+
+[[nodiscard]] svmp::FE::level_set::LevelSetVolumeOptions
+volumeOptionsForCutMaintenance(
+    const std::optional<ActiveCutVolumeRequest>& request,
+    const std::string& maintenance_field_name,
+    double maintenance_isovalue);
 
 [[nodiscard]] svmp::FE::level_set::GeneratedInterfaceGeometryMode
 parseGeneratedInterfaceGeometryMode(const std::string& raw);
