@@ -55,6 +55,9 @@ struct ConstraintRevisionSnapshot {
     std::uint64_t fe_constraint_layout{0};
     std::uint64_t fe_block_layout{0};
     std::uint64_t time_epoch{0};
+
+    [[nodiscard]] bool operator==(
+        const ConstraintRevisionSnapshot&) const noexcept = default;
 };
 
 enum class ConstraintTangentPolicy : std::uint8_t {

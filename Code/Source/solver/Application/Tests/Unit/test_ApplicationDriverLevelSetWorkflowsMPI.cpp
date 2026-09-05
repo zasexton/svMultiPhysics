@@ -49,6 +49,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -557,7 +558,9 @@ makePartitionedBalancedRadialMesh(bool sessile)
 makePartitionedHydrostaticPressureMesh(
     int normal_axis,
     bool column_major_cells,
-    bool reverse_vertex_numbering)
+    bool reverse_vertex_numbering,
+    bool reverse_cell_order = false,
+    int ghost_layers = 1)
 {
   if (normal_axis != 0 && normal_axis != 1) {
     throw std::invalid_argument(
@@ -656,6 +659,23 @@ makePartitionedHydrostaticPressureMesh(
       }
     }
   }
+  if (reverse_cell_order) {
+    const auto cell_count = shapes.size();
+    std::vector<svmp::index_t> reversed_connectivity;
+    reversed_connectivity.reserve(connectivity.size());
+    for (std::size_t reverse_index = 0u;
+         reverse_index < cell_count;
+         ++reverse_index) {
+      const auto cell = cell_count - 1u - reverse_index;
+      reversed_connectivity.insert(
+          reversed_connectivity.end(),
+          connectivity.begin() +
+              static_cast<std::ptrdiff_t>(3u * cell),
+          connectivity.begin() +
+              static_cast<std::ptrdiff_t>(3u * (cell + 1u)));
+    }
+    connectivity = std::move(reversed_connectivity);
+  }
 
   auto mesh = std::make_shared<svmp::Mesh>(
       svmp::MeshComm(MPI_COMM_WORLD));
@@ -666,7 +686,7 @@ makePartitionedHydrostaticPressureMesh(
       connectivity,
       shapes,
       svmp::PartitionHint::Cells,
-      /*ghost_layers=*/1,
+      ghost_layers,
       {{"partition_method", "block"}});
   return mesh;
 }
@@ -3879,13 +3899,19 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
       std::string("1"));
 
-  constexpr std::array<svmp::FE::Real, 3> normal_offsets{
+  constexpr std::array<svmp::FE::Real, 6> normal_offsets{
+      svmp::FE::Real{0.3},
+      svmp::FE::Real{0.3},
+      svmp::FE::Real{0.3},
       svmp::FE::Real{0.35},
       svmp::FE::Real{0.5},
       svmp::FE::Real{0.65},
   };
   std::size_t case_count = 0u;
   std::size_t area_gradient_case_count = 0u;
+  std::size_t support_case_count = 0u;
+  std::size_t support_reversed_ownership_case_count = 0u;
+  std::size_t support_active_gauge_case_count = 0u;
   svmp::FE::Real maximum_kkt_residual = 0.0;
   svmp::FE::Real maximum_kkt_relative_distance = 0.0;
   svmp::FE::Real maximum_pressure_jump_error = 0.0;
@@ -3896,17 +3922,39 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   for (int normal_axis = 0; normal_axis < 2; ++normal_axis) {
     const int tangent_axis = 1 - normal_axis;
     for (const bool positive_side : {false, true}) {
-      for (const auto normal_offset : normal_offsets) {
+      for (std::size_t offset_index = 0u;
+           offset_index < normal_offsets.size();
+           ++offset_index) {
+        const bool support_scoped = offset_index < 3u;
+        if (support_scoped && (normal_axis != 1 || positive_side)) {
+          continue;
+        }
+        const bool reverse_support_ownership = offset_index == 1u;
+        const bool install_supported_pressure_gauge = offset_index == 2u;
+        const auto normal_offset = normal_offsets[offset_index];
         SCOPED_TRACE(::testing::Message()
                      << "rank=" << rank
+                     << " support_scoped=" << support_scoped
+                     << " reverse_support_ownership="
+                     << reverse_support_ownership
+                     << " supported_pressure_gauge="
+                     << install_supported_pressure_gauge
                      << " normal_axis=" << normal_axis
                      << " active_side="
                      << (positive_side ? "positive" : "negative")
                      << " normal_offset=" << normal_offset);
-        ++case_count;
+        if (support_scoped) {
+          ++support_case_count;
+          support_reversed_ownership_case_count +=
+              reverse_support_ownership ? 1u : 0u;
+          support_active_gauge_case_count +=
+              install_supported_pressure_gauge ? 1u : 0u;
+        } else {
+          ++case_count;
+        }
 
         const bool run_area_gradient_case =
-            normal_axis == 0 && !positive_side &&
+            !support_scoped && normal_axis == 0 && !positive_side &&
             normal_offset == svmp::FE::Real{0.5};
         const std::array<
             channel_ns::FreeSurfaceSurfaceTensionForm, 2>
@@ -3934,13 +3982,24 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                                ? "KinematicAreaGradientTraction"
                                : "SurfaceStress"));
 
-        auto mesh =
-            makePartitionedFlatCapillaryFanMesh(normal_axis);
+        auto mesh = support_scoped
+                        ? makePartitionedHydrostaticPressureMesh(
+                              normal_axis,
+                              /*column_major_cells=*/false,
+                              /*reverse_vertex_numbering=*/false,
+                              reverse_support_ownership,
+                              /*ghost_layers=*/8)
+                        : makePartitionedFlatCapillaryFanMesh(normal_axis);
         ASSERT_GT(mesh->n_ghost_vertices(), 0u);
         auto& local_mesh = mesh->local_mesh();
         std::array<int, 4> local_marker_present{};
         constexpr svmp::FE::Real coordinate_tolerance = 1.0e-12;
-        for (const auto face : local_mesh.boundary_faces()) {
+        const auto physical_boundary_faces =
+            support_scoped
+                ? svmp::DistributedTopology::global_boundary_faces(
+                      *mesh, /*owned_only=*/false)
+                : local_mesh.boundary_faces();
+        for (const auto face : physical_boundary_faces) {
           const auto vertices = local_mesh.face_vertices(face);
           ASSERT_EQ(vertices.size(), 2u);
           bool on_first_wall = true;
@@ -4005,10 +4064,23 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                 "phi_physical_flat_mpi",
                 svmp::FieldScalarType::Float64,
                 1);
-        ASSERT_NE(
+        auto* mesh_phi =
             svmp::MeshFields::field_data_as<svmp::real_t>(
-                local_mesh, mesh_field),
-            nullptr);
+                local_mesh, mesh_field);
+        ASSERT_NE(mesh_phi, nullptr);
+        if (install_supported_pressure_gauge) {
+          const auto& mesh_coordinates = mesh->X_ref();
+          ASSERT_EQ(mesh_coordinates.size(), 2u * mesh->n_vertices());
+          for (std::size_t vertex = 0u;
+               vertex < mesh->n_vertices();
+               ++vertex) {
+            mesh_phi[vertex] =
+                mesh_coordinates[
+                    2u * vertex +
+                    static_cast<std::size_t>(normal_axis)] -
+                normal_offset;
+          }
+        }
 
         auto scalar_space =
             svmp::FE::spaces::SpaceFactory::create_h1(
@@ -4046,6 +4118,44 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
         options.enable_convection = false;
         options.enable_vms = false;
         options.jit_policy.enable = false;
+        svmp::gid_t support_gauge_gid =
+            std::numeric_limits<svmp::gid_t>::max();
+        if (install_supported_pressure_gauge) {
+          const auto& vertex_gids = local_mesh.vertex_gids();
+          ASSERT_EQ(vertex_gids.size(), mesh->n_vertices());
+          auto local_gauge_gid =
+              std::numeric_limits<svmp::gid_t>::max();
+          for (std::size_t vertex = 0u;
+               vertex < mesh->n_vertices();
+               ++vertex) {
+            const auto point = local_mesh.get_vertex_coords(
+                static_cast<svmp::index_t>(vertex));
+            if (std::abs(point[normal_axis]) <=
+                coordinate_tolerance) {
+              local_gauge_gid =
+                  std::min(local_gauge_gid, vertex_gids[vertex]);
+            }
+          }
+          ASSERT_EQ(MPI_Allreduce(&local_gauge_gid,
+                                  &support_gauge_gid,
+                                  1,
+                                  MPI_INT64_T,
+                                  MPI_MIN,
+                                  MPI_COMM_WORLD),
+                    MPI_SUCCESS);
+          ASSERT_NE(support_gauge_gid,
+                    std::numeric_limits<svmp::gid_t>::max());
+          options.node_pressure_constraints.id_type =
+              channel_ns::IncompressibleNavierStokesVMSOptions::
+                  NodePressureConstraintIdType::GlobalVertexGid;
+          options.node_pressure_constraints.values.push_back(
+              channel_ns::IncompressibleNavierStokesVMSOptions::
+                  NodePressureConstraint{
+                      .node_id = static_cast<svmp::FE::GlobalIndex>(
+                          support_gauge_gid),
+                      .pressure = 0.0,
+                  });
+        }
         options.velocity_dirichlet.push_back(
             channel_ns::IncompressibleNavierStokesVMSOptions::
                 VelocityDirichletBC{
@@ -4110,7 +4220,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                             ? "kappa_physical_flat_mpi"
                             : "",
                     .use_level_set_curvature = false,
-                    .small_cut_aggregation = false,
+                    .small_cut_aggregation = support_scoped,
                 };
         free_surface.contact_lines.push_back(
             ContactLine{
@@ -4348,7 +4458,9 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       <Active_domain>)xml" + active_domain_name +
             R"xml(</Active_domain>
       <Active_domain_method>CutVolume</Active_domain_method>
-      <Small_cut_aggregation>false</Small_cut_aggregation>
+      <Small_cut_aggregation>)xml" +
+            (support_scoped ? "true" : "false") +
+            R"xml(</Small_cut_aggregation>
       <Surface_tension>1.0</Surface_tension>
       <Surface_tension_form>)xml" + surface_tension_form_name +
             R"xml(</Surface_tension_form>)xml" +
@@ -4395,6 +4507,266 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                 "application-driver-mpi-physical-flat-initial");
         ASSERT_TRUE(initial_report.refreshed);
         ASSERT_NE(initial_report.topology_key, 0u);
+        if (support_scoped) {
+          const auto prolongations = sim.fe_system
+                                         ->finalizedSmallCutAggregationProlongations();
+          const auto pressure_prolongation = std::find_if(
+              prolongations.begin(),
+              prolongations.end(),
+              [pressure](const auto& candidate) {
+                return candidate != nullptr &&
+                       candidate->field == pressure;
+              });
+          const auto pressure_prolongation_count = std::count_if(
+              prolongations.begin(),
+              prolongations.end(),
+              [pressure](const auto& candidate) {
+                return candidate != nullptr &&
+                       candidate->field == pressure;
+              });
+          const int local_report_valid =
+              pressure_prolongation_count == 1 &&
+                      pressure_prolongation != prolongations.end()
+                  ? 1
+                  : 0;
+          int all_reports_valid = 0;
+          ASSERT_EQ(MPI_Allreduce(&local_report_valid,
+                                  &all_reports_valid,
+                                  1,
+                                  MPI_INT,
+                                  MPI_MIN,
+                                  MPI_COMM_WORLD),
+                    MPI_SUCCESS);
+          ASSERT_EQ(all_reports_valid, 1);
+          const auto& prolongation = **pressure_prolongation;
+          ASSERT_EQ(prolongation.field, pressure);
+          ASSERT_TRUE(prolongation.trace_bound_eligible);
+          ASSERT_NE(prolongation.canonical_content_digest, 0u);
+          ASSERT_FALSE(prolongation.active_cells.empty());
+
+          const auto pressure_begin =
+              sim.fe_system->fieldDofOffset(pressure);
+          const auto pressure_count = sim.fe_system
+                                          ->fieldDofHandler(pressure)
+                                          .getNumDofs();
+          const auto pressure_end = pressure_begin + pressure_count;
+          std::set<svmp::FE::GlobalIndex> retained_pressure_support;
+          svmp::FE::Real locally_owned_retained_volume = 0.0;
+          std::size_t locally_owned_active_cell_count = 0u;
+          for (const auto& cell : prolongation.active_cells) {
+            ASSERT_TRUE(std::isfinite(cell.retained_physical_volume));
+            ASSERT_GT(cell.retained_physical_volume, 0.0);
+            ASSERT_FALSE(cell.field_dofs.empty());
+            for (const auto dof : cell.field_dofs) {
+              EXPECT_GE(dof, pressure_begin);
+              EXPECT_LT(dof, pressure_end);
+              retained_pressure_support.insert(dof);
+            }
+            if (cell.owner_rank == rank) {
+              ++locally_owned_active_cell_count;
+              locally_owned_retained_volume +=
+                  cell.retained_physical_volume;
+            }
+          }
+          ASSERT_FALSE(retained_pressure_support.empty());
+
+          std::size_t locally_owned_mesh_cell_count = 0u;
+          for (std::size_t cell = 0u;
+               cell < mesh->n_cells();
+               ++cell) {
+            if (mesh->owner_rank_cell(
+                    static_cast<svmp::index_t>(cell)) == rank) {
+              ++locally_owned_mesh_cell_count;
+            }
+          }
+          EXPECT_GT(locally_owned_mesh_cell_count, 0u);
+          const int zero_active_rank =
+              reverse_support_ownership ? 0 : 1;
+          if (rank == zero_active_rank) {
+            EXPECT_EQ(locally_owned_active_cell_count, 0u);
+            EXPECT_DOUBLE_EQ(locally_owned_retained_volume, 0.0);
+          } else {
+            EXPECT_GT(locally_owned_active_cell_count, 0u);
+            EXPECT_GT(locally_owned_retained_volume, 0.0);
+          }
+
+          std::size_t local_inactive_pin_count = 0u;
+          bool local_inactive_pins_valid = true;
+          sim.fe_system->constraints().forEach(
+              [&](const svmp::FE::constraints::AffineConstraints::
+                      ConstraintView& line) {
+                if (line.slave_dof < pressure_begin ||
+                    line.slave_dof >= pressure_end ||
+                    retained_pressure_support.contains(line.slave_dof)) {
+                  return;
+                }
+                ++local_inactive_pin_count;
+                local_inactive_pins_valid =
+                    local_inactive_pins_valid && line.entries.empty() &&
+                    std::isfinite(line.inhomogeneity) &&
+                    line.inhomogeneity == 0.0;
+              });
+          const unsigned long long local_inactive_pin_count_wire =
+              static_cast<unsigned long long>(local_inactive_pin_count);
+          unsigned long long global_inactive_pin_count = 0u;
+          int all_inactive_pins_valid = 0;
+          const int local_inactive_pins_valid_wire =
+              local_inactive_pins_valid ? 1 : 0;
+          ASSERT_EQ(MPI_Allreduce(&local_inactive_pin_count_wire,
+                                  &global_inactive_pin_count,
+                                  1,
+                                  MPI_UNSIGNED_LONG_LONG,
+                                  MPI_SUM,
+                                  MPI_COMM_WORLD),
+                    MPI_SUCCESS);
+          ASSERT_EQ(MPI_Allreduce(&local_inactive_pins_valid_wire,
+                                  &all_inactive_pins_valid,
+                                  1,
+                                  MPI_INT,
+                                  MPI_MIN,
+                                  MPI_COMM_WORLD),
+                    MPI_SUCCESS);
+          EXPECT_GT(global_inactive_pin_count, 0u);
+          EXPECT_EQ(all_inactive_pins_valid, 1);
+
+          if (install_supported_pressure_gauge) {
+            const auto& pressure_dofs =
+                sim.fe_system->fieldDofHandler(pressure);
+            const auto* pressure_entity_map =
+                pressure_dofs.getEntityDofMap();
+            ASSERT_NE(pressure_entity_map, nullptr);
+            std::optional<svmp::FE::GlobalIndex> local_gauge_dof;
+            const auto& vertex_gids = local_mesh.vertex_gids();
+            for (std::size_t vertex = 0u;
+                 vertex < vertex_gids.size();
+                 ++vertex) {
+              if (vertex_gids[vertex] != support_gauge_gid) {
+                continue;
+              }
+              const auto dofs = pressure_entity_map->getVertexDofs(
+                  static_cast<svmp::FE::GlobalIndex>(vertex));
+              ASSERT_EQ(dofs.size(), 1u);
+              local_gauge_dof = dofs.front();
+              break;
+            }
+            const int local_gauge_owned =
+                local_gauge_dof.has_value() &&
+                        pressure_dofs.getDofMap().isOwnedDof(
+                            *local_gauge_dof)
+                    ? 1
+                    : 0;
+            int global_gauge_owner_count = 0;
+            ASSERT_EQ(MPI_Allreduce(&local_gauge_owned,
+                                    &global_gauge_owner_count,
+                                    1,
+                                    MPI_INT,
+                                    MPI_SUM,
+                                    MPI_COMM_WORLD),
+                      MPI_SUCCESS);
+            EXPECT_EQ(global_gauge_owner_count, 1);
+            if (local_gauge_dof.has_value()) {
+              const auto gauge_dof =
+                  pressure_begin + *local_gauge_dof;
+              EXPECT_TRUE(retained_pressure_support.contains(gauge_dof));
+              const auto gauge_line =
+                  sim.fe_system->constraints().getConstraint(gauge_dof);
+              ASSERT_TRUE(gauge_line.has_value());
+              EXPECT_TRUE(gauge_line->entries.empty());
+              EXPECT_DOUBLE_EQ(gauge_line->inhomogeneity, 0.0);
+            }
+          }
+
+          const auto support_certificate =
+              evaluateStaticCapillaryPressureCertificate(
+                  sim,
+                  current,
+                  requests.front().static_capillary_equilibrium,
+                  /*initialize_compatible_pressure=*/false)
+                  .report;
+          ASSERT_TRUE(support_certificate
+                          .pressure_representability_diagnostic_sampled);
+          EXPECT_TRUE(support_certificate
+                          .constant_pressure_unit_coefficients_represent_constant);
+          EXPECT_EQ(support_certificate.constant_pressure_constraint_scope,
+                    "retained_volume");
+          EXPECT_EQ(
+              support_certificate.constant_pressure_constraint_scope_reason,
+              "available");
+          if (install_supported_pressure_gauge) {
+            EXPECT_FALSE(support_certificate
+                             .constant_pressure_constraints_preserve_constants);
+            EXPECT_FALSE(
+                support_certificate.constant_pressure_kkt_available);
+            EXPECT_EQ(
+                support_certificate.constant_pressure_kkt_reason,
+                "pressure_constraints_do_not_preserve_constants");
+          } else {
+            EXPECT_TRUE(support_certificate
+                            .constant_pressure_constraints_preserve_constants);
+            ASSERT_TRUE(
+                support_certificate.constant_pressure_kkt_available)
+                << support_certificate.constant_pressure_kkt_reason;
+            EXPECT_EQ(support_certificate.constant_pressure_kkt_reason,
+                      "available");
+            EXPECT_NEAR(
+                support_certificate.constant_pressure_kkt_pressure_jump,
+                0.0,
+                2.0e-10);
+          }
+
+          if (!reverse_support_ownership &&
+              !install_supported_pressure_gauge) {
+            const auto* current_context =
+                sim.fe_system->cutIntegrationContext();
+            ASSERT_NE(current_context, nullptr);
+            auto replacement_context = std::make_shared<
+                svmp::FE::assembly::CutIntegrationContext>(
+                    *current_context);
+            ASSERT_NO_THROW(sim.fe_system->setCutIntegrationContext(
+                std::move(replacement_context)));
+            EXPECT_TRUE(sim.fe_system
+                            ->finalizedSmallCutAggregationProlongations()
+                            .empty());
+            EXPECT_TRUE(sim.fe_system
+                            ->constraintStateStaleForCurrentRevisions());
+
+            const auto refreshed_support_certificate =
+                evaluateStaticCapillaryPressureCertificate(
+                    sim,
+                    current,
+                    requests.front().static_capillary_equilibrium,
+                    /*initialize_compatible_pressure=*/false)
+                    .report;
+            EXPECT_TRUE(refreshed_support_certificate
+                            .constant_pressure_constraints_preserve_constants);
+            EXPECT_EQ(
+                refreshed_support_certificate
+                    .constant_pressure_constraint_scope,
+                "retained_volume");
+            EXPECT_EQ(
+                refreshed_support_certificate
+                    .constant_pressure_constraint_scope_reason,
+                "available");
+            EXPECT_TRUE(refreshed_support_certificate
+                            .constant_pressure_kkt_available);
+            EXPECT_FALSE(sim.fe_system
+                             ->constraintStateStaleForCurrentRevisions());
+            const auto refreshed_prolongations =
+                sim.fe_system
+                    ->finalizedSmallCutAggregationProlongations();
+            EXPECT_EQ(
+                std::count_if(
+                    refreshed_prolongations.begin(),
+                    refreshed_prolongations.end(),
+                    [pressure](const auto& candidate) {
+                      return candidate != nullptr &&
+                             candidate->field == pressure;
+                    }),
+                1);
+          }
+
+          continue;
+        }
         const auto initial_functionals =
             evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
         ASSERT_EQ(initial_functionals.size(), 1u);
@@ -4560,6 +4932,9 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
 
   EXPECT_EQ(case_count, 12u);
   EXPECT_EQ(area_gradient_case_count, 1u);
+  EXPECT_EQ(support_case_count, 3u);
+  EXPECT_EQ(support_reversed_ownership_case_count, 1u);
+  EXPECT_EQ(support_active_gauge_case_count, 1u);
   RecordProperty("wp4_physical_flat_mpi_rank_count", size);
   RecordProperty("wp4_physical_flat_mpi_partition_layout_count", 1);
   RecordProperty(
@@ -4573,6 +4948,14 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                  case_count);
   RecordProperty("wp4_area_gradient_static_mpi_case_count",
                  area_gradient_case_count);
+  RecordProperty("wp4_physical_flat_mpi_support_case_count",
+                 support_case_count);
+  RecordProperty(
+      "wp4_physical_flat_mpi_support_reversed_ownership_case_count",
+      support_reversed_ownership_case_count);
+  RecordProperty(
+      "wp4_physical_flat_mpi_support_active_gauge_case_count",
+      support_active_gauge_case_count);
   RecordProperty(
       "wp4_physical_flat_mpi_constant_pressure_kkt_residual_norm",
       maximum_kkt_residual);

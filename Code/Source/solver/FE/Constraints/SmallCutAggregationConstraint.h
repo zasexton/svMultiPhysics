@@ -462,7 +462,9 @@ enum class SmallCutAggregationPatchKind : std::uint8_t {
 /**
  * One communicator-canonical active background cell used by aggregation.
  *
- * Field DOFs, neighbor cell IDs, and retained-rule identity keys are sorted.
+ * Field DOFs are sorted system-global monolithic DOFs, including the owning
+ * field's `FESystem::fieldDofOffset(field)`. Neighbor cell IDs and retained-
+ * rule identity keys are also sorted.
  * A retained-rule key is the rule's nonzero cut-topology revision, scoped by
  * this report's marker/side and the physical cell GID; the scalar key is not
  * globally unique on its own. Zero is an explicit unavailable-identity
