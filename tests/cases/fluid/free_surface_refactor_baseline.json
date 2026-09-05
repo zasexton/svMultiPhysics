@@ -903,6 +903,50 @@
         "Code/Source/solver/Application/Tests/Unit/test_OpenVesselExamples.cpp": "1543f298d4ae24ed1e314fbbb459982febf69febda1b0d19ead24a1979ae3a11"
       },
       "state": "ACCEPTED_BOUNDED_DRIVER_CHARACTERIZATION"
+    },
+    {
+      "acceptance_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-driver-state-migration-acceptance/acceptance.json",
+        "sha256": "848dd005c94542ca81619904886fffd10c9174a1fafa7f02a6730369bbebbd58",
+        "size_bytes": 59119
+      },
+      "id": "r1-driver-state-migration",
+      "limitations": [
+        "Bounded structural Driver migration only; full R0 and R1 remain open, including cut-option conversion, canonical compatibility decisions, physical adapters and effective policy inventory.",
+        "Six initialized one-rank fixtures establish exact payload parity and repeatability within the frozen policy; they do not establish full transient, distributed history, physical energy or capillary qualification.",
+        "Two-rank request drift and two/four-rank transaction consensus are separate tested scopes; no four-rank drift claim.",
+        "Only source provenance commit/tree/manifest values differ in lifecycle payloads. Diagnostic timing sidecars retain separate identities and their required preservation marker."
+      ],
+      "outcome": {
+        "all_two_four_rank_consensus_participants": "passed",
+        "common_compile_recipes_preserved": 1269,
+        "exact_before_migration_schedule_parity": true,
+        "focused_cases": 12,
+        "full_application": 368,
+        "lifecycle_byte_identical_repeat_payloads": 6,
+        "lifecycle_capture_groups": 14,
+        "lifecycle_exact_baseline_payloads": 6,
+        "lifecycle_expected_refusals": 66,
+        "lifecycle_successful_cases": 19,
+        "lifecycle_xml_files": 15,
+        "materialized_inputs_verified": 4670,
+        "ownership_case": 1,
+        "properties_per_serial_group": 160,
+        "repeated_focused_cases": 12,
+        "schedule_records_per_serial_group": 52,
+        "skipped": 0,
+        "two_rank_schedule_drift": "passed",
+        "xml_file_count": 12
+      },
+      "reviewed_source_hashes_match": true,
+      "scope": "Driver consumption of immutable typed maintenance configuration with separate mutable runtime and declaration bindings. Original setup, scheduling, revision, copying, rollback and error order retained.",
+      "source_commit": "447867460c99b9aeb2cf2b634c564968160c460f",
+      "source_hashes": {
+        "Code/Source/solver/Application/Core/ApplicationDriver.cpp": "6dc0625f2860c8eb19310805f46b80010d8e60e64196b5643ed3280b2d6a6343",
+        "Code/Source/solver/Application/Tests/Unit/test_ApplicationDriverLevelSetWorkflows.cpp": "e8393bbffb1080824a30a0b739b1f6fb30ba44abe0b7913d8e719f8a4b1a1aa2",
+        "Code/Source/solver/Application/Tests/Unit/test_ApplicationDriverLevelSetWorkflowsMPI.cpp": "7917209973050f654e97be49d0f4d6ff9cc4170719cca5eaf5ed4031ccf51fcb"
+      },
+      "state": "ACCEPTED_BOUNDED_DRIVER_STATE_MIGRATION"
     }
   ],
   "captured_references": [
@@ -2026,7 +2070,12 @@
     }
   ],
   "comparison_contract": {
-    "bounded_lifecycle_r1_comparison_state": "POLICY_FROZEN_CANDIDATE_PENDING",
+    "bounded_lifecycle_r1_comparison": {
+      "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-lifecycle-candidate-r4-comparison-fix1/comparison.json",
+      "sha256": "ce70bf7a20be4659500be243ea4f502f12e5bf1604db33dfc6f8192078652e97",
+      "size_bytes": 59288
+    },
+    "bounded_lifecycle_r1_comparison_state": "BOUNDED_EXACT_PARITY_PASSED",
     "bounded_lifecycle_r1_policy": {
       "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-lifecycle-r1-comparison-policy/policy.json",
       "sha256": "877ea053dc2e14fb434eba42443f747f0314feff16e8f898f9fe113812de05f8",

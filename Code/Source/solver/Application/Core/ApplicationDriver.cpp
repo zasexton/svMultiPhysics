@@ -4,6 +4,7 @@
 #include "Application/Core/FreeSurfaceEnergyLedger.h"
 #include "Application/Core/LevelSetCutConfiguration.h"
 #include "Application/Core/LevelSetCurvatureSamples.h"
+#include "Application/Core/LevelSetMaintenanceConfiguration.h"
 #include "Application/Core/LevelSetMaintenanceHistory.h"
 #include "Application/Core/LevelSetMaintenanceTransactionConsensus.h"
 #include "Application/Core/LevelSetVelocityExtensionMap.h"
@@ -2344,6 +2345,7 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 using application::core::ActiveCutVolumeRequest;
+using application::core::LevelSetMaintenanceConfigurationHandle;
 using application::core::LevelSetActiveSide;
 using application::core::NearestPointIndex;
 using application::core::NearestPointRecord;
@@ -3440,135 +3442,6 @@ std::optional<bool> first_defined_bool_parameter(
   return std::nullopt;
 }
 
-svmp::FE::level_set::LevelSetReinitializationMethod
-parseLevelSetReinitializationMethod(const std::string& raw)
-{
-  const auto value = normalized_token(raw);
-  using Method = svmp::FE::level_set::LevelSetReinitializationMethod;
-  if (value == "projection" || value == "signeddistanceprojection" ||
-      value == "repairprojection") {
-    return Method::Projection;
-  }
-  if (value == "hamiltonjacobi" || value == "hamiltonjacobipde" ||
-      value == "pde") {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Reinitialization_method=HamiltonJacobiPDE "
-        "is reserved until runtime Hamilton-Jacobi reinitialization is implemented; "
-        "use 'Projection'.");
-  }
-  if (value == "fastmarching" || value == "fastmarchingmethod" ||
-      value == "fmm") {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Reinitialization_method=FastMarching "
-        "is reserved until runtime fast-marching reinitialization is implemented; "
-        "use 'Projection'.");
-  }
-  throw std::runtime_error(
-      "[svMultiPhysics::Application] Reinitialization_method currently supports "
-      "'Projection' only.");
-}
-
-svmp::FE::level_set::LevelSetTransportForm
-parseLevelSetTransportForm(const std::string& raw)
-{
-  const auto value = normalized_token(raw);
-  using Form = svmp::FE::level_set::LevelSetTransportForm;
-  if (value == "advective" || value == "classical" || value == "standard") {
-    return Form::Advective;
-  }
-  if (value == "conservative" || value == "conservativedivergence" ||
-      value == "divergence" || value == "divergenceform") {
-    return Form::ConservativeDivergence;
-  }
-  throw std::runtime_error(
-      "[svMultiPhysics::Application] Level-set Transport_form must be one of "
-      "'advective' or 'conservative_divergence'.");
-}
-
-svmp::FE::level_set::LevelSetVelocitySource
-parseLevelSetVelocitySource(const std::string& raw)
-{
-  const auto value = normalized_token(raw);
-  using Source = svmp::FE::level_set::LevelSetVelocitySource;
-  if (value.empty() || value == "coupled" || value == "coupledfield" ||
-      value == "unknown") {
-    return Source::CoupledField;
-  }
-  if (value == "prescribed" || value == "prescribeddata" ||
-      value == "data") {
-    return Source::PrescribedData;
-  }
-  if (value == "constant" || value == "constantvector") {
-    return Source::ConstantVector;
-  }
-  if (value == "materialinterfacephasepair") {
-    return Source::MaterialInterfacePhasePair;
-  }
-  throw std::runtime_error(
-      "[svMultiPhysics::Application] Level-set Velocity_source must be one of "
-      "'coupled_field', 'prescribed_data', 'constant_vector', or "
-      "'material_interface_phase_pair'.");
-}
-
-svmp::FE::level_set::LevelSetPhaseSide
-parseLevelSetPhaseSide(const std::string& raw)
-{
-  const auto value = normalized_token(raw);
-  using Side = svmp::FE::level_set::LevelSetPhaseSide;
-  if (value == "negative" || value == "minus") {
-    return Side::Negative;
-  }
-  if (value == "positive" || value == "plus") {
-    return Side::Positive;
-  }
-  throw std::runtime_error(
-      "[svMultiPhysics::Application] Conservative_phase_liquid_side must be "
-      "'negative' or 'positive'.");
-}
-
-svmp::FE::level_set::LevelSetConservativePhaseBoundaryFluxPolicy
-parseLevelSetConservativePhaseBoundaryFluxPolicy(
-    const std::string& raw)
-{
-  const auto value = normalized_token(raw);
-  using Policy = svmp::FE::level_set::
-      LevelSetConservativePhaseBoundaryFluxPolicy;
-  if (value == "closeddomaindiscreteqfluxonly") {
-    return Policy::ClosedDomainDiscreteQFluxOnly;
-  }
-  if (value == "globallybalanceddiscreteqflux") {
-    return Policy::GloballyBalancedDiscreteQFlux;
-  }
-  throw std::runtime_error(
-      "[svMultiPhysics::Application] Conservative_phase_boundary_flux_policy must be 'closed_domain_discrete_q_flux_only' or 'globally_balanced_discrete_q_flux'.");
-}
-
-std::array<svmp::FE::Real, 3> parseLevelSetVector3(
-    const std::string& raw,
-    const char* parameter_name)
-{
-  std::string normalized = raw;
-  std::replace(normalized.begin(), normalized.end(), ',', ' ');
-  std::istringstream input(normalized);
-  std::array<svmp::FE::Real, 3> result{};
-  for (auto& value : result) {
-    double parsed = 0.0;
-    if (!(input >> parsed) || !std::isfinite(parsed)) {
-      throw std::runtime_error(
-          std::string("[svMultiPhysics::Application] ") + parameter_name +
-          " must contain exactly three finite numeric components.");
-    }
-    value = static_cast<svmp::FE::Real>(parsed);
-  }
-  std::string trailing;
-  if (input >> trailing) {
-    throw std::runtime_error(
-        std::string("[svMultiPhysics::Application] ") + parameter_name +
-        " must contain exactly three finite numeric components.");
-  }
-  return result;
-}
-
 std::string step_reject_reason_to_string(svmp::FE::timestepping::StepRejectReason r)
 {
   using svmp::FE::timestepping::StepRejectReason;
@@ -3693,54 +3566,86 @@ void applyMonolithicEquationNewtonControls(
   }
 }
 
-struct LevelSetMaintenanceRequest {
-  struct OpenBoundary {
-    std::string face_name{};
-    bool inflow{false};
-    std::optional<svmp::FE::Real> literal_inflow_value{};
-  };
-
-  std::string level_set_field_name{"level_set"};
-  double isovalue{0.0};
-  svmp::FE::level_set::LevelSetTransportForm transport_form{
-      svmp::FE::level_set::LevelSetTransportForm::Advective};
-  svmp::FE::level_set::LevelSetVelocityOptions velocity{};
-  svmp::FE::level_set::LevelSetBoundPreservingOptions bound_preserving{};
-  svmp::FE::level_set::LevelSetConservativePhaseOptions conservative_phase{};
-  std::vector<OpenBoundary> open_boundaries{};
-  svmp::FE::level_set::LevelSetReinitializationOptions reinitialization{};
-  svmp::FE::level_set::LevelSetVolumeCorrectionOptions volume_correction{};
-  std::optional<ActiveCutVolumeRequest> volume_cut_request{};
-  bool static_capillary_equilibrium_enabled{false};
-  svmp::FE::level_set::LevelSetStaticCapillaryEquilibriumOptions
-      static_capillary_equilibrium{};
+struct LevelSetMaintenanceRuntimeState {
   bool static_capillary_equilibrium_initialized{false};
-  bool curvature_projection_enabled{false};
-  std::string curvature_field_name{};
-  int curvature_projection_cadence_steps{1};
-  svmp::FE::level_set::LevelSetCurvatureProjectionOptions curvature_projection{};
+  std::optional<svmp::FE::Real> measured_static_capillary_target{};
   bool volume_target_initialized{false};
   svmp::FE::Real volume_target{0.0};
   svmp::FE::Real volume_correction_reference_minimum_edge_length{0.0};
   svmp::FE::Real cumulative_volume_correction_interface_displacement{0.0};
   svmp::FE::Real cumulative_volume_correction_contact_line_displacement{0.0};
   bool conservative_phase_initialized{false};
-  bool
-      pointwise_impermeable_velocity_tolerance_explicitly_requested{
-          false};
-  std::optional<
-      svmp::FE::level_set::LevelSetP1PhaseTransportGraph>
+  std::optional<svmp::FE::level_set::LevelSetP1PhaseTransportGraph>
       conservative_phase_graph{};
 };
+
+struct LevelSetMaintenanceDeclarationBindings {
+  std::optional<bool> negative_liquid_side{};
+  std::optional<std::vector<
+      svmp::FE::level_set::LevelSetKinematicAreaGradientYoungWall>> young_walls{};
+};
+
+struct LevelSetMaintenanceRequest {
+  explicit LevelSetMaintenanceRequest(
+      LevelSetMaintenanceConfigurationHandle configured)
+      : configuration(std::move(configured))
+  {
+    if (!configuration) {
+      throw std::invalid_argument(
+          "[svMultiPhysics::Application] Level-set maintenance requires a nonnull immutable configuration.");
+    }
+  }
+
+  LevelSetMaintenanceConfigurationHandle configuration;
+  LevelSetMaintenanceRuntimeState runtime{};
+  LevelSetMaintenanceDeclarationBindings bindings{};
+};
+
+std::vector<LevelSetMaintenanceRequest> makeLevelSetMaintenanceRequests(
+    std::span<const LevelSetMaintenanceConfigurationHandle> configurations)
+{
+  std::vector<LevelSetMaintenanceRequest> requests;
+  requests.reserve(configurations.size());
+  for (const auto& configuration : configurations) {
+    requests.emplace_back(configuration);
+  }
+  return requests;
+}
+
+svmp::FE::level_set::LevelSetCurvatureProjectionOptions
+effectiveCurvatureProjectionOptions(const LevelSetMaintenanceRequest& request)
+{
+  auto options = request.configuration->curvature_projection;
+  if (request.bindings.negative_liquid_side.has_value()) {
+    options.kinematic_area_gradient_negative_liquid_side =
+        *request.bindings.negative_liquid_side;
+  }
+  if (request.bindings.young_walls.has_value()) {
+    options.kinematic_area_gradient_young_walls = *request.bindings.young_walls;
+  }
+  return options;
+}
+
+svmp::FE::level_set::LevelSetStaticCapillaryEquilibriumOptions
+effectiveStaticCapillaryEquilibriumOptions(
+    const LevelSetMaintenanceRequest& request)
+{
+  auto options = request.configuration->static_capillary_equilibrium;
+  if (request.runtime.measured_static_capillary_target.has_value()) {
+    options.target_liquid_volume =
+        *request.runtime.measured_static_capillary_target;
+  }
+  return options;
+}
 
 bool hasExplicitUnsupportedConservativePhasePointwiseWallContract(
     std::span<const LevelSetMaintenanceRequest> requests) noexcept
 {
   return std::any_of(
       requests.begin(), requests.end(), [](const auto& request) {
-        return request.conservative_phase.enabled &&
+        return request.configuration->transport.conservative_phase.enabled &&
                request
-                   .pointwise_impermeable_velocity_tolerance_explicitly_requested;
+                   .configuration->transport.conservative_phase.pointwise_impermeable_velocity_tolerance_explicitly_requested;
       });
 }
 
@@ -3950,41 +3855,41 @@ std::uint64_t levelSetMaintenanceRequestActionBits(
     int completed_step)
 {
   const bool conservative_reinitialization_due =
-      request.conservative_phase.enabled &&
+      request.configuration->transport.conservative_phase.enabled &&
       svmp::FE::level_set::shouldReinitializeLevelSet(
-          request.reinitialization, completed_step);
+          request.configuration->transport.reinitialization, completed_step);
   const bool accepted_reinitialization_due =
-      !request.conservative_phase.enabled &&
+      !request.configuration->transport.conservative_phase.enabled &&
       svmp::FE::level_set::shouldReinitializeLevelSet(
-          request.reinitialization, completed_step);
+          request.configuration->transport.reinitialization, completed_step);
   const bool accepted_volume_due =
-      !request.conservative_phase.enabled &&
+      !request.configuration->transport.conservative_phase.enabled &&
       svmp::FE::level_set::shouldApplyLevelSetVolumeCorrection(
-          request.volume_correction, completed_step);
+          request.configuration->transport.volume_correction, completed_step);
   const bool all_request_volume_due =
       svmp::FE::level_set::shouldApplyLevelSetVolumeCorrection(
-          request.volume_correction, completed_step);
+          request.configuration->transport.volume_correction, completed_step);
   const bool artifact_due =
-      request.conservative_phase.enabled &&
-      request.conservative_phase.write_flux_artifacts &&
-      request.conservative_phase.flux_artifact_cadence_steps > 0 &&
+      request.configuration->transport.conservative_phase.enabled &&
+      request.configuration->transport.conservative_phase.write_flux_artifacts &&
+      request.configuration->transport.conservative_phase.flux_artifact_cadence_steps > 0 &&
       completed_step >= 0 &&
       static_cast<std::uint64_t>(completed_step) %
               static_cast<std::uint64_t>(
-                  request.conservative_phase
+                  request.configuration->transport.conservative_phase
                       .flux_artifact_cadence_steps) ==
           0u;
   const bool functional_due =
-      request.conservative_phase.enabled ||
-      request.bound_preserving.enabled ||
+      request.configuration->transport.conservative_phase.enabled ||
+      request.configuration->transport.bound_preserving.enabled ||
       accepted_reinitialization_due ||
       all_request_volume_due;
   std::uint64_t bits = 0u;
-  bits |= request.conservative_phase.enabled ? (1ull << 0u) : 0u;
-  bits |= request.bound_preserving.enabled ? (1ull << 1u) : 0u;
+  bits |= request.configuration->transport.conservative_phase.enabled ? (1ull << 0u) : 0u;
+  bits |= request.configuration->transport.bound_preserving.enabled ? (1ull << 1u) : 0u;
   bits |= conservative_reinitialization_due ? (1ull << 2u) : 0u;
   bits |=
-      request.velocity.source ==
+      request.configuration->transport.velocity.source ==
               svmp::FE::level_set::LevelSetVelocitySource::
                   ConstantVector
           ? (1ull << 3u)
@@ -3994,10 +3899,10 @@ std::uint64_t levelSetMaintenanceRequestActionBits(
   bits |= all_request_volume_due ? (1ull << 7u) : 0u;
   bits |= functional_due ? (1ull << 8u) : 0u;
   bits |= artifact_due ? (1ull << 9u) : 0u;
-  bits |= request.conservative_phase.reconcile_geometry
+  bits |= request.configuration->transport.conservative_phase.reconcile_geometry
               ? (1ull << 10u)
               : 0u;
-  bits |= request.static_capillary_equilibrium_enabled
+  bits |= request.configuration->static_capillary_equilibrium_enabled
               ? (1ull << 11u)
               : 0u;
   return bits;
@@ -4026,106 +3931,108 @@ canonicalLevelSetMaintenanceRequestSchedule(
   appendMaintenanceScheduleWord(words, aggregate_action_bits);
 
   for (const auto& request : requests) {
+    const auto curvature_options = effectiveCurvatureProjectionOptions(request);
+    const auto capillary_options = effectiveStaticCapillaryEquilibriumOptions(request);
     appendMaintenanceScheduleWord(
         words,
         levelSetMaintenanceRequestActionBits(
             request, completed_step));
     appendMaintenanceScheduleString(
-        words, request.level_set_field_name);
-    appendMaintenanceScheduleReal(words, request.isovalue);
-    appendMaintenanceScheduleEnum(words, request.transport_form);
+        words, request.configuration->transport.level_set.field_name);
+    appendMaintenanceScheduleReal(words, request.configuration->isovalue);
+    appendMaintenanceScheduleEnum(words, request.configuration->transport.transport_form);
 
     appendMaintenanceScheduleString(
-        words, request.velocity.field_name);
-    appendMaintenanceScheduleEnum(words, request.velocity.source);
+        words, request.configuration->transport.velocity.field_name);
+    appendMaintenanceScheduleEnum(words, request.configuration->transport.velocity.source);
     appendMaintenanceScheduleBool(
-        words, request.velocity.auto_register_field);
+        words, request.configuration->transport.velocity.auto_register_field);
     appendMaintenanceScheduleBool(
-        words, static_cast<bool>(request.velocity.space));
+        words, static_cast<bool>(request.configuration->transport.velocity.space));
     schedule.supported =
-        !request.velocity.space && schedule.supported;
-    for (const auto value : request.velocity.constant_value) {
+        !request.configuration->transport.velocity.space && schedule.supported;
+    for (const auto value : request.configuration->transport.velocity.constant_value) {
       appendMaintenanceScheduleReal(
           words, static_cast<double>(value));
     }
     appendMaintenanceScheduleString(
         words,
-        request.velocity
+        request.configuration->transport.velocity
             .algebraic_extension_source_field_name);
     appendMaintenanceScheduleSigned(
-        words, request.velocity.material_interface_marker);
+        words, request.configuration->transport.velocity.material_interface_marker);
 
     appendMaintenanceScheduleBool(
-        words, request.bound_preserving.enabled);
+        words, request.configuration->transport.bound_preserving.enabled);
     appendMaintenanceScheduleReal(
-        words, request.bound_preserving.bound_tolerance);
+        words, request.configuration->transport.bound_preserving.bound_tolerance);
     appendMaintenanceScheduleReal(
-        words, request.bound_preserving.sign_tolerance);
+        words, request.configuration->transport.bound_preserving.sign_tolerance);
     appendMaintenanceScheduleReal(
-        words, request.bound_preserving.maximum_courant);
+        words, request.configuration->transport.bound_preserving.maximum_courant);
     appendMaintenanceScheduleReal(
-        words, request.bound_preserving.courant_tolerance);
+        words, request.configuration->transport.bound_preserving.courant_tolerance);
     appendMaintenanceScheduleBool(
         words,
-        request.bound_preserving.enforce_courant_limit);
+        request.configuration->transport.bound_preserving.enforce_courant_limit);
     appendMaintenanceScheduleBool(
         words,
-        request.bound_preserving
+        request.configuration->transport.bound_preserving
             .enforce_impermeable_boundaries);
     appendMaintenanceScheduleReal(
         words,
-        request.bound_preserving
+        request.configuration->transport.bound_preserving
             .impermeable_normal_velocity_tolerance);
 
     appendMaintenanceScheduleBool(
-        words, request.conservative_phase.enabled);
+        words, request.configuration->transport.conservative_phase.enabled);
     appendMaintenanceScheduleString(
         words,
-        request.conservative_phase.liquid_indicator.field_name);
+        request.configuration->transport.conservative_phase.liquid_indicator.field_name);
     appendMaintenanceScheduleEnum(
         words,
-        request.conservative_phase.liquid_indicator.source);
+        request.configuration->transport.conservative_phase.liquid_indicator.source);
     appendMaintenanceScheduleBool(
         words,
-        request.conservative_phase.liquid_indicator
+        request.configuration->transport.conservative_phase.liquid_indicator
             .auto_register_field);
     appendMaintenanceScheduleEnum(
-        words, request.conservative_phase.liquid_side);
+        words, request.configuration->transport.conservative_phase.liquid_side);
     appendMaintenanceScheduleReal(
-        words, request.conservative_phase.invariant_tolerance);
+        words, request.configuration->transport.conservative_phase.invariant_tolerance);
     appendMaintenanceScheduleReal(
         words,
-        request.conservative_phase.component_activity_tolerance);
+        request.configuration->transport.conservative_phase.component_activity_tolerance);
     appendMaintenanceScheduleReal(
-        words, request.conservative_phase.maximum_courant);
+        words, request.configuration->transport.conservative_phase.maximum_courant);
     appendMaintenanceScheduleBool(
         words,
-        request.conservative_phase.enforce_courant_limit);
+        request.configuration->transport.conservative_phase.enforce_courant_limit);
     appendMaintenanceScheduleBool(
         words,
-        request.conservative_phase.require_constant_preservation);
+        request.configuration->transport.conservative_phase.require_constant_preservation);
     appendMaintenanceScheduleReal(
         words,
-        request.conservative_phase.momentum_relative_tolerance);
+        request.configuration->transport.conservative_phase.momentum_relative_tolerance);
     appendMaintenanceScheduleBool(
-        words, request.conservative_phase.write_flux_artifacts);
+        words, request.configuration->transport.conservative_phase.write_flux_artifacts);
     appendMaintenanceScheduleSigned(
         words,
-        request.conservative_phase
+        request.configuration->transport.conservative_phase
             .flux_artifact_cadence_steps);
     appendMaintenanceScheduleBool(
         words,
-        request.conservative_phase
+        request.configuration->transport.conservative_phase
             .classify_nonprimary_components_as_satellites);
     appendMaintenanceScheduleEnum(
         words,
-        request.conservative_phase.boundary_flux_policy);
+        request.configuration->transport.conservative_phase.boundary_flux_policy);
     appendMaintenanceScheduleWord(
         words,
         static_cast<std::uint64_t>(
-            request.conservative_phase.fixed_flux_regions.size()));
+            request.configuration->transport.conservative_phase.fixed_flux_regions.size()));
     for (const auto& region :
-         request.conservative_phase.fixed_flux_regions) {
+         request.configuration->transport.conservative_phase.fixed_flux_regions) {
       appendMaintenanceScheduleString(words, region.name);
       appendMaintenanceScheduleEnum(words, region.kind);
       for (const auto value : region.minimum) {
@@ -4137,31 +4044,31 @@ canonicalLevelSetMaintenanceRequestSchedule(
     }
     appendMaintenanceScheduleReal(
         words,
-        request.conservative_phase
+        request.configuration->transport.conservative_phase
             .impermeable_normal_velocity_tolerance);
     appendMaintenanceScheduleBool(
         words,
         request
-            .pointwise_impermeable_velocity_tolerance_explicitly_requested);
+            .configuration->transport.conservative_phase.pointwise_impermeable_velocity_tolerance_explicitly_requested);
     appendMaintenanceScheduleBool(
-        words, request.conservative_phase.reconcile_geometry);
+        words, request.configuration->transport.conservative_phase.reconcile_geometry);
     appendMaintenanceScheduleReal(
         words,
-        request.conservative_phase.geometry_measure_tolerance);
+        request.configuration->transport.conservative_phase.geometry_measure_tolerance);
     appendMaintenanceScheduleSigned(
         words,
-        request.conservative_phase
+        request.configuration->transport.conservative_phase
             .geometry_correction_max_iterations);
     appendMaintenanceScheduleReal(
         words,
-        request.conservative_phase
+        request.configuration->transport.conservative_phase
             .maximum_geometry_displacement_fraction);
 
     appendMaintenanceScheduleWord(
         words,
         static_cast<std::uint64_t>(
-            request.open_boundaries.size()));
-    for (const auto& boundary : request.open_boundaries) {
+            request.configuration->open_boundaries.size()));
+    for (const auto& boundary : request.configuration->open_boundaries) {
       appendMaintenanceScheduleString(
           words, boundary.face_name);
       appendMaintenanceScheduleBool(words, boundary.inflow);
@@ -4170,197 +4077,197 @@ canonicalLevelSetMaintenanceRequestSchedule(
     }
 
     appendMaintenanceScheduleBool(
-        words, request.reinitialization.enabled);
+        words, request.configuration->transport.reinitialization.enabled);
     appendMaintenanceScheduleEnum(
-        words, request.reinitialization.method);
+        words, request.configuration->transport.reinitialization.method);
     appendMaintenanceScheduleSigned(
-        words, request.reinitialization.cadence_steps);
+        words, request.configuration->transport.reinitialization.cadence_steps);
     appendMaintenanceScheduleSigned(
-        words, request.reinitialization.max_iterations);
+        words, request.configuration->transport.reinitialization.max_iterations);
     appendMaintenanceScheduleReal(
         words,
-        request.reinitialization.pseudo_time_step_scale);
+        request.configuration->transport.reinitialization.pseudo_time_step_scale);
     appendMaintenanceScheduleReal(
-        words, request.reinitialization.interface_band_width);
-    appendMaintenanceScheduleReal(
-        words,
-        request.reinitialization.signed_distance_tolerance);
-    appendMaintenanceScheduleReal(
-        words, request.reinitialization.preserve_band_width);
+        words, request.configuration->transport.reinitialization.interface_band_width);
     appendMaintenanceScheduleReal(
         words,
-        request.reinitialization.max_zero_set_displacement);
+        request.configuration->transport.reinitialization.signed_distance_tolerance);
+    appendMaintenanceScheduleReal(
+        words, request.configuration->transport.reinitialization.preserve_band_width);
+    appendMaintenanceScheduleReal(
+        words,
+        request.configuration->transport.reinitialization.max_zero_set_displacement);
 
     appendMaintenanceScheduleBool(
-        words, request.volume_correction.enabled);
+        words, request.configuration->transport.volume_correction.enabled);
     appendMaintenanceScheduleSigned(
-        words, request.volume_correction.cadence_steps);
+        words, request.configuration->transport.volume_correction.cadence_steps);
     appendMaintenanceScheduleBool(
         words,
-        request.volume_correction
+        request.configuration->transport.volume_correction
             .use_initial_negative_volume_as_target);
     appendMaintenanceScheduleReal(
         words,
-        request.volume_correction.target_negative_volume);
+        request.configuration->transport.volume_correction.target_negative_volume);
     appendMaintenanceScheduleReal(
-        words, request.volume_correction.volume_tolerance);
+        words, request.configuration->transport.volume_correction.volume_tolerance);
     appendMaintenanceScheduleSigned(
-        words, request.volume_correction.max_iterations);
+        words, request.configuration->transport.volume_correction.max_iterations);
     appendMaintenanceScheduleReal(
         words,
-        request.volume_correction.minimum_relative_volume_error);
+        request.configuration->transport.volume_correction.minimum_relative_volume_error);
     appendMaintenanceScheduleReal(
         words,
-        request.volume_correction
+        request.configuration->transport.volume_correction
             .maximum_interface_displacement_fraction);
     appendMaintenanceScheduleReal(
         words,
-        request.volume_correction
+        request.configuration->transport.volume_correction
             .maximum_cumulative_interface_displacement_fraction);
     appendMaintenanceScheduleActiveCutRequest(
-        words, request.volume_cut_request);
+        words, request.configuration->volume_cut_request);
 
     appendMaintenanceScheduleBool(
-        words, request.static_capillary_equilibrium_enabled);
+        words, request.configuration->static_capillary_equilibrium_enabled);
     appendMaintenanceScheduleReal(
         words,
-        request.static_capillary_equilibrium.target_liquid_volume);
+        capillary_options.target_liquid_volume);
     appendMaintenanceScheduleReal(
         words,
-        request.static_capillary_equilibrium.volume_tolerance);
+        capillary_options.volume_tolerance);
     appendMaintenanceScheduleReal(
         words,
-        request.static_capillary_equilibrium
+        capillary_options
             .projected_gradient_tolerance);
     appendMaintenanceScheduleReal(
         words,
-        request.static_capillary_equilibrium
+        capillary_options
             .pressure_representability_max_residual_norm);
     appendMaintenanceScheduleReal(
         words,
-        request.static_capillary_equilibrium
+        capillary_options
             .pressure_representability_max_relative_distance);
     appendMaintenanceScheduleReal(
         words,
-        request.static_capillary_equilibrium
+        capillary_options
             .physical_equilibrium_max_residual_norm);
     appendMaintenanceScheduleReal(
         words,
-        request.static_capillary_equilibrium
+        capillary_options
             .constant_pressure_kkt_max_residual_norm);
     appendMaintenanceScheduleReal(
         words,
-        request.static_capillary_equilibrium
+        capillary_options
             .constant_pressure_kkt_max_relative_distance);
     appendMaintenanceScheduleReal(
         words,
-        request.static_capillary_equilibrium
+        capillary_options
             .finite_difference_reference_coefficient_scale);
     appendMaintenanceScheduleReal(
         words,
-        request.static_capillary_equilibrium
+        capillary_options
             .finite_difference_relative_step);
     appendMaintenanceScheduleReal(
         words,
-        request.static_capillary_equilibrium
+        capillary_options
             .minimum_finite_difference_step);
     appendMaintenanceScheduleSigned(
         words,
-        request.static_capillary_equilibrium
+        capillary_options
             .finite_difference_max_shrinks);
     appendMaintenanceScheduleSigned(
         words,
-        request.static_capillary_equilibrium.max_iterations);
+        capillary_options.max_iterations);
     appendMaintenanceScheduleSigned(
         words,
-        request.static_capillary_equilibrium
+        capillary_options
             .max_line_search_iterations);
     appendMaintenanceScheduleSigned(
         words,
-        request.static_capillary_equilibrium
+        capillary_options
             .max_topology_epoch_transitions);
     appendMaintenanceScheduleReal(
         words,
-        request.static_capillary_equilibrium
+        capillary_options
             .projected_gradient_inverse_stiffness);
     appendMaintenanceScheduleReal(
         words,
-        request.static_capillary_equilibrium.tangent_trust_radius);
+        capillary_options.tangent_trust_radius);
     appendMaintenanceScheduleReal(
         words,
-        request.static_capillary_equilibrium
+        capillary_options
             .maximum_coefficient_update_linf);
     appendMaintenanceScheduleReal(
         words,
-        request.static_capillary_equilibrium.line_search_shrink);
+        capillary_options.line_search_shrink);
     appendMaintenanceScheduleReal(
         words,
-        request.static_capillary_equilibrium.armijo_fraction);
+        capillary_options.armijo_fraction);
     appendMaintenanceScheduleSigned(
         words,
-        request.static_capillary_equilibrium
+        capillary_options
             .limited_memory_history_size);
     appendMaintenanceScheduleReal(
         words,
-        request.static_capillary_equilibrium
+        capillary_options
             .limited_memory_curvature_tolerance);
     appendMaintenanceScheduleReal(
         words,
-        request.static_capillary_equilibrium
+        capillary_options
             .minimum_volume_merit_penalty);
     appendMaintenanceScheduleBool(
-        words, request.static_capillary_equilibrium_initialized);
+        words, request.runtime.static_capillary_equilibrium_initialized);
 
     appendMaintenanceScheduleBool(
-        words, request.curvature_projection_enabled);
+        words, request.configuration->curvature_projection_enabled);
     appendMaintenanceScheduleString(
-        words, request.curvature_field_name);
+        words, request.configuration->curvature_field_name);
     appendMaintenanceScheduleSigned(
-        words, request.curvature_projection_cadence_steps);
+        words, request.configuration->curvature_projection_cadence_steps);
     appendMaintenanceScheduleReal(
-        words, request.curvature_projection.isovalue);
-    appendMaintenanceScheduleReal(
-        words,
-        request.curvature_projection.gradient_tolerance);
+        words, curvature_options.isovalue);
     appendMaintenanceScheduleReal(
         words,
-        request.curvature_projection.normal_equation_tolerance);
+        curvature_options.gradient_tolerance);
     appendMaintenanceScheduleReal(
         words,
-        request.curvature_projection
+        curvature_options.normal_equation_tolerance);
+    appendMaintenanceScheduleReal(
+        words,
+        curvature_options
             .max_normalized_fit_residual);
     appendMaintenanceScheduleSigned(
         words,
-        request.curvature_projection.max_neighbor_rings);
+        curvature_options.max_neighbor_rings);
     appendMaintenanceScheduleSigned(
         words,
-        request.curvature_projection
+        curvature_options
             .max_neighbor_fallback_vertices);
     appendMaintenanceScheduleSigned(
         words,
-        request.curvature_projection
+        curvature_options
             .max_zero_fallback_vertices);
     appendMaintenanceScheduleReal(
         words,
-        request.curvature_projection
+        curvature_options
             .supplemental_sample_weight);
     appendMaintenanceScheduleEnum(
-        words, request.curvature_projection.recovery_mode);
+        words, curvature_options.recovery_mode);
     appendMaintenanceScheduleReal(
         words,
-        request.curvature_projection
+        curvature_options
             .kinematic_area_gradient_filter_coefficient);
     appendMaintenanceScheduleBool(
         words,
-        request.curvature_projection
+        curvature_options
             .kinematic_area_gradient_negative_liquid_side);
     appendMaintenanceScheduleSigned(
         words,
         static_cast<std::int64_t>(
-            request.curvature_projection
+            curvature_options
                 .kinematic_area_gradient_young_walls.size()));
     for (const auto& wall :
-         request.curvature_projection
+         curvature_options
              .kinematic_area_gradient_young_walls) {
       appendMaintenanceScheduleSigned(words, wall.boundary_marker);
       appendMaintenanceScheduleReal(
@@ -4368,34 +4275,34 @@ canonicalLevelSetMaintenanceRequestSchedule(
     }
     appendMaintenanceScheduleReal(
         words,
-        request.curvature_projection.narrow_band_width);
+        curvature_options.narrow_band_width);
     appendMaintenanceScheduleSigned(
         words,
-        request.curvature_projection.smoothing_iterations);
+        curvature_options.smoothing_iterations);
     appendMaintenanceScheduleReal(
         words,
-        request.curvature_projection.smoothing_relaxation);
+        curvature_options.smoothing_relaxation);
     appendMaintenanceScheduleEnum(
-        words, request.curvature_projection.smoothing_mode);
+        words, curvature_options.smoothing_mode);
 
     appendMaintenanceScheduleBool(
-        words, request.volume_target_initialized);
-    appendMaintenanceScheduleReal(words, request.volume_target);
+        words, request.runtime.volume_target_initialized);
+    appendMaintenanceScheduleReal(words, request.runtime.volume_target);
     appendMaintenanceScheduleReal(
         words,
-        request.volume_correction_reference_minimum_edge_length);
-    appendMaintenanceScheduleReal(
-        words,
-        request
-            .cumulative_volume_correction_interface_displacement);
+        request.runtime.volume_correction_reference_minimum_edge_length);
     appendMaintenanceScheduleReal(
         words,
         request
-            .cumulative_volume_correction_contact_line_displacement);
+            .runtime.cumulative_volume_correction_interface_displacement);
+    appendMaintenanceScheduleReal(
+        words,
+        request
+            .runtime.cumulative_volume_correction_contact_line_displacement);
     appendMaintenanceScheduleBool(
-        words, request.conservative_phase_initialized);
+        words, request.runtime.conservative_phase_initialized);
     appendMaintenanceScheduleGraphMetadata(
-        words, request.conservative_phase_graph);
+        words, request.runtime.conservative_phase_graph);
   }
   return schedule;
 }
@@ -4489,14 +4396,14 @@ canonicalLevelSetMaintenanceGeometryState(
       words, static_cast<std::uint64_t>(requests.size()));
   for (const auto& request : requests) {
     appendMaintenanceScheduleBool(
-        words, request.volume_cut_request.has_value());
-    if (!request.volume_cut_request.has_value()) {
+        words, request.configuration->volume_cut_request.has_value());
+    if (!request.configuration->volume_cut_request.has_value()) {
       continue;
     }
 
     const auto marker =
         resolvedActiveCutVolumeInterfaceMarker(
-            *sim.fe_system, *request.volume_cut_request);
+            *sim.fe_system, *request.configuration->volume_cut_request);
     appendMaintenanceScheduleBool(words, marker.has_value());
     appendMaintenanceScheduleSigned(
         words, marker.value_or(-1));
@@ -5346,28 +5253,6 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
   }
 
   return requests;
-}
-
-std::optional<ActiveCutVolumeRequest> matchingActiveCutVolumeRequest(
-    const std::vector<ActiveCutVolumeRequest>& active_requests,
-    const std::string& level_set_field_name,
-    double isovalue)
-{
-  constexpr double kIsovalueTolerance = 1.0e-12;
-  for (const auto& active_request : active_requests) {
-    if (active_request.level_set_field_name != level_set_field_name) {
-      continue;
-    }
-    if (std::abs(active_request.isovalue - isovalue) <= kIsovalueTolerance) {
-      return active_request;
-    }
-  }
-  for (const auto& active_request : active_requests) {
-    if (active_request.level_set_field_name == level_set_field_name) {
-      return active_request;
-    }
-  }
-  return std::nullopt;
 }
 
 bool activeSideContains(double phi, const ActiveCutVolumeRequest& request)
@@ -7068,802 +6953,6 @@ ActiveFluidReport writeActiveFluidVisualizationOutput(
   return report;
 }
 
-std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parameters& params)
-{
-  std::vector<LevelSetMaintenanceRequest> requests;
-  const auto active_requests = activeCutVolumeRequests(params);
-  for (auto* eq : params.equation_parameters) {
-    if (eq == nullptr || !eq->type.defined()) {
-      continue;
-    }
-    const auto type = normalized_token(eq->type.value());
-    if (type != "levelset" && type != "levelsettransport") {
-      continue;
-    }
-
-    auto eq_params = eq->get_parameter_list();
-    LevelSetMaintenanceRequest request{};
-    if (const auto field =
-            first_defined_parameter(eq_params, {"Level_set_field_name",
-                                               "LevelSetFieldName",
-                                               "Level_set_field",
-                                               "LevelSetField",
-                                               "Field_name"})) {
-      request.level_set_field_name = trim_copy(*field);
-    }
-    if (const auto isovalue =
-            first_defined_double_parameter(eq_params, {"Level_set_isovalue",
-                                                      "LevelSetIsovalue",
-                                                      "Interface_isovalue",
-                                                      "InterfaceIsovalue"})) {
-      request.isovalue = *isovalue;
-    }
-    if (const auto form =
-            first_defined_parameter(eq_params, {"Transport_form",
-                                               "TransportForm",
-                                               "Advection_form",
-                                               "AdvectionForm",
-                                               "Level_set_transport_form",
-                                               "LevelSetTransportForm"})) {
-      request.transport_form = parseLevelSetTransportForm(*form);
-    }
-
-    if (const auto velocity_field = first_defined_parameter(
-            eq_params,
-            {"Velocity_field_name", "VelocityFieldName",
-             "Advection_velocity_field", "AdvectionVelocityField"})) {
-      request.velocity.field_name = trim_copy(*velocity_field);
-    }
-    if (const auto velocity_source = first_defined_parameter(
-            eq_params, {"Velocity_source", "VelocitySource"})) {
-      request.velocity.source = parseLevelSetVelocitySource(*velocity_source);
-    }
-    if (const auto marker = first_defined_int_parameter(
-            eq_params,
-            {"Material_interface_marker", "MaterialInterfaceMarker"})) {
-      request.velocity.material_interface_marker = *marker;
-    }
-    const bool wet_extension_enabled =
-        first_defined_bool_parameter(
-            eq_params,
-            {"Use_wet_extension_advection_velocity",
-             "UseWetExtensionAdvectionVelocity",
-             "Update_advection_velocity_from_wet_region",
-             "UpdateAdvectionVelocityFromWetRegion"})
-            .value_or(false) ||
-        first_defined_parameter(
-            eq_params,
-            {"Advection_velocity_from_field",
-             "AdvectionVelocityFromField",
-             "Source_velocity_field_name",
-             "SourceVelocityFieldName",
-             "Physical_velocity_field_name",
-             "PhysicalVelocityFieldName"})
-            .has_value();
-    if (wet_extension_enabled) {
-      // The translator promotes the generated coefficient to an algebraic
-      // unknown.  Maintenance/safety checks must read that solved field from
-      // the coupled state rather than looking for a prescribed buffer.
-      request.velocity.source =
-          svmp::FE::level_set::LevelSetVelocitySource::CoupledField;
-    }
-    if (const auto constant_velocity = first_defined_parameter(
-            eq_params,
-            {"Constant_velocity", "ConstantVelocity",
-             "Velocity_value", "VelocityValue"})) {
-      request.velocity.source =
-          svmp::FE::level_set::LevelSetVelocitySource::ConstantVector;
-      request.velocity.constant_value = parseLevelSetVector3(
-          *constant_velocity, "Constant_velocity");
-    }
-
-    if (const auto enabled = first_defined_bool_parameter(
-            eq_params,
-            {"Enable_conservative_phase_transport",
-             "EnableConservativePhaseTransport",
-             "Conservative_phase_transport",
-             "ConservativePhaseTransport"})) {
-      request.conservative_phase.enabled = *enabled;
-    }
-    if (const auto field = first_defined_parameter(
-            eq_params,
-            {"Conservative_phase_field_name",
-             "ConservativePhaseFieldName",
-             "Liquid_indicator_field_name",
-             "LiquidIndicatorFieldName"})) {
-      request.conservative_phase.liquid_indicator.field_name =
-          trim_copy(*field);
-    }
-    if (const auto auto_register = first_defined_bool_parameter(
-            eq_params,
-            {"Auto_register_conservative_phase_field",
-             "AutoRegisterConservativePhaseField"})) {
-      request.conservative_phase.liquid_indicator.auto_register_field =
-          *auto_register;
-    }
-    if (const auto side = first_defined_parameter(
-            eq_params,
-            {"Conservative_phase_liquid_side",
-             "ConservativePhaseLiquidSide"})) {
-      request.conservative_phase.liquid_side =
-          parseLevelSetPhaseSide(*side);
-    }
-    if (const auto tolerance = first_defined_double_parameter(
-            eq_params,
-            {"Conservative_phase_invariant_tolerance",
-             "ConservativePhaseInvariantTolerance"})) {
-      request.conservative_phase.invariant_tolerance =
-          static_cast<svmp::FE::Real>(*tolerance);
-    }
-    if (const auto tolerance = first_defined_double_parameter(
-            eq_params,
-            {"Conservative_phase_component_activity_tolerance",
-             "ConservativePhaseComponentActivityTolerance"})) {
-      request.conservative_phase.component_activity_tolerance =
-          static_cast<svmp::FE::Real>(*tolerance);
-    }
-    if (const auto maximum_courant = first_defined_double_parameter(
-            eq_params,
-            {"Conservative_phase_maximum_courant",
-             "ConservativePhaseMaximumCourant"})) {
-      request.conservative_phase.maximum_courant =
-          static_cast<svmp::FE::Real>(*maximum_courant);
-    }
-    if (const auto enforce = first_defined_bool_parameter(
-            eq_params,
-            {"Conservative_phase_enforce_courant_limit",
-             "ConservativePhaseEnforceCourantLimit"})) {
-      request.conservative_phase.enforce_courant_limit = *enforce;
-    }
-    if (const auto preserve = first_defined_bool_parameter(
-            eq_params,
-            {"Conservative_phase_require_constant_preservation",
-             "ConservativePhaseRequireConstantPreservation"})) {
-      request.conservative_phase.require_constant_preservation = *preserve;
-    }
-    if (const auto tolerance = first_defined_double_parameter(
-            eq_params,
-            {"Conservative_phase_momentum_relative_tolerance",
-             "ConservativePhaseMomentumRelativeTolerance"})) {
-      request.conservative_phase.momentum_relative_tolerance =
-          static_cast<svmp::FE::Real>(*tolerance);
-    }
-    if (const auto write = first_defined_bool_parameter(
-            eq_params,
-            {"Conservative_phase_write_flux_artifacts",
-             "ConservativePhaseWriteFluxArtifacts"})) {
-      request.conservative_phase.write_flux_artifacts = *write;
-    }
-    if (const auto cadence = first_defined_int_parameter(
-            eq_params,
-            {"Conservative_phase_flux_artifact_cadence_steps",
-             "ConservativePhaseFluxArtifactCadenceSteps"})) {
-      request.conservative_phase.flux_artifact_cadence_steps = *cadence;
-    }
-    if (const auto classify = first_defined_bool_parameter(
-            eq_params,
-            {"Conservative_phase_classify_nonprimary_components_as_satellites",
-             "ConservativePhaseClassifyNonprimaryComponentsAsSatellites"})) {
-      request.conservative_phase
-          .classify_nonprimary_components_as_satellites = *classify;
-    }
-    if (const auto policy = first_defined_parameter(
-            eq_params,
-            {"Conservative_phase_boundary_flux_policy",
-             "ConservativePhaseBoundaryFluxPolicy"})) {
-      request.conservative_phase.boundary_flux_policy =
-          parseLevelSetConservativePhaseBoundaryFluxPolicy(*policy);
-    }
-    if (const auto regions = first_defined_parameter(
-            eq_params,
-            {"Conservative_phase_fixed_flux_regions",
-             "ConservativePhaseFixedFluxRegions"})) {
-      request.conservative_phase.fixed_flux_regions =
-          svmp::FE::level_set::parseLevelSetPhaseRegionBoxes(*regions);
-    }
-    if (const auto tolerance = first_defined_double_parameter(
-            eq_params,
-            {"Conservative_phase_impermeable_normal_velocity_tolerance",
-             "ConservativePhaseImpermeableNormalVelocityTolerance"})) {
-      request.conservative_phase.impermeable_normal_velocity_tolerance =
-          static_cast<svmp::FE::Real>(*tolerance);
-      request
-          .pointwise_impermeable_velocity_tolerance_explicitly_requested =
-          true;
-    }
-    if (const auto reconcile = first_defined_bool_parameter(
-            eq_params,
-            {"Conservative_phase_reconcile_geometry",
-             "ConservativePhaseReconcileGeometry"})) {
-      request.conservative_phase.reconcile_geometry = *reconcile;
-    }
-    if (const auto tolerance = first_defined_double_parameter(
-            eq_params,
-            {"Conservative_phase_geometry_measure_tolerance",
-             "ConservativePhaseGeometryMeasureTolerance"})) {
-      request.conservative_phase.geometry_measure_tolerance =
-          static_cast<svmp::FE::Real>(*tolerance);
-    }
-    if (const auto iterations = first_defined_int_parameter(
-            eq_params,
-            {"Conservative_phase_geometry_correction_max_iterations",
-             "ConservativePhaseGeometryCorrectionMaxIterations"})) {
-      request.conservative_phase.geometry_correction_max_iterations =
-          *iterations;
-    }
-    if (const auto fraction = first_defined_double_parameter(
-            eq_params,
-            {"Conservative_phase_maximum_geometry_displacement_fraction",
-             "ConservativePhaseMaximumGeometryDisplacementFraction"})) {
-      request.conservative_phase.maximum_geometry_displacement_fraction =
-          static_cast<svmp::FE::Real>(*fraction);
-    }
-
-    if (const auto enabled = first_defined_bool_parameter(
-            eq_params,
-            {"Enable_bound_preserving_limiter",
-             "EnableBoundPreservingLimiter",
-             "Bound_preserving_limiter", "BoundPreservingLimiter"})) {
-      request.bound_preserving.enabled = *enabled;
-    }
-    if (const auto tolerance = first_defined_double_parameter(
-            eq_params,
-            {"Bound_preserving_bound_tolerance",
-             "BoundPreservingBoundTolerance"})) {
-      request.bound_preserving.bound_tolerance =
-          static_cast<svmp::FE::Real>(*tolerance);
-    }
-    if (const auto tolerance = first_defined_double_parameter(
-            eq_params,
-            {"Bound_preserving_sign_tolerance",
-             "BoundPreservingSignTolerance"})) {
-      request.bound_preserving.sign_tolerance =
-          static_cast<svmp::FE::Real>(*tolerance);
-    }
-    if (const auto tolerance = first_defined_double_parameter(
-            eq_params,
-            {"Bound_preserving_courant_tolerance",
-             "BoundPreservingCourantTolerance"})) {
-      request.bound_preserving.courant_tolerance =
-          static_cast<svmp::FE::Real>(*tolerance);
-    }
-    if (const auto maximum_courant = first_defined_double_parameter(
-            eq_params,
-            {"Bound_preserving_maximum_courant",
-             "BoundPreservingMaximumCourant"})) {
-      request.bound_preserving.maximum_courant =
-          static_cast<svmp::FE::Real>(*maximum_courant);
-    }
-    if (const auto enabled = first_defined_bool_parameter(
-            eq_params,
-            {"Bound_preserving_enforce_courant_limit",
-             "BoundPreservingEnforceCourantLimit"})) {
-      request.bound_preserving.enforce_courant_limit = *enabled;
-    }
-    if (const auto enabled = first_defined_bool_parameter(
-            eq_params,
-            {"Bound_preserving_enforce_impermeable_boundaries",
-             "BoundPreservingEnforceImpermeableBoundaries"})) {
-      request.bound_preserving.enforce_impermeable_boundaries = *enabled;
-    }
-    if (const auto tolerance = first_defined_double_parameter(
-            eq_params,
-            {"Bound_preserving_impermeable_normal_velocity_tolerance",
-             "BoundPreservingImpermeableNormalVelocityTolerance"})) {
-      request.bound_preserving.impermeable_normal_velocity_tolerance =
-          static_cast<svmp::FE::Real>(*tolerance);
-    }
-
-    for (auto* boundary : eq->boundary_conditions) {
-      if (boundary == nullptr || !boundary->type.defined() ||
-          !boundary->name.defined()) {
-        continue;
-      }
-      const auto boundary_type = normalized_token(boundary->type.value());
-      const bool inflow =
-          boundary_type == "levelsetinflow" || boundary_type == "inflow" ||
-          boundary_type == "levelsetdirichlet";
-      const bool outflow =
-          boundary_type == "levelsetoutflow" || boundary_type == "outflow";
-      if (!inflow && !outflow) {
-        continue;
-      }
-      LevelSetMaintenanceRequest::OpenBoundary open_boundary;
-      open_boundary.face_name = trim_copy(boundary->name.value());
-      open_boundary.inflow = inflow;
-      if (inflow) {
-        const auto boundary_params = boundary->get_parameter_list();
-        if (const auto value = first_defined_double_parameter(
-                boundary_params, {"Value", "Level_set_value"})) {
-          open_boundary.literal_inflow_value =
-              static_cast<svmp::FE::Real>(*value);
-        }
-      }
-      request.open_boundaries.push_back(std::move(open_boundary));
-    }
-
-    if (const auto enabled =
-            first_defined_bool_parameter(eq_params, {"Enable_reinitialization",
-                                                    "Enable_level_set_reinitialization",
-                                                    "Reinitialization",
-                                                    "Reinitialization_enabled",
-                                                    "Reinitialize_level_set"})) {
-      request.reinitialization.enabled = *enabled;
-    }
-    if (const auto method =
-            first_defined_parameter(eq_params, {"Reinitialization_method",
-                                               "Level_set_reinitialization_method",
-                                               "ReinitializationMethod"})) {
-      request.reinitialization.method =
-          parseLevelSetReinitializationMethod(*method);
-    }
-    if (const auto cadence =
-            first_defined_int_parameter(eq_params, {"Reinitialization_cadence_steps",
-                                                   "Reinitialization_cadence",
-                                                   "Level_set_reinitialization_cadence_steps",
-                                                   "ReinitializationCadenceSteps"})) {
-      request.reinitialization.cadence_steps = *cadence;
-    }
-    if (const auto max_it =
-            first_defined_int_parameter(eq_params, {"Reinitialization_max_iterations",
-                                                   "Reinitialization_iterations",
-                                                   "ReinitializationMaxIterations"})) {
-      request.reinitialization.max_iterations = *max_it;
-    }
-    if (const auto scale =
-            first_defined_double_parameter(eq_params, {"Reinitialization_pseudo_time_step_scale",
-                                                      "ReinitializationPseudoTimeStepScale"})) {
-      request.reinitialization.pseudo_time_step_scale =
-          static_cast<svmp::FE::Real>(*scale);
-    }
-    if (const auto band =
-            first_defined_double_parameter(eq_params, {"Reinitialization_interface_band_width",
-                                                      "ReinitializationInterfaceBandWidth"})) {
-      request.reinitialization.interface_band_width =
-          static_cast<svmp::FE::Real>(*band);
-    }
-    if (const auto tol =
-            first_defined_double_parameter(eq_params, {"Reinitialization_signed_distance_tolerance",
-                                                      "ReinitializationSignedDistanceTolerance"})) {
-      request.reinitialization.signed_distance_tolerance =
-          static_cast<svmp::FE::Real>(*tol);
-    }
-    if (const auto displacement = first_defined_double_parameter(
-            eq_params,
-            {"Reinitialization_max_zero_set_displacement",
-             "ReinitializationMaxZeroSetDisplacement"})) {
-      request.reinitialization.max_zero_set_displacement =
-          static_cast<svmp::FE::Real>(*displacement);
-    }
-
-    if (const auto enabled =
-            first_defined_bool_parameter(eq_params, {"Enable_volume_correction",
-                                                    "Enable_level_set_volume_correction",
-                                                    "Volume_correction",
-                                                    "VolumeCorrection",
-                                                    "Correct_level_set_volume"})) {
-      request.volume_correction.enabled = *enabled;
-    }
-    if (const auto cadence =
-            first_defined_int_parameter(eq_params, {"Volume_correction_cadence_steps",
-                                                   "Volume_correction_cadence",
-                                                   "Level_set_volume_correction_cadence_steps",
-                                                   "VolumeCorrectionCadenceSteps"})) {
-      request.volume_correction.cadence_steps = *cadence;
-    }
-    if (const auto use_initial =
-            first_defined_bool_parameter(eq_params, {"Volume_correction_use_initial_volume",
-                                                    "Use_initial_level_set_volume_as_target",
-                                                    "VolumeCorrectionUseInitialVolume"})) {
-      request.volume_correction.use_initial_negative_volume_as_target =
-          *use_initial;
-    }
-    if (const auto target =
-            first_defined_double_parameter(eq_params, {"Volume_correction_target_negative_volume",
-                                                      "Level_set_volume_correction_target_negative_volume",
-                                                      "VolumeCorrectionTargetNegativeVolume"})) {
-      request.volume_correction.target_negative_volume =
-          static_cast<svmp::FE::Real>(*target);
-      request.volume_correction.use_initial_negative_volume_as_target = false;
-    }
-    if (const auto tol =
-            first_defined_double_parameter(eq_params, {"Volume_correction_tolerance",
-                                                      "Volume_correction_volume_tolerance",
-                                                      "Level_set_volume_correction_tolerance",
-                                                      "VolumeCorrectionTolerance"})) {
-      request.volume_correction.volume_tolerance =
-          static_cast<svmp::FE::Real>(*tol);
-    }
-    if (const auto max_it =
-            first_defined_int_parameter(eq_params, {"Volume_correction_max_iterations",
-                                                   "VolumeCorrectionMaxIterations"})) {
-      request.volume_correction.max_iterations = *max_it;
-    }
-    if (const auto relative_error = first_defined_double_parameter(
-            eq_params,
-            {"Volume_correction_minimum_relative_error",
-             "VolumeCorrectionMinimumRelativeError"})) {
-      request.volume_correction.minimum_relative_volume_error =
-          static_cast<svmp::FE::Real>(*relative_error);
-    }
-    if (const auto displacement_fraction = first_defined_double_parameter(
-            eq_params,
-            {"Volume_correction_maximum_interface_displacement_fraction",
-             "VolumeCorrectionMaximumInterfaceDisplacementFraction"})) {
-      request.volume_correction.maximum_interface_displacement_fraction =
-          static_cast<svmp::FE::Real>(*displacement_fraction);
-    }
-    if (const auto cumulative_displacement_fraction =
-            first_defined_double_parameter(
-                eq_params,
-                {"Volume_correction_maximum_cumulative_interface_displacement_fraction",
-                 "VolumeCorrectionMaximumCumulativeInterfaceDisplacementFraction"})) {
-      request.volume_correction
-          .maximum_cumulative_interface_displacement_fraction =
-          static_cast<svmp::FE::Real>(
-              *cumulative_displacement_fraction);
-    }
-
-    if (const auto enabled = first_defined_bool_parameter(
-            eq_params,
-            {"Enable_static_capillary_equilibrium_initialization",
-             "EnableStaticCapillaryEquilibriumInitialization",
-             "Initialize_discrete_static_capillary_equilibrium",
-             "InitializeDiscreteStaticCapillaryEquilibrium"})) {
-      request.static_capillary_equilibrium_enabled = *enabled;
-    }
-    if (const auto tolerance = first_defined_double_parameter(
-            eq_params,
-            {"Static_capillary_volume_tolerance",
-             "StaticCapillaryVolumeTolerance"})) {
-      request.static_capillary_equilibrium.volume_tolerance =
-          static_cast<svmp::FE::Real>(*tolerance);
-    }
-    if (const auto tolerance = first_defined_double_parameter(
-            eq_params,
-            {"Static_capillary_projected_gradient_tolerance",
-             "StaticCapillaryProjectedGradientTolerance"})) {
-      request.static_capillary_equilibrium
-          .projected_gradient_tolerance =
-          static_cast<svmp::FE::Real>(*tolerance);
-    }
-    if (const auto tolerance = first_defined_double_parameter(
-            eq_params,
-            {"Static_capillary_pressure_representability_max_residual_norm",
-             "StaticCapillaryPressureRepresentabilityMaxResidualNorm"})) {
-      request.static_capillary_equilibrium
-          .pressure_representability_max_residual_norm =
-          static_cast<svmp::FE::Real>(*tolerance);
-    }
-    if (const auto tolerance = first_defined_double_parameter(
-            eq_params,
-            {"Static_capillary_pressure_representability_max_relative_distance",
-             "StaticCapillaryPressureRepresentabilityMaxRelativeDistance"})) {
-      request.static_capillary_equilibrium
-          .pressure_representability_max_relative_distance =
-          static_cast<svmp::FE::Real>(*tolerance);
-    }
-    if (const auto tolerance = first_defined_double_parameter(
-            eq_params,
-            {"Static_capillary_physical_equilibrium_max_residual_norm",
-             "StaticCapillaryPhysicalEquilibriumMaxResidualNorm"})) {
-      request.static_capillary_equilibrium
-          .physical_equilibrium_max_residual_norm =
-          static_cast<svmp::FE::Real>(*tolerance);
-    }
-    if (const auto tolerance = first_defined_double_parameter(
-            eq_params,
-            {"Static_capillary_constant_pressure_kkt_max_residual_norm",
-             "StaticCapillaryConstantPressureKktMaxResidualNorm"})) {
-      request.static_capillary_equilibrium
-          .constant_pressure_kkt_max_residual_norm =
-          static_cast<svmp::FE::Real>(*tolerance);
-    }
-    if (const auto tolerance = first_defined_double_parameter(
-            eq_params,
-            {"Static_capillary_constant_pressure_kkt_max_relative_distance",
-             "StaticCapillaryConstantPressureKktMaxRelativeDistance"})) {
-      request.static_capillary_equilibrium
-          .constant_pressure_kkt_max_relative_distance =
-          static_cast<svmp::FE::Real>(*tolerance);
-    }
-    if (const auto scale = first_defined_double_parameter(
-            eq_params,
-            {"Static_capillary_finite_difference_reference_coefficient_scale",
-             "StaticCapillaryFiniteDifferenceReferenceCoefficientScale"})) {
-      request.static_capillary_equilibrium
-          .finite_difference_reference_coefficient_scale =
-          static_cast<svmp::FE::Real>(*scale);
-    }
-    if (const auto step = first_defined_double_parameter(
-            eq_params,
-            {"Static_capillary_finite_difference_relative_step",
-             "StaticCapillaryFiniteDifferenceRelativeStep"})) {
-      request.static_capillary_equilibrium
-          .finite_difference_relative_step =
-          static_cast<svmp::FE::Real>(*step);
-    }
-    if (const auto step = first_defined_double_parameter(
-            eq_params,
-            {"Static_capillary_minimum_finite_difference_step",
-             "StaticCapillaryMinimumFiniteDifferenceStep"})) {
-      request.static_capillary_equilibrium
-          .minimum_finite_difference_step =
-          static_cast<svmp::FE::Real>(*step);
-    }
-    if (const auto shrinks = first_defined_int_parameter(
-            eq_params,
-            {"Static_capillary_finite_difference_max_shrinks",
-             "StaticCapillaryFiniteDifferenceMaxShrinks"})) {
-      request.static_capillary_equilibrium
-          .finite_difference_max_shrinks = *shrinks;
-    }
-    if (const auto iterations = first_defined_int_parameter(
-            eq_params,
-            {"Static_capillary_max_iterations",
-             "StaticCapillaryMaxIterations"})) {
-      request.static_capillary_equilibrium.max_iterations =
-          *iterations;
-    }
-    if (const auto iterations = first_defined_int_parameter(
-            eq_params,
-            {"Static_capillary_max_line_search_iterations",
-             "StaticCapillaryMaxLineSearchIterations"})) {
-      request.static_capillary_equilibrium
-          .max_line_search_iterations = *iterations;
-    }
-    if (const auto transitions = first_defined_int_parameter(
-            eq_params,
-            {"Static_capillary_max_topology_epoch_transitions",
-             "StaticCapillaryMaxTopologyEpochTransitions"})) {
-      request.static_capillary_equilibrium
-          .max_topology_epoch_transitions = *transitions;
-    }
-    if (const auto inverse_stiffness =
-            first_defined_double_parameter(
-                eq_params,
-                {"Static_capillary_projected_gradient_inverse_stiffness",
-                 "StaticCapillaryProjectedGradientInverseStiffness"})) {
-      request.static_capillary_equilibrium
-          .projected_gradient_inverse_stiffness =
-          static_cast<svmp::FE::Real>(*inverse_stiffness);
-    }
-    if (const auto radius = first_defined_double_parameter(
-            eq_params,
-            {"Static_capillary_tangent_trust_radius",
-             "StaticCapillaryTangentTrustRadius"})) {
-      request.static_capillary_equilibrium.tangent_trust_radius =
-          static_cast<svmp::FE::Real>(*radius);
-    }
-    if (const auto maximum_update =
-            first_defined_double_parameter(
-                eq_params,
-                {"Static_capillary_maximum_coefficient_update_linf",
-                 "StaticCapillaryMaximumCoefficientUpdateLinf"})) {
-      request.static_capillary_equilibrium
-          .maximum_coefficient_update_linf =
-          static_cast<svmp::FE::Real>(*maximum_update);
-    }
-    if (const auto shrink = first_defined_double_parameter(
-            eq_params,
-            {"Static_capillary_line_search_shrink",
-             "StaticCapillaryLineSearchShrink"})) {
-      request.static_capillary_equilibrium.line_search_shrink =
-          static_cast<svmp::FE::Real>(*shrink);
-    }
-    if (const auto fraction = first_defined_double_parameter(
-            eq_params,
-            {"Static_capillary_armijo_fraction",
-             "StaticCapillaryArmijoFraction"})) {
-      request.static_capillary_equilibrium.armijo_fraction =
-          static_cast<svmp::FE::Real>(*fraction);
-    }
-    if (const auto history_size = first_defined_int_parameter(
-            eq_params,
-            {"Static_capillary_limited_memory_history_size",
-             "StaticCapillaryLimitedMemoryHistorySize"})) {
-      request.static_capillary_equilibrium
-          .limited_memory_history_size = *history_size;
-    }
-    if (const auto tolerance = first_defined_double_parameter(
-            eq_params,
-            {"Static_capillary_limited_memory_curvature_tolerance",
-             "StaticCapillaryLimitedMemoryCurvatureTolerance"})) {
-      request.static_capillary_equilibrium
-          .limited_memory_curvature_tolerance =
-          static_cast<svmp::FE::Real>(*tolerance);
-    }
-    if (const auto penalty = first_defined_double_parameter(
-            eq_params,
-            {"Static_capillary_minimum_volume_merit_penalty",
-             "StaticCapillaryMinimumVolumeMeritPenalty"})) {
-      request.static_capillary_equilibrium
-          .minimum_volume_merit_penalty =
-          static_cast<svmp::FE::Real>(*penalty);
-    }
-
-    if (const auto enabled =
-            first_defined_bool_parameter(
-                eq_params,
-                {"Enable_curvature_projection",
-                 "Enable_projected_curvature",
-                 "Project_level_set_curvature",
-                 "Maintain_projected_curvature",
-                 "Curvature_projection"})) {
-      request.curvature_projection_enabled = *enabled;
-    }
-    if (const auto curvature_field =
-            first_defined_parameter(
-                eq_params,
-                {"Curvature_field_name",
-                 "CurvatureFieldName",
-                 "Curvature_field",
-                 "CurvatureField",
-                 "Projected_curvature_field",
-                 "ProjectedCurvatureField",
-                 "Free_surface_curvature_field",
-                 "FreeSurfaceCurvatureField"})) {
-      request.curvature_field_name = trim_copy(*curvature_field);
-      request.curvature_projection_enabled = true;
-    }
-    if (const auto cadence =
-            first_defined_int_parameter(
-                eq_params,
-                {"Curvature_projection_cadence_steps",
-                 "CurvatureProjectionCadenceSteps",
-                 "Projected_curvature_cadence_steps",
-                 "ProjectedCurvatureCadenceSteps"})) {
-      request.curvature_projection_cadence_steps = *cadence;
-    }
-    if (const auto tol =
-            first_defined_double_parameter(
-                eq_params,
-                {"Curvature_projection_gradient_tolerance",
-                 "CurvatureProjectionGradientTolerance"})) {
-      request.curvature_projection.gradient_tolerance =
-          static_cast<svmp::FE::Real>(*tol);
-    }
-    if (const auto tol =
-            first_defined_double_parameter(
-                eq_params,
-                {"Curvature_projection_least_squares_rank_tolerance",
-                 "CurvatureProjectionLeastSquaresRankTolerance",
-                 "Curvature_projection_normal_equation_tolerance",
-                 "CurvatureProjectionNormalEquationTolerance"})) {
-      request.curvature_projection.normal_equation_tolerance =
-          static_cast<svmp::FE::Real>(*tol);
-    }
-    if (const auto residual =
-            first_defined_double_parameter(
-                eq_params,
-                {"Curvature_projection_max_normalized_fit_residual",
-                 "CurvatureProjectionMaxNormalizedFitResidual",
-                 "Projected_curvature_max_normalized_fit_residual",
-                 "ProjectedCurvatureMaxNormalizedFitResidual"})) {
-      request.curvature_projection.max_normalized_fit_residual =
-          static_cast<svmp::FE::Real>(*residual);
-    }
-    if (const auto rings =
-            first_defined_int_parameter(
-                eq_params,
-                {"Curvature_projection_neighbor_rings",
-                 "CurvatureProjectionNeighborRings"})) {
-      request.curvature_projection.max_neighbor_rings = *rings;
-    }
-    if (const auto max_neighbor =
-            first_defined_int_parameter(
-                eq_params,
-                {"Curvature_projection_max_neighbor_fallback_vertices",
-                 "CurvatureProjectionMaxNeighborFallbackVertices",
-                 "Projected_curvature_max_neighbor_fallback_vertices",
-                 "ProjectedCurvatureMaxNeighborFallbackVertices"})) {
-      request.curvature_projection.max_neighbor_fallback_vertices =
-          *max_neighbor;
-    }
-    if (const auto max_zero =
-            first_defined_int_parameter(
-                eq_params,
-                {"Curvature_projection_max_zero_fallback_vertices",
-                 "CurvatureProjectionMaxZeroFallbackVertices",
-                 "Projected_curvature_max_zero_fallback_vertices",
-                 "ProjectedCurvatureMaxZeroFallbackVertices"})) {
-      request.curvature_projection.max_zero_fallback_vertices = *max_zero;
-    }
-    if (const auto weight =
-            first_defined_double_parameter(
-                eq_params,
-                {"Curvature_projection_supplemental_sample_weight",
-                 "CurvatureProjectionSupplementalSampleWeight",
-                 "Projected_curvature_supplemental_sample_weight",
-                 "ProjectedCurvatureSupplementalSampleWeight",
-                 "Curvature_projection_interface_sample_weight",
-                 "CurvatureProjectionInterfaceSampleWeight"})) {
-      request.curvature_projection.supplemental_sample_weight =
-          static_cast<svmp::FE::Real>(*weight);
-    }
-    if (const auto mode =
-            first_defined_parameter(
-                eq_params,
-                {"Curvature_projection_recovery_mode",
-                 "CurvatureProjectionRecoveryMode",
-                 "Projected_curvature_recovery_mode",
-                 "ProjectedCurvatureRecoveryMode"})) {
-      request.curvature_projection.recovery_mode =
-          svmp::FE::level_set::parseLevelSetCurvatureRecoveryMode(*mode);
-    }
-    if (const auto coefficient =
-            first_defined_double_parameter(
-                eq_params,
-                {"Curvature_projection_kinematic_area_gradient_filter_coefficient",
-                 "CurvatureProjectionKinematicAreaGradientFilterCoefficient",
-                 "Projected_curvature_kinematic_area_gradient_filter_coefficient",
-                 "ProjectedCurvatureKinematicAreaGradientFilterCoefficient"})) {
-      request.curvature_projection
-          .kinematic_area_gradient_filter_coefficient =
-          static_cast<svmp::FE::Real>(*coefficient);
-    }
-    if (const auto width =
-            first_defined_double_parameter(
-                eq_params,
-                {"Curvature_projection_narrow_band_width",
-                 "CurvatureProjectionNarrowBandWidth",
-                 "Projected_curvature_narrow_band_width",
-                 "ProjectedCurvatureNarrowBandWidth",
-                 "Curvature_projection_interface_band_width",
-                 "CurvatureProjectionInterfaceBandWidth"})) {
-      request.curvature_projection.narrow_band_width =
-          static_cast<svmp::FE::Real>(*width);
-    }
-    if (const auto iterations =
-            first_defined_int_parameter(
-                eq_params,
-                {"Curvature_projection_smoothing_iterations",
-                 "CurvatureProjectionSmoothingIterations",
-                 "Projected_curvature_smoothing_iterations",
-                 "ProjectedCurvatureSmoothingIterations"})) {
-      request.curvature_projection.smoothing_iterations = *iterations;
-    }
-    if (const auto relaxation =
-            first_defined_double_parameter(
-                eq_params,
-                {"Curvature_projection_smoothing_relaxation",
-                 "CurvatureProjectionSmoothingRelaxation",
-                 "Projected_curvature_smoothing_relaxation",
-                 "ProjectedCurvatureSmoothingRelaxation"})) {
-      request.curvature_projection.smoothing_relaxation =
-          static_cast<svmp::FE::Real>(*relaxation);
-    }
-    if (const auto mode =
-            first_defined_parameter(
-                eq_params,
-                {"Curvature_projection_smoothing_mode",
-                 "CurvatureProjectionSmoothingMode",
-                 "Projected_curvature_smoothing_mode",
-                 "ProjectedCurvatureSmoothingMode",
-                 "Curvature_projection_regularization",
-                 "CurvatureProjectionRegularization"})) {
-      request.curvature_projection.smoothing_mode =
-          svmp::FE::level_set::parseLevelSetCurvatureSmoothingMode(*mode);
-    }
-    request.curvature_projection.isovalue =
-        static_cast<svmp::FE::Real>(request.isovalue);
-    request.volume_cut_request = matchingActiveCutVolumeRequest(
-        active_requests,
-        request.level_set_field_name,
-        request.isovalue);
-
-    if (request.bound_preserving.enabled ||
-        request.conservative_phase.enabled ||
-        request.reinitialization.enabled ||
-        request.volume_correction.enabled ||
-        request.static_capillary_equilibrium_enabled ||
-        request.curvature_projection_enabled) {
-      requests.push_back(std::move(request));
-    }
-  }
-  return requests;
-}
-
 void applyCoupledLevelSetFieldResidualCriteria(
     const svmp::FE::systems::FESystem& system,
     const Parameters& params,
@@ -7958,42 +7047,42 @@ void logLevelSetMaintenanceCoverageDiagnostics(
 
   std::set<std::string> transport_maintained_fields;
   for (const auto& request : maintenance_requests) {
-    if (request.reinitialization.enabled || request.volume_correction.enabled) {
-      transport_maintained_fields.insert(request.level_set_field_name);
+    if (request.configuration->transport.reinitialization.enabled || request.configuration->transport.volume_correction.enabled) {
+      transport_maintained_fields.insert(request.configuration->transport.level_set.field_name);
     }
     application::core::oopCout()
         << "[svMultiPhysics::Application] Level-set maintenance diagnostic"
-        << " field='" << request.level_set_field_name << "'"
+        << " field='" << request.configuration->transport.level_set.field_name << "'"
         << " reinitialization="
-        << (request.reinitialization.enabled ? "enabled" : "disabled")
+        << (request.configuration->transport.reinitialization.enabled ? "enabled" : "disabled")
         << " bound_preserving="
-        << (request.bound_preserving.enabled ? "enabled" : "disabled")
+        << (request.configuration->transport.bound_preserving.enabled ? "enabled" : "disabled")
         << " volume_correction="
-        << (request.volume_correction.enabled ? "enabled" : "disabled")
+        << (request.configuration->transport.volume_correction.enabled ? "enabled" : "disabled")
         << " curvature_projection="
-        << (request.curvature_projection_enabled ? "enabled" : "disabled")
+        << (request.configuration->curvature_projection_enabled ? "enabled" : "disabled")
         << " curvature_field='"
-        << request.curvature_field_name << "'"
+        << request.configuration->curvature_field_name << "'"
         << " conservation_diagnostic="
         << svmp::FE::level_set::levelSetConservationDiagnosticName(
                svmp::FE::level_set::levelSetConservationDiagnostic(
-                   request.transport_form,
-                   request.reinitialization,
-                   request.volume_correction))
+                   request.configuration->transport.transport_form,
+                   request.configuration->transport.reinitialization,
+                   request.configuration->transport.volume_correction))
         << " reinitialization_cadence="
-        << request.reinitialization.cadence_steps
+        << request.configuration->transport.reinitialization.cadence_steps
         << " volume_correction_cadence="
-        << request.volume_correction.cadence_steps
+        << request.configuration->transport.volume_correction.cadence_steps
         << " volume_correction_maximum_interface_displacement_fraction="
-        << request.volume_correction.maximum_interface_displacement_fraction
+        << request.configuration->transport.volume_correction.maximum_interface_displacement_fraction
         << " volume_correction_maximum_cumulative_interface_displacement_fraction="
-        << request.volume_correction
+        << request.configuration->transport.volume_correction
                .maximum_cumulative_interface_displacement_fraction
         << " curvature_projection_cadence="
-        << request.curvature_projection_cadence_steps
+        << request.configuration->curvature_projection_cadence_steps
         << " curvature_projection_recovery_mode="
         << svmp::FE::level_set::levelSetCurvatureRecoveryModeName(
-               request.curvature_projection.recovery_mode)
+               effectiveCurvatureProjectionOptions(request).recovery_mode)
         << std::endl;
   }
 
@@ -9993,14 +9082,14 @@ buildCurrentTwoFluidMomentumReconciliations(
       const auto& level_set_name =
           sim.fe_system->fieldRecord(declaration.level_set_field).name;
       const auto matches = [&](const auto& request) {
-        return request.conservative_phase.enabled &&
-               request.conservative_phase.reconcile_geometry &&
-               request.level_set_field_name == level_set_name &&
-               request.isovalue == declaration.level_set_isovalue &&
-               request.velocity.source ==
+        return request.configuration->transport.conservative_phase.enabled &&
+               request.configuration->transport.conservative_phase.reconcile_geometry &&
+               request.configuration->transport.level_set.field_name == level_set_name &&
+               request.configuration->isovalue == declaration.level_set_isovalue &&
+               request.configuration->transport.velocity.source ==
                    svmp::FE::level_set::LevelSetVelocitySource::
                        MaterialInterfacePhasePair &&
-               request.velocity.material_interface_marker ==
+               request.configuration->transport.velocity.material_interface_marker ==
                    declaration.interface_marker;
       };
       const auto count = static_cast<std::size_t>(std::count_if(
@@ -10015,7 +9104,7 @@ buildCurrentTwoFluidMomentumReconciliations(
       const auto request = std::find_if(
           maintenance_requests.begin(), maintenance_requests.end(), matches);
       const auto tolerance =
-          request->conservative_phase.momentum_relative_tolerance;
+          request->configuration->transport.conservative_phase.momentum_relative_tolerance;
       if (!std::isfinite(tolerance) ||
           !(tolerance > svmp::FE::Real{0.0})) {
         throw std::runtime_error(
@@ -13276,19 +12365,19 @@ svmp::FE::level_set::LevelSetVolumeOptions levelSetVolumeOptionsForMaintenance(
     const LevelSetMaintenanceRequest& request)
 {
   svmp::FE::level_set::LevelSetVolumeOptions options{};
-  options.isovalue = static_cast<svmp::FE::Real>(request.isovalue);
-  if (!request.volume_cut_request.has_value()) {
+  options.isovalue = static_cast<svmp::FE::Real>(request.configuration->isovalue);
+  if (!request.configuration->volume_cut_request.has_value()) {
     return options;
   }
 
-  const auto& cut_request = *request.volume_cut_request;
+  const auto& cut_request = *request.configuration->volume_cut_request;
   if (cut_request.geometry_mode !=
       svmp::FE::level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit) {
     return options;
   }
 
   options.use_generated_interface_quadrature = true;
-  options.level_set_field_name = request.level_set_field_name;
+  options.level_set_field_name = request.configuration->transport.level_set.field_name;
   options.generated_domain_id =
       cut_request.domain_id.empty()
           ? std::string{"volume_correction"}
@@ -13333,23 +12422,23 @@ void initializeLevelSetMaintenanceTargets(
       sim.time_history->u(),
       activeFESystemCommunicator(*sim.fe_system));
   for (auto& request : requests) {
-    if (!request.volume_correction.enabled ||
-        request.volume_target_initialized) {
+    if (!request.configuration->transport.volume_correction.enabled ||
+        request.runtime.volume_target_initialized) {
       continue;
     }
-    if (!request.volume_correction.use_initial_negative_volume_as_target) {
-      request.volume_target =
-          request.volume_correction.target_negative_volume;
-      request.volume_target_initialized = true;
+    if (!request.configuration->transport.volume_correction.use_initial_negative_volume_as_target) {
+      request.runtime.volume_target =
+          request.configuration->transport.volume_correction.target_negative_volume;
+      request.runtime.volume_target_initialized = true;
       continue;
     }
 
     const auto field =
-        sim.fe_system->findFieldByName(request.level_set_field_name);
+        sim.fe_system->findFieldByName(request.configuration->transport.level_set.field_name);
     if (field == svmp::FE::INVALID_FIELD_ID) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Level-set volume correction could not find field '" +
-          request.level_set_field_name + "'.");
+          request.configuration->transport.level_set.field_name + "'.");
     }
 
     const auto volume_options =
@@ -13362,14 +12451,14 @@ void initializeLevelSetMaintenanceTargets(
     if (!volume.success) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Initial level-set volume calculation failed for field '" +
-          request.level_set_field_name + "': " + volume.diagnostic);
+          request.configuration->transport.level_set.field_name + "': " + volume.diagnostic);
     }
-    request.volume_target = volume.negative_volume;
-    request.volume_target_initialized = true;
+    request.runtime.volume_target = volume.negative_volume;
+    request.runtime.volume_target_initialized = true;
     application::core::oopCout()
         << "[svMultiPhysics::Application] Level-set volume target field='"
-        << request.level_set_field_name << "' negative_volume="
-        << request.volume_target
+        << request.configuration->transport.level_set.field_name << "' negative_volume="
+        << request.runtime.volume_target
         << " volume_measure_source="
         << (volume_options.use_generated_interface_quadrature
                 ? "generated_interface_quadrature"
@@ -13384,7 +12473,7 @@ resolveLevelSetOpenBoundaries(
     const LevelSetMaintenanceRequest& request)
 {
   svmp::FE::level_set::LevelSetBoundaryOptions boundaries;
-  if (request.open_boundaries.empty()) {
+  if (request.configuration->open_boundaries.empty()) {
     return boundaries;
   }
   if (!sim.primary_mesh) {
@@ -13392,7 +12481,7 @@ resolveLevelSetOpenBoundaries(
         "[svMultiPhysics::Application] Bound-preserving level-set transport "
         "cannot resolve open boundary names without the active mesh.");
   }
-  for (const auto& open : request.open_boundaries) {
+  for (const auto& open : request.configuration->open_boundaries) {
     const auto marker = sim.primary_mesh->label_from_name(open.face_name);
     if (marker == svmp::INVALID_LABEL) {
       throw std::runtime_error(
@@ -13444,7 +12533,7 @@ applyLevelSetBoundPreservingCandidates(
 
   const bool any_enabled = std::any_of(
       requests.begin(), requests.end(), [](const auto& request) {
-        return request.bound_preserving.enabled;
+        return request.configuration->transport.bound_preserving.enabled;
       });
   if (!any_enabled) {
     return application_result;
@@ -13463,15 +12552,15 @@ applyLevelSetBoundPreservingCandidates(
   auto candidate = raw_candidate;
 
   for (const auto& request : requests) {
-    if (!request.bound_preserving.enabled) {
+    if (!request.configuration->transport.bound_preserving.enabled) {
       continue;
     }
     const auto field =
-        sim.fe_system->findFieldByName(request.level_set_field_name);
+        sim.fe_system->findFieldByName(request.configuration->transport.level_set.field_name);
     if (field == svmp::FE::INVALID_FIELD_ID) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Bound-preserving level-set transport "
-          "could not find field '" + request.level_set_field_name + "'.");
+          "could not find field '" + request.configuration->transport.level_set.field_name + "'.");
     }
     const auto boundaries = resolveLevelSetOpenBoundaries(sim, request);
     svmp::FE::systems::SystemStateView state;
@@ -13484,25 +12573,25 @@ applyLevelSetBoundPreservingCandidates(
     const auto safety =
         svmp::FE::level_set::evaluateLevelSetTransportSafety(
             *sim.fe_system,
-            request.velocity,
+            request.configuration->transport.velocity,
             boundaries,
-            request.bound_preserving,
+            request.configuration->transport.bound_preserving,
             state,
             static_cast<svmp::FE::Real>(history.dt()));
     const bool wall_violation =
-        request.bound_preserving.enforce_impermeable_boundaries &&
+        request.configuration->transport.bound_preserving.enforce_impermeable_boundaries &&
         safety.maximum_boundary_normal_velocity_ratio >
-            request.bound_preserving.impermeable_normal_velocity_tolerance;
+            request.configuration->transport.bound_preserving.impermeable_normal_velocity_tolerance;
     const bool courant_violation =
-        request.bound_preserving.enforce_courant_limit &&
+        request.configuration->transport.bound_preserving.enforce_courant_limit &&
         safety.maximum_courant >
-            request.bound_preserving.maximum_courant +
-                request.bound_preserving.courant_tolerance;
+            request.configuration->transport.bound_preserving.maximum_courant +
+                request.configuration->transport.bound_preserving.courant_tolerance;
     if (wall_violation) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Bound-preserving level-set transport "
           "rejected an incompatible impermeable-wall velocity for field '" +
-          request.level_set_field_name + "': marker=" +
+          request.configuration->transport.level_set.field_name + "': marker=" +
           std::to_string(safety.worst_boundary_marker) +
           " normal_velocity=" +
           std::to_string(safety.maximum_boundary_normal_velocity) +
@@ -13513,11 +12602,11 @@ applyLevelSetBoundPreservingCandidates(
     if (courant_violation) {
       application::core::oopCout()
           << "[svMultiPhysics::Application] Level-set candidate rejected"
-          << " field='" << request.level_set_field_name << "'"
+          << " field='" << request.configuration->transport.level_set.field_name << "'"
           << " reason=bound_preserving_courant_contract"
           << " courant=" << safety.maximum_courant
           << " maximum_courant="
-          << request.bound_preserving.maximum_courant
+          << request.configuration->transport.bound_preserving.maximum_courant
           << " minimum_cell_length=" << safety.minimum_cell_length
           << " maximum_speed=" << safety.maximum_speed
           << " dt=" << history.dt() << std::endl;
@@ -13527,7 +12616,7 @@ applyLevelSetBoundPreservingCandidates(
     if (!safety.success) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Level-set transport safety check "
-          "failed for field '" + request.level_set_field_name + "': " +
+          "failed for field '" + request.configuration->transport.level_set.field_name + "': " +
           safety.diagnostic);
     }
 
@@ -13537,7 +12626,7 @@ applyLevelSetBoundPreservingCandidates(
             *sim.fe_system,
             field,
             boundaries,
-            request.bound_preserving,
+            request.configuration->transport.bound_preserving,
             std::span<const svmp::FE::Real>(previous_solution),
             std::span<const svmp::FE::Real>(candidate),
             safety.maximum_courant,
@@ -13545,12 +12634,12 @@ applyLevelSetBoundPreservingCandidates(
     if (!limiter.success) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Bound-preserving level-set limiter "
-          "failed for field '" + request.level_set_field_name + "': " +
+          "failed for field '" + request.configuration->transport.level_set.field_name + "': " +
           limiter.diagnostic);
     }
     application::core::oopCout()
         << "[svMultiPhysics::Application] Level-set bound-preserving gate"
-        << " field='" << request.level_set_field_name << "'"
+        << " field='" << request.configuration->transport.level_set.field_name << "'"
         << " step=" << history.stepIndex() + 1
         << " courant=" << safety.maximum_courant
         << " wall_normal_ratio="
@@ -13579,7 +12668,7 @@ applyLevelSetBoundPreservingCandidates(
       // closed if they cannot produce an in-bounds nonlinear solution.
       application::core::oopCout()
           << "[svMultiPhysics::Application] Level-set candidate rejected"
-          << " field='" << request.level_set_field_name << "'"
+          << " field='" << request.configuration->transport.level_set.field_name << "'"
           << " reason=bound_preserving_limiter_requires_nonlinear_retry"
           << " limited_dofs=" << limiter.limited_dofs
           << " max_unrelaxed_violation="
@@ -13622,7 +12711,7 @@ void accountAppliedLevelSetVolumeCorrection(
   }
 
   auto reference_edge_length =
-      request.volume_correction_reference_minimum_edge_length;
+      request.runtime.volume_correction_reference_minimum_edge_length;
   if (!(reference_edge_length > svmp::FE::Real{0.0}) ||
       !std::isfinite(reference_edge_length)) {
     reference_edge_length = result.minimum_edge_length;
@@ -13631,14 +12720,14 @@ void accountAppliedLevelSetVolumeCorrection(
         std::min(reference_edge_length, result.minimum_edge_length);
   }
   const auto allowed_cumulative_displacement =
-      request.volume_correction
+      request.configuration->transport.volume_correction
           .maximum_cumulative_interface_displacement_fraction *
       reference_edge_length;
   const auto next_interface_displacement =
-      request.cumulative_volume_correction_interface_displacement +
+      request.runtime.cumulative_volume_correction_interface_displacement +
       result.max_interface_displacement;
   const auto next_contact_line_displacement =
-      request.cumulative_volume_correction_contact_line_displacement +
+      request.runtime.cumulative_volume_correction_contact_line_displacement +
       result.max_contact_line_displacement;
   const auto prospective_budget_consumption =
       std::max(next_interface_displacement, next_contact_line_displacement);
@@ -13666,13 +12755,13 @@ void accountAppliedLevelSetVolumeCorrection(
             << "[svMultiPhysics::Application] Level-set volume correction "
                "would exceed the cumulative interface/contact-line "
                "displacement budget for field '"
-            << request.level_set_field_name
+            << request.configuration->transport.level_set.field_name
             << "': previous_interface="
-            << request.cumulative_volume_correction_interface_displacement
+            << request.runtime.cumulative_volume_correction_interface_displacement
             << " event_interface=" << result.max_interface_displacement
             << " prospective_interface=" << next_interface_displacement
             << " previous_contact_line="
-            << request.cumulative_volume_correction_contact_line_displacement
+            << request.runtime.cumulative_volume_correction_contact_line_displacement
             << " event_contact_line=" << result.max_contact_line_displacement
             << " prospective_contact_line="
             << next_contact_line_displacement
@@ -13682,16 +12771,16 @@ void accountAppliedLevelSetVolumeCorrection(
             << " allowed=" << allowed_cumulative_displacement
             << " reference_minimum_edge_length=" << reference_edge_length
             << " maximum_cumulative_fraction="
-            << request.volume_correction
+            << request.configuration->transport.volume_correction
                    .maximum_cumulative_interface_displacement_fraction;
     throw std::runtime_error(message.str());
   }
 
-  request.volume_correction_reference_minimum_edge_length =
+  request.runtime.volume_correction_reference_minimum_edge_length =
       reference_edge_length;
-  request.cumulative_volume_correction_interface_displacement =
+  request.runtime.cumulative_volume_correction_interface_displacement =
       next_interface_displacement;
-  request.cumulative_volume_correction_contact_line_displacement =
+  request.runtime.cumulative_volume_correction_contact_line_displacement =
       next_contact_line_displacement;
 }
 
@@ -15707,7 +14796,7 @@ stageLevelSetProjectionReinitialization(
         accepted_contact_stage_constraints,
     std::span<const svmp::FE::Real> accepted_contact_stage_solution)
 {
-  if (request.reinitialization.method !=
+  if (request.configuration->transport.reinitialization.method !=
       svmp::FE::level_set::LevelSetReinitializationMethod::Projection) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Runtime level-set reinitialization currently supports Projection only.");
@@ -15813,22 +14902,22 @@ stageLevelSetProjectionReinitialization(
       svmp::FE::level_set::repairLevelSetSignedDistanceByProjection(
           *sim.fe_system,
           field,
-          request.reinitialization,
+          request.configuration->transport.reinitialization,
           reinitialization_input,
           repaired,
           staged.wall_context.local_constraints);
   assertCollectiveWallAwareRepairResult(
-      staged.repair, comm, request.level_set_field_name);
+      staged.repair, comm, request.configuration->transport.level_set.field_name);
   if ((staged.repair.wall_contact_constraints > 0u) !=
       staged.wall_context.has_global_contact_constraints) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Wall-aware level-set reinitialization did not retain the complete accepted contact constraint set for field '" +
-        request.level_set_field_name + "'.");
+        request.configuration->transport.level_set.field_name + "'.");
   }
   if (!staged.repair.success) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Level-set reinitialization failed for field '" +
-        request.level_set_field_name + "': " + staged.repair.diagnostic);
+        request.configuration->transport.level_set.field_name + "': " + staged.repair.diagnostic);
   }
   if (!staged.repair.converged) {
     return staged;
@@ -15956,30 +15045,30 @@ bool applyLevelSetMaintenance(
     // step transaction.  Repeating it here after acceptance would expose an
     // intermediate geometry and apply a second representation change outside
     // the phase-mass reconciliation contract.
-    if (request.conservative_phase.enabled) {
+    if (request.configuration->transport.conservative_phase.enabled) {
       continue;
     }
     const int completed_step = history.stepIndex();
     const bool do_reinit =
         svmp::FE::level_set::shouldReinitializeLevelSet(
-            request.reinitialization,
+            request.configuration->transport.reinitialization,
             completed_step);
     const bool do_volume =
         svmp::FE::level_set::shouldApplyLevelSetVolumeCorrection(
-            request.volume_correction,
+            request.configuration->transport.volume_correction,
             completed_step);
     if (!do_reinit && !do_volume) {
       continue;
     }
 
     const auto field =
-        sim.fe_system->findFieldByName(request.level_set_field_name);
+        sim.fe_system->findFieldByName(request.configuration->transport.level_set.field_name);
     if (globalMinDouble(
             field != svmp::FE::INVALID_FIELD_ID ? 1.0 : 0.0,
             activeFESystemCommunicator(*sim.fe_system)) != 1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Level-set maintenance could not find field '" +
-          request.level_set_field_name + "'.");
+          request.configuration->transport.level_set.field_name + "'.");
     }
 
     if (do_reinit) {
@@ -16005,7 +15094,7 @@ bool applyLevelSetMaintenance(
         std::ostringstream log;
         log
             << "[svMultiPhysics::Application] Level-set reinitialization skipped field='"
-            << request.level_set_field_name << "' step=" << completed_step
+            << request.configuration->transport.level_set.field_name << "' step=" << completed_step
             << " reason=nonconverged"
             << " iterations=" << result.iterations
             << " max_iteration_residual="
@@ -16077,7 +15166,7 @@ bool applyLevelSetMaintenance(
         std::ostringstream log;
         log
           << "[svMultiPhysics::Application] Level-set reinitialized field='"
-          << request.level_set_field_name << "' step=" << completed_step
+          << request.configuration->transport.level_set.field_name << "' step=" << completed_step
           << " repaired_dofs=" << result.repaired_dofs
           << " preserved_dofs=" << result.preserved_dofs
           << " preserve_band_width=" << result.preserve_band_width
@@ -16146,23 +15235,23 @@ bool applyLevelSetMaintenance(
       const auto before_correction = fe_solution;
       const bool includes_other_maintenance =
           modified_level_set_fields.contains(field);
-      if (!request.volume_target_initialized) {
-        request.volume_target =
-            request.volume_correction.target_negative_volume;
-        request.volume_target_initialized = true;
+      if (!request.runtime.volume_target_initialized) {
+        request.runtime.volume_target =
+            request.configuration->transport.volume_correction.target_negative_volume;
+        request.runtime.volume_target_initialized = true;
       }
       const auto volume_options =
           levelSetVolumeOptionsForMaintenance(request);
       svmp::FE::level_set::LevelSetGlobalShiftCorrectionOptions correction_options{};
-      correction_options.target_negative_volume = request.volume_target;
+      correction_options.target_negative_volume = request.runtime.volume_target;
       correction_options.volume_tolerance =
-          request.volume_correction.volume_tolerance;
+          request.configuration->transport.volume_correction.volume_tolerance;
       correction_options.max_iterations =
-          request.volume_correction.max_iterations;
+          request.configuration->transport.volume_correction.max_iterations;
       correction_options.minimum_relative_volume_error =
-          request.volume_correction.minimum_relative_volume_error;
+          request.configuration->transport.volume_correction.minimum_relative_volume_error;
       correction_options.maximum_interface_displacement_fraction =
-          request.volume_correction.maximum_interface_displacement_fraction;
+          request.configuration->transport.volume_correction.maximum_interface_displacement_fraction;
 
       std::vector<svmp::FE::Real> corrected;
       auto result =
@@ -16176,7 +15265,7 @@ bool applyLevelSetMaintenance(
       if (!result.success) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Level-set volume correction failed for field '" +
-            request.level_set_field_name + "': " + result.diagnostic);
+            request.configuration->transport.level_set.field_name + "': " + result.diagnostic);
       }
       if (result.correction_applied) {
         // The low-level correction has not mutated the accepted coefficients;
@@ -16195,7 +15284,7 @@ bool applyLevelSetMaintenance(
         staged_volume_corrections.push_back(
             LevelSetVolumeCorrectionMaintenanceEvent{
                 .level_set_field = field,
-                .level_set_field_name = request.level_set_field_name,
+                .level_set_field_name = request.configuration->transport.level_set.field_name,
                 .completed_step = completed_step,
                 .includes_other_maintenance =
                     includes_other_maintenance,
@@ -16215,7 +15304,7 @@ bool applyLevelSetMaintenance(
       std::ostringstream log;
       log << std::setprecision(17)
           << "[svMultiPhysics::Application] Level-set volume corrected field='"
-          << request.level_set_field_name << "' step=" << completed_step
+          << request.configuration->transport.level_set.field_name << "' step=" << completed_step
           << " target_negative_volume=" << result.target_negative_volume
           << " initial_negative_volume=" << result.initial_negative_volume
           << " initial_volume_error="
@@ -16259,23 +15348,23 @@ bool applyLevelSetMaintenance(
           << result.maximum_topology_stable_shift
           << " minimum_edge_length=" << result.minimum_edge_length
           << " cumulative_interface_displacement="
-          << request.cumulative_volume_correction_interface_displacement
+          << request.runtime.cumulative_volume_correction_interface_displacement
           << " cumulative_contact_line_displacement="
-          << request.cumulative_volume_correction_contact_line_displacement
+          << request.runtime.cumulative_volume_correction_contact_line_displacement
           << " cumulative_displacement_budget_consumption="
           << std::max(
-                 request.cumulative_volume_correction_interface_displacement,
-                 request.cumulative_volume_correction_contact_line_displacement)
+                 request.runtime.cumulative_volume_correction_interface_displacement,
+                 request.runtime.cumulative_volume_correction_contact_line_displacement)
           << " cumulative_displacement_limiting_path="
-          << (request.cumulative_volume_correction_contact_line_displacement >
-                      request.cumulative_volume_correction_interface_displacement
+          << (request.runtime.cumulative_volume_correction_contact_line_displacement >
+                      request.runtime.cumulative_volume_correction_interface_displacement
                   ? "contact_line"
                   : "interface")
           << " cumulative_displacement_reference_minimum_edge_length="
-          << request.volume_correction_reference_minimum_edge_length
+          << request.runtime.volume_correction_reference_minimum_edge_length
           << " maximum_cumulative_interface_displacement="
-          << (request.volume_correction_reference_minimum_edge_length *
-              request.volume_correction
+          << (request.runtime.volume_correction_reference_minimum_edge_length *
+              request.configuration->transport.volume_correction
                   .maximum_cumulative_interface_displacement_fraction)
           << " status='" << result.diagnostic << "'"
           << " iterations=" << result.iterations
@@ -17213,18 +16302,18 @@ collectLevelSetCurvatureSupplementalSamples(
 bool shouldProjectLevelSetCurvature(const LevelSetMaintenanceRequest& request,
                                     int step)
 {
-  if (!request.curvature_projection_enabled) {
+  if (!request.configuration->curvature_projection_enabled) {
     return false;
   }
-  if (request.curvature_field_name.empty()) {
+  if (request.configuration->curvature_field_name.empty()) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Level-set curvature projection requires Curvature_field_name.");
   }
-  if (request.curvature_projection_cadence_steps <= 0) {
+  if (request.configuration->curvature_projection_cadence_steps <= 0) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Curvature_projection_cadence_steps must be positive.");
   }
-  return step <= 0 || step % request.curvature_projection_cadence_steps == 0;
+  return step <= 0 || step % request.configuration->curvature_projection_cadence_steps == 0;
 }
 
 void mixCurvatureSignature(std::uint64_t& seed,
@@ -17314,7 +16403,7 @@ void mixCurvatureProjectionOptionsSignature(
 std::string curvatureProjectionCacheKey(
     const LevelSetMaintenanceRequest& request)
 {
-  return request.level_set_field_name + '\n' + request.curvature_field_name;
+  return request.configuration->transport.level_set.field_name + '\n' + request.configuration->curvature_field_name;
 }
 
 void mixCurvatureProjectionCutRuleSignature(
@@ -17382,10 +16471,10 @@ std::optional<int> generatedCutContextMarkerForMaintenance(
     const svmp::FE::systems::FESystem& system,
     const LevelSetMaintenanceRequest& request)
 {
-  if (!request.volume_cut_request.has_value()) {
+  if (!request.configuration->volume_cut_request.has_value()) {
     return std::nullopt;
   }
-  const auto& cut_request = *request.volume_cut_request;
+  const auto& cut_request = *request.configuration->volume_cut_request;
   return application::core::resolvedActiveCutVolumeInterfaceMarker(
       system, cut_request);
 }
@@ -17496,13 +16585,13 @@ bool requiresQuadraticTotalEnergyTractionInterfaceRules(
     const svmp::FE::systems::FESystem& system,
     const LevelSetMaintenanceRequest& request)
 {
-  if (!request.volume_cut_request.has_value()) {
+  if (!request.configuration->volume_cut_request.has_value()) {
     return false;
   }
   const auto level_set_field =
-      system.findFieldByName(request.level_set_field_name);
+      system.findFieldByName(request.configuration->transport.level_set.field_name);
   const auto curvature_field =
-      system.findFieldByName(request.curvature_field_name);
+      system.findFieldByName(request.configuration->curvature_field_name);
   const auto declarations =
       system.freeSurfaceDiscreteFunctionalDeclarations();
   return std::any_of(
@@ -17544,15 +16633,16 @@ void bindKinematicAreaGradientTractionMaintenance(
 
   std::vector<unsigned char> matched(declarations.size(), 0u);
   for (auto& request : requests) {
-    if (request.curvature_projection.recovery_mode !=
+    const auto curvature_options = effectiveCurvatureProjectionOptions(request);
+    if (curvature_options.recovery_mode !=
         svmp::FE::level_set::LevelSetCurvatureRecoveryMode::
             KinematicAreaGradient) {
       continue;
     }
     const auto level_set_field =
-        system.findFieldByName(request.level_set_field_name);
+        system.findFieldByName(request.configuration->transport.level_set.field_name);
     const auto curvature_field =
-        system.findFieldByName(request.curvature_field_name);
+        system.findFieldByName(request.configuration->curvature_field_name);
     std::vector<std::size_t> candidates;
     for (std::size_t index = 0u; index < declarations.size(); ++index) {
       const auto& declaration = declarations[index];
@@ -17571,13 +16661,13 @@ void bindKinematicAreaGradientTractionMaintenance(
       throw std::runtime_error(
           "[svMultiPhysics::Application] Kinematic-area-gradient recovery requires exactly one matching total-energy traction declaration.");
     }
-    if (!request.curvature_projection_enabled ||
-        request.curvature_field_name.empty() ||
-        !request.volume_cut_request.has_value()) {
+    if (!request.configuration->curvature_projection_enabled ||
+        request.configuration->curvature_field_name.empty() ||
+        !request.configuration->volume_cut_request.has_value()) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Kinematic-area-gradient recovery requires enabled curvature maintenance, a target field, and an authoritative active cut-volume request.");
     }
-    if (request.curvature_projection
+    if (curvature_options
             .kinematic_area_gradient_filter_coefficient != 0.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Total-energy traction requires Curvature_projection_kinematic_area_gradient_filter_coefficient=0 so the recovered curvature is the exact consistent-mass representation of the discrete functional derivative.");
@@ -17592,7 +16682,7 @@ void bindKinematicAreaGradientTractionMaintenance(
     }
     const auto declaration_index = candidates.front();
     const auto& declaration = declarations[declaration_index];
-    const auto& cut_request = *request.volume_cut_request;
+    const auto& cut_request = *request.configuration->volume_cut_request;
     if (declaration.interface_marker != *marker ||
         declaration.capillary_balance_qualification !=
             svmp::FE::systems::FreeSurfaceCapillaryBalanceQualification::
@@ -17600,9 +16690,9 @@ void bindKinematicAreaGradientTractionMaintenance(
         !declaration.endpoint_functional_power_enabled ||
         declaration.curvature_field != curvature_field ||
         declaration.geometry_domain_id != cut_request.domain_id ||
-        request.level_set_field_name !=
+        request.configuration->transport.level_set.field_name !=
             cut_request.level_set_field_name ||
-        request.isovalue != cut_request.isovalue ||
+        request.configuration->isovalue != cut_request.isovalue ||
         declaration.parameters.liquid_side !=
             cutIntegrationSide(cut_request.active_side) ||
         cut_request.geometry_mode !=
@@ -17655,7 +16745,7 @@ void bindKinematicAreaGradientTractionMaintenance(
       }
     }
     const auto& configured_walls =
-        request.curvature_projection
+        curvature_options
             .kinematic_area_gradient_young_walls;
     if (!configured_walls.empty()) {
       const bool same = configured_walls.size() == young_walls.size() &&
@@ -17673,12 +16763,10 @@ void bindKinematicAreaGradientTractionMaintenance(
             "[svMultiPhysics::Application] Curvature maintenance cannot override the Young-wall list owned by the total-energy traction declaration.");
       }
     }
-    request.curvature_projection
-        .kinematic_area_gradient_negative_liquid_side =
+    request.bindings.negative_liquid_side =
         declaration.parameters.liquid_side ==
         svmp::FE::geometry::CutIntegrationSide::Negative;
-    request.curvature_projection
-        .kinematic_area_gradient_young_walls =
+    request.bindings.young_walls =
         std::move(young_walls);
     matched[declaration_index] = 1u;
   }
@@ -17735,12 +16823,12 @@ std::uint64_t curvatureProjectionCutRequestSignature(
     const LevelSetMaintenanceRequest& request)
 {
   std::uint64_t seed = 0x9e3779b97f4a7c15ull;
-  mixCurvatureSignature(seed, request.volume_cut_request.has_value() ? 1u : 0u);
-  if (!request.volume_cut_request.has_value()) {
+  mixCurvatureSignature(seed, request.configuration->volume_cut_request.has_value() ? 1u : 0u);
+  if (!request.configuration->volume_cut_request.has_value()) {
     return seed;
   }
 
-  const auto& cut_request = *request.volume_cut_request;
+  const auto& cut_request = *request.configuration->volume_cut_request;
   mixCurvatureSignatureString(seed, cut_request.level_set_field_name);
   mixCurvatureSignatureString(seed, cut_request.domain_id);
   mixCurvatureSignatureReal(
@@ -17899,13 +16987,13 @@ std::uint64_t curvatureProjectionInputSignature(
     std::uint64_t mesh_coordinate_configuration_key)
 {
   std::uint64_t seed = 0xcbf29ce484222325ull;
-  mixCurvatureSignatureString(seed, request.level_set_field_name);
-  mixCurvatureSignatureString(seed, request.curvature_field_name);
+  mixCurvatureSignatureString(seed, request.configuration->transport.level_set.field_name);
+  mixCurvatureSignatureString(seed, request.configuration->curvature_field_name);
   mixCurvatureSignatureReal(seed,
-                            static_cast<svmp::FE::Real>(request.isovalue));
+                            static_cast<svmp::FE::Real>(request.configuration->isovalue));
   mixCurvatureSignature(seed,
                         static_cast<std::uint64_t>(
-                            request.curvature_projection_cadence_steps));
+                            request.configuration->curvature_projection_cadence_steps));
   mixCurvatureProjectionOptionsSignature(seed, options);
   mixCurvatureSignature(seed, cut_context_signature);
   mixCurvatureSignature(seed, static_cast<std::uint64_t>(mesh_vertices));
@@ -18010,13 +17098,13 @@ std::optional<std::uint64_t> curvatureProjectionFastInputSignature(
   }
 
   std::uint64_t seed = 0x6a09e667f3bcc909ull;
-  mixCurvatureSignatureString(seed, request.level_set_field_name);
-  mixCurvatureSignatureString(seed, request.curvature_field_name);
+  mixCurvatureSignatureString(seed, request.configuration->transport.level_set.field_name);
+  mixCurvatureSignatureString(seed, request.configuration->curvature_field_name);
   mixCurvatureSignatureReal(seed,
-                            static_cast<svmp::FE::Real>(request.isovalue));
+                            static_cast<svmp::FE::Real>(request.configuration->isovalue));
   mixCurvatureSignature(seed,
                         static_cast<std::uint64_t>(
-                            request.curvature_projection_cadence_steps));
+                            request.configuration->curvature_projection_cadence_steps));
   mixCurvatureProjectionOptionsSignature(seed, options);
   mixCurvatureSignature(seed, cut_context_signature);
   mixCurvatureSignature(seed, static_cast<std::uint64_t>(mesh_vertices));
@@ -18060,10 +17148,11 @@ void logLevelSetCurvatureProjectionDiagnostic(
     std::size_t cut_signature_cache_hits = 0u,
     std::size_t cut_signature_cache_misses = 0u)
 {
+  const auto curvature_options = effectiveCurvatureProjectionOptions(request);
   application::core::oopCout()
       << "[svMultiPhysics::Application] Level-set curvature projected"
-      << " field='" << request.level_set_field_name << "'"
-      << " curvature_field='" << request.curvature_field_name << "'"
+      << " field='" << request.configuration->transport.level_set.field_name << "'"
+      << " curvature_field='" << request.configuration->curvature_field_name << "'"
       << " step=" << step
       << " reason=" << reason
       << " cache=" << cache_state
@@ -18159,10 +17248,10 @@ void logLevelSetCurvatureProjectionDiagnostic(
       << " skipped_far_vertices=" << result.skipped_far_vertices
       << " fallback_vertices=" << result.fallback_vertices
       << " max_neighbor_fallback_vertices="
-      << request.curvature_projection.max_neighbor_fallback_vertices
+      << curvature_options.max_neighbor_fallback_vertices
       << " zero_fallback_vertices=" << result.zero_fallback_vertices
       << " max_zero_fallback_vertices="
-      << request.curvature_projection.max_zero_fallback_vertices
+      << curvature_options.max_zero_fallback_vertices
       << " insufficient_stencil_vertices="
       << result.insufficient_stencil_vertices
       << " singular_stencil_vertices=" << result.singular_stencil_vertices
@@ -18269,12 +17358,12 @@ std::size_t projectLevelSetCurvatureFieldsFromState(
   std::size_t updated_fields = 0u;
 
   for (const auto& request : requests) {
-    if (!request.curvature_projection_enabled) {
+    if (!request.configuration->curvature_projection_enabled) {
       continue;
     }
     const bool cadence_due =
         !honor_cadence || shouldProjectLevelSetCurvature(request, step);
-    if (!honor_cadence && request.curvature_field_name.empty()) {
+    if (!honor_cadence && request.configuration->curvature_field_name.empty()) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Level-set curvature projection requires Curvature_field_name.");
     }
@@ -18290,14 +17379,14 @@ std::size_t projectLevelSetCurvatureFieldsFromState(
       continue;
     }
 
-    const auto phi_field = system.findFieldByName(request.level_set_field_name);
-    const auto kappa_field = system.findFieldByName(request.curvature_field_name);
+    const auto phi_field = system.findFieldByName(request.configuration->transport.level_set.field_name);
+    const auto kappa_field = system.findFieldByName(request.configuration->curvature_field_name);
     if (phi_field == svmp::FE::INVALID_FIELD_ID ||
         kappa_field == svmp::FE::INVALID_FIELD_ID) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Level-set curvature projection could not find level-set field '" +
-              request.level_set_field_name + "' or curvature field '" +
-              request.curvature_field_name + "'.");
+              request.configuration->transport.level_set.field_name + "' or curvature field '" +
+              request.configuration->curvature_field_name + "'.");
     }
 
     auto reapply_cached_curvature_if_needed =
@@ -18310,7 +17399,7 @@ std::size_t projectLevelSetCurvatureFieldsFromState(
         throw std::runtime_error(
             "[svMultiPhysics::Application] Cached level-set curvature projection "
             "has an incompatible vertex count for field '" +
-            request.level_set_field_name + "'.");
+            request.configuration->transport.level_set.field_name + "'.");
       }
       const auto current_revision = system.prescribedFieldRevision(kappa_field);
       if (current_revision == entry.target_prescribed_revision) {
@@ -18328,8 +17417,8 @@ std::size_t projectLevelSetCurvatureFieldsFromState(
           system.prescribedFieldRevision(kappa_field);
     };
 
-    auto options = request.curvature_projection;
-    options.isovalue = static_cast<svmp::FE::Real>(request.isovalue);
+    auto options = effectiveCurvatureProjectionOptions(request);
+    options.isovalue = static_cast<svmp::FE::Real>(request.configuration->isovalue);
     const auto& mesh_access = system.meshAccess();
     const bool mesh_revisions_available =
         mesh_access.revisionTrackingAvailable();
@@ -18441,9 +17530,9 @@ std::size_t projectLevelSetCurvatureFieldsFromState(
             phi_field,
             options.isovalue,
             interface_marker,
-            request.volume_cut_request.has_value()
+            request.configuration->volume_cut_request.has_value()
                 ? std::optional<svmp::FE::geometry::CutIntegrationSide>(
-                      cutIntegrationSide(request.volume_cut_request->active_side))
+                      cutIntegrationSide(request.configuration->volume_cut_request->active_side))
                 : std::nullopt,
             evaluated_state_source_revision);
     std::vector<svmp::FE::Real> curvature;
@@ -18492,8 +17581,8 @@ std::size_t projectLevelSetCurvatureFieldsFromState(
       application::core::oopCout()
           << "[svMultiPhysics::Application] Level-set curvature projection "
           << "overriding cadence because level-set/cut signature changed"
-          << " field='" << request.level_set_field_name << "'"
-          << " curvature_field='" << request.curvature_field_name << "'"
+          << " field='" << request.configuration->transport.level_set.field_name << "'"
+          << " curvature_field='" << request.configuration->curvature_field_name << "'"
           << " step=" << step
           << " reason=" << reason
           << " diagnostic=curvature_projection_cadence_override_changed_signature"
@@ -18567,8 +17656,8 @@ std::size_t projectLevelSetCurvatureFieldsFromState(
         application::core::oopCout()
             << "[svMultiPhysics::Application] WARNING Level-set curvature projection"
             << " failed residual screening and reused cached curvature"
-            << " field='" << request.level_set_field_name << "'"
-            << " curvature_field='" << request.curvature_field_name << "'"
+            << " field='" << request.configuration->transport.level_set.field_name << "'"
+            << " curvature_field='" << request.configuration->curvature_field_name << "'"
             << " step=" << step
             << " reason=" << reason
             << " diagnostic=curvature_projection_cached_after_failed_trial"
@@ -18590,7 +17679,7 @@ std::size_t projectLevelSetCurvatureFieldsFromState(
       }
       throw std::runtime_error(
           "[svMultiPhysics::Application] Level-set curvature projection failed for field '" +
-          request.level_set_field_name + "': " + result.diagnostic);
+          request.configuration->transport.level_set.field_name + "': " + result.diagnostic);
     }
 
     setScalarPrescribedVertexFieldFromValues(
@@ -22708,26 +21797,26 @@ void requireConservativePhaseGeometryBinding(
     const svmp::FE::systems::FESystem& system,
     const LevelSetMaintenanceRequest& request)
 {
-  if (!request.volume_cut_request.has_value()) {
+  if (!request.configuration->volume_cut_request.has_value()) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Conservative phase transport requires one matching authoritative active cut-volume request for level-set field '" +
-        request.level_set_field_name + "'.");
+        request.configuration->transport.level_set.field_name + "'.");
   }
   const auto requested_side = conservativePhaseSide(
-      request.conservative_phase);
+      request.configuration->transport.conservative_phase);
   const auto active_side = cutIntegrationSide(
-      request.volume_cut_request->active_side);
+      request.configuration->volume_cut_request->active_side);
   if (requested_side != active_side) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Conservative phase liquid side disagrees with the active cut-volume side for level-set field '" +
-        request.level_set_field_name + "'.");
+        request.configuration->transport.level_set.field_name + "'.");
   }
   const auto marker = generatedCutContextMarkerForMaintenance(
       system, request);
   if (!marker.has_value()) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Conservative phase transport could not resolve an authoritative generated interface marker for level-set field '" +
-        request.level_set_field_name + "'.");
+        request.configuration->transport.level_set.field_name + "'.");
   }
 }
 
@@ -22738,19 +21827,19 @@ requireCurrentConservativePhaseGraph(
     bool allow_graph_rebuild = true)
 {
   const auto phase_field = system.findFieldByName(
-      request.conservative_phase.liquid_indicator.field_name);
+      request.configuration->transport.conservative_phase.liquid_indicator.field_name);
   if (phase_field == svmp::FE::INVALID_FIELD_ID) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Conservative phase transport could not find field '" +
-        request.conservative_phase.liquid_indicator.field_name + "'.");
+        request.configuration->transport.conservative_phase.liquid_indicator.field_name + "'.");
   }
   const auto& mesh = system.meshAccess();
   const auto& dofs = system.fieldDofHandler(phase_field);
   const auto graph_is_current = [&] {
-    if (!request.conservative_phase_graph.has_value()) {
+    if (!request.runtime.conservative_phase_graph.has_value()) {
       return false;
     }
-    const auto& graph = *request.conservative_phase_graph;
+    const auto& graph = *request.runtime.conservative_phase_graph;
     return graph.success &&
            graph.geometry_revision == mesh.geometryRevision() &&
            graph.topology_revision == mesh.topologyRevision() &&
@@ -22770,19 +21859,19 @@ requireCurrentConservativePhaseGraph(
     }
     svmp::FE::level_set::LevelSetP1PhaseGraphOptions graph_options;
     graph_options.invariant_tolerance =
-        request.conservative_phase.invariant_tolerance;
+        request.configuration->transport.conservative_phase.invariant_tolerance;
     auto graph =
         svmp::FE::level_set::buildLevelSetP1PhaseTransportGraph(
             system, phase_field, graph_options);
     if (!graph.success) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Conservative phase graph assembly failed for field '" +
-          request.conservative_phase.liquid_indicator.field_name +
+          request.configuration->transport.conservative_phase.liquid_indicator.field_name +
           "': " + graph.diagnostic);
     }
-    request.conservative_phase_graph = std::move(graph);
+    request.runtime.conservative_phase_graph = std::move(graph);
   }
-  return *request.conservative_phase_graph;
+  return *request.runtime.conservative_phase_graph;
 }
 
 svmp::FE::level_set::LevelSetP1PhaseProjectionOptions
@@ -22799,9 +21888,9 @@ conservativePhaseProjectionOptions(
   svmp::FE::level_set::LevelSetP1PhaseProjectionOptions options;
   options.interface_marker = *marker;
   options.liquid_side = conservativePhaseSide(
-      request.conservative_phase);
+      request.configuration->transport.conservative_phase);
   options.invariant_tolerance =
-      request.conservative_phase.invariant_tolerance;
+      request.configuration->transport.conservative_phase.invariant_tolerance;
   return options;
 }
 
@@ -22815,7 +21904,7 @@ projectCurrentConservativePhaseGeometry(
   auto& graph = requireCurrentConservativePhaseGraph(
       system, request, allow_graph_rebuild);
   const auto phase_field = system.findFieldByName(
-      request.conservative_phase.liquid_indicator.field_name);
+      request.configuration->transport.conservative_phase.liquid_indicator.field_name);
   const auto projection_options = conservativePhaseProjectionOptions(
       system, request);
   return svmp::FE::level_set::
@@ -22873,8 +21962,8 @@ void initializeConservativePhaseStates(
   auto& history = *sim.time_history;
   const auto comm = activeFESystemCommunicator(system);
   for (auto& request : requests) {
-    if (!request.conservative_phase.enabled ||
-        request.conservative_phase_initialized) {
+    if (!request.configuration->transport.conservative_phase.enabled ||
+        request.runtime.conservative_phase_initialized) {
       continue;
     }
     const auto projection = projectCurrentConservativePhaseGeometry(
@@ -22882,11 +21971,11 @@ void initializeConservativePhaseStates(
     if (!projection.success) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Initial conservative phase projection failed for field '" +
-          request.conservative_phase.liquid_indicator.field_name +
+          request.configuration->transport.conservative_phase.liquid_indicator.field_name +
           "': " + projection.diagnostic);
     }
     const auto phase_field = system.findFieldByName(
-        request.conservative_phase.liquid_indicator.field_name);
+        request.configuration->transport.conservative_phase.liquid_indicator.field_name);
     auto current = gatherFeOrderedSolution(history.u(), comm);
     assignConservativePhaseSlice(
         system, phase_field, projection.liquid_indicator, current);
@@ -22913,14 +22002,14 @@ void initializeConservativePhaseStates(
       zeroConservativePhaseRateSlice(system, phase_field, history.uDDot());
     }
     history.updateGhosts();
-    request.conservative_phase_initialized = true;
+    request.runtime.conservative_phase_initialized = true;
     application::core::oopCout()
         << "[svMultiPhysics::Application] Conservative phase initialized"
         << " field='"
-        << request.conservative_phase.liquid_indicator.field_name << "'"
-        << " level_set_field='" << request.level_set_field_name << "'"
+        << request.configuration->transport.conservative_phase.liquid_indicator.field_name << "'"
+        << " level_set_field='" << request.configuration->transport.level_set.field_name << "'"
         << " liquid_side="
-        << (request.conservative_phase.liquid_side ==
+        << (request.configuration->transport.conservative_phase.liquid_side ==
                     svmp::FE::level_set::LevelSetPhaseSide::Negative
                 ? "negative"
                 : "positive")
@@ -22991,19 +22080,19 @@ sampleConservativePhaseVelocity(
     const svmp::FE::systems::SystemStateView& state)
 {
   std::vector<std::array<svmp::FE::Real, 3>> velocity;
-  if (request.velocity.source ==
+  if (request.configuration->transport.velocity.source ==
       svmp::FE::level_set::LevelSetVelocitySource::ConstantVector) {
     std::exception_ptr local_preparation_failure;
     try {
       velocity.resize(graph.nodes);
-      for (const auto value : request.velocity.constant_value) {
+      for (const auto value : request.configuration->transport.velocity.constant_value) {
         if (!std::isfinite(value)) {
           throw std::runtime_error(
               "[svMultiPhysics::Application] Conservative phase constant velocity contains a non-finite component.");
         }
       }
       std::fill(velocity.begin(), velocity.end(),
-                request.velocity.constant_value);
+                request.configuration->transport.velocity.constant_value);
     } catch (...) {
       local_preparation_failure = std::current_exception();
     }
@@ -23035,7 +22124,7 @@ sampleConservativePhaseVelocity(
     accumulated.assign(
         graph.nodes * 4u, svmp::FE::Real{0.0});
     const auto phase_field = system.findFieldByName(
-        request.conservative_phase.liquid_indicator.field_name);
+        request.configuration->transport.conservative_phase.liquid_indicator.field_name);
     if (phase_field == svmp::FE::INVALID_FIELD_ID) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Conservative phase velocity sampling could not resolve its phase field.");
@@ -23048,7 +22137,7 @@ sampleConservativePhaseVelocity(
     }
 
     const bool material_interface_velocity =
-        request.velocity.source ==
+        request.configuration->transport.velocity.source ==
         svmp::FE::level_set::LevelSetVelocitySource::
             MaterialInterfacePhasePair;
     std::vector<double> vertex_velocity;
@@ -23059,9 +22148,9 @@ sampleConservativePhaseVelocity(
         material_declaration = nullptr;
     if (material_interface_velocity) {
       const auto level_set_field = system.findFieldByName(
-          request.level_set_field_name);
+          request.configuration->transport.level_set.field_name);
       if (level_set_field == svmp::FE::INVALID_FIELD_ID ||
-          request.velocity.material_interface_marker < 0) {
+          request.configuration->transport.velocity.material_interface_marker < 0) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase material-interface velocity sampling requires a level-set field and interface marker.");
       }
@@ -23069,7 +22158,7 @@ sampleConservativePhaseVelocity(
            system.materialInterfaceTransportVelocityDeclarations()) {
         if (declaration.level_set_field != level_set_field ||
             declaration.interface_marker !=
-                request.velocity.material_interface_marker) {
+                request.configuration->transport.velocity.material_interface_marker) {
           continue;
         }
         if (material_declaration != nullptr) {
@@ -23099,7 +22188,7 @@ sampleConservativePhaseVelocity(
           "sampling conservative positive-phase velocity");
     } else {
       const auto velocity_field = system.findFieldByName(
-          request.velocity.field_name);
+          request.configuration->transport.velocity.field_name);
       if (velocity_field == svmp::FE::INVALID_FIELD_ID) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase velocity sampling could not resolve its velocity field.");
@@ -23334,7 +22423,7 @@ std::vector<std::uint8_t> conservativePhaseContactProtectedNodes(
   std::exception_ptr local_phase_layout_failure;
   try {
     phase_field = system.findFieldByName(
-        request.conservative_phase.liquid_indicator.field_name);
+        request.configuration->transport.conservative_phase.liquid_indicator.field_name);
     if (phase_field == svmp::FE::INVALID_FIELD_ID) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Conservative phase contact protection could not resolve the phase field.");
@@ -24068,17 +23157,17 @@ captureConservativePhaseFixedGraphBindings(
     for (std::size_t index = 0u; index < requests.size(); ++index) {
       const auto& request = requests[index];
       auto& binding = bindings[index];
-      binding.enabled = request.conservative_phase.enabled;
+      binding.enabled = request.configuration->transport.conservative_phase.enabled;
       binding.phase_field_name =
-          request.conservative_phase.liquid_indicator.field_name;
+          request.configuration->transport.conservative_phase.liquid_indicator.field_name;
       if (!binding.enabled) {
         continue;
       }
-      if (!request.conservative_phase_graph.has_value()) {
+      if (!request.runtime.conservative_phase_graph.has_value()) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase fixed-background transport requires an initialized accepted q graph.");
       }
-      const auto& graph = *request.conservative_phase_graph;
+      const auto& graph = *request.runtime.conservative_phase_graph;
       binding.identity =
           svmp::FE::level_set::levelSetP1PhaseGraphIdentity(graph);
       binding.geometry_revision = graph.geometry_revision;
@@ -24139,9 +23228,9 @@ void requireConservativePhaseFixedGraphBindingsCurrent(
       for (std::size_t index = 0u; index < requests.size(); ++index) {
         const auto& request = requests[index];
         const auto& binding = bindings[index];
-        if (binding.enabled != request.conservative_phase.enabled ||
+        if (binding.enabled != request.configuration->transport.conservative_phase.enabled ||
             binding.phase_field_name !=
-                request.conservative_phase.liquid_indicator.field_name) {
+                request.configuration->transport.conservative_phase.liquid_indicator.field_name) {
           local_current = false;
           break;
         }
@@ -24151,11 +23240,11 @@ void requireConservativePhaseFixedGraphBindingsCurrent(
         const auto phase_field = system.findFieldByName(
             binding.phase_field_name);
         if (phase_field == svmp::FE::INVALID_FIELD_ID ||
-            !request.conservative_phase_graph.has_value()) {
+            !request.runtime.conservative_phase_graph.has_value()) {
           local_current = false;
           break;
         }
-        const auto& graph = *request.conservative_phase_graph;
+        const auto& graph = *request.runtime.conservative_phase_graph;
         const auto current_identity =
             svmp::FE::level_set::levelSetP1PhaseGraphIdentity(graph);
         const auto& dofs = system.fieldDofHandler(phase_field);
@@ -24326,19 +23415,19 @@ buildConservativePhaseCandidateStageSnapshot(
     auto& staged_request = snapshot.requests[index];
     std::exception_ptr local_request_failure;
     try {
-      staged_request.enabled = request.conservative_phase.enabled;
+      staged_request.enabled = request.configuration->transport.conservative_phase.enabled;
       staged_request.phase_field_name =
-          request.conservative_phase.liquid_indicator.field_name;
-      staged_request.velocity_field_name = request.velocity.field_name;
-      staged_request.velocity_source = request.velocity.source;
+          request.configuration->transport.conservative_phase.liquid_indicator.field_name;
+      staged_request.velocity_field_name = request.configuration->transport.velocity.field_name;
+      staged_request.velocity_source = request.configuration->transport.velocity.source;
       staged_request.material_interface_marker =
-          request.velocity.material_interface_marker;
+          request.configuration->transport.velocity.material_interface_marker;
       if (staged_request.enabled) {
-        if (!request.conservative_phase_graph.has_value()) {
+        if (!request.runtime.conservative_phase_graph.has_value()) {
           throw std::runtime_error(
               "[svMultiPhysics::Application] Conservative phase stage lost its accepted fixed-background graph.");
         }
-        const auto& graph = *request.conservative_phase_graph;
+        const auto& graph = *request.runtime.conservative_phase_graph;
         staged_request.graph_identity =
             svmp::FE::level_set::levelSetP1PhaseGraphIdentity(graph);
         staged_request.graph_geometry_revision = graph.geometry_revision;
@@ -24360,7 +23449,7 @@ buildConservativePhaseCandidateStageSnapshot(
         sampleConservativePhaseVelocity(
             sim,
             request,
-            *request.conservative_phase_graph,
+            *request.runtime.conservative_phase_graph,
             operator_state);
     if (!collectiveConservativePhaseVelocityBitsAgree(
             staged_request.sampled_nodal_velocity, comm)) {
@@ -24436,25 +23525,25 @@ std::uint64_t conservativePhaseArtifactFingerprint(
   mixConservativePhaseArtifactFingerprint(
       fingerprint, accepted_state_revision);
   mixConservativePhaseArtifactFingerprint(
-      fingerprint, request.level_set_field_name);
+      fingerprint, request.configuration->transport.level_set.field_name);
   mixConservativePhaseArtifactFingerprint(
       fingerprint,
-      request.conservative_phase.liquid_indicator.field_name);
+      request.configuration->transport.conservative_phase.liquid_indicator.field_name);
   mixConservativePhaseArtifactFingerprint(
       fingerprint,
-      request.volume_cut_request.has_value()
-          ? std::string_view(request.volume_cut_request->domain_id)
+      request.configuration->volume_cut_request.has_value()
+          ? std::string_view(request.configuration->volume_cut_request->domain_id)
           : std::string_view{});
   mixConservativePhaseArtifactFingerprint(
       fingerprint,
-      request.conservative_phase
+      request.configuration->transport.conservative_phase
           .classify_nonprimary_components_as_satellites);
   mixConservativePhaseArtifactFingerprint(
-      fingerprint, request.conservative_phase_graph.has_value());
-  if (request.conservative_phase_graph.has_value()) {
+      fingerprint, request.runtime.conservative_phase_graph.has_value());
+  if (request.runtime.conservative_phase_graph.has_value()) {
     const auto live_graph_identity =
         svmp::FE::level_set::levelSetP1PhaseGraphIdentity(
-            *request.conservative_phase_graph);
+            *request.runtime.conservative_phase_graph);
     mixConservativePhaseArtifactFingerprint(
         fingerprint, live_graph_identity.dimension);
     mixConservativePhaseArtifactFingerprint(
@@ -24467,8 +23556,8 @@ std::uint64_t conservativePhaseArtifactFingerprint(
         fingerprint, live_graph_identity.content_revision);
   }
   mixConservativePhaseArtifactFingerprint(
-      fingerprint, request.conservative_phase.fixed_flux_regions.size());
-  for (const auto& box : request.conservative_phase.fixed_flux_regions) {
+      fingerprint, request.configuration->transport.conservative_phase.fixed_flux_regions.size());
+  for (const auto& box : request.configuration->transport.conservative_phase.fixed_flux_regions) {
     mixConservativePhaseArtifactFingerprint(fingerprint, box.name);
     mixConservativePhaseArtifactFingerprint(fingerprint, box.kind);
     for (std::size_t dimension = 0u; dimension < 3u; ++dimension) {
@@ -24781,8 +23870,8 @@ void writeAcceptedConservativePhaseArtifacts(
   const bool locally_any_artifact_configured =
       std::any_of(
           requests.begin(), requests.end(), [](const auto& request) {
-            return request.conservative_phase.enabled &&
-                   request.conservative_phase.write_flux_artifacts;
+            return request.configuration->transport.conservative_phase.enabled &&
+                   request.configuration->transport.conservative_phase.write_flux_artifacts;
           });
   if (!globalAnyBool(locally_any_artifact_configured, comm)) {
     return;
@@ -24838,10 +23927,10 @@ void writeAcceptedConservativePhaseArtifacts(
   for (std::size_t index = 0u; index < requests.size(); ++index) {
     const auto& request = requests[index];
     const int cadence =
-        request.conservative_phase.flux_artifact_cadence_steps;
+        request.configuration->transport.conservative_phase.flux_artifact_cadence_steps;
     const bool locally_configured =
-        request.conservative_phase.enabled &&
-        request.conservative_phase.write_flux_artifacts;
+        request.configuration->transport.conservative_phase.enabled &&
+        request.configuration->transport.conservative_phase.write_flux_artifacts;
     const bool configured_on_any_rank =
         globalAnyBool(locally_configured, comm);
     const bool not_configured_on_any_rank =
@@ -24873,9 +23962,9 @@ void writeAcceptedConservativePhaseArtifacts(
       std::exception_ptr local_fingerprint_preparation_failure;
       try {
         const auto live_graph_identity =
-            request.conservative_phase_graph.has_value()
+            request.runtime.conservative_phase_graph.has_value()
                 ? svmp::FE::level_set::levelSetP1PhaseGraphIdentity(
-                      *request.conservative_phase_graph)
+                      *request.runtime.conservative_phase_graph)
                 : svmp::FE::level_set::LevelSetP1PhaseGraphIdentity{};
         const auto live_flux_ledger_digest =
             candidate.maintenance_ledgers.size() > index
@@ -24913,8 +24002,8 @@ void writeAcceptedConservativePhaseArtifacts(
             std::isfinite(time_step) &&
             time_step > svmp::FE::Real{0.0} &&
             state_revision != 0u &&
-            request.conservative_phase_graph.has_value() &&
-            request.volume_cut_request.has_value() &&
+            request.runtime.conservative_phase_graph.has_value() &&
+            request.configuration->volume_cut_request.has_value() &&
             candidate.maintenance_ledgers.size() > index &&
             candidate.maintenance_ledgers[index]
                 .split_stage_provenance.has_value() &&
@@ -24986,7 +24075,7 @@ void writeAcceptedConservativePhaseArtifacts(
                     .boundary_mass_tolerance >= svmp::FE::Real{0.0} &&
             candidate.maintenance_ledgers[index]
                     .boundary_flux_policy ==
-                request.conservative_phase.boundary_flux_policy &&
+                request.configuration->transport.conservative_phase.boundary_flux_policy &&
             svmp::FE::level_set::
                 levelSetConservativePhaseBoundaryFluxSatisfied(
                     candidate.maintenance_ledgers[index]
@@ -25057,7 +24146,7 @@ void writeAcceptedConservativePhaseArtifacts(
       continue;
     }
     const auto& ledger = candidate.maintenance_ledgers[index];
-    const auto& graph = *request.conservative_phase_graph;
+    const auto& graph = *request.runtime.conservative_phase_graph;
     const auto& repair = ledger.reinitialization;
     const auto& reconciliation = ledger.reconciliation;
     svmp::FE::level_set::LevelSetConservativePhaseArtifactResult artifact;
@@ -25068,9 +24157,9 @@ void writeAcceptedConservativePhaseArtifacts(
         svmp::FE::level_set::LevelSetConservativePhaseArtifactContext
             context;
         context.phase_field_name =
-            request.conservative_phase.liquid_indicator.field_name;
-        context.level_set_field_name = request.level_set_field_name;
-        context.geometry_domain_id = request.volume_cut_request->domain_id;
+            request.configuration->transport.conservative_phase.liquid_indicator.field_name;
+        context.level_set_field_name = request.configuration->transport.level_set.field_name;
+        context.geometry_domain_id = request.configuration->volume_cut_request->domain_id;
         context.accepted_step = accepted_step;
         context.accepted_time = accepted_time;
         context.time_step = time_step;
@@ -25173,7 +24262,7 @@ void writeAcceptedConservativePhaseArtifacts(
           published_artifacts.push_back(
               PublishedConservativePhaseArtifact{
                   .phase_field_name =
-                      request.conservative_phase.liquid_indicator
+                      request.configuration->transport.conservative_phase.liquid_indicator
                           .field_name,
                   .result = artifact,
               });
@@ -25219,7 +24308,7 @@ void writeAcceptedConservativePhaseArtifacts(
             << "[svMultiPhysics::Application] Conservative phase artifact"
             << " diagnostic=conservative_phase_flux_artifact"
             << " field='"
-            << request.conservative_phase.liquid_indicator.field_name
+            << request.configuration->transport.conservative_phase.liquid_indicator.field_name
             << "' step=" << accepted_step
             << " outcome=failed"
             << " batch_rollback=complete"
@@ -25294,9 +24383,9 @@ reconcileConservativePhaseGeometry(
       contact_protected_nodes.end(),
       [](std::uint8_t value) { return value != 0u; }));
   const auto phase_field = system.findFieldByName(
-      request.conservative_phase.liquid_indicator.field_name);
+      request.configuration->transport.conservative_phase.liquid_indicator.field_name);
   const auto level_set_field = system.findFieldByName(
-      request.level_set_field_name);
+      request.configuration->transport.level_set.field_name);
   if (phase_field == svmp::FE::INVALID_FIELD_ID ||
       level_set_field == svmp::FE::INVALID_FIELD_ID) {
     result.diagnostic =
@@ -25328,7 +24417,7 @@ reconcileConservativePhaseGeometry(
       system, request);
   const auto volume_options = levelSetVolumeOptionsForMaintenance(request);
   const auto moment_tolerance =
-      request.conservative_phase.geometry_measure_tolerance *
+      request.configuration->transport.conservative_phase.geometry_measure_tolerance *
       std::max({svmp::FE::Real{1.0}, graph.physical_measure,
                 std::accumulate(target_liquid_phase_mass.begin(),
                                 target_liquid_phase_mass.end(),
@@ -25345,7 +24434,7 @@ reconcileConservativePhaseGeometry(
       transaction.refresh(params, candidate).refreshed ? 1 : 0;
   for (int iteration = 0;
        iteration <
-       request.conservative_phase.geometry_correction_max_iterations;
+       request.configuration->transport.conservative_phase.geometry_correction_max_iterations;
        ++iteration) {
     const auto projection = projectCurrentConservativePhaseGeometry(
         system, request, /*allow_graph_rebuild=*/false);
@@ -25386,7 +24475,7 @@ reconcileConservativePhaseGeometry(
     }
     if (iteration == 0) {
       result.allowed_interface_displacement =
-          request.conservative_phase
+          request.configuration->transport.conservative_phase
               .maximum_geometry_displacement_fraction *
           sensitivity.minimum_cell_node_distance;
     }
@@ -25395,11 +24484,11 @@ reconcileConservativePhaseGeometry(
     svmp::FE::level_set::LevelSetP1PhaseGeometryCorrectionOptions
         correction_options;
     correction_options.invariant_tolerance =
-        request.conservative_phase.invariant_tolerance;
+        request.configuration->transport.conservative_phase.invariant_tolerance;
     correction_options.relative_linear_tolerance = std::max(
-        request.conservative_phase.invariant_tolerance,
+        request.configuration->transport.conservative_phase.invariant_tolerance,
         std::min(svmp::FE::Real{1.0e-8},
-                 request.conservative_phase.geometry_measure_tolerance));
+                 request.configuration->transport.conservative_phase.geometry_measure_tolerance));
     auto correction =
         svmp::FE::level_set::solveLevelSetP1PhaseGeometryCorrection(
             sensitivity,
@@ -25457,7 +24546,7 @@ reconcileConservativePhaseGeometry(
     }
 
     const auto sign_margin =
-        request.conservative_phase.invariant_tolerance *
+        request.configuration->transport.conservative_phase.invariant_tolerance *
         std::max(svmp::FE::Real{1.0},
                  std::abs(*std::max_element(
                      current_level_set.begin(), current_level_set.end(),
@@ -25589,7 +24678,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
   }
   const bool any_enabled = std::any_of(
       requests.begin(), requests.end(), [](const auto& request) {
-        return request.conservative_phase.enabled;
+        return request.configuration->transport.conservative_phase.enabled;
       });
   if (!any_enabled) {
     return result;
@@ -25654,24 +24743,24 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     for (std::size_t index = 0u; index < requests.size(); ++index) {
       const auto& request = requests[index];
       const auto& staged_request = temporal_stage.requests[index];
-      if (staged_request.enabled != request.conservative_phase.enabled ||
+      if (staged_request.enabled != request.configuration->transport.conservative_phase.enabled ||
           staged_request.phase_field_name !=
-              request.conservative_phase.liquid_indicator.field_name ||
-          staged_request.velocity_field_name != request.velocity.field_name ||
-          staged_request.velocity_source != request.velocity.source ||
+              request.configuration->transport.conservative_phase.liquid_indicator.field_name ||
+          staged_request.velocity_field_name != request.configuration->transport.velocity.field_name ||
+          staged_request.velocity_source != request.configuration->transport.velocity.source ||
           staged_request.material_interface_marker !=
-              request.velocity.material_interface_marker) {
+              request.configuration->transport.velocity.material_interface_marker) {
         local_stage_matches = false;
         break;
       }
       if (!staged_request.enabled) {
         continue;
       }
-      if (!request.conservative_phase_graph.has_value()) {
+      if (!request.runtime.conservative_phase_graph.has_value()) {
         local_stage_matches = false;
         break;
       }
-      const auto& graph = *request.conservative_phase_graph;
+      const auto& graph = *request.runtime.conservative_phase_graph;
       if (!sameConservativePhaseGraphIdentity(
               staged_request.graph_identity,
               svmp::FE::level_set::levelSetP1PhaseGraphIdentity(graph)) ||
@@ -25737,7 +24826,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
   for (std::size_t request_index = 0u;
        request_index < requests.size(); ++request_index) {
     auto& request = requests[request_index];
-    if (!request.conservative_phase.enabled) {
+    if (!request.configuration->transport.conservative_phase.enabled) {
       continue;
     }
     auto& staged_request = temporal_stage.requests[request_index];
@@ -25748,18 +24837,18 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     std::size_t phase_count{0u};
     std::exception_ptr local_request_setup_failure;
     try {
-      if (!request.conservative_phase_initialized) {
+      if (!request.runtime.conservative_phase_initialized) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase transport reached a candidate before its geometry projection was initialized.");
       }
       requireConservativePhaseGeometryBinding(system, request);
-      if (!request.conservative_phase_graph.has_value()) {
+      if (!request.runtime.conservative_phase_graph.has_value()) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase candidate lost its fixed transport graph.");
       }
-      graph_ptr = &*request.conservative_phase_graph;
+      graph_ptr = &*request.runtime.conservative_phase_graph;
       phase_field = system.findFieldByName(
-          request.conservative_phase.liquid_indicator.field_name);
+          request.configuration->transport.conservative_phase.liquid_indicator.field_name);
       if (phase_field == svmp::FE::INVALID_FIELD_ID) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase candidate could not resolve its liquid-indicator field.");
@@ -25815,15 +24904,15 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
 
     svmp::FE::level_set::LevelSetP1PhaseStageOptions stage_options;
     stage_options.invariant_tolerance =
-        request.conservative_phase.invariant_tolerance;
+        request.configuration->transport.conservative_phase.invariant_tolerance;
     stage_options.component_activity_tolerance =
-        request.conservative_phase.component_activity_tolerance;
+        request.configuration->transport.conservative_phase.component_activity_tolerance;
     stage_options.maximum_courant =
-        request.conservative_phase.maximum_courant;
+        request.configuration->transport.conservative_phase.maximum_courant;
     stage_options.enforce_courant_limit =
-        request.conservative_phase.enforce_courant_limit;
+        request.configuration->transport.conservative_phase.enforce_courant_limit;
     stage_options.require_constant_preservation =
-        request.conservative_phase.require_constant_preservation;
+        request.configuration->transport.conservative_phase.require_constant_preservation;
     auto stage =
         svmp::FE::level_set::advanceLevelSetP1ConservativePhaseStage(
             graph,
@@ -25844,7 +24933,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     if (any_stage_failure) {
       const bool local_courant_rejection =
           !stage.courant_satisfied &&
-          request.conservative_phase.enforce_courant_limit;
+          request.configuration->transport.conservative_phase.enforce_courant_limit;
       const bool any_courant_rejection =
           globalAnyBool(local_courant_rejection, comm);
       const bool any_non_courant_failure =
@@ -25857,18 +24946,18 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         application::core::oopCout()
             << "[svMultiPhysics::Application] Conservative phase candidate rejected"
             << " field='"
-            << request.conservative_phase.liquid_indicator.field_name
+            << request.configuration->transport.conservative_phase.liquid_indicator.field_name
             << "' reason=courant_contract"
             << " courant=" << stage.maximum_courant
             << " maximum_courant="
-            << request.conservative_phase.maximum_courant
+            << request.configuration->transport.conservative_phase.maximum_courant
             << " dt=" << history.dt() << std::endl;
         result.accept_step = false;
         return result;
       }
       throw std::runtime_error(
           "[svMultiPhysics::Application] Conservative phase graph stage failed for field '" +
-          request.conservative_phase.liquid_indicator.field_name +
+          request.configuration->transport.conservative_phase.liquid_indicator.field_name +
           "': " + stage.diagnostic);
     }
     svmp::FE::Real maximum_nodal_boundary_mass_transfer{0.0};
@@ -25884,7 +24973,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     const auto total_boundary_mass_transfer =
         stage.correction.total_physical_boundary_mass_transfer;
     const auto boundary_mass_tolerance =
-        request.conservative_phase.invariant_tolerance *
+        request.configuration->transport.conservative_phase.invariant_tolerance *
         std::max(
             svmp::FE::Real{1.0},
             std::abs(stage.correction.total_previous_liquid_measure));
@@ -25892,13 +24981,13 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         local_nodal_boundary_flux_finite &&
         svmp::FE::level_set::
             levelSetConservativePhaseBoundaryFluxSatisfied(
-                request.conservative_phase.boundary_flux_policy,
+                request.configuration->transport.conservative_phase.boundary_flux_policy,
                 maximum_nodal_boundary_mass_transfer,
                 total_boundary_mass_transfer,
                 boundary_mass_tolerance);
     if (globalAnyBool(!local_boundary_flux_satisfied, comm)) {
       const bool closed_domain_policy =
-          request.conservative_phase.boundary_flux_policy ==
+          request.configuration->transport.conservative_phase.boundary_flux_policy ==
           svmp::FE::level_set::
               LevelSetConservativePhaseBoundaryFluxPolicy::
                   ClosedDomainDiscreteQFluxOnly;
@@ -25909,7 +24998,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
                ? "closed-domain policy rejected discrete q boundary flux above its invariant tolerance"
                : "globally balanced policy rejected non-finite or nonzero net discrete q boundary flux above its invariant tolerance") +
           " for field '" +
-          request.conservative_phase.liquid_indicator.field_name +
+          request.configuration->transport.conservative_phase.liquid_indicator.field_name +
           "'; this is a phase-mass-flux gate, not a pointwise velocity-normal test.");
     }
     const svmp::FE::level_set::LevelSetP1PhaseSplitStageProvenance
@@ -25968,7 +25057,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     if (any_split_stage_invalid) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Conservative phase Backward Euler split-stage provenance validation failed for field '" +
-          request.conservative_phase.liquid_indicator.field_name +
+          request.configuration->transport.conservative_phase.liquid_indicator.field_name +
           "': " + split_stage_validation.diagnostic);
     }
     svmp::FE::Real phase_measure{0.0};
@@ -25992,7 +25081,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           system, phase_field, limited_phase, candidate);
       phase_measure = stage.correction.total_limited_liquid_measure;
       const auto measure_tolerance =
-          request.conservative_phase.geometry_measure_tolerance *
+          request.configuration->transport.conservative_phase.geometry_measure_tolerance *
           std::max({svmp::FE::Real{1.0}, graph.physical_measure,
                     std::abs(phase_measure)});
       if (!std::isfinite(phase_measure) ||
@@ -26009,7 +25098,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       maintenance_ledger.boundary_mass_tolerance =
           boundary_mass_tolerance;
       maintenance_ledger.boundary_flux_policy =
-          request.conservative_phase.boundary_flux_policy;
+          request.configuration->transport.conservative_phase.boundary_flux_policy;
       maintenance_ledger.raw_post_transport_phase_measure =
           stage.correction.total_raw_target_liquid_measure;
       maintenance_ledger.post_limit_phase_measure = phase_measure;
@@ -26027,7 +25116,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         "conservative_phase_post_stage_materialization");
 
     std::vector<std::array<svmp::FE::Real, 3>> region_coordinates;
-    if (!request.conservative_phase.fixed_flux_regions.empty()) {
+    if (!request.configuration->transport.conservative_phase.fixed_flux_regions.empty()) {
       region_coordinates = conservativePhaseNodeCoordinates(
           system, phase_field, graph);
     }
@@ -26035,13 +25124,13 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         region_definitions;
     std::exception_ptr local_region_ledger_failure;
     try {
-      if (!request.conservative_phase.fixed_flux_regions.empty()) {
+      if (!request.configuration->transport.conservative_phase.fixed_flux_regions.empty()) {
         region_definitions =
             svmp::FE::level_set::makeAxisAlignedBoxPhaseRegions(
-                request.conservative_phase.fixed_flux_regions,
+                request.configuration->transport.conservative_phase.fixed_flux_regions,
                 region_coordinates);
       }
-      if (request.conservative_phase
+      if (request.configuration->transport.conservative_phase
               .classify_nonprimary_components_as_satellites) {
         auto satellites = svmp::FE::level_set::
             makeNonprimaryComponentSatelliteRegions(stage.correction);
@@ -26054,18 +25143,18 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           svmp::FE::level_set::buildLevelSetPhaseRegionLedgers(
               stage.correction,
               region_definitions,
-              request.conservative_phase.invariant_tolerance);
+              request.configuration->transport.conservative_phase.invariant_tolerance);
       if (!maintenance_ledger.region_ledger.success) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase fixed region ledger failed for field '" +
-            request.conservative_phase.liquid_indicator.field_name +
+            request.configuration->transport.conservative_phase.liquid_indicator.field_name +
             "': " + maintenance_ledger.region_ledger.diagnostic);
       }
 
       application::core::oopCout()
         << "[svMultiPhysics::Application] Conservative phase staged"
         << " field='"
-        << request.conservative_phase.liquid_indicator.field_name << "'"
+        << request.configuration->transport.conservative_phase.liquid_indicator.field_name << "'"
         << " step=" << history.stepIndex() + 1
         << " previous_measure="
         << stage.correction.total_previous_liquid_measure
@@ -26078,11 +25167,11 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         << " boundary_flux_policy="
         << svmp::FE::level_set::
                levelSetConservativePhaseBoundaryFluxPolicyName(
-                   request.conservative_phase.boundary_flux_policy)
+                   request.configuration->transport.conservative_phase.boundary_flux_policy)
         << " boundary_safety_scope="
         << svmp::FE::level_set::
                levelSetConservativePhaseBoundaryFluxScope(
-                   request.conservative_phase.boundary_flux_policy)
+                   request.configuration->transport.conservative_phase.boundary_flux_policy)
         << " boundary_safety_limitation=blind_where_q_is_zero"
         << " divergence_source="
         << stage.correction.total_discrete_divergence_mass_source
@@ -26190,7 +25279,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     for (std::size_t request_index = 0u;
          request_index < requests.size(); ++request_index) {
       auto& request = requests[request_index];
-      if (!request.conservative_phase.enabled) {
+      if (!request.configuration->transport.conservative_phase.enabled) {
         continue;
       }
       const auto projection = projectCurrentConservativePhaseGeometry(
@@ -26198,7 +25287,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       if (!projection.success) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase raw post-transport geometry projection failed for field '" +
-            request.conservative_phase.liquid_indicator.field_name +
+            request.configuration->transport.conservative_phase.liquid_indicator.field_name +
             "': " + projection.diagnostic);
       }
       result.maintenance_ledgers[request_index]
@@ -26216,21 +25305,21 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     for (std::size_t request_index = 0u;
          request_index < requests.size(); ++request_index) {
       auto& request = requests[request_index];
-      if (!request.conservative_phase.enabled) {
+      if (!request.configuration->transport.conservative_phase.enabled) {
         continue;
       }
       auto& maintenance_ledger =
           result.maintenance_ledgers[request_index];
       maintenance_ledger.reinitialization_due =
           svmp::FE::level_set::shouldReinitializeLevelSet(
-              request.reinitialization,
+              request.configuration->transport.reinitialization,
               history.stepIndex() + 1);
       const auto field =
-          system.findFieldByName(request.level_set_field_name);
+          system.findFieldByName(request.configuration->transport.level_set.field_name);
       if (field == svmp::FE::INVALID_FIELD_ID) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase maintenance could not find level-set field '" +
-            request.level_set_field_name + "'.");
+            request.configuration->transport.level_set.field_name + "'.");
       }
       const auto wall_context = resolveLevelSetWallAwareMaintenanceContext(
           sim,
@@ -26272,7 +25361,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         application::core::oopCout()
             << "[svMultiPhysics::Application] Conservative phase candidate rejected"
             << " field='"
-            << request.conservative_phase.liquid_indicator.field_name
+            << request.configuration->transport.conservative_phase.liquid_indicator.field_name
             << "' reason=reinitialization_nonconverged"
             << " iterations="
             << staged_reinitialization.repair.iterations
@@ -26313,7 +25402,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     for (std::size_t request_index = 0u;
          request_index < requests.size(); ++request_index) {
       auto& request = requests[request_index];
-      if (!request.conservative_phase.enabled) {
+      if (!request.configuration->transport.conservative_phase.enabled) {
         continue;
       }
       const auto projection = projectCurrentConservativePhaseGeometry(
@@ -26321,7 +25410,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       if (!projection.success) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase post-reinitialization geometry projection failed for field '" +
-            request.conservative_phase.liquid_indicator.field_name +
+            request.configuration->transport.conservative_phase.liquid_indicator.field_name +
             "': " + projection.diagnostic);
       }
       auto& maintenance_ledger =
@@ -26337,8 +25426,8 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     for (std::size_t request_index = 0u;
          request_index < requests.size(); ++request_index) {
       auto& request = requests[request_index];
-      if (!request.conservative_phase.enabled ||
-          !request.conservative_phase.reconcile_geometry) {
+      if (!request.configuration->transport.conservative_phase.enabled ||
+          !request.configuration->transport.conservative_phase.reconcile_geometry) {
         continue;
       }
       any_reconciliation = true;
@@ -26351,7 +25440,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       if (!projection.success) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase stationary-equilibrium projection failed for field '" +
-            request.conservative_phase.liquid_indicator.field_name +
+            request.configuration->transport.conservative_phase.liquid_indicator.field_name +
             "': " + projection.diagnostic);
       }
       const auto& transport_nodes =
@@ -26384,7 +25473,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
               projection.liquid_phase_mass,
               accepted_phase_masses[request_index]);
       const auto equilibrium_tolerance =
-          request.conservative_phase.geometry_measure_tolerance *
+          request.configuration->transport.conservative_phase.geometry_measure_tolerance *
           std::max(
               {svmp::FE::Real{1.0}, graph.physical_measure,
                std::abs(projection.retained_liquid_measure),
@@ -26416,7 +25505,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       if (stationary_geometry && transported_total_compatible &&
           phase_projection_needed) {
         const auto phase_field = system.findFieldByName(
-            request.conservative_phase.liquid_indicator.field_name);
+            request.configuration->transport.conservative_phase.liquid_indicator.field_name);
         if (phase_field == svmp::FE::INVALID_FIELD_ID) {
           throw std::runtime_error(
               "[svMultiPhysics::Application] Conservative phase stationary-equilibrium reconciliation could not resolve its phase field.");
@@ -26441,7 +25530,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
             << "[svMultiPhysics::Application] Conservative phase stationary geometry equilibrium preserved"
             << " diagnostic=" << reconciliation.diagnostic
             << " field='"
-            << request.conservative_phase.liquid_indicator.field_name
+            << request.configuration->transport.conservative_phase.liquid_indicator.field_name
             << "' initial_local_residual_norm="
             << transported_geometry_mismatch.residual_norm
             << " maximum_initial_nodal_residual="
@@ -26469,7 +25558,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         application::core::oopCout()
             << "[svMultiPhysics::Application] Conservative phase candidate rejected"
             << " field='"
-            << request.conservative_phase.liquid_indicator.field_name
+            << request.configuration->transport.conservative_phase.liquid_indicator.field_name
             << "' reason=local_geometry_reconciliation_contract"
             << " iterations=" << reconciliation.iterations
             << " line_search_evaluations="
@@ -26517,7 +25606,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     for (std::size_t request_index = 0u;
          request_index < requests.size(); ++request_index) {
       auto& request = requests[request_index];
-      if (!request.conservative_phase.enabled) {
+      if (!request.configuration->transport.conservative_phase.enabled) {
         continue;
       }
       const auto projection = projectCurrentConservativePhaseGeometry(
@@ -26525,14 +25614,14 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       if (!projection.success) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase authoritative geometry projection failed for field '" +
-            request.conservative_phase.liquid_indicator.field_name +
+            request.configuration->transport.conservative_phase.liquid_indicator.field_name +
             "': " + projection.diagnostic);
       }
       const auto phase_measure = accepted_phase_measures[request_index];
       const auto mismatch = std::abs(
           projection.retained_liquid_measure - phase_measure);
       const auto tolerance =
-          request.conservative_phase.geometry_measure_tolerance *
+          request.configuration->transport.conservative_phase.geometry_measure_tolerance *
           std::max({svmp::FE::Real{1.0},
                     std::abs(projection.retained_liquid_measure),
                     std::abs(phase_measure)});
@@ -26545,13 +25634,13 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       maintenance_ledger.post_correction_geometry_measure =
           projection.retained_liquid_measure;
       maintenance_ledger.post_correction_mismatch = local_mismatch;
-      if (request.conservative_phase.reconcile_geometry &&
+      if (request.configuration->transport.conservative_phase.reconcile_geometry &&
           (mismatch > tolerance ||
            local_mismatch.maximum_nodal_residual > tolerance ||
            std::abs(local_mismatch.total_residual) > tolerance)) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase local geometry reconciliation did not match the transported nodal moments for field '" +
-            request.conservative_phase.liquid_indicator.field_name +
+            request.configuration->transport.conservative_phase.liquid_indicator.field_name +
             "'.");
       }
       const auto& reconciliation =
@@ -26559,7 +25648,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       application::core::oopCout()
           << "[svMultiPhysics::Application] Conservative phase geometry validated"
           << " field='"
-          << request.conservative_phase.liquid_indicator.field_name << "'"
+          << request.configuration->transport.conservative_phase.liquid_indicator.field_name << "'"
           << " step=" << history.stepIndex() + 1
           << " phase_measure=" << phase_measure
           << " retained_geometry_measure="
@@ -26591,7 +25680,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           << reconciliation.allowed_interface_displacement
           << " tolerance=" << tolerance
           << " reconciliation_enabled="
-          << (request.conservative_phase.reconcile_geometry ? "true"
+          << (request.configuration->transport.conservative_phase.reconcile_geometry ? "true"
                                                              : "false")
           << " cut_context_revision="
           << projection.cut_context_revision
@@ -26623,7 +25712,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           << "[svMultiPhysics::Application] Conservative phase maintenance ledger"
           << " diagnostic=conservative_phase_maintenance_ledger"
           << " field='"
-          << request.conservative_phase.liquid_indicator.field_name << "'"
+          << request.configuration->transport.conservative_phase.liquid_indicator.field_name << "'"
           << " step=" << history.stepIndex() + 1
           << " raw_post_transport_phase_measure="
           << maintenance_ledger.raw_post_transport_phase_measure
@@ -26770,7 +25859,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
             << "[svMultiPhysics::Application] Conservative phase component ledger"
             << " diagnostic=conservative_phase_component_ledger"
             << " field='"
-            << request.conservative_phase.liquid_indicator.field_name
+            << request.configuration->transport.conservative_phase.liquid_indicator.field_name
             << "'"
             << " step=" << history.stepIndex() + 1
             << " classification=" << classification
@@ -26816,7 +25905,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
             << "[svMultiPhysics::Application] Conservative phase region ledger"
             << " diagnostic=conservative_phase_region_ledger"
             << " field='"
-            << request.conservative_phase.liquid_indicator.field_name
+            << request.configuration->transport.conservative_phase.liquid_indicator.field_name
             << "'"
             << " step=" << history.stepIndex() + 1
             << " region='" << region.name << "'"
@@ -27379,7 +26468,7 @@ evaluateStaticCapillaryFunctionalCandidate(
             level_set_field,
             phi_values,
             no_supplemental_samples,
-            request.curvature_projection,
+            effectiveCurvatureProjectionOptions(request),
             trial_curvature);
     const bool local_derivative_projection_valid =
         derivative_projection.success &&
@@ -27714,8 +26803,8 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
 {
   const auto enabled_count = static_cast<std::size_t>(std::count_if(
       requests.begin(), requests.end(), [](const auto& request) {
-        return request.static_capillary_equilibrium_enabled &&
-               !request.static_capillary_equilibrium_initialized;
+        return request.configuration->static_capillary_equilibrium_enabled &&
+               !request.runtime.static_capillary_equilibrium_initialized;
       }));
   if (enabled_count == 0u) {
     return false;
@@ -27733,25 +26822,26 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
 
   auto request_it = std::find_if(
       requests.begin(), requests.end(), [](const auto& request) {
-        return request.static_capillary_equilibrium_enabled &&
-               !request.static_capillary_equilibrium_initialized;
+        return request.configuration->static_capillary_equilibrium_enabled &&
+               !request.runtime.static_capillary_equilibrium_initialized;
       });
   auto& request = *request_it;
-  if (!request.volume_cut_request.has_value()) {
+  if (!request.configuration->volume_cut_request.has_value()) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Static capillary initialization requires a matching authoritative cut-volume request.");
   }
 
   auto& system = *sim.fe_system;
   bindKinematicAreaGradientTractionMaintenance(system, requests);
+  const auto curvature_options = effectiveCurvatureProjectionOptions(request);
   auto& history = *sim.time_history;
   const auto comm = activeFESystemCommunicator(system);
   const auto level_set_field =
-      system.findFieldByName(request.level_set_field_name);
+      system.findFieldByName(request.configuration->transport.level_set.field_name);
   if (level_set_field == svmp::FE::INVALID_FIELD_ID) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Static capillary initialization could not resolve level-set field '" +
-        request.level_set_field_name + "'.");
+        request.configuration->transport.level_set.field_name + "'.");
   }
   const auto marker =
       generatedCutContextMarkerForMaintenance(system, request);
@@ -27767,10 +26857,10 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       declarations.front().interface_marker == *marker &&
       declarations.front().level_set_field == level_set_field &&
       declarations.front().geometry_domain_id ==
-          request.volume_cut_request->domain_id &&
+          request.configuration->volume_cut_request->domain_id &&
       declarations.front().parameters.liquid_side ==
           cutIntegrationSide(
-              request.volume_cut_request->active_side) &&
+              request.configuration->volume_cut_request->active_side) &&
       declarations.front().parameters.surface_tension >
           svmp::FE::Real{0.0} &&
       (declarations.front().capillary_balance_method ==
@@ -27795,13 +26885,13 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       !uses_kinematic_area_gradient_traction;
   if (uses_kinematic_area_gradient_traction) {
     const auto curvature_field =
-        system.findFieldByName(request.curvature_field_name);
+        system.findFieldByName(request.configuration->curvature_field_name);
     local_curvature_maintenance_matches =
-        request.curvature_projection_enabled &&
-        request.curvature_projection.recovery_mode ==
+        request.configuration->curvature_projection_enabled &&
+        curvature_options.recovery_mode ==
             svmp::FE::level_set::LevelSetCurvatureRecoveryMode::
                 KinematicAreaGradient &&
-        request.curvature_projection
+        curvature_options
                 .kinematic_area_gradient_filter_coefficient ==
             svmp::FE::Real{0.0} &&
         curvature_field != svmp::FE::INVALID_FIELD_ID &&
@@ -27955,8 +27045,9 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
     throw std::runtime_error(
         "[svMultiPhysics::Application] Static capillary initialization target volume differs across the FE communicator.");
   }
-  request.static_capillary_equilibrium.target_liquid_volume =
+  request.runtime.measured_static_capillary_target =
       target_volume;
+  const auto capillary_options = effectiveStaticCapillaryEquilibriumOptions(request);
 
   const auto raw_field_offset =
       system.fieldDofOffset(level_set_field);
@@ -28081,7 +27172,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
           transaction_prescribed_fields.data(),
           transaction_prescribed_fields.size()));
   auto minimization_options =
-      request.static_capillary_equilibrium;
+      capillary_options;
   minimization_options.allow_topology_epoch_transitions =
       exact_functional_derivatives_requested;
   std::vector<svmp::FE::Real> certified_solution;
@@ -28122,7 +27213,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
               evaluateStaticCapillaryPressureCertificate(
                   sim,
                   candidate,
-                  request.static_capillary_equilibrium,
+                  capillary_options,
                   /*initialize_compatible_pressure=*/true);
           const auto& report = certificate.report;
           const auto post_certificate_constraint_key =
@@ -28716,16 +27807,16 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
     std::rethrow_exception(failure);
   }
 
-  request.static_capillary_equilibrium_initialized = true;
+  request.runtime.static_capillary_equilibrium_initialized = true;
   application::core::oopCout()
       << std::setprecision(17)
       << "[svMultiPhysics::Application] Static capillary equilibrium initialized"
       << " diagnostic=static_capillary_equilibrium_initialization"
-      << " field='" << request.level_set_field_name << "'"
+      << " field='" << request.configuration->transport.level_set.field_name << "'"
       << " marker=" << *marker
       << " active_coefficients=" << active_parameters.size()
       << " target_liquid_volume="
-      << request.static_capillary_equilibrium.target_liquid_volume
+      << capillary_options.target_liquid_volume
       << " initial_surface_wall_energy="
       << result.initial_surface_wall_energy
       << " final_surface_wall_energy="
@@ -28775,30 +27866,30 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       << " constant_pressure_kkt_relative_distance="
       << result.final_constant_pressure_kkt_relative_distance
       << " volume_tolerance="
-      << request.static_capillary_equilibrium.volume_tolerance
+      << capillary_options.volume_tolerance
       << " projected_gradient_tolerance="
-      << request.static_capillary_equilibrium
+      << capillary_options
              .projected_gradient_tolerance
       << " pressure_representability_max_residual_norm="
-      << request.static_capillary_equilibrium
+      << capillary_options
              .pressure_representability_max_residual_norm
       << " pressure_representability_max_relative_distance="
-      << request.static_capillary_equilibrium
+      << capillary_options
              .pressure_representability_max_relative_distance
       << " physical_equilibrium_max_residual_norm="
-      << request.static_capillary_equilibrium
+      << capillary_options
              .physical_equilibrium_max_residual_norm
       << " constant_pressure_kkt_max_residual_norm="
-      << request.static_capillary_equilibrium
+      << capillary_options
              .constant_pressure_kkt_max_residual_norm
       << " constant_pressure_kkt_max_relative_distance="
-      << request.static_capillary_equilibrium
+      << capillary_options
              .constant_pressure_kkt_max_relative_distance
       << " limited_memory_history_size="
-      << request.static_capillary_equilibrium
+      << capillary_options
              .limited_memory_history_size
       << " limited_memory_curvature_tolerance="
-      << request.static_capillary_equilibrium
+      << capillary_options
              .limited_memory_curvature_tolerance
       << " initial_snapshot_revision_key="
       << result.initial_snapshot_revision_key
@@ -29124,7 +28215,12 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       std::make_shared<svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle>();
   auto cut_refresh_cache =
       std::make_shared<ActiveCutContextRefreshCache>();
-  auto level_set_maintenance = levelSetMaintenanceRequests(params);
+  const auto maintenance_active_requests = activeCutVolumeRequests(params);
+  const auto maintenance_configurations = resolveLevelSetMaintenanceConfigurations(
+      sim.resolved_level_set_equations_by_input_index,
+      maintenance_active_requests);
+  auto level_set_maintenance = makeLevelSetMaintenanceRequests(
+      maintenance_configurations);
   requireCollectiveLevelSetMaintenanceRequestSchedule(
       level_set_maintenance,
       LevelSetMaintenanceScheduleStage::SteadyInitialization,
@@ -29616,7 +28712,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
 
   auto bdf1 = std::make_shared<const svmp::FE::systems::BDFIntegrator>(1);
   svmp::FE::systems::TransientSystem transient(*sim.fe_system, std::move(bdf1));
-  auto level_set_maintenance = levelSetMaintenanceRequests(params);
+  const auto maintenance_active_requests = activeCutVolumeRequests(params);
+  const auto maintenance_configurations = resolveLevelSetMaintenanceConfigurations(
+      sim.resolved_level_set_equations_by_input_index,
+      maintenance_active_requests);
+  auto level_set_maintenance = makeLevelSetMaintenanceRequests(
+      maintenance_configurations);
   requireCollectiveLevelSetMaintenanceRequestSchedule(
       level_set_maintenance,
       LevelSetMaintenanceScheduleStage::TransientInitialization,
@@ -29778,7 +28879,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       level_set_maintenance.begin(),
       level_set_maintenance.end(),
       [](const auto& request) {
-        return request.conservative_phase.enabled;
+        return request.configuration->transport.conservative_phase.enabled;
       });
   const auto [minimum_has_conservative_phase,
               maximum_has_conservative_phase] =
@@ -31218,7 +30319,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       level_set_maintenance.begin(),
       level_set_maintenance.end(),
       [](const auto& request) {
-        return request.bound_preserving.enabled;
+        return request.configuration->transport.bound_preserving.enabled;
       });
   const bool has_precommit_maintenance =
       has_conservative_phase || has_bound_preserving_maintenance;
@@ -32125,11 +31226,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   pending_phase_candidate.maintenance_ledgers[index];
               appendMaintenanceScheduleBool(
                   commit_state_words,
-                  request.conservative_phase.enabled);
+                  request.configuration->transport.conservative_phase.enabled);
               appendConservativePhaseSplitStageProvenanceWords(
                   commit_state_words,
                   ledger.split_stage_provenance);
-              if (!request.conservative_phase.enabled) {
+              if (!request.configuration->transport.conservative_phase.enabled) {
                 continue;
               }
               const auto live_flux_ledger_digest =
@@ -32201,7 +31302,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   ledger.boundary_mass_tolerance >=
                       svmp::FE::Real{0.0} &&
                   ledger.boundary_flux_policy ==
-                      request.conservative_phase
+                      request.configuration->transport.conservative_phase
                           .boundary_flux_policy &&
                   svmp::FE::level_set::
                       levelSetConservativePhaseBoundaryFluxSatisfied(
@@ -32448,18 +31549,18 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         level_set_maintenance.end(),
         [&](const auto& request) {
           return svmp::FE::level_set::shouldApplyLevelSetVolumeCorrection(
-              request.volume_correction, h.stepIndex());
+              request.configuration->transport.volume_correction, h.stepIndex());
         });
     const bool maintenance_work_due = std::any_of(
         level_set_maintenance.begin(),
         level_set_maintenance.end(),
         [&](const auto& request) {
-          return !request.conservative_phase.enabled &&
+          return !request.configuration->transport.conservative_phase.enabled &&
                  (svmp::FE::level_set::shouldReinitializeLevelSet(
-                      request.reinitialization, h.stepIndex()) ||
+                      request.configuration->transport.reinitialization, h.stepIndex()) ||
                   svmp::FE::level_set::
                       shouldApplyLevelSetVolumeCorrection(
-                          request.volume_correction, h.stepIndex()));
+                          request.configuration->transport.volume_correction, h.stepIndex()));
         });
     const bool postaccept_maintenance_topology_tracking_required =
         maintenance_work_due && track_transient_cut_topology;
