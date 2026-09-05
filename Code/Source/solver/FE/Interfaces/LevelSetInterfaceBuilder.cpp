@@ -58,16 +58,89 @@ void mixTopologyHash(std::uint64_t& hash, std::uint64_t value) noexcept
     }
 }
 
+// Identities are scoped to one parent construction and discarded at publication.
+struct PointOrigin {
+    enum class Kind { Unknown, Corner, EdgeRoot };
+    Kind kind{Kind::Unknown};
+    std::size_t first{0u}, second{0u};
+    static PointOrigin corner(std::size_t i) { return {Kind::Corner, i, i}; }
+    static PointOrigin root(std::size_t i, std::size_t j) {
+        return {Kind::EdgeRoot, std::min(i, j), std::max(i, j)};
+    }
+    bool known() const { return kind != Kind::Unknown; }
+    bool operator==(const PointOrigin&) const = default;
+};
+
+struct StrictConstructionObservation {
+    LinearCornerStrictBranch state{LinearCornerStrictBranch::Unchecked};
+    void unresolved() { state = LinearCornerStrictBranch::ModifiedOrUnresolved; }
+    void stamp(LevelSetCellCutResult& result) const {
+        result.construction_observation = state;
+        for (auto& fragment : result.fragments) fragment.construction_observation = state;
+        for (auto& region : result.volume_regions) region.construction_observation = state;
+    }
+};
+
+bool identicalFinite(const std::array<Real, 3>& a, const std::array<Real, 3>& b)
+{
+    return a == b && std::all_of(a.begin(), a.end(), [](Real x) { return std::isfinite(x); });
+}
+
+template<class A, class B>
+bool structuralRepeat(const A& a, const B& b)
+{
+    return a.origin.known() && a.origin == b.origin && identicalFinite(a.point, b.point);
+}
+
+template<class A, class B>
+void observeRepeat(StrictConstructionObservation& observation,
+                   const A& a, const B& b, bool merged)
+{
+    if (!a.origin.known() || !b.origin.known() ||
+        (a.origin == b.origin && !identicalFinite(a.point, b.point)) ||
+        (merged && !structuralRepeat(a, b))) {
+        observation.unresolved();
+    }
+}
+
+template<class A>
+bool structuralZero(const A& a, const A& b, const A& c)
+{
+    return structuralRepeat(a, b) || structuralRepeat(a, c) || structuralRepeat(b, c);
+}
+
+struct IdentifiedPoint {
+    std::array<Real, 3> point{};
+    PointOrigin origin{};
+};
+using IdentifiedFaces = std::vector<std::vector<IdentifiedPoint>>;
+
 struct CutPointCandidate {
     std::array<Real, 3> point{{0.0, 0.0, 0.0}};
     std::array<Real, 3> parent_coordinate{{0.0, 0.0, 0.0}};
     Real level_set_value{0.0};
+    PointOrigin origin{};
 };
 
 struct SignedPoint {
     std::array<Real, 3> point{{0.0, 0.0, 0.0}};
     Real value{0.0};
+    PointOrigin origin{};
 };
+
+PointOrigin crossingOrigin(const SignedPoint& a, const SignedPoint& b,
+                           StrictConstructionObservation& observation)
+{
+    if (a.value == Real{0.0} && b.value != Real{0.0}) return a.origin;
+    if (b.value == Real{0.0} && a.value != Real{0.0}) return b.origin;
+    if (a.origin.kind == PointOrigin::Kind::Corner &&
+        b.origin.kind == PointOrigin::Kind::Corner &&
+        ((a.value < 0 && b.value > 0) || (a.value > 0 && b.value < 0))) {
+        return PointOrigin::root(a.origin.first, b.origin.first);
+    }
+    observation.unresolved();
+    return {};
+}
 
 struct RegionMoments {
     Real measure{0.0};
@@ -122,8 +195,10 @@ struct RegionMoments {
 }
 
 [[nodiscard]] std::array<Real, 3> unitOrDefault(const std::array<Real, 3>& a,
-                                                const std::array<Real, 3>& fallback) noexcept {
+                                                const std::array<Real, 3>& fallback,
+                                                StrictConstructionObservation* observation = nullptr) noexcept {
     const Real len = norm3(a);
+    if (observation && (!std::isfinite(len) || len <= Real{1.0e-30})) observation->unresolved();
     if (len <= Real{1.0e-30}) {
         return fallback;
     }
@@ -243,7 +318,7 @@ struct RegionMoments {
     return CutInterfaceDegeneracy::VertexTouch;
 }
 
-void addUniqueCandidate(std::vector<CutPointCandidate>& points,
+void addUniqueCandidate(StrictConstructionObservation& observation, std::vector<CutPointCandidate>& points,
                         CutPointCandidate candidate,
                         Real tolerance) {
     const auto duplicate = std::find_if(
@@ -252,6 +327,10 @@ void addUniqueCandidate(std::vector<CutPointCandidate>& points,
         [&](const CutPointCandidate& existing) {
             return nearlySamePoint(existing.point, candidate.point, tolerance);
         });
+    for (const auto& existing : points) {
+        observeRepeat(observation, existing, candidate,
+                      duplicate != points.end() && &existing == &*duplicate);
+    }
     if (duplicate == points.end()) {
         points.push_back(std::move(candidate));
     }
@@ -340,7 +419,8 @@ void addUniqueCandidate(std::vector<CutPointCandidate>& points,
 [[nodiscard]] std::array<Real, 3> estimateGradient2D(
     const std::vector<std::array<Real, 3>>& points,
     const std::vector<Real>& signed_values,
-    std::size_t count) noexcept {
+    std::size_t count,
+    StrictConstructionObservation* observation) noexcept {
     std::array<std::array<Real, 3>, 3> normal_matrix{{
         {{0.0, 0.0, 0.0}},
         {{0.0, 0.0, 0.0}},
@@ -357,10 +437,13 @@ void addUniqueCandidate(std::vector<CutPointCandidate>& points,
     }
     std::array<Real, 3> solution{{0.0, 0.0, 0.0}};
     if (!solve3x3(normal_matrix, rhs, solution)) {
+        if (observation) observation->unresolved();
         return {{1.0, 0.0, 0.0}};
     }
     const Real len = std::sqrt(solution[0] * solution[0] + solution[1] * solution[1]);
+    if (observation && !std::isfinite(len)) observation->unresolved();
     if (len <= Real{1.0e-30}) {
+        if (observation) observation->unresolved();
         return {{1.0, 0.0, 0.0}};
     }
     return {{solution[0] / len, solution[1] / len, 0.0}};
@@ -369,7 +452,8 @@ void addUniqueCandidate(std::vector<CutPointCandidate>& points,
 [[nodiscard]] std::array<Real, 3> estimateGradient3D(
     const std::vector<std::array<Real, 3>>& points,
     const std::vector<Real>& signed_values,
-    std::size_t count) noexcept {
+    std::size_t count,
+    StrictConstructionObservation* observation) noexcept {
     std::array<std::array<Real, 4>, 4> matrix{{
         {{0.0, 0.0, 0.0, 0.0}},
         {{0.0, 0.0, 0.0, 0.0}},
@@ -387,10 +471,11 @@ void addUniqueCandidate(std::vector<CutPointCandidate>& points,
     }
     std::array<Real, 4> solution{{0.0, 0.0, 0.0, 0.0}};
     if (!solve4x4(matrix, rhs, solution)) {
+        if (observation) observation->unresolved();
         return {{1.0, 0.0, 0.0}};
     }
     return unitOrDefault({{solution[0], solution[1], solution[2]}},
-                         {{1.0, 0.0, 0.0}});
+                         {{1.0, 0.0, 0.0}}, observation);
 }
 
 [[nodiscard]] std::pair<std::size_t, std::size_t> farthestPair(
@@ -421,7 +506,7 @@ void addUniqueCandidate(std::vector<CutPointCandidate>& points,
     return scale(c, Real{1.0} / static_cast<Real>(points.size()));
 }
 
-[[nodiscard]] std::array<Real, 3> polygonCentroid(
+[[nodiscard]] std::array<Real, 3> polygonCentroid(StrictConstructionObservation& observation,
     const std::vector<CutPointCandidate>& points) noexcept {
     const auto fallback = centroid(points);
     if (points.size() < 3u) {
@@ -438,6 +523,7 @@ void addUniqueCandidate(std::vector<CutPointCandidate>& points,
         const Real area =
             Real{0.5} * norm3(cross(sub(b, a), sub(c, a)));
         if (!(area > Real{0.0}) || !std::isfinite(area)) {
+            if (!(area == 0 && structuralZero(points.front(), points[triangle], points[triangle + 1u]))) observation.unresolved();
             continue;
         }
         const auto triangle_centroid =
@@ -451,20 +537,21 @@ void addUniqueCandidate(std::vector<CutPointCandidate>& points,
                : fallback;
 }
 
-void orderPolygonPoints(std::vector<CutPointCandidate>& points,
+void orderPolygonPoints(StrictConstructionObservation& observation, std::vector<CutPointCandidate>& points,
                         const std::array<Real, 3>& normal) {
     if (points.size() < 3u) {
         return;
     }
     const auto c = centroid(points);
     std::array<Real, 3> axis0 = unitOrDefault(sub(points.front().point, c),
-                                              {{1.0, 0.0, 0.0}});
+                                              {{1.0, 0.0, 0.0}}, &observation);
     if (norm3(cross(axis0, normal)) <= Real{1.0e-30}) {
+        observation.unresolved();
         axis0 = unitOrDefault(cross(normal, {{0.0, 1.0, 0.0}}),
-                              {{1.0, 0.0, 0.0}});
+                              {{1.0, 0.0, 0.0}}, &observation);
     }
     const auto axis1 = unitOrDefault(cross(normal, axis0),
-                                     {{0.0, 1.0, 0.0}});
+                                     {{0.0, 1.0, 0.0}}, &observation);
     std::sort(points.begin(),
               points.end(),
               [&](const CutPointCandidate& a, const CutPointCandidate& b) {
@@ -491,21 +578,31 @@ void orderPolygonPoints(std::vector<CutPointCandidate>& points,
     return area;
 }
 
-[[nodiscard]] Real clampFraction(Real value) noexcept {
+[[nodiscard]] Real clampFraction(StrictConstructionObservation& observation, Real value) noexcept {
+    if (!std::isfinite(value) || value < Real{0.0} || value > Real{1.0}) observation.unresolved();
     return std::max(Real{0.0}, std::min(Real{1.0}, value));
 }
 
-[[nodiscard]] SignedPoint interpolateSignedPoint(const SignedPoint& a,
+[[nodiscard]] SignedPoint interpolateSignedPoint(StrictConstructionObservation& observation, const SignedPoint& a,
                                                  const SignedPoint& b) noexcept {
     const Real denominator = a.value - b.value;
     Real t = Real{0.0};
     if (std::abs(denominator) > Real{1.0e-30}) {
-        t = clampFraction(a.value / denominator);
+        t = clampFraction(observation, a.value / denominator);
+    } else {
+        observation.unresolved();
     }
-    return SignedPoint{interpolate(a.point, b.point, t), Real{0.0}};
+    auto origin = crossingOrigin(a, b, observation);
+    if (!(std::abs(denominator) > Real{1.0e-30}) ||
+        !std::isfinite(denominator) || !std::isfinite(t) ||
+        (a.value != 0 && b.value != 0 && !(t > 0 && t < 1))) {
+        observation.unresolved();
+        origin = {};
+    }
+    return SignedPoint{interpolate(a.point, b.point, t), Real{0.0}, origin};
 }
 
-[[nodiscard]] std::vector<SignedPoint> clipPolygonToNegativeLevelSet(
+[[nodiscard]] std::vector<SignedPoint> clipPolygonToNegativeLevelSet(StrictConstructionObservation& observation,
     const std::vector<SignedPoint>& polygon,
     Real tolerance)
 {
@@ -524,9 +621,9 @@ void orderPolygonPoints(std::vector<CutPointCandidate>& points,
         if (previous_inside && current_inside) {
             clipped.push_back(current);
         } else if (previous_inside && !current_inside) {
-            clipped.push_back(interpolateSignedPoint(previous, current));
+            clipped.push_back(interpolateSignedPoint(observation, previous, current));
         } else if (!previous_inside && current_inside) {
-            clipped.push_back(interpolateSignedPoint(previous, current));
+            clipped.push_back(interpolateSignedPoint(observation, previous, current));
             clipped.push_back(current);
         }
         previous = current;
@@ -535,7 +632,7 @@ void orderPolygonPoints(std::vector<CutPointCandidate>& points,
     return clipped;
 }
 
-[[nodiscard]] std::vector<SignedPoint> clipPolygonToPositiveLevelSet(
+[[nodiscard]] std::vector<SignedPoint> clipPolygonToPositiveLevelSet(StrictConstructionObservation& observation,
     const std::vector<SignedPoint>& polygon,
     Real tolerance)
 {
@@ -554,9 +651,9 @@ void orderPolygonPoints(std::vector<CutPointCandidate>& points,
         if (previous_inside && current_inside) {
             clipped.push_back(current);
         } else if (previous_inside && !current_inside) {
-            clipped.push_back(interpolateSignedPoint(previous, current));
+            clipped.push_back(interpolateSignedPoint(observation, previous, current));
         } else if (!previous_inside && current_inside) {
-            clipped.push_back(interpolateSignedPoint(previous, current));
+            clipped.push_back(interpolateSignedPoint(observation, previous, current));
             clipped.push_back(current);
         }
         previous = current;
@@ -565,7 +662,7 @@ void orderPolygonPoints(std::vector<CutPointCandidate>& points,
     return clipped;
 }
 
-[[nodiscard]] RegionMoments polygonMoments2D(
+[[nodiscard]] RegionMoments polygonMoments2D(StrictConstructionObservation& observation,
     const std::vector<SignedPoint>& polygon) noexcept
 {
     RegionMoments moments;
@@ -589,7 +686,9 @@ void orderPolygonPoints(std::vector<CutPointCandidate>& points,
         first_moment = add(first_moment,
                            scale(triangle_centroid, triangle_measure));
     }
+    if (!std::isfinite(signed_measure)) observation.unresolved();
     if (std::abs(signed_measure) <= Real{1.0e-30}) {
+        observation.unresolved();
         return RegionMoments{};
     }
     moments.measure = std::abs(signed_measure);
@@ -605,24 +704,24 @@ void orderPolygonPoints(std::vector<CutPointCandidate>& points,
     std::vector<SignedPoint> polygon;
     polygon.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
-        polygon.push_back(SignedPoint{points[i], signed_values[i]});
+        polygon.push_back(SignedPoint{points[i], signed_values[i], PointOrigin::corner(i)});
     }
     return polygon;
 }
 
-[[nodiscard]] RegionMoments parentMoments2D(
+[[nodiscard]] RegionMoments parentMoments2D(StrictConstructionObservation& observation,
     const std::vector<std::array<Real, 3>>& points,
     std::size_t count)
 {
     std::vector<SignedPoint> polygon;
     polygon.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
-        polygon.push_back(SignedPoint{points[i], Real{0.0}});
+        polygon.push_back(SignedPoint{points[i], Real{0.0}, PointOrigin::corner(i)});
     }
-    return polygonMoments2D(polygon);
+    return polygonMoments2D(observation, polygon);
 }
 
-[[nodiscard]] std::vector<SignedPoint> cutSidePolygon2D(
+[[nodiscard]] std::vector<SignedPoint> cutSidePolygon2D(StrictConstructionObservation& observation,
     const std::vector<std::array<Real, 3>>& points,
     const std::vector<Real>& signed_values,
     std::size_t count,
@@ -631,8 +730,8 @@ void orderPolygonPoints(std::vector<CutPointCandidate>& points,
 {
     const auto polygon = makeSignedPolygon(points, signed_values, count);
     return side == geometry::CutIntegrationSide::Negative
-               ? clipPolygonToNegativeLevelSet(polygon, tolerance)
-               : clipPolygonToPositiveLevelSet(polygon, tolerance);
+               ? clipPolygonToNegativeLevelSet(observation, polygon, tolerance)
+               : clipPolygonToPositiveLevelSet(observation, polygon, tolerance);
 }
 
 [[nodiscard]] CutInterfaceReferenceSimplex makeReferenceSimplex(
@@ -660,7 +759,7 @@ void orderPolygonPoints(std::vector<CutPointCandidate>& points,
 }
 
 [[nodiscard]] std::vector<CutInterfaceReferenceSimplex>
-referenceTrianglesFromPolygon(const std::vector<SignedPoint>& polygon,
+referenceTrianglesFromPolygon(StrictConstructionObservation& observation, const std::vector<SignedPoint>& polygon,
                               Real tolerance)
 {
     std::vector<CutInterfaceReferenceSimplex> triangles;
@@ -676,6 +775,8 @@ referenceTrianglesFromPolygon(const std::vector<SignedPoint>& polygon,
         const auto& c = polygon[i + 1u].point;
         const Real area =
             Real{0.5} * norm3(cross(sub(b, origin), sub(c, origin)));
+        if (!(area > minimum_area) &&
+            !(area == 0 && structuralZero(polygon.front(), polygon[i], polygon[i + 1u]))) observation.unresolved();
         if (area > minimum_area) {
             triangles.push_back(makeReferenceSimplex(
                 {origin, b, c},
@@ -687,7 +788,7 @@ referenceTrianglesFromPolygon(const std::vector<SignedPoint>& polygon,
     return triangles;
 }
 
-[[nodiscard]] std::vector<geometry::CutQuadraturePoint> polygonQuadrature2D(
+[[nodiscard]] std::vector<geometry::CutQuadraturePoint> polygonQuadrature2D(StrictConstructionObservation& observation,
     const std::vector<SignedPoint>& polygon,
     Real tolerance,
     int requested_order)
@@ -708,7 +809,9 @@ referenceTrianglesFromPolygon(const std::vector<SignedPoint>& polygon,
         const auto& c = polygon[i + 1u].point;
         const Real area =
             Real{0.5} * norm3(cross(sub(b, origin), sub(c, origin)));
+        if (!std::isfinite(area)) observation.unresolved();
         if (area <= minimum_area) {
+            if (!(area == 0 && structuralZero(polygon.front(), polygon[i], polygon[i + 1u]))) observation.unresolved();
             continue;
         }
         const auto add_point = [&](Real l0, Real l1, Real l2, Real weight) {
@@ -749,7 +852,7 @@ referenceTrianglesFromPolygon(const std::vector<SignedPoint>& polygon,
     return points;
 }
 
-[[nodiscard]] std::vector<geometry::CutQuadraturePoint> cutSideQuadrature2D(
+[[nodiscard]] std::vector<geometry::CutQuadraturePoint> cutSideQuadrature2D(StrictConstructionObservation& observation,
     const std::vector<std::array<Real, 3>>& points,
     const std::vector<Real>& signed_values,
     std::size_t count,
@@ -757,8 +860,8 @@ referenceTrianglesFromPolygon(const std::vector<SignedPoint>& polygon,
     Real tolerance,
     int requested_order)
 {
-    return polygonQuadrature2D(
-        cutSidePolygon2D(points, signed_values, count, side, tolerance),
+    return polygonQuadrature2D(observation,
+        cutSidePolygon2D(observation, points, signed_values, count, side, tolerance),
         tolerance,
         requested_order);
 }
@@ -773,22 +876,25 @@ referenceTrianglesFromPolygon(const std::vector<SignedPoint>& polygon,
     return sum;
 }
 
-void normalizeQuadratureWeightsToMeasure(
+void normalizeQuadratureWeightsToMeasure(StrictConstructionObservation& observation,
     std::vector<geometry::CutQuadraturePoint>& points,
     Real target_measure)
 {
     if (!(target_measure > Real{0.0}) || !std::isfinite(target_measure) ||
         points.empty()) {
+        observation.unresolved();
         return;
     }
 
     const Real sum = quadratureWeightSum(points);
     if (!(sum > Real{0.0}) || !std::isfinite(sum)) {
+        observation.unresolved();
         return;
     }
 
     const Real scale_factor = target_measure / sum;
     if (!(scale_factor > Real{0.0}) || !std::isfinite(scale_factor)) {
+        observation.unresolved();
         return;
     }
 
@@ -801,16 +907,20 @@ void normalizeQuadratureWeightsToMeasure(
     }
 }
 
-void addUniquePoint(std::vector<std::array<Real, 3>>& points,
-                    const std::array<Real, 3>& point,
+void addUniquePoint(StrictConstructionObservation& observation, std::vector<IdentifiedPoint>& points,
+                    const IdentifiedPoint& point,
                     Real tolerance)
 {
     const auto duplicate = std::find_if(
         points.begin(),
         points.end(),
-        [&](const std::array<Real, 3>& existing) {
-            return nearlySamePoint(existing, point, tolerance);
+        [&](const IdentifiedPoint& existing) {
+            return nearlySamePoint(existing.point, point.point, tolerance);
         });
+    for (const auto& existing : points) {
+        observeRepeat(observation, existing, point,
+                      duplicate != points.end() && &existing == &*duplicate);
+    }
     if (duplicate == points.end()) {
         points.push_back(point);
     }
@@ -823,14 +933,14 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
     return std::abs(dot3(sub(b, a), cross(sub(c, a), sub(d, a)))) / Real{6.0};
 }
 
-[[nodiscard]] RegionMoments polyhedronMomentsFromFaces(
-    const std::vector<std::vector<std::array<Real, 3>>>& faces,
+[[nodiscard]] RegionMoments polyhedronMomentsFromFaces(StrictConstructionObservation& observation,
+    const IdentifiedFaces& faces,
     Real tolerance)
 {
-    std::vector<std::array<Real, 3>> unique_points;
+    std::vector<IdentifiedPoint> unique_points;
     for (const auto& face : faces) {
         for (const auto& point : face) {
-            addUniquePoint(unique_points, point, tolerance);
+            addUniquePoint(observation, unique_points, point, tolerance);
         }
     }
     if (unique_points.empty()) {
@@ -839,7 +949,7 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
 
     std::array<Real, 3> center{{0.0, 0.0, 0.0}};
     for (const auto& point : unique_points) {
-        center = add(center, point);
+        center = add(center, point.point);
     }
     center = scale(center, Real{1.0} / static_cast<Real>(unique_points.size()));
 
@@ -850,25 +960,27 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
             continue;
         }
         for (std::size_t i = 1u; i + 1u < face.size(); ++i) {
-            const Real volume = std::abs(dot3(sub(face[0], center),
-                                              cross(sub(face[i], center),
-                                                    sub(face[i + 1u], center)))) /
+            const Real volume = std::abs(dot3(sub(face[0].point, center),
+                                              cross(sub(face[i].point, center),
+                                                    sub(face[i + 1u].point, center)))) /
                                 Real{6.0};
             const auto tetra_centroid =
-                scale(add(add(center, face[0]), add(face[i], face[i + 1u])),
+                scale(add(add(center, face[0].point), add(face[i].point, face[i + 1u].point)),
                       Real{0.25});
             moments.measure += volume;
             first_moment = add(first_moment, scale(tetra_centroid, volume));
         }
     }
+    if (!std::isfinite(moments.measure)) observation.unresolved();
     if (moments.measure <= Real{1.0e-30}) {
+        observation.unresolved();
         return RegionMoments{};
     }
     moments.centroid = scale(first_moment, Real{1.0} / moments.measure);
     return moments;
 }
 
-[[nodiscard]] std::vector<std::vector<std::array<Real, 3>>> tetrahedronSideFaces(
+[[nodiscard]] IdentifiedFaces tetrahedronSideFaces(StrictConstructionObservation& observation,
     const std::vector<std::array<Real, 3>>& points,
     const std::vector<Real>& signed_values,
     const std::vector<CutPointCandidate>& ordered_cut_points,
@@ -880,53 +992,74 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
         {{0u, 1u, 3u}},
         {{0u, 2u, 3u}},
         {{1u, 2u, 3u}}}};
-    std::vector<std::vector<std::array<Real, 3>>> clipped_faces;
+    IdentifiedFaces clipped_faces;
     clipped_faces.reserve(5u);
     for (const auto& face : faces) {
         std::vector<SignedPoint> signed_face;
         signed_face.reserve(3u);
         for (const auto index : face) {
-            signed_face.push_back(SignedPoint{points[index], signed_values[index]});
+            signed_face.push_back(SignedPoint{points[index], signed_values[index], PointOrigin::corner(index)});
         }
         const auto clipped =
             side == geometry::CutIntegrationSide::Negative
-                ? clipPolygonToNegativeLevelSet(signed_face, tolerance)
-                : clipPolygonToPositiveLevelSet(signed_face, tolerance);
+                ? clipPolygonToNegativeLevelSet(observation, signed_face, tolerance)
+                : clipPolygonToPositiveLevelSet(observation, signed_face, tolerance);
         if (clipped.size() >= 3u) {
-            std::vector<std::array<Real, 3>> face_points;
+            std::vector<IdentifiedPoint> face_points;
             face_points.reserve(clipped.size());
             for (const auto& point : clipped) {
-                face_points.push_back(point.point);
+                face_points.push_back({point.point, point.origin});
             }
             clipped_faces.push_back(std::move(face_points));
         }
     }
     if (ordered_cut_points.size() >= 3u) {
-        std::vector<std::array<Real, 3>> cut_face;
+        std::vector<IdentifiedPoint> cut_face;
         cut_face.reserve(ordered_cut_points.size());
         for (const auto& point : ordered_cut_points) {
-            cut_face.push_back(point.point);
+            cut_face.push_back({point.point, point.origin});
         }
+        const std::vector<IdentifiedPoint>* reused_face = nullptr;
         const bool cut_face_is_existing_parent_face = std::any_of(
             clipped_faces.begin(),
             clipped_faces.end(),
-            [&](const std::vector<std::array<Real, 3>>& face) {
+            [&](const std::vector<IdentifiedPoint>& face) {
                 if (face.size() != cut_face.size()) {
                     return false;
                 }
-                return std::all_of(
+                const bool coordinate_match = std::all_of(
                     cut_face.begin(),
                     cut_face.end(),
-                    [&](const std::array<Real, 3>& point) {
+                    [&](const IdentifiedPoint& point) {
                         return std::any_of(
                             face.begin(),
                             face.end(),
-                            [&](const std::array<Real, 3>& existing) {
+                            [&](const IdentifiedPoint& existing) {
                                 return nearlySamePoint(
-                                    point, existing, tolerance);
+                                    point.point, existing.point, tolerance);
                             });
                     });
+                if (coordinate_match) reused_face = &face;
+                return coordinate_match;
             });
+        bool symbolic_reuse = false;
+        for (const auto& face : clipped_faces) {
+            if (face.size() != cut_face.size()) continue;
+            std::vector<bool> used(face.size(), false);
+            bool bijection = true;
+            for (const auto& point : cut_face) {
+                std::size_t j = 0;
+                while (j < face.size() &&
+                       (used[j] || !point.origin.known() ||
+                        !(point.origin == face[j].origin))) ++j;
+                if (j == face.size()) { bijection = false; break; }
+                used[j] = true;
+                observeRepeat(observation, point, face[j], false);
+            }
+            symbolic_reuse = symbolic_reuse || bijection;
+            if (&face == reused_face && !bijection) observation.unresolved();
+        }
+        if (symbolic_reuse != cut_face_is_existing_parent_face) observation.unresolved();
         if (!cut_face_is_existing_parent_face) {
             clipped_faces.push_back(std::move(cut_face));
         }
@@ -934,14 +1067,14 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
     return clipped_faces;
 }
 
-[[nodiscard]] std::vector<geometry::CutQuadraturePoint> polyhedronQuadratureFromFaces(
-    const std::vector<std::vector<std::array<Real, 3>>>& faces,
+[[nodiscard]] std::vector<geometry::CutQuadraturePoint> polyhedronQuadratureFromFaces(StrictConstructionObservation& observation,
+    const IdentifiedFaces& faces,
     Real tolerance)
 {
-    std::vector<std::array<Real, 3>> unique_points;
+    std::vector<IdentifiedPoint> unique_points;
     for (const auto& face : faces) {
         for (const auto& point : face) {
-            addUniquePoint(unique_points, point, tolerance);
+            addUniquePoint(observation, unique_points, point, tolerance);
         }
     }
     if (unique_points.empty()) {
@@ -950,7 +1083,7 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
 
     std::array<Real, 3> center{{0.0, 0.0, 0.0}};
     for (const auto& point : unique_points) {
-        center = add(center, point);
+        center = add(center, point.point);
     }
     center = scale(center, Real{1.0} / static_cast<Real>(unique_points.size()));
 
@@ -963,13 +1096,15 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
         }
         for (std::size_t i = 1u; i + 1u < face.size(); ++i) {
             const auto& a = center;
-            const auto& b = face[0];
-            const auto& c = face[i];
-            const auto& d = face[i + 1u];
+            const auto& b = face[0].point;
+            const auto& c = face[i].point;
+            const auto& d = face[i + 1u].point;
             const Real volume = tetraVolume(a, b, c, d);
             const Real minimum_volume =
                 std::max(Real{1.0e-30}, tolerance * tolerance * tolerance);
+            if (!std::isfinite(volume)) observation.unresolved();
             if (volume <= minimum_volume) {
+                if (!(volume == 0 && structuralZero(face[0], face[i], face[i + 1u]))) observation.unresolved();
                 continue;
             }
             const Real weight = volume / Real{4.0};
@@ -991,8 +1126,8 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
 }
 
 [[nodiscard]] std::vector<CutInterfaceReferenceSimplex>
-referenceTetrahedraFromFaces(
-    const std::vector<std::vector<std::array<Real, 3>>>& faces,
+referenceTetrahedraFromFaces(StrictConstructionObservation& observation,
+    const IdentifiedFaces& faces,
     const std::vector<std::array<Real, 3>>& source_points,
     const std::vector<Real>& signed_values,
     Real tolerance)
@@ -1029,13 +1164,14 @@ referenceTetrahedraFromFaces(
             coordinates[0] * (signed_values[1] - signed_values[0]) +
             coordinates[1] * (signed_values[2] - signed_values[0]) +
             coordinates[2] * (signed_values[3] - signed_values[0]);
+        if (!std::isfinite(value) || (value != 0 && std::abs(value) <= tolerance)) observation.unresolved();
         return canonicalSignedValue(value, tolerance);
     };
 
-    std::vector<std::array<Real, 3>> unique_points;
+    std::vector<IdentifiedPoint> unique_points;
     for (const auto& face : faces) {
         for (const auto& point : face) {
-            addUniquePoint(unique_points, point, tolerance);
+            addUniquePoint(observation, unique_points, point, tolerance);
         }
     }
     if (unique_points.empty()) {
@@ -1044,7 +1180,7 @@ referenceTetrahedraFromFaces(
 
     std::array<Real, 3> center{{0.0, 0.0, 0.0}};
     for (const auto& point : unique_points) {
-        center = add(center, point);
+        center = add(center, point.point);
     }
     center = scale(center, Real{1.0} / static_cast<Real>(unique_points.size()));
 
@@ -1056,14 +1192,16 @@ referenceTetrahedraFromFaces(
             continue;
         }
         for (std::size_t i = 1u; i + 1u < face.size(); ++i) {
-            if (tetraVolume(center, face[0], face[i], face[i + 1u]) >
-                minimum_volume) {
+            const Real volume = tetraVolume(center, face[0].point, face[i].point, face[i + 1u].point);
+            if (!(volume > minimum_volume) &&
+                !(volume == 0 && structuralZero(face[0], face[i], face[i + 1u]))) observation.unresolved();
+            if (volume > minimum_volume) {
                 tetrahedra.push_back(makeReferenceSimplex(
-                    {center, face[0], face[i], face[i + 1u]},
+                    {center, face[0].point, face[i].point, face[i + 1u].point},
                     {represented_value(center),
-                     represented_value(face[0]),
-                     represented_value(face[i]),
-                     represented_value(face[i + 1u])}));
+                     represented_value(face[0].point),
+                     represented_value(face[i].point),
+                     represented_value(face[i + 1u].point)}));
             }
         }
     }
@@ -1075,7 +1213,7 @@ struct SideVolumeFractions {
     Real positive{0.0};
 };
 
-[[nodiscard]] SideVolumeFractions sideVolumeFractions(
+[[nodiscard]] SideVolumeFractions sideVolumeFractions(StrictConstructionObservation& observation,
     Real negative_measure,
     Real positive_measure)
 {
@@ -1097,11 +1235,11 @@ struct SideVolumeFractions {
     // the exact partition-of-unity relation used by downstream consumers.
     if (negative_measure <= positive_measure) {
         fractions.negative =
-            clampFraction(negative_measure / represented_measure);
+            clampFraction(observation, negative_measure / represented_measure);
         fractions.positive = Real{1.0} - fractions.negative;
     } else {
         fractions.positive =
-            clampFraction(positive_measure / represented_measure);
+            clampFraction(observation, positive_measure / represented_measure);
         fractions.negative = Real{1.0} - fractions.positive;
     }
     return fractions;
@@ -1136,7 +1274,7 @@ struct SideVolumeFractions {
     return moments;
 }
 
-[[nodiscard]] CutInterfaceVolumeRegion makeVolumeRegion(
+[[nodiscard]] CutInterfaceVolumeRegion makeVolumeRegion(StrictConstructionObservation& observation,
     const CutInterfaceDomainRequest& request,
     const LevelSetCellCutInput& input,
     geometry::CutIntegrationSide side,
@@ -1162,7 +1300,7 @@ struct SideVolumeFractions {
                         ? interface_normal
                         : scale(interface_normal, Real{-1.0});
     region.parent_measure = parent_measure;
-    region.volume_fraction = clampFraction(volume_fraction);
+    region.volume_fraction = clampFraction(observation, volume_fraction);
     region.measure = parent_measure * region.volume_fraction;
     region.min_level_set_value = *std::min_element(signed_values.begin(), signed_values.end());
     region.max_level_set_value = *std::max_element(signed_values.begin(), signed_values.end());
@@ -1184,11 +1322,13 @@ struct SideVolumeFractions {
     return region;
 }
 
-void appendSideVolumeRegion(LevelSetCellCutResult& result,
+void appendSideVolumeRegion(StrictConstructionObservation& observation, LevelSetCellCutResult& result,
                             CutInterfaceVolumeRegion region)
 {
     if (region.measure > Real{0.0}) {
         result.volume_regions.push_back(std::move(region));
+    } else {
+        observation.unresolved();
     }
 }
 
@@ -1339,10 +1479,12 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                                               const LevelSetCellCutInput& input)
 {
     LevelSetCellCutResult result;
+    StrictConstructionObservation observation;
     if (!supportsLinearLevelSetCellCut2D(input.element_type)) {
         result.supported = false;
         result.degeneracy = CutInterfaceDegeneracy::NoCut;
         result.diagnostic = "unsupported element type for linear 2D level-set cutting";
+        observation.stamp(result);
         return result;
     }
     if (!request.valid()) {
@@ -1364,7 +1506,11 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
             input.level_set_values[i] - request.isovalue,
             request.tolerance);
         signed_values.push_back(signed_value);
+        if (!std::isfinite(signed_value) ||
+            !std::all_of(input.node_coordinates[i].begin(), input.node_coordinates[i].end(),
+                         [](Real x) { return std::isfinite(x); })) observation.unresolved();
         if (signed_value == Real{0.0}) {
+            observation.unresolved();
             ++zero_count;
         } else if (signed_value < Real{0.0}) {
             ++negative_count;
@@ -1373,11 +1519,12 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
         }
     }
 
-    const auto parent_moments = parentMoments2D(input.node_coordinates, count);
+    const auto parent_moments = parentMoments2D(observation, input.node_coordinates, count);
     const Real parent_measure = parent_moments.measure;
     const auto parent_centroid = parent_moments.centroid;
     const auto gradient_normal =
-        estimateGradient2D(input.node_coordinates, signed_values, count);
+        estimateGradient2D(input.node_coordinates, signed_values, count,
+                           negative_count > 0 && positive_count > 0 ? &observation : nullptr);
     std::size_t zero_edge_count = 0u;
     for (std::size_t i = 0u; i < count; ++i) {
         const std::size_t j = (i + 1u) % count;
@@ -1401,6 +1548,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
             request.resolvedVolumeQuadratureOrder());
     const auto append_collapsed_full_region =
         [&](CutInterfaceDegeneracy degeneracy, const char* reason) {
+            observation.unresolved();
             const Real centroid_value =
                 std::accumulate(signed_values.begin(),
                                 signed_values.end(),
@@ -1418,16 +1566,16 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                     : Real{1.0};
             const std::vector<Real> dominant_values(count,
                                                     representative_value);
-            const auto full_quadrature = cutSideQuadrature2D(
+            const auto full_quadrature = cutSideQuadrature2D(observation,
                 input.node_coordinates,
                 dominant_values,
                 count,
                 side,
                 request.tolerance,
                 planar_volume_order);
-            appendSideVolumeRegion(
+            appendSideVolumeRegion(observation,
                 result,
-                makeVolumeRegion(request,
+                makeVolumeRegion(observation, request,
                                  input,
                                  side,
                                  parent_measure,
@@ -1447,19 +1595,20 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
     if (zero_count == count) {
         result.degeneracy = CutInterfaceDegeneracy::FullZeroCell;
         result.diagnostic = "all corner level-set values are on the requested isovalue";
+        observation.stamp(result);
         return result;
     }
     if (positive_count == 0u && !publish_aligned_zero_edge) {
         const auto full_quadrature =
-            cutSideQuadrature2D(input.node_coordinates,
+            cutSideQuadrature2D(observation, input.node_coordinates,
                                 signed_values,
                                 count,
                                 geometry::CutIntegrationSide::Negative,
                                 request.tolerance,
                                 planar_volume_order);
-        appendSideVolumeRegion(
+        appendSideVolumeRegion(observation,
             result,
-            makeVolumeRegion(request,
+            makeVolumeRegion(observation, request,
                              input,
                              geometry::CutIntegrationSide::Negative,
                              parent_measure,
@@ -1475,19 +1624,20 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
         result.degeneracy = classifyZeroContact2D(signed_values,
                                                   count,
                                                   request.tolerance);
+        observation.stamp(result);
         return result;
     }
     if (negative_count == 0u && !publish_aligned_zero_edge) {
         const auto full_quadrature =
-            cutSideQuadrature2D(input.node_coordinates,
+            cutSideQuadrature2D(observation, input.node_coordinates,
                                 signed_values,
                                 count,
                                 geometry::CutIntegrationSide::Positive,
                                 request.tolerance,
                                 planar_volume_order);
-        appendSideVolumeRegion(
+        appendSideVolumeRegion(observation,
             result,
-            makeVolumeRegion(request,
+            makeVolumeRegion(observation, request,
                              input,
                              geometry::CutIntegrationSide::Positive,
                              parent_measure,
@@ -1503,6 +1653,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
         result.degeneracy = classifyZeroContact2D(signed_values,
                                                   count,
                                                   request.tolerance);
+        observation.stamp(result);
         return result;
     }
 
@@ -1517,36 +1668,37 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
         const bool j_zero = std::abs(dj) <= request.tolerance;
         if (i_zero && j_zero) {
             zero_edge = true;
-            addUniqueCandidate(
+            addUniqueCandidate(observation,
                 cut_points,
-                CutPointCandidate{input.node_coordinates[i], input.node_coordinates[i], 0.0},
+                CutPointCandidate{input.node_coordinates[i], input.node_coordinates[i], 0.0, PointOrigin::corner(i)},
                 request.tolerance);
-            addUniqueCandidate(
+            addUniqueCandidate(observation,
                 cut_points,
-                CutPointCandidate{input.node_coordinates[j], input.node_coordinates[j], 0.0},
+                CutPointCandidate{input.node_coordinates[j], input.node_coordinates[j], 0.0, PointOrigin::corner(j)},
                 request.tolerance);
             continue;
         }
         if (i_zero) {
-            addUniqueCandidate(
+            addUniqueCandidate(observation,
                 cut_points,
-                CutPointCandidate{input.node_coordinates[i], input.node_coordinates[i], 0.0},
+                CutPointCandidate{input.node_coordinates[i], input.node_coordinates[i], 0.0, PointOrigin::corner(i)},
                 request.tolerance);
             continue;
         }
         if (j_zero) {
-            addUniqueCandidate(
+            addUniqueCandidate(observation,
                 cut_points,
-                CutPointCandidate{input.node_coordinates[j], input.node_coordinates[j], 0.0},
+                CutPointCandidate{input.node_coordinates[j], input.node_coordinates[j], 0.0, PointOrigin::corner(j)},
                 request.tolerance);
             continue;
         }
         if ((di < Real{0.0} && dj > Real{0.0}) ||
             (di > Real{0.0} && dj < Real{0.0})) {
             const Real t = di / (di - dj);
+            if (!std::isfinite(di - dj) || !std::isfinite(t) || !(t > 0 && t < 1)) observation.unresolved();
             const auto point = interpolate(input.node_coordinates[i], input.node_coordinates[j], t);
-            addUniqueCandidate(cut_points,
-                               CutPointCandidate{point, point, 0.0},
+            addUniqueCandidate(observation, cut_points,
+                               CutPointCandidate{point, point, 0.0, PointOrigin::root(i, j)},
                                request.tolerance);
         }
     }
@@ -1556,6 +1708,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
             zero_count > 0u ? CutInterfaceDegeneracy::VertexTouch
                             : CutInterfaceDegeneracy::SmallFragment,
             "level-set cut collapsed a fragment below the point separation tolerance onto its represented dominant phase");
+        observation.stamp(result);
         return result;
     }
 
@@ -1567,6 +1720,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
         append_collapsed_full_region(
             CutInterfaceDegeneracy::SmallFragment,
             "level-set cut collapsed a fragment below the minimum measure tolerance onto its represented dominant phase");
+        observation.stamp(result);
         return result;
     }
 
@@ -1579,6 +1733,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
             normal = scale(normal, Real{-1.0});
         }
     } else {
+        observation.unresolved();
         normal = gradient_normal;
     }
 
@@ -1603,19 +1758,19 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
     fragment.normal = normal;
     fragment.measure = measure;
     const auto negative_polygon =
-        cutSidePolygon2D(input.node_coordinates,
+        cutSidePolygon2D(observation, input.node_coordinates,
                          signed_values,
                          count,
                          geometry::CutIntegrationSide::Negative,
                          request.tolerance);
     const auto positive_polygon =
-        cutSidePolygon2D(input.node_coordinates,
+        cutSidePolygon2D(observation, input.node_coordinates,
                          signed_values,
                          count,
                          geometry::CutIntegrationSide::Positive,
                          request.tolerance);
-    const auto negative_moments = polygonMoments2D(negative_polygon);
-    const auto positive_moments = polygonMoments2D(positive_polygon);
+    const auto negative_moments = polygonMoments2D(observation, negative_polygon);
+    const auto positive_moments = polygonMoments2D(observation, positive_polygon);
     const auto side_fractions =
         publish_aligned_zero_edge
             ? SideVolumeFractions{
@@ -1627,22 +1782,22 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                           geometry::CutIntegrationSide::Positive
                       ? Real{1.0}
                       : Real{0.0}}
-            : sideVolumeFractions(
+            : sideVolumeFractions(observation,
                   negative_moments.measure, positive_moments.measure);
-    auto negative_quadrature = polygonQuadrature2D(
+    auto negative_quadrature = polygonQuadrature2D(observation,
         negative_polygon, request.tolerance, planar_volume_order);
-    auto positive_quadrature = polygonQuadrature2D(
+    auto positive_quadrature = polygonQuadrature2D(observation,
         positive_polygon, request.tolerance, planar_volume_order);
-    auto negative_reference_subcells = referenceTrianglesFromPolygon(
+    auto negative_reference_subcells = referenceTrianglesFromPolygon(observation,
         negative_polygon, request.tolerance);
-    auto positive_reference_subcells = referenceTrianglesFromPolygon(
+    auto positive_reference_subcells = referenceTrianglesFromPolygon(observation,
         positive_polygon, request.tolerance);
     fragment.negative_volume_fraction = side_fractions.negative;
     fragment.positive_volume_fraction = side_fractions.positive;
-    normalizeQuadratureWeightsToMeasure(
+    normalizeQuadratureWeightsToMeasure(observation,
         negative_quadrature,
         parent_measure * fragment.negative_volume_fraction);
-    normalizeQuadratureWeightsToMeasure(
+    normalizeQuadratureWeightsToMeasure(observation,
         positive_quadrature,
         parent_measure * fragment.positive_volume_fraction);
     fragment.min_level_set_value = *std::min_element(signed_values.begin(), signed_values.end());
@@ -1674,9 +1829,9 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                                     .weight = measure}};
 
     result.degeneracy = fragment.degeneracy;
-    appendSideVolumeRegion(
+    appendSideVolumeRegion(observation,
         result,
-        makeVolumeRegion(request,
+        makeVolumeRegion(observation, request,
                          input,
                          geometry::CutIntegrationSide::Negative,
                          parent_measure,
@@ -1694,9 +1849,9 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                                  geometry::CutIntegrationSide::Negative,
                          planar_volume_order,
                          std::move(negative_reference_subcells)));
-    appendSideVolumeRegion(
+    appendSideVolumeRegion(observation,
         result,
-        makeVolumeRegion(request,
+        makeVolumeRegion(observation, request,
                          input,
                          geometry::CutIntegrationSide::Positive,
                          parent_measure,
@@ -1715,6 +1870,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                          planar_volume_order,
                          std::move(positive_reference_subcells)));
     result.fragments.push_back(std::move(fragment));
+    observation.stamp(result);
     return result;
 }
 
@@ -1722,10 +1878,12 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                                               const LevelSetCellCutInput& input)
 {
     LevelSetCellCutResult result;
+    StrictConstructionObservation observation;
     if (!supportsLinearLevelSetCellCut3D(input.element_type)) {
         result.supported = false;
         result.degeneracy = CutInterfaceDegeneracy::NoCut;
         result.diagnostic = "unsupported element type for linear 3D level-set cutting";
+        observation.stamp(result);
         return result;
     }
     if (!request.valid()) {
@@ -1747,7 +1905,11 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
             input.level_set_values[i] - request.isovalue,
             request.tolerance);
         signed_values.push_back(signed_value);
+        if (!std::isfinite(signed_value) ||
+            !std::all_of(input.node_coordinates[i].begin(), input.node_coordinates[i].end(),
+                         [](Real x) { return std::isfinite(x); })) observation.unresolved();
         if (signed_value == Real{0.0}) {
+            observation.unresolved();
             ++zero_count;
         } else if (signed_value < Real{0.0}) {
             ++negative_count;
@@ -1760,7 +1922,8 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
     const Real parent_measure = parent_moments.measure;
     const auto parent_centroid = parent_moments.centroid;
     const auto gradient_normal =
-        estimateGradient3D(input.node_coordinates, signed_values, count);
+        estimateGradient3D(input.node_coordinates, signed_values, count,
+                           negative_count > 0 && positive_count > 0 ? &observation : nullptr);
     const auto aligned_parent_side =
         request.aligned_zero_interface_parent_side;
     const bool publish_aligned_zero_face =
@@ -1773,6 +1936,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
           positive_count == 1u && negative_count == 0u));
     const auto append_collapsed_full_region =
         [&](CutInterfaceDegeneracy degeneracy, const char* reason) {
+            observation.unresolved();
             const Real centroid_value =
                 std::accumulate(signed_values.begin(),
                                 signed_values.end(),
@@ -1790,17 +1954,17 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                     : Real{1.0};
             const std::vector<Real> dominant_values(count,
                                                     representative_value);
-            const auto full_faces = tetrahedronSideFaces(
+            const auto full_faces = tetrahedronSideFaces(observation,
                 input.node_coordinates,
                 dominant_values,
                 {},
                 side,
                 request.tolerance);
             const auto full_quadrature =
-                polyhedronQuadratureFromFaces(full_faces, request.tolerance);
-            appendSideVolumeRegion(
+                polyhedronQuadratureFromFaces(observation, full_faces, request.tolerance);
+            appendSideVolumeRegion(observation,
                 result,
-                makeVolumeRegion(request,
+                makeVolumeRegion(observation, request,
                                  input,
                                  side,
                                  parent_measure,
@@ -1819,20 +1983,21 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
     if (zero_count == count) {
         result.degeneracy = CutInterfaceDegeneracy::FullZeroCell;
         result.diagnostic = "all tetrahedron corner level-set values are on the requested isovalue";
+        observation.stamp(result);
         return result;
     }
     if (positive_count == 0u && !publish_aligned_zero_face) {
         const auto full_faces =
-            tetrahedronSideFaces(input.node_coordinates,
+            tetrahedronSideFaces(observation, input.node_coordinates,
                                  signed_values,
                                  {},
                                  geometry::CutIntegrationSide::Negative,
                                  request.tolerance);
         const auto full_quadrature =
-            polyhedronQuadratureFromFaces(full_faces, request.tolerance);
-        appendSideVolumeRegion(
+            polyhedronQuadratureFromFaces(observation, full_faces, request.tolerance);
+        appendSideVolumeRegion(observation,
             result,
-            makeVolumeRegion(request,
+            makeVolumeRegion(observation, request,
                              input,
                              geometry::CutIntegrationSide::Negative,
                              parent_measure,
@@ -1846,20 +2011,21 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                              true));
         result.degeneracy =
             classifyZeroContactTetrahedron(signed_values, request.tolerance);
+        observation.stamp(result);
         return result;
     }
     if (negative_count == 0u && !publish_aligned_zero_face) {
         const auto full_faces =
-            tetrahedronSideFaces(input.node_coordinates,
+            tetrahedronSideFaces(observation, input.node_coordinates,
                                  signed_values,
                                  {},
                                  geometry::CutIntegrationSide::Positive,
                                  request.tolerance);
         const auto full_quadrature =
-            polyhedronQuadratureFromFaces(full_faces, request.tolerance);
-        appendSideVolumeRegion(
+            polyhedronQuadratureFromFaces(observation, full_faces, request.tolerance);
+        appendSideVolumeRegion(observation,
             result,
-            makeVolumeRegion(request,
+            makeVolumeRegion(observation, request,
                              input,
                              geometry::CutIntegrationSide::Positive,
                              parent_measure,
@@ -1873,6 +2039,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                              true));
         result.degeneracy =
             classifyZeroContactTetrahedron(signed_values, request.tolerance);
+        observation.stamp(result);
         return result;
     }
 
@@ -1896,36 +2063,37 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
         const bool j_zero = std::abs(dj) <= request.tolerance;
         if (i_zero && j_zero) {
             zero_edge = true;
-            addUniqueCandidate(
+            addUniqueCandidate(observation,
                 cut_points,
-                CutPointCandidate{input.node_coordinates[i], input.node_coordinates[i], 0.0},
+                CutPointCandidate{input.node_coordinates[i], input.node_coordinates[i], 0.0, PointOrigin::corner(i)},
                 request.tolerance);
-            addUniqueCandidate(
+            addUniqueCandidate(observation,
                 cut_points,
-                CutPointCandidate{input.node_coordinates[j], input.node_coordinates[j], 0.0},
+                CutPointCandidate{input.node_coordinates[j], input.node_coordinates[j], 0.0, PointOrigin::corner(j)},
                 request.tolerance);
             continue;
         }
         if (i_zero) {
-            addUniqueCandidate(
+            addUniqueCandidate(observation,
                 cut_points,
-                CutPointCandidate{input.node_coordinates[i], input.node_coordinates[i], 0.0},
+                CutPointCandidate{input.node_coordinates[i], input.node_coordinates[i], 0.0, PointOrigin::corner(i)},
                 request.tolerance);
             continue;
         }
         if (j_zero) {
-            addUniqueCandidate(
+            addUniqueCandidate(observation,
                 cut_points,
-                CutPointCandidate{input.node_coordinates[j], input.node_coordinates[j], 0.0},
+                CutPointCandidate{input.node_coordinates[j], input.node_coordinates[j], 0.0, PointOrigin::corner(j)},
                 request.tolerance);
             continue;
         }
         if ((di < Real{0.0} && dj > Real{0.0}) ||
             (di > Real{0.0} && dj < Real{0.0})) {
             const Real t = di / (di - dj);
+            if (!std::isfinite(di - dj) || !std::isfinite(t) || !(t > 0 && t < 1)) observation.unresolved();
             const auto point = interpolate(input.node_coordinates[i], input.node_coordinates[j], t);
-            addUniqueCandidate(cut_points,
-                               CutPointCandidate{point, point, 0.0},
+            addUniqueCandidate(observation, cut_points,
+                               CutPointCandidate{point, point, 0.0, PointOrigin::root(i, j)},
                                request.tolerance);
         }
     }
@@ -1938,22 +2106,24 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                        : CutInterfaceDegeneracy::VertexTouch)
                 : CutInterfaceDegeneracy::SmallFragment,
             "level-set cut collapsed a fragment below the point separation tolerance onto its represented dominant phase");
+        observation.stamp(result);
         return result;
     }
 
-    orderPolygonPoints(cut_points, gradient_normal);
+    orderPolygonPoints(observation, cut_points, gradient_normal);
     const Real measure = polygonArea(cut_points, gradient_normal);
     if (measure <= request.tolerance) {
         append_collapsed_full_region(
             CutInterfaceDegeneracy::SmallFragment,
             "level-set cut collapsed a fragment below the minimum measure tolerance onto its represented dominant phase");
+        observation.stamp(result);
         return result;
     }
 
     auto normal = unitOrDefault(
         cross(sub(cut_points[1].point, cut_points[0].point),
               sub(cut_points[2].point, cut_points[0].point)),
-        gradient_normal);
+        gradient_normal, &observation);
     if (dot3(normal, gradient_normal) < Real{0.0}) {
         normal = scale(normal, Real{-1.0});
     }
@@ -1979,21 +2149,21 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
     fragment.normal = normal;
     fragment.measure = measure;
     const auto negative_faces =
-        tetrahedronSideFaces(input.node_coordinates,
+        tetrahedronSideFaces(observation, input.node_coordinates,
                              signed_values,
                              cut_points,
                              geometry::CutIntegrationSide::Negative,
                              request.tolerance);
     const auto positive_faces =
-        tetrahedronSideFaces(input.node_coordinates,
+        tetrahedronSideFaces(observation, input.node_coordinates,
                              signed_values,
                              cut_points,
                              geometry::CutIntegrationSide::Positive,
                              request.tolerance);
     const auto negative_moments =
-        polyhedronMomentsFromFaces(negative_faces, request.tolerance);
+        polyhedronMomentsFromFaces(observation, negative_faces, request.tolerance);
     const auto positive_moments =
-        polyhedronMomentsFromFaces(positive_faces, request.tolerance);
+        polyhedronMomentsFromFaces(observation, positive_faces, request.tolerance);
     const auto side_fractions =
         publish_aligned_zero_face
             ? SideVolumeFractions{
@@ -2005,30 +2175,30 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                           geometry::CutIntegrationSide::Positive
                       ? Real{1.0}
                       : Real{0.0}}
-            : sideVolumeFractions(
+            : sideVolumeFractions(observation,
                   negative_moments.measure, positive_moments.measure);
     auto negative_quadrature =
-        polyhedronQuadratureFromFaces(negative_faces, request.tolerance);
+        polyhedronQuadratureFromFaces(observation, negative_faces, request.tolerance);
     auto positive_quadrature =
-        polyhedronQuadratureFromFaces(positive_faces, request.tolerance);
+        polyhedronQuadratureFromFaces(observation, positive_faces, request.tolerance);
     auto negative_reference_subcells =
-        referenceTetrahedraFromFaces(
+        referenceTetrahedraFromFaces(observation,
             negative_faces,
             input.node_coordinates,
             signed_values,
             request.tolerance);
     auto positive_reference_subcells =
-        referenceTetrahedraFromFaces(
+        referenceTetrahedraFromFaces(observation,
             positive_faces,
             input.node_coordinates,
             signed_values,
             request.tolerance);
     fragment.negative_volume_fraction = side_fractions.negative;
     fragment.positive_volume_fraction = side_fractions.positive;
-    normalizeQuadratureWeightsToMeasure(
+    normalizeQuadratureWeightsToMeasure(observation,
         negative_quadrature,
         parent_measure * fragment.negative_volume_fraction);
-    normalizeQuadratureWeightsToMeasure(
+    normalizeQuadratureWeightsToMeasure(observation,
         positive_quadrature,
         parent_measure * fragment.positive_volume_fraction);
     fragment.min_level_set_value = *std::min_element(signed_values.begin(), signed_values.end());
@@ -2048,7 +2218,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                                                                  stable_index,
                                                                  request.source.value_revision)});
     }
-    const auto qp = polygonCentroid(cut_points);
+    const auto qp = polygonCentroid(observation, cut_points);
     fragment.quadrature_points = {
         CutInterfaceQuadraturePoint{.point = qp,
                                     .parent_coordinate = qp,
@@ -2056,9 +2226,9 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                                     .weight = measure}};
 
     result.degeneracy = fragment.degeneracy;
-    appendSideVolumeRegion(
+    appendSideVolumeRegion(observation,
         result,
-        makeVolumeRegion(request,
+        makeVolumeRegion(observation, request,
                          input,
                          geometry::CutIntegrationSide::Negative,
                          parent_measure,
@@ -2076,9 +2246,9 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                                  geometry::CutIntegrationSide::Negative,
                          -1,
                          std::move(negative_reference_subcells)));
-    appendSideVolumeRegion(
+    appendSideVolumeRegion(observation,
         result,
-        makeVolumeRegion(request,
+        makeVolumeRegion(observation, request,
                          input,
                          geometry::CutIntegrationSide::Positive,
                          parent_measure,
@@ -2097,6 +2267,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                          -1,
                          std::move(positive_reference_subcells)));
     result.fragments.push_back(std::move(fragment));
+    observation.stamp(result);
     return result;
 }
 

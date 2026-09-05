@@ -76,6 +76,7 @@ struct GeneratedActiveBoundaryScalarField {
 };
 
 struct GeneratedActiveBoundaryFragment {
+    LinearCornerStrictBranch construction_observation{LinearCornerStrictBranch::Unchecked};
     int interface_marker{-1};
     int boundary_marker{-1};
     int active_boundary_marker{-1};

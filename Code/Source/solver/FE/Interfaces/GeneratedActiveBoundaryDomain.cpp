@@ -22,9 +22,47 @@ namespace {
 
 using Point = std::array<Real, 3>;
 
+// Parent-local identities never escape this face construction.
+struct PointOrigin {
+    enum class Kind { Unknown, Corner, EdgeRoot };
+    Kind kind{Kind::Unknown};
+    std::size_t first{0u}, second{0u};
+    static PointOrigin corner(std::size_t i) { return {Kind::Corner, i, i}; }
+    static PointOrigin root(std::size_t i, std::size_t j) {
+        return {Kind::EdgeRoot, std::min(i, j), std::max(i, j)};
+    }
+    bool known() const { return kind != Kind::Unknown; }
+    bool operator==(const PointOrigin&) const = default;
+};
+
+struct StrictConstructionObservation {
+    LinearCornerStrictBranch state{LinearCornerStrictBranch::Unchecked};
+    void unresolved() { state = LinearCornerStrictBranch::ModifiedOrUnresolved; }
+    void combine(LinearCornerStrictBranch source) {
+        if (source == LinearCornerStrictBranch::ModifiedOrUnresolved) unresolved();
+    }
+};
+
+bool structuralRepeat(const Point& a, PointOrigin ao, const Point& b, PointOrigin bo)
+{
+    return ao.known() && ao == bo && a == b &&
+        std::all_of(a.begin(), a.end(), [](Real x) { return std::isfinite(x); });
+}
+
+void observeRepeat(StrictConstructionObservation& observation,
+                   const Point& a, PointOrigin ao, const Point& b, PointOrigin bo,
+                   bool merged)
+{
+    if (!ao.known() || !bo.known() ||
+        ((merged || ao == bo) && !structuralRepeat(a, ao, b, bo))) {
+        observation.unresolved();
+    }
+}
+
 struct SignedPoint {
     Point point{{0.0, 0.0, 0.0}};
     Real value{0.0};
+    PointOrigin origin{};
 };
 
 [[nodiscard]] Point add(const Point& a, const Point& b) noexcept
@@ -225,7 +263,8 @@ struct SignedPoint {
 }
 
 [[nodiscard]] SignedPoint crossing(const SignedPoint& a,
-                                   const SignedPoint& b) noexcept
+                                   const SignedPoint& b,
+                                   StrictConstructionObservation& observation) noexcept
 {
     const Real denominator = a.value - b.value;
     const Real t = std::abs(denominator) > Real{1.0e-30}
@@ -233,12 +272,32 @@ struct SignedPoint {
                                     Real{0.0},
                                     Real{1.0})
                        : Real{0.5};
-    return {interpolate(a.point, b.point, t), Real{0.0}};
+    PointOrigin origin;
+    if (a.value == 0 && b.value != 0) origin = a.origin;
+    else if (b.value == 0 && a.value != 0) origin = b.origin;
+    else if (a.origin.kind == PointOrigin::Kind::Corner &&
+             b.origin.kind == PointOrigin::Kind::Corner &&
+             ((a.value < 0 && b.value > 0) || (a.value > 0 && b.value < 0))) {
+        origin = PointOrigin::root(a.origin.first, b.origin.first);
+    }
+    if (!(std::abs(denominator) > Real{1.0e-30}) || !std::isfinite(denominator)) {
+        observation.unresolved();
+        origin = {};
+    } else {
+        const Real raw_t = a.value / denominator;
+        if (!std::isfinite(raw_t) || raw_t < 0 || raw_t > 1 ||
+            (a.value != 0 && b.value != 0 && !(raw_t > 0 && raw_t < 1))) {
+            observation.unresolved();
+        }
+    }
+    if (!origin.known()) observation.unresolved();
+    return {interpolate(a.point, b.point, t), Real{0.0}, origin};
 }
 
 [[nodiscard]] std::vector<SignedPoint> clipPolygon(
     const std::vector<SignedPoint>& polygon,
-    geometry::CutIntegrationSide side)
+    geometry::CutIntegrationSide side,
+    StrictConstructionObservation& observation)
 {
     std::vector<SignedPoint> clipped;
     if (polygon.empty()) {
@@ -251,9 +310,9 @@ struct SignedPoint {
         if (previous_inside && current_inside) {
             clipped.push_back(current);
         } else if (previous_inside && !current_inside) {
-            clipped.push_back(crossing(previous, current));
+            clipped.push_back(crossing(previous, current, observation));
         } else if (!previous_inside && current_inside) {
-            clipped.push_back(crossing(previous, current));
+            clipped.push_back(crossing(previous, current, observation));
             clipped.push_back(current);
         }
         previous = current;
@@ -262,18 +321,36 @@ struct SignedPoint {
     return clipped;
 }
 
-void removeDuplicatePolygonVertices(std::vector<Point>& points, Real tolerance)
+void removeDuplicatePolygonVertices(std::vector<Point>& points,
+                                    std::vector<PointOrigin>& origins,
+                                    Real tolerance,
+                                    StrictConstructionObservation& observation)
 {
     std::vector<Point> unique;
-    for (const auto& point : points) {
+    std::vector<PointOrigin> unique_origins;
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        const auto& point = points[i];
+        // Include inconsistent repeated roots outside the existing adjacent
+        // and closing predicates without changing their insertion decisions.
+        for (std::size_t j = 0; j < i; ++j) {
+            observeRepeat(observation, points[j], origins[j], point, origins[i], false);
+        }
         if (unique.empty() || !samePoint(unique.back(), point, tolerance)) {
             unique.push_back(point);
+            unique_origins.push_back(origins[i]);
+        } else {
+            observeRepeat(observation, unique.back(), unique_origins.back(),
+                          point, origins[i], true);
         }
     }
     if (unique.size() > 1u && samePoint(unique.front(), unique.back(), tolerance)) {
+        observeRepeat(observation, unique.front(), unique_origins.front(),
+                      unique.back(), unique_origins.back(), true);
         unique.pop_back();
+        unique_origins.pop_back();
     }
     points = std::move(unique);
+    origins = std::move(unique_origins);
 }
 
 [[nodiscard]] std::vector<geometry::CutQuadraturePoint> segmentQuadrature(
@@ -311,7 +388,9 @@ void removeDuplicatePolygonVertices(std::vector<Point>& points, Real tolerance)
 [[nodiscard]] std::vector<geometry::CutQuadraturePoint> polygonQuadrature(
     const std::vector<Point>& polygon,
     const Point& normal,
-    int order)
+    int order,
+    const std::vector<PointOrigin>& origins,
+    StrictConstructionObservation& observation)
 {
     std::vector<geometry::CutQuadraturePoint> points;
     if (polygon.size() < 3u) {
@@ -324,6 +403,11 @@ void removeDuplicatePolygonVertices(std::vector<Point>& points, Real tolerance)
         const Real area = Real{0.5} *
                           norm(cross(sub(b, origin), sub(c, origin)));
         if (!(area > Real{0.0})) {
+            const bool structural_zero =
+                structuralRepeat(origin, origins.front(), b, origins[i]) ||
+                structuralRepeat(origin, origins.front(), c, origins[i + 1u]) ||
+                structuralRepeat(b, origins[i], c, origins[i + 1u]);
+            if (!(area == 0 && structural_zero)) observation.unresolved();
             continue;
         }
         const auto append = [&](Real l0, Real l1, Real l2, Real fraction) {
@@ -877,6 +961,15 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
             }
             const auto reference_nodes = referenceCellNodes(type, cell_nodes.size());
             std::vector<Point> face_points;
+            StrictConstructionObservation observation;
+            for (const auto& source : interface_domain.fragments()) {
+                if (source.parent_cell == static_cast<MeshIndex>(cell))
+                    observation.combine(source.construction_observation);
+            }
+            for (const auto& source : interface_domain.volumeRegions()) {
+                if (source.parent_cell == static_cast<MeshIndex>(cell))
+                    observation.combine(source.construction_observation);
+            }
             std::vector<SignedPoint> signed_face;
             face_points.reserve(corners.size());
             signed_face.reserve(corners.size());
@@ -892,10 +985,11 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
                         "sharp active-boundary clipping found a non-finite level-set value");
                 }
                 if (std::abs(value) <= req.tolerance) {
+                    observation.unresolved();
                     value = Real{0.0};
                 }
                 face_points.push_back(reference_nodes[corner]);
-                signed_face.push_back({reference_nodes[corner], value});
+                signed_face.push_back({reference_nodes[corner], value, PointOrigin::corner(corner)});
             }
             if (!hasAuthoritativeInterfaceFragment(
                     interface_domain,
@@ -916,6 +1010,11 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
                     *full_side == geometry::CutIntegrationSide::Negative
                         ? Real{-1.0}
                         : Real{1.0};
+                const bool original_negative = std::any_of(signed_face.begin(), signed_face.end(),
+                    [](const auto& point) { return point.value < 0; });
+                const bool original_positive = std::any_of(signed_face.begin(), signed_face.end(),
+                    [](const auto& point) { return point.value > 0; });
+                if (original_negative && original_positive) observation.unresolved();
                 for (auto& point : signed_face) {
                     point.value = represented_value;
                 }
@@ -933,20 +1032,24 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
                     "sharp active-boundary clipping found a degenerate parent face");
             }
 
-            const auto clipped_signed = clipPolygon(signed_face, req.side);
+            const auto clipped_signed = clipPolygon(signed_face, req.side, observation);
             std::vector<Point> clipped;
+            std::vector<PointOrigin> origins;
             clipped.reserve(clipped_signed.size());
             for (const auto& point : clipped_signed) {
                 clipped.push_back(point.point);
+                origins.push_back(point.origin);
             }
-            removeDuplicatePolygonVertices(clipped, req.tolerance);
+            removeDuplicatePolygonVertices(clipped, origins, req.tolerance, observation);
             const std::size_t minimum_points = mesh.dimension() == 2 ? 2u : 3u;
             if (clipped.size() < minimum_points) {
+                observation.unresolved();
                 return;
             }
             const Real measure = polygonMeasure(clipped, mesh.dimension());
             if (!(measure > req.tolerance * req.tolerance) ||
                 !std::isfinite(measure)) {
+                observation.unresolved();
                 return;
             }
 
@@ -1056,8 +1159,11 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
                 fragment.quadrature_points = polygonQuadrature(
                     clipped,
                     normal,
-                    fragment.achieved_quadrature_order);
+                    fragment.achieved_quadrature_order,
+                    origins,
+                    observation);
             }
+            fragment.construction_observation = observation.state;
             domain.addFragment(std::move(fragment));
         });
     return domain;

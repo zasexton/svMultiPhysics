@@ -1971,6 +1971,10 @@ TEST(GeneratedActiveBoundaryDomain,
         EXPECT_TRUE(cut.fragments.empty());
         ASSERT_EQ(cut.volume_regions.size(), 1u);
         EXPECT_TRUE(cut.volume_regions.front().full_cell_equivalent);
+        EXPECT_EQ(cut.construction_observation,
+                  interfaces::LinearCornerStrictBranch::ModifiedOrUnresolved);
+        EXPECT_EQ(cut.volume_regions.front().construction_observation,
+                  interfaces::LinearCornerStrictBranch::ModifiedOrUnresolved);
         const auto dominant_side =
             phase_sign > FE::Real{0.0}
                 ? FE::geometry::CutIntegrationSide::Positive
@@ -2017,6 +2021,8 @@ TEST(GeneratedActiveBoundaryDomain,
                 : negative;
         ASSERT_EQ(dominant.fragments().size(), 1u);
         EXPECT_TRUE(dominant.fragments().front().full_face_equivalent);
+        EXPECT_EQ(dominant.fragments().front().construction_observation,
+                  interfaces::LinearCornerStrictBranch::ModifiedOrUnresolved);
         EXPECT_GT(dominant.summary().measure, FE::Real{0.0});
         EXPECT_EQ(collapsed.summary().measure, FE::Real{0.0});
         const auto partition =
@@ -6438,4 +6444,172 @@ TEST(FreeSurfaceGeometrySnapshotCache,
     ASSERT_TRUE(second);
     EXPECT_NE(first->revision().snapshot_revision_key,
               second->revision().snapshot_revision_key);
+}
+
+TEST(ProducerObservation, SnapshotContentBindsSourceObservationWithoutChangingTopology)
+{
+    constexpr int marker = 114;
+    const SingleQuadBoundaryMesh mesh;
+    const auto source = verticalInterfaceWithVolumes(marker);
+    const auto baseline = interfaces::buildFreeSurfaceGeometrySnapshot(
+        source, {}, {}, mesh, snapshotPolicyWithoutBoundary(), verticalScalar(), "observation_content");
+    ASSERT_TRUE(baseline);
+    for (const bool change_volume : {false, true}) {
+        interfaces::LevelSetInterfaceDomain changed(source.request());
+        for (auto fragment : source.fragments()) {
+            if (!change_volume) fragment.construction_observation =
+                interfaces::LinearCornerStrictBranch::ModifiedOrUnresolved;
+            changed.addFragment(std::move(fragment));
+        }
+        for (auto region : source.volumeRegions()) {
+            if (change_volume) region.construction_observation =
+                interfaces::LinearCornerStrictBranch::ModifiedOrUnresolved;
+            changed.addVolumeRegion(std::move(region));
+        }
+        // A copied record is changed only to test content sensitivity. No
+        // successful construction/derivative certificate is manufactured.
+        const auto candidate = interfaces::buildFreeSurfaceGeometrySnapshot(
+            changed, {}, {}, mesh, snapshotPolicyWithoutBoundary(), verticalScalar(), "observation_content");
+        ASSERT_TRUE(candidate);
+        ASSERT_EQ(candidate->rules().size(), baseline->rules().size());
+        EXPECT_NE(candidate->revision().snapshot_revision_key,
+                  baseline->revision().snapshot_revision_key);
+        for (std::size_t i = 0; i < candidate->rules().size(); ++i) {
+            const auto& record = candidate->rules()[i];
+            EXPECT_EQ(record.source_topology_key, baseline->rules()[i].source_topology_key);
+            EXPECT_EQ(record.reference_rule.measure, baseline->rules()[i].reference_rule.measure);
+            const bool volume = record.reference_rule.kind == FE::geometry::CutQuadratureKind::Volume;
+            EXPECT_EQ(record.construction_observation,
+                      volume == change_volume ? interfaces::LinearCornerStrictBranch::ModifiedOrUnresolved
+                                              : interfaces::LinearCornerStrictBranch::Unchecked);
+        }
+    }
+}
+
+TEST(ProducerObservation, RealDyadicTriangleBoundaryCopiesRemainUnchecked)
+{
+    constexpr int marker = 291, wall = 7;
+    const SingleQuadBoundaryMesh mesh(wall, 0, 1, 0, true, FE::ElementType::Triangle3,
+        {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}});
+    for (const FE::Real sign : {-1.0, 1.0}) {
+        const std::array<FE::Real, 3> values{{-sign, sign, sign}};
+        const auto source = linearTriangleCutDomain(marker, values);
+        const auto contact = interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+            contactRequest(marker, wall), source, mesh);
+        ASSERT_EQ(contact.fragments().size(), 1u);
+        interfaces::GeneratedActiveBoundaryScalarField field;
+        field.value_at_node = [values](FE::GlobalIndex i) { return values.at(static_cast<std::size_t>(i)); };
+        std::vector<interfaces::GeneratedActiveBoundaryDomain> boundaries;
+        for (const auto side : {FE::geometry::CutIntegrationSide::Negative,
+                                FE::geometry::CutIntegrationSide::Positive}) {
+            boundaries.push_back(interfaces::buildGeneratedActiveBoundaryDomain(
+                activeRequest(marker, wall, side), source, contact, mesh, field));
+            const auto copy = boundaries.back();
+            ASSERT_EQ(copy.fragments().size(), 1u);
+            const auto& fragment = copy.fragments().front();
+            EXPECT_EQ(fragment.construction_observation, interfaces::LinearCornerStrictBranch::Unchecked);
+            EXPECT_EQ(fragment.measure, 0.5);
+            EXPECT_EQ(fragment.vertices.size(), 2u);
+            ASSERT_EQ(fragment.quadrature_points.size(), 2u);
+            EXPECT_EQ(fragment.quadrature_points[0].weight, 0.25);
+            EXPECT_EQ(fragment.quadrature_points[1].weight, 0.25);
+        }
+        const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+            source, {contact}, boundaries, mesh, snapshotPolicyWithoutBoundary(),
+            affineTriangleScalar(values), "dyadic_boundary_observation");
+        ASSERT_TRUE(snapshot);
+        for (const auto& record : snapshot->rules()) {
+            EXPECT_EQ(record.construction_observation, interfaces::LinearCornerStrictBranch::Unchecked);
+        }
+        for (std::size_t selected = 0; selected < boundaries.size(); ++selected) {
+            auto changed = boundaries;
+            interfaces::GeneratedActiveBoundaryDomain replacement(changed[selected].request());
+            for (auto fragment : changed[selected].fragments()) {
+                fragment.construction_observation = interfaces::LinearCornerStrictBranch::ModifiedOrUnresolved;
+                replacement.addFragment(std::move(fragment));
+            }
+            changed[selected] = std::move(replacement);
+            const auto content_variant = interfaces::buildFreeSurfaceGeometrySnapshot(
+                source, {contact}, changed, mesh, snapshotPolicyWithoutBoundary(),
+                affineTriangleScalar(values), "dyadic_boundary_observation");
+            ASSERT_TRUE(content_variant);
+            EXPECT_NE(content_variant->revision().snapshot_revision_key,
+                      snapshot->revision().snapshot_revision_key);
+            ASSERT_EQ(content_variant->rules().size(), snapshot->rules().size());
+            for (std::size_t i = 0; i < snapshot->rules().size(); ++i) {
+                EXPECT_EQ(content_variant->rules()[i].source_topology_key,
+                          snapshot->rules()[i].source_topology_key);
+            }
+        }
+    }
+    EXPECT_EQ(interfaces::GeneratedActiveBoundaryFragment{}.construction_observation,
+              interfaces::LinearCornerStrictBranch::Unchecked);
+}
+
+TEST(ProducerObservation, RealDyadicTetraBoundaryAndSnapshotRemainUnchecked)
+{
+    constexpr int marker = 292, wall = 17;
+    const SingleTetraBoundaryMesh mesh(wall);
+    for (const FE::Real sign : {-1.0, 1.0}) {
+        const std::array<FE::Real, 4> values{{-sign, -sign, sign, sign}};
+        const auto source = linearTetraCutDomain(marker, values);
+        const auto contact = interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+            contactRequest(marker, wall), source, mesh);
+        ASSERT_EQ(contact.fragments().size(), 1u);
+        interfaces::GeneratedActiveBoundaryScalarField field;
+        field.value_at_node = [values](FE::GlobalIndex i) { return values.at(static_cast<std::size_t>(i)); };
+        std::vector<interfaces::GeneratedActiveBoundaryDomain> boundaries;
+        for (const auto side : {FE::geometry::CutIntegrationSide::Negative,
+                                FE::geometry::CutIntegrationSide::Positive}) {
+            boundaries.push_back(interfaces::buildGeneratedActiveBoundaryDomain(
+                activeRequest(marker, wall, side), source, contact, mesh, field));
+            ASSERT_EQ(boundaries.back().fragments().size(), 1u);
+            const auto& fragment = boundaries.back().fragments().front();
+            EXPECT_EQ(fragment.construction_observation, interfaces::LinearCornerStrictBranch::Unchecked);
+            EXPECT_TRUE(fragment.measure == 0.125 || fragment.measure == 0.375);
+        }
+        EXPECT_EQ(boundaries[0].summary().measure + boundaries[1].summary().measure, 0.5);
+        const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+            source, {contact}, boundaries, mesh, snapshotPolicyWithoutBoundary(),
+            affineTetraScalar(values), "dyadic_tetra_observation");
+        ASSERT_TRUE(snapshot);
+        for (const auto& record : snapshot->rules()) {
+            EXPECT_EQ(record.construction_observation, interfaces::LinearCornerStrictBranch::Unchecked);
+        }
+    }
+}
+
+TEST(ProducerObservation, PositivePieceFilteringSnapshotConstructionIsRejected)
+{
+    constexpr int marker = 293;
+    const SingleQuadBoundaryMesh mesh(7, 0, 1, 0, true, FE::ElementType::Triangle3,
+        {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}});
+    for (const FE::Real sign : {-1.0, 1.0}) {
+        const std::array<FE::Real, 3> values{{sign * 0.1, -sign * 0.1, sign * 1e6}};
+        auto request = interfaceRequest(marker);
+        request.tolerance = 0.05;
+        request.volume_quadrature_order = 1;
+        const interfaces::LevelSetCellCutInput input{
+            .parent_cell = 0, .element_type = FE::ElementType::Triangle3,
+            .node_coordinates = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}},
+            .level_set_values = {values.begin(), values.end()}};
+        const auto cut = interfaces::cutLinearLevelSetCell2D(request, input);
+        ASSERT_TRUE(cut.supported);
+        ASSERT_EQ(cut.fragments.size(), 1u);
+        ASSERT_EQ(cut.volume_regions.size(), 2u);
+        EXPECT_EQ(cut.construction_observation, interfaces::LinearCornerStrictBranch::ModifiedOrUnresolved);
+        interfaces::LevelSetInterfaceDomain source(request);
+        for (const auto& fragment : cut.fragments) source.addFragment(fragment);
+        for (const auto& region : cut.volume_regions) source.addVolumeRegion(region);
+        try {
+            const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+                source, {}, {}, mesh, snapshotPolicyWithoutBoundary(), affineTriangleScalar(values),
+                "filtered_piece_observation");
+            (void)snapshot;
+            FAIL() << "filtered geometry unexpectedly passed public snapshot construction";
+        } catch (const std::invalid_argument& error) {
+            RecordProperty(sign > 0 ? "positive_label_snapshot_rejection" : "negative_label_snapshot_rejection",
+                           error.what());
+        }
+    }
 }
