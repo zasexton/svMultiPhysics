@@ -319,7 +319,7 @@ Each package is an independently reviewable change with a defined numerical gate
 
 - [ ] Record commit, dirty diff/hash, compiler/build flags, backend/JIT settings, MPI implementation/rank count, input checksums, and effective numerical configuration.
 - [ ] Inventory all selected cases by physical model, geometry representation, FE space, active side, integration route, tangent policy, stabilization, transport, contact law, and ALE policy.
-- [ ] Separate entries into implemented behavior, focused prerequisite evidence, physically qualified scope, unsupported configurations, and open numerical requirements. Link every qualification claim to its source revision and frozen record.
+- [x] Separate entries into implemented behavior, focused prerequisite evidence, physically qualified scope, unsupported configurations, and open numerical requirements. Link every qualification claim to its source revision and frozen record. Completed in the [capability and evidence ledger](free_surface_capability_ledger.md), reviewed against `0d77e6cd` on 2026-09-04.
 - [ ] Run the representative baseline suite specified in Section 8. Retain failed, incomplete and unavailable results. An existing failure remains an explicit baseline issue; it does not become a tolerated success.
 - [ ] Capture residual vectors and Jacobian blocks after mapping them to stable field/component/physical-DOF identities; retain sparsity, constraint rows, interface/volume moments, and normalized histories.
 - [ ] Select comparison tolerances from existing gate definitions and measured backend reduction behavior before running the candidate implementation. Require exact identity for discrete metadata; use declared scaled comparisons for floating-point outputs.
@@ -328,6 +328,8 @@ Each package is an independently reviewable change with a defined numerical gate
 **Verification:** The baseline manifest names every selected input and numerical policy, reproduces its recorded results in the designated build, and labels pre-existing failures and missing evidence honestly. Historical records remain byte-identical.
 
 **Suggested commit:** `docs: define free-surface refactor baseline and capability evidence`.
+
+**Progress, 2026-09-04:** The capability ledger passed its scoped review after provenance corrections. The [baseline manifest](../tests/cases/fluid/free_surface_refactor_baseline.json) records the frozen source, the separately preserved original dirty worktree, input hashes, and two owned build/test jobs. Numerical references, test outcomes, tolerance selection and performance comparisons remain incomplete; R0 as a whole remains in progress.
 
 ### R1. Introduce one resolved configuration and remove repeated parsing
 
