@@ -14,7 +14,7 @@
 
 ## Jobs
 
-Nine owned jobs have been submitted: four terminal failures, four completed successfully, and one running. The sole nonterminal reservation is one node / 32,000 MiB.
+Ten owned jobs have been submitted: four terminal failures, four completed successfully, and two nonterminal. Their combined reservation is two nodes / 64,000 MiB.
 
 | Job ID | Request | Source/build identity | Nodes | CPUs | Memory | State | Evidence |
 |---|---|---|---:|---:|---:|---|---|
@@ -27,6 +27,8 @@ Nine owned jobs have been submitted: four terminal failures, four completed succ
 | 42083671 | Resolved level-set green and integrated candidate | `6f5f56d6` plus seven frozen source files; `candidate/r1-resolved-build` | 1 | 6 (build uses 4) | 32,000 MiB | COMPLETED (0:0) | `jobs/candidate-r1-resolved-request.json`; script SHA-256 `9a7f7d5f5aff802f15b53609c8c8a065b2b83e71f05009f3009f3a2ebecee814` |
 | 42086668 | Explicit serial MPI launch and remaining baseline groups | `0d77e6cd`; unchanged `baseline/core-build` | 1 | 4 tasks, 1 CPU each | 16,000 MiB | COMPLETED (0:0) | `jobs/baseline-core-rerun-r1-request.json`; dependent on `42082703` |
 | 42090895 | Enabled-feature numerical baseline | `0d77e6cd`; `baseline/enabled-features-build`; Eigen/JIT ON | 1 | 8 requested; 4 allocated (build uses 4) | 32,000 MiB | RUNNING | `jobs/baseline-enabled-features-request.json`; script SHA-256 `93bbce1338efab6c422f41982fcb6ab73f633e3f019c8a830fe9c483e18f5fd4` |
+
+| 42093152 | Sequential candidate verification allocation | `candidate/validation-cache-source`; per-step immutable Git/input snapshots; new build cache | 1 | 6 tasks/CPUs (build uses 4) | 32,000 MiB | RUNNING | `jobs/candidate-validation-cache-request.json`; script SHA-256 `0d67b34b093241484f40a42ca40303336c8cdc626506350e280dd48fe0d5782c` |
 
 ## Events
 
@@ -105,3 +107,17 @@ Nine owned jobs have been submitted: four terminal failures, four completed succ
 - 2026-09-04: `42080271` COMPLETED (0:0, 1:06:14, 2,166,004 KiB batch peak RSS). Parsed individual XML: 2,145 passed and 27 skipped among 2,172 selected Forms/Assembly/Systems cases. This profile does not build LevelSet; its JIT-only case remains assigned to `42090895`.
 
 - 2026-09-04: `42090895` is RUNNING. Scheduler records eight requested CPUs but four allocated CPUs; the prepared overlay check `42090895.0` shares one bound CPU with the build inside the allocated four CPUs / 32,000 MiB. The earlier spare-CPU description was based on the request, not the observed allocation. Only this job remains nonterminal: one node / 32,000 MiB. The serial capture remains unaccepted pending new execution, artifact validation and scoped review.
+
+- 2026-09-04: Prepared a reusable candidate validation allocation: one node, six MPI tasks/CPUs, 32,000 MiB, eight hours, four build workers. Each verification step freezes a retained Git source snapshot and materialized-input manifest, then records commands, binary identity and results; the cache changes only between terminal steps. All prior frozen baseline/candidate paths remain intact. With running 42090895, total reservation is two nodes / 64,000 MiB (67.11 GB). Script SHA-256 `0d67b34b093241484f40a42ca40303336c8cdc626506350e280dd48fe0d5782c`.
+
+- 2026-09-04: Submitted owned candidate validation allocation `42093152`; receipt and exact request retained. Together with `42090895`, reservation is two nodes / 64,000 MiB. Each test/build step will be recorded separately; the holding batch exit is not numerical validation.
+
+- 2026-09-04: Prepared R1 builder runtime-red step inside owned `42093152`: one CPU / 6,000 MiB / twenty minutes. Source snapshot `9a8c51e9` retains three test/scaffolding files. Recompiles all six direct Application objects dependent on the changed headers/tests, using the frozen resolved candidate numerical libraries; no mixed `SimulationComponents` layout. The six-case filter must establish runtime missing-retention failures before implementation. Script SHA-256 `53d21d19baf6b32fb281d9defd6de5a42dd9eaccf36ed075ff68fcf6c9399c8e`.
+
+- 2026-09-04: Prepared a configured candidate build step in `42093152`: four CPUs / 24,000 MiB / ninety minutes, LLVM 17 JIT and Eigen ON, complete Application test target at retained red source `9a8c51e9`. Together with its one-CPU / 6,000-MiB red overlay step, this stays within six allocated CPUs / 32,000 MiB. Source cache remains frozen until both reader steps terminate. Script SHA-256 `8ae0b76e41cdd5d9a58f31078c7a925986a6df16c31936d3bc6697923e83c052`.
+
+- 2026-09-04: Red step `42093152.0` stopped before compilation when its inventory guard also detected the intentionally updated live baseline manifest. Preserve this as a harness failure. Prepared a new helper/result directory recording that exact metadata-only difference while still requiring the three intended changed source files and identical remaining input hashes/membership. Same one CPU / 6,000 MiB / twenty-minute limits. Script SHA-256 `baad53b5e76366172314c7d4fe1e49c379c10a86e8070854677e79ccb6467a67`.
+
+- 2026-09-04: Red retry `42093152.2` stopped before compilation because the system Git cannot resolve the linked worktree. The configured build already uses Git 2.45.1 successfully; pin the same executable in a new overlay retry, retain both failed harness attempts, and keep the source/tests unchanged. Same one CPU / 6,000 MiB / twenty-minute limits. Script SHA-256 `00b1dd1fc295cbe2d67703aed38ce2679f170edfa7fb9810a47915fe40813365`.
+
+- 2026-09-04: Capture step `42090895.0` COMPLETED (0:0, 1:42, 1,409,016 KiB). Six expected success/rejection groups have complete individual XML and meaningful outcomes. Independent artifact validation passed and was archived under `verification/r0-wet-block-serial-r2-acceptance/`. Accepted reference SHA-256 values: physical `139491d55b566a87fadc3b1868de528766c327272b84f5da7069c72d404203d2`; islands `faddf56ff28241269a598dd0432779eb40cd634a28d0baa17bab71d094c361e9`. Both repeats are byte-identical. Prior rejected captures remain unaccepted and intact; full R0 is incomplete.

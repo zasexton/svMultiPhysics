@@ -200,10 +200,110 @@
       "working_directory": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r1-resolved-source"
     }
   ],
+  "captured_references": [
+    {
+      "artifacts": [
+        {
+          "case_ids": [
+            "islands_baseline",
+            "islands_dry_values"
+          ],
+          "comparison_contract": {
+            "canonical_and_discrete_metadata_comparison": "exact",
+            "dry_column_denominator_floor": 1e-12,
+            "dry_column_scaled_gate": 1e-11,
+            "island_cross_denominator_floor": 1e-12,
+            "island_cross_scaled_gate": 1e-11,
+            "jacobian_absolute_floor": 1e-12,
+            "jacobian_scaled_gate": 1e-11,
+            "residual_absolute_floor": 1e-12,
+            "residual_scaled_gate": 1e-11,
+            "solved_state_absolute_floor": 1e-12,
+            "solved_state_scaled_gate": 1e-10
+          },
+          "gate_result_count": 2,
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-wet-block-serial-r2/reference/operator/wet-block/serial/disconnected-liquid-islands.json",
+          "repeat": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-wet-block-serial-r2/repeat/operator/wet-block/serial/disconnected-liquid-islands.json",
+            "sha256": "faddf56ff28241269a598dd0432779eb40cd634a28d0baa17bab71d094c361e9"
+          },
+          "sha256": "faddf56ff28241269a598dd0432779eb40cd634a28d0baa17bab71d094c361e9",
+          "size_bytes": 114790,
+          "test": "FreeSurfaceCutStability.DisconnectedLiquidIslandsHaveZeroPhysicalCrossCouplingThroughDryStrip"
+        },
+        {
+          "case_ids": [
+            "physical_baseline",
+            "physical_dry_depth",
+            "physical_dry_values"
+          ],
+          "comparison_contract": {
+            "canonical_and_discrete_metadata_comparison": "exact",
+            "dry_column_denominator_floor": 1e-12,
+            "dry_column_scaled_gate": 1e-11,
+            "island_cross_denominator_floor": 1e-12,
+            "island_cross_scaled_gate": 1e-11,
+            "jacobian_absolute_floor": 1e-12,
+            "jacobian_scaled_gate": 1e-11,
+            "residual_absolute_floor": 1e-12,
+            "residual_scaled_gate": 1e-11,
+            "solved_state_absolute_floor": 1e-12,
+            "solved_state_scaled_gate": 1e-10
+          },
+          "gate_result_count": 3,
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-wet-block-serial-r2/reference/operator/wet-block/serial/physical-wet-blocks.json",
+          "repeat": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-wet-block-serial-r2/repeat/operator/wet-block/serial/physical-wet-blocks.json",
+            "sha256": "139491d55b566a87fadc3b1868de528766c327272b84f5da7069c72d404203d2"
+          },
+          "sha256": "139491d55b566a87fadc3b1868de528766c327272b84f5da7069c72d404203d2",
+          "size_bytes": 108185,
+          "test": "FreeSurfaceCutStability.PhysicalWetBlocksAreInvariantToDryDepthAndState"
+        }
+      ],
+      "checks": "Capture-disabled, reference and repeat each passed both existing tests. All expected existing-destination, temporary-sentinel and invalid-provenance rejections occurred without changing existing publications. Independent component/identity/geometry/gate checks passed; reference/repeat files are byte-identical.",
+      "executable_sha256": "3ff44dfbc7e26729406b7fc3c8866fa930c3e6cd5415b428863d25f2fae7096d",
+      "execution_report": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-wet-block-serial-r2/report.json",
+        "sha256": "9d7552023180c7186cbea625cbb608ed86d7688315525632162fb7fe019fa0a7"
+      },
+      "id": "serial-wet-block-operators",
+      "independent_validation": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-wet-block-serial-r2-acceptance/r0-serial-capture-validation.json",
+        "sha256": "b25f464947aedc8460c7dd0c6fdacb295d07a822ed5211b2a806b6ad1cf8a492"
+      },
+      "job_step": "42090895.0",
+      "limits": [
+        "serial rank-one Q1 wet blocks only",
+        "no MPI capture qualification",
+        "no history qualification beyond recorded current and previous fixture vectors",
+        "no energy qualification",
+        "no general capillary qualification"
+      ],
+      "scope": "Five serial rank-one Q1 single-phase wet-block cases with zero surface tension. Full physical velocity/pressure DOFs including dry support; source level set remains geometry input, not an invented operator block. Current and previous fixture vectors are recorded; only the retained wet projection is solved.",
+      "source_review": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-wet-block-serial-r2-acceptance/r0-serial-capture-fix-review.md",
+        "sha256": "e1ebd3e7974d3bcda77e6bede7e4427c4491d5516d23ff05ff59c374ff3373eb"
+      },
+      "source_revision": "0d77e6cd1c350c20334d43021a186753231398a4",
+      "source_tree": "26d8e720c6dc5490168ffad54def72c74b174aad",
+      "state": "ACCEPTED_WITHIN_DECLARED_SCOPE",
+      "step_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/r0-wet-block-serial-r2-step.json",
+        "sha256": "c8dc4d222a416bdba49d2d3aaeec9720cc7a81a629d86ed0baa8340dac405682"
+      },
+      "test_overlay_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r0-wet-block-serial-overlay-r2/test_FreeSurfaceCutStability.cpp",
+      "test_overlay_sha256": "1dcabf85f1e3eee5e822c039142a800790bac891d23d4701089042deb38b75e9",
+      "validator": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-wet-block-serial-r2-acceptance/validate-r0-serial-capture.py",
+        "sha256": "8e1d0f937981f5f6c6798d52d6e967926f7e6fa3d2a39d408fd8ee4f8c5ae00d"
+      }
+    }
+  ],
   "comparison_contract": {
     "discrete_identity": "exact field/component/physical-DOF, domain/side, stage, availability, constraint topology and capability decisions",
-    "floating_point_tolerances": "Freeze existing case gates and measured reduction tolerances before candidate comparisons; no acceptance thresholds are established by this in-progress record.",
-    "reference_artifact_status": "NOT_CAPTURED",
+    "floating_point_tolerances": "The accepted serial wet-block bundles freeze existing residual/Jacobian gates at 1e-11, solved-state gate at 1e-10 and denominator floors at 1e-12. Other case-specific gates and measured MPI/backend tolerances remain pending; these serial gates do not authorize broader numerical changes.",
+    "reference_artifact_status": "PARTIAL_SERIAL_WET_BLOCK_CAPTURE",
     "required_reference_outputs": [
       "full residual and Jacobian blocks in stable physical DOF order",
       "sparsity and constraint rows",
@@ -1052,11 +1152,10 @@
   ],
   "record_type": "free_surface_architecture_refactor_baseline",
   "remaining_r0_work": [
-    "Inspect configured toolchain, compiler flags and numerical build settings.",
-    "Record exact test discovery and source-bound input/effective-policy inventory.",
-    "Execute and retain representative serial/MPI suites and physical prerequisites.",
-    "Capture stable operator/history/geometry references and baseline performance.",
-    "Freeze numerical comparison tolerances before candidate evaluation."
+    "Complete the enabled-feature profile and remaining rank-layout/physical prerequisite checks, preserving existing failures and skips.",
+    "Complete source-bound input/effective-policy coverage for the full selected physical/geometry/algorithm matrix.",
+    "Capture MPI and remaining operator/history/geometry/energy references; serial Q1 wet-block references are accepted only within their declared scope.",
+    "Freeze case-specific numerical tolerances and record baseline runtime, memory, iterations, refresh and cache behavior for comparisons."
   ],
   "reviewed_revision": "905239de40b41aa3ca615305516b600e640d95e4",
   "schema_version": 1,

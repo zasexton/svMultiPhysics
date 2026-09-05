@@ -18,7 +18,7 @@
 
 **Reviewed committed HEAD:** `905239de40b41aa3ca615305516b600e640d95e4`.
 
-**Implementation status:** Implementation authorized on 2026-09-04. R0 baseline capture and the initial R1 Physics option extraction are in progress; R2-R12 remain pending. The original review did not execute solver builds or physical qualification. Completed work is recorded by checked items and dated progress entries below.
+**Implementation status:** Implementation authorized on 2026-09-04. R0 baseline capture and R1 configuration migration are in progress. The Physics option and resolved level-set translator slices are verified; serial wet-block references are accepted within their limited scope. R2-R12 remain pending. The original review did not execute solver builds or physical qualification. Completed work is recorded by checked items and dated progress entries below.
 
 **Execution records:** [Coordination notes](free_surface_boundary_unfitted_audit_20260720.md#2026-09-04-architecture-refactoring-coordination) and [owned Slurm job ledger](free_surface_refactor_job_ledger_20260904.md). Commits use Zachary Sexton <zsexton@stanford.edu> and are pushed to `issue-449-modern-mesh-core` after their relevant checks.
 
@@ -365,7 +365,7 @@ Each package is an independently reviewable change with a defined numerical gate
 
 **Suggested commit:** `docs: define free-surface refactor baseline and capability evidence`.
 
-**Progress, 2026-09-04:** The capability ledger passed its scoped review after provenance corrections. The [baseline manifest](../tests/cases/fluid/free_surface_refactor_baseline.json) records the frozen source, the separately preserved original dirty worktree, input hashes, and two owned build/test jobs. Numerical references, test outcomes, tolerance selection and performance comparisons remain incomplete; R0 as a whole remains in progress.
+**Progress, 2026-09-04:** The capability ledger passed its scoped review after provenance corrections. The [baseline manifest](../tests/cases/fluid/free_surface_refactor_baseline.json) records frozen source/input identities, the separately preserved original dirty worktree, and inspected build/test outcomes with explicit failures and skips. Five serial Q1 wet-block cases now have accepted full physical operator/constraint/geometry references, unchanged existing gates, repeatable output and independently checked publication behavior. MPI and broader history/energy/performance references and the enabled-feature suite remain incomplete; no remaining R0 checkbox is satisfied by this serial subset alone.
 
 ### R1. Introduce one resolved configuration and remove repeated parsing
 
@@ -406,6 +406,8 @@ Each package is an independently reviewable change with a defined numerical gate
 **Specific new contract checks:** Compare the options observed by installation and maintenance for the same input; verify equal fields, velocity-source promotion, reinitialization and conservative-phase choices where they currently agree, and explicit recorded differences where compatibility requires them. Exercise equation-only input and conflicting domain overrides. A preflight failure must leave the system definition unchanged, and separate boundaries must retain distinct contact and stabilization values.
 
 **Suggested commit:** `refactor: resolve moving-domain configuration once`.
+
+**Progress, 2026-09-04:** The Physics option extraction and resolved level-set translator slices passed source review and configured verification; they are committed in `b60221f9` and `d4907a49`. The translator has 23 focused passes and 309 integrated Application passes/four Eigen skips, with 51 focused Physics passes/one JIT skip. Builder reuse is under test-first implementation. Driver compatibility views, cut-option consolidation, physical input adapters and effective-value provenance remain open; R1 is not complete.
 
 ### R2. Make integration-domain selection a reusable FE contract
 

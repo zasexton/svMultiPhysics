@@ -61,7 +61,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <iterator>
@@ -75,6 +77,8 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -3198,6 +3202,96 @@ struct CanonicalWetBlockDof {
     std::array<FE::Real, 3> point{};
 };
 
+struct WetBlockReferenceDof {
+    std::size_t canonical_index{0u};
+    int field{0};
+    gid_t vertex_gid{INVALID_GID};
+    std::size_t component{0u};
+    FE::GlobalIndex global_dof{FE::INVALID_GLOBAL_INDEX};
+    std::array<FE::Real, 3> point{};
+    bool retained_support{false};
+    bool constrained{false};
+};
+
+struct WetBlockReferenceConstraintEntry {
+    std::size_t master_canonical_index{0u};
+    FE::GlobalIndex master_global_dof{FE::INVALID_GLOBAL_INDEX};
+    FE::Real weight{0.0};
+};
+
+struct WetBlockReferenceConstraint {
+    std::size_t slave_canonical_index{0u};
+    FE::GlobalIndex slave_global_dof{FE::INVALID_GLOBAL_INDEX};
+    FE::Real inhomogeneity{0.0};
+    std::vector<WetBlockReferenceConstraintEntry> entries{};
+};
+
+struct WetBlockReferenceFragment {
+    bool volume{false};
+    std::uint64_t stable_id{0u};
+    FE::GlobalIndex parent_cell_gid{FE::INVALID_GLOBAL_INDEX};
+    int owner_rank{-1};
+    FE::LocalIndex local_ordinal{FE::INVALID_LOCAL_INDEX};
+    int kind_or_side{0};
+    std::string topology_id{};
+    std::uint64_t corner_topology_key{0u};
+    FE::Real measure{0.0};
+    std::optional<FE::Real> volume_fraction{};
+    int achieved_quadrature_order{-1};
+};
+
+struct WetBlockReferenceVertex {
+    gid_t gid{INVALID_GID};
+    std::array<FE::Real, 3> point{};
+};
+
+struct WetBlockReferenceCell {
+    gid_t gid{INVALID_GID};
+    std::vector<gid_t> vertex_gids{};
+};
+
+struct WetBlockReferenceCapture {
+    std::string case_id{};
+    std::string scope{};
+    std::string partition_method{};
+    int rank_count{1};
+    FE::Real dry_state_scale{0.0};
+    std::vector<FE::Real> x_coordinates{};
+    std::vector<FE::Real> level_set_by_plane{};
+    std::vector<WetBlockReferenceDof> dofs{};
+    std::vector<std::size_t> wet_to_all{};
+    std::vector<FE::Real> current_state{};
+    std::vector<FE::Real> previous_state{};
+    std::vector<FE::Real> residual{};
+    std::vector<FE::Real> full_jacobian{};
+    std::vector<std::size_t> sparsity_row_offsets{};
+    std::vector<std::size_t> sparsity_column_indices{};
+    std::vector<std::array<std::size_t, 2>> numerical_nonzeros{};
+    FE::GlobalIndex original_sparsity_rows{0};
+    FE::GlobalIndex original_sparsity_columns{0};
+    FE::GlobalIndex original_sparsity_nnz{0};
+    bool sparsity_finalized{false};
+    std::string sparsity_indexing{"natural"};
+    std::vector<WetBlockReferenceConstraint> constraints{};
+    std::vector<WetBlockReferenceVertex> vertices{};
+    std::vector<WetBlockReferenceCell> cells{};
+    std::vector<WetBlockReferenceFragment> generated_entities{};
+    FE::interfaces::CutInterfaceDomainSummary owned_geometry_summary{};
+    FE::systems::OperatorRevisionSnapshot operator_revision{};
+    std::uint64_t constraint_layout_revision{0u};
+    std::uint64_t sparsity_pattern_revision{0u};
+    FE::interfaces::CutInterfaceDomainRequest domain_request{};
+    int realized_interface_marker{-1};
+    std::uint64_t generated_value_revision{0u};
+    std::size_t owned_generated_cell_count{0u};
+    std::size_t owned_corner_linearized_cell_count{0u};
+    std::size_t owned_implicit_fallback_cell_count{0u};
+    std::size_t owned_backend_volume_quadrature_point_count{0u};
+    std::size_t owned_backend_interface_quadrature_point_count{0u};
+    FE::systems::SystemStateView stage{};
+    FE::assembly::TimeIntegrationContext time_context{};
+};
+
 struct WetBlockAssemblySample {
     std::vector<CanonicalWetBlockDof> dofs{};
     std::vector<FE::Real> current_state{};
@@ -3208,6 +3302,7 @@ struct WetBlockAssemblySample {
     std::size_t retained_vertices{0u};
     std::size_t constrained_dry_velocity_dofs{0u};
     std::size_t constrained_dry_pressure_dofs{0u};
+    std::shared_ptr<WetBlockReferenceCapture> reference_capture{};
 };
 
 struct ScaledWetBlockDifference {
@@ -3217,6 +3312,12 @@ struct ScaledWetBlockDifference {
     FE::Real residual_absolute{0.0};
     FE::Real jacobian_absolute{0.0};
     FE::Real solved_state_absolute{0.0};
+};
+
+struct WetBlockGateResult {
+    std::string_view case_id{};
+    std::string_view metric{};
+    FE::Real scaled_value{0.0};
 };
 
 [[nodiscard]] FE::Real vectorL2Norm(std::span<const FE::Real> values)
@@ -3658,6 +3759,1520 @@ compareWetBlockSamples(const WetBlockAssemblySample& baseline,
     return retained;
 }
 
+[[nodiscard]] std::optional<std::size_t> wetBlockCanonicalIndex(
+    const WetBlockReferenceCapture& capture,
+    FE::GlobalIndex global_dof) noexcept
+{
+    const auto found = std::find_if(
+        capture.dofs.begin(),
+        capture.dofs.end(),
+        [&](const WetBlockReferenceDof& dof) {
+            return dof.global_dof == global_dof;
+        });
+    if (found == capture.dofs.end()) {
+        return std::nullopt;
+    }
+    return static_cast<std::size_t>(
+        std::distance(capture.dofs.begin(), found));
+}
+
+void validateWetBlockReferenceCapture(
+    const WetBlockReferenceCapture& capture,
+    const WetBlockAssemblySample& sample)
+{
+    const auto n = capture.dofs.size();
+    if (n == 0u || capture.current_state.size() != n ||
+        capture.previous_state.size() != n || capture.residual.size() != n ||
+        capture.full_jacobian.size() != n * n ||
+        capture.sparsity_row_offsets.size() != n + 1u ||
+        capture.sparsity_row_offsets.back() !=
+            capture.sparsity_column_indices.size()) {
+        throw std::runtime_error(
+            "wet-block reference capture has inconsistent dimensions");
+    }
+    const auto retained_size = sample.dofs.size();
+    if (retained_size == 0u || capture.wet_to_all.size() != retained_size ||
+        sample.current_state.size() != retained_size ||
+        sample.residual.size() != retained_size ||
+        sample.solved_state.size() != retained_size ||
+        sample.jacobian.size() != retained_size * retained_size ||
+        retained_size != sample.retained_vertices * 3u) {
+        throw std::runtime_error(
+            "wet-block reference retained projection has inconsistent dimensions");
+    }
+    const auto require_finite = [](std::span<const FE::Real> values,
+                                   std::string_view label) {
+        if (std::any_of(values.begin(), values.end(), [](FE::Real value) {
+                return !std::isfinite(value);
+            })) {
+            throw std::runtime_error(
+                "wet-block reference capture contains nonfinite " +
+                std::string(label));
+        }
+    };
+    require_finite(capture.x_coordinates, "plane coordinate");
+    require_finite(capture.level_set_by_plane, "level-set value");
+    require_finite(capture.current_state, "current state");
+    require_finite(capture.previous_state, "previous state");
+    require_finite(capture.residual, "residual");
+    require_finite(capture.full_jacobian, "Jacobian");
+    require_finite(sample.current_state, "retained current state");
+    require_finite(sample.residual, "retained residual");
+    require_finite(sample.solved_state, "retained solved state");
+    require_finite(sample.jacobian, "retained Jacobian");
+    if (!std::isfinite(capture.dry_state_scale) ||
+        !std::isfinite(sample.dry_column_coupling_norm) ||
+        sample.dry_column_coupling_norm < FE::Real{0.0}) {
+        throw std::runtime_error(
+            "wet-block reference capture contains a nonfinite case scalar");
+    }
+
+    std::set<FE::GlobalIndex> global_dofs;
+    for (std::size_t index = 0u; index < n; ++index) {
+        const auto& dof = capture.dofs[index];
+        if (dof.canonical_index != index || dof.global_dof < 0 ||
+            dof.vertex_gid == INVALID_GID || dof.field < 0 || dof.field > 1 ||
+            dof.component >= (dof.field == 0 ? 2u : 1u) ||
+            !std::all_of(dof.point.begin(), dof.point.end(),
+                         [](FE::Real value) { return std::isfinite(value); }) ||
+            !global_dofs.insert(dof.global_dof).second ||
+            (!dof.retained_support && !dof.constrained) ||
+            (dof.retained_support && dof.constrained)) {
+            throw std::runtime_error(
+                "wet-block reference capture has an invalid canonical DOF");
+        }
+        if (index != 0u) {
+            const auto& prior = capture.dofs[index - 1u];
+            if (std::tie(prior.field, prior.vertex_gid, prior.component) >=
+                std::tie(dof.field, dof.vertex_gid, dof.component)) {
+                throw std::runtime_error(
+                    "wet-block reference capture DOFs are not strictly canonical");
+            }
+        }
+    }
+
+    std::vector<bool> retained_mapped(n, false);
+    for (std::size_t index = 0u; index < retained_size; ++index) {
+        const auto all_index = capture.wet_to_all[index];
+        if (all_index >= n || retained_mapped[all_index]) {
+            throw std::runtime_error(
+                "wet-block reference retained projection has an invalid or duplicate canonical index");
+        }
+        retained_mapped[all_index] = true;
+        const auto& retained_dof = sample.dofs[index];
+        const auto& all_dof = capture.dofs[all_index];
+        if (retained_dof.field != all_dof.field ||
+            retained_dof.vertex_gid != all_dof.vertex_gid ||
+            retained_dof.component != all_dof.component ||
+            retained_dof.global_dof != all_dof.global_dof ||
+            retained_dof.point != all_dof.point ||
+            !all_dof.retained_support || all_dof.constrained ||
+            sample.current_state[index] != capture.current_state[all_index] ||
+            sample.residual[index] != capture.residual[all_index]) {
+            throw std::runtime_error(
+                "wet-block reference retained projection identity disagrees with the all-physical capture");
+        }
+        for (std::size_t column = 0u; column < retained_size; ++column) {
+            const auto all_column = capture.wet_to_all[column];
+            if (all_column >= n ||
+                sample.jacobian[index * retained_size + column] !=
+                    capture.full_jacobian[all_index * n + all_column]) {
+                throw std::runtime_error(
+                    "wet-block reference retained Jacobian is not the mapped all-physical block");
+            }
+        }
+    }
+    for (std::size_t index = 0u; index < n; ++index) {
+        if (capture.dofs[index].retained_support != retained_mapped[index]) {
+            throw std::runtime_error(
+                "wet-block reference retained projection omits or includes the wrong physical DOF");
+        }
+    }
+
+    for (std::size_t row = 0u; row < n; ++row) {
+        if (capture.sparsity_row_offsets[row] >
+            capture.sparsity_row_offsets[row + 1u]) {
+            throw std::runtime_error(
+                "wet-block reference capture CSR offsets are not monotone");
+        }
+        const auto begin = capture.sparsity_column_indices.begin() +
+                           static_cast<std::ptrdiff_t>(
+                               capture.sparsity_row_offsets[row]);
+        const auto end = capture.sparsity_column_indices.begin() +
+                         static_cast<std::ptrdiff_t>(
+                             capture.sparsity_row_offsets[row + 1u]);
+        if (!std::is_sorted(begin, end) ||
+            std::adjacent_find(begin, end) != end ||
+            std::any_of(begin, end, [&](std::size_t column) {
+                return column >= n;
+            })) {
+            throw std::runtime_error(
+                "wet-block reference capture CSR row is invalid");
+        }
+        for (std::size_t column = 0u; column < n; ++column) {
+            if (capture.full_jacobian[row * n + column] != FE::Real{0.0} &&
+                !std::binary_search(begin, end, column)) {
+                throw std::runtime_error(
+                    "wet-block reference capture found a numerical coupling outside declared sparsity");
+            }
+        }
+    }
+    std::size_t numerical_nonzero_index = 0u;
+    for (std::size_t row = 0u; row < n; ++row) {
+        for (std::size_t column = 0u; column < n; ++column) {
+            if (capture.full_jacobian[row * n + column] == FE::Real{0.0}) {
+                continue;
+            }
+            if (numerical_nonzero_index >= capture.numerical_nonzeros.size() ||
+                capture.numerical_nonzeros[numerical_nonzero_index] !=
+                    std::array<std::size_t, 2>{{row, column}}) {
+                throw std::runtime_error(
+                    "wet-block reference numerical nonzero identities disagree with the dense Jacobian");
+            }
+            ++numerical_nonzero_index;
+        }
+    }
+    if (numerical_nonzero_index != capture.numerical_nonzeros.size()) {
+        throw std::runtime_error(
+            "wet-block reference numerical nonzero identities include an exact zero");
+    }
+
+    std::vector<bool> constrained(n, false);
+    for (const auto& row : capture.constraints) {
+        if (row.slave_canonical_index >= n ||
+            constrained[row.slave_canonical_index] ||
+            !std::isfinite(row.inhomogeneity) ||
+            row.slave_global_dof !=
+                capture.dofs[row.slave_canonical_index].global_dof) {
+            throw std::runtime_error(
+                "wet-block reference capture has an invalid or duplicate constraint row");
+        }
+        constrained[row.slave_canonical_index] = true;
+        if (!capture.dofs[row.slave_canonical_index].constrained) {
+            throw std::runtime_error(
+                "wet-block reference constraint flag disagrees with its row");
+        }
+        std::size_t prior_master = 0u;
+        bool first = true;
+        for (const auto& entry : row.entries) {
+            if (entry.master_canonical_index >= n ||
+                !std::isfinite(entry.weight) ||
+                entry.master_global_dof !=
+                    capture.dofs[entry.master_canonical_index].global_dof ||
+                (!first && entry.master_canonical_index <= prior_master)) {
+                throw std::runtime_error(
+                    "wet-block reference capture has an invalid constraint master");
+            }
+            first = false;
+            prior_master = entry.master_canonical_index;
+        }
+    }
+    for (std::size_t index = 0u; index < n; ++index) {
+        if (capture.dofs[index].constrained != constrained[index]) {
+            throw std::runtime_error(
+                "wet-block reference capture omitted a physical constraint row");
+        }
+    }
+
+    if (capture.scope != "serial" || capture.rank_count != 1 ||
+        !capture.partition_method.empty() || capture.x_coordinates.size() < 2u ||
+        capture.x_coordinates.size() != capture.level_set_by_plane.size() ||
+        !std::is_sorted(capture.x_coordinates.begin(),
+                        capture.x_coordinates.end()) ||
+        std::adjacent_find(capture.x_coordinates.begin(),
+                           capture.x_coordinates.end()) !=
+            capture.x_coordinates.end()) {
+        throw std::runtime_error(
+            "wet-block reference capture has invalid serial case geometry dimensions");
+    }
+
+    std::set<gid_t> vertex_gids;
+    for (const auto& vertex : capture.vertices) {
+        if (vertex.gid == INVALID_GID ||
+            !std::all_of(vertex.point.begin(), vertex.point.end(),
+                         [](FE::Real value) { return std::isfinite(value); }) ||
+            !vertex_gids.insert(vertex.gid).second) {
+            throw std::runtime_error(
+                "wet-block reference capture has an invalid or duplicate mesh vertex");
+        }
+    }
+    if (capture.vertices.size() != 2u * capture.x_coordinates.size() ||
+        capture.dofs.size() != 3u * capture.vertices.size()) {
+        throw std::runtime_error(
+            "wet-block reference capture does not match the serial Quad4 strip shape");
+    }
+    for (const auto x : capture.x_coordinates) {
+        if (std::count_if(capture.vertices.begin(), capture.vertices.end(),
+                          [x](const auto& vertex) {
+                              return vertex.point[0] == x;
+                          }) != 2) {
+            throw std::runtime_error(
+                "wet-block reference capture vertices do not match the recorded planes");
+        }
+    }
+
+    std::set<gid_t> cell_gids;
+    std::set<gid_t> connected_vertex_gids;
+    for (const auto& cell : capture.cells) {
+        std::set<gid_t> cell_vertices;
+        if (cell.gid == INVALID_GID || !cell_gids.insert(cell.gid).second ||
+            cell.vertex_gids.size() != 4u) {
+            throw std::runtime_error(
+                "wet-block reference capture has an invalid or duplicate Quad4 cell");
+        }
+        for (const auto vertex_gid : cell.vertex_gids) {
+            if (!vertex_gids.contains(vertex_gid) ||
+                !cell_vertices.insert(vertex_gid).second) {
+                throw std::runtime_error(
+                    "wet-block reference cell connectivity has an invalid vertex identity");
+            }
+            connected_vertex_gids.insert(vertex_gid);
+        }
+    }
+    if (capture.cells.size() + 1u != capture.x_coordinates.size() ||
+        connected_vertex_gids != vertex_gids) {
+        throw std::runtime_error(
+            "wet-block reference capture has incomplete serial Quad4 connectivity");
+    }
+
+    std::set<gid_t> retained_vertex_gids;
+    std::size_t dry_velocity_constraints = 0u;
+    std::size_t dry_pressure_constraints = 0u;
+    for (const auto& dof : capture.dofs) {
+        const auto vertex = std::find_if(
+            capture.vertices.begin(), capture.vertices.end(),
+            [&](const auto& record) { return record.gid == dof.vertex_gid; });
+        if (vertex == capture.vertices.end() || vertex->point != dof.point) {
+            throw std::runtime_error(
+                "wet-block reference physical DOF has no matching mesh vertex identity");
+        }
+        if (dof.retained_support) {
+            retained_vertex_gids.insert(dof.vertex_gid);
+        } else if (dof.field == 0 && dof.constrained) {
+            ++dry_velocity_constraints;
+        } else if (dof.field == 1 && dof.constrained) {
+            ++dry_pressure_constraints;
+        }
+    }
+    if (retained_vertex_gids.size() != sample.retained_vertices ||
+        dry_velocity_constraints != sample.constrained_dry_velocity_dofs ||
+        dry_pressure_constraints != sample.constrained_dry_pressure_dofs) {
+        throw std::runtime_error(
+            "wet-block reference retained or dry-constraint summary disagrees with canonical identities");
+    }
+
+    const auto& request = capture.domain_request;
+    const auto& summary = capture.owned_geometry_summary;
+    if (!request.valid() || request.generated_domain_id.empty() ||
+        request.source.kind != FE::interfaces::CutInterfaceSourceKind::Field ||
+        request.achieved_interface_quadrature_order < 0 ||
+        request.achieved_volume_quadrature_order < 0 ||
+        capture.realized_interface_marker != request.interface_marker ||
+        summary.interface_marker != capture.realized_interface_marker ||
+        !capture.operator_revision.valid ||
+        !capture.operator_revision.mesh.valid) {
+        throw std::runtime_error(
+            "wet-block reference capture has invalid or inconsistent geometry provenance");
+    }
+    const std::array<FE::Real, 3> summary_measures = {{
+        summary.measure,
+        summary.negative_volume_measure,
+        summary.positive_volume_measure,
+    }};
+    require_finite(summary_measures, "generated geometry summary measure");
+    if (std::any_of(summary_measures.begin(), summary_measures.end(),
+                    [](FE::Real value) { return value < FE::Real{0.0}; }) ||
+        summary.active_fragment_count > summary.fragment_count ||
+        summary.active_volume_region_count > summary.volume_region_count ||
+        summary.degenerate_fragment_count > summary.fragment_count ||
+        summary.total_quadrature_point_count !=
+            summary.quadrature_point_count +
+                summary.volume_quadrature_point_count ||
+        capture.owned_backend_interface_quadrature_point_count !=
+            summary.quadrature_point_count ||
+        capture.owned_backend_volume_quadrature_point_count !=
+            summary.volume_quadrature_point_count ||
+        capture.owned_corner_linearized_cell_count >
+            capture.owned_generated_cell_count ||
+        capture.owned_implicit_fallback_cell_count >
+            capture.owned_generated_cell_count) {
+        throw std::runtime_error(
+            "wet-block reference generated geometry summary is inconsistent");
+    }
+
+    std::set<std::uint64_t> generated_stable_ids;
+    std::set<gid_t> generated_parent_gids;
+    std::size_t interface_count = 0u;
+    std::size_t volume_count = 0u;
+    long double interface_measure = 0.0L;
+    long double negative_volume_measure = 0.0L;
+    long double positive_volume_measure = 0.0L;
+    for (const auto& entity : capture.generated_entities) {
+        if (entity.parent_cell_gid < 0 || entity.owner_rank != 0 ||
+            entity.local_ordinal == FE::INVALID_LOCAL_INDEX ||
+            entity.topology_id.empty() ||
+            !std::isfinite(entity.measure) || entity.measure <= FE::Real{0.0} ||
+            entity.achieved_quadrature_order < 0 ||
+            !generated_stable_ids.insert(entity.stable_id).second ||
+            !cell_gids.contains(static_cast<gid_t>(entity.parent_cell_gid))) {
+            throw std::runtime_error(
+                "wet-block reference capture has an invalid generated entity identity");
+        }
+        generated_parent_gids.insert(
+            static_cast<gid_t>(entity.parent_cell_gid));
+        if (entity.volume) {
+            const auto side = static_cast<FE::geometry::CutIntegrationSide>(
+                entity.kind_or_side);
+            if (!entity.volume_fraction.has_value() ||
+                !std::isfinite(*entity.volume_fraction) ||
+                *entity.volume_fraction <= FE::Real{0.0} ||
+                *entity.volume_fraction > FE::Real{1.0} ||
+                (side != FE::geometry::CutIntegrationSide::Negative &&
+                 side != FE::geometry::CutIntegrationSide::Positive)) {
+                throw std::runtime_error(
+                    "wet-block reference volume region has invalid geometry data");
+            }
+            ++volume_count;
+            if (side == FE::geometry::CutIntegrationSide::Negative) {
+                negative_volume_measure += entity.measure;
+            } else {
+                positive_volume_measure += entity.measure;
+            }
+        } else {
+            const auto kind =
+                static_cast<FE::interfaces::CutInterfaceFragmentKind>(
+                    entity.kind_or_side);
+            if (entity.volume_fraction.has_value() ||
+                (kind != FE::interfaces::CutInterfaceFragmentKind::Segment &&
+                 kind != FE::interfaces::CutInterfaceFragmentKind::Polygon &&
+                 kind !=
+                     FE::interfaces::CutInterfaceFragmentKind::CurvedPatch)) {
+                throw std::runtime_error(
+                    "wet-block reference interface fragment has invalid geometry data");
+            }
+            ++interface_count;
+            interface_measure += entity.measure;
+        }
+    }
+    const auto measures_agree = [](long double accumulated, FE::Real recorded,
+                                   std::size_t count) {
+        const auto scale = std::max(
+            {1.0L, std::abs(accumulated),
+             std::abs(static_cast<long double>(recorded))});
+        return std::abs(accumulated - static_cast<long double>(recorded)) <=
+               static_cast<long double>(
+                   std::numeric_limits<FE::Real>::epsilon()) *
+                   static_cast<long double>(std::max<std::size_t>(1u, count)) *
+                   8.0L * scale;
+    };
+    if (interface_count != summary.active_fragment_count ||
+        volume_count != summary.active_volume_region_count ||
+        generated_parent_gids.size() != capture.owned_generated_cell_count ||
+        capture.owned_generated_cell_count != capture.cells.size() ||
+        !measures_agree(interface_measure, summary.measure, interface_count) ||
+        !measures_agree(negative_volume_measure,
+                        summary.negative_volume_measure, volume_count) ||
+        !measures_agree(positive_volume_measure,
+                        summary.positive_volume_measure, volume_count)) {
+        throw std::runtime_error(
+            "wet-block reference generated identities disagree with their summary");
+    }
+}
+
+[[nodiscard]] std::shared_ptr<WetBlockReferenceCapture>
+captureSerialWetBlockReference(
+    std::string_view case_id,
+    std::span<const FE::Real> x_coordinates,
+    std::span<const FE::Real> level_set_by_plane,
+    FE::Real dry_state_scale,
+    const Mesh& mesh,
+    const FE::systems::FESystem& system,
+    FE::FieldId velocity,
+    FE::FieldId pressure,
+    const std::set<gid_t>& retained,
+    const FE::level_set::LevelSetGeneratedInterfaceResult& generated,
+    const FE::systems::SystemStateView& state,
+    const FE::assembly::TimeIntegrationContext& time_context,
+    std::span<const FE::Real> solution,
+    std::span<const FE::Real> previous,
+    std::span<const FE::Real> residual,
+    const FE::assembly::DenseMatrixView& matrix,
+    const WetBlockAssemblySample& sample)
+{
+    auto capture = std::make_shared<WetBlockReferenceCapture>();
+    capture->case_id = std::string(case_id);
+    capture->scope = "serial";
+    capture->rank_count = 1;
+    capture->dry_state_scale = dry_state_scale;
+    capture->x_coordinates.assign(x_coordinates.begin(), x_coordinates.end());
+    capture->level_set_by_plane.assign(
+        level_set_by_plane.begin(), level_set_by_plane.end());
+    capture->operator_revision = system.operatorRevisionSnapshot();
+    capture->constraint_layout_revision = system.constraintLayoutRevision();
+    capture->sparsity_pattern_revision = system.sparsityPatternRevision();
+    capture->domain_request = generated.domain.request();
+    capture->realized_interface_marker = generated.interface_marker;
+    capture->generated_value_revision = generated.value_revision;
+    capture->owned_geometry_summary = generated.owned_summary;
+    capture->owned_generated_cell_count = generated.owned_cell_count;
+    capture->owned_corner_linearized_cell_count =
+        generated.owned_corner_linearized_cell_count;
+    capture->owned_implicit_fallback_cell_count =
+        generated.owned_implicit_cut_fallback_cell_count;
+    capture->owned_backend_volume_quadrature_point_count =
+        generated.owned_backend_volume_quadrature_point_count;
+    capture->owned_backend_interface_quadrature_point_count =
+        generated.owned_backend_interface_quadrature_point_count;
+    capture->stage.time = state.time;
+    capture->stage.dt = state.dt;
+    capture->stage.effective_dt = state.effective_dt;
+    capture->stage.dt_prev = state.dt_prev;
+    capture->time_context = time_context;
+
+    const auto& base = mesh.base();
+    const auto& vertex_gids = base.vertex_gids();
+    const auto append_field = [&](FE::FieldId field,
+                                  int field_index,
+                                  std::size_t components) {
+        const auto* entity_map =
+            system.fieldDofHandler(field).getEntityDofMap();
+        if (entity_map == nullptr) {
+            throw std::runtime_error(
+                "wet-block reference field has no entity DOF map");
+        }
+        const auto offset = system.fieldDofOffset(field);
+        for (index_t vertex = 0;
+             vertex < static_cast<index_t>(base.n_vertices());
+             ++vertex) {
+            const auto vertex_dofs = entity_map->getVertexDofs(vertex);
+            if (vertex_dofs.size() != components) {
+                throw std::runtime_error(
+                    "wet-block reference field is not the expected P1 space");
+            }
+            const auto gid = vertex_gids.at(static_cast<std::size_t>(vertex));
+            for (std::size_t component = 0u; component < components;
+                 ++component) {
+                const auto global = offset + vertex_dofs[component];
+                capture->dofs.push_back(WetBlockReferenceDof{
+                    .field = field_index,
+                    .vertex_gid = gid,
+                    .component = component,
+                    .global_dof = global,
+                    .point = system.meshAccess().getNodeCoordinates(vertex),
+                    .retained_support = retained.contains(gid),
+                    .constrained = system.constraints().isConstrained(global),
+                });
+            }
+        }
+    };
+    append_field(velocity, 0, 2u);
+    append_field(pressure, 1, 1u);
+    std::sort(capture->dofs.begin(), capture->dofs.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return std::tie(lhs.field, lhs.vertex_gid, lhs.component) <
+                         std::tie(rhs.field, rhs.vertex_gid, rhs.component);
+              });
+    for (std::size_t index = 0u; index < capture->dofs.size(); ++index) {
+        capture->dofs[index].canonical_index = index;
+    }
+
+    std::vector<FE::GlobalIndex> physical_dofs;
+    physical_dofs.reserve(capture->dofs.size());
+    for (const auto& dof : capture->dofs) {
+        physical_dofs.push_back(dof.global_dof);
+        capture->current_state.push_back(
+            solution[static_cast<std::size_t>(dof.global_dof)]);
+        capture->previous_state.push_back(
+            previous[static_cast<std::size_t>(dof.global_dof)]);
+        capture->residual.push_back(
+            residual[static_cast<std::size_t>(dof.global_dof)]);
+    }
+    capture->full_jacobian = extractRectangularMatrix(
+        matrix, physical_dofs, physical_dofs);
+    for (const auto& wet_dof : sample.dofs) {
+        const auto index = wetBlockCanonicalIndex(*capture, wet_dof.global_dof);
+        if (!index.has_value()) {
+            throw std::runtime_error(
+                "wet-block retained projection cannot map to the all-physical capture");
+        }
+        capture->wet_to_all.push_back(*index);
+    }
+
+    const auto& sparsity = system.sparsity("equations");
+    capture->original_sparsity_rows = sparsity.numRows();
+    capture->original_sparsity_columns = sparsity.numCols();
+    capture->original_sparsity_nnz = sparsity.getNnz();
+    capture->sparsity_finalized = sparsity.isFinalized();
+    if (!capture->sparsity_finalized) {
+        throw std::runtime_error(
+            "wet-block reference sparsity is not finalized");
+    }
+    capture->sparsity_row_offsets.push_back(0u);
+    for (const auto& row_dof : capture->dofs) {
+        std::vector<std::size_t> columns;
+        for (const auto global_column :
+             sparsity.getRowIndices(row_dof.global_dof)) {
+            if (const auto column =
+                    wetBlockCanonicalIndex(*capture, global_column);
+                column.has_value()) {
+                columns.push_back(*column);
+            }
+        }
+        std::sort(columns.begin(), columns.end());
+        columns.erase(std::unique(columns.begin(), columns.end()),
+                      columns.end());
+        capture->sparsity_column_indices.insert(
+            capture->sparsity_column_indices.end(),
+            columns.begin(), columns.end());
+        capture->sparsity_row_offsets.push_back(
+            capture->sparsity_column_indices.size());
+    }
+    const auto n = capture->dofs.size();
+    for (std::size_t row = 0u; row < n; ++row) {
+        for (std::size_t column = 0u; column < n; ++column) {
+            if (capture->full_jacobian[row * n + column] != FE::Real{0.0}) {
+                capture->numerical_nonzeros.push_back({{row, column}});
+            }
+        }
+    }
+
+    if (!system.constraints().isClosed()) {
+        throw std::runtime_error(
+            "wet-block reference constraints are not closed");
+    }
+    for (const auto slave : system.constraints().getConstrainedDofs()) {
+        const auto slave_index = wetBlockCanonicalIndex(*capture, slave);
+        if (!slave_index.has_value()) {
+            continue;
+        }
+        const auto line = system.constraints().getConstraint(slave);
+        if (!line.has_value()) {
+            throw std::runtime_error(
+                "wet-block reference constrained DOF has no closed row");
+        }
+        WetBlockReferenceConstraint row;
+        row.slave_canonical_index = *slave_index;
+        row.slave_global_dof = slave;
+        row.inhomogeneity = static_cast<FE::Real>(line->inhomogeneity);
+        for (const auto& entry : line->entries) {
+            const auto master_index =
+                wetBlockCanonicalIndex(*capture, entry.master_dof);
+            if (!master_index.has_value()) {
+                throw std::runtime_error(
+                    "wet-block reference constraint master is outside the physical capture");
+            }
+            row.entries.push_back(WetBlockReferenceConstraintEntry{
+                .master_canonical_index = *master_index,
+                .master_global_dof = entry.master_dof,
+                .weight = static_cast<FE::Real>(entry.weight),
+            });
+        }
+        std::sort(row.entries.begin(), row.entries.end(),
+                  [](const auto& lhs, const auto& rhs) {
+                      return lhs.master_canonical_index <
+                             rhs.master_canonical_index;
+                  });
+        capture->constraints.push_back(std::move(row));
+    }
+    std::sort(capture->constraints.begin(), capture->constraints.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return lhs.slave_canonical_index <
+                         rhs.slave_canonical_index;
+              });
+
+    capture->vertices.reserve(base.n_vertices());
+    for (index_t vertex = 0;
+         vertex < static_cast<index_t>(base.n_vertices()); ++vertex) {
+        capture->vertices.push_back(WetBlockReferenceVertex{
+            .gid = vertex_gids.at(static_cast<std::size_t>(vertex)),
+            .point = system.meshAccess().getNodeCoordinates(vertex),
+        });
+    }
+    std::sort(capture->vertices.begin(), capture->vertices.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return lhs.gid < rhs.gid;
+              });
+    const auto& cell_gids = base.cell_gids();
+    for (index_t cell = 0; cell < static_cast<index_t>(base.n_cells());
+         ++cell) {
+        WetBlockReferenceCell record;
+        record.gid = cell_gids.at(static_cast<std::size_t>(cell));
+        for (const auto vertex : base.cell_vertices(cell)) {
+            record.vertex_gids.push_back(
+                vertex_gids.at(static_cast<std::size_t>(vertex)));
+        }
+        capture->cells.push_back(std::move(record));
+    }
+    std::sort(capture->cells.begin(), capture->cells.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return lhs.gid < rhs.gid;
+              });
+
+    for (const auto& fragment : generated.domain.fragments()) {
+        if (!fragment.active()) {
+            continue;
+        }
+        capture->generated_entities.push_back(WetBlockReferenceFragment{
+            .volume = false,
+            .stable_id = fragment.stable_id,
+            .parent_cell_gid = fragment.parent_cell_global_id,
+            .owner_rank = fragment.owner_rank,
+            .local_ordinal = fragment.local_fragment_index,
+            .kind_or_side = static_cast<int>(fragment.kind),
+            .topology_id = fragment.topology_id,
+            .corner_topology_key = fragment.parent_corner_topology_key,
+            .measure = fragment.measure,
+            .volume_fraction = std::nullopt,
+            .achieved_quadrature_order =
+                generated.domain.request().achieved_interface_quadrature_order,
+        });
+    }
+    for (const auto& region : generated.domain.volumeRegions()) {
+        if (!region.active()) {
+            continue;
+        }
+        capture->generated_entities.push_back(WetBlockReferenceFragment{
+            .volume = true,
+            .stable_id = region.stable_id,
+            .parent_cell_gid = region.parent_cell_global_id,
+            .owner_rank = region.owner_rank,
+            .local_ordinal = region.local_region_index,
+            .kind_or_side = static_cast<int>(region.side),
+            .topology_id = region.topology_id,
+            .corner_topology_key = region.parent_corner_topology_key,
+            .measure = region.measure,
+            .volume_fraction = region.volume_fraction,
+            .achieved_quadrature_order = region.achieved_quadrature_order,
+        });
+    }
+    std::sort(capture->generated_entities.begin(),
+              capture->generated_entities.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return std::tie(lhs.volume, lhs.stable_id) <
+                         std::tie(rhs.volume, rhs.stable_id);
+              });
+    validateWetBlockReferenceCapture(*capture, sample);
+    return capture;
+}
+
+void writeWetBlockJsonString(std::ostream& output, std::string_view value)
+{
+    output.put('"');
+    for (const unsigned char character : value) {
+        switch (character) {
+            case '"': output << "\\\""; break;
+            case '\\': output << "\\\\"; break;
+            case '\b': output << "\\b"; break;
+            case '\f': output << "\\f"; break;
+            case '\n': output << "\\n"; break;
+            case '\r': output << "\\r"; break;
+            case '\t': output << "\\t"; break;
+            default:
+                if (character < 0x20u) {
+                    output << "\\u" << std::hex << std::setw(4)
+                           << std::setfill('0')
+                           << static_cast<unsigned int>(character)
+                           << std::dec << std::setfill(' ');
+                } else {
+                    output.put(static_cast<char>(character));
+                }
+        }
+    }
+    output.put('"');
+}
+
+void writeWetBlockJsonReal(std::ostream& output, FE::Real value)
+{
+    if (!std::isfinite(value)) {
+        throw std::runtime_error(
+            "wet-block reference JSON cannot represent a nonfinite number");
+    }
+    output << std::setprecision(std::numeric_limits<FE::Real>::max_digits10)
+           << value;
+}
+
+void writeWetBlockJsonRealArray(std::ostream& output,
+                                std::span<const FE::Real> values)
+{
+    output << '[';
+    for (std::size_t index = 0u; index < values.size(); ++index) {
+        if (index != 0u) {
+            output << ',';
+        }
+        writeWetBlockJsonReal(output, values[index]);
+    }
+    output << ']';
+}
+
+void writeWetBlockJsonIndexArray(std::ostream& output,
+                                 std::span<const std::size_t> values)
+{
+    output << '[';
+    for (std::size_t index = 0u; index < values.size(); ++index) {
+        if (index != 0u) {
+            output << ',';
+        }
+        output << values[index];
+    }
+    output << ']';
+}
+
+[[nodiscard]] const char* wetBlockFieldName(int field)
+{
+    if (field == 0) {
+        return "u";
+    }
+    if (field == 1) {
+        return "p";
+    }
+    throw std::runtime_error("wet-block reference has an unknown field block");
+}
+
+[[nodiscard]] const char* wetBlockFieldRole(int field)
+{
+    return field == 0 ? "velocity" : "pressure";
+}
+
+[[nodiscard]] const char* wetBlockFrameName(
+    FE::geometry::CutGeometryFrame frame)
+{
+    switch (frame) {
+        case FE::geometry::CutGeometryFrame::Reference: return "reference";
+        case FE::geometry::CutGeometryFrame::Current: return "current";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] const char* wetBlockSideName(int side)
+{
+    switch (static_cast<FE::geometry::CutIntegrationSide>(side)) {
+        case FE::geometry::CutIntegrationSide::Negative: return "negative";
+        case FE::geometry::CutIntegrationSide::Positive: return "positive";
+        case FE::geometry::CutIntegrationSide::Interface: return "interface";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] const char* wetBlockFragmentKindName(int kind)
+{
+    switch (static_cast<FE::interfaces::CutInterfaceFragmentKind>(kind)) {
+        case FE::interfaces::CutInterfaceFragmentKind::Segment:
+            return "segment";
+        case FE::interfaces::CutInterfaceFragmentKind::Polygon:
+            return "polygon";
+        case FE::interfaces::CutInterfaceFragmentKind::CurvedPatch:
+            return "curved_patch";
+    }
+    return "unknown";
+}
+
+void writeWetBlockUnavailable(std::ostream& output, std::string_view reason)
+{
+    output << "{\"available\":false,\"reason\":";
+    writeWetBlockJsonString(output, reason);
+    output << '}';
+}
+
+void writeWetBlockMatrixBlock(
+    std::ostream& output,
+    const WetBlockReferenceCapture& capture,
+    int row_field,
+    int column_field)
+{
+    std::vector<std::size_t> rows;
+    std::vector<std::size_t> columns;
+    for (const auto& dof : capture.dofs) {
+        if (dof.field == row_field) {
+            rows.push_back(dof.canonical_index);
+        }
+        if (dof.field == column_field) {
+            columns.push_back(dof.canonical_index);
+        }
+    }
+    output << "{\"row_field\":";
+    writeWetBlockJsonString(output, wetBlockFieldName(row_field));
+    output << ",\"column_field\":";
+    writeWetBlockJsonString(output, wetBlockFieldName(column_field));
+    output << ",\"rows\":" << rows.size()
+           << ",\"columns\":" << columns.size()
+           << ",\"row_canonical_indices\":";
+    writeWetBlockJsonIndexArray(output, rows);
+    output << ",\"column_canonical_indices\":";
+    writeWetBlockJsonIndexArray(output, columns);
+    output << ",\"layout\":\"row_major\",\"values\":[";
+    const auto n = capture.dofs.size();
+    bool first = true;
+    for (const auto row : rows) {
+        for (const auto column : columns) {
+            if (!first) {
+                output << ',';
+            }
+            first = false;
+            writeWetBlockJsonReal(
+                output, capture.full_jacobian[row * n + column]);
+        }
+    }
+    output << "]}";
+}
+
+void writeWetBlockReferenceCase(std::ostream& output,
+                                const WetBlockAssemblySample& sample)
+{
+    if (!sample.reference_capture) {
+        throw std::runtime_error(
+            "wet-block reference bundle contains an uncaptured case");
+    }
+    const auto& capture = *sample.reference_capture;
+    validateWetBlockReferenceCapture(capture, sample);
+    const auto& request = capture.domain_request;
+    const auto& revision = capture.operator_revision;
+    output << "{\"case\":{\"logical_id\":";
+    writeWetBlockJsonString(output, capture.case_id);
+    output << ",\"scope\":";
+    writeWetBlockJsonString(output, capture.scope);
+    output << ",\"rank_count\":" << capture.rank_count
+           << ",\"partition_method\":";
+    if (capture.partition_method.empty()) {
+        writeWetBlockUnavailable(output, "serial_case_has_no_partition");
+    } else {
+        output << "{\"available\":true,\"value\":";
+        writeWetBlockJsonString(output, capture.partition_method);
+        output << '}';
+    }
+    output << "},\"configuration\":{\"spatial_dimension\":2,"
+              "\"element\":\"Quad4\",\"order\":1,"
+              "\"field_components\":{\"u\":2,\"p\":1,\"phi\":1},"
+              "\"x_coordinates\":";
+    writeWetBlockJsonRealArray(output, capture.x_coordinates);
+    output << ",\"level_set_by_plane\":";
+    writeWetBlockJsonRealArray(output, capture.level_set_by_plane);
+    output << ",\"dry_state_scale\":";
+    writeWetBlockJsonReal(output, capture.dry_state_scale);
+    output << ",\"density\":1.2,\"viscosity\":0.070000000000000007,"
+              "\"convection\":false,\"vms\":true,"
+              "\"active_side\":\"negative\","
+              "\"active_domain_method\":\"cut_volume\","
+              "\"external_pressure\":0,\"surface_tension\":0,"
+              "\"use_level_set_curvature\":false,"
+              "\"cut_stabilization\":false,"
+              "\"small_cut_aggregation\":false,"
+              "\"velocity_extension\":false},"
+              "\"operator_stage\":{\"operator_tag\":\"equations\","
+              "\"physical_block_order\":[\"u\",\"p\"],"
+              "\"stage_label\":\"single_backward_difference_linearization\","
+              "\"state_time\":";
+    writeWetBlockJsonReal(output, capture.stage.time);
+    output << ",\"dt\":";
+    writeWetBlockJsonReal(output, capture.stage.dt);
+    output << ",\"effective_dt\":";
+    writeWetBlockJsonReal(output, capture.stage.effective_dt);
+    output << ",\"dt_prev\":";
+    writeWetBlockJsonReal(output, capture.stage.dt_prev);
+    output << ",\"integrator_name\":";
+    writeWetBlockJsonString(output, capture.time_context.integrator_name);
+    output << ",\"derivative_stencils\":[";
+    bool first_stencil = true;
+    const auto write_stencil = [&](const FE::assembly::TimeDerivativeStencil& s) {
+        if (!first_stencil) {
+            output << ',';
+        }
+        first_stencil = false;
+        output << "{\"order\":" << s.order << ",\"coefficients\":";
+        writeWetBlockJsonRealArray(output, s.a);
+        output << '}';
+    };
+    if (capture.time_context.dt1.has_value()) {
+        write_stencil(*capture.time_context.dt1);
+    }
+    if (capture.time_context.dt2.has_value()) {
+        write_stencil(*capture.time_context.dt2);
+    }
+    for (const auto& stencil : capture.time_context.dt_extra) {
+        if (stencil.has_value()) {
+            write_stencil(*stencil);
+        }
+    }
+    output << "],\"term_weights\":{\"time_derivative\":";
+    writeWetBlockJsonReal(
+        output, capture.time_context.time_derivative_term_weight);
+    output << ",\"non_time_derivative\":";
+    writeWetBlockJsonReal(
+        output, capture.time_context.non_time_derivative_term_weight);
+    output << ",\"dt1\":";
+    writeWetBlockJsonReal(output, capture.time_context.dt1_term_weight);
+    output << ",\"dt2\":";
+    writeWetBlockJsonReal(output, capture.time_context.dt2_term_weight);
+    output << ",\"dt_extra\":";
+    writeWetBlockJsonRealArray(
+        output, capture.time_context.dt_extra_term_weight);
+    output << "},\"assembly_sequence\":"
+              "\"matrix_then_residual_at_same_state\","
+              "\"solved_state_definition\":"
+              "\"current_minus_inverse_wet_jacobian_times_wet_residual\","
+              "\"operator_revision\":{\"valid\":"
+           << (revision.valid ? "true" : "false")
+           << ",\"mesh\":{\"valid\":"
+           << (revision.mesh.valid ? "true" : "false")
+           << ",\"geometry\":" << revision.mesh.geometry
+           << ",\"reference_geometry\":"
+           << revision.mesh.reference_geometry
+           << ",\"current_geometry\":"
+           << revision.mesh.current_geometry
+           << ",\"reference_rebase\":"
+           << revision.mesh.reference_rebase
+           << ",\"topology\":" << revision.mesh.topology
+           << ",\"ownership\":" << revision.mesh.ownership
+           << ",\"numbering\":" << revision.mesh.numbering
+           << ",\"field_layout\":" << revision.mesh.field_layout
+           << ",\"labels\":" << revision.mesh.labels
+           << ",\"active_configuration\":"
+           << revision.mesh.active_configuration
+           << "},\"fe_layout\":{\"space\":"
+           << revision.fe_layout.space
+           << ",\"dof_layout\":" << revision.fe_layout.dof_layout
+           << ",\"constraint_layout\":"
+           << revision.fe_layout.constraint_layout
+           << ",\"block_layout\":" << revision.fe_layout.block_layout
+           << "},\"system_layout_key\":" << revision.system_layout_key
+           << ",\"geometry_transaction_state\":";
+    writeWetBlockJsonString(
+        output, FE::systems::to_string(revision.geometry_state));
+    output << ",\"geometry_configuration_use\":";
+    writeWetBlockJsonString(
+        output, FE::systems::to_string(revision.geometry_use));
+    output << "},\"constraint_layout_revision\":"
+           << capture.constraint_layout_revision
+           << ",\"sparsity_pattern_revision\":"
+           << capture.sparsity_pattern_revision
+           << ",\"accepted_step\":";
+    writeWetBlockUnavailable(
+        output, "fixture_does_not_supply_lifecycle_stage_identity");
+    output << ",\"nonlinear_iteration\":";
+    writeWetBlockUnavailable(
+        output, "fixture_does_not_supply_lifecycle_stage_identity");
+    output << ",\"candidate_accepted_transaction\":";
+    writeWetBlockUnavailable(
+        output, "fixture_does_not_supply_lifecycle_stage_identity");
+    output << ",\"state_revision\":";
+    writeWetBlockUnavailable(
+        output, "fixture_does_not_supply_lifecycle_stage_identity");
+    output << "},\"geometry\":{\"source\":{"
+              "\"field_name\":\"phi\",\"source_kind\":\"field\","
+              "\"operator_block_available\":false,"
+              "\"field_id_diagnostic\":" << request.source.field_id
+           << ",\"layout_revision\":" << request.source.layout_revision
+           << ",\"value_revision\":" << request.source.value_revision
+           << ",\"generated_value_revision\":"
+           << capture.generated_value_revision << "},\"domain\":{"
+              "\"domain_id\":";
+    writeWetBlockJsonString(output, request.generated_domain_id);
+    output << ",\"requested_interface_marker\":"
+           << request.interface_marker
+           << ",\"realized_interface_marker\":"
+           << capture.realized_interface_marker << ",\"isovalue\":";
+    writeWetBlockJsonReal(output, request.isovalue);
+    output << ",\"tolerance\":";
+    writeWetBlockJsonReal(output, request.tolerance);
+    output << ",\"frame\":";
+    writeWetBlockJsonString(output, wetBlockFrameName(request.frame));
+    output << ",\"aligned_zero_parent_side\":";
+    writeWetBlockJsonString(
+        output,
+        wetBlockSideName(
+            static_cast<int>(request.aligned_zero_interface_parent_side)));
+    output << ",\"quadrature_policy_key\":"
+           << request.quadrature_policy_key
+           << ",\"requested_interface_order\":"
+           << request.resolvedInterfaceQuadratureOrder()
+           << ",\"requested_volume_order\":"
+           << request.resolvedVolumeQuadratureOrder()
+           << ",\"achieved_interface_order\":"
+           << request.achieved_interface_quadrature_order
+           << ",\"achieved_volume_order\":"
+           << request.achieved_volume_quadrature_order
+           << ",\"implicit_geometry_mode\":";
+    writeWetBlockJsonString(output, request.implicit_geometry_mode);
+    output << ",\"implicit_quadrature_backend\":";
+    writeWetBlockJsonString(output, request.implicit_quadrature_backend);
+    output << ",\"implicit_fallback_policy\":";
+    writeWetBlockJsonString(output, request.implicit_fallback_policy);
+    output << ",\"implicit_fallback_status\":";
+    writeWetBlockJsonString(output, request.implicit_fallback_status);
+    output << ",\"geometry_tangent_policy\":";
+    writeWetBlockJsonString(output, request.geometry_tangent_policy);
+    output << "},\"mesh\":{\"vertices\":[";
+    for (std::size_t index = 0u; index < capture.vertices.size(); ++index) {
+        if (index != 0u) {
+            output << ',';
+        }
+        output << "{\"gid\":" << capture.vertices[index].gid
+               << ",\"point\":";
+        writeWetBlockJsonRealArray(output, capture.vertices[index].point);
+        output << '}';
+    }
+    output << "],\"cells\":[";
+    for (std::size_t index = 0u; index < capture.cells.size(); ++index) {
+        if (index != 0u) {
+            output << ',';
+        }
+        output << "{\"gid\":" << capture.cells[index].gid
+               << ",\"vertex_gids\":[";
+        for (std::size_t vertex = 0u;
+             vertex < capture.cells[index].vertex_gids.size(); ++vertex) {
+            if (vertex != 0u) {
+                output << ',';
+            }
+            output << capture.cells[index].vertex_gids[vertex];
+        }
+        output << "]}";
+    }
+    output << "],\"retained_vertex_gids\":[";
+    bool first_retained = true;
+    std::set<gid_t> written_retained;
+    for (const auto& dof : capture.dofs) {
+        if (!dof.retained_support ||
+            !written_retained.insert(dof.vertex_gid).second) {
+            continue;
+        }
+        if (!first_retained) {
+            output << ',';
+        }
+        first_retained = false;
+        output << dof.vertex_gid;
+    }
+    const auto& summary = capture.owned_geometry_summary;
+    output << "]},\"owned_summary\":{\"interface_marker\":"
+           << summary.interface_marker
+           << ",\"fragment_count\":" << summary.fragment_count
+           << ",\"active_fragment_count\":"
+           << summary.active_fragment_count
+           << ",\"volume_region_count\":"
+           << summary.volume_region_count
+           << ",\"active_volume_region_count\":"
+           << summary.active_volume_region_count
+           << ",\"interface_quadrature_point_count\":"
+           << summary.quadrature_point_count
+           << ",\"volume_quadrature_point_count\":"
+           << summary.volume_quadrature_point_count
+           << ",\"total_quadrature_point_count\":"
+           << summary.total_quadrature_point_count
+           << ",\"degenerate_fragment_count\":"
+           << summary.degenerate_fragment_count << ",\"measure\":";
+    writeWetBlockJsonReal(output, summary.measure);
+    output << ",\"negative_volume_measure\":";
+    writeWetBlockJsonReal(output, summary.negative_volume_measure);
+    output << ",\"positive_volume_measure\":";
+    writeWetBlockJsonReal(output, summary.positive_volume_measure);
+    output << ",\"generated_cell_count\":"
+           << capture.owned_generated_cell_count
+           << ",\"corner_linearized_cell_count\":"
+           << capture.owned_corner_linearized_cell_count
+           << ",\"implicit_fallback_cell_count\":"
+           << capture.owned_implicit_fallback_cell_count
+           << ",\"backend_volume_quadrature_point_count\":"
+           << capture.owned_backend_volume_quadrature_point_count
+           << ",\"backend_interface_quadrature_point_count\":"
+           << capture.owned_backend_interface_quadrature_point_count
+           << "},\"owned_generated_entities\":[";
+    for (std::size_t index = 0u;
+         index < capture.generated_entities.size(); ++index) {
+        if (index != 0u) {
+            output << ',';
+        }
+        const auto& entity = capture.generated_entities[index];
+        output << "{\"entity_kind\":";
+        writeWetBlockJsonString(
+            output, entity.volume ? "volume_region" : "interface_fragment");
+        output << ",\"kind_or_side\":";
+        writeWetBlockJsonString(
+            output,
+            entity.volume ? wetBlockSideName(entity.kind_or_side)
+                          : wetBlockFragmentKindName(entity.kind_or_side));
+        output << ",\"parent_cell_gid\":" << entity.parent_cell_gid
+               << ",\"owner_rank\":" << entity.owner_rank
+               << ",\"local_ordinal\":" << entity.local_ordinal
+               << ",\"stable_id\":" << entity.stable_id
+               << ",\"topology_id\":";
+        writeWetBlockJsonString(output, entity.topology_id);
+        output << ",\"corner_topology_key\":"
+               << entity.corner_topology_key << ",\"measure\":";
+        writeWetBlockJsonReal(output, entity.measure);
+        output << ",\"volume_fraction\":";
+        if (entity.volume_fraction.has_value()) {
+            writeWetBlockJsonReal(output, *entity.volume_fraction);
+        } else {
+            writeWetBlockUnavailable(
+                output, "not_applicable_to_interface_fragment");
+        }
+        output << ",\"achieved_quadrature_order\":"
+               << entity.achieved_quadrature_order << '}';
+    }
+    output << "]},\"canonical_physical_dofs\":[";
+    for (std::size_t index = 0u; index < capture.dofs.size(); ++index) {
+        if (index != 0u) {
+            output << ',';
+        }
+        const auto& dof = capture.dofs[index];
+        output << "{\"canonical_index\":" << dof.canonical_index
+               << ",\"block_ordinal\":" << dof.field
+               << ",\"field_name\":";
+        writeWetBlockJsonString(output, wetBlockFieldName(dof.field));
+        output << ",\"field_role\":";
+        writeWetBlockJsonString(output, wetBlockFieldRole(dof.field));
+        output << ",\"component\":" << dof.component
+               << ",\"entity_kind\":\"vertex\",\"entity_global_id\":"
+               << dof.vertex_gid << ",\"basis_ordinal\":0,\"point\":";
+        writeWetBlockJsonRealArray(output, dof.point);
+        output << ",\"retained_support\":"
+               << (dof.retained_support ? "true" : "false")
+               << ",\"constraint_present\":"
+               << (dof.constrained ? "true" : "false")
+               << ",\"algebraic_global_dof_diagnostic\":"
+               << dof.global_dof << '}';
+    }
+    output << "],\"vectors\":{\"current\":";
+    writeWetBlockJsonRealArray(output, capture.current_state);
+    output << ",\"previous\":";
+    writeWetBlockJsonRealArray(output, capture.previous_state);
+    output << ",\"assembled_residual\":";
+    writeWetBlockJsonRealArray(output, capture.residual);
+    output << ",\"canonical_indices\":[";
+    for (std::size_t index = 0u; index < capture.dofs.size(); ++index) {
+        if (index != 0u) {
+            output << ',';
+        }
+        output << index;
+    }
+    output << "]},\"matrix_blocks\":{\"u_u\":";
+    writeWetBlockMatrixBlock(output, capture, 0, 0);
+    output << ",\"u_p\":";
+    writeWetBlockMatrixBlock(output, capture, 0, 1);
+    output << ",\"p_u\":";
+    writeWetBlockMatrixBlock(output, capture, 1, 0);
+    output << ",\"p_p\":";
+    writeWetBlockMatrixBlock(output, capture, 1, 1);
+    output << "},\"retained_wet_projection\":{\"canonical_indices\":";
+    writeWetBlockJsonIndexArray(output, capture.wet_to_all);
+    output << ",\"current_state\":";
+    writeWetBlockJsonRealArray(output, sample.current_state);
+    output << ",\"residual\":";
+    writeWetBlockJsonRealArray(output, sample.residual);
+    output << ",\"solved_state\":";
+    writeWetBlockJsonRealArray(output, sample.solved_state);
+    output << ",\"jacobian_layout\":\"row_major\",\"jacobian\":";
+    writeWetBlockJsonRealArray(output, sample.jacobian);
+    output << ",\"dry_column_coupling_norm\":";
+    writeWetBlockJsonReal(output, sample.dry_column_coupling_norm);
+    output << ",\"retained_vertex_count\":" << sample.retained_vertices
+           << ",\"dry_velocity_constraint_count\":"
+           << sample.constrained_dry_velocity_dofs
+           << ",\"dry_pressure_constraint_count\":"
+           << sample.constrained_dry_pressure_dofs
+           << ",\"all_physical_solved_state\":";
+    writeWetBlockUnavailable(
+        output, "fixture_solves_only_the_retained_wet_projection");
+    output << "},\"declared_sparsity\":{\"format\":\"canonical_csr\","
+              "\"row_offsets\":";
+    writeWetBlockJsonIndexArray(output, capture.sparsity_row_offsets);
+    output << ",\"column_indices\":";
+    writeWetBlockJsonIndexArray(output, capture.sparsity_column_indices);
+    output << ",\"original_global_rows\":"
+           << capture.original_sparsity_rows
+           << ",\"original_global_columns\":"
+           << capture.original_sparsity_columns
+           << ",\"original_declared_nnz\":"
+           << capture.original_sparsity_nnz
+           << ",\"physical_filtered_nnz\":"
+           << capture.sparsity_column_indices.size()
+           << ",\"finalized\":"
+           << (capture.sparsity_finalized ? "true" : "false")
+           << ",\"indexing_mode\":";
+    writeWetBlockJsonString(output, capture.sparsity_indexing);
+    output << ",\"sparsity_pattern_revision\":"
+           << capture.sparsity_pattern_revision
+           << ",\"numerical_nonzero_coordinates\":[";
+    for (std::size_t index = 0u;
+         index < capture.numerical_nonzeros.size(); ++index) {
+        if (index != 0u) {
+            output << ',';
+        }
+        output << '[' << capture.numerical_nonzeros[index][0] << ','
+               << capture.numerical_nonzeros[index][1] << ']';
+    }
+    output << "],\"numerical_nonzero_outside_declared_count\":0},"
+              "\"closed_constraints\":{\"closed\":true,"
+              "\"constraint_layout_revision\":"
+           << capture.constraint_layout_revision << ",\"rows\":[";
+    for (std::size_t index = 0u; index < capture.constraints.size(); ++index) {
+        if (index != 0u) {
+            output << ',';
+        }
+        const auto& row = capture.constraints[index];
+        output << "{\"slave_canonical_index\":"
+               << row.slave_canonical_index
+               << ",\"slave_global_dof_diagnostic\":"
+               << row.slave_global_dof << ",\"inhomogeneity\":";
+        writeWetBlockJsonReal(output, row.inhomogeneity);
+        output << ",\"entries_empty\":"
+               << (row.entries.empty() ? "true" : "false")
+               << ",\"dirichlet\":"
+               << (row.entries.empty() ? "true" : "false")
+               << ",\"inhomogeneity_exactly_zero\":"
+               << (row.inhomogeneity == FE::Real{0.0} ? "true" : "false")
+               << ",\"masters\":[";
+        for (std::size_t master = 0u; master < row.entries.size(); ++master) {
+            if (master != 0u) {
+                output << ',';
+            }
+            output << "{\"canonical_index\":"
+                   << row.entries[master].master_canonical_index
+                   << ",\"global_dof_diagnostic\":"
+                   << row.entries[master].master_global_dof
+                   << ",\"weight\":";
+            writeWetBlockJsonReal(output, row.entries[master].weight);
+            output << '}';
+        }
+        output << "]}";
+    }
+    output << "]}}";
+}
+
+void publishWetBlockReferenceBundle(
+    std::string_view relative_path,
+    std::string_view test_name,
+    std::span<const WetBlockAssemblySample* const> samples,
+    std::span<const std::pair<std::string_view, ScaledWetBlockDifference>>
+        comparisons,
+    std::span<const WetBlockGateResult> gate_results,
+    FE::Real numerical_gate,
+    FE::Real solved_state_gate)
+{
+    const char* directory = std::getenv("SVMP_FREE_SURFACE_R0_CAPTURE_DIR");
+    if (directory == nullptr || directory[0] == '\0') {
+        if (std::any_of(samples.begin(), samples.end(), [](const auto* sample) {
+                return sample != nullptr && sample->reference_capture;
+            })) {
+            throw std::runtime_error(
+                "wet-block reference payload exists while capture is disabled");
+        }
+        return;
+    }
+    if (samples.empty() ||
+        std::any_of(samples.begin(), samples.end(), [](const auto* sample) {
+            return sample == nullptr || !sample->reference_capture;
+        })) {
+        throw std::runtime_error(
+            "wet-block reference publication requires every case payload");
+    }
+    if (gate_results.empty() || !std::isfinite(numerical_gate) ||
+        numerical_gate < FE::Real{0.0} ||
+        !std::isfinite(solved_state_gate) ||
+        solved_state_gate < FE::Real{0.0}) {
+        throw std::runtime_error(
+            "wet-block reference publication requires valid gate results and thresholds");
+    }
+    std::set<std::pair<std::string_view, std::string_view>> gate_identities;
+    for (const auto& result : gate_results) {
+        const auto case_exists = std::any_of(
+            samples.begin(), samples.end(), [&](const auto* sample) {
+                return sample->reference_capture->case_id == result.case_id;
+            });
+        if (!case_exists || result.metric.empty() ||
+            !std::isfinite(result.scaled_value) ||
+            result.scaled_value < FE::Real{0.0} ||
+            result.scaled_value > numerical_gate ||
+            !gate_identities.emplace(result.case_id, result.metric).second) {
+            throw std::runtime_error(
+                "wet-block reference publication has an invalid or duplicate gate result");
+        }
+    }
+    const auto require_hex_environment = [](const char* name,
+                                            std::size_t length) {
+        const char* value = std::getenv(name);
+        const std::string_view text = value == nullptr
+                                          ? std::string_view{}
+                                          : std::string_view(value);
+        const auto is_hexadecimal = [](char character) {
+            return (character >= '0' && character <= '9') ||
+                   (character >= 'a' && character <= 'f') ||
+                   (character >= 'A' && character <= 'F');
+        };
+        if (text.size() != length ||
+            !std::all_of(text.begin(), text.end(), is_hexadecimal)) {
+            throw std::runtime_error(
+                "wet-block reference publication requires " +
+                std::string(name) + " to contain exactly " +
+                std::to_string(length) + " hexadecimal characters");
+        }
+        return text;
+    };
+    const auto source_commit = require_hex_environment(
+        "SVMP_FREE_SURFACE_R0_SOURCE_COMMIT", 40u);
+    const auto source_tree = require_hex_environment(
+        "SVMP_FREE_SURFACE_R0_SOURCE_TREE", 40u);
+    const auto overlay_digest = require_hex_environment(
+        "SVMP_FREE_SURFACE_R0_OVERLAY_SHA256", 64u);
+    std::ostringstream document;
+    document.imbue(std::locale::classic());
+    document << "{\"artifact_type\":\"svmp_free_surface_wet_block_operator\","
+                "\"schema_version\":1,"
+                "\"source_commit\":";
+    writeWetBlockJsonString(document, source_commit);
+    document << ",\"source_tree\":";
+    writeWetBlockJsonString(document, source_tree);
+    document << ",\"test_overlay_sha256\":";
+    writeWetBlockJsonString(document, overlay_digest);
+    document << ",\"test_suite\":";
+    writeWetBlockJsonString(
+        document,
+        samples.front()->reference_capture->scope == "serial"
+            ? "FreeSurfaceCutStability"
+            : "FreeSurfaceCutStabilityMPI");
+    document << ",\"test_name\":";
+    writeWetBlockJsonString(document, test_name);
+    document << ",\"comparison_contract\":{"
+                "\"residual_absolute_floor\":9.9999999999999998e-13,"
+                "\"jacobian_absolute_floor\":9.9999999999999998e-13,"
+                "\"solved_state_absolute_floor\":9.9999999999999998e-13,"
+                "\"residual_scaled_gate\":";
+    writeWetBlockJsonReal(document, numerical_gate);
+    document << ",\"jacobian_scaled_gate\":";
+    writeWetBlockJsonReal(document, numerical_gate);
+    document << ",\"solved_state_scaled_gate\":";
+    writeWetBlockJsonReal(document, solved_state_gate);
+    document << ",\"dry_column_denominator_floor\":"
+                "9.9999999999999998e-13,"
+                "\"dry_column_scaled_gate\":";
+    writeWetBlockJsonReal(document, numerical_gate);
+    document << ",\"island_cross_denominator_floor\":"
+                "9.9999999999999998e-13,"
+                "\"island_cross_scaled_gate\":";
+    writeWetBlockJsonReal(document, numerical_gate);
+    document << ",\"canonical_and_discrete_metadata_comparison\":\"exact\"},"
+                "\"comparisons\":[";
+    for (std::size_t index = 0u; index < comparisons.size(); ++index) {
+        if (index != 0u) {
+            document << ',';
+        }
+        const auto& [factor, difference] = comparisons[index];
+        document << "{\"factor\":";
+        writeWetBlockJsonString(document, factor);
+        document << ",\"scaled_residual_difference\":";
+        writeWetBlockJsonReal(document, difference.residual);
+        document << ",\"scaled_jacobian_difference\":";
+        writeWetBlockJsonReal(document, difference.jacobian);
+        document << ",\"scaled_solved_state_difference\":";
+        writeWetBlockJsonReal(document, difference.solved_state);
+        document << ",\"residual_absolute_difference\":";
+        writeWetBlockJsonReal(document, difference.residual_absolute);
+        document << ",\"jacobian_absolute_difference\":";
+        writeWetBlockJsonReal(document, difference.jacobian_absolute);
+        document << ",\"solved_state_absolute_difference\":";
+        writeWetBlockJsonReal(document, difference.solved_state_absolute);
+        document << '}';
+    }
+    document << "],\"gate_results\":[";
+    for (std::size_t index = 0u; index < gate_results.size(); ++index) {
+        if (index != 0u) {
+            document << ',';
+        }
+        const auto& result = gate_results[index];
+        document << "{\"case_id\":";
+        writeWetBlockJsonString(document, result.case_id);
+        document << ",\"metric\":";
+        writeWetBlockJsonString(document, result.metric);
+        document << ",\"scaled_value\":";
+        writeWetBlockJsonReal(document, result.scaled_value);
+        document << ",\"accepted_gate\":";
+        writeWetBlockJsonReal(document, numerical_gate);
+        document << ",\"passed\":"
+                 << (result.scaled_value <= numerical_gate ? "true" : "false")
+                 << '}';
+    }
+    document << "],\"cases\":[";
+    for (std::size_t index = 0u; index < samples.size(); ++index) {
+        if (index != 0u) {
+            document << ',';
+        }
+        writeWetBlockReferenceCase(document, *samples[index]);
+    }
+    document << "]}\n";
+
+    const auto destination =
+        std::filesystem::path(directory) / std::filesystem::path(relative_path);
+    const auto temporary =
+        std::filesystem::path(destination.string() + ".tmp");
+    std::error_code error;
+    if (std::filesystem::exists(destination, error) || error) {
+        throw std::runtime_error(
+            "wet-block reference destination already exists or cannot be inspected: " +
+            destination.string());
+    }
+    if (!std::filesystem::create_directories(destination.parent_path(), error) &&
+        error) {
+        throw std::runtime_error(
+            "wet-block reference output directory cannot be created: " +
+            error.message());
+    }
+    const auto temporary_name = temporary.string();
+    std::FILE* output = std::fopen(temporary_name.c_str(), "wbx");
+    if (output == nullptr) {
+        throw std::runtime_error(
+            "wet-block reference temporary artifact cannot be created exclusively");
+    }
+    const auto text = document.str();
+    const bool write_failed =
+        std::fwrite(text.data(), 1u, text.size(), output) != text.size();
+    const bool flush_failed = std::fflush(output) != 0;
+    const bool close_failed = std::fclose(output) != 0;
+    if (write_failed || flush_failed || close_failed) {
+        std::error_code cleanup_error;
+        std::filesystem::remove(temporary, cleanup_error);
+        std::string message =
+            "wet-block reference temporary artifact cannot be written and closed";
+        if (cleanup_error) {
+            message += "; temporary cleanup failed: " +
+                       cleanup_error.message();
+        }
+        throw std::runtime_error(message);
+    }
+    error.clear();
+    std::filesystem::create_hard_link(temporary, destination, error);
+    if (error) {
+        const auto publication_error = error.message();
+        std::error_code cleanup_error;
+        std::filesystem::remove(temporary, cleanup_error);
+        std::string message =
+            "wet-block reference artifact cannot be atomically published: " +
+            publication_error;
+        if (cleanup_error) {
+            message += "; temporary cleanup failed: " +
+                       cleanup_error.message();
+        }
+        throw std::runtime_error(message);
+    }
+    std::error_code unlink_error;
+    const bool temporary_removed =
+        std::filesystem::remove(temporary, unlink_error);
+    if (!temporary_removed || unlink_error) {
+        std::error_code rollback_error;
+        const bool destination_removed =
+            std::filesystem::remove(destination, rollback_error);
+        std::string message =
+            "wet-block reference artifact publication could not remove its temporary alias";
+        if (unlink_error) {
+            message += ": " + unlink_error.message();
+        }
+        if (rollback_error) {
+            message += "; destination rollback failed: " +
+                       rollback_error.message();
+        } else if (!destination_removed) {
+            message += "; destination was already absent during rollback";
+        }
+        throw std::runtime_error(message);
+    }
+}
+
 void setWetBlockP1Field(
     std::vector<FE::Real>& state,
     const Mesh& mesh,
@@ -3724,7 +5339,8 @@ void setWetBlockP1Field(
 [[nodiscard]] WetBlockAssemblySample assembleSerialWetBlockSample(
     std::span<const FE::Real> x_coordinates,
     std::span<const FE::Real> level_set_by_plane,
-    FE::Real dry_state_scale)
+    FE::Real dry_state_scale,
+    std::string_view capture_case_id)
 {
     constexpr int interface_marker = 27305;
     constexpr std::string_view domain_id =
@@ -3985,6 +5601,32 @@ void setWetBlockP1Field(
     }
     sample.dry_column_coupling_norm = selectedFrobeniusNorm(
         matrix, wet_dofs, dry_columns);
+    if (const char* directory =
+            std::getenv("SVMP_FREE_SURFACE_R0_CAPTURE_DIR");
+        directory != nullptr && directory[0] != '\0') {
+        if (capture_case_id.empty()) {
+            throw std::runtime_error(
+                "wet-block reference capture requires a logical case ID");
+        }
+        sample.reference_capture = captureSerialWetBlockReference(
+            capture_case_id,
+            x_coordinates,
+            level_set_by_plane,
+            dry_state_scale,
+            *mesh,
+            system,
+            velocity,
+            pressure,
+            retained,
+            generated,
+            state,
+            time_context,
+            solution,
+            previous,
+            residual,
+            matrix,
+            sample);
+    }
     return sample;
 }
 
@@ -8263,18 +9905,21 @@ TEST(FreeSurfaceCutStability,
     const auto baseline = assembleSerialWetBlockSample(
         baseline_x,
         baseline_phi,
-        /*dry_state_scale=*/FE::Real{3.0});
+        /*dry_state_scale=*/FE::Real{3.0},
+        "physical_baseline");
     const auto depth = assembleSerialWetBlockSample(
         deep_x,
         deep_phi,
-        /*dry_state_scale=*/FE::Real{3.0});
+        /*dry_state_scale=*/FE::Real{3.0},
+        "physical_dry_depth");
     const auto dry_state = assembleSerialWetBlockSample(
         baseline_x,
         baseline_phi,
         // This changes every dry-only coefficient, including the exterior
         // right-boundary vertices, while preserving every retained-support
         // coefficient.
-        /*dry_state_scale=*/FE::Real{1.0e6});
+        /*dry_state_scale=*/FE::Real{1.0e6},
+        "physical_dry_values");
 
     ASSERT_EQ(baseline.retained_vertices, 6u);
     EXPECT_EQ(depth.retained_vertices, baseline.retained_vertices);
@@ -8320,10 +9965,34 @@ TEST(FreeSurfaceCutStability,
                   << " solved_state_gate=" << serial_solved_gate << '\n';
     }
 
-    for (const auto* sample : {&baseline, &depth, &dry_state}) {
+    const std::array<std::pair<std::string_view,
+                               const WetBlockAssemblySample*>, 3>
+        dry_column_cases = {{{"physical_baseline", &baseline},
+                             {"physical_dry_depth", &depth},
+                             {"physical_dry_values", &dry_state}}};
+    std::array<WetBlockGateResult, 3> gate_results{};
+    for (std::size_t index = 0u; index < dry_column_cases.size(); ++index) {
+        const auto& [case_id, sample] = dry_column_cases[index];
         const auto scaled_dry_coupling = sample->dry_column_coupling_norm /
             (norm_floor + vectorL2Norm(sample->jacobian));
         EXPECT_LE(scaled_dry_coupling, serial_gate);
+        gate_results[index] = WetBlockGateResult{
+            .case_id = case_id,
+            .metric = "scaled_dry_column_coupling",
+            .scaled_value = scaled_dry_coupling,
+        };
+    }
+    if (!::testing::Test::HasFailure()) {
+        const std::array<const WetBlockAssemblySample*, 3> captured_samples = {
+            &baseline, &depth, &dry_state};
+        publishWetBlockReferenceBundle(
+            "operator/wet-block/serial/physical-wet-blocks.json",
+            "PhysicalWetBlocksAreInvariantToDryDepthAndState",
+            captured_samples,
+            comparisons,
+            gate_results,
+            serial_gate,
+            serial_solved_gate);
     }
 #endif
 }
@@ -8346,11 +10015,13 @@ TEST(FreeSurfaceCutStability,
     const auto baseline = assembleSerialWetBlockSample(
         x,
         phi,
-        /*dry_state_scale=*/FE::Real{2.0});
+        /*dry_state_scale=*/FE::Real{2.0},
+        "islands_baseline");
     const auto changed_dry_path = assembleSerialWetBlockSample(
         x,
         phi,
-        /*dry_state_scale=*/FE::Real{1.0e6});
+        /*dry_state_scale=*/FE::Real{1.0e6},
+        "islands_dry_values");
     ASSERT_EQ(baseline.retained_vertices, 12u);
     ASSERT_EQ(baseline.dofs.size(), 36u);
     const auto dry_path_difference = compareWetBlockSamples(
@@ -8384,9 +10055,9 @@ TEST(FreeSurfaceCutStability,
     const auto scaled_cross = cross_norm /
         (norm_floor + vectorL2Norm(baseline.jacobian));
     EXPECT_LE(scaled_cross, serial_gate);
-    EXPECT_LE(baseline.dry_column_coupling_norm /
-                  (norm_floor + vectorL2Norm(baseline.jacobian)),
-              serial_gate);
+    const auto scaled_dry_coupling = baseline.dry_column_coupling_norm /
+        (norm_floor + vectorL2Norm(baseline.jacobian));
+    EXPECT_LE(scaled_dry_coupling, serial_gate);
     std::cout << std::setprecision(17)
               << "WP1_two_island_decoupling"
               << " scope=serial"
@@ -8404,6 +10075,33 @@ TEST(FreeSurfaceCutStability,
               << dry_path_difference.solved_state
               << " accepted_gate=" << serial_gate
               << " solved_state_gate=" << serial_solved_gate << '\n';
+    if (!::testing::Test::HasFailure()) {
+        const std::array<const WetBlockAssemblySample*, 2> captured_samples = {
+            &baseline, &changed_dry_path};
+        const std::array<std::pair<std::string_view, ScaledWetBlockDifference>,
+                         1>
+            captured_comparisons = {{{"dry_path", dry_path_difference}}};
+        const std::array<WetBlockGateResult, 2> gate_results = {{
+            {
+                .case_id = "islands_baseline",
+                .metric = "scaled_island_cross_jacobian",
+                .scaled_value = scaled_cross,
+            },
+            {
+                .case_id = "islands_baseline",
+                .metric = "scaled_dry_column_coupling",
+                .scaled_value = scaled_dry_coupling,
+            },
+        }};
+        publishWetBlockReferenceBundle(
+            "operator/wet-block/serial/disconnected-liquid-islands.json",
+            "DisconnectedLiquidIslandsHaveZeroPhysicalCrossCouplingThroughDryStrip",
+            captured_samples,
+            captured_comparisons,
+            gate_results,
+            serial_gate,
+            serial_solved_gate);
+    }
 #endif
 }
 
