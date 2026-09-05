@@ -262,6 +262,204 @@ TEST(LevelSetEquationTranslator, RecognizesLegacyEquationTypes)
   EXPECT_FALSE(application::translators::level_set::isEquationType("fluid"));
 }
 
+TEST(LevelSetEquationTranslator,
+     ResolvedLayeredConfigurationSurvivesRawInputChanges)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryQuadMesh();
+  svmp::Physics::EquationModuleInput input{};
+  input.equation_type = "level_set";
+  input.mesh_name = "quad";
+  input.mesh = mesh->local_mesh_ptr();
+  input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi_equation"};
+  input.equation_params["Operator_tag"] =
+      svmp::Physics::ParameterValue{true, "equation_transport"};
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "constant"};
+  input.equation_params["Constant_velocity"] =
+      svmp::Physics::ParameterValue{true, "1.25 -0.5 0.0"};
+  input.default_domain.params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi_default_domain"};
+  input.default_domain.params["Operator_tag"] =
+      svmp::Physics::ParameterValue{true, "default_transport"};
+  svmp::Physics::DomainInput domain{};
+  domain.id = "domain";
+  domain.params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi_resolved"};
+  domain.params["Operator_tag"] =
+      svmp::Physics::ParameterValue{true, "resolved_transport"};
+  domain.params["Transport_form"] =
+      svmp::Physics::ParameterValue{true, "conservative_divergence"};
+  input.domains.push_back(std::move(domain));
+
+  svmp::Physics::BoundaryConditionInput inflow{};
+  inflow.name = "inlet";
+  inflow.boundary_marker = 4;
+  inflow.params["Type"] =
+      svmp::Physics::ParameterValue{true, "LevelSetInflow"};
+  inflow.params["Value"] =
+      svmp::Physics::ParameterValue{true, "0.375"};
+  input.boundary_conditions.push_back(std::move(inflow));
+
+  const auto* source_mesh = input.mesh.get();
+  auto resolved =
+      application::translators::level_set::resolveConfiguration(input);
+  ASSERT_TRUE(resolved);
+  EXPECT_EQ(resolved->source_mesh.get(), source_mesh);
+  EXPECT_EQ(resolved->source_mesh_name, "quad");
+
+  input = svmp::Physics::EquationModuleInput{};
+
+  svmp::FE::systems::FESystem system(mesh);
+  auto module = application::translators::level_set::createModule(
+      *resolved, system);
+
+  ASSERT_TRUE(module);
+  EXPECT_NE(system.findFieldByName("phi_resolved"),
+            svmp::FE::INVALID_FIELD_ID);
+  EXPECT_EQ(system.findFieldByName("phi_equation"),
+            svmp::FE::INVALID_FIELD_ID);
+  EXPECT_EQ(system.findFieldByName("phi_default_domain"),
+            svmp::FE::INVALID_FIELD_ID);
+  EXPECT_TRUE(system.hasOperator("resolved_transport"));
+  EXPECT_TRUE(formulationRecordsContain(
+      system, FormExprType::BoundaryIntegral));
+  EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Divergence));
+#endif
+}
+
+TEST(LevelSetEquationTranslator,
+     ResolvedMaterialInterfaceConfigurationSuppliesCanonicalDependencyAndRegistration)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryTriangleMesh();
+  svmp::Physics::EquationModuleInput input{};
+  input.equation_type = "level_set";
+  input.mesh_name = "triangle";
+  input.mesh = mesh->local_mesh_ptr();
+  input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "level_set_resolved"};
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{
+          true, "material_interface_phase_pair"};
+  input.equation_params["Material_interface_marker"] =
+      svmp::Physics::ParameterValue{true, "71"};
+  input.equation_params["Enable_conservative_phase_transport"] =
+      svmp::Physics::ParameterValue{true, "true"};
+  input.equation_params["Conservative_phase_field_name"] =
+      svmp::Physics::ParameterValue{true, "phase_resolved"};
+  input.equation_params["Operator_tag"] =
+      svmp::Physics::ParameterValue{true, "resolved_pair"};
+  input.equation_params["Projected_curvature_field"] =
+      svmp::Physics::ParameterValue{true, "kappa_resolved"};
+
+  const auto expected_mesh = input.mesh.get();
+  auto resolved =
+      application::translators::level_set::resolveConfiguration(input);
+  ASSERT_TRUE(resolved);
+  input = svmp::Physics::EquationModuleInput{};
+
+  const auto dependency = application::translators::level_set::
+      materialInterfaceTransportDependency(*resolved);
+  ASSERT_TRUE(dependency.has_value());
+  EXPECT_EQ(dependency->mesh, expected_mesh);
+  EXPECT_EQ(dependency->mesh_name, "triangle");
+  EXPECT_EQ(dependency->dimension, 2);
+  EXPECT_EQ(dependency->interface_marker, 71);
+  EXPECT_EQ(dependency->level_set_field_name, "level_set_resolved");
+  EXPECT_EQ(dependency->conservative_phase_field_name, "phase_resolved");
+  EXPECT_EQ(dependency->operator_tag, "resolved_pair");
+
+  svmp::FE::systems::FESystem system(mesh);
+  application::translators::level_set::
+      preRegisterMaterialInterfaceTransportFields(*resolved, system);
+  const auto level_set = system.findFieldByName("level_set_resolved");
+  const auto phase = system.findFieldByName("phase_resolved");
+  ASSERT_NE(level_set, svmp::FE::INVALID_FIELD_ID);
+  ASSERT_NE(phase, svmp::FE::INVALID_FIELD_ID);
+  EXPECT_EQ(level_set, static_cast<svmp::FE::FieldId>(0));
+  EXPECT_EQ(phase, static_cast<svmp::FE::FieldId>(1));
+  EXPECT_EQ(system.findFieldByName("kappa_resolved"),
+            svmp::FE::INVALID_FIELD_ID);
+
+  const auto velocity_space =
+      svmp::FE::spaces::SpaceFactory::create_vector_h1(
+          svmp::FE::ElementType::Triangle3, 1, 2);
+  const auto negative_velocity =
+      system.addField(svmp::FE::systems::FieldSpec{
+          .name = "u_negative",
+          .space = velocity_space,
+          .components = 2,
+      });
+  const auto positive_velocity =
+      system.addField(svmp::FE::systems::FieldSpec{
+          .name = "u_positive",
+          .space = velocity_space,
+          .components = 2,
+      });
+  system.declareMaterialInterfaceTransportVelocity(
+      svmp::FE::interfaces::MaterialInterfaceTransportVelocityDeclaration{
+          .dimension = 2,
+          .interface_marker = 71,
+          .level_set_field = level_set,
+          .negative_velocity_field = negative_velocity,
+          .positive_velocity_field = positive_velocity,
+          .level_set_isovalue = 0.0,
+          .negative_trace_weight = 0.5,
+          .positive_trace_weight = 0.5,
+          .geometry_domain_id = "material_interface",
+          .owner_component = "incompressible_two_fluid",
+      });
+
+  auto module = application::translators::level_set::createModule(
+      *resolved, system);
+  ASSERT_TRUE(module);
+  EXPECT_TRUE(system.hasOperator("resolved_pair"));
+  EXPECT_NE(system.findFieldByName("kappa_resolved"),
+            svmp::FE::INVALID_FIELD_ID);
+#endif
+}
+
+TEST(LevelSetEquationTranslator,
+     ResolvedProjectedCurvatureCollisionFailsBeforeSystemMutation)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryQuadMesh();
+  svmp::Physics::EquationModuleInput input{};
+  input.equation_type = "level_set";
+  input.mesh_name = "quad";
+  input.mesh = mesh->local_mesh_ptr();
+  input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi_pending"};
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "constant"};
+  input.equation_params["Constant_velocity"] =
+      svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
+  input.equation_params["Projected_curvature_field"] =
+      svmp::Physics::ParameterValue{true, "phi_pending"};
+
+  auto resolved =
+      application::translators::level_set::resolveConfiguration(input);
+  ASSERT_TRUE(resolved);
+  svmp::FE::systems::FESystem system(mesh);
+  EXPECT_THROW(
+      static_cast<void>(application::translators::level_set::createModule(
+          *resolved, system)),
+      std::runtime_error);
+  EXPECT_EQ(system.findFieldByName("phi_pending"),
+            svmp::FE::INVALID_FIELD_ID);
+  EXPECT_FALSE(system.hasOperator("level_set"));
+  EXPECT_TRUE(system.formulationRecords().empty());
+#endif
+}
+
 TEST(LevelSetEquationTranslator, RejectsUnsupportedRuntimeReinitializationMethods)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
