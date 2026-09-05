@@ -5958,14 +5958,16 @@ def free_surface_pressure_representability_errors(
             "free_surface_static_compatible_pressure_initializers", [])
         if not isinstance(initializer_records, list) or not initializer_records:
             errors.append(
-                "static compatible-pressure initializer was not reported"
+                "additive current nonlinear pressure initial guess was not "
+                "reported"
             )
         else:
             malformed = any(
                 not isinstance(item, dict) for item in initializer_records)
             if malformed:
                 errors.append(
-                    "static compatible-pressure initializer record is malformed"
+                    "additive current nonlinear pressure initial-guess record "
+                    "is malformed"
                 )
             else:
                 failed = [
@@ -5974,19 +5976,33 @@ def free_surface_pressure_representability_errors(
                 ]
                 if failed:
                     errors.append(
-                        "static compatible-pressure initializer reported a "
+                        "additive current nonlinear pressure initial guess "
+                        "reported a "
                         f"failed attempt ({failed[-1].get('reason', 'unknown')})"
                     )
                 applied = [
                     item for item in initializer_records
                     if item.get("applied") in (1, True)
                 ]
-                if not applied:
+                if len(applied) != 1:
                     errors.append(
-                        "static compatible-pressure initializer never applied "
-                        "the pressure preload"
+                        "additive current nonlinear pressure initial guess "
+                        "requires exactly one applied record "
+                        f"(observed {len(applied)})"
                     )
-                else:
+                unexpected_non_applied = [
+                    item for item in initializer_records
+                    if item.get("applied") not in (1, True) and
+                    item.get("passed") in (1, True) and
+                    item.get("reason") != "already_initialized"
+                ]
+                if unexpected_non_applied:
+                    errors.append(
+                        "additive current nonlinear pressure initial guess has "
+                        "unexpected successful non-applied reason "
+                        f"{unexpected_non_applied[-1].get('reason')!r}"
+                    )
+                if applied:
                     initialized = applied[0]
                     expected_initializer_flags = {
                         "requested": 1,
@@ -5995,20 +6011,45 @@ def free_surface_pressure_representability_errors(
                         "pressure_representability_available": 1,
                         "pressure_representability_converged": 1,
                         "pressure_representability_breakdown": 0,
+                        "existing_pressure_baseline_preserved": 1,
+                        "committed_history_or_rate_slots_mutated": 0,
                         "force_projection_applied": 0,
                         "production_capillary_operator_changed": 0,
+                        "balanced_force_evidence": 0,
+                        "total_momentum_equilibrium_claimed": 0,
                     }
                     for key, expected in expected_initializer_flags.items():
                         value = initialized.get(key)
                         if value not in (expected, bool(expected)):
                             errors.append(
-                                "static compatible-pressure initializer has "
+                                "additive current nonlinear pressure initial "
+                                "guess has "
                                 f"unexpected {key} {value!r}; expected {expected}"
                             )
+                    expected_initializer_strings = {
+                        "pressure_update": "additive",
+                        "pressure_increment": (
+                            "conservative_balance_residual_correction"
+                        ),
+                        "pressure_correction_method": (
+                            "direct_balance_residual_lsqr"
+                        ),
+                        "scope": "one_shot_current_pressure_initial_guess",
+                    }
+                    for key, expected in expected_initializer_strings.items():
+                        value = initialized.get(key)
+                        if value != expected:
+                            errors.append(
+                                "additive current nonlinear pressure initial "
+                                "guess has "
+                                f"unexpected {key} {value!r}; expected "
+                                f"{expected!r}"
+                            )
                     if initialized.get("reason") != (
-                            "initialized_within_threshold"):
+                            "additive_initial_guess_within_threshold"):
                         errors.append(
-                            "static compatible-pressure initializer has "
+                            "additive current nonlinear pressure initial guess "
+                            "has "
                             f"unexpected reason {initialized.get('reason')!r}"
                         )
                     initializer_distance = initialized.get(
@@ -6025,7 +6066,8 @@ def free_surface_pressure_representability_errors(
                                 not math.isfinite(float(value)) or
                                 float(value) < 0.0):
                             errors.append(
-                                "static compatible-pressure initializer "
+                                "additive current nonlinear pressure initial "
+                                "guess "
                                 f"{key} is unavailable, nonfinite, or negative"
                             )
                     if (isinstance(initializer_maximum, (int, float)) and
@@ -6035,7 +6077,8 @@ def free_surface_pressure_representability_errors(
                                 float(initializer_maximum), float(maximum),
                                 rel_tol=1.0e-13, abs_tol=1.0e-15)):
                         errors.append(
-                            "static compatible-pressure initializer maximum "
+                            "additive current nonlinear pressure initial-guess "
+                            "maximum "
                             f"{float(initializer_maximum):.6g} does not match "
                             f"{float(maximum):.6g}"
                         )
@@ -6044,7 +6087,8 @@ def free_surface_pressure_representability_errors(
                             math.isfinite(float(initializer_distance)) and
                             float(initializer_distance) > float(maximum)):
                         errors.append(
-                            "static compatible-pressure initializer distance "
+                            "additive current nonlinear pressure initial-guess "
+                            "distance "
                             f"{float(initializer_distance):.6g} exceeds "
                             f"{float(maximum):.6g}"
                         )
