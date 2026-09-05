@@ -989,6 +989,193 @@
         "Code/Source/solver/Application/Tests/Unit/test_LevelSetCutConfiguration.cpp": "c7a927e681929b674c9a0d53302969f9278b1a90d4bcf585a978c24e1758c00f"
       },
       "state": "ACCEPTED_BOUNDED_CUT_OPTION_CONVERSION_AND_FINAL_CLEANUP"
+    },
+    {
+      "acceptance_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r2-volume-selector-first-slice/acceptance.json",
+        "sha256": "26dcce35dc65b8b37457a948417531b93212a8099352dd005895f680d2efcd27",
+        "size_bytes": 10158
+      },
+      "id": "r2-fe-volume-selector-first-slice",
+      "integration_followup": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r2-volume-selector-wp4-integration-r2/acceptance.json",
+        "sha256": "255e97fba3210a7382b2ee96fa69930f8c6d100a57db02d223e0f2700141026a",
+        "size_bytes": 8180
+      },
+      "limitations": [
+        "This closes only the first FE-only slice of R2. Navier-Stokes domain dispatch, collective measures, surface/facet binding and full R0-R12 work remain open.",
+        "Paired evidence uses accepted baseline neighbors and the exact new header; the current FE owner build independently verifies coherent integration.",
+        "Seven local scalar P1 tetrahedron regions; no batch/SIMD, distributed, mixed/nonlinear or physical free-surface benchmark qualification.",
+        "Dry support is exact and is not a compiled-execution witness. Existing runtime skips and disabled cases remain unavailable evidence.",
+        "This initial result predates shared-branch producer revision573fb4d2 and the standalone-header packaging correction. Their subsequent coherent verification is recorded in r2-fe-volume-selector-wp4-integration-and-packaging; original numerical evidence retains its original source identity."
+      ],
+      "outcome": {
+        "focused_passed": 3,
+        "full_owner_passed": 2404,
+        "full_owner_runtime_skipped": 27,
+        "full_owner_suppressed": 27,
+        "materialized_inputs_verified": 4671,
+        "maximum_observed_errors": {
+          "direct": {
+            "assembly_oracle": 3.3306690738754696e-16,
+            "closure": 6.661338147750939e-16,
+            "geometry_oracle": 5.551115123125783e-17,
+            "standard_jit": 0.0
+          },
+          "historical": {
+            "assembly_oracle": 3.3306690738754696e-16,
+            "closure": 6.661338147750939e-16,
+            "geometry_oracle": 5.551115123125783e-17,
+            "standard_jit": 0.0
+          },
+          "selector": {
+            "assembly_oracle": 3.3306690738754696e-16,
+            "closure": 6.661338147750939e-16,
+            "geometry_oracle": 5.551115123125783e-17,
+            "standard_jit": 0.0
+          }
+        },
+        "owner_counts": {
+          "FE_Assembly_Tests": {
+            "passed": 784,
+            "selected": 792,
+            "skipped": 8,
+            "suppressed": 0
+          },
+          "FE_Forms_Tests": {
+            "passed": 752,
+            "selected": 787,
+            "skipped": 18,
+            "suppressed": 17
+          },
+          "FE_Geometry_Tests": {
+            "passed": 283,
+            "selected": 283,
+            "skipped": 0,
+            "suppressed": 0
+          },
+          "FE_Systems_Tests": {
+            "passed": 585,
+            "selected": 596,
+            "skipped": 1,
+            "suppressed": 10
+          },
+          "Volume_selector_forms": {
+            "passed": 2,
+            "selected": 2,
+            "skipped": 0,
+            "suppressed": 0
+          },
+          "Volume_selector_scalar": {
+            "passed": 1,
+            "selected": 1,
+            "skipped": 0,
+            "suppressed": 0
+          }
+        },
+        "pair_comparisons": {
+          "comparison": "exact complete same-mode payload",
+          "direct_selector": 32,
+          "historical_direct": 32
+        },
+        "scalar_counts": {
+          "case_executions": 16,
+          "dry_jit_records": 4,
+          "groups": 8,
+          "guard_controls": 8,
+          "non_dry_jit_witnesses": 24,
+          "records": 64,
+          "standard_records": 28
+        }
+      },
+      "reviewed_source_hashes_match": true,
+      "scope": "One physics-neutral FE volume selector, two factory/lowering contract tests and a durable scalar reaction-diffusion consumer through existing public installation and assembly.",
+      "source_commit": "f8ed36e12d2d8d2028ee5edcc2f132f2b52b8e0e",
+      "source_hashes": {
+        "Code/Source/solver/FE/Forms/IntegrationDomain.h": "e8b22f050b9f097781ecb29e84b12e4e50c810aee8fd604070a34e29b02589b4",
+        "Code/Source/solver/FE/Tests/Unit/Forms/test_CutCellForms.cpp": "aeaf109e9e2267a950ab85991db17c75cfae33cb6f55ac45abe0ff9de0f1c1b7",
+        "Code/Source/solver/FE/Tests/Unit/Systems/test_FormsInstaller.cpp": "8cbc970f5027d8c1b4d8741fe5efc83f32020be724fe62484e87eb7d51c57bc4"
+      },
+      "state": "ACCEPTED_BOUNDED_FE_VOLUME_SELECTOR_AND_SCALAR_CONSUMER"
+    },
+    {
+      "acceptance_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r2-volume-selector-wp4-integration-r2/acceptance.json",
+        "sha256": "255e97fba3210a7382b2ee96fa69930f8c6d100a57db02d223e0f2700141026a",
+        "size_bytes": 8180
+      },
+      "id": "r2-fe-volume-selector-wp4-integration-and-packaging",
+      "limitations": [
+        "Original paired numerical evidence remains bound to its original header and recipes. This followup changes only include spelling and packaging outside the separately merged WP4 producer work; no new paired execution is claimed.",
+        "The generated header rules and staged syntax pass. A complete standalone library build, installation and package-link test are not established.",
+        "No broader WP4 symbol-binding, strict3D, performance or physical qualification claim follows from this owner run.",
+        "R1 configuration and the remaining R2 Navier-Stokes dispatch, surface/facet and collective migrations remain open; R3-R12 remain pending."
+      ],
+      "outcome": {
+        "focused_passed": 3,
+        "full_owner_passed": 2425,
+        "full_owner_runtime_skipped": 27,
+        "full_owner_selected": 2479,
+        "full_owner_suppressed": 27,
+        "generated_header_install_rules": "passed",
+        "materialized_inputs_verified": 4674,
+        "staged_installed_header_syntax": "passed"
+      },
+      "owner_counts": {
+        "FE_Assembly_Tests": {
+          "passed": 784,
+          "selected": 792,
+          "skipped": 8,
+          "suppressed": 0
+        },
+        "FE_Forms_Tests": {
+          "passed": 752,
+          "selected": 787,
+          "skipped": 18,
+          "suppressed": 17
+        },
+        "FE_Geometry_Tests": {
+          "passed": 304,
+          "selected": 304,
+          "skipped": 0,
+          "suppressed": 0
+        },
+        "FE_Systems_Tests": {
+          "passed": 585,
+          "selected": 596,
+          "skipped": 1,
+          "suppressed": 10
+        },
+        "Volume_selector_forms": {
+          "passed": 2,
+          "selected": 2,
+          "skipped": 0,
+          "suppressed": 0
+        },
+        "Volume_selector_scalar": {
+          "passed": 1,
+          "selected": 1,
+          "skipped": 0,
+          "suppressed": 0
+        }
+      },
+      "scope": "Integrate the accepted FE selector with incoming WP4 producer changes through573fb4d2 and correct public-header installation membership/include spelling.",
+      "source_commit": "41c7a1f9caad0d9258729d600b01e4ad7b889d38",
+      "source_hashes": {
+        "Code/Source/solver/FE/CMakeLists.txt": "7dc30b17023381c139396c0383b0abb66d40b578a8d4657c10e9a716cf4efdf9",
+        "Code/Source/solver/FE/Forms/IntegrationDomain.h": "95a4c7f38941a4a05ceafb5b723efc6bd2bc1ad71c66f7754091f06e22a1f363",
+        "Code/Source/solver/FE/Interfaces/GeneratedActiveBoundaryDomain.cpp": "ba06e55367a19916b1d9c9f255a935abfc87455021bcc7e836c7518f61e31aa3",
+        "Code/Source/solver/FE/Interfaces/LevelSetInterfaceBuilder.cpp": "542c13471e4688fa222855f51362ddd5fc0626c1b6c3f51431b18a824a16f5a4",
+        "Code/Source/solver/FE/Interfaces/detail/ProducerArithmeticAssessment.cpp": "a8301bcc72be8b2cc0974d88971c700a8c539f550c4baf41fe2c11d63de65f7b",
+        "Code/Source/solver/FE/Interfaces/detail/ProducerArithmeticAssessment.h": "6398a087d12ffbb97fea9ed75c4fff6f39e1dc81cb479fa67291f9039bbe2f0f",
+        "Code/Source/solver/FE/Tests/Unit/Forms/test_CutCellForms.cpp": "aeaf109e9e2267a950ab85991db17c75cfae33cb6f55ac45abe0ff9de0f1c1b7",
+        "Code/Source/solver/FE/Tests/Unit/Geometry/test_GeneratedActiveBoundaryDomain.cpp": "6a7b5fa563267233f56813331e4a9cf8ec0eaebdd83a5a926d416d8ffb5a5b1c",
+        "Code/Source/solver/FE/Tests/Unit/Geometry/test_LevelSetInterfaceBuilder.cpp": "8c8e69627b3080045a01eb6db5bd33a64217639213f30fe5e88af902d54fbfaa",
+        "Code/Source/solver/FE/Tests/Unit/Geometry/test_ProducerArithmeticAssessment.cpp": "d8725b3712d5a0d98dfc0d85351f1a87dd7df185cb6c9af5a0b3ae560ec25500",
+        "Code/Source/solver/FE/Tests/Unit/Systems/test_FormsInstaller.cpp": "8cbc970f5027d8c1b4d8741fe5efc83f32020be724fe62484e87eb7d51c57bc4"
+      },
+      "source_tree": "b4e09bf8e7cf8e745b891f2c726c8f9ed024e0c0",
+      "state": "ACCEPTED_BOUNDED_SELECTOR_WP4_INTEGRATION_AND_HEADER_PACKAGING"
     }
   ],
   "captured_references": [
@@ -2109,6 +2296,41 @@
         "sha256": "1682fdbc2680fe396a4ef12bf8d2093cd122a0ab94b5fa1d120618f28455d219",
         "size_bytes": 1583
       }
+    },
+    {
+      "acceptance_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r2-scalar-direct-before-data-r4/acceptance.json",
+        "sha256": "b61b1863c3420c45fa2e19c316dcd847e03dbbc5f29560c2b99339a47a21e5f7",
+        "size_bytes": 9264
+      },
+      "counts": {
+        "case_executions": 8,
+        "dry_jit_records": 2,
+        "groups": 4,
+        "guard_controls": 4,
+        "non_dry_jit_witnesses": 12,
+        "records": 32,
+        "standard_records": 14
+      },
+      "id": "r2-direct-scalar-volume-reference",
+      "limitations": [
+        "Seven local scalar P1 tetrahedron regions only; this is reference evidence for a thin volume selector, not full R0/R1/R2 or physical free-surface qualification.",
+        "Non-dry installed affine JIT execution is witnessed by successful residual and matrix work under the independently demonstrated active interpreter guard; dry support is not an execution witness.",
+        "No batch/SIMD, nonlinear/mixed/facet/distributed or specialized-address identity claim.",
+        "Raw generated-rule global parent identity remains unavailable in this local fixture; physical mesh identity is separately captured.",
+        "Native input identities are the compute-node pre-use freeze and executed checkpoints; original individual-object historical build provenance is not inferred.",
+        "Future paired capture and coherent current-branch owner tests remain separate acceptance gates."
+      ],
+      "maximum_observed_errors": {
+        "assembly_oracle": 3.3306690738754696e-16,
+        "closure": 6.661338147750939e-16,
+        "geometry_oracle": 5.551115123125783e-17,
+        "standard_jit": 0.0
+      },
+      "scope": "Seven FE-only scalar P1 tetrahedron regions through existing installation and standard/guarded compiled assembly, preserving full numerical and geometry observations.",
+      "source_revision": "0d77e6cd1c350c20334d43021a186753231398a4",
+      "source_tree": "26d8e720c6dc5490168ffad54def72c74b174aad",
+      "state": "ACCEPTED_BOUNDED_R2_DIRECT_SCALAR_BEFORE_DATA"
     }
   ],
   "comparison_contract": {
@@ -3019,6 +3241,11 @@
         "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/build.resources",
         "sha256": "1aa80b3db9812c7efeb38ed83234e3761fc8934eef80c5d9a3115dd088817da1"
       },
+      "count_reconciliation": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-disabled-count-reconciliation/reconciliation.json",
+        "sha256": "d937c3ae70581daeb0b25403fbc008036e87c120e9e22b947eb055ab0b16a693",
+        "size_bytes": 24270
+      },
       "cpus_per_task": 2,
       "eigen": "ON",
       "groups": [
@@ -3046,8 +3273,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 16,
+                "run": 16,
                 "selected": 16,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_MovingMesh_Tests/rank-0.identity",
@@ -3055,6 +3284,7 @@
               },
               "rank": 0,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_MovingMesh_Tests/rank-0.xml",
                 "sha256": "7e5857f61a98e1c2eefc5c9f52b93b7a5533dde2b279c11c1b4482d8145e9e7b"
@@ -3087,8 +3317,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 274,
+                "run": 274,
                 "selected": 274,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Geometry_Tests/rank-0.identity",
@@ -3096,6 +3328,7 @@
               },
               "rank": 0,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Geometry_Tests/rank-0.xml",
                 "sha256": "77a2d5cf33ebc388d918214ac6203cc50d03b34ec1568095314a01ef773ba800"
@@ -3128,8 +3361,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 335,
+                "run": 336,
                 "selected": 336,
-                "skipped": 1
+                "skipped": 1,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_LevelSet_Tests/rank-0.identity",
@@ -3143,6 +3378,7 @@
                   "suite": "LevelSetConservativePhaseQualification"
                 }
               ],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_LevelSet_Tests/rank-0.xml",
                 "sha256": "1d985188b6ab4aba5f2ef8c818ced58ebf315a7bb2d89d5f100192adece782c9"
@@ -3175,8 +3411,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 273,
+                "run": 273,
                 "selected": 273,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Constraints_Tests/rank-0.identity",
@@ -3184,6 +3422,7 @@
               },
               "rank": 0,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Constraints_Tests/rank-0.xml",
                 "sha256": "e82bb4c1fed681a6a3475cbd041a0ea9ccaee9df63bfc66ead7df4f8745acc44"
@@ -3215,9 +3454,11 @@
             {
               "counts": {
                 "failed": 0,
-                "passed": 767,
+                "passed": 750,
+                "run": 768,
                 "selected": 785,
-                "skipped": 18
+                "skipped": 18,
+                "suppressed": 17
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Forms_Tests/rank-0.identity",
@@ -3316,6 +3557,76 @@
                   "suite": "JITMemoryOverhead"
                 }
               ],
+              "suppressed_cases": [
+                {
+                  "case": "DISABLED_CellAssemblyThroughput",
+                  "suite": "FormsPerformance"
+                },
+                {
+                  "case": "DISABLED_NonlinearAssemblyThroughput",
+                  "suite": "FormsPerformance"
+                },
+                {
+                  "case": "DISABLED_ADOverheadRatio",
+                  "suite": "FormsPerformance"
+                },
+                {
+                  "case": "DISABLED_FormKernelQuadraturePointEvaluation",
+                  "suite": "FormsPerformance"
+                },
+                {
+                  "case": "DISABLED_FormCompilerLatency",
+                  "suite": "FormsPerformance"
+                },
+                {
+                  "case": "DISABLED_DualWorkspaceAllocationThroughput",
+                  "suite": "FormsPerformance"
+                },
+                {
+                  "case": "DISABLED_LargeDofScaling",
+                  "suite": "FormsPerformance"
+                },
+                {
+                  "case": "DISABLED_BoundaryAssemblyThroughput",
+                  "suite": "FormsPerformance"
+                },
+                {
+                  "case": "DISABLED_DGInteriorFaceAssemblyThroughput",
+                  "suite": "FormsPerformance"
+                },
+                {
+                  "case": "DISABLED_MemoryAllocationProfile",
+                  "suite": "FormsPerformance"
+                },
+                {
+                  "case": "DISABLED_JIT_CellKernelThroughputVsInterpreter",
+                  "suite": "FormsPerformance"
+                },
+                {
+                  "case": "DISABLED_JIT_Macro_AssembleMatrixVectorBothVsInterpreter",
+                  "suite": "FormsPerformance"
+                },
+                {
+                  "case": "DISABLED_JIT_CacheEffectiveness_FirstCallVsSteadyState",
+                  "suite": "FormsPerformance"
+                },
+                {
+                  "case": "DISABLED_ADvsSymbolic_NonlinearDiffusion_CellMatrix",
+                  "suite": "SymbolicNonlinearFormKernelBenchmark"
+                },
+                {
+                  "case": "DISABLED_ExpressionAndKernelIRSize",
+                  "suite": "TensorBenchmarks"
+                },
+                {
+                  "case": "DISABLED_InterpreterAssemblyThroughput",
+                  "suite": "TensorBenchmarks"
+                },
+                {
+                  "case": "DISABLED_JITCompileTimeCacheHitAndLLVMIRSize",
+                  "suite": "TensorBenchmarks"
+                }
+              ],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Forms_Tests/rank-0.xml",
                 "sha256": "082a9b79bc0e6580661e8a4bf35054ffde950a39403a3e790d8d5ef5acb61c4f"
@@ -3348,8 +3659,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 784,
+                "run": 792,
                 "selected": 792,
-                "skipped": 8
+                "skipped": 8,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Assembly_Tests/rank-0.identity",
@@ -3398,6 +3711,7 @@
                   "suite": "DeviceAssemblerGPUTest"
                 }
               ],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Assembly_Tests/rank-0.xml",
                 "sha256": "712199461cc3a8d0dc994b064050fc19aa3a4a90db1c37d995a1199ea722e979"
@@ -3429,9 +3743,11 @@
             {
               "counts": {
                 "failed": 0,
-                "passed": 594,
+                "passed": 584,
+                "run": 585,
                 "selected": 595,
-                "skipped": 1
+                "skipped": 1,
+                "suppressed": 10
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Systems_Tests/rank-0.identity",
@@ -3443,6 +3759,48 @@
                   "case": "OnMeshAdaptedCoverageRequiresMeshAdaptivity",
                   "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Systems/test_FEAdaptivityTransfer.cpp:466\nMESH_HAS_ADAPTIVITY is not enabled\n",
                   "suite": "FEAdaptivityTransfer"
+                }
+              ],
+              "suppressed_cases": [
+                {
+                  "case": "DISABLED_Benchmark_CompilationTiming",
+                  "suite": "MixedFormPerformance"
+                },
+                {
+                  "case": "DISABLED_MixedSaddlePointPressureFieldGetsGauge_QuadStripSteadyProbe",
+                  "suite": "GaugeIntegration"
+                },
+                {
+                  "case": "DISABLED_MixedSaddlePointPressureFieldGetsGauge_QuadStripTransientProbe",
+                  "suite": "GaugeIntegration"
+                },
+                {
+                  "case": "DISABLED_MixedSaddlePointPressureFieldGetsGauge_QuadStripTransientOutletProbe",
+                  "suite": "GaugeIntegration"
+                },
+                {
+                  "case": "DISABLED_MixedSaddlePointPressureFieldGetsGauge_QuadStripExactAssemblyProbe",
+                  "suite": "GaugeIntegration"
+                },
+                {
+                  "case": "DISABLED_MixedSaddlePointPressureFieldGetsGauge_QuadStripExactAssemblyNoNonlinearProbe",
+                  "suite": "GaugeIntegration"
+                },
+                {
+                  "case": "DISABLED_MixedSaddlePointPressureFieldGetsGauge_QuadStripExactAssemblyNoLinearProbe",
+                  "suite": "GaugeIntegration"
+                },
+                {
+                  "case": "DISABLED_MixedSaddlePointPressureFieldGetsGauge_QuadStripExactAssemblyNoReactionProbe",
+                  "suite": "GaugeIntegration"
+                },
+                {
+                  "case": "DISABLED_MixedSaddlePointPressureFieldGetsGauge_QuadStripExactAssemblyNoOutletProbe",
+                  "suite": "GaugeIntegration"
+                },
+                {
+                  "case": "DISABLED_MixedSaddlePointPressureFieldGetsGauge_QuadStripExactAssemblyTransientDiffusionOutletProbe",
+                  "suite": "GaugeIntegration"
                 }
               ],
               "xml": {
@@ -3476,9 +3834,11 @@
             {
               "counts": {
                 "failed": 0,
-                "passed": 262,
+                "passed": 261,
+                "run": 262,
                 "selected": 263,
-                "skipped": 1
+                "skipped": 1,
+                "suppressed": 1
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_TimeStepping_Tests/rank-0.identity",
@@ -3489,6 +3849,12 @@
                 {
                   "case": "MonolithicAuxiliaryConvergenceRequiresEachResidualComponent",
                   "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/TimeStepping/test_NewtonSolver.cpp:9183\nFixture did not produce a combined-relative gap for this backend/configuration\n",
+                  "suite": "NewtonSolver"
+                }
+              ],
+              "suppressed_cases": [
+                {
+                  "case": "DISABLED_PreservesCoupledUpdatesAcrossJacobianCheckResidualAssemblies",
                   "suite": "NewtonSolver"
                 }
               ],
@@ -3524,9 +3890,11 @@
             {
               "counts": {
                 "failed": 0,
-                "passed": 472,
+                "passed": 466,
+                "run": 485,
                 "selected": 491,
-                "skipped": 19
+                "skipped": 19,
+                "suppressed": 6
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/physics-serial/rank-0.identity",
@@ -3630,6 +3998,32 @@
                   "suite": "FreeSurfaceCutStabilityMPI"
                 }
               ],
+              "suppressed_cases": [
+                {
+                  "case": "DISABLED_MonolithicRCRCR_MixedFieldJacobianMatchesFD",
+                  "suite": "NavierStokesOutletFactory"
+                },
+                {
+                  "case": "DISABLED_LegacyResistiveOutflowBoundaryMeshJacobianMatchesFD",
+                  "suite": "NavierStokesOutletFactory"
+                },
+                {
+                  "case": "DISABLED_MonolithicRCRCR_BorderedReductionMatchesDenseSolve",
+                  "suite": "NavierStokesOutletFactory"
+                },
+                {
+                  "case": "DISABLED_MonolithicRCRCR_GeneralizedAlphaMixedFieldJacobianMatchesFD",
+                  "suite": "NavierStokesOutletFactory"
+                },
+                {
+                  "case": "DISABLED_FixedMeshNodeCrossingOffsetRefinementDiagnostic",
+                  "suite": "FreeSurfaceCutStability"
+                },
+                {
+                  "case": "DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3",
+                  "suite": "FreeSurfaceCutStability"
+                }
+              ],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/physics-serial/rank-0.xml",
                 "sha256": "380024668082c5a7196c0588a50f099a4bc396fce1c8e29c8e54170e8a13cf3d"
@@ -3662,8 +4056,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 310,
+                "run": 310,
                 "selected": 310,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/application-serial/rank-0.identity",
@@ -3671,6 +4067,7 @@
               },
               "rank": 0,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/application-serial/rank-0.xml",
                 "sha256": "c969e26dc4814a04ef6bcc821561e6a1e53bc60aef02544acb3ee7f7560fcd71"
@@ -3704,8 +4101,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 1,
+                "run": 1,
                 "selected": 1,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_2/rank-0.identity",
@@ -3713,6 +4112,7 @@
               },
               "rank": 0,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_2/rank-0.xml",
                 "sha256": "5b5b627c27b82362207b9d1070888719e58d6a82faf89e6c33b89ccd018ee837"
@@ -3722,8 +4122,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 1,
+                "run": 1,
                 "selected": 1,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_2/rank-1.identity",
@@ -3731,6 +4133,7 @@
               },
               "rank": 1,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_2/rank-1.xml",
                 "sha256": "3d5fa4b475d84eedf3faed12150fd5ca1406cb976b31b7f3ce35012e485c68eb"
@@ -3764,8 +4167,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 1,
+                "run": 1,
                 "selected": 1,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_4/rank-0.identity",
@@ -3773,6 +4178,7 @@
               },
               "rank": 0,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_4/rank-0.xml",
                 "sha256": "ad2de7af301bbef02a1a9601a03dfb70f4c0672ccadaa56bd7371a666127587f"
@@ -3782,8 +4188,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 1,
+                "run": 1,
                 "selected": 1,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_4/rank-1.identity",
@@ -3791,6 +4199,7 @@
               },
               "rank": 1,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_4/rank-1.xml",
                 "sha256": "ad2de7af301bbef02a1a9601a03dfb70f4c0672ccadaa56bd7371a666127587f"
@@ -3800,8 +4209,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 1,
+                "run": 1,
                 "selected": 1,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_4/rank-2.identity",
@@ -3809,6 +4220,7 @@
               },
               "rank": 2,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_4/rank-2.xml",
                 "sha256": "ad2de7af301bbef02a1a9601a03dfb70f4c0672ccadaa56bd7371a666127587f"
@@ -3818,8 +4230,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 1,
+                "run": 1,
                 "selected": 1,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_4/rank-3.identity",
@@ -3827,6 +4241,7 @@
               },
               "rank": 3,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_4/rank-3.xml",
                 "sha256": "ad2de7af301bbef02a1a9601a03dfb70f4c0672ccadaa56bd7371a666127587f"
@@ -3860,8 +4275,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 3,
+                "run": 3,
                 "selected": 3,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Physics_FreeSurfaceSharpBoundary_MPI_2/rank-0.identity",
@@ -3869,6 +4286,7 @@
               },
               "rank": 0,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Physics_FreeSurfaceSharpBoundary_MPI_2/rank-0.xml",
                 "sha256": "b8d09f904d6ad2d9c4a2b4d4a877ca81867b17d79496e43e5d047673cf5bb332"
@@ -3878,8 +4296,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 3,
+                "run": 3,
                 "selected": 3,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Physics_FreeSurfaceSharpBoundary_MPI_2/rank-1.identity",
@@ -3887,6 +4307,7 @@
               },
               "rank": 1,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Physics_FreeSurfaceSharpBoundary_MPI_2/rank-1.xml",
                 "sha256": "720b0c54f4f264e9f13b954a040d89ca869d3198ffbc91ed90e1a3902dbaa484"
@@ -3919,8 +4340,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 2,
+                "run": 2,
                 "selected": 2,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_movingmesh_mpi_mpi_2/rank-0.identity",
@@ -3928,6 +4351,7 @@
               },
               "rank": 0,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_movingmesh_mpi_mpi_2/rank-0.xml",
                 "sha256": "430bbc97bbe59f73ad6198b36925495eb12c8a8833788c21dda47947e2648be9"
@@ -3937,8 +4361,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 2,
+                "run": 2,
                 "selected": 2,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_movingmesh_mpi_mpi_2/rank-1.identity",
@@ -3946,6 +4372,7 @@
               },
               "rank": 1,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_movingmesh_mpi_mpi_2/rank-1.xml",
                 "sha256": "58cdc50939752dc26a14c3f7eb724251e63fec1dfd15d483e73b29f28f1899a1"
@@ -3978,8 +4405,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 25,
+                "run": 26,
                 "selected": 26,
-                "skipped": 1
+                "skipped": 1,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_constraints_mpi_mpi_2/rank-0.identity",
@@ -3993,6 +4422,7 @@
                   "suite": "SmallCutAggregationConstraintMPI"
                 }
               ],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_constraints_mpi_mpi_2/rank-0.xml",
                 "sha256": "c57cd308b464750ccea6024e64287e9cb9d1d1762023314cbd438642dc7e0210"
@@ -4002,8 +4432,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 25,
+                "run": 26,
                 "selected": 26,
-                "skipped": 1
+                "skipped": 1,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_constraints_mpi_mpi_2/rank-1.identity",
@@ -4017,6 +4449,7 @@
                   "suite": "SmallCutAggregationConstraintMPI"
                 }
               ],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_constraints_mpi_mpi_2/rank-1.xml",
                 "sha256": "ffa3240f8df4ef1ebcec259f21bbc7d55727ca07b7fa5d180a52ced05f8d6bba"
@@ -4048,9 +4481,11 @@
             {
               "counts": {
                 "failed": 0,
-                "passed": 59,
+                "passed": 57,
+                "run": 60,
                 "selected": 62,
-                "skipped": 3
+                "skipped": 3,
+                "suppressed": 2
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_assembly_mpi_mpi_2/rank-0.identity",
@@ -4074,6 +4509,16 @@
                   "suite": "TimeLoopFsilsConvergenceMPI"
                 }
               ],
+              "suppressed_cases": [
+                {
+                  "case": "DISABLED_GeneralizedAlphaMonolithicResistanceOutletsProbe",
+                  "suite": "TimeLoopFsilsConvergenceMPI"
+                },
+                {
+                  "case": "DISABLED_GeneralizedAlphaMonolithicRCROutletsProbe",
+                  "suite": "TimeLoopFsilsConvergenceMPI"
+                }
+              ],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_assembly_mpi_mpi_2/rank-0.xml",
                 "sha256": "fc85fb3c6f378e033ac8097802b37d46fcc96b79a724060f2f3c35a5f8ca25fd"
@@ -4082,9 +4527,11 @@
             {
               "counts": {
                 "failed": 0,
-                "passed": 59,
+                "passed": 57,
+                "run": 60,
                 "selected": 62,
-                "skipped": 3
+                "skipped": 3,
+                "suppressed": 2
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_assembly_mpi_mpi_2/rank-1.identity",
@@ -4105,6 +4552,16 @@
                 {
                   "case": "ConcurrentSplitSubcommunicatorsIsolateNewtonCollectives",
                   "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Assembly/test_TimeLoopFsilsConvergenceMPI.cpp:2669\nRun with exactly 4 MPI ranks to enable this test\n",
+                  "suite": "TimeLoopFsilsConvergenceMPI"
+                }
+              ],
+              "suppressed_cases": [
+                {
+                  "case": "DISABLED_GeneralizedAlphaMonolithicResistanceOutletsProbe",
+                  "suite": "TimeLoopFsilsConvergenceMPI"
+                },
+                {
+                  "case": "DISABLED_GeneralizedAlphaMonolithicRCROutletsProbe",
                   "suite": "TimeLoopFsilsConvergenceMPI"
                 }
               ],
@@ -4140,8 +4597,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 19,
+                "run": 19,
                 "selected": 19,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_levelset_mpi_mpi_2/rank-0.identity",
@@ -4149,6 +4608,7 @@
               },
               "rank": 0,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_levelset_mpi_mpi_2/rank-0.xml",
                 "sha256": "0b0810e030fe80b3daadef233f68653bcd7273fe9a30a3f1f3a43c94e8208c27"
@@ -4158,8 +4618,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 19,
+                "run": 19,
                 "selected": 19,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_levelset_mpi_mpi_2/rank-1.identity",
@@ -4167,6 +4629,7 @@
               },
               "rank": 1,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_levelset_mpi_mpi_2/rank-1.xml",
                 "sha256": "0b0810e030fe80b3daadef233f68653bcd7273fe9a30a3f1f3a43c94e8208c27"
@@ -4200,8 +4663,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 1,
+                "run": 1,
                 "selected": 1,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/constraints-four-rank-ownership/rank-0.identity",
@@ -4209,6 +4674,7 @@
               },
               "rank": 0,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/constraints-four-rank-ownership/rank-0.xml",
                 "sha256": "737e34c931dd9e01abaa3743f6524d05240ab4895cc1b040201752e2cc5c7e72"
@@ -4218,8 +4684,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 1,
+                "run": 1,
                 "selected": 1,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/constraints-four-rank-ownership/rank-1.identity",
@@ -4227,6 +4695,7 @@
               },
               "rank": 1,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/constraints-four-rank-ownership/rank-1.xml",
                 "sha256": "737e34c931dd9e01abaa3743f6524d05240ab4895cc1b040201752e2cc5c7e72"
@@ -4236,8 +4705,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 1,
+                "run": 1,
                 "selected": 1,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/constraints-four-rank-ownership/rank-2.identity",
@@ -4245,6 +4716,7 @@
               },
               "rank": 2,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/constraints-four-rank-ownership/rank-2.xml",
                 "sha256": "e364b4b88d54e724780ec741904b7092701ea7b60b990c6b8b2c70b5d9044e25"
@@ -4254,8 +4726,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 1,
+                "run": 1,
                 "selected": 1,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/constraints-four-rank-ownership/rank-3.identity",
@@ -4263,6 +4737,7 @@
               },
               "rank": 3,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/constraints-four-rank-ownership/rank-3.xml",
                 "sha256": "737e34c931dd9e01abaa3743f6524d05240ab4895cc1b040201752e2cc5c7e72"
@@ -4296,8 +4771,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 2,
+                "run": 2,
                 "selected": 2,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-four-rank-ownership/rank-0.identity",
@@ -4305,6 +4782,7 @@
               },
               "rank": 0,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-four-rank-ownership/rank-0.xml",
                 "sha256": "f297416b22bddd210db6fadaf7326bf899829825ad8f0ffee6a98f9890b0f024"
@@ -4314,8 +4792,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 2,
+                "run": 2,
                 "selected": 2,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-four-rank-ownership/rank-1.identity",
@@ -4323,6 +4803,7 @@
               },
               "rank": 1,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-four-rank-ownership/rank-1.xml",
                 "sha256": "f297416b22bddd210db6fadaf7326bf899829825ad8f0ffee6a98f9890b0f024"
@@ -4332,8 +4813,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 2,
+                "run": 2,
                 "selected": 2,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-four-rank-ownership/rank-2.identity",
@@ -4341,6 +4824,7 @@
               },
               "rank": 2,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-four-rank-ownership/rank-2.xml",
                 "sha256": "fa291e7e491a5948f0098fbe9b54c4410a8d5a238c07604e661b05908ded8636"
@@ -4350,8 +4834,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 2,
+                "run": 2,
                 "selected": 2,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-four-rank-ownership/rank-3.identity",
@@ -4359,6 +4845,7 @@
               },
               "rank": 3,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-four-rank-ownership/rank-3.xml",
                 "sha256": "7711804534bb761b6e2dab3bd77986ae3898dbe67443268cfea28a7c6779f9a2"
@@ -4392,8 +4879,10 @@
               "counts": {
                 "failed": 0,
                 "passed": 1,
+                "run": 1,
                 "selected": 1,
-                "skipped": 0
+                "skipped": 0,
+                "suppressed": 0
               },
               "identity": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-one-rank-snapshot/rank-0.identity",
@@ -4401,6 +4890,7 @@
               },
               "rank": 0,
               "skipped_cases": [],
+              "suppressed_cases": [],
               "xml": {
                 "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-one-rank-snapshot/rank-0.xml",
                 "sha256": "b14a4ab48009802b6dd5fa9d64bbb4294bd6384a9526e5046a4f2c8530cd6f93"
@@ -4416,16 +4906,20 @@
       "llvm": "17.0.6",
       "logical_group_counts": {
         "failed": 0,
-        "passed": 4201,
+        "passed": 4165,
+        "run": 4217,
         "selected": 4253,
-        "skipped": 52
+        "skipped": 52,
+        "suppressed": 36
       },
-      "outcome": "20 groups completed without failures. 4201 logical group passes/52 skips; 4322 per-rank passes/56 skips. Counts include declared repeat rank-layout groups, not unique test identities.",
+      "outcome": "20 groups completed without failures. 4165 logical group passes/52 runtime skips/36 suppressed; 4284 per-rank passes/56 runtime skips/38 suppressed. Counts include declared repeat rank-layout groups, not unique test identities.",
       "per_rank_counts": {
         "failed": 0,
-        "passed": 4322,
+        "passed": 4284,
+        "run": 4340,
         "selected": 4378,
-        "skipped": 56
+        "skipped": 56,
+        "suppressed": 38
       },
       "requested_memory_mib": 32000,
       "requested_nodes": 1,

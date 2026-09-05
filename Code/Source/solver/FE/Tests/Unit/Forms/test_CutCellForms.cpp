@@ -1,4 +1,5 @@
 #include "Forms/CutCellForms.h"
+#include "Forms/IntegrationDomain.h"
 
 #include <gtest/gtest.h>
 
@@ -26,6 +27,7 @@
 #include <memory>
 #include <span>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 using namespace svmp::FE::forms;
@@ -1237,6 +1239,163 @@ void expectHighOrderCutInterfaceJacobianMatchesCentralFD(
 }
 
 } // namespace
+
+TEST(CutCellForms, VolumeIntegrationDomainFactoriesAreExplicitValues)
+{
+    static_assert(!std::is_default_constructible_v<VolumeIntegrationDomain>);
+    static_assert(std::is_copy_constructible_v<VolumeIntegrationDomain>);
+    static_assert(std::is_copy_assignable_v<VolumeIntegrationDomain>);
+    static_assert(std::is_move_constructible_v<VolumeIntegrationDomain>);
+    static_assert(std::is_move_assignable_v<VolumeIntegrationDomain>);
+
+    constexpr int marker = 41;
+    constexpr int other_marker = 42;
+    const auto full = VolumeIntegrationDomain::fullVolume();
+    const auto full_same = VolumeIntegrationDomain::fullVolume();
+    const auto negative = VolumeIntegrationDomain::cutVolume(
+        marker, CutVolumeSide::Negative);
+    const auto negative_same = VolumeIntegrationDomain::cutVolume(
+        marker, CutVolumeSide::Negative);
+    const auto positive = VolumeIntegrationDomain::cutVolume(
+        marker, CutVolumeSide::Positive);
+    const auto other_marker_negative = VolumeIntegrationDomain::cutVolume(
+        other_marker, CutVolumeSide::Negative);
+
+    EXPECT_EQ(full.scope(), VolumeIntegrationScope::FullVolume);
+    EXPECT_FALSE(full.interfaceMarker().has_value());
+    EXPECT_FALSE(full.side().has_value());
+
+    EXPECT_EQ(negative.scope(), VolumeIntegrationScope::CutVolume);
+    ASSERT_TRUE(negative.interfaceMarker().has_value());
+    EXPECT_EQ(*negative.interfaceMarker(), marker);
+    ASSERT_TRUE(negative.side().has_value());
+    EXPECT_EQ(*negative.side(), CutVolumeSide::Negative);
+
+    EXPECT_EQ(full, full_same);
+    EXPECT_EQ(negative, negative_same);
+    EXPECT_NE(negative, positive);
+    EXPECT_NE(negative, other_marker_negative);
+    EXPECT_NE(full, negative);
+
+    EXPECT_THROW(
+        (void)VolumeIntegrationDomain::cutVolume(
+            -1, CutVolumeSide::Negative),
+        std::invalid_argument);
+    EXPECT_THROW(
+        (void)VolumeIntegrationDomain::cutVolume(
+            0, static_cast<CutVolumeSide>(0xff)),
+        std::invalid_argument);
+}
+
+TEST(CutCellForms, VolumeIntegrationDomainLowersToExistingMeasures)
+{
+    constexpr int negative_marker = 41;
+    constexpr int positive_marker = 42;
+    svmp::FE::spaces::H1Space space(
+        svmp::FE::ElementType::Tetra4, /*order=*/1);
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto integrand =
+        inner(grad(u), grad(v)) + Real(2.0) * u * v;
+
+    const auto selected_full = integrate(
+        integrand, VolumeIntegrationDomain::fullVolume());
+    const auto direct_full = integrand.dx();
+    ASSERT_NE(selected_full.node(), nullptr);
+    ASSERT_NE(direct_full.node(), nullptr);
+    EXPECT_EQ(selected_full.node()->type(), FormExprType::CellIntegral);
+    EXPECT_EQ(selected_full.node()->type(), direct_full.node()->type());
+    EXPECT_FALSE(selected_full.node()->interfaceMarker().has_value());
+    EXPECT_FALSE(selected_full.node()->cutVolumeSide().has_value());
+    EXPECT_EQ(selected_full.toString(), direct_full.toString());
+
+    FormCompiler compiler;
+    const auto expect_ir_equivalence =
+        [](const FormIR& selected_ir,
+           const FormIR& direct_ir,
+           IntegralDomain expected_domain,
+           int expected_marker,
+           CutVolumeSide expected_side) {
+            EXPECT_EQ(selected_ir.kind(), FormKind::Bilinear);
+            EXPECT_EQ(selected_ir.kind(), direct_ir.kind());
+            ASSERT_EQ(selected_ir.terms().size(), 2u);
+            ASSERT_EQ(direct_ir.terms().size(), 2u);
+            for (std::size_t i = 0; i < selected_ir.terms().size(); ++i) {
+                const auto& selected_term = selected_ir.terms()[i];
+                const auto& direct_term = direct_ir.terms()[i];
+                EXPECT_EQ(selected_term.domain, expected_domain);
+                EXPECT_EQ(selected_term.domain, direct_term.domain);
+                EXPECT_EQ(selected_term.boundary_marker,
+                          direct_term.boundary_marker);
+                EXPECT_EQ(selected_term.interface_marker,
+                          direct_term.interface_marker);
+                EXPECT_EQ(selected_term.cut_volume_side,
+                          direct_term.cut_volume_side);
+                EXPECT_EQ(selected_term.time_derivative_order,
+                          direct_term.time_derivative_order);
+                EXPECT_EQ(selected_term.integrand.toString(),
+                          direct_term.integrand.toString());
+                EXPECT_EQ(selected_term.debug_string,
+                          direct_term.debug_string);
+                EXPECT_EQ(selected_term.required_data,
+                          direct_term.required_data);
+                EXPECT_EQ(selected_term.exterior_boundary_measure,
+                          direct_term.exterior_boundary_measure);
+                if (expected_domain == IntegralDomain::CutVolume) {
+                    EXPECT_EQ(selected_term.interface_marker,
+                              expected_marker);
+                    EXPECT_EQ(selected_term.cut_volume_side,
+                              expected_side);
+                } else {
+                    EXPECT_EQ(selected_term.interface_marker, -1);
+                }
+            }
+        };
+    const auto selected_full_ir = compiler.compileBilinear(selected_full);
+    const auto direct_full_ir = compiler.compileBilinear(direct_full);
+    expect_ir_equivalence(
+        selected_full_ir,
+        direct_full_ir,
+        IntegralDomain::Cell,
+        /*expected_marker=*/-1,
+        CutVolumeSide::Negative);
+
+    const auto expect_cut_lowering =
+        [&](int marker, CutVolumeSide side) {
+            const auto domain =
+                VolumeIntegrationDomain::cutVolume(marker, side);
+            const auto selected = integrate(integrand, domain);
+            const auto direct = integrand.dCutVolume(marker, side);
+            ASSERT_NE(selected.node(), nullptr);
+            ASSERT_NE(direct.node(), nullptr);
+            EXPECT_EQ(selected.node()->type(),
+                      FormExprType::CutVolumeIntegral);
+            EXPECT_EQ(selected.node()->type(), direct.node()->type());
+            ASSERT_TRUE(selected.node()->interfaceMarker().has_value());
+            ASSERT_TRUE(direct.node()->interfaceMarker().has_value());
+            EXPECT_EQ(*selected.node()->interfaceMarker(), marker);
+            EXPECT_EQ(selected.node()->interfaceMarker(),
+                      direct.node()->interfaceMarker());
+            ASSERT_TRUE(selected.node()->cutVolumeSide().has_value());
+            ASSERT_TRUE(direct.node()->cutVolumeSide().has_value());
+            EXPECT_EQ(*selected.node()->cutVolumeSide(), side);
+            EXPECT_EQ(selected.node()->cutVolumeSide(),
+                      direct.node()->cutVolumeSide());
+            EXPECT_EQ(selected.toString(), direct.toString());
+
+            const auto selected_ir = compiler.compileBilinear(selected);
+            const auto direct_ir = compiler.compileBilinear(direct);
+            expect_ir_equivalence(
+                selected_ir,
+                direct_ir,
+                IntegralDomain::CutVolume,
+                marker,
+                side);
+        };
+
+    expect_cut_lowering(negative_marker, CutVolumeSide::Negative);
+    expect_cut_lowering(positive_marker, CutVolumeSide::Positive);
+}
 
 TEST(CutCellForms, CutAdjacentFacetVocabularyReusesInteriorFaceOperators)
 {

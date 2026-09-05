@@ -24,6 +24,7 @@
 
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/IntegrationDomain.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/StandardBCs.h"
 #include "Forms/Vocabulary.h"
@@ -31,6 +32,7 @@
 
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
+#include "Interfaces/LevelSetInterfaceBuilder.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
 
 #include "Quadrature/QuadratureFactory.h"
@@ -47,10 +49,13 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 using svmp::FE::ElementType;
@@ -5817,4 +5822,642 @@ TEST(FormsInstaller, FormsInstaller_MismatchedFieldSpaces_Behavior)
 
     EXPECT_THROW((void)svmp::FE::systems::installResidualForm(sys, "op", u_field, u_field, residual_form),
                  svmp::FE::InvalidArgumentException);
+}
+
+namespace {
+
+enum class VolumeSelectorTestRoute : std::uint8_t {
+    Direct,
+    Selector
+};
+
+enum class VolumeSelectorTestRegion : std::uint8_t {
+    Full,
+    Small,
+    Large,
+    Dry
+};
+
+struct VolumeSelectorTestCase {
+    std::string_view name;
+    bool full_volume{false};
+    int marker{-1};
+    svmp::FE::forms::CutVolumeSide form_side{
+        svmp::FE::forms::CutVolumeSide::Negative};
+    svmp::FE::geometry::CutIntegrationSide geometry_side{
+        svmp::FE::geometry::CutIntegrationSide::Negative};
+    std::array<Real, 4> level_set_values{};
+    std::optional<svmp::FE::geometry::CutIntegrationSide> retained_side{};
+    std::string_view domain_id{};
+    VolumeSelectorTestRegion region{VolumeSelectorTestRegion::Dry};
+    Real volume{0.0};
+    std::array<Real, 3> first_moments{};
+};
+
+struct VolumeSelectorMoments {
+    Real one{0.0};
+    Real x{0.0};
+    Real y{0.0};
+    Real z{0.0};
+
+    [[nodiscard]] friend bool operator==(
+        const VolumeSelectorMoments&,
+        const VolumeSelectorMoments&) noexcept = default;
+};
+
+struct VolumeSelectorAssemblyResult {
+    std::array<Real, 4> residual{};
+    std::array<Real, 16> jacobian{};
+    std::array<Real, 4> recovered_load{};
+    VolumeSelectorMoments selected_moments{};
+    VolumeSelectorMoments complementary_moments{};
+    std::size_t retained_rule_count{0u};
+    std::size_t selected_rule_count{0u};
+    std::size_t complementary_rule_count{0u};
+    bool selected_rule_is_full_cell{false};
+    GlobalIndex elements_assembled{0};
+};
+
+void requireVolumeSelectorCondition(
+    bool condition,
+    std::string_view message)
+{
+    if (!condition) {
+        throw std::runtime_error(std::string(message));
+    }
+}
+
+std::array<VolumeSelectorTestCase, 7> volumeSelectorTestCases()
+{
+    using FormSide = svmp::FE::forms::CutVolumeSide;
+    using GeometrySide = svmp::FE::geometry::CutIntegrationSide;
+    return {{
+        VolumeSelectorTestCase{
+            .name = "full",
+            .full_volume = true,
+            .region = VolumeSelectorTestRegion::Full,
+            .volume = Real{1.0} / Real{6.0},
+            .first_moments = {{Real{1.0} / Real{24.0},
+                               Real{1.0} / Real{24.0},
+                               Real{1.0} / Real{24.0}}},
+        },
+        VolumeSelectorTestCase{
+            .name = "small-negative-both",
+            .marker = 731,
+            .form_side = FormSide::Negative,
+            .geometry_side = GeometrySide::Negative,
+            .level_set_values = {{-0.5, 0.5, 0.5, 0.5}},
+            .domain_id = "volume-selector-small",
+            .region = VolumeSelectorTestRegion::Small,
+            .volume = Real{1.0} / Real{48.0},
+            .first_moments = {{Real{1.0} / Real{384.0},
+                               Real{1.0} / Real{384.0},
+                               Real{1.0} / Real{384.0}}},
+        },
+        VolumeSelectorTestCase{
+            .name = "large-positive-both",
+            .marker = 731,
+            .form_side = FormSide::Positive,
+            .geometry_side = GeometrySide::Positive,
+            .level_set_values = {{-0.5, 0.5, 0.5, 0.5}},
+            .domain_id = "volume-selector-small",
+            .region = VolumeSelectorTestRegion::Large,
+            .volume = Real{7.0} / Real{48.0},
+            .first_moments = {{Real{5.0} / Real{128.0},
+                               Real{5.0} / Real{128.0},
+                               Real{5.0} / Real{128.0}}},
+        },
+        VolumeSelectorTestCase{
+            .name = "second-marker-large-negative",
+            .marker = 907,
+            .form_side = FormSide::Negative,
+            .geometry_side = GeometrySide::Negative,
+            .level_set_values = {{0.5, -0.5, -0.5, -0.5}},
+            .domain_id = "volume-selector-large",
+            .region = VolumeSelectorTestRegion::Large,
+            .volume = Real{7.0} / Real{48.0},
+            .first_moments = {{Real{5.0} / Real{128.0},
+                               Real{5.0} / Real{128.0},
+                               Real{5.0} / Real{128.0}}},
+        },
+        VolumeSelectorTestCase{
+            .name = "small-negative-only",
+            .marker = 731,
+            .form_side = FormSide::Negative,
+            .geometry_side = GeometrySide::Negative,
+            .level_set_values = {{-0.5, 0.5, 0.5, 0.5}},
+            .retained_side = GeometrySide::Negative,
+            .domain_id = "volume-selector-small",
+            .region = VolumeSelectorTestRegion::Small,
+            .volume = Real{1.0} / Real{48.0},
+            .first_moments = {{Real{1.0} / Real{384.0},
+                               Real{1.0} / Real{384.0},
+                               Real{1.0} / Real{384.0}}},
+        },
+        VolumeSelectorTestCase{
+            .name = "fully-wet-negative",
+            .marker = 731,
+            .form_side = FormSide::Negative,
+            .geometry_side = GeometrySide::Negative,
+            .level_set_values = {{-1.0, -1.0, -1.0, -1.0}},
+            .retained_side = GeometrySide::Negative,
+            .domain_id = "volume-selector-small",
+            .region = VolumeSelectorTestRegion::Full,
+            .volume = Real{1.0} / Real{6.0},
+            .first_moments = {{Real{1.0} / Real{24.0},
+                               Real{1.0} / Real{24.0},
+                               Real{1.0} / Real{24.0}}},
+        },
+        VolumeSelectorTestCase{
+            .name = "exactly-dry-negative",
+            .marker = 731,
+            .form_side = FormSide::Negative,
+            .geometry_side = GeometrySide::Negative,
+            .level_set_values = {{1.0, 1.0, 1.0, 1.0}},
+            .retained_side = GeometrySide::Negative,
+            .domain_id = "volume-selector-small",
+            .region = VolumeSelectorTestRegion::Dry,
+        },
+    }};
+}
+
+VolumeSelectorMoments volumeSelectorMoments(
+    const std::vector<const svmp::FE::geometry::CutQuadratureRule*>& rules)
+{
+    VolumeSelectorMoments moments;
+    for (const auto* rule : rules) {
+        EXPECT_NE(rule, nullptr);
+        if (rule == nullptr) {
+            continue;
+        }
+        for (const auto& point : rule->points) {
+            moments.one += point.weight;
+            moments.x += point.weight * point.point[0];
+            moments.y += point.weight * point.point[1];
+            moments.z += point.weight * point.point[2];
+        }
+    }
+    return moments;
+}
+
+std::array<Real, 16> volumeSelectorExpectedMass(
+    VolumeSelectorTestRegion region)
+{
+    // On the unit tetrahedron, integral_T x^a y^b z^c =
+    // a!b!c!/(a+b+c+3)!; on x+y+z <= 1/2 it gains the factor
+    // 2^(-(a+b+c+3)). With lambda0=1-x-y-z and lambda1..3=x,y,z,
+    // the full and small entries below are integral lambda_i lambda_j.
+    std::array<Real, 16> full{};
+    std::array<Real, 16> small{};
+    for (std::size_t i = 0u; i < 4u; ++i) {
+        for (std::size_t j = 0u; j < 4u; ++j) {
+            full[i * 4u + j] = i == j
+                                   ? Real{1.0} / Real{60.0}
+                                   : Real{1.0} / Real{120.0};
+        }
+    }
+    small[0] = Real{1.0} / Real{120.0};
+    for (std::size_t i = 1u; i < 4u; ++i) {
+        small[i] = Real{1.0} / Real{640.0};
+        small[i * 4u] = Real{1.0} / Real{640.0};
+        for (std::size_t j = 1u; j < 4u; ++j) {
+            small[i * 4u + j] = i == j
+                                     ? Real{1.0} / Real{1920.0}
+                                     : Real{1.0} / Real{3840.0};
+        }
+    }
+    if (region == VolumeSelectorTestRegion::Full) {
+        return full;
+    }
+    if (region == VolumeSelectorTestRegion::Small) {
+        return small;
+    }
+    if (region == VolumeSelectorTestRegion::Large) {
+        for (std::size_t i = 0u; i < full.size(); ++i) {
+            full[i] -= small[i];
+        }
+        return full;
+    }
+    return {};
+}
+
+std::array<Real, 16> volumeSelectorExpectedJacobian(
+    const VolumeSelectorTestCase& test_case)
+{
+    constexpr std::array<Real, 16> stiffness_per_volume{{
+        3.0, -1.0, -1.0, -1.0,
+        -1.0, 1.0, 0.0, 0.0,
+        -1.0, 0.0, 1.0, 0.0,
+        -1.0, 0.0, 0.0, 1.0,
+    }};
+    auto jacobian = volumeSelectorExpectedMass(test_case.region);
+    for (std::size_t i = 0u; i < jacobian.size(); ++i) {
+        jacobian[i] += test_case.volume * stiffness_per_volume[i];
+    }
+    return jacobian;
+}
+
+std::array<Real, 4> volumeSelectorExpectedLoad(
+    const VolumeSelectorTestCase& test_case)
+{
+    return {{
+        -(test_case.volume - test_case.first_moments[0] -
+          test_case.first_moments[1] - test_case.first_moments[2]),
+        -test_case.first_moments[0],
+        -test_case.first_moments[1],
+        -test_case.first_moments[2],
+    }};
+}
+
+std::array<Real, 4> volumeSelectorExpectedResidual(
+    const std::array<Real, 16>& jacobian,
+    const std::array<Real, 4>& load)
+{
+    constexpr std::array<Real, 4> state{{1.0, 2.0, 3.0, 4.0}};
+    std::array<Real, 4> residual = load;
+    for (std::size_t i = 0u; i < 4u; ++i) {
+        for (std::size_t j = 0u; j < 4u; ++j) {
+            residual[i] += jacobian[i * 4u + j] * state[j];
+        }
+    }
+    return residual;
+}
+
+VolumeSelectorAssemblyResult assembleVolumeSelectorCase(
+    const VolumeSelectorTestCase& test_case,
+    VolumeSelectorTestRoute route)
+{
+    namespace assembly = svmp::FE::assembly;
+    namespace forms = svmp::FE::forms;
+    namespace geometry = svmp::FE::geometry;
+    namespace interfaces = svmp::FE::interfaces;
+    namespace spaces = svmp::FE::spaces;
+    namespace systems = svmp::FE::systems;
+
+    SCOPED_TRACE(route == VolumeSelectorTestRoute::Direct
+                     ? "route=direct"
+                     : "route=selector");
+
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    std::vector<GlobalIndex> physical_nodes;
+    mesh->getCellNodes(0, physical_nodes);
+    EXPECT_EQ(physical_nodes, (std::vector<GlobalIndex>{0, 1, 2, 3}));
+    std::vector<std::array<Real, 3>> physical_coordinates;
+    mesh->getCellCoordinates(0, physical_coordinates);
+    EXPECT_EQ(physical_coordinates,
+              (std::vector<std::array<Real, 3>>{
+                  {{0.0, 0.0, 0.0}},
+                  {{1.0, 0.0, 0.0}},
+                  {{0.0, 1.0, 0.0}},
+                  {{0.0, 0.0, 1.0}},
+              }));
+    const auto topology = singleTetraTopology();
+    EXPECT_EQ(topology.cell_gids, (std::vector<GlobalIndex>{0}));
+
+    auto space = std::make_shared<spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+    systems::FESystem system(mesh);
+    const auto unknown_field = system.addField(systems::FieldSpec{
+        .name = "u",
+        .space = space,
+        .components = 1,
+    });
+    FieldId source_field = INVALID_FIELD_ID;
+    if (!test_case.full_volume) {
+        source_field = system.addField(systems::FieldSpec{
+            .name = "level_set",
+            .space = space,
+            .components = 1,
+            .source_kind = systems::FieldSourceKind::PrescribedData,
+        });
+    }
+    system.addOperator("volume_selector_scalar");
+
+    const auto u = forms::FormExpr::stateField(
+        unknown_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(
+        unknown_field, *space, "v");
+    const auto integrand =
+        forms::inner(forms::grad(u), forms::grad(v)) + u * v -
+        forms::FormExpr::constant(1.0) * v;
+    const auto direct = test_case.full_volume
+                            ? integrand.dx()
+                            : integrand.dCutVolume(
+                                  test_case.marker, test_case.form_side);
+    const auto residual = route == VolumeSelectorTestRoute::Direct
+                              ? direct
+                              : forms::integrate(
+                                    integrand,
+                                    test_case.full_volume
+                                        ? forms::VolumeIntegrationDomain::fullVolume()
+                                        : forms::VolumeIntegrationDomain::cutVolume(
+                                              test_case.marker,
+                                              test_case.form_side));
+
+    const auto installed = systems::installFormulation(
+        system,
+        "volume_selector_scalar",
+        {unknown_field},
+        residual);
+    requireVolumeSelectorCondition(
+        !installed.residual.empty() && installed.residual.front() != nullptr,
+        "volume selector installation did not return a residual kernel");
+
+    systems::SetupOptions setup_options;
+    setup_options.assembler_name = "StandardAssembler";
+    setup_options.assembly_options.threading =
+        assembly::ThreadingStrategy::Sequential;
+    setup_options.assembly_options.num_threads = 1;
+    setup_options.assembly_options.use_batching = false;
+    systems::SetupInputs setup_inputs;
+    setup_inputs.topology_override = topology;
+    system.setup(setup_options, setup_inputs);
+
+    VolumeSelectorAssemblyResult observed;
+    std::shared_ptr<assembly::CutIntegrationContext> cut_context;
+    if (!test_case.full_volume) {
+        system.setPrescribedFieldCoefficients(
+            source_field,
+            std::span<const Real>(test_case.level_set_values.data(),
+                                  test_case.level_set_values.size()));
+        interfaces::CutInterfaceDomainRequest request;
+        request.source = interfaces::LevelSetInterfaceSource::fromField(
+            source_field,
+            system.dofLayoutRevision(),
+            system.prescribedFieldRevision(source_field));
+        request.generated_domain_id = std::string(test_case.domain_id);
+        request.interface_marker = test_case.marker;
+        request.isovalue = Real{0.0};
+        request.volume_quadrature_order = 2;
+        request.frame = geometry::CutGeometryFrame::Reference;
+        interfaces::LevelSetInterfaceDomain generated_domain(request);
+        interfaces::LevelSetCellCutInput cut_input;
+        cut_input.parent_cell = 0;
+        cut_input.element_type = ElementType::Tetra4;
+        cut_input.node_coordinates = physical_coordinates;
+        cut_input.level_set_values.assign(
+            test_case.level_set_values.begin(),
+            test_case.level_set_values.end());
+        interfaces::appendLinearLevelSetCellCut3D(
+            generated_domain, cut_input);
+
+        cut_context = std::make_shared<assembly::CutIntegrationContext>();
+        cut_context->addGeneratedInterfaceDomain(
+            generated_domain,
+            test_case.retained_side,
+            std::string(test_case.domain_id));
+        system.setCutIntegrationContext(cut_context);
+        cut_context->assertGeneratedVolumeRulesCurrentForMarkerAndSide(
+            test_case.marker, test_case.geometry_side);
+
+        const auto* publication =
+            cut_context->findGeneratedLevelSetInterfacePublicationProvenance(
+                test_case.marker);
+        requireVolumeSelectorCondition(
+            publication != nullptr,
+            "volume selector publication provenance is missing");
+        EXPECT_EQ(publication->volume_side_filter, test_case.retained_side);
+        EXPECT_EQ(publication->publication_domain_id, test_case.domain_id);
+        EXPECT_EQ(publication->request.source.field_id, source_field);
+
+        const auto selected_rules =
+            cut_context->generatedVolumeRulesForMarkerAndSide(
+                test_case.marker, test_case.geometry_side);
+        const auto complementary_side =
+            test_case.geometry_side == geometry::CutIntegrationSide::Negative
+                ? geometry::CutIntegrationSide::Positive
+                : geometry::CutIntegrationSide::Negative;
+        const auto complementary_rules =
+            cut_context->generatedVolumeRulesForMarkerAndSide(
+                test_case.marker, complementary_side);
+        observed.retained_rule_count = cut_context->volumeRules().size();
+        observed.selected_rule_count = selected_rules.size();
+        observed.complementary_rule_count = complementary_rules.size();
+        observed.selected_moments = volumeSelectorMoments(selected_rules);
+        observed.complementary_moments =
+            volumeSelectorMoments(complementary_rules);
+
+        const std::size_t expected_selected =
+            test_case.region == VolumeSelectorTestRegion::Dry ? 0u : 1u;
+        const std::size_t expected_complement =
+            test_case.retained_side.has_value() ? 0u : 1u;
+        EXPECT_EQ(observed.selected_rule_count, expected_selected);
+        EXPECT_EQ(observed.complementary_rule_count, expected_complement);
+        EXPECT_EQ(observed.retained_rule_count,
+                  expected_selected + expected_complement);
+        EXPECT_EQ(cut_context->generatedPrunedVolumeRuleCount(), 0u);
+        EXPECT_EQ(cut_context->generatedPrunedVolumeMeasure(), Real{0.0});
+
+        for (const auto* rule : selected_rules) {
+            requireVolumeSelectorCondition(
+                rule != nullptr,
+                "volume selector selected a null rule");
+            EXPECT_EQ(rule->side, test_case.geometry_side);
+            EXPECT_EQ(rule->frame, geometry::CutGeometryFrame::Reference);
+            EXPECT_EQ(rule->provenance.marker, test_case.marker);
+            EXPECT_EQ(rule->provenance.parent_entity, 0);
+            EXPECT_EQ(rule->provenance.parent_entity_global_id,
+                      svmp::FE::INVALID_GLOBAL_INDEX);
+            EXPECT_EQ(rule->exact_polynomial_order, 2);
+            EXPECT_EQ(rule->provenance.requested_quadrature_order, 2);
+            EXPECT_EQ(rule->provenance.achieved_quadrature_order, 2);
+            Real weight_sum = 0.0;
+            for (const auto& point : rule->points) {
+                weight_sum += point.weight;
+            }
+            EXPECT_NEAR(rule->measure, weight_sum, 1.0e-14);
+            observed.selected_rule_is_full_cell =
+                rule->full_cell_equivalent;
+        }
+
+        if (!test_case.retained_side.has_value()) {
+            EXPECT_NEAR(observed.selected_moments.one +
+                            observed.complementary_moments.one,
+                        Real{1.0} / Real{6.0}, 1.0e-14);
+            EXPECT_NEAR(observed.selected_moments.x +
+                            observed.complementary_moments.x,
+                        Real{1.0} / Real{24.0}, 1.0e-14);
+            EXPECT_NEAR(observed.selected_moments.y +
+                            observed.complementary_moments.y,
+                        Real{1.0} / Real{24.0}, 1.0e-14);
+            EXPECT_NEAR(observed.selected_moments.z +
+                            observed.complementary_moments.z,
+                        Real{1.0} / Real{24.0}, 1.0e-14);
+        } else {
+            EXPECT_EQ(observed.complementary_moments,
+                      VolumeSelectorMoments{});
+        }
+    }
+
+    EXPECT_EQ(system.registeredFieldCount(),
+              test_case.full_volume ? 1u : 2u);
+    EXPECT_EQ(system.unknownFieldIdsInDofMapOrder(),
+              (std::vector<FieldId>{unknown_field}));
+    EXPECT_TRUE(system.fieldParticipatesInUnknownVector(unknown_field));
+    if (!test_case.full_volume) {
+        EXPECT_EQ(system.fieldRecord(source_field).source_kind,
+                  systems::FieldSourceKind::PrescribedData);
+        EXPECT_FALSE(system.fieldParticipatesInUnknownVector(source_field));
+    }
+    EXPECT_EQ(system.fieldDofOffset(unknown_field), 0);
+    const auto cell_dofs =
+        system.fieldDofHandler(unknown_field).getCellDofs(0);
+    EXPECT_EQ(std::vector<GlobalIndex>(cell_dofs.begin(), cell_dofs.end()),
+              (std::vector<GlobalIndex>{0, 1, 2, 3}));
+    EXPECT_EQ(system.dofHandler().getNumDofs(), 4);
+    EXPECT_EQ(system.constraints().numConstraints(), 0u);
+
+    const auto& definition =
+        system.operatorDefinition("volume_selector_scalar");
+    if (test_case.full_volume) {
+        requireVolumeSelectorCondition(
+            definition.cells.size() == 1u,
+            "full selector must install one cell kernel");
+        EXPECT_TRUE(definition.cut_volumes.empty());
+        EXPECT_EQ(definition.cells.front().test_field, unknown_field);
+        EXPECT_EQ(definition.cells.front().trial_field, unknown_field);
+    } else {
+        EXPECT_TRUE(definition.cells.empty());
+        requireVolumeSelectorCondition(
+            definition.cut_volumes.size() == 1u,
+            "cut selector must install one cut-volume kernel");
+        EXPECT_EQ(definition.cut_volumes.front().marker, test_case.marker);
+        EXPECT_EQ(definition.cut_volumes.front().side,
+                  test_case.geometry_side);
+        EXPECT_EQ(definition.cut_volumes.front().test_field, unknown_field);
+        EXPECT_EQ(definition.cut_volumes.front().trial_field, unknown_field);
+    }
+
+    const auto& sparsity = system.sparsity("volume_selector_scalar");
+    const auto row_ptr = sparsity.getRowPtr();
+    const auto columns = sparsity.getColIndices();
+    EXPECT_EQ(std::vector<GlobalIndex>(row_ptr.begin(), row_ptr.end()),
+              (std::vector<GlobalIndex>{0, 4, 8, 12, 16}));
+    EXPECT_EQ(std::vector<GlobalIndex>(columns.begin(), columns.end()),
+              (std::vector<GlobalIndex>{
+                  0, 1, 2, 3,
+                  0, 1, 2, 3,
+                  0, 1, 2, 3,
+                  0, 1, 2, 3,
+              }));
+
+    constexpr std::array<Real, 4> state_values{{1.0, 2.0, 3.0, 4.0}};
+    std::vector<Real> state_storage(
+        state_values.begin(), state_values.end());
+    systems::SystemStateView state;
+    state.u = state_storage;
+    systems::AssemblyRequest request;
+    request.op = "volume_selector_scalar";
+    request.want_matrix = true;
+    request.want_vector = true;
+    assembly::DenseSystemView output(4);
+    output.zero();
+    const auto assembly_result =
+        system.assemble(request, state, &output, &output);
+    requireVolumeSelectorCondition(
+        assembly_result.success,
+        assembly_result.error_message);
+    observed.elements_assembled = assembly_result.elements_assembled;
+    EXPECT_EQ(observed.elements_assembled,
+              test_case.region == VolumeSelectorTestRegion::Dry ? 0 : 1);
+    if (test_case.region == VolumeSelectorTestRegion::Dry) {
+        EXPECT_EQ(assembly_result.matrix_entries_inserted, 0);
+        EXPECT_EQ(assembly_result.vector_entries_inserted, 0);
+    }
+
+    for (std::size_t i = 0u; i < 4u; ++i) {
+        observed.residual[i] =
+            output.getVectorEntry(static_cast<GlobalIndex>(i));
+        for (std::size_t j = 0u; j < 4u; ++j) {
+            observed.jacobian[i * 4u + j] = output.getMatrixEntry(
+                static_cast<GlobalIndex>(i),
+                static_cast<GlobalIndex>(j));
+            observed.recovered_load[i] -=
+                observed.jacobian[i * 4u + j] * state_values[j];
+        }
+        observed.recovered_load[i] += observed.residual[i];
+    }
+    if (test_case.full_volume) {
+        observed.selected_moments = VolumeSelectorMoments{
+            .one = -(observed.recovered_load[0] +
+                     observed.recovered_load[1] +
+                     observed.recovered_load[2] +
+                     observed.recovered_load[3]),
+            .x = -observed.recovered_load[1],
+            .y = -observed.recovered_load[2],
+            .z = -observed.recovered_load[3],
+        };
+    }
+    return observed;
+}
+
+void expectVolumeSelectorResult(
+    const VolumeSelectorTestCase& test_case,
+    const VolumeSelectorAssemblyResult& observed)
+{
+    const auto expected_jacobian =
+        volumeSelectorExpectedJacobian(test_case);
+    const auto expected_load = volumeSelectorExpectedLoad(test_case);
+    const auto expected_residual =
+        volumeSelectorExpectedResidual(expected_jacobian, expected_load);
+    for (std::size_t i = 0u; i < observed.residual.size(); ++i) {
+        if (test_case.region == VolumeSelectorTestRegion::Dry) {
+            EXPECT_EQ(observed.residual[i], Real{0.0});
+            EXPECT_EQ(observed.recovered_load[i], Real{0.0});
+        } else {
+            EXPECT_NEAR(observed.residual[i], expected_residual[i], 1.0e-12);
+            EXPECT_NEAR(observed.recovered_load[i], expected_load[i], 1.0e-12);
+        }
+    }
+    for (std::size_t i = 0u; i < observed.jacobian.size(); ++i) {
+        if (test_case.region == VolumeSelectorTestRegion::Dry) {
+            EXPECT_EQ(observed.jacobian[i], Real{0.0});
+        } else {
+            EXPECT_NEAR(observed.jacobian[i], expected_jacobian[i], 1.0e-12);
+        }
+    }
+    EXPECT_NEAR(observed.selected_moments.one,
+                test_case.volume, 1.0e-14);
+    EXPECT_NEAR(observed.selected_moments.x,
+                test_case.first_moments[0], 1.0e-14);
+    EXPECT_NEAR(observed.selected_moments.y,
+                test_case.first_moments[1], 1.0e-14);
+    EXPECT_NEAR(observed.selected_moments.z,
+                test_case.first_moments[2], 1.0e-14);
+    EXPECT_EQ(observed.selected_rule_is_full_cell,
+              !test_case.full_volume &&
+                  test_case.region == VolumeSelectorTestRegion::Full);
+}
+
+} // namespace
+
+TEST(FormsInstaller, VolumeIntegrationDomainPreservesScalarReactionDiffusion)
+{
+    for (const auto& test_case : volumeSelectorTestCases()) {
+        SCOPED_TRACE(std::string("region=") + std::string(test_case.name));
+        const auto direct = assembleVolumeSelectorCase(
+            test_case, VolumeSelectorTestRoute::Direct);
+        expectVolumeSelectorResult(test_case, direct);
+
+        const auto selector = assembleVolumeSelectorCase(
+            test_case, VolumeSelectorTestRoute::Selector);
+        expectVolumeSelectorResult(test_case, selector);
+
+        EXPECT_EQ(selector.residual, direct.residual);
+        EXPECT_EQ(selector.jacobian, direct.jacobian);
+        EXPECT_EQ(selector.recovered_load, direct.recovered_load);
+        EXPECT_EQ(selector.selected_moments, direct.selected_moments);
+        EXPECT_EQ(selector.complementary_moments,
+                  direct.complementary_moments);
+        EXPECT_EQ(selector.retained_rule_count,
+                  direct.retained_rule_count);
+        EXPECT_EQ(selector.selected_rule_count,
+                  direct.selected_rule_count);
+        EXPECT_EQ(selector.complementary_rule_count,
+                  direct.complementary_rule_count);
+        EXPECT_EQ(selector.selected_rule_is_full_cell,
+                  direct.selected_rule_is_full_cell);
+        EXPECT_EQ(selector.elements_assembled,
+                  direct.elements_assembled);
+    }
 }
