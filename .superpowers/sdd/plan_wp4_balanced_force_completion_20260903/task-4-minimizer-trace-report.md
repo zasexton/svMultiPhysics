@@ -106,3 +106,23 @@ bounded physical diagnostic also remains coordinator-owned.
 Immediately before staging, `git fetch origin issue-449-modern-mesh-core`
 resolved both the local and remote heads to
 `d1e16ea99d8ac3ce50fd5c3e3054882252c7f036`; ancestry was identical.
+
+## Delivery
+
+The owned implementation and report were committed as
+`f07d93b0f188161b6bfda69218df678da5d0b7e0`, with parent
+`d1e16ea99d8ac3ce50fd5c3e3054882252c7f036`, tree
+`56df6cc64d01c69e56e564efaefd23c69882156b`, and subject
+`Record bounded capillary line-search evidence`. Author and committer were
+both verified as `Zachary Sexton <zsexton@stanford.edu>`.
+
+The staged binary diff SHA-256 was
+`c4affba08713d6e52903fa14c9690fb0341093ae70cd8e25ce713854cb5f6739`.
+All five staged paths were ordinary text. `git diff --cached --check` and the
+repository vocabulary scans over staged bytes and the message were clean.
+
+Immediately before the normal push, the fetched remote remained the supplied
+base and was an ancestor of the implementation commit. With the repository's
+available `git-lfs/2.4.0` module loaded, the normal push advanced
+`origin/issue-449-modern-mesh-core` from `d1e16ea99` to `f07d93b0`.
+`git ls-remote` returned the full implementation commit ID above.
