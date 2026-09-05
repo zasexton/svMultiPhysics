@@ -173,6 +173,29 @@ def write_executable(path, source):
     return path
 
 
+def process_state(process_id):
+    try:
+        stat = Path(f"/proc/{process_id}/stat").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    return stat.split(") ", 1)[1][0]
+
+
+def terminate_test_process(process_id):
+    if process_state(process_id) not in {None, "Z"}:
+        os.kill(process_id, signal.SIGKILL)
+
+
+def wait_for_process_exit(process_id, timeout_seconds=1.0):
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        state = process_state(process_id)
+        if state in {None, "Z"}:
+            return state
+        time.sleep(0.01)
+    return process_state(process_id)
+
+
 def provenance_inputs(tmp_path, value):
     provenance = value["provenance_contract"]
     return (
@@ -1451,6 +1474,117 @@ def test_timeout_terminates_invocation_tree_and_preserves_diagnostics(
         if control.poll() is None:
             os.killpg(control.pid, signal.SIGKILL)
         control.wait()
+
+
+def test_timeout_tracks_session_changing_child_after_launcher_exit(
+    monkeypatch, tmp_path
+):
+    child_pid_path = tmp_path / "detached-child.pid"
+    script = tmp_path / "launch-detached-child.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import pathlib, subprocess, sys",
+                "child = subprocess.Popen([sys.executable, '-c', "
+                "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'], "
+                "start_new_session=True)",
+                f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid))",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    control = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+    )
+    child_pid = None
+    monkeypatch.setenv("PATH", str(tmp_path / "no-tools"))
+    try:
+        execution = runner._run_bounded_exact_command(
+            [sys.executable, str(script)],
+            cwd=tmp_path,
+            stdout_path=tmp_path / "stdout.txt",
+            stderr_path=tmp_path / "stderr.txt",
+            environment=os.environ.copy(),
+            timeout_seconds=0.25,
+            termination_grace_seconds=0.1,
+            launcher_mode="mpiexec",
+            ranks=1,
+        )
+        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+        diagnostics = runner.read_json(tmp_path / "timeout_diagnostics.json")
+        recorded_pids = {
+            record["pid"]
+            for record in diagnostics["processes_before_termination"]
+        }
+        assert execution["timed_out"] is True
+        assert child_pid in recorded_pids
+        assert diagnostics["termination"][
+            "all_owned_descendants_terminated"
+        ] is True
+        assert diagnostics["termination"][
+            "all_session_processes_terminated"
+        ] is True
+        assert wait_for_process_exit(child_pid) in {None, "Z"}
+        assert control.poll() is None
+    finally:
+        if child_pid is not None:
+            terminate_test_process(child_pid)
+        if control.poll() is None:
+            os.killpg(control.pid, signal.SIGKILL)
+        control.wait()
+
+
+def test_stack_tool_timeout_terminates_tool_descendants(monkeypatch, tmp_path):
+    child_pid_path = tmp_path / "diagnostic-child.pid"
+    write_executable(
+        tmp_path / "gstack",
+        f"#!{sys.executable}\n"
+        "import pathlib, signal, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', "
+        "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'], "
+        "start_new_session=True)\n"
+        f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid))\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "time.sleep(30)\n",
+    )
+    monkeypatch.setenv("PATH", str(tmp_path))
+    child_pid = None
+    try:
+        result = runner._capture_stack_tool(
+            [{"pid": os.getpid()}], deadline=time.monotonic() + 0.25
+        )
+        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+        assert result["status"] == "attempted"
+        assert result["captures"][0]["status"] == "capture_timed_out"
+        assert wait_for_process_exit(child_pid) in {None, "Z"}
+    finally:
+        if child_pid is not None:
+            terminate_test_process(child_pid)
+
+
+def test_stack_tool_limits_output_during_capture(monkeypatch, tmp_path):
+    completion_path = tmp_path / "diagnostic-completed"
+    write_executable(
+        tmp_path / "gstack",
+        f"#!{sys.executable}\n"
+        "import os, pathlib\n"
+        f"limit = {runner.EXACT_DIAGNOSTIC_OUTPUT_BYTES}\n"
+        "os.write(1, b'x' * (limit * 4))\n"
+        "os.write(1, b'y')\n"
+        f"pathlib.Path({str(completion_path)!r}).write_text('complete')\n",
+    )
+    monkeypatch.setenv("PATH", str(tmp_path))
+    result = runner._capture_stack_tool(
+        [{"pid": os.getpid()}], deadline=time.monotonic() + 0.5
+    )
+    capture = result["captures"][0]
+    assert result["status"] == "attempted"
+    assert capture["status"] == "output_limit_exceeded"
+    assert len(capture["stdout"].encode()) <= runner.EXACT_DIAGNOSTIC_OUTPUT_BYTES
+    assert len(capture["stderr"].encode()) <= runner.EXACT_DIAGNOSTIC_OUTPUT_BYTES
+    assert completion_path.exists() is False
 
 
 def test_timeout_cannot_pass_when_child_wrote_passing_json(tmp_path):

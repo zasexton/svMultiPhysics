@@ -15,6 +15,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -57,6 +58,40 @@ EXACT_TERMINATION_GRACE_SECONDS = 2.0
 EXACT_DIAGNOSTIC_CAPTURE_SECONDS = 2.0
 EXACT_DIAGNOSTIC_OUTPUT_BYTES = 65536
 EXACT_DIAGNOSTIC_PROCESS_LIMIT = 64
+EXACT_DIAGNOSTIC_TERMINATION_GRACE_SECONDS = 0.1
+
+_PROCESS_SUPERVISOR = r"""
+import ctypes
+import os
+import resource
+import signal
+import subprocess
+import sys
+
+PR_SET_CHILD_SUBREAPER = 36
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+    raise OSError(ctypes.get_errno(), "unable to establish process containment")
+output_limit = int(sys.argv[1])
+if output_limit > 0:
+    resource.setrlimit(resource.RLIMIT_FSIZE, (output_limit, output_limit))
+signal.signal(signal.SIGTERM, lambda *_: None)
+primary = subprocess.Popen(sys.argv[2:])
+primary_returncode = None
+while True:
+    try:
+        child_pid, status = os.wait()
+    except ChildProcessError:
+        break
+    if child_pid == primary.pid:
+        primary_returncode = os.waitstatus_to_exitcode(status)
+        primary.returncode = primary_returncode
+if primary_returncode is None:
+    primary_returncode = 125
+if primary_returncode < 0:
+    primary_returncode = 128 - primary_returncode
+raise SystemExit(primary_returncode)
+"""
 
 
 def _sha256_file(path: Path) -> str:
@@ -1809,8 +1844,8 @@ def _positive_finite_seconds(value: Any, context: str) -> float:
     return float(value)
 
 
-def _process_session_records(session_id: int) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
+def _process_table_records() -> dict[int, dict[str, Any]]:
+    records: dict[int, dict[str, Any]] = {}
     try:
         process_directories = list(Path("/proc").iterdir())
     except OSError:
@@ -1826,40 +1861,89 @@ def _process_session_records(session_id: int) -> list[dict[str, Any]]:
             if closing_parenthesis < 0:
                 continue
             fields = stat[closing_parenthesis + 2 :].split()
-            if len(fields) < 4 or int(fields[3]) != session_id:
+            if len(fields) < 20:
                 continue
-            try:
-                command_bytes = (process_directory / "cmdline").read_bytes()[
-                    :EXACT_DIAGNOSTIC_OUTPUT_BYTES
-                ]
-                command_status = "captured"
-            except PermissionError:
-                command_bytes = b""
-                command_status = "permission_denied"
-            except OSError:
-                command_bytes = b""
-                command_status = "unavailable"
-            records.append(
-                {
-                    "pid": int(process_directory.name),
-                    "parent_pid": int(fields[1]),
-                    "process_group_id": int(fields[2]),
-                    "session_id": int(fields[3]),
-                    "state": fields[0],
-                    "command_status": command_status,
-                    "command": command_bytes.replace(b"\0", b" ").decode(
-                        encoding="utf-8", errors="replace"
-                    ),
-                }
-            )
+            process_id = int(process_directory.name)
+            records[process_id] = {
+                "pid": process_id,
+                "parent_pid": int(fields[1]),
+                "process_group_id": int(fields[2]),
+                "session_id": int(fields[3]),
+                "state": fields[0],
+                "start_time_ticks": int(fields[19]),
+            }
         except (FileNotFoundError, OSError, ValueError):
             continue
-    return sorted(records, key=lambda record: record["pid"])
+    return records
+
+
+def _owned_process_records(
+    root_pid: int, identities: dict[int, int]
+) -> list[dict[str, Any]]:
+    table = _process_table_records()
+    root = table.get(root_pid)
+    if root is not None and root_pid not in identities:
+        identities[root_pid] = root["start_time_ticks"]
+    current = {
+        process_id
+        for process_id, start_time in identities.items()
+        if process_id in table
+        and table[process_id]["start_time_ticks"] == start_time
+    }
+    changed = True
+    while changed:
+        changed = False
+        for process_id, record in table.items():
+            if process_id in current or record["parent_pid"] not in current:
+                continue
+            if process_id in identities:
+                continue
+            identities[process_id] = record["start_time_ticks"]
+            current.add(process_id)
+            changed = True
+    records = []
+    for process_id in sorted(current):
+        record = dict(table[process_id])
+        try:
+            with Path(f"/proc/{process_id}/cmdline").open("rb") as stream:
+                command_bytes = stream.read(EXACT_DIAGNOSTIC_OUTPUT_BYTES)
+            record["command_status"] = "captured"
+        except PermissionError:
+            command_bytes = b""
+            record["command_status"] = "permission_denied"
+        except OSError:
+            command_bytes = b""
+            record["command_status"] = "unavailable"
+        record["command"] = command_bytes.replace(b"\0", b" ").decode(
+            encoding="utf-8", errors="replace"
+        )
+        records.append(record)
+    return records
+
+
+def _managed_process(
+    command: Sequence[str],
+    *,
+    cwd: Path | None = None,
+    environment: dict[str, str] | None = None,
+    stdout: Any = None,
+    stderr: Any = None,
+    output_limit: int = 0,
+) -> subprocess.Popen[Any]:
+    return subprocess.Popen(
+        [sys.executable, "-c", _PROCESS_SUPERVISOR, str(output_limit), *command],
+        cwd=cwd,
+        env=environment,
+        stdout=stdout,
+        stderr=stderr,
+        start_new_session=True,
+    )
 
 
 def _bounded_proc_read(path: Path) -> dict[str, Any]:
     try:
-        payload = path.read_bytes()[:EXACT_DIAGNOSTIC_OUTPUT_BYTES]
+        with path.open("rb") as stream:
+            payload = stream.read(EXACT_DIAGNOSTIC_OUTPUT_BYTES)
     except PermissionError as error:
         return {"status": "permission_denied", "error": type(error).__name__}
     except FileNotFoundError as error:
@@ -1898,43 +1982,86 @@ def _capture_stack_tool(
                 }
             )
             break
+        identities: dict[int, int] = {}
+        process: subprocess.Popen[Any] | None = None
+        timed_out = False
+        termination: dict[str, Any] | None = None
         try:
-            completed = subprocess.run(
-                [selected, str(record["pid"])],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-                timeout=min(0.25, remaining),
+            with tempfile.TemporaryFile(mode="w+b") as stdout_stream:
+                with tempfile.TemporaryFile(mode="w+b") as stderr_stream:
+                    process = _managed_process(
+                        [selected, str(record["pid"])],
+                        stdout=stdout_stream,
+                        stderr=stderr_stream,
+                        output_limit=EXACT_DIAGNOSTIC_OUTPUT_BYTES,
+                    )
+                    capture_deadline = time.monotonic() + min(0.25, remaining)
+                    while process.poll() is None:
+                        _owned_process_records(process.pid, identities)
+                        capture_remaining = capture_deadline - time.monotonic()
+                        if capture_remaining <= 0.0:
+                            timed_out = True
+                            break
+                        time.sleep(min(0.01, capture_remaining))
+                    if timed_out:
+                        termination = _terminate_owned_processes(
+                            process,
+                            identities,
+                            grace_seconds=(
+                                EXACT_DIAGNOSTIC_TERMINATION_GRACE_SECONDS
+                            ),
+                        )
+                    else:
+                        process.wait()
+                    stdout_stream.flush()
+                    stderr_stream.flush()
+                    stdout_stream.seek(0, os.SEEK_END)
+                    stdout_size = stdout_stream.tell()
+                    stderr_stream.seek(0, os.SEEK_END)
+                    stderr_size = stderr_stream.tell()
+                    stdout_stream.seek(0)
+                    stderr_stream.seek(0)
+                    stdout_payload = stdout_stream.read(
+                        EXACT_DIAGNOSTIC_OUTPUT_BYTES
+                    )
+                    stderr_payload = stderr_stream.read(
+                        EXACT_DIAGNOSTIC_OUTPUT_BYTES
+                    )
+            output_limited = (
+                stdout_size >= EXACT_DIAGNOSTIC_OUTPUT_BYTES
+                or stderr_size >= EXACT_DIAGNOSTIC_OUTPUT_BYTES
             )
+            if output_limited:
+                status = "output_limit_exceeded"
+            elif timed_out:
+                status = "capture_timed_out"
+            elif process.returncode == 0:
+                status = "captured"
+            else:
+                status = "attach_failed"
             captures.append(
                 {
                     "pid": record["pid"],
-                    "status": (
-                        "captured" if completed.returncode == 0 else "attach_failed"
-                    ),
-                    "returncode": completed.returncode,
-                    "stdout": completed.stdout[:EXACT_DIAGNOSTIC_OUTPUT_BYTES].decode(
+                    "status": status,
+                    "returncode": process.returncode,
+                    "stdout": stdout_payload.decode(
                         encoding="utf-8", errors="replace"
                     ),
-                    "stderr": completed.stderr[:EXACT_DIAGNOSTIC_OUTPUT_BYTES].decode(
+                    "stderr": stderr_payload.decode(
                         encoding="utf-8", errors="replace"
                     ),
-                }
-            )
-        except subprocess.TimeoutExpired as error:
-            captures.append(
-                {
-                    "pid": record["pid"],
-                    "status": "capture_timed_out",
-                    "stdout": (error.stdout or b"")[:EXACT_DIAGNOSTIC_OUTPUT_BYTES].decode(
-                        encoding="utf-8", errors="replace"
-                    ),
-                    "stderr": (error.stderr or b"")[:EXACT_DIAGNOSTIC_OUTPUT_BYTES].decode(
-                        encoding="utf-8", errors="replace"
-                    ),
+                    "stdout_bytes": stdout_size,
+                    "stderr_bytes": stderr_size,
+                    "termination": termination,
                 }
             )
         except (OSError, ValueError) as error:
+            if process is not None and process.poll() is None:
+                _terminate_owned_processes(
+                    process,
+                    identities,
+                    grace_seconds=EXACT_DIAGNOSTIC_TERMINATION_GRACE_SECONDS,
+                )
             captures.append(
                 {
                     "pid": record["pid"],
@@ -1949,11 +2076,12 @@ def _capture_timeout_diagnostics(
     command: Sequence[str],
     *,
     process: subprocess.Popen[Any],
+    identities: dict[int, int],
     launcher_mode: str,
     ranks: int,
     elapsed_seconds: float,
 ) -> dict[str, Any]:
-    all_processes = _process_session_records(process.pid)
+    all_processes = _owned_process_records(process.pid, identities)
     processes = all_processes[:EXACT_DIAGNOSTIC_PROCESS_LIMIT]
     capture_deadline = time.monotonic() + EXACT_DIAGNOSTIC_CAPTURE_SECONDS
     proc_captures = [
@@ -1973,6 +2101,7 @@ def _capture_timeout_diagnostics(
         "ranks": ranks,
         "elapsed_seconds": elapsed_seconds,
         "launcher_pid": process.pid,
+        "containment_pid": process.pid,
         "process_group_id": process.pid,
         "session_id": process.pid,
         "processes_before_termination": processes,
@@ -1984,12 +2113,14 @@ def _capture_timeout_diagnostics(
     }
 
 
-def _signal_exact_session(session_id: int, signal_number: int) -> list[int]:
+def _signal_owned_processes(
+    root_pid: int, identities: dict[int, int], signal_number: int
+) -> list[int]:
     runner_process_group = os.getpgrp()
     process_groups = sorted(
         {
             record["process_group_id"]
-            for record in _process_session_records(session_id)
+            for record in _owned_process_records(root_pid, identities)
             if record["process_group_id"] != runner_process_group
             and record["state"] != "Z"
         }
@@ -2004,23 +2135,30 @@ def _signal_exact_session(session_id: int, signal_number: int) -> list[int]:
     return signaled
 
 
-def _terminate_exact_session(
-    process: subprocess.Popen[Any], *, grace_seconds: float
+def _terminate_owned_processes(
+    process: subprocess.Popen[Any],
+    identities: dict[int, int],
+    *,
+    grace_seconds: float,
 ) -> dict[str, Any]:
     grace = _positive_finite_seconds(grace_seconds, "exact termination grace")
-    terminated_groups = set(_signal_exact_session(process.pid, signal.SIGTERM))
+    terminated_groups = set(
+        _signal_owned_processes(process.pid, identities, signal.SIGTERM)
+    )
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline:
         process.poll()
         living = [
             record
-            for record in _process_session_records(process.pid)
+            for record in _owned_process_records(process.pid, identities)
             if record["state"] != "Z"
         ]
         if not living:
             break
         time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
-    killed_groups = set(_signal_exact_session(process.pid, signal.SIGKILL))
+    killed_groups = set(
+        _signal_owned_processes(process.pid, identities, signal.SIGKILL)
+    )
     try:
         process.wait(timeout=max(0.05, grace))
     except subprocess.TimeoutExpired:
@@ -2033,13 +2171,15 @@ def _terminate_exact_session(
             process.wait(timeout=max(0.05, grace))
         except subprocess.TimeoutExpired:
             pass
-    remaining = _process_session_records(process.pid)
+    remaining = _owned_process_records(process.pid, identities)
     living = [record for record in remaining if record["state"] != "Z"]
+    all_terminated = process.poll() is not None and not living
     return {
         "terminate_process_group_ids": sorted(terminated_groups),
         "kill_process_group_ids": sorted(killed_groups),
         "remaining_processes": remaining,
-        "all_session_processes_terminated": process.poll() is not None and not living,
+        "all_owned_descendants_terminated": all_terminated,
+        "all_session_processes_terminated": all_terminated,
     }
 
 
@@ -2069,16 +2209,15 @@ def _run_bounded_exact_command(
     timed_out = False
     diagnostics_path: Path | None = None
     termination: dict[str, Any] | None = None
+    identities: dict[int, int] = {}
     with stdout_path.open("w", encoding="utf-8") as stdout_stream:
         with stderr_path.open("w", encoding="utf-8") as stderr_stream:
-            process = subprocess.Popen(
-                list(command),
+            process = _managed_process(
+                command,
                 cwd=cwd,
-                env=environment,
+                environment=environment,
                 stdout=stdout_stream,
                 stderr=stderr_stream,
-                text=True,
-                start_new_session=True,
             )
             try:
                 deadline = started + watchdog
@@ -2086,7 +2225,9 @@ def _run_bounded_exact_command(
                     process.poll()
                     living = [
                         record
-                        for record in _process_session_records(process.pid)
+                        for record in _owned_process_records(
+                            process.pid, identities
+                        )
                         if record["state"] != "Z"
                     ]
                     if process.returncode is not None and not living:
@@ -2102,6 +2243,7 @@ def _run_bounded_exact_command(
                         diagnostics = _capture_timeout_diagnostics(
                             command,
                             process=process,
+                            identities=identities,
                             launcher_mode=launcher_mode,
                             ranks=ranks,
                             elapsed_seconds=time.monotonic() - started,
@@ -2119,13 +2261,15 @@ def _run_bounded_exact_command(
                             "termination": None,
                         }
                     write_json(diagnostics_path, diagnostics)
-                    termination = _terminate_exact_session(
-                        process, grace_seconds=grace
+                    termination = _terminate_owned_processes(
+                        process, identities, grace_seconds=grace
                     )
                     diagnostics["termination"] = termination
                     write_json(diagnostics_path, diagnostics)
             except BaseException:
-                _terminate_exact_session(process, grace_seconds=grace)
+                _terminate_owned_processes(
+                    process, identities, grace_seconds=grace
+                )
                 raise
     return {
         "command": list(command),
@@ -2136,6 +2280,7 @@ def _run_bounded_exact_command(
         "stdout": str(stdout_path),
         "stderr": str(stderr_path),
         "process_id": process.pid,
+        "containment_process_id": process.pid,
         "process_group_id": process.pid,
         "session_id": process.pid,
         "launcher_mode": launcher_mode,
