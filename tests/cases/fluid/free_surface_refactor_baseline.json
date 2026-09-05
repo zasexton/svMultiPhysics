@@ -198,6 +198,269 @@
       "terminal_record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/candidate-r1-resolved-terminal.json",
       "terminal_record_sha256": "4fee388377b057f326dae68fd17170af4247e5a6026049f80b5b44029a421f00",
       "working_directory": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r1-resolved-source"
+    },
+    {
+      "acceptance_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-builder-acceptance/acceptance.json",
+        "sha256": "1c873ef1e4c6bee94bb4df81561087670d7a058ecfe038776e17e1faf36dc7ed",
+        "size_bytes": 28028
+      },
+      "controlled_source_commit": "e3305b896c43eec766127e2db3c42cf72c0767f5",
+      "groups": [
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "--oversubscribe",
+            "--bind-to",
+            "none",
+            "-n",
+            "1",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-build/bin/test_application",
+            "--gtest_filter=OpenVesselExamples.SimulationDependencyPreflightResolvesTwoFluidMaterialInterfaceInEitherOrder:OpenVesselExamples.SimulationDependencyPreflightRetainsLevelSetSnapshotAfterRawInputRemoval:OpenVesselExamples.SimulationBuilderResolvesWetExtensionVelocityOwnedByLaterFluidEquation:OpenVesselExamples.SimulationBuilderPreflightsFittedCapabilityBeforeWetExtensionMutation:OpenVesselExamples.SimulationBuilderRegistersEquationCutDomainWithUnfittedFreeSurface:OpenVesselExamples.SimulationBuilderBuildsCompleteTwoFluidMaterialInterfaceSystem:OpenVesselExamples.SimulationDependencyPreflightSelectsStokesSolverAfterLevelSetAlias:OpenVesselExamples.SimulationDependencyPreflightRetainsBroadLevelSetSpellingButRawDispatchRejectsIt:OpenVesselExamples.SimulationDependencyPreflightKeepsResolvedLevelSetSlotsInputAligned"
+          ],
+          "exit_code": 0,
+          "name": "Application_serial",
+          "rank_results": [
+            {
+              "failed_cases": [],
+              "passed": 9,
+              "rank": 0,
+              "selected": 9,
+              "skip_details": [],
+              "skipped_cases": [],
+              "xml": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-builder-green-configured-r2/Application_serial/rank-0.xml",
+              "xml_sha256": "5596f9a0ccc4a4919af3486e933fcafc4595530b35c6a3c038e85452cd270fd4"
+            }
+          ],
+          "timeout": false,
+          "verification_step": "42093152.8",
+          "working_directory": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-source"
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "--oversubscribe",
+            "--bind-to",
+            "none",
+            "-n",
+            "1",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-build/bin/test_application",
+            "--gtest_filter=*"
+          ],
+          "exit_code": 0,
+          "name": "Application_serial",
+          "rank_results": [
+            {
+              "failed_cases": [],
+              "passed": 316,
+              "rank": 0,
+              "selected": 316,
+              "skip_details": [],
+              "skipped_cases": [],
+              "xml": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-builder-integration-r1/Application_serial/rank-0.xml",
+              "xml_sha256": "8e7dd4a532e706570ba539e473a192182a2e8451648218c1aa1419584c0ba156"
+            }
+          ],
+          "timeout": false,
+          "verification_step": "42093152.9",
+          "working_directory": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-source"
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "--oversubscribe",
+            "--bind-to",
+            "none",
+            "-n",
+            "2",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-build/bin/test_application_mpi",
+            "--gtest_filter=LevelSetMaintenanceTransactionConsensusMPI.TwoRankCommitRejectAndContentRevisionAgreement"
+          ],
+          "exit_code": 0,
+          "name": "Application_consensus_2",
+          "rank_results": [
+            {
+              "failed_cases": [],
+              "passed": 1,
+              "rank": 0,
+              "selected": 1,
+              "skip_details": [],
+              "skipped_cases": [],
+              "xml": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-builder-integration-r1/Application_consensus_2/rank-0.xml",
+              "xml_sha256": "e7bde8ec56d0fe15a3b5b3f85162d65759fc6c6286e0cea119eb6055a5af42a8"
+            },
+            {
+              "failed_cases": [],
+              "passed": 1,
+              "rank": 1,
+              "selected": 1,
+              "skip_details": [],
+              "skipped_cases": [],
+              "xml": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-builder-integration-r1/Application_consensus_2/rank-1.xml",
+              "xml_sha256": "5193752ef1bb06ee8bd23ba9fa7e940709d1351d8236b67eaf66a614c5160cdb"
+            }
+          ],
+          "timeout": false,
+          "verification_step": "42093152.9",
+          "working_directory": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-source"
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "--oversubscribe",
+            "--bind-to",
+            "none",
+            "-n",
+            "4",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-build/bin/test_application_mpi",
+            "--gtest_filter=LevelSetMaintenanceTransactionConsensusMPI.FourRankCommitRejectAndContentRevisionAgreement"
+          ],
+          "exit_code": 0,
+          "name": "Application_consensus_4",
+          "rank_results": [
+            {
+              "failed_cases": [],
+              "passed": 1,
+              "rank": 0,
+              "selected": 1,
+              "skip_details": [],
+              "skipped_cases": [],
+              "xml": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-builder-integration-r1/Application_consensus_4/rank-0.xml",
+              "xml_sha256": "0e69f21433cc14c173730984f839ab376dde804e39f5221aecdcf7c0bc8dc541"
+            },
+            {
+              "failed_cases": [],
+              "passed": 1,
+              "rank": 1,
+              "selected": 1,
+              "skip_details": [],
+              "skipped_cases": [],
+              "xml": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-builder-integration-r1/Application_consensus_4/rank-1.xml",
+              "xml_sha256": "7f8d3844563b3aebd042d2af3c8904fc828744c5a48a646d446366eb5c14378c"
+            },
+            {
+              "failed_cases": [],
+              "passed": 1,
+              "rank": 2,
+              "selected": 1,
+              "skip_details": [],
+              "skipped_cases": [],
+              "xml": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-builder-integration-r1/Application_consensus_4/rank-2.xml",
+              "xml_sha256": "a6fa7b745407db2522ea6a7ad8f91cafc27e6c02f95cb054068002110f1064ce"
+            },
+            {
+              "failed_cases": [],
+              "passed": 1,
+              "rank": 3,
+              "selected": 1,
+              "skip_details": [],
+              "skipped_cases": [],
+              "xml": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-builder-integration-r1/Application_consensus_4/rank-3.xml",
+              "xml_sha256": "87a8deb25271736603b7a1c53543912fa07a245a53da371dee95ff7fbc73e24d"
+            }
+          ],
+          "timeout": false,
+          "verification_step": "42093152.9",
+          "working_directory": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-source"
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "--oversubscribe",
+            "--bind-to",
+            "none",
+            "-n",
+            "1",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-build/bin/test_fe_constraints",
+            "--gtest_filter=*"
+          ],
+          "exit_code": 0,
+          "name": "FE_Constraints_Tests",
+          "rank_results": [
+            {
+              "failed_cases": [],
+              "passed": 274,
+              "rank": 0,
+              "selected": 274,
+              "skip_details": [],
+              "skipped_cases": [],
+              "xml": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-builder-integration-r1/FE_Constraints_Tests/rank-0.xml",
+              "xml_sha256": "0d18fbb21bd0252857a98ac8a3509af91b847951362a69b64ca6f24df2595e27"
+            }
+          ],
+          "timeout": false,
+          "verification_step": "42093152.9",
+          "working_directory": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-source"
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "--oversubscribe",
+            "--bind-to",
+            "none",
+            "-n",
+            "1",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-build/bin/test_fe_timestepping",
+            "--gtest_filter=*"
+          ],
+          "exit_code": 0,
+          "name": "FE_TimeStepping_Tests",
+          "rank_results": [
+            {
+              "failed_cases": [],
+              "passed": 269,
+              "rank": 0,
+              "selected": 270,
+              "skip_details": [
+                {
+                  "case": "MonolithicAuxiliaryConvergenceRequiresEachResidualComponent",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-source/Code/Source/solver/FE/Tests/Unit/TimeStepping/test_NewtonSolver.cpp:9820\nFixture did not produce a combined-relative gap for this backend/configuration\n",
+                  "suite": "NewtonSolver"
+                }
+              ],
+              "skipped_cases": [
+                "NewtonSolver.MonolithicAuxiliaryConvergenceRequiresEachResidualComponent"
+              ],
+              "xml": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-builder-integration-r1/FE_TimeStepping_Tests/rank-0.xml",
+              "xml_sha256": "a3279430d5efb5a1175ce1d84d57693655fae80e6c99a2fa6fe50dfa79f68f30"
+            }
+          ],
+          "timeout": false,
+          "verification_step": "42093152.9",
+          "working_directory": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/validation-cache-source"
+        }
+      ],
+      "id": "r1-builder-consumer",
+      "integrated_base_revision": "458649169be7084831b4e51716b32bac01f81179",
+      "integrated_source_commit": "794bec87ab455e041c1cc5323d9b2601849dbf2e",
+      "limitations": [
+        "No maintenance producer extraction or input-contract behavior alignment in this slice.",
+        "Current branch integration includes WP-4 through 45864916; numerical baseline and prior controlled snapshots are unchanged.",
+        "The existing NewtonSolver.MonolithicAuxiliaryConvergenceRequiresEachResidualComponent skip remains explicit.",
+        "Structural verification does not close R0 numerical reference capture or WP-4 physical qualification."
+      ],
+      "outcome": "Nine focused cases passed. Integrated Application: 316 passed; two/four-rank consensus passed on every rank; FE Constraints: 274 passed; FE TimeStepping: 269 passed and one existing skip. No failures.",
+      "reviewed_source_hashes_match": true,
+      "scope": "Resolve once during existing ordered dependency discovery and reuse retained immutable level-set handles in builder consumers; installation/maintenance contract alignment and full R1 remain open.",
+      "source_hashes": {
+        "Code/Source/solver/Application/Core/ResolvedMovingDomainConfiguration.h": "e8bf47b884f207c54312ad4bc15b1cbc2461ae3806d29f747bb1dc6da0c1f518",
+        "Code/Source/solver/Application/Core/SimulationBuilder.cpp": "598a64cff11e8a049011b67836d17fa1ce66955a2c13c1fc586892cc764c7cad",
+        "Code/Source/solver/Application/Core/SimulationBuilder.h": "ef64caed97c4250fe09788c69e76813442a3be7adbb9476177b3fe62cd90bdbe",
+        "Code/Source/solver/Application/Tests/Unit/test_OpenVesselExamples.cpp": "3221b035d91502c95484d251997e2a5118d7eb7be7fbc780b0a6eaec2f22db8e"
+      },
+      "state": "COMPLETED"
     }
   ],
   "captured_references": [
@@ -1129,30 +1392,1519 @@
     {
       "allocated_cpus": 4,
       "allocation_note": "Scheduler records ReqTRES cpu=8 but AllocTRES cpu=4. Owned overlay step shares one bound CPU within that four-CPU allocation; it does not reserve additional nodes or memory.",
+      "binaries": [
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_application",
+          "sha256": "f83259b472cc09921e76526ec052d0ebb523543978440892f526fd8cab42b2c9"
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_application_mpi",
+          "sha256": "206966c89f4e1988018950c89668f69b08ebe9f3ab944f6ab253581d166f410e"
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_assembly",
+          "sha256": "629d69b1917885f5d72fb5210dc259ac8428e5bafd8bf09648bdad742104d6c1"
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_assembly_mpi",
+          "sha256": "9318bed2c09017dd6d3648bf4cdbddb5a3b8f302f9dddaa45e2af00464dbc805"
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_constraints",
+          "sha256": "8d90dfe189455aa90af4380ac92ba59edf1ec51bd76bfe1a99ebcb73b2bdcd49"
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_constraints_mpi",
+          "sha256": "0949e48a132f509c334c82c07a52762fed6ca390e1ec753e7969861e0e5fb9e6"
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_forms",
+          "sha256": "7cc710e6ad085cbf015bffb212bfc98ea56b0324ca35fa6975b19db348c123f3"
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_geometry",
+          "sha256": "7a5fbf334cfcda2ab45c4fee2ef3af6f7d6801f8c88c350cf8b088bda2ce7fe0"
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_levelset",
+          "sha256": "418f3cbf50a14391706d13d6bdf01dfd06cd95e6dd718e95694b54d634bc8939"
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_levelset_mpi",
+          "sha256": "df8e3064e6cad5ee5dbe6ecd3e6684c69d015f889e92ee1de81f7ef848d57427"
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_movingmesh",
+          "sha256": "c47a3ac45dec22462e2da9b666479c19e6888a6a565433d635381969604f8397"
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_movingmesh_mpi",
+          "sha256": "38fbb73675dffb429c46e57ced181ba84e69d726cc693fe603d44c65056a0937"
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_systems",
+          "sha256": "7471abf72f94df085a45ec4b3a3c80edb12e7a457b50ffe98ac9d1355205e17d"
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_timestepping",
+          "sha256": "bc6c85ed463618724ec6d9a8c43c89554595ee9d9cd38cbe704acecabba84239"
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_physics",
+          "sha256": "1e07d983955fa01d956e007257211d7507e9ce07ef9710bf33be73e181c8512d"
+        }
+      ],
       "build_parallelism": 4,
       "build_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build",
+      "build_resources": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/build.resources",
+        "sha256": "1aa80b3db9812c7efeb38ed83234e3761fc8934eef80c5d9a3115dd088817da1"
+      },
       "cpus_per_task": 2,
       "eigen": "ON",
+      "groups": [
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "-n",
+            "1",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_movingmesh"
+          ],
+          "exit_code": 0,
+          "id": "FE_MovingMesh_Tests",
+          "launch_resources": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_MovingMesh_Tests/resources.txt",
+            "sha256": "e607892745258f6ae18d4f6306157fd3bff79bd16f3be4e904a15fad2e9a9776"
+          },
+          "output_log": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_MovingMesh_Tests/output.log",
+            "sha256": "4291440d1789dbf6b31439b6e2d3b3fde72099d2e563408735d3f1544b2cbe40"
+          },
+          "rank_results": [
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 16,
+                "selected": 16,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_MovingMesh_Tests/rank-0.identity",
+                "sha256": "2bed50cfbadfa349d30d76979d4fbf424481f594eb6778c49c774d47fc55a312"
+              },
+              "rank": 0,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_MovingMesh_Tests/rank-0.xml",
+                "sha256": "7e5857f61a98e1c2eefc5c9f52b93b7a5533dde2b279c11c1b4482d8145e9e7b"
+              }
+            }
+          ],
+          "ranks": 1
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "-n",
+            "1",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_geometry"
+          ],
+          "exit_code": 0,
+          "id": "FE_Geometry_Tests",
+          "launch_resources": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Geometry_Tests/resources.txt",
+            "sha256": "1510ab2d5b47b9d1497a4649643830e5b06739c9702a37f47fe1477722d3569c"
+          },
+          "output_log": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Geometry_Tests/output.log",
+            "sha256": "1b870dfc7f66e5759049dc8771b4df6a1ae7bfb0a88a793c1d22e20244fa68f0"
+          },
+          "rank_results": [
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 274,
+                "selected": 274,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Geometry_Tests/rank-0.identity",
+                "sha256": "2bed50cfbadfa349d30d76979d4fbf424481f594eb6778c49c774d47fc55a312"
+              },
+              "rank": 0,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Geometry_Tests/rank-0.xml",
+                "sha256": "77a2d5cf33ebc388d918214ac6203cc50d03b34ec1568095314a01ef773ba800"
+              }
+            }
+          ],
+          "ranks": 1
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "-n",
+            "1",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_levelset"
+          ],
+          "exit_code": 0,
+          "id": "FE_LevelSet_Tests",
+          "launch_resources": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_LevelSet_Tests/resources.txt",
+            "sha256": "e65b84f353b5a1e7e6b136cbefb32cc1e8af60129c01a4c24e4afecd0f35781a"
+          },
+          "output_log": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_LevelSet_Tests/output.log",
+            "sha256": "5a2d8207583946fa7fe3735461553e28cdbb1399028f1557a7391503fa0e5cdc"
+          },
+          "rank_results": [
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 335,
+                "selected": 336,
+                "skipped": 1
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_LevelSet_Tests/rank-0.identity",
+                "sha256": "2bed50cfbadfa349d30d76979d4fbf424481f594eb6778c49c774d47fc55a312"
+              },
+              "rank": 0,
+              "skipped_cases": [
+                {
+                  "case": "RunsOneExplicitReleaseMatrixPoint",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/LevelSet/test_LevelSetConservativePhaseBenchmarks.cpp:2066\nSet the five release-matrix environment variables to run one scheduled qualification point.\n",
+                  "suite": "LevelSetConservativePhaseQualification"
+                }
+              ],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_LevelSet_Tests/rank-0.xml",
+                "sha256": "1d985188b6ab4aba5f2ef8c818ced58ebf315a7bb2d89d5f100192adece782c9"
+              }
+            }
+          ],
+          "ranks": 1
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "-n",
+            "1",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_constraints"
+          ],
+          "exit_code": 0,
+          "id": "FE_Constraints_Tests",
+          "launch_resources": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Constraints_Tests/resources.txt",
+            "sha256": "fca159fda7d268501519198c1c1b0f8de912e895462531611d98485f0421990e"
+          },
+          "output_log": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Constraints_Tests/output.log",
+            "sha256": "51c2572eae7e3e6a13df01ec22242f6041d42c03eff9dabc9eab94c7fe7d8ec8"
+          },
+          "rank_results": [
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 273,
+                "selected": 273,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Constraints_Tests/rank-0.identity",
+                "sha256": "2bed50cfbadfa349d30d76979d4fbf424481f594eb6778c49c774d47fc55a312"
+              },
+              "rank": 0,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Constraints_Tests/rank-0.xml",
+                "sha256": "e82bb4c1fed681a6a3475cbd041a0ea9ccaee9df63bfc66ead7df4f8745acc44"
+              }
+            }
+          ],
+          "ranks": 1
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "-n",
+            "1",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_forms"
+          ],
+          "exit_code": 0,
+          "id": "FE_Forms_Tests",
+          "launch_resources": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Forms_Tests/resources.txt",
+            "sha256": "5dcc9ac55089b8ca53105317fc3f8b3cf602392e9996bb107293dd2325f6d2da"
+          },
+          "output_log": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Forms_Tests/output.log",
+            "sha256": "1119cce139b926f382646f96b2589b09acfcbfd4c807a48a1383d47b2075cbda"
+          },
+          "rank_results": [
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 767,
+                "selected": 785,
+                "skipped": 18
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Forms_Tests/rank-0.identity",
+                "sha256": "2bed50cfbadfa349d30d76979d4fbf424481f594eb6778c49c774d47fc55a312"
+              },
+              "rank": 0,
+              "skipped_cases": [
+                {
+                  "case": "CacheHitAtLeast100xFasterThanCompile",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_CacheRegression.cpp:28\nSet SVMP_FE_RUN_PERF_TESTS=1 to enable\n",
+                  "suite": "JITCacheRegression"
+                },
+                {
+                  "case": "CacheKeyDifferentiatesDistinctFunctionalIntegrands",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_CacheRegression.cpp:84\nSet SVMP_FE_RUN_PERF_TESTS=1 to enable\n",
+                  "suite": "JITCacheRegression"
+                },
+                {
+                  "case": "SimplePoissonBilinearCompilesUnder100ms",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_CompilationLatency.cpp:28\nSet SVMP_FE_RUN_PERF_TESTS=1 to enable\n",
+                  "suite": "JITCompilationLatency"
+                },
+                {
+                  "case": "ComplexNonlinearWithMatrixFunctionsCompilesUnder200ms",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_CompilationLatency.cpp:74\nSet SVMP_FE_RUN_PERF_TESTS=1 to enable\n",
+                  "suite": "JITCompilationLatency"
+                },
+                {
+                  "case": "BoundaryAssembly_JITNotMuchSlowerThanInterpreter",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_FacePerformance.cpp:34\nSet SVMP_FE_RUN_PERF_TESTS=1 to enable\n",
+                  "suite": "JITPerformanceRegression"
+                },
+                {
+                  "case": "DGInteriorFaceAssembly_JITNotMuchSlowerThanInterpreter",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_FacePerformance.cpp:113\nSet SVMP_FE_RUN_PERF_TESTS=1 to enable\n",
+                  "suite": "JITPerformanceRegression"
+                },
+                {
+                  "case": "NonlinearAssembly_JITAtLeast1p5xFasterThanAD",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_NonlinearPerformance.cpp:47\nSet SVMP_FE_RUN_PERF_TESTS=1 to enable\n",
+                  "suite": "JITPerformanceRegression"
+                },
+                {
+                  "case": "SymbolicJacobian_JITFasterThanAD",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_NonlinearPerformance.cpp:137\nSet SVMP_FE_RUN_PERF_TESTS=1 to enable\n",
+                  "suite": "JITPerformanceRegression"
+                },
+                {
+                  "case": "CellAssembly_JITAtLeast2xFasterThanInterpreter",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_PerformanceRegression.cpp:50\nSet SVMP_FE_RUN_PERF_TESTS=1 to enable\n",
+                  "suite": "JITPerformanceRegression"
+                },
+                {
+                  "case": "HighOrderP3_JITAtLeast4xFasterThanInterpreter",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_PerformanceRegression.cpp:128\nSet SVMP_FE_RUN_PERF_TESTS=1 to enable\n",
+                  "suite": "JITPerformanceRegression"
+                },
+                {
+                  "case": "TensorContraction_JITAtLeast3xFasterThanInterpreter",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_TensorContractionPerformance.cpp:64\nSet SVMP_FE_RUN_PERF_TESTS=1 to enable\n",
+                  "suite": "JITPerformanceRegression"
+                },
+                {
+                  "case": "MatrixFunctions_JITNotSlowerThanInterpreter",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_MatrixFunctionPerformance.cpp:49\nSet SVMP_FE_RUN_PERF_TESTS=1 to enable\n",
+                  "suite": "JITMatrixFunctionPerformance"
+                },
+                {
+                  "case": "VectorizedKernelFasterOrEqualToScalar",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_Vectorization.cpp:184\nSet SVMP_FE_RUN_PERF_TESTS=1 to enable\n",
+                  "suite": "JITVectorization"
+                },
+                {
+                  "case": "OptimizedIRContainsVectorTypesWhenVectorizeEnabled",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_Vectorization.cpp:262\nSet SVMP_FE_RUN_PERF_TESTS=1 to enable\n",
+                  "suite": "JITVectorization"
+                },
+                {
+                  "case": "MultiElementCellAssembly_JITAtLeast1p2xFasterThanInterpreter",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_Scaling.cpp:142\nSet SVMP_FE_RUN_PERF_TESTS=1 to enable\n",
+                  "suite": "JITScaling"
+                },
+                {
+                  "case": "SpecializedNotMuchSlowerThanGeneric",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_SpecializationPerformance.cpp:49\nSet SVMP_FE_RUN_PERF_TESTS=1 to enable\n",
+                  "suite": "JITSpecializationPerformance"
+                },
+                {
+                  "case": "ObjectCacheSecondCompilerFasterThanColdCompile",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_DiskCache.cpp:59\nSet SVMP_FE_RUN_PERF_TESTS=1 to enable\n",
+                  "suite": "JITDiskCache"
+                },
+                {
+                  "case": "PeakRssIncreaseUnderConfiguredBound",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_MemoryOverhead.cpp:67\nSet SVMP_FE_RUN_PERF_TESTS=1 to enable\n",
+                  "suite": "JITMemoryOverhead"
+                }
+              ],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Forms_Tests/rank-0.xml",
+                "sha256": "082a9b79bc0e6580661e8a4bf35054ffde950a39403a3e790d8d5ef5acb61c4f"
+              }
+            }
+          ],
+          "ranks": 1
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "-n",
+            "1",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_assembly"
+          ],
+          "exit_code": 0,
+          "id": "FE_Assembly_Tests",
+          "launch_resources": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Assembly_Tests/resources.txt",
+            "sha256": "f93d8417b72c5ee25b27011f044439971d73b7f2c917e3dd3d21b36362c1e7ed"
+          },
+          "output_log": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Assembly_Tests/output.log",
+            "sha256": "2ff917874461a41b95cddf4e4d7b59e88b7f8db06a572150509f1e90e8f988cf"
+          },
+          "rank_results": [
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 784,
+                "selected": 792,
+                "skipped": 8
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Assembly_Tests/rank-0.identity",
+                "sha256": "2bed50cfbadfa349d30d76979d4fbf424481f594eb6778c49c774d47fc55a312"
+              },
+              "rank": 0,
+              "skipped_cases": [
+                {
+                  "case": "VeryLargeMatrixConstructionOptional",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Assembly/test_GlobalSystemView.cpp:172\nSet SVMP_FE_RUN_STRESS_TESTS=1 to enable\n",
+                  "suite": "DenseMatrixViewStress"
+                },
+                {
+                  "case": "SingleNodePoint1IfSupported",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:5236\nPoint1 element path not supported: [FE Exception] Unknown error\n  Location: /scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Geometry/FrameGeometry.cpp:733 in scaleConditionedInverse()\n  Message: FrameGeometry: invalid Jacobian column scale\n\n",
+                  "suite": "StandardAssemblerEdgeCases"
+                },
+                {
+                  "case": "TwoRankGhostExchange",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Assembly/test_GhostContributionManager.cpp:544\nMPI not initialized\n",
+                  "suite": "GhostContributionManagerMPITest"
+                },
+                {
+                  "case": "MultiRankGhostExchange",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Assembly/test_GhostContributionManager.cpp:631\nMPI not initialized\n",
+                  "suite": "GhostContributionManagerMPITest"
+                },
+                {
+                  "case": "LargeMessageHandling",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Assembly/test_GhostContributionManager.cpp:698\nMPI not initialized\n",
+                  "suite": "GhostContributionManagerMPITest"
+                },
+                {
+                  "case": "CUDABackendKernelLaunchIfAvailable",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Assembly/test_DeviceAssembler.cpp:809\nCUDA backend not compiled\n",
+                  "suite": "DeviceAssemblerGPUTest"
+                },
+                {
+                  "case": "HIPBackendKernelLaunchIfAvailable",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Assembly/test_DeviceAssembler.cpp:820\nHIP backend not compiled\n",
+                  "suite": "DeviceAssemblerGPUTest"
+                },
+                {
+                  "case": "SYCLBackendKernelLaunchIfAvailable",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Assembly/test_DeviceAssembler.cpp:831\nSYCL backend not compiled\n",
+                  "suite": "DeviceAssemblerGPUTest"
+                }
+              ],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Assembly_Tests/rank-0.xml",
+                "sha256": "712199461cc3a8d0dc994b064050fc19aa3a4a90db1c37d995a1199ea722e979"
+              }
+            }
+          ],
+          "ranks": 1
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "-n",
+            "1",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_systems"
+          ],
+          "exit_code": 0,
+          "id": "FE_Systems_Tests",
+          "launch_resources": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Systems_Tests/resources.txt",
+            "sha256": "5c96ff042ccaba6dae8fbb4531e86d2fff9706aa073677dff4b1ffd5dbeeebb7"
+          },
+          "output_log": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Systems_Tests/output.log",
+            "sha256": "bcf6612e32cddb56e26d3f3097df8d5ca01824cb360ed7ef907a524397d39398"
+          },
+          "rank_results": [
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 594,
+                "selected": 595,
+                "skipped": 1
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Systems_Tests/rank-0.identity",
+                "sha256": "2bed50cfbadfa349d30d76979d4fbf424481f594eb6778c49c774d47fc55a312"
+              },
+              "rank": 0,
+              "skipped_cases": [
+                {
+                  "case": "OnMeshAdaptedCoverageRequiresMeshAdaptivity",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Systems/test_FEAdaptivityTransfer.cpp:466\nMESH_HAS_ADAPTIVITY is not enabled\n",
+                  "suite": "FEAdaptivityTransfer"
+                }
+              ],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_Systems_Tests/rank-0.xml",
+                "sha256": "d1434e70b518c10aecb016832778634263026f0a34052e0e24df3005deaf1928"
+              }
+            }
+          ],
+          "ranks": 1
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "-n",
+            "1",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_timestepping"
+          ],
+          "exit_code": 0,
+          "id": "FE_TimeStepping_Tests",
+          "launch_resources": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_TimeStepping_Tests/resources.txt",
+            "sha256": "fa2fa1a4e75621550e6df6c8fa1356aac0804f4106549f464f56763c80a26d43"
+          },
+          "output_log": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_TimeStepping_Tests/output.log",
+            "sha256": "c679100f1b4785289b228ffb39aacf5762a6b3f6419a6c8c837a90402d71e3fa"
+          },
+          "rank_results": [
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 262,
+                "selected": 263,
+                "skipped": 1
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_TimeStepping_Tests/rank-0.identity",
+                "sha256": "2bed50cfbadfa349d30d76979d4fbf424481f594eb6778c49c774d47fc55a312"
+              },
+              "rank": 0,
+              "skipped_cases": [
+                {
+                  "case": "MonolithicAuxiliaryConvergenceRequiresEachResidualComponent",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/TimeStepping/test_NewtonSolver.cpp:9183\nFixture did not produce a combined-relative gap for this backend/configuration\n",
+                  "suite": "NewtonSolver"
+                }
+              ],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/FE_TimeStepping_Tests/rank-0.xml",
+                "sha256": "10ba4bdb01f66d15fb886763b849b5f81e5453a456916d6cb821e2e09889196a"
+              }
+            }
+          ],
+          "ranks": 1
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "-n",
+            "1",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_physics",
+            "--gtest_filter=-FreeSurfaceCutStability.FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations"
+          ],
+          "exit_code": 0,
+          "id": "physics-serial",
+          "launch_resources": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/physics-serial/resources.txt",
+            "sha256": "78f34bafc7405f2a3b841843030e45cf673e2fdb8a9c55ed5308be5fc054cbe1"
+          },
+          "output_log": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/physics-serial/output.log",
+            "sha256": "336a9c10805d4c2d0df599b2e8dc91ce2d4da0e6ca4f9f460a07a09e6042fae4"
+          },
+          "rank_results": [
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 472,
+                "selected": 491,
+                "skipped": 19
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/physics-serial/rank-0.identity",
+                "sha256": "2bed50cfbadfa349d30d76979d4fbf424481f594eb6778c49c774d47fc55a312"
+              },
+              "rank": 0,
+              "skipped_cases": [
+                {
+                  "case": "DarcyNodePressureCsvSolvesWithInteriorConstraint",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_PoissonModule.cpp:1201\nThis test requires exactly 2 MPI ranks\n",
+                  "suite": "PoissonModuleMPI"
+                },
+                {
+                  "case": "DarcyNodePressureMissingGlobalGidFailsGlobally",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_PoissonModule.cpp:1300\nThis test requires exactly 2 MPI ranks\n",
+                  "suite": "PoissonModuleMPI"
+                },
+                {
+                  "case": "DirichletLeftRight_NeumannTopBottom_Linear_2Ranks",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_PoissonSquareSteady.cpp:1507\nThis test requires exactly 2 MPI ranks\n",
+                  "suite": "PoissonSquareSteadyMPI"
+                },
+                {
+                  "case": "GeneralVelocityFileMappingIsolatedToActiveCommunicator",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_NavierStokesLegacyBCs.cpp:1255\nThis test requires exactly two MPI ranks.\n",
+                  "suite": "NavierStokesLegacyBCsMPI"
+                },
+                {
+                  "case": "FittedALEOperatorStageHistoryCommitsCompleteGlobalMomentsAndRejectsRankDrift",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_SharpBoundaryOperatorMPI.cpp:4165\nrequires an MPI launch with exactly two ranks\n",
+                  "suite": "MovingDomainPhysicsMPI"
+                },
+                {
+                  "case": "MeshBoundaryHistoryRejectsRankDriftAndRollsBackCollectively",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_SharpBoundaryOperatorMPI.cpp:4377\nrequires an MPI launch with at least two ranks\n",
+                  "suite": "MovingDomainPhysicsMPI"
+                },
+                {
+                  "case": "GeneratedActiveCoupledOutflowReductionGradientAndTractionArePartitionIndependent",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_SharpBoundaryOperatorMPI.cpp:4629\nrequires an MPI launch with at least two ranks\n",
+                  "suite": "MovingDomainPhysicsMPI"
+                },
+                {
+                  "case": "StructuredChannelWorkIsInvariantUnderActualRepartition",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_SharpBoundaryOperatorMPI.cpp:4926\nrequires an MPI launch with at least two ranks\n",
+                  "suite": "FreeSurfaceSharpBoundaryOperatorsMPI"
+                },
+                {
+                  "case": "AdditionalPspgBoundaryFormsArePartitionIndependent",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_SharpBoundaryOperatorMPI.cpp:5088\nrequires an MPI launch with at least two ranks\n",
+                  "suite": "FreeSurfaceSharpBoundaryOperatorsMPI"
+                },
+                {
+                  "case": "OperatorWorkIsPartitionIndependent",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_SharpBoundaryOperatorMPI.cpp:5420\nrequires an MPI launch with at least two ranks\n",
+                  "suite": "FreeSurfaceSharpBoundaryOperatorsMPI"
+                },
+                {
+                  "case": "WetFractionSweepIsOwnershipUniqueAndPartitionIndependent",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_SharpBoundaryOperatorMPI.cpp:5284\nrequires an MPI launch with at least two ranks\n",
+                  "suite": "GeneratedActiveBoundaryDomainMPI"
+                },
+                {
+                  "case": "TwoFluidPhaseIdentityIsInvariantAcrossSideAndPartitionChanges",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp:13166\nThis test requires exactly two MPI ranks.\n",
+                  "suite": "FreeSurfaceCutStabilityMPI"
+                },
+                {
+                  "case": "TwoFluidAcceptedStageHistoryRejectsRankDivergence",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp:13329\nThis test requires exactly two MPI ranks.\n",
+                  "suite": "FreeSurfaceCutStabilityMPI"
+                },
+                {
+                  "case": "PhysicalWetBlocksAndDisconnectedIslandsAreInvariantAcrossDryMPIData",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp:13679\nThis test requires exactly two MPI ranks.\n",
+                  "suite": "FreeSurfaceCutStabilityMPI"
+                },
+                {
+                  "case": "FourRankFixedCutIsInvariantAcrossBlockAndMetisPartitions",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp:13861\nThis test requires exactly four MPI ranks.\n",
+                  "suite": "FreeSurfaceCutStabilityMPI"
+                },
+                {
+                  "case": "TwoRankFractionOrientationRegimeMatrixMatchesSerial",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp:13997\nThis test requires exactly two MPI ranks.\n",
+                  "suite": "FreeSurfaceCutStabilityMPI"
+                },
+                {
+                  "case": "FourRankFractionOrientationRegimeMatrixMatchesSerial",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp:14018\nThis test requires exactly four MPI ranks.\n",
+                  "suite": "FreeSurfaceCutStabilityMPI"
+                },
+                {
+                  "case": "LimitedMetisHaloFailsClosedOnIncompleteAggregationSupport",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp:14042\nThis test requires exactly two MPI ranks.\n",
+                  "suite": "FreeSurfaceCutStabilityMPI"
+                },
+                {
+                  "case": "DistributedMovingCutRemainsStableAcrossBlockAndMetisPartitions",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp:14099\nThis test requires exactly two MPI ranks.\n",
+                  "suite": "FreeSurfaceCutStabilityMPI"
+                }
+              ],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/physics-serial/rank-0.xml",
+                "sha256": "380024668082c5a7196c0588a50f099a4bc396fce1c8e29c8e54170e8a13cf3d"
+              }
+            }
+          ],
+          "ranks": 1
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "-n",
+            "1",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_application"
+          ],
+          "exit_code": 0,
+          "id": "application-serial",
+          "launch_resources": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/application-serial/resources.txt",
+            "sha256": "6ca773c15776ccad19bf9af851e0859d6cedaf2f17b553c216138f25796b74ed"
+          },
+          "output_log": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/application-serial/output.log",
+            "sha256": "d1c18990dfaca13faf6554dc6a5ba2e880000d46e2216294f16b2178b2b1658f"
+          },
+          "rank_results": [
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 310,
+                "selected": 310,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/application-serial/rank-0.identity",
+                "sha256": "2bed50cfbadfa349d30d76979d4fbf424481f594eb6778c49c774d47fc55a312"
+              },
+              "rank": 0,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/application-serial/rank-0.xml",
+                "sha256": "c969e26dc4814a04ef6bcc821561e6a1e53bc60aef02544acb3ee7f7560fcd71"
+              }
+            }
+          ],
+          "ranks": 1
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "-n",
+            "2",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_application_mpi",
+            "--gtest_filter=LevelSetMaintenanceTransactionConsensusMPI.TwoRankCommitRejectAndContentRevisionAgreement"
+          ],
+          "exit_code": 0,
+          "id": "Application_LevelSetMaintenanceConsensus_MPI_2",
+          "launch_resources": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_2/resources.txt",
+            "sha256": "38b0af763b2bffaa336537ada2420b77a63b38655e49c7dd20bc6394f7fac2cf"
+          },
+          "output_log": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_2/output.log",
+            "sha256": "54b1cda19335828eb99836f8ae29b716c3c0b8d3954c7867f1d869705cada038"
+          },
+          "rank_results": [
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 1,
+                "selected": 1,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_2/rank-0.identity",
+                "sha256": "2bed50cfbadfa349d30d76979d4fbf424481f594eb6778c49c774d47fc55a312"
+              },
+              "rank": 0,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_2/rank-0.xml",
+                "sha256": "5b5b627c27b82362207b9d1070888719e58d6a82faf89e6c33b89ccd018ee837"
+              }
+            },
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 1,
+                "selected": 1,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_2/rank-1.identity",
+                "sha256": "619ea403604e3d44d58453736cf5c629566dd0a684a9f7ffc1511b93a522ce59"
+              },
+              "rank": 1,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_2/rank-1.xml",
+                "sha256": "3d5fa4b475d84eedf3faed12150fd5ca1406cb976b31b7f3ce35012e485c68eb"
+              }
+            }
+          ],
+          "ranks": 2
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "-n",
+            "4",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_application_mpi",
+            "--gtest_filter=LevelSetMaintenanceTransactionConsensusMPI.FourRankCommitRejectAndContentRevisionAgreement"
+          ],
+          "exit_code": 0,
+          "id": "Application_LevelSetMaintenanceConsensus_MPI_4",
+          "launch_resources": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_4/resources.txt",
+            "sha256": "593ee50a6772644bdf23ad604dcc561f6fbf300a3856212e6533b0ad225bc703"
+          },
+          "output_log": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_4/output.log",
+            "sha256": "4b2c2d0f7ea3d2ceed1dd94ee8dd0e419607f34ea6543a1b937d3b81601673e8"
+          },
+          "rank_results": [
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 1,
+                "selected": 1,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_4/rank-0.identity",
+                "sha256": "2bed50cfbadfa349d30d76979d4fbf424481f594eb6778c49c774d47fc55a312"
+              },
+              "rank": 0,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_4/rank-0.xml",
+                "sha256": "ad2de7af301bbef02a1a9601a03dfb70f4c0672ccadaa56bd7371a666127587f"
+              }
+            },
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 1,
+                "selected": 1,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_4/rank-1.identity",
+                "sha256": "619ea403604e3d44d58453736cf5c629566dd0a684a9f7ffc1511b93a522ce59"
+              },
+              "rank": 1,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_4/rank-1.xml",
+                "sha256": "ad2de7af301bbef02a1a9601a03dfb70f4c0672ccadaa56bd7371a666127587f"
+              }
+            },
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 1,
+                "selected": 1,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_4/rank-2.identity",
+                "sha256": "6da623a2daf13b8d8589950ef3c8b8e41f1277f40234020a82d7231606120649"
+              },
+              "rank": 2,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_4/rank-2.xml",
+                "sha256": "ad2de7af301bbef02a1a9601a03dfb70f4c0672ccadaa56bd7371a666127587f"
+              }
+            },
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 1,
+                "selected": 1,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_4/rank-3.identity",
+                "sha256": "e922eacca4ac26062f9dddeb77897e906648bb9a47a80d965e663312315f0661"
+              },
+              "rank": 3,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Application_LevelSetMaintenanceConsensus_MPI_4/rank-3.xml",
+                "sha256": "ad2de7af301bbef02a1a9601a03dfb70f4c0672ccadaa56bd7371a666127587f"
+              }
+            }
+          ],
+          "ranks": 4
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "-np",
+            "2",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_physics",
+            "--gtest_filter=GeneratedActiveBoundaryDomainMPI.WetFractionSweepIsOwnershipUniqueAndPartitionIndependent:FreeSurfaceSharpBoundaryOperatorsMPI.OperatorWorkIsPartitionIndependent:FreeSurfaceSharpBoundaryOperatorsMPI.StructuredChannelWorkIsInvariantUnderActualRepartition"
+          ],
+          "exit_code": 0,
+          "id": "Physics_FreeSurfaceSharpBoundary_MPI_2",
+          "launch_resources": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Physics_FreeSurfaceSharpBoundary_MPI_2/resources.txt",
+            "sha256": "48e2ddefc1b1c3192d5f04e800a3156b7c60181fc0c0e89edc8537d9f6a8f234"
+          },
+          "output_log": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Physics_FreeSurfaceSharpBoundary_MPI_2/output.log",
+            "sha256": "450e94fbb5f8f47bd2085797c5a684c3a511403af535e94fda54fc7ea7ba2e9c"
+          },
+          "rank_results": [
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 3,
+                "selected": 3,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Physics_FreeSurfaceSharpBoundary_MPI_2/rank-0.identity",
+                "sha256": "2bed50cfbadfa349d30d76979d4fbf424481f594eb6778c49c774d47fc55a312"
+              },
+              "rank": 0,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Physics_FreeSurfaceSharpBoundary_MPI_2/rank-0.xml",
+                "sha256": "b8d09f904d6ad2d9c4a2b4d4a877ca81867b17d79496e43e5d047673cf5bb332"
+              }
+            },
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 3,
+                "selected": 3,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Physics_FreeSurfaceSharpBoundary_MPI_2/rank-1.identity",
+                "sha256": "619ea403604e3d44d58453736cf5c629566dd0a684a9f7ffc1511b93a522ce59"
+              },
+              "rank": 1,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/Physics_FreeSurfaceSharpBoundary_MPI_2/rank-1.xml",
+                "sha256": "720b0c54f4f264e9f13b954a040d89ca869d3198ffbc91ed90e1a3902dbaa484"
+              }
+            }
+          ],
+          "ranks": 2
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "-np",
+            "2",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_movingmesh_mpi"
+          ],
+          "exit_code": 0,
+          "id": "test_fe_movingmesh_mpi_mpi_2",
+          "launch_resources": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_movingmesh_mpi_mpi_2/resources.txt",
+            "sha256": "e3c15450b76073c036bade4152ef81a98d2ff20269c95ff8f7f4aaa93dcada94"
+          },
+          "output_log": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_movingmesh_mpi_mpi_2/output.log",
+            "sha256": "0b87e076a2a26d8a8257e09865997df56e364365876c194c33606d0496c7733a"
+          },
+          "rank_results": [
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 2,
+                "selected": 2,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_movingmesh_mpi_mpi_2/rank-0.identity",
+                "sha256": "2bed50cfbadfa349d30d76979d4fbf424481f594eb6778c49c774d47fc55a312"
+              },
+              "rank": 0,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_movingmesh_mpi_mpi_2/rank-0.xml",
+                "sha256": "430bbc97bbe59f73ad6198b36925495eb12c8a8833788c21dda47947e2648be9"
+              }
+            },
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 2,
+                "selected": 2,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_movingmesh_mpi_mpi_2/rank-1.identity",
+                "sha256": "619ea403604e3d44d58453736cf5c629566dd0a684a9f7ffc1511b93a522ce59"
+              },
+              "rank": 1,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_movingmesh_mpi_mpi_2/rank-1.xml",
+                "sha256": "58cdc50939752dc26a14c3f7eb724251e63fec1dfd15d483e73b29f28f1899a1"
+              }
+            }
+          ],
+          "ranks": 2
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "-np",
+            "2",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_constraints_mpi"
+          ],
+          "exit_code": 0,
+          "id": "test_fe_constraints_mpi_mpi_2",
+          "launch_resources": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_constraints_mpi_mpi_2/resources.txt",
+            "sha256": "6c47454b97e78e91b93e160618c8fe1706c2a9c44dd04d7a28ec9e6f90cca06d"
+          },
+          "output_log": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_constraints_mpi_mpi_2/output.log",
+            "sha256": "f0968b5e3cbd41d489533e09243b9586d63e6029b5f75e76d3a5e7c78303a9c8"
+          },
+          "rank_results": [
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 25,
+                "selected": 26,
+                "skipped": 1
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_constraints_mpi_mpi_2/rank-0.identity",
+                "sha256": "2bed50cfbadfa349d30d76979d4fbf424481f594eb6778c49c774d47fc55a312"
+              },
+              "rank": 0,
+              "skipped_cases": [
+                {
+                  "case": "SplitSubcommunicatorsDoNotCrossContaminateAggregation",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Constraints/test_SmallCutAggregationConstraintMPI.cpp:2304\nRun with exactly four MPI ranks\n",
+                  "suite": "SmallCutAggregationConstraintMPI"
+                }
+              ],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_constraints_mpi_mpi_2/rank-0.xml",
+                "sha256": "c57cd308b464750ccea6024e64287e9cb9d1d1762023314cbd438642dc7e0210"
+              }
+            },
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 25,
+                "selected": 26,
+                "skipped": 1
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_constraints_mpi_mpi_2/rank-1.identity",
+                "sha256": "619ea403604e3d44d58453736cf5c629566dd0a684a9f7ffc1511b93a522ce59"
+              },
+              "rank": 1,
+              "skipped_cases": [
+                {
+                  "case": "SplitSubcommunicatorsDoNotCrossContaminateAggregation",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Constraints/test_SmallCutAggregationConstraintMPI.cpp:2304\nRun with exactly four MPI ranks\n",
+                  "suite": "SmallCutAggregationConstraintMPI"
+                }
+              ],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_constraints_mpi_mpi_2/rank-1.xml",
+                "sha256": "ffa3240f8df4ef1ebcec259f21bbc7d55727ca07b7fa5d180a52ced05f8d6bba"
+              }
+            }
+          ],
+          "ranks": 2
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "-np",
+            "2",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_assembly_mpi"
+          ],
+          "exit_code": 0,
+          "id": "test_fe_assembly_mpi_mpi_2",
+          "launch_resources": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_assembly_mpi_mpi_2/resources.txt",
+            "sha256": "bc8f11786e44529a94dc52402e9a21bce6bed450ea3d5dc22edc9658a856121d"
+          },
+          "output_log": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_assembly_mpi_mpi_2/output.log",
+            "sha256": "9763e08dca5daf78892f5fa7a873cd47919d763fd3bdbe3b71fd189ae2213978"
+          },
+          "rank_results": [
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 59,
+                "selected": 62,
+                "skipped": 3
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_assembly_mpi_mpi_2/rank-0.identity",
+                "sha256": "2bed50cfbadfa349d30d76979d4fbf424481f594eb6778c49c774d47fc55a312"
+              },
+              "rank": 0,
+              "skipped_cases": [
+                {
+                  "case": "AnalysisAndPreSetupRegistrationUseSystemSubcommunicator",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Assembly/test_FESystemSerialParallelEquivalenceMPI.cpp:597\nThis split-communicator regression requires exactly 4 MPI ranks\n",
+                  "suite": "FESystemSerialParallelEquivalenceMPI"
+                },
+                {
+                  "case": "RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedContactMeasureMPI.cpp:1642\nsnapshot trajectory qualification requires one rank\n",
+                  "suite": "GeneratedContactMeasureMPI"
+                },
+                {
+                  "case": "ConcurrentSplitSubcommunicatorsIsolateNewtonCollectives",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Assembly/test_TimeLoopFsilsConvergenceMPI.cpp:2669\nRun with exactly 4 MPI ranks to enable this test\n",
+                  "suite": "TimeLoopFsilsConvergenceMPI"
+                }
+              ],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_assembly_mpi_mpi_2/rank-0.xml",
+                "sha256": "fc85fb3c6f378e033ac8097802b37d46fcc96b79a724060f2f3c35a5f8ca25fd"
+              }
+            },
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 59,
+                "selected": 62,
+                "skipped": 3
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_assembly_mpi_mpi_2/rank-1.identity",
+                "sha256": "619ea403604e3d44d58453736cf5c629566dd0a684a9f7ffc1511b93a522ce59"
+              },
+              "rank": 1,
+              "skipped_cases": [
+                {
+                  "case": "AnalysisAndPreSetupRegistrationUseSystemSubcommunicator",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Assembly/test_FESystemSerialParallelEquivalenceMPI.cpp:597\nThis split-communicator regression requires exactly 4 MPI ranks\n",
+                  "suite": "FESystemSerialParallelEquivalenceMPI"
+                },
+                {
+                  "case": "RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedContactMeasureMPI.cpp:1642\nsnapshot trajectory qualification requires one rank\n",
+                  "suite": "GeneratedContactMeasureMPI"
+                },
+                {
+                  "case": "ConcurrentSplitSubcommunicatorsIsolateNewtonCollectives",
+                  "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/Assembly/test_TimeLoopFsilsConvergenceMPI.cpp:2669\nRun with exactly 4 MPI ranks to enable this test\n",
+                  "suite": "TimeLoopFsilsConvergenceMPI"
+                }
+              ],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_assembly_mpi_mpi_2/rank-1.xml",
+                "sha256": "c66c31e67c57cd78bb71d35375ca90b0b03a5511e1f3f03719d5cab75b9492b0"
+              }
+            }
+          ],
+          "ranks": 2
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "-np",
+            "2",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_levelset_mpi"
+          ],
+          "exit_code": 0,
+          "id": "test_fe_levelset_mpi_mpi_2",
+          "launch_resources": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_levelset_mpi_mpi_2/resources.txt",
+            "sha256": "4b23a7d1faf337938fc6833e7580248471f060de1ead16d40dbb15ad777e638f"
+          },
+          "output_log": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_levelset_mpi_mpi_2/output.log",
+            "sha256": "f1d91b13f59f662fd6ccde5103896d26eec05253ed792ae8f1c7a486cfa79693"
+          },
+          "rank_results": [
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 19,
+                "selected": 19,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_levelset_mpi_mpi_2/rank-0.identity",
+                "sha256": "2bed50cfbadfa349d30d76979d4fbf424481f594eb6778c49c774d47fc55a312"
+              },
+              "rank": 0,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_levelset_mpi_mpi_2/rank-0.xml",
+                "sha256": "0b0810e030fe80b3daadef233f68653bcd7273fe9a30a3f1f3a43c94e8208c27"
+              }
+            },
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 19,
+                "selected": 19,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_levelset_mpi_mpi_2/rank-1.identity",
+                "sha256": "619ea403604e3d44d58453736cf5c629566dd0a684a9f7ffc1511b93a522ce59"
+              },
+              "rank": 1,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/test_fe_levelset_mpi_mpi_2/rank-1.xml",
+                "sha256": "0b0810e030fe80b3daadef233f68653bcd7273fe9a30a3f1f3a43c94e8208c27"
+              }
+            }
+          ],
+          "ranks": 2
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "-n",
+            "4",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_constraints_mpi",
+            "--gtest_filter=SmallCutAggregationConstraintMPI.SplitSubcommunicatorsDoNotCrossContaminateAggregation"
+          ],
+          "exit_code": 0,
+          "id": "constraints-four-rank-ownership",
+          "launch_resources": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/constraints-four-rank-ownership/resources.txt",
+            "sha256": "39a789088f8998682f3ae93da25b470ad0af9a67c00b4d56c6af59aa865253be"
+          },
+          "output_log": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/constraints-four-rank-ownership/output.log",
+            "sha256": "ed840e1a672f0e2410273ada1f182150a7c3f4df53a81977bcdff2953c5c3afc"
+          },
+          "rank_results": [
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 1,
+                "selected": 1,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/constraints-four-rank-ownership/rank-0.identity",
+                "sha256": "2bed50cfbadfa349d30d76979d4fbf424481f594eb6778c49c774d47fc55a312"
+              },
+              "rank": 0,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/constraints-four-rank-ownership/rank-0.xml",
+                "sha256": "737e34c931dd9e01abaa3743f6524d05240ab4895cc1b040201752e2cc5c7e72"
+              }
+            },
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 1,
+                "selected": 1,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/constraints-four-rank-ownership/rank-1.identity",
+                "sha256": "619ea403604e3d44d58453736cf5c629566dd0a684a9f7ffc1511b93a522ce59"
+              },
+              "rank": 1,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/constraints-four-rank-ownership/rank-1.xml",
+                "sha256": "737e34c931dd9e01abaa3743f6524d05240ab4895cc1b040201752e2cc5c7e72"
+              }
+            },
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 1,
+                "selected": 1,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/constraints-four-rank-ownership/rank-2.identity",
+                "sha256": "6da623a2daf13b8d8589950ef3c8b8e41f1277f40234020a82d7231606120649"
+              },
+              "rank": 2,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/constraints-four-rank-ownership/rank-2.xml",
+                "sha256": "e364b4b88d54e724780ec741904b7092701ea7b60b990c6b8b2c70b5d9044e25"
+              }
+            },
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 1,
+                "selected": 1,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/constraints-four-rank-ownership/rank-3.identity",
+                "sha256": "e922eacca4ac26062f9dddeb77897e906648bb9a47a80d965e663312315f0661"
+              },
+              "rank": 3,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/constraints-four-rank-ownership/rank-3.xml",
+                "sha256": "737e34c931dd9e01abaa3743f6524d05240ab4895cc1b040201752e2cc5c7e72"
+              }
+            }
+          ],
+          "ranks": 4
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "-n",
+            "4",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_assembly_mpi",
+            "--gtest_filter=FESystemSerialParallelEquivalenceMPI.AnalysisAndPreSetupRegistrationUseSystemSubcommunicator:TimeLoopFsilsConvergenceMPI.ConcurrentSplitSubcommunicatorsIsolateNewtonCollectives"
+          ],
+          "exit_code": 0,
+          "id": "assembly-four-rank-ownership",
+          "launch_resources": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-four-rank-ownership/resources.txt",
+            "sha256": "83db2cbbc1550eed2d27800ab59afaa61aeab3b7d4405d1862fa09ee4e659743"
+          },
+          "output_log": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-four-rank-ownership/output.log",
+            "sha256": "ffa0f188d3970e9f3ac91ad5162d8d1a371260a10c0752ed703e6d76ce7952f2"
+          },
+          "rank_results": [
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 2,
+                "selected": 2,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-four-rank-ownership/rank-0.identity",
+                "sha256": "2bed50cfbadfa349d30d76979d4fbf424481f594eb6778c49c774d47fc55a312"
+              },
+              "rank": 0,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-four-rank-ownership/rank-0.xml",
+                "sha256": "f297416b22bddd210db6fadaf7326bf899829825ad8f0ffee6a98f9890b0f024"
+              }
+            },
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 2,
+                "selected": 2,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-four-rank-ownership/rank-1.identity",
+                "sha256": "619ea403604e3d44d58453736cf5c629566dd0a684a9f7ffc1511b93a522ce59"
+              },
+              "rank": 1,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-four-rank-ownership/rank-1.xml",
+                "sha256": "f297416b22bddd210db6fadaf7326bf899829825ad8f0ffee6a98f9890b0f024"
+              }
+            },
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 2,
+                "selected": 2,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-four-rank-ownership/rank-2.identity",
+                "sha256": "6da623a2daf13b8d8589950ef3c8b8e41f1277f40234020a82d7231606120649"
+              },
+              "rank": 2,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-four-rank-ownership/rank-2.xml",
+                "sha256": "fa291e7e491a5948f0098fbe9b54c4410a8d5a238c07604e661b05908ded8636"
+              }
+            },
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 2,
+                "selected": 2,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-four-rank-ownership/rank-3.identity",
+                "sha256": "e922eacca4ac26062f9dddeb77897e906648bb9a47a80d965e663312315f0661"
+              },
+              "rank": 3,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-four-rank-ownership/rank-3.xml",
+                "sha256": "7711804534bb761b6e2dab3bd77986ae3898dbe67443268cfea28a7c6779f9a2"
+              }
+            }
+          ],
+          "ranks": 4
+        },
+        {
+          "command": [
+            "/share/software/user/open/openmpi/4.1.2/bin/mpiexec",
+            "-n",
+            "1",
+            "/bin/bash",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-gtest-rank.sh",
+            "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/bin/test_fe_assembly_mpi",
+            "--gtest_filter=GeneratedContactMeasureMPI.RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic"
+          ],
+          "exit_code": 0,
+          "id": "assembly-one-rank-snapshot",
+          "launch_resources": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-one-rank-snapshot/resources.txt",
+            "sha256": "905cf04b709ac8b19397b1064bda83e2ad034d486008e9de57125caafe6aa555"
+          },
+          "output_log": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-one-rank-snapshot/output.log",
+            "sha256": "8e091c19e8fec59e939269bc397f97541e308e114f83a801d00f239fa5be2683"
+          },
+          "rank_results": [
+            {
+              "counts": {
+                "failed": 0,
+                "passed": 1,
+                "selected": 1,
+                "skipped": 0
+              },
+              "identity": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-one-rank-snapshot/rank-0.identity",
+                "sha256": "2bed50cfbadfa349d30d76979d4fbf424481f594eb6778c49c774d47fc55a312"
+              },
+              "rank": 0,
+              "skipped_cases": [],
+              "xml": {
+                "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/assembly-one-rank-snapshot/rank-0.xml",
+                "sha256": "b14a4ab48009802b6dd5fa9d64bbb4294bd6384a9526e5046a4f2c8530cd6f93"
+              }
+            }
+          ],
+          "ranks": 1
+        }
+      ],
       "id": "enabled-features",
       "jit": "ON",
       "job_id": "42090895",
       "llvm": "17.0.6",
-      "outcome": "Build and execution pending; explicit serial/MPI launches and per-rank result validation are configured.",
+      "logical_group_counts": {
+        "failed": 0,
+        "passed": 4201,
+        "selected": 4253,
+        "skipped": 52
+      },
+      "outcome": "20 groups completed without failures. 4201 logical group passes/52 skips; 4322 per-rank passes/56 skips. Counts include declared repeat rank-layout groups, not unique test identities.",
+      "per_rank_counts": {
+        "failed": 0,
+        "passed": 4322,
+        "selected": 4378,
+        "skipped": 56
+      },
       "requested_memory_mib": 32000,
       "requested_nodes": 1,
       "result_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895",
+      "results_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/results.json",
+        "sha256": "cca2a56c4c973d76d944753bc96bbe8b5c3b3c1ef9e8e218f38f6b0997a1d84c"
+      },
+      "retained_limitations": [
+        "Physics frozen fraction/orientation/refinement regime matrix remains explicitly excluded.",
+        "Rank-specific, optional performance, hardware and capability skips remain in per-rank XML.",
+        "Suite-level launcher RSS is not aggregate all-rank peak memory or per-fixture memory.",
+        "Passing suite results do not substitute for uncaptured operator/history/energy references."
+      ],
       "script_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-enabled-features.sbatch",
       "script_sha256": "93bbce1338efab6c422f41982fcb6ab73f633e3f019c8a830fe9c483e18f5fd4",
+      "selected_groups_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/selected-groups.json",
+        "sha256": "fa46269715e7d7fae92d8e888a87c7074ec78796a8fb17c24cb36f30260340db"
+      },
+      "source_identity": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-42090895/source-identity.txt",
+        "sha256": "0ae3d075aefde55595973a4f236eab21ede33a8ed8d732ff2a98f72f6ee16573"
+      },
       "source_revision": "0d77e6cd1c350c20334d43021a186753231398a4",
-      "state": "RUNNING",
+      "state": "COMPLETED",
       "submission_record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-enabled-features-request.json",
       "submission_record_sha256": "24c68447f5574c657920a2e8f8fa4d3d3e3b4799f3df43f004a7f9f70030730f",
-      "tasks": 4
+      "tasks": 4,
+      "terminal_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-enabled-features-terminal.json",
+        "sha256": "3f33ac08922047b545a84f0d0c31566537c0e94b72da2084ae967669cec8fdbb"
+      }
     }
   ],
   "record_type": "free_surface_architecture_refactor_baseline",
   "remaining_r0_work": [
-    "Complete the enabled-feature profile and remaining rank-layout/physical prerequisite checks, preserving existing failures and skips.",
+    "Complete remaining physical prerequisite/matrix checks. Enabled-feature and designated rank-layout reruns completed; retain their exclusions and skips.",
     "Complete source-bound input/effective-policy coverage for the full selected physical/geometry/algorithm matrix.",
     "Capture MPI and remaining operator/history/geometry/energy references; serial Q1 wet-block references are accepted only within their declared scope.",
     "Freeze case-specific numerical tolerances and record baseline runtime, memory, iterations, refresh and cache behavior for comparisons."

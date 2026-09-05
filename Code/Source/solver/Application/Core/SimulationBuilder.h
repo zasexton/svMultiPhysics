@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "Application/Core/MeshCollection.h"
+#include "Application/Core/ResolvedMovingDomainConfiguration.h"
 #include "Mesh/Mesh.h"
 
 class Parameters;
@@ -52,6 +53,8 @@ struct SimulationComponents {
   std::unique_ptr<svmp::FE::interfaces::FreeSurfaceGeometrySnapshotCache>
       free_surface_geometry_snapshot_cache{};
   std::vector<std::unique_ptr<svmp::Physics::PhysicsModule>> physics_modules{};
+  std::vector<ResolvedLevelSetEquationHandle>
+      resolved_level_set_equations_by_input_index{};
 
   std::unique_ptr<svmp::FE::backends::BackendFactory> backend{};
   std::unique_ptr<svmp::FE::backends::LinearSolver> linear_solver{};

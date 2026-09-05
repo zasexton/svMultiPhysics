@@ -26,4 +26,7 @@ struct ResolvedLevelSetEquationConfiguration {
   std::vector<std::string> projected_curvature_fields{};
 };
 
+using ResolvedLevelSetEquationHandle =
+    std::shared_ptr<const ResolvedLevelSetEquationConfiguration>;
+
 } // namespace application::core

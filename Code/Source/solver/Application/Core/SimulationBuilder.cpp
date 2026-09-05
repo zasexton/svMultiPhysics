@@ -57,26 +57,6 @@ std::string trim_copy(std::string value)
   return value;
 }
 
-const svmp::Physics::ParameterValue* find_defined_parameter(
-    const svmp::Physics::ParameterMap& params,
-    std::initializer_list<std::string_view> names)
-{
-  for (const auto name : names) {
-    const auto it = params.find(std::string(name));
-    if (it != params.end() && it->second.defined) {
-      return &it->second;
-    }
-  }
-  return nullptr;
-}
-
-bool parse_bool_relaxed(std::string value)
-{
-  value = lower_copy(trim_copy(std::move(value)));
-  return value == "true" || value == "1" || value == "yes" ||
-         value == "on";
-}
-
 svmp::FE::backends::BackendKind selectBackend(const Parameters& params);
 
 svmp::FE::backends::SolverOptions translateSolverOptions(
@@ -119,15 +99,16 @@ void preflightNavierStokesFittedSurfaceContactCapabilities(
 
 void preflightAndPreRegisterTwoFluidMaterialInterfaceDependencies(
     const Parameters& params,
-    const std::map<std::string, std::shared_ptr<svmp::Mesh>>& meshes,
-    svmp::FE::systems::FESystem& system)
+    application::core::SimulationComponents& components)
 {
   namespace level_set = application::translators::level_set;
   namespace navier_stokes =
       svmp::Physics::formulations::navier_stokes;
+  const auto& meshes = components.meshes;
+  auto& system = *components.fe_system;
 
   struct MaterialTransportCandidate {
-    svmp::Physics::EquationModuleInput input{};
+    application::core::ResolvedLevelSetEquationHandle configuration{};
     level_set::MaterialInterfaceTransportDependency dependency{};
   };
   struct TwoFluidCandidate {
@@ -138,7 +119,12 @@ void preflightAndPreRegisterTwoFluidMaterialInterfaceDependencies(
   std::vector<TwoFluidCandidate> owners;
   std::size_t equation_count = 0u;
 
-  for (const auto* equation : params.equation_parameters) {
+  components.resolved_level_set_equations_by_input_index.assign(
+      params.equation_parameters.size(), {});
+  for (std::size_t equation_index = 0u;
+       equation_index < params.equation_parameters.size();
+       ++equation_index) {
+    const auto* equation = params.equation_parameters[equation_index];
     if (equation == nullptr) {
       continue;
     }
@@ -165,10 +151,13 @@ void preflightAndPreRegisterTwoFluidMaterialInterfaceDependencies(
       }
       continue;
     }
-    if (auto dependency =
-            level_set::materialInterfaceTransportDependency(input)) {
+    auto configuration = level_set::resolveConfiguration(input);
+    components.resolved_level_set_equations_by_input_index[equation_index] =
+        configuration;
+    if (auto dependency = level_set::materialInterfaceTransportDependency(
+            *configuration)) {
       transports.push_back(MaterialTransportCandidate{
-          .input = std::move(input),
+          .configuration = std::move(configuration),
           .dependency = std::move(*dependency),
       });
     }
@@ -239,7 +228,7 @@ void preflightAndPreRegisterTwoFluidMaterialInterfaceDependencies(
 
   const auto register_dependencies = [&](auto& target_system) {
     level_set::preRegisterMaterialInterfaceTransportFields(
-        transports.front().input, target_system);
+        *transports.front().configuration, target_system);
     navier_stokes::preRegisterIncompressibleTwoFluidDependencyFields(
         owners.front().input, target_system);
   };
@@ -288,6 +277,8 @@ void preflightAndPreRegisterTwoFluidMaterialInterfaceDependencies(
 void preRegisterFutureWetExtensionVelocity(
     const Parameters& params,
     const std::map<std::string, std::shared_ptr<svmp::Mesh>>& meshes,
+    const std::vector<application::core::ResolvedLevelSetEquationHandle>&
+        resolved_level_set_equations_by_input_index,
     svmp::FE::systems::FESystem& system)
 {
   const EquationParameters* unique_fluid = nullptr;
@@ -313,46 +304,21 @@ void preRegisterFutureWetExtensionVelocity(
   }
 
   bool needs_future_velocity = false;
-  for (std::size_t index = 0u; index < params.equation_parameters.size();
+  for (std::size_t index = 0u;
+       index < resolved_level_set_equations_by_input_index.size();
        ++index) {
-    const auto* equation = params.equation_parameters[index];
-    if (equation == nullptr || !equation->type.defined()) {
+    const auto& configuration =
+        resolved_level_set_equations_by_input_index[index];
+    if (!configuration) {
       continue;
     }
-    const auto type = lower_copy(trim_copy(equation->type.value()));
-    if (type != "level_set" && type != "levelset" &&
-        type != "level_set_transport") {
+    const auto& source =
+        configuration->options.velocity
+            .algebraic_extension_source_field_name;
+    if (source.empty()) {
       continue;
     }
-
-    const auto input =
-        application::translators::EquationTranslator::buildInput(
-            *equation, meshes);
-    const auto* enabled = find_defined_parameter(
-        input.equation_params,
-        {"Use_wet_extension_advection_velocity",
-         "UseWetExtensionAdvectionVelocity",
-         "Update_advection_velocity_from_wet_region",
-         "UpdateAdvectionVelocityFromWetRegion"});
-    const auto* source = find_defined_parameter(
-        input.equation_params,
-        {"Advection_velocity_from_field",
-         "AdvectionVelocityFromField",
-         "Source_velocity_field_name",
-         "SourceVelocityFieldName",
-         "Physical_velocity_field_name",
-         "PhysicalVelocityFieldName"});
-    const bool wet_extension =
-        (enabled != nullptr && parse_bool_relaxed(enabled->value)) ||
-        source != nullptr;
-    if (!wet_extension) {
-      continue;
-    }
-
-    const auto source_name =
-        source == nullptr ? std::string{"Velocity"}
-                          : trim_copy(source->value);
-    if (source_name == "Velocity" && index < fluid_index) {
+    if (source == "Velocity" && index < fluid_index) {
       needs_future_velocity = true;
     }
   }
@@ -1224,9 +1190,12 @@ void detail::preflightAndPreRegisterPhysicsModuleDependencies(
   preflightNavierStokesFittedSurfaceContactCapabilities(
       params, components.meshes);
   preflightAndPreRegisterTwoFluidMaterialInterfaceDependencies(
-      params, components.meshes, *components.fe_system);
+      params, components);
   preRegisterFutureWetExtensionVelocity(
-      params, components.meshes, *components.fe_system);
+      params,
+      components.meshes,
+      components.resolved_level_set_equations_by_input_index,
+      *components.fe_system);
 }
 
 SimulationBuilder::SimulationBuilder(const Parameters& params)
@@ -1379,7 +1348,10 @@ void SimulationBuilder::createPhysicsModules()
       params_, components_);
 
   components_.physics_modules.clear();
-  for (const auto* eq_params : params_.equation_parameters) {
+  for (std::size_t equation_index = 0u;
+       equation_index < params_.equation_parameters.size();
+       ++equation_index) {
+    const auto* eq_params = params_.equation_parameters[equation_index];
     if (!eq_params) {
       continue;
     }
@@ -1403,8 +1375,19 @@ void SimulationBuilder::createPhysicsModules()
     auto cell_restriction_scope =
         components_.fe_system->scopedFormInstallCellDomainRestrictions(
             std::move(cell_restrictions));
-    auto module = application::translators::EquationTranslator::createModule(
-        *eq_params, *components_.fe_system, components_.meshes);
+    std::unique_ptr<svmp::Physics::PhysicsModule> module;
+    const auto& resolved_level_set =
+        components_
+            .resolved_level_set_equations_by_input_index[equation_index];
+    if (resolved_level_set && eq_params->type.defined() &&
+        application::translators::level_set::isEquationType(
+            eq_params->type.value())) {
+      module = application::translators::level_set::createModule(
+          *resolved_level_set, *components_.fe_system);
+    } else {
+      module = application::translators::EquationTranslator::createModule(
+          *eq_params, *components_.fe_system, components_.meshes);
+    }
     cell_restriction_scope.restore();
     for (const auto& cut_restriction : equation_cut_restrictions) {
       application::core::validateEquationLevelCutVolumeConsumer(
