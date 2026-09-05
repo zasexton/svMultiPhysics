@@ -11,6 +11,7 @@
 Implementation of [the architecture refactoring plan](free_surface_architecture_refactoring_plan_20260904.md) is now authorized on `issue-449-modern-mesh-core`. The historical audit and qualification claims below retain their original dates and scope. This coordination section records structural work separately from ongoing WP-4 physical qualification.
 
 - **Starting revision:** `905239de40b41aa3ca615305516b600e640d95e4`, with 52 pre-existing modified tracked files and the untracked WP-10 static-drop matrix/runner/tests. These edits are outside the initial refactoring changes and will not be staged or reverted by this work.
+- **Integration revision and workspace:** The remote advanced through `0d77e6cd1c350c20334d43021a186753231398a4` with seventeen WP-4 commits before extraction. Refactoring therefore uses `/scratch/users/zsexton/free-surface-refactor-20260904-905239de/implementation`, based on that revision. Its forward commits are pushed to the requested branch; the original checkout's dirty source is preserved separately. The original review revision is historical, not the new build baseline.
 - **Current work:** R0 baseline/configuration/build provenance, capability inventory, and independent validation setup. Production extraction has not started at this checkpoint.
 - **Expected future overlap:** Navier-Stokes form composition and configuration; Application generated-state/history orchestration; FE domain bindings, geometry snapshots and physical energy ownership. Before each shared-file extraction, this section will name the affected components and the numerical contract being preserved.
 - **WP-4 boundary:** Surface/wall/pressure signs, production force definitions, tangent/synchronization policies, static-capillary acceptance thresholds and open qualification requirements are preserved during structural moves. Relocation is not new evidence of balanced capillary behavior or WP-4 closure. Existing physical campaigns and their immutable source/build/input records remain separate.
@@ -23,6 +24,7 @@ Implementation of [the architecture refactoring plan](free_surface_architecture_
 | Date | Package | Change and evidence | Remaining work |
 |---|---|---|---|
 | 2026-09-04 | R0 | Recorded authorization, starting source state, shared-file boundary and exclusive job ownership | Capture reproducible source/build/configuration baseline and execute baseline checks |
+| 2026-09-04 | R0 | Integrated the coordination documents on the newer WP-4 source without modifying the original dirty checkout | Freeze `0d77e6cd` for baseline execution; review capability evidence and record source/input hashes |
 
 ## Executive verdict
 
