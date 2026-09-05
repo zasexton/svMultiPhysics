@@ -254,6 +254,9 @@ void normalize(UInt4352& value) noexcept
     for (std::size_t left_index = 0u;
          left_index < left.used;
          ++left_index) {
+        if (left.limbs[left_index] == 0u) {
+            continue;
+        }
         __uint128_t carry = 0u;
         for (std::size_t right_index = 0u;
              right_index < right.used;
