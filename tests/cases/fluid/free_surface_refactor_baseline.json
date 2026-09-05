@@ -11,6 +11,23 @@
     "tracked_diff": "empty before submission",
     "tree": "26d8e720c6dc5490168ffad54def72c74b174aad"
   },
+  "candidate_checks": [
+    {
+      "id": "r1-options",
+      "job_id": "42080275",
+      "scope": "Public-header/direct-consumer syntax and baseline/candidate focused Physics/Application configuration checks; full R0 references remain uncaptured.",
+      "script_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/candidate-r1-options.sbatch",
+      "script_sha256": "f7f3e74c3c823362f62ec648487b1d9fab3295c533a4c3d3b1989f76e46176ea",
+      "source_record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r1-options-source-record.json",
+      "source_record_sha256": "7b1d64fab17c4307d2075c6421508fd97fd24862b491716e2aff145fa74767cd",
+      "state": "RUNNING",
+      "submission_record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/candidate-r1-options-request.json",
+      "submission_record_sha256": "e51b84fb91d934f55d27175240894396166443c66754b0938c75c5709a942953",
+      "syntax_passed_translation_units": 5,
+      "syntax_result_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r1-options-42080275/syntax/report.json",
+      "syntax_result_sha256": "509ce7461da44b3cbc4dc195254e3afec5cbbcd5b439dce8804d4a74bf78143c"
+    }
+  ],
   "comparison_contract": {
     "discrete_identity": "exact field/component/physical-DOF, domain/side, stage, availability, constraint topology and capability decisions",
     "floating_point_tolerances": "Freeze existing case gates and measured reduction tolerances before candidate comparisons; no acceptance thresholds are established by this in-progress record.",
@@ -40,22 +57,98 @@
     {
       "build_parallelism": 6,
       "build_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/core-build",
+      "completed_groups": [
+        {
+          "classification": "The failing assertion requires a ready JIT kernel in the explicitly JIT-OFF profile. Retain failure; verify this case with JIT enabled before considering coverage complete.",
+          "ctest_suites": 8,
+          "exit_code": 8,
+          "failed_cases": [
+            {
+              "case": "DiscontinuityCapturingPrescribedVelocityCompiledGeneralizedAlphaMatchesSeparateResidual",
+              "message": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Tests/Unit/LevelSet/test_LevelSetTransport.cpp:2182\nValue of: compiled_kernel->isJITReady()\n  Actual: false\nExpected: true\n",
+              "suite": "LevelSetTransport"
+            }
+          ],
+          "failed_ctest_suites": 1,
+          "id": "fe-serial",
+          "junit_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/core-42068077/fe-serial.xml",
+          "junit_sha256": "cad75ce7d002f5c0a97e8f3178d11520de49fe55f8826e98acbb47b213312faa"
+        },
+        {
+          "exit_code": 0,
+          "failures": 0,
+          "id": "physics-serial",
+          "junit_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/core-42068077/physics-serial.xml",
+          "junit_sha256": "3cf1440df136979dca7e309628b7a2b6570c3ce62eae0d77a59c00669f05e8f1",
+          "tests": 491
+        },
+        {
+          "exit_code": 8,
+          "failures": 1,
+          "id": "application-serial",
+          "junit_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/core-42068077/application-serial.xml",
+          "junit_sha256": "c3fb9782131f6aedaff94be21c7024c85f8032eeedbc053f4fd4bbb411ef27e9",
+          "tests": 1
+        },
+        {
+          "exit_code": 8,
+          "failures": 2,
+          "id": "application-consensus",
+          "junit_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/core-42068077/application-consensus.xml",
+          "junit_sha256": "073599d53a710069b79fad3791f7ce1fd74422d22eb92ee9d479202af1a7f1f6",
+          "tests": 2
+        },
+        {
+          "exit_code": 8,
+          "failures": 1,
+          "id": "physics-sharp-mpi",
+          "junit_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/core-42068077/physics-sharp-mpi.xml",
+          "junit_sha256": "d5feadf9439706661489a46c2026072c8017cea5f61ed17142c5f831df09040c",
+          "tests": 1
+        },
+        {
+          "exit_code": 8,
+          "failures": 4,
+          "id": "fe-mpi",
+          "junit_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/core-42068077/fe-mpi.xml",
+          "junit_sha256": "e0aea6c1d558340913b773d24b14553f9ba19e8fda93009cec3acd912ba54dbc",
+          "tests": 4
+        }
+      ],
       "cpus_per_task": 8,
       "eigen": "OFF",
       "id": "core",
       "jit": "OFF",
       "job_id": "42068077",
       "llvm": null,
-      "outcome": null,
+      "observed_configuration": {
+        "APPLICATION_BUILD_TESTS": "ON",
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "/share/software/user/open/gcc/12.4.0/bin/c++",
+        "CMAKE_CXX_FLAGS": "",
+        "CMAKE_CXX_FLAGS_RELEASE": "-O3 -DNDEBUG",
+        "FE_BUILD_TESTS": "ON",
+        "FE_ENABLE_ASSEMBLY": "ON",
+        "FE_ENABLE_EIGEN": "OFF",
+        "FE_ENABLE_LLVM_JIT": "OFF",
+        "FE_ENABLE_LLVM_JIT_RESOLVED": "OFF",
+        "FE_ENABLE_MPI": "ON",
+        "MPI_CXX_COMPILER": "/share/software/user/open/openmpi/4.1.2/bin/mpicxx",
+        "MPI_mpi_LIBRARY": "/share/software/user/open/openmpi/4.1.2/lib/libmpi.so",
+        "PHYSICS_BUILD_TESTS": "ON"
+      },
+      "outcome": "Physics serial passed; FE JIT-readiness assertion, Application fixture working directory and MPI slot declarations require targeted corrected verification.",
       "requested_memory_mib": 38000,
       "requested_nodes": 1,
       "result_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/core-42068077",
       "script_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-core.sbatch",
       "script_sha256": "1dc106604f0e5931f38eccdec41a58cfa2df8cf2f0cb79aafc60a6b2ed0704c4",
       "source_revision": "0d77e6cd1c350c20334d43021a186753231398a4",
-      "state": "RUNNING",
+      "state": "FAILED",
       "submission_record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-core-request.json",
       "submission_record_sha256": "8fea9a74a86db1146707c654da83a34118be56283cf2df16bd89c5d6e40c2a93",
+      "terminal_record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-core-terminal.json",
+      "terminal_record_sha256": "a849a4c1944d32037566ae6c6a8a4d292e58548a7eb8b796ff7012e2f3d79686",
       "wall_time": "08:00:00"
     },
     {
@@ -67,16 +160,66 @@
       "jit": "ON",
       "job_id": "42068499",
       "llvm": "17.0.6",
-      "outcome": null,
+      "outcome": "LLVM 17.0.6 requires Terminfo::terminfo; Terminfo_LIBRARIES was NOTFOUND. No C++ build or test executed.",
       "requested_memory_mib": 38000,
       "requested_nodes": 1,
       "result_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/jit-42068499",
       "script_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-jit.sbatch",
       "script_sha256": "b10ebd78700766067914bdff009315dc6e530e46a2ed0949ace07ba0cc4dc2cf",
       "source_revision": "0d77e6cd1c350c20334d43021a186753231398a4",
-      "state": "PENDING",
+      "state": "FAILED",
       "submission_record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-jit-request.json",
       "submission_record_sha256": "7da58a93c7ef26f8a62940860bcd4ac11350d1d4e58b093e57bceba1e00e7537",
+      "terminal_record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-jit-terminal.json",
+      "terminal_record_sha256": "eacf24b027cc60d11e551b9cf13350aca9d8066b4dd83326fa3d4cadcef0ff74",
+      "wall_time": "04:00:00"
+    },
+    {
+      "build_parallelism": 4,
+      "build_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/jit-r1-build",
+      "cpus_per_task": 6,
+      "eigen": "OFF",
+      "id": "jit-r1",
+      "jit": "ON",
+      "job_id": "42070565",
+      "llvm": "17.0.6",
+      "outcome": "X11 loads LLVM 4 headers into CPATH ahead of LLVM 17 system includes.",
+      "replaces_terminal_job": "42068499",
+      "requested_memory_mib": 38000,
+      "requested_nodes": 1,
+      "result_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/jit-r1-42070565",
+      "script_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-jit-r1.sbatch",
+      "script_sha256": "86f433a1add39e87e9f5e75ea94dfb9eada0d9d49d105933433a475144bd6709",
+      "source_revision": "0d77e6cd1c350c20334d43021a186753231398a4",
+      "state": "FAILED",
+      "submission_record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-jit-r1-request.json",
+      "submission_record_sha256": "911ab23070e7db1d8ce9d3eca2a37a3130abdc399d6b78effa1777368eaeb1b4",
+      "terminal_record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-jit-r1-terminal.json",
+      "terminal_record_sha256": "813ea300bcaa19ca0d217a9049e55f561167b298a0de8229e89120420f872452",
+      "terminfo": "/share/software/user/open/ncurses/6.4/lib/libtinfo.so.6.4",
+      "wall_time": "04:00:00"
+    },
+    {
+      "build_parallelism": 1,
+      "build_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/jit-r2-build",
+      "cpus_per_task": 2,
+      "eigen": "OFF",
+      "id": "jit-r2",
+      "include_environment": "CPATH/C_INCLUDE_PATH/CPLUS_INCLUDE_PATH/OBJC_INCLUDE_PATH unset after module loading",
+      "jit": "ON",
+      "job_id": "42080271",
+      "llvm": "17.0.6",
+      "outcome": null,
+      "replaces_terminal_job": "42070565",
+      "requested_memory_mib": 6000,
+      "requested_nodes": 1,
+      "result_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/jit-r2-42080271",
+      "script_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-jit-r2.sbatch",
+      "script_sha256": "62c79a8f6a3f3ec60e6c30301cf538f092176b198ae97629bd093074b407de23",
+      "source_revision": "0d77e6cd1c350c20334d43021a186753231398a4",
+      "state": "RUNNING",
+      "submission_record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-jit-r2-request.json",
+      "submission_record_sha256": "a2de69d69282c60d87a7b2e9dd055d4cbb08446c1efa8d14e4d111ae0d2811f1",
       "wall_time": "04:00:00"
     }
   ],

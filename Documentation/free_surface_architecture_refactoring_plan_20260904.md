@@ -12,11 +12,13 @@
 
 **Review date:** 2026-09-04.
 
+**Documentation supplement:** The configuration migration details below expand the source review into a concrete change specification. They identify existing differences between input paths that must be preserved during extraction or corrected in a separately reviewed behavior change. This supplement does not establish a build, test, or physical qualification result.
+
 **Reviewed branch:** `issue-449-modern-mesh-core`.
 
 **Reviewed committed HEAD:** `905239de40b41aa3ca615305516b600e640d95e4`.
 
-**Implementation status:** Implementation authorized on 2026-09-04. R0 baseline capture and coordination are in progress; R1-R12 remain pending. The original review did not execute solver builds or physical qualification. Completed work is recorded by checked items and dated progress entries below.
+**Implementation status:** Implementation authorized on 2026-09-04. R0 baseline capture and the initial R1 Physics option extraction are in progress; R2-R12 remain pending. The original review did not execute solver builds or physical qualification. Completed work is recorded by checked items and dated progress entries below.
 
 **Execution records:** [Coordination notes](free_surface_boundary_unfitted_audit_20260720.md#2026-09-04-architecture-refactoring-coordination) and [owned Slurm job ledger](free_surface_refactor_job_ledger_20260904.md). Commits use Zachary Sexton <zsexton@stanford.edu> and are pushed to `issue-449-modern-mesh-core` after their relevant checks.
 
@@ -92,6 +94,14 @@ Before implementation, record the then-current committed revision and dirty diff
 | F08 | Rootless support handling includes a physical feature-removal decision inside FE | Generic support classification plus explicit selected treatment and accounting | R8 |
 | F09 | Runner inheritance, large fixtures, and source-layout checks hinder maintenance | Shared qualification utilities, contract-based tests, immutable archives | R11 |
 | F10 | Prerequisite results can be mistaken for full physical qualification | Explicit capability/evidence ledger and unchanged open numerical gates | R0, R11, R12 |
+
+### 1.4 What to retain and what to simplify first
+
+The main problem is the concentration and duplication of decisions. Retain the shared Forms installer, generated-domain infrastructure, symbolic differentiation, cut integration, level-set transport, constraint machinery and moving-mesh services. The refactor should make those services easier for other formulations to consume.
+
+Start with the ownership boundaries that prevent further duplication: typed configuration, explicit integration domains, and a bulk Navier-Stokes contribution. Moving a large helper into another file without changing its inputs and responsibilities does not resolve the dependency problem. Likewise, putting a fluid law behind a callback does not make the law itself an FE responsibility; only the mechanism invoking that callback belongs in FE.
+
+Do not create every proposed file in Section 4 at once. Introduce a component when its extraction produces a tested public contract or a cohesive private implementation. Keep small contact-law helpers together until their consumers justify a separate component. Remove the old numerical implementation when its callers migrate so the split reduces the maintained code rather than retaining two versions.
 
 ## 2. Target ownership and dependency rules
 
@@ -300,6 +310,32 @@ resolved configuration
 
 Use explicit outcomes for success, unavailable optional evidence, unsupported configuration, numerical rejection, and unrecoverable publication failure. An unavailable measurement must not be serialized as zero work or zero error.
 
+### 5.5 Resolved configuration and compatibility
+
+Resolve input before registering fields, constraints or forms. The existing private `TranslatedLevelSetTransportInput` already combines an FE space, `LevelSetTransportOptions`, `FormInstallOptions` and projected-curvature field declarations. Make that resolved boundary available to Application consumers instead of rebuilding equivalent options inside the driver.
+
+The proposed records have the following responsibilities. These are interface requirements; the final declarations must use existing repository types and preserve required lifetimes.
+
+| Record/member | Contents and owner | Consumers |
+|---|---|---|
+| Resolved level-set equation | Equation identity, immutable input snapshot, FE spaces, `FE::level_set::LevelSetTransportOptions`, `FormInstallOptions`, field dependencies and resolved boundary markers | Dependency discovery, preregistration, module creation and maintenance scheduling |
+| Resolved generated domain | `LevelSetGeneratedInterfaceOptions` after order resolution, domain/marker/side/retention, input provenance and explicitly supplied order overrides | Domain installation, volume measurements and geometry maintenance |
+| Resolved physical boundary | Physics-owned free-surface/contact/material options, bound field/domain identities and boundary-local numerical choices | Physics validation and composition |
+| Resolved workflow policy | Initialization/maintenance scheduling, trial-refresh and fixed-point policies, output settings and compatibility mode | Application coordinator |
+| Per-value provenance | Canonical key, selected spelling, source layer, whether explicitly supplied, override chain and any compatibility fallback | Effective-configuration output and regression comparisons |
+| Mutable workflow state | Initialization flags, accepted targets, accumulated displacement, candidate caches and histories | Runtime workflow only; never part of immutable configuration |
+
+There is an important intermediate state: installation and maintenance do not currently agree for every input. During a structural extraction, one resolver may need to produce explicitly named compatibility views from one immutable input snapshot. Both views must use shared parsing machinery with declared policies, and the effective record must expose any difference. Do not silently copy installation values into maintenance and call that behavioral equivalence.
+
+After characterizing the differences in Section 7.3, converge the views in a separate configuration-contract change. That change must name the affected inputs, selected precedence and expected before/after behavior. The final architecture has one canonical configuration; compatibility views are temporary adapters with a removal gate in R12.
+
+Retain these entry points throughout migration:
+
+- Direct FE callers construct `LevelSetTransportOptions` and use `installLevelSetTransport` without Application or Physics dependencies.
+- Direct Physics callers construct `IncompressibleNavierStokesVMSOptions` and call `registerOn`; physical validation remains available on this path.
+- `EquationModuleRegistry::create` retains an input adapter for existing registry clients. Typed construction does not require reverse dependencies from Physics to Application.
+- Application's `createModule`, `materialInterfaceTransportDependency` and `preRegisterMaterialInterfaceTransportFields` forward to resolved overloads. A workflow that already holds the resolved object must not invoke raw-input translation again.
+
 ## 6. Implementation work packages
 
 Each package is an independently reviewable change with a defined numerical gate. Split its mechanical moves into smaller commits when useful, but do not mix numerical retuning into those commits. Use existing behavioral tests for pure moves; add tests where a new public contract, policy boundary, or previously untested failure path is introduced.
@@ -351,7 +387,7 @@ Each package is an independently reviewable change with a defined numerical gate
 - [ ] Move lexical parsing, face-name resolution, compatibility aliases, and environment reads to Application input adapters. Retain registry adapters for existing callers while forwarding to the typed path.
 - [ ] Reuse FE-owned numerical option structs for cut generation, aggregation guards, and history/transport services. Avoid separately maintained copies of the same defaults in Application and Physics.
 - [ ] Represent fitted and unfitted geometry configuration as alternatives. Keep exterior one-phase boundary laws distinct from internal two-fluid interface laws and from bulk region selection.
-- [ ] Pass the resolved object to both installation and maintenance. Remove repeated reinitialization, transport-source, geometry-policy, and cut-backend parsing from the driver.
+- [ ] Pass the resolved object to both installation and maintenance, retaining explicit compatibility views where Section 7.3 identifies different current semantics. Remove repeated reinitialization, transport-source, geometry-policy, and cut-backend parsing from the driver without silently changing either path.
 - [ ] Retain physical validation in Physics and numerical preconditions at FE API boundaries. Preflight all inputs and referenced fields/domains before mutating a system definition.
 - [ ] Add effective-value provenance, including whether each value was defaulted, supplied, aliased, or overridden. Serialize the canonical values and the selected algorithm routes.
 - [ ] Preserve accepted legacy input behavior during this package. If malformed environment values currently fall back silently, record that compatibility behavior and treat stricter rejection as an explicit later schema/policy change.
@@ -359,6 +395,15 @@ Each package is an independently reviewable change with a defined numerical gate
 **Required cases:** Equivalent aliases resolve identically; conflicting selectors retain their documented precedence/error; unsupported one-/two-fluid scope fails before field/form installation; separate interfaces retain boundary-local options; direct C++ calls retain validation without requiring Application.
 
 **Test owners:** Existing `Application/Tests/Unit/test_LevelSetEquationTranslator.cpp`, `test_LevelSetCutConfiguration.cpp`, `test_EquationTranslator.cpp`, and Physics free-surface configuration/legacy BC tests. Add focused canonical-configuration tests where those fixtures lack a path.
+
+**Implementation slices:**
+
+1. Extract the Physics option declarations into `FreeSurfaceOptions.h`, preserving defaults, enum values, aggregate member order and old public nested names through aliases where needed. Reuse `FE::constraints::SmallCutAggregationGuardOptions`. Compile the header on its own and its direct Physics consumers; run configuration/default and invalid-guard cases before accepting the extraction.
+2. Expose the existing typed level-set translation as a pure resolver and add resolved overloads for module creation, dependency discovery and preregistration. Characterize equation/default-domain/domain layering, velocity-source promotion and current errors. Keep the existing raw-input wrappers as compatibility adapters.
+3. Replace repeated driver parsing with resolved configuration and separately stored mutable workflow state. Consolidate generated-domain option conversion, preserving omitted-versus-explicit quadrature choices. Exercise both steady and transient setup, maintenance scheduling and direct construction paths.
+4. Resolve the characterized input-path disagreements in a separate behavior change. Freeze the selected schema/compatibility policy, input migration rules and expected effective records first. Remove each compatibility view only when its consumers and old-input behavior are accounted for.
+
+**Specific new contract checks:** Compare the options observed by installation and maintenance for the same input; verify equal fields, velocity-source promotion, reinitialization and conservative-phase choices where they currently agree, and explicit recorded differences where compatibility requires them. Exercise equation-only input and conflicting domain overrides. A preflight failure must leave the system definition unchanged, and separate boundaries must retain distinct contact and stabilization values.
 
 **Suggested commit:** `refactor: resolve moving-domain configuration once`.
 
@@ -720,6 +765,47 @@ For every retained parameter, record: canonical name, option owner, default sour
 
 Preserve current aliases initially. Add a run-level record of every active experiment and its exact effective value, including Application-resolved controls currently absent from Physics-only artifacts. A compatibility alias is not a second independent option definition.
 
+### 7.3 Configuration differences that must not be hidden by cleanup
+
+The following are source-observed differences and precedence rules. They are not claims that every unusual input reaches an accepted solve: some paths reject the input later or are used independently in tests/direct adapters. Characterize both the direct adapter and complete setup behavior before changing a rule.
+
+| Concern | Current source behavior | Required migration action |
+|---|---|---|
+| Equation/domain layering | `translate_level_set_transport_input` applies equation parameters, default-domain parameters, then the single explicit domain; boundary conditions follow. `levelSetMaintenanceRequests` reads equation parameters for its duplicated maintenance values. | Capture both effective views. Preserve the difference in the mechanical move; select one final precedence in a separately tested configuration-contract change. |
+| Constant velocity syntax | Translator `parse_real_vector3` requires three finite whitespace-separated components. Driver `parseLevelSetVector3` first replaces commas with spaces. | Preserve path-specific acceptance during extraction. Add direct parser and end-to-end cases before choosing the canonical grammar. |
+| Reinitialization cadence/iterations | The translator uses positive-integer parsing. The maintenance parser initially accepts general integer values. | Preserve validation timing and error behavior; do not make a previously rejected or delayed-invalid request silently valid. |
+| Boolean text | XML-style helpers accept the true token family and commonly map other nonempty text to false. Environment helpers fall back to their supplied default on malformed text. | Distinguish lexical policies and record fallback provenance. Do not replace them with one strict parser as an incidental refactor. |
+| Numeric text | The translator checks full consumption and finite real values. Cut-configuration helpers use `std::stod`/`std::stoi` without those additional checks. Environment parsers have their own fallback/range rules. | Characterize trailing text, overflow and nonfinite values at each public boundary. Tightening accepted syntax is a schema/compatibility change. |
+| Multiple aliases | Many helpers select the first nonempty defined key in a fixed list. Schema, implementation and contact selectors have explicit duplicate/conflict checks. | Preserve ordered alias selection where used and rejection where used. Do not globally replace these with either last-write-wins or reject-all-duplicates. |
+| Fitted/unfitted detection | `EquationTranslator::is_unfitted_free_surface_bc` reads `Implementation`; Physics also accepts `Free_surface_implementation` and `FreeSurfaceImplementation`. | Add full XML face-resolution cases for all three spellings. Correct alias recognition in a separate behavior change while centralizing resolution. |
+| Wet-extension enable and velocity source | A supplied source-field name can imply extension. The translator requires the prescribed-data input route, then promotes the typed velocity to a registered coupled field and records the physical source field. | Preserve the order of validation and promotion, generated-field dependencies, wall/band options and the actual source-field identity. |
+| Constant velocity precedence | An explicitly supplied constant vector is applied after the velocity-source selector and overrides it, disabling automatic field registration. | Retain this precedence and test interactions with wet-extension requests; do not merge the selectors as independent booleans. |
+| Retained cut support | Two-fluid, aggregation and extension consumers may require both sides. `SVMP_CUT_RETENTION_FORCE` recognizes exact override strings; downstream checks reject incompatible active-only requests. | Resolve the override once, retain each consumer requirement and record the chosen retention. Preserve existing rejection behavior. |
+| Duplicate generated domains | Matching requests deduplicate and combine required retention. Tangent selection has a special rule for an implicit equation choice versus a free-surface choice; explicit conflicts fail. | Retain origin and explicitness in provenance. Do not infer equivalence from domain name alone or discard the tangent-origin flag. |
+| Omitted quadrature orders | `ActiveCutVolumeRequest` uses optional orders; `LevelSetGeneratedInterfaceOptions` has effective integer defaults and additional geometry controls. Maintenance also converts to `LevelSetVolumeOptions`. | Consolidate conversion at the point where mesh/field/form order is known. Preserve absence separately from the resolved value; embedding the FE struct must not prematurely fix a generic order. |
+| Boundary-local suboptions | Aggregation defaults on. Stabilization/extension suboptions have implicit-enable behavior and schema-dependent rules when a parent is explicitly disabled. | Keep per-boundary values and schema behavior; avoid one run-global enable flag that loses overrides or legacy rejection rules. |
+
+Use these existing numerical option owners rather than creating parallel defaults:
+
+| Authoritative type | Values/services it already groups | Duplication to remove |
+|---|---|---|
+| `FE::level_set::LevelSetTransportOptions` in `FE/LevelSet/LevelSetOptions.h` | Transport fields, velocity source, stabilization, boundary data, bound checks, reinitialization, volume correction and conservative-phase options | Common values inside `LevelSetMaintenanceRequest` and repeated translator/driver parsing |
+| `FE::level_set::LevelSetGeneratedInterfaceOptions` in `FE/LevelSet/LevelSetInterfaceLifecycle.h` | Geometry/backend/tangent policies, root controls, subdivision and generated-domain settings | Repeated numerical members and manual conversion in active-cut setup; retain Application-only input origin and optional overrides |
+| `FE::constraints::SmallCutAggregationGuardOptions` in `FE/Constraints/SmallCutAggregationConstraint.h` | Path, reference-distance, coefficient and row-norm guards | Duplicate Physics guard struct and member-by-member copying |
+| Physics free-surface option declarations | Physical model, interface law, contact, material and fluid-specific enforcement/stabilization choices | Large module-header declarations and reparsing of the same physical selection |
+
+Characterization belongs primarily in `test_LevelSetEquationTranslator.cpp`, `test_LevelSetCutConfiguration.cpp`, `test_EquationTranslator.cpp` and `test_ApplicationDriverLevelSetWorkflows.cpp`. Preserve direct-Physics invalid-configuration tests in `test_MovingDomainPhysics.cpp` and direct-FE option/transport tests. Do not replace these with tests that inspect source layout.
+
+### 7.4 What an effective parameter record must explain
+
+Each numerical setting must be explainable without locating a literal in a large source file. Record its physical or numerical meaning, units, scaling, owning type and source; make that record available before installation and attach it to the run's evidence. Defaulted, explicitly supplied, overridden and compatibility-fallback values are distinct states.
+
+For example, aggregation's default path bound of `8` is a count, the reference extrapolation bound of `4` is a reference-coordinate bound, and `16`/`32` bound coefficients and row norms. They should remain four separate settings even if all are colloquially described as stability controls. Similarly, the cut-pressure calibration `0.01` belongs beside its fluid scaling formula and method evidence, while a deduplication squared-distance tolerance belongs with FE sampling.
+
+Also record derived choices: resolved interface/volume quadrature orders, whether both sides were retained, whether a velocity field was automatically registered, which tangent algorithm is active, and which geometry refresh/fixed-point route is used. Capturing only user-specified XML values misses defaults, promotions and environment controls that affect the operator.
+
+For generated-state iteration, the reviewed driver defaults include outer fixed-point iteration enabled, maximum outer iterations `12`, maximum discontinuity restarts `0`, and per-step-only cut refresh disabled. Keep those values and their actual clamping/validation rules together in the workflow policy. Any later tuning must produce a distinguishable effective configuration and its own comparison evidence.
+
 ## 8. Verification and qualification plan
 
 ### 8.1 Three distinct verification layers
@@ -837,6 +923,26 @@ Specific evidence limits at review time:
 | WP-10 two-fluid hydrostatic record | Stationary planar balance prerequisite | Nonlinear solve robustness; the recorded case reports zero linear/nonlinear iterations |
 | Untracked WP-10 static-drop matrix | Prospective one-step 2D circular-drop contract | Executed qualification, spherical drops, sustained dynamics and both-phase mass conservation |
 
+### 8.6 Concrete baseline artifacts and acceptance records
+
+R0 must produce comparison data that later packages can actually consume. A log containing only a residual norm, final volume or a `PASS` label cannot detect reordered/missing couplings, cancellation between errors or changed maintenance accounting.
+
+| Artifact | Required contents | Main consumers |
+|---|---|---|
+| Source/build/input manifest | Exact source commit and any test-only overlay or dirty diff, binary/compiler identity, CMake feature flags, MPI/ranks, input hashes and complete effective configuration | Every package |
+| Operator sample | Canonical DOF map, trial/current/history inputs, full residual, Jacobian blocks and sparsity, constraint equations, operator/domain identities and stage | R2-R4, R8, R10 |
+| Geometry sample | Volume/surface/wall moments, side/orientation, retained support, source revision, mesh/configuration revision and quadrature policy | R2, R5, R6, R9 |
+| Lifecycle sample | Accepted and candidate field/history states, rates, generated geometry, extension/projection and constraint revisions, publication outcome and rollback result | R6, R7, R9 |
+| Physical history | Time/stage, pressure jump, velocity measures, raw and corrected phase inventory, boundary flux, applicable energy/work channels and support-removal events | R4-R9 |
+| Execution record | Test discovery/selection, command, process status, rank completeness, runtime, memory, iteration counts, cache/refresh counts and unavailable measurements | R0, R11, R12 |
+| Comparison specification | Selected metrics, canonicalization rules, absolute/relative tolerances, permitted execution differences and expected capability/rejection decisions | Frozen before candidate comparisons |
+
+For the existing affine P1 wet-block fixture, `CanonicalWetBlockDof` and `WetBlockAssemblySample` in `Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp` already retain useful physical identities and vector/matrix data in memory. Reuse that fixture's assembled data for test-only capture; do not add a production residual-changing probe to obtain it. Extend the artifact set with other cases for contact, histories, fitted geometry and two-fluid behavior instead of claiming that one wet-block sample covers them.
+
+The P1 vertex-based map is not a universal high-order DOF identity. Where higher-order, discontinuous or constrained spaces are supported, use field/phase/component plus the appropriate mesh entity, basis functional and constraint representation. Compare in a declared constrained or expanded space consistently. Normalizing by algebraic row number or by coordinates alone is insufficient across repartitioning, coincident phase fields or different FE layouts.
+
+Store baseline and candidate artifacts separately. If additional capture instrumentation is needed, record it as a test-only source change or overlay and build both numerical versions with the same capture contract. Do not mutate a source tree while a baseline build is using it. Existing qualification thresholds remain in force; missing reference data must be filled by a new baseline capture rather than by selecting a tolerance after seeing the candidate difference.
+
 ## 9. Sequencing, integration and risk control
 
 ### 9.1 Recommended order
@@ -886,6 +992,22 @@ Keep the following in separate changes, even if they become easier after extract
 
 Each such change needs a concrete method specification, frozen comparison thresholds, accuracy/conservation/conditioning studies appropriate to that method, and an updated capability record. A shorter implementation is not evidence that the altered method is more accurate.
 
+### 9.5 Migration handoff and removal gates
+
+Each extraction must leave a clear handoff for physical qualification work proceeding on the branch. Record the old and new symbols/paths, their owning targets, any public alias, whether formulas or defaults changed, and the exact focused checks/results. Put the dated coordination entry in `free_surface_boundary_unfitted_audit_20260720.md` and keep historical qualification source identities intact.
+
+Shared files such as `ApplicationDriver.cpp`, `FESystem`, Forms/JIT and the Navier-Stokes module need one integration owner at a time. Merge the required shared contract before moving its consumers. A work package can be reviewed independently, but its source changes must be based on the actual integrated branch revision and accounted-for local work.
+
+Use the following removal gates:
+
+- Delete an old numerical implementation only after all live call sites use the extracted owner and its direct/integration comparisons pass.
+- Remove a compatibility alias only after direct C++ consumers and maintained input/qualification tools migrate; record a schema/API change where required.
+- Remove a duplicate option representation only after omitted values, derived defaults, explicit overrides and error timing are preserved or deliberately migrated.
+- Remove an experimental switch only after its live consumers and frozen evidence are identified; retain archival reproducibility separately from the maintained runtime interface.
+- Keep a new service private when it has no independent consumer or reusable contract. Avoid adding a public abstraction solely to achieve a smaller parent file.
+
+An extraction review should answer four questions: which decision now has one owner, which old implementation disappeared, what numerical evidence demonstrates unchanged behavior, and which temporary adapter or open gate remains. Those answers are more useful than a line-count target.
+
 ## 10. Definition of completion
 
 ### 10.1 Architecture
@@ -927,6 +1049,13 @@ Line anchors below describe the reviewed worktree and will move during implement
 |---|---|
 | Existing FE/Physics ownership policy | [FE infrastructure boundary](../Code/Source/solver/FE/Docs/PHYSICS_AGNOSTIC_FE_INFRASTRUCTURE_BOUNDARY.md) |
 | Existing generic level-set ownership and support | [FE LevelSet services](../Code/Source/solver/FE/Docs/LevelSet.md) |
+| Typed level-set options to reuse | [LevelSetOptions](../Code/Source/solver/FE/LevelSet/LevelSetOptions.h) |
+| Existing typed translation and input layering | [Level-set equation translator](../Code/Source/solver/Application/Translators/LevelSetEquationTranslator.cpp#L1892) |
+| Repeated maintenance parsing | [levelSetMaintenanceRequests](../Code/Source/solver/Application/Core/ApplicationDriver.cpp#L7071) |
+| Optional cut inputs and provenance | [ActiveCutVolumeRequest](../Code/Source/solver/Application/Core/LevelSetCutConfiguration.h#L32) |
+| Effective generated-interface numerical options | [LevelSetGeneratedInterfaceOptions](../Code/Source/solver/FE/LevelSet/LevelSetInterfaceLifecycle.h#L87) |
+| Input face-resolution and implementation-alias boundary | [EquationTranslator](../Code/Source/solver/Application/Translators/EquationTranslator.cpp#L98) |
+| Existing full wet-block sample fixture | [Cut-stability tests](../Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp) |
 | Bulk flow expressions | [Navier-Stokes module, bulk forms](../Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.cpp#L8992) |
 | Large free-surface contribution helper | [applyFreeSurfaceBoundary](../Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.cpp#L6574) |
 | Phase-volume selection through a free-surface BC | [Two-fluid phase options](../Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleTwoFluidModule.cpp#L403) |
