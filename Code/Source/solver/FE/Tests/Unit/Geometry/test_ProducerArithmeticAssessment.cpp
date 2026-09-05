@@ -147,6 +147,78 @@ void expectBits(const ArithmeticInterval& interval,
     EXPECT_EQ(bits(interval.upper), upper);
 }
 
+Real normalWithExponentAndFraction(int exponent, std::uint64_t fraction)
+{
+    return fromBits((static_cast<std::uint64_t>(exponent + 1023) << 52u) |
+                    fraction);
+}
+
+void expectTightDyadicBracket(const IntervalAssessment& result,
+                              const cpp_int& exact,
+                              unsigned scale,
+                              bool negative = false)
+{
+    ASSERT_TRUE(result.available());
+    ASSERT_GE(scale, 1074u);
+    ASSERT_GT(exact, 0);
+
+    const auto lower_bits = negative
+                                ? bits(result.interval.upper) & ~sign_mask
+                                : bits(result.interval.lower);
+    const auto upper_bits = negative
+                                ? bits(result.interval.lower) & ~sign_mask
+                                : bits(result.interval.upper);
+    if (negative) {
+        EXPECT_NE(bits(result.interval.lower) & sign_mask, 0u);
+        EXPECT_NE(bits(result.interval.upper) & sign_mask, 0u);
+    } else {
+        EXPECT_EQ(lower_bits & sign_mask, 0u);
+        EXPECT_EQ(upper_bits & sign_mask, 0u);
+    }
+
+    const cpp_int lower = independentlyScaledMagnitude(fromBits(lower_bits))
+                          << (scale - 1074u);
+    const cpp_int upper = independentlyScaledMagnitude(fromBits(upper_bits))
+                          << (scale - 1074u);
+    EXPECT_LE(lower, exact);
+    EXPECT_GE(upper, exact);
+
+    if (lower_bits == upper_bits) {
+        EXPECT_EQ(lower, exact);
+        return;
+    }
+
+    EXPECT_EQ(upper_bits, lower_bits + 1u);
+    EXPECT_LT(lower, exact);
+    EXPECT_GT(upper, exact);
+    for (const auto endpoint : {lower_bits, upper_bits}) {
+        const auto exponent = endpoint >> 52u;
+        EXPECT_NE(exponent, 0u);
+        EXPECT_NE(exponent, UINT64_C(0x7ff));
+    }
+}
+
+void expectPositiveZeroSingleton(const IntervalAssessment& result)
+{
+    ASSERT_TRUE(result.available());
+    expectBits(result.interval, 0u, 0u);
+}
+
+void expectDyadicRangeFailure(const IntervalAssessment& result,
+                              const cpp_int& exact,
+                              unsigned scale)
+{
+    EXPECT_FALSE(result.available());
+    EXPECT_EQ(result.failure, ArithmeticFailure::ArithmeticRange);
+    const cpp_int minimum =
+        independentlyScaledMagnitude(fromBits(UINT64_C(0x0010000000000000)))
+        << (scale - 1074u);
+    const cpp_int maximum =
+        independentlyScaledMagnitude(fromBits(UINT64_C(0x7fefffffffffffff)))
+        << (scale - 1074u);
+    EXPECT_TRUE(exact > 0 && (exact < minimum || exact > maximum));
+}
+
 TEST(ProducerArithmeticAssessment, DivideRoundsOneFifthOutward)
 {
     const auto quotient = assessIntervalOperation(
@@ -287,6 +359,254 @@ TEST(ProducerArithmeticAssessment, NormalBoundariesPassAndRangesReject)
         {2.0, 2.0});
     EXPECT_FALSE(overflow.available());
     EXPECT_EQ(overflow.failure, ArithmeticFailure::ArithmeticRange);
+}
+
+TEST(ProducerArithmeticAssessment,
+     DyadicDirectOracleCoversZeroReflectionAndBinadeCarry)
+{
+    const Real one = fromBits(UINT64_C(0x3ff0000000000000));
+    const Real negative_one = fromBits(UINT64_C(0xbff0000000000000));
+    const Real two_to_minus_53 = fromBits(UINT64_C(0x3ca0000000000000));
+    const Real two_to_minus_54 = fromBits(UINT64_C(0x3c90000000000000));
+
+    expectPositiveZeroSingleton(assessIntervalOperation(
+        IntervalOperation::Add, {-0.0, -0.0}, {0.0, 0.0}));
+    expectPositiveZeroSingleton(assessIntervalOperation(
+        IntervalOperation::Multiply, {0.0, 0.0}, {negative_one, negative_one}));
+    expectPositiveZeroSingleton(assessIntervalOperation(
+        IntervalOperation::Add, {one, one}, {negative_one, negative_one}));
+
+    const auto predecessor = assessIntervalOperation(
+        IntervalOperation::Subtract,
+        {one, one},
+        {two_to_minus_53, two_to_minus_53});
+    expectTightDyadicBracket(
+        predecessor,
+        independentlyScaledMagnitude(one) -
+            independentlyScaledMagnitude(two_to_minus_53),
+        1074u);
+    expectBits(predecessor.interval,
+               UINT64_C(0x3fefffffffffffff),
+               UINT64_C(0x3fefffffffffffff));
+
+    const auto crossing = assessIntervalOperation(
+        IntervalOperation::Subtract,
+        {one, one},
+        {two_to_minus_54, two_to_minus_54});
+    expectTightDyadicBracket(
+        crossing,
+        independentlyScaledMagnitude(one) -
+            independentlyScaledMagnitude(two_to_minus_54),
+        1074u);
+    expectBits(crossing.interval,
+               UINT64_C(0x3fefffffffffffff),
+               UINT64_C(0x3ff0000000000000));
+
+    const auto reflected = assessIntervalOperation(
+        IntervalOperation::Subtract,
+        {negative_one, negative_one},
+        {two_to_minus_54, two_to_minus_54});
+    expectTightDyadicBracket(
+        reflected,
+        independentlyScaledMagnitude(one) +
+            independentlyScaledMagnitude(two_to_minus_54),
+        1074u,
+        true);
+}
+
+TEST(ProducerArithmeticAssessment,
+     DyadicDirectOracleCoversRangeAndAllDiscardedLimbPositions)
+{
+    const Real minimum = fromBits(UINT64_C(0x0010000000000000));
+    const Real minimum_successor = fromBits(UINT64_C(0x0010000000000001));
+    const Real half = fromBits(UINT64_C(0x3fe0000000000000));
+    const Real one_predecessor = fromBits(UINT64_C(0x3fefffffffffffff));
+
+    const auto exact_subnormal = assessIntervalOperation(
+        IntervalOperation::Subtract,
+        {minimum_successor, minimum_successor},
+        {minimum, minimum});
+    expectDyadicRangeFailure(exact_subnormal, cpp_int(1), 1074u);
+
+    for (const Real factor : {half, one_predecessor}) {
+        const auto below_minimum = assessIntervalOperation(
+            IntervalOperation::Multiply,
+            {minimum, minimum},
+            {factor, factor});
+        expectDyadicRangeFailure(
+            below_minimum,
+            independentlyScaledMagnitude(minimum) *
+                independentlyScaledMagnitude(factor),
+            2148u);
+    }
+
+    for (const int exponent : {1, 2, 3, 13, 14}) {
+        const Real leading = normalWithExponentAndFraction(exponent, 0u);
+        const auto sticky = assessIntervalOperation(
+            IntervalOperation::Add,
+            {leading, leading},
+            {minimum, minimum});
+        expectTightDyadicBracket(
+            sticky,
+            independentlyScaledMagnitude(leading) +
+                independentlyScaledMagnitude(minimum),
+            1074u);
+
+        const Real one_ulp =
+            normalWithExponentAndFraction(exponent - 52, 0u);
+        const auto exact = assessIntervalOperation(
+            IntervalOperation::Add,
+            {leading, leading},
+            {one_ulp, one_ulp});
+        expectTightDyadicBracket(
+            exact,
+            independentlyScaledMagnitude(leading) +
+                independentlyScaledMagnitude(one_ulp),
+            1074u);
+    }
+}
+
+TEST(ProducerArithmeticAssessment,
+     DyadicProductOracleCoversRangeAndExtractionBoundaries)
+{
+    const Real minimum = fromBits(UINT64_C(0x0010000000000000));
+    const Real minimum_successor = fromBits(UINT64_C(0x0010000000000001));
+    const Real half = fromBits(UINT64_C(0x3fe0000000000000));
+    const Real one = fromBits(UINT64_C(0x3ff0000000000000));
+    const Real one_successor = fromBits(UINT64_C(0x3ff0000000000001));
+
+    const auto exact_minimum = assessIntervalOperation(
+        IntervalOperation::Multiply,
+        {minimum, minimum},
+        {one, one});
+    expectTightDyadicBracket(
+        exact_minimum,
+        independentlyScaledMagnitude(minimum) *
+            independentlyScaledMagnitude(one),
+        2148u);
+
+    const auto above_minimum = assessIntervalOperation(
+        IntervalOperation::Multiply,
+        {minimum_successor, minimum_successor},
+        {one_successor, one_successor});
+    expectTightDyadicBracket(
+        above_minimum,
+        independentlyScaledMagnitude(minimum_successor) *
+            independentlyScaledMagnitude(one_successor),
+        2148u);
+
+    const auto half_minimum = assessIntervalOperation(
+        IntervalOperation::Multiply,
+        {minimum, minimum},
+        {half, half});
+    expectDyadicRangeFailure(
+        half_minimum,
+        independentlyScaledMagnitude(minimum) *
+            independentlyScaledMagnitude(half),
+        2148u);
+
+    const auto minimum_squared = assessIntervalOperation(
+        IntervalOperation::Multiply,
+        {minimum, minimum},
+        {minimum, minimum});
+    expectDyadicRangeFailure(
+        minimum_squared,
+        independentlyScaledMagnitude(minimum) *
+            independentlyScaledMagnitude(minimum),
+        2148u);
+
+    for (const int exponent : {15, 16, 17, 27, 28}) {
+        const Real left = normalWithExponentAndFraction(exponent, 1u);
+        const auto product = assessIntervalOperation(
+            IntervalOperation::Multiply,
+            {left, left},
+            {one_successor, one_successor});
+        expectTightDyadicBracket(
+            product,
+            independentlyScaledMagnitude(left) *
+                independentlyScaledMagnitude(one_successor),
+            2148u);
+    }
+}
+
+TEST(ProducerArithmeticAssessment,
+     DyadicOracleCoversMaximumFiniteTailAndExponentRejection)
+{
+    const Real minimum = fromBits(UINT64_C(0x0010000000000000));
+    const Real one = fromBits(UINT64_C(0x3ff0000000000000));
+    const Real maximum = fromBits(UINT64_C(0x7fefffffffffffff));
+
+    const auto exact_maximum = assessIntervalOperation(
+        IntervalOperation::Multiply,
+        {maximum, maximum},
+        {one, one});
+    expectTightDyadicBracket(
+        exact_maximum,
+        independentlyScaledMagnitude(maximum) *
+            independentlyScaledMagnitude(one),
+        2148u);
+
+    const auto maximum_tail = assessIntervalOperation(
+        IntervalOperation::Add,
+        {maximum, maximum},
+        {minimum, minimum});
+    expectDyadicRangeFailure(
+        maximum_tail,
+        independentlyScaledMagnitude(maximum) +
+            independentlyScaledMagnitude(minimum),
+        1074u);
+
+    const auto maximum_span = assessIntervalOperation(
+        IntervalOperation::Subtract,
+        {maximum, maximum},
+        {minimum, minimum});
+    expectTightDyadicBracket(
+        maximum_span,
+        independentlyScaledMagnitude(maximum) -
+            independentlyScaledMagnitude(minimum),
+        1074u);
+
+    const Real product_left = normalWithExponentAndFraction(512, 1u);
+    const Real product_right =
+        normalWithExponentAndFraction(511, fraction_mask - 1u);
+    const cpp_int exact_product =
+        independentlyScaledMagnitude(product_left) *
+        independentlyScaledMagnitude(product_right);
+    const cpp_int maximum_scaled =
+        independentlyScaledMagnitude(maximum) << 1074u;
+    const cpp_int two_to_1024_scaled = cpp_int(1) << 3172u;
+    EXPECT_EQ(exact_product,
+              two_to_1024_scaled - (cpp_int(1) << 3068u));
+    EXPECT_GT(exact_product, maximum_scaled);
+    EXPECT_LT(exact_product, two_to_1024_scaled);
+    const auto product_tail = assessIntervalOperation(
+        IntervalOperation::Multiply,
+        {product_left, product_left},
+        {product_right, product_right});
+    expectDyadicRangeFailure(
+        product_tail,
+        exact_product,
+        2148u);
+
+    const auto maximum_sum = assessIntervalOperation(
+        IntervalOperation::Add,
+        {maximum, maximum},
+        {maximum, maximum});
+    expectDyadicRangeFailure(
+        maximum_sum,
+        independentlyScaledMagnitude(maximum) +
+            independentlyScaledMagnitude(maximum),
+        1074u);
+
+    const auto maximum_product = assessIntervalOperation(
+        IntervalOperation::Multiply,
+        {maximum, maximum},
+        {maximum, maximum});
+    expectDyadicRangeFailure(
+        maximum_product,
+        independentlyScaledMagnitude(maximum) *
+            independentlyScaledMagnitude(maximum),
+        2148u);
 }
 
 TEST(ProducerArithmeticAssessment,

@@ -29,6 +29,7 @@ constexpr std::size_t kLimbBits = 64u;
 constexpr std::size_t kLimbCount = 68u;
 constexpr std::size_t kMaximumOperandLimbs = 33u;
 constexpr unsigned kBinary64Scale = 1074u;
+constexpr unsigned kProductScale = 2u * kBinary64Scale;
 constexpr std::uint64_t kSignMask = UINT64_C(0x8000000000000000);
 constexpr std::uint64_t kFractionMask = UINT64_C(0x000fffffffffffff);
 constexpr std::uint64_t kExponentMask = UINT64_C(0x7ff0000000000000);
@@ -488,6 +489,77 @@ void normalize(UInt4352& value) noexcept
     return {lower, upper, true};
 }
 
+[[nodiscard]] MagnitudeBracket bracketDyadicMagnitude(
+    const UInt4352& magnitude,
+    unsigned scale) noexcept
+{
+    if (magnitude.used == 0u) {
+        return {0u, 0u, true};
+    }
+    if (magnitude.used > kLimbCount ||
+        magnitude.limbs[magnitude.used - 1u] == 0u ||
+        (scale != kBinary64Scale && scale != kProductScale)) {
+        return {};
+    }
+
+    const auto top_width =
+        std::bit_width(magnitude.limbs[magnitude.used - 1u]);
+    const auto highest_bit =
+        (magnitude.used - 1u) * kLimbBits + top_width - 1u;
+    if (highest_bit > static_cast<std::size_t>(INT_MAX) ||
+        scale > static_cast<unsigned>(INT_MAX)) {
+        return {};
+    }
+    const auto exponent = static_cast<int>(highest_bit) -
+                          static_cast<int>(scale);
+    if (exponent < -1022 || exponent > 1023 || highest_bit < 52u) {
+        return {};
+    }
+
+    const auto discarded_bits = highest_bit - 52u;
+    const auto limb_index = discarded_bits / kLimbBits;
+    const auto bit_shift =
+        static_cast<unsigned>(discarded_bits % kLimbBits);
+    if (limb_index >= magnitude.used ||
+        magnitude.used > limb_index + (bit_shift == 0u ? 1u : 2u)) {
+        return {};
+    }
+
+    auto significand = magnitude.limbs[limb_index] >> bit_shift;
+    if (bit_shift != 0u && limb_index + 1u < magnitude.used) {
+        significand |= magnitude.limbs[limb_index + 1u]
+                       << (kLimbBits - bit_shift);
+    }
+    if (std::bit_width(significand) != 53u) {
+        return {};
+    }
+
+    bool has_remainder = false;
+    for (std::size_t index = 0u; index < limb_index; ++index) {
+        has_remainder = has_remainder || magnitude.limbs[index] != 0u;
+    }
+    if (bit_shift != 0u) {
+        const auto mask = (UINT64_C(1) << bit_shift) - 1u;
+        has_remainder =
+            has_remainder || (magnitude.limbs[limb_index] & mask) != 0u;
+    }
+
+    const auto biased_exponent =
+        static_cast<std::uint64_t>(exponent + 1023);
+    const auto fraction = significand - (UINT64_C(1) << 52u);
+    const auto lower = (biased_exponent << 52u) | fraction;
+    if (lower < kMinimumNormal || lower > kMaximumFinite) {
+        return {};
+    }
+    if (!has_remainder) {
+        return {lower, lower, true};
+    }
+    if (lower == kMaximumFinite) {
+        return {};
+    }
+    return {lower, lower + 1u, true};
+}
+
 [[nodiscard]] IntervalAssessment unavailable(
     ArithmeticFailure failure) noexcept
 {
@@ -533,10 +605,9 @@ void normalize(UInt4352& value) noexcept
     if (!addSigned(left, right, exact)) {
         return unavailable(ArithmeticFailure::ArithmeticRange);
     }
-    SearchTarget target;
-    target.kind = TargetKind::Direct;
-    target.fixed = exact.magnitude;
-    return fromMagnitudeBracket(searchMagnitude(target), exact.sign);
+    return fromMagnitudeBracket(
+        bracketDyadicMagnitude(exact.magnitude, kBinary64Scale),
+        exact.sign);
 }
 
 [[nodiscard]] IntervalAssessment scalarMultiply(
@@ -552,13 +623,11 @@ void normalize(UInt4352& value) noexcept
     if (!multiply(left.magnitude, right.magnitude, exact_product)) {
         return unavailable(ArithmeticFailure::ArithmeticRange);
     }
-    SearchTarget target;
-    target.kind = TargetKind::ShiftedCandidate;
-    target.fixed = exact_product;
     const auto sign = left.sign == 0 || right.sign == 0
                           ? 0
                           : left.sign * right.sign;
-    return fromMagnitudeBracket(searchMagnitude(target), sign);
+    return fromMagnitudeBracket(
+        bracketDyadicMagnitude(exact_product, kProductScale), sign);
 }
 
 [[nodiscard]] IntervalAssessment scalarDivide(
