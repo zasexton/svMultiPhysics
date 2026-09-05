@@ -250,8 +250,8 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     EXPECT_EQ(state.constraint_semantics_key, 303u);
     EXPECT_DOUBLE_EQ(state.current_merit, 1.0);
     EXPECT_DOUBLE_EQ(state.merit_penalty, 3.0);
-    EXPECT_EQ(state.coefficients, input);
-    EXPECT_EQ(
+    ASSERT_EQ(state.coefficients, input);
+    ASSERT_EQ(
         state.active_coefficient_indices,
         (std::vector<std::size_t>{1u, 4u}));
     EXPECT_EQ(
@@ -260,7 +260,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     EXPECT_EQ(
         state.volume_gradient,
         (std::vector<FE::Real>{1.0, 1.0}));
-    EXPECT_EQ(
+    ASSERT_EQ(
         state.direction,
         (std::vector<FE::Real>{0.5, -0.5}));
 

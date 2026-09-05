@@ -197,10 +197,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(
       parseDiagnosticUnsigned(summary.at("constraint_semantics_key")),
       state.constraint_semantics_key);
-  EXPECT_DOUBLE_EQ(
+  EXPECT_EQ(
       parseDiagnosticReal(summary.at("current_merit")),
       state.current_merit);
-  EXPECT_DOUBLE_EQ(
+  EXPECT_EQ(
       parseDiagnosticReal(summary.at("merit_penalty")),
       state.merit_penalty);
 
@@ -210,7 +210,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   for (std::size_t index = 0u; index < coefficients.size(); ++index) {
     EXPECT_EQ(
         parseDiagnosticUnsigned(coefficients[index].at("index")), index);
-    EXPECT_DOUBLE_EQ(
+    EXPECT_EQ(
         parseDiagnosticReal(coefficients[index].at("value")),
         state.coefficients[index]);
   }
@@ -223,13 +223,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
     EXPECT_EQ(
         parseDiagnosticUnsigned(active[index].at("coefficient_index")),
         state.active_coefficient_indices[index]);
-    EXPECT_DOUBLE_EQ(
+    EXPECT_EQ(
         parseDiagnosticReal(active[index].at("energy_gradient")),
         state.energy_gradient[index]);
-    EXPECT_DOUBLE_EQ(
+    EXPECT_EQ(
         parseDiagnosticReal(active[index].at("volume_gradient")),
         state.volume_gradient[index]);
-    EXPECT_DOUBLE_EQ(
+    EXPECT_EQ(
         parseDiagnosticReal(active[index].at("direction")),
         state.direction[index]);
   }
