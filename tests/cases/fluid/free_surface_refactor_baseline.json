@@ -828,6 +828,48 @@
         "Code/Source/solver/Application/Translators/LevelSetEquationTranslator.h": "147d249c0b11c479d5b0dd8a451489970a0fbfdbf8ddeb6e9763a8ac246d3985"
       },
       "state": "ACCEPTED_BOUNDED_SNAPSHOT_RETENTION"
+    },
+    {
+      "acceptance_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-maintenance-producer-acceptance/acceptance.json",
+        "sha256": "de08380f0e58f9b3febcf8fb465b9f2d50ec2c0f2ff0dad6900a580fc87be810",
+        "size_bytes": 22316
+      },
+      "id": "r1-maintenance-producer",
+      "limitations": [
+        "This accepts only the bounded producer/parser slice, not full R1 or physical qualification.",
+        "Legacy-equation maintenance and layered installation retain characterized input-policy differences; reconciliation is a separate contract change.",
+        "Production driver still uses its old maintenance producer at the existing setup stage; state/binding migration and duplicate-driver-parser removal follow.",
+        "Provenance covers the declared observation families; complete free-surface/environment policy inventory remains open.",
+        "Three separate driver characterization WIP files were excluded from this source and its test evidence."
+      ],
+      "outcome": {
+        "all_two_four_rank_consensus_participants": "passed",
+        "focused_compatibility": 21,
+        "focused_producer": 17,
+        "focused_snapshot": 7,
+        "full_application": 364,
+        "materialized_inputs_verified": 4670,
+        "skipped": 0,
+        "strict_repeated_json_properties": 2,
+        "xml_file_count": 10
+      },
+      "reviewed_source_hashes_match": true,
+      "scope": "Immutable typed legacy-equation maintenance configuration paired with retained installation configuration; shared lexical policies preserve existing path differences, defaults, promotion order, diagnostics and bounded source-backed provenance. ApplicationDriver has not migrated yet.",
+      "source_commit": "8b3460f7213be82581f64426af90b381e0d70e19",
+      "source_hashes": {
+        "Code/Source/solver/Application/CMakeLists.txt": "9292fa8a4e4bc30b8cc0666298e077eb47ec71d1f8209e685537b84e5ea69028",
+        "Code/Source/solver/Application/Core/LevelSetMaintenanceConfiguration.cpp": "17850c0f120a090c167ba8654f76d58367814e2c1ffff1ecd017d5ec0e818105",
+        "Code/Source/solver/Application/Core/LevelSetMaintenanceConfiguration.h": "c135f83db5d11ad6e7720e4c714bb9d344b2bde54163b94550365eb7c17a6ed7",
+        "Code/Source/solver/Application/Core/ResolvedMovingDomainConfiguration.h": "d942107199da4e18615f0ca787f58dd9f4844683ef0474f81122d487aedf6072",
+        "Code/Source/solver/Application/Tests/CMakeLists.txt": "6ae25aa2a0de02b62a75a20e08b11d7c1f66eb8333c195408c34facd256c6d34",
+        "Code/Source/solver/Application/Tests/Unit/test_LevelSetEquationTranslator.cpp": "2dc0676a4f09ae5a92fa3b3cc4f95e50f49c7612286a5e4ce054c26c6af878f9",
+        "Code/Source/solver/Application/Tests/Unit/test_LevelSetMaintenanceConfiguration.cpp": "aa5d23d1711575b9fa651428c7ede866bc12c0f6a7e4e04d416c1c65d134fbdf",
+        "Code/Source/solver/Application/Translators/LevelSetConfigurationParsing.cpp": "481f64e4bfa33d500c9de6326dfbcb939ecb1cadacc908daab1a0a71af295773",
+        "Code/Source/solver/Application/Translators/LevelSetConfigurationParsing.h": "87a604d29cf93181defcdcf83e3fe0c0014e7cb6bbe88630936fd41381fa8b80",
+        "Code/Source/solver/Application/Translators/LevelSetEquationTranslator.cpp": "4121d0174c710ba610aafe0b0513952cd2702c4b9e9522bf77687a709a67bdfd"
+      },
+      "state": "ACCEPTED_BOUNDED_PRODUCER_AND_SHARED_PARSER"
     }
   ],
   "captured_references": [

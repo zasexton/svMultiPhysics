@@ -18,6 +18,16 @@ class FunctionSpace;
 
 namespace application::core {
 
+struct LevelSetInputObservation {
+  std::string canonical_key{};
+  std::string selected_spelling{};
+  std::string source_layer{};
+  bool supplied{false};
+  std::string representation{};
+  bool compatibility_fallback{false};
+  std::vector<std::string> ordered_overrides{};
+};
+
 struct ResolvedLevelSetEquationConfiguration {
   std::shared_ptr<svmp::MeshBase> source_mesh{};
   std::string source_mesh_name{};
@@ -25,6 +35,7 @@ struct ResolvedLevelSetEquationConfiguration {
   svmp::FE::level_set::LevelSetTransportOptions options{};
   svmp::FE::systems::FormInstallOptions install_options{};
   std::vector<std::string> projected_curvature_fields{};
+  std::vector<LevelSetInputObservation> input_observations{};
   LevelSetEquationInputHandle input_snapshot{};
 };
 

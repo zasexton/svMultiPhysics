@@ -1,6 +1,7 @@
 #include "Application/Translators/LevelSetEquationTranslator.h"
 
 #include "Application/Core/LevelSetEquationInputSnapshot.h"
+#include "Application/Translators/LevelSetConfigurationParsing.h"
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Core/JITRuntimePolicy.h"
 #include "Physics/Core/PhysicsModule.h"
@@ -38,6 +39,8 @@
 namespace {
 
 namespace ls = svmp::FE::level_set;
+namespace parsing = application::translators::level_set::configuration;
+namespace level_set_aliases = parsing::aliases;
 
 struct LevelSetTemporalSpatialInflowValues {
   struct Key {
@@ -852,27 +855,14 @@ private:
 
 std::string trim_copy(std::string s)
 {
-  auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
-  s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
-  s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
-  return s;
-}
-
-std::string lower_copy(std::string s)
-{
-  std::transform(s.begin(), s.end(), s.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return s;
+  return application::translators::level_set::configuration::trimCopy(
+      std::move(s));
 }
 
 std::string normalized_token(std::string s)
 {
-  s = lower_copy(trim_copy(std::move(s)));
-  s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char ch) {
-            return ch == '_' || ch == '-' || std::isspace(ch);
-          }),
-          s.end());
-  return s;
+  return application::translators::level_set::configuration::normalizedToken(
+      std::move(s));
 }
 
 const svmp::Physics::ParameterValue* find_param(const svmp::Physics::ParameterMap& params,
@@ -886,71 +876,19 @@ std::optional<std::string> get_defined_string(
     const svmp::Physics::ParameterMap& params,
     std::initializer_list<std::string_view> keys)
 {
-  for (const auto key : keys) {
-    const auto* p = find_param(params, key);
-    if (!p || !p->defined) {
-      continue;
-    }
-    auto value = trim_copy(p->value);
-    if (!value.empty()) {
-      return value;
-    }
-  }
-  return std::nullopt;
-}
-
-bool parse_bool_relaxed(std::string_view raw)
-{
-  const auto value = lower_copy(trim_copy(std::string(raw)));
-  return value == "true" || value == "1" || value == "yes" || value == "on";
+  using namespace application::translators::level_set::configuration;
+  const LevelSetConfigurationReader reader(
+      params, LevelSetInputPolicy::Installation);
+  const auto value = reader.selected(keys);
+  return value ? std::optional<std::string>{value->text} : std::nullopt;
 }
 
 std::optional<bool> get_defined_bool(const svmp::Physics::ParameterMap& params,
                                      std::initializer_list<std::string_view> keys)
 {
-  for (const auto key : keys) {
-    const auto* p = find_param(params, key);
-    if (!p || !p->defined) {
-      continue;
-    }
-    const auto value = trim_copy(p->value);
-    if (!value.empty()) {
-      return parse_bool_relaxed(value);
-    }
-  }
-  return std::nullopt;
-}
-
-double parse_double(std::string_view raw, std::string_view context)
-{
-  const auto s = trim_copy(std::string(raw));
-  try {
-    size_t pos = 0;
-    const double v = std::stod(s, &pos);
-    if (pos != s.size() || !std::isfinite(v)) {
-      throw std::runtime_error("");
-    }
-    return v;
-  } catch (...) {
-    throw std::runtime_error("[svMultiPhysics::Application] Failed to parse numeric value '" + std::string(raw) +
-                             "' for " + std::string(context) + ".");
-  }
-}
-
-int parse_int(std::string_view raw, std::string_view context)
-{
-  const auto s = trim_copy(std::string(raw));
-  try {
-    size_t pos = 0;
-    const int v = std::stoi(s, &pos);
-    if (pos != s.size()) {
-      throw std::runtime_error("");
-    }
-    return v;
-  } catch (...) {
-    throw std::runtime_error("[svMultiPhysics::Application] Failed to parse integer value '" + std::string(raw) +
-                             "' for " + std::string(context) + ".");
-  }
+  using namespace application::translators::level_set::configuration;
+  LevelSetConfigurationReader reader(params, LevelSetInputPolicy::Installation);
+  return reader.boolean(keys);
 }
 
 std::optional<svmp::FE::Real> get_defined_real(
@@ -958,17 +896,9 @@ std::optional<svmp::FE::Real> get_defined_real(
     std::initializer_list<std::string_view> keys,
     std::string_view context)
 {
-  for (const auto key : keys) {
-    const auto* p = find_param(params, key);
-    if (!p || !p->defined) {
-      continue;
-    }
-    const auto value = trim_copy(p->value);
-    if (!value.empty()) {
-      return static_cast<svmp::FE::Real>(parse_double(value, context));
-    }
-  }
-  return std::nullopt;
+  using namespace application::translators::level_set::configuration;
+  LevelSetConfigurationReader reader(params, LevelSetInputPolicy::Installation);
+  return reader.real(keys, context);
 }
 
 std::optional<int> get_defined_int(
@@ -976,39 +906,9 @@ std::optional<int> get_defined_int(
     std::initializer_list<std::string_view> keys,
     std::string_view context)
 {
-  for (const auto key : keys) {
-    const auto* p = find_param(params, key);
-    if (!p || !p->defined) {
-      continue;
-    }
-    const auto value = trim_copy(p->value);
-    if (!value.empty()) {
-      return parse_int(value, context);
-    }
-  }
-  return std::nullopt;
-}
-
-std::array<svmp::FE::Real, 3> parse_real_vector3(std::string_view raw, std::string_view context)
-{
-  std::istringstream in{std::string(raw)};
-  std::array<svmp::FE::Real, 3> out{0.0, 0.0, 0.0};
-  for (std::size_t i = 0; i < out.size(); ++i) {
-    double value = 0.0;
-    if (!(in >> value) || !std::isfinite(value)) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Failed to parse three numeric components for " +
-          std::string(context) + ".");
-    }
-    out[i] = static_cast<svmp::FE::Real>(value);
-  }
-  std::string extra;
-  if (in >> extra) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Failed to parse three numeric components for " +
-        std::string(context) + ".");
-  }
-  return out;
+  using namespace application::translators::level_set::configuration;
+  LevelSetConfigurationReader reader(params, LevelSetInputPolicy::Installation);
+  return reader.integer(keys, context);
 }
 
 std::optional<std::array<svmp::FE::Real, 3>> get_defined_vector3(
@@ -1016,33 +916,9 @@ std::optional<std::array<svmp::FE::Real, 3>> get_defined_vector3(
     std::initializer_list<std::string_view> keys,
     std::string_view context)
 {
-  for (const auto key : keys) {
-    const auto* p = find_param(params, key);
-    if (!p || !p->defined) {
-      continue;
-    }
-    const auto value = trim_copy(p->value);
-    if (!value.empty()) {
-      return parse_real_vector3(value, context);
-    }
-  }
-  return std::nullopt;
-}
-
-int parse_positive_int(std::string_view raw, std::string_view context)
-{
-  const auto s = trim_copy(std::string(raw));
-  try {
-    size_t pos = 0;
-    const int v = std::stoi(s, &pos);
-    if (pos != s.size() || v < 1) {
-      throw std::runtime_error("");
-    }
-    return v;
-  } catch (...) {
-    throw std::runtime_error("[svMultiPhysics::Application] Failed to parse positive integer value '" +
-                             std::string(raw) + "' for " + std::string(context) + ".");
-  }
+  using namespace application::translators::level_set::configuration;
+  LevelSetConfigurationReader reader(params, LevelSetInputPolicy::Installation);
+  return reader.vector3(keys, context);
 }
 
 std::optional<int> get_defined_positive_int(
@@ -1050,17 +926,74 @@ std::optional<int> get_defined_positive_int(
     std::initializer_list<std::string_view> keys,
     std::string_view context)
 {
-  for (const auto key : keys) {
-    const auto* p = find_param(params, key);
-    if (!p || !p->defined) {
-      continue;
-    }
-    const auto value = trim_copy(p->value);
-    if (!value.empty()) {
-      return parse_positive_int(value, context);
-    }
-  }
-  return std::nullopt;
+  using namespace application::translators::level_set::configuration;
+  LevelSetConfigurationReader reader(params, LevelSetInputPolicy::Installation);
+  return reader.integer(keys, context, true);
+}
+
+template <std::size_t N>
+std::optional<std::string> get_defined_string(
+    const svmp::Physics::ParameterMap& params,
+    const std::array<std::string_view, N>& keys)
+{
+  parsing::LevelSetConfigurationReader reader(
+      params, parsing::LevelSetInputPolicy::Installation);
+  const auto value = reader.selected(keys);
+  return value ? std::optional<std::string>{value->text} : std::nullopt;
+}
+
+template <std::size_t N>
+std::optional<bool> get_defined_bool(
+    const svmp::Physics::ParameterMap& params,
+    const std::array<std::string_view, N>& keys)
+{
+  parsing::LevelSetConfigurationReader reader(
+      params, parsing::LevelSetInputPolicy::Installation);
+  return reader.boolean(keys);
+}
+
+template <std::size_t N>
+std::optional<svmp::FE::Real> get_defined_real(
+    const svmp::Physics::ParameterMap& params,
+    const std::array<std::string_view, N>& keys,
+    std::string_view context)
+{
+  parsing::LevelSetConfigurationReader reader(
+      params, parsing::LevelSetInputPolicy::Installation);
+  return reader.real(keys, context);
+}
+
+template <std::size_t N>
+std::optional<int> get_defined_int(
+    const svmp::Physics::ParameterMap& params,
+    const std::array<std::string_view, N>& keys,
+    std::string_view context)
+{
+  parsing::LevelSetConfigurationReader reader(
+      params, parsing::LevelSetInputPolicy::Installation);
+  return reader.integer(keys, context);
+}
+
+template <std::size_t N>
+std::optional<std::array<svmp::FE::Real, 3>> get_defined_vector3(
+    const svmp::Physics::ParameterMap& params,
+    const std::array<std::string_view, N>& keys,
+    std::string_view context)
+{
+  parsing::LevelSetConfigurationReader reader(
+      params, parsing::LevelSetInputPolicy::Installation);
+  return reader.vector3(keys, context);
+}
+
+template <std::size_t N>
+std::optional<int> get_defined_positive_int(
+    const svmp::Physics::ParameterMap& params,
+    const std::array<std::string_view, N>& keys,
+    std::string_view context)
+{
+  parsing::LevelSetConfigurationReader reader(
+      params, parsing::LevelSetInputPolicy::Installation);
+  return reader.integer(keys, context, true);
 }
 
 svmp::FE::systems::FormInstallOptions level_set_install_options(
@@ -1137,7 +1070,7 @@ int infer_polynomial_order(const svmp::MeshBase& mesh)
 int resolve_element_order(const svmp::Physics::EquationModuleInput& input, int inferred_order)
 {
   if (const auto* p = find_param(input.equation_params, "Element_order"); p && p->defined) {
-    return parse_positive_int(p->value, "Element_order");
+    return parsing::parseStrictPositiveInteger(p->value, "Element_order");
   }
   return inferred_order;
 }
@@ -1186,92 +1119,109 @@ ls::LevelSetFieldSource parse_level_set_source(std::string_view raw)
 
 ls::LevelSetVelocitySource parse_velocity_source(std::string_view raw)
 {
-  const auto value = normalized_token(std::string(raw));
-  if (value == "coupled" || value == "coupledfield" || value == "unknown" || value == "navierstokes") {
-    return ls::LevelSetVelocitySource::CoupledField;
-  }
-  if (value == "prescribed" || value == "prescribeddata" || value == "data") {
-    return ls::LevelSetVelocitySource::PrescribedData;
-  }
-  if (value == "constant" || value == "constantvector") {
-    return ls::LevelSetVelocitySource::ConstantVector;
-  }
-  if (value == "materialinterfacephasepair") {
-    return ls::LevelSetVelocitySource::MaterialInterfacePhasePair;
-  }
-  throw std::runtime_error(
-      "[svMultiPhysics::Application] Velocity_source must be one of 'coupled_field', 'prescribed_data', 'constant', or 'material_interface_phase_pair'.");
+  using namespace application::translators::level_set::configuration;
+  return parseVelocitySource(raw, LevelSetInputPolicy::Installation);
 }
 
 ls::LevelSetTransportForm parse_transport_form(std::string_view raw)
 {
-  const auto value = normalized_token(std::string(raw));
-  if (value == "advective" || value == "classical" || value == "standard") {
-    return ls::LevelSetTransportForm::Advective;
-  }
-  if (value == "conservative" ||
-      value == "conservativedivergence" ||
-      value == "divergence" ||
-      value == "divergenceform") {
-    return ls::LevelSetTransportForm::ConservativeDivergence;
-  }
-  throw std::runtime_error(
-      "[svMultiPhysics::Application] Level-set Transport_form must be one of 'advective' or 'conservative_divergence'.");
+  return application::translators::level_set::configuration::parseTransportForm(
+      raw);
 }
 
 ls::LevelSetPhaseSide parse_phase_side(std::string_view raw)
 {
-  const auto value = normalized_token(std::string(raw));
-  if (value == "negative" || value == "minus") {
-    return ls::LevelSetPhaseSide::Negative;
-  }
-  if (value == "positive" || value == "plus") {
-    return ls::LevelSetPhaseSide::Positive;
-  }
-  throw std::runtime_error(
-      "[svMultiPhysics::Application] Conservative_phase_liquid_side must be 'negative' or 'positive'.");
+  return application::translators::level_set::configuration::parsePhaseSide(raw);
 }
 
 ls::LevelSetConservativePhaseBoundaryFluxPolicy
 parse_conservative_phase_boundary_flux_policy(std::string_view raw)
 {
-  const auto value = normalized_token(std::string(raw));
-  if (value == "closeddomaindiscreteqfluxonly") {
-    return ls::LevelSetConservativePhaseBoundaryFluxPolicy::
-        ClosedDomainDiscreteQFluxOnly;
-  }
-  if (value == "globallybalanceddiscreteqflux") {
-    return ls::LevelSetConservativePhaseBoundaryFluxPolicy::
-        GloballyBalancedDiscreteQFlux;
-  }
-  throw std::runtime_error(
-      "[svMultiPhysics::Application] Conservative_phase_boundary_flux_policy must be 'closed_domain_discrete_q_flux_only' or 'globally_balanced_discrete_q_flux'.");
+  return application::translators::level_set::configuration::
+      parseConservativePhaseBoundaryFluxPolicy(raw);
 }
 
 ls::LevelSetReinitializationMethod parse_reinitialization_method(std::string_view raw)
 {
-  const auto value = normalized_token(std::string(raw));
-  if (value == "hamiltonjacobi" || value == "hamiltonjacobipde" || value == "pde") {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Reinitialization_method=HamiltonJacobiPDE "
-        "is reserved until runtime Hamilton-Jacobi reinitialization is implemented; "
-        "use 'Projection'.");
+  using namespace application::translators::level_set::configuration;
+  return parseReinitializationMethod(raw, LevelSetInputPolicy::Installation);
+}
+
+void append_installation_selection(
+    std::vector<application::core::LevelSetInputObservation>& observations,
+    const parsing::LevelSetSelectedParameter& selection,
+    std::string_view source_layer)
+{
+  observations.push_back(application::core::LevelSetInputObservation{
+      .canonical_key = selection.canonical_key,
+      .selected_spelling = selection.selected_spelling,
+      .source_layer = std::string(source_layer),
+      .supplied = selection.supplied,
+      .representation = "installation_snapshot",
+      .compatibility_fallback = false,
+      .ordered_overrides = {},
+  });
+}
+
+void append_installation_selections(
+    std::vector<application::core::LevelSetInputObservation>& observations,
+    const parsing::LevelSetConfigurationReader& reader,
+    std::string_view source_layer)
+{
+  for (const auto& selection : reader.selections()) {
+    append_installation_selection(observations, selection, source_layer);
   }
-  if (value == "fastmarching" || value == "fastmarchingmethod" || value == "fmm") {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Reinitialization_method=FastMarching "
-        "is reserved until runtime fast-marching reinitialization is implemented; "
-        "use 'Projection'.");
-  }
-  if (value == "projection" || value == "signeddistanceprojection" || value == "repairprojection") {
-    return ls::LevelSetReinitializationMethod::Projection;
-  }
-  throw std::runtime_error(
-      "[svMultiPhysics::Application] Reinitialization_method currently supports 'Projection' only.");
+}
+
+void append_installation_derived(
+    std::vector<application::core::LevelSetInputObservation>& observations,
+    std::string_view canonical_key, std::string_view source_layer,
+    std::string_view originating_layer = {})
+{
+  observations.push_back(application::core::LevelSetInputObservation{
+      .canonical_key = std::string(canonical_key),
+      .selected_spelling = {},
+      .source_layer = std::string(source_layer),
+      .supplied = false,
+      .representation = "installation_derived",
+      .compatibility_fallback = false,
+      .ordered_overrides = originating_layer.empty()
+                               ? std::vector<std::string>{}
+                               : std::vector<std::string>{
+                                     std::string(originating_layer)},
+  });
+}
+
+void append_installation_default(
+    std::vector<application::core::LevelSetInputObservation>& observations,
+    std::string_view canonical_key)
+{
+  observations.push_back(application::core::LevelSetInputObservation{
+      .canonical_key = std::string(canonical_key),
+      .selected_spelling = {},
+      .source_layer = "fe_default",
+      .supplied = false,
+      .representation = "installation_default",
+      .compatibility_fallback = false,
+      .ordered_overrides = {},
+  });
+}
+
+bool has_installation_observation(
+    const std::vector<application::core::LevelSetInputObservation>& observations,
+    std::string_view canonical_key)
+{
+  return std::any_of(observations.begin(), observations.end(),
+                     [&](const auto& observation) {
+                       return observation.canonical_key == canonical_key;
+                     });
 }
 
 void apply_level_set_params(const svmp::Physics::ParameterMap& params,
-                            ls::LevelSetTransportOptions& options)
+                            ls::LevelSetTransportOptions& options,
+                            std::vector<application::core::LevelSetInputObservation>&
+                                observations,
+                            std::string_view source_layer)
 {
   if (const auto value = get_defined_string(params, {"Operator_tag", "OperatorTag"})) {
     options.operator_tag = *value;
@@ -1282,15 +1232,12 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
     }
   }
   if (const auto value = get_defined_string(
-          params,
-          {"Transport_form", "TransportForm", "Advection_form", "AdvectionForm",
-           "Level_set_transport_form", "LevelSetTransportForm"})) {
+          params, level_set_aliases::transport_form)) {
     options.transport_form = parse_transport_form(*value);
   }
 
   if (const auto value = get_defined_string(
-          params,
-          {"Level_set_field_name", "LevelSetFieldName", "Level_set_field", "LevelSetField", "Field_name"})) {
+          params, level_set_aliases::level_set_field_name)) {
     options.level_set.field_name = *value;
   }
   if (const auto value = get_defined_string(params, {"Level_set_source", "LevelSetSource"})) {
@@ -1303,31 +1250,19 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
   }
 
   if (const auto value = get_defined_bool(
-          params,
-          {"Enable_conservative_phase_transport",
-           "EnableConservativePhaseTransport",
-           "Conservative_phase_transport",
-           "ConservativePhaseTransport"})) {
+          params, level_set_aliases::conservative_phase_enable)) {
     options.conservative_phase.enabled = *value;
   }
   if (const auto value = get_defined_string(
-          params,
-          {"Conservative_phase_field_name",
-           "ConservativePhaseFieldName",
-           "Liquid_indicator_field_name",
-           "LiquidIndicatorFieldName"})) {
+          params, level_set_aliases::conservative_phase_field)) {
     options.conservative_phase.liquid_indicator.field_name = *value;
   }
   if (const auto value = get_defined_bool(
-          params,
-          {"Auto_register_conservative_phase_field",
-           "AutoRegisterConservativePhaseField"})) {
+          params, level_set_aliases::conservative_phase_auto_register)) {
     options.conservative_phase.liquid_indicator.auto_register_field = *value;
   }
   if (const auto value = get_defined_string(
-          params,
-          {"Conservative_phase_liquid_side",
-           "ConservativePhaseLiquidSide"})) {
+          params, level_set_aliases::conservative_phase_side)) {
     options.conservative_phase.liquid_side = parse_phase_side(*value);
   }
   if (const auto value = get_defined_real(
@@ -1442,39 +1377,63 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
   }
 
   if (const auto value = get_defined_string(
-          params,
-          {"Velocity_field_name", "VelocityFieldName", "Advection_velocity_field", "AdvectionVelocityField"})) {
+          params, level_set_aliases::velocity_field_name)) {
     options.velocity.field_name = *value;
   }
-  if (const auto value = get_defined_string(params, {"Velocity_source", "VelocitySource"})) {
-    options.velocity.source = parse_velocity_source(*value);
+  parsing::LevelSetConfigurationReader velocity_source_reader(
+      params, parsing::LevelSetInputPolicy::Installation);
+  if (const auto selected = velocity_source_reader.string(
+          level_set_aliases::velocity_source, "velocity_source")) {
+    options.velocity.source = parse_velocity_source(selected->text);
+    append_installation_selections(observations, velocity_source_reader,
+                                   source_layer);
     if (options.velocity.source == ls::LevelSetVelocitySource::PrescribedData) {
       options.velocity.auto_register_field = true;
+      append_installation_derived(observations,
+                                  "velocity_auto_register_field",
+                                  "derived:velocity_source", source_layer);
     } else if (options.velocity.source == ls::LevelSetVelocitySource::ConstantVector) {
       options.velocity.auto_register_field = false;
+      append_installation_derived(observations,
+                                  "velocity_auto_register_field",
+                                  "derived:velocity_source", source_layer);
     } else if (options.velocity.source ==
                ls::LevelSetVelocitySource::MaterialInterfacePhasePair) {
       options.velocity.auto_register_field = false;
+      append_installation_derived(observations,
+                                  "velocity_auto_register_field",
+                                  "derived:velocity_source", source_layer);
     }
   }
   if (const auto value = get_defined_int(
-          params,
-          {"Material_interface_marker", "MaterialInterfaceMarker"},
+          params, level_set_aliases::material_interface_marker,
           "Material_interface_marker")) {
     options.velocity.material_interface_marker = *value;
   }
-  if (const auto value = get_defined_bool(
-          params,
-          {"Auto_register_velocity_field", "AutoRegisterVelocityField"})) {
+  parsing::LevelSetConfigurationReader velocity_metadata_reader(
+      params, parsing::LevelSetInputPolicy::Installation);
+  if (const auto value = velocity_metadata_reader.boolean(
+          level_set_aliases::velocity_auto_register,
+          "velocity_auto_register_field")) {
     options.velocity.auto_register_field = *value;
   }
-  if (const auto value = get_defined_vector3(
-          params,
-          {"Constant_velocity", "ConstantVelocity", "Velocity_value", "VelocityValue"},
-          "Constant_velocity")) {
+  append_installation_selections(observations, velocity_metadata_reader,
+                                 source_layer);
+  parsing::LevelSetConfigurationReader constant_velocity_reader(
+      params, parsing::LevelSetInputPolicy::Installation);
+  if (const auto value = constant_velocity_reader.vector3(
+          level_set_aliases::constant_velocity, "Constant_velocity",
+          "constant_velocity")) {
     options.velocity.source = ls::LevelSetVelocitySource::ConstantVector;
     options.velocity.auto_register_field = false;
     options.velocity.constant_value = *value;
+    append_installation_selections(observations, constant_velocity_reader,
+                                   source_layer);
+    append_installation_derived(observations, "velocity_source",
+                                "derived:constant_velocity", source_layer);
+    append_installation_derived(observations,
+                                "velocity_auto_register_field",
+                                "derived:constant_velocity", source_layer);
   }
 
   if (const auto value = get_defined_bool(params, {"Enable_SUPG", "SUPG", "SUPG_enabled"})) {
@@ -1603,94 +1562,70 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
   }
 
   if (const auto value = get_defined_bool(
-          params,
-          {"Enable_reinitialization", "Enable_level_set_reinitialization",
-           "Reinitialization", "Reinitialization_enabled", "Reinitialize_level_set"})) {
+          params, level_set_aliases::reinitialization_enable)) {
     options.reinitialization.enabled = *value;
   }
   if (const auto value = get_defined_string(
-          params,
-          {"Reinitialization_method", "Level_set_reinitialization_method", "ReinitializationMethod"})) {
+          params, level_set_aliases::reinitialization_method)) {
     options.reinitialization.method = parse_reinitialization_method(*value);
   }
   if (const auto value = get_defined_positive_int(
-          params,
-          {"Reinitialization_cadence_steps", "Reinitialization_cadence",
-           "Level_set_reinitialization_cadence_steps", "ReinitializationCadenceSteps"},
+          params, level_set_aliases::reinitialization_cadence,
           "Reinitialization_cadence_steps")) {
     options.reinitialization.cadence_steps = *value;
   }
   if (const auto value = get_defined_positive_int(
-          params,
-          {"Reinitialization_max_iterations", "Reinitialization_iterations",
-           "ReinitializationMaxIterations"},
+          params, level_set_aliases::reinitialization_iterations,
           "Reinitialization_max_iterations")) {
     options.reinitialization.max_iterations = *value;
   }
   if (const auto value = get_defined_real(
-          params,
-          {"Reinitialization_pseudo_time_step_scale", "ReinitializationPseudoTimeStepScale"},
+          params, level_set_aliases::reinitialization_pseudo_time_step,
           "Reinitialization_pseudo_time_step_scale")) {
     options.reinitialization.pseudo_time_step_scale = *value;
   }
   if (const auto value = get_defined_real(
-          params,
-          {"Reinitialization_interface_band_width", "ReinitializationInterfaceBandWidth"},
+          params, level_set_aliases::reinitialization_interface_band,
           "Reinitialization_interface_band_width")) {
     options.reinitialization.interface_band_width = *value;
   }
   if (const auto value = get_defined_real(
-          params,
-          {"Reinitialization_signed_distance_tolerance", "ReinitializationSignedDistanceTolerance"},
+          params, level_set_aliases::reinitialization_signed_distance_tolerance,
           "Reinitialization_signed_distance_tolerance")) {
     options.reinitialization.signed_distance_tolerance = *value;
   }
   if (const auto value = get_defined_real(
-          params,
-          {"Reinitialization_max_zero_set_displacement",
-           "ReinitializationMaxZeroSetDisplacement"},
+          params, level_set_aliases::reinitialization_max_zero_set_displacement,
           "Reinitialization_max_zero_set_displacement")) {
     options.reinitialization.max_zero_set_displacement = *value;
   }
 
   if (const auto value = get_defined_bool(
-          params,
-          {"Enable_volume_correction", "Enable_level_set_volume_correction",
-           "Volume_correction", "VolumeCorrection", "Correct_level_set_volume"})) {
+          params, level_set_aliases::volume_correction_enable)) {
     options.volume_correction.enabled = *value;
   }
   if (const auto value = get_defined_positive_int(
-          params,
-          {"Volume_correction_cadence_steps", "Volume_correction_cadence",
-           "Level_set_volume_correction_cadence_steps", "VolumeCorrectionCadenceSteps"},
+          params, level_set_aliases::volume_correction_cadence,
           "Volume_correction_cadence_steps")) {
     options.volume_correction.cadence_steps = *value;
   }
   if (const auto value = get_defined_bool(
-          params,
-          {"Volume_correction_use_initial_volume", "Use_initial_level_set_volume_as_target",
-           "VolumeCorrectionUseInitialVolume"})) {
+          params, level_set_aliases::volume_correction_use_initial)) {
     options.volume_correction.use_initial_negative_volume_as_target = *value;
   }
   if (const auto value = get_defined_real(
-          params,
-          {"Volume_correction_target_negative_volume",
-           "Level_set_volume_correction_target_negative_volume",
-           "VolumeCorrectionTargetNegativeVolume"},
+          params, level_set_aliases::volume_correction_target,
           "Volume_correction_target_negative_volume")) {
     options.volume_correction.target_negative_volume = *value;
     options.volume_correction.use_initial_negative_volume_as_target = false;
   }
   if (const auto value = get_defined_real(
-          params,
-          {"Volume_correction_tolerance", "Volume_correction_volume_tolerance",
-           "Level_set_volume_correction_tolerance", "VolumeCorrectionTolerance"},
+          params, level_set_aliases::volume_correction_tolerance,
           "Volume_correction_tolerance")) {
     options.volume_correction.volume_tolerance = *value;
   }
   if (const auto value = get_defined_positive_int(
-          params,
-          {"Volume_correction_max_iterations", "VolumeCorrectionMaxIterations"},
+          params, level_set_aliases::volume_correction_iterations,
           "Volume_correction_max_iterations")) {
     options.volume_correction.max_iterations = *value;
   }
@@ -1722,15 +1657,7 @@ std::optional<std::string> projected_curvature_field_name(
     const svmp::Physics::ParameterMap& params)
 {
   return get_defined_string(
-      params,
-      {"Curvature_field_name",
-       "CurvatureFieldName",
-       "Curvature_field",
-       "CurvatureField",
-       "Projected_curvature_field",
-       "ProjectedCurvatureField",
-       "Free_surface_curvature_field",
-       "FreeSurfaceCurvatureField"});
+      params, level_set_aliases::curvature_field);
 }
 
 std::vector<std::string> projected_curvature_fields_from_input(
@@ -1915,17 +1842,22 @@ translate_level_set_transport_input(
           velocity_scalar_space, dim);
 
   ls::LevelSetTransportOptions options{};
+  std::vector<application::core::LevelSetInputObservation> input_observations;
   const auto install_options =
       level_set_install_options(svmp::Physics::core::resolveOopJitPolicy(input));
 
-  apply_level_set_params(input.equation_params, options);
-  apply_level_set_params(input.default_domain.params, options);
+  apply_level_set_params(input.equation_params, options, input_observations,
+                         "equation");
+  apply_level_set_params(input.default_domain.params, options,
+                         input_observations, "default_domain");
   if (!input.domains.empty()) {
     if (input.domains.size() != 1u) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Multiple <Domain> blocks are not supported by the level-set transport module.");
     }
-    apply_level_set_params(input.domains.front().params, options);
+    apply_level_set_params(input.domains.front().params, options,
+                           input_observations,
+                           "domain:" + input.domains.front().id);
   }
   apply_level_set_bcs(input, options);
 
@@ -1982,23 +1914,18 @@ translate_level_set_transport_input(
         "[svMultiPhysics::Application] Conservative_phase_impermeable_normal_velocity_tolerance requests a pointwise velocity-normal wall contract that the current conservative-phase split does not implement; the configured boundary policy enforces only discrete q-flux at invariant_tolerance and can be blind where q=0.");
   }
 
-  const bool wet_extension_enabled =
-      get_defined_bool(
-          input.equation_params,
-          {"Use_wet_extension_advection_velocity",
-           "UseWetExtensionAdvectionVelocity",
-           "Update_advection_velocity_from_wet_region",
-           "UpdateAdvectionVelocityFromWetRegion"})
-          .value_or(false) ||
-      get_defined_string(
-          input.equation_params,
-          {"Advection_velocity_from_field",
-           "AdvectionVelocityFromField",
-           "Source_velocity_field_name",
-           "SourceVelocityFieldName",
-           "Physical_velocity_field_name",
-           "PhysicalVelocityFieldName"})
-          .has_value();
+  parsing::LevelSetConfigurationReader wet_reader(
+      input.equation_params, parsing::LevelSetInputPolicy::Installation);
+  const auto wet_enabled = wet_reader.boolean(
+      level_set_aliases::wet_extension_enable,
+      "use_wet_extension_advection_velocity");
+  std::optional<parsing::LevelSetSelectedParameter> wet_source;
+  bool wet_extension_enabled = wet_enabled.value_or(false);
+  if (!wet_extension_enabled) {
+    wet_source = wet_reader.string(level_set_aliases::wet_extension_source,
+                                   "advection_velocity_from_field");
+    wet_extension_enabled = wet_source.has_value();
+  }
   if (wet_extension_enabled) {
     if (options.velocity.source !=
         ls::LevelSetVelocitySource::PrescribedData) {
@@ -2008,16 +1935,13 @@ translate_level_set_transport_input(
           "state-dependent coefficient to an algebraic coupled unknown so "
           "its monolithic velocity tangent is retained.");
     }
-    const auto source = get_defined_string(
-        input.equation_params,
-        {"Advection_velocity_from_field",
-         "AdvectionVelocityFromField",
-         "Source_velocity_field_name",
-         "SourceVelocityFieldName",
-         "Physical_velocity_field_name",
-         "PhysicalVelocityFieldName"});
+    if (!wet_source) {
+      wet_source = wet_reader.string(level_set_aliases::wet_extension_source,
+                                     "advection_velocity_from_field");
+    }
     options.velocity.algebraic_extension_source_field_name =
-        source.has_value() ? trim_copy(*source) : std::string{"Velocity"};
+        wet_source.has_value() ? trim_copy(wet_source->text)
+                               : std::string{"Velocity"};
     if (options.velocity.algebraic_extension_source_field_name.empty() ||
         options.velocity.algebraic_extension_source_field_name ==
             options.velocity.field_name) {
@@ -2025,12 +1949,47 @@ translate_level_set_transport_input(
           "[svMultiPhysics::Application] Wet-extension algebraic source must "
           "name a distinct physical velocity field.");
     }
+    append_installation_selections(input_observations, wet_reader, "equation");
+    if (wet_source) {
+      auto source_name = *wet_source;
+      source_name.canonical_key = "velocity_source_field_name";
+      append_installation_selection(input_observations, source_name,
+                                    "equation");
+    } else {
+      append_installation_derived(input_observations,
+                                  "velocity_source_field_name",
+                                  "derived:wet_extension_default_source",
+                                  "equation");
+    }
     options.velocity.source = ls::LevelSetVelocitySource::CoupledField;
     options.velocity.auto_register_field = true;
+    append_installation_derived(input_observations, "velocity_source",
+                                "derived:wet_extension", "equation");
+    append_installation_derived(input_observations,
+                                "velocity_auto_register_field",
+                                "derived:wet_extension", "equation");
+  } else {
+    append_installation_selections(input_observations, wet_reader, "equation");
+  }
+
+  if (!has_installation_observation(input_observations,
+                                    "velocity_auto_register_field")) {
+    append_installation_default(input_observations,
+                                "velocity_auto_register_field");
+  }
+  if (!has_installation_observation(input_observations,
+                                    "velocity_source_field_name")) {
+    append_installation_default(input_observations,
+                                "velocity_source_field_name");
   }
 
   if (!material_interface_velocity) {
     options.velocity.space = velocity_space;
+    append_installation_derived(input_observations, "velocity_space_present",
+                                "derived:resolved_velocity_space");
+  } else {
+    append_installation_derived(input_observations, "velocity_space_present",
+                                "derived:material_interface_phase_pair");
   }
   const auto projected_curvature_fields =
       projected_curvature_fields_from_input(input);
@@ -2041,6 +2000,7 @@ translate_level_set_transport_input(
       .options = std::move(options),
       .install_options = install_options,
       .projected_curvature_fields = projected_curvature_fields,
+      .input_observations = std::move(input_observations),
   };
 }
 

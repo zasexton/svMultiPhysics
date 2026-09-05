@@ -9,6 +9,7 @@ add_library(svapplication STATIC
   Core/ApplicationDriver.cpp
   Core/FreeSurfaceEnergyLedger.cpp
   Core/LevelSetCutConfiguration.cpp
+  Core/LevelSetMaintenanceConfiguration.cpp
   Core/LevelSetCurvatureSamples.cpp
   Core/LevelSetMaintenanceHistory.cpp
   Core/LevelSetMaintenanceTransactionConsensus.cpp
@@ -17,6 +18,7 @@ add_library(svapplication STATIC
   Core/SimulationBuilder.cpp
   Translators/MeshTranslator.cpp
   Translators/EquationTranslator.cpp
+  Translators/LevelSetConfigurationParsing.cpp
   Translators/LevelSetEquationTranslator.cpp
 )
 
