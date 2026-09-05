@@ -10,6 +10,7 @@
 #include "FE/Assembly/AssemblyKernel.h"
 #include "FE/Backends/Interfaces/BackendFactory.h"
 #include "FE/Backends/Interfaces/BackendKind.h"
+#include "FE/Constraints/MultiPointConstraint.h"
 #include "FE/Geometry/CutQuadratureMapping.h"
 #include "FE/Interfaces/LevelSetInterfaceBuilder.h"
 #include "FE/Spaces/H1Space.h"
@@ -1350,6 +1351,60 @@ struct WorkflowBalancedCapillaryFixture {
   std::vector<svmp::FE::Real> initial_solution{};
 };
 
+class WorkflowStaticPhiMpc final
+    : public svmp::FE::constraints::ISystemConstraint {
+public:
+  explicit WorkflowStaticPhiMpc(svmp::FE::Real offset) : offset_(offset) {}
+
+  void apply(const svmp::FE::systems::FESystem& system,
+             svmp::FE::constraints::AffineConstraints& constraints) override
+  {
+    const auto field = system.findFieldByName("phi_balanced_curved");
+    if (field == svmp::FE::INVALID_FIELD_ID) {
+      throw std::runtime_error("missing strict capillary fixture field");
+    }
+    const auto* entities = system.fieldDofHandler(field).getEntityDofMap();
+    if (!entities) {
+      throw std::runtime_error("missing strict capillary fixture entity map");
+    }
+    const auto base = system.fieldDofOffset(field);
+    std::array<svmp::FE::GlobalIndex, 3> dofs{};
+    for (std::size_t vertex = 0; vertex < dofs.size(); ++vertex) {
+      const auto entries = entities->getVertexDofs(
+          static_cast<svmp::FE::GlobalIndex>(vertex));
+      if (base < 0 || entries.size() != 1u || entries.front() < 0) {
+        throw std::runtime_error(
+            "invalid strict capillary fixture DOF layout");
+      }
+      dofs[vertex] = base + entries.front();
+    }
+    svmp::FE::constraints::MultiPointConstraint row;
+    row.addConstraint(
+        dofs[0], {{dofs[1], 2.0}, {dofs[2], -1.0}}, offset_);
+    row.apply(constraints);
+  }
+
+  bool updateValues(const svmp::FE::systems::FESystem&,
+                    svmp::FE::constraints::AffineConstraints&,
+                    double, double) override
+  {
+    return false;
+  }
+
+  bool isTimeDependent() const noexcept override { return false; }
+
+  svmp::FE::systems::SetupStorageRequirements
+  storageRequirements() const noexcept override
+  {
+    svmp::FE::systems::SetupStorageRequirements result;
+    result.entity_dof_map = true;
+    return result;
+  }
+
+private:
+  svmp::FE::Real offset_;
+};
+
 std::unique_ptr<WorkflowBalancedCapillaryFixture>
 makeWorkflowBalancedCapillaryFixture(
     int dimension,
@@ -1360,7 +1415,8 @@ makeWorkflowBalancedCapillaryFixture(
     int resolution = 1,
     svmp::FE::Real rotation_radians = 0.0,
     std::array<svmp::FE::Real, 3> translation = {{0.0, 0.0, 0.0}},
-    bool install_level_set_transport = false)
+    bool install_level_set_transport = false,
+    std::optional<svmp::FE::Real> affine_phi_offset = std::nullopt)
 {
   constexpr int interface_marker = 846;
   constexpr int wall_marker = 8461;
@@ -1510,6 +1566,14 @@ makeWorkflowBalancedCapillaryFixture(
     transport.supg.enabled = false;
     (void)svmp::FE::level_set::installLevelSetTransport(
         *system, scalar_space, transport);
+  }
+  if (affine_phi_offset.has_value()) {
+    if (dimension != 2 || resolution != 1) {
+      throw std::invalid_argument(
+          "strict capillary affine fixture requires dimension two and resolution one");
+    }
+    system->addSystemConstraint(
+        std::make_unique<WorkflowStaticPhiMpc>(*affine_phi_offset));
   }
   system->setup({});
   fixture->velocity_field =
@@ -1934,6 +1998,942 @@ workflowBalancedCapillaryCutSemantics(
   result.combined_semantics_digest ^= result.volume_fraction_digest;
   result.combined_semantics_digest *= 1099511628211ull;
   return result;
+}
+
+std::shared_ptr<
+    const svmp::FE::interfaces::FreeSurfaceGeometrySnapshot>
+workflowBalancedCapillarySnapshot(
+    const WorkflowBalancedCapillaryFixture& fixture)
+{
+  const auto* context =
+      fixture.simulation.fe_system->cutIntegrationContext();
+  if (context == nullptr) {
+    throw std::runtime_error(
+        "strict capillary fixture has no cut context");
+  }
+  const auto bound =
+      context->freeSurfaceGeometrySnapshotRevisionForMarker(
+          fixture.interface_marker);
+  const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+  const auto snapshot = std::find_if(
+      snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
+        return candidate != nullptr &&
+               candidate->revision().interface_marker ==
+                   fixture.interface_marker &&
+               candidate->revision().snapshot_revision_key == bound;
+      });
+  if (snapshot == snapshots.end()) {
+    throw std::runtime_error(
+        "strict capillary fixture cannot bind its snapshot");
+  }
+  return *snapshot;
+}
+
+struct WorkflowProductionDerivativePhaseSummary {
+  svmp::FE::Real energy{0.0};
+  svmp::FE::Real volume{0.0};
+  svmp::FE::Real young_wall_energy{0.0};
+  std::vector<svmp::FE::Real> energy_gradient{};
+  std::vector<svmp::FE::Real> volume_gradient{};
+  std::array<svmp::FE::Real, 4> energy_actions{};
+  std::array<svmp::FE::Real, 4> volume_actions{};
+};
+
+void expectProductionCapillaryFunctionalDerivatives(bool sessile)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  std::optional<WorkflowProductionDerivativePhaseSummary>
+      negative_phase_summary;
+  for (const bool positive_liquid : {false, true}) {
+    const auto phase_sign = positive_liquid
+                                ? svmp::FE::Real{-1.0}
+                                : svmp::FE::Real{1.0};
+    auto fixture = makeWorkflowBalancedCapillaryFixture(
+        2,
+        sessile,
+        positive_liquid,
+        73.0,
+        false,
+        1,
+        0.0,
+        {{0.0, 0.0, 0.0}},
+        false,
+        positive_liquid ? svmp::FE::Real{1.0}
+                        : svmp::FE::Real{-1.0});
+    auto& sim = fixture->simulation;
+    auto& system = *sim.fe_system;
+    auto& history = *sim.time_history;
+    const auto comm = activeFESystemCommunicator(system);
+
+    ASSERT_DOUBLE_EQ(fixture->surface_tension, 0.75);
+    ASSERT_EQ(fixture->geometry.dimension, 2);
+    ASSERT_FALSE(fixture->level_set_transport_installed);
+    ASSERT_EQ(fixture->requests.size(), 1u);
+    ASSERT_DOUBLE_EQ(
+        fixture->requests.front()
+            .curvature_projection
+            .kinematic_area_gradient_filter_coefficient,
+        0.0);
+    ASSERT_EQ(
+        fixture->requests.front().curvature_projection.smoothing_iterations,
+        0);
+
+    const auto declarations =
+        system.freeSurfaceDiscreteFunctionalDeclarations();
+    ASSERT_EQ(declarations.size(), 1u);
+    ASSERT_EQ(fixture->requests.size(), 1u);
+    const auto declaration = declarations.front();
+    ASSERT_EQ(declaration.level_set_field, fixture->level_set_field);
+    ASSERT_EQ(declaration.interface_marker, fixture->interface_marker);
+    ASSERT_DOUBLE_EQ(declaration.parameters.surface_tension, 0.75);
+    ASSERT_TRUE(declaration.active_volume_energy_parameters.has_value());
+    for (const auto gravity :
+         declaration.active_volume_energy_parameters
+             ->gravitational_acceleration) {
+      ASSERT_DOUBLE_EQ(gravity, 0.0);
+    }
+    if (sessile) {
+      ASSERT_FALSE(
+          declaration.parameters.young_wall_coefficients.empty());
+      ASSERT_GT(
+          std::abs(
+              declaration.parameters.surface_tension *
+              std::cos(declaration.parameters.young_wall_coefficients.front()
+                           .equilibrium_contact_angle_radians)),
+          svmp::FE::Real{1.0e-3});
+    } else {
+      ASSERT_TRUE(
+          declaration.parameters.young_wall_coefficients.empty());
+    }
+
+    const auto baseline = gatherFeOrderedSolution(history.u());
+    const auto previous = gatherFeOrderedSolution(history.uPrev());
+    const auto previous2 = gatherFeOrderedSolution(history.uPrev2());
+    const auto rates = gatherFeOrderedSolution(history.uDot());
+    const auto accelerations = gatherFeOrderedSolution(history.uDDot());
+    const auto current_revision = history.u().valueRevision();
+    const auto previous_revision = history.uPrev().valueRevision();
+    const auto previous2_revision = history.uPrev2().valueRevision();
+    const auto rate_revision = history.uDot().valueRevision();
+    const auto acceleration_revision = history.uDDot().valueRevision();
+    const auto time_before = history.time();
+    const auto dt_before = history.dt();
+    const auto dt_prev_before = history.dtPrev();
+    const auto step_before = history.stepIndex();
+
+    const auto raw_phi_offset =
+        system.fieldDofOffset(fixture->level_set_field);
+    const auto raw_phi_count =
+        system.fieldDofHandler(fixture->level_set_field).getNumDofs();
+    ASSERT_GE(raw_phi_offset, 0);
+    ASSERT_GT(raw_phi_count, 0);
+    const auto phi_offset = static_cast<std::size_t>(raw_phi_offset);
+    const auto phi_count = static_cast<std::size_t>(raw_phi_count);
+    ASSERT_LE(phi_offset + phi_count, baseline.size());
+    const auto velocity_offset = static_cast<std::size_t>(
+        system.fieldDofOffset(fixture->velocity_field));
+    const auto velocity_count = static_cast<std::size_t>(
+        system.fieldDofHandler(fixture->velocity_field).getNumDofs());
+    ASSERT_LE(velocity_offset + velocity_count, baseline.size());
+    for (std::size_t index = 0u; index < velocity_count; ++index) {
+      ASSERT_DOUBLE_EQ(baseline[velocity_offset + index], 0.0);
+    }
+
+    const auto* entities =
+        system.fieldDofHandler(fixture->level_set_field).getEntityDofMap();
+    ASSERT_NE(entities, nullptr);
+    std::array<svmp::FE::GlobalIndex, 3> relative_dofs{};
+    std::array<svmp::FE::GlobalIndex, 3> global_dofs{};
+    for (std::size_t vertex = 0u; vertex < relative_dofs.size(); ++vertex) {
+      const auto entries = entities->getVertexDofs(
+          static_cast<svmp::FE::GlobalIndex>(vertex));
+      ASSERT_EQ(entries.size(), 1u);
+      ASSERT_GE(entries.front(), 0);
+      ASSERT_LT(static_cast<std::size_t>(entries.front()), phi_count);
+      relative_dofs[vertex] = entries.front();
+      global_dofs[vertex] = raw_phi_offset + entries.front();
+    }
+    const auto slave = global_dofs[0];
+    const auto first_master = global_dofs[1];
+    const auto second_master = global_dofs[2];
+    ASSERT_TRUE(system.constraints().isConstrained(slave));
+    ASSERT_FALSE(system.constraints().isConstrained(first_master));
+    ASSERT_FALSE(system.constraints().isConstrained(second_master));
+    const auto stored_row = system.constraints().getConstraint(slave);
+    ASSERT_TRUE(stored_row.has_value());
+    ASSERT_EQ(stored_row->entries.size(), 2u);
+    const auto stored_row_inhomogeneity = stored_row->inhomogeneity;
+    const std::vector<svmp::FE::constraints::ConstraintEntry>
+        stored_row_entries(
+            stored_row->entries.begin(), stored_row->entries.end());
+    EXPECT_DOUBLE_EQ(
+        stored_row_inhomogeneity,
+        positive_liquid ? 1.0 : -1.0);
+    const auto require_weight = [&](svmp::FE::GlobalIndex master,
+                                    svmp::FE::Real weight) {
+      const auto entry = std::find_if(
+          stored_row_entries.begin(),
+          stored_row_entries.end(),
+          [&](const auto& candidate) {
+            return candidate.master_dof == master;
+          });
+      ASSERT_NE(entry, stored_row_entries.end());
+      EXPECT_DOUBLE_EQ(entry->weight, weight);
+    };
+    require_weight(first_master, 2.0);
+    require_weight(second_master, -1.0);
+
+    const auto constraint_fingerprint_before =
+        svmp::FE::constraints::constraintSemanticFingerprint(
+            system.constraints());
+    const auto constraint_key_before =
+        collectiveConstraintSemanticsKey(system, comm);
+    ASSERT_NE(constraint_key_before, 0u);
+    const auto constraint_layout_revision_before =
+        system.constraintLayoutRevision();
+    const auto sparsity_revision_before = system.sparsityPatternRevision();
+    const auto* context_before = system.cutIntegrationContext();
+    ASSERT_NE(context_before, nullptr);
+    const auto snapshot_before =
+        workflowBalancedCapillarySnapshot(*fixture);
+    const auto snapshot_revision_before =
+        snapshot_before->revision().snapshot_revision_key;
+    const auto cut_semantics_before =
+        workflowBalancedCapillaryCutSemantics(*fixture);
+    const auto lifecycle_revision_before = fixture->lifecycle.valueRevision();
+    const auto refresh_cache_before = fixture->refresh_cache;
+    const auto prescribed_curvature_before = std::vector<svmp::FE::Real>(
+        system.prescribedFieldCoefficients(fixture->curvature_field).begin(),
+        system.prescribedFieldCoefficients(fixture->curvature_field).end());
+    const auto maintenance_schedule_before =
+        canonicalLevelSetMaintenanceRequestSchedule(
+            fixture->requests,
+            LevelSetMaintenanceScheduleStage::SteadyInitialization,
+            history.stepIndex());
+    const bool equilibrium_initialized_before =
+        fixture->requests.front().static_capillary_equilibrium_initialized;
+    const bool volume_initialized_before =
+        fixture->requests.front().volume_target_initialized;
+    const bool phase_initialized_before =
+        fixture->requests.front().conservative_phase_initialized;
+
+    const auto mesh_phi_handle = fixture->geometry.mesh->field_handle(
+        svmp::EntityKind::Vertex, "phi_balanced_curved");
+    const auto mesh_phi_count =
+        fixture->geometry.mesh->field_components(mesh_phi_handle) *
+        fixture->geometry.mesh->field_entity_count(mesh_phi_handle);
+    const auto* mesh_phi_data_before = static_cast<const double*>(
+        fixture->geometry.mesh->field_data(mesh_phi_handle));
+    ASSERT_NE(mesh_phi_data_before, nullptr);
+    const std::vector<double> mesh_phi_before(
+        mesh_phi_data_before, mesh_phi_data_before + mesh_phi_count);
+
+    std::vector<svmp::FE::Real> c(
+        baseline.begin() + static_cast<std::ptrdiff_t>(phi_offset),
+        baseline.begin() +
+            static_cast<std::ptrdiff_t>(phi_offset + phi_count));
+    const auto slave_relative =
+        static_cast<std::size_t>(relative_dofs[0]);
+    const auto first_master_relative =
+        static_cast<std::size_t>(relative_dofs[1]);
+    const auto second_master_relative =
+        static_cast<std::size_t>(relative_dofs[2]);
+    c[slave_relative] += positive_liquid ? -0.125 : 0.125;
+
+    const auto active_requests =
+        activeCutVolumeRequests(*fixture->parameters);
+    ASSERT_EQ(active_requests.size(), 1u);
+    const std::array<svmp::FE::FieldId, 1> prescribed_fields{{
+        fixture->curvature_field}};
+    LevelSetMaintenanceGeometryTransaction transaction(
+        sim,
+        fixture->lifecycle,
+        fixture->refresh_cache,
+        active_requests,
+        prescribed_fields);
+    ASSERT_TRUE(transaction.active());
+    ASSERT_TRUE(system.cutIntegrationContextTransactionActive());
+    ASSERT_TRUE(fixture->lifecycle.transactionActive());
+
+    const auto evaluate_at = [&](std::span<const svmp::FE::Real> values) {
+      return evaluateStaticCapillaryFunctionalCandidate(
+          sim,
+          *fixture->parameters,
+          fixture->requests.front(),
+          declaration,
+          baseline,
+          transaction,
+          values,
+          svmp::FE::level_set::
+              LevelSetStaticCapillaryEvaluationPurpose::FunctionalTrial,
+          true);
+    };
+    const auto current_young_wall_energy = [&]() {
+      const auto states =
+          evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+      if (states.size() != 1u) {
+        throw std::runtime_error(
+            "strict capillary sample has no unique functional state");
+      }
+      return states.front().state.young_wall_energy;
+    };
+    const auto expect_strict_evaluation =
+        [&](const StaticCapillaryFunctionalCandidate& result) {
+          EXPECT_TRUE(result.evaluation.success)
+              << result.evaluation.diagnostic;
+          EXPECT_TRUE(result.evaluation.functional_derivatives_available);
+          EXPECT_EQ(
+              result.evaluation.physical_potential_derivative.size(),
+              phi_count);
+          EXPECT_EQ(
+              result.evaluation.liquid_volume_derivative.size(),
+              phi_count);
+          EXPECT_NE(result.evaluation.snapshot_revision_key, 0u);
+          EXPECT_NE(result.evaluation.cut_topology_key, 0u);
+          EXPECT_NE(result.evaluation.constraint_semantics_key, 0u);
+          EXPECT_FALSE(
+              result.evaluation.production_force_projection_applied);
+          EXPECT_EQ(result.candidate.size(), baseline.size());
+          for (const auto value :
+               result.evaluation.physical_potential_derivative) {
+            EXPECT_TRUE(std::isfinite(value));
+          }
+          for (const auto value :
+               result.evaluation.liquid_volume_derivative) {
+            EXPECT_TRUE(std::isfinite(value));
+          }
+          const auto snapshot =
+              workflowBalancedCapillarySnapshot(*fixture);
+          const auto& ledger = snapshot->ledger();
+          EXPECT_EQ(ledger.pruned_rule_count, 0u);
+          EXPECT_EQ(ledger.rule_count, ledger.retained_rule_count);
+          EXPECT_GT(ledger.interface_physical_measure, 0.0);
+          EXPECT_GT(ledger.owned_retained_negative_physical_volume, 0.0);
+          EXPECT_GT(ledger.owned_retained_positive_physical_volume, 0.0);
+          if (sessile) {
+            EXPECT_GT(ledger.contact_physical_measure, 0.0);
+          }
+          for (const auto& fragment :
+               snapshot->interfaceDomain().fragments()) {
+            if (!fragment.active()) {
+              continue;
+            }
+            EXPECT_EQ(
+                fragment.degeneracy,
+                svmp::FE::interfaces::CutInterfaceDegeneracy::None);
+            EXPECT_LT(fragment.min_level_set_value, -1.0e-4);
+            EXPECT_GT(fragment.max_level_set_value, 1.0e-4);
+            EXPECT_GT(fragment.negative_volume_fraction, 1.0e-4);
+            EXPECT_GT(fragment.positive_volume_fraction, 1.0e-4);
+          }
+        };
+
+    const auto baseline_result = evaluate_at(c);
+    ASSERT_TRUE(baseline_result.evaluation.success)
+        << baseline_result.evaluation.diagnostic;
+    expect_strict_evaluation(baseline_result);
+    ASSERT_EQ(baseline_result.candidate.size(), baseline.size());
+    EXPECT_NE(
+        c[slave_relative],
+        baseline_result.candidate[
+            phi_offset + slave_relative]);
+    EXPECT_DOUBLE_EQ(
+        baseline_result.candidate[phi_offset + slave_relative],
+        2.0 * baseline_result.candidate[
+                  phi_offset + first_master_relative] -
+            baseline_result.candidate[
+                phi_offset + second_master_relative] +
+            (positive_liquid ? 1.0 : -1.0));
+    auto baseline_fixed_point = baseline_result.candidate;
+    system.constraints().distribute(baseline_fixed_point);
+    EXPECT_EQ(baseline_fixed_point, baseline_result.candidate);
+    const auto baseline_young_wall_energy = current_young_wall_energy();
+
+    svmp::FE::systems::SystemStateView derivative_state;
+    derivative_state.time = history.time();
+    derivative_state.dt = history.dt();
+    derivative_state.effective_dt = history.dt();
+    derivative_state.dt_prev = history.dtPrev();
+    derivative_state.u = baseline_result.candidate;
+    const auto phi_values = evaluateVertexField(
+        system,
+        *sim.primary_mesh,
+        fixture->level_set_field,
+        derivative_state,
+        1u,
+        "strict production capillary transpose control");
+    const std::vector<
+        svmp::FE::level_set::LevelSetCurvatureProjectionSample>
+        no_supplemental_samples;
+    std::vector<svmp::FE::Real> recovered_curvature;
+    const auto state_projection =
+        svmp::FE::level_set::projectLevelSetMeanCurvatureToVertices(
+            system,
+            fixture->level_set_field,
+            phi_values,
+            no_supplemental_samples,
+            fixture->requests.front().curvature_projection,
+            recovered_curvature);
+    ASSERT_TRUE(state_projection.success)
+        << state_projection.diagnostic;
+    ASSERT_TRUE(
+        state_projection
+            .kinematic_area_gradient_derivatives_global_dof_order);
+    ASSERT_EQ(
+        state_projection
+            .kinematic_area_gradient_total_energy_derivative.size(),
+        phi_count);
+    ASSERT_EQ(
+        state_projection
+            .kinematic_area_gradient_liquid_volume_derivative.size(),
+        phi_count);
+    ASSERT_EQ(state_projection.kinematic_area_gradient_tie_break_vertices,
+              0u);
+    ASSERT_EQ(
+        state_projection.kinematic_area_gradient_operator_vertices,
+        phi_count);
+    ASSERT_GT(state_projection.kinematic_area_gradient_cut_cells, 0u);
+    if (sessile) {
+      EXPECT_GT(
+          state_projection.kinematic_area_gradient_young_wall_count,
+          0u);
+      EXPECT_GT(
+          state_projection
+              .kinematic_area_gradient_young_wall_gradient_norm,
+          1.0e-10);
+    } else {
+      EXPECT_EQ(
+          state_projection.kinematic_area_gradient_young_wall_count,
+          0u);
+    }
+    std::vector<svmp::FE::Real> state_energy_gradient(
+        state_projection
+            .kinematic_area_gradient_total_energy_derivative.begin(),
+        state_projection
+            .kinematic_area_gradient_total_energy_derivative.end());
+    for (auto& value : state_energy_gradient) {
+      value *= declaration.parameters.surface_tension;
+    }
+    const auto& state_volume_gradient =
+        state_projection
+            .kinematic_area_gradient_liquid_volume_derivative;
+    ASSERT_GT(std::abs(state_energy_gradient[slave_relative]), 1.0e-10);
+    ASSERT_GT(std::abs(state_volume_gradient[slave_relative]), 1.0e-10);
+    EXPECT_DOUBLE_EQ(
+        baseline_result.evaluation
+            .physical_potential_derivative[slave_relative],
+        0.0);
+    EXPECT_DOUBLE_EQ(
+        baseline_result.evaluation
+            .liquid_volume_derivative[slave_relative],
+        0.0);
+    const auto transpose_tolerance = [](svmp::FE::Real expected) {
+      return 64.0 * std::numeric_limits<svmp::FE::Real>::epsilon() *
+             std::max(svmp::FE::Real{1.0}, std::abs(expected));
+    };
+    const auto expected_first_energy =
+        state_energy_gradient[first_master_relative] +
+        2.0 * state_energy_gradient[slave_relative];
+    const auto expected_second_energy =
+        state_energy_gradient[second_master_relative] -
+        state_energy_gradient[slave_relative];
+    const auto expected_first_volume =
+        state_volume_gradient[first_master_relative] +
+        2.0 * state_volume_gradient[slave_relative];
+    const auto expected_second_volume =
+        state_volume_gradient[second_master_relative] -
+        state_volume_gradient[slave_relative];
+    EXPECT_NEAR(
+        baseline_result.evaluation
+            .physical_potential_derivative[first_master_relative],
+        expected_first_energy,
+        transpose_tolerance(expected_first_energy));
+    EXPECT_NEAR(
+        baseline_result.evaluation
+            .physical_potential_derivative[second_master_relative],
+        expected_second_energy,
+        transpose_tolerance(expected_second_energy));
+    EXPECT_NEAR(
+        baseline_result.evaluation
+            .liquid_volume_derivative[first_master_relative],
+        expected_first_volume,
+        transpose_tolerance(expected_first_volume));
+    EXPECT_NEAR(
+        baseline_result.evaluation
+            .liquid_volume_derivative[second_master_relative],
+        expected_second_volume,
+        transpose_tolerance(expected_second_volume));
+    for (std::size_t index = 0u; index < phi_count; ++index) {
+      if (index == slave_relative || index == first_master_relative ||
+          index == second_master_relative) {
+        continue;
+      }
+      EXPECT_DOUBLE_EQ(
+          baseline_result.evaluation
+              .physical_potential_derivative[index],
+          state_energy_gradient[index]);
+      EXPECT_DOUBLE_EQ(
+          baseline_result.evaluation.liquid_volume_derivative[index],
+          state_volume_gradient[index]);
+    }
+
+    const std::array<std::array<svmp::FE::Real, 3>, 4>
+        raw_directions{{
+            {{1.0, 0.0, 0.0}},
+            {{0.0, 1.0, 0.0}},
+            {{0.0, 0.0, 1.0}},
+            {{0.7, 0.3, -0.2}},
+        }};
+    const std::array<std::array<svmp::FE::Real, 3>, 4>
+        distributed_directions{{
+            {{0.0, 0.0, 0.0}},
+            {{2.0, 1.0, 0.0}},
+            {{-1.0, 0.0, 1.0}},
+            {{0.8, 0.3, -0.2}},
+        }};
+    const auto scalar_tolerance = [&](svmp::FE::Real action,
+                                      svmp::FE::Real plus,
+                                      svmp::FE::Real minus,
+                                      svmp::FE::Real h) {
+      return 1.0e-8 * std::max(1.0, std::abs(action)) +
+             32.0 * std::numeric_limits<svmp::FE::Real>::epsilon() *
+                 std::max({1.0, std::abs(plus), std::abs(minus)}) / h;
+    };
+    const auto compare_repeated_baseline =
+        [&](const StaticCapillaryFunctionalCandidate& repeated) {
+          ASSERT_TRUE(repeated.evaluation.success)
+              << repeated.evaluation.diagnostic;
+          EXPECT_DOUBLE_EQ(
+              repeated.evaluation.surface_wall_energy,
+              baseline_result.evaluation.surface_wall_energy);
+          EXPECT_DOUBLE_EQ(
+              repeated.evaluation.gravitational_potential_energy,
+              baseline_result.evaluation.gravitational_potential_energy);
+          EXPECT_DOUBLE_EQ(
+              repeated.evaluation.liquid_volume,
+              baseline_result.evaluation.liquid_volume);
+          EXPECT_EQ(
+              repeated.evaluation.physical_potential_derivative,
+              baseline_result.evaluation.physical_potential_derivative);
+          EXPECT_EQ(
+              repeated.evaluation.liquid_volume_derivative,
+              baseline_result.evaluation.liquid_volume_derivative);
+          EXPECT_EQ(
+              repeated.evaluation.cut_topology_key,
+              baseline_result.evaluation.cut_topology_key);
+          EXPECT_EQ(
+              repeated.evaluation.constraint_semantics_key,
+              baseline_result.evaluation.constraint_semantics_key);
+          EXPECT_EQ(repeated.candidate, baseline_result.candidate);
+        };
+
+    WorkflowProductionDerivativePhaseSummary phase_summary;
+    phase_summary.energy =
+        baseline_result.evaluation.surface_wall_energy +
+        baseline_result.evaluation.gravitational_potential_energy;
+    phase_summary.volume = baseline_result.evaluation.liquid_volume;
+    phase_summary.young_wall_energy = baseline_young_wall_energy;
+    phase_summary.energy_gradient =
+        baseline_result.evaluation.physical_potential_derivative;
+    phase_summary.volume_gradient =
+        baseline_result.evaluation.liquid_volume_derivative;
+    bool nonzero_energy_master_action = false;
+    bool nonzero_volume_master_action = false;
+    bool nonzero_wall_master_variation = false;
+    for (std::size_t direction_index = 0u;
+         direction_index < raw_directions.size();
+         ++direction_index) {
+      std::vector<svmp::FE::Real> direction(phi_count, 0.0);
+      std::vector<svmp::FE::Real> distributed(phi_count, 0.0);
+      for (std::size_t vertex = 0u; vertex < 3u; ++vertex) {
+        const auto relative =
+            static_cast<std::size_t>(relative_dofs[vertex]);
+        direction[relative] =
+            phase_sign * raw_directions[direction_index][vertex];
+        distributed[relative] =
+            phase_sign * distributed_directions[direction_index][vertex];
+      }
+      const auto energy_action = std::inner_product(
+          baseline_result.evaluation.physical_potential_derivative.begin(),
+          baseline_result.evaluation.physical_potential_derivative.end(),
+          direction.begin(),
+          svmp::FE::Real{0.0});
+      const auto volume_action = std::inner_product(
+          baseline_result.evaluation.liquid_volume_derivative.begin(),
+          baseline_result.evaluation.liquid_volume_derivative.end(),
+          direction.begin(),
+          svmp::FE::Real{0.0});
+      phase_summary.energy_actions[direction_index] = energy_action;
+      phase_summary.volume_actions[direction_index] = volume_action;
+      if (direction_index > 0u) {
+        nonzero_energy_master_action =
+            nonzero_energy_master_action ||
+            std::abs(energy_action) > 1.0e-10;
+        nonzero_volume_master_action =
+            nonzero_volume_master_action ||
+            std::abs(volume_action) > 1.0e-10;
+      }
+      if (direction_index == 0u) {
+        EXPECT_DOUBLE_EQ(energy_action, 0.0);
+        EXPECT_DOUBLE_EQ(volume_action, 0.0);
+      }
+
+      for (const auto h : {svmp::FE::Real{1.0e-5},
+                           svmp::FE::Real{5.0e-6}}) {
+        auto plus_values = c;
+        auto minus_values = c;
+        for (std::size_t index = 0u; index < phi_count; ++index) {
+          plus_values[index] += h * direction[index];
+          minus_values[index] -= h * direction[index];
+        }
+
+        const auto plus = evaluate_at(plus_values);
+        ASSERT_TRUE(plus.evaluation.success)
+            << plus.evaluation.diagnostic;
+        expect_strict_evaluation(plus);
+        const auto plus_young_wall_energy = current_young_wall_energy();
+        const auto minus = evaluate_at(minus_values);
+        ASSERT_TRUE(minus.evaluation.success)
+            << minus.evaluation.diagnostic;
+        expect_strict_evaluation(minus);
+        const auto minus_young_wall_energy = current_young_wall_energy();
+        const auto baseline_after_forward = evaluate_at(c);
+        compare_repeated_baseline(baseline_after_forward);
+
+        const auto repeated_minus = evaluate_at(minus_values);
+        ASSERT_TRUE(repeated_minus.evaluation.success)
+            << repeated_minus.evaluation.diagnostic;
+        const auto repeated_plus = evaluate_at(plus_values);
+        ASSERT_TRUE(repeated_plus.evaluation.success)
+            << repeated_plus.evaluation.diagnostic;
+        const auto baseline_after_reverse = evaluate_at(c);
+        compare_repeated_baseline(baseline_after_reverse);
+        EXPECT_DOUBLE_EQ(
+            repeated_plus.evaluation.surface_wall_energy,
+            plus.evaluation.surface_wall_energy);
+        EXPECT_DOUBLE_EQ(
+            repeated_plus.evaluation.gravitational_potential_energy,
+            plus.evaluation.gravitational_potential_energy);
+        EXPECT_DOUBLE_EQ(
+            repeated_plus.evaluation.liquid_volume,
+            plus.evaluation.liquid_volume);
+        EXPECT_EQ(
+            repeated_plus.evaluation.physical_potential_derivative,
+            plus.evaluation.physical_potential_derivative);
+        EXPECT_EQ(
+            repeated_plus.evaluation.liquid_volume_derivative,
+            plus.evaluation.liquid_volume_derivative);
+        EXPECT_EQ(
+            repeated_plus.evaluation.cut_topology_key,
+            plus.evaluation.cut_topology_key);
+        EXPECT_EQ(
+            repeated_plus.evaluation.constraint_semantics_key,
+            plus.evaluation.constraint_semantics_key);
+        EXPECT_EQ(repeated_plus.candidate, plus.candidate);
+        EXPECT_DOUBLE_EQ(
+            repeated_minus.evaluation.surface_wall_energy,
+            minus.evaluation.surface_wall_energy);
+        EXPECT_DOUBLE_EQ(
+            repeated_minus.evaluation.gravitational_potential_energy,
+            minus.evaluation.gravitational_potential_energy);
+        EXPECT_DOUBLE_EQ(
+            repeated_minus.evaluation.liquid_volume,
+            minus.evaluation.liquid_volume);
+        EXPECT_EQ(
+            repeated_minus.evaluation.physical_potential_derivative,
+            minus.evaluation.physical_potential_derivative);
+        EXPECT_EQ(
+            repeated_minus.evaluation.liquid_volume_derivative,
+            minus.evaluation.liquid_volume_derivative);
+        EXPECT_EQ(
+            repeated_minus.evaluation.cut_topology_key,
+            minus.evaluation.cut_topology_key);
+        EXPECT_EQ(
+            repeated_minus.evaluation.constraint_semantics_key,
+            minus.evaluation.constraint_semantics_key);
+        EXPECT_EQ(repeated_minus.candidate, minus.candidate);
+
+        for (const auto* result : {&plus, &minus}) {
+          EXPECT_EQ(
+              result->evaluation.cut_topology_key,
+              baseline_result.evaluation.cut_topology_key);
+          EXPECT_EQ(
+              result->evaluation.constraint_semantics_key,
+              baseline_result.evaluation.constraint_semantics_key);
+          auto fixed_point = result->candidate;
+          system.constraints().distribute(fixed_point);
+          EXPECT_EQ(fixed_point, result->candidate);
+        }
+        for (std::size_t index = 0u; index < baseline.size(); ++index) {
+          svmp::FE::Real expected_plus =
+              baseline_result.candidate[index];
+          svmp::FE::Real expected_minus =
+              baseline_result.candidate[index];
+          if (index >= phi_offset && index < phi_offset + phi_count) {
+            const auto relative = index - phi_offset;
+            expected_plus += h * distributed[relative];
+            expected_minus -= h * distributed[relative];
+          }
+          const auto mapping_tolerance =
+              64.0 * std::numeric_limits<svmp::FE::Real>::epsilon() *
+              std::max({svmp::FE::Real{1.0},
+                        std::abs(expected_plus),
+                        std::abs(expected_minus)});
+          EXPECT_NEAR(
+              plus.candidate[index], expected_plus, mapping_tolerance);
+          EXPECT_NEAR(
+              minus.candidate[index], expected_minus, mapping_tolerance);
+        }
+        EXPECT_DOUBLE_EQ(
+            plus.candidate[phi_offset + slave_relative],
+            2.0 * plus.candidate[phi_offset + first_master_relative] -
+                plus.candidate[phi_offset + second_master_relative] +
+                (positive_liquid ? 1.0 : -1.0));
+        EXPECT_DOUBLE_EQ(
+            minus.candidate[phi_offset + slave_relative],
+            2.0 * minus.candidate[phi_offset + first_master_relative] -
+                minus.candidate[phi_offset + second_master_relative] +
+                (positive_liquid ? 1.0 : -1.0));
+        if (direction_index == 0u) {
+          EXPECT_EQ(plus.candidate, baseline_result.candidate);
+          EXPECT_EQ(minus.candidate, baseline_result.candidate);
+          EXPECT_NEAR(
+              plus.evaluation.surface_wall_energy,
+              minus.evaluation.surface_wall_energy,
+              scalar_tolerance(
+                  0.0,
+                  plus.evaluation.surface_wall_energy,
+                  minus.evaluation.surface_wall_energy,
+                  h));
+          EXPECT_NEAR(
+              plus.evaluation.liquid_volume,
+              minus.evaluation.liquid_volume,
+              scalar_tolerance(
+                  0.0,
+                  plus.evaluation.liquid_volume,
+                  minus.evaluation.liquid_volume,
+                  h));
+        }
+
+        const auto energy_plus =
+            plus.evaluation.surface_wall_energy +
+            plus.evaluation.gravitational_potential_energy;
+        const auto energy_minus =
+            minus.evaluation.surface_wall_energy +
+            minus.evaluation.gravitational_potential_energy;
+        const auto volume_plus = plus.evaluation.liquid_volume;
+        const auto volume_minus = minus.evaluation.liquid_volume;
+        EXPECT_NEAR(
+            (energy_plus - energy_minus) / (2.0 * h),
+            energy_action,
+            scalar_tolerance(
+                energy_action, energy_plus, energy_minus, h));
+        EXPECT_NEAR(
+            (volume_plus - volume_minus) / (2.0 * h),
+            volume_action,
+            scalar_tolerance(
+                volume_action, volume_plus, volume_minus, h));
+        if (sessile && direction_index > 0u) {
+          nonzero_wall_master_variation =
+              nonzero_wall_master_variation ||
+              std::abs(
+                  plus_young_wall_energy - minus_young_wall_energy) >
+                  1.0e-12;
+        }
+      }
+    }
+    EXPECT_TRUE(nonzero_energy_master_action);
+    EXPECT_TRUE(nonzero_volume_master_action);
+    if (sessile) {
+      EXPECT_TRUE(nonzero_wall_master_variation);
+    }
+
+    if (!positive_liquid) {
+      negative_phase_summary = phase_summary;
+    } else {
+      ASSERT_TRUE(negative_phase_summary.has_value());
+      const auto& reference = *negative_phase_summary;
+      const auto phase_tolerance = [](svmp::FE::Real value) {
+        return 2.0e-10 *
+               std::max(svmp::FE::Real{1.0}, std::abs(value));
+      };
+      EXPECT_NEAR(
+          phase_summary.energy,
+          reference.energy,
+          phase_tolerance(reference.energy));
+      EXPECT_NEAR(
+          phase_summary.volume,
+          reference.volume,
+          phase_tolerance(reference.volume));
+      EXPECT_NEAR(
+          phase_summary.young_wall_energy,
+          reference.young_wall_energy,
+          phase_tolerance(reference.young_wall_energy));
+      ASSERT_EQ(
+          phase_summary.energy_gradient.size(),
+          reference.energy_gradient.size());
+      ASSERT_EQ(
+          phase_summary.volume_gradient.size(),
+          reference.volume_gradient.size());
+      for (std::size_t index = 0u;
+           index < phase_summary.energy_gradient.size();
+           ++index) {
+        EXPECT_NEAR(
+            phase_summary.energy_gradient[index],
+            -reference.energy_gradient[index],
+            phase_tolerance(reference.energy_gradient[index]));
+        EXPECT_NEAR(
+            phase_summary.volume_gradient[index],
+            -reference.volume_gradient[index],
+            phase_tolerance(reference.volume_gradient[index]));
+      }
+      for (std::size_t index = 0u;
+           index < phase_summary.energy_actions.size();
+           ++index) {
+        EXPECT_NEAR(
+            phase_summary.energy_actions[index],
+            reference.energy_actions[index],
+            phase_tolerance(reference.energy_actions[index]));
+        EXPECT_NEAR(
+            phase_summary.volume_actions[index],
+            reference.volume_actions[index],
+            phase_tolerance(reference.volume_actions[index]));
+      }
+    }
+
+    ASSERT_NO_THROW(transaction.rollback());
+    EXPECT_FALSE(transaction.active());
+    EXPECT_FALSE(system.cutIntegrationContextTransactionActive());
+    EXPECT_FALSE(fixture->lifecycle.transactionActive());
+    EXPECT_EQ(gatherFeOrderedSolution(history.u()), baseline);
+    EXPECT_EQ(gatherFeOrderedSolution(history.uPrev()), previous);
+    EXPECT_EQ(gatherFeOrderedSolution(history.uPrev2()), previous2);
+    EXPECT_EQ(gatherFeOrderedSolution(history.uDot()), rates);
+    EXPECT_EQ(gatherFeOrderedSolution(history.uDDot()), accelerations);
+    EXPECT_EQ(history.u().valueRevision(), current_revision);
+    EXPECT_EQ(history.uPrev().valueRevision(), previous_revision);
+    EXPECT_EQ(history.uPrev2().valueRevision(), previous2_revision);
+    EXPECT_EQ(history.uDot().valueRevision(), rate_revision);
+    EXPECT_EQ(history.uDDot().valueRevision(), acceleration_revision);
+    EXPECT_DOUBLE_EQ(history.time(), time_before);
+    EXPECT_DOUBLE_EQ(history.dt(), dt_before);
+    EXPECT_DOUBLE_EQ(history.dtPrev(), dt_prev_before);
+    EXPECT_EQ(history.stepIndex(), step_before);
+    EXPECT_EQ(system.cutIntegrationContext(), context_before);
+    const auto restored_snapshot =
+        workflowBalancedCapillarySnapshot(*fixture);
+    EXPECT_EQ(restored_snapshot.get(), snapshot_before.get());
+    EXPECT_EQ(
+        restored_snapshot->revision().snapshot_revision_key,
+        snapshot_revision_before);
+    const auto restored_cut_semantics =
+        workflowBalancedCapillaryCutSemantics(*fixture);
+    EXPECT_EQ(
+        restored_cut_semantics.source_topology_keys,
+        cut_semantics_before.source_topology_keys);
+    EXPECT_EQ(
+        restored_cut_semantics.negative_volume_fractions,
+        cut_semantics_before.negative_volume_fractions);
+    EXPECT_EQ(
+        restored_cut_semantics.combined_semantics_digest,
+        cut_semantics_before.combined_semantics_digest);
+    EXPECT_EQ(
+        svmp::FE::constraints::constraintSemanticFingerprint(
+            system.constraints()),
+        constraint_fingerprint_before);
+    EXPECT_EQ(
+        collectiveConstraintSemanticsKey(system, comm),
+        constraint_key_before);
+    EXPECT_EQ(
+        system.constraintLayoutRevision(),
+        constraint_layout_revision_before);
+    EXPECT_EQ(system.sparsityPatternRevision(), sparsity_revision_before);
+    const auto restored_row = system.constraints().getConstraint(slave);
+    ASSERT_TRUE(restored_row.has_value());
+    ASSERT_EQ(restored_row->entries.size(), stored_row_entries.size());
+    EXPECT_DOUBLE_EQ(
+        restored_row->inhomogeneity, stored_row_inhomogeneity);
+    for (std::size_t index = 0u; index < stored_row_entries.size(); ++index) {
+      EXPECT_EQ(
+          restored_row->entries[index].master_dof,
+          stored_row_entries[index].master_dof);
+      EXPECT_DOUBLE_EQ(
+          restored_row->entries[index].weight,
+          stored_row_entries[index].weight);
+    }
+    EXPECT_EQ(fixture->lifecycle.valueRevision(), lifecycle_revision_before);
+    EXPECT_EQ(
+        fixture->refresh_cache.evaluated_state_source_revisions,
+        refresh_cache_before.evaluated_state_source_revisions);
+    EXPECT_EQ(
+        fixture->refresh_cache.topology_key,
+        refresh_cache_before.topology_key);
+    ASSERT_EQ(
+        fixture->refresh_cache.last_signature.has_value(),
+        refresh_cache_before.last_signature.has_value());
+    if (fixture->refresh_cache.last_signature.has_value()) {
+      EXPECT_TRUE(
+          *fixture->refresh_cache.last_signature ==
+          *refresh_cache_before.last_signature);
+    }
+    ASSERT_EQ(
+        fixture->refresh_cache.last_vector_signature.has_value(),
+        refresh_cache_before.last_vector_signature.has_value());
+    if (fixture->refresh_cache.last_vector_signature.has_value()) {
+      EXPECT_TRUE(
+          *fixture->refresh_cache.last_vector_signature ==
+          *refresh_cache_before.last_vector_signature);
+    }
+    EXPECT_EQ(
+        std::vector<svmp::FE::Real>(
+            system.prescribedFieldCoefficients(fixture->curvature_field)
+                .begin(),
+            system.prescribedFieldCoefficients(fixture->curvature_field)
+                .end()),
+        prescribed_curvature_before);
+    const auto* mesh_phi_data_after = static_cast<const double*>(
+        fixture->geometry.mesh->field_data(mesh_phi_handle));
+    ASSERT_NE(mesh_phi_data_after, nullptr);
+    EXPECT_EQ(
+        std::vector<double>(
+            mesh_phi_data_after, mesh_phi_data_after + mesh_phi_count),
+        mesh_phi_before);
+    const auto maintenance_schedule_after =
+        canonicalLevelSetMaintenanceRequestSchedule(
+            fixture->requests,
+            LevelSetMaintenanceScheduleStage::SteadyInitialization,
+            history.stepIndex());
+    EXPECT_EQ(
+        maintenance_schedule_after.supported,
+        maintenance_schedule_before.supported);
+    EXPECT_EQ(
+        maintenance_schedule_after.words,
+        maintenance_schedule_before.words);
+    EXPECT_EQ(
+        fixture->requests.front().static_capillary_equilibrium_initialized,
+        equilibrium_initialized_before);
+    EXPECT_EQ(
+        fixture->requests.front().volume_target_initialized,
+        volume_initialized_before);
+    EXPECT_EQ(
+        fixture->requests.front().conservative_phase_initialized,
+        phase_initialized_before);
+  }
+#endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     ProductionCapillaryFunctionalDerivativesPullBackAffineConstraints)
+{
+  expectProductionCapillaryFunctionalDerivatives(false);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     ProductionCapillaryFunctionalDerivativesIncludeYoungWallAndRestoreState)
+{
+  expectProductionCapillaryFunctionalDerivatives(true);
 }
 
 WorkflowBalancedCapillaryObservables
