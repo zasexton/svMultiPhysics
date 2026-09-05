@@ -34,6 +34,7 @@
 #include <iomanip>
 #include <iterator>
 #include <limits>
+#include <locale>
 #include <map>
 #include <memory>
 #include <numeric>
@@ -50,6 +51,267 @@ namespace {
 
 namespace channel_ns =
     svmp::Physics::formulations::navier_stokes;
+
+class CommaDecimalPoint : public std::numpunct<char> {
+protected:
+  char do_decimal_point() const override { return ','; }
+};
+
+using DiagnosticFields = std::map<std::string, std::string>;
+
+std::vector<DiagnosticFields> parseDiagnosticRecords(
+    std::string_view message,
+    std::string_view record_name)
+{
+  const std::string marker = std::string(record_name) + "={";
+  std::vector<DiagnosticFields> records;
+  std::size_t search = 0u;
+  while ((search = message.find(marker, search)) != std::string_view::npos) {
+    const auto begin = search + marker.size();
+    const auto end = message.find('}', begin);
+    if (end == std::string_view::npos) {
+      throw std::runtime_error("unterminated diagnostic record");
+    }
+    DiagnosticFields fields;
+    std::size_t field_begin = begin;
+    while (field_begin < end) {
+      const auto field_end = message.find(',', field_begin);
+      const auto bounded_end =
+          field_end == std::string_view::npos || field_end > end
+              ? end
+              : field_end;
+      const auto separator = message.find('=', field_begin);
+      if (separator == std::string_view::npos || separator >= bounded_end) {
+        throw std::runtime_error("malformed diagnostic field");
+      }
+      fields.emplace(
+          std::string(message.substr(field_begin, separator - field_begin)),
+          std::string(message.substr(
+              separator + 1u, bounded_end - separator - 1u)));
+      field_begin = bounded_end + 1u;
+    }
+    records.push_back(std::move(fields));
+    search = end + 1u;
+  }
+  return records;
+}
+
+std::uint64_t parseDiagnosticUnsigned(const std::string& text)
+{
+  std::size_t consumed = 0u;
+  const auto value = std::stoull(text, &consumed);
+  if (consumed != text.size()) {
+    throw std::runtime_error("diagnostic unsigned value has trailing text");
+  }
+  return value;
+}
+
+svmp::FE::Real parseDiagnosticReal(const std::string& text)
+{
+  std::istringstream parser(text);
+  parser.imbue(std::locale::classic());
+  svmp::FE::Real value = std::numeric_limits<svmp::FE::Real>::quiet_NaN();
+  parser >> value;
+  if (!parser || parser.peek() != std::char_traits<char>::eof()) {
+    throw std::runtime_error("diagnostic real value is not round-trip text");
+  }
+  return value;
+}
+
+svmp::FE::level_set::LevelSetStaticCapillaryFailureState
+availableStaticCapillaryFailureState()
+{
+  using State =
+      svmp::FE::level_set::LevelSetStaticCapillaryFailureState;
+  using Status =
+      svmp::FE::level_set::LevelSetStaticCapillaryFailureStateStatus;
+  State state;
+  state.status = Status::Available;
+  state.coefficient_count = 5u;
+  state.active_coefficient_count = 2u;
+  state.accepted_iteration_index = 7u;
+  state.snapshot_revision_key = 9007199254740997ull;
+  state.cut_topology_key = 9007199254740999ull;
+  state.constraint_semantics_key = 9007199254741001ull;
+  state.current_merit = std::nextafter(
+      svmp::FE::Real{1.0}, svmp::FE::Real{2.0});
+  state.merit_penalty = std::nextafter(
+      svmp::FE::Real{3.0}, svmp::FE::Real{4.0});
+  state.coefficients = {
+      std::nextafter(svmp::FE::Real{1.0}, svmp::FE::Real{2.0}),
+      std::nextafter(svmp::FE::Real{-1.0}, svmp::FE::Real{-2.0}),
+      svmp::FE::Real{0.125},
+      svmp::FE::Real{-19.5},
+      std::nextafter(svmp::FE::Real{17.0}, svmp::FE::Real{18.0})};
+  state.active_coefficient_indices = {1u, 4u};
+  state.energy_gradient = {
+      std::nextafter(svmp::FE::Real{-1.0}, svmp::FE::Real{-2.0}),
+      std::nextafter(svmp::FE::Real{0.0}, svmp::FE::Real{1.0})};
+  state.volume_gradient = {
+      std::nextafter(svmp::FE::Real{1.0}, svmp::FE::Real{2.0}),
+      std::nextafter(svmp::FE::Real{1.0}, svmp::FE::Real{0.0})};
+  state.direction = {
+      std::nextafter(svmp::FE::Real{0.5}, svmp::FE::Real{1.0}),
+      std::nextafter(svmp::FE::Real{-0.5}, svmp::FE::Real{-1.0})};
+  return state;
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     StaticCapillaryFailureStateDiagnosticUsesRoundTripIndexedValues)
+{
+  const auto state = availableStaticCapillaryFailureState();
+  std::ostringstream stream;
+  const std::locale caller_locale(
+      std::locale::classic(), new CommaDecimalPoint);
+  stream.imbue(caller_locale);
+  stream << std::hex << std::scientific << std::setprecision(3);
+  const auto flags_before = stream.flags();
+  const auto precision_before = stream.precision();
+  const auto locale_before = stream.getloc();
+
+  appendStaticCapillaryFailureState(stream, state);
+
+  EXPECT_EQ(stream.flags(), flags_before);
+  EXPECT_EQ(stream.precision(), precision_before);
+  EXPECT_EQ(stream.getloc(), locale_before);
+  const auto text = stream.str();
+  const auto summaries = parseDiagnosticRecords(
+      text, "line_search_failure_state_summary");
+  ASSERT_EQ(summaries.size(), 1u);
+  const auto& summary = summaries.front();
+  EXPECT_EQ(summary.at("status"), "available");
+  EXPECT_EQ(parseDiagnosticUnsigned(summary.at("coefficient_count")), 5u);
+  EXPECT_EQ(parseDiagnosticUnsigned(summary.at("active_count")), 2u);
+  EXPECT_EQ(
+      parseDiagnosticUnsigned(summary.at("capacity")),
+      svmp::FE::level_set::
+          kLevelSetStaticCapillaryFailureStateCoefficientCapacity);
+  EXPECT_EQ(
+      parseDiagnosticUnsigned(summary.at("accepted_iteration_index")), 7u);
+  EXPECT_EQ(
+      parseDiagnosticUnsigned(summary.at("snapshot_revision_key")),
+      state.snapshot_revision_key);
+  EXPECT_EQ(
+      parseDiagnosticUnsigned(summary.at("cut_topology_key")),
+      state.cut_topology_key);
+  EXPECT_EQ(
+      parseDiagnosticUnsigned(summary.at("constraint_semantics_key")),
+      state.constraint_semantics_key);
+  EXPECT_EQ(
+      parseDiagnosticReal(summary.at("current_merit")),
+      state.current_merit);
+  EXPECT_EQ(
+      parseDiagnosticReal(summary.at("merit_penalty")),
+      state.merit_penalty);
+
+  const auto coefficients = parseDiagnosticRecords(
+      text, "line_search_failure_coefficient");
+  ASSERT_EQ(coefficients.size(), state.coefficients.size());
+  for (std::size_t index = 0u; index < coefficients.size(); ++index) {
+    EXPECT_EQ(
+        parseDiagnosticUnsigned(coefficients[index].at("index")), index);
+    EXPECT_EQ(
+        parseDiagnosticReal(coefficients[index].at("value")),
+        state.coefficients[index]);
+  }
+
+  const auto active = parseDiagnosticRecords(
+      text, "line_search_failure_active");
+  ASSERT_EQ(active.size(), state.active_coefficient_indices.size());
+  for (std::size_t index = 0u; index < active.size(); ++index) {
+    EXPECT_EQ(parseDiagnosticUnsigned(active[index].at("index")), index);
+    EXPECT_EQ(
+        parseDiagnosticUnsigned(active[index].at("coefficient_index")),
+        state.active_coefficient_indices[index]);
+    EXPECT_EQ(
+        parseDiagnosticReal(active[index].at("energy_gradient")),
+        state.energy_gradient[index]);
+    EXPECT_EQ(
+        parseDiagnosticReal(active[index].at("volume_gradient")),
+        state.volume_gradient[index]);
+    EXPECT_EQ(
+        parseDiagnosticReal(active[index].at("direction")),
+        state.direction[index]);
+  }
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     StaticCapillaryFailureStateDiagnosticRejectsMalformedOrOversizedRecords)
+{
+  using Status =
+      svmp::FE::level_set::LevelSetStaticCapillaryFailureStateStatus;
+  std::vector<std::pair<std::string,
+                        svmp::FE::level_set::
+                            LevelSetStaticCapillaryFailureState>>
+      invalid;
+
+  auto mismatched = availableStaticCapillaryFailureState();
+  mismatched.direction.pop_back();
+  invalid.emplace_back("mismatched lengths", mismatched);
+  auto out_of_range = availableStaticCapillaryFailureState();
+  out_of_range.active_coefficient_indices = {1u, 5u};
+  invalid.emplace_back("out-of-range active index", out_of_range);
+  auto duplicated = availableStaticCapillaryFailureState();
+  duplicated.active_coefficient_indices = {1u, 1u};
+  invalid.emplace_back("duplicate active index", duplicated);
+  auto unsorted = availableStaticCapillaryFailureState();
+  unsorted.active_coefficient_indices = {4u, 1u};
+  invalid.emplace_back("unsorted active indices", unsorted);
+  auto nonfinite_scalar = availableStaticCapillaryFailureState();
+  nonfinite_scalar.current_merit =
+      std::numeric_limits<svmp::FE::Real>::infinity();
+  invalid.emplace_back("nonfinite scalar", nonfinite_scalar);
+  auto nonfinite_vector = availableStaticCapillaryFailureState();
+  nonfinite_vector.energy_gradient[0] =
+      std::numeric_limits<svmp::FE::Real>::quiet_NaN();
+  invalid.emplace_back("nonfinite vector", nonfinite_vector);
+  auto oversized_count = availableStaticCapillaryFailureState();
+  oversized_count.coefficient_count =
+      svmp::FE::level_set::
+          kLevelSetStaticCapillaryFailureStateCoefficientCapacity +
+      1u;
+  invalid.emplace_back("oversized count", oversized_count);
+
+  for (const auto& [label, state] : invalid) {
+    SCOPED_TRACE(label);
+    std::ostringstream stream;
+    appendStaticCapillaryFailureState(stream, state);
+    const auto text = stream.str();
+    const auto summaries = parseDiagnosticRecords(
+        text, "line_search_failure_state_summary");
+    ASSERT_EQ(summaries.size(), 1u);
+    EXPECT_EQ(summaries.front().at("status"), "invalid_record");
+    EXPECT_TRUE(parseDiagnosticRecords(
+                    text, "line_search_failure_coefficient")
+                    .empty());
+    EXPECT_TRUE(parseDiagnosticRecords(
+                    text, "line_search_failure_active")
+                    .empty());
+  }
+
+  const std::array<std::pair<Status, std::string_view>, 3> unavailable{{
+      {Status::NotApplicable, "not_applicable"},
+      {Status::CapacityExceeded, "capacity_exceeded"},
+      {Status::RecordingFailed, "recording_failed"},
+  }};
+  for (const auto& [status, spelling] : unavailable) {
+    svmp::FE::level_set::LevelSetStaticCapillaryFailureState state;
+    state.status = status;
+    std::ostringstream stream;
+    appendStaticCapillaryFailureState(stream, state);
+    const auto text = stream.str();
+    const auto summaries = parseDiagnosticRecords(
+        text, "line_search_failure_state_summary");
+    ASSERT_EQ(summaries.size(), 1u);
+    EXPECT_EQ(summaries.front().at("status"), spelling);
+    EXPECT_TRUE(parseDiagnosticRecords(
+                    text, "line_search_failure_coefficient")
+                    .empty());
+    EXPECT_TRUE(parseDiagnosticRecords(
+                    text, "line_search_failure_active")
+                    .empty());
+  }
+}
 
 TEST(ApplicationDriverTwoFluidAcceptedStageTelemetry,
      ExactEntryConvergenceMarksTheUnattemptedLinearSolveConverged)
@@ -2302,10 +2564,10 @@ void expectProductionCapillaryFunctionalDerivatives(bool sessile)
           EXPECT_TRUE(result.evaluation.success)
               << result.evaluation.diagnostic;
           EXPECT_TRUE(result.evaluation.functional_derivatives_available);
-          EXPECT_EQ(
+          ASSERT_EQ(
               result.evaluation.physical_potential_derivative.size(),
               phi_count);
-          EXPECT_EQ(
+          ASSERT_EQ(
               result.evaluation.liquid_volume_derivative.size(),
               phi_count);
           EXPECT_NE(result.evaluation.snapshot_revision_key, 0u);
@@ -2313,7 +2575,7 @@ void expectProductionCapillaryFunctionalDerivatives(bool sessile)
           EXPECT_NE(result.evaluation.constraint_semantics_key, 0u);
           EXPECT_FALSE(
               result.evaluation.production_force_projection_applied);
-          EXPECT_EQ(result.candidate.size(), baseline.size());
+          ASSERT_EQ(result.candidate.size(), baseline.size());
           for (const auto value :
                result.evaluation.physical_potential_derivative) {
             EXPECT_TRUE(std::isfinite(value));
@@ -2351,7 +2613,7 @@ void expectProductionCapillaryFunctionalDerivatives(bool sessile)
     const auto baseline_result = evaluate_at(c);
     ASSERT_TRUE(baseline_result.evaluation.success)
         << baseline_result.evaluation.diagnostic;
-    expect_strict_evaluation(baseline_result);
+    ASSERT_NO_FATAL_FAILURE(expect_strict_evaluation(baseline_result));
     ASSERT_EQ(baseline_result.candidate.size(), baseline.size());
     EXPECT_NE(
         c[slave_relative],
@@ -2519,6 +2781,14 @@ void expectProductionCapillaryFunctionalDerivatives(bool sessile)
              32.0 * std::numeric_limits<svmp::FE::Real>::epsilon() *
                  std::max({1.0, std::abs(plus), std::abs(minus)}) / h;
     };
+    const auto slave_only_scalar_tolerance = [](
+                                                 svmp::FE::Real plus,
+                                                 svmp::FE::Real minus) {
+      return 64.0 * std::numeric_limits<svmp::FE::Real>::epsilon() *
+             std::max({svmp::FE::Real{1.0},
+                       std::abs(plus),
+                       std::abs(minus)});
+    };
     const auto compare_repeated_baseline =
         [&](const StaticCapillaryFunctionalCandidate& repeated) {
           ASSERT_TRUE(repeated.evaluation.success)
@@ -2610,12 +2880,12 @@ void expectProductionCapillaryFunctionalDerivatives(bool sessile)
         const auto plus = evaluate_at(plus_values);
         ASSERT_TRUE(plus.evaluation.success)
             << plus.evaluation.diagnostic;
-        expect_strict_evaluation(plus);
+        ASSERT_NO_FATAL_FAILURE(expect_strict_evaluation(plus));
         const auto plus_young_wall_energy = current_young_wall_energy();
         const auto minus = evaluate_at(minus_values);
         ASSERT_TRUE(minus.evaluation.success)
             << minus.evaluation.diagnostic;
-        expect_strict_evaluation(minus);
+        ASSERT_NO_FATAL_FAILURE(expect_strict_evaluation(minus));
         const auto minus_young_wall_energy = current_young_wall_energy();
         const auto baseline_after_forward = evaluate_at(c);
         compare_repeated_baseline(baseline_after_forward);
@@ -2720,19 +2990,15 @@ void expectProductionCapillaryFunctionalDerivatives(bool sessile)
           EXPECT_NEAR(
               plus.evaluation.surface_wall_energy,
               minus.evaluation.surface_wall_energy,
-              scalar_tolerance(
-                  0.0,
+              slave_only_scalar_tolerance(
                   plus.evaluation.surface_wall_energy,
-                  minus.evaluation.surface_wall_energy,
-                  h));
+                  minus.evaluation.surface_wall_energy));
           EXPECT_NEAR(
               plus.evaluation.liquid_volume,
               minus.evaluation.liquid_volume,
-              scalar_tolerance(
-                  0.0,
+              slave_only_scalar_tolerance(
                   plus.evaluation.liquid_volume,
-                  minus.evaluation.liquid_volume,
-                  h));
+                  minus.evaluation.liquid_volume));
         }
 
         const auto energy_plus =
