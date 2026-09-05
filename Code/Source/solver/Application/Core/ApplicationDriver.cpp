@@ -27249,6 +27249,347 @@ void stageStaticCapillaryHistoryForPublication(
   history.updateGhosts();
 }
 
+struct StaticCapillaryFunctionalCandidate {
+  svmp::FE::level_set::LevelSetStaticCapillaryEquilibriumEvaluation
+      evaluation;
+  std::vector<svmp::FE::Real> candidate;
+};
+
+StaticCapillaryFunctionalCandidate
+evaluateStaticCapillaryFunctionalCandidate(
+    application::core::SimulationComponents& sim,
+    const Parameters& params,
+    const LevelSetMaintenanceRequest& request,
+    const svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration&
+        declaration,
+    std::span<const svmp::FE::Real> baseline,
+    LevelSetMaintenanceGeometryTransaction& transaction,
+    std::span<const svmp::FE::Real> coefficients,
+    svmp::FE::level_set::LevelSetStaticCapillaryEvaluationPurpose purpose,
+    bool exact_functional_derivatives_requested)
+{
+  StaticCapillaryFunctionalCandidate result;
+  auto& evaluation = result.evaluation;
+  auto& candidate = result.candidate;
+  auto& system = *sim.fe_system;
+  auto& history = *sim.time_history;
+  const auto comm = activeFESystemCommunicator(system);
+  const auto level_set_field = declaration.level_set_field;
+  const auto marker = declaration.interface_marker;
+  const auto raw_field_offset = system.fieldDofOffset(level_set_field);
+  const auto raw_field_count =
+      system.fieldDofHandler(level_set_field).getNumDofs();
+  const auto field_offset = static_cast<std::size_t>(raw_field_offset);
+  const auto field_count = static_cast<std::size_t>(raw_field_count);
+  const bool uses_kinematic_area_gradient_traction =
+      declaration.capillary_balance_method ==
+      svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
+          KinematicAreaGradientEnergyTraction;
+  const double constraint_dt =
+      std::isfinite(history.dt()) && history.dt() > 0.0
+          ? history.dt()
+          : 1.0;
+
+  if (globalAnyBool(coefficients.size() != field_count, comm)) {
+    evaluation.diagnostic =
+        "candidate_level_set_coefficient_count_mismatch";
+    return result;
+  }
+  (void)collectiveLevelSetMaintenanceAlgebraicRevision(
+      coefficients, comm);
+
+  candidate.assign(baseline.begin(), baseline.end());
+  std::copy(
+      coefficients.begin(),
+      coefficients.end(),
+      candidate.begin() + static_cast<std::ptrdiff_t>(field_offset));
+  std::optional<std::uint64_t> previous_constraint_key;
+  std::uint64_t constraint_key = 0u;
+  ActiveCutContextRefreshReport refresh_report;
+  bool fixed_point_reached = false;
+  constexpr int maximum_projection_passes = 4;
+  for (int pass = 0; pass < maximum_projection_passes; ++pass) {
+    refresh_report = transaction.refresh(
+        params,
+        candidate,
+        purpose ==
+                    svmp::FE::level_set::
+                        LevelSetStaticCapillaryEvaluationPurpose::
+                            AcceptanceCertificate &&
+                pass == 0);
+    if (refresh_report.topology_key == 0u) {
+      evaluation.diagnostic =
+          "candidate_cut_topology_key_unavailable";
+      return result;
+    }
+    system.updateConstraints(history.time(), constraint_dt);
+    constraint_key = collectiveConstraintSemanticsKey(system, comm);
+    auto projected = candidate;
+    system.constraints().distribute(projected);
+    const bool projected_values_finite = std::all_of(
+        projected.begin(), projected.end(), [](svmp::FE::Real value) {
+          return std::isfinite(value);
+        });
+    if (globalAnyBool(!projected_values_finite, comm)) {
+      evaluation.diagnostic =
+          "candidate_constraint_projection_is_nonfinite";
+      return result;
+    }
+    const auto projection_change =
+        globalMaxAbsDifference(candidate, projected, comm);
+    candidate = std::move(projected);
+    if (pass > 0 && previous_constraint_key.has_value() &&
+        *previous_constraint_key == constraint_key &&
+        projection_change == 0.0) {
+      fixed_point_reached = true;
+      break;
+    }
+    previous_constraint_key = constraint_key;
+  }
+  if (!fixed_point_reached) {
+    evaluation.diagnostic =
+        "candidate_constraint_geometry_fixed_point_failed";
+    return result;
+  }
+
+  std::vector<svmp::FE::Real> physical_potential_derivative;
+  std::vector<svmp::FE::Real> liquid_volume_derivative;
+  if (exact_functional_derivatives_requested) {
+    svmp::FE::systems::SystemStateView derivative_state;
+    derivative_state.time = history.time();
+    derivative_state.dt = constraint_dt;
+    derivative_state.effective_dt = constraint_dt;
+    derivative_state.dt_prev = history.dtPrev();
+    derivative_state.u = candidate;
+    const auto phi_values = evaluateVertexField(
+        system,
+        *sim.primary_mesh,
+        level_set_field,
+        derivative_state,
+        1u,
+        "differentiating the static capillary functional");
+    std::vector<svmp::FE::Real> trial_curvature;
+    const std::vector<
+        svmp::FE::level_set::LevelSetCurvatureProjectionSample>
+        no_supplemental_samples;
+    const auto derivative_projection =
+        svmp::FE::level_set::projectLevelSetMeanCurvatureToVertices(
+            system,
+            level_set_field,
+            phi_values,
+            no_supplemental_samples,
+            request.curvature_projection,
+            trial_curvature);
+    const bool local_derivative_projection_valid =
+        derivative_projection.success &&
+        derivative_projection
+            .kinematic_area_gradient_derivatives_global_dof_order &&
+        derivative_projection
+                .kinematic_area_gradient_total_energy_derivative.size() ==
+            field_count &&
+        derivative_projection
+                .kinematic_area_gradient_liquid_volume_derivative.size() ==
+            field_count;
+    if (globalAnyBool(!local_derivative_projection_valid, comm)) {
+      evaluation.diagnostic =
+          "candidate_exact_functional_derivative_projection_failed:" +
+          derivative_projection.diagnostic;
+      return result;
+    }
+
+    std::vector<svmp::FE::Real> full_energy_derivative(
+        candidate.size(), svmp::FE::Real{0.0});
+    std::vector<svmp::FE::Real> full_volume_derivative(
+        candidate.size(), svmp::FE::Real{0.0});
+    const auto surface_tension = declaration.parameters.surface_tension;
+    for (std::size_t dof = 0u; dof < field_count; ++dof) {
+      full_energy_derivative[field_offset + dof] =
+          surface_tension *
+          derivative_projection
+              .kinematic_area_gradient_total_energy_derivative[dof];
+      full_volume_derivative[field_offset + dof] =
+          derivative_projection
+              .kinematic_area_gradient_liquid_volume_derivative[dof];
+    }
+
+    bool local_constraint_transpose_invalid = false;
+    for (const auto slave : system.constraints().getConstrainedDofs()) {
+      if (slave < 0 ||
+          static_cast<std::size_t>(slave) >= candidate.size()) {
+        local_constraint_transpose_invalid = true;
+        continue;
+      }
+      const auto constraint = system.constraints().getConstraint(slave);
+      if (!constraint.has_value()) {
+        local_constraint_transpose_invalid = true;
+        continue;
+      }
+      const auto slave_index = static_cast<std::size_t>(slave);
+      const auto energy_slave = full_energy_derivative[slave_index];
+      const auto volume_slave = full_volume_derivative[slave_index];
+      full_energy_derivative[slave_index] = 0.0;
+      full_volume_derivative[slave_index] = 0.0;
+      for (const auto& entry : constraint->entries) {
+        if (entry.master_dof < 0 ||
+            static_cast<std::size_t>(entry.master_dof) >= candidate.size() ||
+            system.constraints().isConstrained(entry.master_dof) ||
+            !std::isfinite(entry.weight)) {
+          local_constraint_transpose_invalid = true;
+          continue;
+        }
+        const auto master = static_cast<std::size_t>(entry.master_dof);
+        full_energy_derivative[master] += entry.weight * energy_slave;
+        full_volume_derivative[master] += entry.weight * volume_slave;
+      }
+    }
+    const bool cross_field_derivative =
+        std::any_of(
+            full_energy_derivative.begin(),
+            full_energy_derivative.begin() +
+                static_cast<std::ptrdiff_t>(field_offset),
+            [](svmp::FE::Real value) {
+              return value != svmp::FE::Real{0.0};
+            }) ||
+        std::any_of(
+            full_energy_derivative.begin() +
+                static_cast<std::ptrdiff_t>(field_offset + field_count),
+            full_energy_derivative.end(),
+            [](svmp::FE::Real value) {
+              return value != svmp::FE::Real{0.0};
+            }) ||
+        std::any_of(
+            full_volume_derivative.begin(),
+            full_volume_derivative.begin() +
+                static_cast<std::ptrdiff_t>(field_offset),
+            [](svmp::FE::Real value) {
+              return value != svmp::FE::Real{0.0};
+            }) ||
+        std::any_of(
+            full_volume_derivative.begin() +
+                static_cast<std::ptrdiff_t>(field_offset + field_count),
+            full_volume_derivative.end(),
+            [](svmp::FE::Real value) {
+              return value != svmp::FE::Real{0.0};
+            });
+    local_constraint_transpose_invalid =
+        local_constraint_transpose_invalid || cross_field_derivative ||
+        !std::all_of(
+            full_energy_derivative.begin(),
+            full_energy_derivative.end(),
+            [](svmp::FE::Real value) { return std::isfinite(value); }) ||
+        !std::all_of(
+            full_volume_derivative.begin(),
+            full_volume_derivative.end(),
+            [](svmp::FE::Real value) { return std::isfinite(value); });
+    if (globalAnyBool(local_constraint_transpose_invalid, comm)) {
+      evaluation.diagnostic =
+          "candidate_exact_functional_derivative_constraint_transpose_failed";
+      return result;
+    }
+    physical_potential_derivative.assign(
+        full_energy_derivative.begin() +
+            static_cast<std::ptrdiff_t>(field_offset),
+        full_energy_derivative.begin() +
+            static_cast<std::ptrdiff_t>(field_offset + field_count));
+    liquid_volume_derivative.assign(
+        full_volume_derivative.begin() +
+            static_cast<std::ptrdiff_t>(field_offset),
+        full_volume_derivative.begin() +
+            static_cast<std::ptrdiff_t>(field_offset + field_count));
+  }
+
+  if (purpose ==
+          svmp::FE::level_set::LevelSetStaticCapillaryEvaluationPurpose::
+              AcceptanceCertificate &&
+      uses_kinematic_area_gradient_traction) {
+    svmp::FE::systems::SystemStateView candidate_state;
+    candidate_state.time = history.time();
+    candidate_state.dt = constraint_dt;
+    candidate_state.effective_dt = constraint_dt;
+    candidate_state.dt_prev = history.dtPrev();
+    candidate_state.u = candidate;
+    CurvatureProjectionCache acceptance_curvature_cache;
+    const std::vector<LevelSetMaintenanceRequest>
+        acceptance_curvature_requests{request};
+    const auto projected_fields = projectLevelSetCurvatureFieldsFromState(
+        sim,
+        candidate_state,
+        refresh_report.evaluated_state_source_revisions,
+        acceptance_curvature_requests,
+        history.stepIndex(),
+        "static_capillary_acceptance_certificate",
+        /*honor_cadence=*/false,
+        &acceptance_curvature_cache,
+        /*reuse_cached_on_projection_failure=*/false);
+    if (projected_fields != 1u) {
+      evaluation.diagnostic =
+          "accepted_kinematic_area_gradient_curvature_projection_count_mismatch";
+      return result;
+    }
+  }
+
+  auto states = evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+  attachAcceptedFreeSurfaceActiveVolumeEnergies(sim, candidate, states);
+  const bool local_functional_available =
+      states.size() == 1u &&
+      states.front().interface_marker == marker &&
+      states.front().active_volume_energy.has_value();
+  if (globalAnyBool(!local_functional_available, comm)) {
+    evaluation.diagnostic =
+        "candidate_authoritative_functional_unavailable";
+    return result;
+  }
+  const auto& state = states.front();
+  const auto energy = state.state.liquid_gas_surface_energy +
+                      state.state.young_wall_energy;
+  const auto gravitational_energy =
+      state.active_volume_energy->gravitational_energy;
+  const auto volume = state.state.owned_liquid_volume;
+  const bool local_functional_valid =
+      std::isfinite(energy) && std::isfinite(gravitational_energy) &&
+      std::isfinite(energy + gravitational_energy) &&
+      std::isfinite(volume) && volume >= svmp::FE::Real{0.0};
+  if (globalAnyBool(!local_functional_valid, comm)) {
+    evaluation.diagnostic =
+        "candidate_authoritative_functional_is_nonfinite";
+    return result;
+  }
+  const auto [minimum_snapshot_revision, maximum_snapshot_revision] =
+      globalMinMaxUint64(
+          state.geometry_revision.snapshot_revision_key, comm);
+  const bool functional_decision_data_identical =
+      minimum_snapshot_revision == maximum_snapshot_revision &&
+      globalMinDouble(static_cast<double>(energy), comm) ==
+          globalMaxDouble(static_cast<double>(energy), comm) &&
+      globalMinDouble(static_cast<double>(gravitational_energy), comm) ==
+          globalMaxDouble(static_cast<double>(gravitational_energy), comm) &&
+      globalMinDouble(static_cast<double>(volume), comm) ==
+          globalMaxDouble(static_cast<double>(volume), comm);
+  if (!functional_decision_data_identical) {
+    evaluation.diagnostic =
+        "candidate_functional_decision_data_differs_across_communicator";
+    return result;
+  }
+
+  evaluation.success = true;
+  evaluation.snapshot_revision_key =
+      state.geometry_revision.snapshot_revision_key;
+  evaluation.cut_topology_key = refresh_report.topology_key;
+  evaluation.constraint_semantics_key = constraint_key;
+  evaluation.surface_wall_energy = energy;
+  evaluation.gravitational_potential_energy = gravitational_energy;
+  evaluation.liquid_volume = volume;
+  evaluation.functional_derivatives_available =
+      exact_functional_derivatives_requested;
+  evaluation.physical_potential_derivative =
+      std::move(physical_potential_derivative);
+  evaluation.liquid_volume_derivative =
+      std::move(liquid_volume_derivative);
+  evaluation.production_force_projection_applied = false;
+  evaluation.diagnostic = "functional_trial_available";
+  return result;
+}
+
 bool initializeDiscreteStaticCapillaryEquilibrium(
     application::core::SimulationComponents& sim,
     const Parameters& params,
@@ -27612,11 +27953,9 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
   }
 
   std::vector<svmp::FE::FieldId> transaction_prescribed_fields;
-  std::vector<LevelSetMaintenanceRequest> acceptance_curvature_requests;
   if (uses_kinematic_area_gradient_traction) {
     transaction_prescribed_fields.push_back(
         declaration.curvature_field);
-    acceptance_curvature_requests.push_back(request);
   }
   LevelSetMaintenanceGeometryTransaction transaction(
       sim,
@@ -27626,10 +27965,6 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       std::span<const svmp::FE::FieldId>(
           transaction_prescribed_fields.data(),
           transaction_prescribed_fields.size()));
-  const double constraint_dt =
-      std::isfinite(history.dt()) && history.dt() > 0.0
-          ? history.dt()
-          : 1.0;
   auto minimization_options =
       request.static_capillary_equilibrium;
   minimization_options.allow_topology_epoch_transitions =
@@ -27646,355 +27981,23 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       [&](std::span<const svmp::FE::Real> coefficients,
           svmp::FE::level_set::
               LevelSetStaticCapillaryEvaluationPurpose purpose) {
-        svmp::FE::level_set::
-            LevelSetStaticCapillaryEquilibriumEvaluation evaluation;
-        if (globalAnyBool(
-                coefficients.size() != field_count, comm)) {
-          evaluation.diagnostic =
-              "candidate_level_set_coefficient_count_mismatch";
+        auto functional = evaluateStaticCapillaryFunctionalCandidate(
+            sim,
+            params,
+            request,
+            declaration,
+            baseline,
+            transaction,
+            coefficients,
+            purpose,
+            exact_functional_derivatives_requested);
+        auto evaluation = std::move(functional.evaluation);
+        if (!evaluation.success) {
           return evaluation;
         }
-        (void)collectiveLevelSetMaintenanceAlgebraicRevision(
-            coefficients, comm);
-
-        std::vector<svmp::FE::Real> candidate = baseline;
-        std::copy(
-            coefficients.begin(),
-            coefficients.end(),
-            candidate.begin() +
-                static_cast<std::ptrdiff_t>(field_offset));
-        std::optional<std::uint64_t> previous_constraint_key;
-        std::uint64_t constraint_key = 0u;
-        ActiveCutContextRefreshReport refresh_report;
-        bool fixed_point_reached = false;
-        constexpr int maximum_projection_passes = 4;
-        for (int pass = 0;
-             pass < maximum_projection_passes;
-             ++pass) {
-          refresh_report = transaction.refresh(
-              params,
-              candidate,
-              purpose ==
-                      svmp::FE::level_set::
-                          LevelSetStaticCapillaryEvaluationPurpose::
-                              AcceptanceCertificate &&
-                  pass == 0);
-          if (refresh_report.topology_key == 0u) {
-            evaluation.diagnostic =
-                "candidate_cut_topology_key_unavailable";
-            return evaluation;
-          }
-          system.updateConstraints(
-              history.time(), constraint_dt);
-          constraint_key =
-              collectiveConstraintSemanticsKey(system, comm);
-          auto projected = candidate;
-          system.constraints().distribute(projected);
-          const bool projected_values_finite = std::all_of(
-              projected.begin(),
-              projected.end(),
-              [](svmp::FE::Real value) {
-                return std::isfinite(value);
-              });
-          if (globalAnyBool(
-                  !projected_values_finite, comm)) {
-            evaluation.diagnostic =
-                "candidate_constraint_projection_is_nonfinite";
-            return evaluation;
-          }
-          const auto projection_change =
-              globalMaxAbsDifference(
-                  candidate, projected, comm);
-          candidate = std::move(projected);
-          if (pass > 0 &&
-              previous_constraint_key.has_value() &&
-              *previous_constraint_key == constraint_key &&
-              projection_change == 0.0) {
-            fixed_point_reached = true;
-            break;
-          }
-          previous_constraint_key = constraint_key;
-        }
-        if (!fixed_point_reached) {
-          evaluation.diagnostic =
-              "candidate_constraint_geometry_fixed_point_failed";
-          return evaluation;
-        }
-
-        std::vector<svmp::FE::Real> physical_potential_derivative;
-        std::vector<svmp::FE::Real> liquid_volume_derivative;
-        if (exact_functional_derivatives_requested) {
-          svmp::FE::systems::SystemStateView derivative_state;
-          derivative_state.time = history.time();
-          derivative_state.dt = constraint_dt;
-          derivative_state.effective_dt = constraint_dt;
-          derivative_state.dt_prev = history.dtPrev();
-          derivative_state.u = candidate;
-          const auto phi_values = evaluateVertexField(
-              system,
-              *sim.primary_mesh,
-              level_set_field,
-              derivative_state,
-              1u,
-              "differentiating the static capillary functional");
-          std::vector<svmp::FE::Real> trial_curvature;
-          const std::vector<
-              svmp::FE::level_set::LevelSetCurvatureProjectionSample>
-              no_supplemental_samples;
-          const auto derivative_projection =
-              svmp::FE::level_set::
-                  projectLevelSetMeanCurvatureToVertices(
-                      system,
-                      level_set_field,
-                      phi_values,
-                      no_supplemental_samples,
-                      request.curvature_projection,
-                      trial_curvature);
-          const bool local_derivative_projection_valid =
-              derivative_projection.success &&
-              derivative_projection
-                  .kinematic_area_gradient_derivatives_global_dof_order &&
-              derivative_projection
-                      .kinematic_area_gradient_total_energy_derivative.size() ==
-                  field_count &&
-              derivative_projection
-                      .kinematic_area_gradient_liquid_volume_derivative.size() ==
-                  field_count;
-          if (globalAnyBool(
-                  !local_derivative_projection_valid, comm)) {
-            evaluation.diagnostic =
-                "candidate_exact_functional_derivative_projection_failed:" +
-                derivative_projection.diagnostic;
-            return evaluation;
-          }
-
-          std::vector<svmp::FE::Real> full_energy_derivative(
-              candidate.size(), svmp::FE::Real{0.0});
-          std::vector<svmp::FE::Real> full_volume_derivative(
-              candidate.size(), svmp::FE::Real{0.0});
-          const auto surface_tension =
-              declaration.parameters.surface_tension;
-          for (std::size_t dof = 0u; dof < field_count; ++dof) {
-            full_energy_derivative[field_offset + dof] =
-                surface_tension *
-                derivative_projection
-                    .kinematic_area_gradient_total_energy_derivative[dof];
-            full_volume_derivative[field_offset + dof] =
-                derivative_projection
-                    .kinematic_area_gradient_liquid_volume_derivative[dof];
-          }
-
-          bool local_constraint_transpose_invalid = false;
-          for (const auto slave :
-               system.constraints().getConstrainedDofs()) {
-            if (slave < 0 ||
-                static_cast<std::size_t>(slave) >= candidate.size()) {
-              local_constraint_transpose_invalid = true;
-              continue;
-            }
-            const auto constraint =
-                system.constraints().getConstraint(slave);
-            if (!constraint.has_value()) {
-              local_constraint_transpose_invalid = true;
-              continue;
-            }
-            const auto slave_index =
-                static_cast<std::size_t>(slave);
-            const auto energy_slave =
-                full_energy_derivative[slave_index];
-            const auto volume_slave =
-                full_volume_derivative[slave_index];
-            full_energy_derivative[slave_index] = 0.0;
-            full_volume_derivative[slave_index] = 0.0;
-            for (const auto& entry : constraint->entries) {
-              if (entry.master_dof < 0 ||
-                  static_cast<std::size_t>(entry.master_dof) >=
-                      candidate.size() ||
-                  system.constraints().isConstrained(entry.master_dof) ||
-                  !std::isfinite(entry.weight)) {
-                local_constraint_transpose_invalid = true;
-                continue;
-              }
-              const auto master =
-                  static_cast<std::size_t>(entry.master_dof);
-              full_energy_derivative[master] +=
-                  entry.weight * energy_slave;
-              full_volume_derivative[master] +=
-                  entry.weight * volume_slave;
-            }
-          }
-          const bool cross_field_derivative =
-              std::any_of(
-                  full_energy_derivative.begin(),
-                  full_energy_derivative.begin() +
-                      static_cast<std::ptrdiff_t>(field_offset),
-                  [](svmp::FE::Real value) {
-                    return value != svmp::FE::Real{0.0};
-                  }) ||
-              std::any_of(
-                  full_energy_derivative.begin() +
-                      static_cast<std::ptrdiff_t>(field_offset + field_count),
-                  full_energy_derivative.end(),
-                  [](svmp::FE::Real value) {
-                    return value != svmp::FE::Real{0.0};
-                  }) ||
-              std::any_of(
-                  full_volume_derivative.begin(),
-                  full_volume_derivative.begin() +
-                      static_cast<std::ptrdiff_t>(field_offset),
-                  [](svmp::FE::Real value) {
-                    return value != svmp::FE::Real{0.0};
-                  }) ||
-              std::any_of(
-                  full_volume_derivative.begin() +
-                      static_cast<std::ptrdiff_t>(field_offset + field_count),
-                  full_volume_derivative.end(),
-                  [](svmp::FE::Real value) {
-                    return value != svmp::FE::Real{0.0};
-                  });
-          local_constraint_transpose_invalid =
-              local_constraint_transpose_invalid ||
-              cross_field_derivative ||
-              !std::all_of(
-                  full_energy_derivative.begin(),
-                  full_energy_derivative.end(),
-                  [](svmp::FE::Real value) {
-                    return std::isfinite(value);
-                  }) ||
-              !std::all_of(
-                  full_volume_derivative.begin(),
-                  full_volume_derivative.end(),
-                  [](svmp::FE::Real value) {
-                    return std::isfinite(value);
-                  });
-          if (globalAnyBool(
-                  local_constraint_transpose_invalid, comm)) {
-            evaluation.diagnostic =
-                "candidate_exact_functional_derivative_constraint_transpose_failed";
-            return evaluation;
-          }
-          physical_potential_derivative.assign(
-              full_energy_derivative.begin() +
-                  static_cast<std::ptrdiff_t>(field_offset),
-              full_energy_derivative.begin() +
-                  static_cast<std::ptrdiff_t>(
-                      field_offset + field_count));
-          liquid_volume_derivative.assign(
-              full_volume_derivative.begin() +
-                  static_cast<std::ptrdiff_t>(field_offset),
-              full_volume_derivative.begin() +
-                  static_cast<std::ptrdiff_t>(
-                      field_offset + field_count));
-        }
-
-        if (purpose ==
-                svmp::FE::level_set::
-                    LevelSetStaticCapillaryEvaluationPurpose::
-                        AcceptanceCertificate &&
-            uses_kinematic_area_gradient_traction) {
-          svmp::FE::systems::SystemStateView candidate_state;
-          candidate_state.time = history.time();
-          candidate_state.dt = constraint_dt;
-          candidate_state.effective_dt = constraint_dt;
-          candidate_state.dt_prev = history.dtPrev();
-          candidate_state.u = candidate;
-          CurvatureProjectionCache acceptance_curvature_cache;
-          const auto projected_fields =
-              projectLevelSetCurvatureFieldsFromState(
-                  sim,
-                  candidate_state,
-                  refresh_report.evaluated_state_source_revisions,
-                  acceptance_curvature_requests,
-                  history.stepIndex(),
-                  "static_capillary_acceptance_certificate",
-                  /*honor_cadence=*/false,
-                  &acceptance_curvature_cache,
-                  /*reuse_cached_on_projection_failure=*/false);
-          if (projected_fields != 1u) {
-            evaluation.diagnostic =
-                "accepted_kinematic_area_gradient_curvature_projection_count_mismatch";
-            return evaluation;
-          }
-        }
-
-        auto states =
-            evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
-        attachAcceptedFreeSurfaceActiveVolumeEnergies(
-            sim, candidate, states);
-        const bool local_functional_available =
-            states.size() == 1u &&
-            states.front().interface_marker == *marker &&
-            states.front().active_volume_energy.has_value();
-        if (globalAnyBool(
-                !local_functional_available, comm)) {
-          evaluation.diagnostic =
-              "candidate_authoritative_functional_unavailable";
-          return evaluation;
-        }
-        const auto& state = states.front();
-        const auto energy =
-            state.state.liquid_gas_surface_energy +
-            state.state.young_wall_energy;
-        const auto gravitational_energy =
-            state.active_volume_energy->gravitational_energy;
-        const auto volume = state.state.owned_liquid_volume;
-        const bool local_functional_valid =
-            std::isfinite(energy) &&
-            std::isfinite(gravitational_energy) &&
-            std::isfinite(energy + gravitational_energy) &&
-            std::isfinite(volume) &&
-            volume >= svmp::FE::Real{0.0};
-        if (globalAnyBool(
-                !local_functional_valid, comm)) {
-          evaluation.diagnostic =
-              "candidate_authoritative_functional_is_nonfinite";
-          return evaluation;
-        }
-        const auto [minimum_snapshot_revision,
-                    maximum_snapshot_revision] =
-            globalMinMaxUint64(
-                state.geometry_revision.snapshot_revision_key,
-                comm);
-        const bool functional_decision_data_identical =
-            minimum_snapshot_revision ==
-                maximum_snapshot_revision &&
-            globalMinDouble(
-                static_cast<double>(energy), comm) ==
-                globalMaxDouble(
-                    static_cast<double>(energy), comm) &&
-            globalMinDouble(
-                static_cast<double>(gravitational_energy), comm) ==
-                globalMaxDouble(
-                    static_cast<double>(gravitational_energy), comm) &&
-            globalMinDouble(
-                static_cast<double>(volume), comm) ==
-                globalMaxDouble(
-                    static_cast<double>(volume), comm);
-        if (!functional_decision_data_identical) {
-          evaluation.diagnostic =
-              "candidate_functional_decision_data_differs_across_communicator";
-          return evaluation;
-        }
-
-        evaluation.success = true;
-        evaluation.snapshot_revision_key =
-            state.geometry_revision.snapshot_revision_key;
-        evaluation.cut_topology_key =
-            refresh_report.topology_key;
-        evaluation.constraint_semantics_key =
-            constraint_key;
-        evaluation.surface_wall_energy = energy;
-        evaluation.gravitational_potential_energy =
-            gravitational_energy;
-        evaluation.liquid_volume = volume;
-        evaluation.functional_derivatives_available =
-            exact_functional_derivatives_requested;
-        evaluation.physical_potential_derivative =
-            std::move(physical_potential_derivative);
-        evaluation.liquid_volume_derivative =
-            std::move(liquid_volume_derivative);
-        evaluation.production_force_projection_applied = false;
-        evaluation.diagnostic = "functional_trial_available";
+        auto candidate = std::move(functional.candidate);
+        const auto constraint_key =
+            evaluation.constraint_semantics_key;
 
         if (purpose ==
             svmp::FE::level_set::
