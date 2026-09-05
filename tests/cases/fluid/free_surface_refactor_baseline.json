@@ -1315,6 +1315,265 @@
         "sha256": "4b6e6e4191b7b569bbad6bbd4fb0598c5a9264d1a0628aa71d171aeccef560a7",
         "size_bytes": 56617
       }
+    },
+    {
+      "acceptance_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-history-log-v2-acceptance/acceptance.json",
+        "sha256": "f16665d14d999ab681050f827a30c65c4cd0c6c6359fc3d5db205a41849e0e59",
+        "size_bytes": 15823
+      },
+      "artifact": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-history-log-references-v2/scalar-observations.json",
+        "sha256": "80c8acbb2417a43da1c2f864ee6c6db90d33b38a5c87c8ba10c8b81f4cb5de89",
+        "size_bytes": 1263302
+      },
+      "checks": "Independent raw reconstruction and source/provenance validation completed 13,065 checks with no failures; all 3,961 baseline files and linked hashes matched; all 116 ordinary diagnostic objects retain exact v1 meaning.",
+      "comparison_state": "BASELINE_TO_CANDIDATE_POLICY_PENDING",
+      "fix_report": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-history-log-v2-acceptance/r0-history-log-normalizer-fix-report.md",
+        "sha256": "a9025ffc98bfb6e776fd4ebf6309eddedc0157d034fb71181a7f0a54b3c876bb",
+        "size_bytes": 9563
+      },
+      "fixtures": [
+        {
+          "baseline_to_candidate_gate_status": "Pending explicit per-channel comparison policy; behavioral assertions are not automatically universal comparison tolerances.",
+          "event_count": 4,
+          "evidence_class": "synthetic_functional_history_connector",
+          "fixture": "MovingDomainPhysics.FreeSurfaceDiscreteFunctionalHistoryIsValidatedAndReplaySafe",
+          "job_id": "42068077",
+          "original_behavioral_gate": "Original exact metadata and GoogleTest floating equality for the supplied total potential.",
+          "outcome": "PASSED",
+          "raw_excerpt": {
+            "bytes": 4231,
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-history-log-references-v2/MovingDomainPhysics.FreeSurfaceDiscreteFunctionalHistoryIsValidatedAndReplaySafe.raw.log",
+            "sha256": "d4458eba3009ecccd8f259e68b1576540862f804c4a47bd4225133a8413c4de7"
+          },
+          "scope_limit": "Supplied functional values establish publication and replay behavior; no independently integrated physical trajectory.",
+          "source_log_first_line": 2833,
+          "source_log_last_line": 2838,
+          "test_source": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_MovingDomainPhysics.cpp",
+          "test_source_line": 6674,
+          "xml_properties": [
+            {
+              "name": "functional_snapshot_mismatch_rejected",
+              "value_text": "1"
+            }
+          ],
+          "xml_time_seconds_text": "0."
+        },
+        {
+          "baseline_to_candidate_gate_status": "Pending explicit per-channel comparison policy; behavioral assertions are not automatically universal comparison tolerances.",
+          "event_count": 3,
+          "evidence_class": "synthetic_contact_history_connector",
+          "fixture": "MovingDomainPhysics.FreeSurfaceDynamicContactStageHistoryPreservesLawAndFrameProvenance",
+          "job_id": "42068077",
+          "original_behavioral_gate": "Original 1e-14 absolute checks for selected angle, speed, dissipation and frame values; exact stage provenance.",
+          "outcome": "PASSED",
+          "raw_excerpt": {
+            "bytes": 5203,
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-history-log-references-v2/MovingDomainPhysics.FreeSurfaceDynamicContactStageHistoryPreservesLawAndFrameProvenance.raw.log",
+            "sha256": "cced4a7bef27c1a08e9605a4e353448691cb90024129e5c598ba9284e8515f52"
+          },
+          "scope_limit": "Supplied contact state establishes law/frame/stage provenance; unavailable kinematics remain unavailable.",
+          "source_log_first_line": 2839,
+          "source_log_last_line": 2843,
+          "test_source": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_MovingDomainPhysics.cpp",
+          "test_source_line": 6907,
+          "xml_properties": [
+            {
+              "name": "contact_snapshot_mismatch_rejected",
+              "value_text": "1"
+            }
+          ],
+          "xml_time_seconds_text": "0.001"
+        },
+        {
+          "baseline_to_candidate_gate_status": "Pending explicit per-channel comparison policy; behavioral assertions are not automatically universal comparison tolerances.",
+          "event_count": 15,
+          "evidence_class": "assembled_physics_virtual_work_prerequisite",
+          "fixture": "MovingDomainPhysics.KinematicAreaGradientTractionIsEnergyAdjointOnQuadraticTetraCut",
+          "job_id": "42068077",
+          "original_behavioral_gate": "Original mismatch <= 1e-12 * max(1, abs(derivative), abs(work)); linear-rule mismatch > 1e-3 * scale.",
+          "outcome": "PASSED",
+          "raw_excerpt": {
+            "bytes": 8261,
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-history-log-references-v2/MovingDomainPhysics.KinematicAreaGradientTractionIsEnergyAdjointOnQuadraticTetraCut.raw.log",
+            "sha256": "db46d8776ef8898d51f53d117054a44df5761c8e7a220bb08dcb12a1cf2a991b"
+          },
+          "scope_limit": "XML properties retain assembled work comparisons; complete operator blocks and higher order DOF maps are not in these logs.",
+          "source_log_first_line": 4165,
+          "source_log_last_line": 4183,
+          "test_source": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_MovingDomainPhysics.cpp",
+          "test_source_line": 12559,
+          "xml_properties": [
+            {
+              "name": "kinematic_energy_adjoint_derivative",
+              "value_text": "-0.028284271247461905"
+            },
+            {
+              "name": "kinematic_energy_adjoint_surface_work",
+              "value_text": "-0.028284271247461797"
+            },
+            {
+              "name": "kinematic_energy_adjoint_quadratic_mismatch",
+              "value_text": "1.0755285551056204e-16"
+            },
+            {
+              "name": "kinematic_energy_adjoint_linear_mismatch",
+              "value_text": "0.02828427124746203"
+            },
+            {
+              "name": "kinematic_energy_adjoint_scaled_tolerance",
+              "value_text": "9.9999999999999998e-13"
+            }
+          ],
+          "xml_time_seconds_text": "0.008"
+        },
+        {
+          "baseline_to_candidate_gate_status": "Pending explicit per-channel comparison policy; behavioral assertions are not automatically universal comparison tolerances.",
+          "event_count": 7,
+          "evidence_class": "integrated_fe_application_functional_prerequisite",
+          "fixture": "ApplicationDriverLevelSetWorkflows.AcceptedFunctionalUsesAuthoritativeSnapshotAndRecordsGlobalState",
+          "job_id": "42090895",
+          "original_behavioral_gate": "Original relevant energy identities at 1e-13; unlisted channels require their own comparison contract.",
+          "outcome": "PASSED",
+          "raw_excerpt": {
+            "bytes": 12778,
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-history-log-references-v2/ApplicationDriverLevelSetWorkflows.AcceptedFunctionalUsesAuthoritativeSnapshotAndRecordsGlobalState.raw.log",
+            "sha256": "5280ba2bf4d266584a1727bda16e14c40b2cafbbc014dc7f631335be28dd1cd3"
+          },
+          "scope_limit": "Initialization and accepted step are distinct events. FE geometry support does not expand physical model qualification.",
+          "source_log_first_line": 892,
+          "source_log_last_line": 900,
+          "test_source": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Application/Tests/Unit/test_ApplicationDriverLevelSetWorkflows.cpp",
+          "test_source_line": 6000,
+          "xml_properties": [],
+          "xml_time_seconds_text": "0.005"
+        },
+        {
+          "baseline_to_candidate_gate_status": "Pending explicit per-channel comparison policy; behavioral assertions are not automatically universal comparison tolerances.",
+          "event_count": 35,
+          "evidence_class": "integrated_fe_contact_provenance_prerequisite",
+          "fixture": "ApplicationDriverLevelSetWorkflows.ConsumedContactMarkerAcceptsCurvedHighOrderFragments",
+          "job_id": "42090895",
+          "original_behavioral_gate": "Per-channel numeric baseline comparison gates remain pending source assertion audit and repetition.",
+          "outcome": "PASSED",
+          "raw_excerpt": {
+            "bytes": 54181,
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-history-log-references-v2/ApplicationDriverLevelSetWorkflows.ConsumedContactMarkerAcceptsCurvedHighOrderFragments.raw.log",
+            "sha256": "2880cf36d2bfdc73bd0946cfaa1cd926121e5e3356b2f3515e6236d342c1b2d2"
+          },
+          "scope_limit": "Curved fragment integration and contact history are retained within this FE prerequisite scope.",
+          "source_log_first_line": 160027,
+          "source_log_last_line": 160063,
+          "test_source": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Application/Tests/Unit/test_ApplicationDriverLevelSetWorkflows.cpp",
+          "test_source_line": 10398,
+          "xml_properties": [],
+          "xml_time_seconds_text": "0.02"
+        },
+        {
+          "baseline_to_candidate_gate_status": "Pending explicit per-channel comparison policy; behavioral assertions are not automatically universal comparison tolerances.",
+          "event_count": 19,
+          "evidence_class": "phase_candidate_maintenance_prerequisite",
+          "fixture": "ApplicationDriverConservativePhaseCandidatesTest.ReconciliationOnlyRepairsTransportedGeometryLocally",
+          "job_id": "42090895",
+          "original_behavioral_gate": "Original stage/boundary-mass invariants at 1e-12; activity and Courant values are policy inputs, not output tolerances.",
+          "outcome": "PASSED",
+          "raw_excerpt": {
+            "bytes": 36484,
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-history-log-references-v2/ApplicationDriverConservativePhaseCandidatesTest.ReconciliationOnlyRepairsTransportedGeometryLocally.raw.log",
+            "sha256": "17f839bf4a75c3f0a1732dd0f668d01633da61a0fd5ca2ee5c6aee5a1d0699a4"
+          },
+          "scope_limit": "Logged prepared maintenance is not automatically an accepted physical step; full nodal arrays are absent.",
+          "source_log_first_line": 160326,
+          "source_log_last_line": 160348,
+          "test_source": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Application/Tests/Unit/test_ApplicationDriverLevelSetWorkflows.cpp",
+          "test_source_line": 17283,
+          "xml_properties": [],
+          "xml_time_seconds_text": "0.003"
+        },
+        {
+          "baseline_to_candidate_gate_status": "Pending explicit per-channel comparison policy; behavioral assertions are not automatically universal comparison tolerances.",
+          "event_count": 24,
+          "evidence_class": "rejected_phase_candidate_rollback_prerequisite",
+          "fixture": "ApplicationDriverConservativePhaseCandidatesTest.LaterRejectionRestoresTheRawCandidateAndEveryGeometryRevision",
+          "job_id": "42090895",
+          "original_behavioral_gate": "Original exact rollback identities and local phase-mass equality 1e-10; full rollback-array capture remains pending.",
+          "outcome": "PASSED",
+          "raw_excerpt": {
+            "bytes": 49403,
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-history-log-references-v2/ApplicationDriverConservativePhaseCandidatesTest.LaterRejectionRestoresTheRawCandidateAndEveryGeometryRevision.raw.log",
+            "sha256": "21ce22e22aa78af630d0ddccf8cb458e2b6e626bdf50723ae59d2f017e2fa2d9"
+          },
+          "scope_limit": "The fixture later rejects prepared work. The log does not contain every restored state array.",
+          "source_log_first_line": 160405,
+          "source_log_last_line": 160432,
+          "test_source": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Application/Tests/Unit/test_ApplicationDriverLevelSetWorkflows.cpp",
+          "test_source_line": 17652,
+          "xml_properties": [],
+          "xml_time_seconds_text": "0.004"
+        },
+        {
+          "baseline_to_candidate_gate_status": "Pending explicit per-channel comparison policy; behavioral assertions are not automatically universal comparison tolerances.",
+          "event_count": 11,
+          "evidence_class": "geometry_refresh_cache_observation",
+          "fixture": "ApplicationDriverConservativePhaseCandidatesTest.ActiveCutRefreshObserverSeesVectorAndSpanCachePaths",
+          "job_id": "42090895",
+          "original_behavioral_gate": "Original exercise observes 4 events, 2 rebuilds and 2 hits; no timing or memory regression percentage is imposed.",
+          "outcome": "PASSED",
+          "raw_excerpt": {
+            "bytes": 22560,
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-history-log-references-v2/ApplicationDriverConservativePhaseCandidatesTest.ActiveCutRefreshObserverSeesVectorAndSpanCachePaths.raw.log",
+            "sha256": "fc47e4beecb7141d366ba113d474e5926798149dbcc3ee80884ae612e9b4e404"
+          },
+          "scope_limit": "Setup logs are retained separately in event order; raw event counts are not observer rebuild counters.",
+          "source_log_first_line": 160185,
+          "source_log_last_line": 160198,
+          "test_source": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Application/Tests/Unit/test_ApplicationDriverLevelSetWorkflows.cpp",
+          "test_source_line": 16617,
+          "xml_properties": [],
+          "xml_time_seconds_text": "0.005"
+        }
+      ],
+      "id": "history-functional-scalar-observations",
+      "independent_validation": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-history-log-v2-acceptance/r0-history-log-v2-validation.json",
+        "sha256": "23fb231ec18ea7c1aaa01cf2dacf358aff19602812a0e100e90e166601cd784f",
+        "size_bytes": 35660
+      },
+      "job_ids": [
+        "42068077",
+        "42090895"
+      ],
+      "limits": [
+        "No canonical field-ID map is supplied; raw field identifiers and their context are retained.",
+        "Setup cache events remain ordered but are not phase-classified; setup ordinals must not be counted as exercise observations.",
+        "No state or history arrays are supplied by this scalar observation slice.",
+        "This artifact does not claim full R0 equivalence, physical qualification, or universal candidate tolerances.",
+        "Baseline-to-candidate comparison gates remain pending explicit per-channel policy and independent validation.",
+        "The selected Physics fixtures passed within a profile that failed elsewhere; this slice does not change that profile outcome.",
+        "A prior development publication is preserved but its executed helper version is unavailable; that development generation is not accepted or used as the final correctness oracle."
+      ],
+      "normalizer": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-history-log-v2-acceptance/normalize-r0-history-log-references-v2.py",
+        "sha256": "cf95861e3c32af8720d88a7d1cf68852bae81033ee531631c0a5797789649306",
+        "size_bytes": 16947
+      },
+      "schema_version": 2,
+      "scope": "Eight passing fixture spans from immutable completed baseline logs; 118 ordered events (116 diagnostics and two untagged geometry-validation records), seven XML properties. Functional/contact/phase/cache scalar observations only.",
+      "source_revision": "0d77e6cd1c350c20334d43021a186753231398a4",
+      "source_tree": "26d8e720c6dc5490168ffad54def72c74b174aad",
+      "state": "ACCEPTED_BOUNDED_SCALAR_OBSERVATIONS",
+      "summary": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-history-log-references-v2/summary.json",
+        "sha256": "175b00aeb9906cb4d03774ce2f00788e07ddeba3c11c0932038194e01bb8d3f4",
+        "size_bytes": 531
+      },
+      "validator": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-history-log-v2-acceptance/validate-r0-history-log-references-v2.py",
+        "sha256": "6004e6230fe23f152d2278524b5150ca36c2424d2b29393682003dd61d4b12cb",
+        "size_bytes": 44049
+      }
     }
   ],
   "comparison_contract": {
