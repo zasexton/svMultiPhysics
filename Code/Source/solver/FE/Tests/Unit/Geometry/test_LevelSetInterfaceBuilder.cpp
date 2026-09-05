@@ -36,6 +36,53 @@ CutInterfaceDomainRequest make_request(int marker)
     return request;
 }
 
+TEST(ProducerObservation, FiniteDyadicGradientNormOverflowStampsEveryRecord)
+{
+    const auto request = make_request(70);
+    const Real magnitude = std::ldexp(Real{1.0}, 600);
+    ASSERT_TRUE(std::isfinite(magnitude));
+    ASSERT_TRUE(std::isfinite(Real{2.0} * magnitude));
+    for (const Real sign : {-1.0, 1.0}) {
+        SCOPED_TRACE(sign);
+        const LevelSetCellCutInput input{
+            .parent_cell = 0,
+            .element_type = ElementType::Triangle3,
+            .node_coordinates = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}},
+            .level_set_values = {-sign * magnitude, sign * magnitude, sign * magnitude}};
+        for (const auto value : input.level_set_values) {
+            ASSERT_TRUE(std::isfinite(value));
+        }
+        const Real crossing_denominator = input.level_set_values[0] - input.level_set_values[1];
+        ASSERT_TRUE(std::isfinite(crossing_denominator));
+        EXPECT_EQ(input.level_set_values[0] / crossing_denominator, 0.5);
+
+        const auto result = cutLinearLevelSetCell2D(request, input);
+        ASSERT_TRUE(result.supported);
+        ASSERT_EQ(result.fragments.size(), 1u);
+        ASSERT_EQ(result.volume_regions.size(), 2u);
+        const auto& fragment = result.fragments.front();
+        ASSERT_EQ(fragment.vertices.size(), 2u);
+        EXPECT_EQ(fragment.vertices[0].point, (std::array<Real, 3>{{0.5, 0, 0}}));
+        EXPECT_EQ(fragment.vertices[1].point, (std::array<Real, 3>{{0, 0.5, 0}}));
+        EXPECT_EQ(fragment.measure, std::sqrt(0.5));
+        EXPECT_EQ(fragment.negative_volume_fraction, sign > 0 ? 0.25 : 0.75);
+        EXPECT_EQ(fragment.positive_volume_fraction, sign > 0 ? 0.75 : 0.25);
+        EXPECT_EQ(result.volume_regions[0].side, geometry::CutIntegrationSide::Negative);
+        EXPECT_EQ(result.volume_regions[1].side, geometry::CutIntegrationSide::Positive);
+        EXPECT_EQ(result.volume_regions[0].measure, sign > 0 ? 0.125 : 0.375);
+        EXPECT_EQ(result.volume_regions[1].measure, sign > 0 ? 0.375 : 0.125);
+        for (const auto& region : result.volume_regions) {
+            EXPECT_FALSE(region.quadrature_points.empty());
+            EXPECT_FALSE(region.reference_subcells.empty());
+        }
+        // The existing overflowing gradient normalization loses its orientation
+        // direction under either sign. This observation-only fix must not repair it.
+        const Real normal_component = 0.5 * (1.0 / std::sqrt(0.5));
+        EXPECT_EQ(fragment.normal, (std::array<Real, 3>{{normal_component, normal_component, 0}}));
+        expect_observation(result, LinearCornerStrictBranch::ModifiedOrUnresolved);
+    }
+}
+
 TEST(ProducerObservation, DistinctRootCollapseSurvivesFullPhaseReplacement)
 {
     const auto request = make_request(70);

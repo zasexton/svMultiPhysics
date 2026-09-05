@@ -441,6 +441,7 @@ void addUniqueCandidate(StrictConstructionObservation& observation, std::vector<
         return {{1.0, 0.0, 0.0}};
     }
     const Real len = std::sqrt(solution[0] * solution[0] + solution[1] * solution[1]);
+    if (observation && !std::isfinite(len)) observation->unresolved();
     if (len <= Real{1.0e-30}) {
         if (observation) observation->unresolved();
         return {{1.0, 0.0, 0.0}};
