@@ -8,6 +8,8 @@
 
 #include "Application/Core/FreeSurfaceEnergyLedger.h"
 
+#include "../Support/FreeSurfaceLifecycleReferenceCapture.h"
+
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -17,6 +19,9 @@
 #include <string>
 
 namespace {
+
+namespace lifecycle_capture =
+    application_test::free_surface_lifecycle_capture;
 
 using application::core::FreeSurfaceEnergyAttemptMetadata;
 using application::core::FreeSurfaceEnergyAttemptStatus;
@@ -285,6 +290,7 @@ void stageWithoutMaintenance(
 TEST(FreeSurfaceEnergyLedger,
      CommitsOneCompleteBackwardEulerFixedTopologyBalance)
 {
+  const auto capture_gate = lifecycle_capture::captureGate();
   FreeSurfaceEnergyLedger ledger;
   ledger.beginAttempt(metadata(1u));
   ledger.stageBalance(
@@ -324,6 +330,10 @@ TEST(FreeSurfaceEnergyLedger,
   EXPECT_NEAR(ledger.trialBalance()->total_numerical_work, 0.48, 1e-14);
   EXPECT_NEAR(ledger.trialBalance()->trial_balance_residual, 0.22, 1e-14);
   EXPECT_DOUBLE_EQ(ledger.trialBalance()->accepted_balance_residual, 0.0);
+  std::optional<application::core::FreeSurfaceEnergyAttempt> captured_trial;
+  if (capture_gate.enabled) {
+    captured_trial = *ledger.trialBalance();
+  }
 
   ledger.commitAttempt();
 
@@ -376,6 +386,41 @@ TEST(FreeSurfaceEnergyLedger,
       0.48,
       1e-14);
   EXPECT_TRUE(ledger.rejectedAttempts().empty());
+  if (capture_gate.enabled) {
+    lifecycle_capture::publish(
+        capture_gate,
+        "ApplicationLifecycleSerial/energy_ledger_backward_euler_commit.json",
+        "FreeSurfaceEnergyLedger",
+        "CommitsOneCompleteBackwardEulerFixedTopologyBalance",
+        "synthetic fixed-topology backward-Euler ledger inputs; not a complete simulation energy qualification",
+        lifecycle_capture::jsonObject({
+            {"fixture_kind",
+             lifecycle_capture::jsonString("synthetic_ledger_inputs")},
+            {"before_commit", lifecycle_capture::jsonObject({
+                {"attempt_active", "true"},
+                {"trial_balance", lifecycle_capture::energyAttemptJson(*captured_trial)},
+                {"accepted_attempt_count", "0"},
+                {"rejected_attempt_count", "0"},
+            })},
+            {"after_commit", lifecycle_capture::jsonObject({
+                {"attempt_active", lifecycle_capture::jsonBool(ledger.attemptActive())},
+                {"trial_balance_status", lifecycle_capture::jsonString("absent")},
+                {"accepted_attempts", lifecycle_capture::jsonArray({
+                    lifecycle_capture::energyAttemptJson(
+                        ledger.acceptedAttempts().front())})},
+                {"rejected_attempts", "[]"},
+            })},
+            {"comparison_contract", lifecycle_capture::jsonObject({
+                {"balance_absolute_tolerance", lifecycle_capture::jsonReal(1.0e-14)},
+                {"accepted_attempt_count", "1"},
+                {"rejected_attempt_count", "0"},
+            })},
+            {"unsupported_route_contract", lifecycle_capture::jsonObject({
+                {"generalized_alpha_complete_balance", lifecycle_capture::jsonString("rejected by StageBalanceRequiresExplicitBackwardEulerAcceptedEndpointIdentity")},
+                {"qualification_scope", lifecycle_capture::jsonString("synthetic ledger only")},
+            })},
+        }));
+  }
 }
 
 TEST(FreeSurfaceEnergyLedger,
@@ -637,6 +682,7 @@ TEST(FreeSurfaceEnergyLedger,
 TEST(FreeSurfaceEnergyLedger,
      UnstagedRejectionPreservesReasonWithoutInventingBalanceValues)
 {
+  const auto capture_gate = lifecycle_capture::captureGate();
   FreeSurfaceEnergyLedger ledger;
   ledger.beginAttempt(partialMetadata(1u));
 
@@ -689,6 +735,40 @@ TEST(FreeSurfaceEnergyLedger,
   EXPECT_EQ(
       ledger.rejectedAttempts().back().rejection_reason,
       FreeSurfaceEnergyRejectionReason::TopologyChange);
+  if (capture_gate.enabled) {
+    std::vector<std::string> rejected_attempts;
+    rejected_attempts.reserve(ledger.rejectedAttempts().size());
+    for (const auto& attempt : ledger.rejectedAttempts()) {
+      rejected_attempts.push_back(
+          lifecycle_capture::energyAttemptJson(attempt));
+    }
+    lifecycle_capture::publish(
+        capture_gate,
+        "ApplicationLifecycleSerial/energy_ledger_unstaged_rejection.json",
+        "FreeSurfaceEnergyLedger",
+        "UnstagedRejectionPreservesReasonWithoutInventingBalanceValues",
+        "synthetic unstaged rejection ledger inputs; unavailable balance values remain distinct from exact-zero accepted contributions",
+        lifecycle_capture::jsonObject({
+            {"fixture_kind",
+             lifecycle_capture::jsonString("synthetic_ledger_inputs")},
+            {"after_rejections", lifecycle_capture::jsonObject({
+                {"attempt_active", lifecycle_capture::jsonBool(ledger.attemptActive())},
+                {"trial_balance_status", lifecycle_capture::jsonString("absent")},
+                {"accepted_attempts", "[]"},
+                {"rejected_attempts", lifecycle_capture::jsonArray(rejected_attempts)},
+            })},
+            {"comparison_contract", lifecycle_capture::jsonObject({
+                {"accepted_contributions", lifecycle_capture::jsonString("exact_zero")},
+                {"unstaged_balance_values", lifecycle_capture::jsonString("explicitly_unavailable")},
+                {"rejection_reasons", lifecycle_capture::jsonString("exact")},
+                {"rejected_attempt_count", lifecycle_capture::jsonInteger(ledger.rejectedAttempts().size())},
+            })},
+            {"unsupported_route_contract", lifecycle_capture::jsonObject({
+                {"generalized_alpha_complete_balance", lifecycle_capture::jsonString("rejected by StageBalanceRequiresExplicitBackwardEulerAcceptedEndpointIdentity")},
+                {"qualification_scope", lifecycle_capture::jsonString("synthetic ledger only")},
+            })},
+        }));
+  }
 }
 
 TEST(FreeSurfaceEnergyLedger,

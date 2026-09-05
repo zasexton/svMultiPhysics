@@ -1669,6 +1669,285 @@
         "sha256": "6004e6230fe23f152d2278524b5150ca36c2424d2b29393682003dd61d4b12cb",
         "size_bytes": 44049
       }
+    },
+    {
+      "acceptance_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3-acceptance/acceptance.json",
+        "sha256": "26e21ad34826436fd2b5cf1ed83c51da473c19b1e59204c7701791657d48560c",
+        "size_bytes": 16980
+      },
+      "accounting": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3-acceptance/accounting.txt",
+        "sha256": "eeb1104ab61a147df226252b94ba1e62869b9af197ee2dfd30d909ecdf073d0c",
+        "size_bytes": 100
+      },
+      "artifacts": [
+        {
+          "case_scope": "one-rank scalar P1 conservative-phase candidate staging and rejection rollback fixture",
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3/reference/artifacts/ApplicationLifecycleSerial/conservative_phase_later_rejection_rollback.json",
+          "repeat": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3/repeat/artifacts/ApplicationLifecycleSerial/conservative_phase_later_rejection_rollback.json",
+            "sha256": "4beb2a83b203f1bad62faed65e8d7e21fd139df30b23e19d04126023734eabca",
+            "size_bytes": 16469
+          },
+          "sha256": "4beb2a83b203f1bad62faed65e8d7e21fd139df30b23e19d04126023734eabca",
+          "size_bytes": 16469,
+          "test": "ApplicationDriverConservativePhaseCandidatesTest.LaterRejectionRestoresTheRawCandidateAndEveryGeometryRevision"
+        },
+        {
+          "case_scope": "one-rank scalar P1 maintenance representation synchronization fixture; not a BDF solve or complete simulation",
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3/reference/artifacts/ApplicationLifecycleSerial/converged_maintenance_history_delta.json",
+          "repeat": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3/repeat/artifacts/ApplicationLifecycleSerial/converged_maintenance_history_delta.json",
+            "sha256": "5c4c2fa52ec6f35f3afd63808a5b9e51c04d95a3362ec076dba93cbaae566bb3",
+            "size_bytes": 6327
+          },
+          "sha256": "5c4c2fa52ec6f35f3afd63808a5b9e51c04d95a3362ec076dba93cbaae566bb3",
+          "size_bytes": 6327,
+          "test": "ApplicationDriverLevelSetWorkflows.ConvergedMaintenanceAppliesOneRepresentationDeltaToEveryHistoryLevel"
+        },
+        {
+          "case_scope": "synthetic fixed-topology backward-Euler ledger inputs; not a complete simulation energy qualification",
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3/reference/artifacts/ApplicationLifecycleSerial/energy_ledger_backward_euler_commit.json",
+          "repeat": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3/repeat/artifacts/ApplicationLifecycleSerial/energy_ledger_backward_euler_commit.json",
+            "sha256": "37f8365b2a0d1d17038d4b27321cd05c4d5c2d78f6276d0e7fc13d7129944c73",
+            "size_bytes": 17802
+          },
+          "sha256": "37f8365b2a0d1d17038d4b27321cd05c4d5c2d78f6276d0e7fc13d7129944c73",
+          "size_bytes": 17802,
+          "test": "FreeSurfaceEnergyLedger.CommitsOneCompleteBackwardEulerFixedTopologyBalance"
+        },
+        {
+          "case_scope": "synthetic unstaged rejection ledger inputs; unavailable balance values remain distinct from exact-zero accepted contributions",
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3/reference/artifacts/ApplicationLifecycleSerial/energy_ledger_unstaged_rejection.json",
+          "repeat": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3/repeat/artifacts/ApplicationLifecycleSerial/energy_ledger_unstaged_rejection.json",
+            "sha256": "53fdae13a7245a7c2084e5d30f552f4bea05d959b147757dc3ca32c3e95e784a",
+            "size_bytes": 19334
+          },
+          "sha256": "53fdae13a7245a7c2084e5d30f552f4bea05d959b147757dc3ca32c3e95e784a",
+          "size_bytes": 19334,
+          "test": "FreeSurfaceEnergyLedger.UnstagedRejectionPreservesReasonWithoutInventingBalanceValues"
+        },
+        {
+          "case_scope": "synthetic generalized-alpha maintenance fixture components; not mesh DOFs or a complete simulation",
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3/reference/artifacts/ApplicationLifecycleSerial/generalized_alpha_common_delta.json",
+          "repeat": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3/repeat/artifacts/ApplicationLifecycleSerial/generalized_alpha_common_delta.json",
+            "sha256": "5a58ea548fa4f69a13acf253ebeaa403497020bf9b00b5afdb062831b42f8ac2",
+            "size_bytes": 8020
+          },
+          "sha256": "5a58ea548fa4f69a13acf253ebeaa403497020bf9b00b5afdb062831b42f8ac2",
+          "size_bytes": 8020,
+          "test": "ApplicationDriverLevelSetWorkflows.GeneralizedAlphaMaintenanceCommonDeltaMapsEveryPostAcceptState"
+        },
+        {
+          "case_scope": "synthetic generalized-alpha maintenance fixture components; not mesh DOFs or a complete simulation",
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3/reference/artifacts/ApplicationLifecycleSerial/generalized_alpha_fixed_prior_endpoint_rate.json",
+          "repeat": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3/repeat/artifacts/ApplicationLifecycleSerial/generalized_alpha_fixed_prior_endpoint_rate.json",
+            "sha256": "39a2669fd691b871001b68331aa61114827f99c079b50c32e6f5e90d315fa781",
+            "size_bytes": 6618
+          },
+          "sha256": "39a2669fd691b871001b68331aa61114827f99c079b50c32e6f5e90d315fa781",
+          "size_bytes": 6618,
+          "test": "ApplicationDriverLevelSetWorkflows.GeneralizedAlphaMaintenanceFixedPriorPolicyMapsEndpointRate"
+        }
+      ],
+      "baseline_input_inventory": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/source-input-files.json",
+        "sha256": "6341af4d055828046e4f2020c6b5848cd1b9d69d0c52c1e0bbbf09f1d57d5f91",
+        "size_bytes": 855612
+      },
+      "binary": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3/test_application",
+        "sha256": "f2c39802f02a97bf1801b46dd27a90763338fba4aabf03d4bbbfc0cf386b79a4",
+        "size_bytes": 88704016
+      },
+      "build_report": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3/build-report.json",
+        "sha256": "12888a462fff1a6c79882553221376634bb6878ac95cceaa6a29ff38b49b3ea9",
+        "size_bytes": 70878
+      },
+      "capture_patch": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r0-application-history-overlay-r3/capture-hooks.diff",
+        "sha256": "7a329a00e8d7e237dfce219f1680dba787c31f4257c9b9e9105dbd651afc4188",
+        "size_bytes": 42496
+      },
+      "checks": {
+        "baseline_inputs": 3961,
+        "expected_refusal_executions": 66,
+        "failed": 0,
+        "independent_checks": 374,
+        "numeric_repeats_byte_identical": true,
+        "original_assertions_preserved": 147,
+        "original_numerical_link_inputs": 91,
+        "overlay_inputs": 3,
+        "rank_xml_files": 15,
+        "runtime_groups": 14,
+        "skips": 0,
+        "successful_case_executions": 19
+      },
+      "comparison_contract": "Exact repeat bytes and discrete identity within this captured baseline. Existing fixture algebra and rollback tolerances are retained; later extraction comparisons require explicit per-channel candidate policies before execution. Timing-sensitive stdout stays separate.",
+      "comparison_state": "BASELINE_TO_CANDIDATE_POLICY_PENDING",
+      "diagnostic_sidecar": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3/reference/artifacts/ApplicationLifecycleSerial/diagnostics/converged_maintenance_history_delta.stdout.log",
+        "sha256": "0d77729aca48039598e449808007744f63b42050bd672ee98974a277271abf91",
+        "size_bytes": 1299
+      },
+      "executed_helpers": [
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/check-r0-application-history-r3.sh",
+          "sha256": "7433b4d1a0caa22a277523de84e3114794a79fa58dd331767b6f0b56657ee417",
+          "size_bytes": 1675
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/build-r0-application-history-overlay.py",
+          "sha256": "53d893c932caa0784dd7d1df6c94a6c063e427a5845cf547c551b05400aeadc1",
+          "size_bytes": 8825
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/run-r0-application-history-overlay.py",
+          "sha256": "11091e74a449c766739a9f257e2b1a26c27ce2eb28472914772a7f0b8c8c04ee",
+          "size_bytes": 9221
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/validate-r0-application-history-r3-r1.py",
+          "sha256": "1682fdbc2680fe396a4ef12bf8d2093cd122a0ab94b5fa1d120618f28455d219",
+          "size_bytes": 1583
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/validate-r0-application-history-r3.py",
+          "sha256": "2e35fbd8ad7c5da2cecbc5462b1c7ccf5909b4586b61085607944c4bf1268b5f",
+          "size_bytes": 61973
+        }
+      ],
+      "execution_report": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3/runtime-report.json",
+        "sha256": "be77d8cada87875be24c8e8d19771f169daed7b450b15c0bf93ca83acdc94422",
+        "size_bytes": 39095
+      },
+      "fixture_translation": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r0-application-history-overlay-r3/fixture-translation.json",
+        "sha256": "5bf63929d84ba691fc82c0d8f072c7c7e0a706c09fca79d2f20bbc19cd9ac038",
+        "size_bytes": 2846
+      },
+      "id": "application-lifecycle-serial-references",
+      "implementation_source_sha256": {
+        "Code/Source/solver/Application/Tests/Support/FreeSurfaceLifecycleReferenceCapture.h": "0967ff20f18cb80bacb5f2a1019c5344e43c78ae26d5bc19454ba6ee06abe874",
+        "Code/Source/solver/Application/Tests/Unit/test_ApplicationDriverLevelSetWorkflows.cpp": "e975a372915cfc5bfb63e59dcaa471e983f72e1d6f2eafc4d942a63469b6a0ce",
+        "Code/Source/solver/Application/Tests/Unit/test_FreeSurfaceEnergyLedger.cpp": "a4b343df63147ed45521dbdf6b6a317fc739408e3b30380911491c2ba70d3c5b"
+      },
+      "independent_validation": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3-independent-validation-r1/validation.json",
+        "sha256": "b092f53fcc16fb62fa437439aef007676e86e78b65c42d21c8a6e40e4f7318db",
+        "size_bytes": 4821
+      },
+      "independent_validation_report": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3-acceptance/r0-application-history-r3-validation-report.md",
+        "sha256": "3a753d86ef229f62c04813fdd2c87952b2f47066411bfabbef83066c136c1543",
+        "size_bytes": 7633
+      },
+      "initialized_mpi_test_main": {
+        "object": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/enabled-features-build/Source/solver/Physics/CMakeFiles/test_physics.dir/Tests/Unit/test_main.cpp.o",
+        "object_sha256": "1107a1b76d0f091f7043552797fe74f4ee78a209c6fe8b6cb3b15cefecfc7ffa",
+        "scope": "Unchanged baseline Physics test main replaces gtest_main in this overlay executable; initializes MPI under the recorded mpiexec launch.",
+        "source": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_main.cpp",
+        "source_sha256": "43a48452d990e99ef966f00b3c6c253cfb6c6b56f8b5ec12451097eae9bf8946"
+      },
+      "job_step": "42093152.20",
+      "limits": [
+        "This validates six one-rank records and does not establish distributed-layout behavior.",
+        "The scalar physical maps cover only nodal P1 phi/phase; vector, higher-order, edge, face and cell identities remain outside scope.",
+        "The generalized-alpha records are synthetic publication algebra, not a full transient solve or physical trajectory.",
+        "The energy records are synthetic ledger fixtures, not physical energy qualification.",
+        "uDDot, deeper or unobserved histories, implementation-local candidates and unexposed arrays remain outside the claims recorded by each artifact.",
+        "The feature-disabled build evidence is a focused poison-header syntax check, not a complete feature-disabled product build.",
+        "Unavailable or uninitialized MPI routes and filesystem fault injection were not executed; only the retained two-rank and collision/provenance refusal groups were validated.",
+        "The diagnostic stdout sidecar is excluded from deterministic numeric JSON comparison and may vary between valid executions.",
+        "No baseline-to-candidate numerical equivalence or overall R0 completion is claimed.",
+        "The poison-header Mesh/MPI-disabled ledger check is syntax-only, not a full feature-disabled product build.",
+        "No unavailable-MPI or filesystem-fault-injection execution evidence.",
+        "This is bounded baseline acceptance, not full R0 completion or physical qualification."
+      ],
+      "retained_rejected_generations": [
+        {
+          "kind": "local overlay preparation",
+          "record": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/r0-application-history-overlay-preparation.json",
+            "sha256": "8284dfdc62ac45f427451249090adbd5e389d4c27f69f1993d2446c43a1d2429",
+            "size_bytes": 868
+          }
+        },
+        {
+          "kind": "local overlay preparation",
+          "record": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/r0-application-history-overlay-r1-preparation.json",
+            "sha256": "3f84bb808bd7d59acfb2c3e93056bab33ac46ff4a2de092b8c65fac057476d2a",
+            "size_bytes": 871
+          }
+        },
+        {
+          "job_step": "42093152.19",
+          "kind": "compile failure before runtime",
+          "record": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/r0-application-history-r2-step.json",
+            "sha256": "295efdb00e8ea0092f2e51da381388abe7e46311811d07535edba110ac45f369",
+            "size_bytes": 1618
+          }
+        },
+        {
+          "helper": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/validate-r0-application-history-r3.py",
+            "sha256": "2e35fbd8ad7c5da2cecbc5462b1c7ccf5909b4586b61085607944c4bf1268b5f",
+            "size_bytes": 61973
+          },
+          "kind": "validator-only expected sentinel path mismatch",
+          "result": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3-independent-validation/validation.json",
+            "sha256": "9b477fbe275de3ac386e6a02e11a845829be0e6d3f7f1edfce5abb2a7455b6a0",
+            "size_bytes": 5137
+          }
+        }
+      ],
+      "scope": "Six original one-rank Application maintenance, rollback, generalized-alpha publication and synthetic energy-ledger fixtures. Opt-in test capture only; numerical baseline remains immutable 0d77e6cd.",
+      "source_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r0-application-history-overlay-r3/source-record.json",
+        "sha256": "f9d848eb912c93b35ab2f8705ac6b73d21692b6ba6179c6dbe26e770450200bc",
+        "size_bytes": 3280
+      },
+      "source_reviews": [
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3-acceptance/r0-application-history-capture-fix1-review.md",
+          "sha256": "b2485aedb016fd8f82b11b0cbd95fb7d87835523e09acd9fdd65b596b9029e0a",
+          "size_bytes": 6048
+        },
+        {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-application-history-r3-acceptance/r0-application-history-capture-include-review.md",
+          "sha256": "880ba47e1664756c149934c5ca509f287ea064ba415231a49086dfd51c26b460",
+          "size_bytes": 1941
+        }
+      ],
+      "source_revision": "0d77e6cd1c350c20334d43021a186753231398a4",
+      "source_tree": "26d8e720c6dc5490168ffad54def72c74b174aad",
+      "state": "ACCEPTED_WITHIN_DECLARED_SCOPE",
+      "step_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/r0-application-history-r3-step.json",
+        "sha256": "4007f423f647bd2616ad2937bbcf2495d818f0edd0df8d2400dcfbfe69166780",
+        "size_bytes": 1618
+      },
+      "test_overlay_inventory": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r0-application-history-overlay-r3/overlay-source-files.json",
+        "sha256": "90df2d1e762843695e15e9a675bbbec1a2229e839f8fdce66ca377f03cad55df",
+        "size_bytes": 639
+      },
+      "test_overlay_sha256": "90df2d1e762843695e15e9a675bbbec1a2229e839f8fdce66ca377f03cad55df",
+      "validator": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/validate-r0-application-history-r3-r1.py",
+        "sha256": "1682fdbc2680fe396a4ef12bf8d2093cd122a0ab94b5fa1d120618f28455d219",
+        "size_bytes": 1583
+      }
     }
   ],
   "comparison_contract": {
@@ -4014,7 +4293,7 @@
   "remaining_r0_work": [
     "Complete remaining physical prerequisite/matrix checks. Enabled-feature and designated rank-layout reruns completed; retain their exclusions and skips.",
     "Complete source-bound input/effective-policy coverage for the full selected physical/geometry/algorithm matrix.",
-    "Capture remaining operator/history/geometry/energy references and broader MPI cases; serial and two-rank Q1 wet-block references are accepted only within their declared scope.",
+    "Capture remaining operator/history/geometry/energy references and broader MPI cases; accepted serial/two-rank Q1 operators, scalar observations and six one-rank Application lifecycle references retain their separate bounded scopes.",
     "Freeze case-specific numerical tolerances and record baseline runtime, memory, iterations, refresh and cache behavior for comparisons."
   ],
   "reviewed_revision": "905239de40b41aa3ca615305516b600e640d95e4",
