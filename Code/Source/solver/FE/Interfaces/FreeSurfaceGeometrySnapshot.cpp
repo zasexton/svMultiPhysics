@@ -213,6 +213,7 @@ struct OwnedRuleDigest {
 void mixRuleContent(std::uint64_t& hash,
                     const FreeSurfaceGeometryRuleRecord& record) noexcept
 {
+    mix(hash, static_cast<std::uint64_t>(record.construction_observation));
     mix(hash, static_cast<std::uint64_t>(record.role));
     mix(hash, static_cast<std::uint64_t>(record.retention));
     mix(hash, static_cast<std::uint64_t>(
@@ -749,6 +750,7 @@ void addRule(std::vector<FreeSurfaceGeometryRuleRecord>& records,
              const FreeSurfaceGeometrySnapshotPolicy& policy,
              FreeSurfaceGeometryMomentCertificate moment_certificate,
              std::uint64_t source_topology_key,
+             LinearCornerStrictBranch construction_observation,
              int physical_boundary_marker = -1,
              std::vector<std::uint64_t> source_ids = {},
              std::int64_t component_id = -1,
@@ -801,6 +803,7 @@ void addRule(std::vector<FreeSurfaceGeometryRuleRecord>& records,
     }
     completeAndValidateRuleIdentity(rule, mesh, ledger);
     FreeSurfaceGeometryRuleRecord record;
+    record.construction_observation = construction_observation;
     record.role = roleFor(rule, role);
     const bool boundary_rule =
         record.role == FreeSurfaceGeometryRuleRole::Contact ||
@@ -4340,7 +4343,8 @@ buildFreeSurfaceGeometrySnapshot(
                 mesh,
                 policy,
                 std::move(moment_certificate),
-                volumeSourceTopologyKey(*region));
+                volumeSourceTopologyKey(*region),
+                region->construction_observation);
     }
     for (auto& rule : interface_rules) {
         const auto fragment = std::find_if(
@@ -4366,7 +4370,8 @@ buildFreeSurfaceGeometrySnapshot(
                 interfaceSourceTopologyKey(
                     *fragment,
                     mesh.getCellType(fragment->parent_cell),
-                    policy.tolerance));
+                    policy.tolerance),
+                fragment->construction_observation);
     }
 
     std::map<int, const GeneratedInterfaceBoundaryIntersectionDomain*>
@@ -4421,6 +4426,7 @@ buildFreeSurfaceGeometrySnapshot(
                         *fragment,
                         mesh.getCellType(fragment->parent_cell),
                         policy.tolerance),
+                    LinearCornerStrictBranch::Unchecked,
                     contact.boundaryMarker());
         }
     }
@@ -4502,6 +4508,7 @@ buildFreeSurfaceGeometrySnapshot(
                         *fragment,
                         mesh.getCellType(fragment->parent_cell),
                         policy.tolerance),
+                    fragment->construction_observation,
                     active.request().boundary_marker,
                     std::move(source_ids),
                     componentIdForActiveRule(active, stable_id),

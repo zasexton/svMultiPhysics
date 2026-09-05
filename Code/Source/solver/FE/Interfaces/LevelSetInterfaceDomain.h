@@ -376,7 +376,16 @@ struct CutInterfaceReferenceSimplex {
     Real measure_scale{1.0};
 };
 
+// Producer observation, not derivative availability. Stage one never emits
+// UnmodifiedResolved; that state is reserved for a fully assessed producer.
+enum class LinearCornerStrictBranch : std::uint8_t {
+    Unchecked,
+    UnmodifiedResolved,
+    ModifiedOrUnresolved
+};
+
 struct CutInterfaceVolumeRegion {
+    LinearCornerStrictBranch construction_observation{LinearCornerStrictBranch::Unchecked};
     int interface_marker{-1};
     MeshIndex parent_cell{static_cast<MeshIndex>(-1)};
     GlobalIndex parent_cell_global_id{INVALID_GLOBAL_INDEX};
@@ -521,6 +530,7 @@ struct CutInterfaceVolumeRegion {
 };
 
 struct CutInterfaceFragment {
+    LinearCornerStrictBranch construction_observation{LinearCornerStrictBranch::Unchecked};
     int interface_marker{-1};
     MeshIndex parent_cell{static_cast<MeshIndex>(-1)};
     GlobalIndex parent_cell_global_id{INVALID_GLOBAL_INDEX};

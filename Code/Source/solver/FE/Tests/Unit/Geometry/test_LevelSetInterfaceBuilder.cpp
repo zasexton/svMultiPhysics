@@ -11,6 +11,18 @@ using namespace svmp::FE::interfaces;
 
 namespace {
 
+void expect_observation(const LevelSetCellCutResult& result,
+                        LinearCornerStrictBranch expected)
+{
+    EXPECT_EQ(result.construction_observation, expected);
+    for (const auto& fragment : result.fragments) {
+        EXPECT_EQ(fragment.construction_observation, expected);
+    }
+    for (const auto& region : result.volume_regions) {
+        EXPECT_EQ(region.construction_observation, expected);
+    }
+}
+
 CutInterfaceDomainRequest make_request(int marker)
 {
     CutInterfaceDomainRequest request;
@@ -22,6 +34,173 @@ CutInterfaceDomainRequest make_request(int marker)
     request.tolerance = 1.0e-12;
     request.quadrature_policy_key = 31;
     return request;
+}
+
+TEST(ProducerObservation, DistinctRootCollapseSurvivesFullPhaseReplacement)
+{
+    const auto request = make_request(70);
+    for (const Real sign : {-1.0, 1.0}) {
+        const LevelSetCellCutInput input{
+            .parent_cell = 0,
+            .element_type = ElementType::Tetra4,
+            .node_coordinates = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}, {{0, 0, 1}}},
+            .level_set_values = {-sign, sign * 1e14, sign * 1e14, sign * 1e14}};
+        const auto result = cutLinearLevelSetCell3D(request, input);
+        ASSERT_TRUE(result.supported);
+        ASSERT_TRUE(result.fragments.empty());
+        ASSERT_EQ(result.volume_regions.size(), 1u);
+        EXPECT_TRUE(result.volume_regions.front().full_cell_equivalent);
+        EXPECT_EQ(result.volume_regions.front().volume_fraction, 1.0);
+        EXPECT_EQ(result.volume_regions.front().measure, 1.0 / 6.0);
+        expect_observation(result, LinearCornerStrictBranch::ModifiedOrUnresolved);
+    }
+}
+
+TEST(ProducerObservation, DyadicAndFullPhaseControlsRemainUnchecked)
+{
+    const auto request = make_request(70);
+    for (const auto type : {ElementType::Triangle3, ElementType::Tetra4}) {
+        for (const int negative_count : {0, 1, 2}) {
+            for (const Real sign : {-1.0, 1.0}) {
+                LevelSetCellCutInput input{
+                    .parent_cell = 0, .element_type = type,
+                    .node_coordinates = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}},
+                    .level_set_values = {sign, sign, sign}};
+                if (type == ElementType::Tetra4) {
+                    input.node_coordinates.push_back({{0, 0, 1}});
+                    input.level_set_values.push_back(sign);
+                }
+                for (int i = 0; i < negative_count; ++i) {
+                    input.level_set_values[static_cast<std::size_t>(i)] = -sign;
+                }
+                const auto result = type == ElementType::Triangle3
+                    ? cutLinearLevelSetCell2D(request, input)
+                    : cutLinearLevelSetCell3D(request, input);
+                ASSERT_TRUE(result.supported);
+                ASSERT_EQ(result.volume_regions.size(), negative_count == 0 ? 1u : 2u);
+                expect_observation(result, LinearCornerStrictBranch::Unchecked);
+                Real volume = 0;
+                for (const auto& region : result.volume_regions) {
+                    volume += region.measure;
+                    EXPECT_GT(region.quadrature_points.size(), 0u);
+                }
+                EXPECT_NEAR(volume, type == ElementType::Triangle3 ? 0.5 : 1.0 / 6.0, 1e-15);
+                for (const auto& fragment : result.fragments) {
+                    for (const auto& vertex : fragment.vertices) {
+                        for (const auto coordinate : vertex.point) {
+                            EXPECT_TRUE(coordinate == 0.0 || coordinate == 0.5);
+                        }
+                    }
+                    EXPECT_EQ(fragment.quadrature_points.front().weight, fragment.measure);
+                }
+                if (type == ElementType::Triangle3 && negative_count == 1) {
+                    ASSERT_EQ(result.fragments.size(), 1u);
+                    EXPECT_EQ(result.fragments.front().vertices[0].point,
+                              (std::array<Real, 3>{{0.5, 0, 0}}));
+                    EXPECT_EQ(result.fragments.front().vertices[1].point,
+                              (std::array<Real, 3>{{0, 0.5, 0}}));
+                    EXPECT_EQ(result.fragments.front().measure, std::sqrt(0.5));
+                    EXPECT_EQ(result.volume_regions[0].measure, sign > 0 ? 0.125 : 0.375);
+                }
+            }
+        }
+    }
+}
+
+TEST(ProducerObservation, FloatingRootRepeatsAndZeroBranchesStayUnresolved)
+{
+    auto request = make_request(70);
+    for (const auto& values : {std::vector<Real>{0.25, -1, -1, -1},
+                              std::vector<Real>{0.25, 1, -1, -1},
+                              std::vector<Real>{0, 0, 0, 1}}) {
+        LevelSetCellCutInput input{
+            .parent_cell = 0, .element_type = ElementType::Tetra4,
+            .node_coordinates = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}, {{0, 0, 1}}},
+            .level_set_values = values};
+        request.aligned_zero_interface_parent_side = geometry::CutIntegrationSide::Positive;
+        const auto result = cutLinearLevelSetCell3D(request, input);
+        ASSERT_TRUE(result.supported);
+        ASSERT_EQ(result.fragments.size(), 1u);
+        expect_observation(result, LinearCornerStrictBranch::ModifiedOrUnresolved);
+        if (values[0] == 0.25 && values[1] == -1) {
+            Real minimum_root = 1.0, maximum_root = 0.0;
+            std::size_t appearances = 0;
+            for (const auto& region : result.volume_regions) {
+                for (const auto& simplex : region.reference_subcells) {
+                    for (std::size_t i = 0; i < simplex.vertex_count; ++i) {
+                        const auto& point = simplex.vertices[i];
+                        // Face (0,1,2) crosses (2,0); face (0,2,3)
+                        // crosses (0,2). The x-axis edge is not reversed.
+                        if (point[0] == 0 && point[2] == 0 && point[1] > 0 && point[1] < 0.3) {
+                            minimum_root = std::min(minimum_root, point[1]);
+                            maximum_root = std::max(maximum_root, point[1]);
+                            ++appearances;
+                        }
+                    }
+                }
+            }
+            ASSERT_GT(appearances, 1u);
+            EXPECT_GT(maximum_root, minimum_root);
+            RecordProperty("floating_original_edge_root_residual",
+                           ::testing::PrintToString(maximum_root - minimum_root));
+        }
+    }
+    for (const auto& values : {std::vector<Real>{0, -1, 1},
+                              std::vector<Real>{0, 0, 1},
+                              std::vector<Real>{0.75e-12, -1, 1},
+                              std::vector<Real>{0, 0, 0}}) {
+        const LevelSetCellCutInput input{
+            .parent_cell = 0, .element_type = ElementType::Triangle3,
+            .node_coordinates = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}},
+            .level_set_values = values};
+        const auto result = cutLinearLevelSetCell2D(request, input);
+        ASSERT_TRUE(result.supported);
+        expect_observation(result, LinearCornerStrictBranch::ModifiedOrUnresolved);
+    }
+    expect_observation(LevelSetCellCutResult{}, LinearCornerStrictBranch::Unchecked);
+    EXPECT_EQ(CutInterfaceFragment{}.construction_observation, LinearCornerStrictBranch::Unchecked);
+    EXPECT_EQ(CutInterfaceVolumeRegion{}.construction_observation, LinearCornerStrictBranch::Unchecked);
+    const LevelSetCellCutInput triangle{
+        .parent_cell = 0, .element_type = ElementType::Triangle3,
+        .node_coordinates = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}},
+        .level_set_values = {0.25, -1, 1}};
+    const auto triangle_result = cutLinearLevelSetCell2D(request, triangle);
+    ASSERT_EQ(triangle_result.fragments.size(), 1u);
+    ASSERT_EQ(triangle_result.volume_regions.size(), 2u);
+    // This path has no compared repeated-root appearances. It remains
+    // unassessed, not a successful numerical-margin certificate.
+    expect_observation(triangle_result, LinearCornerStrictBranch::Unchecked);
+}
+
+TEST(ProducerObservation, PositivePieceFilteringStampsBothPhasesAndInterface)
+{
+    auto request = make_request(70);
+    request.tolerance = 0.05;
+    for (const Real sign : {-1.0, 1.0}) {
+        const LevelSetCellCutInput input{
+            .parent_cell = 0,
+            .element_type = ElementType::Triangle3,
+            .node_coordinates = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}},
+            .level_set_values = {sign * 0.1, -sign * 0.1, sign * 1e6}};
+        const auto result = cutLinearLevelSetCell2D(request, input);
+        ASSERT_TRUE(result.supported);
+        ASSERT_EQ(result.fragments.size(), 1u);
+        ASSERT_EQ(result.volume_regions.size(), 2u);
+        const auto side = sign > 0 ? geometry::CutIntegrationSide::Negative
+                                   : geometry::CutIntegrationSide::Positive;
+        std::size_t selected_regions = 0;
+        for (const auto& region : result.volume_regions) {
+            if (region.side == side) {
+                ++selected_regions;
+                EXPECT_GT(region.measure, 0.0);
+                EXPECT_LT(region.measure, request.tolerance * request.tolerance);
+                EXPECT_TRUE(region.reference_subcells.empty());
+                EXPECT_TRUE(region.quadrature_points.empty());
+            }
+        }
+        ASSERT_EQ(selected_regions, 1u);
+        expect_observation(result, LinearCornerStrictBranch::ModifiedOrUnresolved);
+    }
 }
 
 void expect_normal_near(const std::array<Real, 3>& actual,

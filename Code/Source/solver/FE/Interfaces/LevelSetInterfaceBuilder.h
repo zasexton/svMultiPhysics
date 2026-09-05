@@ -34,6 +34,7 @@ struct LevelSetCellCutInput {
 };
 
 struct LevelSetCellCutResult {
+    LinearCornerStrictBranch construction_observation{LinearCornerStrictBranch::Unchecked};
     std::vector<CutInterfaceFragment> fragments{};
     std::vector<CutInterfaceVolumeRegion> volume_regions{};
     CutInterfaceDegeneracy degeneracy{CutInterfaceDegeneracy::None};

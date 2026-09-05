@@ -105,6 +105,7 @@ struct FreeSurfaceGeometryLocalMeshRevision {
 };
 
 struct FreeSurfaceGeometryRuleRecord {
+    LinearCornerStrictBranch construction_observation{LinearCornerStrictBranch::Unchecked};
     FreeSurfaceGeometryRuleRole role{FreeSurfaceGeometryRuleRole::Interface};
     FreeSurfaceGeometryRetention retention{
         FreeSurfaceGeometryRetention::Retained};
