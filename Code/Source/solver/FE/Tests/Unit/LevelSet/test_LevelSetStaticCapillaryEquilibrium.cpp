@@ -494,6 +494,62 @@ TEST(LevelSetStaticCapillaryEquilibrium,
 }
 
 TEST(LevelSetStaticCapillaryEquilibrium,
+     ClearsPriorAttemptBeforeNewDirectionTerminatesWithoutATrial)
+{
+    const std::vector<FE::Real> input{0.0, 3.0};
+    const std::array<std::size_t, 2> active{0u, 1u};
+    const std::vector<FE::Real> sentinel{93.0, 94.0};
+    std::vector<FE::Real> accepted = sentinel;
+    auto options = quadraticOptions();
+    options.projected_gradient_tolerance = 0.0;
+    options.max_iterations = 3;
+    options.projected_gradient_inverse_stiffness = 1.0e210;
+    options.limited_memory_history_size = 0;
+
+    const auto result =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            options,
+            input,
+            active,
+            [](std::span<const FE::Real> coefficients,
+               EvaluationPurpose) {
+                level_set::LevelSetStaticCapillaryEquilibriumEvaluation
+                    evaluation;
+                const bool initial =
+                    coefficients[0] == FE::Real{0.0};
+                evaluation.success = true;
+                evaluation.snapshot_revision_key =
+                    coefficientRevision(coefficients);
+                evaluation.cut_topology_key = 401u;
+                evaluation.constraint_semantics_key = 402u;
+                evaluation.surface_wall_energy =
+                    initial ? FE::Real{1.0} : FE::Real{0.5};
+                evaluation.liquid_volume =
+                    coefficients[0] + coefficients[1];
+                evaluation.functional_derivatives_available = true;
+                evaluation.physical_potential_derivative = {
+                    initial ? FE::Real{-1.0e-100} : FE::Real{1.0e100},
+                    FE::Real{0.0}};
+                evaluation.liquid_volume_derivative = {
+                    FE::Real{1.0}, FE::Real{1.0}};
+                evaluation.diagnostic = "available";
+                return evaluation;
+            },
+            accepted);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(
+        result.diagnostic,
+        "static_capillary_equilibrium_tangent_step_is_nonfinite");
+    EXPECT_EQ(result.iterations, 1);
+    EXPECT_EQ(result.functional_evaluations, 2u);
+    EXPECT_EQ(accepted, sentinel);
+    EXPECT_EQ(result.line_search_trace_total_attempt_count, 0u);
+    EXPECT_EQ(result.line_search_trace_omitted_count, 0u);
+    EXPECT_TRUE(result.line_search_trace.empty());
+}
+
+TEST(LevelSetStaticCapillaryEquilibrium,
      ConvergesAtFixedVolumeAndAssignsOnlyTheAcceptedCandidate)
 {
     const std::vector<FE::Real> input{2.5, 0.5};

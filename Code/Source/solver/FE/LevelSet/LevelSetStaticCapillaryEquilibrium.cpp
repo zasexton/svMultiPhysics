@@ -867,6 +867,7 @@ minimizeLevelSetStaticCapillaryEquilibrium(
             return result;
         }
 
+        clearLineSearchTrace();
         std::vector<Real> tangent_direction = projected_gradient;
         bool used_limited_memory = !limited_memory.empty();
         bool search_used_limited_memory_direction =
@@ -1045,7 +1046,6 @@ minimizeLevelSetStaticCapillaryEquilibrium(
         LevelSetStaticCapillaryEquilibriumEvaluation accepted_state;
         std::optional<TopologyTransitionTrial>
             deferred_topology_transition;
-        clearLineSearchTrace();
         for (int line_search_iteration = 0;
              line_search_iteration <
              options.max_line_search_iterations;
