@@ -873,6 +873,7 @@ set(FE_GEOMETRY_HEADERS
     Interfaces/LevelSetInterfaceGeometryWriter.h
     Interfaces/LevelSetInterfaceBuilder.h
     Interfaces/LevelSetInterfaceDomain.h
+    Interfaces/detail/ProducerArithmeticAssessment.h
     Geometry/FrameAwareTransform.h
     Geometry/MovingFrame.h
     Geometry/RegionFrameBinding.h
@@ -906,6 +907,7 @@ set(FE_GEOMETRY_SOURCES
     Interfaces/LevelSetInterfaceDiagnostics.cpp
     Interfaces/LevelSetInterfaceGeometryWriter.cpp
     Interfaces/LevelSetInterfaceBuilder.cpp
+    Interfaces/detail/ProducerArithmeticAssessment.cpp
     Geometry/FrameAwareTransform.cpp
     Geometry/MovingFrame.cpp
     Geometry/RegionFrameBinding.cpp
@@ -1600,6 +1602,25 @@ endif()
 
 # Add an alias for consistency
 add_library(svfe::svfe ALIAS svfe)
+
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set(_SVMP_PRODUCER_ARITHMETIC_OPTIONS
+        -fno-fast-math
+        -ffp-contract=off
+        -fno-lto
+        -fno-plt
+        -fno-tree-loop-distribute-patterns)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+        list(APPEND _SVMP_PRODUCER_ARITHMETIC_OPTIONS
+            -mfpmath=sse
+            -msse2)
+    endif()
+    set_source_files_properties(
+        Interfaces/detail/ProducerArithmeticAssessment.cpp
+        PROPERTIES COMPILE_OPTIONS
+        "${_SVMP_PRODUCER_ARITHMETIC_OPTIONS}")
+    unset(_SVMP_PRODUCER_ARITHMETIC_OPTIONS)
+endif()
 
 _svmp_fe_target_enable_warnings(svfe)
 _svmp_fe_target_enable_developer_optimization_reports(svfe)
@@ -2369,6 +2390,7 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Geometry/test_LevelSetInterfaceDiagnostics.cpp
         Tests/Unit/Geometry/test_LevelSetInterfaceDomain.cpp
         Tests/Unit/Geometry/test_LevelSetInterfaceGeometryWriter.cpp
+        Tests/Unit/Geometry/test_ProducerArithmeticAssessment.cpp
         Tests/Unit/Geometry/test_FrameAwareTransform.cpp
         Tests/Unit/Geometry/test_MovingFrame.cpp
         Tests/Unit/Geometry/test_FiniteDeformationKinematics.cpp
@@ -2388,6 +2410,14 @@ if(FE_BUILD_TESTS)
             svfe
             ${GTEST_LIBRARIES}
     )
+    if(TARGET Boost::headers)
+        target_link_libraries(test_fe_geometry PRIVATE Boost::headers)
+    elseif(TARGET Boost::boost)
+        target_link_libraries(test_fe_geometry PRIVATE Boost::boost)
+    else()
+        target_include_directories(
+            test_fe_geometry SYSTEM PRIVATE ${Boost_INCLUDE_DIRS})
+    endif()
     add_test(NAME FE_Geometry_Tests COMMAND test_fe_geometry)
 
     # Level-set module tests
