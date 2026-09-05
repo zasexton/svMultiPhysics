@@ -28322,6 +28322,46 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
   if (globalAnyBool(
           !local_prepublication_result_valid, comm)) {
     transaction.rollback();
+    const auto line_search_phase_name =
+        [](svmp::FE::level_set::LevelSetStaticCapillaryLineSearchPhase
+               phase) {
+          using Phase = svmp::FE::level_set::
+              LevelSetStaticCapillaryLineSearchPhase;
+          switch (phase) {
+          case Phase::Trial:
+            return "trial";
+          case Phase::DeferredReproduction:
+            return "deferred_reproduction";
+          }
+          return "unknown";
+        };
+    const auto line_search_disposition_name =
+        [](svmp::FE::level_set::
+               LevelSetStaticCapillaryLineSearchDisposition disposition) {
+          using Disposition = svmp::FE::level_set::
+              LevelSetStaticCapillaryLineSearchDisposition;
+          switch (disposition) {
+          case Disposition::UnavailableOrForbidden:
+            return "unavailable_or_forbidden";
+          case Disposition::TopologyRejected:
+            return "topology_rejected";
+          case Disposition::ConstraintRejected:
+            return "constraint_rejected";
+          case Disposition::Deferred:
+            return "deferred";
+          case Disposition::SameTopologyMeritRejected:
+            return "same_topology_merit_rejected";
+          case Disposition::ArmijoAccepted:
+            return "armijo_accepted";
+          case Disposition::DerivativeResolutionAccepted:
+            return "derivative_resolution_accepted";
+          case Disposition::ReproductionAccepted:
+            return "reproduction_accepted";
+          case Disposition::ReproductionRejected:
+            return "reproduction_rejected";
+          }
+          return "unknown";
+        };
     std::ostringstream message;
     message
         << "[svMultiPhysics::Application] Static capillary initialization failed before publication: "
@@ -28369,7 +28409,44 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
         << " initial_physical_potential_energy="
         << result.initial_physical_potential_energy
         << " final_physical_potential_energy="
-        << result.final_physical_potential_energy;
+        << result.final_physical_potential_energy
+        << " line_search_trace_summary={total_attempt_count="
+        << result.line_search_trace_total_attempt_count
+        << ",retained_count=" << result.line_search_trace.size()
+        << ",omitted_count="
+        << result.line_search_trace_omitted_count << "}";
+    for (const auto& record : result.line_search_trace) {
+      message
+          << " line_search_trace_record={accepted_iteration_index="
+          << record.accepted_iteration_index
+          << ",line_search_trial_index="
+          << record.line_search_trial_index
+          << ",phase=" << line_search_phase_name(record.phase)
+          << ",disposition="
+          << line_search_disposition_name(record.disposition)
+          << ",evaluation_available="
+          << record.evaluation_available
+          << ",used_limited_memory_direction="
+          << record.used_limited_memory_direction
+          << ",used_projected_gradient_fallback_direction="
+          << record.used_projected_gradient_fallback_direction
+          << ",step_size=" << record.step_size
+          << ",current_cut_topology_key="
+          << record.current_cut_topology_key
+          << ",trial_cut_topology_key="
+          << record.trial_cut_topology_key
+          << ",current_constraint_semantics_key="
+          << record.current_constraint_semantics_key
+          << ",trial_constraint_semantics_key="
+          << record.trial_constraint_semantics_key
+          << ",current_merit=" << record.current_merit
+          << ",trial_merit=" << record.trial_merit
+          << ",armijo_bound=" << record.armijo_bound
+          << ",predicted_merit_decrease="
+          << record.predicted_merit_decrease
+          << ",trial_volume_error="
+          << record.trial_volume_error << "}";
+    }
     throw std::runtime_error(message.str());
   }
 

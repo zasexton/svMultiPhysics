@@ -142,6 +142,357 @@ quadraticOptions()
     return options;
 }
 
+level_set::LevelSetStaticCapillaryEquilibriumEvaluation
+piecewiseTransitionEvaluation(
+    std::span<const FE::Real> coefficients,
+    FE::Real positive_energy_slope)
+{
+    level_set::LevelSetStaticCapillaryEquilibriumEvaluation evaluation;
+    if (coefficients.size() != 2u) {
+        evaluation.diagnostic = "unexpected_coefficient_count";
+        return evaluation;
+    }
+    constexpr FE::Real epsilon{1.0e-6};
+    const FE::Real x = coefficients[0];
+    const FE::Real y = coefficients[1];
+    evaluation.success = true;
+    evaluation.snapshot_revision_key = coefficientRevision(coefficients);
+    evaluation.cut_topology_key = x <= FE::Real{0.0} ? 101u : 202u;
+    evaluation.constraint_semantics_key = 303u;
+    evaluation.surface_wall_energy =
+        x <= FE::Real{0.0}
+            ? FE::Real{1.0} - x
+            : FE::Real{1.0} + positive_energy_slope * epsilon * x;
+    evaluation.liquid_volume = x + y;
+    evaluation.functional_derivatives_available = true;
+    evaluation.physical_potential_derivative = {
+        x <= FE::Real{0.0}
+            ? FE::Real{-1.0}
+            : positive_energy_slope * epsilon,
+        FE::Real{0.0}};
+    evaluation.liquid_volume_derivative = {
+        FE::Real{1.0}, FE::Real{1.0}};
+    evaluation.diagnostic = "available";
+    return evaluation;
+}
+
+level_set::LevelSetStaticCapillaryEquilibriumOptions
+piecewiseTransitionOptions(int line_search_trials, FE::Real shrink = 0.5)
+{
+    auto options = quadraticOptions();
+    options.projected_gradient_tolerance = 1.0e-12;
+    options.max_iterations = 1;
+    options.max_line_search_iterations = line_search_trials;
+    options.allow_topology_epoch_transitions = true;
+    options.max_topology_epoch_transitions = 2;
+    options.projected_gradient_inverse_stiffness = 1.0;
+    options.tangent_trust_radius = 2.0;
+    options.maximum_coefficient_update_linf = 2.0;
+    options.line_search_shrink = shrink;
+    options.armijo_fraction = 1.0e-4;
+    options.limited_memory_history_size = 0;
+    return options;
+}
+
+TEST(LevelSetStaticCapillaryEquilibrium,
+     RecordsCrossTopologyDecreaseThatMissesTheArmijoBound)
+{
+    const std::vector<FE::Real> input{0.0, 3.0};
+    const std::array<std::size_t, 2> active{0u, 1u};
+    const std::vector<FE::Real> sentinel{81.0, 82.0, 83.0};
+    std::vector<FE::Real> accepted = sentinel;
+
+    const auto result =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            piecewiseTransitionOptions(4),
+            input,
+            active,
+            [](std::span<const FE::Real> coefficients,
+               EvaluationPurpose) {
+                return piecewiseTransitionEvaluation(
+                    coefficients, FE::Real{-1.0});
+            },
+            accepted);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(
+        result.diagnostic,
+        "capillary_merit_line_search_failed:candidate_cut_topology_changed");
+    EXPECT_EQ(accepted, sentinel);
+    EXPECT_EQ(result.functional_evaluations, 5u);
+    EXPECT_EQ(result.line_search_trace_total_attempt_count, 4u);
+    EXPECT_EQ(result.line_search_trace_omitted_count, 0u);
+    ASSERT_EQ(result.line_search_trace.size(), 4u);
+    FE::Real expected_step = 1.0;
+    for (std::size_t i = 0u; i < result.line_search_trace.size(); ++i) {
+        const auto& record = result.line_search_trace[i];
+        EXPECT_EQ(record.accepted_iteration_index, 0u);
+        EXPECT_EQ(record.line_search_trial_index, i);
+        EXPECT_EQ(
+            record.phase,
+            level_set::LevelSetStaticCapillaryLineSearchPhase::Trial);
+        EXPECT_EQ(
+            record.disposition,
+            level_set::LevelSetStaticCapillaryLineSearchDisposition::
+                TopologyRejected);
+        EXPECT_TRUE(record.evaluation_available);
+        EXPECT_FALSE(record.used_limited_memory_direction);
+        EXPECT_FALSE(record.used_projected_gradient_fallback_direction);
+        EXPECT_DOUBLE_EQ(record.step_size, expected_step);
+        EXPECT_EQ(record.current_cut_topology_key, 101u);
+        EXPECT_EQ(record.trial_cut_topology_key, 202u);
+        EXPECT_EQ(record.current_constraint_semantics_key, 303u);
+        EXPECT_EQ(record.trial_constraint_semantics_key, 303u);
+        EXPECT_DOUBLE_EQ(record.current_merit, 1.0);
+        EXPECT_LT(record.armijo_bound, record.trial_merit);
+        EXPECT_LT(record.trial_merit, record.current_merit);
+        EXPECT_DOUBLE_EQ(record.predicted_merit_decrease, 0.5);
+        EXPECT_DOUBLE_EQ(record.trial_volume_error, 0.0);
+        expected_step *= 0.5;
+    }
+}
+
+TEST(LevelSetStaticCapillaryEquilibrium,
+     RecordsCrossTopologyMeritIncrease)
+{
+    const std::vector<FE::Real> input{0.0, 3.0};
+    const std::array<std::size_t, 2> active{0u, 1u};
+    const std::vector<FE::Real> sentinel{84.0, 85.0};
+    std::vector<FE::Real> accepted = sentinel;
+
+    const auto result =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            piecewiseTransitionOptions(4),
+            input,
+            active,
+            [](std::span<const FE::Real> coefficients,
+               EvaluationPurpose) {
+                return piecewiseTransitionEvaluation(
+                    coefficients, FE::Real{1.0});
+            },
+            accepted);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(
+        result.diagnostic,
+        "capillary_merit_line_search_failed:candidate_cut_topology_changed");
+    EXPECT_EQ(accepted, sentinel);
+    ASSERT_EQ(result.line_search_trace.size(), 4u);
+    for (const auto& record : result.line_search_trace) {
+        EXPECT_EQ(
+            record.disposition,
+            level_set::LevelSetStaticCapillaryLineSearchDisposition::
+                TopologyRejected);
+        EXPECT_TRUE(record.evaluation_available);
+        EXPECT_GT(record.trial_merit, record.current_merit);
+        EXPECT_GT(record.trial_merit, record.armijo_bound);
+    }
+}
+
+TEST(LevelSetStaticCapillaryEquilibrium,
+     RetainsTheLatestSixtyFourLineSearchTrialsInOrder)
+{
+    const std::vector<FE::Real> input{0.0, 3.0};
+    const std::array<std::size_t, 2> active{0u, 1u};
+    std::vector<FE::Real> accepted{86.0};
+
+    const auto result =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            piecewiseTransitionOptions(70, FE::Real{0.99}),
+            input,
+            active,
+            [](std::span<const FE::Real> coefficients,
+               EvaluationPurpose) {
+                return piecewiseTransitionEvaluation(
+                    coefficients, FE::Real{-1.0});
+            },
+            accepted);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.functional_evaluations, 71u);
+    EXPECT_EQ(result.line_search_trace_total_attempt_count, 70u);
+    EXPECT_EQ(result.line_search_trace_omitted_count, 6u);
+    ASSERT_EQ(
+        result.line_search_trace.size(),
+        level_set::kLevelSetStaticCapillaryLineSearchTraceCapacity);
+    EXPECT_EQ(result.line_search_trace.front().line_search_trial_index, 6u);
+    EXPECT_EQ(result.line_search_trace.back().line_search_trial_index, 69u);
+    for (std::size_t i = 1u; i < result.line_search_trace.size(); ++i) {
+        EXPECT_EQ(
+            result.line_search_trace[i].line_search_trial_index,
+            result.line_search_trace[i - 1u].line_search_trial_index + 1u);
+    }
+    EXPECT_NEAR(
+        result.line_search_trace.back().step_size,
+        std::pow(FE::Real{0.99}, FE::Real{69.0}),
+        1.0e-15);
+    EXPECT_EQ(
+        result.line_search_trace.back().disposition,
+        level_set::LevelSetStaticCapillaryLineSearchDisposition::
+            TopologyRejected);
+}
+
+TEST(LevelSetStaticCapillaryEquilibrium,
+     MarksUnavailableTrialMeasurementsWithoutFiniteSubstitutes)
+{
+    const std::vector<FE::Real> input{0.0, 3.0};
+    const std::array<std::size_t, 2> active{0u, 1u};
+    std::vector<FE::Real> accepted{87.0};
+
+    const auto result =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            piecewiseTransitionOptions(1),
+            input,
+            active,
+            [](std::span<const FE::Real> coefficients,
+               EvaluationPurpose) {
+                if (coefficients[0] > FE::Real{0.0}) {
+                    level_set::LevelSetStaticCapillaryEquilibriumEvaluation
+                        unavailable;
+                    unavailable.diagnostic = "synthetic_trial_unavailable";
+                    return unavailable;
+                }
+                return piecewiseTransitionEvaluation(
+                    coefficients, FE::Real{-1.0});
+            },
+            accepted);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.functional_evaluations, 2u);
+    ASSERT_EQ(result.line_search_trace.size(), 1u);
+    const auto& record = result.line_search_trace.front();
+    EXPECT_EQ(
+        record.disposition,
+        level_set::LevelSetStaticCapillaryLineSearchDisposition::
+            UnavailableOrForbidden);
+    EXPECT_FALSE(record.evaluation_available);
+    EXPECT_EQ(record.current_cut_topology_key, 101u);
+    EXPECT_EQ(record.trial_cut_topology_key, 0u);
+    EXPECT_EQ(record.current_constraint_semantics_key, 303u);
+    EXPECT_EQ(record.trial_constraint_semantics_key, 0u);
+    EXPECT_TRUE(std::isnan(record.trial_merit));
+    EXPECT_TRUE(std::isnan(record.trial_volume_error));
+    EXPECT_TRUE(std::isfinite(record.current_merit));
+    EXPECT_TRUE(std::isnan(record.armijo_bound));
+    EXPECT_TRUE(std::isfinite(record.predicted_merit_decrease));
+}
+
+TEST(LevelSetStaticCapillaryEquilibrium,
+     RecordsTheActualRejectedTopologyReproductionWithoutAnotherProbe)
+{
+    const std::vector<FE::Real> input{0.0, 3.0};
+    const std::array<std::size_t, 2> active{0u, 1u};
+    std::vector<FE::Real> accepted{88.0};
+    std::size_t positive_candidate_evaluations = 0u;
+
+    const auto result =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            piecewiseTransitionOptions(4),
+            input,
+            active,
+            [&positive_candidate_evaluations](
+                std::span<const FE::Real> coefficients,
+                EvaluationPurpose) {
+                auto evaluation = piecewiseTransitionEvaluation(
+                    coefficients, FE::Real{-1000000.0});
+                if (coefficients[0] > FE::Real{0.0} &&
+                    ++positive_candidate_evaluations == 2u) {
+                    evaluation.surface_wall_energy += FE::Real{0.125};
+                }
+                return evaluation;
+            },
+            accepted);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.diagnostic, "topology_transition_not_reproducible");
+    EXPECT_EQ(result.functional_evaluations, 3u);
+    EXPECT_EQ(positive_candidate_evaluations, 2u);
+    EXPECT_EQ(result.line_search_trace_total_attempt_count, 2u);
+    ASSERT_EQ(result.line_search_trace.size(), 2u);
+    const auto& deferred = result.line_search_trace[0];
+    const auto& reproduced = result.line_search_trace[1];
+    EXPECT_EQ(
+        deferred.disposition,
+        level_set::LevelSetStaticCapillaryLineSearchDisposition::Deferred);
+    EXPECT_EQ(
+        reproduced.phase,
+        level_set::LevelSetStaticCapillaryLineSearchPhase::
+            DeferredReproduction);
+    EXPECT_EQ(
+        reproduced.disposition,
+        level_set::LevelSetStaticCapillaryLineSearchDisposition::
+            ReproductionRejected);
+    EXPECT_TRUE(reproduced.evaluation_available);
+    EXPECT_DOUBLE_EQ(deferred.trial_merit, 0.5);
+    EXPECT_DOUBLE_EQ(reproduced.trial_merit, 0.625);
+    EXPECT_EQ(
+        reproduced.line_search_trial_index,
+        deferred.line_search_trial_index);
+}
+
+TEST(LevelSetStaticCapillaryEquilibrium,
+     ReplacesLimitedMemoryAttemptEvidenceWithFallbackAttemptEvidence)
+{
+    const std::vector<FE::Real> input{2.5, 0.5};
+    const std::array<std::size_t, 2> active{0u, 1u};
+    const std::vector<FE::Real> sentinel{89.0, 90.0};
+    std::vector<FE::Real> accepted = sentinel;
+    bool first_trial_returned = false;
+    auto options = quadraticOptions();
+    options.max_line_search_iterations = 2;
+
+    const auto result =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            options,
+            input,
+            active,
+            [&input, &first_trial_returned](
+                std::span<const FE::Real> coefficients,
+                EvaluationPurpose purpose) {
+                const bool initial_candidate =
+                    coefficients[0] == input[0] &&
+                    coefficients[1] == input[1];
+                if (purpose == EvaluationPurpose::FunctionalTrial &&
+                    !initial_candidate && first_trial_returned) {
+                    level_set::LevelSetStaticCapillaryEquilibriumEvaluation
+                        unavailable;
+                    unavailable.diagnostic =
+                        "synthetic_trial_unavailable";
+                    return unavailable;
+                }
+                if (purpose == EvaluationPurpose::FunctionalTrial &&
+                    !initial_candidate) {
+                    first_trial_returned = true;
+                }
+                return quadraticCapillaryEvaluation(
+                    coefficients,
+                    purpose,
+                    /*topology_barrier=*/false,
+                    /*constraint_barrier=*/false,
+                    /*provide_functional_derivatives=*/true);
+            },
+            accepted);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(accepted, sentinel);
+    EXPECT_EQ(result.iterations, 1);
+    EXPECT_EQ(result.functional_evaluations, 6u);
+    EXPECT_EQ(result.limited_memory_updates, 1u);
+    EXPECT_EQ(result.projected_gradient_fallbacks, 1u);
+    EXPECT_EQ(result.line_search_trace_total_attempt_count, 2u);
+    EXPECT_EQ(result.line_search_trace_omitted_count, 0u);
+    ASSERT_EQ(result.line_search_trace.size(), 2u);
+    for (const auto& record : result.line_search_trace) {
+        EXPECT_EQ(record.accepted_iteration_index, 1u);
+        EXPECT_FALSE(record.used_limited_memory_direction);
+        EXPECT_TRUE(record.used_projected_gradient_fallback_direction);
+        EXPECT_EQ(
+            record.disposition,
+            level_set::LevelSetStaticCapillaryLineSearchDisposition::
+                UnavailableOrForbidden);
+    }
+}
+
 TEST(LevelSetStaticCapillaryEquilibrium,
      ConvergesAtFixedVolumeAndAssignsOnlyTheAcceptedCandidate)
 {

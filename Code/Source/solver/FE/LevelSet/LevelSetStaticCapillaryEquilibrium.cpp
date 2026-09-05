@@ -152,6 +152,24 @@ minimizeLevelSetStaticCapillaryEquilibrium(
         evaluator);
 
     LevelSetStaticCapillaryEquilibriumResult result;
+    result.line_search_trace.reserve(
+        kLevelSetStaticCapillaryLineSearchTraceCapacity);
+    const auto clearLineSearchTrace = [&result]() {
+        result.line_search_trace.clear();
+        result.line_search_trace_total_attempt_count = 0u;
+        result.line_search_trace_omitted_count = 0u;
+    };
+    const auto appendLineSearchRecord =
+        [&result](LevelSetStaticCapillaryLineSearchRecord record) {
+            ++result.line_search_trace_total_attempt_count;
+            if (result.line_search_trace.size() ==
+                kLevelSetStaticCapillaryLineSearchTraceCapacity) {
+                result.line_search_trace.erase(
+                    result.line_search_trace.begin());
+                ++result.line_search_trace_omitted_count;
+            }
+            result.line_search_trace.push_back(std::move(record));
+        };
     std::vector<std::size_t> active_indices(
         active_coefficient_indices.begin(),
         active_coefficient_indices.end());
@@ -297,6 +315,7 @@ minimizeLevelSetStaticCapillaryEquilibrium(
     std::vector<Real> previous_active_coefficients;
     std::vector<Real> previous_projected_gradient;
     bool pending_limited_memory_update = false;
+    bool projected_gradient_retry = false;
     Real effective_projected_gradient_tolerance =
         options.projected_gradient_tolerance;
     std::string pending_acceptance_gate_diagnostic;
@@ -850,6 +869,11 @@ minimizeLevelSetStaticCapillaryEquilibrium(
 
         std::vector<Real> tangent_direction = projected_gradient;
         bool used_limited_memory = !limited_memory.empty();
+        bool search_used_limited_memory_direction =
+            used_limited_memory;
+        bool used_projected_gradient_fallback =
+            projected_gradient_retry;
+        projected_gradient_retry = false;
         if (used_limited_memory) {
             std::vector<Real> alpha(limited_memory.size(), Real{0.0});
             for (std::size_t reverse = limited_memory.size();
@@ -928,6 +952,8 @@ minimizeLevelSetStaticCapillaryEquilibrium(
             limited_memory.clear();
             ++result.limited_memory_resets;
             ++result.projected_gradient_fallbacks;
+            search_used_limited_memory_direction = false;
+            used_projected_gradient_fallback = true;
         }
         if (!finitePositive(tangent_direction_norm)) {
             result.diagnostic =
@@ -1009,6 +1035,7 @@ minimizeLevelSetStaticCapillaryEquilibrium(
 
         struct TopologyTransitionTrial {
             Real alpha{0.0};
+            std::size_t line_search_trial_index{0u};
             std::vector<Real> coefficients{};
             LevelSetStaticCapillaryEquilibriumEvaluation evaluation{};
         };
@@ -1018,6 +1045,7 @@ minimizeLevelSetStaticCapillaryEquilibrium(
         LevelSetStaticCapillaryEquilibriumEvaluation accepted_state;
         std::optional<TopologyTransitionTrial>
             deferred_topology_transition;
+        clearLineSearchTrace();
         for (int line_search_iteration = 0;
              line_search_iteration <
              options.max_line_search_iterations;
@@ -1030,6 +1058,23 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                     alpha * direction[i];
             }
             LevelSetStaticCapillaryEquilibriumEvaluation trial_state;
+            LevelSetStaticCapillaryLineSearchRecord trace_record;
+            trace_record.accepted_iteration_index =
+                static_cast<std::size_t>(result.iterations);
+            trace_record.line_search_trial_index =
+                static_cast<std::size_t>(line_search_iteration);
+            trace_record.used_limited_memory_direction =
+                search_used_limited_memory_direction;
+            trace_record.used_projected_gradient_fallback_direction =
+                used_projected_gradient_fallback;
+            trace_record.step_size = alpha;
+            trace_record.current_cut_topology_key =
+                topology_epoch_key;
+            trace_record.current_constraint_semantics_key =
+                constraint_epoch_key;
+            trace_record.current_merit = current_merit;
+            trace_record.predicted_merit_decrease =
+                predicted_merit_decrease;
             const bool trial_available =
                 evaluate(
                     trial,
@@ -1037,6 +1082,7 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                         FunctionalTrial,
                     trial_state);
             if (forbidden_projection_seen) {
+                appendLineSearchRecord(std::move(trace_record));
                 result.diagnostic =
                     "production_force_projection_is_forbidden";
                 return result;
@@ -1053,6 +1099,15 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                     current_merit -
                     options.armijo_fraction * alpha *
                         predicted_merit_decrease;
+                trace_record.evaluation_available = true;
+                trace_record.trial_cut_topology_key =
+                    trial_state.cut_topology_key;
+                trace_record.trial_constraint_semantics_key =
+                    trial_state.constraint_semantics_key;
+                trace_record.trial_merit = trial_merit;
+                trace_record.armijo_bound = armijo_bound;
+                trace_record.trial_volume_error =
+                    trial_volume_error;
                 const bool topology_changed =
                     trial_state.cut_topology_key !=
                     topology_epoch_key;
@@ -1074,8 +1129,15 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                         deferred_topology_transition =
                             TopologyTransitionTrial{
                                 alpha,
+                                static_cast<std::size_t>(
+                                    line_search_iteration),
                                 std::move(trial),
                                 std::move(trial_state)};
+                        trace_record.disposition =
+                            LevelSetStaticCapillaryLineSearchDisposition::
+                                Deferred;
+                        appendLineSearchRecord(
+                            std::move(trace_record));
                         last_evaluation_diagnostic =
                             "candidate_cut_topology_transition_deferred";
                         // Reproduce the first admissible transition once
@@ -1092,10 +1154,16 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                         last_evaluation_diagnostic =
                             "candidate_cut_topology_changed";
                     }
+                    trace_record.disposition =
+                        LevelSetStaticCapillaryLineSearchDisposition::
+                            TopologyRejected;
                 } else if (constraints_changed) {
                     ++result.constraint_change_rejections;
                     last_evaluation_diagnostic =
                         "candidate_constraint_semantics_changed";
+                    trace_record.disposition =
+                        LevelSetStaticCapillaryLineSearchDisposition::
+                            ConstraintRejected;
                 } else {
                     Real trial_projected_gradient_norm =
                         std::numeric_limits<Real>::quiet_NaN();
@@ -1135,15 +1203,27 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                             ++result
                                   .derivative_resolution_step_acceptances;
                         }
+                        trace_record.disposition =
+                            derivative_resolution_step
+                                ? LevelSetStaticCapillaryLineSearchDisposition::
+                                      DerivativeResolutionAccepted
+                                : LevelSetStaticCapillaryLineSearchDisposition::
+                                      ArmijoAccepted;
+                        appendLineSearchRecord(
+                            std::move(trace_record));
                         break;
                     }
                     last_evaluation_diagnostic =
                         std::isfinite(trial_merit)
                             ? "candidate_capillary_merit_decrease_insufficient"
                             : "candidate_capillary_merit_is_nonfinite";
+                    trace_record.disposition =
+                        LevelSetStaticCapillaryLineSearchDisposition::
+                            SameTopologyMeritRejected;
                 }
             }
 
+            appendLineSearchRecord(std::move(trace_record));
             ++result.line_search_rejections;
             alpha *= options.line_search_shrink;
         }
@@ -1152,16 +1232,46 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                 limited_memory.clear();
                 ++result.limited_memory_resets;
                 ++result.projected_gradient_fallbacks;
+                projected_gradient_retry = true;
                 continue;
             }
             if (deferred_topology_transition.has_value()) {
                 LevelSetStaticCapillaryEquilibriumEvaluation
                     reproduced_state;
+                LevelSetStaticCapillaryLineSearchRecord
+                    reproduction_record;
+                reproduction_record.accepted_iteration_index =
+                    static_cast<std::size_t>(result.iterations);
+                reproduction_record.line_search_trial_index =
+                    deferred_topology_transition
+                        ->line_search_trial_index;
+                reproduction_record.phase =
+                    LevelSetStaticCapillaryLineSearchPhase::
+                        DeferredReproduction;
+                reproduction_record.disposition =
+                    LevelSetStaticCapillaryLineSearchDisposition::
+                        ReproductionRejected;
+                reproduction_record.used_limited_memory_direction =
+                    search_used_limited_memory_direction;
+                reproduction_record
+                    .used_projected_gradient_fallback_direction =
+                    used_projected_gradient_fallback;
+                reproduction_record.step_size =
+                    deferred_topology_transition->alpha;
+                reproduction_record.current_cut_topology_key =
+                    topology_epoch_key;
+                reproduction_record.current_constraint_semantics_key =
+                    constraint_epoch_key;
+                reproduction_record.current_merit = current_merit;
+                reproduction_record.predicted_merit_decrease =
+                    predicted_merit_decrease;
                 if (!evaluate(
                         deferred_topology_transition->coefficients,
                         LevelSetStaticCapillaryEvaluationPurpose::
                             FunctionalTrial,
                         reproduced_state)) {
+                    appendLineSearchRecord(
+                        std::move(reproduction_record));
                     result.diagnostic =
                         "topology_transition_reproduction_failed:" +
                         last_evaluation_diagnostic;
@@ -1181,6 +1291,17 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                     options.armijo_fraction *
                         deferred_topology_transition->alpha *
                         predicted_merit_decrease;
+                reproduction_record.evaluation_available = true;
+                reproduction_record.trial_cut_topology_key =
+                    reproduced_state.cut_topology_key;
+                reproduction_record.trial_constraint_semantics_key =
+                    reproduced_state.constraint_semantics_key;
+                reproduction_record.trial_merit =
+                    reproduced_merit;
+                reproduction_record.armijo_bound =
+                    reproduced_armijo_bound;
+                reproduction_record.trial_volume_error =
+                    reproduced_volume_error;
                 const bool transition_reproduced =
                     reproduced_state.functional_derivatives_available &&
                     reproduced_state.cut_topology_key !=
@@ -1197,6 +1318,14 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                         deferred_state.liquid_volume &&
                     std::isfinite(reproduced_merit) &&
                     reproduced_merit <= reproduced_armijo_bound;
+                reproduction_record.disposition =
+                    transition_reproduced
+                        ? LevelSetStaticCapillaryLineSearchDisposition::
+                              ReproductionAccepted
+                        : LevelSetStaticCapillaryLineSearchDisposition::
+                              ReproductionRejected;
+                appendLineSearchRecord(
+                    std::move(reproduction_record));
                 if (!transition_reproduced) {
                     result.diagnostic =
                         "topology_transition_not_reproducible";

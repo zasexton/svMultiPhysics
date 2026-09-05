@@ -123,6 +123,57 @@ using LevelSetStaticCapillaryEquilibriumEvaluator =
         std::span<const Real>,
         LevelSetStaticCapillaryEvaluationPurpose)>;
 
+inline constexpr std::size_t
+    kLevelSetStaticCapillaryLineSearchTraceCapacity{64u};
+
+enum class LevelSetStaticCapillaryLineSearchPhase : std::uint8_t {
+    Trial,
+    DeferredReproduction,
+};
+
+enum class LevelSetStaticCapillaryLineSearchDisposition : std::uint8_t {
+    UnavailableOrForbidden,
+    TopologyRejected,
+    ConstraintRejected,
+    Deferred,
+    SameTopologyMeritRejected,
+    ArmijoAccepted,
+    DerivativeResolutionAccepted,
+    ReproductionAccepted,
+    ReproductionRejected,
+};
+
+/**
+ * Scalar evidence for one trial in the latest line-search attempt.
+ *
+ * At most kLevelSetStaticCapillaryLineSearchTraceCapacity records are
+ * retained. Uncomputed scalar measurements remain NaN and are distinguished
+ * from computed values by evaluation_available.
+ */
+struct LevelSetStaticCapillaryLineSearchRecord {
+    std::size_t accepted_iteration_index{0u};
+    std::size_t line_search_trial_index{0u};
+    LevelSetStaticCapillaryLineSearchPhase phase{
+        LevelSetStaticCapillaryLineSearchPhase::Trial};
+    LevelSetStaticCapillaryLineSearchDisposition disposition{
+        LevelSetStaticCapillaryLineSearchDisposition::
+            UnavailableOrForbidden};
+    bool evaluation_available{false};
+    bool used_limited_memory_direction{false};
+    bool used_projected_gradient_fallback_direction{false};
+    Real step_size{std::numeric_limits<Real>::quiet_NaN()};
+    std::uint64_t current_cut_topology_key{0u};
+    std::uint64_t trial_cut_topology_key{0u};
+    std::uint64_t current_constraint_semantics_key{0u};
+    std::uint64_t trial_constraint_semantics_key{0u};
+    Real current_merit{std::numeric_limits<Real>::quiet_NaN()};
+    Real trial_merit{std::numeric_limits<Real>::quiet_NaN()};
+    Real armijo_bound{std::numeric_limits<Real>::quiet_NaN()};
+    Real predicted_merit_decrease{
+        std::numeric_limits<Real>::quiet_NaN()};
+    Real trial_volume_error{std::numeric_limits<Real>::quiet_NaN()};
+};
+
 struct LevelSetStaticCapillaryEquilibriumResult {
     bool success{false};
     bool converged{false};
@@ -146,6 +197,10 @@ struct LevelSetStaticCapillaryEquilibriumResult {
     std::size_t limited_memory_resets{0u};
     std::size_t limited_memory_peak_history{0u};
     std::size_t projected_gradient_fallbacks{0u};
+    std::size_t line_search_trace_total_attempt_count{0u};
+    std::size_t line_search_trace_omitted_count{0u};
+    std::vector<LevelSetStaticCapillaryLineSearchRecord>
+        line_search_trace{};
 
     std::uint64_t initial_snapshot_revision_key{0u};
     std::uint64_t final_snapshot_revision_key{0u};
