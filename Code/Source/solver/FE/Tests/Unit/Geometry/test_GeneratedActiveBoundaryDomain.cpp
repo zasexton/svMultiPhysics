@@ -13,8 +13,11 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <map>
@@ -30,6 +33,76 @@ namespace {
 
 namespace FE = svmp::FE;
 namespace interfaces = svmp::FE::interfaces;
+
+void record_real(std::ostream& output, FE::Real value)
+{
+    output << std::bit_cast<std::uint64_t>(value) << '\n';
+}
+
+void record_point(std::ostream& output,
+                  const std::array<FE::Real, 3>& point)
+{
+    for (const FE::Real value : point) {
+        record_real(output, value);
+    }
+}
+
+void record_boundary_domain(
+    const std::string& name,
+    const interfaces::GeneratedActiveBoundaryDomain& domain)
+{
+    const char* directory = std::getenv("SVMP_PRODUCER_RECORD_DIR");
+    if (directory == nullptr) {
+        return;
+    }
+    std::ofstream output(std::string(directory) + "/" + name + ".txt",
+                         std::ios::binary);
+    ASSERT_TRUE(output.is_open());
+    const auto summary = domain.summary();
+    output << domain.marker() << '\n'
+           << summary.fragment_count << '\n'
+           << summary.quadrature_point_count << '\n'
+           << summary.full_face_count << '\n'
+           << summary.cut_face_count << '\n';
+    record_real(output, summary.measure);
+    record_real(output, summary.parent_measure);
+    output << domain.fragments().size() << '\n';
+    for (const auto& fragment : domain.fragments()) {
+        output << fragment.interface_marker << '\n'
+               << fragment.boundary_marker << '\n'
+               << fragment.active_boundary_marker << '\n'
+               << fragment.parent_cell << '\n'
+               << fragment.parent_face << '\n'
+               << fragment.parent_cell_global_id << '\n'
+               << fragment.parent_face_global_id << '\n'
+               << fragment.owner_rank << '\n'
+               << fragment.local_fragment_index << '\n'
+               << fragment.stable_id << '\n'
+               << static_cast<unsigned>(fragment.side) << '\n';
+        record_point(output, fragment.boundary_normal);
+        record_real(output, fragment.measure);
+        record_real(output, fragment.parent_measure);
+        output << fragment.full_face_equivalent << '\n'
+               << fragment.achieved_quadrature_order << '\n'
+               << fragment.vertices.size() << '\n';
+        for (const auto& vertex : fragment.vertices) {
+            record_point(output, vertex);
+        }
+        output << fragment.quadrature_points.size() << '\n';
+        for (const auto& point : fragment.quadrature_points) {
+            record_point(output, point.point);
+            record_point(output, point.normal);
+            record_point(output, point.boundary_normal);
+            record_point(output, point.tangent);
+            record_real(output, point.weight);
+            record_point(output, point.parent_coordinate);
+            record_real(output, point.reference_measure_factor);
+            record_real(output, point.level_set_residual);
+            record_real(output, point.gradient_norm);
+        }
+    }
+    ASSERT_TRUE(output.good());
+}
 
 class SingleQuadBoundaryMesh final : public FE::assembly::IMeshAccess {
 public:
@@ -6482,6 +6555,97 @@ TEST(ProducerObservation, SnapshotContentBindsSourceObservationWithoutChangingTo
             EXPECT_EQ(record.construction_observation,
                       volume == change_volume ? interfaces::LinearCornerStrictBranch::ModifiedOrUnresolved
                                               : interfaces::LinearCornerStrictBranch::Unchecked);
+        }
+    }
+}
+
+TEST(ProducerObservation, RealNonDyadicBoundaryTracesUseBoundedArithmetic)
+{
+    constexpr int triangle_marker = 289, triangle_wall = 7;
+    const SingleQuadBoundaryMesh triangle_mesh(
+        triangle_wall, 0, 1, 0, true, FE::ElementType::Triangle3,
+        {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}});
+    for (const FE::Real sign : {-1.0, 1.0}) {
+        const std::array<FE::Real, 3> values{{sign * 0.25, -sign, sign}};
+        const auto source = linearTriangleCutDomain(triangle_marker, values);
+        const auto contact =
+            interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+                contactRequest(triangle_marker, triangle_wall), source,
+                triangle_mesh);
+        ASSERT_EQ(contact.fragments().size(), 1u);
+        for (const auto side : {FE::geometry::CutIntegrationSide::Negative,
+                                FE::geometry::CutIntegrationSide::Positive}) {
+            std::size_t callback_count = 0u;
+            interfaces::GeneratedActiveBoundaryScalarField field;
+            field.value_at_node = [&](FE::GlobalIndex i) {
+                ++callback_count;
+                return values.at(static_cast<std::size_t>(i));
+            };
+            const auto boundary =
+                interfaces::buildGeneratedActiveBoundaryDomain(
+                    activeRequest(triangle_marker, triangle_wall, side),
+                    source, contact, triangle_mesh, field);
+            ASSERT_EQ(callback_count, 2u);
+            ASSERT_EQ(boundary.fragments().size(), 1u);
+            EXPECT_EQ(boundary.fragments().front().construction_observation,
+                      interfaces::LinearCornerStrictBranch::Unchecked);
+            record_boundary_domain(
+                std::string("boundary-triangle-") +
+                    (sign < 0 ? "negative-" : "positive-") +
+                    (side == FE::geometry::CutIntegrationSide::Negative
+                         ? "negative"
+                         : "positive"),
+                boundary);
+        }
+    }
+
+    constexpr int tetra_marker = 290, tetra_wall = 17;
+    const SingleTetraBoundaryMesh tetra_mesh(tetra_wall);
+    std::size_t case_index = 0u;
+    for (const auto& base_values : {
+             std::array<FE::Real, 4>{{0.25, -1, -1, -1}},
+             std::array<FE::Real, 4>{{0.25, 1, -1, -1}}}) {
+        for (const FE::Real sign : {-1.0, 1.0}) {
+            std::array<FE::Real, 4> values{};
+            std::transform(base_values.begin(), base_values.end(),
+                           values.begin(),
+                           [sign](FE::Real value) { return sign * value; });
+            const auto source = linearTetraCutDomain(tetra_marker, values);
+            for (const auto& fragment : source.fragments()) {
+                EXPECT_EQ(fragment.construction_observation,
+                          interfaces::LinearCornerStrictBranch::ModifiedOrUnresolved);
+            }
+            for (const auto& region : source.volumeRegions()) {
+                EXPECT_EQ(region.construction_observation,
+                          interfaces::LinearCornerStrictBranch::ModifiedOrUnresolved);
+            }
+            const auto contact =
+                interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+                    contactRequest(tetra_marker, tetra_wall), source,
+                    tetra_mesh);
+            ASSERT_EQ(contact.fragments().size(), 1u);
+            for (const auto side : {
+                     FE::geometry::CutIntegrationSide::Negative,
+                     FE::geometry::CutIntegrationSide::Positive}) {
+                std::size_t callback_count = 0u;
+                interfaces::GeneratedActiveBoundaryScalarField field;
+                field.value_at_node = [&](FE::GlobalIndex i) {
+                    ++callback_count;
+                    return values.at(static_cast<std::size_t>(i));
+                };
+                const auto boundary =
+                    interfaces::buildGeneratedActiveBoundaryDomain(
+                        activeRequest(tetra_marker, tetra_wall, side), source,
+                        contact, tetra_mesh, field);
+                ASSERT_EQ(callback_count, 3u);
+                ASSERT_EQ(boundary.fragments().size(), 1u);
+                EXPECT_EQ(
+                    boundary.fragments().front().construction_observation,
+                    interfaces::LinearCornerStrictBranch::ModifiedOrUnresolved);
+                record_boundary_domain(
+                    "boundary-tetra-" + std::to_string(case_index++),
+                    boundary);
+            }
         }
     }
 }

@@ -1,6 +1,7 @@
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 
 #include "Basis/NodeOrderingConventions.h"
+#include "Interfaces/detail/ProducerArithmeticAssessment.h"
 
 #include <algorithm>
 #include <cmath>
@@ -35,6 +36,16 @@ struct PointOrigin {
     bool operator==(const PointOrigin&) const = default;
 };
 
+struct OriginalCornerData {
+    Point point{};
+    Real phi{0.0};
+    Real isovalue{0.0};
+    Real signed_band{0.0};
+    Real actual_signed{0.0};
+    bool canonicalization_changed{false};
+    bool available{false};
+};
+
 struct StrictConstructionObservation {
     LinearCornerStrictBranch state{LinearCornerStrictBranch::Unchecked};
     void unresolved() { state = LinearCornerStrictBranch::ModifiedOrUnresolved; }
@@ -49,12 +60,29 @@ bool structuralRepeat(const Point& a, PointOrigin ao, const Point& b, PointOrigi
         std::all_of(a.begin(), a.end(), [](Real x) { return std::isfinite(x); });
 }
 
-void observeRepeat(StrictConstructionObservation& observation,
-                   const Point& a, PointOrigin ao, const Point& b, PointOrigin bo,
-                   bool merged)
+[[nodiscard]] detail::OriginRelation originRelation(const PointOrigin& a,
+                                                    const PointOrigin& b) noexcept
 {
-    if (!ao.known() || !bo.known() ||
-        ((merged || ao == bo) && !structuralRepeat(a, ao, b, bo))) {
+    if (!a.known() || !b.known()) {
+        return detail::OriginRelation::Unknown;
+    }
+    return a == b ? detail::OriginRelation::SameOriginal
+                  : detail::OriginRelation::DistinctOriginal;
+}
+
+void observeAssessedRepeat(StrictConstructionObservation& observation,
+                           const Point& a,
+                           PointOrigin ao,
+                           const detail::PointAssessment& aa,
+                           const Point& b,
+                           PointOrigin bo,
+                           const detail::PointAssessment& ba,
+                           Real tolerance,
+                           detail::DistanceObservation distance)
+{
+    const auto assessment = detail::assessDistance(
+        aa, a, ba, b, tolerance, 3u, originRelation(ao, bo), distance);
+    if (!assessment.available()) {
         observation.unresolved();
     }
 }
@@ -63,7 +91,52 @@ struct SignedPoint {
     Point point{{0.0, 0.0, 0.0}};
     Real value{0.0};
     PointOrigin origin{};
+    OriginalCornerData original{};
+    detail::PointAssessment assessment{};
 };
+
+[[nodiscard]] detail::PointAssessment assessCrossing(
+    const SignedPoint& a,
+    const SignedPoint& b,
+    const Point& emitted,
+    Real denominator,
+    Real quotient,
+    Real clamped,
+    bool division_taken) noexcept
+{
+    if (a.value == Real{0.0} && b.value != Real{0.0}) {
+        return a.assessment;
+    }
+    if (b.value == Real{0.0} && a.value != Real{0.0}) {
+        return b.assessment;
+    }
+    if (!a.original.available || !b.original.available ||
+        a.origin.kind != PointOrigin::Kind::Corner ||
+        b.origin.kind != PointOrigin::Kind::Corner) {
+        return {};
+    }
+    detail::OriginalEdgeObservation input;
+    input.a = a.original.point;
+    input.b = b.original.point;
+    input.emitted = emitted;
+    input.phi_a = a.original.phi;
+    input.phi_b = b.original.phi;
+    input.isovalue = a.original.isovalue;
+    input.signed_band = a.original.signed_band;
+    input.actual_signed_a = a.original.actual_signed;
+    input.actual_signed_b = b.original.actual_signed;
+    input.actual_denominator = denominator;
+    input.actual_quotient = quotient;
+    input.actual_clamped = clamped;
+    input.canonicalization_changed =
+        a.original.canonicalization_changed ||
+        b.original.canonicalization_changed ||
+        a.original.isovalue != b.original.isovalue ||
+        a.original.signed_band != b.original.signed_band;
+    input.helper_denominator_guard = true;
+    input.division_taken = division_taken;
+    return detail::assessOriginalEdge(input);
+}
 
 [[nodiscard]] Point add(const Point& a, const Point& b) noexcept
 {
@@ -267,10 +340,12 @@ struct SignedPoint {
                                    StrictConstructionObservation& observation) noexcept
 {
     const Real denominator = a.value - b.value;
-    const Real t = std::abs(denominator) > Real{1.0e-30}
-                       ? std::clamp(a.value / denominator,
-                                    Real{0.0},
-                                    Real{1.0})
+    const bool division_taken =
+        std::abs(denominator) > Real{1.0e-30};
+    const Real quotient =
+        division_taken ? a.value / denominator : Real{0.0};
+    const Real t = division_taken
+                       ? std::clamp(quotient, Real{0.0}, Real{1.0})
                        : Real{0.5};
     PointOrigin origin;
     if (a.value == 0 && b.value != 0) origin = a.origin;
@@ -284,14 +359,17 @@ struct SignedPoint {
         observation.unresolved();
         origin = {};
     } else {
-        const Real raw_t = a.value / denominator;
-        if (!std::isfinite(raw_t) || raw_t < 0 || raw_t > 1 ||
-            (a.value != 0 && b.value != 0 && !(raw_t > 0 && raw_t < 1))) {
+        if (!std::isfinite(quotient) || quotient < 0 || quotient > 1 ||
+            (a.value != 0 && b.value != 0 &&
+             !(quotient > 0 && quotient < 1))) {
             observation.unresolved();
         }
     }
     if (!origin.known()) observation.unresolved();
-    return {interpolate(a.point, b.point, t), Real{0.0}, origin};
+    const auto point = interpolate(a.point, b.point, t);
+    return {point, Real{0.0}, origin, {},
+            assessCrossing(a, b, point, denominator, quotient, t,
+                           division_taken)};
 }
 
 [[nodiscard]] std::vector<SignedPoint> clipPolygon(
@@ -323,34 +401,60 @@ struct SignedPoint {
 
 void removeDuplicatePolygonVertices(std::vector<Point>& points,
                                     std::vector<PointOrigin>& origins,
+                                    std::vector<detail::PointAssessment>& assessments,
                                     Real tolerance,
                                     StrictConstructionObservation& observation)
 {
     std::vector<Point> unique;
     std::vector<PointOrigin> unique_origins;
+    std::vector<detail::PointAssessment> unique_assessments;
     for (std::size_t i = 0; i < points.size(); ++i) {
         const auto& point = points[i];
-        // Include inconsistent repeated roots outside the existing adjacent
-        // and closing predicates without changing their insertion decisions.
-        for (std::size_t j = 0; j < i; ++j) {
-            observeRepeat(observation, points[j], origins[j], point, origins[i], false);
-        }
-        if (unique.empty() || !samePoint(unique.back(), point, tolerance)) {
+        if (unique.empty()) {
             unique.push_back(point);
             unique_origins.push_back(origins[i]);
-        } else {
-            observeRepeat(observation, unique.back(), unique_origins.back(),
-                          point, origins[i], true);
+            unique_assessments.push_back(assessments[i]);
+            continue;
+        }
+        const Real distance = norm(sub(unique.back(), point));
+        const bool same = distance <= tolerance;
+        observeAssessedRepeat(
+            observation, unique.back(), unique_origins.back(),
+            unique_assessments.back(), point, origins[i], assessments[i],
+            tolerance,
+            detail::DistanceObservation{true, distance, same, same});
+        if (!same) {
+            unique.push_back(point);
+            unique_origins.push_back(origins[i]);
+            unique_assessments.push_back(assessments[i]);
         }
     }
-    if (unique.size() > 1u && samePoint(unique.front(), unique.back(), tolerance)) {
-        observeRepeat(observation, unique.front(), unique_origins.front(),
-                      unique.back(), unique_origins.back(), true);
-        unique.pop_back();
-        unique_origins.pop_back();
+    if (unique.size() > 1u) {
+        const Real distance = norm(sub(unique.front(), unique.back()));
+        const bool same = distance <= tolerance;
+        observeAssessedRepeat(
+            observation, unique.front(), unique_origins.front(),
+            unique_assessments.front(), unique.back(), unique_origins.back(),
+            unique_assessments.back(), tolerance,
+            detail::DistanceObservation{true, distance, same, same});
+        if (same) {
+            unique.pop_back();
+            unique_origins.pop_back();
+            unique_assessments.pop_back();
+        }
+    }
+    for (std::size_t i = 0; i < unique.size(); ++i) {
+        for (std::size_t j = i + 1u; j < unique.size(); ++j) {
+            observeAssessedRepeat(
+                observation, unique[i], unique_origins[i],
+                unique_assessments[i], unique[j], unique_origins[j],
+                unique_assessments[j], tolerance,
+                detail::DistanceObservation{});
+        }
     }
     points = std::move(unique);
     origins = std::move(unique_origins);
+    assessments = std::move(unique_assessments);
 }
 
 [[nodiscard]] std::vector<geometry::CutQuadraturePoint> segmentQuadrature(
@@ -978,8 +1082,10 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
                     throw std::invalid_argument(
                         "sharp active-boundary clipping found incomplete face connectivity");
                 }
-                Real value = scalar_field.value_at_node(cell_nodes[corner]) -
-                             req.isovalue;
+                const Real original_value =
+                    scalar_field.value_at_node(cell_nodes[corner]);
+                const Real actual_signed = original_value - req.isovalue;
+                Real value = actual_signed;
                 if (!std::isfinite(value)) {
                     throw std::invalid_argument(
                         "sharp active-boundary clipping found a non-finite level-set value");
@@ -989,7 +1095,14 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
                     value = Real{0.0};
                 }
                 face_points.push_back(reference_nodes[corner]);
-                signed_face.push_back({reference_nodes[corner], value, PointOrigin::corner(corner)});
+                signed_face.push_back({
+                    reference_nodes[corner], value, PointOrigin::corner(corner),
+                    OriginalCornerData{
+                        reference_nodes[corner], original_value, req.isovalue,
+                        req.tolerance, actual_signed, actual_signed != value,
+                        true},
+                    detail::assessOriginalCorner(reference_nodes[corner],
+                                                 reference_nodes[corner])});
             }
             if (!hasAuthoritativeInterfaceFragment(
                     interface_domain,
@@ -1035,12 +1148,17 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
             const auto clipped_signed = clipPolygon(signed_face, req.side, observation);
             std::vector<Point> clipped;
             std::vector<PointOrigin> origins;
+            std::vector<detail::PointAssessment> assessments;
             clipped.reserve(clipped_signed.size());
+            origins.reserve(clipped_signed.size());
+            assessments.reserve(clipped_signed.size());
             for (const auto& point : clipped_signed) {
                 clipped.push_back(point.point);
                 origins.push_back(point.origin);
+                assessments.push_back(point.assessment);
             }
-            removeDuplicatePolygonVertices(clipped, origins, req.tolerance, observation);
+            removeDuplicatePolygonVertices(clipped, origins, assessments,
+                                           req.tolerance, observation);
             const std::size_t minimum_points = mesh.dimension() == 2 ? 2u : 3u;
             if (clipped.size() < minimum_points) {
                 observation.unresolved();
