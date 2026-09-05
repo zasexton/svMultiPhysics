@@ -34,6 +34,7 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -1738,6 +1739,194 @@ private:
   const char* key_;
   std::optional<std::string> original_{};
 };
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+
+struct CutOptionRefreshCase {
+  std::string label{};
+  int dimension{2};
+  std::optional<int> quadrature_order{};
+  std::optional<int> interface_quadrature_order{};
+  std::optional<int> volume_quadrature_order{};
+  std::optional<double> root_coordinate_tolerance{};
+  bool allow_corner_linearized_geometry{false};
+};
+
+enum class CutOptionRefreshException {
+  None,
+  InvalidArgument,
+  FiniteElement,
+  Other,
+};
+
+struct CutOptionRefreshRun {
+  bool refresh_completed{false};
+  bool report_refreshed{false};
+  bool context_installed{false};
+  std::uint64_t lifecycle_revision{0u};
+  CutOptionRefreshException exception{CutOptionRefreshException::None};
+  svmp::FE::FEStatus finite_element_status{svmp::FE::FEStatus::Unknown};
+  std::string diagnostic{};
+  std::optional<svmp::FE::interfaces::CutInterfaceDomainRequest>
+      effective_request{};
+};
+
+std::string activeCutOptionXml(const CutOptionRefreshCase& current_case)
+{
+  std::ostringstream xml;
+  xml.imbue(std::locale::classic());
+  xml << R"xml(<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="cut_option_reference">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi_cut_reference</Level_set_field_name>
+      <Generated_interface_domain_id>)xml"
+      << "cut_option_" + current_case.label
+      << R"xml(</Generated_interface_domain_id>
+      <Small_cut_aggregation>false</Small_cut_aggregation>
+      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+)xml";
+
+  if (current_case.quadrature_order.has_value()) {
+    xml << "      <Generated_interface_quadrature_order>"
+        << *current_case.quadrature_order
+        << "</Generated_interface_quadrature_order>\n";
+  }
+  if (current_case.interface_quadrature_order.has_value()) {
+    xml << "      <Interface_quadrature_order>"
+        << *current_case.interface_quadrature_order
+        << "</Interface_quadrature_order>\n";
+  }
+  if (current_case.volume_quadrature_order.has_value()) {
+    xml << "      <Volume_quadrature_order>"
+        << *current_case.volume_quadrature_order
+        << "</Volume_quadrature_order>\n";
+  }
+  if (current_case.root_coordinate_tolerance.has_value()) {
+    xml << "      <Implicit_cut_root_coordinate_tolerance>"
+        << std::setprecision(std::numeric_limits<double>::max_digits10)
+        << *current_case.root_coordinate_tolerance
+        << "</Implicit_cut_root_coordinate_tolerance>\n";
+  }
+  if (current_case.allow_corner_linearized_geometry) {
+    xml << "      <Allow_corner_linearized_cut_geometry>true"
+           "</Allow_corner_linearized_cut_geometry>\n";
+  }
+
+  xml << R"xml(    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>)xml";
+  return xml.str();
+}
+
+CutOptionRefreshRun runCutOptionRefreshCase(
+    const CutOptionRefreshCase& current_case)
+{
+  if (current_case.dimension != 2 && current_case.dimension != 3) {
+    throw std::invalid_argument("cut-option refresh fixture dimension is invalid");
+  }
+  WorkflowScopedEnvVar retention_override(
+      "SVMP_CUT_RETENTION_FORCE", std::nullopt);
+  auto mesh = current_case.dimension == 2
+                  ? makeWorkflowTriangleMesh()
+                  : makeWorkflowHydrostaticPressureMesh3D(2);
+  const auto mesh_field = svmp::MeshFields::attach_field(
+      mesh->local_mesh(),
+      svmp::EntityKind::Vertex,
+      "phi_cut_reference",
+      svmp::FieldScalarType::Float64,
+      1);
+  if (svmp::MeshFields::field_data_as<svmp::real_t>(
+          mesh->local_mesh(), mesh_field) == nullptr) {
+    throw std::runtime_error(
+        "cut-option refresh fixture could not attach its level-set field");
+  }
+
+  const auto element_type =
+      current_case.dimension == 2
+          ? svmp::FE::ElementType::Triangle3
+          : svmp::FE::ElementType::Tetra4;
+  auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
+      element_type, /*order=*/1);
+  auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
+  const auto field = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "phi_cut_reference",
+      .space = scalar_space,
+      .components = 1,
+  });
+  system->setup({});
+
+  std::vector<svmp::FE::Real> vertex_values(
+      mesh->n_vertices(), svmp::FE::Real{0.0});
+  for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
+    const auto point = workflowVertexPoint(*mesh, vertex);
+    vertex_values[vertex] =
+        current_case.dimension == 2
+            ? point[0] - svmp::FE::Real{0.25}
+            : point[2] - svmp::FE::Real{0.35};
+  }
+  const auto coefficients = projectWorkflowVertexValues(
+      *system,
+      field,
+      vertex_values,
+      /*components=*/1u,
+      "ApplicationDriver cut-option refresh projection");
+  std::vector<svmp::FE::Real> solution(
+      static_cast<std::size_t>(system->dofHandler().getNumDofs()),
+      svmp::FE::Real{0.0});
+  writeWorkflowFieldSlice(*system, field, coefficients, solution);
+
+  application::core::SimulationComponents simulation;
+  simulation.primary_mesh = mesh;
+  simulation.fe_system = std::move(system);
+  const auto xml = activeCutOptionXml(current_case);
+  auto parameters = parseWorkflowParametersXml(xml.c_str());
+
+  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+  CutOptionRefreshRun run;
+  try {
+    const auto report = refreshActiveCutIntegrationContextFromSolution(
+        simulation,
+        *parameters,
+        solution,
+        lifecycle,
+        "application-driver-cut-option-contract");
+    run.refresh_completed = true;
+    run.report_refreshed = report.refreshed;
+  } catch (const std::invalid_argument& error) {
+    run.exception = CutOptionRefreshException::InvalidArgument;
+    run.diagnostic = error.what();
+  } catch (const svmp::FE::FEException& error) {
+    run.exception = CutOptionRefreshException::FiniteElement;
+    run.finite_element_status = error.status();
+    run.diagnostic = error.message();
+  } catch (const std::exception& error) {
+    run.exception = CutOptionRefreshException::Other;
+    run.diagnostic = error.what();
+  } catch (...) {
+    run.exception = CutOptionRefreshException::Other;
+    run.diagnostic = "non-standard exception";
+  }
+
+  run.lifecycle_revision = lifecycle.valueRevision();
+  const auto* context = simulation.fe_system->cutIntegrationContext();
+  run.context_installed = context != nullptr;
+  if (run.refresh_completed && context != nullptr) {
+    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto snapshot = std::find_if(
+        snapshots.begin(), snapshots.end(), [](const auto& candidate) {
+          return candidate != nullptr;
+        });
+    if (snapshot != snapshots.end()) {
+      run.effective_request = (*snapshot)->interfaceDomain().request();
+    }
+  }
+  return run;
+}
+
+#endif
 
 struct WorkflowBalancedCapillaryFixture {
   WorkflowRadialSimplexMesh geometry{};
@@ -7779,6 +7968,112 @@ TEST(ApplicationDriverLevelSetWorkflows,
                        702,
                        svmp::FE::geometry::CutIntegrationSide::Positive)
                    .empty());
+#endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     ActiveCutRefreshPreservesQuadratureResolution)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  struct Case {
+    CutOptionRefreshCase input;
+    int expected_interface_order;
+    int expected_volume_order;
+  };
+  const std::array<Case, 4> cases{{
+      {{"omitted_2d", 2, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, true}, 2, 2},
+      {{"explicit_interface_negative_1_2d", 2, std::nullopt, -1,
+        std::nullopt, std::nullopt, true}, 1, 2},
+      {{"omitted_3d", 3, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, true}, 1, 2},
+      {{"volume_6_2d", 2, std::nullopt, std::nullopt, 6,
+        std::nullopt, true}, 6, 6},
+  }};
+
+  for (const auto& current_case : cases) {
+    SCOPED_TRACE(current_case.input.label);
+    const auto run = runCutOptionRefreshCase(current_case.input);
+    EXPECT_EQ(run.exception, CutOptionRefreshException::None);
+    EXPECT_TRUE(run.refresh_completed);
+    EXPECT_TRUE(run.report_refreshed);
+    EXPECT_TRUE(run.context_installed);
+    EXPECT_EQ(run.lifecycle_revision, 1u);
+    ASSERT_TRUE(run.effective_request.has_value());
+    EXPECT_EQ(
+        run.effective_request->interface_quadrature_order,
+        current_case.expected_interface_order);
+    EXPECT_EQ(
+        run.effective_request->volume_quadrature_order,
+        current_case.expected_volume_order);
+    EXPECT_EQ(
+        run.effective_request->resolvedInterfaceQuadratureOrder(),
+        current_case.expected_interface_order);
+    EXPECT_EQ(
+        run.effective_request->resolvedVolumeQuadratureOrder(),
+        current_case.expected_volume_order);
+  }
+#endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     ActiveCutRefreshPreservesOptionFailureTiming)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  struct Case {
+    CutOptionRefreshCase input;
+    CutOptionRefreshException expected_exception;
+    svmp::FE::FEStatus expected_finite_element_status;
+    const char* expected_diagnostic;
+    std::uint64_t expected_lifecycle_revision;
+  };
+  const std::array<Case, 4> cases{{
+      {{"invalid_generic_precedes_invalid_root", 2, -1, 2, 2, 0.0, false},
+       CutOptionRefreshException::InvalidArgument,
+       svmp::FE::FEStatus::Unknown,
+       "generated level-set interface requires nonnegative quadrature_order",
+       0u},
+      {{"invalid_root_after_valid_generic", 2, 1, 2, 2, 0.0, false},
+       CutOptionRefreshException::InvalidArgument,
+       svmp::FE::FEStatus::Unknown,
+       "generated level-set interface requires a positive "
+       "implicit_cut_root_coordinate_tolerance",
+       0u},
+      {{"explicit_interface_zero", 2, std::nullopt, 0, std::nullopt,
+        std::nullopt, true},
+       CutOptionRefreshException::FiniteElement,
+       svmp::FE::FEStatus::InvalidArgument,
+       "QuadratureFactory: order must be >= 1",
+       1u},
+      {{"generic_5_planar_limit", 3, 5, std::nullopt, 2,
+        std::nullopt, true},
+       CutOptionRefreshException::InvalidArgument,
+       svmp::FE::FEStatus::Unknown,
+       "planar polygon cut-interface quadrature supports orders through two",
+       1u},
+  }};
+
+  for (const auto& current_case : cases) {
+    SCOPED_TRACE(current_case.input.label);
+    const auto run = runCutOptionRefreshCase(current_case.input);
+    EXPECT_EQ(run.exception, current_case.expected_exception);
+    EXPECT_EQ(run.diagnostic, current_case.expected_diagnostic);
+    EXPECT_EQ(run.lifecycle_revision,
+              current_case.expected_lifecycle_revision);
+    EXPECT_FALSE(run.refresh_completed);
+    EXPECT_FALSE(run.report_refreshed);
+    EXPECT_FALSE(run.context_installed);
+    EXPECT_FALSE(run.effective_request.has_value());
+    if (current_case.expected_exception ==
+        CutOptionRefreshException::FiniteElement) {
+      EXPECT_EQ(run.finite_element_status,
+                current_case.expected_finite_element_status);
+    }
+  }
 #endif
 }
 

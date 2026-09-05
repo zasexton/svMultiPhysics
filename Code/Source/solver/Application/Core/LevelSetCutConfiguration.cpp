@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 namespace application {
@@ -310,6 +311,37 @@ void appendUniqueRequest(std::vector<ActiveCutVolumeRequest>& requests,
         "resolved policy for the equation cut domain and free-surface BC.");
   }
   requests.push_back(std::move(request));
+}
+
+template <typename Options>
+void projectCommonCutOptions(
+    Options& options, const ActiveCutVolumeRequest& request)
+{
+  static_assert(
+      std::is_same_v<Options,
+                     svmp::FE::level_set::LevelSetGeneratedInterfaceOptions> ||
+      std::is_same_v<Options,
+                     svmp::FE::level_set::LevelSetVolumeOptions>);
+  options.geometry_mode = request.geometry_mode;
+  options.implicit_cut_quadrature_backend = request.implicit_cut_backend;
+  options.implicit_cut_fallback_policy =
+      request.implicit_cut_fallback_policy;
+  options.geometry_tangent_policy = request.geometry_tangent_policy;
+  options.implicit_cut_root_tolerance =
+      static_cast<svmp::FE::Real>(request.implicit_cut_root_tolerance);
+  options.implicit_cut_root_coordinate_tolerance =
+      static_cast<svmp::FE::Real>(
+          request.implicit_cut_root_coordinate_tolerance);
+  options.implicit_cut_root_max_iterations =
+      request.implicit_cut_root_max_iterations;
+  options.implicit_cut_max_subdivision_depth =
+      request.implicit_cut_max_subdivision_depth;
+  options.affected_cell_neighborhood_layers =
+      request.affected_cell_neighborhood_layers;
+  options.allow_corner_linearized_geometry =
+      request.allow_corner_linearized_geometry;
+  options.require_production_qualified_implicit_cut_backend =
+      request.require_production_qualified_implicit_cut_backend;
 }
 
 std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
@@ -637,6 +669,67 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
 }
 
 } // namespace
+
+svmp::FE::level_set::LevelSetGeneratedInterfaceOptions
+generatedInterfaceOptionsForActiveCut(
+    const ActiveCutVolumeRequest& request, int mesh_dimension)
+{
+  svmp::FE::level_set::LevelSetGeneratedInterfaceOptions options{};
+  options.level_set_field_name = request.level_set_field_name;
+  options.domain_id = request.domain_id;
+  options.requested_interface_marker = request.requested_interface_marker;
+  options.isovalue = static_cast<svmp::FE::Real>(request.isovalue);
+  if (request.quadrature_order.has_value()) {
+    options.quadrature_order = *request.quadrature_order;
+  }
+  if (request.interface_quadrature_order.has_value()) {
+    options.interface_quadrature_order =
+        *request.interface_quadrature_order;
+  }
+  if (request.volume_quadrature_order.has_value()) {
+    options.volume_quadrature_order = *request.volume_quadrature_order;
+  }
+  if (!request.interface_quadrature_order.has_value() &&
+      mesh_dimension == 2 &&
+      options.interface_quadrature_order < 0) {
+    options.interface_quadrature_order = options.volume_quadrature_order;
+  }
+  projectCommonCutOptions(options, request);
+  options.aligned_zero_interface_parent_side =
+      cutIntegrationSide(request.active_side);
+  return options;
+}
+
+svmp::FE::level_set::LevelSetVolumeOptions
+volumeOptionsForCutMaintenance(
+    const std::optional<ActiveCutVolumeRequest>& request,
+    const std::string& maintenance_field_name,
+    double maintenance_isovalue)
+{
+  svmp::FE::level_set::LevelSetVolumeOptions options{};
+  options.isovalue = static_cast<svmp::FE::Real>(maintenance_isovalue);
+  if (!request.has_value()) {
+    return options;
+  }
+  if (request->geometry_mode !=
+      svmp::FE::level_set::GeneratedInterfaceGeometryMode::
+          HighOrderImplicit) {
+    return options;
+  }
+
+  options.use_generated_interface_quadrature = true;
+  options.level_set_field_name = maintenance_field_name;
+  options.generated_domain_id =
+      request->domain_id.empty()
+          ? std::string{"volume_correction"}
+          : request->domain_id + "_volume_correction";
+  options.requested_interface_marker = request->requested_interface_marker;
+  options.quadrature_order = request->quadrature_order;
+  options.interface_quadrature_order = request->interface_quadrature_order;
+  options.volume_quadrature_order = request->volume_quadrature_order;
+  projectCommonCutOptions(options, *request);
+  return options;
+}
 
 svmp::FE::level_set::GeneratedInterfaceGeometryMode
 parseGeneratedInterfaceGeometryMode(const std::string& raw)

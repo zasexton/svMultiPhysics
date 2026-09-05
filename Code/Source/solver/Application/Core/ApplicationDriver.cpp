@@ -12364,50 +12364,10 @@ std::array<std::size_t, 3> localImplicitCutBackendQualificationCounts(
 svmp::FE::level_set::LevelSetVolumeOptions levelSetVolumeOptionsForMaintenance(
     const LevelSetMaintenanceRequest& request)
 {
-  svmp::FE::level_set::LevelSetVolumeOptions options{};
-  options.isovalue = static_cast<svmp::FE::Real>(request.configuration->isovalue);
-  if (!request.configuration->volume_cut_request.has_value()) {
-    return options;
-  }
-
-  const auto& cut_request = *request.configuration->volume_cut_request;
-  if (cut_request.geometry_mode !=
-      svmp::FE::level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit) {
-    return options;
-  }
-
-  options.use_generated_interface_quadrature = true;
-  options.level_set_field_name = request.configuration->transport.level_set.field_name;
-  options.generated_domain_id =
-      cut_request.domain_id.empty()
-          ? std::string{"volume_correction"}
-          : cut_request.domain_id + "_volume_correction";
-  options.requested_interface_marker = cut_request.requested_interface_marker;
-  options.quadrature_order = cut_request.quadrature_order;
-  options.interface_quadrature_order = cut_request.interface_quadrature_order;
-  options.volume_quadrature_order = cut_request.volume_quadrature_order;
-  options.geometry_mode = cut_request.geometry_mode;
-  options.implicit_cut_quadrature_backend = cut_request.implicit_cut_backend;
-  options.implicit_cut_fallback_policy =
-      cut_request.implicit_cut_fallback_policy;
-  options.geometry_tangent_policy = cut_request.geometry_tangent_policy;
-  options.implicit_cut_root_tolerance =
-      static_cast<svmp::FE::Real>(
-          cut_request.implicit_cut_root_tolerance);
-  options.implicit_cut_root_coordinate_tolerance =
-      static_cast<svmp::FE::Real>(
-          cut_request.implicit_cut_root_coordinate_tolerance);
-  options.implicit_cut_root_max_iterations =
-      cut_request.implicit_cut_root_max_iterations;
-  options.implicit_cut_max_subdivision_depth =
-      cut_request.implicit_cut_max_subdivision_depth;
-  options.affected_cell_neighborhood_layers =
-      cut_request.affected_cell_neighborhood_layers;
-  options.allow_corner_linearized_geometry =
-      cut_request.allow_corner_linearized_geometry;
-  options.require_production_qualified_implicit_cut_backend =
-      cut_request.require_production_qualified_implicit_cut_backend;
-  return options;
+  return application::core::volumeOptionsForCutMaintenance(
+      request.configuration->volume_cut_request,
+      request.configuration->transport.level_set.field_name,
+      request.configuration->isovalue);
 }
 
 void initializeLevelSetMaintenanceTargets(
@@ -19114,53 +19074,9 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         result_storage;
     std::exception_ptr local_build_failure;
     try {
-      auto& options = options_storage.emplace();
-      options.level_set_field_name = request.level_set_field_name;
-      options.domain_id = request.domain_id;
-      options.requested_interface_marker =
-          request.requested_interface_marker;
-      options.isovalue = static_cast<svmp::FE::Real>(request.isovalue);
-      if (request.quadrature_order.has_value()) {
-        options.quadrature_order = *request.quadrature_order;
-      }
-      if (request.interface_quadrature_order.has_value()) {
-        options.interface_quadrature_order =
-            *request.interface_quadrature_order;
-      }
-      if (request.volume_quadrature_order.has_value()) {
-        options.volume_quadrature_order =
-            *request.volume_quadrature_order;
-      }
-      if (!request.interface_quadrature_order.has_value() &&
-          mesh_access.dimension() == 2 &&
-          options.interface_quadrature_order < 0) {
-        options.interface_quadrature_order =
-            options.volume_quadrature_order;
-      }
-      options.geometry_mode = request.geometry_mode;
-      options.implicit_cut_quadrature_backend =
-          request.implicit_cut_backend;
-      options.implicit_cut_fallback_policy =
-          request.implicit_cut_fallback_policy;
-      options.geometry_tangent_policy = request.geometry_tangent_policy;
-      options.implicit_cut_root_tolerance =
-          static_cast<svmp::FE::Real>(
-              request.implicit_cut_root_tolerance);
-      options.implicit_cut_root_coordinate_tolerance =
-          static_cast<svmp::FE::Real>(
-              request.implicit_cut_root_coordinate_tolerance);
-      options.implicit_cut_root_max_iterations =
-          request.implicit_cut_root_max_iterations;
-      options.implicit_cut_max_subdivision_depth =
-          request.implicit_cut_max_subdivision_depth;
-      options.affected_cell_neighborhood_layers =
-          request.affected_cell_neighborhood_layers;
-      options.aligned_zero_interface_parent_side =
-          cutIntegrationSide(request.active_side);
-      options.allow_corner_linearized_geometry =
-          request.allow_corner_linearized_geometry;
-      options.require_production_qualified_implicit_cut_backend =
-          request.require_production_qualified_implicit_cut_backend;
+      auto& options = options_storage.emplace(
+          application::core::generatedInterfaceOptionsForActiveCut(
+              request, mesh_access.dimension()));
       result_storage.emplace(
           lifecycle.build(*sim.fe_system, options, fe_solution));
       if (!result_storage->success) {
