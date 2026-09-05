@@ -1,0 +1,100 @@
+{
+  "baseline_source": {
+    "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source",
+    "revision": "0d77e6cd1c350c20334d43021a186753231398a4",
+    "source_and_input_inventory": {
+      "file_count": 3961,
+      "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/source-input-files.json",
+      "remaining_lfs_pointers": 0,
+      "sha256": "6341af4d055828046e4f2020c6b5848cd1b9d69d0c52c1e0bbbf09f1d57d5f91"
+    },
+    "tracked_diff": "empty before submission",
+    "tree": "26d8e720c6dc5490168ffad54def72c74b174aad"
+  },
+  "comparison_contract": {
+    "discrete_identity": "exact field/component/physical-DOF, domain/side, stage, availability, constraint topology and capability decisions",
+    "floating_point_tolerances": "Freeze existing case gates and measured reduction tolerances before candidate comparisons; no acceptance thresholds are established by this in-progress record.",
+    "reference_artifact_status": "NOT_CAPTURED",
+    "required_reference_outputs": [
+      "full residual and Jacobian blocks in stable physical DOF order",
+      "sparsity and constraint rows",
+      "volume/interface moments and phase inventory",
+      "accepted and rejected state/rate/history records",
+      "effective numerical options and selected algorithm routes",
+      "runtime, peak memory, iteration count, geometry refresh and cache behavior"
+    ],
+    "status": "AWAITING_MEASURED_BASELINE"
+  },
+  "preserved_original_worktree": {
+    "committed_head": "09976e28639127e52bb07184399c37e36762e332",
+    "modified_source_files": 52,
+    "path": "/home/users/zsexton/svMultiPhysics",
+    "record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/original-worktree/record.json",
+    "record_sha256": "a47d79c6c516b3ce8ce81ed47886f41f8d3091064a897f661efca257358efbb1",
+    "source_patch_sha256": "b20d56f1ea431d806b5bda38617314b53ef4ccd37e6604d51d49025680481469",
+    "stable_during_capture": true,
+    "untracked_static_drop_files": 3,
+    "used_as_baseline_solver_source": false
+  },
+  "profiles": [
+    {
+      "build_parallelism": 6,
+      "build_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/core-build",
+      "cpus_per_task": 8,
+      "eigen": "OFF",
+      "id": "core",
+      "jit": "OFF",
+      "job_id": "42068077",
+      "llvm": null,
+      "outcome": null,
+      "requested_memory_mib": 38000,
+      "requested_nodes": 1,
+      "result_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/core-42068077",
+      "script_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-core.sbatch",
+      "script_sha256": "1dc106604f0e5931f38eccdec41a58cfa2df8cf2f0cb79aafc60a6b2ed0704c4",
+      "source_revision": "0d77e6cd1c350c20334d43021a186753231398a4",
+      "state": "RUNNING",
+      "submission_record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-core-request.json",
+      "submission_record_sha256": "8fea9a74a86db1146707c654da83a34118be56283cf2df16bd89c5d6e40c2a93",
+      "wall_time": "08:00:00"
+    },
+    {
+      "build_parallelism": 4,
+      "build_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/jit-build",
+      "cpus_per_task": 6,
+      "eigen": "OFF",
+      "id": "jit",
+      "jit": "ON",
+      "job_id": "42068499",
+      "llvm": "17.0.6",
+      "outcome": null,
+      "requested_memory_mib": 38000,
+      "requested_nodes": 1,
+      "result_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/jit-42068499",
+      "script_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-jit.sbatch",
+      "script_sha256": "b10ebd78700766067914bdff009315dc6e530e46a2ed0949ace07ba0cc4dc2cf",
+      "source_revision": "0d77e6cd1c350c20334d43021a186753231398a4",
+      "state": "PENDING",
+      "submission_record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-jit-request.json",
+      "submission_record_sha256": "7da58a93c7ef26f8a62940860bcd4ac11350d1d4e58b093e57bceba1e00e7537",
+      "wall_time": "04:00:00"
+    }
+  ],
+  "record_type": "free_surface_architecture_refactor_baseline",
+  "remaining_r0_work": [
+    "Inspect configured toolchain, compiler flags and numerical build settings.",
+    "Record exact test discovery and source-bound input/effective-policy inventory.",
+    "Execute and retain representative serial/MPI suites and physical prerequisites.",
+    "Capture stable operator/history/geometry references and baseline performance.",
+    "Freeze numerical comparison tolerances before candidate evaluation."
+  ],
+  "reviewed_revision": "905239de40b41aa3ca615305516b600e640d95e4",
+  "schema_version": 1,
+  "scope_boundary": [
+    "This manifest does not declare any baseline suite passing until its process exits and retained results are inspected.",
+    "Prerequisite tests do not close open physical qualification gates.",
+    "The original dirty worktree is preserved separately and excluded from the committed-source baseline.",
+    "JIT OFF and JIT ON are independent explicitly configured profiles; automatic availability is not evidence of JIT execution."
+  ],
+  "status": "IN_PROGRESS"
+}

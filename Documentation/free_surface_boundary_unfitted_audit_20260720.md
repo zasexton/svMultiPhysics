@@ -17,7 +17,7 @@ Implementation of [the architecture refactoring plan](free_surface_architecture_
 - **WP-4 boundary:** Surface/wall/pressure signs, production force definitions, tangent/synchronization policies, static-capillary acceptance thresholds and open qualification requirements are preserved during structural moves. Relocation is not new evidence of balanced capillary behavior or WP-4 closure. Existing physical campaigns and their immutable source/build/input records remain separate.
 - **Coordination practice:** Re-read shared files and current Git state before edits; stage only owned changes; retain ordinary forward commits and push them to this branch. A shared-file move will identify the replacement path/API here so the physical work can follow it.
 - **Validation isolation:** Refactoring builds and outputs use their own source snapshot and scratch directory. Existing WP-4 build caches and jobs are read-only to this work.
-- **Compute ownership:** Only Slurm job IDs entered at submission in [the refactoring job ledger](free_surface_refactor_job_ledger_20260904.md) may be modified by this work. The allocation ceiling is four nodes and 80 GB aggregate requested memory on `amarsden`, including pending reservations. No jobs have been submitted at this checkpoint.
+- **Compute ownership:** Only Slurm job IDs entered at submission in [the refactoring job ledger](free_surface_refactor_job_ledger_20260904.md) may be modified by this work. The allocation ceiling is four nodes and 80 GB aggregate requested memory on `amarsden`, including pending reservations. Owned baseline jobs are `42068077` (integrated, JIT OFF) and `42068499` (standalone FE, LLVM JIT ON). Their combined request is two nodes and 76,000 MiB; the latest live state is recorded in that ledger.
 
 ### Refactoring progress
 
@@ -25,6 +25,7 @@ Implementation of [the architecture refactoring plan](free_surface_architecture_
 |---|---|---|---|
 | 2026-09-04 | R0 | Recorded authorization, starting source state, shared-file boundary and exclusive job ownership | Capture reproducible source/build/configuration baseline and execute baseline checks |
 | 2026-09-04 | R0 | Integrated the coordination documents on the newer WP-4 source without modifying the original dirty checkout | Freeze `0d77e6cd` for baseline execution; review capability evidence and record source/input hashes |
+| 2026-09-04 | R0 | Froze `0d77e6cd` in an independent source checkout; hashed 3,961 source/input files with all selected LFS inputs materialized; retained the original dirty source patch separately; submitted two owned baseline profiles | Execute the queued jobs; record numerical references, tolerance selection, effective policy and performance in the [baseline manifest](../tests/cases/fluid/free_surface_refactor_baseline.json) |
 
 ## Executive verdict
 
