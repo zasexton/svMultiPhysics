@@ -64,6 +64,42 @@ protected:
 
 using DiagnosticFields = std::map<std::string, std::string>;
 
+void recordMaintenanceSchedule(
+    std::string_view property_prefix,
+    const CanonicalLevelSetMaintenanceSchedule& schedule,
+    std::optional<double> measured_target = std::nullopt,
+    std::optional<bool> initialized = std::nullopt)
+{
+  const auto word_hex = [](std::uint64_t word) {
+    std::ostringstream stream;
+    stream << "0x" << std::hex << std::nouppercase << std::setfill('0')
+           << std::setw(16) << word;
+    return stream.str();
+  };
+  std::ostringstream words;
+  for (std::size_t index = 0u; index < schedule.words.size(); ++index) {
+    if (index != 0u) {
+      words << ' ';
+    }
+    words << word_hex(schedule.words[index]);
+  }
+  const std::string prefix(property_prefix);
+  testing::Test::RecordProperty(
+      prefix + "_supported", schedule.supported ? "true" : "false");
+  testing::Test::RecordProperty(
+      prefix + "_word_count", std::to_string(schedule.words.size()));
+  testing::Test::RecordProperty(prefix + "_words_v4", words.str());
+  if (measured_target.has_value()) {
+    testing::Test::RecordProperty(
+        prefix + "_measured_target_word",
+        word_hex(std::bit_cast<std::uint64_t>(*measured_target)));
+  }
+  if (initialized.has_value()) {
+    testing::Test::RecordProperty(
+        prefix + "_initialized", *initialized ? "true" : "false");
+  }
+}
+
 std::vector<DiagnosticFields> parseDiagnosticRecords(
     std::string_view message,
     std::string_view record_name)
@@ -6161,6 +6197,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
   ASSERT_TRUE(canonical.supported);
   ASSERT_FALSE(canonical.words.empty());
   EXPECT_EQ(canonical.words.front(), 4u);
+  recordMaintenanceSchedule(
+      "r1_static_controls_baseline", canonical);
   auto changed_requests = requests;
   changed_requests.front()
       .static_capillary_equilibrium
@@ -6172,6 +6210,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
               TransientInitialization,
           /*completed_step=*/0);
   EXPECT_NE(canonical.words, changed.words);
+  recordMaintenanceSchedule(
+      "r1_static_controls_physical_residual", changed);
   changed_requests = requests;
   ++changed_requests.front()
         .static_capillary_equilibrium
@@ -6183,6 +6223,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
               TransientInitialization,
           /*completed_step=*/0);
   EXPECT_NE(canonical.words, changed_history.words);
+  recordMaintenanceSchedule(
+      "r1_static_controls_history_size", changed_history);
   changed_requests = requests;
   changed_requests.front()
       .static_capillary_equilibrium
@@ -6194,6 +6236,46 @@ TEST(ApplicationDriverLevelSetWorkflows,
               TransientInitialization,
           /*completed_step=*/0);
   EXPECT_NE(canonical.words, changed_curvature_tolerance.words);
+  recordMaintenanceSchedule(
+      "r1_static_controls_curvature_tolerance",
+      changed_curvature_tolerance);
+
+  const auto accepted_before =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          requests,
+          LevelSetMaintenanceScheduleStage::TransientInitialization,
+          /*completed_step=*/0);
+  auto trial_requests = requests;
+  trial_requests.front()
+      .static_capillary_equilibrium.target_liquid_volume = 1.25;
+  trial_requests.front().static_capillary_equilibrium_initialized = true;
+  trial_requests.front().volume_target_initialized = true;
+  trial_requests.front().volume_target = 2.5;
+  trial_requests.front()
+      .volume_correction_reference_minimum_edge_length = 0.125;
+  trial_requests.front()
+      .cumulative_volume_correction_interface_displacement = 0.375;
+  trial_requests.front()
+      .cumulative_volume_correction_contact_line_displacement = -0.625;
+  const auto trial = canonicalLevelSetMaintenanceRequestSchedule(
+      trial_requests,
+      LevelSetMaintenanceScheduleStage::TransientInitialization,
+      /*completed_step=*/0);
+  const auto accepted_after =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          requests,
+          LevelSetMaintenanceScheduleStage::TransientInitialization,
+          /*completed_step=*/0);
+  EXPECT_NE(accepted_before.words, trial.words);
+  EXPECT_EQ(accepted_before.words, accepted_after.words);
+  EXPECT_TRUE(accepted_before.supported);
+  EXPECT_TRUE(trial.supported);
+  EXPECT_TRUE(accepted_after.supported);
+  recordMaintenanceSchedule(
+      "r1_static_state_accepted_before", accepted_before);
+  recordMaintenanceSchedule("r1_static_state_trial", trial);
+  recordMaintenanceSchedule(
+      "r1_static_state_accepted_after", accepted_after);
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
@@ -6233,6 +6315,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
       LevelSetMaintenanceScheduleStage::TransientInitialization,
       /*completed_step=*/0);
   ASSERT_TRUE(canonical.supported);
+  recordMaintenanceSchedule(
+      "r1_curvature_controls_baseline", canonical);
   auto changed_requests = requests;
   changed_requests.front().curvature_projection.recovery_mode =
       svmp::FE::level_set::LevelSetCurvatureRecoveryMode::LevelSetQuadratic;
@@ -6241,6 +6325,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
       LevelSetMaintenanceScheduleStage::TransientInitialization,
       /*completed_step=*/0);
   EXPECT_NE(canonical.words, changed.words);
+  recordMaintenanceSchedule(
+      "r1_curvature_controls_recovery", changed);
   changed_requests = requests;
   changed_requests.front()
       .curvature_projection
@@ -6250,6 +6336,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
       LevelSetMaintenanceScheduleStage::TransientInitialization,
       /*completed_step=*/0);
   EXPECT_NE(canonical.words, changed_filter.words);
+  recordMaintenanceSchedule(
+      "r1_curvature_controls_filter", changed_filter);
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
@@ -6340,6 +6428,12 @@ TEST(ApplicationDriverLevelSetWorkflows,
                    .kinematic_area_gradient_negative_liquid_side);
   EXPECT_TRUE(default_orders.front().curvature_projection
                   .kinematic_area_gradient_young_walls.empty());
+  recordMaintenanceSchedule(
+      "r1_kinematic_bind_failed_default_order",
+      canonicalLevelSetMaintenanceRequestSchedule(
+          default_orders,
+          LevelSetMaintenanceScheduleStage::TransientInitialization,
+          /*completed_step=*/0));
 
   auto linear_order = request;
   linear_order.volume_cut_request->interface_quadrature_order = 1;
@@ -6349,6 +6443,12 @@ TEST(ApplicationDriverLevelSetWorkflows,
                    .kinematic_area_gradient_negative_liquid_side);
   EXPECT_TRUE(linear_orders.front().curvature_projection
                   .kinematic_area_gradient_young_walls.empty());
+  recordMaintenanceSchedule(
+      "r1_kinematic_bind_failed_linear_order",
+      canonicalLevelSetMaintenanceRequestSchedule(
+          linear_orders,
+          LevelSetMaintenanceScheduleStage::TransientInitialization,
+          /*completed_step=*/0));
 
   auto quadratic_order = request;
   quadratic_order.volume_cut_request->interface_quadrature_order = 2;
@@ -6367,8 +6467,20 @@ TEST(ApplicationDriverLevelSetWorkflows,
   std::vector<LevelSetMaintenanceRequest> explicit_linear_orders{
       explicit_linear_order};
   EXPECT_THROW(bind_one(explicit_linear_orders), std::runtime_error);
+  recordMaintenanceSchedule(
+      "r1_kinematic_bind_failed_explicit_linear_order",
+      canonicalLevelSetMaintenanceRequestSchedule(
+          explicit_linear_orders,
+          LevelSetMaintenanceScheduleStage::TransientInitialization,
+          /*completed_step=*/0));
 
   std::vector<LevelSetMaintenanceRequest> requests{request};
+  const auto before_binding = canonicalLevelSetMaintenanceRequestSchedule(
+      requests,
+      LevelSetMaintenanceScheduleStage::TransientInitialization,
+      /*completed_step=*/0);
+  recordMaintenanceSchedule(
+      "r1_kinematic_bind_before", before_binding);
   ASSERT_NO_THROW(bindKinematicAreaGradientTractionMaintenance(
       system, requests));
   ASSERT_EQ(requests.size(), 1u);
@@ -6395,6 +6507,46 @@ TEST(ApplicationDriverLevelSetWorkflows,
       LevelSetMaintenanceScheduleStage::TransientInitialization,
       /*completed_step=*/0);
   ASSERT_TRUE(canonical.supported);
+  EXPECT_NE(before_binding.words, canonical.words);
+  recordMaintenanceSchedule(
+      "r1_kinematic_bind_after", canonical);
+
+  auto negative_side_request = request;
+  negative_side_request.curvature_projection
+      .kinematic_area_gradient_negative_liquid_side = true;
+  std::vector<LevelSetMaintenanceRequest> negative_side_requests{
+      negative_side_request};
+  const auto negative_side_before =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          negative_side_requests,
+          LevelSetMaintenanceScheduleStage::TransientInitialization,
+          /*completed_step=*/0);
+  ASSERT_NO_THROW(bindKinematicAreaGradientTractionMaintenance(
+      system, negative_side_requests));
+  EXPECT_FALSE(
+      negative_side_requests.front().curvature_projection
+          .kinematic_area_gradient_negative_liquid_side);
+  const auto negative_side_after =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          negative_side_requests,
+          LevelSetMaintenanceScheduleStage::TransientInitialization,
+          /*completed_step=*/0);
+  EXPECT_NE(negative_side_before.words, negative_side_after.words);
+  recordMaintenanceSchedule(
+      "r1_kinematic_bind_negative_side_before", negative_side_before);
+  recordMaintenanceSchedule(
+      "r1_kinematic_bind_negative_side_after", negative_side_after);
+
+  ASSERT_NO_THROW(bindKinematicAreaGradientTractionMaintenance(
+      system, requests));
+  const auto repeated_binding =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          requests,
+          LevelSetMaintenanceScheduleStage::TransientInitialization,
+          /*completed_step=*/0);
+  EXPECT_EQ(repeated_binding.words, canonical.words);
+  recordMaintenanceSchedule(
+      "r1_kinematic_bind_repeated", repeated_binding);
   auto changed = requests;
   changed.front()
       .curvature_projection
@@ -6446,6 +6598,47 @@ TEST(ApplicationDriverLevelSetWorkflows,
       bindKinematicAreaGradientTractionMaintenance(
           system, wrong_recovery),
       std::runtime_error);
+
+  auto declarations =
+      system.freeSurfaceDiscreteFunctionalDeclarations();
+  ASSERT_EQ(declarations.size(), 1u);
+  auto& mutable_declaration = const_cast<
+      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration&>(
+      declarations.front());
+  ASSERT_EQ(
+      mutable_declaration.parameters.young_wall_coefficients.size(), 2u);
+  const auto saved_declaration_walls =
+      mutable_declaration.parameters.young_wall_coefficients;
+  mutable_declaration.parameters.young_wall_coefficients.front()
+      .equilibrium_contact_angle_radians += 0.125;
+  EXPECT_THROW(
+      bindKinematicAreaGradientTractionMaintenance(system, requests),
+      std::runtime_error);
+  mutable_declaration.parameters.young_wall_coefficients =
+      saved_declaration_walls;
+  ASSERT_EQ(
+      requests.front().curvature_projection
+          .kinematic_area_gradient_young_walls.size(),
+      2u);
+  EXPECT_DOUBLE_EQ(
+      requests.front().curvature_projection
+          .kinematic_area_gradient_young_walls[0]
+          .equilibrium_contact_angle_radians,
+      0.9);
+  EXPECT_DOUBLE_EQ(
+      requests.front().curvature_projection
+          .kinematic_area_gradient_young_walls[1]
+          .equilibrium_contact_angle_radians,
+      2.1);
+  const auto changed_declaration_failure =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          requests,
+          LevelSetMaintenanceScheduleStage::TransientInitialization,
+          /*completed_step=*/0);
+  EXPECT_EQ(changed_declaration_failure.words, canonical.words);
+  recordMaintenanceSchedule(
+      "r1_kinematic_bind_changed_declaration_failure",
+      changed_declaration_failure);
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
@@ -8802,6 +8995,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
       "registered, finalized, dimension-compatible unknown vector volume field");
   mutable_declaration.velocity_field = saved_velocity_field;
 
+  const auto initialization_entry =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          requests,
+          LevelSetMaintenanceScheduleStage::TransientInitialization,
+          /*completed_step=*/0);
+  recordMaintenanceSchedule(
+      "r1_static_failed_initialization_entry", initialization_entry);
   std::string failure;
   try {
     (void)initializeDiscreteStaticCapillaryEquilibrium(
@@ -8819,6 +9019,25 @@ TEST(ApplicationDriverLevelSetWorkflows,
       std::string::npos)
       << failure;
   EXPECT_FALSE(
+      requests.front().static_capillary_equilibrium_initialized);
+  EXPECT_NE(
+      requests.front().static_capillary_equilibrium.target_liquid_volume,
+      target_volume_before_body_force_rejection);
+  EXPECT_GT(
+      requests.front().static_capillary_equilibrium.target_liquid_volume,
+      0.0);
+  const auto failed_return =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          requests,
+          LevelSetMaintenanceScheduleStage::TransientInitialization,
+          /*completed_step=*/0);
+  EXPECT_NE(initialization_entry.words, failed_return.words);
+  recordMaintenanceSchedule(
+      "r1_static_failed_initialization_catch",
+      failed_return,
+      static_cast<double>(requests.front()
+                              .static_capillary_equilibrium
+                              .target_liquid_volume),
       requests.front().static_capillary_equilibrium_initialized);
   EXPECT_EQ(
       gatherFeOrderedSolution(sim.time_history->u()),
@@ -9210,6 +9429,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
   }
   EXPECT_GT(maximum_pressure_update, svmp::FE::Real{0.0});
 
+  const auto initialization_entry =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          requests,
+          LevelSetMaintenanceScheduleStage::TransientInitialization,
+          /*completed_step=*/0);
+  recordMaintenanceSchedule(
+      "r1_static_successful_initialization_entry", initialization_entry);
   bool initialized = false;
   ASSERT_NO_THROW(
       initialized =
@@ -9227,6 +9453,19 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .static_capillary_equilibrium
           .target_liquid_volume,
       0.0);
+  const auto successful_return =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          requests,
+          LevelSetMaintenanceScheduleStage::TransientInitialization,
+          /*completed_step=*/0);
+  EXPECT_NE(initialization_entry.words, successful_return.words);
+  recordMaintenanceSchedule(
+      "r1_static_successful_initialization_return",
+      successful_return,
+      static_cast<double>(requests.front()
+                              .static_capillary_equilibrium
+                              .target_liquid_volume),
+      requests.front().static_capillary_equilibrium_initialized);
   EXPECT_FALSE(
       sim.fe_system->cutIntegrationContextTransactionActive());
   EXPECT_FALSE(lifecycle.transactionActive());
@@ -17895,6 +18134,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
   request.reinitialization.max_iterations = 100;
   request.reinitialization.signed_distance_tolerance = 1.0e-10;
   std::vector<LevelSetMaintenanceRequest> requests{request};
+  const auto request_before_maintenance =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          requests,
+          LevelSetMaintenanceScheduleStage::AcceptedEndpointPostStep,
+          history.stepIndex());
+  recordMaintenanceSchedule(
+      "r1_converged_history_request_before", request_before_maintenance);
   std::vector<application::core::LevelSetMaintenanceWorkSubstage>
       observed_substages;
   std::vector<std::pair<std::uint64_t, std::uint64_t>>
@@ -17927,6 +18173,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
       {},
       observe_stage);
   const auto output = testing::internal::GetCapturedStdout();
+  const auto request_after_maintenance =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          requests,
+          LevelSetMaintenanceScheduleStage::AcceptedEndpointPostStep,
+          history.stepIndex());
+  recordMaintenanceSchedule(
+      "r1_converged_history_request_after", request_after_maintenance);
   ASSERT_TRUE(changed);
   EXPECT_NE(output.find("temporal_increments=preserved"), std::string::npos);
   ASSERT_EQ(observed_substages.size(), 1u);
@@ -18086,6 +18339,8 @@ TEST(ApplicationDriverLevelSetMaintenance,
       LevelSetMaintenanceScheduleStage::TransientInitialization,
       /*completed_step=*/0);
   ASSERT_TRUE(canonical.supported);
+  recordMaintenanceSchedule(
+      "r1_boundary_flux_policy_balanced", canonical);
   auto changed = requests;
   changed.front().conservative_phase.boundary_flux_policy =
       svmp::FE::level_set::
@@ -18097,6 +18352,165 @@ TEST(ApplicationDriverLevelSetMaintenance,
           LevelSetMaintenanceScheduleStage::TransientInitialization,
           /*completed_step=*/0);
   EXPECT_NE(canonical.words, changed_canonical.words);
+  recordMaintenanceSchedule(
+      "r1_boundary_flux_policy_closed", changed_canonical);
+}
+
+TEST(ApplicationDriverLevelSetMaintenance,
+     CanonicalScheduleMatrixPreservesStagesActionsOrderingTargetsAndSupport)
+{
+  const std::vector<LevelSetMaintenanceRequest> empty_requests;
+  const auto empty_steady = canonicalLevelSetMaintenanceRequestSchedule(
+      empty_requests,
+      LevelSetMaintenanceScheduleStage::SteadyInitialization,
+      /*completed_step=*/0);
+  const auto empty_transient = canonicalLevelSetMaintenanceRequestSchedule(
+      empty_requests,
+      LevelSetMaintenanceScheduleStage::TransientInitialization,
+      /*completed_step=*/0);
+  ASSERT_TRUE(empty_steady.supported);
+  ASSERT_TRUE(empty_transient.supported);
+  ASSERT_EQ(empty_steady.words.size(), 5u);
+  ASSERT_EQ(empty_transient.words.size(), 5u);
+  EXPECT_EQ(empty_steady.words[0], 4u);
+  EXPECT_EQ(empty_steady.words[4], 0u);
+  EXPECT_EQ(empty_transient.words[4], 0u);
+  EXPECT_NE(empty_steady.words, empty_transient.words);
+  recordMaintenanceSchedule("r1_matrix_empty_steady_step_0", empty_steady);
+  recordMaintenanceSchedule(
+      "r1_matrix_empty_transient_step_0", empty_transient);
+
+  LevelSetMaintenanceRequest first;
+  first.level_set_field_name = "phi_alpha";
+  first.velocity.source =
+      svmp::FE::level_set::LevelSetVelocitySource::ConstantVector;
+  first.velocity.constant_value = {{0.25, -0.5, 0.75}};
+  first.bound_preserving.enabled = true;
+  first.reinitialization.enabled = true;
+  first.reinitialization.cadence_steps = 2;
+  first.volume_correction.enabled = true;
+  first.volume_correction.cadence_steps = 6;
+  first.curvature_projection_enabled = true;
+  first.curvature_projection_cadence_steps = 6;
+
+  LevelSetMaintenanceRequest second;
+  second.level_set_field_name = "phi_beta";
+  second.velocity.source =
+      svmp::FE::level_set::LevelSetVelocitySource::CoupledField;
+  second.velocity.field_name = "velocity_beta";
+  second.conservative_phase.enabled = true;
+  second.conservative_phase.liquid_indicator.field_name = "phase_beta";
+  second.conservative_phase.write_flux_artifacts = true;
+  second.conservative_phase.flux_artifact_cadence_steps = 2;
+  second.conservative_phase.reconcile_geometry = true;
+  second.reinitialization.enabled = true;
+  second.reinitialization.cadence_steps = 3;
+  second.volume_correction.enabled = true;
+  second.volume_correction.cadence_steps = 2;
+  second.static_capillary_equilibrium_enabled = true;
+  svmp::FE::level_set::LevelSetP1PhaseTransportGraph second_graph;
+  second_graph.success = true;
+  second_graph.partition_of_unity_satisfied = true;
+  second_graph.dimension = 2;
+  second_graph.parallel_size = 1;
+  second_graph.cells = 1u;
+  second_graph.nodes = 2u;
+  second_graph.dof_layout_revision = 29u;
+  second_graph.lumped_control_volume = {0.5, 0.5};
+  second_graph.diagonal_gradient.resize(2u);
+  second_graph.boundary_column_sum.resize(2u);
+  second.conservative_phase_graph = std::move(second_graph);
+
+  const std::vector<LevelSetMaintenanceRequest> ordered{first, second};
+  EXPECT_FALSE(ordered[0].conservative_phase_graph.has_value());
+  EXPECT_TRUE(ordered[1].conservative_phase_graph.has_value());
+  struct MatrixCase {
+    const char* property;
+    LevelSetMaintenanceScheduleStage stage;
+    int completed_step;
+    std::uint64_t aggregate_action_bits;
+  };
+  const std::array<MatrixCase, 8> cases{{
+      {"r1_matrix_two_steady_step_0",
+       LevelSetMaintenanceScheduleStage::SteadyInitialization, 0, 3867u},
+      {"r1_matrix_two_transient_step_0",
+       LevelSetMaintenanceScheduleStage::TransientInitialization, 0, 3867u},
+      {"r1_matrix_two_prospective_step_1",
+       LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint, 1,
+       3355u},
+      {"r1_matrix_two_prospective_step_2",
+       LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint, 2,
+       4027u},
+      {"r1_matrix_two_prospective_step_6",
+       LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint, 6,
+       4095u},
+      {"r1_matrix_two_post_step_1",
+       LevelSetMaintenanceScheduleStage::AcceptedEndpointPostStep, 1,
+       3355u},
+      {"r1_matrix_two_post_step_2",
+       LevelSetMaintenanceScheduleStage::AcceptedEndpointPostStep, 2,
+       4027u},
+      {"r1_matrix_two_post_step_6",
+       LevelSetMaintenanceScheduleStage::AcceptedEndpointPostStep, 6,
+       4095u},
+  }};
+  for (const auto& matrix_case : cases) {
+    const auto schedule = canonicalLevelSetMaintenanceRequestSchedule(
+        ordered, matrix_case.stage, matrix_case.completed_step);
+    ASSERT_TRUE(schedule.supported) << matrix_case.property;
+    ASSERT_GT(schedule.words.size(), 5u) << matrix_case.property;
+    EXPECT_EQ(schedule.words[0], 4u) << matrix_case.property;
+    EXPECT_EQ(schedule.words[3], 2u) << matrix_case.property;
+    EXPECT_EQ(schedule.words[4], matrix_case.aggregate_action_bits)
+        << matrix_case.property;
+    recordMaintenanceSchedule(matrix_case.property, schedule);
+  }
+
+  auto measured = ordered;
+  measured[1].static_capillary_equilibrium.target_liquid_volume = 8.5;
+  measured[1].static_capillary_equilibrium_initialized = true;
+  const auto configured_target = canonicalLevelSetMaintenanceRequestSchedule(
+      ordered,
+      LevelSetMaintenanceScheduleStage::TransientInitialization,
+      /*completed_step=*/0);
+  const auto measured_target = canonicalLevelSetMaintenanceRequestSchedule(
+      measured,
+      LevelSetMaintenanceScheduleStage::TransientInitialization,
+      /*completed_step=*/0);
+  EXPECT_NE(configured_target.words, measured_target.words);
+  recordMaintenanceSchedule(
+      "r1_matrix_configured_target", configured_target);
+  recordMaintenanceSchedule("r1_matrix_measured_target", measured_target);
+
+  auto reversed = ordered;
+  std::reverse(reversed.begin(), reversed.end());
+  const auto reversed_schedule = canonicalLevelSetMaintenanceRequestSchedule(
+      reversed,
+      LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint,
+      /*completed_step=*/2);
+  EXPECT_NE(
+      reversed_schedule.words,
+      canonicalLevelSetMaintenanceRequestSchedule(
+          ordered,
+          LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint,
+          /*completed_step=*/2)
+          .words);
+  recordMaintenanceSchedule("r1_matrix_reversed_order", reversed_schedule);
+
+  auto unsupported = ordered;
+  unsupported.front().velocity.space =
+      svmp::FE::spaces::SpaceFactory::create_h1(
+          svmp::FE::ElementType::Triangle3,
+          /*order=*/1);
+  const auto unsupported_schedule =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          unsupported,
+          LevelSetMaintenanceScheduleStage::TransientInitialization,
+          /*completed_step=*/0);
+  EXPECT_FALSE(unsupported_schedule.supported);
+  recordMaintenanceSchedule(
+      "r1_matrix_nonempty_velocity_space_unsupported",
+      unsupported_schedule);
 }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -18498,6 +18912,112 @@ protected:
   ActiveCutContextRefreshCache refresh_cache_{};
   std::vector<svmp::FE::Real> initialized_solution_{};
 };
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       RequestCopyIsolatesGraphVectorsMetadataAndRuntimeTargets)
+{
+  ASSERT_EQ(requests_.size(), 1u);
+  ASSERT_TRUE(requests_.front().conservative_phase_graph.has_value());
+  const auto& accepted_graph =
+      *requests_.front().conservative_phase_graph;
+  ASSERT_FALSE(accepted_graph.lumped_control_volume.empty());
+  const auto accepted_lumped_value =
+      accepted_graph.lumped_control_volume.front();
+  const auto accepted_layout_revision = accepted_graph.dof_layout_revision;
+  const std::array<std::uint64_t, 4> accepted_rank_local_stamps{{
+      accepted_graph.geometry_revision,
+      accepted_graph.topology_revision,
+      accepted_graph.ownership_revision,
+      accepted_graph.numbering_revision}};
+  const auto accepted_static_target =
+      requests_.front().static_capillary_equilibrium.target_liquid_volume;
+  const auto accepted_volume_target = requests_.front().volume_target;
+  const auto accepted_before =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          requests_,
+          LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint,
+          /*completed_step=*/2);
+
+  auto trial = requests_;
+  ASSERT_TRUE(trial.front().conservative_phase_graph.has_value());
+  EXPECT_EQ(
+      trial.front().conservative_phase_graph->collective_state,
+      accepted_graph.collective_state);
+  trial.front().conservative_phase_graph->lumped_control_volume.front() +=
+      svmp::FE::Real{0.25};
+  trial.front().conservative_phase_graph->geometry_revision += 11u;
+  trial.front().conservative_phase_graph->topology_revision += 13u;
+  trial.front().conservative_phase_graph->ownership_revision += 17u;
+  trial.front().conservative_phase_graph->numbering_revision += 19u;
+  EXPECT_NE(
+      trial.front().conservative_phase_graph->lumped_control_volume.front(),
+      accepted_lumped_value);
+  const auto vector_only = canonicalLevelSetMaintenanceRequestSchedule(
+      trial,
+      LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint,
+      /*completed_step=*/2);
+  EXPECT_EQ(vector_only.words, accepted_before.words);
+
+  ++trial.front().conservative_phase_graph->dof_layout_revision;
+  const auto layout_only = canonicalLevelSetMaintenanceRequestSchedule(
+      trial,
+      LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint,
+      /*completed_step=*/2);
+  EXPECT_NE(layout_only.words, accepted_before.words);
+  trial.front().static_capillary_equilibrium.target_liquid_volume = 3.25;
+  trial.front().static_capillary_equilibrium_initialized = true;
+  trial.front().volume_target = 4.5;
+  trial.front().volume_target_initialized = true;
+  trial.front().volume_correction_reference_minimum_edge_length = 0.125;
+  trial.front().cumulative_volume_correction_interface_displacement = 0.25;
+  trial.front().cumulative_volume_correction_contact_line_displacement =
+      -0.375;
+  const auto changed_trial = canonicalLevelSetMaintenanceRequestSchedule(
+      trial,
+      LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint,
+      /*completed_step=*/2);
+  EXPECT_NE(changed_trial.words, accepted_before.words);
+
+  EXPECT_DOUBLE_EQ(
+      requests_.front().conservative_phase_graph
+          ->lumped_control_volume.front(),
+      accepted_lumped_value);
+  EXPECT_EQ(
+      requests_.front().conservative_phase_graph->dof_layout_revision,
+      accepted_layout_revision);
+  EXPECT_EQ(
+      (std::array<std::uint64_t, 4>{{
+          requests_.front().conservative_phase_graph->geometry_revision,
+          requests_.front().conservative_phase_graph->topology_revision,
+          requests_.front().conservative_phase_graph->ownership_revision,
+          requests_.front().conservative_phase_graph->numbering_revision}}),
+      accepted_rank_local_stamps);
+  EXPECT_DOUBLE_EQ(
+      requests_.front().static_capillary_equilibrium.target_liquid_volume,
+      accepted_static_target);
+  EXPECT_DOUBLE_EQ(
+      requests_.front().volume_target, accepted_volume_target);
+  EXPECT_FALSE(requests_.front().volume_target_initialized);
+  trial.front().conservative_phase_graph.reset();
+  EXPECT_TRUE(requests_.front().conservative_phase_graph.has_value());
+
+  const auto accepted_after =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          requests_,
+          LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint,
+          /*completed_step=*/2);
+  EXPECT_EQ(accepted_after.words, accepted_before.words);
+  recordMaintenanceSchedule(
+      "r1_request_copy_accepted_before", accepted_before);
+  recordMaintenanceSchedule(
+      "r1_request_copy_omitted_graph_state_trial", vector_only);
+  recordMaintenanceSchedule(
+      "r1_request_copy_layout_only_trial", layout_only);
+  recordMaintenanceSchedule(
+      "r1_request_copy_metadata_target_trial", changed_trial);
+  recordMaintenanceSchedule(
+      "r1_request_copy_accepted_after", accepted_after);
+}
 
 TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
        ActiveCutRefreshObserverSeesVectorAndSpanCachePaths)
@@ -19586,9 +20106,23 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   requests_.front().reinitialization.cadence_steps = 1;
   requests_.front().reinitialization.max_iterations = 100;
   requests_.front().reinitialization.signed_distance_tolerance = 1.0e-10;
+  const auto request_before_candidate =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          requests_,
+          LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint,
+          history().stepIndex() + 1);
+  recordMaintenanceSchedule(
+      "r1_later_rejection_request_before", request_before_candidate);
 
   auto prepared = prepareConservativePhaseCandidateStage();
   auto result = applyPreparedConservativePhaseCandidate(prepared);
+  const auto request_during_candidate =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          requests_,
+          LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint,
+          history().stepIndex() + 1);
+  recordMaintenanceSchedule(
+      "r1_later_rejection_request_trial", request_during_candidate);
   EXPECT_TRUE(result.accept_step);
   EXPECT_TRUE(result.changed);
   if (capture_gate.enabled) {
@@ -19704,6 +20238,14 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   }
 
   ASSERT_NO_THROW(rollbackConservativePhaseCandidate(history(), result));
+  const auto request_after_rollback =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          requests_,
+          LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint,
+          history().stepIndex() + 1);
+  EXPECT_EQ(request_after_rollback.words, request_before_candidate.words);
+  recordMaintenanceSchedule(
+      "r1_later_rejection_request_restored", request_after_rollback);
   EXPECT_EQ(gatherFeOrderedSolution(history().u()), raw_candidate);
   EXPECT_EQ(sim_.fe_system->cutIntegrationContext(), raw_context);
   EXPECT_EQ(lifecycle_.valueRevision(), lifecycle_revision);
@@ -20416,9 +20958,18 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
   request.volume_correction
       .maximum_cumulative_interface_displacement_fraction = 1.0;
   std::vector<LevelSetMaintenanceRequest> requests{request};
+  const auto request_before_failure =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          requests,
+          LevelSetMaintenanceScheduleStage::AcceptedEndpointPostStep,
+          history.stepIndex());
+  recordMaintenanceSchedule(
+      "r1_geometry_failure_request_before", request_before_failure);
   std::vector<LevelSetVolumeCorrectionMaintenanceEvent> published_events;
   std::unique_ptr<LevelSetMaintenanceGeometryTransaction>
       geometry_transaction;
+  std::optional<CanonicalLevelSetMaintenanceSchedule>
+      rejected_trial_schedule;
   bool candidate_context_replaced = false;
   const LevelSetMaintenanceCandidateValidator reject_candidate =
       [&](std::span<const svmp::FE::Real> candidate,
@@ -20427,6 +20978,11 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
           throw std::runtime_error(
               "injected maintenance candidate had incomplete event coverage");
         }
+        rejected_trial_schedule =
+            canonicalLevelSetMaintenanceRequestSchedule(
+                requests,
+                LevelSetMaintenanceScheduleStage::AcceptedEndpointPostStep,
+                history.stepIndex());
         geometry_transaction =
             std::make_unique<LevelSetMaintenanceGeometryTransaction>(
                 sim, lifecycle, refresh_cache, active_requests);
@@ -20457,6 +21013,18 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
   EXPECT_EQ(output.find("Level-set volume corrected"), std::string::npos);
   EXPECT_TRUE(published_events.empty());
   ASSERT_EQ(requests.size(), 1u);
+  ASSERT_TRUE(rejected_trial_schedule.has_value());
+  recordMaintenanceSchedule(
+      "r1_geometry_failure_request_trial",
+      *rejected_trial_schedule);
+  const auto request_after_failure =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          requests,
+          LevelSetMaintenanceScheduleStage::AcceptedEndpointPostStep,
+          history.stepIndex());
+  EXPECT_EQ(request_after_failure.words, request_before_failure.words);
+  recordMaintenanceSchedule(
+      "r1_geometry_failure_request_restored", request_after_failure);
   EXPECT_FALSE(requests.front().volume_target_initialized);
   EXPECT_DOUBLE_EQ(
       requests.front().cumulative_volume_correction_interface_displacement,

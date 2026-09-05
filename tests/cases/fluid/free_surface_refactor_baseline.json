@@ -870,6 +870,39 @@
         "Code/Source/solver/Application/Translators/LevelSetEquationTranslator.cpp": "4121d0174c710ba610aafe0b0513952cd2702c4b9e9522bf77687a709a67bdfd"
       },
       "state": "ACCEPTED_BOUNDED_PRODUCER_AND_SHARED_PARSER"
+    },
+    {
+      "acceptance_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-driver-state-characterization-acceptance/acceptance.json",
+        "sha256": "30cc96447a80ccc3b05c5b48d75548caf6c65dff67f4acd6b3e1732ed686f72e",
+        "size_bytes": 20099
+      },
+      "id": "r1-driver-state-characterization",
+      "limitations": [
+        "Full-suite execution-local revision words are retained separately from focused repeat.",
+        "Production driver migration and lifecycle candidate comparison remain pending."
+      ],
+      "outcome": {
+        "all_two_four_rank_consensus_participants": "passed",
+        "focused_cases": 12,
+        "full_application": 367,
+        "materialized_inputs_verified": 4670,
+        "properties_per_serial_group": 160,
+        "repeated_focused_cases": 12,
+        "schedule_records_per_serial_group": 52,
+        "skipped": 0,
+        "two_rank_schedule_drift": "passed",
+        "xml_file_count": 11
+      },
+      "reviewed_source_hashes_match": true,
+      "scope": "Before-migration schedule/state/binding/setup characterization; source changes confined to three test files. All numerical assertions and production behavior retained.",
+      "source_commit": "ea8fb633f8e0a89ff4173cf2fa83c50a730cebf4",
+      "source_hashes": {
+        "Code/Source/solver/Application/Tests/Unit/test_ApplicationDriverLevelSetWorkflows.cpp": "6500b8a3c31f968e00dc517cb40cc8b362732f956b5fe012ce588ec428d50ff1",
+        "Code/Source/solver/Application/Tests/Unit/test_ApplicationDriverLevelSetWorkflowsMPI.cpp": "5d089ee03bf7b4e0be09b8b3230a1684f34775cf0ff5dec09bc3386256ad8a59",
+        "Code/Source/solver/Application/Tests/Unit/test_OpenVesselExamples.cpp": "1543f298d4ae24ed1e314fbbb459982febf69febda1b0d19ead24a1979ae3a11"
+      },
+      "state": "ACCEPTED_BOUNDED_DRIVER_CHARACTERIZATION"
     }
   ],
   "captured_references": [

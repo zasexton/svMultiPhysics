@@ -2,6 +2,7 @@
 
 #include "Application/Core/LevelSetCutConfiguration.h"
 #include "Application/Core/LevelSetEquationInputSnapshot.h"
+#include "Application/Core/ApplicationDriver.h"
 #include "Application/Core/SimulationBuilder.h"
 #include "Application/Translators/EquationTranslator.h"
 #include "Application/Translators/LevelSetEquationTranslator.h"
@@ -25,6 +26,8 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -32,6 +35,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -434,6 +438,184 @@ fs::path writeBuilderRegressionXml(const fs::path& case_dir)
   }
   return xml_path;
 }
+
+struct DriverSetupRegressionVariant {
+  std::string_view name{};
+  int number_of_time_steps{0};
+  std::string_view transient_scheme{"BackwardEuler"};
+  bool continue_previous_simulation{false};
+  bool zero_newton_iterations{false};
+  bool missing_fitted_inflow_face{false};
+};
+
+struct DriverSetupRegressionPaths {
+  fs::path xml{};
+  fs::path results{};
+};
+
+DriverSetupRegressionPaths writeDriverSetupRegressionXml(
+    const fs::path& case_dir,
+    const DriverSetupRegressionVariant& variant)
+{
+  tinyxml2::XMLDocument doc;
+  loadXml(case_dir / "solver.xml", doc);
+  auto* root = doc.FirstChildElement("svMultiPhysicsFile");
+  if (root == nullptr) {
+    throw std::runtime_error("solver.xml has no svMultiPhysicsFile root");
+  }
+  auto* general = root->FirstChildElement("GeneralSimulationParameters");
+  if (general == nullptr) {
+    throw std::runtime_error(
+        "builder regression requires GeneralSimulationParameters");
+  }
+  auto& fluid =
+      mutableChildWithAttribute(*root, "Add_equation", "type", "fluid");
+  auto& level_set =
+      mutableChildWithAttribute(*root, "Add_equation", "type", "level_set");
+  auto* level_set_solver = level_set.FirstChildElement("LS");
+  auto* fluid_solver = fluid.FirstChildElement("LS");
+  if (level_set_solver == nullptr || fluid_solver == nullptr) {
+    throw std::runtime_error("builder regression requires both LS blocks");
+  }
+
+  const auto nonce = std::chrono::steady_clock::now()
+                         .time_since_epoch()
+                         .count();
+  const auto stem = std::string{"svmp_driver_setup_"} +
+                    std::string(variant.name) + "_" +
+                    std::to_string(nonce);
+  DriverSetupRegressionPaths paths;
+  paths.xml = fs::temp_directory_path() / (stem + ".xml");
+  paths.results = fs::temp_directory_path() / (stem + "_results");
+
+  const auto steps = std::to_string(variant.number_of_time_steps);
+  setOrAppendText(doc, *general, "Number_of_time_steps", steps.c_str());
+  setOrAppendText(doc, *general, "Time_step_size", "0.0025");
+  setOrAppendText(
+      doc,
+      *general,
+      "Continue_previous_simulation",
+      variant.continue_previous_simulation ? "true" : "false");
+  setOrAppendText(
+      doc,
+      *general,
+      "Transient_time_integration_scheme",
+      std::string(variant.transient_scheme).c_str());
+  if (variant.zero_newton_iterations) {
+    setOrAppendText(doc, *general, "Newton_max_iterations", "0");
+  }
+  setOrAppendText(doc, *general, "Save_results_to_VTK_format", "false");
+  setOrAppendText(doc, *general, "Combine_time_series", "false");
+  setOrAppendText(
+      doc,
+      *general,
+      "Save_results_in_folder",
+      paths.results.string().c_str());
+
+  setOrAppendText(doc, *level_set_solver, "Tolerance", "1.0e-6");
+  setOrAppendText(
+      doc, *level_set_solver, "Absolute_tolerance", "1.0e-10");
+  setOrAppendText(doc, *fluid_solver, "Tolerance", "1.0e-4");
+  setOrAppendText(doc, *fluid_solver, "Absolute_tolerance", "1.0e-4");
+  setOrAppendText(doc, fluid, "Enable_level_set_cut_domain", "true");
+  setOrAppendText(doc, fluid, "Level_set_field_name", "phi");
+  setOrAppendText(
+      doc,
+      fluid,
+      "Generated_interface_domain_id",
+      "open_vessel_surface");
+  setOrAppendText(doc, fluid, "Interface_marker", "101");
+  setOrAppendText(doc, fluid, "Active_domain", "LevelSetNegative");
+  setOrAppendText(doc, fluid, "Active_domain_method", "CutVolume");
+  setOrAppendText(
+      doc,
+      level_set,
+      "Curvature_projection_recovery_mode",
+      "invalid_recovery");
+
+  if (variant.missing_fitted_inflow_face) {
+    auto* boundary = doc.NewElement("Add_BC");
+    boundary->SetAttribute("name", "missing_fitted_inflow");
+    auto* type = doc.NewElement("Type");
+    type->SetText("LevelSetInflow");
+    boundary->InsertEndChild(type);
+    auto* value = doc.NewElement("Value");
+    value->SetText("0.0");
+    boundary->InsertEndChild(value);
+    level_set.InsertEndChild(boundary);
+  }
+
+  const auto status = doc.SaveFile(paths.xml.string().c_str());
+  if (status != tinyxml2::XML_SUCCESS) {
+    throw std::runtime_error(
+        "failed to write " + paths.xml.string() + ": " + doc.ErrorStr());
+  }
+  return paths;
+}
+
+class ScopedDriverSetupEnvironment {
+public:
+  ScopedDriverSetupEnvironment()
+  {
+    static constexpr std::array<const char*, 32> keys{{
+        "SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION",
+        "SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION_DENOMINATOR_RELATIVE_TOLERANCE",
+        "SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION_INITIAL_FACTOR",
+        "SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION_MAXIMUM_FACTOR",
+        "SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION_MINIMUM_FACTOR",
+        "SVMP_JACOBIAN_REBUILD_PERIOD",
+        "SVMP_NEWTON_ABS_TOLERANCE",
+        "SVMP_NEWTON_ACCEPT_INEXACT_LINEAR",
+        "SVMP_NEWTON_LINE_SEARCH",
+        "SVMP_NEWTON_LINE_SEARCH_ALPHA_MIN",
+        "SVMP_NEWTON_LINE_SEARCH_C1",
+        "SVMP_NEWTON_LINE_SEARCH_FAIL_ON_NO_REDUCTION",
+        "SVMP_NEWTON_LINE_SEARCH_MAX_ITERATIONS",
+        "SVMP_NEWTON_LINE_SEARCH_SHRINK",
+        "SVMP_NEWTON_PTC",
+        "SVMP_NEWTON_PTC_ACTIVATE_ON_LINEAR_FAILURE",
+        "SVMP_NEWTON_PTC_GAMMA_DROP_TOLERANCE",
+        "SVMP_NEWTON_PTC_GAMMA_GROWTH",
+        "SVMP_NEWTON_PTC_GAMMA_INITIAL",
+        "SVMP_NEWTON_PTC_GAMMA_MAX",
+        "SVMP_NEWTON_PTC_MAX_LINEAR_RETRIES",
+        "SVMP_NEWTON_PTC_UPDATE_FROM_RESIDUAL_RATIO",
+        "SVMP_NEWTON_REL_TOLERANCE",
+        "SVMP_TIMELOOP_ADAPTIVE",
+        "SVMP_TIMELOOP_DECREASE_FACTOR",
+        "SVMP_TIMELOOP_INCREASE_FACTOR",
+        "SVMP_TIMELOOP_LAST_STEP_ABSORB_FRACTION",
+        "SVMP_TIMELOOP_MAX_DT",
+        "SVMP_TIMELOOP_MIN_DT",
+        "SVMP_TIMELOOP_MAX_RETRIES",
+        "SVMP_TIMELOOP_MAX_STEPS_MULTIPLIER",
+        "SVMP_TIMELOOP_TARGET_NEWTON_ITERATIONS",
+    }};
+    original_.reserve(keys.size());
+    for (const char* key : keys) {
+      const char* value = std::getenv(key);
+      original_.emplace_back(
+          key,
+          value == nullptr ? std::optional<std::string>{}
+                           : std::optional<std::string>{value});
+      ::unsetenv(key);
+    }
+  }
+
+  ~ScopedDriverSetupEnvironment()
+  {
+    for (const auto& [key, value] : original_) {
+      if (value.has_value()) {
+        ::setenv(key.c_str(), value->c_str(), 1);
+      } else {
+        ::unsetenv(key.c_str());
+      }
+    }
+  }
+
+private:
+  std::vector<std::pair<std::string, std::optional<std::string>>> original_{};
+};
 
 fs::path writeWetExtensionOrderRegressionXml(const fs::path& case_dir,
                                               bool include_fluid_owner,
@@ -1152,6 +1334,180 @@ TEST(OpenVesselExamples, SimulationBuilderRegistersEquationCutDomainWithUnfitted
 
   std::error_code ec;
   fs::remove(xml_path, ec);
+#endif
+}
+
+TEST(OpenVesselExamples,
+     PublicDriverPreservesBuilderInstallationAndSetupErrorOrder)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  ensure_mpi_initialized_for_open_vessel_builder();
+  const ScopedDriverSetupEnvironment environment;
+  const auto case_dir = openVesselCaseDir("unfitted_level_set");
+  enum class ExceptionCategory { InvalidArgument, RuntimeError };
+  struct ExpectedCase {
+    DriverSetupRegressionVariant variant;
+    ExceptionCategory category;
+    std::string expected_diagnostic;
+    bool builder_succeeds;
+    bool requires_time_advancement;
+  };
+  const std::vector<ExpectedCase> cases{
+      {DriverSetupRegressionVariant{
+           .name = "steady_delayed_maintenance",
+           .number_of_time_steps = 0},
+       ExceptionCategory::InvalidArgument,
+       "level-set curvature recovery mode 'invalid_recovery' must be "
+       "level_set_quadratic, generated_interface_patch, or "
+       "kinematic_area_gradient",
+       true,
+       false},
+      {DriverSetupRegressionVariant{
+           .name = "transient_delayed_maintenance",
+           .number_of_time_steps = 1,
+           .transient_scheme = "BackwardEuler"},
+       ExceptionCategory::InvalidArgument,
+       "level-set curvature recovery mode 'invalid_recovery' must be "
+       "level_set_quadratic, generated_interface_patch, or "
+       "kinematic_area_gradient",
+       true,
+       true},
+      {DriverSetupRegressionVariant{
+           .name = "steady_newton_zero",
+           .number_of_time_steps = 0,
+           .zero_newton_iterations = true},
+       ExceptionCategory::RuntimeError,
+       "[svMultiPhysics::Application] Newton_max_iterations must be positive.",
+       true,
+       false},
+      {DriverSetupRegressionVariant{
+           .name = "transient_continue_previous",
+           .number_of_time_steps = 1,
+           .transient_scheme = "BackwardEuler",
+           .continue_previous_simulation = true},
+       ExceptionCategory::RuntimeError,
+       "[svMultiPhysics::Application] <Continue_previous_simulation> is not "
+       "supported by the new solver yet. Set <Use_new_OOP_solver>false"
+       "</Use_new_OOP_solver> to use the legacy solver.",
+       true,
+       true},
+      {DriverSetupRegressionVariant{
+           .name = "transient_crank_nicolson",
+           .number_of_time_steps = 1,
+           .transient_scheme = "CrankNicolson"},
+       ExceptionCategory::RuntimeError,
+       "[svMultiPhysics::Application] Unsupported "
+       "<Transient_time_integration_scheme> 'CrankNicolson'. Supported "
+       "values are exactly 'GeneralizedAlpha' and 'BackwardEuler'.",
+       true,
+       true},
+      {DriverSetupRegressionVariant{
+           .name = "missing_fitted_inflow_face",
+           .number_of_time_steps = 0,
+           .missing_fitted_inflow_face = true},
+       ExceptionCategory::RuntimeError,
+       "[svMultiPhysics::Application] Boundary condition references face "
+       "'missing_fitted_inflow', but that face is not registered. Ensure "
+       "<Add_face name=\"missing_fitted_inflow\"> exists under the mesh and "
+       "<Add_BC name=\"missing_fitted_inflow\"> references it, or set "
+       "<Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.",
+       false,
+       false},
+  };
+
+  for (const auto& expected : cases) {
+    SCOPED_TRACE(expected.variant.name);
+    const auto builder_paths =
+        writeDriverSetupRegressionXml(case_dir, expected.variant);
+    Parameters params;
+    {
+      const ScopedCurrentPath cwd(case_dir);
+      ASSERT_NO_THROW(params.read_xml(builder_paths.xml.string()));
+      application::core::SimulationBuilder builder(params);
+      if (expected.builder_succeeds) {
+        auto components = builder.build();
+        ASSERT_TRUE(components.fe_system);
+        EXPECT_EQ(components.primary_mesh_name, "tank");
+        ASSERT_EQ(components.physics_modules.size(), 2u);
+        ASSERT_FALSE(
+            components.fe_system
+                ->operatorDefinition("equations")
+                .cut_volumes.empty());
+        EXPECT_TRUE(
+            components.fe_system->formInstallCellDomainRestrictions().empty());
+        const auto phi = components.fe_system->findFieldByName("phi");
+        ASSERT_NE(phi, svmp::FE::INVALID_FIELD_ID);
+        EXPECT_TRUE(
+            components.fe_system->fieldParticipatesInUnknownVector(phi));
+        ASSERT_TRUE(components.time_history);
+        ASSERT_TRUE(components.linear_solver);
+        EXPECT_DOUBLE_EQ(
+            components.linear_solver->getOptions().rel_tol, 1.0e-6);
+        EXPECT_DOUBLE_EQ(
+            components.linear_solver->getOptions().abs_tol, 1.0e-10);
+        const auto resolved = std::find_if(
+            components.resolved_level_set_equations_by_input_index.begin(),
+            components.resolved_level_set_equations_by_input_index.end(),
+            [](const auto& candidate) {
+              return candidate != nullptr;
+            });
+        ASSERT_NE(
+            resolved,
+            components.resolved_level_set_equations_by_input_index.end());
+        ASSERT_TRUE((*resolved)->input_snapshot);
+        ASSERT_TRUE(
+            (*resolved)->input_snapshot->legacy_maintenance_input.has_value());
+        const auto& legacy =
+            *(*resolved)->input_snapshot->legacy_maintenance_input;
+        const auto recovery = legacy.equation_parameters.find(
+            "Curvature_projection_recovery_mode");
+        ASSERT_NE(recovery, legacy.equation_parameters.end());
+        EXPECT_TRUE(recovery->second.defined);
+        EXPECT_EQ(recovery->second.value, "invalid_recovery");
+        EXPECT_TRUE((*resolved)->projected_curvature_fields.empty());
+        if (expected.requires_time_advancement) {
+          EXPECT_TRUE(components.fe_system->requiresTimeAdvancement());
+        }
+      } else {
+        try {
+          (void)builder.build();
+          FAIL() << "Expected builder capture to fail";
+        } catch (const std::runtime_error& error) {
+          EXPECT_EQ(std::string(error.what()), expected.expected_diagnostic);
+        }
+      }
+    }
+
+    const auto driver_paths =
+        writeDriverSetupRegressionXml(case_dir, expected.variant);
+    bool caught_expected_category = false;
+    try {
+      const ScopedCurrentPath cwd(case_dir);
+      application::core::ApplicationDriver::run(
+          driver_paths.xml.string());
+      FAIL() << "Expected public driver setup to fail";
+    } catch (const std::invalid_argument& error) {
+      caught_expected_category =
+          expected.category == ExceptionCategory::InvalidArgument;
+      EXPECT_EQ(std::string(error.what()), expected.expected_diagnostic);
+    } catch (const std::runtime_error& error) {
+      caught_expected_category =
+          expected.category == ExceptionCategory::RuntimeError;
+      EXPECT_EQ(std::string(error.what()), expected.expected_diagnostic);
+    }
+    EXPECT_TRUE(caught_expected_category);
+
+    std::error_code ec;
+    fs::remove(builder_paths.xml, ec);
+    ec.clear();
+    fs::remove_all(builder_paths.results, ec);
+    ec.clear();
+    fs::remove(driver_paths.xml, ec);
+    ec.clear();
+    fs::remove_all(driver_paths.results, ec);
+  }
 #endif
 }
 

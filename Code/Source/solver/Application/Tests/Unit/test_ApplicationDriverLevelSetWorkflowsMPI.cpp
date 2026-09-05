@@ -9200,6 +9200,23 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   first.reinitialization.cadence_steps = 2;
   first.bound_preserving.enabled = true;
   first.static_capillary_equilibrium_enabled = true;
+  first.static_capillary_equilibrium.target_liquid_volume = 1.25;
+  first.curvature_projection
+      .kinematic_area_gradient_negative_liquid_side = false;
+  first.curvature_projection
+      .kinematic_area_gradient_young_walls = {
+          {.boundary_marker = 17,
+           .equilibrium_contact_angle_radians = 0.75}};
+  svmp::FE::level_set::LevelSetP1PhaseTransportGraph first_graph;
+  first_graph.success = true;
+  first_graph.dimension = 2;
+  first_graph.parallel_size = size;
+  first_graph.nodes = 2u;
+  first_graph.dof_layout_revision = 41u;
+  first_graph.lumped_control_volume = {0.4, 0.6};
+  first_graph.diagonal_gradient.resize(2u);
+  first_graph.boundary_column_sum.resize(2u);
+  first.conservative_phase_graph = std::move(first_graph);
 
   LevelSetMaintenanceRequest second;
   second.level_set_field_name = "phi_second";
@@ -9209,12 +9226,14 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   second.reinitialization.cadence_steps = 3;
   second.volume_correction.enabled = true;
   second.volume_correction.cadence_steps = 4;
+  second.volume_target_initialized = true;
+  second.volume_target = 2.5;
   const std::vector<LevelSetMaintenanceRequest> baseline{
       first, second};
 
   using Mutation =
       std::function<void(std::vector<LevelSetMaintenanceRequest>&)>;
-  const std::array<std::pair<const char*, Mutation>, 5> cases{{
+  const std::array<std::pair<const char*, Mutation>, 10> cases{{
       {"request_count",
        [](auto& requests) { requests.pop_back(); }},
       {"request_order",
@@ -9236,6 +9255,30 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
          requests[0]
              .static_capillary_equilibrium
              .constant_pressure_kkt_max_relative_distance *= 2.0;
+       }},
+      {"bound_liquid_side",
+       [](auto& requests) {
+         requests[0]
+             .curvature_projection
+             .kinematic_area_gradient_negative_liquid_side = true;
+       }},
+      {"bound_young_wall_angle",
+       [](auto& requests) {
+         requests[0]
+             .curvature_projection
+             .kinematic_area_gradient_young_walls[0]
+             .equilibrium_contact_angle_radians += 0.125;
+       }},
+      {"measured_static_capillary_target",
+       [](auto& requests) {
+         requests[0]
+             .static_capillary_equilibrium.target_liquid_volume += 0.5;
+       }},
+      {"volume_target",
+       [](auto& requests) { requests[1].volume_target += 0.75; }},
+      {"graph_dof_layout_revision",
+       [](auto& requests) {
+         ++requests[0].conservative_phase_graph->dof_layout_revision;
        }},
   }};
 
@@ -9278,6 +9321,38 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
     EXPECT_EQ(every_rank_rejected, 1) << name;
     EXPECT_EQ(maximum_stage_callback_sentinel, 0) << name;
   }
+
+  int no_drift_callback_sentinel = 0;
+  bool no_drift_rejected = false;
+  try {
+    requireCollectiveLevelSetMaintenanceRequestSchedule(
+        baseline,
+        LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint,
+        /*completed_step=*/6,
+        svmp::MeshComm(MPI_COMM_WORLD));
+    ++no_drift_callback_sentinel;
+  } catch (const std::runtime_error&) {
+    no_drift_rejected = true;
+  }
+  const int local_no_drift_passed = no_drift_rejected ? 0 : 1;
+  int every_rank_no_drift_passed = 0;
+  int minimum_no_drift_callback_sentinel = 0;
+  MPI_Allreduce(
+      &local_no_drift_passed,
+      &every_rank_no_drift_passed,
+      1,
+      MPI_INT,
+      MPI_MIN,
+      MPI_COMM_WORLD);
+  MPI_Allreduce(
+      &no_drift_callback_sentinel,
+      &minimum_no_drift_callback_sentinel,
+      1,
+      MPI_INT,
+      MPI_MIN,
+      MPI_COMM_WORLD);
+  EXPECT_EQ(every_rank_no_drift_passed, 1);
+  EXPECT_EQ(minimum_no_drift_callback_sentinel, 1);
 }
 
 TEST(ApplicationDriverLevelSetWorkflowsMPI,
