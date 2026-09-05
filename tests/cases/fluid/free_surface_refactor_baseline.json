@@ -13,19 +13,93 @@
   },
   "candidate_checks": [
     {
+      "groups": [
+        {
+          "failures": 0,
+          "id": "baseline-physics-options",
+          "passed": 51,
+          "selected": 52,
+          "skipped": [
+            {
+              "case": "BeamMesh_JitParity_ParabolicInflowResistanceOutflow",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_NavierStokesLegacyBCs.cpp:3368\nJIT parity requires FE_ENABLE_LLVM_JIT=ON.\n",
+              "suite": "NavierStokesLegacyBCs"
+            }
+          ],
+          "xml": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r1-options-42080275/baseline-physics-options.xml",
+            "sha256": "35e06e8be18b08c15e51bc738cafd04231ca4dd563e22e3b8b3f05f74c5d1bd3"
+          }
+        },
+        {
+          "failures": 0,
+          "id": "baseline-application-options",
+          "passed": 84,
+          "selected": 84,
+          "skipped": [],
+          "xml": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r1-options-42080275/baseline-application-options.xml",
+            "sha256": "40e8b2baa23c3fbe7bff3edf1bb7d0c146efe9335e517915f54f1920ccab2a00"
+          }
+        },
+        {
+          "failures": 0,
+          "id": "physics-options",
+          "passed": 51,
+          "selected": 52,
+          "skipped": [
+            {
+              "case": "BeamMesh_JitParity_ParabolicInflowResistanceOutflow",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r1-options-source/Code/Source/solver/Physics/Tests/Unit/test_NavierStokesLegacyBCs.cpp:3368\nJIT parity requires FE_ENABLE_LLVM_JIT=ON.\n",
+              "suite": "NavierStokesLegacyBCs"
+            }
+          ],
+          "xml": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r1-options-42080275/physics-options.xml",
+            "sha256": "2c559ae1d0d514617bfdedaafa53ea89c42b4e79d394b36dc8ea13ba3d54f7df"
+          }
+        },
+        {
+          "failures": 0,
+          "id": "application-options",
+          "passed": 84,
+          "selected": 84,
+          "skipped": [],
+          "xml": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r1-options-42080275/application-options.xml",
+            "sha256": "fa4d58dfe59e366006fa3acc04223de916d30a710f8a1797d0c9f8713c0a6ca8"
+          }
+        }
+      ],
       "id": "r1-options",
       "job_id": "42080275",
+      "outcome": "135 passed, one JIT-only skip in both baseline and candidate; five syntax checks passed.",
       "scope": "Public-header/direct-consumer syntax and baseline/candidate focused Physics/Application configuration checks; full R0 references remain uncaptured.",
       "script_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/candidate-r1-options.sbatch",
       "script_sha256": "f7f3e74c3c823362f62ec648487b1d9fab3295c533a4c3d3b1989f76e46176ea",
       "source_record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r1-options-source-record.json",
       "source_record_sha256": "7b1d64fab17c4307d2075c6421508fd97fd24862b491716e2aff145fa74767cd",
-      "state": "RUNNING",
+      "state": "COMPLETED",
       "submission_record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/candidate-r1-options-request.json",
       "submission_record_sha256": "e51b84fb91d934f55d27175240894396166443c66754b0938c75c5709a942953",
       "syntax_passed_translation_units": 5,
       "syntax_result_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r1-options-42080275/syntax/report.json",
-      "syntax_result_sha256": "509ce7461da44b3cbc4dc195254e3afec5cbbcd5b439dce8804d4a74bf78143c"
+      "syntax_result_sha256": "509ce7461da44b3cbc4dc195254e3afec5cbbcd5b439dce8804d4a74bf78143c",
+      "terminal_record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/candidate-r1-options-terminal.json",
+      "terminal_record_sha256": "184793ff263ed1635d2823c3d3a86c6ce061b970551cdd5066b5c01b3e215a45",
+      "working_directory": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/implementation"
+    },
+    {
+      "id": "r1-resolved",
+      "job_id": "42083671",
+      "scope": "Focused resolved-level-set green check, configured integrated Physics/Application build, 52 selected Physics cases and full serial Application suite. Full R0 remains incomplete.",
+      "script_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/candidate-r1-resolved.sbatch",
+      "script_sha256": "9a7f7d5f5aff802f15b53609c8c8a065b2b83e71f05009f3009f3a2ebecee814",
+      "source_record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r1-resolved-source-record.json",
+      "source_record_sha256": "6661ba14b50ee7f44ad342b67999bf7c6e5baccc7615c59e8c9cf17415f5d565",
+      "state": "PENDING",
+      "submission_record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/candidate-r1-resolved-request.json",
+      "submission_record_sha256": "678cf88e40b02a4efd64da047762ee7a9d4628330b1efca96419ecb33d8487fa"
     }
   ],
   "comparison_contract": {
@@ -80,6 +154,135 @@
           "id": "physics-serial",
           "junit_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/core-42068077/physics-serial.xml",
           "junit_sha256": "3cf1440df136979dca7e309628b7a2b6570c3ce62eae0d77a59c00669f05e8f1",
+          "passed": 466,
+          "skipped": 25,
+          "skipped_cases": [
+            {
+              "case": "LevelSetCutDomainRestrictionPrescribedGeometrySolveConservesGeneratedMeasure",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_PoissonModule.cpp:662\nRequires Eigen backend: [FE Exception] Not implemented (Rank 0)\n  Location: /scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Backends/Interfaces/BackendFactory.cpp:61 in create()\n  Message: Feature not implemented: BackendFactory: Eigen backend not compiled (enable FE_ENABLE_EIGEN)\n\n",
+              "suite": "PoissonModule"
+            },
+            {
+              "case": "DarcyNodePressureCsvSolvesWithInteriorConstraint",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_PoissonModule.cpp:1201\nThis test requires exactly 2 MPI ranks\n",
+              "suite": "PoissonModuleMPI"
+            },
+            {
+              "case": "DarcyNodePressureMissingGlobalGidFailsGlobally",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_PoissonModule.cpp:1300\nThis test requires exactly 2 MPI ranks\n",
+              "suite": "PoissonModuleMPI"
+            },
+            {
+              "case": "DirichletLeftRight_NeumannTopBottom_WritesVtu",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_PoissonSquareSteady.cpp:1222\nRequires Eigen backend (enable FE_ENABLE_EIGEN): [FE Exception] Not implemented (Rank 0)\n  Location: /scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Backends/Interfaces/BackendFactory.cpp:61 in create()\n  Message: Feature not implemented: BackendFactory: Eigen backend not compiled (enable FE_ENABLE_EIGEN)\n\n",
+              "suite": "PoissonSquareSteady"
+            },
+            {
+              "case": "DirichletLeftRight_NeumannTopBottom_Quadratic_WritesVtu",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_PoissonSquareSteady.cpp:1341\nRequires Eigen backend (enable FE_ENABLE_EIGEN): [FE Exception] Not implemented (Rank 0)\n  Location: /scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/FE/Backends/Interfaces/BackendFactory.cpp:61 in create()\n  Message: Feature not implemented: BackendFactory: Eigen backend not compiled (enable FE_ENABLE_EIGEN)\n\n",
+              "suite": "PoissonSquareSteady"
+            },
+            {
+              "case": "DirichletLeftRight_NeumannTopBottom_Linear_2Ranks",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_PoissonSquareSteady.cpp:1507\nThis test requires exactly 2 MPI ranks\n",
+              "suite": "PoissonSquareSteadyMPI"
+            },
+            {
+              "case": "HydrostaticPressureInitializationFillsPressureVertices",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_NavierStokesPressureGauge.cpp:796\nHydrostatic initialization test requires the Eigen backend.\n",
+              "suite": "NavierStokesInitialConditions"
+            },
+            {
+              "case": "MeshVertexFieldsInitializeVelocityAndPressure",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_NavierStokesPressureGauge.cpp:852\nMesh-field initialization test requires Eigen and native mesh support.\n",
+              "suite": "NavierStokesInitialConditions"
+            },
+            {
+              "case": "BeamMesh_JitParity_ParabolicInflowResistanceOutflow",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_NavierStokesLegacyBCs.cpp:3368\nJIT parity requires FE_ENABLE_LLVM_JIT=ON.\n",
+              "suite": "NavierStokesLegacyBCs"
+            },
+            {
+              "case": "GeneralVelocityFileMappingIsolatedToActiveCommunicator",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_NavierStokesLegacyBCs.cpp:1255\nThis test requires exactly two MPI ranks.\n",
+              "suite": "NavierStokesLegacyBCsMPI"
+            },
+            {
+              "case": "FittedALEOperatorStageHistoryCommitsCompleteGlobalMomentsAndRejectsRankDrift",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_SharpBoundaryOperatorMPI.cpp:4165\nrequires an MPI launch with exactly two ranks\n",
+              "suite": "MovingDomainPhysicsMPI"
+            },
+            {
+              "case": "MeshBoundaryHistoryRejectsRankDriftAndRollsBackCollectively",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_SharpBoundaryOperatorMPI.cpp:4377\nrequires an MPI launch with at least two ranks\n",
+              "suite": "MovingDomainPhysicsMPI"
+            },
+            {
+              "case": "GeneratedActiveCoupledOutflowReductionGradientAndTractionArePartitionIndependent",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_SharpBoundaryOperatorMPI.cpp:4629\nrequires an MPI launch with at least two ranks\n",
+              "suite": "MovingDomainPhysicsMPI"
+            },
+            {
+              "case": "StructuredChannelWorkIsInvariantUnderActualRepartition",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_SharpBoundaryOperatorMPI.cpp:4926\nrequires an MPI launch with at least two ranks\n",
+              "suite": "FreeSurfaceSharpBoundaryOperatorsMPI"
+            },
+            {
+              "case": "AdditionalPspgBoundaryFormsArePartitionIndependent",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_SharpBoundaryOperatorMPI.cpp:5088\nrequires an MPI launch with at least two ranks\n",
+              "suite": "FreeSurfaceSharpBoundaryOperatorsMPI"
+            },
+            {
+              "case": "OperatorWorkIsPartitionIndependent",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_SharpBoundaryOperatorMPI.cpp:5420\nrequires an MPI launch with at least two ranks\n",
+              "suite": "FreeSurfaceSharpBoundaryOperatorsMPI"
+            },
+            {
+              "case": "WetFractionSweepIsOwnershipUniqueAndPartitionIndependent",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_SharpBoundaryOperatorMPI.cpp:5284\nrequires an MPI launch with at least two ranks\n",
+              "suite": "GeneratedActiveBoundaryDomainMPI"
+            },
+            {
+              "case": "TwoFluidPhaseIdentityIsInvariantAcrossSideAndPartitionChanges",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp:13166\nThis test requires exactly two MPI ranks.\n",
+              "suite": "FreeSurfaceCutStabilityMPI"
+            },
+            {
+              "case": "TwoFluidAcceptedStageHistoryRejectsRankDivergence",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp:13329\nThis test requires exactly two MPI ranks.\n",
+              "suite": "FreeSurfaceCutStabilityMPI"
+            },
+            {
+              "case": "PhysicalWetBlocksAndDisconnectedIslandsAreInvariantAcrossDryMPIData",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp:13679\nThis test requires exactly two MPI ranks.\n",
+              "suite": "FreeSurfaceCutStabilityMPI"
+            },
+            {
+              "case": "FourRankFixedCutIsInvariantAcrossBlockAndMetisPartitions",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp:13861\nThis test requires exactly four MPI ranks.\n",
+              "suite": "FreeSurfaceCutStabilityMPI"
+            },
+            {
+              "case": "TwoRankFractionOrientationRegimeMatrixMatchesSerial",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp:13997\nThis test requires exactly two MPI ranks.\n",
+              "suite": "FreeSurfaceCutStabilityMPI"
+            },
+            {
+              "case": "FourRankFractionOrientationRegimeMatrixMatchesSerial",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp:14018\nThis test requires exactly four MPI ranks.\n",
+              "suite": "FreeSurfaceCutStabilityMPI"
+            },
+            {
+              "case": "LimitedMetisHaloFailsClosedOnIncompleteAggregationSupport",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp:14042\nThis test requires exactly two MPI ranks.\n",
+              "suite": "FreeSurfaceCutStabilityMPI"
+            },
+            {
+              "case": "DistributedMovingCutRemainsStableAcrossBlockAndMetisPartitions",
+              "reason": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source/Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp:14099\nThis test requires exactly two MPI ranks.\n",
+              "suite": "FreeSurfaceCutStabilityMPI"
+            }
+          ],
           "tests": 491
         },
         {
@@ -137,7 +340,7 @@
         "MPI_mpi_LIBRARY": "/share/software/user/open/openmpi/4.1.2/lib/libmpi.so",
         "PHYSICS_BUILD_TESTS": "ON"
       },
-      "outcome": "Physics serial passed; FE JIT-readiness assertion, Application fixture working directory and MPI slot declarations require targeted corrected verification.",
+      "outcome": "Build complete. Physics: 466 passed, 25 skipped, no failures among 491 selected. FE retains a JIT-only assertion failure in the JIT-OFF build. Application fixture and MPI launch failures are retained and targeted by the corrected execution profile.",
       "requested_memory_mib": 38000,
       "requested_nodes": 1,
       "result_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/core-42068077",
@@ -221,6 +424,24 @@
       "submission_record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-jit-r2-request.json",
       "submission_record_sha256": "a2de69d69282c60d87a7b2e9dd055d4cbb08446c1efa8d14e4d111ae0d2811f1",
       "wall_time": "04:00:00"
+    },
+    {
+      "build_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/core-build",
+      "cpus_per_task": 1,
+      "id": "core-rerun",
+      "job_id": "42082703",
+      "outcome": "Pending evidence; unchanged binaries, corrected source working directory and declared MPI slots.",
+      "requested_memory_mib": 16000,
+      "requested_nodes": 1,
+      "reruns_terminal_job": "42068077",
+      "result_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/core-rerun-42082703",
+      "script_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-core-rerun.sbatch",
+      "script_sha256": "1372bdb9edec3874c3c4b31dd3c857a172bb2c2b06b3de59ba999b5b1a103e1b",
+      "source_revision": "0d77e6cd1c350c20334d43021a186753231398a4",
+      "state": "RUNNING",
+      "submission_record_path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/baseline-core-rerun-request.json",
+      "submission_record_sha256": "567956e21ffe56c17944a03d4938d292457c4d4f2c50d84d313947f414c264d5",
+      "tasks": 4
     }
   ],
   "record_type": "free_surface_architecture_refactor_baseline",

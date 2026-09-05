@@ -14,17 +14,17 @@
 
 ## Jobs
 
-Five owned jobs have been submitted; three are terminal failures. Their live state and final results are recorded below.
+Seven owned jobs have been submitted; three are terminal failures and one completed successfully. Their live state and final results are recorded below.
 
 | Job ID | Request | Source/build identity | Nodes | CPUs | Memory | State | Evidence |
 |---|---|---|---:|---:|---:|---|---|
 | 42068077 | Integrated build; FE/Physics/Application serial and selected MPI checks | `0d77e6cd`; `baseline/core-build`; JIT/Eigen OFF | 1 | 8 (build uses 6) | 38,000 MiB | FAILED (tests, 1:0) | `jobs/baseline-core-request.json`; script SHA-256 `1dc106604f0e5931f38eccdec41a58cfa2df8cf2f0cb79aafc60a6b2ed0704c4` |
 | 42068499 | Standalone FE Forms/Assembly/Systems with explicit LLVM JIT | `0d77e6cd`; `baseline/jit-build`; LLVM 17.0.6, Eigen OFF | 1 | 6 (build uses 4) | 38,000 MiB | FAILED (configure, 1:0) | `jobs/baseline-jit-request.json`; script SHA-256 `b10ebd78700766067914bdff009315dc6e530e46a2ed0949ace07ba0cc4dc2cf` |
 | 42070565 | JIT baseline with explicit Terminfo dependency | `0d77e6cd`; `baseline/jit-r1-build`; LLVM 17.0.6, ncurses 6.4 | 1 | 6 (build uses 4) | 38,000 MiB | FAILED (build, 2:0) | `jobs/baseline-jit-r1-request.json`; script SHA-256 `86f433a1add39e87e9f5e75ea94dfb9eada0d9d49d105933433a475144bd6709` |
-
 | 42080271 | baseline-jit-r2 | `/scratch/users/zsexton/free-surface-refactor-20260904-905239de/source`; `/scratch/users/zsexton/free-surface-refactor-20260904-905239de/baseline/jit-r2-build` | 1 | 2 (build uses 1) | 6,000 MiB | RUNNING | `jobs/baseline-jit-r2-request.json`; script SHA-256 `62c79a8f6a3f3ec60e6c30301cf538f092176b198ae97629bd093074b407de23` |
-
-| 42080275 | candidate-r1-options | `/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r1-options-source`; `/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r1-options-build` | 1 | 6 (build uses 4) | 32,000 MiB | RUNNING | `jobs/candidate-r1-options-request.json`; script SHA-256 `f7f3e74c3c823362f62ec648487b1d9fab3295c533a4c3d3b1989f76e46176ea` |
+| 42080275 | candidate-r1-options | `/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r1-options-source`; `/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/r1-options-build` | 1 | 6 (build uses 4) | 32,000 MiB | COMPLETED (0:0) | `jobs/candidate-r1-options-request.json`; script SHA-256 `f7f3e74c3c823362f62ec648487b1d9fab3295c533a4c3d3b1989f76e46176ea` |
+| 42082703 | Corrected core fixture/MPI execution | `0d77e6cd`; unchanged `baseline/core-build` | 1 | 4 tasks, 1 CPU each | 16,000 MiB | RUNNING | `jobs/baseline-core-rerun-request.json`; script SHA-256 `1372bdb9edec3874c3c4b31dd3c857a172bb2c2b06b3de59ba999b5b1a103e1b` |
+| 42083671 | Resolved level-set green and integrated candidate | `6f5f56d6` plus seven frozen source files; `candidate/r1-resolved-build` | 1 | 6 (build uses 4) | 32,000 MiB | PENDING | `jobs/candidate-r1-resolved-request.json`; script SHA-256 `9a7f7d5f5aff802f15b53609c8c8a065b2b83e71f05009f3009f3a2ebecee814` |
 
 ## Events
 
@@ -67,3 +67,15 @@ Five owned jobs have been submitted; three are terminal failures. Their live sta
 - 2026-09-04: Candidate job `42080275` compiled the extracted public header and four direct consumers successfully. Its focused baseline checks passed 52 Physics and 84 Application cases; the candidate build and before/after comparison are still in progress.
 
 - 2026-09-04: R1 resolver step `42080275.0` compiled both files but stopped before linking; the helper expected a library entry, while this target compiles Application sources directly. Preserve the attempt as a harness failure, not the intended red test. Prepared a corrected direct-object overlay using the actual test-target compile flags and a new output directory, same owned step limits. Helper SHA-256 `e78fc36550b5e77df06592772dbecc888e4190edddfb2295b3ee85f2d28a5a3f`.
+
+- 2026-09-04: Prepared `baseline-core-rerun`: one node, four MPI tasks, 16,000 MiB, two hours. Reuses unchanged core binaries, reruns only the 17 fixture failures from the frozen source directory and the seven MPI groups that never launched, and requires per-rank XML results. Combined reservation with `42080271` and `42080275`: three nodes / 54,000 MiB. Request, selection, helpers and script hashes recorded before submission.
+
+- 2026-09-04: Resolver red step `42080275.1` compiled/linked successfully and all three new tests failed at their intended missing behavior. The extraction is now staged for green verification. Prepared one CPU / 6,000 MiB / fifteen-minute step in the same owned allocation, using a new result directory and the full LevelSetEquationTranslator fixture; shell SHA-256 `f3f2ebefd8f1ce5b865eeee37d701b58e7f1ed8a2acdb296ac4ee8644ea11398`.
+
+- 2026-09-04: Submitted owned baseline correction job `42082703`; immutable receipt retained in `jobs/baseline-core-rerun-submission.txt`. Reserved total: three nodes / 54,000 MiB including the two active builds.
+
+- 2026-09-04: Option candidate `42080275` completed successfully (0:0); five syntax checks, 52 Physics and 84 Application cases passed for both baseline and candidate. The prepared green step was not launched because that allocation ended. Prepared a fresh `candidate-r1-resolved` job: one node, six CPUs, 32,000 MiB, four build workers; frozen source at `6f5f56d6d6ee36b448ab28a06aa9d45afc42ae1d` plus seven recorded files, focused green followed by a configured build and full serial Application checks. With owned jobs `42080271` and `42082703`, reserved total will be three nodes / 54,000 MiB. Script SHA-256 `9a7f7d5f5aff802f15b53609c8c8a065b2b83e71f05009f3009f3a2ebecee814`.
+
+- 2026-09-04: Submitted owned resolver validation job `42083671`; receipt retained under `jobs/`. Two existing owned jobs plus this reservation: three nodes / 54,000 MiB.
+
+- 2026-09-04: Parsed individual test outcomes before accepting the option extraction: 135 passed and one explicit JIT-only skip in each baseline/candidate run, with identical selections and skip identity. Earlier counts of 136 referred to selected cases. The core Physics profile likewise has 466 passed, 25 skipped and zero failed among 491 selected. Updated the live manifest; retained all raw results. Option candidate source hashes match all three reviewed files; batch peak RSS was 4,741,896 KiB and elapsed time 18:42. Current reservation remains three nodes / 54,000 MiB including pending `42083671`.
