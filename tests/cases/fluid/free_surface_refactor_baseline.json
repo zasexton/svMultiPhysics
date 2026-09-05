@@ -1951,9 +1951,15 @@
     }
   ],
   "comparison_contract": {
+    "bounded_lifecycle_r1_comparison_state": "POLICY_FROZEN_CANDIDATE_PENDING",
+    "bounded_lifecycle_r1_policy": {
+      "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r0-lifecycle-r1-comparison-policy/policy.json",
+      "sha256": "877ea053dc2e14fb434eba42443f747f0314feff16e8f898f9fe113812de05f8",
+      "size_bytes": 3226
+    },
     "discrete_identity": "exact field/component/physical-DOF, domain/side, stage, availability, constraint topology and capability decisions",
-    "floating_point_tolerances": "The accepted serial wet-block bundles freeze existing residual/Jacobian gates at 1e-11, solved-state gate at 1e-10 and denominator floors at 1e-12. Other case-specific gates and measured MPI/backend tolerances remain pending; these serial gates do not authorize broader numerical changes.",
-    "reference_artifact_status": "PARTIAL_SERIAL_WET_BLOCK_CAPTURE",
+    "floating_point_tolerances": "Accepted serial wet-block residual/Jacobian gates are 1e-11 and solved-state gate 1e-10; two-rank counterparts are 1e-9 and 1e-8, with declared 1e-12 denominator floors. The bounded R1 lifecycle policy requires exact payload-value parity under controlled execution conditions. Remaining case-specific policies stay pending; these gates do not authorize numerical retuning.",
+    "reference_artifact_status": "PARTIAL_OPERATOR_SCALAR_AND_LIFECYCLE_CAPTURE",
     "required_reference_outputs": [
       "full residual and Jacobian blocks in stable physical DOF order",
       "sparsity and constraint rows",
@@ -1962,7 +1968,7 @@
       "effective numerical options and selected algorithm routes",
       "runtime, peak memory, iteration count, geometry refresh and cache behavior"
     ],
-    "status": "AWAITING_MEASURED_BASELINE"
+    "status": "PARTIAL_CASE_SPECIFIC_POLICIES"
   },
   "preserved_original_worktree": {
     "committed_head": "09976e28639127e52bb07184399c37e36762e332",
