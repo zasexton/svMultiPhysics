@@ -1103,8 +1103,12 @@ TEST(SmallCutAggregationConstraint, SlavesOnlyUnsupportedCutVerticesWithExtrapol
     auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
 
     systems::FESystem system(mesh);
+    const auto leading_field = system.addField(
+        systems::FieldSpec{
+            .name = "leading", .space = space, .components = 1});
     const auto pressure = system.addField(
         systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    EXPECT_NE(leading_field, pressure);
     system.addOperator("pressure");
     system.addSystemConstraint(std::make_unique<SmallCutAggregationConstraint>(
         pressure,
@@ -1112,6 +1116,7 @@ TEST(SmallCutAggregationConstraint, SlavesOnlyUnsupportedCutVerticesWithExtrapol
         kInterfaceMarker));
 
     ASSERT_NO_THROW(system.setup());
+    ASSERT_GT(system.fieldDofOffset(pressure), 0);
     ASSERT_FALSE(system.meshAccess().globalEntityIdsAvailable());
     system.setCutIntegrationContext(makeCutContext({
         {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
@@ -1246,6 +1251,18 @@ TEST(SmallCutAggregationConstraint, SlavesOnlyUnsupportedCutVerticesWithExtrapol
     EXPECT_TRUE(std::binary_search(cut_cell->field_dofs.begin(),
                                    cut_cell->field_dofs.end(),
                                    top_slave));
+    const auto pressure_begin = system.fieldDofOffset(pressure);
+    const auto pressure_end =
+        pressure_begin + system.fieldDofHandler(pressure).getNumDofs();
+    for (const auto& cell : prolongation.active_cells) {
+        ASSERT_FALSE(cell.field_dofs.empty());
+        EXPECT_TRUE(std::all_of(
+            cell.field_dofs.begin(),
+            cell.field_dofs.end(),
+            [pressure_begin, pressure_end](GlobalIndex dof) {
+                return dof >= pressure_begin && dof < pressure_end;
+            }));
+    }
 
     ASSERT_EQ(prolongation.patches.size(), 1u);
     const auto& patch = prolongation.patches.front();

@@ -398,6 +398,8 @@ struct NewtonReport {
     bool constant_pressure_kkt_available{false};
     bool constant_pressure_unit_coefficients_represent_constant{false};
     bool constant_pressure_constraints_preserve_constants{false};
+    std::string constant_pressure_constraint_scope{"full_field"};
+    std::string constant_pressure_constraint_scope_reason{"not_attempted"};
     double constant_pressure_kkt_pressure_jump{
         std::numeric_limits<double>::quiet_NaN()};
     double constant_pressure_kkt_volume_multiplier{

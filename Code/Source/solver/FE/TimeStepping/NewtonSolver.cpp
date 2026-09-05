@@ -1163,6 +1163,58 @@ void logPostTangentAnalysisReport(const systems::FESystem& system,
 #endif
 }
 
+[[nodiscard]] int communicatorSize(NewtonCommunicator communicator) noexcept
+{
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    MPI_Finalized(&finalized);
+    if (!initialized || finalized || communicator == MPI_COMM_NULL) {
+        return 1;
+    }
+    int size = 1;
+    (void)MPI_Comm_size(communicator, &size);
+    return size;
+#else
+    (void)communicator;
+    return 1;
+#endif
+}
+
+[[nodiscard]] bool communicatorAgreesOnUnsigned(
+    std::uint64_t value,
+    NewtonCommunicator communicator) noexcept
+{
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    MPI_Finalized(&finalized);
+    if (initialized != 0 && finalized == 0 &&
+        communicator != MPI_COMM_NULL) {
+        std::uint64_t minimum = value;
+        std::uint64_t maximum = value;
+        MPI_Allreduce(&value,
+                      &minimum,
+                      1,
+                      MPI_UINT64_T,
+                      MPI_MIN,
+                      communicator);
+        MPI_Allreduce(&value,
+                      &maximum,
+                      1,
+                      MPI_UINT64_T,
+                      MPI_MAX,
+                      communicator);
+        return minimum == maximum;
+    }
+#else
+    (void)communicator;
+#endif
+    return true;
+}
+
 [[nodiscard]] NewtonCommunicator systemCommunicator(
     const systems::FESystem& system) noexcept
 {
@@ -2835,7 +2887,8 @@ struct ConstantPressureKktResult {
 [[nodiscard]] bool pressureConstraintsPreserveUnitField(
     const constraints::AffineConstraints& affine_constraints,
     GlobalIndex pressure_begin,
-    GlobalIndex pressure_count)
+    GlobalIndex pressure_count,
+    const std::set<GlobalIndex>* retained_pressure_support = nullptr)
 {
     if (pressure_begin < 0 || pressure_count <= 0) {
         return false;
@@ -2868,6 +2921,13 @@ struct ConstantPressureKktResult {
             // scalar pressure trace.  Homogeneous pressure MPCs preserve the
             // mode only when their weights form a partition of unity.
             if (pressure_slave) {
+                if (retained_pressure_support != nullptr &&
+                    !retained_pressure_support->contains(line.slave_dof) &&
+                    line.entries.empty() &&
+                    std::isfinite(line.inhomogeneity) &&
+                    line.inhomogeneity == 0.0) {
+                    return;
+                }
                 const double tolerance =
                     100.0 * std::numeric_limits<Real>::epsilon() *
                     std::max(1.0, absolute_weight_sum);
@@ -2883,6 +2943,252 @@ struct ConstantPressureKktResult {
             }
         });
     return compatible;
+}
+
+struct ConstantPressureCutVolumeBinding {
+    int marker{-1};
+    geometry::CutIntegrationSide side{
+        geometry::CutIntegrationSide::Interface};
+};
+
+[[nodiscard]] std::optional<ConstantPressureCutVolumeBinding>
+constantPressureCutVolumeBinding(
+    const systems::OperatorDefinition& pair,
+    FieldId pressure_field)
+{
+    bool unsupported_pressure_term = !pair.global.empty();
+    const auto pressure_bearing = [pressure_field](const auto& term) {
+        return term.test_field == pressure_field ||
+               term.trial_field == pressure_field;
+    };
+    const auto inspect_nonvolume = [&](const auto& terms) {
+        unsupported_pressure_term =
+            unsupported_pressure_term ||
+            std::any_of(terms.begin(), terms.end(), pressure_bearing);
+    };
+    inspect_nonvolume(pair.cells);
+    inspect_nonvolume(pair.boundary);
+    inspect_nonvolume(pair.interior);
+    inspect_nonvolume(pair.interface_faces);
+
+    std::optional<ConstantPressureCutVolumeBinding> binding;
+    for (const auto& term : pair.cut_volumes) {
+        if (!pressure_bearing(term)) {
+            continue;
+        }
+        if (term.marker < 0 ||
+            term.side == geometry::CutIntegrationSide::Interface) {
+            unsupported_pressure_term = true;
+            continue;
+        }
+        const ConstantPressureCutVolumeBinding candidate{
+            term.marker, term.side};
+        if (!binding.has_value()) {
+            binding = candidate;
+        } else if (binding->marker != candidate.marker ||
+                   binding->side != candidate.side) {
+            unsupported_pressure_term = true;
+        }
+    }
+    if (unsupported_pressure_term || !binding.has_value()) {
+        return std::nullopt;
+    }
+    return binding;
+}
+
+struct RetainedPressureSupportResult {
+    std::optional<std::set<GlobalIndex>> support{};
+    std::string reason{"pair_support_unavailable"};
+};
+
+[[nodiscard]] RetainedPressureSupportResult retainedPressureSupport(
+    const systems::FESystem& system,
+    const systems::OperatorDefinition& pair,
+    FieldId pressure_field,
+    GlobalIndex pressure_begin,
+    GlobalIndex pressure_count,
+    NewtonCommunicator communicator,
+    const std::function<bool(bool)>& all_ranks,
+    const std::function<bool(bool)>& any_rank)
+{
+    RetainedPressureSupportResult result;
+    const auto binding =
+        constantPressureCutVolumeBinding(pair, pressure_field);
+    if (!all_ranks(binding.has_value())) {
+        return result;
+    }
+
+    const auto binding_key =
+        (static_cast<std::uint64_t>(binding->marker) << 8u) |
+        static_cast<std::uint64_t>(binding->side);
+    if (!communicatorAgreesOnUnsigned(binding_key, communicator)) {
+        result.reason = "pair_support_inconsistent";
+        return result;
+    }
+
+    const auto reports =
+        system.finalizedSmallCutAggregationProlongations();
+    std::vector<std::shared_ptr<const constraints::
+        SmallCutAggregationProlongationReport>> matches;
+    for (const auto& candidate : reports) {
+        if (candidate && candidate->field == pressure_field &&
+            candidate->interface_marker == binding->marker &&
+            candidate->active_side == binding->side) {
+            matches.push_back(candidate);
+        }
+    }
+    const bool ambiguous = any_rank(matches.size() > 1u);
+    const bool unavailable = any_rank(matches.empty());
+    if (ambiguous) {
+        result.reason = "aggregation_report_ambiguous";
+        return result;
+    }
+    if (unavailable || !all_ranks(matches.size() == 1u)) {
+        result.reason = "aggregation_report_unavailable";
+        return result;
+    }
+
+    const auto& report = *matches.front();
+    const bool ineligible = any_rank(!report.trace_bound_eligible);
+    const bool invalid_identity = any_rank(
+        report.active_cells.empty() ||
+        report.canonical_content_digest == 0u);
+    if (ineligible) {
+        result.reason = "aggregation_report_ineligible";
+        return result;
+    }
+    if (invalid_identity) {
+        result.reason = "aggregation_report_invalid";
+        return result;
+    }
+    if (!communicatorAgreesOnUnsigned(
+            report.canonical_content_digest, communicator)) {
+        result.reason = "aggregation_report_inconsistent";
+        return result;
+    }
+
+    const auto& affine_constraints = system.constraints();
+    const int rank = communicatorRank(communicator);
+    const int size = communicatorSize(communicator);
+    const bool local_communicator_current =
+        report.revision.local_rank == rank &&
+        report.revision.communicator_size == size;
+    if (!all_ranks(local_communicator_current)) {
+        result.reason = "aggregation_report_inconsistent";
+        return result;
+    }
+
+    const bool local_constraint_state_current =
+        affine_constraints.isClosed() &&
+        !system.constraintStateStaleForCurrentRevisions() &&
+        report.revision.constraint ==
+            system.constraintRevisionSnapshot() &&
+        report.revision.affine_constraint_layout_revision ==
+            affine_constraints.constraintLayoutRevision();
+    if (!all_ranks(local_constraint_state_current)) {
+        result.reason = "aggregation_report_stale";
+        return result;
+    }
+
+    const auto* cut = system.cutIntegrationContext();
+    bool local_cut_state_current = cut != nullptr;
+    if (local_cut_state_current) {
+        try {
+            cut->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+                system.meshAccess());
+        } catch (...) {
+            local_cut_state_current = false;
+        }
+    }
+    local_cut_state_current =
+        local_cut_state_current &&
+        cut->contentRevision() ==
+            report.revision.cut_context_content_revision &&
+        cut->hasGeneratedVolumeMarker(binding->marker) &&
+        report.revision.has_free_surface_snapshot_revision &&
+        report.revision.has_source_value_revision &&
+        cut->hasFreeSurfaceGeometrySnapshotForMarker(binding->marker);
+    if (!all_ranks(local_cut_state_current)) {
+        result.reason = "aggregation_report_stale";
+        return result;
+    }
+
+    const auto snapshot_revision =
+        cut->freeSurfaceGeometrySnapshotRevisionForMarker(binding->marker);
+    std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot>
+        selected_snapshot;
+    std::size_t local_snapshot_matches = 0u;
+    for (const auto& snapshot : cut->freeSurfaceGeometrySnapshots()) {
+        if (snapshot &&
+            snapshot->revision().snapshot_revision_key ==
+                snapshot_revision) {
+            ++local_snapshot_matches;
+            selected_snapshot = snapshot;
+        }
+    }
+    const bool local_snapshot_current =
+        snapshot_revision ==
+            report.revision.free_surface_snapshot_revision &&
+        local_snapshot_matches == 1u && selected_snapshot != nullptr &&
+        selected_snapshot->revision().complete() &&
+        selected_snapshot->revision().interface_marker == binding->marker &&
+        selected_snapshot->revision().source_value_revision ==
+            report.revision.source_value_revision;
+    if (!all_ranks(local_snapshot_current)) {
+        result.reason = "aggregation_report_stale";
+        return result;
+    }
+
+    const GlobalIndex pressure_end = pressure_begin + pressure_count;
+    bool local_cells_valid = true;
+    GlobalIndex previous_cell = INVALID_GLOBAL_INDEX;
+    std::set<GlobalIndex> support;
+    for (const auto& cell : report.active_cells) {
+        const bool valid_kind =
+            cell.kind == constraints::
+                             SmallCutAggregationActiveCellKind::FullActive ||
+            cell.kind ==
+                constraints::SmallCutAggregationActiveCellKind::Cut;
+        const bool canonical_dofs =
+            !cell.field_dofs.empty() &&
+            std::is_sorted(
+                cell.field_dofs.begin(), cell.field_dofs.end()) &&
+            std::adjacent_find(
+                cell.field_dofs.begin(), cell.field_dofs.end()) ==
+                cell.field_dofs.end();
+        const bool valid_cell =
+            cell.cell_gid >= 0 && cell.cell_gid > previous_cell &&
+            cell.owner_rank >= 0 && cell.owner_rank < size &&
+            cell.retained_measure_provider_rank >= 0 &&
+            cell.retained_measure_provider_rank < size &&
+            cell.active_feature_id >= 0 && valid_kind &&
+            std::isfinite(cell.retained_physical_volume) &&
+            cell.retained_physical_volume > 0.0 && canonical_dofs;
+        if (!valid_cell) {
+            local_cells_valid = false;
+            break;
+        }
+        for (const auto dof : cell.field_dofs) {
+            if (dof < pressure_begin || dof >= pressure_end) {
+                local_cells_valid = false;
+                break;
+            }
+        }
+        if (!local_cells_valid) {
+            break;
+        }
+        support.insert(cell.field_dofs.begin(), cell.field_dofs.end());
+        previous_cell = cell.cell_gid;
+    }
+    local_cells_valid = local_cells_valid && !support.empty();
+    if (!all_ranks(local_cells_valid)) {
+        result.reason = "aggregation_report_invalid";
+        return result;
+    }
+
+    result.support = std::move(support);
+    result.reason = "available";
+    return result;
 }
 
 /**
@@ -13669,6 +13975,9 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             report.constant_pressure_unit_coefficients_represent_constant =
                 false;
             report.constant_pressure_constraints_preserve_constants = false;
+            report.constant_pressure_constraint_scope = "full_field";
+            report.constant_pressure_constraint_scope_reason =
+                "not_attempted";
             report.constant_pressure_kkt_pressure_jump =
                 std::numeric_limits<double>::quiet_NaN();
             report.constant_pressure_kkt_volume_multiplier =
@@ -13979,6 +14288,8 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             int pressure_representability_iteration_cap = 0;
             bool pressure_unit_coefficients_represent_constant = false;
             bool pressure_constraints_preserve_constants = false;
+            std::string pressure_constraint_scope{"full_field"};
+            std::string pressure_constraint_scope_reason{"not_attempted"};
 
             std::optional<FieldId> velocity_field;
             std::optional<FieldId> pressure_field;
@@ -14068,10 +14379,40 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                         *pressure_record.space);
                 pressure_unit_coefficients_represent_constant = allRanks(
                     local_unit_coefficients_represent_constant);
-                pressure_constraints_preserve_constants =
-                    pressure_unit_coefficients_represent_constant &&
-                    allRanks(pressureConstraintsPreserveUnitField(
-                        constraints, pressure_begin, pressure_count));
+                if (pressure_unit_coefficients_represent_constant) {
+                    pressure_constraints_preserve_constants = allRanks(
+                        pressureConstraintsPreserveUnitField(
+                            constraints,
+                            pressure_begin,
+                            pressure_count));
+                    pressure_constraint_scope_reason =
+                        pressure_constraints_preserve_constants
+                            ? "available"
+                            : "pair_support_unavailable";
+                    if (!pressure_constraints_preserve_constants) {
+                        const auto support = retainedPressureSupport(
+                            transient.system(),
+                            transient.system().operatorDefinition(pair_op),
+                            *pressure_field,
+                            pressure_begin,
+                            pressure_count,
+                            system_communicator,
+                            allRanks,
+                            anyRank);
+                        pressure_constraint_scope_reason = support.reason;
+                        if (support.support.has_value()) {
+                            pressure_constraint_scope = "retained_volume";
+                            pressure_constraint_scope_reason = "available";
+                            pressure_constraints_preserve_constants =
+                                allRanks(
+                                    pressureConstraintsPreserveUnitField(
+                                        constraints,
+                                        pressure_begin,
+                                        pressure_count,
+                                        &*support.support));
+                        }
+                    }
+                }
 
                 bool local_nonzero_pressure_inhomogeneity = false;
                 constraints.forEach(
@@ -14346,6 +14687,10 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 pressure_unit_coefficients_represent_constant;
             report.constant_pressure_constraints_preserve_constants =
                 pressure_constraints_preserve_constants;
+            report.constant_pressure_constraint_scope =
+                pressure_constraint_scope;
+            report.constant_pressure_constraint_scope_reason =
+                pressure_constraint_scope_reason;
             report.constant_pressure_kkt_pressure_jump =
                 constant_pressure_kkt.pressure_jump;
             report.constant_pressure_kkt_volume_multiplier =
@@ -14454,6 +14799,10 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                     << (pressure_unit_coefficients_represent_constant ? 1 : 0)
                     << " constant_pressure_constraints_preserve_constants="
                     << (pressure_constraints_preserve_constants ? 1 : 0)
+                    << " constant_pressure_constraint_scope="
+                    << pressure_constraint_scope
+                    << " constant_pressure_constraint_scope_reason="
+                    << pressure_constraint_scope_reason
                     << " constant_pressure_kkt_method="
                        "closed_form_one_dimensional_pressure_trace"
                     << " constant_pressure_kkt_force_projection_applied=0";

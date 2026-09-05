@@ -480,27 +480,6 @@ struct GatheredWords {
 #endif
 }
 
-[[nodiscard]] bool sameConstraintRevision(
-    const constraints::ConstraintRevisionSnapshot& left,
-    const constraints::ConstraintRevisionSnapshot& right) noexcept
-{
-    return left.valid == right.valid &&
-           left.geometry == right.geometry &&
-           left.reference_rebase == right.reference_rebase &&
-           left.topology == right.topology &&
-           left.ownership == right.ownership &&
-           left.numbering == right.numbering &&
-           left.mesh_field_layout == right.mesh_field_layout &&
-           left.mesh_field_values == right.mesh_field_values &&
-           left.labels == right.labels &&
-           left.active_configuration == right.active_configuration &&
-           left.fe_space == right.fe_space &&
-           left.fe_dof_layout == right.fe_dof_layout &&
-           left.fe_constraint_layout == right.fe_constraint_layout &&
-           left.fe_block_layout == right.fe_block_layout &&
-           left.time_epoch == right.time_epoch;
-}
-
 struct DofDescriptor {
     GlobalIndex dof{INVALID_GLOBAL_INDEX};
     std::size_t component{0u};
@@ -1004,9 +983,8 @@ struct SelectedState {
         report.revision.local_rank != collective.rank) {
         reject("aggregation report communicator metadata is stale");
     }
-    if (!sameConstraintRevision(
-            report.revision.constraint,
-            system.constraintRevisionSnapshot()) ||
+    if (report.revision.constraint !=
+            system.constraintRevisionSnapshot() ||
         report.revision.affine_constraint_layout_revision !=
             closed_constraints.constraintLayoutRevision()) {
         reject("aggregation report constraint revisions are stale");

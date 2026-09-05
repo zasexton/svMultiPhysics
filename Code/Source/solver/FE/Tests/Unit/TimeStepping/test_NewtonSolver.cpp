@@ -26,7 +26,12 @@
 #include "Auxiliary/AuxiliaryModelDSL.h"
 #include "Auxiliary/AuxiliaryStateManager.h"
 #include "Assembly/CutIntegrationContext.h"
+#include "Constraints/LevelSetActiveSideVertexDirichletConstraint.h"
+#include "Constraints/SmallCutAggregationConstraint.h"
 #include "Constraints/SystemConstraint.h"
+#include "Dofs/EntityDofMap.h"
+#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetInterfaceBuilder.h"
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/TimeIntegrator.h"
@@ -42,6 +47,7 @@
 #include "Tests/Unit/TimeStepping/TimeSteppingTestHelpers.h"
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#  include "Mesh/Fields/MeshFields.h"
 #  include "Mesh/Mesh.h"
 #  include "Mesh/Topology/CellShape.h"
 #endif
@@ -55,6 +61,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -64,6 +71,8 @@
 namespace ts_test = svmp::FE::timestepping::test;
 
 namespace {
+
+constexpr int kRetainedVolumePressureMarker = 812;
 
 class RejectFirstConvergedAttemptController final
     : public svmp::FE::timestepping::StepController {
@@ -1695,6 +1704,7 @@ private:
 
 struct FixedPressureDirichletState {
     svmp::FE::Real value{0.0};
+    svmp::FE::GlobalIndex field_local_dof{0};
 };
 
 class FixedPressureDirichlet final
@@ -1716,12 +1726,16 @@ public:
         const svmp::FE::systems::FESystem& system,
         svmp::FE::constraints::AffineConstraints& constraints) override
     {
-        if (system.fieldDofHandler(pressure_field_).getNumDofs() != 1) {
+        const auto pressure_count =
+            system.fieldDofHandler(pressure_field_).getNumDofs();
+        if (state_->field_local_dof < 0 ||
+            state_->field_local_dof >= pressure_count) {
             throw std::runtime_error(
-                "FixedPressureDirichlet requires one pressure DOF");
+                "FixedPressureDirichlet field-local DOF is out of range");
         }
         const auto pressure_dof =
-            system.fieldDofOffset(pressure_field_);
+            system.fieldDofOffset(pressure_field_) +
+            state_->field_local_dof;
         constraints.addLine(pressure_dof);
         constraints.setInhomogeneity(pressure_dof, state_->value);
     }
@@ -1778,7 +1792,7 @@ struct TwoFieldProblem {
 
 struct PressureRepresentabilityProblem {
     std::shared_ptr<svmp::FE::assembly::IMeshAccess> mesh{};
-    std::shared_ptr<svmp::FE::spaces::L2Space> space{};
+    std::shared_ptr<svmp::FE::spaces::FunctionSpace> space{};
     std::unique_ptr<svmp::FE::systems::FESystem> sys{};
     svmp::FE::FieldId velocity_field{svmp::FE::INVALID_FIELD_ID};
     svmp::FE::FieldId pressure_field{svmp::FE::INVALID_FIELD_ID};
@@ -1820,6 +1834,150 @@ struct DirectCouplingProblem {
         3, reference_coordinates, offsets, connectivity, shapes);
     base->finalize();
     return svmp::create_mesh(std::move(base));
+}
+
+[[nodiscard]] std::shared_ptr<svmp::Mesh>
+makeNativeThreeQuadPressureSupportMesh()
+{
+    auto base = std::make_shared<svmp::MeshBase>();
+    const std::vector<svmp::real_t> reference_coordinates{
+        0.0, 0.0,
+        1.0, 0.0,
+        2.0, 0.0,
+        3.0, 0.0,
+        0.0, 1.0,
+        1.0, 1.0,
+        2.0, 1.0,
+        3.0, 1.0,
+    };
+    const std::vector<svmp::offset_t> offsets{0, 4, 8, 12};
+    const std::vector<svmp::index_t> connectivity{
+        0, 1, 5, 4,
+        1, 2, 6, 5,
+        2, 3, 7, 6,
+    };
+    svmp::CellShape shape{};
+    shape.family = svmp::CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(
+        /*spatial_dim=*/2,
+        reference_coordinates,
+        offsets,
+        connectivity,
+        std::vector<svmp::CellShape>(3u, shape));
+    base->finalize();
+
+    auto mesh = svmp::create_mesh(std::move(base));
+    const auto phi_handle = svmp::MeshFields::attach_field(
+        mesh->local_mesh(),
+        svmp::EntityKind::Vertex,
+        "phi",
+        svmp::FieldScalarType::Float64,
+        1);
+    auto* phi = svmp::MeshFields::field_data_as<svmp::real_t>(
+        mesh->local_mesh(), phi_handle);
+    const std::array<svmp::real_t, 8> values{
+        1.0, 1.0, -1.0, -1.0,
+        1.0, 1.0, -1.0, -1.0,
+    };
+    std::copy(values.begin(), values.end(), phi);
+    return mesh;
+}
+
+[[nodiscard]] std::shared_ptr<svmp::FE::assembly::CutIntegrationContext>
+makeRetainedVolumePressureCutContext(
+    const svmp::FE::assembly::IMeshAccess& mesh)
+{
+    namespace geometry = svmp::FE::geometry;
+    namespace interfaces = svmp::FE::interfaces;
+
+    interfaces::CutInterfaceDomainRequest request;
+    request.source = interfaces::LevelSetInterfaceSource::fromEvaluator(
+        "newton-retained-volume-pressure-phi",
+        /*layout_revision=*/1u,
+        /*value_revision=*/1u);
+    request.generated_domain_id =
+        "newton-retained-volume-pressure-support";
+    request.interface_marker = kRetainedVolumePressureMarker;
+    request.quadrature_order = 1;
+    request.interface_quadrature_order = 1;
+    request.volume_quadrature_order = 1;
+    request.frame = geometry::CutGeometryFrame::Reference;
+    request.mesh_geometry_revision = mesh.geometryRevision();
+    request.mesh_topology_revision = mesh.topologyRevision();
+    request.ownership_revision = mesh.ownershipRevision();
+    request.implicit_geometry_mode = "LinearCorner";
+    request.implicit_quadrature_backend = "LinearCorner";
+    request.implicit_fallback_status = "None";
+
+    interfaces::LevelSetInterfaceDomain domain(request);
+    constexpr std::array<svmp::FE::Real, 8> phi{
+        1.0, 1.0, -1.0, -1.0,
+        1.0, 1.0, -1.0, -1.0,
+    };
+    for (svmp::FE::GlobalIndex cell = 0; cell < 3; ++cell) {
+        const auto bottom_left = static_cast<std::size_t>(cell);
+        const auto bottom_right = bottom_left + 1u;
+        const auto top_left = bottom_left + 4u;
+        const auto top_right = top_left + 1u;
+        interfaces::appendLinearLevelSetCellCut2D(
+            domain,
+            interfaces::LevelSetCellCutInput{
+                .parent_cell = cell,
+                .element_type = svmp::FE::ElementType::Quad4,
+                .node_coordinates = {
+                    {{-1.0, -1.0, 0.0}},
+                    {{1.0, -1.0, 0.0}},
+                    {{1.0, 1.0, 0.0}},
+                    {{-1.0, 1.0, 0.0}},
+                },
+                .level_set_values = {
+                    phi[bottom_left],
+                    phi[bottom_right],
+                    phi[top_right],
+                    phi[top_left],
+                },
+            });
+    }
+
+    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    policy.minimum_retained_volume_fraction =
+        svmp::FE::assembly::CutIntegrationContext::
+            minGeneratedCutVolumeFraction();
+    policy.require_complete_exterior_boundary_partition = false;
+    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    scalar.value = [](svmp::FE::GlobalIndex cell,
+                      const std::array<svmp::FE::Real, 3>& xi,
+                      const geometry::CutQuadratureProvenance&) {
+        if (cell == 0) {
+            return svmp::FE::Real{1.0};
+        }
+        if (cell == 1) {
+            return -xi[0];
+        }
+        return svmp::FE::Real{-1.0};
+    };
+    scalar.reference_gradient = [](
+        svmp::FE::GlobalIndex cell,
+        const std::array<svmp::FE::Real, 3>&,
+        const geometry::CutQuadratureProvenance&) {
+        return cell == 1
+                   ? std::array<svmp::FE::Real, 3>{{-1.0, 0.0, 0.0}}
+                   : std::array<svmp::FE::Real, 3>{{0.0, 0.0, 0.0}};
+    };
+    auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+        std::move(domain),
+        {},
+        {},
+        mesh,
+        policy,
+        std::move(scalar),
+        "newton-retained-volume-pressure-support");
+    auto context =
+        std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
+    context->addFreeSurfaceGeometrySnapshot(std::move(snapshot));
+    return context;
 }
 #endif
 
@@ -1938,7 +2096,10 @@ makePressureRepresentabilityProblem(
     std::optional<std::array<svmp::FE::Real, 16>>
         pressure_pair_matrix = std::nullopt,
     std::optional<std::array<svmp::FE::Real, 4>>
-        diagnostic_vector_shape = std::nullopt)
+        diagnostic_vector_shape = std::nullopt,
+    bool install_retained_volume_constraints = false,
+    std::size_t retained_volume_aggregation_count = 1u,
+    bool install_mixed_domain_pressure_term = false)
 {
     using svmp::FE::forms::FormExpr;
 
@@ -1955,13 +2116,35 @@ makePressureRepresentabilityProblem(
         throw std::runtime_error(
             "prescribed diagnostic vectors require a one-cell P1 pressure pair fixture");
     }
+    if (install_retained_volume_constraints &&
+        (two_cells || has_prescribed_pressure_pair || use_native_mesh ||
+         !install_symbolic_cut_volume_pair)) {
+        throw std::runtime_error(
+            "retained-volume pressure fixture requires its three-cell "
+            "symbolic cut-volume configuration");
+    }
+    if (!install_retained_volume_constraints &&
+        (retained_volume_aggregation_count != 1u ||
+         install_mixed_domain_pressure_term)) {
+        throw std::runtime_error(
+            "retained-volume evidence controls require the retained-volume fixture");
+    }
 
     PressureRepresentabilityProblem p;
-    p.space = std::make_shared<svmp::FE::spaces::L2Space>(
-        svmp::FE::ElementType::Tetra4,
-        has_prescribed_pressure_pair ? /*order=*/1 : /*order=*/0);
+    if (install_retained_volume_constraints) {
+        p.space = std::make_shared<svmp::FE::spaces::H1Space>(
+            svmp::FE::ElementType::Quad4, /*order=*/1);
+    } else {
+        p.space = std::make_shared<svmp::FE::spaces::L2Space>(
+            svmp::FE::ElementType::Tetra4,
+            has_prescribed_pressure_pair ? /*order=*/1 : /*order=*/0);
+    }
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
-    if (use_native_mesh) {
+    if (install_retained_volume_constraints) {
+        auto mesh = makeNativeThreeQuadPressureSupportMesh();
+        p.sys = std::make_unique<svmp::FE::systems::FESystem>(
+            std::move(mesh));
+    } else if (use_native_mesh) {
         if (two_cells) {
             throw std::runtime_error(
                 "native pressure fixture supports one tetrahedron");
@@ -2013,6 +2196,26 @@ makePressureRepresentabilityProblem(
         p.sys->addSystemConstraint(
             std::make_unique<FixedPressureDirichlet>(
                 p.pressure_field, pressure_dirichlet_state));
+    }
+    if (install_retained_volume_constraints) {
+        p.sys->addSystemConstraint(std::make_unique<
+            svmp::FE::constraints::
+                LevelSetActiveSideVertexDirichletConstraint>(
+            p.pressure_field,
+            "phi",
+            svmp::FE::constraints::LevelSetConstraintSide::Negative,
+            svmp::FE::Real{0.0},
+            svmp::FE::Real{0.0},
+            kRetainedVolumePressureMarker));
+        for (std::size_t i = 0u;
+             i < retained_volume_aggregation_count;
+             ++i) {
+            p.sys->addSystemConstraint(std::make_unique<
+                svmp::FE::constraints::SmallCutAggregationConstraint>(
+                p.pressure_field,
+                svmp::FE::geometry::CutIntegrationSide::Negative,
+                kRetainedVolumePressureMarker));
+        }
     }
 
     const auto u = FormExpr::trialFunction(*p.space, "u");
@@ -2101,12 +2304,23 @@ makePressureRepresentabilityProblem(
         } else {
             vector_kernel = make_kernel(vector_forms[i]);
         }
-        p.sys->addCellKernel(
-            vector_ops[i],
-            p.velocity_field,
-            p.velocity_field,
-            std::make_shared<CountingKernel>(
-                std::move(vector_kernel), &counts.operators[i]));
+        auto counting_kernel = std::make_shared<CountingKernel>(
+            std::move(vector_kernel), &counts.operators[i]);
+        if (install_retained_volume_constraints) {
+            p.sys->addCutVolumeKernel(
+                vector_ops[i],
+                kRetainedVolumePressureMarker,
+                svmp::FE::geometry::CutIntegrationSide::Negative,
+                p.velocity_field,
+                p.velocity_field,
+                std::move(counting_kernel));
+        } else {
+            p.sys->addCellKernel(
+                vector_ops[i],
+                p.velocity_field,
+                p.velocity_field,
+                std::move(counting_kernel));
+        }
     }
 
     constexpr const char* pair_op =
@@ -2118,7 +2332,7 @@ makePressureRepresentabilityProblem(
         // scalar mass analogue keeps this Newton cache fixture compact; the
         // FormsInstaller regression separately covers the vector-divergence
         // expression exactly.
-        constexpr int marker = 812;
+        constexpr int marker = kRetainedVolumePressureMarker;
         const auto velocity_state = FormExpr::stateField(
             p.velocity_field, *p.space, "u");
         const auto pressure_state = FormExpr::stateField(
@@ -2145,29 +2359,48 @@ makePressureRepresentabilityProblem(
             {p.velocity_field, p.pressure_field},
             pair_residual,
             install);
+        if (install_mixed_domain_pressure_term) {
+            p.sys->addCellKernel(
+                pair_op,
+                p.velocity_field,
+                p.pressure_field,
+                make_kernel((-pressure * v).dx()));
+        }
 
-        auto cut_context =
-            std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
-        svmp::FE::geometry::CutQuadratureRule rule;
-        rule.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
-        rule.side = svmp::FE::geometry::CutIntegrationSide::Negative;
-        rule.parent_measure = svmp::FE::Real{1.0} / svmp::FE::Real{6.0};
-        rule.measure = svmp::FE::Real{1.0} / svmp::FE::Real{12.0};
-        rule.volume_fraction = svmp::FE::Real{0.5};
-        rule.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
-        rule.provenance.parent_entity = 0;
-        rule.provenance.marker = marker;
-        rule.points.push_back(svmp::FE::geometry::CutQuadraturePoint{
-            .point = {{svmp::FE::Real{0.25},
-                       svmp::FE::Real{0.25},
-                       svmp::FE::Real{0.25}}},
-            .weight = rule.measure,
-        });
-        svmp::FE::assembly::CutCellAssemblyMetadata metadata;
-        metadata.parent_entity = 0;
-        metadata.side = svmp::FE::geometry::CutIntegrationSide::Negative;
-        metadata.volume_fraction = rule.volume_fraction;
-        cut_context->addGeneratedVolumeRule(marker, metadata, rule);
+        std::shared_ptr<svmp::FE::assembly::CutIntegrationContext>
+            cut_context;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+        if (install_retained_volume_constraints) {
+            cut_context = makeRetainedVolumePressureCutContext(
+                p.sys->meshAccess());
+        }
+#endif
+        if (!cut_context) {
+            cut_context = std::make_shared<
+                svmp::FE::assembly::CutIntegrationContext>();
+            svmp::FE::geometry::CutQuadratureRule rule;
+            rule.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
+            rule.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+            rule.parent_measure =
+                svmp::FE::Real{1.0} / svmp::FE::Real{6.0};
+            rule.measure = svmp::FE::Real{1.0} / svmp::FE::Real{12.0};
+            rule.volume_fraction = svmp::FE::Real{0.5};
+            rule.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+            rule.provenance.parent_entity = 0;
+            rule.provenance.marker = marker;
+            rule.points.push_back(svmp::FE::geometry::CutQuadraturePoint{
+                .point = {{svmp::FE::Real{0.25},
+                           svmp::FE::Real{0.25},
+                           svmp::FE::Real{0.25}}},
+                .weight = rule.measure,
+            });
+            svmp::FE::assembly::CutCellAssemblyMetadata metadata;
+            metadata.parent_entity = 0;
+            metadata.side =
+                svmp::FE::geometry::CutIntegrationSide::Negative;
+            metadata.volume_fraction = rule.volume_fraction;
+            cut_context->addGeneratedVolumeRule(marker, metadata, rule);
+        }
         p.sys->setCutIntegrationContext(std::move(cut_context));
     } else if (pressure_pair_matrix.has_value()) {
         // A symmetric [0,G;G^T,0] pair with a prescribed dense G supports
@@ -2272,6 +2505,71 @@ makePressureRepresentabilityProblem(
     ts_test::setVectorByDof(p.history.uPrev2(), entry_state);
     p.history.resetCurrentToPrevious();
     return p;
+}
+
+struct CapturedPressureDiagnostic {
+    svmp::FE::timestepping::NewtonReport report{};
+    std::string telemetry{};
+};
+
+[[nodiscard]] CapturedPressureDiagnostic runPressureDiagnostic(
+    PressureRepresentabilityProblem& problem)
+{
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    auto telemetry = testing::internal::GetCapturedStdout();
+    telemetry += testing::internal::GetCapturedStderr();
+    return CapturedPressureDiagnostic{
+        .report = std::move(report),
+        .telemetry = std::move(telemetry)};
+}
+
+[[nodiscard]] PressureRepresentabilityProblem
+makeRetainedVolumePressureProblem(
+    FreeSurfaceConservativeBalanceKernelCounts& counts,
+    std::shared_ptr<FixedPressureDirichletState> pressure_dirichlet = {},
+    std::size_t aggregation_count = 1u,
+    bool mixed_domain_pair = false)
+{
+    return makePressureRepresentabilityProblem(
+        counts,
+        /*two_cells=*/false,
+        /*pressure_mpc_state=*/{},
+        std::move(pressure_dirichlet),
+        /*entry_velocity=*/1.0,
+        /*pressure_pair_diagonal=*/std::nullopt,
+        /*track_immutable_mesh_revisions=*/false,
+        /*install_symbolic_cut_volume_pair=*/true,
+        /*production_pressure_target=*/0.0,
+        /*entry_pressure_baseline=*/0.0,
+        /*use_native_mesh=*/false,
+        /*surface_energy_scale=*/1.0,
+        /*gravitational_potential_scale=*/0.0,
+        /*prescribed_external_pressure_scale=*/0.0,
+        /*pressure_pair_matrix=*/std::nullopt,
+        /*diagnostic_vector_shape=*/std::nullopt,
+        /*install_retained_volume_constraints=*/true,
+        aggregation_count,
+        mixed_domain_pair);
 }
 
 [[nodiscard]] ScalarProblem makeAffineScalarProblem(double target,
@@ -6397,6 +6695,345 @@ TEST(NewtonSolver,
             std::string::npos)
             << op;
     }
+}
+
+TEST(NewtonSolver,
+     ConstantPressureKktIgnoresOnlyProvedInactiveRetainedVolumePins)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN || \
+    !defined(SVMP_FE_WITH_MESH) || !SVMP_FE_WITH_MESH
+    GTEST_SKIP()
+        << "retained-volume Newton test requires Eigen and native mesh support";
+#else
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    auto problem = makePressureRepresentabilityProblem(
+        diagnostic_counts,
+        /*two_cells=*/false,
+        /*pressure_mpc_state=*/{},
+        /*pressure_dirichlet_state=*/{},
+        /*entry_velocity=*/1.0,
+        /*pressure_pair_diagonal=*/std::nullopt,
+        /*track_immutable_mesh_revisions=*/false,
+        /*install_symbolic_cut_volume_pair=*/true,
+        /*production_pressure_target=*/0.0,
+        /*entry_pressure_baseline=*/0.0,
+        /*use_native_mesh=*/false,
+        /*surface_energy_scale=*/1.0,
+        /*gravitational_potential_scale=*/0.0,
+        /*prescribed_external_pressure_scale=*/0.0,
+        /*pressure_pair_matrix=*/std::nullopt,
+        /*diagnostic_vector_shape=*/std::nullopt,
+        /*install_retained_volume_constraints=*/true);
+
+    const auto pressure_begin =
+        problem.sys->fieldDofOffset(problem.pressure_field);
+    const auto pressure_count = problem.sys
+                                    ->fieldDofHandler(problem.pressure_field)
+                                    .getNumDofs();
+    ASSERT_GT(pressure_begin, 0);
+    ASSERT_EQ(pressure_count, 8);
+    const auto vertex_dof = [&](svmp::FE::GlobalIndex vertex) {
+        const auto* entity = problem.sys
+                                 ->fieldDofHandler(problem.pressure_field)
+                                 .getEntityDofMap();
+        EXPECT_NE(entity, nullptr);
+        if (entity == nullptr) {
+            return svmp::FE::GlobalIndex{-1};
+        }
+        const auto dofs = entity->getVertexDofs(vertex);
+        EXPECT_EQ(dofs.size(), 1u);
+        return dofs.size() == 1u
+                   ? pressure_begin + dofs.front()
+                   : svmp::FE::GlobalIndex{-1};
+    };
+
+    const auto inactive_bottom = vertex_dof(0);
+    const auto inactive_top = vertex_dof(4);
+    const auto cut_bottom = vertex_dof(1);
+    const auto root_bottom_near = vertex_dof(2);
+    const auto root_bottom_far = vertex_dof(3);
+    const auto inactive_line =
+        problem.sys->constraints().getConstraint(inactive_bottom);
+    ASSERT_TRUE(inactive_line.has_value());
+    EXPECT_TRUE(inactive_line->entries.empty());
+    EXPECT_TRUE(std::isfinite(inactive_line->inhomogeneity));
+    EXPECT_DOUBLE_EQ(inactive_line->inhomogeneity, 0.0);
+    const auto inactive_top_line =
+        problem.sys->constraints().getConstraint(inactive_top);
+    ASSERT_TRUE(inactive_top_line.has_value());
+    EXPECT_TRUE(inactive_top_line->entries.empty());
+    EXPECT_DOUBLE_EQ(inactive_top_line->inhomogeneity, 0.0);
+
+    const auto cut_line =
+        problem.sys->constraints().getConstraint(cut_bottom);
+    ASSERT_TRUE(cut_line.has_value());
+    ASSERT_EQ(cut_line->entries.size(), 2u);
+    EXPECT_EQ(cut_line->entries[0].master_dof, root_bottom_near);
+    EXPECT_DOUBLE_EQ(cut_line->entries[0].weight, 2.0);
+    EXPECT_EQ(cut_line->entries[1].master_dof, root_bottom_far);
+    EXPECT_DOUBLE_EQ(cut_line->entries[1].weight, -1.0);
+
+    const auto prolongations =
+        problem.sys->finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(prolongations.size(), 1u);
+    ASSERT_NE(prolongations.front(), nullptr);
+    const auto& prolongation = *prolongations.front();
+    ASSERT_TRUE(prolongation.trace_bound_eligible);
+    ASSERT_NE(prolongation.canonical_content_digest, 0u);
+    ASSERT_EQ(prolongation.active_cells.size(), 2u);
+    std::set<svmp::FE::GlobalIndex> retained_pressure_support;
+    for (const auto& cell : prolongation.active_cells) {
+        EXPECT_TRUE(std::isfinite(cell.retained_physical_volume));
+        EXPECT_GT(cell.retained_physical_volume, 0.0);
+        ASSERT_FALSE(cell.field_dofs.empty());
+        retained_pressure_support.insert(
+            cell.field_dofs.begin(), cell.field_dofs.end());
+    }
+    EXPECT_FALSE(retained_pressure_support.contains(inactive_bottom));
+    EXPECT_FALSE(retained_pressure_support.contains(inactive_top));
+    EXPECT_TRUE(retained_pressure_support.contains(cut_bottom));
+    EXPECT_TRUE(retained_pressure_support.contains(root_bottom_near));
+    EXPECT_TRUE(retained_pressure_support.contains(root_bottom_far));
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    const auto stderr_text = testing::internal::GetCapturedStderr();
+    const auto stdout_text = testing::internal::GetCapturedStdout();
+    const auto telemetry = stdout_text + stderr_text;
+
+    EXPECT_TRUE(report.converged);
+    EXPECT_TRUE(
+        report.constant_pressure_unit_coefficients_represent_constant);
+    EXPECT_TRUE(report.constant_pressure_constraints_preserve_constants);
+    EXPECT_TRUE(report.constant_pressure_kkt_available);
+    EXPECT_NEAR(report.constant_pressure_kkt_pressure_jump, 2.0, 1.0e-12);
+    EXPECT_NEAR(report.constant_pressure_kkt_volume_multiplier, -2.0,
+                1.0e-12);
+    EXPECT_EQ(report.constant_pressure_kkt_reason, "available");
+    EXPECT_EQ(report.constant_pressure_constraint_scope,
+              "retained_volume");
+    EXPECT_EQ(report.constant_pressure_constraint_scope_reason,
+              "available");
+    EXPECT_NE(
+        telemetry.find("constant_pressure_constraint_scope=retained_volume"),
+        std::string::npos);
+    EXPECT_NE(
+        telemetry.find("constant_pressure_constraint_scope_reason=available"),
+        std::string::npos);
+#endif
+}
+
+TEST(NewtonSolver,
+     ConstantPressureKktRejectsSupportedZeroPressureDirichlet)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN || \
+    !defined(SVMP_FE_WITH_MESH) || !SVMP_FE_WITH_MESH
+    GTEST_SKIP()
+        << "retained-volume Newton test requires Eigen and native mesh support";
+#else
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    auto dirichlet = std::make_shared<FixedPressureDirichletState>();
+    dirichlet->field_local_dof = 2;
+    auto problem = makeRetainedVolumePressureProblem(
+        diagnostic_counts, dirichlet);
+
+    const auto pressure_begin =
+        problem.sys->fieldDofOffset(problem.pressure_field);
+    const auto supported_pin = pressure_begin + dirichlet->field_local_dof;
+    const auto line =
+        problem.sys->constraints().getConstraint(supported_pin);
+    ASSERT_TRUE(line.has_value());
+    EXPECT_TRUE(line->entries.empty());
+    EXPECT_DOUBLE_EQ(line->inhomogeneity, 0.0);
+    const auto reports =
+        problem.sys->finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(reports.size(), 1u);
+    ASSERT_NE(reports.front(), nullptr);
+    ASSERT_TRUE(reports.front()->trace_bound_eligible);
+    EXPECT_TRUE(std::any_of(
+        reports.front()->active_cells.begin(),
+        reports.front()->active_cells.end(),
+        [supported_pin](const auto& cell) {
+            return std::binary_search(
+                cell.field_dofs.begin(),
+                cell.field_dofs.end(),
+                supported_pin);
+        }));
+
+    const auto captured = runPressureDiagnostic(problem);
+    EXPECT_TRUE(captured.report.converged);
+    EXPECT_TRUE(captured.report
+                    .constant_pressure_unit_coefficients_represent_constant);
+    EXPECT_FALSE(captured.report
+                     .constant_pressure_constraints_preserve_constants);
+    EXPECT_FALSE(captured.report.constant_pressure_kkt_available);
+    EXPECT_EQ(captured.report.constant_pressure_constraint_scope,
+              "retained_volume");
+    EXPECT_EQ(captured.report.constant_pressure_constraint_scope_reason,
+              "available");
+    EXPECT_EQ(
+        captured.report.constant_pressure_kkt_reason,
+        "pressure_constraints_do_not_preserve_constants");
+#endif
+}
+
+TEST(NewtonSolver,
+     ConstantPressureKktRejectsAbsentRetainedVolumeEvidence)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN || \
+    !defined(SVMP_FE_WITH_MESH) || !SVMP_FE_WITH_MESH
+    GTEST_SKIP()
+        << "retained-volume Newton test requires Eigen and native mesh support";
+#else
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    auto problem = makeRetainedVolumePressureProblem(
+        diagnostic_counts, {}, /*aggregation_count=*/0u);
+    ASSERT_TRUE(problem.sys
+                    ->finalizedSmallCutAggregationProlongations()
+                    .empty());
+
+    const auto captured = runPressureDiagnostic(problem);
+    EXPECT_FALSE(captured.report.constant_pressure_kkt_available);
+    EXPECT_EQ(captured.report.constant_pressure_constraint_scope,
+              "full_field");
+    EXPECT_EQ(captured.report.constant_pressure_constraint_scope_reason,
+              "aggregation_report_unavailable");
+#endif
+}
+
+TEST(NewtonSolver,
+     RetainedVolumeEvidenceLifecycleClearsStaleReportBeforeConsumer)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN || \
+    !defined(SVMP_FE_WITH_MESH) || !SVMP_FE_WITH_MESH
+    GTEST_SKIP()
+        << "retained-volume Newton test requires Eigen and native mesh support";
+#else
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    auto problem =
+        makeRetainedVolumePressureProblem(diagnostic_counts);
+    ASSERT_EQ(
+        problem.sys->finalizedSmallCutAggregationProlongations().size(),
+        1u);
+
+    problem.sys->setCutIntegrationContext(
+        makeRetainedVolumePressureCutContext(
+            problem.sys->meshAccess()));
+
+    EXPECT_TRUE(problem.sys
+                    ->finalizedSmallCutAggregationProlongations()
+                    .empty());
+    EXPECT_TRUE(
+        problem.sys->constraintStateStaleForCurrentRevisions());
+#endif
+}
+
+TEST(NewtonSolver,
+     ConstantPressureKktRejectsIneligibleRetainedVolumeEvidence)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN || \
+    !defined(SVMP_FE_WITH_MESH) || !SVMP_FE_WITH_MESH
+    GTEST_SKIP()
+        << "retained-volume Newton test requires Eigen and native mesh support";
+#else
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    ScopedEnvVar allow_unaggregated(
+        "SVMP_AGGREGATION_ALLOW_UNAGGREGATED", "1");
+    auto problem = makeRetainedVolumePressureProblem(diagnostic_counts);
+    const auto reports =
+        problem.sys->finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(reports.size(), 1u);
+    ASSERT_NE(reports.front(), nullptr);
+    ASSERT_FALSE(reports.front()->trace_bound_eligible);
+
+    const auto captured = runPressureDiagnostic(problem);
+    EXPECT_FALSE(captured.report.constant_pressure_kkt_available);
+    EXPECT_EQ(captured.report.constant_pressure_constraint_scope,
+              "full_field");
+    EXPECT_EQ(captured.report.constant_pressure_constraint_scope_reason,
+              "aggregation_report_ineligible");
+#endif
+}
+
+TEST(NewtonSolver,
+     ConstantPressureKktRejectsAmbiguousRetainedVolumeEvidence)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN || \
+    !defined(SVMP_FE_WITH_MESH) || !SVMP_FE_WITH_MESH
+    GTEST_SKIP()
+        << "retained-volume Newton test requires Eigen and native mesh support";
+#else
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    auto problem = makeRetainedVolumePressureProblem(
+        diagnostic_counts, {}, /*aggregation_count=*/2u);
+    ASSERT_EQ(
+        problem.sys->finalizedSmallCutAggregationProlongations().size(),
+        2u);
+
+    const auto captured = runPressureDiagnostic(problem);
+    EXPECT_FALSE(captured.report.constant_pressure_kkt_available);
+    EXPECT_EQ(captured.report.constant_pressure_constraint_scope,
+              "full_field");
+    EXPECT_EQ(captured.report.constant_pressure_constraint_scope_reason,
+              "aggregation_report_ambiguous");
+#endif
+}
+
+TEST(NewtonSolver,
+     ConstantPressureKktRejectsMixedDomainPressurePair)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN || \
+    !defined(SVMP_FE_WITH_MESH) || !SVMP_FE_WITH_MESH
+    GTEST_SKIP()
+        << "retained-volume Newton test requires Eigen and native mesh support";
+#else
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    auto problem = makeRetainedVolumePressureProblem(
+        diagnostic_counts,
+        {},
+        /*aggregation_count=*/1u,
+        /*mixed_domain_pair=*/true);
+    ASSERT_EQ(
+        problem.sys->finalizedSmallCutAggregationProlongations().size(),
+        1u);
+
+    const auto captured = runPressureDiagnostic(problem);
+    EXPECT_FALSE(captured.report.constant_pressure_kkt_available);
+    EXPECT_EQ(captured.report.constant_pressure_constraint_scope,
+              "full_field");
+    EXPECT_EQ(captured.report.constant_pressure_constraint_scope_reason,
+              "pair_support_unavailable");
+#endif
 }
 
 TEST(NewtonSolver,

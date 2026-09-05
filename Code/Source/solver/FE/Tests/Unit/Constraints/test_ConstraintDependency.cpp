@@ -33,6 +33,31 @@ TEST(ConstraintDependencyTest, RevisionMasksDetectOnlyDeclaredDomains)
     EXPECT_TRUE(dependency_changed(deps, cached, current));
 }
 
+TEST(ConstraintDependencyTest, RevisionSnapshotEqualityIsMemberwise)
+{
+    ConstraintRevisionSnapshot snapshot;
+    snapshot.valid = true;
+    snapshot.geometry = 1;
+    snapshot.reference_rebase = 2;
+    snapshot.topology = 3;
+    snapshot.ownership = 4;
+    snapshot.numbering = 5;
+    snapshot.mesh_field_layout = 6;
+    snapshot.mesh_field_values = 7;
+    snapshot.labels = 8;
+    snapshot.active_configuration = 9;
+    snapshot.fe_space = 10;
+    snapshot.fe_dof_layout = 11;
+    snapshot.fe_constraint_layout = 12;
+    snapshot.fe_block_layout = 13;
+    snapshot.time_epoch = 14;
+
+    EXPECT_EQ(snapshot, snapshot);
+    auto changed = snapshot;
+    ++changed.time_epoch;
+    EXPECT_NE(snapshot, changed);
+}
+
 TEST(ConstraintDependencyTest, CoordinateMatchedPeriodicDeclaresStructuralMotionDependencies)
 {
     std::vector<GlobalIndex> slave_dofs = {0, 1};
