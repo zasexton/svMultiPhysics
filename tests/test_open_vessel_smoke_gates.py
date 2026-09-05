@@ -1889,7 +1889,7 @@ def test_static_compatible_pressure_initializer_allows_repeated_already_initiali
             "free_surface_static_compatible_pressure_initializers": [
                 _passing_static_compatible_pressure_initializer_record(),
                 initialized,
-                dict(initialized),
+                {**initialized, "applied": False},
             ],
         },
     }
@@ -1901,6 +1901,47 @@ def test_static_compatible_pressure_initializer_allows_repeated_already_initiali
 
     assert smoke.free_surface_pressure_representability_errors(
         metrics, args) == []
+
+
+@pytest.mark.parametrize(
+    ("applied_present", "applied_value"),
+    [(False, None), (True, 2)],
+    ids=("missing", "invalid"),
+)
+def test_static_compatible_pressure_initializer_rejects_malformed_already_initialized(
+        applied_present, applied_value):
+    smoke = _load_smoke_module()
+    already_initialized = {
+        **_passing_static_compatible_pressure_initializer_record(),
+        "reason": "already_initialized",
+    }
+    if applied_present:
+        already_initialized["applied"] = applied_value
+    else:
+        already_initialized.pop("applied")
+    metrics = {
+        "diagnostics": {
+            "free_surface_conservative_balances": [
+                _complete_pressure_representability_record()
+            ],
+            "free_surface_pressure_representability_distance_gates": [
+                _passing_pressure_representability_distance_gate_record()
+            ],
+            "free_surface_static_compatible_pressure_initializers": [
+                _passing_static_compatible_pressure_initializer_record(),
+                already_initialized,
+            ],
+        },
+    }
+    args = argparse.Namespace(
+        require_free_surface_pressure_representability_diagnostic=True,
+        max_free_surface_pressure_representability_relative_distance=0.05,
+        initialize_static_compatible_pressure=True,
+    )
+
+    errors = smoke.free_surface_pressure_representability_errors(metrics, args)
+
+    assert any("unexpected applied" in error for error in errors)
 
 
 def test_pressure_representability_diagnostic_does_not_require_initializer():

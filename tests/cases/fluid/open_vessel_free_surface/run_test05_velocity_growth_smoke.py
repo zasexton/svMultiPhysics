@@ -5990,6 +5990,19 @@ def free_surface_pressure_representability_errors(
                         "requires exactly one applied record "
                         f"(observed {len(applied)})"
                     )
+                malformed_non_applied = [
+                    item for item in initializer_records
+                    if item.get("applied") not in (1, True) and
+                    item.get("passed") in (1, True) and
+                    item.get("applied") not in (0, False)
+                ]
+                if malformed_non_applied:
+                    errors.append(
+                        "additive current nonlinear pressure initial guess has "
+                        "unexpected applied "
+                        f"{malformed_non_applied[-1].get('applied')!r}; "
+                        "expected 0 for a successful already-initialized record"
+                    )
                 unexpected_non_applied = [
                     item for item in initializer_records
                     if item.get("applied") not in (1, True) and
