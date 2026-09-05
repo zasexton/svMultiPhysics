@@ -18,7 +18,7 @@
 
 **Reviewed committed HEAD:** `905239de40b41aa3ca615305516b600e640d95e4`.
 
-**Implementation status:** Implementation authorized on 2026-09-04. R0 baseline capture and R1 configuration migration are in progress. The Physics option, resolved level-set translator and builder reuse slices are verified; serial wet-block references are accepted within their limited scope. R2-R12 remain pending. The original review did not execute solver builds or physical qualification. Completed work is recorded by checked items and dated progress entries below.
+**Implementation status:** Implementation authorized on 2026-09-04. R0 baseline capture and R1 configuration migration are in progress. The Physics option, resolved level-set translator and builder reuse slices are verified; serial and two-rank wet-block references are accepted within their limited scope. R2-R12 remain pending. The original review did not execute solver builds or physical qualification. Completed work is recorded by checked items and dated progress entries below.
 
 **Execution records:** [Coordination notes](free_surface_boundary_unfitted_audit_20260720.md#2026-09-04-architecture-refactoring-coordination) and [owned Slurm job ledger](free_surface_refactor_job_ledger_20260904.md). Commits use Zachary Sexton <zsexton@stanford.edu> and are pushed to `issue-449-modern-mesh-core` after their relevant checks.
 
@@ -365,7 +365,7 @@ Each package is an independently reviewable change with a defined numerical gate
 
 **Suggested commit:** `docs: define free-surface refactor baseline and capability evidence`.
 
-**Progress, 2026-09-04:** The capability ledger passed its scoped review after provenance corrections. The [baseline manifest](../tests/cases/fluid/free_surface_refactor_baseline.json) records frozen source/input identities, the separately preserved original dirty worktree, and inspected build/test outcomes with explicit failures and skips. Five serial Q1 wet-block cases now have accepted full physical operator/constraint/geometry references, unchanged existing gates, repeatable output and independently checked publication behavior. The enabled-feature suite completed all 20 declared groups without failures, with individual skips and its matrix exclusion retained. MPI and broader history/energy/performance references remain incomplete; no remaining R0 checkbox is satisfied by the serial subset and suite outcomes alone.
+**Progress, 2026-09-04:** The capability ledger passed its scoped review after provenance corrections. The [baseline manifest](../tests/cases/fluid/free_surface_refactor_baseline.json) records frozen source/input identities, the separately preserved original dirty worktree, and inspected build/test outcomes with explicit failures and skips. Five serial Q1 wet-block cases now have accepted full physical operator/constraint/geometry references, unchanged existing gates, repeatable output and independently checked publication behavior. The enabled-feature suite completed all 20 declared groups without failures, with individual skips and its matrix exclusion retained. Five two-rank block-partition Q1 cases also have accepted operator references: independent canonical-identity, ownership, CSR, geometry and numerical-gate checks passed; repeat output is byte-identical and serial payloads remain equivalent. Broader MPI, history, energy and performance references remain incomplete; no remaining R0 checkbox is satisfied by these wet-block subsets and suite outcomes alone.
 
 ### R1. Introduce one resolved configuration and remove repeated parsing
 
