@@ -18,7 +18,7 @@
 
 **Reviewed committed HEAD:** `905239de40b41aa3ca615305516b600e640d95e4`.
 
-**Implementation status:** Implementation authorized on 2026-09-04. R0 baseline capture and R1 configuration migration are in progress. The Physics option, resolved level-set translator and builder reuse slices are verified; serial and two-rank wet-block references are accepted within their limited scope. R2-R12 remain pending. The original review did not execute solver builds or physical qualification. Completed work is recorded by checked items and dated progress entries below.
+**Implementation status:** Implementation authorized on 2026-09-04. R0 baseline capture, R1 configuration migration and R2 domain separation are in progress. The typed maintenance and cut-option slices and the first reusable FE volume selector are verified within their recorded scopes. R3-R12 remain pending. Physical qualification and the remaining configuration/domain migrations remain open. Completed work is recorded by checked items and dated progress entries below.
 
 **Execution records:** [Coordination notes](free_surface_boundary_unfitted_audit_20260720.md#2026-09-04-architecture-refactoring-coordination) and [owned Slurm job ledger](free_surface_refactor_job_ledger_20260904.md). Commits use Zachary Sexton <zsexton@stanford.edu> and are pushed to `issue-449-modern-mesh-core` after their relevant checks.
 
@@ -441,13 +441,15 @@ Each package is an independently reviewable change with a defined numerical gate
 - [ ] Preserve active-only versus active-and-inactive rule retention. Physical assembly selects its own side; an extension or aggregation consumer explicitly declares additional retained support.
 - [ ] Preserve exact-zero dry contributions and existing full-cell reuse paths. Reject stale/missing source or unsupported geometry policies at the same contract boundary as before.
 - [ ] Extract generic collective measure validation from Navier-Stokes into FE geometry/integration services. Physics still decides when its model requires positive embedded interface measure.
-- [ ] Exercise the new binding with a generic scalar diffusion/transport form on a cut region, using FE alone. This demonstrates reuse without adding a new production physics module.
+- [x] Exercise the new binding with a generic scalar reaction-diffusion form on a cut region, using FE alone. This demonstrates reuse without adding a new production physics module; transport/history are outside this first consumer.
 
 **Required cases:** Integrate constants and linear fields; sum complementary side volumes; reverse side; distinguish two markers; distinguish marker/side facet sets in the cache; reject stale geometry; compare supported interpreted/JIT/parallel paths; preserve full-domain behavior.
 
 **Test owners:** `FE/Tests/Unit/Systems/test_CutIntegrationInfrastructure.cpp`, `FE/Tests/Unit/Forms/test_CutCellForms.cpp`, `test_SymbolicDifferentiation.cpp`, `test_JITCacheKey.cpp`, and existing generated-domain tests.
 
 **Suggested commit:** `refactor: expose physics-neutral integration-domain bindings`.
+
+**Progress, 2026-09-05 (UTC), FE volume selector:** `FE/Forms/IntegrationDomain.h` now owns an explicit full-volume or marker/side cut-volume request and forwards to the existing Forms measures. It owns no geometry, physical boundary law or new backend. Two value/lowering tests and one durable scalar reaction-diffusion consumer verify reuse through public installation and assembly. The accepted baseline and paired capture cover seven scalar P1 tetrahedron regions, complementary side moments, distinct markers, both support-retention policies, full-cell reuse and exact dry support. All 64 paired records pass: 32 historical-direct/new-direct and 32 direct/selector comparisons are exact after only validated route/cache-path metadata handling; numerical and live IR fields are unchanged. Twenty-four non-dry compiled witnesses and eight interpreter-rejection controls establish the stated installed path, with dry observations kept separate. Maximum assembly and geometry oracle errors remain 3.33e-16 and 5.55e-17. The coherent current build passes all three focused cases and 2,404 cases across Forms, Systems, Geometry and Assembly, preserving the original 27 runtime skips and 27 disabled cases. Source, actual build/runtime reviews, fixed policies, failed generations and terminal accounting are linked in the [baseline manifest](../tests/cases/fluid/free_surface_refactor_baseline.json). Navier-Stokes dispatch migration, collective measures, surface/facet binding and distributed/physical qualification remain open. Newly incoming WP-4 geometry-producer changes require a separate combined-source verification before push.
 
 ### R3. Extract the Navier-Stokes bulk formulation
 
