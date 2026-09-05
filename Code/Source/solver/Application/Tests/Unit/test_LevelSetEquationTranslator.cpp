@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "Application/Core/LevelSetEquationInputSnapshot.h"
 #include "Application/Translators/EquationTranslator.h"
 #include "Application/Translators/LevelSetEquationTranslator.h"
 #include "FE/Backends/Interfaces/BackendFactory.h"
@@ -584,6 +585,302 @@ TEST(LevelSetEquationTranslator,
             "state-dependent coefficient to an algebraic coupled unknown so "
             "its monolithic velocity tangent is retained.");
 #endif
+}
+
+TEST(LevelSetEquationTranslator,
+     InputSnapshotPreservesDistinctLegacyAndInstallationText)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryTriangleMesh();
+  EquationParameters equation;
+  equation.type.set_raw_value("level_set_transport");
+
+  Parameter<double> precise_value(
+      "Snapshot_precision_probe", 1.2345678901234567, false);
+  precise_value.set_raw_value(1.2345678901234567);
+  Parameter<std::string> undefined_default(
+      "Snapshot_undefined_default", "default_choice", false);
+  VectorParameter<double> typed_vector(
+      "Snapshot_typed_vector", std::vector<double>{}, false);
+  typed_vector.set("(1.25,-0.5,3.0)");
+  equation.params_map[precise_value.name()] = &precise_value;
+  equation.params_map[undefined_default.name()] = &undefined_default;
+  equation.params_map[typed_vector.name()] = &typed_vector;
+  equation.set_extra_parameter_value(
+      "Snapshot_prefix_probe", "  2tail  ");
+
+  const std::map<std::string, std::shared_ptr<svmp::Mesh>> meshes{
+      {"triangle", mesh}};
+  auto installation =
+      application::translators::EquationTranslator::buildInput(
+          equation, meshes);
+  const auto snapshot = application::translators::EquationTranslator::
+      snapshotLevelSetEquationInput(equation, std::move(installation));
+
+  ASSERT_TRUE(snapshot);
+  EXPECT_EQ(snapshot->installation_input.equation_type,
+            "level_set_transport");
+  ASSERT_TRUE(snapshot->legacy_maintenance_input.has_value());
+  const auto& legacy = *snapshot->legacy_maintenance_input;
+  EXPECT_TRUE(legacy.equation_type_defined);
+  EXPECT_EQ(legacy.equation_type, "level_set_transport");
+
+  const auto& legacy_precise =
+      legacy.equation_parameters.at("Snapshot_precision_probe");
+  const auto& installation_precise =
+      snapshot->installation_input.equation_params.at(
+          "Snapshot_precision_probe");
+  EXPECT_TRUE(legacy_precise.defined);
+  EXPECT_EQ(legacy_precise.value, "1.23457");
+  EXPECT_TRUE(installation_precise.defined);
+  EXPECT_EQ(installation_precise.value, "1.2345678901234567");
+
+  const auto& legacy_default =
+      legacy.equation_parameters.at("Snapshot_undefined_default");
+  const auto& installation_default =
+      snapshot->installation_input.equation_params.at(
+          "Snapshot_undefined_default");
+  EXPECT_FALSE(legacy_default.defined);
+  EXPECT_EQ(legacy_default.value, "default_choice");
+  EXPECT_FALSE(installation_default.defined);
+  EXPECT_EQ(installation_default.value, "default_choice");
+
+  EXPECT_EQ(legacy.equation_parameters.at("Snapshot_prefix_probe").value,
+            "  2tail  ");
+  EXPECT_EQ(snapshot->installation_input.equation_params
+                .at("Snapshot_prefix_probe")
+                .value,
+            "  2tail  ");
+  EXPECT_EQ(legacy.equation_parameters.at("Snapshot_typed_vector").value,
+            " 1.250000 -0.500000 3.000000");
+  EXPECT_EQ(snapshot->installation_input.equation_params
+                .at("Snapshot_typed_vector")
+                .value,
+            " 1.25 -0.5 3");
+#endif
+}
+
+TEST(LevelSetEquationTranslator,
+     InputSnapshotPreservesBoundaryOrderAndDefinitionFlags)
+{
+  EquationParameters equation;
+  equation.type.set_raw_value("levelSet");
+  equation.boundary_conditions.push_back(nullptr);
+
+  auto* inlet = new BoundaryConditionParameters();
+  inlet->name.set_raw_value(" inlet ");
+  inlet->type.set_raw_value("LevelSetInflow");
+  inlet->set_extra_parameter_value("Level_set_value", "  0.25tail  ");
+  equation.boundary_conditions.push_back(inlet);
+
+  auto* defaulted = new BoundaryConditionParameters();
+  defaulted->name.set("name", true, std::string{"default_face"});
+  defaulted->type.set("Type", true, std::string{"LevelSetOutflow"});
+  equation.boundary_conditions.push_back(defaulted);
+
+  auto* outlet = new BoundaryConditionParameters();
+  outlet->name.set_raw_value("outlet");
+  outlet->type.set_raw_value("LevelSetOutflow");
+  equation.boundary_conditions.push_back(outlet);
+
+  const auto legacy = application::translators::EquationTranslator::
+      snapshotLegacyLevelSetMaintenanceInput(equation);
+
+  EXPECT_TRUE(legacy.equation_type_defined);
+  EXPECT_EQ(legacy.equation_type, "levelSet");
+  ASSERT_EQ(legacy.boundaries.size(), 3u);
+  EXPECT_TRUE(legacy.boundaries[0].type_defined);
+  EXPECT_TRUE(legacy.boundaries[0].name_defined);
+  EXPECT_EQ(legacy.boundaries[0].type, "LevelSetInflow");
+  EXPECT_EQ(legacy.boundaries[0].name, " inlet ");
+  EXPECT_EQ(legacy.boundaries[0].parameters.at("Level_set_value").value,
+            "  0.25tail  ");
+  EXPECT_FALSE(legacy.boundaries[1].type_defined);
+  EXPECT_FALSE(legacy.boundaries[1].name_defined);
+  EXPECT_EQ(legacy.boundaries[1].type, "LevelSetOutflow");
+  EXPECT_EQ(legacy.boundaries[1].name, "default_face");
+  EXPECT_TRUE(legacy.boundaries[2].type_defined);
+  EXPECT_TRUE(legacy.boundaries[2].name_defined);
+  EXPECT_EQ(legacy.boundaries[2].type, "LevelSetOutflow");
+  EXPECT_EQ(legacy.boundaries[2].name, "outlet");
+}
+
+TEST(LevelSetEquationTranslator,
+     InputSnapshotSurvivesSourceMutationAndInstallsCapturedValues)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryQuadMesh();
+  application::core::LevelSetEquationInputHandle snapshot;
+  {
+    EquationParameters equation;
+    equation.type.set_raw_value("level_set");
+    equation.set_extra_parameter_value(
+        "Level_set_field_name", "captured_phi");
+    equation.set_extra_parameter_value(
+        "Operator_tag", "captured_transport");
+    equation.set_extra_parameter_value("Velocity_source", "constant");
+    equation.set_extra_parameter_value(
+        "Constant_velocity", "1.25 -0.5 0.0");
+
+    const std::map<std::string, std::shared_ptr<svmp::Mesh>> meshes{
+        {"quad", mesh}};
+    auto installation =
+        application::translators::EquationTranslator::buildInput(
+            equation, meshes);
+    snapshot = application::translators::EquationTranslator::
+        snapshotLevelSetEquationInput(equation, std::move(installation));
+
+    equation.type.set_raw_value("changed_type");
+    equation.set_extra_parameter_value(
+        "Level_set_field_name", "changed_phi");
+    equation.set_extra_parameter_value(
+        "Operator_tag", "changed_transport");
+  }
+
+  ASSERT_TRUE(snapshot);
+  ASSERT_TRUE(snapshot->legacy_maintenance_input.has_value());
+  EXPECT_EQ(snapshot->legacy_maintenance_input->equation_type, "level_set");
+  EXPECT_EQ(snapshot->legacy_maintenance_input->equation_parameters
+                .at("Level_set_field_name")
+                .value,
+            "captured_phi");
+  EXPECT_EQ(snapshot->installation_input.equation_params
+                .at("Level_set_field_name")
+                .value,
+            "captured_phi");
+  EXPECT_EQ(snapshot->installation_input.equation_params
+                .at("Operator_tag")
+                .value,
+            "captured_transport");
+
+  const auto resolved =
+      application::translators::level_set::resolveConfiguration(snapshot);
+  ASSERT_TRUE(resolved);
+  ASSERT_TRUE(resolved->input_snapshot);
+  EXPECT_EQ(resolved->options.level_set.field_name, "captured_phi");
+  EXPECT_EQ(resolved->options.operator_tag, "captured_transport");
+  EXPECT_EQ(resolved->options.velocity.constant_value,
+            (std::array<svmp::FE::Real, 3>{1.25, -0.5, 0.0}));
+
+  svmp::FE::systems::FESystem system(mesh);
+  auto module = application::translators::level_set::createModule(
+      *resolved, system);
+  ASSERT_TRUE(module);
+  EXPECT_NE(system.findFieldByName("captured_phi"),
+            svmp::FE::INVALID_FIELD_ID);
+  EXPECT_EQ(system.findFieldByName("changed_phi"),
+            svmp::FE::INVALID_FIELD_ID);
+  EXPECT_TRUE(system.hasOperator("captured_transport"));
+  EXPECT_FALSE(system.hasOperator("changed_transport"));
+#endif
+}
+
+TEST(LevelSetEquationTranslator,
+     InputSnapshotRawResolutionRetainsInstallationWithoutLegacyAttachment)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryTriangleMesh();
+  auto input = makeMaintenanceCompatibilityInput(mesh);
+  input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "raw_phi"};
+  input.equation_params["Operator_tag"] =
+      svmp::Physics::ParameterValue{true, "raw_transport"};
+  input.equation_params["Constant_velocity"] =
+      svmp::Physics::ParameterValue{true, "0.75 -0.25 0.0"};
+
+  const auto resolved =
+      application::translators::level_set::resolveConfiguration(input);
+  ASSERT_TRUE(resolved);
+  input = svmp::Physics::EquationModuleInput{};
+
+  ASSERT_TRUE(resolved->input_snapshot);
+  EXPECT_EQ(resolved->input_snapshot->installation_input.equation_type,
+            "level_set");
+  EXPECT_EQ(resolved->input_snapshot->installation_input.mesh_name,
+            "triangle");
+  EXPECT_EQ(resolved->input_snapshot->installation_input.equation_params
+                .at("Level_set_field_name")
+                .value,
+            "raw_phi");
+  EXPECT_FALSE(resolved->input_snapshot->legacy_maintenance_input.has_value());
+  EXPECT_EQ(resolved->options.velocity.constant_value,
+            (std::array<svmp::FE::Real, 3>{0.75, -0.25, 0.0}));
+
+  svmp::FE::systems::FESystem system(mesh);
+  auto module = application::translators::level_set::createModule(
+      *resolved, system);
+  ASSERT_TRUE(module);
+  EXPECT_NE(system.findFieldByName("raw_phi"), svmp::FE::INVALID_FIELD_ID);
+  EXPECT_TRUE(system.hasOperator("raw_transport"));
+#endif
+}
+
+TEST(LevelSetEquationTranslator,
+     InputSnapshotResolveOverloadRetainsExplicitLegacyAttachment)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryTriangleMesh();
+  auto owned_snapshot =
+      std::make_shared<application::core::LevelSetEquationInputSnapshot>();
+  owned_snapshot->installation_input = makeMaintenanceCompatibilityInput(mesh);
+  owned_snapshot->installation_input.equation_params[
+      "Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "explicit_phi"};
+  application::core::LegacyLevelSetMaintenanceInput legacy{};
+  legacy.equation_type_defined = true;
+  legacy.equation_type = "level_set";
+  legacy.equation_parameters["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "legacy_explicit_phi"};
+  owned_snapshot->legacy_maintenance_input = std::move(legacy);
+  application::core::LevelSetEquationInputHandle snapshot = owned_snapshot;
+
+  const auto resolved =
+      application::translators::level_set::resolveConfiguration(snapshot);
+  owned_snapshot.reset();
+  snapshot.reset();
+
+  ASSERT_TRUE(resolved);
+  ASSERT_TRUE(resolved->input_snapshot);
+  EXPECT_EQ(resolved->options.level_set.field_name, "explicit_phi");
+  ASSERT_TRUE(
+      resolved->input_snapshot->legacy_maintenance_input.has_value());
+  EXPECT_EQ(resolved->input_snapshot->legacy_maintenance_input
+                ->equation_parameters.at("Level_set_field_name")
+                .value,
+            "legacy_explicit_phi");
+  EXPECT_EQ(resolved->input_snapshot->installation_input.equation_params
+                .at("Level_set_field_name")
+                .value,
+            "explicit_phi");
+#endif
+}
+
+TEST(LevelSetEquationTranslator,
+     InputSnapshotNullHandleIsDistinctFromRawInputValidation)
+{
+  svmp::Physics::EquationModuleInput raw_input{};
+  raw_input.equation_type = "level_set";
+  EXPECT_EQ(
+      (maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
+        (void)application::translators::level_set::resolveConfiguration(
+            raw_input);
+      })),
+      "[svMultiPhysics::Application] Level-set transport module factory "
+      "received null mesh.");
+
+  const application::core::LevelSetEquationInputHandle null_snapshot{};
+  EXPECT_THROW(
+      (void)application::translators::level_set::resolveConfiguration(
+          null_snapshot),
+      std::invalid_argument);
 }
 
 TEST(LevelSetEquationTranslator,

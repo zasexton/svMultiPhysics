@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -61,6 +62,24 @@ svmp::Physics::ParameterMap snapshot_params(const ParameterLists& list)
           out[p->name()] = svmp::Physics::ParameterValue{p->defined(), snapshot_value_string(*p)};
         },
         v);
+  }
+  return out;
+}
+
+svmp::Physics::ParameterMap snapshot_legacy_params(
+    const ParameterLists& list)
+{
+  svmp::Physics::ParameterMap out;
+  for (const auto& [_, value] : list.params_map) {
+    std::visit(
+        [&](const auto* parameter) {
+          if (parameter == nullptr) {
+            return;
+          }
+          out[parameter->name()] = svmp::Physics::ParameterValue{
+              parameter->defined(), parameter->svalue()};
+        },
+        value);
   }
   return out;
 }
@@ -426,6 +445,44 @@ svmp::Physics::EquationModuleInput EquationTranslator::buildInput(
   }
 
   return input;
+}
+
+application::core::LegacyLevelSetMaintenanceInput
+EquationTranslator::snapshotLegacyLevelSetMaintenanceInput(
+    const EquationParameters& equation)
+{
+  application::core::LegacyLevelSetMaintenanceInput input{};
+  input.equation_type_defined = equation.type.defined();
+  input.equation_type = equation.type.value();
+  input.equation_parameters = snapshot_legacy_params(equation);
+  input.boundaries.reserve(equation.boundary_conditions.size());
+  for (const auto* boundary : equation.boundary_conditions) {
+    if (boundary == nullptr) {
+      continue;
+    }
+    input.boundaries.push_back(
+        application::core::LegacyLevelSetBoundaryInput{
+            .type_defined = boundary->type.defined(),
+            .name_defined = boundary->name.defined(),
+            .type = boundary->type.value(),
+            .name = boundary->name.value(),
+            .parameters = snapshot_legacy_params(*boundary),
+        });
+  }
+  return input;
+}
+
+application::core::LevelSetEquationInputHandle
+EquationTranslator::snapshotLevelSetEquationInput(
+    const EquationParameters& equation,
+    svmp::Physics::EquationModuleInput installation_input)
+{
+  auto snapshot =
+      std::make_shared<application::core::LevelSetEquationInputSnapshot>();
+  snapshot->installation_input = std::move(installation_input);
+  snapshot->legacy_maintenance_input =
+      snapshotLegacyLevelSetMaintenanceInput(equation);
+  return snapshot;
 }
 
 std::unique_ptr<svmp::Physics::PhysicsModule> EquationTranslator::createModule(

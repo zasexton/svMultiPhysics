@@ -151,7 +151,9 @@ void preflightAndPreRegisterTwoFluidMaterialInterfaceDependencies(
       }
       continue;
     }
-    auto configuration = level_set::resolveConfiguration(input);
+    auto snapshot = application::translators::EquationTranslator::
+        snapshotLevelSetEquationInput(*equation, std::move(input));
+    auto configuration = level_set::resolveConfiguration(std::move(snapshot));
     components.resolved_level_set_equations_by_input_index[equation_index] =
         configuration;
     if (auto dependency = level_set::materialInterfaceTransportDependency(

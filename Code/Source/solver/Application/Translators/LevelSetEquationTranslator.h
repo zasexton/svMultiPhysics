@@ -47,6 +47,9 @@ struct MaterialInterfaceTransportDependency {
     const application::core::ResolvedLevelSetEquationConfiguration>
 resolveConfiguration(const svmp::Physics::EquationModuleInput& input);
 
+[[nodiscard]] application::core::ResolvedLevelSetEquationHandle
+resolveConfiguration(application::core::LevelSetEquationInputHandle input);
+
 /**
  * Translate and validate the material-interface dependency without mutating
  * an FE system. Non-material-interface level-set inputs return nullopt.

@@ -733,6 +733,101 @@
         "sha256": "d9d8ae312c4121a386ad99a5100f1b5c58267ccee7de685e0d2f47f09c015585",
         "size_bytes": 1246
       }
+    },
+    {
+      "acceptance_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-input-snapshot-acceptance/acceptance.json",
+        "sha256": "203ccb0a04dd56231516720ccb82b91fce4b704cead819c47fadd2dcdda6ac64",
+        "size_bytes": 39662
+      },
+      "id": "r1-input-snapshot",
+      "limitations": [
+        "Legacy maintenance parsing and driver runtime state have not migrated in this slice.",
+        "Shared lexical policies, typed maintenance producer, cut/advection/environment consolidation and effective value provenance remain subsequent R1 work.",
+        "Pointer identity and exact new null-handle misuse text are not separately asserted; independent source review found no required correction.",
+        "Pending R0 lifecycle capture instrumentation is excluded from these retained sources.",
+        "Full R0-R12 implementation and physical qualification remain incomplete."
+      ],
+      "outcome": "Seven snapshot and seventeen compatibility cases pass in both runs; full Application 341 controlled and 343 combined passes, all two/four-rank consensus passes, no skips. Combined svapplication library and both test targets built.",
+      "reviewed_source_hashes_match": true,
+      "runs": [
+        {
+          "accounting_text": "42093152.16|COMPLETED|00:09:36|4||3990568K|0:0\n",
+          "binaries": [
+            {
+              "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-input-snapshot-green/binaries/test_application",
+              "sha256": "6a8a2a4a7e74b58bfcd713eefbecdc5a2b54cde871f37af8ba1974bcd1af2eac",
+              "size_bytes": 88979656
+            },
+            {
+              "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-input-snapshot-green/binaries/test_application_mpi",
+              "sha256": "bb652d63fc4d66824b67d62c0d00bbae79683570afb15c1edc190814a5818eac",
+              "size_bytes": 84556016
+            }
+          ],
+          "job_step": "42093152.16",
+          "label": "r1-input-snapshot-green",
+          "request": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/r1-input-snapshot-green-step.json",
+            "sha256": "346d052fc95b970609c9d53746751c9329430d5ca23ee64ba5ab8a09c5ed0c13",
+            "size_bytes": 1343
+          },
+          "source_commit": "b45f8fc1d538df1a4536bc67015aeb900d5f5a90",
+          "source_record": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/verification-snapshots/r1-input-snapshot-green/source-record.json",
+            "sha256": "9c73dc5c210eccbff979b9b5cbb200229cc09a166bce5ed0b6697482c695cbe0",
+            "size_bytes": 2255
+          },
+          "source_tree": "c5baf109ef30571802310e54dd63f469610d8c34"
+        },
+        {
+          "accounting_text": "42093152.17|COMPLETED|00:11:06|4||3328916K|0:0\n",
+          "binaries": [
+            {
+              "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-input-snapshot-integration/binaries/libsvapplication.a",
+              "sha256": "b3f88a70538391860c366c9590cde530601ca24e80e265ac9c99a93c9878b5ba",
+              "size_bytes": 4958240
+            },
+            {
+              "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-input-snapshot-integration/binaries/test_application",
+              "sha256": "4c7daa78557ede3e35b4568101fe26d9c356889f6d42a6f45925d38f58c8dd8f",
+              "size_bytes": 89030816
+            },
+            {
+              "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-input-snapshot-integration/binaries/test_application_mpi",
+              "sha256": "f790b316e3d8e3636ed13d0fb829694f8a3b1308f58239f4b98f11dbda6cbe9a",
+              "size_bytes": 84565208
+            }
+          ],
+          "job_step": "42093152.17",
+          "label": "r1-input-snapshot-integration",
+          "request": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/r1-input-snapshot-integration-step.json",
+            "sha256": "a5f1bd89bd149fc2230819e861f1ad8919d610d3674e87edd05dcbc1b2424516",
+            "size_bytes": 1456
+          },
+          "source_commit": "9f4d9ce90687a0dc27a1d1734e3454ed24a77298",
+          "source_record": {
+            "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/candidate/verification-snapshots/r1-input-snapshot-integration/source-record.json",
+            "sha256": "df9f94a849169f905870ddc816c923a4f8dbde4adc68806fbd7ee60e1fe8a1b5",
+            "size_bytes": 2239
+          },
+          "source_tree": "3ff5acaa21aea8504a1455b66a5e2091e85a70f5"
+        }
+      ],
+      "scope": "Immutable Application input owner retaining installation and exact legacy getter representations, raw/handle resolver paths and existing builder discovery; combined integration includes WP-4 through 240babd9.",
+      "source_hashes": {
+        "Code/Source/solver/Application/Core/LevelSetEquationInputSnapshot.h": "80897e09e1871af9fab9a9f3a3eba56210098c3b4ff42a88fbc53a861b9d4b1a",
+        "Code/Source/solver/Application/Core/ResolvedMovingDomainConfiguration.h": "b9324c032d07995157348ca4957b8108235a48000e0afdf1be11d99e30cf1dc1",
+        "Code/Source/solver/Application/Core/SimulationBuilder.cpp": "0f7c580a77b02cc80a78c41dd2b6599fec1968627053c0f443d0ba05faf8e0b2",
+        "Code/Source/solver/Application/Tests/Unit/test_LevelSetEquationTranslator.cpp": "5e9d082b5320291fd52bb163cb62f74b5c8070b826f32cdb3a8d18d59b5e1eeb",
+        "Code/Source/solver/Application/Tests/Unit/test_OpenVesselExamples.cpp": "818937dfcac600aea1c8ef9e36a0388455d7e9b4428f62c2278f6f09230fdb18",
+        "Code/Source/solver/Application/Translators/EquationTranslator.cpp": "5d1466849b182a47819fdcd14b1b28beecbbde56803708634165f45cabfd1899",
+        "Code/Source/solver/Application/Translators/EquationTranslator.h": "2302db517ab1d5a23f2ce966cfe5a8a6babfba5bfbff079ea86584bd5270f8ab",
+        "Code/Source/solver/Application/Translators/LevelSetEquationTranslator.cpp": "668c72106688ae5c2888ee44b7b6e6b7bc41ede005ef84a44e77155bddb79de6",
+        "Code/Source/solver/Application/Translators/LevelSetEquationTranslator.h": "147d249c0b11c479d5b0dd8a451489970a0fbfdbf8ddeb6e9763a8ac246d3985"
+      },
+      "state": "ACCEPTED_BOUNDED_SNAPSHOT_RETENTION"
     }
   ],
   "captured_references": [

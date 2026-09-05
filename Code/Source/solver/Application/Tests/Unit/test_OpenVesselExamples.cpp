@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "Application/Core/LevelSetCutConfiguration.h"
+#include "Application/Core/LevelSetEquationInputSnapshot.h"
 #include "Application/Core/SimulationBuilder.h"
 #include "Application/Translators/EquationTranslator.h"
 #include "Application/Translators/LevelSetEquationTranslator.h"
@@ -1518,6 +1519,33 @@ TEST(OpenVesselExamples,
 
     delete parameters.equation_parameters[level_set_index];
     parameters.equation_parameters[level_set_index] = nullptr;
+
+    const auto& retained =
+        components.resolved_level_set_equations_by_input_index[level_set_index];
+    ASSERT_TRUE(retained->input_snapshot);
+    EXPECT_EQ(retained->input_snapshot->installation_input.equation_type,
+              "level_set");
+    EXPECT_EQ(retained->input_snapshot->installation_input.mesh_name,
+              "triangle");
+    EXPECT_EQ(retained->input_snapshot->installation_input.equation_params
+                  .at("Level_set_field_name")
+                  .value,
+              "level_set");
+    EXPECT_EQ(retained->input_snapshot->installation_input.equation_params
+                  .at("Projected_curvature_field")
+                  .value,
+              "kappa_projected");
+    ASSERT_TRUE(
+        retained->input_snapshot->legacy_maintenance_input.has_value());
+    const auto& legacy =
+        *retained->input_snapshot->legacy_maintenance_input;
+    EXPECT_TRUE(legacy.equation_type_defined);
+    EXPECT_EQ(legacy.equation_type, "level_set");
+    EXPECT_EQ(legacy.equation_parameters.at("Level_set_field_name").value,
+              "level_set");
+    EXPECT_EQ(
+        legacy.equation_parameters.at("Projected_curvature_field").value,
+        "kappa_projected");
 
     ASSERT_NO_THROW(components.physics_modules.push_back(
         application::translators::level_set::createModule(

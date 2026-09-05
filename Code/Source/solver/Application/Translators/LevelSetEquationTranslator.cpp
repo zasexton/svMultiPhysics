@@ -1,5 +1,6 @@
 #include "Application/Translators/LevelSetEquationTranslator.h"
 
+#include "Application/Core/LevelSetEquationInputSnapshot.h"
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Core/JITRuntimePolicy.h"
 #include "Physics/Core/PhysicsModule.h"
@@ -2176,9 +2177,25 @@ std::shared_ptr<
     const application::core::ResolvedLevelSetEquationConfiguration>
 resolveConfiguration(const svmp::Physics::EquationModuleInput& input)
 {
+  auto snapshot =
+      std::make_shared<application::core::LevelSetEquationInputSnapshot>();
+  snapshot->installation_input = input;
+  return resolveConfiguration(std::move(snapshot));
+}
+
+application::core::ResolvedLevelSetEquationHandle
+resolveConfiguration(application::core::LevelSetEquationInputHandle input)
+{
+  if (!input) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Application] Cannot resolve a null level-set input snapshot.");
+  }
+  auto configuration =
+      translate_level_set_transport_input(input->installation_input);
+  configuration.input_snapshot = std::move(input);
   return std::make_shared<
       application::core::ResolvedLevelSetEquationConfiguration>(
-      translate_level_set_transport_input(input));
+      std::move(configuration));
 }
 
 std::optional<MaterialInterfaceTransportDependency>

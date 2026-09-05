@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Application/Core/LevelSetEquationInputSnapshot.h"
 #include "FE/LevelSet/LevelSetOptions.h"
 #include "FE/Systems/FormsInstaller.h"
 
@@ -24,6 +25,7 @@ struct ResolvedLevelSetEquationConfiguration {
   svmp::FE::level_set::LevelSetTransportOptions options{};
   svmp::FE::systems::FormInstallOptions install_options{};
   std::vector<std::string> projected_curvature_fields{};
+  LevelSetEquationInputHandle input_snapshot{};
 };
 
 using ResolvedLevelSetEquationHandle =
