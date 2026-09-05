@@ -33,6 +33,7 @@
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Assembly/StandardAssembler.h"
+#include "FE/Backends/Interfaces/DofPermutation.h"
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Forms/Vocabulary.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
@@ -41,6 +42,7 @@
 #include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
 #include "FE/Math/DenseLinearAlgebra.h"
 #include "FE/Spaces/SpaceFactory.h"
+#include "FE/Sparsity/DistributedSparsityPattern.h"
 #include "FE/Systems/CutIntegrationInvalidation.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
@@ -63,6 +65,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -79,6 +82,7 @@
 #include <string_view>
 #include <system_error>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -3203,6 +3207,7 @@ struct CanonicalWetBlockDof {
 };
 
 struct WetBlockReferenceDof {
+    int owner_rank{0};
     std::size_t canonical_index{0u};
     int field{0};
     gid_t vertex_gid{INVALID_GID};
@@ -3241,11 +3246,13 @@ struct WetBlockReferenceFragment {
 };
 
 struct WetBlockReferenceVertex {
+    int owner_rank{0};
     gid_t gid{INVALID_GID};
     std::array<FE::Real, 3> point{};
 };
 
 struct WetBlockReferenceCell {
+    int owner_rank{0};
     gid_t gid{INVALID_GID};
     std::vector<gid_t> vertex_gids{};
 };
@@ -3290,6 +3297,8 @@ struct WetBlockReferenceCapture {
     std::size_t owned_backend_interface_quadrature_point_count{0u};
     FE::systems::SystemStateView stage{};
     FE::assembly::TimeIntegrationContext time_context{};
+    std::vector<std::vector<std::pair<std::string, std::uint64_t>>>
+        partition_revision_diagnostics{};
 };
 
 struct WetBlockAssemblySample {
@@ -3776,7 +3785,7 @@ compareWetBlockSamples(const WetBlockAssemblySample& baseline,
         std::distance(capture.dofs.begin(), found));
 }
 
-void validateWetBlockReferenceCapture(
+void validateWetBlockReferenceCaptureCommon(
     const WetBlockReferenceCapture& capture,
     const WetBlockAssemblySample& sample)
 {
@@ -3974,8 +3983,7 @@ void validateWetBlockReferenceCapture(
         }
     }
 
-    if (capture.scope != "serial" || capture.rank_count != 1 ||
-        !capture.partition_method.empty() || capture.x_coordinates.size() < 2u ||
+    if (capture.x_coordinates.size() < 2u ||
         capture.x_coordinates.size() != capture.level_set_by_plane.size() ||
         !std::is_sorted(capture.x_coordinates.begin(),
                         capture.x_coordinates.end()) ||
@@ -3983,7 +3991,7 @@ void validateWetBlockReferenceCapture(
                            capture.x_coordinates.end()) !=
             capture.x_coordinates.end()) {
         throw std::runtime_error(
-            "wet-block reference capture has invalid serial case geometry dimensions");
+            "wet-block reference capture has invalid case geometry dimensions");
     }
 
     std::set<gid_t> vertex_gids;
@@ -3999,7 +4007,7 @@ void validateWetBlockReferenceCapture(
     if (capture.vertices.size() != 2u * capture.x_coordinates.size() ||
         capture.dofs.size() != 3u * capture.vertices.size()) {
         throw std::runtime_error(
-            "wet-block reference capture does not match the serial Quad4 strip shape");
+            "wet-block reference capture does not match the Quad4 strip shape");
     }
     for (const auto x : capture.x_coordinates) {
         if (std::count_if(capture.vertices.begin(), capture.vertices.end(),
@@ -4032,7 +4040,7 @@ void validateWetBlockReferenceCapture(
     if (capture.cells.size() + 1u != capture.x_coordinates.size() ||
         connected_vertex_gids != vertex_gids) {
         throw std::runtime_error(
-            "wet-block reference capture has incomplete serial Quad4 connectivity");
+            "wet-block reference capture has incomplete Quad4 connectivity");
     }
 
     std::set<gid_t> retained_vertex_gids;
@@ -4108,7 +4116,8 @@ void validateWetBlockReferenceCapture(
     long double negative_volume_measure = 0.0L;
     long double positive_volume_measure = 0.0L;
     for (const auto& entity : capture.generated_entities) {
-        if (entity.parent_cell_gid < 0 || entity.owner_rank != 0 ||
+        if (entity.parent_cell_gid < 0 || entity.owner_rank < 0 ||
+            entity.owner_rank >= capture.rank_count ||
             entity.local_ordinal == FE::INVALID_LOCAL_INDEX ||
             entity.topology_id.empty() ||
             !std::isfinite(entity.measure) || entity.measure <= FE::Real{0.0} ||
@@ -4180,24 +4189,15 @@ void validateWetBlockReferenceCapture(
 }
 
 [[nodiscard]] std::shared_ptr<WetBlockReferenceCapture>
-captureSerialWetBlockReference(
+makeWetBlockReferenceMetadata(
     std::string_view case_id,
     std::span<const FE::Real> x_coordinates,
     std::span<const FE::Real> level_set_by_plane,
     FE::Real dry_state_scale,
-    const Mesh& mesh,
     const FE::systems::FESystem& system,
-    FE::FieldId velocity,
-    FE::FieldId pressure,
-    const std::set<gid_t>& retained,
     const FE::level_set::LevelSetGeneratedInterfaceResult& generated,
     const FE::systems::SystemStateView& state,
-    const FE::assembly::TimeIntegrationContext& time_context,
-    std::span<const FE::Real> solution,
-    std::span<const FE::Real> previous,
-    std::span<const FE::Real> residual,
-    const FE::assembly::DenseMatrixView& matrix,
-    const WetBlockAssemblySample& sample)
+    const FE::assembly::TimeIntegrationContext& time_context)
 {
     auto capture = std::make_shared<WetBlockReferenceCapture>();
     capture->case_id = std::string(case_id);
@@ -4228,6 +4228,114 @@ captureSerialWetBlockReference(
     capture->stage.effective_dt = state.effective_dt;
     capture->stage.dt_prev = state.dt_prev;
     capture->time_context = time_context;
+
+    return capture;
+}
+
+void validateSerialWetBlockReferenceCapture(const WetBlockReferenceCapture& capture)
+{
+    if (capture.scope != "serial" || capture.rank_count != 1 ||
+        !capture.partition_method.empty() ||
+        !capture.partition_revision_diagnostics.empty()) {
+        throw std::runtime_error("wet-block reference has invalid serial scope metadata");
+    }
+}
+
+void validateDistributedWetBlockReferenceCapture(
+    const WetBlockReferenceCapture& capture)
+{
+    if (capture.scope != "mpi-2" || capture.rank_count != 2 ||
+        capture.partition_method != "block" ||
+        capture.partition_revision_diagnostics.size() != 2u) {
+        throw std::runtime_error("wet-block reference has invalid distributed scope metadata");
+    }
+    for (const auto& row : capture.constraints) {
+        if (!row.entries.empty() || row.inhomogeneity != FE::Real{0.0}) {
+            throw std::runtime_error("wet-block dry constraint is not a raw homogeneous row");
+        }
+    }
+}
+
+void validateWetBlockReferenceCapture(
+    const WetBlockReferenceCapture& capture,
+    const WetBlockAssemblySample& sample)
+{
+    const bool serial = capture.scope == "serial";
+    if (serial) {
+        validateSerialWetBlockReferenceCapture(capture);
+    } else {
+        validateDistributedWetBlockReferenceCapture(capture);
+    }
+    const auto valid_owner = [&](int owner) {
+        return owner >= 0 && owner < capture.rank_count;
+    };
+    for (const auto& dof : capture.dofs) {
+        if (!valid_owner(dof.owner_rank)) {
+            throw std::runtime_error("wet-block reference has invalid DOF owner");
+        }
+    }
+    for (const auto& vertex : capture.vertices) {
+        if (!valid_owner(vertex.owner_rank)) {
+            throw std::runtime_error("wet-block reference has invalid vertex owner");
+        }
+        for (int field = 0; field != 2; ++field) {
+            for (std::size_t component = 0u;
+                 component < (field == 0 ? 2u : 1u); ++component) {
+                if (std::count_if(capture.dofs.begin(), capture.dofs.end(),
+                        [&](const auto& dof) {
+                            return dof.vertex_gid == vertex.gid &&
+                                   dof.field == field && dof.component == component;
+                        }) != 1) {
+                    throw std::runtime_error("wet-block reference omits a vertex physical component");
+                }
+            }
+        }
+    }
+    std::set<int> cell_owners;
+    for (const auto& cell : capture.cells) {
+        if (!valid_owner(cell.owner_rank)) {
+            throw std::runtime_error("wet-block reference has invalid cell owner");
+        }
+        cell_owners.insert(cell.owner_rank);
+    }
+    if (!serial && cell_owners.size() != 2u) {
+        throw std::runtime_error("wet-block reference requires cells on both ranks");
+    }
+    for (const auto& entity : capture.generated_entities) {
+        const auto parent = std::find_if(capture.cells.begin(), capture.cells.end(),
+            [&](const auto& cell) {
+                return cell.gid == static_cast<gid_t>(entity.parent_cell_gid);
+            });
+        if (parent == capture.cells.end() || parent->owner_rank != entity.owner_rank) {
+            throw std::runtime_error("wet-block generated entity disagrees with its parent owner");
+        }
+    }
+    validateWetBlockReferenceCaptureCommon(capture, sample);
+}
+
+[[nodiscard]] std::shared_ptr<WetBlockReferenceCapture>
+captureSerialWetBlockReference(
+    std::string_view case_id,
+    std::span<const FE::Real> x_coordinates,
+    std::span<const FE::Real> level_set_by_plane,
+    FE::Real dry_state_scale,
+    const Mesh& mesh,
+    const FE::systems::FESystem& system,
+    FE::FieldId velocity,
+    FE::FieldId pressure,
+    const std::set<gid_t>& retained,
+    const FE::level_set::LevelSetGeneratedInterfaceResult& generated,
+    const FE::systems::SystemStateView& state,
+    const FE::assembly::TimeIntegrationContext& time_context,
+    std::span<const FE::Real> solution,
+    std::span<const FE::Real> previous,
+    std::span<const FE::Real> residual,
+    const FE::assembly::DenseMatrixView& matrix,
+    const WetBlockAssemblySample& sample)
+{
+    auto capture = makeWetBlockReferenceMetadata(
+        case_id, x_coordinates, level_set_by_plane, dry_state_scale,
+        system, generated, state, time_context);
 
     const auto& base = mesh.base();
     const auto& vertex_gids = base.vertex_gids();
@@ -4639,6 +4747,22 @@ void writeWetBlockReferenceCase(std::ostream& output,
         writeWetBlockJsonString(output, capture.partition_method);
         output << '}';
     }
+    if (capture.scope == "mpi-2") {
+        output << ",\"revision_scope\":\"rank_zero_local_with_per_rank_diagnostics\","
+                  "\"partition_revision_diagnostics\":[";
+        for (std::size_t rank = 0u;
+             rank < capture.partition_revision_diagnostics.size(); ++rank) {
+            if (rank != 0u) { output << ','; }
+            output << "{\"rank\":" << rank;
+            for (const auto& [name, value] : capture.partition_revision_diagnostics[rank]) {
+                output << ',';
+                writeWetBlockJsonString(output, name);
+                output << ':' << value;
+            }
+            output << '}';
+        }
+        output << ']';
+    }
     output << "},\"configuration\":{\"spatial_dimension\":2,"
               "\"element\":\"Quad4\",\"order\":1,"
               "\"field_components\":{\"u\":2,\"p\":1,\"phi\":1},"
@@ -4808,6 +4932,9 @@ void writeWetBlockReferenceCase(std::ostream& output,
         output << "{\"gid\":" << capture.vertices[index].gid
                << ",\"point\":";
         writeWetBlockJsonRealArray(output, capture.vertices[index].point);
+        if (capture.scope == "mpi-2") {
+            output << ",\"owner_rank\":" << capture.vertices[index].owner_rank;
+        }
         output << '}';
     }
     output << "],\"cells\":[";
@@ -4824,7 +4951,11 @@ void writeWetBlockReferenceCase(std::ostream& output,
             }
             output << capture.cells[index].vertex_gids[vertex];
         }
-        output << "]}";
+        output << ']';
+        if (capture.scope == "mpi-2") {
+            output << ",\"owner_rank\":" << capture.cells[index].owner_rank;
+        }
+        output << '}';
     }
     output << "],\"retained_vertex_gids\":[";
     bool first_retained = true;
@@ -4841,7 +4972,12 @@ void writeWetBlockReferenceCase(std::ostream& output,
         output << dof.vertex_gid;
     }
     const auto& summary = capture.owned_geometry_summary;
-    output << "]},\"owned_summary\":{\"interface_marker\":"
+    output << "]}";
+    if (capture.scope == "mpi-2") {
+        output << ",\"owned_summary_aggregation\":"
+                  "\"global_owned_only_sum_in_rank_order\"";
+    }
+    output << ",\"owned_summary\":{\"interface_marker\":"
            << summary.interface_marker
            << ",\"fragment_count\":" << summary.fragment_count
            << ",\"active_fragment_count\":"
@@ -4928,7 +5064,11 @@ void writeWetBlockReferenceCase(std::ostream& output,
                << ",\"constraint_present\":"
                << (dof.constrained ? "true" : "false")
                << ",\"algebraic_global_dof_diagnostic\":"
-               << dof.global_dof << '}';
+               << dof.global_dof;
+        if (capture.scope == "mpi-2") {
+            output << ",\"owner_rank_diagnostic\":" << dof.owner_rank;
+        }
+        output << '}';
     }
     output << "],\"vectors\":{\"current\":";
     writeWetBlockJsonRealArray(output, capture.current_state);
@@ -5063,6 +5203,15 @@ void publishWetBlockReferenceBundle(
         })) {
         throw std::runtime_error(
             "wet-block reference publication requires every case payload");
+    }
+    const auto& first_capture = *samples.front()->reference_capture;
+    for (const auto* sample : samples) {
+        const auto& capture = *sample->reference_capture;
+        if (capture.scope != first_capture.scope ||
+            capture.rank_count != first_capture.rank_count ||
+            capture.partition_method != first_capture.partition_method) {
+            throw std::runtime_error("wet-block reference bundle mixes partition scopes");
+        }
     }
     if (gate_results.empty() || !std::isfinite(numerical_gate) ||
         numerical_gate < FE::Real{0.0} ||
@@ -8794,12 +8943,1108 @@ struct DenseOperatorDifference {
     };
 }
 
+// This bounded wire transport is private to the two-rank fixture. Only scalar
+// fields are copied as bytes; object representations and padding never travel.
+class WetBlockCaptureWire {
+public:
+    WetBlockCaptureWire() = default;
+    explicit WetBlockCaptureWire(std::span<const char> input)
+        : reading_(true), input_(input) {}
+
+    template <typename... Values>
+    void operator()(Values&... values) { (transfer(values), ...); }
+
+    [[nodiscard]] const std::vector<char>& bytes() const { return output_; }
+    void requireConsumed() const {
+        if (position_ != input_.size()) {
+            throw std::runtime_error("wet-block shard has trailing bytes");
+        }
+    }
+
+private:
+    template <typename T>
+    void scalar(T& value) {
+        if (reading_) {
+            if (sizeof(T) > input_.size() - position_) {
+                throw std::runtime_error("wet-block shard is truncated");
+            }
+            std::memcpy(&value, input_.data() + position_, sizeof(T));
+            position_ += sizeof(T);
+        } else {
+            if (sizeof(T) > limit - output_.size()) {
+                throw std::runtime_error("wet-block shard exceeds MPI count range");
+            }
+            const auto* bytes = reinterpret_cast<const char*>(&value);
+            output_.insert(output_.end(), bytes, bytes + sizeof(T));
+        }
+    }
+
+    template <typename T>
+    void transfer(T& value) {
+        if constexpr (std::is_same_v<T, bool>) {
+            std::uint64_t encoded = value ? 1u : 0u;
+            scalar(encoded);
+            if (encoded > 1u) {
+                throw std::runtime_error("wet-block shard has invalid boolean");
+            }
+            value = encoded != 0u;
+        } else if constexpr (std::is_enum_v<T>) {
+            auto encoded = static_cast<std::underlying_type_t<T>>(value);
+            transfer(encoded);
+            value = static_cast<T>(encoded);
+        } else if constexpr (std::is_integral_v<T>) {
+            using WireInteger = std::conditional_t<std::is_signed_v<T>,
+                                                   std::int64_t, std::uint64_t>;
+            if (!std::in_range<WireInteger>(value)) {
+                throw std::runtime_error("wet-block shard integer exceeds wire range");
+            }
+            auto encoded = static_cast<WireInteger>(value);
+            scalar(encoded);
+            if (!std::in_range<T>(encoded)) {
+                throw std::runtime_error("wet-block shard integer exceeds target range");
+            }
+            value = static_cast<T>(encoded);
+        } else if constexpr (std::is_same_v<T, FE::Real>) {
+            scalar(value);
+            if (!std::isfinite(value)) {
+                throw std::runtime_error("wet-block shard has nonfinite real value");
+            }
+        } else {
+            wetBlockWireFields(*this, value);
+        }
+    }
+
+    std::size_t length(std::size_t size) {
+        auto encoded = static_cast<std::uint64_t>(size);
+        scalar(encoded);
+        if (encoded > limit ||
+            (reading_ && encoded > input_.size() - position_)) {
+            throw std::runtime_error("wet-block shard length exceeds buffer bounds");
+        }
+        return static_cast<std::size_t>(encoded);
+    }
+    void transfer(std::string& value) {
+        const auto size = length(value.size());
+        if (reading_) {
+            value.assign(input_.data() + position_, size);
+            position_ += size;
+        } else {
+            if (size > limit - output_.size()) {
+                throw std::runtime_error("wet-block shard string exceeds MPI range");
+            }
+            output_.insert(output_.end(), value.begin(), value.end());
+        }
+    }
+    template <typename T>
+    void transfer(std::vector<T>& values) {
+        const auto size = length(values.size());
+        if (reading_) { values.resize(size); }
+        for (auto& value : values) { transfer(value); }
+    }
+    template <typename T, std::size_t N>
+    void transfer(std::array<T, N>& values) {
+        for (auto& value : values) { transfer(value); }
+    }
+    template <typename T>
+    void transfer(std::optional<T>& value) {
+        bool present = value.has_value();
+        transfer(present);
+        if (reading_) {
+            if (present) { value.emplace(); } else { value.reset(); }
+        }
+        if (present) { transfer(*value); }
+    }
+    template <typename A, typename B>
+    void transfer(std::pair<A, B>& value) { (*this)(value.first, value.second); }
+
+    static constexpr std::size_t limit =
+        static_cast<std::size_t>(std::numeric_limits<int>::max());
+    bool reading_{false};
+    std::span<const char> input_{};
+    std::size_t position_{0u};
+    std::vector<char> output_{};
+};
+
+void wetBlockWireFields(WetBlockCaptureWire& wire,
+                        FE::assembly::TimeDerivativeStencil& stencil)
+{
+    wire(stencil.order, stencil.a);
+}
+
+void wetBlockWireFields(WetBlockCaptureWire& wire, WetBlockReferenceDof& dof)
+{
+    wire(dof.owner_rank, dof.canonical_index, dof.field, dof.vertex_gid,
+         dof.component, dof.global_dof, dof.point,
+         dof.retained_support, dof.constrained);
+}
+
+void wetBlockWireFields(WetBlockCaptureWire& wire,
+                        WetBlockReferenceConstraintEntry& entry)
+{
+    wire(entry.master_canonical_index, entry.master_global_dof, entry.weight);
+}
+
+void wetBlockWireFields(WetBlockCaptureWire& wire,
+                        WetBlockReferenceConstraint& row)
+{
+    wire(row.slave_canonical_index, row.slave_global_dof,
+         row.inhomogeneity, row.entries);
+}
+
+void wetBlockWireFields(WetBlockCaptureWire& wire, WetBlockReferenceVertex& vertex)
+{
+    wire(vertex.owner_rank, vertex.gid, vertex.point);
+}
+
+void wetBlockWireFields(WetBlockCaptureWire& wire, WetBlockReferenceCell& cell)
+{
+    wire(cell.owner_rank, cell.gid, cell.vertex_gids);
+}
+
+void wetBlockWireFields(WetBlockCaptureWire& wire,
+                        WetBlockReferenceFragment& entity)
+{
+    wire(entity.volume, entity.stable_id, entity.parent_cell_gid,
+         entity.owner_rank, entity.local_ordinal, entity.kind_or_side,
+         entity.topology_id, entity.corner_topology_key, entity.measure,
+         entity.volume_fraction, entity.achieved_quadrature_order);
+}
+
+void wetBlockWireMetadata(WetBlockCaptureWire& wire,
+                          WetBlockReferenceCapture& capture,
+                          bool include_local_revisions)
+{
+    wire(capture.case_id, capture.scope, capture.partition_method,
+         capture.rank_count, capture.dry_state_scale, capture.x_coordinates,
+         capture.level_set_by_plane, capture.original_sparsity_rows,
+         capture.original_sparsity_columns, capture.sparsity_finalized,
+         capture.sparsity_indexing, capture.realized_interface_marker,
+         capture.generated_value_revision);
+    auto& r = capture.domain_request;
+    wire(r.source.kind, r.source.field_id, r.source.evaluator_id,
+         r.source.value_revision, r.generated_domain_id, r.interface_marker,
+         r.isovalue, r.tolerance, r.quadrature_order,
+         r.interface_quadrature_order, r.volume_quadrature_order, r.frame,
+         r.quadrature_policy_key, r.implicit_geometry_mode,
+         r.implicit_quadrature_backend, r.implicit_fallback_policy,
+         r.implicit_fallback_status, r.required_implicit_cut_backend_qualification,
+         r.geometry_tangent_policy, r.implicit_cut_root_tolerance,
+         r.implicit_cut_root_coordinate_tolerance, r.implicit_cut_root_max_iterations,
+         r.implicit_cut_max_subdivision_depth, r.achieved_interface_quadrature_order,
+         r.achieved_volume_quadrature_order, r.keep_degenerate_fragments,
+         r.aligned_zero_interface_parent_side);
+    auto& revision = capture.operator_revision;
+    wire(revision.valid, revision.mesh.valid,
+         revision.geometry_state, revision.geometry_use);
+    if (include_local_revisions) {
+        auto& m = revision.mesh;
+        auto& f = revision.fe_layout;
+        wire(m.geometry, m.reference_geometry, m.current_geometry,
+             m.reference_rebase, m.topology, m.ownership, m.numbering,
+             m.field_layout, m.labels, m.active_configuration,
+             f.space, f.dof_layout, f.constraint_layout, f.block_layout,
+             revision.system_layout_key, capture.constraint_layout_revision,
+             capture.sparsity_pattern_revision, r.source.layout_revision,
+             r.mesh_geometry_revision, r.mesh_topology_revision,
+             r.ownership_revision);
+    }
+    auto& stage = capture.stage;
+    wire(stage.time, stage.dt, stage.effective_dt, stage.dt_prev);
+    auto& time = capture.time_context;
+    wire(time.integrator_name, time.dt1, time.dt2, time.dt_extra,
+         time.time_derivative_term_weight, time.non_time_derivative_term_weight,
+         time.dt1_term_weight, time.dt2_term_weight, time.dt_extra_term_weight);
+}
+
+void wetBlockWireOwnedSummary(WetBlockCaptureWire& wire,
+                              WetBlockReferenceCapture& capture)
+{
+    auto& s = capture.owned_geometry_summary;
+    wire(s.interface_marker, s.fragment_count, s.active_fragment_count,
+         s.volume_region_count, s.active_volume_region_count,
+         s.quadrature_point_count, s.volume_quadrature_point_count,
+         s.total_quadrature_point_count, s.degenerate_fragment_count,
+         s.measure, s.negative_volume_measure, s.positive_volume_measure,
+         capture.owned_generated_cell_count,
+         capture.owned_corner_linearized_cell_count,
+         capture.owned_implicit_fallback_cell_count,
+         capture.owned_backend_volume_quadrature_point_count,
+         capture.owned_backend_interface_quadrature_point_count);
+}
+
+struct WetBlockOwnedShard {
+    int rank{-1};
+    std::size_t global_vertices{0u};
+    std::size_t global_cells{0u};
+    WetBlockReferenceCapture capture{};
+    std::vector<std::pair<FE::GlobalIndex, std::vector<FE::GlobalIndex>>> rows{};
+};
+
+void wetBlockWireFields(WetBlockCaptureWire& wire, WetBlockOwnedShard& shard)
+{
+    wire(shard.rank, shard.global_vertices, shard.global_cells);
+    auto& c = shard.capture;
+    wetBlockWireMetadata(wire, c, true);
+    wetBlockWireOwnedSummary(wire, c);
+    wire(c.original_sparsity_nnz, c.dofs, c.current_state, c.previous_state,
+         c.residual, c.constraints, c.vertices, c.cells, c.generated_entities,
+         shard.rows);
+}
+
+[[nodiscard]] std::vector<char> packWetBlockOwnedShard(WetBlockOwnedShard& shard)
+{
+    WetBlockCaptureWire wire;
+    wire(shard);
+    return wire.bytes();
+}
+
+[[nodiscard]] WetBlockOwnedShard unpackWetBlockOwnedShard(
+    std::span<const char> bytes)
+{
+    WetBlockOwnedShard shard;
+    WetBlockCaptureWire wire(bytes);
+    wire(shard);
+    wire.requireConsumed();
+    return shard;
+}
+
+// Select one bounded error message before any caller throws. A fixed buffer
+// avoids rank-dependent allocation between the reduction and broadcast.
+void collectiveWetBlockCaptureError(std::string_view phase,
+                                     std::string_view local_error,
+                                     MPI_Comm comm)
+{
+    int rank = 0;
+    MPI_Comm_rank(comm, &rank);
+    int local_rank = local_error.empty() ? std::numeric_limits<int>::max() : rank;
+    int error_rank = 0;
+    MPI_Allreduce(&local_rank, &error_rank, 1, MPI_INT, MPI_MIN, comm);
+    if (error_rank == std::numeric_limits<int>::max()) { return; }
+    std::array<char, 2048> message{};
+    if (rank == error_rank) {
+        const auto count = std::min(local_error.size(), message.size() - 1u);
+        std::copy_n(local_error.begin(), count, message.begin());
+    }
+    MPI_Bcast(message.data(), static_cast<int>(message.size()), MPI_CHAR,
+              error_rank, comm);
+    throw std::runtime_error("wet-block capture " + std::string(phase) +
+        " rank " + std::to_string(error_rank) + ": " + message.data());
+}
+
+struct WetBlockMpiCaptureControl {
+    bool enabled{false};
+    std::array<std::string, 4> environment{};
+};
+
+[[nodiscard]] WetBlockMpiCaptureControl wetBlockMpiCaptureControl(MPI_Comm comm)
+{
+    constexpr std::array<const char*, 4> names = {{
+        "SVMP_FREE_SURFACE_R0_CAPTURE_DIR",
+        "SVMP_FREE_SURFACE_R0_SOURCE_COMMIT",
+        "SVMP_FREE_SURFACE_R0_SOURCE_TREE",
+        "SVMP_FREE_SURFACE_R0_OVERLAY_SHA256",
+    }};
+    const auto* directory = std::getenv(names.front());
+    int enabled = directory != nullptr && directory[0] != '\0' ? 1 : 0;
+    int minimum = 0;
+    int maximum = 0;
+    MPI_Allreduce(&enabled, &minimum, 1, MPI_INT, MPI_MIN, comm);
+    MPI_Allreduce(&enabled, &maximum, 1, MPI_INT, MPI_MAX, comm);
+    collectiveWetBlockCaptureError("enablement",
+        minimum == maximum ? "" : "capture enablement differs across ranks", comm);
+    WetBlockMpiCaptureControl control;
+    control.enabled = enabled != 0;
+    if (!control.enabled) { return control; }
+    std::string error;
+    try {
+        for (std::size_t i = 0u; i < names.size(); ++i) {
+            const auto* value = std::getenv(names[i]);
+            control.environment[i] = value == nullptr ? "" : value;
+            const auto& text = control.environment[i];
+            if (text.empty() || text.size() > 4096u ||
+                (i != 0u && (text.size() != (i == 3u ? 64u : 40u) ||
+                    !std::all_of(text.begin(), text.end(), [](char c) {
+                        return (c >= '0' && c <= '9') ||
+                               (c >= 'a' && c <= 'f') ||
+                               (c >= 'A' && c <= 'F');
+                    })))) {
+                throw std::runtime_error(std::string("invalid capture environment: ") + names[i]);
+            }
+        }
+    } catch (const std::exception& exception) { error = exception.what(); }
+      catch (...) { error = "unknown environment extraction error"; }
+    collectiveWetBlockCaptureError("provenance", error, comm);
+    int rank = 0;
+    MPI_Comm_rank(comm, &rank);
+    for (std::size_t i = 0u; i < names.size(); ++i) {
+        std::array<char, 4096> root_value{};
+        int count = rank == 0 ? static_cast<int>(control.environment[i].size()) : 0;
+        MPI_Bcast(&count, 1, MPI_INT, 0, comm);
+        if (rank == 0) {
+            std::copy(control.environment[i].begin(), control.environment[i].end(),
+                      root_value.begin());
+        }
+        MPI_Bcast(root_value.data(), count, MPI_CHAR, 0, comm);
+        const bool equal = control.environment[i] ==
+            std::string_view(root_value.data(), static_cast<std::size_t>(count));
+        collectiveWetBlockCaptureError("provenance agreement",
+            equal ? "" : names[i], comm);
+    }
+    return control;
+}
+
+[[nodiscard]] std::vector<WetBlockOwnedShard> gatherWetBlockOwnedShardsToRoot(
+    const std::vector<char>& local, MPI_Comm comm)
+{
+    int rank = 0;
+    MPI_Comm_rank(comm, &rank);
+    std::array<int, 2> counts{};
+    std::array<int, 2> offsets{};
+    collectiveWetBlockCaptureError("gather count",
+        local.size() <= static_cast<std::size_t>(std::numeric_limits<int>::max())
+            ? "" : "local shard exceeds MPI count range", comm);
+    const auto local_count = static_cast<int>(local.size());
+    MPI_Gather(&local_count, 1, MPI_INT, counts.data(), 1, MPI_INT, 0, comm);
+    std::string error;
+    std::vector<char> bytes;
+    try {
+        if (rank == 0) {
+            if (counts[0] < 0 || counts[1] < 0 ||
+                counts[1] > std::numeric_limits<int>::max() - counts[0]) {
+                throw std::runtime_error("combined shards exceed MPI count range");
+            }
+            offsets[1] = counts[0];
+            bytes.resize(static_cast<std::size_t>(counts[0] + counts[1]));
+        }
+    } catch (const std::exception& exception) { error = exception.what(); }
+      catch (...) { error = "unknown gather allocation error"; }
+    collectiveWetBlockCaptureError("gather allocation", error, comm);
+    MPI_Gatherv(local.data(), local_count, MPI_CHAR, bytes.data(), counts.data(),
+                offsets.data(), MPI_CHAR, 0, comm);
+    std::vector<WetBlockOwnedShard> shards;
+    try {
+        if (rank == 0) {
+            for (std::size_t i = 0u; i < counts.size(); ++i) {
+                shards.push_back(unpackWetBlockOwnedShard(
+                    std::span<const char>(bytes).subspan(
+                        static_cast<std::size_t>(offsets[i]),
+                        static_cast<std::size_t>(counts[i]))));
+            }
+        }
+    } catch (const std::exception& exception) { error = exception.what(); }
+      catch (...) { error = "unknown shard decoding error"; }
+    collectiveWetBlockCaptureError("root decoding", error, comm);
+    return shards;
+}
+
+[[nodiscard]] std::vector<std::pair<std::string, std::uint64_t>>
+wetBlockPartitionRevisionDiagnostics(const WetBlockOwnedShard& shard)
+{
+    const auto& c = shard.capture;
+    const auto& r = c.operator_revision;
+    const auto& m = r.mesh;
+    const auto& f = r.fe_layout;
+    const auto& q = c.domain_request;
+    return {
+        {"operator_valid", r.valid}, {"mesh_valid", m.valid},
+        {"mesh_geometry", m.geometry},
+        {"mesh_reference_geometry", m.reference_geometry},
+        {"mesh_current_geometry", m.current_geometry},
+        {"mesh_reference_rebase", m.reference_rebase},
+        {"mesh_topology", m.topology}, {"mesh_ownership", m.ownership},
+        {"mesh_numbering", m.numbering}, {"mesh_field_layout", m.field_layout},
+        {"mesh_labels", m.labels},
+        {"mesh_active_configuration", m.active_configuration},
+        {"fe_space", f.space}, {"fe_dof_layout", f.dof_layout},
+        {"fe_constraint_layout", f.constraint_layout},
+        {"fe_block_layout", f.block_layout},
+        {"system_layout_key", r.system_layout_key},
+        {"geometry_transaction_state", static_cast<std::uint64_t>(r.geometry_state)},
+        {"geometry_configuration_use", static_cast<std::uint64_t>(r.geometry_use)},
+        {"constraint_layout_revision", c.constraint_layout_revision},
+        {"sparsity_pattern_revision", c.sparsity_pattern_revision},
+        {"source_layout_revision", q.source.layout_revision},
+        {"request_mesh_geometry_revision", q.mesh_geometry_revision},
+        {"request_mesh_topology_revision", q.mesh_topology_revision},
+        {"request_ownership_revision", q.ownership_revision},
+        {"original_local_sparsity_nnz", static_cast<std::uint64_t>(c.original_sparsity_nnz)},
+        {"owned_physical_dof_count", c.dofs.size()},
+        {"owned_vertex_count", c.vertices.size()},
+        {"owned_cell_count", c.cells.size()},
+    };
+}
+
+void addWetBlockOwnedSummary(WetBlockReferenceCapture& target,
+                             const WetBlockReferenceCapture& source)
+{
+    const auto add_count = [](auto& lhs, auto rhs) {
+        if (rhs > std::numeric_limits<std::remove_reference_t<decltype(lhs)>>::max() - lhs) {
+            throw std::runtime_error("wet-block owned summary count overflow");
+        }
+        lhs += rhs;
+    };
+    auto& a = target.owned_geometry_summary;
+    const auto& b = source.owned_geometry_summary;
+    if (a.interface_marker != b.interface_marker) {
+        throw std::runtime_error("wet-block owned summary marker mismatch");
+    }
+    add_count(a.fragment_count, b.fragment_count);
+    add_count(a.active_fragment_count, b.active_fragment_count);
+    add_count(a.volume_region_count, b.volume_region_count);
+    add_count(a.active_volume_region_count, b.active_volume_region_count);
+    add_count(a.quadrature_point_count, b.quadrature_point_count);
+    add_count(a.volume_quadrature_point_count, b.volume_quadrature_point_count);
+    add_count(a.total_quadrature_point_count, b.total_quadrature_point_count);
+    add_count(a.degenerate_fragment_count, b.degenerate_fragment_count);
+    a.measure += b.measure;
+    a.negative_volume_measure += b.negative_volume_measure;
+    a.positive_volume_measure += b.positive_volume_measure;
+    add_count(target.owned_generated_cell_count, source.owned_generated_cell_count);
+    add_count(target.owned_corner_linearized_cell_count,
+              source.owned_corner_linearized_cell_count);
+    add_count(target.owned_implicit_fallback_cell_count,
+              source.owned_implicit_fallback_cell_count);
+    add_count(target.owned_backend_volume_quadrature_point_count,
+              source.owned_backend_volume_quadrature_point_count);
+    add_count(target.owned_backend_interface_quadrature_point_count,
+              source.owned_backend_interface_quadrature_point_count);
+    add_count(target.original_sparsity_nnz, source.original_sparsity_nnz);
+}
+
+[[nodiscard]] std::shared_ptr<WetBlockReferenceCapture>
+captureDistributedWetBlockReference(
+    std::string_view case_id,
+    std::span<const FE::Real> x_coordinates,
+    std::span<const FE::Real> level_set_by_plane,
+    FE::Real dry_state_scale,
+    const Mesh& mesh,
+    const FE::systems::FESystem& system,
+    FE::FieldId velocity,
+    FE::FieldId pressure,
+    const std::set<gid_t>& retained,
+    const FE::level_set::LevelSetGeneratedInterfaceResult& generated,
+    const FE::systems::SystemStateView& state,
+    const FE::assembly::TimeIntegrationContext& time_context,
+    std::span<const FE::Real> solution,
+    std::span<const FE::Real> previous,
+    std::span<const FE::Real> residual,
+    std::span<const int> constrained,
+    const FE::assembly::DenseMatrixView& matrix,
+    const WetBlockAssemblySample& sample,
+    MPI_Comm comm,
+    std::string_view partition_method)
+{
+    int rank = 0;
+    MPI_Comm_rank(comm, &rank);
+    const auto global_vertices = mesh.global_n_vertices();
+    const auto global_cells = mesh.global_n_cells();
+    std::string error;
+    std::vector<char> packed;
+    try {
+        WetBlockOwnedShard shard;
+        shard.rank = rank;
+        shard.global_vertices = global_vertices;
+        shard.global_cells = global_cells;
+        auto capture = makeWetBlockReferenceMetadata(
+            case_id, x_coordinates, level_set_by_plane, dry_state_scale,
+            system, generated, state, time_context);
+        capture->scope = "mpi-2";
+        capture->rank_count = 2;
+        capture->partition_method = partition_method;
+        const auto* sparsity = system.distributedSparsityIfAvailable("equations");
+        using DofIndexing =
+            FE::sparsity::DistributedSparsityPattern::DofIndexing;
+        if (case_id.empty() || partition_method != "block" ||
+            !system.constraints().isClosed() || sparsity == nullptr ||
+            !sparsity->isFinalized() ||
+            (sparsity->dofIndexing() != DofIndexing::Natural &&
+             sparsity->dofIndexing() != DofIndexing::NodalInterleaved) ||
+            sparsity->globalRows() != matrix.numRows() ||
+            sparsity->globalCols() != matrix.numCols() ||
+            matrix.numRows() < 0 || matrix.numRows() != matrix.numCols() ||
+            static_cast<std::size_t>(matrix.numRows()) != residual.size() ||
+            residual.size() != constrained.size() ||
+            residual.size() != solution.size() || residual.size() != previous.size()) {
+            throw std::runtime_error("invalid distributed capture dimensions, constraints or sparsity");
+        }
+        capture->original_sparsity_rows = sparsity->globalRows();
+        capture->original_sparsity_columns = sparsity->globalCols();
+        capture->original_sparsity_nnz = sparsity->getLocalNnz();
+        capture->sparsity_finalized = true;
+        const auto graph_is_permuted =
+            sparsity->dofIndexing() == DofIndexing::NodalInterleaved;
+        capture->sparsity_indexing =
+            graph_is_permuted ? "nodal_interleaved" : "natural";
+        const auto global_dimension =
+            static_cast<std::size_t>(matrix.numRows());
+        const auto permutation = system.dofPermutation();
+        if (graph_is_permuted &&
+            (permutation == nullptr ||
+             permutation->forward.size() != global_dimension ||
+             permutation->inverse.size() != global_dimension ||
+             permutation->owner_rank.size() != global_dimension)) {
+            throw std::runtime_error(
+                "nodal graph permutation dimensions disagree with the global operator");
+        }
+        if (graph_is_permuted) {
+            for (std::size_t natural_index = 0u;
+                 natural_index < global_dimension; ++natural_index) {
+                const auto graph_dof = permutation->forward[natural_index];
+                if (graph_dof < 0 ||
+                    static_cast<std::size_t>(graph_dof) >= global_dimension ||
+                    permutation->inverse[static_cast<std::size_t>(graph_dof)] !=
+                        static_cast<FE::GlobalIndex>(natural_index)) {
+                    throw std::runtime_error(
+                        "nodal graph forward permutation has an invalid round trip");
+                }
+            }
+            for (std::size_t graph_index = 0u;
+                 graph_index < global_dimension; ++graph_index) {
+                const auto natural_dof = permutation->inverse[graph_index];
+                const auto backend_owner = permutation->owner_rank[graph_index];
+                if (natural_dof < 0 ||
+                    static_cast<std::size_t>(natural_dof) >= global_dimension ||
+                    permutation->forward[static_cast<std::size_t>(natural_dof)] !=
+                        static_cast<FE::GlobalIndex>(graph_index) ||
+                    backend_owner < 0 || backend_owner >= capture->rank_count) {
+                    throw std::runtime_error(
+                        "nodal graph inverse permutation or owner map is invalid");
+                }
+                if ((backend_owner == rank) !=
+                    sparsity->ownedRows().contains(
+                        static_cast<FE::GlobalIndex>(graph_index))) {
+                    std::ostringstream message;
+                    message << "graph owner range disagrees with permutation owner"
+                            << " case=" << case_id
+                            << " rank=" << rank
+                            << " graph_dof=" << graph_index
+                            << " backend_owner=" << backend_owner;
+                    throw std::runtime_error(message.str());
+                }
+            }
+        }
+        const auto graphToNatural = [&](FE::GlobalIndex graph_dof) {
+            if (graph_dof < 0 ||
+                static_cast<std::size_t>(graph_dof) >= global_dimension) {
+                throw std::runtime_error(
+                    "distributed graph index is outside the global operator");
+            }
+            if (!graph_is_permuted) { return graph_dof; }
+            const auto natural_dof =
+                permutation->inverse[static_cast<std::size_t>(graph_dof)];
+            if (natural_dof < 0 ||
+                static_cast<std::size_t>(natural_dof) >= global_dimension ||
+                permutation->forward[static_cast<std::size_t>(natural_dof)] !=
+                    graph_dof) {
+                throw std::runtime_error(
+                    "distributed graph index has no valid natural inverse");
+            }
+            return natural_dof;
+        };
+        const auto naturalToGraph = [&](FE::GlobalIndex natural_dof) {
+            if (natural_dof < 0 ||
+                static_cast<std::size_t>(natural_dof) >= global_dimension) {
+                throw std::runtime_error(
+                    "natural finite-element index is outside the global operator");
+            }
+            if (!graph_is_permuted) { return natural_dof; }
+            const auto graph_dof =
+                permutation->forward[static_cast<std::size_t>(natural_dof)];
+            if (graph_dof < 0 ||
+                static_cast<std::size_t>(graph_dof) >= global_dimension ||
+                permutation->inverse[static_cast<std::size_t>(graph_dof)] !=
+                    natural_dof) {
+                throw std::runtime_error(
+                    "natural finite-element index has no valid graph image");
+            }
+            return graph_dof;
+        };
+        const auto& request = capture->domain_request;
+        const auto& revision = capture->operator_revision;
+        const auto& layout = revision.fe_layout;
+        std::uint64_t layout_key = 1469598103934665603ULL;
+        for (const auto value : {layout.space, layout.dof_layout,
+                                 layout.constraint_layout, layout.block_layout}) {
+            layout_key ^= value;
+            layout_key *= 1099511628211ULL;
+        }
+        const auto source_field = request.source.field_id;
+        if (!request.valid() || !revision.valid || !revision.mesh.valid ||
+            request.source.kind != FE::interfaces::CutInterfaceSourceKind::Field ||
+            source_field != system.findFieldByName("phi") ||
+            request.source.layout_revision !=
+                system.fieldDofHandler(source_field).getDofStateRevision() ||
+            request.source.value_revision != generated.value_revision ||
+            request.mesh_geometry_revision != system.meshAccess().geometryRevision() ||
+            request.mesh_topology_revision != system.meshAccess().topologyRevision() ||
+            request.ownership_revision != system.meshAccess().ownershipRevision() ||
+            capture->constraint_layout_revision != layout.constraint_layout ||
+            layout_key != revision.system_layout_key ||
+            capture->original_sparsity_nnz < 0) {
+            throw std::runtime_error("local capture revision identity disagrees with live sources");
+        }
+        const auto& owned = system.dofHandler().getPartition().locallyOwned();
+        const auto& base = mesh.base();
+        const auto& vertex_gids = base.vertex_gids();
+        const auto append_field = [&](FE::FieldId field, int field_index,
+                                      std::size_t components) {
+            const auto* map = system.fieldDofHandler(field).getEntityDofMap();
+            if (map == nullptr) {
+                throw std::runtime_error("owned physical field has no entity map");
+            }
+            const auto offset = system.fieldDofOffset(field);
+            for (index_t vertex = 0;
+                 vertex < static_cast<index_t>(base.n_vertices()); ++vertex) {
+                const auto dofs = map->getVertexDofs(vertex);
+                if (dofs.size() != components) {
+                    throw std::runtime_error("owned physical field is not expected P1 space");
+                }
+                const auto gid = vertex_gids.at(static_cast<std::size_t>(vertex));
+                for (std::size_t component = 0u; component < components; ++component) {
+                    const auto global = offset + dofs[component];
+                    if (!owned.contains(global)) { continue; }
+                    if (global < 0 || static_cast<std::size_t>(global) >= residual.size()) {
+                        throw std::runtime_error("owned physical DOF is outside the global operator");
+                    }
+                    const auto index = static_cast<std::size_t>(global);
+                    capture->dofs.push_back(WetBlockReferenceDof{
+                        .owner_rank = rank,
+                        .field = field_index,
+                        .vertex_gid = gid,
+                        .component = component,
+                        .global_dof = global,
+                        .point = system.meshAccess().getNodeCoordinates(vertex),
+                        .retained_support = retained.contains(gid),
+                        .constrained = constrained[index] != 0,
+                    });
+                    if (system.constraints().isConstrained(global) !=
+                        (constrained[index] != 0)) {
+                        throw std::runtime_error("owned constraint disagrees with global mask");
+                    }
+                    capture->current_state.push_back(solution[index]);
+                    capture->previous_state.push_back(previous[index]);
+                    capture->residual.push_back(residual[index]);
+                }
+            }
+        };
+        append_field(velocity, 0, 2u);
+        append_field(pressure, 1, 1u);
+        const auto& dof_map = system.dofHandler().getDofMap();
+        const auto backendOwner = [&](FE::GlobalIndex graph_dof) {
+            if (graph_is_permuted) {
+                return permutation->owner_rank.at(
+                    static_cast<std::size_t>(graph_dof));
+            }
+            return sparsity->ownedRows().contains(graph_dof) ? rank : -1;
+        };
+        const auto ownerMismatch = [&](std::string_view direction,
+                                       FE::GlobalIndex graph_dof,
+                                       FE::GlobalIndex natural_dof,
+                                       int backend_owner,
+                                       int natural_owner) {
+            std::ostringstream message;
+            message << "physical graph/state owner mismatch"
+                    << " direction=" << direction
+                    << " case=" << case_id
+                    << " rank=" << rank
+                    << " graph_dof=" << graph_dof
+                    << " natural_dof=" << natural_dof
+                    << " backend_owner=" << backend_owner
+                    << " natural_owner=" << natural_owner;
+            throw std::runtime_error(message.str());
+        };
+        for (const auto& dof : capture->dofs) {
+            const auto natural_dof = dof.global_dof;
+            const auto graph_dof = naturalToGraph(natural_dof);
+            const auto backend_owner = backendOwner(graph_dof);
+            const auto natural_owner = dof_map.getDofOwner(natural_dof);
+            if (backend_owner != rank || natural_owner != rank ||
+                backend_owner != natural_owner ||
+                !sparsity->ownedRows().contains(graph_dof)) {
+                ownerMismatch("natural_to_graph", graph_dof, natural_dof,
+                              backend_owner, natural_owner);
+            }
+        }
+        const auto fieldContains = [&](FE::FieldId field,
+                                       FE::GlobalIndex natural_dof) {
+            const auto offset = system.fieldDofOffset(field);
+            const auto count = system.fieldDofHandler(field).getNumDofs();
+            return count >= 0 && natural_dof >= offset &&
+                   natural_dof - offset < count;
+        };
+        FE::GlobalIndex translated_nnz = 0;
+        for (FE::GlobalIndex row = 0; row < sparsity->numOwnedRows(); ++row) {
+            const auto graph_dof = sparsity->localRowToGlobal(row);
+            const auto natural_dof = graphToNatural(graph_dof);
+            const auto physical_row = fieldContains(velocity, natural_dof) ||
+                                      fieldContains(pressure, natural_dof);
+            if (physical_row) {
+                const auto backend_owner = backendOwner(graph_dof);
+                const auto natural_owner = dof_map.getDofOwner(natural_dof);
+                if (backend_owner != rank || natural_owner != rank ||
+                    backend_owner != natural_owner ||
+                    !owned.contains(natural_dof)) {
+                    ownerMismatch("graph_to_natural", graph_dof, natural_dof,
+                                  backend_owner, natural_owner);
+                }
+                if (!wetBlockCanonicalIndex(*capture, natural_dof).has_value()) {
+                    throw std::runtime_error(
+                        "owned physical graph row has no same-sender state record");
+                }
+            }
+            std::vector<FE::GlobalIndex> columns;
+            for (const auto column : sparsity->getRowDiagCols(row)) {
+                const auto natural_column = graphToNatural(
+                    sparsity->localColToGlobal(column));
+                if (physical_row) { columns.push_back(natural_column); }
+                if (translated_nnz == std::numeric_limits<FE::GlobalIndex>::max()) {
+                    throw std::runtime_error(
+                        "translated distributed graph nonzero count overflow");
+                }
+                ++translated_nnz;
+            }
+            for (const auto column : sparsity->getRowOffdiagCols(row)) {
+                const auto natural_column = graphToNatural(
+                    sparsity->ghostColToGlobal(column));
+                if (physical_row) { columns.push_back(natural_column); }
+                if (translated_nnz == std::numeric_limits<FE::GlobalIndex>::max()) {
+                    throw std::runtime_error(
+                        "translated distributed graph nonzero count overflow");
+                }
+                ++translated_nnz;
+            }
+            if (physical_row) {
+                shard.rows.emplace_back(natural_dof, std::move(columns));
+            }
+        }
+        if (translated_nnz != capture->original_sparsity_nnz) {
+            std::ostringstream message;
+            message << "translated distributed graph changed the local nonzero count"
+                    << " case=" << case_id
+                    << " rank=" << rank
+                    << " original=" << capture->original_sparsity_nnz
+                    << " translated=" << translated_nnz;
+            throw std::runtime_error(message.str());
+        }
+        for (const auto slave : system.constraints().getConstrainedDofs()) {
+            if (!owned.contains(slave) ||
+                !wetBlockCanonicalIndex(*capture, slave).has_value()) { continue; }
+            const auto line = system.constraints().getConstraint(slave);
+            if (!line.has_value()) {
+                throw std::runtime_error("owned constraint has no closed row");
+            }
+            WetBlockReferenceConstraint row;
+            row.slave_global_dof = slave;
+            row.inhomogeneity = static_cast<FE::Real>(line->inhomogeneity);
+            for (const auto& entry : line->entries) {
+                row.entries.push_back(WetBlockReferenceConstraintEntry{
+                    .master_global_dof = entry.master_dof,
+                    .weight = static_cast<FE::Real>(entry.weight),
+                });
+            }
+            capture->constraints.push_back(std::move(row));
+        }
+        for (index_t vertex = 0;
+             vertex < static_cast<index_t>(base.n_vertices()); ++vertex) {
+            if (mesh.owner_rank_vertex(vertex) != rank) { continue; }
+            capture->vertices.push_back(WetBlockReferenceVertex{
+                .owner_rank = rank,
+                .gid = vertex_gids.at(static_cast<std::size_t>(vertex)),
+                .point = system.meshAccess().getNodeCoordinates(vertex),
+            });
+        }
+        const auto& cell_gids = base.cell_gids();
+        for (index_t cell = 0; cell < static_cast<index_t>(base.n_cells()); ++cell) {
+            if (!mesh.is_owned_cell(cell)) { continue; }
+            WetBlockReferenceCell record;
+            record.owner_rank = mesh.owner_rank_cell(cell);
+            if (record.owner_rank != rank) {
+                throw std::runtime_error("owned mesh cell has inconsistent owner");
+            }
+            record.gid = cell_gids.at(static_cast<std::size_t>(cell));
+            for (const auto vertex : base.cell_vertices(cell)) {
+                record.vertex_gids.push_back(vertex_gids.at(static_cast<std::size_t>(vertex)));
+            }
+            capture->cells.push_back(std::move(record));
+        }
+        for (const auto& fragment : generated.domain.fragments()) {
+            if (!fragment.active() || fragment.owner_rank != rank) {
+                continue;
+            }
+            capture->generated_entities.push_back(WetBlockReferenceFragment{
+                .volume = false,
+                .stable_id = fragment.stable_id,
+                .parent_cell_gid = fragment.parent_cell_global_id,
+                .owner_rank = fragment.owner_rank,
+                .local_ordinal = fragment.local_fragment_index,
+                .kind_or_side = static_cast<int>(fragment.kind),
+                .topology_id = fragment.topology_id,
+                .corner_topology_key = fragment.parent_corner_topology_key,
+                .measure = fragment.measure,
+                .volume_fraction = std::nullopt,
+                .achieved_quadrature_order =
+                    generated.domain.request().achieved_interface_quadrature_order,
+            });
+        }
+        for (const auto& region : generated.domain.volumeRegions()) {
+            if (!region.active() || region.owner_rank != rank) {
+                continue;
+            }
+            capture->generated_entities.push_back(WetBlockReferenceFragment{
+                .volume = true,
+                .stable_id = region.stable_id,
+                .parent_cell_gid = region.parent_cell_global_id,
+                .owner_rank = region.owner_rank,
+                .local_ordinal = region.local_region_index,
+                .kind_or_side = static_cast<int>(region.side),
+                .topology_id = region.topology_id,
+                .corner_topology_key = region.parent_corner_topology_key,
+                .measure = region.measure,
+                .volume_fraction = region.volume_fraction,
+                .achieved_quadrature_order = region.achieved_quadrature_order,
+            });
+        }
+        for (const auto& entity : capture->generated_entities) {
+            if (std::none_of(capture->cells.begin(), capture->cells.end(),
+                    [&](const auto& cell) {
+                        return cell.gid == static_cast<gid_t>(entity.parent_cell_gid);
+                    })) {
+                throw std::runtime_error("owned generated entity has no locally owned parent");
+            }
+        }
+        shard.capture = std::move(*capture);
+        packed = packWetBlockOwnedShard(shard);
+    } catch (const std::exception& exception) { error = exception.what(); }
+      catch (...) { error = "unknown local shard error"; }
+    collectiveWetBlockCaptureError("local shard", error, comm);
+    auto shards = gatherWetBlockOwnedShardsToRoot(packed, comm);
+    std::shared_ptr<WetBlockReferenceCapture> result;
+    try {
+        if (rank == 0) {
+            if (shards.size() != 2u) {
+                throw std::runtime_error("capture requires exactly two owner shards");
+            }
+            WetBlockCaptureWire expected_metadata;
+            wetBlockWireMetadata(expected_metadata, shards.front().capture, false);
+            for (std::size_t owner = 0u; owner < shards.size(); ++owner) {
+                auto& shard = shards[owner];
+                auto& c = shard.capture;
+                WetBlockCaptureWire metadata;
+                wetBlockWireMetadata(metadata, c, false);
+                if (shard.rank != static_cast<int>(owner) ||
+                    shard.global_vertices != global_vertices ||
+                    shard.global_cells != global_cells ||
+                    metadata.bytes() != expected_metadata.bytes() ||
+                    c.dofs.size() != c.current_state.size() ||
+                    c.dofs.size() != c.previous_state.size() ||
+                    c.dofs.size() != c.residual.size()) {
+                    throw std::runtime_error("owner shards disagree on global identity or dimensions");
+                }
+                const auto require_owner = [&](const auto& records) {
+                    for (const auto& record : records) {
+                        if (record.owner_rank != shard.rank) {
+                            throw std::runtime_error("shard record claims a different sender owner");
+                        }
+                    }
+                };
+                require_owner(c.dofs);
+                require_owner(c.vertices);
+                require_owner(c.cells);
+                require_owner(c.generated_entities);
+                for (const auto& row : c.constraints) {
+                    if (!wetBlockCanonicalIndex(c, row.slave_global_dof).has_value()) {
+                        throw std::runtime_error("constraint slave is not owned by its sender");
+                    }
+                }
+                for (const auto& row : shard.rows) {
+                    if (!wetBlockCanonicalIndex(c, row.first).has_value()) {
+                        throw std::runtime_error("sparsity row is not owned by its sender");
+                    }
+                }
+            }
+            result = std::make_shared<WetBlockReferenceCapture>(shards.front().capture);
+            result->dofs.clear();
+            result->current_state.clear();
+            result->previous_state.clear();
+            result->residual.clear();
+            result->constraints.clear();
+            result->vertices.clear();
+            result->cells.clear();
+            result->generated_entities.clear();
+            for (std::size_t owner = 0u; owner < shards.size(); ++owner) {
+                auto& shard = shards[owner];
+                auto& c = shard.capture;
+                result->partition_revision_diagnostics.push_back(
+                    wetBlockPartitionRevisionDiagnostics(shard));
+                if (owner != 0u) { addWetBlockOwnedSummary(*result, c); }
+                result->dofs.insert(result->dofs.end(), c.dofs.begin(), c.dofs.end());
+                result->constraints.insert(result->constraints.end(),
+                                            c.constraints.begin(), c.constraints.end());
+                result->vertices.insert(result->vertices.end(), c.vertices.begin(), c.vertices.end());
+                result->cells.insert(result->cells.end(), c.cells.begin(), c.cells.end());
+                result->generated_entities.insert(result->generated_entities.end(),
+                    c.generated_entities.begin(), c.generated_entities.end());
+            }
+            std::sort(result->dofs.begin(), result->dofs.end(),
+                [](const auto& a, const auto& b) {
+                    return std::tie(a.field, a.vertex_gid, a.component) <
+                           std::tie(b.field, b.vertex_gid, b.component);
+                });
+            std::vector<FE::GlobalIndex> physical;
+            std::set<FE::GlobalIndex> global_dofs;
+            for (std::size_t index = 0u; index < result->dofs.size(); ++index) {
+                auto& dof = result->dofs[index];
+                dof.canonical_index = index;
+                if (dof.global_dof < 0 ||
+                    static_cast<std::size_t>(dof.global_dof) >= residual.size() ||
+                    !global_dofs.insert(dof.global_dof).second) {
+                    throw std::runtime_error("invalid or duplicate physical algebraic owner identity");
+                }
+                auto& source = shards.at(static_cast<std::size_t>(dof.owner_rank)).capture;
+                const auto source_index = wetBlockCanonicalIndex(source, dof.global_dof);
+                if (!source_index.has_value()) {
+                    throw std::runtime_error("physical DOF has no sender state");
+                }
+                const auto global = static_cast<std::size_t>(dof.global_dof);
+                if (std::memcmp(&source.residual[*source_index], &residual[global],
+                                sizeof(FE::Real)) != 0 ||
+                    dof.constrained != (constrained[global] != 0) ||
+                    dof.retained_support != retained.contains(dof.vertex_gid)) {
+                    throw std::runtime_error("owner state identity disagrees with existing global data");
+                }
+                physical.push_back(dof.global_dof);
+                result->current_state.push_back(source.current_state[*source_index]);
+                result->previous_state.push_back(source.previous_state[*source_index]);
+                result->residual.push_back(residual[global]);
+            }
+            result->full_jacobian = extractRectangularMatrix(matrix, physical, physical);
+            for (const auto& wet : sample.dofs) {
+                const auto index = wetBlockCanonicalIndex(*result, wet.global_dof);
+                if (!index.has_value()) {
+                    throw std::runtime_error("retained DOF is absent from physical owner union");
+                }
+                result->wet_to_all.push_back(*index);
+            }
+            result->sparsity_row_offsets.push_back(0u);
+            for (const auto& dof : result->dofs) {
+                const auto& rows = shards.at(static_cast<std::size_t>(dof.owner_rank)).rows;
+                const auto row = std::find_if(rows.begin(), rows.end(),
+                    [&](const auto& item) { return item.first == dof.global_dof; });
+                if (row == rows.end() || std::count_if(rows.begin(), rows.end(),
+                        [&](const auto& item) { return item.first == dof.global_dof; }) != 1) {
+                    throw std::runtime_error("physical sparsity row has missing or duplicate owner");
+                }
+                std::vector<std::size_t> columns;
+                for (const auto global : row->second) {
+                    if (const auto index = wetBlockCanonicalIndex(*result, global);
+                        index.has_value()) { columns.push_back(*index); }
+                }
+                std::sort(columns.begin(), columns.end());
+                columns.erase(std::unique(columns.begin(), columns.end()), columns.end());
+                result->sparsity_column_indices.insert(result->sparsity_column_indices.end(),
+                                                        columns.begin(), columns.end());
+                result->sparsity_row_offsets.push_back(result->sparsity_column_indices.size());
+            }
+            const auto n = result->dofs.size();
+            for (std::size_t row = 0u; row < n; ++row) {
+                for (std::size_t column = 0u; column < n; ++column) {
+                    if (result->full_jacobian[row * n + column] != FE::Real{0.0}) {
+                        result->numerical_nonzeros.push_back({{row, column}});
+                    }
+                }
+            }
+            for (auto& row : result->constraints) {
+                const auto slave = wetBlockCanonicalIndex(*result, row.slave_global_dof);
+                if (!slave.has_value()) {
+                    throw std::runtime_error("constraint slave cannot map to physical identity");
+                }
+                row.slave_canonical_index = *slave;
+                for (auto& entry : row.entries) {
+                    const auto master = wetBlockCanonicalIndex(*result, entry.master_global_dof);
+                    if (!master.has_value()) {
+                        throw std::runtime_error("constraint master cannot map to physical identity");
+                    }
+                    entry.master_canonical_index = *master;
+                }
+                std::sort(row.entries.begin(), row.entries.end(),
+                    [](const auto& a, const auto& b) {
+                        return a.master_canonical_index < b.master_canonical_index;
+                    });
+            }
+            std::sort(result->constraints.begin(), result->constraints.end(),
+                [](const auto& a, const auto& b) {
+                    return a.slave_canonical_index < b.slave_canonical_index;
+                });
+            const auto sort_gid = [](auto& records) {
+                std::sort(records.begin(), records.end(),
+                    [](const auto& a, const auto& b) { return a.gid < b.gid; });
+            };
+            sort_gid(result->vertices);
+            sort_gid(result->cells);
+            std::sort(result->generated_entities.begin(), result->generated_entities.end(),
+                [](const auto& a, const auto& b) {
+                    return std::tie(a.volume, a.stable_id) < std::tie(b.volume, b.stable_id);
+                });
+            if (result->vertices.size() != global_vertices ||
+                result->cells.size() != global_cells) {
+                throw std::runtime_error("owned mesh union has incomplete global cardinality");
+            }
+            validateWetBlockReferenceCapture(*result, sample);
+        }
+    } catch (const std::exception& exception) { error = exception.what(); }
+      catch (...) { error = "unknown root canonicalization error"; }
+    collectiveWetBlockCaptureError("root canonicalization", error, comm);
+    return result;
+}
+
+void collectivePublishWetBlockReferenceBundle(
+    const WetBlockMpiCaptureControl& control,
+    std::span<const WetBlockAssemblySample* const> samples,
+    std::span<const std::pair<std::string_view, ScaledWetBlockDifference>> comparisons,
+    std::span<const WetBlockGateResult> gates,
+    FE::Real numerical_gate,
+    FE::Real solved_gate,
+    MPI_Comm comm)
+{
+    int rank = 0;
+    MPI_Comm_rank(comm, &rank);
+    std::string error;
+    try {
+        // Recheck the agreed environment before publication, including rank-local
+        // changes during the fixture. No rank touches the filesystem here.
+        constexpr std::array<const char*, 4> names = {{
+            "SVMP_FREE_SURFACE_R0_CAPTURE_DIR", "SVMP_FREE_SURFACE_R0_SOURCE_COMMIT",
+            "SVMP_FREE_SURFACE_R0_SOURCE_TREE", "SVMP_FREE_SURFACE_R0_OVERLAY_SHA256",
+        }};
+        for (std::size_t i = 0u; i < names.size(); ++i) {
+            const auto* value = std::getenv(names[i]);
+            if (control.environment[i] != (value == nullptr ? "" : value)) {
+                throw std::runtime_error("capture environment changed before publication");
+            }
+        }
+    } catch (const std::exception& exception) { error = exception.what(); }
+      catch (...) { error = "unknown publication provenance error"; }
+    collectiveWetBlockCaptureError("publication provenance", error, comm);
+    try {
+        if (rank == 0) {
+            publishWetBlockReferenceBundle(
+                "operator/wet-block/mpi-2-block/physical-wet-blocks-and-islands.json",
+                "PhysicalWetBlocksAndDisconnectedIslandsAreInvariantAcrossDryMPIData",
+                samples, comparisons, gates, numerical_gate, solved_gate);
+        }
+    } catch (const std::exception& exception) { error = exception.what(); }
+      catch (...) { error = "unknown publication error"; }
+    collectiveWetBlockCaptureError("publication", error, comm);
+}
+
 [[nodiscard]] WetBlockAssemblySample assembleDistributedWetBlockSample(
     std::span<const FE::Real> x_coordinates,
     std::span<const FE::Real> level_set_by_plane,
     FE::Real dry_state_scale,
     MPI_Comm comm,
-    std::string_view partition_method)
+    std::string_view partition_method,
+    const WetBlockMpiCaptureControl& capture_control,
+    std::string_view capture_case_id)
 {
     constexpr int interface_marker = 27315;
     constexpr std::string_view domain_id =
@@ -9113,6 +10358,13 @@ struct DenseOperatorDifference {
     }
     sample.dry_column_coupling_norm = selectedFrobeniusNorm(
         matrix, wet_dofs, dry_columns);
+    if (capture_control.enabled) {
+        sample.reference_capture = captureDistributedWetBlockReference(
+            capture_case_id, x_coordinates, level_set_by_plane, dry_state_scale,
+            *mesh, system, velocity, pressure, retained, generated, state,
+            time_context, solution, previous, residual, constrained, matrix,
+            sample, comm, partition_method);
+    }
     return sample;
 }
 
@@ -15377,6 +16629,14 @@ TEST(FreeSurfaceCutStabilityMPI,
         GTEST_SKIP() << "This test requires exactly two MPI ranks.";
     }
 
+    const auto capture_control = wetBlockMpiCaptureControl(comm);
+    const auto globally_valid = [&](bool local_valid) {
+        int local_failure = local_valid ? 0 : 1;
+        int global_failure = 0;
+        MPI_Allreduce(&local_failure, &global_failure, 1, MPI_INT, MPI_MAX, comm);
+        return global_failure == 0;
+    };
+
     constexpr std::array<FE::Real, 4> baseline_x = {
         FE::Real{-1.0}, FE::Real{0.0}, FE::Real{1.0}, FE::Real{2.0}};
     constexpr std::array<FE::Real, 4> baseline_phi = {
@@ -15405,22 +16665,34 @@ TEST(FreeSurfaceCutStabilityMPI,
         baseline_phi,
         /*dry_state_scale=*/FE::Real{3.0},
         comm,
-        partition_method);
+        partition_method,
+        capture_control,
+        "physical_baseline");
     const auto depth = assembleDistributedWetBlockSample(
         deep_x,
         deep_phi,
         /*dry_state_scale=*/FE::Real{3.0},
         comm,
-        partition_method);
+        partition_method,
+        capture_control,
+        "physical_dry_depth");
     const auto dry_state = assembleDistributedWetBlockSample(
         baseline_x,
         baseline_phi,
         // Includes the dry-only exterior vertices on both MPI owners.
         /*dry_state_scale=*/FE::Real{1.0e6},
         comm,
-        partition_method);
-    ASSERT_EQ(baseline.retained_vertices, 6u);
-    ASSERT_EQ(depth.retained_vertices, baseline.retained_vertices);
+        partition_method,
+        capture_control,
+        "physical_dry_values");
+    ASSERT_TRUE(globally_valid(
+        baseline.retained_vertices == 6u &&
+        depth.retained_vertices == baseline.retained_vertices &&
+        dry_state.retained_vertices == baseline.retained_vertices &&
+        baseline.dofs.size() == 18u &&
+        depth.dofs.size() == baseline.dofs.size() &&
+        dry_state.dofs.size() == baseline.dofs.size()))
+        << "Distributed physical wet-block structural preconditions failed.";
     EXPECT_EQ(baseline.constrained_dry_velocity_dofs, 4u);
     EXPECT_EQ(baseline.constrained_dry_pressure_dofs, 2u);
     EXPECT_EQ(depth.constrained_dry_velocity_dofs, 16u);
@@ -15464,10 +16736,13 @@ TEST(FreeSurfaceCutStabilityMPI,
                       << " solved_state_gate=" << mpi_solved_gate << '\n';
         }
     }
+    std::array<FE::Real, 3> scaled_physical_dry_columns{};
+    std::size_t physical_gate_index = 0u;
     for (const auto* sample : {&baseline, &depth, &dry_state}) {
-        EXPECT_LE(sample->dry_column_coupling_norm /
-                      (norm_floor + vectorL2Norm(sample->jacobian)),
-                  mpi_gate);
+        const auto scaled_dry_column = sample->dry_column_coupling_norm /
+            (norm_floor + vectorL2Norm(sample->jacobian));
+        EXPECT_LE(scaled_dry_column, mpi_gate);
+        scaled_physical_dry_columns[physical_gate_index++] = scaled_dry_column;
     }
 
     const auto islands = assembleDistributedWetBlockSample(
@@ -15475,15 +16750,26 @@ TEST(FreeSurfaceCutStabilityMPI,
         island_phi,
         /*dry_state_scale=*/FE::Real{2.0},
         comm,
-        partition_method);
+        partition_method,
+        capture_control,
+        "islands_baseline");
     const auto changed_dry_path = assembleDistributedWetBlockSample(
         island_x,
         island_phi,
         /*dry_state_scale=*/FE::Real{1.0e6},
         comm,
-        partition_method);
-    ASSERT_EQ(islands.retained_vertices, 12u);
-    ASSERT_EQ(islands.dofs.size(), 36u);
+        partition_method,
+        capture_control,
+        "islands_dry_values");
+    ASSERT_TRUE(globally_valid(
+        islands.retained_vertices == 12u && islands.dofs.size() == 36u &&
+        changed_dry_path.retained_vertices == islands.retained_vertices &&
+        changed_dry_path.dofs.size() == islands.dofs.size() &&
+        std::all_of(islands.dofs.begin(), islands.dofs.end(), [](const auto& dof) {
+            return dof.point[0] <= FE::Real{2.0} ||
+                   dof.point[0] >= FE::Real{4.0};
+        })))
+        << "Distributed island structural preconditions failed.";
     const auto dry_path_difference = compareWetBlockSamples(
         islands, changed_dry_path);
     EXPECT_LE(dry_path_difference.residual, mpi_gate);
@@ -15495,13 +16781,11 @@ TEST(FreeSurfaceCutStabilityMPI,
     for (std::size_t row = 0u; row < n; ++row) {
         const bool left_row = islands.dofs[row].point[0] <= FE::Real{2.0};
         const bool right_row = islands.dofs[row].point[0] >= FE::Real{4.0};
-        ASSERT_TRUE(left_row || right_row);
         for (std::size_t column = 0u; column < n; ++column) {
             const bool left_column =
                 islands.dofs[column].point[0] <= FE::Real{2.0};
             const bool right_column =
                 islands.dofs[column].point[0] >= FE::Real{4.0};
-            ASSERT_TRUE(left_column || right_column);
             if ((left_row && right_column) ||
                 (right_row && left_column)) {
                 const auto value = static_cast<long double>(
@@ -15515,9 +16799,9 @@ TEST(FreeSurfaceCutStabilityMPI,
     const auto scaled_cross = cross_norm /
         (norm_floor + vectorL2Norm(islands.jacobian));
     EXPECT_LE(scaled_cross, mpi_gate);
-    EXPECT_LE(islands.dry_column_coupling_norm /
-                  (norm_floor + vectorL2Norm(islands.jacobian)),
-              mpi_gate);
+    const auto scaled_island_dry_column = islands.dry_column_coupling_norm /
+        (norm_floor + vectorL2Norm(islands.jacobian));
+    EXPECT_LE(scaled_island_dry_column, mpi_gate);
     if (rank == 0) {
         std::cout << std::setprecision(17)
                   << "WP1_two_island_decoupling"
@@ -15534,6 +16818,30 @@ TEST(FreeSurfaceCutStabilityMPI,
                   << dry_path_difference.solved_state
                   << " accepted_gate=" << mpi_gate
                   << " solved_state_gate=" << mpi_solved_gate << '\n';
+    }
+    const bool all_gates_passed = globally_valid(!::testing::Test::HasFailure());
+    if (all_gates_passed && capture_control.enabled) {
+        const std::array<const WetBlockAssemblySample*, 5> samples = {{
+            &baseline, &depth, &dry_state, &islands, &changed_dry_path,
+        }};
+        const std::array<std::pair<std::string_view, ScaledWetBlockDifference>, 3>
+            capture_comparisons = {{
+                comparisons[0], comparisons[1],
+                {"dry_path", dry_path_difference},
+            }};
+        const std::array<WetBlockGateResult, 5> gates = {{
+            {"physical_baseline", "scaled_dry_column_coupling",
+             scaled_physical_dry_columns[0]},
+            {"physical_dry_depth", "scaled_dry_column_coupling",
+             scaled_physical_dry_columns[1]},
+            {"physical_dry_values", "scaled_dry_column_coupling",
+             scaled_physical_dry_columns[2]},
+            {"islands_baseline", "scaled_island_cross_jacobian", scaled_cross},
+            {"islands_baseline", "scaled_dry_column_coupling", scaled_island_dry_column},
+        }};
+        collectivePublishWetBlockReferenceBundle(
+            capture_control, samples, capture_comparisons, gates,
+            mpi_gate, mpi_solved_gate, comm);
     }
 #endif
 }

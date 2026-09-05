@@ -3,6 +3,7 @@
 #include "Application/Core/LevelSetCutConfiguration.h"
 #include "Application/Core/SimulationBuilder.h"
 #include "Application/Translators/EquationTranslator.h"
+#include "Application/Translators/LevelSetEquationTranslator.h"
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Interfaces/LevelSetInterfaceDomain.h"
 #include "FE/Spaces/SpaceFactory.h"
@@ -1135,6 +1136,8 @@ TEST(OpenVesselExamples, SimulationBuilderRegistersEquationCutDomainWithUnfitted
     ASSERT_TRUE(components.fe_system);
     EXPECT_EQ(components.primary_mesh_name, "tank");
     ASSERT_EQ(components.physics_modules.size(), 2u);
+    ASSERT_FALSE(
+        components.fe_system->operatorDefinition("equations").cut_volumes.empty());
     EXPECT_TRUE(components.fe_system->formInstallCellDomainRestrictions().empty());
 
     const auto phi = components.fe_system->findFieldByName("phi");
@@ -1185,6 +1188,27 @@ TEST(OpenVesselExamples,
     EXPECT_EQ(components.fe_system->fieldRecord(physical_velocity).components,
               components.fe_system->fieldRecord(extension_velocity).components);
     EXPECT_TRUE(components.fe_system->hasOperator("equations"));
+
+    ASSERT_EQ(
+        components.resolved_level_set_equations_by_input_index.size(),
+        params.equation_parameters.size());
+    const auto level_set = std::find_if(
+        params.equation_parameters.begin(),
+        params.equation_parameters.end(),
+        [](const auto* equation) {
+          return equation != nullptr && equation->type.defined() &&
+                 equation->type.value() == "level_set";
+        });
+    ASSERT_NE(level_set, params.equation_parameters.end());
+    const auto level_set_index = static_cast<std::size_t>(
+        std::distance(params.equation_parameters.begin(), level_set));
+    ASSERT_TRUE(
+        components.resolved_level_set_equations_by_input_index[level_set_index]);
+    EXPECT_EQ(
+        components
+            .resolved_level_set_equations_by_input_index[level_set_index]
+            ->options.velocity.algebraic_extension_source_field_name,
+        "Velocity");
 
     ASSERT_TRUE(components.linear_solver);
     const auto& solver_options = components.linear_solver->getOptions();
@@ -1247,6 +1271,16 @@ TEST(OpenVesselExamples,
             preflightAndPreRegisterPhysicsModuleDependencies(
                 parameters, components));
     ASSERT_EQ(
+        components.resolved_level_set_equations_by_input_index.size(),
+        parameters.equation_parameters.size());
+    const std::size_t level_set_index = level_set_first ? 0u : 1u;
+    const std::size_t fluid_index = level_set_first ? 1u : 0u;
+    ASSERT_TRUE(
+        components.resolved_level_set_equations_by_input_index[level_set_index]);
+    EXPECT_FALSE(
+        components.resolved_level_set_equations_by_input_index[fluid_index]);
+    EXPECT_EQ(components.fe_system->registeredFieldCount(), 6u);
+    ASSERT_EQ(
         components.fe_system
             ->materialInterfaceTransportVelocityDeclarations()
             .size(),
@@ -1267,13 +1301,24 @@ TEST(OpenVesselExamples,
         std::invalid_argument);
     ASSERT_EQ(incomplete_owner_layout.blocks.size(), 1u);
     EXPECT_EQ(incomplete_owner_layout.blocks.front().name, "sentinel");
-    for (const auto* equation : parameters.equation_parameters) {
+    for (std::size_t equation_index = 0u;
+         equation_index < parameters.equation_parameters.size();
+         ++equation_index) {
+      const auto* equation = parameters.equation_parameters[equation_index];
       ASSERT_NE(equation, nullptr);
-      ASSERT_NO_THROW(components.physics_modules.push_back(
-          application::translators::EquationTranslator::createModule(
-              *equation,
-              *components.fe_system,
-              components.meshes)));
+      if (equation_index == level_set_index) {
+        ASSERT_NO_THROW(components.physics_modules.push_back(
+            application::translators::level_set::createModule(
+                *components
+                     .resolved_level_set_equations_by_input_index[equation_index],
+                *components.fe_system)));
+      } else {
+        ASSERT_NO_THROW(components.physics_modules.push_back(
+            application::translators::EquationTranslator::createModule(
+                *equation,
+                *components.fe_system,
+                components.meshes)));
+      }
     }
 
     ASSERT_EQ(components.physics_modules.size(), 2u);
@@ -1425,6 +1470,87 @@ TEST(OpenVesselExamples,
     EXPECT_EQ(malformed_layout.blocks.back().name, "unexpected");
     EXPECT_EQ(malformed_layout.blocks.back().start_component, 8);
     EXPECT_EQ(malformed_layout.blocks.back().n_components, 1);
+  }
+#endif
+}
+
+TEST(OpenVesselExamples,
+     SimulationDependencyPreflightRetainsLevelSetSnapshotAfterRawInputRemoval)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  ensure_mpi_initialized_for_open_vessel_builder();
+
+  for (const bool level_set_first : {true, false}) {
+    SCOPED_TRACE(level_set_first ? "level_set_then_fluid"
+                                 : "fluid_then_level_set");
+    Parameters parameters;
+    appendTwoFluidMaterialInterfaceEquations(
+        parameters, level_set_first);
+    const std::size_t level_set_index = level_set_first ? 0u : 1u;
+    const std::size_t fluid_index = level_set_first ? 1u : 0u;
+    parameters.equation_parameters[level_set_index]
+        ->set_extra_parameter_value("Enable_curvature_projection", "true");
+    parameters.equation_parameters[level_set_index]
+        ->set_extra_parameter_value(
+            "Projected_curvature_field", "kappa_projected");
+
+    auto mesh = makeTranslatorTriangleMesh();
+    application::core::SimulationComponents components;
+    components.primary_mesh_name = "triangle";
+    components.primary_mesh = mesh;
+    components.meshes.emplace("triangle", mesh);
+    components.fe_system =
+        std::make_unique<svmp::FE::systems::FESystem>(mesh);
+
+    ASSERT_NO_THROW(
+        application::core::detail::
+            preflightAndPreRegisterPhysicsModuleDependencies(
+                parameters, components));
+    ASSERT_EQ(
+        components.resolved_level_set_equations_by_input_index.size(), 2u);
+    ASSERT_TRUE(
+        components.resolved_level_set_equations_by_input_index[level_set_index]);
+    EXPECT_EQ(components.fe_system->registeredFieldCount(), 6u);
+    EXPECT_EQ(components.fe_system->findFieldByName("kappa_projected"),
+              svmp::FE::INVALID_FIELD_ID);
+
+    delete parameters.equation_parameters[level_set_index];
+    parameters.equation_parameters[level_set_index] = nullptr;
+
+    ASSERT_NO_THROW(components.physics_modules.push_back(
+        application::translators::level_set::createModule(
+            *components
+                 .resolved_level_set_equations_by_input_index[level_set_index],
+            *components.fe_system)));
+    ASSERT_NO_THROW(components.physics_modules.push_back(
+        application::translators::EquationTranslator::createModule(
+            *parameters.equation_parameters[fluid_index],
+            *components.fe_system,
+            components.meshes)));
+
+    ASSERT_EQ(components.physics_modules.size(), 2u);
+    EXPECT_NE(components.fe_system->findFieldByName("level_set"),
+              svmp::FE::INVALID_FIELD_ID);
+    EXPECT_NE(components.fe_system->findFieldByName("phase"),
+              svmp::FE::INVALID_FIELD_ID);
+    const auto projected_curvature =
+        components.fe_system->findFieldByName("kappa_projected");
+    ASSERT_NE(projected_curvature, svmp::FE::INVALID_FIELD_ID);
+    EXPECT_EQ(projected_curvature, static_cast<svmp::FE::FieldId>(6u));
+    EXPECT_TRUE(components.fe_system->hasOperator("equations"));
+    ASSERT_EQ(
+        components.fe_system
+            ->materialInterfaceTransportVelocityDeclarations()
+            .size(),
+        1u);
+    EXPECT_EQ(
+        components.fe_system
+            ->materialInterfaceTransportVelocityDeclarations()
+            .front()
+            .level_set_field,
+        components.fe_system->findFieldByName("level_set"));
   }
 #endif
 }
@@ -1614,6 +1740,102 @@ TEST(OpenVesselExamples,
             .size(),
         1u);
   }
+#endif
+}
+
+TEST(OpenVesselExamples,
+     SimulationDependencyPreflightRetainsBroadLevelSetSpellingButRawDispatchRejectsIt)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  ensure_mpi_initialized_for_open_vessel_builder();
+
+  Parameters parameters;
+  appendTwoFluidMaterialInterfaceEquations(
+      parameters, /*level_set_first=*/false);
+  ASSERT_EQ(parameters.equation_parameters.size(), 2u);
+  parameters.equation_parameters[1]->type.set_raw_value(" LEVEL_SET ");
+
+  auto mesh = makeTranslatorTriangleMesh();
+  application::core::SimulationComponents components;
+  components.primary_mesh_name = "triangle";
+  components.primary_mesh = mesh;
+  components.meshes.emplace("triangle", mesh);
+  components.fe_system =
+      std::make_unique<svmp::FE::systems::FESystem>(mesh);
+
+  ASSERT_NO_THROW(
+      application::core::detail::
+          preflightAndPreRegisterPhysicsModuleDependencies(
+              parameters, components));
+  ASSERT_EQ(
+      components.resolved_level_set_equations_by_input_index.size(), 2u);
+  EXPECT_FALSE(components.resolved_level_set_equations_by_input_index[0]);
+  ASSERT_TRUE(components.resolved_level_set_equations_by_input_index[1]);
+  EXPECT_EQ(components.fe_system->registeredFieldCount(), 6u);
+
+  try {
+    (void)application::translators::EquationTranslator::createModule(
+        *parameters.equation_parameters[1],
+        *components.fe_system,
+        components.meshes);
+    FAIL() << "Expected unsupported raw level-set spelling to be rejected";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string_view(error.what()).find(
+                  "Equation type ' LEVEL_SET ' is not registered"),
+              std::string_view::npos)
+        << error.what();
+  }
+  EXPECT_EQ(components.fe_system->registeredFieldCount(), 6u);
+#endif
+}
+
+TEST(OpenVesselExamples,
+     SimulationDependencyPreflightKeepsResolvedLevelSetSlotsInputAligned)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  ensure_mpi_initialized_for_open_vessel_builder();
+
+  Parameters parameters;
+  parameters.equation_parameters.push_back(nullptr);
+  parameters.equation_parameters.push_back(new EquationParameters());
+  auto unrelated = std::make_unique<EquationParameters>();
+  unrelated->type.set("poisson");
+  parameters.equation_parameters.push_back(unrelated.release());
+  parameters.equation_parameters.push_back(
+      equationParametersFromText(R"xml(
+<Add_equation type="level_set">
+  <Level_set_field_name>aligned_level_set</Level_set_field_name>
+</Add_equation>
+)xml")
+          .release());
+
+  auto mesh = makeTranslatorTriangleMesh();
+  application::core::SimulationComponents components;
+  components.primary_mesh_name = "triangle";
+  components.primary_mesh = mesh;
+  components.meshes.emplace("triangle", mesh);
+  components.fe_system =
+      std::make_unique<svmp::FE::systems::FESystem>(mesh);
+
+  ASSERT_NO_THROW(
+      application::core::detail::
+          preflightAndPreRegisterPhysicsModuleDependencies(
+              parameters, components));
+  ASSERT_EQ(
+      components.resolved_level_set_equations_by_input_index.size(), 4u);
+  EXPECT_FALSE(components.resolved_level_set_equations_by_input_index[0]);
+  EXPECT_FALSE(components.resolved_level_set_equations_by_input_index[1]);
+  EXPECT_FALSE(components.resolved_level_set_equations_by_input_index[2]);
+  ASSERT_TRUE(components.resolved_level_set_equations_by_input_index[3]);
+  EXPECT_EQ(
+      components.resolved_level_set_equations_by_input_index[3]
+          ->options.level_set.field_name,
+      "aligned_level_set");
+  EXPECT_EQ(components.fe_system->registeredFieldCount(), 0u);
 #endif
 }
 
@@ -2070,6 +2292,19 @@ TEST(OpenVesselExamples,
       ASSERT_NO_THROW(params.read_xml(xml_path.string()));
     }
 
+    if (request == "SurfaceStress") {
+      const auto level_set = std::find_if(
+          params.equation_parameters.begin(),
+          params.equation_parameters.end(),
+          [](const auto* equation) {
+            return equation != nullptr && equation->type.defined() &&
+                   equation->type.value() == "level_set";
+          });
+      ASSERT_NE(level_set, params.equation_parameters.end());
+      (*level_set)->set_extra_parameter_value(
+          "Transport_form", "invalid_transport_form");
+    }
+
     auto mesh = makeTranslatorQuadMesh();
     application::core::SimulationComponents components;
     components.meshes.emplace("tank", mesh);
@@ -2102,6 +2337,8 @@ TEST(OpenVesselExamples,
     EXPECT_FALSE(components.fe_system->hasOperator("equations"));
     EXPECT_FALSE(components.fe_system->hasOperator("level_set"));
     EXPECT_TRUE(components.physics_modules.empty());
+    EXPECT_TRUE(
+        components.resolved_level_set_equations_by_input_index.empty());
 
     std::error_code ec;
     fs::remove(xml_path, ec);
