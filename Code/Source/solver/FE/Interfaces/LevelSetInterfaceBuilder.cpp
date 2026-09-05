@@ -6,12 +6,14 @@
  */
 
 #include "Interfaces/LevelSetInterfaceBuilder.h"
+#include "Interfaces/detail/ProducerArithmeticAssessment.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <initializer_list>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -71,6 +73,16 @@ struct PointOrigin {
     bool operator==(const PointOrigin&) const = default;
 };
 
+struct OriginalCornerData {
+    std::array<Real, 3> point{};
+    Real phi{0.0};
+    Real isovalue{0.0};
+    Real signed_band{0.0};
+    Real actual_signed{0.0};
+    bool canonicalization_changed{false};
+    bool available{false};
+};
+
 struct StrictConstructionObservation {
     LinearCornerStrictBranch state{LinearCornerStrictBranch::Unchecked};
     void unresolved() { state = LinearCornerStrictBranch::ModifiedOrUnresolved; }
@@ -103,6 +115,31 @@ void observeRepeat(StrictConstructionObservation& observation,
     }
 }
 
+[[nodiscard]] detail::OriginRelation originRelation(const PointOrigin& a,
+                                                    const PointOrigin& b) noexcept
+{
+    if (!a.known() || !b.known()) {
+        return detail::OriginRelation::Unknown;
+    }
+    return a == b ? detail::OriginRelation::SameOriginal
+                  : detail::OriginRelation::DistinctOriginal;
+}
+
+template<class A, class B>
+void observeAssessedRepeat(StrictConstructionObservation& observation,
+                           const A& a,
+                           const B& b,
+                           Real tolerance,
+                           detail::DistanceObservation distance)
+{
+    const auto assessment = detail::assessDistance(
+        a.assessment, a.point, b.assessment, b.point, tolerance, 3u,
+        originRelation(a.origin, b.origin), distance);
+    if (!assessment.available()) {
+        observation.unresolved();
+    }
+}
+
 template<class A>
 bool structuralZero(const A& a, const A& b, const A& c)
 {
@@ -112,6 +149,7 @@ bool structuralZero(const A& a, const A& b, const A& c)
 struct IdentifiedPoint {
     std::array<Real, 3> point{};
     PointOrigin origin{};
+    detail::PointAssessment assessment{};
 };
 using IdentifiedFaces = std::vector<std::vector<IdentifiedPoint>>;
 
@@ -120,13 +158,111 @@ struct CutPointCandidate {
     std::array<Real, 3> parent_coordinate{{0.0, 0.0, 0.0}};
     Real level_set_value{0.0};
     PointOrigin origin{};
+    detail::PointAssessment assessment{};
 };
 
 struct SignedPoint {
     std::array<Real, 3> point{{0.0, 0.0, 0.0}};
     Real value{0.0};
     PointOrigin origin{};
+    OriginalCornerData original{};
+    detail::PointAssessment assessment{};
 };
+
+[[nodiscard]] OriginalCornerData originalCorner(
+    const std::array<Real, 3>& point,
+    Real phi,
+    Real isovalue,
+    Real signed_band,
+    Real actual_signed,
+    Real canonical_signed) noexcept
+{
+    return {point, phi, isovalue, signed_band, actual_signed,
+            actual_signed != canonical_signed, true};
+}
+
+[[nodiscard]] detail::PointAssessment assessCrossing(
+    const SignedPoint& a,
+    const SignedPoint& b,
+    const std::array<Real, 3>& emitted,
+    Real denominator,
+    Real quotient,
+    Real clamped,
+    bool helper_denominator_guard,
+    bool division_taken) noexcept
+{
+    if (a.value == Real{0.0} && b.value != Real{0.0}) {
+        return a.assessment;
+    }
+    if (b.value == Real{0.0} && a.value != Real{0.0}) {
+        return b.assessment;
+    }
+    if (!a.original.available || !b.original.available ||
+        a.origin.kind != PointOrigin::Kind::Corner ||
+        b.origin.kind != PointOrigin::Kind::Corner) {
+        return {};
+    }
+    detail::OriginalEdgeObservation input;
+    input.a = a.original.point;
+    input.b = b.original.point;
+    input.emitted = emitted;
+    input.phi_a = a.original.phi;
+    input.phi_b = b.original.phi;
+    input.isovalue = a.original.isovalue;
+    input.signed_band = a.original.signed_band;
+    input.actual_signed_a = a.original.actual_signed;
+    input.actual_signed_b = b.original.actual_signed;
+    input.actual_denominator = denominator;
+    input.actual_quotient = quotient;
+    input.actual_clamped = clamped;
+    input.canonicalization_changed =
+        a.original.canonicalization_changed ||
+        b.original.canonicalization_changed ||
+        a.original.isovalue != b.original.isovalue ||
+        a.original.signed_band != b.original.signed_band;
+    input.helper_denominator_guard = helper_denominator_guard;
+    input.division_taken = division_taken;
+    return detail::assessOriginalEdge(input);
+}
+
+[[nodiscard]] CutPointCandidate originalCornerCandidate(
+    const std::array<Real, 3>& point,
+    std::size_t index) noexcept
+{
+    return {point, point, Real{0.0}, PointOrigin::corner(index),
+            detail::assessOriginalCorner(point, point)};
+}
+
+[[nodiscard]] detail::PointAssessment assessDirectOriginalEdge(
+    const LevelSetCellCutInput& input,
+    const std::vector<Real>& actual_signed_values,
+    const std::vector<Real>& signed_values,
+    const CutInterfaceDomainRequest& request,
+    std::size_t i,
+    std::size_t j,
+    const std::array<Real, 3>& emitted,
+    Real denominator,
+    Real quotient) noexcept
+{
+    detail::OriginalEdgeObservation observation;
+    observation.a = input.node_coordinates[i];
+    observation.b = input.node_coordinates[j];
+    observation.emitted = emitted;
+    observation.phi_a = input.level_set_values[i];
+    observation.phi_b = input.level_set_values[j];
+    observation.isovalue = request.isovalue;
+    observation.signed_band = request.tolerance;
+    observation.actual_signed_a = actual_signed_values[i];
+    observation.actual_signed_b = actual_signed_values[j];
+    observation.actual_denominator = denominator;
+    observation.actual_quotient = quotient;
+    observation.actual_clamped = quotient;
+    observation.canonicalization_changed =
+        actual_signed_values[i] != signed_values[i] ||
+        actual_signed_values[j] != signed_values[j];
+    observation.division_taken = true;
+    return detail::assessOriginalEdge(observation);
+}
 
 PointOrigin crossingOrigin(const SignedPoint& a, const SignedPoint& b,
                            StrictConstructionObservation& observation)
@@ -321,15 +457,27 @@ struct RegionMoments {
 void addUniqueCandidate(StrictConstructionObservation& observation, std::vector<CutPointCandidate>& points,
                         CutPointCandidate candidate,
                         Real tolerance) {
+    std::vector<std::optional<detail::DistanceObservation>> comparisons(
+        points.size());
     const auto duplicate = std::find_if(
         points.begin(),
         points.end(),
         [&](const CutPointCandidate& existing) {
-            return nearlySamePoint(existing.point, candidate.point, tolerance);
+            const Real distance = norm3(sub(existing.point, candidate.point));
+            const bool same = distance <= tolerance;
+            comparisons[static_cast<std::size_t>(&existing - points.data())] =
+                detail::DistanceObservation{true, distance, same, false};
+            return same;
         });
-    for (const auto& existing : points) {
-        observeRepeat(observation, existing, candidate,
-                      duplicate != points.end() && &existing == &*duplicate);
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        if (!comparisons[i].has_value()) {
+            continue;
+        }
+        auto distance = *comparisons[i];
+        distance.removed = duplicate != points.end() &&
+                           &points[i] == &*duplicate;
+        observeAssessedRepeat(observation, points[i], candidate, tolerance,
+                              distance);
     }
     if (duplicate == points.end()) {
         points.push_back(std::move(candidate));
@@ -587,8 +735,12 @@ void orderPolygonPoints(StrictConstructionObservation& observation, std::vector<
                                                  const SignedPoint& b) noexcept {
     const Real denominator = a.value - b.value;
     Real t = Real{0.0};
+    Real quotient = Real{0.0};
+    bool division_taken = false;
     if (std::abs(denominator) > Real{1.0e-30}) {
-        t = clampFraction(observation, a.value / denominator);
+        quotient = a.value / denominator;
+        division_taken = true;
+        t = clampFraction(observation, quotient);
     } else {
         observation.unresolved();
     }
@@ -599,7 +751,10 @@ void orderPolygonPoints(StrictConstructionObservation& observation, std::vector<
         observation.unresolved();
         origin = {};
     }
-    return SignedPoint{interpolate(a.point, b.point, t), Real{0.0}, origin};
+    const auto point = interpolate(a.point, b.point, t);
+    return SignedPoint{point, Real{0.0}, origin, {},
+                       assessCrossing(a, b, point, denominator, quotient, t,
+                                      true, division_taken)};
 }
 
 [[nodiscard]] std::vector<SignedPoint> clipPolygonToNegativeLevelSet(StrictConstructionObservation& observation,
@@ -699,12 +854,25 @@ void orderPolygonPoints(StrictConstructionObservation& observation, std::vector<
 [[nodiscard]] std::vector<SignedPoint> makeSignedPolygon(
     const std::vector<std::array<Real, 3>>& points,
     const std::vector<Real>& signed_values,
-    std::size_t count)
+    std::size_t count,
+    const std::vector<Real>* original_values = nullptr,
+    const std::vector<Real>* actual_signed_values = nullptr,
+    Real isovalue = Real{0.0},
+    Real signed_band = Real{0.0})
 {
     std::vector<SignedPoint> polygon;
     polygon.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
-        polygon.push_back(SignedPoint{points[i], signed_values[i], PointOrigin::corner(i)});
+        OriginalCornerData original;
+        if (original_values != nullptr && actual_signed_values != nullptr) {
+            original = originalCorner(points[i], (*original_values)[i],
+                                      isovalue, signed_band,
+                                      (*actual_signed_values)[i],
+                                      signed_values[i]);
+        }
+        polygon.push_back(SignedPoint{
+            points[i], signed_values[i], PointOrigin::corner(i), original,
+            detail::assessOriginalCorner(points[i], points[i])});
     }
     return polygon;
 }
@@ -716,7 +884,9 @@ void orderPolygonPoints(StrictConstructionObservation& observation, std::vector<
     std::vector<SignedPoint> polygon;
     polygon.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
-        polygon.push_back(SignedPoint{points[i], Real{0.0}, PointOrigin::corner(i)});
+        polygon.push_back(SignedPoint{
+            points[i], Real{0.0}, PointOrigin::corner(i), {},
+            detail::assessOriginalCorner(points[i], points[i])});
     }
     return polygonMoments2D(observation, polygon);
 }
@@ -726,9 +896,14 @@ void orderPolygonPoints(StrictConstructionObservation& observation, std::vector<
     const std::vector<Real>& signed_values,
     std::size_t count,
     geometry::CutIntegrationSide side,
-    Real tolerance)
+    Real tolerance,
+    const std::vector<Real>* original_values = nullptr,
+    const std::vector<Real>* actual_signed_values = nullptr,
+    Real isovalue = Real{0.0})
 {
-    const auto polygon = makeSignedPolygon(points, signed_values, count);
+    const auto polygon = makeSignedPolygon(
+        points, signed_values, count, original_values, actual_signed_values,
+        isovalue, tolerance);
     return side == geometry::CutIntegrationSide::Negative
                ? clipPolygonToNegativeLevelSet(observation, polygon, tolerance)
                : clipPolygonToPositiveLevelSet(observation, polygon, tolerance);
@@ -911,15 +1086,27 @@ void addUniquePoint(StrictConstructionObservation& observation, std::vector<Iden
                     const IdentifiedPoint& point,
                     Real tolerance)
 {
+    std::vector<std::optional<detail::DistanceObservation>> comparisons(
+        points.size());
     const auto duplicate = std::find_if(
         points.begin(),
         points.end(),
         [&](const IdentifiedPoint& existing) {
-            return nearlySamePoint(existing.point, point.point, tolerance);
+            const Real distance = norm3(sub(existing.point, point.point));
+            const bool same = distance <= tolerance;
+            comparisons[static_cast<std::size_t>(&existing - points.data())] =
+                detail::DistanceObservation{true, distance, same, false};
+            return same;
         });
-    for (const auto& existing : points) {
-        observeRepeat(observation, existing, point,
-                      duplicate != points.end() && &existing == &*duplicate);
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        if (!comparisons[i].has_value()) {
+            continue;
+        }
+        auto distance = *comparisons[i];
+        distance.removed = duplicate != points.end() &&
+                           &points[i] == &*duplicate;
+        observeAssessedRepeat(observation, points[i], point, tolerance,
+                              distance);
     }
     if (duplicate == points.end()) {
         points.push_back(point);
@@ -985,7 +1172,10 @@ void addUniquePoint(StrictConstructionObservation& observation, std::vector<Iden
     const std::vector<Real>& signed_values,
     const std::vector<CutPointCandidate>& ordered_cut_points,
     geometry::CutIntegrationSide side,
-    Real tolerance)
+    Real tolerance,
+    const std::vector<Real>* original_values = nullptr,
+    const std::vector<Real>* actual_signed_values = nullptr,
+    Real isovalue = Real{0.0})
 {
     constexpr std::array<std::array<std::size_t, 3>, 4> faces{{
         {{0u, 1u, 2u}},
@@ -998,7 +1188,17 @@ void addUniquePoint(StrictConstructionObservation& observation, std::vector<Iden
         std::vector<SignedPoint> signed_face;
         signed_face.reserve(3u);
         for (const auto index : face) {
-            signed_face.push_back(SignedPoint{points[index], signed_values[index], PointOrigin::corner(index)});
+            OriginalCornerData original;
+            if (original_values != nullptr && actual_signed_values != nullptr) {
+                original = originalCorner(
+                    points[index], (*original_values)[index], isovalue,
+                    tolerance, (*actual_signed_values)[index],
+                    signed_values[index]);
+            }
+            signed_face.push_back(SignedPoint{
+                points[index], signed_values[index],
+                PointOrigin::corner(index), original,
+                detail::assessOriginalCorner(points[index], points[index])});
         }
         const auto clipped =
             side == geometry::CutIntegrationSide::Negative
@@ -1008,7 +1208,8 @@ void addUniquePoint(StrictConstructionObservation& observation, std::vector<Iden
             std::vector<IdentifiedPoint> face_points;
             face_points.reserve(clipped.size());
             for (const auto& point : clipped) {
-                face_points.push_back({point.point, point.origin});
+                face_points.push_back(
+                    {point.point, point.origin, point.assessment});
             }
             clipped_faces.push_back(std::move(face_points));
         }
@@ -1017,7 +1218,8 @@ void addUniquePoint(StrictConstructionObservation& observation, std::vector<Iden
         std::vector<IdentifiedPoint> cut_face;
         cut_face.reserve(ordered_cut_points.size());
         for (const auto& point : ordered_cut_points) {
-            cut_face.push_back({point.point, point.origin});
+            cut_face.push_back(
+                {point.point, point.origin, point.assessment});
         }
         const std::vector<IdentifiedPoint>* reused_face = nullptr;
         const bool cut_face_is_existing_parent_face = std::any_of(
@@ -1497,14 +1699,18 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
     }
 
     std::vector<Real> signed_values;
+    std::vector<Real> actual_signed_values;
     signed_values.reserve(count);
+    actual_signed_values.reserve(count);
     std::size_t zero_count = 0u;
     std::size_t negative_count = 0u;
     std::size_t positive_count = 0u;
     for (std::size_t i = 0; i < count; ++i) {
-        const Real signed_value = canonicalSignedValue(
-            input.level_set_values[i] - request.isovalue,
-            request.tolerance);
+        const Real actual_signed =
+            input.level_set_values[i] - request.isovalue;
+        const Real signed_value =
+            canonicalSignedValue(actual_signed, request.tolerance);
+        actual_signed_values.push_back(actual_signed);
         signed_values.push_back(signed_value);
         if (!std::isfinite(signed_value) ||
             !std::all_of(input.node_coordinates[i].begin(), input.node_coordinates[i].end(),
@@ -1670,35 +1876,41 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
             zero_edge = true;
             addUniqueCandidate(observation,
                 cut_points,
-                CutPointCandidate{input.node_coordinates[i], input.node_coordinates[i], 0.0, PointOrigin::corner(i)},
+                originalCornerCandidate(input.node_coordinates[i], i),
                 request.tolerance);
             addUniqueCandidate(observation,
                 cut_points,
-                CutPointCandidate{input.node_coordinates[j], input.node_coordinates[j], 0.0, PointOrigin::corner(j)},
+                originalCornerCandidate(input.node_coordinates[j], j),
                 request.tolerance);
             continue;
         }
         if (i_zero) {
             addUniqueCandidate(observation,
                 cut_points,
-                CutPointCandidate{input.node_coordinates[i], input.node_coordinates[i], 0.0, PointOrigin::corner(i)},
+                originalCornerCandidate(input.node_coordinates[i], i),
                 request.tolerance);
             continue;
         }
         if (j_zero) {
             addUniqueCandidate(observation,
                 cut_points,
-                CutPointCandidate{input.node_coordinates[j], input.node_coordinates[j], 0.0, PointOrigin::corner(j)},
+                originalCornerCandidate(input.node_coordinates[j], j),
                 request.tolerance);
             continue;
         }
         if ((di < Real{0.0} && dj > Real{0.0}) ||
             (di > Real{0.0} && dj < Real{0.0})) {
-            const Real t = di / (di - dj);
-            if (!std::isfinite(di - dj) || !std::isfinite(t) || !(t > 0 && t < 1)) observation.unresolved();
+            const Real denominator = di - dj;
+            const Real t = di / denominator;
+            if (!std::isfinite(denominator) || !std::isfinite(t) || !(t > 0 && t < 1)) observation.unresolved();
             const auto point = interpolate(input.node_coordinates[i], input.node_coordinates[j], t);
             addUniqueCandidate(observation, cut_points,
-                               CutPointCandidate{point, point, 0.0, PointOrigin::root(i, j)},
+                               CutPointCandidate{
+                                   point, point, 0.0, PointOrigin::root(i, j),
+                                   assessDirectOriginalEdge(
+                                       input, actual_signed_values,
+                                       signed_values, request, i, j, point,
+                                       denominator, t)},
                                request.tolerance);
         }
     }
@@ -1762,13 +1974,19 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                          signed_values,
                          count,
                          geometry::CutIntegrationSide::Negative,
-                         request.tolerance);
+                         request.tolerance,
+                         &input.level_set_values,
+                         &actual_signed_values,
+                         request.isovalue);
     const auto positive_polygon =
         cutSidePolygon2D(observation, input.node_coordinates,
                          signed_values,
                          count,
                          geometry::CutIntegrationSide::Positive,
-                         request.tolerance);
+                         request.tolerance,
+                         &input.level_set_values,
+                         &actual_signed_values,
+                         request.isovalue);
     const auto negative_moments = polygonMoments2D(observation, negative_polygon);
     const auto positive_moments = polygonMoments2D(observation, positive_polygon);
     const auto side_fractions =
@@ -1896,14 +2114,18 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
     }
 
     std::vector<Real> signed_values;
+    std::vector<Real> actual_signed_values;
     signed_values.reserve(count);
+    actual_signed_values.reserve(count);
     std::size_t zero_count = 0u;
     std::size_t negative_count = 0u;
     std::size_t positive_count = 0u;
     for (std::size_t i = 0; i < count; ++i) {
-        const Real signed_value = canonicalSignedValue(
-            input.level_set_values[i] - request.isovalue,
-            request.tolerance);
+        const Real actual_signed =
+            input.level_set_values[i] - request.isovalue;
+        const Real signed_value =
+            canonicalSignedValue(actual_signed, request.tolerance);
+        actual_signed_values.push_back(actual_signed);
         signed_values.push_back(signed_value);
         if (!std::isfinite(signed_value) ||
             !std::all_of(input.node_coordinates[i].begin(), input.node_coordinates[i].end(),
@@ -2065,35 +2287,41 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
             zero_edge = true;
             addUniqueCandidate(observation,
                 cut_points,
-                CutPointCandidate{input.node_coordinates[i], input.node_coordinates[i], 0.0, PointOrigin::corner(i)},
+                originalCornerCandidate(input.node_coordinates[i], i),
                 request.tolerance);
             addUniqueCandidate(observation,
                 cut_points,
-                CutPointCandidate{input.node_coordinates[j], input.node_coordinates[j], 0.0, PointOrigin::corner(j)},
+                originalCornerCandidate(input.node_coordinates[j], j),
                 request.tolerance);
             continue;
         }
         if (i_zero) {
             addUniqueCandidate(observation,
                 cut_points,
-                CutPointCandidate{input.node_coordinates[i], input.node_coordinates[i], 0.0, PointOrigin::corner(i)},
+                originalCornerCandidate(input.node_coordinates[i], i),
                 request.tolerance);
             continue;
         }
         if (j_zero) {
             addUniqueCandidate(observation,
                 cut_points,
-                CutPointCandidate{input.node_coordinates[j], input.node_coordinates[j], 0.0, PointOrigin::corner(j)},
+                originalCornerCandidate(input.node_coordinates[j], j),
                 request.tolerance);
             continue;
         }
         if ((di < Real{0.0} && dj > Real{0.0}) ||
             (di > Real{0.0} && dj < Real{0.0})) {
-            const Real t = di / (di - dj);
-            if (!std::isfinite(di - dj) || !std::isfinite(t) || !(t > 0 && t < 1)) observation.unresolved();
+            const Real denominator = di - dj;
+            const Real t = di / denominator;
+            if (!std::isfinite(denominator) || !std::isfinite(t) || !(t > 0 && t < 1)) observation.unresolved();
             const auto point = interpolate(input.node_coordinates[i], input.node_coordinates[j], t);
             addUniqueCandidate(observation, cut_points,
-                               CutPointCandidate{point, point, 0.0, PointOrigin::root(i, j)},
+                               CutPointCandidate{
+                                   point, point, 0.0, PointOrigin::root(i, j),
+                                   assessDirectOriginalEdge(
+                                       input, actual_signed_values,
+                                       signed_values, request, i, j, point,
+                                       denominator, t)},
                                request.tolerance);
         }
     }
@@ -2153,13 +2381,19 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                              signed_values,
                              cut_points,
                              geometry::CutIntegrationSide::Negative,
-                             request.tolerance);
+                             request.tolerance,
+                             &input.level_set_values,
+                             &actual_signed_values,
+                             request.isovalue);
     const auto positive_faces =
         tetrahedronSideFaces(observation, input.node_coordinates,
                              signed_values,
                              cut_points,
                              geometry::CutIntegrationSide::Positive,
-                             request.tolerance);
+                             request.tolerance,
+                             &input.level_set_values,
+                             &actual_signed_values,
+                             request.isovalue);
     const auto negative_moments =
         polyhedronMomentsFromFaces(observation, negative_faces, request.tolerance);
     const auto positive_moments =

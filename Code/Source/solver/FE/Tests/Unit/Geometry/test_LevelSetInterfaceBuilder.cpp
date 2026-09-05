@@ -3,13 +3,126 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <bit>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
+#include <string>
 #include <vector>
 
 using namespace svmp::FE;
 using namespace svmp::FE::interfaces;
 
 namespace {
+
+void record_real(std::ostream& output, Real value)
+{
+    output << std::bit_cast<std::uint64_t>(value) << '\n';
+}
+
+void record_point(std::ostream& output, const std::array<Real, 3>& point)
+{
+    for (const Real value : point) {
+        record_real(output, value);
+    }
+}
+
+void record_quadrature_point(std::ostream& output,
+                             const geometry::CutQuadraturePoint& point)
+{
+    record_point(output, point.point);
+    record_point(output, point.normal);
+    record_point(output, point.boundary_normal);
+    record_point(output, point.tangent);
+    record_real(output, point.weight);
+    record_point(output, point.parent_coordinate);
+    record_real(output, point.reference_measure_factor);
+    record_real(output, point.level_set_residual);
+    record_real(output, point.gradient_norm);
+}
+
+void record_cell_result(const std::string& name,
+                        const LevelSetCellCutResult& result)
+{
+    const char* directory = std::getenv("SVMP_PRODUCER_RECORD_DIR");
+    if (directory == nullptr) {
+        return;
+    }
+    std::ofstream output(std::string(directory) + "/" + name + ".txt",
+                         std::ios::binary);
+    ASSERT_TRUE(output.is_open());
+    output << result.supported << '\n'
+           << static_cast<unsigned>(result.degeneracy) << '\n'
+           << result.diagnostic.size() << '\n'
+           << result.diagnostic << '\n'
+           << result.fragments.size() << '\n';
+    for (const auto& fragment : result.fragments) {
+        output << fragment.interface_marker << '\n'
+               << fragment.parent_cell << '\n'
+               << fragment.parent_cell_global_id << '\n'
+               << fragment.owner_rank << '\n'
+               << fragment.local_fragment_index << '\n'
+               << fragment.stable_id << '\n'
+               << static_cast<unsigned>(fragment.kind) << '\n'
+               << static_cast<unsigned>(fragment.degeneracy) << '\n'
+               << static_cast<unsigned>(fragment.minus_side) << '\n'
+               << static_cast<unsigned>(fragment.plus_side) << '\n';
+        record_point(output, fragment.normal);
+        record_real(output, fragment.measure);
+        record_real(output, fragment.negative_volume_fraction);
+        record_real(output, fragment.positive_volume_fraction);
+        output << fragment.vertices.size() << '\n';
+        for (const auto& vertex : fragment.vertices) {
+            record_point(output, vertex.point);
+            record_point(output, vertex.parent_coordinate);
+            record_real(output, vertex.level_set_value);
+            output << vertex.stable_id << '\n';
+        }
+        output << fragment.quadrature_points.size() << '\n';
+        for (const auto& point : fragment.quadrature_points) {
+            record_point(output, point.point);
+            record_point(output, point.parent_coordinate);
+            record_point(output, point.normal);
+            record_real(output, point.weight);
+            record_real(output, point.reference_measure_factor);
+            record_real(output, point.level_set_residual);
+            record_real(output, point.gradient_norm);
+        }
+    }
+    output << result.volume_regions.size() << '\n';
+    for (const auto& region : result.volume_regions) {
+        output << region.interface_marker << '\n'
+               << region.parent_cell << '\n'
+               << region.parent_cell_global_id << '\n'
+               << region.owner_rank << '\n'
+               << region.local_region_index << '\n'
+               << region.stable_id << '\n'
+               << static_cast<unsigned>(region.side) << '\n';
+        record_point(output, region.centroid);
+        record_point(output, region.normal);
+        record_real(output, region.parent_measure);
+        record_real(output, region.measure);
+        record_real(output, region.volume_fraction);
+        output << region.full_cell_equivalent << '\n'
+               << region.reference_subcells.size() << '\n';
+        for (const auto& simplex : region.reference_subcells) {
+            output << static_cast<unsigned>(simplex.vertex_count) << '\n'
+                   << simplex.has_represented_signed_values << '\n';
+            for (const auto& vertex : simplex.vertices) {
+                record_point(output, vertex);
+            }
+            for (const Real value : simplex.represented_signed_values) {
+                record_real(output, value);
+            }
+            record_real(output, simplex.measure_scale);
+        }
+        output << region.quadrature_points.size() << '\n';
+        for (const auto& point : region.quadrature_points) {
+            record_quadrature_point(output, point);
+        }
+    }
+    ASSERT_TRUE(output.good());
+}
 
 void expect_observation(const LevelSetCellCutResult& result,
                         LinearCornerStrictBranch expected)
@@ -154,12 +267,12 @@ TEST(ProducerObservation, DyadicAndFullPhaseControlsRemainUnchecked)
     }
 }
 
-TEST(ProducerObservation, FloatingRootRepeatsAndZeroBranchesStayUnresolved)
+TEST(ProducerObservation, NonDyadicOriginalRootRepeatsUseBoundedArithmetic)
 {
     auto request = make_request(70);
+    std::size_t case_index = 0u;
     for (const auto& values : {std::vector<Real>{0.25, -1, -1, -1},
-                              std::vector<Real>{0.25, 1, -1, -1},
-                              std::vector<Real>{0, 0, 0, 1}}) {
+                               std::vector<Real>{0.25, 1, -1, -1}}) {
         LevelSetCellCutInput input{
             .parent_cell = 0, .element_type = ElementType::Tetra4,
             .node_coordinates = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}, {{0, 0, 1}}},
@@ -168,7 +281,12 @@ TEST(ProducerObservation, FloatingRootRepeatsAndZeroBranchesStayUnresolved)
         const auto result = cutLinearLevelSetCell3D(request, input);
         ASSERT_TRUE(result.supported);
         ASSERT_EQ(result.fragments.size(), 1u);
-        expect_observation(result, LinearCornerStrictBranch::ModifiedOrUnresolved);
+        record_cell_result("cell-tetra-" + std::to_string(case_index++), result);
+        // The repeated-root assessment succeeds, but the independent
+        // non-removing face match and represented-value reconstruction remain
+        // sticky for these tetrahedra.
+        expect_observation(
+            result, LinearCornerStrictBranch::ModifiedOrUnresolved);
         if (values[0] == 0.25 && values[1] == -1) {
             Real minimum_root = 1.0, maximum_root = 0.0;
             std::size_t appearances = 0;
@@ -192,6 +310,36 @@ TEST(ProducerObservation, FloatingRootRepeatsAndZeroBranchesStayUnresolved)
                            ::testing::PrintToString(maximum_root - minimum_root));
         }
     }
+    for (const Real sign : {-1.0, 1.0}) {
+        const LevelSetCellCutInput triangle{
+            .parent_cell = 0, .element_type = ElementType::Triangle3,
+            .node_coordinates = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}},
+            .level_set_values = {sign * 0.25, -sign, sign}};
+        const auto result = cutLinearLevelSetCell2D(request, triangle);
+        ASSERT_EQ(result.fragments.size(), 1u);
+        ASSERT_EQ(result.volume_regions.size(), 2u);
+        record_cell_result(sign < 0 ? "cell-triangle-negative"
+                                    : "cell-triangle-positive",
+                           result);
+        expect_observation(result, LinearCornerStrictBranch::Unchecked);
+    }
+}
+
+TEST(ProducerObservation, ZeroAndCanonicalBranchesStayUnresolved)
+{
+    auto request = make_request(70);
+    const LevelSetCellCutInput tetrahedron{
+        .parent_cell = 0, .element_type = ElementType::Tetra4,
+        .node_coordinates = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}, {{0, 0, 1}}},
+        .level_set_values = {0, 0, 0, 1}};
+    request.aligned_zero_interface_parent_side =
+        geometry::CutIntegrationSide::Positive;
+    const auto tetrahedron_result =
+        cutLinearLevelSetCell3D(request, tetrahedron);
+    ASSERT_TRUE(tetrahedron_result.supported);
+    ASSERT_EQ(tetrahedron_result.fragments.size(), 1u);
+    expect_observation(tetrahedron_result,
+                       LinearCornerStrictBranch::ModifiedOrUnresolved);
     for (const auto& values : {std::vector<Real>{0, -1, 1},
                               std::vector<Real>{0, 0, 1},
                               std::vector<Real>{0.75e-12, -1, 1},
@@ -207,16 +355,6 @@ TEST(ProducerObservation, FloatingRootRepeatsAndZeroBranchesStayUnresolved)
     expect_observation(LevelSetCellCutResult{}, LinearCornerStrictBranch::Unchecked);
     EXPECT_EQ(CutInterfaceFragment{}.construction_observation, LinearCornerStrictBranch::Unchecked);
     EXPECT_EQ(CutInterfaceVolumeRegion{}.construction_observation, LinearCornerStrictBranch::Unchecked);
-    const LevelSetCellCutInput triangle{
-        .parent_cell = 0, .element_type = ElementType::Triangle3,
-        .node_coordinates = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}},
-        .level_set_values = {0.25, -1, 1}};
-    const auto triangle_result = cutLinearLevelSetCell2D(request, triangle);
-    ASSERT_EQ(triangle_result.fragments.size(), 1u);
-    ASSERT_EQ(triangle_result.volume_regions.size(), 2u);
-    // This path has no compared repeated-root appearances. It remains
-    // unassessed, not a successful numerical-margin certificate.
-    expect_observation(triangle_result, LinearCornerStrictBranch::Unchecked);
 }
 
 TEST(ProducerObservation, PositivePieceFilteringStampsBothPhasesAndInterface)

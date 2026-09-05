@@ -618,11 +618,17 @@ void normalize(UInt4352& value) noexcept
         bitsOf(left.lower), bitsOf(left.upper)};
     const std::array<std::uint64_t, 2> right_bits{
         bitsOf(right.lower), bitsOf(right.upper)};
+    const auto left_count = left_bits[0] == left_bits[1] ? 1u : 2u;
+    const auto right_count = right_bits[0] == right_bits[1] ? 1u : 2u;
     bool initialized = false;
     std::uint64_t lower = 0u;
     std::uint64_t upper = 0u;
-    for (const auto left_endpoint : left_bits) {
-        for (const auto right_endpoint : right_bits) {
+    for (std::size_t left_index = 0u; left_index < left_count;
+         ++left_index) {
+        for (std::size_t right_index = 0u; right_index < right_count;
+             ++right_index) {
+            const auto left_endpoint = left_bits[left_index];
+            const auto right_endpoint = right_bits[right_index];
             const auto scalar = operation == IntervalOperation::Multiply
                                     ? scalarMultiply(left_endpoint,
                                                      right_endpoint)
@@ -833,6 +839,21 @@ void normalize(UInt4352& value) noexcept
              {point[2], point[2]}}};
 }
 
+[[nodiscard]] bool matchesSingletonPoint(
+    const std::array<ArithmeticInterval, 3>& intervals,
+    const AssessmentPoint& point,
+    unsigned dimension) noexcept
+{
+    for (unsigned coordinate = 0u; coordinate < dimension; ++coordinate) {
+        const auto point_bits = bitsOf(point[coordinate]);
+        if (bitsOf(intervals[coordinate].lower) != point_bits ||
+            bitsOf(intervals[coordinate].upper) != point_bits) {
+            return false;
+        }
+    }
+    return true;
+}
+
 [[nodiscard]] DistanceAssessment unavailableDistance(
     ArithmeticFailure failure) noexcept
 {
@@ -867,10 +888,16 @@ SVMP_PRODUCER_ARITHMETIC_ENTRY IntervalAssessment assessIntervalOperation(
     IntervalAssessment upper;
     if (operation == IntervalOperation::Add) {
         lower = scalarAdd(bitsOf(left.lower), bitsOf(right.lower), false);
-        upper = scalarAdd(bitsOf(left.upper), bitsOf(right.upper), false);
+        upper = bitsOf(left.lower) == bitsOf(left.upper) &&
+                        bitsOf(right.lower) == bitsOf(right.upper)
+                    ? lower
+                    : scalarAdd(bitsOf(left.upper), bitsOf(right.upper), false);
     } else if (operation == IntervalOperation::Subtract) {
         lower = scalarAdd(bitsOf(left.lower), bitsOf(right.upper), true);
-        upper = scalarAdd(bitsOf(left.upper), bitsOf(right.lower), true);
+        upper = bitsOf(left.lower) == bitsOf(left.upper) &&
+                        bitsOf(right.upper) == bitsOf(right.lower)
+                    ? lower
+                    : scalarAdd(bitsOf(left.upper), bitsOf(right.lower), true);
     } else {
         return unavailable(ArithmeticFailure::InvalidInput);
     }
@@ -910,7 +937,9 @@ SVMP_PRODUCER_ARITHMETIC_ENTRY IntervalAssessment assessIntervalSquare(
             return result;
         }
         const auto lower = scalarMultiply(lower_bits, lower_bits);
-        const auto upper = scalarMultiply(upper_bits, upper_bits);
+        const auto upper = lower_bits == upper_bits
+                               ? lower
+                               : scalarMultiply(upper_bits, upper_bits);
         if (!lower.available()) {
             return lower;
         }
@@ -925,7 +954,10 @@ SVMP_PRODUCER_ARITHMETIC_ENTRY IntervalAssessment assessIntervalSquare(
     const auto smaller_magnitude = absoluteBits(upper_bits);
     const auto larger_magnitude = absoluteBits(lower_bits);
     const auto lower = scalarMultiply(smaller_magnitude, smaller_magnitude);
-    const auto upper = scalarMultiply(larger_magnitude, larger_magnitude);
+    const auto upper = smaller_magnitude == larger_magnitude
+                           ? lower
+                           : scalarMultiply(larger_magnitude,
+                                            larger_magnitude);
     if (!lower.available()) {
         return lower;
     }
@@ -948,7 +980,9 @@ SVMP_PRODUCER_ARITHMETIC_ENTRY IntervalAssessment assessIntervalSqrt(
         return unavailable(ArithmeticFailure::InvalidInput);
     }
     const auto lower = scalarSqrt(bitsOf(value.lower));
-    const auto upper = scalarSqrt(bitsOf(value.upper));
+    const auto upper = bitsOf(value.lower) == bitsOf(value.upper)
+                           ? lower
+                           : scalarSqrt(bitsOf(value.upper));
     if (!lower.available()) {
         return lower;
     }
@@ -1167,8 +1201,15 @@ SVMP_PRODUCER_ARITHMETIC_ENTRY DistanceAssessment assessDistance(
     }
 
     const auto ideal_distance = distanceInterval(a.ideal, b.ideal, dimension);
-    const auto emitted_distance = distanceInterval(
-        singletonPoint(emitted_a), singletonPoint(emitted_b), dimension);
+    const auto emitted_distance = matchesSingletonPoint(
+                                      a.ideal, emitted_a, dimension) &&
+                                          matchesSingletonPoint(
+                                              b.ideal, emitted_b, dimension)
+                                      ? ideal_distance
+                                      : distanceInterval(
+                                            singletonPoint(emitted_a),
+                                            singletonPoint(emitted_b),
+                                            dimension);
     if (!ideal_distance.available() || !emitted_distance.available()) {
         return unavailableDistance(ArithmeticFailure::UnresolvedDistance);
     }
