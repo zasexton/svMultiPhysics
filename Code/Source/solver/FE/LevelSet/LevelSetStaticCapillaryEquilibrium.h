@@ -174,6 +174,37 @@ struct LevelSetStaticCapillaryLineSearchRecord {
     Real trial_volume_error{std::numeric_limits<Real>::quiet_NaN()};
 };
 
+inline constexpr std::size_t
+    kLevelSetStaticCapillaryFailureStateCoefficientCapacity{65536u};
+
+enum class LevelSetStaticCapillaryFailureStateStatus : std::uint8_t {
+    NotApplicable,
+    Available,
+    CapacityExceeded,
+    RecordingFailed,
+};
+
+struct LevelSetStaticCapillaryFailureState {
+    LevelSetStaticCapillaryFailureStateStatus status{
+        LevelSetStaticCapillaryFailureStateStatus::NotApplicable};
+    std::size_t coefficient_count{0u};
+    std::size_t active_coefficient_count{0u};
+    std::size_t accepted_iteration_index{0u};
+    std::uint64_t snapshot_revision_key{0u};
+    std::uint64_t cut_topology_key{0u};
+    std::uint64_t constraint_semantics_key{0u};
+    Real current_merit{std::numeric_limits<Real>::quiet_NaN()};
+    Real merit_penalty{std::numeric_limits<Real>::quiet_NaN()};
+    // Full raw field-coefficient order, before the evaluator's affine map.
+    std::vector<Real> coefficients{};
+    // Sorted coefficient indices used by the existing minimizer.
+    std::vector<std::size_t> active_coefficient_indices{};
+    // All three arrays below use that active-index order, not full-field order.
+    std::vector<Real> energy_gradient{};
+    std::vector<Real> volume_gradient{};
+    std::vector<Real> direction{};
+};
+
 struct LevelSetStaticCapillaryEquilibriumResult {
     bool success{false};
     bool converged{false};
@@ -201,6 +232,7 @@ struct LevelSetStaticCapillaryEquilibriumResult {
     std::size_t line_search_trace_omitted_count{0u};
     std::vector<LevelSetStaticCapillaryLineSearchRecord>
         line_search_trace{};
+    LevelSetStaticCapillaryFailureState line_search_failure_state{};
 
     std::uint64_t initial_snapshot_revision_key{0u};
     std::uint64_t final_snapshot_revision_key{0u};

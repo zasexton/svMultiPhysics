@@ -195,6 +195,231 @@ piecewiseTransitionOptions(int line_search_trials, FE::Real shrink = 0.5)
 }
 
 TEST(LevelSetStaticCapillaryEquilibrium,
+     RecordsUnpublishedStateAndModelForExhaustedLineSearch)
+{
+    const std::vector<FE::Real> input{17.0, 0.0, 18.0, 19.0, 3.0};
+    const std::array<std::size_t, 2> active{4u, 1u};
+    const std::vector<FE::Real> sentinel{101.0, 102.0, 103.0};
+    std::vector<FE::Real> accepted = sentinel;
+    std::vector<std::vector<FE::Real>> evaluated_coefficients;
+    const auto evaluator = [&evaluated_coefficients](
+                               std::span<const FE::Real> c,
+                               EvaluationPurpose) {
+        evaluated_coefficients.emplace_back(c.begin(), c.end());
+        const std::array<FE::Real, 2> compact{c[1], c[4]};
+        auto e = piecewiseTransitionEvaluation(compact, FE::Real{1.0});
+        const auto ge = e.physical_potential_derivative;
+        const auto gv = e.liquid_volume_derivative;
+        e.snapshot_revision_key = coefficientRevision(c);
+        e.physical_potential_derivative.assign(c.size(), FE::Real{0.0});
+        e.liquid_volume_derivative.assign(c.size(), FE::Real{0.0});
+        e.physical_potential_derivative[1] = ge[0];
+        e.physical_potential_derivative[4] = ge[1];
+        e.liquid_volume_derivative[1] = gv[0];
+        e.liquid_volume_derivative[4] = gv[1];
+        return e;
+    };
+
+    const auto result =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            piecewiseTransitionOptions(4),
+            input,
+            active,
+            evaluator,
+            accepted);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(
+        result.diagnostic,
+        "capillary_merit_line_search_failed:candidate_cut_topology_changed");
+    EXPECT_EQ(result.functional_evaluations, 5u);
+    EXPECT_EQ(result.line_search_rejections, 4u);
+    EXPECT_EQ(result.line_search_trace_total_attempt_count, 4u);
+    EXPECT_EQ(result.line_search_trace_omitted_count, 0u);
+    EXPECT_EQ(accepted, sentinel);
+
+    const auto& state = result.line_search_failure_state;
+    EXPECT_EQ(
+        state.status,
+        level_set::LevelSetStaticCapillaryFailureStateStatus::Available);
+    EXPECT_EQ(state.coefficient_count, input.size());
+    EXPECT_EQ(state.active_coefficient_count, active.size());
+    EXPECT_EQ(state.accepted_iteration_index, 0u);
+    EXPECT_EQ(state.snapshot_revision_key, coefficientRevision(input));
+    EXPECT_EQ(state.cut_topology_key, 101u);
+    EXPECT_EQ(state.constraint_semantics_key, 303u);
+    EXPECT_DOUBLE_EQ(state.current_merit, 1.0);
+    EXPECT_DOUBLE_EQ(state.merit_penalty, 3.0);
+    EXPECT_EQ(state.coefficients, input);
+    EXPECT_EQ(
+        state.active_coefficient_indices,
+        (std::vector<std::size_t>{1u, 4u}));
+    EXPECT_EQ(
+        state.energy_gradient,
+        (std::vector<FE::Real>{-1.0, 0.0}));
+    EXPECT_EQ(
+        state.volume_gradient,
+        (std::vector<FE::Real>{1.0, 1.0}));
+    EXPECT_EQ(
+        state.direction,
+        (std::vector<FE::Real>{0.5, -0.5}));
+
+    ASSERT_EQ(evaluated_coefficients.size(), 5u);
+    ASSERT_EQ(result.line_search_trace.size(), 4u);
+    for (std::size_t trial = 0u;
+         trial < result.line_search_trace.size();
+         ++trial) {
+        auto reconstructed = state.coefficients;
+        for (std::size_t local = 0u;
+             local < state.active_coefficient_indices.size();
+             ++local) {
+            reconstructed[state.active_coefficient_indices[local]] +=
+                result.line_search_trace[trial].step_size *
+                state.direction[local];
+        }
+        EXPECT_EQ(reconstructed, evaluated_coefficients[trial + 1u]);
+    }
+}
+
+TEST(LevelSetStaticCapillaryEquilibrium,
+     FailureStateCapacityDoesNotChangeTheNumericalOutcome)
+{
+    std::vector<FE::Real> input(
+        level_set::kLevelSetStaticCapillaryFailureStateCoefficientCapacity +
+            1u,
+        FE::Real{17.0});
+    input[1] = FE::Real{0.0};
+    input.back() = FE::Real{3.0};
+    const std::array<std::size_t, 2> active{input.size() - 1u, 1u};
+    const std::vector<FE::Real> sentinel{104.0, 105.0};
+    std::vector<FE::Real> accepted = sentinel;
+    const auto evaluator = [](std::span<const FE::Real> c,
+                              EvaluationPurpose) {
+        const std::array<FE::Real, 2> compact{c[1], c.back()};
+        auto e = piecewiseTransitionEvaluation(compact, FE::Real{1.0});
+        const auto ge = e.physical_potential_derivative;
+        const auto gv = e.liquid_volume_derivative;
+        e.snapshot_revision_key = coefficientRevision(c);
+        e.physical_potential_derivative.assign(c.size(), FE::Real{0.0});
+        e.liquid_volume_derivative.assign(c.size(), FE::Real{0.0});
+        e.physical_potential_derivative[1] = ge[0];
+        e.physical_potential_derivative.back() = ge[1];
+        e.liquid_volume_derivative[1] = gv[0];
+        e.liquid_volume_derivative.back() = gv[1];
+        return e;
+    };
+
+    const auto result =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            piecewiseTransitionOptions(4),
+            input,
+            active,
+            evaluator,
+            accepted);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(
+        result.diagnostic,
+        "capillary_merit_line_search_failed:candidate_cut_topology_changed");
+    EXPECT_EQ(result.functional_evaluations, 5u);
+    EXPECT_EQ(result.line_search_rejections, 4u);
+    EXPECT_EQ(result.line_search_trace_total_attempt_count, 4u);
+    EXPECT_EQ(result.line_search_trace_omitted_count, 0u);
+    EXPECT_EQ(accepted, sentinel);
+
+    const auto& state = result.line_search_failure_state;
+    EXPECT_EQ(
+        state.status,
+        level_set::LevelSetStaticCapillaryFailureStateStatus::CapacityExceeded);
+    EXPECT_EQ(state.coefficient_count, input.size());
+    EXPECT_EQ(state.active_coefficient_count, active.size());
+    EXPECT_TRUE(state.coefficients.empty());
+    EXPECT_TRUE(state.active_coefficient_indices.empty());
+    EXPECT_TRUE(state.energy_gradient.empty());
+    EXPECT_TRUE(state.volume_gradient.empty());
+    EXPECT_TRUE(state.direction.empty());
+}
+
+TEST(LevelSetStaticCapillaryEquilibrium,
+     DoesNotRecordFailureStateForSuccessOrPreSearchExit)
+{
+    level_set::LevelSetStaticCapillaryFailureState manual;
+    EXPECT_EQ(
+        manual.status,
+        level_set::LevelSetStaticCapillaryFailureStateStatus::NotApplicable);
+    EXPECT_TRUE(manual.coefficients.empty());
+    EXPECT_TRUE(manual.active_coefficient_indices.empty());
+    EXPECT_TRUE(manual.energy_gradient.empty());
+    EXPECT_TRUE(manual.volume_gradient.empty());
+    EXPECT_TRUE(manual.direction.empty());
+
+    const std::vector<FE::Real> input{2.5, 0.5};
+    const std::array<std::size_t, 2> active{0u, 1u};
+    std::vector<FE::Real> accepted;
+    const auto exact_evaluator = [](
+                                     std::span<const FE::Real> coefficients,
+                                     EvaluationPurpose purpose) {
+        return quadraticCapillaryEvaluation(
+            coefficients,
+            purpose,
+            /*topology_barrier=*/false,
+            /*constraint_barrier=*/false,
+            /*provide_functional_derivatives=*/true);
+    };
+
+    const auto success =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            quadraticOptions(),
+            input,
+            active,
+            exact_evaluator,
+            accepted);
+    ASSERT_TRUE(success.success) << success.diagnostic;
+    EXPECT_TRUE(success.accepted_coefficients_assigned);
+    EXPECT_EQ(
+        success.line_search_failure_state.status,
+        level_set::LevelSetStaticCapillaryFailureStateStatus::NotApplicable);
+    EXPECT_TRUE(success.line_search_failure_state.coefficients.empty());
+    EXPECT_TRUE(
+        success.line_search_failure_state.active_coefficient_indices.empty());
+    EXPECT_TRUE(success.line_search_failure_state.energy_gradient.empty());
+    EXPECT_TRUE(success.line_search_failure_state.volume_gradient.empty());
+    EXPECT_TRUE(success.line_search_failure_state.direction.empty());
+
+    auto limited_options = quadraticOptions();
+    limited_options.max_iterations = 1;
+    limited_options.projected_gradient_inverse_stiffness = 0.25;
+    limited_options.limited_memory_history_size = 0;
+    const std::vector<FE::Real> sentinel{106.0, 107.0, 108.0};
+    accepted = sentinel;
+    const auto pre_search_exit =
+        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+            limited_options,
+            input,
+            active,
+            exact_evaluator,
+            accepted);
+    EXPECT_FALSE(pre_search_exit.success);
+    EXPECT_EQ(pre_search_exit.iterations, 1);
+    EXPECT_EQ(
+        pre_search_exit.diagnostic,
+        "static_capillary_equilibrium_iteration_limit_reached");
+    EXPECT_EQ(accepted, sentinel);
+    EXPECT_EQ(
+        pre_search_exit.line_search_failure_state.status,
+        level_set::LevelSetStaticCapillaryFailureStateStatus::NotApplicable);
+    EXPECT_TRUE(pre_search_exit.line_search_failure_state.coefficients.empty());
+    EXPECT_TRUE(
+        pre_search_exit.line_search_failure_state
+            .active_coefficient_indices.empty());
+    EXPECT_TRUE(
+        pre_search_exit.line_search_failure_state.energy_gradient.empty());
+    EXPECT_TRUE(
+        pre_search_exit.line_search_failure_state.volume_gradient.empty());
+    EXPECT_TRUE(pre_search_exit.line_search_failure_state.direction.empty());
+}
+
+TEST(LevelSetStaticCapillaryEquilibrium,
      RecordsCrossTopologyDecreaseThatMissesTheArmijoBound)
 {
     const std::vector<FE::Real> input{0.0, 3.0};

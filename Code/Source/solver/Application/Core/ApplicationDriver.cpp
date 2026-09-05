@@ -75,6 +75,7 @@
 #include <initializer_list>
 #include <iterator>
 #include <limits>
+#include <locale>
 #include <map>
 #include <memory>
 #include <numeric>
@@ -27590,6 +27591,120 @@ evaluateStaticCapillaryFunctionalCandidate(
   return result;
 }
 
+void appendStaticCapillaryFailureState(
+    std::ostream& stream,
+    const svmp::FE::level_set::LevelSetStaticCapillaryFailureState& state)
+{
+  using Status =
+      svmp::FE::level_set::LevelSetStaticCapillaryFailureStateStatus;
+  constexpr auto capacity =
+      svmp::FE::level_set::
+          kLevelSetStaticCapillaryFailureStateCoefficientCapacity;
+
+  bool recognized_status = true;
+  const char* status_name = "invalid_record";
+  switch (state.status) {
+  case Status::NotApplicable:
+    status_name = "not_applicable";
+    break;
+  case Status::Available:
+    status_name = "available";
+    break;
+  case Status::CapacityExceeded:
+    status_name = "capacity_exceeded";
+    break;
+  case Status::RecordingFailed:
+    status_name = "recording_failed";
+    break;
+  default:
+    recognized_status = false;
+    break;
+  }
+
+  bool available_record_valid = false;
+  if (state.status == Status::Available) {
+    const bool shape_valid =
+        state.coefficient_count <= capacity &&
+        state.active_coefficient_count <= capacity &&
+        state.coefficients.size() == state.coefficient_count &&
+        state.active_coefficient_indices.size() ==
+            state.active_coefficient_count &&
+        state.energy_gradient.size() == state.active_coefficient_count &&
+        state.volume_gradient.size() == state.active_coefficient_count &&
+        state.direction.size() == state.active_coefficient_count;
+    if (shape_valid) {
+      const auto finite_values = [](const auto& values) {
+        return std::all_of(
+            values.begin(), values.end(), [](const auto value) {
+              return std::isfinite(value);
+            });
+      };
+      const bool finite =
+          std::isfinite(state.current_merit) &&
+          std::isfinite(state.merit_penalty) &&
+          finite_values(state.coefficients) &&
+          finite_values(state.energy_gradient) &&
+          finite_values(state.volume_gradient) &&
+          finite_values(state.direction);
+      bool indices_valid = true;
+      for (std::size_t active = 0u;
+           finite && active < state.active_coefficient_indices.size();
+           ++active) {
+        const auto coefficient = state.active_coefficient_indices[active];
+        if (coefficient >= state.coefficient_count ||
+            (active > 0u &&
+             coefficient <= state.active_coefficient_indices[active - 1u])) {
+          indices_valid = false;
+          break;
+        }
+      }
+      available_record_valid = finite && indices_valid;
+    }
+    if (!available_record_valid) {
+      status_name = "invalid_record";
+    }
+  } else if (!recognized_status) {
+    status_name = "invalid_record";
+  }
+
+  std::ostringstream formatted;
+  formatted.imbue(std::locale::classic());
+  formatted << std::setprecision(
+      std::numeric_limits<svmp::FE::Real>::max_digits10);
+  formatted
+      << " line_search_failure_state_summary={status=" << status_name
+      << ",coefficient_count=" << state.coefficient_count
+      << ",active_count=" << state.active_coefficient_count
+      << ",capacity=" << capacity
+      << ",accepted_iteration_index=" << state.accepted_iteration_index
+      << ",snapshot_revision_key=" << state.snapshot_revision_key
+      << ",cut_topology_key=" << state.cut_topology_key
+      << ",constraint_semantics_key=" << state.constraint_semantics_key
+      << ",current_merit=" << state.current_merit
+      << ",merit_penalty=" << state.merit_penalty << "}";
+  if (available_record_valid) {
+    for (std::size_t index = 0u;
+         index < state.coefficients.size();
+         ++index) {
+      formatted
+          << " line_search_failure_coefficient={index=" << index
+          << ",value=" << state.coefficients[index] << "}";
+    }
+    for (std::size_t active = 0u;
+         active < state.active_coefficient_indices.size();
+         ++active) {
+      formatted
+          << " line_search_failure_active={index=" << active
+          << ",coefficient_index="
+          << state.active_coefficient_indices[active]
+          << ",energy_gradient=" << state.energy_gradient[active]
+          << ",volume_gradient=" << state.volume_gradient[active]
+          << ",direction=" << state.direction[active] << "}";
+    }
+  }
+  stream << formatted.str();
+}
+
 bool initializeDiscreteStaticCapillaryEquilibrium(
     application::core::SimulationComponents& sim,
     const Parameters& params,
@@ -28450,6 +28565,12 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
           << ",trial_volume_error="
           << record.trial_volume_error << "}";
     }
+    message
+        << " line_search_failure_field={field_id=" << level_set_field
+        << ",field_offset=" << field_offset
+        << ",coefficient_order=raw_field}";
+    appendStaticCapillaryFailureState(
+        message, result.line_search_failure_state);
     throw std::runtime_error(message.str());
   }
 

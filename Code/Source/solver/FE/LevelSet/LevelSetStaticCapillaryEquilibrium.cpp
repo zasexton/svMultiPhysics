@@ -1350,6 +1350,49 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                         pending_acceptance_gate_diagnostic + ":" +
                         last_evaluation_diagnostic;
                 }
+                auto& saved = result.line_search_failure_state;
+                saved.coefficient_count = coefficients.size();
+                saved.active_coefficient_count = active_indices.size();
+                saved.accepted_iteration_index =
+                    static_cast<std::size_t>(result.iterations);
+                saved.snapshot_revision_key = current.snapshot_revision_key;
+                saved.cut_topology_key = current.cut_topology_key;
+                saved.constraint_semantics_key =
+                    current.constraint_semantics_key;
+                saved.current_merit = current_merit;
+                saved.merit_penalty = merit_penalty;
+                if (saved.coefficient_count >
+                        kLevelSetStaticCapillaryFailureStateCoefficientCapacity ||
+                    saved.active_coefficient_count >
+                        kLevelSetStaticCapillaryFailureStateCoefficientCapacity) {
+                    saved.status =
+                        LevelSetStaticCapillaryFailureStateStatus::
+                            CapacityExceeded;
+                } else if (active_indices.size() > coefficients.size() ||
+                           energy_gradient.size() != active_indices.size() ||
+                           volume_gradient.size() != active_indices.size() ||
+                           direction.size() != active_indices.size()) {
+                    saved.status =
+                        LevelSetStaticCapillaryFailureStateStatus::
+                            RecordingFailed;
+                } else {
+                    try {
+                        auto complete = saved;
+                        complete.coefficients = coefficients;
+                        complete.active_coefficient_indices = active_indices;
+                        complete.energy_gradient = energy_gradient;
+                        complete.volume_gradient = volume_gradient;
+                        complete.direction = direction;
+                        complete.status =
+                            LevelSetStaticCapillaryFailureStateStatus::
+                                Available;
+                        saved = std::move(complete);
+                    } catch (...) {
+                        saved.status =
+                            LevelSetStaticCapillaryFailureStateStatus::
+                                RecordingFailed;
+                    }
+                }
                 return result;
             }
         }
