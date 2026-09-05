@@ -5,6 +5,8 @@
 // widening the production API.
 #include "../../Core/ApplicationDriver.cpp"
 
+#include "../Support/FreeSurfaceLifecycleReferenceCapture.h"
+
 #include "FE/Assembly/AssemblyContext.h"
 #include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Assembly/AssemblyKernel.h"
@@ -48,6 +50,9 @@
 #include <vector>
 
 namespace {
+
+namespace lifecycle_capture =
+    application_test::free_surface_lifecycle_capture;
 
 namespace channel_ns =
     svmp::Physics::formulations::navier_stokes;
@@ -4499,11 +4504,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
 TEST(ApplicationDriverLevelSetWorkflows,
      GeneralizedAlphaMaintenanceCommonDeltaMapsEveryPostAcceptState)
 {
+  const auto capture_gate = lifecycle_capture::captureGate();
   const std::vector<svmp::FE::Real> repair_delta{
       svmp::FE::Real{0.25},
       svmp::FE::Real{-0.5},
       svmp::FE::Real{0.0}};
   const auto original_delta = repair_delta;
+  std::vector<std::string> captured_plans;
 
   for (const double rho_inf : {0.0, 0.2, 0.5, 0.75, 1.0}) {
     const auto parameters =
@@ -4561,6 +4568,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
     ASSERT_TRUE(scheme.gamma.has_value());
     EXPECT_NEAR(*scheme.alpha_m, parameters.alpha_m, 1.0e-15);
     EXPECT_NEAR(*scheme.gamma, parameters.gamma, 1.0e-15);
+    if (capture_gate.enabled) {
+      captured_plans.push_back(lifecycle_capture::generalizedAlphaPlanJson(
+          plan,
+          "same_representation_delta",
+          "algebraically_complete",
+          "rho_inf=" + lifecycle_capture::jsonReal(rho_inf)));
+    }
   }
 
   const FirstOrderGeneralizedAlphaMaintenanceScheme alpha_f_only_scheme{
@@ -4592,17 +4606,45 @@ TEST(ApplicationDriverLevelSetWorkflows,
       alpha_f_only_plan.post_accept->accepted_stage_rate_delta,
       std::vector<svmp::FE::Real>(repair_delta.size(), 0.0));
 
+  if (capture_gate.enabled) {
+    captured_plans.push_back(lifecycle_capture::generalizedAlphaPlanJson(
+        alpha_f_only_plan,
+        "same_representation_delta",
+        "algebraically_complete",
+        "alpha_f_only"));
+  }
+
   EXPECT_EQ(repair_delta, original_delta);
+  if (capture_gate.enabled) {
+    lifecycle_capture::publish(
+        capture_gate,
+        "ApplicationLifecycleSerial/generalized_alpha_common_delta.json",
+        "ApplicationDriverLevelSetWorkflows",
+        "GeneralizedAlphaMaintenanceCommonDeltaMapsEveryPostAcceptState",
+        "synthetic generalized-alpha maintenance fixture components; not mesh DOFs or a complete simulation",
+        lifecycle_capture::jsonObject({
+            {"fixture_component_kind",
+             lifecycle_capture::jsonString("synthetic_algebra_vectors")},
+            {"plans", lifecycle_capture::jsonArray(captured_plans)},
+            {"unsupported_or_unobserved", lifecycle_capture::jsonObject({
+                {"mesh_identity", lifecycle_capture::jsonString("not_applicable")},
+                {"physical_trajectory", lifecycle_capture::jsonString("unavailable")},
+                {"u_ddot_values", lifecycle_capture::jsonString("outside_scope")},
+            })},
+        }));
+  }
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
      GeneralizedAlphaMaintenanceFixedPriorPolicyMapsEndpointRate)
 {
+  const auto capture_gate = lifecycle_capture::captureGate();
   const std::vector<svmp::FE::Real> endpoint_delta{
       svmp::FE::Real{0.3},
       svmp::FE::Real{-0.6},
       svmp::FE::Real{0.0}};
   const auto original_endpoint_delta = endpoint_delta;
+  std::vector<std::string> captured_plans;
 
   for (const double rho_inf : {0.2, 1.0 / 3.0, 0.5, 1.0}) {
     SCOPED_TRACE(::testing::Message() << "rho_inf=" << rho_inf);
@@ -4686,8 +4728,33 @@ TEST(ApplicationDriverLevelSetWorkflows,
     if (rho_inf == 1.0) {
       EXPECT_DOUBLE_EQ(*scheme.alpha_m, *scheme.gamma);
     }
+    if (capture_gate.enabled) {
+      captured_plans.push_back(lifecycle_capture::generalizedAlphaPlanJson(
+          plan,
+          "preserve_prior_state_and_rate",
+          "algebraically_complete",
+          "rho_inf=" + lifecycle_capture::jsonReal(rho_inf)));
+    }
   }
   EXPECT_EQ(endpoint_delta, original_endpoint_delta);
+  if (capture_gate.enabled) {
+    lifecycle_capture::publish(
+        capture_gate,
+        "ApplicationLifecycleSerial/generalized_alpha_fixed_prior_endpoint_rate.json",
+        "ApplicationDriverLevelSetWorkflows",
+        "GeneralizedAlphaMaintenanceFixedPriorPolicyMapsEndpointRate",
+        "synthetic generalized-alpha maintenance fixture components; not mesh DOFs or a complete simulation",
+        lifecycle_capture::jsonObject({
+            {"fixture_component_kind",
+             lifecycle_capture::jsonString("synthetic_algebra_vectors")},
+            {"plans", lifecycle_capture::jsonArray(captured_plans)},
+            {"unsupported_or_unobserved", lifecycle_capture::jsonObject({
+                {"mesh_identity", lifecycle_capture::jsonString("not_applicable")},
+                {"physical_trajectory", lifecycle_capture::jsonString("unavailable")},
+                {"u_ddot_values", lifecycle_capture::jsonString("outside_scope")},
+            })},
+        }));
+  }
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
@@ -17732,6 +17799,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
 #else
+  const auto capture_gate = lifecycle_capture::captureGate();
   auto mesh = makeWorkflowQuadPatch2x2Mesh();
   auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
       svmp::FE::ElementType::Quad4,
@@ -17743,6 +17811,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
       .components = 1,
   });
   ASSERT_NO_THROW(system->setup({}));
+  lifecycle_capture::ScalarP1VertexMap canonical_map;
+  if (capture_gate.enabled) {
+    const std::array<std::string_view, 1> expected_fields{"phi"};
+    canonical_map = lifecycle_capture::captureScalarP1VertexMap(
+        *system, *mesh, expected_fields);
+    ASSERT_EQ(canonical_map.rows.size(), 9u);
+  }
 
   const auto make_plane = [&](svmp::FE::Real offset,
                               svmp::FE::Real gradient_scale) {
@@ -17786,6 +17861,24 @@ TEST(ApplicationDriverLevelSetWorkflows,
   scatterFeOrderedSolution(history.uPrev2(), previous2_before);
   std::vector<svmp::FE::Real> rate_before(current_before.size(), 0.375);
   scatterFeOrderedSolution(history.uDot(), rate_before);
+  const auto current_revision_before =
+      capture_gate.enabled ? history.u().valueRevision() : 0u;
+  const auto previous_revision_before =
+      capture_gate.enabled ? history.uPrev().valueRevision() : 0u;
+  const auto previous2_revision_before =
+      capture_gate.enabled ? history.uPrev2().valueRevision() : 0u;
+  const auto rate_revision_before =
+      capture_gate.enabled ? history.uDot().valueRevision() : 0u;
+  if (capture_gate.enabled) {
+    lifecycle_capture::validateCompleteOwnedVector(
+        history.u(), canonical_map, current_before);
+    lifecycle_capture::validateCompleteOwnedVector(
+        history.uPrev(), canonical_map, previous_before);
+    lifecycle_capture::validateCompleteOwnedVector(
+        history.uPrev2(), canonical_map, previous2_before);
+    lifecycle_capture::validateCompleteOwnedVector(
+        history.uDot(), canonical_map, rate_before);
+  }
 
   application::core::SimulationComponents sim;
   sim.primary_mesh = mesh;
@@ -17806,6 +17899,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
       observed_substages;
   std::vector<std::pair<std::uint64_t, std::uint64_t>>
       observed_state_revisions;
+  std::vector<svmp::FE::Real> observed_stage_input;
+  std::vector<svmp::FE::Real> observed_stage_output;
   const LevelSetMaintenanceStageObserver observe_stage =
       [&](application::core::LevelSetMaintenanceWorkSubstage substage,
           std::span<const svmp::FE::Real> before,
@@ -17814,6 +17909,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
         observed_state_revisions.emplace_back(
             levelSetMaintenanceAlgebraicRevision(before),
             levelSetMaintenanceAlgebraicRevision(after));
+        if (capture_gate.enabled) {
+          observed_stage_input.assign(before.begin(), before.end());
+          observed_stage_output.assign(after.begin(), after.end());
+        }
       };
 
   testing::internal::CaptureStdout();
@@ -17868,6 +17967,97 @@ TEST(ApplicationDriverLevelSetWorkflows,
   }
   EXPECT_TRUE(saw_nonzero_delta);
   EXPECT_EQ(gatherFeOrderedSolution(history.uDot()), rate_before);
+  if (capture_gate.enabled) {
+    const auto rate_after = gatherFeOrderedSolution(history.uDot());
+    lifecycle_capture::validateCompleteOwnedVector(
+        history.u(), canonical_map, current_after);
+    lifecycle_capture::validateCompleteOwnedVector(
+        history.uPrev(), canonical_map, previous_after);
+    lifecycle_capture::validateCompleteOwnedVector(
+        history.uPrev2(), canonical_map, previous2_after);
+    lifecycle_capture::validateCompleteOwnedVector(
+        history.uDot(), canonical_map, rate_after);
+    ASSERT_EQ(observed_stage_input.size(), canonical_map.rows.size());
+    ASSERT_EQ(observed_stage_output.size(), canonical_map.rows.size());
+    lifecycle_capture::publish(
+        capture_gate,
+        "ApplicationLifecycleSerial/converged_maintenance_history_delta.json",
+        "ApplicationDriverLevelSetWorkflows",
+        "ConvergedMaintenanceAppliesOneRepresentationDeltaToEveryHistoryLevel",
+        "one-rank scalar P1 maintenance representation synchronization fixture; not a BDF solve or complete simulation",
+        lifecycle_capture::jsonObject({
+            {"map", lifecycle_capture::scalarP1VertexMapJson(canonical_map)},
+            {"time", lifecycle_capture::jsonObject({
+                {"step_index", lifecycle_capture::jsonInteger(history.stepIndex())},
+                {"time", lifecycle_capture::jsonReal(history.time())},
+                {"dt", lifecycle_capture::jsonReal(history.dt())},
+                {"dt_prev", lifecycle_capture::jsonReal(history.dtPrev())},
+            })},
+            {"request", lifecycle_capture::jsonObject({
+                {"field_name", lifecycle_capture::jsonString(request.level_set_field_name)},
+                {"reinitialization_enabled", lifecycle_capture::jsonBool(request.reinitialization.enabled)},
+                {"cadence_steps", lifecycle_capture::jsonInteger(request.reinitialization.cadence_steps)},
+                {"max_iterations", lifecycle_capture::jsonInteger(request.reinitialization.max_iterations)},
+                {"signed_distance_tolerance", lifecycle_capture::jsonReal(request.reinitialization.signed_distance_tolerance)},
+            })},
+            {"observer", lifecycle_capture::jsonObject({
+                {"callback_count", lifecycle_capture::jsonInteger(observed_substages.size())},
+                {"substage", lifecycle_capture::jsonString("reinitialization")},
+                {"algebraic_revision_before", lifecycle_capture::jsonInteger(observed_state_revisions.front().first)},
+                {"algebraic_revision_after", lifecycle_capture::jsonInteger(observed_state_revisions.front().second)},
+                {"stage_input", lifecycle_capture::vectorSnapshotJson(
+                    "observer", "reinitialization_stage_input",
+                    observed_stage_input)},
+                {"stage_output", lifecycle_capture::vectorSnapshotJson(
+                    "observer", "reinitialization_stage_output",
+                    observed_stage_output)},
+            })},
+            {"snapshots", lifecycle_capture::jsonArray({
+                lifecycle_capture::vectorSnapshotJson(
+                    "pre_maintenance", "current", current_before,
+                    current_revision_before),
+                lifecycle_capture::vectorSnapshotJson(
+                    "pre_maintenance", "previous", previous_before,
+                    previous_revision_before),
+                lifecycle_capture::vectorSnapshotJson(
+                    "pre_maintenance", "previous2", previous2_before,
+                    previous2_revision_before),
+                lifecycle_capture::vectorSnapshotJson(
+                    "pre_maintenance", "rate", rate_before,
+                    rate_revision_before),
+                lifecycle_capture::vectorSnapshotJson(
+                    "post_maintenance", "current", current_after,
+                    history.u().valueRevision()),
+                lifecycle_capture::vectorSnapshotJson(
+                    "post_maintenance", "previous", previous_after,
+                    history.uPrev().valueRevision()),
+                lifecycle_capture::vectorSnapshotJson(
+                    "post_maintenance", "previous2", previous2_after,
+                    history.uPrev2().valueRevision()),
+                lifecycle_capture::vectorSnapshotJson(
+                    "post_maintenance", "rate", rate_after,
+                    history.uDot().valueRevision()),
+            })},
+            {"diagnostic_context", lifecycle_capture::jsonObject({
+                {"comparison_inclusion", lifecycle_capture::jsonString("excluded")},
+                {"raw_stdout_sidecar", lifecycle_capture::jsonString("diagnostics/converged_maintenance_history_delta.stdout.log")},
+                {"required_substring", lifecycle_capture::jsonString("temporal_increments=preserved")},
+            })},
+            {"comparison_contract", lifecycle_capture::jsonObject({
+                {"common_delta_absolute_tolerance", lifecycle_capture::jsonReal(1.0e-12)},
+                {"temporal_increment_absolute_tolerance", lifecycle_capture::jsonReal(1.0e-12)},
+                {"rate_comparison", lifecycle_capture::jsonString("exact")},
+                {"nonzero_delta_threshold", lifecycle_capture::jsonReal(1.0e-12)},
+            })},
+            {"unavailable_or_outside_scope", lifecycle_capture::jsonObject({
+                {"u_ddot", lifecycle_capture::jsonString("allocated but uninitialized and unread")},
+                {"deeper_history", lifecycle_capture::jsonString("not allocated")},
+                {"solver_identity", lifecycle_capture::jsonString("not a BDF solve")},
+            })},
+        }),
+        "ApplicationLifecycleSerial/diagnostics/converged_maintenance_history_delta.stdout.log",
+        output);
+  }
 #endif
 }
 
@@ -18047,6 +18237,12 @@ class ApplicationDriverConservativePhaseCandidatesTest
 protected:
   void SetUp() override
   {
+    const auto *test_info = ::testing::UnitTest::GetInstance()->current_test_info();
+    if (test_info != nullptr &&
+        std::string_view(test_info->name()) ==
+            "LaterRejectionRestoresTheRawCandidateAndEveryGeometryRevision") {
+      lifecycle_capture_gate_ = lifecycle_capture::captureGate();
+    }
     mesh_ = makeWorkflowTriangleMesh();
     (void)svmp::MeshFields::attach_field(
         mesh_->local_mesh(),
@@ -18290,6 +18486,7 @@ protected:
         provenance);
   }
 
+  lifecycle_capture::CaptureGate lifecycle_capture_gate_{};
   std::shared_ptr<svmp::Mesh> mesh_{};
   svmp::FE::FieldId phi_{svmp::FE::INVALID_FIELD_ID};
   svmp::FE::FieldId phase_{svmp::FE::INVALID_FIELD_ID};
@@ -19340,6 +19537,14 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
 TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
        LaterRejectionRestoresTheRawCandidateAndEveryGeometryRevision)
 {
+  const auto &capture_gate = lifecycle_capture_gate_;
+  lifecycle_capture::ScalarP1VertexMap canonical_map;
+  if (capture_gate.enabled) {
+    const std::array<std::string_view, 2> expected_fields{"phi", "phase"};
+    canonical_map = lifecycle_capture::captureScalarP1VertexMap(
+        *sim_.fe_system, *mesh_, expected_fields);
+    ASSERT_EQ(canonical_map.rows.size(), 6u);
+  }
   auto raw_candidate = initialized_solution_;
   raw_candidate[fieldOffset(phi_)] += svmp::FE::Real{0.01};
   const auto phase_offset = fieldOffset(phase_);
@@ -19349,21 +19554,46 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   scatterFeOrderedSolution(history().u(), raw_candidate);
   refreshCurrentCandidate(
       "application-driver-conservative-phase-rollback-raw");
+  if (capture_gate.enabled) {
+    lifecycle_capture::validateCompleteOwnedVector(
+        history().u(), canonical_map, raw_candidate);
+  }
   const auto* raw_context = sim_.fe_system->cutIntegrationContext();
   ASSERT_NE(raw_context, nullptr);
+  const auto raw_context_content_revision =
+      capture_gate.enabled ? raw_context->contentRevision() : 0u;
+  const auto raw_solution_value_revision =
+      capture_gate.enabled ? history().u().valueRevision() : 0u;
   const auto lifecycle_revision = lifecycle_.valueRevision();
   const auto constraint_revision =
       sim_.fe_system->constraintLayoutRevision();
   const auto sparsity_revision = sim_.fe_system->sparsityPatternRevision();
   const auto cache_before = refresh_cache_;
+  const auto capture_mesh_state = [&]() {
+    std::array<std::uint64_t, 8> values{};
+    if (capture_gate.enabled) {
+      const auto &mesh_access = sim_.fe_system->meshAccess();
+      values = {mesh_access.geometryRevision(), mesh_access.topologyRevision(),
+                mesh_access.ownershipRevision(), mesh_access.numberingRevision(),
+                mesh_access.fieldLayoutRevision(), mesh_access.labelRevision(),
+                mesh_access.activeConfigurationEpoch(),
+                mesh_access.coordinateConfigurationKey()};
+    }
+    return values;
+  };
+  const auto raw_mesh_state = capture_mesh_state();
   requests_.front().reinitialization.enabled = true;
   requests_.front().reinitialization.cadence_steps = 1;
   requests_.front().reinitialization.max_iterations = 100;
   requests_.front().reinitialization.signed_distance_tolerance = 1.0e-10;
 
-  auto result = applyPreparedConservativePhaseCandidate();
+  auto prepared = prepareConservativePhaseCandidateStage();
+  auto result = applyPreparedConservativePhaseCandidate(prepared);
   EXPECT_TRUE(result.accept_step);
   EXPECT_TRUE(result.changed);
+  if (capture_gate.enabled) {
+    EXPECT_EQ(result.original_solution, raw_candidate);
+  }
   ASSERT_NE(result.geometry_transaction, nullptr);
   ASSERT_EQ(result.maintenance_ledgers.size(), requests_.size());
   EXPECT_TRUE(result.maintenance_ledgers.front().reinitialization_due);
@@ -19372,8 +19602,29 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   EXPECT_TRUE(sim_.fe_system->cutIntegrationContextTransactionActive());
   EXPECT_TRUE(lifecycle_.transactionActive());
   EXPECT_NE(sim_.fe_system->cutIntegrationContext(), raw_context);
+  const bool staged_accept_step = capture_gate.enabled && result.accept_step;
+  const bool staged_changed = capture_gate.enabled && result.changed;
+  const bool staged_geometry_transaction_present =
+      capture_gate.enabled && result.geometry_transaction != nullptr;
+  const bool staged_context_differs_from_raw =
+      capture_gate.enabled && sim_.fe_system->cutIntegrationContext() != raw_context;
+  const auto staged_context_content_revision =
+      capture_gate.enabled ? sim_.fe_system->cutIntegrationContext()->contentRevision() : 0u;
+  const auto staged_mesh_state = capture_mesh_state();
+  const auto staged_lifecycle_revision =
+      capture_gate.enabled ? lifecycle_.valueRevision() : 0u;
+  const auto staged_constraint_revision =
+      capture_gate.enabled ? sim_.fe_system->constraintLayoutRevision() : 0u;
+  const auto staged_sparsity_revision =
+      capture_gate.enabled ? sim_.fe_system->sparsityPatternRevision() : 0u;
+  const auto staged_refresh_signature = capture_gate.enabled
+      ? refresh_cache_.last_signature : decltype(refresh_cache_.last_signature){};
+  const auto staged_vector_signature = capture_gate.enabled
+      ? refresh_cache_.last_vector_signature : decltype(refresh_cache_.last_vector_signature){};
 
   const auto staged_solution = gatherFeOrderedSolution(history().u());
+  const auto staged_solution_value_revision =
+      capture_gate.enabled ? history().u().valueRevision() : 0u;
   const auto staged_phi = fieldSlice(staged_solution, phi_);
   const auto raw_phi = fieldSlice(raw_candidate, phi_);
   ASSERT_EQ(staged_phi.size(), raw_phi.size());
@@ -19401,6 +19652,56 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
                 graph.lumped_control_volume[node] * staged_phase[node],
                 svmp::FE::Real{1.0e-10});
   }
+  svmp::FE::level_set::LevelSetP1PhaseGraphIdentity graph_identity{};
+  std::vector<svmp::FE::Real> staged_lumped_control_volume;
+  std::vector<lifecycle_capture::CanonicalRow> graph_node_rows;
+  std::exception_ptr capture_failure;
+  if (capture_gate.enabled) {
+    try {
+      lifecycle_capture::validateCompleteOwnedVector(
+          history().u(), canonical_map, staged_solution);
+      graph_identity = svmp::FE::level_set::levelSetP1PhaseGraphIdentity(graph);
+      staged_lumped_control_volume = graph.lumped_control_volume;
+      const auto &handler = sim_.fe_system->fieldDofHandler(phase_);
+      const auto *entities = handler.getEntityDofMap();
+      const auto &vertices = mesh_->local_mesh().vertex_gids();
+      if (!graph.success || graph.nodes != 3u || handler.getNumDofs() != 3 ||
+          graph.dof_layout_revision != handler.dofLayoutRevision() ||
+          vertices.size() != 3u || entities == nullptr || !entities->isFinalized()) {
+        throw std::runtime_error("phase graph requires three finalized vertex DOFs");
+      }
+      // The graph builder and projection index the phase field-local DOFs.
+      // Resolve every vertex through that field's actual entity map.
+      std::set<std::uint64_t> seen_nodes;
+      for (std::size_t vertex = 0u; vertex < vertices.size(); ++vertex) {
+        const auto dofs = entities->getVertexDofs(
+            static_cast<svmp::FE::GlobalIndex>(vertex));
+        if (dofs.size() != 1u || dofs.front() < 0 ||
+            static_cast<std::size_t>(dofs.front()) >= graph.nodes ||
+            !seen_nodes.insert(static_cast<std::uint64_t>(dofs.front())).second) {
+          throw std::runtime_error("phase graph vertex-to-node map is not bijective");
+        }
+        const auto node = static_cast<std::uint64_t>(dofs.front());
+        const auto row = std::find_if(canonical_map.rows.begin(), canonical_map.rows.end(),
+            [&](const auto &entry) {
+              return entry.field_name == "phase" && entry.field_local_row == node &&
+                     entry.entity_gid == static_cast<std::uint64_t>(vertices[vertex]) &&
+                     entry.public_fe_row == static_cast<std::uint64_t>(
+                         sim_.fe_system->fieldDofOffset(phase_) + dofs.front());
+            });
+        if (row == canonical_map.rows.end()) {
+          throw std::runtime_error("phase graph node has no matching canonical vertex row");
+        }
+        graph_node_rows.push_back(*row);
+      }
+      std::sort(graph_node_rows.begin(), graph_node_rows.end(),
+          [](const auto &left, const auto &right) {
+            return left.field_local_row < right.field_local_row;
+          });
+    } catch (...) {
+      capture_failure = std::current_exception();
+    }
+  }
 
   ASSERT_NO_THROW(rollbackConservativePhaseCandidate(history(), result));
   EXPECT_EQ(gatherFeOrderedSolution(history().u()), raw_candidate);
@@ -19423,6 +19724,171 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   if (refresh_cache_.last_vector_signature.has_value()) {
     EXPECT_TRUE(*refresh_cache_.last_vector_signature ==
                 *cache_before.last_vector_signature);
+  }
+  if (capture_gate.enabled) {
+    if (capture_failure) {
+      std::rethrow_exception(capture_failure);
+    }
+    const auto restored_solution = gatherFeOrderedSolution(history().u());
+    const auto restored_solution_value_revision = history().u().valueRevision();
+    lifecycle_capture::validateCompleteOwnedVector(
+        history().u(), canonical_map, restored_solution);
+    const auto prepared_stage =
+        lifecycle_capture::conservativeCandidateStageJson(prepared.snapshot);
+    std::vector<std::string> maintenance_ledgers;
+    for (const auto &ledger : result.maintenance_ledgers) {
+      maintenance_ledgers.push_back(
+          lifecycle_capture::conservativeMaintenanceLedgerJson(ledger));
+    }
+    std::vector<std::string> graph_node_map;
+    for (const auto &row : graph_node_rows) {
+      graph_node_map.push_back(lifecycle_capture::jsonObject({
+          {"graph_node", lifecycle_capture::jsonInteger(row.field_local_row)},
+          {"field_local_row", lifecycle_capture::jsonInteger(row.field_local_row)},
+          {"public_fe_row", lifecycle_capture::jsonInteger(row.public_fe_row)},
+          {"field_name", lifecycle_capture::jsonString(row.field_name)},
+          {"component", "0"},
+          {"entity_kind", lifecycle_capture::jsonString("vertex")},
+          {"entity_gid", lifecycle_capture::jsonInteger(row.entity_gid)},
+          {"basis_ordinal", "0"},
+      }));
+    }
+    const auto mesh_state_json = [](const std::array<std::uint64_t, 8> &values) {
+      const std::array<const char *, 8> names{
+          "geometry_revision", "topology_revision", "ownership_revision",
+          "numbering_revision", "field_layout_revision", "label_revision",
+          "active_configuration_epoch", "coordinate_configuration_key"};
+      lifecycle_capture::JsonFields fields;
+      for (std::size_t index = 0u; index < names.size(); ++index) {
+        fields.emplace_back(names[index], lifecycle_capture::jsonInteger(values[index]));
+      }
+      return lifecycle_capture::jsonObject(fields);
+    };
+    const bool restored_context_matches_raw =
+        sim_.fe_system->cutIntegrationContext() == raw_context;
+    const auto restored_context_content_revision =
+        sim_.fe_system->cutIntegrationContext()->contentRevision();
+    const auto restored_mesh_state = capture_mesh_state();
+    lifecycle_capture::publish(
+        capture_gate,
+        "ApplicationLifecycleSerial/conservative_phase_later_rejection_rollback.json",
+        "ApplicationDriverConservativePhaseCandidatesTest",
+        "LaterRejectionRestoresTheRawCandidateAndEveryGeometryRevision",
+        "one-rank scalar P1 conservative-phase candidate staging and rejection rollback fixture",
+        lifecycle_capture::jsonObject({
+            {"map", lifecycle_capture::scalarP1VertexMapJson(canonical_map)},
+            {"phi_field_submap", lifecycle_capture::fieldSubmapJson(canonical_map, "phi")},
+            {"phase_field_submap", lifecycle_capture::fieldSubmapJson(canonical_map, "phase")},
+            {"time", lifecycle_capture::jsonObject({
+                {"accepted_step", lifecycle_capture::jsonInteger(history().stepIndex())},
+                {"candidate_step", lifecycle_capture::jsonInteger(history().stepIndex() + 1)},
+                {"attempt", lifecycle_capture::jsonInteger(prepared.expected_attempt)},
+                {"time", lifecycle_capture::jsonReal(history().time())},
+                {"dt", lifecycle_capture::jsonReal(history().dt())},
+                {"dt_prev", lifecycle_capture::jsonReal(history().dtPrev())},
+            })},
+            {"request_policy", lifecycle_capture::jsonObject({
+                {"level_set_field_name", lifecycle_capture::jsonString(requests_.front().level_set_field_name)},
+                {"phase_field_name", lifecycle_capture::jsonString(requests_.front().conservative_phase.liquid_indicator.field_name)},
+                {"reinitialization_enabled", lifecycle_capture::jsonBool(requests_.front().reinitialization.enabled)},
+                {"cadence_steps", lifecycle_capture::jsonInteger(requests_.front().reinitialization.cadence_steps)},
+                {"max_iterations", lifecycle_capture::jsonInteger(requests_.front().reinitialization.max_iterations)},
+                {"signed_distance_tolerance", lifecycle_capture::jsonReal(requests_.front().reinitialization.signed_distance_tolerance)},
+            })},
+            {"candidate_stage", prepared_stage},
+            {"candidate_result", lifecycle_capture::jsonObject({
+                {"accept_step", lifecycle_capture::jsonBool(staged_accept_step)},
+                {"changed", lifecycle_capture::jsonBool(staged_changed)},
+                {"geometry_transaction_present", lifecycle_capture::jsonBool(staged_geometry_transaction_present)},
+                {"maintenance_ledger_count", lifecycle_capture::jsonInteger(maintenance_ledgers.size())},
+            })},
+            {"snapshots", lifecycle_capture::jsonArray({
+                lifecycle_capture::vectorSnapshotJson(
+                    "accepted_initialized", "base", initialized_solution_),
+                lifecycle_capture::vectorSnapshotJson(
+                    "before_maintenance", "candidate_raw", raw_candidate,
+                    raw_solution_value_revision),
+                lifecycle_capture::vectorSnapshotJson(
+                    "transaction_checkpoint", "candidate_raw",
+                    result.original_solution),
+                lifecycle_capture::vectorSnapshotJson(
+                    "transaction_active", "candidate_staged",
+                    staged_solution, staged_solution_value_revision),
+                lifecycle_capture::vectorSnapshotJson(
+                    "post_rollback", "candidate_restored_raw",
+                    restored_solution, restored_solution_value_revision),
+            })},
+            {"field_local_arrays", lifecycle_capture::jsonObject({
+                {"raw_phi", lifecycle_capture::jsonRealArray(std::span<const svmp::FE::Real>(raw_phi))},
+                {"staged_phi", lifecycle_capture::jsonRealArray(std::span<const svmp::FE::Real>(staged_phi))},
+                {"phi_coefficient_updates", lifecycle_capture::jsonRealArray(std::span<const svmp::FE::Real>(coefficient_updates))},
+                {"staged_phase", lifecycle_capture::jsonRealArray(std::span<const svmp::FE::Real>(staged_phase))},
+            })},
+            {"phase_graph_algebra", lifecycle_capture::jsonObject({
+                {"semantic_role", lifecycle_capture::jsonString("computed_staged_phase_graph_arrays_from_physical_fixture")},
+                {"ordering", lifecycle_capture::jsonString("graph_node_equals_phase_field_local_row")},
+                {"graph_node_map", lifecycle_capture::jsonArray(graph_node_map)},
+                {"identity", lifecycle_capture::phaseGraphIdentityJson(graph_identity)},
+                {"liquid_phase_mass", lifecycle_capture::jsonRealArray(std::span<const svmp::FE::Real>(staged_projection.liquid_phase_mass))},
+                {"lumped_control_volume", lifecycle_capture::jsonRealArray(std::span<const svmp::FE::Real>(staged_lumped_control_volume))},
+                {"comparison_tolerance", lifecycle_capture::jsonReal(1.0e-10)},
+            })},
+            {"maintenance_ledgers", lifecycle_capture::jsonArray(maintenance_ledgers)},
+            {"lifecycle", lifecycle_capture::jsonObject({
+                {"raw", lifecycle_capture::jsonObject({
+                    {"cut_context_present", "true"},
+                    {"cut_context_content_revision", lifecycle_capture::jsonInteger(raw_context_content_revision)},
+                    {"context_transaction_active", "false"},
+                    {"lifecycle_transaction_active", "false"},
+                    {"lifecycle_value_revision", lifecycle_capture::jsonInteger(lifecycle_revision)},
+                    {"constraint_layout_revision", lifecycle_capture::jsonInteger(constraint_revision)},
+                    {"sparsity_pattern_revision", lifecycle_capture::jsonInteger(sparsity_revision)},
+                    {"mesh", mesh_state_json(raw_mesh_state)},
+                    {"refresh_signature", lifecycle_capture::refreshSignatureJson(cache_before.last_signature)},
+                    {"vector_signature", lifecycle_capture::refreshSignatureJson(cache_before.last_vector_signature)},
+                })},
+                {"staged", lifecycle_capture::jsonObject({
+                    {"cut_context_present", "true"},
+                    {"context_differs_from_raw", lifecycle_capture::jsonBool(staged_context_differs_from_raw)},
+                    {"cut_context_content_revision", lifecycle_capture::jsonInteger(staged_context_content_revision)},
+                    {"context_transaction_active", "true"},
+                    {"lifecycle_transaction_active", "true"},
+                    {"lifecycle_value_revision", lifecycle_capture::jsonInteger(staged_lifecycle_revision)},
+                    {"constraint_layout_revision", lifecycle_capture::jsonInteger(staged_constraint_revision)},
+                    {"sparsity_pattern_revision", lifecycle_capture::jsonInteger(staged_sparsity_revision)},
+                    {"mesh", mesh_state_json(staged_mesh_state)},
+                    {"refresh_signature", lifecycle_capture::refreshSignatureJson(staged_refresh_signature)},
+                    {"vector_signature", lifecycle_capture::refreshSignatureJson(staged_vector_signature)},
+                })},
+                {"restored", lifecycle_capture::jsonObject({
+                    {"cut_context_present", "true"},
+                    {"context_matches_raw", lifecycle_capture::jsonBool(restored_context_matches_raw)},
+                    {"cut_context_content_revision", lifecycle_capture::jsonInteger(restored_context_content_revision)},
+                    {"context_transaction_active", lifecycle_capture::jsonBool(sim_.fe_system->cutIntegrationContextTransactionActive())},
+                    {"lifecycle_transaction_active", lifecycle_capture::jsonBool(lifecycle_.transactionActive())},
+                    {"lifecycle_value_revision", lifecycle_capture::jsonInteger(lifecycle_.valueRevision())},
+                    {"constraint_layout_revision", lifecycle_capture::jsonInteger(sim_.fe_system->constraintLayoutRevision())},
+                    {"sparsity_pattern_revision", lifecycle_capture::jsonInteger(sim_.fe_system->sparsityPatternRevision())},
+                    {"mesh", mesh_state_json(restored_mesh_state)},
+                    {"refresh_signature", lifecycle_capture::refreshSignatureJson(refresh_cache_.last_signature)},
+                    {"vector_signature", lifecycle_capture::refreshSignatureJson(refresh_cache_.last_vector_signature)},
+                })},
+            })},
+            {"comparison_contract", lifecycle_capture::jsonObject({
+                {"full_vector_rollback", lifecycle_capture::jsonString("exact")},
+                {"raw_checkpoint_identity", lifecycle_capture::jsonString("exact")},
+                {"geometry_revision_restoration", lifecycle_capture::jsonString("exact")},
+                {"phase_mass_absolute_tolerance", lifecycle_capture::jsonReal(1.0e-10)},
+                {"nonuniform_phi_update_spread_threshold", lifecycle_capture::jsonReal(1.0e-5)},
+            })},
+            {"unavailable_or_outside_scope", lifecycle_capture::jsonObject({
+                {"u_prev", lifecycle_capture::jsonString("candidate-stage behavior unobserved")},
+                {"u_prev2", lifecycle_capture::jsonString("candidate-stage behavior unobserved")},
+                {"u_dot", lifecycle_capture::jsonString("candidate-stage behavior unobserved")},
+                {"u_ddot", lifecycle_capture::jsonString("candidate-stage behavior unobserved")},
+                {"implementation_local_candidates", lifecycle_capture::jsonString("not exposed by returned result")},
+            })},
+        }));
   }
 }
 
