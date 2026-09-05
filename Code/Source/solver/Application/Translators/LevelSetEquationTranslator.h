@@ -6,6 +6,7 @@
 #include <string_view>
 #include <vector>
 
+#include "Application/Core/ResolvedMovingDomainConfiguration.h"
 #include "FE/Core/Types.h"
 #include "Physics/Core/PhysicsModule.h"
 
@@ -42,6 +43,10 @@ struct MaterialInterfaceTransportDependency {
 
 [[nodiscard]] std::vector<std::string> equationTypes();
 
+[[nodiscard]] std::shared_ptr<
+    const application::core::ResolvedLevelSetEquationConfiguration>
+resolveConfiguration(const svmp::Physics::EquationModuleInput& input);
+
 /**
  * Translate and validate the material-interface dependency without mutating
  * an FE system. Non-material-interface level-set inputs return nullopt.
@@ -49,6 +54,11 @@ struct MaterialInterfaceTransportDependency {
 [[nodiscard]] std::optional<MaterialInterfaceTransportDependency>
 materialInterfaceTransportDependency(
     const svmp::Physics::EquationModuleInput& input);
+
+[[nodiscard]] std::optional<MaterialInterfaceTransportDependency>
+materialInterfaceTransportDependency(
+    const application::core::ResolvedLevelSetEquationConfiguration&
+        configuration);
 
 /**
  * Predeclare the paired scalar unknowns in canonical level-set/phase order.
@@ -58,9 +68,20 @@ void preRegisterMaterialInterfaceTransportFields(
     const svmp::Physics::EquationModuleInput& input,
     svmp::FE::systems::FESystem& system);
 
+void preRegisterMaterialInterfaceTransportFields(
+    const application::core::ResolvedLevelSetEquationConfiguration&
+        configuration,
+    svmp::FE::systems::FESystem& system);
+
 [[nodiscard]] std::unique_ptr<svmp::Physics::PhysicsModule>
 createModule(const svmp::Physics::EquationModuleInput& input,
              svmp::FE::systems::FESystem& system);
+
+[[nodiscard]] std::unique_ptr<svmp::Physics::PhysicsModule>
+createModule(
+    const application::core::ResolvedLevelSetEquationConfiguration&
+        configuration,
+    svmp::FE::systems::FESystem& system);
 
 } // namespace level_set
 } // namespace translators
