@@ -1933,3 +1933,452 @@ TEST(LevelSetReinitialization, ProjectionReportsMissingInterface)
     EXPECT_EQ(result.interface_fragments, 0u);
     EXPECT_EQ(repaired, input);
 }
+
+namespace {
+
+constexpr std::array<FE::Real, 3> workingScales{{1.0, 1.0e-14, 1.0e14}};
+constexpr FE::Real workingCoefficientGate = 2.0e-12;
+constexpr FE::Real workingGeometryGate = 8.0e-12;
+
+[[nodiscard]] level_set::LevelSetWallContactConstraint workingQuadWall(
+    FE::Real angle, FE::Real contact_x)
+{
+    return {.kind = level_set::LevelSetWallContactConstraintKind::PrescribedAngle,
+            .interface_marker = 93,
+            .boundary_marker = 9,
+            .parent_cell_global_id = 0,
+            .geometry_revision = 33u,
+            .target_angle_radians = angle,
+            .physical_wall_normal = {{0.0, -1.0, 0.0}},
+            .accepted_contact_point = {{contact_x, 0.0, 0.0}},
+            .accepted_contact_line_tangent = {{0.0, 0.0, 1.0}}};
+}
+
+void expectWorkingSupport(const level_set::LevelSetSignedDistanceRepairResult& result)
+{
+    EXPECT_EQ(result.cut_cells, 1u);
+    EXPECT_EQ(result.interface_fragments, 1u);
+    EXPECT_EQ(result.repaired_dofs, 4u);
+    EXPECT_EQ(result.wall_contact_constraints, 1u);
+    EXPECT_EQ(result.wall_contact_cells, 1u);
+    EXPECT_EQ(result.wall_contact_dofs, 4u);
+}
+
+enum class WorkingQuadOutcome { Converged, FiniteIteration, MotionLimited };
+
+// The oracle is the declared affine target and its equal-nodal-weight fit,
+// not a second cutter or another invocation of the production target builder.
+void checkWorkingQuadCorrection(FE::Real relaxation, int iterations,
+                                WorkingQuadOutcome outcome)
+{
+    const QuadScalarFieldFixture fixture;
+    const auto& dofs = fixture.system.fieldDofHandler(fixture.phi);
+    const auto* entities = dofs.getEntityDofMap();
+    ASSERT_NE(entities, nullptr);
+    ASSERT_EQ(dofs.getNumDofs(), 4);
+    const FE::Real pi = std::acos(FE::Real{-1.0});
+    const FE::Real initial_angle = pi / 6.0;
+    const FE::Real target_angle = pi / 3.0;
+    constexpr FE::Real contact_x = 0.35;
+    std::array<FE::Real, 4> incoming{}, target{};
+    FE::Real pairing = 0.0, norm2 = 0.0;
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = fixture.mesh->getNodeCoordinates(vertex);
+        incoming[vertex] = std::sin(initial_angle) * (x[0] - contact_x) +
+                           std::cos(initial_angle) * x[1];
+        target[vertex] = std::sin(target_angle) * (x[0] - contact_x) +
+                         std::cos(target_angle) * x[1];
+        pairing += incoming[vertex] * target[vertex];
+        norm2 += incoming[vertex] * incoming[vertex];
+    }
+    ASSERT_GT(pairing, 0.0);
+    ASSERT_GT(norm2, 0.0);
+    const FE::Real fit = pairing / norm2;
+    const FE::Real original_left_root = contact_x * std::tan(initial_angle);
+    const FE::Real target_left_root = contact_x * std::tan(target_angle);
+    ASSERT_GT(target_left_root - original_left_root, 0.4);
+    const std::array constraints{workingQuadWall(target_angle, contact_x)};
+    level_set::LevelSetReinitializationOptions options{};
+    options.signed_distance_tolerance = 1.0e-12;
+    options.interface_band_width = 2.0;
+    options.pseudo_time_step_scale = relaxation;
+    options.max_iterations = iterations;
+    options.max_zero_set_displacement =
+        outcome == WorkingQuadOutcome::MotionLimited ? 0.01 : 1.0;
+    std::vector<FE::Real> baseline;
+    std::optional<level_set::LevelSetSignedDistanceRepairResult> baseline_result;
+    for (const FE::Real scale : workingScales) {
+        SCOPED_TRACE(scale);
+        std::vector<FE::Real> raw(4), candidate;
+        for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+            const auto ids = entities->getVertexDofs(vertex);
+            ASSERT_EQ(ids.size(), 1u);
+            raw[static_cast<std::size_t>(ids.front())] = scale * incoming[vertex];
+        }
+        const FE::Real raw0 = vertexValue(*entities, raw, 0);
+        const FE::Real raw_gx = vertexValue(*entities, raw, 1) - raw0;
+        const FE::Real raw_gy = vertexValue(*entities, raw, 3) - raw0;
+        ASSERT_GT(std::hypot(raw_gx, raw_gy), 0.0);
+        const FE::Real measured_initial_angle = std::atan2(raw_gx, raw_gy);
+        EXPECT_NEAR(measured_initial_angle, initial_angle, 1.0e-14);
+        EXPECT_GT(std::abs(measured_initial_angle - target_angle), 0.5);
+        EXPECT_NEAR(-raw0 / raw_gx, contact_x, 1.0e-14);
+        EXPECT_NEAR(-raw0 / raw_gy, original_left_root, 1.0e-14);
+        const auto result = level_set::repairLevelSetSignedDistanceByProjection(
+            *fixture.mesh, dofs, options, raw, candidate, constraints);
+        expectWorkingSupport(result);
+        ASSERT_EQ(candidate.size(), raw.size());
+        const FE::Real origin = vertexValue(*entities, candidate, 0);
+        const FE::Real gx = vertexValue(*entities, candidate, 1) - origin;
+        const FE::Real gy = vertexValue(*entities, candidate, 3) - origin;
+        ASSERT_GT(gx, 0.0);
+        ASSERT_GT(gy, 0.0);
+        const FE::Real measured_angle = std::atan2(gx, gy);
+        const FE::Real left_root = -origin / gy;
+        EXPECT_NEAR(-origin / gx, contact_x, workingGeometryGate);
+        EXPECT_NEAR(vertexValue(*entities, candidate, 2), origin + gx + gy,
+                    workingCoefficientGate);
+        EXPECT_GT(left_root - original_left_root, 0.0);
+        EXPECT_LE(left_root - original_left_root,
+                  options.max_zero_set_displacement + workingGeometryGate);
+        if (outcome == WorkingQuadOutcome::Converged) {
+            EXPECT_TRUE(result.success) << result.diagnostic;
+            EXPECT_TRUE(result.converged) << result.diagnostic;
+            EXPECT_TRUE(result.wall_contact_constraints_satisfied);
+            EXPECT_EQ(result.interface_displacement_samples, 2u);
+            EXPECT_TRUE(result.zero_set_bound_satisfied);
+            EXPECT_LE(result.max_iteration_residual, options.signed_distance_tolerance);
+            EXPECT_NEAR(std::hypot(gx, gy), 1.0, workingGeometryGate);
+            EXPECT_NEAR(measured_angle, target_angle, workingGeometryGate);
+            EXPECT_NEAR(left_root, target_left_root, workingGeometryGate);
+            EXPECT_GT(measured_angle - measured_initial_angle, 0.5);
+            EXPECT_GT(result.max_contact_angle_change_radians, 0.5);
+            for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+                EXPECT_NEAR(vertexValue(*entities, candidate, vertex), target[vertex],
+                            workingCoefficientGate);
+            }
+        } else {
+            EXPECT_FALSE(result.success);
+            EXPECT_FALSE(result.converged);
+            EXPECT_FALSE(result.wall_contact_constraints_satisfied);
+            EXPECT_GT(result.max_prescribed_contact_value_residual, 1.0e-3);
+            EXPECT_GT(std::abs(measured_angle - target_angle), 1.0e-3);
+            // Wall rejection precedes publication of displacement statistics;
+            // the two explicit roots above remain the independent motion oracle.
+            if (outcome == WorkingQuadOutcome::FiniteIteration) {
+                EXPECT_EQ(result.iterations, iterations);
+                const FE::Real remainder = std::pow(1.0 - relaxation, iterations);
+                FE::Real expected_residual = 0.0;
+                for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+                    const FE::Real expected = remainder * fit * incoming[vertex] +
+                                             (1.0 - remainder) * target[vertex];
+                    EXPECT_NEAR(vertexValue(*entities, candidate, vertex), expected,
+                                workingCoefficientGate);
+                    expected_residual = std::max(expected_residual,
+                                                  std::abs(expected - target[vertex]));
+                }
+                EXPECT_NEAR(result.max_iteration_residual, expected_residual,
+                            workingCoefficientGate);
+            } else {
+                EXPECT_GT(left_root - original_left_root,
+                          options.max_zero_set_displacement / 2.0);
+                EXPECT_GT(target_left_root - left_root,
+                          options.max_zero_set_displacement);
+            }
+        }
+        if (baseline.empty()) {
+            baseline = candidate;
+            baseline_result = result;
+        } else {
+            for (std::size_t i = 0; i < candidate.size(); ++i) {
+                EXPECT_NEAR(candidate[i], baseline[i], workingCoefficientGate);
+            }
+            ASSERT_TRUE(baseline_result.has_value());
+            EXPECT_EQ(result.success, baseline_result->success);
+            EXPECT_EQ(result.converged, baseline_result->converged);
+            EXPECT_EQ(result.iterations, baseline_result->iterations);
+            EXPECT_NEAR(result.max_iteration_residual,
+                        baseline_result->max_iteration_residual, workingCoefficientGate);
+            EXPECT_NEAR(result.max_prescribed_contact_angle_error_radians,
+                        baseline_result->max_prescribed_contact_angle_error_radians,
+                        workingGeometryGate);
+        }
+    }
+}
+
+void checkWorkingQuadFixedPoint(FE::Real angle, FE::Real contact_x)
+{
+    const QuadScalarFieldFixture fixture;
+    const auto& dofs = fixture.system.fieldDofHandler(fixture.phi);
+    const auto* entities = dofs.getEntityDofMap();
+    ASSERT_NE(entities, nullptr);
+    const std::array constraints{workingQuadWall(angle, contact_x)};
+    for (const int iterations : {1, 7}) {
+        for (const FE::Real scale : workingScales) {
+            SCOPED_TRACE(::testing::Message() << iterations << ":" << scale);
+            std::vector<FE::Real> target(4), raw(4), candidate;
+            for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+                const auto ids = entities->getVertexDofs(vertex);
+                ASSERT_EQ(ids.size(), 1u);
+                const auto x = fixture.mesh->getNodeCoordinates(vertex);
+                // The orthogonal case is exactly dyadic, not cos(pi/2) data.
+                const FE::Real d = contact_x == 0.25
+                    ? x[0] - 0.25
+                    : std::sin(angle) * (x[0] - contact_x) + std::cos(angle) * x[1];
+                target[ids.front()] = d;
+                raw[ids.front()] = scale * d;
+            }
+            level_set::LevelSetReinitializationOptions options{};
+            options.signed_distance_tolerance = 1.0e-12;
+            options.interface_band_width = 2.0;
+            options.pseudo_time_step_scale = 0.3;
+            options.max_iterations = iterations;
+            options.max_zero_set_displacement = 1.0e-10;
+            for (int application = 0; application < 2; ++application) {
+                SCOPED_TRACE(application);
+                const auto input = application == 0 ? raw : candidate;
+                const auto result = level_set::repairLevelSetSignedDistanceByProjection(
+                    *fixture.mesh, dofs, options, input, candidate, constraints);
+                EXPECT_TRUE(result.success) << result.diagnostic;
+                EXPECT_TRUE(result.converged) << result.diagnostic;
+                expectWorkingSupport(result);
+                EXPECT_EQ(result.interface_displacement_samples, 2u);
+                ASSERT_EQ(candidate.size(), target.size());
+                for (std::size_t i = 0; i < target.size(); ++i) {
+                    EXPECT_NEAR(candidate[i], target[i], 6.0e-14);
+                    if (scale == 1.0 || application == 1) {
+                        EXPECT_NEAR(candidate[i], input[i], 6.0e-14);
+                    }
+                }
+                const FE::Real origin = vertexValue(*entities, candidate, 0);
+                const FE::Real gx = vertexValue(*entities, candidate, 1) - origin;
+                const FE::Real gy = vertexValue(*entities, candidate, 3) - origin;
+                EXPECT_NEAR(std::hypot(gx, gy), 1.0, 2.0e-13);
+                EXPECT_NEAR(std::atan2(gx, gy), angle, 2.0e-13);
+                EXPECT_NEAR(-origin / gx, contact_x, 2.0e-13);
+                if (contact_x == 0.25) {
+                    EXPECT_NEAR(-(origin + gy) / gx, contact_x, 2.0e-13);
+                } else {
+                    EXPECT_NEAR(-origin / gy, contact_x * std::tan(angle), 2.0e-13);
+                }
+                EXPECT_LE(result.max_interface_displacement, workingGeometryGate);
+            }
+        }
+    }
+}
+
+} // namespace
+
+TEST(LevelSetWorkingScale, FullRelaxationCorrectsToleranceCrossingInputs)
+{
+    checkWorkingQuadCorrection(1.0, 2, WorkingQuadOutcome::Converged);
+}
+
+TEST(LevelSetWorkingScale, FiniteRelaxationConvergesWithoutRawAmplitudeLeakage)
+{
+    checkWorkingQuadCorrection(0.5, 64, WorkingQuadOutcome::Converged);
+}
+
+TEST(LevelSetWorkingScale, InsufficientIterationsReturnCanonicalUnmetTarget)
+{
+    for (const int iterations : {1, 2}) {
+        SCOPED_TRACE(iterations);
+        checkWorkingQuadCorrection(0.5, iterations, WorkingQuadOutcome::FiniteIteration);
+    }
+}
+
+TEST(LevelSetWorkingScale, OriginalMotionBoundRejectsUnreachableRotation)
+{
+    checkWorkingQuadCorrection(0.5, 64, WorkingQuadOutcome::MotionLimited);
+}
+
+TEST(LevelSetWorkingScale, DyadicQuadTargetIsACompatibleFixedPoint)
+{
+    checkWorkingQuadFixedPoint(std::acos(FE::Real{-1.0}) / 2.0, 0.25);
+}
+
+TEST(LevelSetWorkingScale, ObliqueQuadTargetIsACompatibleFixedPoint)
+{
+    checkWorkingQuadFixedPoint(std::acos(FE::Real{-1.0}) / 3.0, 0.35);
+}
+
+TEST(LevelSetWorkingScale, ObliqueTetraTargetIsACompatibleFixedPoint)
+{
+    const ScalarFieldFixture fixture;
+    const auto& dofs = fixture.system.fieldDofHandler(fixture.phi);
+    const auto* entities = dofs.getEntityDofMap();
+    ASSERT_NE(entities, nullptr);
+    const FE::Real angle = std::acos(FE::Real{-1.0}) / 3.0;
+    const std::array<FE::Real, 3> normal{{0.6 * std::sin(angle),
+                                       0.8 * std::sin(angle), std::cos(angle)}};
+    const std::array constraints{level_set::LevelSetWallContactConstraint{
+        .kind = level_set::LevelSetWallContactConstraintKind::PrescribedAngle,
+        .interface_marker = 92, .boundary_marker = 8,
+        .parent_cell_global_id = 0, .geometry_revision = 32u,
+        .target_angle_radians = angle,
+        .physical_wall_normal = {{0.0, 0.0, -1.0}},
+        .accepted_contact_point = {{0.2, 0.2, 0.0}},
+        .accepted_contact_line_tangent = {{0.8, -0.6, 0.0}}}};
+    for (const int iterations : {1, 7}) {
+        for (const FE::Real scale : workingScales) {
+            SCOPED_TRACE(::testing::Message() << iterations << ":" << scale);
+            std::vector<FE::Real> target(4), raw(4), candidate;
+            for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+                const auto ids = entities->getVertexDofs(vertex);
+                ASSERT_EQ(ids.size(), 1u);
+                const auto x = fixture.mesh->getNodeCoordinates(vertex);
+                target[ids.front()] = normal[0] * (x[0] - 0.2) +
+                                      normal[1] * (x[1] - 0.2) + normal[2] * x[2];
+                raw[ids.front()] = scale * target[ids.front()];
+            }
+            level_set::LevelSetReinitializationOptions options{};
+            options.signed_distance_tolerance = 1.0e-12;
+            options.interface_band_width = 2.0;
+            options.pseudo_time_step_scale = 0.3;
+            options.max_iterations = iterations;
+            options.max_zero_set_displacement = 1.0e-10;
+            for (int application = 0; application < 2; ++application) {
+                const auto input = application == 0 ? raw : candidate;
+                const auto result = level_set::repairLevelSetSignedDistanceByProjection(
+                    *fixture.mesh, dofs, options, input, candidate, constraints);
+                EXPECT_TRUE(result.success) << result.diagnostic;
+                EXPECT_TRUE(result.converged) << result.diagnostic;
+                expectWorkingSupport(result);
+                EXPECT_EQ(result.interface_displacement_samples, 3u);
+                ASSERT_EQ(candidate.size(), target.size());
+                for (std::size_t i = 0; i < target.size(); ++i) {
+                    EXPECT_NEAR(candidate[i], target[i], 6.0e-14);
+                    if (scale == 1.0 || application == 1) {
+                        EXPECT_NEAR(candidate[i], input[i], 6.0e-14);
+                    }
+                }
+                const FE::Real origin = vertexValue(*entities, candidate, 0);
+                std::array<FE::Real, 3> gradient{};
+                for (std::size_t axis = 0; axis < 3; ++axis) {
+                    gradient[axis] = vertexValue(*entities, candidate, axis + 1) - origin;
+                    ASSERT_GT(gradient[axis], 0.0);
+                    EXPECT_NEAR(gradient[axis], normal[axis], 2.0e-13);
+                    EXPECT_NEAR(-origin / gradient[axis],
+                                0.28 * std::sin(angle) / normal[axis], 2.0e-13);
+                }
+                const FE::Real magnitude = std::hypot(gradient[0], gradient[1], gradient[2]);
+                EXPECT_NEAR(magnitude, 1.0, 2.0e-13);
+                EXPECT_NEAR(std::acos(gradient[2] / magnitude), angle, 2.0e-13);
+                EXPECT_NEAR(origin + 0.2 * gradient[0] + 0.2 * gradient[1], 0.0, 2.0e-13);
+                EXPECT_NEAR(0.8 * gradient[0] - 0.6 * gradient[1], 0.0, 2.0e-13);
+                EXPECT_LE(result.max_interface_displacement, workingGeometryGate);
+            }
+        }
+    }
+}
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+TEST(LevelSetWorkingScale, SystemSliceRestoresRawProtectedOutsideValues)
+{
+    auto mesh = buildNativeStructuredQuadMesh(2);
+    auto space = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Quad4, 1);
+    FE::systems::FESystem system(mesh);
+    const auto unrelated = system.addField(FE::systems::FieldSpec{
+        .name = "unrelated", .space = space, .components = 1});
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi", .space = space, .components = 1});
+    ASSERT_NO_THROW(system.setup());
+    const auto& dofs = system.fieldDofHandler(phi);
+    const auto* entities = dofs.getEntityDofMap();
+    ASSERT_NE(entities, nullptr);
+    const auto offset = static_cast<std::size_t>(system.fieldDofOffset(phi));
+    const auto count = static_cast<std::size_t>(dofs.getNumDofs());
+    ASSERT_EQ(count, 9u);
+    ASSERT_GT(offset, 0u);
+    ASSERT_EQ(system.fieldDofHandler(unrelated).getNumDofs(), 9);
+    const FE::Real pi = std::acos(FE::Real{-1.0});
+    constexpr FE::Real contact_x = 0.175;
+    const std::array constraints{workingQuadWall(pi / 3.0, contact_x)};
+    std::vector<FE::GlobalIndex> cut_nodes;
+    system.meshAccess().getCellNodes(0, cut_nodes);
+    ASSERT_EQ(cut_nodes.size(), 4u);
+    const std::array<std::array<FE::Real, 2>, 4> cut_corners{{
+        {{0.0, 0.0}}, {{0.5, 0.0}}, {{0.5, 0.5}}, {{0.0, 0.5}}}};
+    for (std::size_t corner = 0; corner < cut_nodes.size(); ++corner) {
+        const auto x = system.meshAccess().getNodeCoordinates(cut_nodes[corner]);
+        ASSERT_EQ(x[0], cut_corners[corner][0]);
+        ASSERT_EQ(x[1], cut_corners[corner][1]);
+    }
+    level_set::LevelSetReinitializationOptions options{};
+    options.signed_distance_tolerance = 1.0e-12;
+    options.interface_band_width = 0.01;
+    options.pseudo_time_step_scale = 0.5;
+    options.max_iterations = 64;
+    options.max_zero_set_displacement = 1.0;
+    std::vector<FE::Real> baseline_cut;
+    for (const FE::Real scale : workingScales) {
+        SCOPED_TRACE(scale);
+        std::vector<FE::Real> raw(static_cast<std::size_t>(system.dofHandler().getNumDofs()));
+        for (std::size_t i = 0; i < raw.size(); ++i) raw[i] = 1000.0 + i;
+        for (FE::GlobalIndex vertex = 0; vertex < entities->numVertices(); ++vertex) {
+            const auto ids = entities->getVertexDofs(vertex);
+            ASSERT_EQ(ids.size(), 1u);
+            const auto x = system.meshAccess().getNodeCoordinates(vertex);
+            raw[offset + ids.front()] = scale *
+                (std::sin(pi / 6.0) * (x[0] - contact_x) + std::cos(pi / 6.0) * x[1]);
+        }
+        std::vector<FE::Real> candidate;
+        const auto result = level_set::repairLevelSetSignedDistanceByProjection(
+            system, phi, options, raw, candidate, constraints);
+        EXPECT_TRUE(result.success) << result.diagnostic;
+        EXPECT_TRUE(result.converged) << result.diagnostic;
+        expectWorkingSupport(result);
+        EXPECT_EQ(result.preserved_dofs, 5u);
+        EXPECT_EQ(result.interface_displacement_samples, 2u);
+        EXPECT_GT(result.max_contact_angle_change_radians, 0.5);
+        ASSERT_EQ(candidate.size(), raw.size());
+        for (std::size_t i = 0; i < raw.size(); ++i) {
+            if (i < offset || i >= offset + count) EXPECT_EQ(candidate[i], raw[i]);
+        }
+        std::vector<FE::Real> cut_values;
+        std::size_t protected_count = 0;
+        for (FE::GlobalIndex vertex = 0; vertex < entities->numVertices(); ++vertex) {
+            const auto id = entities->getVertexDofs(vertex).front();
+            const auto x = system.meshAccess().getNodeCoordinates(vertex);
+            const bool in_cut = std::find(cut_nodes.begin(), cut_nodes.end(), vertex) != cut_nodes.end();
+            if (!in_cut) {
+                ++protected_count;
+                EXPECT_EQ(candidate[offset + id], raw[offset + id]);
+            } else {
+                const FE::Real expected = std::sin(pi / 3.0) * (x[0] - contact_x) +
+                                          std::cos(pi / 3.0) * x[1];
+                EXPECT_NEAR(candidate[offset + id], expected, workingCoefficientGate);
+                cut_values.push_back(candidate[offset + id]);
+            }
+        }
+        EXPECT_EQ(protected_count, 5u);
+        ASSERT_EQ(cut_values.size(), 4u);
+        if (baseline_cut.empty()) baseline_cut = cut_values;
+        else for (std::size_t i = 0; i < cut_values.size(); ++i)
+            EXPECT_NEAR(cut_values[i], baseline_cut[i], workingCoefficientGate);
+        // Only the original lower-left cut cell is a scale-comparison target.
+        const auto value = [&](std::size_t corner) {
+            return candidate[offset + entities->getVertexDofs(cut_nodes[corner]).front()];
+        };
+        const FE::Real origin = value(0);
+        const FE::Real gx = (value(1) - origin) / 0.5;
+        const FE::Real gy = (value(3) - origin) / 0.5;
+        const auto raw_value = [&](std::size_t corner) {
+            return raw[offset + entities->getVertexDofs(cut_nodes[corner]).front()];
+        };
+        const FE::Real raw_gx = (raw_value(1) - raw_value(0)) / 0.5;
+        const FE::Real raw_gy = (raw_value(3) - raw_value(0)) / 0.5;
+        const FE::Real initial_angle = std::atan2(raw_gx, raw_gy);
+        EXPECT_NEAR(initial_angle, pi / 6.0, 1.0e-14);
+        EXPECT_GT(std::atan2(gx, gy) - initial_angle, 0.5);
+        EXPECT_GT(-origin / gy - (-raw_value(0) / raw_gy), 0.2);
+        EXPECT_NEAR(std::hypot(gx, gy), 1.0, workingGeometryGate);
+        EXPECT_NEAR(std::atan2(gx, gy), pi / 3.0, workingGeometryGate);
+        EXPECT_NEAR(-origin / gx, contact_x, workingGeometryGate);
+        EXPECT_NEAR(-origin / gy, contact_x * std::tan(pi / 3.0), workingGeometryGate);
+        EXPECT_GT(std::abs(value(2)), options.interface_band_width);
+        // Publication cannot observe whether protected raw values were restored
+        // too early internally; that separate owner-level check remains required.
+    }
+}
+#endif

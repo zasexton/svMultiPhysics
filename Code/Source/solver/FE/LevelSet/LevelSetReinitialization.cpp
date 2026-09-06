@@ -340,13 +340,18 @@ struct LinearInterfacePrimitiveSet {
     const dofs::DofHandler& field_dofs,
     const dofs::EntityDofMap& entity_map,
     Real tolerance,
-    std::span<const Real> coefficients)
+    std::span<const Real> coefficients,
+    bool canonical_prescribed = false)
 {
     CutInterfaceDomainRequest request{};
     request.source = LevelSetInterfaceSource::fromField(FieldId{0});
     request.interface_marker = 0;
     request.tolerance = tolerance;
     request.quadrature_order = 1;
+    if (canonical_prescribed) {
+        request.coefficient_classification_policy =
+            interfaces::LevelSetCoefficientClassificationPolicy::ExactRepresentedZero;
+    }
 
     LinearInterfacePrimitiveSet output;
     std::vector<GlobalIndex> cell_nodes;
@@ -376,6 +381,25 @@ struct LinearInterfacePrimitiveSet {
                 coefficientAtVertex(entity_map,
                                     cell_nodes[i],
                                     coefficients));
+        }
+        if (canonical_prescribed) {
+            Real amplitude = Real{0.0};
+            for (const Real value : input.level_set_values) {
+                amplitude = std::max(amplitude, std::abs(value));
+            }
+            if (!(amplitude > Real{0.0})) {
+                throw std::runtime_error(
+                    "prescribed working-scale discovery encountered an ambiguous zero cell");
+            }
+            for (Real& value : input.level_set_values) {
+                const Real ratio = value / amplitude;
+                if (!std::isfinite(ratio) ||
+                    (value != Real{0.0} && ratio == Real{0.0})) {
+                    throw std::runtime_error(
+                        "prescribed working-scale discovery lost a represented coefficient ratio");
+                }
+                value = ratio;
+            }
         }
 
         interfaces::LevelSetCellCutResult cut_result;
@@ -429,12 +453,18 @@ struct LinearInterfacePrimitiveSet {
             }
             const Real a = coefficients[ia];
             const Real b = coefficients[ib];
-            if (!((a < -tolerance && b > tolerance) ||
-                  (a > tolerance && b < -tolerance))) {
+            const Real coefficient_band = canonical_prescribed ? Real{0.0} : tolerance;
+            if (!((a < -coefficient_band && b > coefficient_band) ||
+                  (a > coefficient_band && b < -coefficient_band))) {
                 continue;
             }
-            const Real denominator = a - b;
-            if (std::abs(denominator) <= tolerance) {
+            const Real amplitude = canonical_prescribed
+                                       ? std::max(std::abs(a), std::abs(b))
+                                       : Real{1.0};
+            const Real scaled_a = a / amplitude;
+            const Real scaled_b = b / amplitude;
+            const Real denominator = scaled_a - scaled_b;
+            if (std::abs(denominator) <= coefficient_band) {
                 continue;
             }
             EdgeZeroCrossing crossing{
@@ -442,7 +472,7 @@ struct LinearInterfacePrimitiveSet {
                 .dof_b = dofs_b.front(),
                 .point_a = cell_coordinates[edge[0]],
                 .point_b = cell_coordinates[edge[1]],
-                .original_t = std::clamp(a / denominator,
+                .original_t = std::clamp(scaled_a / denominator,
                                          Real{0.0},
                                          Real{1.0}),
             };
@@ -1117,7 +1147,8 @@ struct ZeroSetDisplacementEvaluation {
 [[nodiscard]] ZeroSetDisplacementEvaluation evaluateZeroSetDisplacement(
     std::span<const EdgeZeroCrossing> crossings,
     std::span<const Real> coefficients,
-    Real tolerance)
+    Real tolerance,
+    bool canonical_prescribed = false)
 {
     ZeroSetDisplacementEvaluation evaluation;
     Real displacement_squared_sum = 0.0;
@@ -1130,17 +1161,23 @@ struct ZeroSetDisplacementEvaluation {
         }
         const Real a = coefficients[ia];
         const Real b = coefficients[ib];
-        const Real denominator = a - b;
+        const Real amplitude = canonical_prescribed
+                                   ? std::max(std::abs(a), std::abs(b))
+                                   : Real{1.0};
+        const Real scaled_a = a / amplitude;
+        const Real scaled_b = b / amplitude;
+        const Real denominator = scaled_a - scaled_b;
         if (!std::isfinite(a) || !std::isfinite(b) ||
             !std::isfinite(denominator) ||
-            std::abs(denominator) <= tolerance ||
+            std::abs(denominator) <= (canonical_prescribed ? Real{0.0} : tolerance) ||
+            (canonical_prescribed && (scaled_a == Real{0.0} || scaled_b == Real{0.0})) ||
             !((a < Real{0.0} && b > Real{0.0}) ||
               (a > Real{0.0} && b < Real{0.0}))) {
             evaluation.topology_preserved = false;
             return evaluation;
         }
         const Real repaired_t =
-            std::clamp(a / denominator, Real{0.0}, Real{1.0});
+            std::clamp(scaled_a / denominator, Real{0.0}, Real{1.0});
         const Real displacement =
             std::abs(repaired_t - crossing.original_t) *
             distance(crossing.point_a, crossing.point_b);
@@ -1318,6 +1355,147 @@ struct AffineFieldFit {
     return fit;
 }
 
+[[nodiscard]] bool hasPrescribedContact(
+    std::span<const LevelSetWallContactConstraint> constraints)
+{
+    return std::any_of(constraints.begin(), constraints.end(), [](const auto& constraint) {
+        return constraint.kind == LevelSetWallContactConstraintKind::PrescribedAngle;
+    });
+}
+
+[[nodiscard]] LinearInterfacePrimitiveSet repairPrimitiveSet(
+    const assembly::IMeshAccess& mesh,
+    const dofs::DofHandler& field_dofs,
+    const dofs::EntityDofMap& entity_map,
+    Real tolerance,
+    std::span<const Real> coefficients,
+    bool canonical_prescribed)
+{
+    if (!canonical_prescribed) {
+        return globalizePrimitiveSet(field_dofs, buildLinearInterfacePrimitives(
+            mesh, field_dofs, entity_map, tolerance, coefficients));
+    }
+    // The coefficient snapshot is already owner-synchronized on every rank.
+    // Resolve local discovery errors before any rank enters the primitive gather.
+    LinearInterfacePrimitiveSet local;
+    int failed = 0;
+    std::string diagnostic;
+    try {
+        if (!std::all_of(coefficients.begin(), coefficients.end(),
+                         [](Real value) { return std::isfinite(value); })) {
+            throw std::runtime_error("non-finite owner-authoritative coefficients");
+        }
+        local = buildLinearInterfacePrimitives(
+            mesh, field_dofs, entity_map, tolerance, coefficients, true);
+    } catch (const std::exception& error) {
+        failed = 1;
+        diagnostic = error.what();
+    }
+#if FE_HAS_MPI
+    if (usesMultipleRanks(field_dofs)) {
+        int global_failed = 0;
+        MPI_Allreduce(&failed, &global_failed, 1, MPI_INT, MPI_MAX, field_dofs.mpiComm());
+        failed = global_failed;
+    }
+#endif
+    if (failed != 0) {
+        throw std::runtime_error("prescribed working-scale discovery failed: " +
+            (diagnostic.empty() ? std::string{"failure on another owner"} : diagnostic));
+    }
+    auto global = globalizePrimitiveSet(field_dofs, std::move(local));
+    std::sort(global.cut_cells.begin(), global.cut_cells.end(),
+              [](const auto& a, const auto& b) { return a.parent_cell < b.parent_cell; });
+    global.primitives.clear();
+    std::optional<GlobalIndex> previous;
+    for (auto& cell : global.cut_cells) {
+        if (previous == cell.parent_cell) {
+            throw std::runtime_error("prescribed working-scale snapshot has duplicate parent ownership");
+        }
+        previous = cell.parent_cell;
+        std::sort(cell.dofs.begin(), cell.dofs.end());
+        cell.dofs.erase(std::unique(cell.dofs.begin(), cell.dofs.end()), cell.dofs.end());
+        global.primitives.insert(global.primitives.end(), cell.primitives.begin(), cell.primitives.end());
+    }
+    return global;
+}
+
+struct CompensatedFitSum {
+    Real value{0.0};
+    Real correction{0.0};
+    void add(Real term)
+    {
+        const Real adjusted = term - correction;
+        const Real next = value + adjusted;
+        correction = (next - value) - adjusted;
+        value = next;
+    }
+};
+
+// Store the bounded fit, never the potentially unrepresentable multiplier D/M.
+struct PositiveWorkingFit {
+    Real input_amplitude{0.0};
+    Real target_amplitude{0.0};
+    Real beta{0.0};
+
+    [[nodiscard]] Real apply(Real value) const
+    {
+        if (value == Real{0.0}) return value;
+        int value_exponent = 0, input_exponent = 0, target_exponent = 0, beta_exponent = 0;
+        const Real value_fraction = std::frexp(value, &value_exponent);
+        const Real input_fraction = std::frexp(input_amplitude, &input_exponent);
+        const Real target_fraction = std::frexp(target_amplitude, &target_exponent);
+        const Real beta_fraction = std::frexp(beta, &beta_exponent);
+        const Real fraction = ((value_fraction / input_fraction) * target_fraction) * beta_fraction;
+        const Real result = std::scalbn(fraction,
+            value_exponent - input_exponent + target_exponent + beta_exponent);
+        if (!std::isfinite(result) || result == Real{0.0}) {
+            throw std::runtime_error("prescribed working-scale value is not representable");
+        }
+        return result;
+    }
+};
+
+template <typename Selected>
+[[nodiscard]] PositiveWorkingFit positiveWorkingFit(
+    std::span<const Real> input, std::span<const Real> target, Selected&& selected)
+{
+    PositiveWorkingFit fit;
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        if (!selected(i)) continue;
+        if (!std::isfinite(input[i]) || !std::isfinite(target[i])) {
+            throw std::runtime_error("prescribed working-scale fit has non-finite operands");
+        }
+        fit.input_amplitude = std::max(fit.input_amplitude, std::abs(input[i]));
+        fit.target_amplitude = std::max(fit.target_amplitude, std::abs(target[i]));
+    }
+    if (!(fit.input_amplitude > Real{0.0}) || !(fit.target_amplitude > Real{0.0})) {
+        throw std::runtime_error("prescribed working-scale fit has zero input or target norm");
+    }
+    CompensatedFitSum pairing, magnitude, norm_squared;
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        if (!selected(i)) continue;
+        const Real q = input[i] / fit.input_amplitude;
+        const Real b = target[i] / fit.target_amplitude;
+        if ((input[i] != Real{0.0} && q == Real{0.0}) ||
+            (target[i] != Real{0.0} && b == Real{0.0})) {
+            throw std::runtime_error("prescribed working-scale fit lost a represented ratio");
+        }
+        pairing.add(q * b);
+        magnitude.add(std::abs(q * b));
+        norm_squared.add(q * q);
+    }
+    if (!std::isfinite(pairing.value) || !std::isfinite(norm_squared.value) ||
+        !std::isfinite(magnitude.value) || !(norm_squared.value > Real{0.0}) ||
+        !(pairing.value > Real{64.0} * std::numeric_limits<Real>::epsilon() * magnitude.value)) {
+        throw std::runtime_error("prescribed working-scale fit is not positively resolved");
+    }
+    fit.beta = pairing.value / norm_squared.value;
+    if (!std::isfinite(fit.beta) || !(fit.beta > Real{0.0})) {
+        throw std::runtime_error("prescribed working-scale positive fit is not representable");
+    }
+    return fit;
+}
+
 template <typename ForEachDofPoint>
 [[nodiscard]] LevelSetSignedDistanceRepairResult repairSignedDistanceCoefficientsFromPrimitives(
     const assembly::IMeshAccess& mesh,
@@ -1332,6 +1510,7 @@ template <typename ForEachDofPoint>
 {
     LevelSetSignedDistanceRepairResult result;
     result.method = LevelSetReinitializationMethod::Projection;
+    const bool canonical_prescribed = hasPrescribedContact(wall_contact_constraints);
     result.interface_fragments = primitive_set.primitives.size();
     result.cut_cells = primitive_set.cut_cells.size();
     result.wall_contact_constraints = wall_contact_constraints.size();
@@ -1362,6 +1541,10 @@ template <typename ForEachDofPoint>
 
     for_each_dof_point(collect_dof_point);
     synchronizeDofPoints(field_dofs, bound, dof_points);
+    if (canonical_prescribed && !std::all_of(dof_points.begin(), dof_points.end(),
+                                            [](const auto& point) { return finiteVector(point); })) {
+        throw std::runtime_error("prescribed working-scale coordinates are not finite");
+    }
 
     const auto unrepaired =
         static_cast<std::size_t>(std::count(bound.begin(),
@@ -1444,9 +1627,11 @@ template <typename ForEachDofPoint>
         }
         distances[i] = d;
         result.max_distance = std::max(result.max_distance, d);
-        if (input_coefficients[i] > options.signed_distance_tolerance) {
+        const Real coefficient_band = canonical_prescribed
+                                          ? Real{0.0} : options.signed_distance_tolerance;
+        if (input_coefficients[i] > coefficient_band) {
             signed_distance_target[i] = d;
-        } else if (input_coefficients[i] < -options.signed_distance_tolerance) {
+        } else if (input_coefficients[i] < -coefficient_band) {
             signed_distance_target[i] = -d;
         }
     }
@@ -1567,49 +1752,85 @@ template <typename ForEachDofPoint>
         }
     }
 
-    std::map<std::size_t, std::pair<Real, Real>> scale_sums;
-    for (std::size_t i = 0; i < expected; ++i) {
-        if (in_cut_patch[i] == 0u) {
-            continue;
+    std::vector<Real> seed(expected, Real{0.0});
+    std::map<std::size_t, PositiveWorkingFit> component_working_fits;
+    std::map<std::size_t, PositiveWorkingFit> dynamic_working_fits;
+    if (canonical_prescribed) {
+        Real amplitude = Real{0.0};
+        for (std::size_t i = 0; i < expected; ++i) {
+            if (in_cut_patch[i] != 0u) amplitude = std::max(amplitude, std::abs(input_coefficients[i]));
         }
-        auto& sums = scale_sums[components.find(i)];
-        sums.first += input_coefficients[i] * signed_distance_target[i];
-        sums.second += input_coefficients[i] * input_coefficients[i];
-    }
-    std::map<std::size_t, Real> component_target_scale;
-    for (const auto& [root, sums] : scale_sums) {
-        Real fitted = Real{1.0};
-        if (sums.second > options.signed_distance_tolerance *
-                              options.signed_distance_tolerance) {
-            fitted = sums.first / sums.second;
+        if (!(amplitude > Real{0.0}) || !std::isfinite(amplitude)) {
+            throw std::runtime_error("prescribed working-scale cut support has no finite nonzero amplitude");
         }
-        if (!std::isfinite(fitted) || fitted <= Real{0.0}) {
-            fitted = Real{1.0};
+        for (std::size_t i = 0; i < expected; ++i) {
+            if (in_cut_patch[i] == 0u) continue;
+            seed[i] = input_coefficients[i] / amplitude;
+            if (!std::isfinite(seed[i]) || (input_coefficients[i] != Real{0.0} && seed[i] == Real{0.0})) {
+                throw std::runtime_error("prescribed working-scale seed lost a represented coefficient ratio");
+            }
         }
-        component_target_scale[root] = fitted;
+        for (const auto& [root, required] : component_requires_common_scale) {
+            if (required) {
+                component_working_fits.emplace(root, positiveWorkingFit(seed, signed_distance_target,
+                    [&](std::size_t i) { return in_cut_patch[i] != 0u && components.find(i) == root; }));
+            }
+        }
+        for (std::size_t i = 0; i < expected; ++i) {
+            if (in_dynamic_contact_patch[i] == 0u) continue;
+            const auto root = wall_contact_components.find(i);
+            if (!dynamic_working_fits.contains(root)) {
+                dynamic_working_fits.emplace(root, positiveWorkingFit(seed, signed_distance_target,
+                    [&](std::size_t j) { return in_dynamic_contact_patch[j] != 0u && wall_contact_components.find(j) == root; }));
+            }
+        }
     }
 
-    std::map<std::size_t, std::pair<Real, Real>> wall_contact_scale_sums;
-    for (std::size_t i = 0; i < expected; ++i) {
-        if (in_dynamic_contact_patch[i] == 0u) {
-            continue;
-        }
-        auto& sums = wall_contact_scale_sums[
-            wall_contact_components.find(i)];
-        sums.first += input_coefficients[i] * signed_distance_target[i];
-        sums.second += input_coefficients[i] * input_coefficients[i];
-    }
+    std::map<std::size_t, Real> component_target_scale;
     std::map<std::size_t, Real> wall_contact_target_scale;
-    for (const auto& [root, sums] : wall_contact_scale_sums) {
-        Real fitted = Real{1.0};
-        if (sums.second > options.signed_distance_tolerance *
-                              options.signed_distance_tolerance) {
-            fitted = sums.first / sums.second;
+    if (!canonical_prescribed) {
+        std::map<std::size_t, std::pair<Real, Real>> scale_sums;
+        for (std::size_t i = 0; i < expected; ++i) {
+            if (in_cut_patch[i] == 0u) {
+                continue;
+            }
+            auto& sums = scale_sums[components.find(i)];
+            sums.first += input_coefficients[i] * signed_distance_target[i];
+            sums.second += input_coefficients[i] * input_coefficients[i];
         }
-        if (!std::isfinite(fitted) || fitted <= Real{0.0}) {
-            fitted = Real{1.0};
+        for (const auto& [root, sums] : scale_sums) {
+            Real fitted = Real{1.0};
+            if (sums.second > options.signed_distance_tolerance *
+                                  options.signed_distance_tolerance) {
+                fitted = sums.first / sums.second;
+            }
+            if (!std::isfinite(fitted) || fitted <= Real{0.0}) {
+                fitted = Real{1.0};
+            }
+            component_target_scale[root] = fitted;
         }
-        wall_contact_target_scale[root] = fitted;
+
+        std::map<std::size_t, std::pair<Real, Real>> wall_contact_scale_sums;
+        for (std::size_t i = 0; i < expected; ++i) {
+            if (in_dynamic_contact_patch[i] == 0u) {
+                continue;
+            }
+            auto& sums = wall_contact_scale_sums[
+                wall_contact_components.find(i)];
+            sums.first += input_coefficients[i] * signed_distance_target[i];
+            sums.second += input_coefficients[i] * input_coefficients[i];
+        }
+        for (const auto& [root, sums] : wall_contact_scale_sums) {
+            Real fitted = Real{1.0};
+            if (sums.second > options.signed_distance_tolerance *
+                                  options.signed_distance_tolerance) {
+                fitted = sums.first / sums.second;
+            }
+            if (!std::isfinite(fitted) || fitted <= Real{0.0}) {
+                fitted = Real{1.0};
+            }
+            wall_contact_target_scale[root] = fitted;
+        }
     }
 
     std::vector<Real> target(expected, 0.0);
@@ -1620,12 +1841,13 @@ template <typename ForEachDofPoint>
             if (in_prescribed_contact_patch[i] != 0u) {
                 target[i] = prescribed_contact_target[i];
             } else if (component_requires_common_scale.at(root)) {
-                target[i] = component_target_scale.at(root) *
-                            input_coefficients[i];
+                target[i] = canonical_prescribed
+                                ? component_working_fits.at(root).apply(seed[i])
+                                : component_target_scale.at(root) * input_coefficients[i];
             } else if (in_dynamic_contact_patch[i] != 0u) {
-                target[i] = wall_contact_target_scale.at(
-                                wall_contact_components.find(i)) *
-                            input_coefficients[i];
+                target[i] = canonical_prescribed
+                                ? dynamic_working_fits.at(wall_contact_components.find(i)).apply(seed[i])
+                                : wall_contact_target_scale.at(wall_contact_components.find(i)) * input_coefficients[i];
             } else {
                 target[i] = signed_distance_target[i];
             }
@@ -1634,24 +1856,52 @@ template <typename ForEachDofPoint>
             if (options.interface_band_width > Real{0.0} &&
                 distances[i] > options.interface_band_width) {
                 update_enabled[i] = 0u;
-                target[i] = input_coefficients[i];
+                target[i] = canonical_prescribed ? Real{0.0} : input_coefficients[i];
                 ++result.preserved_dofs;
             }
         }
     }
 
+    // Fit the assembled target, not a replacement distance target. Every
+    // connected cut component must independently admit a positive pairing.
+    // Protected raw values have no working consumer and use a lazy zero slot.
+    std::vector<Real> working_start(input_coefficients.begin(), input_coefficients.end());
+    if (canonical_prescribed) {
+        for (const auto& [root, required] : component_requires_common_scale) {
+            (void)required;
+            (void)positiveWorkingFit(seed, target,
+                [&](std::size_t i) { return in_cut_patch[i] != 0u && components.find(i) == root; });
+        }
+        const auto fit = positiveWorkingFit(input_coefficients, target,
+            [&](std::size_t i) { return in_cut_patch[i] != 0u; });
+        for (std::size_t i = 0; i < expected; ++i) {
+            working_start[i] = update_enabled[i] != 0u ? fit.apply(input_coefficients[i]) : Real{0.0};
+        }
+    }
+    const auto publish_protected = [&]() {
+        if (!canonical_prescribed) return;
+        for (std::size_t i = 0; i < expected; ++i) {
+            if (update_enabled[i] == 0u) repaired_coefficients[i] = input_coefficients[i];
+        }
+    };
+
     const Real relaxation = std::clamp(
         options.pseudo_time_step_scale, Real{0.0}, Real{1.0});
-    std::vector<Real> unconstrained(input_coefficients.begin(),
-                                    input_coefficients.end());
+    std::vector<Real> unconstrained(working_start.begin(), working_start.end());
     for (int iteration = 1; iteration <= options.max_iterations; ++iteration) {
         Real max_remaining = 0.0;
         for (std::size_t i = 0; i < expected; ++i) {
             if (update_enabled[i] == 0u) {
                 continue;
             }
-            unconstrained[i] +=
-                relaxation * (target[i] - unconstrained[i]);
+            if (canonical_prescribed) {
+                unconstrained[i] = std::lerp(unconstrained[i], target[i], relaxation);
+                if (!std::isfinite(unconstrained[i])) {
+                    throw std::runtime_error("prescribed working-scale iterate is not finite");
+                }
+            } else {
+                unconstrained[i] += relaxation * (target[i] - unconstrained[i]);
+            }
             max_remaining = std::max(
                 max_remaining,
                 std::abs(target[i] - unconstrained[i]));
@@ -1672,7 +1922,7 @@ template <typename ForEachDofPoint>
     auto displacement = evaluateZeroSetDisplacement(
         crossings,
         repaired_coefficients,
-        options.signed_distance_tolerance);
+        options.signed_distance_tolerance, canonical_prescribed);
     if (!displacement.topology_preserved ||
         displacement.max_displacement > displacement_gate) {
         // Along a convex coefficient path every individual linear-edge root is
@@ -1685,14 +1935,16 @@ template <typename ForEachDofPoint>
         for (int iteration = 0; iteration < 64; ++iteration) {
             const Real fraction = Real{0.5} * (lower + upper);
             for (std::size_t i = 0; i < expected; ++i) {
-                candidate[i] = input_coefficients[i] +
+                candidate[i] = canonical_prescribed
+                                   ? std::lerp(working_start[i], unconstrained[i], fraction)
+                                   : working_start[i] +
                                fraction *
-                                   (unconstrained[i] - input_coefficients[i]);
+                                   (unconstrained[i] - working_start[i]);
             }
             const auto trial = evaluateZeroSetDisplacement(
                 crossings,
                 candidate,
-                options.signed_distance_tolerance);
+                options.signed_distance_tolerance, canonical_prescribed);
             if (trial.topology_preserved &&
                 trial.max_displacement <= displacement_gate) {
                 lower = fraction;
@@ -1701,15 +1953,17 @@ template <typename ForEachDofPoint>
             }
         }
         for (std::size_t i = 0; i < expected; ++i) {
-            repaired_coefficients[i] = input_coefficients[i] +
+            repaired_coefficients[i] = canonical_prescribed
+                                          ? std::lerp(working_start[i], unconstrained[i], lower)
+                                          : working_start[i] +
                                        lower *
                                            (unconstrained[i] -
-                                            input_coefficients[i]);
+                                            working_start[i]);
         }
         displacement = evaluateZeroSetDisplacement(
             crossings,
             repaired_coefficients,
-            options.signed_distance_tolerance);
+            options.signed_distance_tolerance, canonical_prescribed);
     }
 
     result.max_iteration_residual = 0.0;
@@ -1741,50 +1995,67 @@ template <typename ForEachDofPoint>
     }
 
     if (!wall_contact_constraints.empty()) {
-        std::map<std::size_t, std::pair<Real, Real>> repaired_scale_sums;
         Real constraint_scale = Real{1.0};
-        for (std::size_t i = 0; i < expected; ++i) {
-            if (in_dynamic_contact_patch[i] == 0u) {
-                continue;
-            }
-            auto& sums = repaired_scale_sums[
-                wall_contact_components.find(i)];
-            sums.first += input_coefficients[i] * repaired_coefficients[i];
-            sums.second += input_coefficients[i] * input_coefficients[i];
-            constraint_scale = std::max(
-                {constraint_scale,
-                 std::abs(input_coefficients[i]),
-                 std::abs(repaired_coefficients[i])});
-        }
-        std::map<std::size_t, Real> repaired_scales;
         bool positive_scales = true;
-        for (const auto& [root, sums] : repaired_scale_sums) {
-            if (!(sums.second > options.signed_distance_tolerance *
-                                   options.signed_distance_tolerance)) {
-                positive_scales = false;
-                continue;
+        if (canonical_prescribed) {
+            std::map<std::size_t, PositiveWorkingFit> repaired_fits;
+            for (std::size_t i = 0; i < expected; ++i) {
+                if (in_dynamic_contact_patch[i] == 0u) continue;
+                const auto root = wall_contact_components.find(i);
+                if (!repaired_fits.contains(root)) {
+                    repaired_fits.emplace(root, positiveWorkingFit(working_start, repaired_coefficients,
+                        [&](std::size_t j) { return in_dynamic_contact_patch[j] != 0u && wall_contact_components.find(j) == root; }));
+                }
+                constraint_scale = std::max({constraint_scale, std::abs(working_start[i]),
+                                             std::abs(repaired_coefficients[i])});
+                result.max_wall_contact_scale_residual = std::max(
+                    result.max_wall_contact_scale_residual,
+                    std::abs(repaired_coefficients[i] - repaired_fits.at(root).apply(working_start[i])));
             }
-            const Real fitted = sums.first / sums.second;
-            if (!std::isfinite(fitted) || !(fitted > Real{0.0})) {
-                positive_scales = false;
-                continue;
+        } else {
+            std::map<std::size_t, std::pair<Real, Real>> repaired_scale_sums;
+            for (std::size_t i = 0; i < expected; ++i) {
+                if (in_dynamic_contact_patch[i] == 0u) {
+                    continue;
+                }
+                auto& sums = repaired_scale_sums[
+                    wall_contact_components.find(i)];
+                sums.first += working_start[i] * repaired_coefficients[i];
+                sums.second += working_start[i] * working_start[i];
+                constraint_scale = std::max(
+                    {constraint_scale,
+                     std::abs(working_start[i]),
+                     std::abs(repaired_coefficients[i])});
             }
-            repaired_scales[root] = fitted;
-        }
-        for (std::size_t i = 0; i < expected; ++i) {
-            if (in_dynamic_contact_patch[i] == 0u) {
-                continue;
+            std::map<std::size_t, Real> repaired_scales;
+            for (const auto& [root, sums] : repaired_scale_sums) {
+                if (!(sums.second > options.signed_distance_tolerance *
+                                       options.signed_distance_tolerance)) {
+                    positive_scales = false;
+                    continue;
+                }
+                const Real fitted = sums.first / sums.second;
+                if (!std::isfinite(fitted) || !(fitted > Real{0.0})) {
+                    positive_scales = false;
+                    continue;
+                }
+                repaired_scales[root] = fitted;
             }
-            const auto found = repaired_scales.find(
-                wall_contact_components.find(i));
-            if (found == repaired_scales.end()) {
-                positive_scales = false;
-                continue;
+            for (std::size_t i = 0; i < expected; ++i) {
+                if (in_dynamic_contact_patch[i] == 0u) {
+                    continue;
+                }
+                const auto found = repaired_scales.find(
+                    wall_contact_components.find(i));
+                if (found == repaired_scales.end()) {
+                    positive_scales = false;
+                    continue;
+                }
+                result.max_wall_contact_scale_residual = std::max(
+                    result.max_wall_contact_scale_residual,
+                    std::abs(repaired_coefficients[i] -
+                             found->second * working_start[i]));
             }
-            result.max_wall_contact_scale_residual = std::max(
-                result.max_wall_contact_scale_residual,
-                std::abs(repaired_coefficients[i] -
-                         found->second * input_coefficients[i]));
         }
         const Real constraint_tolerance =
             Real{4096.0} * std::numeric_limits<Real>::epsilon() *
@@ -1809,7 +2080,7 @@ template <typename ForEachDofPoint>
             const auto repaired_fit = fitAffineFieldOnCell(
                 cell, dof_points, repaired_coefficients, mesh.dimension());
             const auto input_fit = fitAffineFieldOnCell(
-                cell, dof_points, input_coefficients, mesh.dimension());
+                cell, dof_points, working_start, mesh.dimension());
             if (!repaired_fit.valid) {
                 prescribed_constraints_satisfied = false;
                 continue;
@@ -1925,6 +2196,7 @@ template <typename ForEachDofPoint>
             result.success = false;
             result.diagnostic =
                 "level-set signed-distance repair violated a wall-contact geometry constraint";
+            publish_protected();
             return result;
         }
         // AcceptedDynamicAngle patches remain a positive common scale, so
@@ -1936,6 +2208,7 @@ template <typename ForEachDofPoint>
         result.success = false;
         result.diagnostic =
             "level-set signed-distance repair changed interface topology on a cut edge";
+        publish_protected();
         return result;
     }
     result.max_interface_displacement = displacement.max_displacement;
@@ -1947,6 +2220,7 @@ template <typename ForEachDofPoint>
         result.success = false;
         result.diagnostic =
             "level-set signed-distance repair exceeded max_zero_set_displacement";
+        publish_protected();
         return result;
     }
     result.converged =
@@ -1959,6 +2233,7 @@ template <typename ForEachDofPoint>
         result.diagnostic =
             "level-set signed-distance repair did not reach the signed-distance tolerance; partial repair must not be applied in production";
     }
+    publish_protected();
     return result;
 }
 
@@ -2410,16 +2685,12 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
 
     const auto synchronized = ownerSynchronizedCoefficients(
         level_set_dofs, input_coefficients);
-    const auto primitive_set = globalizePrimitiveSet(
-        level_set_dofs,
-        buildLinearInterfacePrimitives(mesh,
-                                       level_set_dofs,
-                                       *entity_map,
-                                       options.signed_distance_tolerance,
-                                       synchronized));
     const auto global_wall_contact_constraints =
         globalizeWallContactConstraints(level_set_dofs,
                                         wall_contact_constraints);
+    const auto primitive_set = repairPrimitiveSet(
+        mesh, level_set_dofs, *entity_map, options.signed_distance_tolerance,
+        synchronized, hasPrescribedContact(global_wall_contact_constraints));
     std::vector<Real> candidate(synchronized.begin(), synchronized.end());
     auto result = repairSignedDistanceCoefficientsFromPrimitives(
         mesh,
@@ -2490,16 +2761,12 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
         throw std::invalid_argument(
             "level-set signed-distance repair requires a scalar nodal field");
     }
-    const auto primitive_set = globalizePrimitiveSet(
-        field_dofs,
-        buildLinearInterfacePrimitives(mesh_access,
-                                       field_dofs,
-                                       *entity_map,
-                                       options.signed_distance_tolerance,
-                                       field_coefficients));
     const auto global_wall_contact_constraints =
         globalizeWallContactConstraints(field_dofs,
                                         wall_contact_constraints);
+    const auto primitive_set = repairPrimitiveSet(
+        mesh_access, field_dofs, *entity_map, options.signed_distance_tolerance,
+        field_coefficients, hasPrescribedContact(global_wall_contact_constraints));
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     const auto* native_mesh = system.mesh();
