@@ -8,6 +8,7 @@
 
 #include "Assembly/Assembler.h"
 #include "Core/Types.h"
+#include "Interfaces/LevelSetInterfaceDomain.h"
 
 #include <array>
 #include <cstddef>
@@ -19,6 +20,11 @@
 
 namespace svmp::FE::systems {
 class FESystem;
+}
+
+namespace svmp::FE::interfaces {
+class FreeSurfaceGeometrySnapshot;
+struct FreeSurfaceDiscreteFunctionalParameters;
 }
 
 namespace svmp::FE::level_set {
@@ -94,6 +100,21 @@ struct LevelSetCurvatureProjectionSample {
     bool generated_interface_geometry{false};
 };
 
+/**
+ * Call-scoped producer binding for the authoritative energy/volume pair.
+ * The producer must supply the unchanged coefficients used to construct the
+ * snapshot and an independently obtained source identity. Matching epochs
+ * alone do not prove coefficient equality. The snapshot, parameters, input
+ * storage and mesh/system must outlive the call and must not be changed,
+ * refreshed or rolled back concurrently. Curvature output must not alias
+ * input storage. Neither this binding nor its borrowed objects are retained.
+ */
+struct LevelSetAuthoritativeDerivativeBinding {
+    const interfaces::FreeSurfaceGeometrySnapshot& snapshot;
+    const interfaces::FreeSurfaceDiscreteFunctionalParameters& functional;
+    interfaces::LevelSetInterfaceSource input_source;
+};
+
 struct LevelSetCurvatureProjectionResult {
     bool success{false};
     std::uint64_t free_surface_snapshot_revision_key{0};
@@ -141,7 +162,12 @@ struct LevelSetCurvatureProjectionResult {
     Real kinematic_area_gradient_surface_gradient_norm{0.0};
     Real kinematic_area_gradient_young_wall_gradient_norm{0.0};
     Real kinematic_area_gradient_total_energy_gradient_norm{0.0};
-    // Derivatives of A_lg - sum cos(theta_w) A_sl,w and liquid volume.
+    // Derivatives of A_lg - sum cos(theta_w) A_sl,w and liquid volume for the
+    // recovery working cut. Unbound success or supplemental-sample provenance
+    // does not establish derivatives of an authoritative snapshot's scalar;
+    // working coefficients may have been displaced. Only successful explicit
+    // binding establishes the joint authoritative pair. Surface tension is
+    // applied by the consumer exactly once; volume is unscaled.
     // Mesh-access overloads use visible-vertex order. FESystem overloads use
     // the field's global scalar-DOF order and set the flag below.
     std::vector<Real> kinematic_area_gradient_total_energy_derivative{};
@@ -288,5 +314,44 @@ projectLevelSetMeanCurvatureToVertices(
     const LevelSetCurvatureProjectionOptions& options,
     std::vector<Real>& curvature_vertex_values,
     LevelSetCurvatureProjectionWorkspace& workspace);
+
+/**
+ * Request the joint authoritative energy/volume derivative pair. Bound
+ * success requires validated source, functional, geometry and retained
+ * support, and stamps the result with the bound snapshot/source revisions.
+ * Failure leaves no derivative arrays. Geometry eligibility is currently
+ * unverified, so otherwise valid bindings report source_branch_unverified.
+ * Existing unbound overloads retain their standalone recovery contract.
+ *
+ * This mesh-only overload requires an evaluator source and values in visible
+ * mesh-vertex order on a serial mesh. Historical coefficient equality is a
+ * trusted producer precondition, not inferred from size or source epochs.
+ */
+[[nodiscard]] LevelSetCurvatureProjectionResult
+projectLevelSetMeanCurvatureToVertices(
+    const assembly::IMeshAccess& mesh,
+    std::span<const Real> producer_vertex_values,
+    const LevelSetAuthoritativeDerivativeBinding& binding,
+    const LevelSetCurvatureProjectionOptions& options,
+    std::vector<Real>& curvature_vertex_values,
+    LevelSetCurvatureProjectionWorkspace* workspace = nullptr);
+
+/**
+ * Collective field overload of the same bound contract. The producer span
+ * is the full solution in global system order, including other fields.
+ * Required scalar P1 field values are sampled directly from this span;
+ * prescribed storage and point-search fallback are unsupported. Successful
+ * derivatives use global scalar field DOF order, as in the unbound overload.
+ * All ranks on the system communicator must call this overload together.
+ */
+[[nodiscard]] LevelSetCurvatureProjectionResult
+projectLevelSetMeanCurvatureToVertices(
+    const systems::FESystem& system,
+    FieldId level_set_field,
+    std::span<const Real> producer_solution,
+    const LevelSetAuthoritativeDerivativeBinding& binding,
+    const LevelSetCurvatureProjectionOptions& options,
+    std::vector<Real>& curvature_vertex_values,
+    LevelSetCurvatureProjectionWorkspace* workspace = nullptr);
 
 } // namespace svmp::FE::level_set

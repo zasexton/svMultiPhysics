@@ -1,6 +1,7 @@
 #include "LevelSet/LevelSetCurvatureProjection.h"
 
 #include "Dofs/EntityDofMap.h"
+#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Interfaces/LevelSetInterfaceBuilder.h"
 #include "Spaces/FunctionSpace.h"
 #include "Systems/FESystem.h"
@@ -5274,6 +5275,303 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
         options,
         curvature_vertex_values,
         &workspace);
+}
+
+namespace {
+
+void validateAuthoritativeDerivativeBinding(
+    const assembly::IMeshAccess& mesh,
+    const LevelSetAuthoritativeDerivativeBinding& binding,
+    const LevelSetCurvatureProjectionOptions& options)
+{
+    const auto& request = binding.snapshot.interfaceDomain().request();
+    const auto& revision = binding.snapshot.revision();
+    const auto& source = binding.input_source;
+    if (!source.valid() || source.kind != request.source.kind ||
+        (source.kind == interfaces::CutInterfaceSourceKind::Field
+             ? source.field_id != request.source.field_id
+             : source.evaluator_id != request.source.evaluator_id) ||
+        source.identifier() != revision.source_id) {
+        throw std::invalid_argument("source_identity_mismatch");
+    }
+    if (source.layout_revision != request.source.layout_revision ||
+        source.layout_revision != revision.source_layout_revision) {
+        throw std::invalid_argument("source_layout_mismatch");
+    }
+    if (source.value_revision != request.source.value_revision ||
+        source.value_revision != revision.source_value_revision) {
+        throw std::invalid_argument("source_value_mismatch");
+    }
+    if (!revision.complete() ||
+        request.interface_marker != revision.interface_marker ||
+        (!request.generated_domain_id.empty() &&
+         request.generated_domain_id != revision.domain_id)) {
+        throw std::invalid_argument("source_snapshot_identity_unavailable");
+    }
+    if (!std::isfinite(options.isovalue) ||
+        options.isovalue != request.isovalue ||
+        options.isovalue != revision.isovalue) {
+        throw std::invalid_argument("isovalue_mismatch");
+    }
+    if (!mesh.revisionTrackingAvailable()) {
+        throw std::invalid_argument("source_mesh_revision_unavailable");
+    }
+    const auto& local = binding.snapshot.localMeshRevision();
+    if (local.mesh_geometry_revision != mesh.geometryRevision() ||
+        local.mesh_topology_revision != mesh.topologyRevision() ||
+        local.ownership_revision != mesh.ownershipRevision() ||
+        local.numbering_revision != mesh.numberingRevision()) {
+        throw std::invalid_argument("source_mesh_revision_mismatch");
+    }
+    if (options.recovery_mode !=
+        LevelSetCurvatureRecoveryMode::KinematicAreaGradient) {
+        throw std::invalid_argument("authoritative_recovery_mode_unsupported");
+    }
+    const auto selected_side =
+        options.kinematic_area_gradient_negative_liquid_side
+            ? geometry::CutIntegrationSide::Negative
+            : geometry::CutIntegrationSide::Positive;
+    if (binding.functional.liquid_side != selected_side) {
+        throw std::invalid_argument("liquid_side_mismatch");
+    }
+    if (!binding.functional.dynamic_contact_coefficients.empty()) {
+        throw std::invalid_argument("functional_terms_unsupported");
+    }
+    // Reuse scalar-owned coefficient validation, including finite sigma and
+    // lambda, angle ranges and duplicate wall markers. This does not certify
+    // derivative support or alter the unit-surface-tension array convention.
+    try {
+        (void)interfaces::evaluateFreeSurfaceDiscreteFunctional(
+            binding.snapshot, binding.functional);
+    } catch (const std::exception& exception) {
+        throw std::invalid_argument(
+            "functional_parameter_invalid: " + std::string(exception.what()));
+    }
+    const auto& walls = options.kinematic_area_gradient_young_walls;
+    if (walls.size() != binding.functional.young_wall_coefficients.size()) {
+        throw std::invalid_argument("young_wall_parameter_mismatch");
+    }
+    std::set<int> matched_markers;
+    for (const auto& wall : walls) {
+        const auto match = std::find_if(
+            binding.functional.young_wall_coefficients.begin(),
+            binding.functional.young_wall_coefficients.end(),
+            [&](const auto& coefficient) {
+                return coefficient.boundary_marker == wall.boundary_marker &&
+                       coefficient.equilibrium_contact_angle_radians ==
+                           wall.equilibrium_contact_angle_radians;
+            });
+        if (match == binding.functional.young_wall_coefficients.end() ||
+            !matched_markers.insert(wall.boundary_marker).second) {
+            throw std::invalid_argument("young_wall_parameter_mismatch");
+        }
+    }
+}
+
+void validateAuthoritativeVertexValues(
+    const assembly::IMeshAccess& mesh,
+    std::span<const Real> values)
+{
+    if (mesh.numVertices() <= 0 ||
+        values.size() != static_cast<std::size_t>(mesh.numVertices())) {
+        throw std::invalid_argument("producer_vertex_extent_mismatch");
+    }
+    for (std::size_t vertex = 0; vertex < values.size(); ++vertex) {
+        if (!std::isfinite(values[vertex])) {
+            throw std::invalid_argument(
+                "producer_vertex_nonfinite: vertex " + std::to_string(vertex));
+        }
+    }
+}
+
+constexpr const char* unverifiedAuthoritativeGeometry =
+    "source_branch_unverified: authoritative geometry and retained support "
+    "have not been validated";
+
+} // namespace
+
+LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
+    const assembly::IMeshAccess& mesh,
+    std::span<const Real> producer_vertex_values,
+    const LevelSetAuthoritativeDerivativeBinding& binding,
+    const LevelSetCurvatureProjectionOptions& options,
+    std::vector<Real>& curvature_vertex_values,
+    LevelSetCurvatureProjectionWorkspace* workspace)
+{
+    (void)workspace;
+    curvature_vertex_values.clear();
+    LevelSetCurvatureProjectionResult result;
+    result.recovery_mode = options.recovery_mode;
+    result.vertices = producer_vertex_values.size();
+    try {
+        if (binding.input_source.kind !=
+            interfaces::CutInterfaceSourceKind::Evaluator) {
+            throw std::invalid_argument("source_kind_mismatch");
+        }
+        if (mesh.parallelSize() != 1 || mesh.parallelRank() != 0) {
+            throw std::invalid_argument("mesh_only_collective_unsupported");
+        }
+        validateAuthoritativeDerivativeBinding(mesh, binding, options);
+        validateAuthoritativeVertexValues(mesh, producer_vertex_values);
+        result.diagnostic = unverifiedAuthoritativeGeometry;
+    } catch (const std::exception& exception) {
+        result.diagnostic = exception.what();
+    }
+    return result;
+}
+
+LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
+    const systems::FESystem& system,
+    FieldId level_set_field,
+    std::span<const Real> producer_solution,
+    const LevelSetAuthoritativeDerivativeBinding& binding,
+    const LevelSetCurvatureProjectionOptions& options,
+    std::vector<Real>& curvature_vertex_values,
+    LevelSetCurvatureProjectionWorkspace* workspace)
+{
+    (void)workspace;
+    curvature_vertex_values.clear();
+    LevelSetCurvatureProjectionResult result;
+    result.recovery_mode = options.recovery_mode;
+    KinematicProjectionCollectiveContext context;
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized != 0 && finalized == 0) {
+        // Obtain the established system communicator before any field lookup
+        // that could fail on one rank, so peers always reach the same consensus.
+        context.communicator = system.activeMpiCommunicator();
+        if (context.communicator != MPI_COMM_NULL) {
+            MPI_Comm_rank(context.communicator, &context.rank);
+            MPI_Comm_size(context.communicator, &context.size);
+            context.active = context.size > 1;
+        }
+    }
+#endif
+    result.kinematic_area_gradient_parallel_size = context.size;
+    bool local_success = true;
+    std::string local_diagnostic;
+    std::vector<Real> values;
+    try {
+        const auto& mesh = system.meshAccess();
+        if (mesh.parallelRank() != context.rank ||
+            mesh.parallelSize() != context.size) {
+            throw std::invalid_argument("source_communicator_mismatch");
+        }
+        if (binding.input_source.kind !=
+            interfaces::CutInterfaceSourceKind::Field) {
+            throw std::invalid_argument("source_kind_mismatch");
+        }
+        if (binding.input_source.field_id != level_set_field) {
+            throw std::invalid_argument("source_identity_mismatch");
+        }
+        validateAuthoritativeDerivativeBinding(mesh, binding, options);
+        if (!system.isSetup()) {
+            throw std::invalid_argument("source_field_layout_unavailable");
+        }
+        const auto& field = system.fieldRecord(level_set_field);
+        if (field.source_kind == systems::FieldSourceKind::PrescribedData) {
+            throw std::invalid_argument("prescribed_field_source_unsupported");
+        }
+        if (!field.space || field.components != 1 ||
+            field.scope != systems::FieldScope::VolumeCell ||
+            field.space->space_type() != spaces::SpaceType::H1 ||
+            field.space->field_type() != FieldType::Scalar ||
+            field.space->continuity() != Continuity::C0 ||
+            field.space->value_dimension() != 1 ||
+            field.space->is_variable_order() ||
+            field.space->polynomial_order() != 1) {
+            throw std::invalid_argument("scalar_field_layout_unsupported");
+        }
+        const auto& dofs = system.fieldDofHandler(level_set_field);
+        if (binding.input_source.layout_revision != dofs.getDofStateRevision()) {
+            throw std::invalid_argument("source_layout_mismatch");
+        }
+        const auto system_size = system.fieldMap().totalDofs();
+        const auto dof_count = dofs.getNumDofs();
+        const auto offset = system.fieldDofOffset(level_set_field);
+        if (system_size <= 0 || producer_solution.size() !=
+                static_cast<std::size_t>(system_size)) {
+            throw std::invalid_argument("producer_solution_extent_mismatch");
+        }
+        const auto* map = dofs.getEntityDofMap();
+        if (mesh.numVertices() <= 0 || map == nullptr ||
+            map->numVertices() < mesh.numVertices() || dof_count <= 0 ||
+            offset < 0 || offset > system_size ||
+            dof_count > system_size - offset) {
+            throw std::invalid_argument("scalar_vertex_dof_map_incomplete");
+        }
+        std::set<GlobalIndex> visible_dofs;
+        for (GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+            const auto vertex_dofs = map->getVertexDofs(vertex);
+            if (vertex_dofs.size() != 1u || vertex_dofs.front() < 0 ||
+                vertex_dofs.front() >= dof_count ||
+                !visible_dofs.insert(vertex_dofs.front()).second) {
+                throw std::invalid_argument("scalar_vertex_dof_map_incomplete");
+            }
+        }
+        if (context.size == 1 && visible_dofs.size() !=
+                static_cast<std::size_t>(dof_count)) {
+            throw std::invalid_argument("scalar_vertex_dof_map_incomplete");
+        }
+        values.resize(static_cast<std::size_t>(mesh.numVertices()));
+        result.vertices = values.size();
+    } catch (const std::exception& exception) {
+        local_success = false;
+        local_diagnostic = exception.what();
+    }
+    if (!synchronizeKinematicProjectionFailure(
+            context, local_success, local_diagnostic, result.diagnostic)) {
+        return result;
+    }
+
+    // Reuse the projection's transient options signature. Snapshot content
+    // identity already binds source/layout and policy; no coefficient hash
+    // or copy can replace the producer's unchanged-input precondition here.
+    auto signature = kinematicProjectionOptionsSignature(options);
+    mixKinematicProjectionSignature(
+        signature, binding.snapshot.revision().snapshot_revision_key);
+    mixKinematicProjectionReal(signature, binding.functional.surface_tension);
+    mixKinematicProjectionReal(signature, binding.functional.volume_multiplier);
+    auto minimum_signature = signature;
+    auto maximum_signature = signature;
+#if FE_HAS_MPI
+    if (context.active) {
+        MPI_Allreduce(MPI_IN_PLACE, &minimum_signature, 1,
+                      kinematicMpiUnsigned64Type(), MPI_MIN, context.communicator);
+        MPI_Allreduce(MPI_IN_PLACE, &maximum_signature, 1,
+                      kinematicMpiUnsigned64Type(), MPI_MAX, context.communicator);
+    }
+#endif
+    if (minimum_signature != maximum_signature) {
+        result.diagnostic = "collective_authoritative_binding_mismatch";
+        return result;
+    }
+
+    try {
+        systems::SystemStateView state{};
+        state.u = producer_solution;
+        if (!system.evaluateFieldAtVertices(
+                level_set_field, state, system.meshAccess().numVertices(), values)) {
+            throw std::invalid_argument("producer_vertex_sampling_unavailable");
+        }
+        validateAuthoritativeVertexValues(system.meshAccess(), values);
+    } catch (const std::exception& exception) {
+        local_success = false;
+        local_diagnostic = exception.what();
+    }
+    if (!synchronizeKinematicProjectionFailure(
+            context, local_success, local_diagnostic, result.diagnostic)) {
+        return result;
+    }
+    // Binding and sampling do not establish mapped strict geometry/support.
+    // Do not enter legacy recovery or publish its arrays as an exact pair.
+    result.diagnostic = unverifiedAuthoritativeGeometry;
+    return result;
 }
 
 } // namespace svmp::FE::level_set

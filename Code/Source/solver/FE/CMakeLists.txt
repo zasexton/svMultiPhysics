@@ -2450,6 +2450,23 @@ if(FE_BUILD_TESTS)
                 ${GTEST_LIBRARIES}
         )
         add_test(NAME FE_LevelSet_Tests COMMAND test_fe_levelset)
+        if(FE_WITH_MESH)
+            add_executable(test_fe_levelset_authoritative_binding
+                Tests/Unit/LevelSet/test_LevelSetAuthoritativeDerivativeBinding.cpp)
+            _svmp_fe_target_enable_warnings(test_fe_levelset_authoritative_binding)
+            if(TARGET GTest::gtest)
+                target_link_libraries(test_fe_levelset_authoritative_binding
+                    PRIVATE svfe GTest::gtest)
+            else()
+                set(_fe_binding_gtest_libs ${GTEST_LIBRARIES})
+                list(REMOVE_ITEM _fe_binding_gtest_libs gtest_main GTest::gtest_main)
+                target_link_libraries(test_fe_levelset_authoritative_binding
+                    PRIVATE svfe ${_fe_binding_gtest_libs})
+            endif()
+            add_test(NAME FE_LevelSet_Authoritative_Binding_Tests
+                COMMAND test_fe_levelset_authoritative_binding
+                    --gtest_filter=LevelSetAuthoritativeDerivativeBinding.*)
+        endif()
     endif()
 
     # Elements module tests
@@ -3156,6 +3173,12 @@ if(FE_BUILD_TESTS)
         file(GLOB FE_LEVELSET_MPI_TEST_SOURCES
             Tests/Unit/LevelSet/test_*MPI*.cpp
         )
+        if(TARGET test_fe_levelset_authoritative_binding)
+            add_fe_mpi_test(test_fe_levelset_authoritative_binding 2)
+            set_tests_properties(test_fe_levelset_authoritative_binding_mpi_2
+                PROPERTIES ENVIRONMENT
+                    "GTEST_FILTER=LevelSetAuthoritativeDerivativeBindingMPI.*")
+        endif()
         if(FE_LEVELSET_MPI_TEST_SOURCES)
             add_executable(test_fe_levelset_mpi ${FE_LEVELSET_MPI_TEST_SOURCES})
             _svmp_fe_target_enable_warnings(test_fe_levelset_mpi)
