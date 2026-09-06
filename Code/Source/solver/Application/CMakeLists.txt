@@ -18,6 +18,7 @@ add_library(svapplication STATIC
   Core/SimulationBuilder.cpp
   Translators/MeshTranslator.cpp
   Translators/EquationTranslator.cpp
+  Translators/FreeSurfaceInputAdapter.cpp
   Translators/LevelSetConfigurationParsing.cpp
   Translators/LevelSetEquationTranslator.cpp
 )

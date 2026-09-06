@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
 #include "Application/Translators/EquationTranslator.h"
+#include "Application/Translators/FreeSurfaceInputAdapter.h"
+#include <utility>
+#include <variant>
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
 #include "Mesh/Core/MeshBase.h"
@@ -2147,4 +2150,389 @@ TEST(EquationTranslatorNodePressureConstraints, BuildInputRejectsUnsupportedIdTy
 
   EXPECT_THROW((void)application::translators::EquationTranslator::buildInput(*params, singleMeshMap(mesh)),
                std::runtime_error);
+}
+
+
+namespace {
+namespace face_input = application::translators::free_surface_input;
+using FaceParams = svmp::Physics::ParameterMap;
+using FaceParamState = std::map<std::string, std::pair<bool, std::string>>;
+
+constexpr std::array<const char*, 8> faceKeys{
+    "Contact_line_wall_faces", "ContactLineWallFaces",
+    "Contact_line_wall_face", "ContactLineWallFace",
+    "Wall_boundary_faces", "WallBoundaryFaces",
+    "Wall_boundary_face", "WallBoundaryFace"};
+constexpr std::array<const char*, 8> faceMarkerKeys{
+    "Contact_line_wall_markers", "ContactLineWallMarkers",
+    "Contact_line_wall_marker", "ContactLineWallMarker",
+    "Wall_boundary_markers", "WallBoundaryMarkers",
+    "Wall_boundary_marker", "WallBoundaryMarker"};
+constexpr const char* faceConflictError =
+    "[svMultiPhysics::Application] Free-surface contact-line wall input must use either wall face names or wall markers, not both.";
+constexpr const char* faceEmptyError =
+    "[svMultiPhysics::Application] Contact_line_wall_face(s) is defined but empty.";
+constexpr const char* faceBcError =
+    "[svMultiPhysics::Application] Boundary condition references face 'free_surface', but that face is not registered. Ensure <Add_face name=\"free_surface\"> exists under the mesh and <Add_BC name=\"free_surface\"> references it, or set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.";
+
+FaceParamState faceParamState(const FaceParams& params)
+{
+  FaceParamState result;
+  for (const auto& [key, value] : params) {
+    result.emplace(key, std::make_pair(value.defined, value.value));
+  }
+  return result;
+}
+
+FaceParamState faceSourceState(const ParameterLists& params)
+{
+  FaceParamState result;
+  for (const auto& [key, value] : params.params_map) {
+    std::visit([&](const auto* parameter) {
+      if (parameter != nullptr) {
+        result.emplace(key, std::make_pair(parameter->defined(), parameter->svalue()));
+      }
+    }, value);
+  }
+  return result;
+}
+
+template <class Action>
+void expectFaceRuntimeError(Action&& action, const std::string& expected)
+{
+  try {
+    action();
+    ADD_FAILURE() << "Expected std::runtime_error";
+  } catch (const std::runtime_error& error) {
+    EXPECT_EQ(std::string(error.what()), expected);
+  } catch (...) {
+    ADD_FAILURE() << "Expected std::runtime_error, received another exception";
+  }
+}
+
+std::string faceLookupError(const std::string& name)
+{
+  return "[svMultiPhysics::Application] Contact-line wall face '" + name +
+         "' is not registered in the mesh labels.";
+}
+
+std::shared_ptr<svmp::Mesh> faceBindingMesh()
+{
+  auto mesh = buildTranslatorMesh();
+  mesh->base().register_label("wall_left", 11);
+  mesh->base().register_label("wall_right", 12);
+  return mesh;
+}
+
+std::string faceBindingBc(const std::string& contents)
+{
+  return "<Add_BC name=\"free_surface\"><Type>Free_surface</Type>" +
+         contents + "</Add_BC>";
+}
+
+std::unique_ptr<EquationParameters> faceBindingEquation(const std::string& boundaries)
+{
+  const auto xml = "<Add_equation type=\"fluid\">" + boundaries + "</Add_equation>";
+  return parseEquationXml(xml.c_str());
+}
+
+FaceParams faceBindingParams()
+{
+  return {{"Type", {true, "Free_surface"}},
+          {"Implementation", {true, "UnfittedLevelSet"}},
+          {"Contact_line_wall_normals", {true, " 1.0 0.0 0.0 "}},
+          {"Unused", {false, " raw "}}};
+}
+} // namespace
+
+TEST(FreeSurfaceInputAdapter, PredicateUsesOnlyCanonicalLegacyKeys)
+{
+  for (const char* implementation :
+       {"Unfitted", "UnfittedLevelSet", "LevelSet", "EmbeddedLevelSet",
+        " \tUN_fitted-Level Set\n"}) {
+    SCOPED_TRACE(implementation);
+    auto params = faceBindingParams();
+    params["Type"] = {true, " \tFREE_-surface\n"};
+    params["Implementation"] = {true, implementation};
+    EXPECT_TRUE(face_input::usesLegacyUnfittedFaceBinding(params));
+  }
+  for (const char* alias : {"Free_surface_implementation", "FreeSurfaceImplementation"}) {
+    SCOPED_TRACE(alias);
+    auto params = faceBindingParams();
+    params.erase("Implementation");
+    params[alias] = {true, "UnfittedLevelSet"};
+    EXPECT_FALSE(face_input::usesLegacyUnfittedFaceBinding(params));
+    params["Implementation"] = {true, "FittedALE"};
+    EXPECT_FALSE(face_input::usesLegacyUnfittedFaceBinding(params));
+    params["Implementation"] = {true, ""};
+    EXPECT_FALSE(face_input::usesLegacyUnfittedFaceBinding(params));
+    params["Implementation"] = {false, "UnfittedLevelSet"};
+    EXPECT_FALSE(face_input::usesLegacyUnfittedFaceBinding(params));
+    params["Implementation"] = {true, "UnfittedLevelSet"};
+    params[alias] = {true, "FittedALE"};
+    EXPECT_TRUE(face_input::usesLegacyUnfittedFaceBinding(params));
+  }
+  for (const auto type : {svmp::Physics::ParameterValue{true, "Dirichlet"},
+                          svmp::Physics::ParameterValue{false, "Free_surface"},
+                          svmp::Physics::ParameterValue{true, " \t "}}) {
+    auto params = faceBindingParams();
+    params["Type"] = type;
+    EXPECT_FALSE(face_input::usesLegacyUnfittedFaceBinding(params));
+  }
+  auto params = faceBindingParams();
+  params.erase("Type");
+  EXPECT_FALSE(face_input::usesLegacyUnfittedFaceBinding(params));
+}
+
+TEST(FreeSurfaceInputAdapter, ResolvesEveryFaceAliasAndErasesAllFaceAliases)
+{
+  const auto mesh = faceBindingMesh();
+  for (const char* key : faceKeys) {
+    SCOPED_TRACE(key);
+    auto params = faceBindingParams();
+    params[key] = {true, "wall_left"};
+    auto expected = faceBindingParams();
+    expected["Contact_line_wall_markers"] = {true, "11"};
+    face_input::resolveLegacyContactWallFaces(params, *mesh);
+    EXPECT_EQ(faceParamState(params), faceParamState(expected));
+  }
+  auto params = faceBindingParams();
+  for (const char* key : faceKeys) {
+    params[key] = {true, "wall_left"};
+  }
+  params[faceKeys.front()] = {true, "wall_right"};
+  auto expected = faceBindingParams();
+  expected["Contact_line_wall_markers"] = {true, "12"};
+  face_input::resolveLegacyContactWallFaces(params, *mesh);
+  EXPECT_EQ(faceParamState(params), faceParamState(expected));
+}
+
+TEST(FreeSurfaceInputAdapter, RetainsMissingUndefinedAndBlankValues)
+{
+  const auto mesh = faceBindingMesh();
+  auto absent = faceBindingParams();
+  const auto absent_before = faceParamState(absent);
+  face_input::resolveLegacyContactWallFaces(absent, *mesh);
+  EXPECT_EQ(faceParamState(absent), absent_before);
+  for (const auto value : {svmp::Physics::ParameterValue{false, "wall_left"},
+                           svmp::Physics::ParameterValue{true, ""},
+                           svmp::Physics::ParameterValue{true, " \t\n "}}) {
+    auto params = faceBindingParams();
+    params[faceKeys.front()] = value;
+    const auto before = faceParamState(params);
+    face_input::resolveLegacyContactWallFaces(params, *mesh);
+    EXPECT_EQ(faceParamState(params), before);
+    params[faceKeys.back()] = {true, "wall_right"};
+    auto expected = faceBindingParams();
+    expected["Contact_line_wall_markers"] = {true, "12"};
+    face_input::resolveLegacyContactWallFaces(params, *mesh);
+    EXPECT_EQ(faceParamState(params), faceParamState(expected));
+  }
+  auto params = faceBindingParams();
+  params[faceKeys.front()] = {true, ";, \t ;"};
+  params[faceKeys.back()] = {true, "wall_right"};
+  const auto before = faceParamState(params);
+  expectFaceRuntimeError(
+      [&] { face_input::resolveLegacyContactWallFaces(params, *mesh); }, faceEmptyError);
+  EXPECT_EQ(faceParamState(params), before);
+}
+
+TEST(FreeSurfaceInputAdapter, MarkerConflictsPrecedeSplittingAndLookup)
+{
+  const auto mesh = faceBindingMesh();
+  for (const char* key : faceMarkerKeys) {
+    SCOPED_TRACE(key);
+    for (const char* faces : {"missing_wall", ";,"}) {
+      auto params = faceBindingParams();
+      params[faceKeys.front()] = {true, faces};
+      params[key] = {true, "91"};
+      const auto before = faceParamState(params);
+      expectFaceRuntimeError(
+          [&] { face_input::resolveLegacyContactWallFaces(params, *mesh); },
+          faceConflictError);
+      EXPECT_EQ(faceParamState(params), before);
+    }
+  }
+  for (const char* key : {faceMarkerKeys[0], faceMarkerKeys[1]}) {
+    for (const auto value : {svmp::Physics::ParameterValue{true, ""},
+                             svmp::Physics::ParameterValue{true, " \t "},
+                             svmp::Physics::ParameterValue{false, "91"}}) {
+      auto params = faceBindingParams();
+      params[key] = value;
+      params[faceKeys.front()] = {true, "wall_left"};
+      auto expected = faceBindingParams();
+      expected[key] = value;
+      expected["Contact_line_wall_markers"] = {true, "11"};
+      face_input::resolveLegacyContactWallFaces(params, *mesh);
+      EXPECT_EQ(faceParamState(params), faceParamState(expected));
+    }
+  }
+  auto params = faceBindingParams();
+  params[faceMarkerKeys.front()] = {true, "11"};
+  params[faceKeys.front()] = {true, " \t "};
+  const auto before = faceParamState(params);
+  face_input::resolveLegacyContactWallFaces(params, *mesh);
+  EXPECT_EQ(faceParamState(params), before);
+}
+
+TEST(FreeSurfaceInputAdapter, NamesRetainOrderDuplicatesSpacesAndCase)
+{
+  const auto mesh = faceBindingMesh();
+  auto params = faceBindingParams();
+  params[faceKeys.front()] = {true, " wall_right, wall_left;wall_left,, ;wall_right "};
+  auto expected = faceBindingParams();
+  expected[faceMarkerKeys.front()] = {true, "12;11;11;12"};
+  face_input::resolveLegacyContactWallFaces(params, *mesh);
+  EXPECT_EQ(faceParamState(params), faceParamState(expected));
+  const std::array<std::pair<const char*, const char*>, 5> failures{{
+      {"wall_left wall_right", "wall_left wall_right"},
+      {"missing_a;wall_left", "missing_a"},
+      {"wall_left;missing_b", "missing_b"},
+      {"Wall_Left", "Wall_Left"},
+      {"missing_b;missing_a", "missing_b"},
+  }};
+  for (const auto& [faces, missing] : failures) {
+    SCOPED_TRACE(faces);
+    params = faceBindingParams();
+    params[faceKeys.front()] = {true, faces};
+    const auto before = faceParamState(params);
+    expectFaceRuntimeError(
+        [&] { face_input::resolveLegacyContactWallFaces(params, *mesh); },
+        faceLookupError(missing));
+    EXPECT_EQ(faceParamState(params), before);
+  }
+  EXPECT_EQ(mesh->label_from_name("wall_left"), 11);
+  EXPECT_EQ(mesh->label_from_name("wall_right"), 12);
+  EXPECT_EQ(mesh->label_from_name("Wall_Left"), svmp::INVALID_LABEL);
+}
+
+TEST(EquationTranslatorFreeSurfaceFaceContract, XmlAliasPriorityIsIndependentOfElementOrder)
+{
+  const auto mesh = faceBindingMesh();
+  for (std::size_t i = 0; i + 1 < faceKeys.size(); ++i) {
+    SCOPED_TRACE(i);
+    const auto contents = std::string("<Implementation>UnfittedLevelSet</Implementation><") +
+        faceKeys[i + 1] + ">wall_right</" + faceKeys[i + 1] + "><" +
+        faceKeys[i] + ">wall_left</" + faceKeys[i] + ">";
+    auto params = faceBindingEquation(faceBindingBc(contents));
+    const auto before = faceSourceState(*params->boundary_conditions.front());
+    const auto input = application::translators::EquationTranslator::buildInput(
+        *params, singleMeshMap(mesh));
+    ASSERT_EQ(input.boundary_conditions.size(), 1u);
+    EXPECT_EQ(input.boundary_conditions.front().params.at(faceMarkerKeys[0]).value, "11");
+    for (const char* key : faceKeys) {
+      EXPECT_EQ(input.boundary_conditions.front().params.count(key), 0u);
+    }
+    EXPECT_EQ(faceSourceState(*params->boundary_conditions.front()), before);
+  }
+}
+
+TEST(EquationTranslatorFreeSurfaceFaceContract, ImplementationAliasesKeepBcNameAdmission)
+{
+  for (const char* key :
+       {"Implementation", "Free_surface_implementation", "FreeSurfaceImplementation"}) {
+    for (bool registered : {false, true}) {
+      SCOPED_TRACE(key);
+      SCOPED_TRACE(registered);
+      const auto mesh = faceBindingMesh();
+      if (registered) {
+        mesh->base().register_label("free_surface", 31);
+      }
+      const auto contents = std::string("<") + key + ">UnfittedLevelSet</" + key +
+          "><Contact_line_wall_faces>wall_left</Contact_line_wall_faces>";
+      auto params = faceBindingEquation(faceBindingBc(contents));
+      const auto before = faceSourceState(*params->boundary_conditions.front());
+      if (std::string_view(key) != "Implementation" && !registered) {
+        expectFaceRuntimeError([&] {
+          (void)application::translators::EquationTranslator::buildInput(
+              *params, singleMeshMap(mesh));
+        }, faceBcError);
+      } else {
+        const auto input = application::translators::EquationTranslator::buildInput(
+            *params, singleMeshMap(mesh));
+        ASSERT_EQ(input.boundary_conditions.size(), 1u);
+        const auto& bc = input.boundary_conditions.front();
+        EXPECT_EQ(bc.boundary_marker, registered ? 31 : -1);
+        if (std::string_view(key) == "Implementation") {
+          EXPECT_EQ(bc.params.at(faceMarkerKeys[0]).value, "11");
+          EXPECT_EQ(bc.params.count(faceKeys[0]), 0u);
+        } else {
+          EXPECT_EQ(bc.params.at(faceKeys[0]).value, "wall_left");
+          EXPECT_EQ(bc.params.count(faceMarkerKeys[0]), 0u);
+        }
+      }
+      EXPECT_EQ(faceSourceState(*params->boundary_conditions.front()), before);
+      EXPECT_EQ(mesh->label_from_name("free_surface"),
+                registered ? 31 : svmp::INVALID_LABEL);
+    }
+  }
+}
+
+TEST(EquationTranslatorFreeSurfaceFaceContract, DuplicateNamesKeepOrderAndOwnSnapshots)
+{
+  const auto mesh = faceBindingMesh();
+  auto params = faceBindingEquation(
+      faceBindingBc("<Implementation>UnfittedLevelSet</Implementation>"
+                    "<Contact_line_wall_faces>wall_right</Contact_line_wall_faces>") +
+      faceBindingBc("<Implementation>UnfittedLevelSet</Implementation>"
+                    "<Contact_line_wall_faces>wall_left</Contact_line_wall_faces>"));
+  ASSERT_EQ(params->boundary_conditions.size(), 2u);
+  const auto first_before = faceSourceState(*params->boundary_conditions[0]);
+  const auto second_before = faceSourceState(*params->boundary_conditions[1]);
+  auto input = application::translators::EquationTranslator::buildInput(
+      *params, singleMeshMap(mesh));
+  ASSERT_EQ(input.boundary_conditions.size(), 2u);
+  EXPECT_EQ(input.boundary_conditions[0].name, "free_surface");
+  EXPECT_EQ(input.boundary_conditions[1].name, "free_surface");
+  EXPECT_EQ(input.boundary_conditions[0].params.at(faceMarkerKeys[0]).value, "12");
+  EXPECT_EQ(input.boundary_conditions[1].params.at(faceMarkerKeys[0]).value, "11");
+  EXPECT_EQ(faceSourceState(*params->boundary_conditions[0]), first_before);
+  EXPECT_EQ(faceSourceState(*params->boundary_conditions[1]), second_before);
+  EXPECT_EQ(input.mesh, mesh->local_mesh_ptr());
+  input.boundary_conditions[0].params[faceMarkerKeys[0]] = {true, "77"};
+  EXPECT_EQ(faceSourceState(*params->boundary_conditions[0]), first_before);
+  const auto returned_first = faceParamState(input.boundary_conditions[0].params);
+  const auto returned_second = faceParamState(input.boundary_conditions[1].params);
+  params->boundary_conditions[0]->set_extra_parameter_value(faceKeys[0], "missing_wall");
+  params->boundary_conditions[1]->set_extra_parameter_value(faceKeys[0], "wall_right");
+  params.reset();
+  EXPECT_EQ(faceParamState(input.boundary_conditions[0].params), returned_first);
+  EXPECT_EQ(faceParamState(input.boundary_conditions[1].params), returned_second);
+  EXPECT_EQ(mesh->label_from_name("wall_left"), 11);
+  EXPECT_EQ(mesh->label_from_name("wall_right"), 12);
+}
+
+TEST(EquationTranslatorFreeSurfaceFaceContract, FirstBoundaryErrorWinsWithoutSourceMutation)
+{
+  const auto mesh = faceBindingMesh();
+  const auto bad_wall = faceBindingBc(
+      "<Implementation>UnfittedLevelSet</Implementation>"
+      "<Contact_line_wall_faces>missing_a</Contact_line_wall_faces>");
+  const auto bad_bc = faceBindingBc(
+      "<Free_surface_implementation>UnfittedLevelSet</Free_surface_implementation>"
+      "<Contact_line_wall_faces>wall_left</Contact_line_wall_faces>");
+  for (bool wall_first : {true, false}) {
+    auto params = faceBindingEquation(wall_first ? bad_wall + bad_bc : bad_bc + bad_wall);
+    const auto first_before = faceSourceState(*params->boundary_conditions[0]);
+    const auto second_before = faceSourceState(*params->boundary_conditions[1]);
+    expectFaceRuntimeError([&] {
+      (void)application::translators::EquationTranslator::buildInput(
+          *params, singleMeshMap(mesh));
+    }, wall_first ? faceLookupError("missing_a") : std::string(faceBcError));
+    EXPECT_EQ(faceSourceState(*params->boundary_conditions[0]), first_before);
+    EXPECT_EQ(faceSourceState(*params->boundary_conditions[1]), second_before);
+    EXPECT_EQ(mesh->label_from_name("wall_left"), 11);
+    EXPECT_EQ(mesh->label_from_name("wall_right"), 12);
+  }
+}
+
+TEST(EquationTranslatorFreeSurfaceFaceContract, SelfClosingValuesFailDuringXmlParsing)
+{
+  for (const char* key : {"Contact_line_wall_faces", "Implementation"}) {
+    SCOPED_TRACE(key);
+    const auto contents = std::string("<") + key + "/>";
+    expectFaceRuntimeError([&] {
+      (void)faceBindingEquation(faceBindingBc(contents));
+    }, std::string("Unknown Add_BC XML element '") + key + "'.");
+  }
 }

@@ -33,6 +33,7 @@ add_executable(test_application
   ../Core/MeshCollection.cpp
   ../Core/SimulationBuilder.cpp
   ../Translators/EquationTranslator.cpp
+  ../Translators/FreeSurfaceInputAdapter.cpp
   ../Translators/LevelSetConfigurationParsing.cpp
   ../Translators/LevelSetEquationTranslator.cpp
   ../Translators/MeshTranslator.cpp
@@ -83,6 +84,7 @@ if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
     ../Core/MeshCollection.cpp
     ../Core/SimulationBuilder.cpp
     ../Translators/EquationTranslator.cpp
+    ../Translators/FreeSurfaceInputAdapter.cpp
     ../Translators/LevelSetConfigurationParsing.cpp
     ../Translators/LevelSetEquationTranslator.cpp
     ../Translators/MeshTranslator.cpp

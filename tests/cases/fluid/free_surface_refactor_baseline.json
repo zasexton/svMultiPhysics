@@ -1176,6 +1176,317 @@
       },
       "source_tree": "b4e09bf8e7cf8e745b891f2c726c8f9ed024e0c0",
       "state": "ACCEPTED_BOUNDED_SELECTOR_WP4_INTEGRATION_AND_HEADER_PACKAGING"
+    },
+    {
+      "acceptance_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-face-input-candidate-r1/acceptance.json",
+        "sha256": "ff7728fdecdc5b87d18211d8c3b422f6e440beb5c9764aacdd5232c676f1b8ca",
+        "size_bytes": 6678
+      },
+      "id": "r1-application-face-input-adapter-equivalence",
+      "limitations": [
+        "This accepts complete input equivalence, not physical assembly or fullR1.",
+        "Prior owner20 timeout and later source35767 owners retain their own execution identities."
+      ],
+      "outcome": {
+        "exact_reference_candidate_rows": 128,
+        "exact_repeat_rows": 64,
+        "parse_failures_per_process": 2,
+        "passed_cases_per_process": 10,
+        "processes": 2,
+        "returned_rows_per_process": 40,
+        "rows_per_process": 64,
+        "thrown_rows_per_process": 24
+      },
+      "scope": "Six-path Application input adapter extraction preserving legacy alias/order/error/map ownership behavior.",
+      "source_commit": "4f940681dde0201b46092dbc5b9a092ba189fca2",
+      "source_tree": "8f760b2520d7c4933a661e659562ed36ffcd209e",
+      "state": "ACCEPTED_BOUNDED_R1_FACE_INPUT_EQUIVALENCE"
+    },
+    {
+      "acceptance_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-face-input-adapter-build-wp4-r1/owner-acceptance.json",
+        "sha256": "ce572c9abcd1e206858ad953a270c43c192ebf15c8bb6c14e0edfddfc74b36b4",
+        "size_bytes": 3818
+      },
+      "id": "r1-face-input-adapter-combined-application-owners",
+      "limitations": [
+        "CombinedFE24 remains a failed integration gate pending diagnosis.",
+        "Full canonical physical configuration and effective provenance remain open."
+      ],
+      "outcome": {
+        "focused_mpi_rank_participants": 8,
+        "materialized_inputs_verified": 4676,
+        "runtime_skipped": 0,
+        "serial_passed": 384,
+        "suppressed": 0
+      },
+      "owner_counts": {
+        "Application_consensus_2": {
+          "passed_per_rank": [
+            1,
+            1
+          ],
+          "ranks": 2
+        },
+        "Application_consensus_4": {
+          "passed_per_rank": [
+            1,
+            1,
+            1,
+            1
+          ],
+          "ranks": 4
+        },
+        "Application_serial": {
+          "passed_per_rank": [
+            384
+          ],
+          "ranks": 1
+        },
+        "Driver_schedule_drift_2": {
+          "passed_per_rank": [
+            1,
+            1
+          ],
+          "ranks": 2
+        }
+      },
+      "scope": "Same384 serial and exact2/2/4 MPI owner selection on combined dyadic source. Retains zero skip/suppression. Private64-row comparison has separate4f source identity; fullFE integration and fullR1 remain open.",
+      "source_commit": "35767de5a18479e2a26b6b5a93c6b7dd65216297",
+      "source_tree": "8760edc507dc4ce4d79d292f09cd42a61bc16bbd",
+      "state": "ACCEPTED_BOUNDED_COMBINED_R1_APPLICATION_OWNERS"
+    },
+    {
+      "evidence": {
+        "accounting": {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-face-input-fe-integration-r1/accounting.txt",
+          "sha256": "89eeaaf258cd3f1670bdf61b9777345719fa86be0a166faaa1149ae88474bef3",
+          "size_bytes": 83
+        },
+        "owner_results": {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-face-input-fe-integration-r1/owner-results.json",
+          "sha256": "e6de3d70b727c70f8d6109f35ddb1fb990874e7658949aa6ecc9d34b072f9161",
+          "size_bytes": 71215
+        },
+        "source_final": {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-face-input-fe-integration-r1/input-verification-final.json",
+          "sha256": "c2092cb518e9b3edb1e35b63ff10dd0217c5af1b3505a9e527852caa4f77a432",
+          "size_bytes": 356
+        },
+        "step": {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/jobs/r1-face-input-fe-integration-r1-step.json",
+          "sha256": "e04d545a24d2a90ac240a47d23a50d864f8049e4edfce0fd8d61864f215c2126",
+          "size_bytes": 3337
+        },
+        "system_xml": {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-face-input-fe-integration-r1/FE_Systems_Tests/rank-0.xml",
+          "sha256": "c59117046cf4a8ecac115dff841f04faeb2ea433980d009576a8ea19d0a1f153",
+          "size_bytes": 232121
+        },
+        "triage": {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/implementation/.superpowers/sdd/free_surface_architecture_refactoring_plan_20260904/r1-face-input-fe-integration-r1-failure-triage.md",
+          "sha256": "3abf02326294b60fa58136f553ab4a98f9ed67f3e2446dee62cf6de20e7371e8",
+          "size_bytes": 9612
+        }
+      },
+      "failure_case": "MonolithicCoupling.QuadraturePointScopedLocalCondensationAutoLayoutMatchesExplicitOffsetsReference",
+      "id": "r1-face-input-adapter-combined-fe-owners-r1-failed",
+      "limitations": [
+        "The failure remains unresolved; no tolerance, test or production fix is justified by source inspection alone.",
+        "Focused reproduction and previously unrun owner checks do not erase this original full-suite result."
+      ],
+      "owner_counts": {
+        "focused_passed": 3,
+        "forms_passed": 752,
+        "forms_selected": 787,
+        "forms_skipped": 18,
+        "forms_suppressed": 17,
+        "systems_failed": 1,
+        "systems_passed": 584,
+        "systems_selected": 596,
+        "systems_skipped": 1,
+        "systems_suppressed": 10
+      },
+      "scope": "Four targets built; focused3 and Forms passed; fullSystems has one actual numerical failure. Geometry/Assembly were unstarted.",
+      "source_commit": "35767de5a18479e2a26b6b5a93c6b7dd65216297",
+      "source_tree": "8760edc507dc4ce4d79d292f09cd42a61bc16bbd",
+      "state": "FAILED_COMBINED_FE_INTEGRATION"
+    },
+    {
+      "counts": {
+        "assembly_passed": 784,
+        "assembly_prior_skips": 8,
+        "containing_suite_passed_per_process": 26,
+        "current_isolated_passed": 1,
+        "fresh_containing_suite_processes": 2,
+        "fresh_three_case_processes": 2,
+        "geometry_passed": 308,
+        "old_isolated_passed": 1,
+        "retained_failure_inputs": 100,
+        "three_case_passed_per_process": 3
+      },
+      "evidence": {
+        "containing_suite_accounting": {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-fe-monolithic-sequence-r1/accounting.txt",
+          "sha256": "e9542abf653cc1d994b47fb3ffba0beceaf2a73a01fa526eed945f0e0d437bfd",
+          "size_bytes": 43
+        },
+        "retained_original_failure_inputs": {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-face-input-fe-integration-r1/retained-failure-inputs/manifest.json",
+          "sha256": "2c56a6390056c09f57a841712a0c3d27a36bcf47ad6576ae4e73bd40ac7d6184",
+          "size_bytes": 78268
+        },
+        "two_fresh_containing_suite_sequences": {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-fe-monolithic-sequence-r1/report.json",
+          "sha256": "a14881149813f07a1ac5a4f1dd3ee4565c1c8dcc42c646bb799fddb66b8575bf",
+          "size_bytes": 82594
+        },
+        "two_fresh_three_case_sequences": {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-fe-condensation-chain-r1/report.json",
+          "sha256": "cf33d987f6b1304d79501f58b04164bdd7fbe95ed6d03050ff7b9d53c67f94e7",
+          "size_bytes": 76491
+        },
+        "unrun_owners_and_old_current_focus": {
+          "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-fe-failure-diagnostic-r1/report.json",
+          "sha256": "50387c61281a875543902f0757fd79b34fc483e400875eb3ffa70e30913dcf89",
+          "size_bytes": 222527
+        }
+      },
+      "id": "r1-fe-condensation-targeted-diagnostics-r1",
+      "limitations": [
+        "The original full Systems failure remains unresolved and is not replaced by these focused passes.",
+        "No numerical tolerance, production code, original assertion, skip or suppression set changed."
+      ],
+      "scope": "Run the two previously unstarted FE owners and bounded old/current isolated, three-case, and containing-suite diagnostics without source or tolerance changes.",
+      "source_commit": "35767de5a18479e2a26b6b5a93c6b7dd65216297",
+      "source_tree": "8760edc507dc4ce4d79d292f09cd42a61bc16bbd",
+      "state": "TARGETED_DIAGNOSTICS_COMPLETED_ORIGINAL_FAILURE_UNRESOLVED"
+    },
+    {
+      "acceptance_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-face-input-fe-integration-r2/acceptance.json",
+        "sha256": "67d095fce2f8ab9c443af49b5d475e6ca9bbc890a130c3c0f6e34ed1dd503b90",
+        "size_bytes": 8665
+      },
+      "id": "r1-current-combined-fe-owners-r2",
+      "limitations": [
+        "Original FE24 failure remains unresolved and retained; the new pass does not prove its cause or repair.",
+        "Actual snapshot contains four private Physics observer files over clean production29b; these are outside the four FE targets.",
+        "Full Application integration, R1/R2/R3 completion and physical qualification remain separate."
+      ],
+      "outcome": {
+        "focused_passed": 3,
+        "materialized_inputs_verified": 4677,
+        "owner_passed": 2433,
+        "runtime_skipped": 27,
+        "suppressed": 27
+      },
+      "owner_counts": {
+        "FE_Assembly_Tests": {
+          "passed": 784,
+          "selected": 792,
+          "skipped": 8,
+          "suppressed": 0
+        },
+        "FE_Forms_Tests": {
+          "passed": 752,
+          "selected": 787,
+          "skipped": 18,
+          "suppressed": 17
+        },
+        "FE_Geometry_Tests": {
+          "passed": 312,
+          "selected": 312,
+          "skipped": 0,
+          "suppressed": 0
+        },
+        "FE_Systems_Tests": {
+          "passed": 585,
+          "selected": 596,
+          "skipped": 1,
+          "suppressed": 10
+        },
+        "Volume_selector_forms": {
+          "passed": 2,
+          "selected": 2,
+          "skipped": 0,
+          "suppressed": 0
+        },
+        "Volume_selector_scalar": {
+          "passed": 1,
+          "selected": 1,
+          "skipped": 0,
+          "suppressed": 0
+        }
+      },
+      "scope": "Four coherent FE targets and six exact owner groups on current combined dbe7 source, including three focused cases. This establishes current integration at existing gates; the original FE24 numerical failure remains unresolved. No Physics native profile, paired capture, full R1/R2 or physical qualification follows.",
+      "source_commit": "dbe7abf04870022a12e6b7bdf9dda0235cb1b572",
+      "source_tree": "1b7bd621504ede073e501134f60b28de1e21ed56",
+      "state": "ACCEPTED_BOUNDED_CURRENT_COMBINED_FE_OWNERS"
+    },
+    {
+      "acceptance_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-face-input-adapter-build-wp4-r2/acceptance.json",
+        "sha256": "f251124abed40cd8508ab39675809707d4517c5bbf7fcea8e849fde8c09e503e",
+        "size_bytes": 8589
+      },
+      "id": "r1-current-combined-application-owners-r2",
+      "limitations": [
+        "The original 64-row input comparison remains separately accepted on source4f940681.",
+        "The actual dbe7 snapshot includes four private Physics observer files outside Application targets.",
+        "Original failures remain retained; full R1 and physical qualification remain open."
+      ],
+      "outcome": {
+        "groups": 5,
+        "mpi_participant_case_passes": 10,
+        "rank_records": 11,
+        "serial_passed": 385,
+        "skipped": 0,
+        "suppressed": 0,
+        "total_participant_case_passes": 395
+      },
+      "owner_counts": {
+        "Application_consensus_2": {
+          "cases_per_rank": 1,
+          "participant_case_passes": 2,
+          "participants": 2,
+          "skipped": 0,
+          "suppressed": 0
+        },
+        "Application_consensus_4": {
+          "cases_per_rank": 1,
+          "participant_case_passes": 4,
+          "participants": 4,
+          "skipped": 0,
+          "suppressed": 0
+        },
+        "Application_serial": {
+          "cases_per_rank": 385,
+          "participant_case_passes": 385,
+          "participants": 1,
+          "skipped": 0,
+          "suppressed": 0
+        },
+        "Driver_current_candidate_linkage_2": {
+          "cases_per_rank": 1,
+          "participant_case_passes": 2,
+          "participants": 2,
+          "skipped": 0,
+          "suppressed": 0
+        },
+        "Driver_schedule_drift_2": {
+          "cases_per_rank": 1,
+          "participant_case_passes": 2,
+          "participants": 2,
+          "skipped": 0,
+          "suppressed": 0
+        }
+      },
+      "scope": "Coherent Application library and both test targets with five exact owner groups on dbe7. This accepts current integration of the unchanged six-file R1 adapter extraction. The private 64-row comparison retains its original source; original failures, full R1 completion and physical qualification remain separate.",
+      "source_commit": "dbe7abf04870022a12e6b7bdf9dda0235cb1b572",
+      "source_tree": "1b7bd621504ede073e501134f60b28de1e21ed56",
+      "state": "ACCEPTED_BOUNDED_CURRENT_COMBINED_APPLICATION_OWNERS"
     }
   ],
   "captured_references": [
@@ -2331,6 +2642,40 @@
       "source_revision": "0d77e6cd1c350c20334d43021a186753231398a4",
       "source_tree": "26d8e720c6dc5490168ffad54def72c74b174aad",
       "state": "ACCEPTED_BOUNDED_R2_DIRECT_SCALAR_BEFORE_DATA"
+    },
+    {
+      "acceptance_record": {
+        "path": "/scratch/users/zsexton/free-surface-refactor-20260904-905239de/verification/r1-face-input-before-data-r2/acceptance.json",
+        "sha256": "1840f66746115b0a94e159adaefba8cca8b5c828b4abbcb9f93328eb03afb785",
+        "size_bytes": 6603
+      },
+      "comparison": {
+        "floating_tolerance": "none",
+        "normalization": "none",
+        "raw_property_bytes": "exact",
+        "typed_rows": "exact"
+      },
+      "counts": {
+        "case_executions": 20,
+        "exact_complete_repeat_rows": 64,
+        "processes": 2,
+        "records": 128,
+        "returned_rows_per_process": 40,
+        "rows_per_process": 64,
+        "runtime_skips": 0,
+        "suppressed_cases": 0,
+        "thrown_rows_per_process": 24
+      },
+      "id": "r1-application-face-binding-reference",
+      "limitations": [
+        "The existing Application vocabulary is preserved, including the distinct behavior of Physics-only implementation aliases.",
+        "This reference gates the bounded face-input adapter extraction. It does not close R1 or establish physical free-surface qualification.",
+        "Current extraction, coherent Application build, maintained tests and exact candidate comparison remain separate gates."
+      ],
+      "scope": "Application legacy unfitted face-name binding through complete public EquationModuleInput snapshots, exact aliases/errors/order and independent owned parameter snapshots.",
+      "source_revision": "0d77e6cd1c350c20334d43021a186753231398a4",
+      "source_tree": "26d8e720c6dc5490168ffad54def72c74b174aad",
+      "state": "ACCEPTED_R1_FACE_INPUT_BEFORE_DATA"
     }
   ],
   "comparison_contract": {
