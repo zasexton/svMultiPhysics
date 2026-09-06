@@ -19781,6 +19781,152 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
 }
 
 TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       CurrentCandidateTruthTableProducerLinkage)
+{
+  const auto current = gatherFeOrderedSolution(history().u());
+  const auto phi_offset = fieldOffset(phi_);
+  const auto phi_count = fieldCount(phi_);
+  ASSERT_GE(phi_count, 2u);
+  ASSERT_LE(phi_offset + phi_count, current.size());
+  ASSERT_NE(current[phi_offset], current[phi_offset + 1u]);
+
+  const auto cache_before = refresh_cache_;
+  LevelSetMaintenanceGeometryTransaction transaction(
+      sim_, lifecycle_, refresh_cache_, active_requests_);
+  const auto fresh_report = transaction.refresh(
+      *params_, current, /*force_rebuild=*/true);
+  ASSERT_TRUE(fresh_report.refreshed);
+  EXPECT_TRUE(transaction.currentCandidateProducerLinkage(
+      *params_, current, fresh_report).success);
+
+  const auto reused_report = transaction.refresh(*params_, current);
+  EXPECT_FALSE(reused_report.refreshed);
+  EXPECT_TRUE(transaction.currentCandidateProducerLinkage(
+      *params_, current, reused_report).success);
+
+  auto unrelated_field_change = current;
+  unrelated_field_change[fieldOffset(phase_)] += svmp::FE::Real{0.125};
+  EXPECT_TRUE(transaction.currentCandidateProducerLinkage(
+      *params_, unrelated_field_change, reused_report).success);
+
+  auto permuted = current;
+  std::swap(permuted[phi_offset], permuted[phi_offset + 1u]);
+  const auto permuted_linkage = transaction.currentCandidateProducerLinkage(
+      *params_, permuted, reused_report);
+  EXPECT_FALSE(permuted_linkage.success);
+  EXPECT_EQ(permuted_linkage.diagnostic,
+            "current_candidate_producer_linkage_span_signature_mismatch");
+
+  auto rescaled = current;
+  for (std::size_t dof = 0u; dof < phi_count; ++dof) {
+    rescaled[phi_offset + dof] *= svmp::FE::Real{2.0};
+  }
+  const auto rescaled_linkage = transaction.currentCandidateProducerLinkage(
+      *params_, rescaled, reused_report);
+  EXPECT_FALSE(rescaled_linkage.success);
+  EXPECT_EQ(rescaled_linkage.diagnostic,
+            "current_candidate_producer_linkage_span_signature_mismatch");
+
+  const auto rescaled_report = transaction.refresh(*params_, rescaled);
+  ASSERT_TRUE(rescaled_report.refreshed);
+  EXPECT_TRUE(transaction.currentCandidateProducerLinkage(
+      *params_, rescaled, rescaled_report).success);
+  EXPECT_FALSE(transaction.currentCandidateProducerLinkage(
+      *params_, current, rescaled_report).success);
+
+  auto missing_sources = rescaled_report;
+  missing_sources.evaluated_state_source_revisions.clear();
+  const auto missing_source_linkage =
+      transaction.currentCandidateProducerLinkage(
+          *params_, rescaled, missing_sources);
+  EXPECT_FALSE(missing_source_linkage.success);
+  EXPECT_EQ(
+      missing_source_linkage.diagnostic,
+      "current_candidate_producer_linkage_report_source_mapping_mismatch");
+
+  auto stale_source = rescaled_report;
+  ASSERT_FALSE(stale_source.evaluated_state_source_revisions.empty());
+  ++stale_source.evaluated_state_source_revisions.begin()->second;
+  const auto stale_source_linkage =
+      transaction.currentCandidateProducerLinkage(
+          *params_, rescaled, stale_source);
+  EXPECT_FALSE(stale_source_linkage.success);
+  EXPECT_EQ(
+      stale_source_linkage.diagnostic,
+      "current_candidate_producer_linkage_report_source_mapping_mismatch");
+
+  auto stale_topology = rescaled_report;
+  ++stale_topology.topology_key;
+  const auto stale_topology_linkage =
+      transaction.currentCandidateProducerLinkage(
+          *params_, rescaled, stale_topology);
+  EXPECT_FALSE(stale_topology_linkage.success);
+  EXPECT_EQ(
+      stale_topology_linkage.diagnostic,
+      "current_candidate_producer_linkage_report_topology_mismatch");
+
+  auto missing_topology = rescaled_report;
+  missing_topology.topology_key = 0u;
+  const auto missing_topology_linkage =
+      transaction.currentCandidateProducerLinkage(
+          *params_, rescaled, missing_topology);
+  EXPECT_FALSE(missing_topology_linkage.success);
+  EXPECT_EQ(
+      missing_topology_linkage.diagnostic,
+      "current_candidate_producer_linkage_report_topology_mismatch");
+
+  auto stale_policy = rescaled_report;
+  ++stale_policy.request_policy_key;
+  const auto stale_policy_linkage =
+      transaction.currentCandidateProducerLinkage(
+          *params_, rescaled, stale_policy);
+  EXPECT_FALSE(stale_policy_linkage.success);
+  EXPECT_EQ(
+      stale_policy_linkage.diagnostic,
+      "current_candidate_producer_linkage_report_policy_mismatch");
+
+  const auto current_cache = refresh_cache_;
+  refresh_cache_.invalidateGeneratedState();
+  const auto cleared_cache_linkage =
+      transaction.currentCandidateProducerLinkage(
+          *params_, rescaled, rescaled_report);
+  EXPECT_FALSE(cleared_cache_linkage.success);
+  EXPECT_EQ(
+      cleared_cache_linkage.diagnostic,
+      "current_candidate_producer_linkage_cache_signature_unavailable");
+  refresh_cache_ = current_cache;
+
+  mesh_->event_bus().notify(svmp::MeshEvent::NumberingChanged);
+  EXPECT_FALSE(transaction.currentCandidateProducerLinkage(
+      *params_, rescaled, rescaled_report).success);
+
+  ASSERT_NO_THROW(transaction.rollback());
+  ASSERT_EQ(refresh_cache_.last_signature.has_value(),
+            cache_before.last_signature.has_value());
+  ASSERT_EQ(refresh_cache_.last_vector_signature.has_value(),
+            cache_before.last_vector_signature.has_value());
+  EXPECT_EQ(refresh_cache_.evaluated_state_source_revisions,
+            cache_before.evaluated_state_source_revisions);
+  EXPECT_EQ(refresh_cache_.topology_key, cache_before.topology_key);
+  const auto rolled_back_linkage =
+      transaction.currentCandidateProducerLinkage(
+          *params_, current, reused_report);
+  EXPECT_FALSE(rolled_back_linkage.success);
+  EXPECT_EQ(
+      rolled_back_linkage.diagnostic,
+      "current_candidate_producer_linkage_transaction_inactive");
+
+  LevelSetMaintenanceGeometryTransaction restored_transaction(
+      sim_, lifecycle_, refresh_cache_, active_requests_);
+  const auto restored_report =
+      restored_transaction.refresh(*params_, current);
+  EXPECT_FALSE(restored_report.refreshed);
+  EXPECT_TRUE(restored_transaction.currentCandidateProducerLinkage(
+      *params_, current, restored_report).success);
+  ASSERT_NO_THROW(restored_transaction.rollback());
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
        InitializesEveryHistoryLevelAndOnlyItsRateSlices)
 {
   const auto current = gatherFeOrderedSolution(history().u());

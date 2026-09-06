@@ -6747,6 +6747,31 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                           candidate_solution.data(),
                           candidate_solution.size())));
   EXPECT_TRUE(candidate_report.refreshed);
+  EXPECT_TRUE(geometry_transaction.currentCandidateProducerLinkage(
+      *params, candidate_solution, candidate_report).success);
+  auto one_rank_stale_candidate = candidate_solution;
+  if (rank == 0) {
+    const auto changed_index = static_cast<std::size_t>(field_offset);
+    ASSERT_LT(changed_index, one_rank_stale_candidate.size());
+    one_rank_stale_candidate[changed_index] += svmp::FE::Real{0.03125};
+  }
+  const auto one_rank_stale_linkage =
+      geometry_transaction.currentCandidateProducerLinkage(
+          *params, one_rank_stale_candidate, candidate_report);
+  EXPECT_FALSE(one_rank_stale_linkage.success);
+  EXPECT_EQ(
+      one_rank_stale_linkage.diagnostic,
+      "current_candidate_producer_linkage_span_signature_mismatch");
+  EXPECT_TRUE(geometry_transaction.currentCandidateProducerLinkage(
+      *params, candidate_solution, candidate_report).success);
+  const auto refreshed_positive_report = geometry_transaction.refresh(
+      *params,
+      std::span<const svmp::FE::Real>(
+          candidate_solution.data(), candidate_solution.size()),
+      /*force_rebuild=*/true);
+  ASSERT_TRUE(refreshed_positive_report.refreshed);
+  EXPECT_TRUE(geometry_transaction.currentCandidateProducerLinkage(
+      *params, candidate_solution, refreshed_positive_report).success);
   EXPECT_NE(sim.fe_system->cutIntegrationContext(), original_context);
   EXPECT_TRUE(sim.fe_system->cutIntegrationContextTransactionActive());
   EXPECT_TRUE(lifecycle.transactionActive());

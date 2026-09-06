@@ -20960,6 +20960,11 @@ void restorePrescribedFieldCoefficients(
   }
 }
 
+struct CurrentCandidateProducerLinkageResult {
+  bool success{false};
+  std::string diagnostic{"current_candidate_producer_linkage_unavailable"};
+};
+
 class LevelSetMaintenanceGeometryTransaction {
 public:
   LevelSetMaintenanceGeometryTransaction(
@@ -21128,6 +21133,148 @@ public:
   [[nodiscard]] bool publicationStarted() const noexcept
   {
     return publication_started_;
+  }
+
+  [[nodiscard]] CurrentCandidateProducerLinkageResult
+  currentCandidateProducerLinkage(
+      const Parameters& params,
+      std::span<const svmp::FE::Real> candidate,
+      const ActiveCutContextRefreshReport& refresh_report) const
+  {
+    const auto comm = activeFESystemCommunicator(*sim_.fe_system);
+    const auto unavailable = [](const char* diagnostic) {
+      return CurrentCandidateProducerLinkageResult{
+          .success = false,
+          .diagnostic = diagnostic,
+      };
+    };
+    if (globalAnyBool(
+            !active_ || !system_transaction_active_ ||
+                !lifecycle_transaction_active_ || publication_started_ ||
+                !sim_.fe_system->isSetup() ||
+                !sim_.fe_system->cutIntegrationContextTransactionActive() ||
+                !lifecycle_.transactionActive(),
+            comm)) {
+      return unavailable(
+          "current_candidate_producer_linkage_transaction_inactive");
+    }
+
+    std::vector<ActiveCutVolumeRequest> requests;
+    std::optional<ActiveCutContextRefreshSignature> signature;
+    std::exception_ptr local_preparation_failure;
+    try {
+      requests = activeCutVolumeRequests(params);
+      signature = activeCutContextRefreshSignature(
+          sim_, requests, candidate);
+    } catch (...) {
+      local_preparation_failure = std::current_exception();
+    }
+    if (globalAnyBool(local_preparation_failure != nullptr, comm)) {
+      return unavailable(
+          "current_candidate_producer_linkage_preparation_failed");
+    }
+    if (globalAnyBool(requests.empty(), comm)) {
+      return unavailable(
+          "current_candidate_producer_linkage_active_requests_unavailable");
+    }
+    if (globalAnyBool(!signature.has_value(), comm)) {
+      return unavailable(
+          "current_candidate_producer_linkage_span_signature_unavailable");
+    }
+    if (globalAnyBool(!refresh_cache_.last_signature.has_value(), comm)) {
+      return unavailable(
+          "current_candidate_producer_linkage_cache_signature_unavailable");
+    }
+    if (globalAnyBool(
+            *signature != *refresh_cache_.last_signature, comm)) {
+      return unavailable(
+          "current_candidate_producer_linkage_span_signature_mismatch");
+    }
+    bool context_matches_cache = false;
+    std::exception_ptr local_context_failure;
+    try {
+      context_matches_cache = activeCutContextMatchesRefreshCache(
+          *sim_.fe_system,
+          refresh_cache_,
+          comm,
+          "current_candidate_producer_linkage_context_preparation");
+    } catch (...) {
+      local_context_failure = std::current_exception();
+    }
+    if (globalAnyBool(local_context_failure != nullptr, comm)) {
+      return unavailable(
+          "current_candidate_producer_linkage_context_preparation_failed");
+    }
+    if (!context_matches_cache) {
+      return unavailable(
+          "current_candidate_producer_linkage_context_cache_mismatch");
+    }
+    if (globalAnyBool(
+            refresh_report.request_policy_key == 0u ||
+                refresh_report.request_policy_key !=
+                    signature->request_policy_key,
+            comm)) {
+      return unavailable(
+          "current_candidate_producer_linkage_report_policy_mismatch");
+    }
+    if (globalAnyBool(
+            !refresh_cache_.topology_key.has_value() ||
+                refresh_report.topology_key == 0u ||
+                refresh_report.topology_key !=
+                    *refresh_cache_.topology_key,
+            comm)) {
+      return unavailable(
+          "current_candidate_producer_linkage_report_topology_mismatch");
+    }
+    if (globalAnyBool(
+            refresh_report.evaluated_state_source_revisions.empty() ||
+                refresh_report.evaluated_state_source_revisions !=
+                    refresh_cache_.evaluated_state_source_revisions,
+            comm)) {
+      return unavailable(
+          "current_candidate_producer_linkage_report_source_mapping_mismatch");
+    }
+
+    bool local_marker_mapping_matches = true;
+    std::exception_ptr local_marker_failure;
+    try {
+      const auto* context = sim_.fe_system->cutIntegrationContext();
+      local_marker_mapping_matches = context != nullptr;
+      for (const auto& request : requests) {
+        const auto marker =
+            application::core::resolvedActiveCutVolumeInterfaceMarker(
+                *sim_.fe_system, request);
+        if (!marker.has_value()) {
+          local_marker_mapping_matches = false;
+          continue;
+        }
+        const auto source =
+            refresh_report.evaluated_state_source_revisions.find(*marker);
+        if (source ==
+                refresh_report.evaluated_state_source_revisions.end() ||
+            source->second == 0u || context == nullptr ||
+            !context->hasFreeSurfaceGeometrySnapshotForMarker(*marker) ||
+            !context->hasExpectedGeneratedSourceValueRevision(*marker) ||
+            context->expectedGeneratedSourceValueRevision(*marker) !=
+                source->second) {
+          local_marker_mapping_matches = false;
+        }
+      }
+    } catch (...) {
+      local_marker_failure = std::current_exception();
+    }
+    if (globalAnyBool(local_marker_failure != nullptr, comm)) {
+      return unavailable(
+          "current_candidate_producer_linkage_marker_mapping_preparation_failed");
+    }
+    if (globalAnyBool(!local_marker_mapping_matches, comm)) {
+      return unavailable(
+          "current_candidate_producer_linkage_marker_source_mapping_mismatch");
+    }
+    return CurrentCandidateProducerLinkageResult{
+        .success = true,
+        .diagnostic = "current_candidate_producer_linkage_available",
+    };
   }
 
   void commit()
@@ -26361,6 +26508,15 @@ evaluateStaticCapillaryFunctionalCandidate(
   std::vector<svmp::FE::Real> physical_potential_derivative;
   std::vector<svmp::FE::Real> liquid_volume_derivative;
   if (exact_functional_derivatives_requested) {
+    const auto producer_linkage =
+        transaction.currentCandidateProducerLinkage(
+            params, candidate, refresh_report);
+    if (!producer_linkage.success) {
+      evaluation.diagnostic =
+          "candidate_exact_functional_derivative_producer_linkage_failed:" +
+          producer_linkage.diagnostic;
+      return result;
+    }
     svmp::FE::systems::SystemStateView derivative_state;
     derivative_state.time = history.time();
     derivative_state.dt = constraint_dt;
