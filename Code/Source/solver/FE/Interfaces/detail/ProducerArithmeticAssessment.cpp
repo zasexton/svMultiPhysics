@@ -63,6 +63,12 @@ struct DecodedScalar {
     int sign{0};
 };
 
+struct NormalizedScalar {
+    std::uint64_t significand{0u};
+    int exponent{0};
+    int sign{0};
+};
+
 struct MagnitudeBracket {
     std::uint64_t lower{0u};
     std::uint64_t upper{0u};
@@ -320,6 +326,32 @@ void normalize(UInt4352& value) noexcept
     return true;
 }
 
+[[nodiscard]] bool decodeNormalizedScalar(
+    std::uint64_t bits,
+    NormalizedScalar& result) noexcept
+{
+    const auto magnitude_bits = bits & ~kSignMask;
+    if (magnitude_bits > kMaximumFinite) {
+        return false;
+    }
+    const auto exponent = magnitude_bits >> 52u;
+    const auto fraction = magnitude_bits & kFractionMask;
+    if (exponent == 0u) {
+        if (fraction == 0u) {
+            result = {};
+            return true;
+        }
+        const auto width = static_cast<unsigned>(std::bit_width(fraction));
+        result.significand = fraction << (53u - width);
+        result.exponent = static_cast<int>(width) - 1 - 1074;
+    } else {
+        result.significand = (UINT64_C(1) << 52u) | fraction;
+        result.exponent = static_cast<int>(exponent) - 1023;
+    }
+    result.sign = (bits & kSignMask) == 0u ? 1 : -1;
+    return true;
+}
+
 [[nodiscard]] bool validSubmittedScalarBits(std::uint64_t bits) noexcept
 {
     const auto magnitude = bits & ~kSignMask;
@@ -560,6 +592,93 @@ void normalize(UInt4352& value) noexcept
     return {lower, lower + 1u, true};
 }
 
+[[nodiscard]] MagnitudeBracket bracketNormalizedMagnitude(
+    std::uint64_t significand,
+    int exponent,
+    bool has_remainder) noexcept
+{
+    if (significand < (UINT64_C(1) << 52u) ||
+        significand >= (UINT64_C(1) << 53u) ||
+        exponent < -1022 || exponent > 1023) {
+        return {};
+    }
+    const auto biased_exponent =
+        static_cast<std::uint64_t>(exponent + 1023);
+    const auto fraction = significand - (UINT64_C(1) << 52u);
+    const auto lower = (biased_exponent << 52u) | fraction;
+    if (!has_remainder) {
+        return {lower, lower, true};
+    }
+    if (lower == kMaximumFinite) {
+        return {};
+    }
+    return {lower, lower + 1u, true};
+}
+
+[[nodiscard]] MagnitudeBracket bracketQuotient(
+    const NormalizedScalar& numerator,
+    const NormalizedScalar& denominator) noexcept
+{
+    if (numerator.sign == 0) {
+        return {0u, 0u, true};
+    }
+    const unsigned normalization_shift =
+        numerator.significand < denominator.significand ? 1u : 0u;
+    const auto normalized_numerator =
+        numerator.significand << normalization_shift;
+    const auto exponent = numerator.exponent - denominator.exponent -
+                          static_cast<int>(normalization_shift);
+
+    std::uint64_t significand = 1u;
+    std::uint64_t remainder =
+        normalized_numerator - denominator.significand;
+    for (unsigned bit = 0u; bit < 52u; ++bit) {
+        const auto doubled_remainder = remainder << 1u;
+        significand <<= 1u;
+        if (doubled_remainder >= denominator.significand) {
+            ++significand;
+            remainder = doubled_remainder - denominator.significand;
+        } else {
+            remainder = doubled_remainder;
+        }
+    }
+    return bracketNormalizedMagnitude(
+        significand, exponent, remainder != 0u);
+}
+
+[[nodiscard]] MagnitudeBracket bracketSquareRoot(
+    const NormalizedScalar& input) noexcept
+{
+    if (input.sign == 0) {
+        return {0u, 0u, true};
+    }
+    const auto root_exponent = input.exponent >= 0
+                                   ? input.exponent / 2
+                                   : -((-input.exponent + 1) / 2);
+    const auto parity = input.exponent - 2 * root_exponent;
+    const auto radicand = static_cast<__uint128_t>(input.significand)
+                          << static_cast<unsigned>(52 + parity);
+
+    std::uint64_t root = 0u;
+    std::uint64_t remainder = 0u;
+    for (unsigned pair_index = 0u; pair_index < 53u; ++pair_index) {
+        const auto shift = 104u - 2u * pair_index;
+        const auto pair = static_cast<std::uint64_t>(
+            (radicand >> shift) & static_cast<__uint128_t>(3u));
+        const auto expanded_remainder = (remainder << 2u) | pair;
+        const auto trial = (root << 2u) | 1u;
+        root <<= 1u;
+        if (expanded_remainder >= trial) {
+            ++root;
+            remainder = expanded_remainder - trial;
+        } else {
+            remainder = expanded_remainder;
+        }
+    }
+    return bracketNormalizedMagnitude(
+        root, root_exponent, remainder != 0u);
+}
+
 [[nodiscard]] IntervalAssessment unavailable(
     ArithmeticFailure failure) noexcept
 {
@@ -634,39 +753,29 @@ void normalize(UInt4352& value) noexcept
     std::uint64_t numerator_bits,
     std::uint64_t denominator_bits) noexcept
 {
-    DecodedScalar numerator;
-    DecodedScalar denominator;
-    if (!decodeScalar(numerator_bits, numerator) ||
-        !decodeScalar(denominator_bits, denominator)) {
+    NormalizedScalar numerator;
+    NormalizedScalar denominator;
+    if (!decodeNormalizedScalar(numerator_bits, numerator) ||
+        !decodeNormalizedScalar(denominator_bits, denominator)) {
         return unavailable(ArithmeticFailure::InvalidInput);
     }
     if (denominator.sign == 0) {
         return unavailable(ArithmeticFailure::UnresolvedDenominator);
     }
-    SearchTarget target;
-    target.kind = TargetKind::CandidateProduct;
-    if (!shiftLeft(numerator.magnitude, kBinary64Scale, target.fixed)) {
-        return unavailable(ArithmeticFailure::ArithmeticRange);
-    }
-    target.factor = denominator.magnitude;
     const auto sign = numerator.sign == 0
                           ? 0
                           : numerator.sign * denominator.sign;
-    return fromMagnitudeBracket(searchMagnitude(target), sign);
+    return fromMagnitudeBracket(
+        bracketQuotient(numerator, denominator), sign);
 }
 
 [[nodiscard]] IntervalAssessment scalarSqrt(std::uint64_t input_bits) noexcept
 {
-    DecodedScalar input;
-    if (!decodeScalar(input_bits, input) || input.sign < 0) {
+    NormalizedScalar input;
+    if (!decodeNormalizedScalar(input_bits, input) || input.sign < 0) {
         return unavailable(ArithmeticFailure::InvalidInput);
     }
-    SearchTarget target;
-    target.kind = TargetKind::Square;
-    if (!shiftLeft(input.magnitude, kBinary64Scale, target.fixed)) {
-        return unavailable(ArithmeticFailure::ArithmeticRange);
-    }
-    return fromMagnitudeBracket(searchMagnitude(target), input.sign);
+    return fromMagnitudeBracket(bracketSquareRoot(input), input.sign);
 }
 
 [[nodiscard]] std::uint64_t smallerBits(std::uint64_t left,

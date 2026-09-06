@@ -153,6 +153,98 @@ Real normalWithExponentAndFraction(int exponent, std::uint64_t fraction)
                     fraction);
 }
 
+void expectTightDivisionBracket(const IntervalAssessment& result,
+                                Real numerator,
+                                Real denominator)
+{
+    ASSERT_TRUE(result.available());
+    const bool negative = ((bits(numerator) ^ bits(denominator)) &
+                           sign_mask) != 0u;
+    const auto lower_bits = negative
+                                ? bits(result.interval.upper) & ~sign_mask
+                                : bits(result.interval.lower);
+    const auto upper_bits = negative
+                                ? bits(result.interval.lower) & ~sign_mask
+                                : bits(result.interval.upper);
+    if (negative) {
+        EXPECT_NE(bits(result.interval.lower) & sign_mask, 0u);
+        EXPECT_NE(bits(result.interval.upper) & sign_mask, 0u);
+    } else {
+        EXPECT_EQ(bits(result.interval.lower) & sign_mask, 0u);
+        EXPECT_EQ(bits(result.interval.upper) & sign_mask, 0u);
+    }
+
+    const cpp_int exact = independentlyScaledMagnitude(numerator) << 1074u;
+    const cpp_int denominator_integer =
+        independentlyScaledMagnitude(denominator);
+    const cpp_int lower = independentlyScaledMagnitude(fromBits(lower_bits)) *
+                          denominator_integer;
+    const cpp_int upper = independentlyScaledMagnitude(fromBits(upper_bits)) *
+                          denominator_integer;
+    EXPECT_LE(lower, exact);
+    EXPECT_GE(upper, exact);
+    if (lower_bits == upper_bits) {
+        EXPECT_EQ(lower, exact);
+        return;
+    }
+
+    EXPECT_EQ(upper_bits, lower_bits + 1u);
+    EXPECT_LT(lower, exact);
+    EXPECT_GT(upper, exact);
+    for (const auto endpoint : {lower_bits, upper_bits}) {
+        const auto exponent = endpoint >> 52u;
+        EXPECT_NE(exponent, 0u);
+        EXPECT_NE(exponent, UINT64_C(0x7ff));
+    }
+}
+
+void expectDivisionRangeFailure(const IntervalAssessment& result,
+                                Real numerator,
+                                Real denominator)
+{
+    EXPECT_FALSE(result.available());
+    EXPECT_EQ(result.failure, ArithmeticFailure::ArithmeticRange);
+    expectBits(result.interval, 0u, 0u);
+    const cpp_int exact = independentlyScaledMagnitude(numerator) << 1074u;
+    const cpp_int denominator_integer =
+        independentlyScaledMagnitude(denominator);
+    const cpp_int minimum = independentlyScaledMagnitude(
+                                fromBits(UINT64_C(0x0010000000000000))) *
+                            denominator_integer;
+    const cpp_int maximum = independentlyScaledMagnitude(
+                                fromBits(UINT64_C(0x7fefffffffffffff))) *
+                            denominator_integer;
+    EXPECT_TRUE(exact < minimum || exact > maximum);
+}
+
+void expectTightSqrtBracket(const IntervalAssessment& result, Real input)
+{
+    ASSERT_TRUE(result.available());
+    const auto lower_bits = bits(result.interval.lower);
+    const auto upper_bits = bits(result.interval.upper);
+    EXPECT_EQ(lower_bits & sign_mask, 0u);
+    EXPECT_EQ(upper_bits & sign_mask, 0u);
+
+    const cpp_int exact = independentlyScaledMagnitude(input) << 1074u;
+    const cpp_int lower = independentlyScaledMagnitude(result.interval.lower);
+    const cpp_int upper = independentlyScaledMagnitude(result.interval.upper);
+    EXPECT_LE(lower * lower, exact);
+    EXPECT_GE(upper * upper, exact);
+    if (lower_bits == upper_bits) {
+        EXPECT_EQ(lower * lower, exact);
+        return;
+    }
+
+    EXPECT_EQ(upper_bits, lower_bits + 1u);
+    EXPECT_LT(lower * lower, exact);
+    EXPECT_GT(upper * upper, exact);
+    for (const auto endpoint : {lower_bits, upper_bits}) {
+        const auto exponent = endpoint >> 52u;
+        EXPECT_NE(exponent, 0u);
+        EXPECT_NE(exponent, UINT64_C(0x7ff));
+    }
+}
+
 void expectTightDyadicBracket(const IntervalAssessment& result,
                               const cpp_int& exact,
                               unsigned scale,
@@ -610,6 +702,242 @@ TEST(ProducerArithmeticAssessment,
 }
 
 TEST(ProducerArithmeticAssessment,
+     CompactDivisionOracleCoversNormalizedBranchesSignsAndRemainders)
+{
+    const Real one = fromBits(UINT64_C(0x3ff0000000000000));
+    const Real one_successor = fromBits(UINT64_C(0x3ff0000000000001));
+    const Real one_predecessor = fromBits(UINT64_C(0x3fefffffffffffff));
+    const Real maximum = fromBits(UINT64_C(0x7fefffffffffffff));
+    const Real maximum_predecessor = fromBits(UINT64_C(0x7feffffffffffffe));
+
+    for (const auto operands : {
+             std::array<Real, 2>{1.0, 3.0},
+             std::array<Real, 2>{1.0, 5.0},
+             std::array<Real, 2>{3.0, 2.0},
+             std::array<Real, 2>{one_successor, one},
+             std::array<Real, 2>{maximum, maximum},
+             std::array<Real, 2>{one, one_successor},
+             std::array<Real, 2>{one, one_predecessor},
+             std::array<Real, 2>{maximum_predecessor, one_predecessor}}) {
+        const auto result = assessIntervalOperation(
+            IntervalOperation::Divide,
+            {operands[0], operands[0]},
+            {operands[1], operands[1]});
+        expectTightDivisionBracket(result, operands[0], operands[1]);
+    }
+
+    const auto below_one = assessIntervalOperation(
+        IntervalOperation::Divide,
+        {one, one},
+        {one_successor, one_successor});
+    expectBits(below_one.interval,
+               UINT64_C(0x3feffffffffffffe),
+               UINT64_C(0x3fefffffffffffff));
+    const auto above_one = assessIntervalOperation(
+        IntervalOperation::Divide,
+        {one, one},
+        {one_predecessor, one_predecessor});
+    expectBits(above_one.interval,
+               UINT64_C(0x3ff0000000000000),
+               UINT64_C(0x3ff0000000000001));
+    const auto last_finite_tail = assessIntervalOperation(
+        IntervalOperation::Divide,
+        {maximum_predecessor, maximum_predecessor},
+        {one_predecessor, one_predecessor});
+    expectBits(last_finite_tail.interval,
+               UINT64_C(0x7feffffffffffffe),
+               UINT64_C(0x7fefffffffffffff));
+
+    for (const auto operands : {
+             std::array<Real, 2>{-1.0, 5.0},
+             std::array<Real, 2>{1.0, -5.0},
+             std::array<Real, 2>{-1.0, -5.0}}) {
+        const auto result = assessIntervalOperation(
+            IntervalOperation::Divide,
+            {operands[0], operands[0]},
+            {operands[1], operands[1]});
+        expectTightDivisionBracket(result, operands[0], operands[1]);
+    }
+
+    expectPositiveZeroSingleton(assessIntervalOperation(
+        IntervalOperation::Divide, {0.0, 0.0}, {3.0, 3.0}));
+    expectPositiveZeroSingleton(assessIntervalOperation(
+        IntervalOperation::Divide, {-0.0, -0.0}, {-3.0, -3.0}));
+}
+
+TEST(ProducerArithmeticAssessment,
+     CompactDivisionOracleCoversNormalRangeAndIntervalExtrema)
+{
+    const Real minimum = fromBits(UINT64_C(0x0010000000000000));
+    const Real minimum_successor = fromBits(UINT64_C(0x0010000000000001));
+    const Real maximum = fromBits(UINT64_C(0x7fefffffffffffff));
+    const Real one = fromBits(UINT64_C(0x3ff0000000000000));
+    const Real one_successor = fromBits(UINT64_C(0x3ff0000000000001));
+    const Real one_predecessor = fromBits(UINT64_C(0x3fefffffffffffff));
+
+    const auto exact_minimum = assessIntervalOperation(
+        IntervalOperation::Divide,
+        {minimum, minimum},
+        {one, one});
+    expectTightDivisionBracket(exact_minimum, minimum, one);
+    expectBits(exact_minimum.interval,
+               UINT64_C(0x0010000000000000),
+               UINT64_C(0x0010000000000000));
+
+    const auto exact_above_minimum = assessIntervalOperation(
+        IntervalOperation::Divide,
+        {minimum_successor, minimum_successor},
+        {one, one});
+    expectTightDivisionBracket(exact_above_minimum, minimum_successor, one);
+    expectBits(exact_above_minimum.interval,
+               UINT64_C(0x0010000000000001),
+               UINT64_C(0x0010000000000001));
+
+    const auto recovered_minimum = assessIntervalOperation(
+        IntervalOperation::Divide,
+        {minimum_successor, minimum_successor},
+        {one_successor, one_successor});
+    expectTightDivisionBracket(
+        recovered_minimum, minimum_successor, one_successor);
+    expectBits(recovered_minimum.interval,
+               UINT64_C(0x0010000000000000),
+               UINT64_C(0x0010000000000000));
+
+    const auto exact_maximum = assessIntervalOperation(
+        IntervalOperation::Divide,
+        {maximum, maximum},
+        {one, one});
+    expectTightDivisionBracket(exact_maximum, maximum, one);
+    expectBits(exact_maximum.interval,
+               UINT64_C(0x7fefffffffffffff),
+               UINT64_C(0x7fefffffffffffff));
+
+    const auto below_minimum = assessIntervalOperation(
+        IntervalOperation::Divide,
+        {minimum, minimum},
+        {one_successor, one_successor});
+    expectDivisionRangeFailure(below_minimum, minimum, one_successor);
+    const auto above_maximum = assessIntervalOperation(
+        IntervalOperation::Divide,
+        {maximum, maximum},
+        {one_predecessor, one_predecessor});
+    expectDivisionRangeFailure(above_maximum, maximum, one_predecessor);
+
+    const auto positive_extrema = assessIntervalOperation(
+        IntervalOperation::Divide, {1.0, 3.0}, {2.0, 4.0});
+    ASSERT_TRUE(positive_extrema.available());
+    expectBits(positive_extrema.interval,
+               UINT64_C(0x3fd0000000000000),
+               UINT64_C(0x3ff8000000000000));
+    const auto negative_extrema = assessIntervalOperation(
+        IntervalOperation::Divide, {1.0, 3.0}, {-4.0, -2.0});
+    ASSERT_TRUE(negative_extrema.available());
+    expectBits(negative_extrema.interval,
+               UINT64_C(0xbff8000000000000),
+               UINT64_C(0xbfd0000000000000));
+
+    for (const ArithmeticInterval denominator : {
+             ArithmeticInterval{-1.0, 1.0},
+             ArithmeticInterval{0.0, 0.0},
+             ArithmeticInterval{-0.0, -0.0}}) {
+        const auto result = assessIntervalOperation(
+            IntervalOperation::Divide, {1.0, 1.0}, denominator);
+        EXPECT_FALSE(result.available());
+        EXPECT_EQ(result.failure, ArithmeticFailure::UnresolvedDenominator);
+        expectBits(result.interval, 0u, 0u);
+    }
+
+    const Real infinity = fromBits(UINT64_C(0x7ff0000000000000));
+    const Real subnormal = fromBits(UINT64_C(0x0000000000000001));
+    for (const Real invalid : {infinity, subnormal}) {
+        const auto result = assessIntervalOperation(
+            IntervalOperation::Divide,
+            {invalid, invalid},
+            {0.0, 0.0});
+        EXPECT_FALSE(result.available());
+        EXPECT_EQ(result.failure, ArithmeticFailure::InvalidInput);
+        expectBits(result.interval, 0u, 0u);
+    }
+}
+
+TEST(ProducerArithmeticAssessment,
+     CompactSqrtOracleCoversParityResidualsAndBinadeCarry)
+{
+    const Real minimum = fromBits(UINT64_C(0x0010000000000000));
+    const Real maximum = fromBits(UINT64_C(0x7fefffffffffffff));
+    const Real one_predecessor = fromBits(UINT64_C(0x3fefffffffffffff));
+    const Real one_successor = fromBits(UINT64_C(0x3ff0000000000001));
+    const Real four_predecessor = fromBits(UINT64_C(0x400fffffffffffff));
+    const Real four_successor = fromBits(UINT64_C(0x4010000000000001));
+    const Real negative_odd_exponent =
+        normalWithExponentAndFraction(-1021, 0u);
+
+    for (const Real input : {
+             1.0,
+             4.0,
+             2.25,
+             2.0,
+             minimum,
+             negative_odd_exponent,
+             one_predecessor,
+             one_successor,
+             four_predecessor,
+             four_successor,
+             maximum}) {
+        const auto result = assessIntervalSqrt({input, input});
+        expectTightSqrtBracket(result, input);
+    }
+
+    expectBits(assessIntervalSqrt({1.0, 1.0}).interval,
+               UINT64_C(0x3ff0000000000000),
+               UINT64_C(0x3ff0000000000000));
+    expectBits(assessIntervalSqrt({4.0, 4.0}).interval,
+               UINT64_C(0x4000000000000000),
+               UINT64_C(0x4000000000000000));
+    expectBits(assessIntervalSqrt({2.25, 2.25}).interval,
+               UINT64_C(0x3ff8000000000000),
+               UINT64_C(0x3ff8000000000000));
+    expectBits(assessIntervalSqrt({minimum, minimum}).interval,
+               UINT64_C(0x2000000000000000),
+               UINT64_C(0x2000000000000000));
+    expectBits(assessIntervalSqrt({maximum, maximum}).interval,
+               UINT64_C(0x5fefffffffffffff),
+               UINT64_C(0x5ff0000000000000));
+}
+
+TEST(ProducerArithmeticAssessment,
+     CompactSqrtOracleCoversNormalBoundariesValidationAndIntervalExtrema)
+{
+    const Real minimum = fromBits(UINT64_C(0x0010000000000000));
+    const Real maximum = fromBits(UINT64_C(0x7fefffffffffffff));
+    const auto extrema = assessIntervalSqrt({minimum, maximum});
+    ASSERT_TRUE(extrema.available());
+    expectBits(extrema.interval,
+               UINT64_C(0x2000000000000000),
+               UINT64_C(0x5ff0000000000000));
+    expectTightSqrtBracket(
+        assessIntervalSqrt({minimum, minimum}), minimum);
+    expectTightSqrtBracket(
+        assessIntervalSqrt({maximum, maximum}), maximum);
+
+    expectPositiveZeroSingleton(assessIntervalSqrt({0.0, 0.0}));
+    expectPositiveZeroSingleton(assessIntervalSqrt({-0.0, 0.0}));
+
+    const Real subnormal = fromBits(UINT64_C(0x0000000000000001));
+    const Real infinity = fromBits(UINT64_C(0x7ff0000000000000));
+    for (const ArithmeticInterval input : {
+             ArithmeticInterval{-1.0, -1.0},
+             ArithmeticInterval{2.0, 1.0},
+             ArithmeticInterval{subnormal, subnormal},
+             ArithmeticInterval{infinity, infinity}}) {
+        const auto result = assessIntervalSqrt(input);
+        EXPECT_FALSE(result.available());
+        EXPECT_EQ(result.failure, ArithmeticFailure::InvalidInput);
+        expectBits(result.interval, 0u, 0u);
+    }
+}
+
+TEST(ProducerArithmeticAssessment,
      NonDyadicForwardAndReverseRootsResolveTheSameRemovedOrigin)
 {
     const Real forward_emitted = 0.2;
@@ -947,6 +1275,25 @@ TEST(ProducerArithmeticAssessment,
         {2.0, 2.0});
     const auto after_range_rejection = readHardwareState();
     const int errno_after_range_rejection = errno;
+    const Real minimum = fromBits(UINT64_C(0x0010000000000000));
+    const auto before_division_range = readHardwareState();
+    const auto division_range = assessIntervalOperation(
+        IntervalOperation::Divide,
+        {minimum, minimum},
+        {2.0, 2.0});
+    const auto after_division_range = readHardwareState();
+    const int errno_after_division_range = errno;
+    const auto before_denominator_rejection = readHardwareState();
+    const auto denominator_rejection = assessIntervalOperation(
+        IntervalOperation::Divide,
+        {0.0, 0.0},
+        {-0.0, -0.0});
+    const auto after_denominator_rejection = readHardwareState();
+    const int errno_after_denominator_rejection = errno;
+    const auto before_zero_root = readHardwareState();
+    const auto zero_root = assessIntervalSqrt({-0.0, -0.0});
+    const auto after_zero_root = readHardwareState();
+    const int errno_after_zero_root = errno;
     ASSERT_EQ(fesetenv(&saved_environment), 0);
     errno = saved_errno;
 
@@ -958,13 +1305,27 @@ TEST(ProducerArithmeticAssessment,
     EXPECT_EQ(rejection.failure, ArithmeticFailure::InvalidInput);
     EXPECT_FALSE(range_rejection.available());
     EXPECT_EQ(range_rejection.failure, ArithmeticFailure::ArithmeticRange);
+    EXPECT_FALSE(division_range.available());
+    EXPECT_EQ(division_range.failure, ArithmeticFailure::ArithmeticRange);
+    EXPECT_FALSE(denominator_rejection.available());
+    EXPECT_EQ(denominator_rejection.failure,
+              ArithmeticFailure::UnresolvedDenominator);
+    expectPositiveZeroSingleton(zero_root);
     expectHardwareStateEqual(after_success, before_success);
     expectHardwareStateEqual(after_rejection, before_rejection);
     expectHardwareStateEqual(after_range_rejection,
                              before_range_rejection);
+    expectHardwareStateEqual(after_division_range,
+                             before_division_range);
+    expectHardwareStateEqual(after_denominator_rejection,
+                             before_denominator_rejection);
+    expectHardwareStateEqual(after_zero_root, before_zero_root);
     EXPECT_EQ(errno_after_success, EDOM);
     EXPECT_EQ(errno_after_rejection, EDOM);
     EXPECT_EQ(errno_after_range_rejection, EDOM);
+    EXPECT_EQ(errno_after_division_range, EDOM);
+    EXPECT_EQ(errno_after_denominator_rejection, EDOM);
+    EXPECT_EQ(errno_after_zero_root, EDOM);
 }
 
 TEST(ProducerArithmeticAssessment,
