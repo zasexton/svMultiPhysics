@@ -648,7 +648,15 @@ authoritativeFullCellSide(const LevelSetInterfaceDomain& domain,
            active.ownership_revision == interface.ownership_revision &&
            active.ownership_revision == contact.ownership_revision &&
            active.quadrature_policy_key == interface.quadrature_policy_key &&
-           active.quadrature_policy_key == contact.quadrature_policy_key;
+           active.quadrature_policy_key == contact.quadrature_policy_key &&
+           active.coefficient_classification_policy ==
+               interface.coefficient_classification_policy &&
+           active.coefficient_classification_policy ==
+               contact.coefficient_classification_policy &&
+           active.resolvedCoefficientClassificationBand() ==
+               interface.resolvedCoefficientClassificationBand() &&
+           active.resolvedCoefficientClassificationBand() ==
+               contact.resolvedCoefficientClassificationBand();
 }
 
 struct RepresentedImplicitProvenance {
@@ -809,6 +817,8 @@ bool GeneratedActiveBoundaryRequest::valid() const noexcept
            std::isfinite(isovalue) &&
            std::isfinite(tolerance) &&
            tolerance > Real{0.0} && quadrature_order >= 0 &&
+           validLevelSetCoefficientClassificationPolicy(
+               coefficient_classification_policy) &&
            frame == geometry::CutGeometryFrame::Reference &&
            (source.value_revision == 0u ||
             source_value_revision == 0u ||
@@ -876,6 +886,10 @@ GeneratedActiveBoundaryFragment::toCutQuadratureRule(
     rule.provenance.marker = active_boundary_marker;
     rule.provenance.cut_topology_revision = stable_id;
     rule.provenance.predicate_policy_key = request.quadrature_policy_key;
+    rule.provenance.coefficient_classification_policy =
+        request.coefficient_classification_policy;
+    rule.provenance.coefficient_classification_band =
+        request.resolvedCoefficientClassificationBand();
     rule.provenance.source_value_revision = request.source_value_revision;
     if (source_interface_stable_ids.size() == 1u) {
         rule.provenance.source_stable_id = source_interface_stable_ids.front();
@@ -1041,6 +1055,8 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
     }
     GeneratedActiveBoundaryDomain domain(std::move(request));
     const auto& req = domain.request();
+    const Real coefficient_band =
+        req.resolvedCoefficientClassificationBand();
 
     mesh.forEachBoundaryFace(
         req.boundary_marker,
@@ -1090,7 +1106,7 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
                     throw std::invalid_argument(
                         "sharp active-boundary clipping found a non-finite level-set value");
                 }
-                if (std::abs(value) <= req.tolerance) {
+                if (std::abs(value) <= coefficient_band) {
                     observation.unresolved();
                     value = Real{0.0};
                 }
@@ -1099,7 +1115,8 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
                     reference_nodes[corner], value, PointOrigin::corner(corner),
                     OriginalCornerData{
                         reference_nodes[corner], original_value, req.isovalue,
-                        req.tolerance, actual_signed, actual_signed != value,
+                        coefficient_band, actual_signed,
+                        actual_signed != value,
                         true},
                     detail::assessOriginalCorner(reference_nodes[corner],
                                                  reference_nodes[corner])});

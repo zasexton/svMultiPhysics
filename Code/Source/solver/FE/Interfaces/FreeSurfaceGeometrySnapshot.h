@@ -85,6 +85,9 @@ struct FreeSurfaceGeometryRevision {
     std::uint64_t ownership_revision{0};
     std::uint64_t numbering_revision{0};
     std::uint64_t quadrature_policy_key{0};
+    LevelSetCoefficientClassificationPolicy coefficient_classification_policy{
+        LevelSetCoefficientClassificationPolicy::LegacyAbsoluteBand};
+    Real coefficient_classification_band{1.0e-12};
     std::uint64_t snapshot_revision_key{0};
 
     [[nodiscard]] bool complete() const noexcept;

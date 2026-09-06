@@ -55,6 +55,24 @@ void mix(std::uint64_t& hash, Real value) noexcept
     mix(hash, canonicalRealBits(value));
 }
 
+void mixCoefficientClassificationPolicy(
+    std::uint64_t& hash,
+    LevelSetCoefficientClassificationPolicy policy,
+    Real band) noexcept
+{
+    // Preserve the historical identity of the implicit default.  Every
+    // opt-in policy and every nondefault legacy band receives an explicit,
+    // tagged content component.
+    if (policy ==
+            LevelSetCoefficientClassificationPolicy::LegacyAbsoluteBand &&
+        band == Real{1.0e-12}) {
+        return;
+    }
+    mix(hash, std::uint64_t{0x4c53434c41535331ull}); // "LSCLASS1"
+    mix(hash, static_cast<std::uint64_t>(policy));
+    mix(hash, band);
+}
+
 [[nodiscard]] std::uint64_t stringDigest(std::string_view value) noexcept
 {
     std::uint64_t hash = kHashOffset;
@@ -232,6 +250,12 @@ void mixRuleContent(std::uint64_t& hash,
     mix(hash, static_cast<std::uint64_t>(
                   record.reference_rule.provenance.owner_rank + 1));
     mix(hash, record.reference_rule.provenance.cut_topology_id);
+    mixCoefficientClassificationPolicy(
+        hash,
+        record.reference_rule.provenance
+            .coefficient_classification_policy,
+        record.reference_rule.provenance
+            .coefficient_classification_band);
     mix(hash,
         record.reference_rule.provenance
             .selected_implicit_quadrature_backend);
@@ -436,6 +460,10 @@ void mixRuleContent(std::uint64_t& hash,
     revision.ownership_revision = request.ownership_revision;
     revision.numbering_revision = mesh.numberingRevision();
     revision.quadrature_policy_key = request.quadrature_policy_key;
+    revision.coefficient_classification_policy =
+        request.coefficient_classification_policy;
+    revision.coefficient_classification_band =
+        request.resolvedCoefficientClassificationBand();
     return revision;
 }
 
@@ -452,8 +480,8 @@ void canonicalizeDistributedRevision(
             "distributed free-surface snapshot requires a revision collective");
     }
 
-    constexpr std::size_t common_value_count = 11u;
-    constexpr std::size_t value_count = 15u;
+    constexpr std::size_t common_value_count = 13u;
+    constexpr std::size_t value_count = 17u;
     const std::array<std::uint64_t, value_count> local_values{{
         stringDigest(revision.source_id),
         stringDigest(revision.domain_id),
@@ -462,6 +490,9 @@ void canonicalizeDistributedRevision(
         revision.source_layout_revision,
         revision.source_value_revision,
         revision.quadrature_policy_key,
+        static_cast<std::uint64_t>(
+            revision.coefficient_classification_policy),
+        canonicalRealBits(revision.coefficient_classification_band),
         canonicalRealBits(policy.tolerance),
         canonicalRealBits(policy.minimum_retained_volume_fraction),
         static_cast<std::uint64_t>(
@@ -506,10 +537,10 @@ void canonicalizeDistributedRevision(
         }
         return hash == 0u ? std::uint64_t{1u} : hash;
     };
-    revision.mesh_geometry_revision = distributed_key(11u, 1u);
-    revision.mesh_topology_revision = distributed_key(12u, 2u);
-    revision.ownership_revision = distributed_key(13u, 3u);
-    revision.numbering_revision = distributed_key(14u, 4u);
+    revision.mesh_geometry_revision = distributed_key(13u, 1u);
+    revision.mesh_topology_revision = distributed_key(14u, 2u);
+    revision.ownership_revision = distributed_key(15u, 3u);
+    revision.numbering_revision = distributed_key(16u, 4u);
 }
 
 void requireContactRevision(
@@ -525,7 +556,11 @@ void requireContactRevision(
         request.mesh_geometry_revision != revision.mesh_geometry_revision ||
         request.mesh_topology_revision != revision.mesh_topology_revision ||
         request.ownership_revision != revision.ownership_revision ||
-        request.quadrature_policy_key != revision.quadrature_policy_key) {
+        request.quadrature_policy_key != revision.quadrature_policy_key ||
+        request.coefficient_classification_policy !=
+            revision.coefficient_classification_policy ||
+        request.resolvedCoefficientClassificationBand() !=
+            revision.coefficient_classification_band) {
         throw std::invalid_argument(
             "contact domain does not match the free-surface snapshot revision");
     }
@@ -544,7 +579,11 @@ void requireActiveBoundaryRevision(
         request.mesh_geometry_revision != revision.mesh_geometry_revision ||
         request.mesh_topology_revision != revision.mesh_topology_revision ||
         request.ownership_revision != revision.ownership_revision ||
-        request.quadrature_policy_key != revision.quadrature_policy_key) {
+        request.quadrature_policy_key != revision.quadrature_policy_key ||
+        request.coefficient_classification_policy !=
+            revision.coefficient_classification_policy ||
+        request.resolvedCoefficientClassificationBand() !=
+            revision.coefficient_classification_band) {
         throw std::invalid_argument(
             "active-boundary domain does not match the free-surface snapshot revision");
     }
@@ -1117,7 +1156,11 @@ void validateRule(
             "retained free-surface rule has incomplete or ambiguous represented-backend provenance");
     }
     if (rule.provenance.source_value_revision != revision.source_value_revision ||
-        rule.provenance.predicate_policy_key != revision.quadrature_policy_key) {
+        rule.provenance.predicate_policy_key != revision.quadrature_policy_key ||
+        rule.provenance.coefficient_classification_policy !=
+            revision.coefficient_classification_policy ||
+        rule.provenance.coefficient_classification_band !=
+            revision.coefficient_classification_band) {
         ++ledger.stale_revision_count;
         throw std::invalid_argument(
             "retained free-surface rule has a stale source revision");
@@ -2213,21 +2256,24 @@ void requireCompleteAuthoritativeCutFamilies(
         auto& state = volume_state_by_parent[fragment.parent_cell];
         ++state.fragment_count;
         const Real tolerance = interface_domain.request().tolerance;
+        const Real coefficient_band =
+            interface_domain.request()
+                .resolvedCoefficientClassificationBand();
         const bool is_edge_aligned =
             fragment.degeneracy == CutInterfaceDegeneracy::EdgeTouch;
         state.has_aligned_negative_fragment =
             state.has_aligned_negative_fragment ||
             (is_edge_aligned &&
-             fragment.min_level_set_value < -tolerance &&
-             fragment.max_level_set_value <= tolerance &&
+             fragment.min_level_set_value < -coefficient_band &&
+             fragment.max_level_set_value <= coefficient_band &&
              std::abs(fragment.negative_volume_fraction - Real{1.0}) <=
                  tolerance &&
              std::abs(fragment.positive_volume_fraction) <= tolerance);
         state.has_aligned_positive_fragment =
             state.has_aligned_positive_fragment ||
             (is_edge_aligned &&
-             fragment.max_level_set_value > tolerance &&
-             fragment.min_level_set_value >= -tolerance &&
+             fragment.max_level_set_value > coefficient_band &&
+             fragment.min_level_set_value >= -coefficient_band &&
              std::abs(fragment.positive_volume_fraction - Real{1.0}) <=
                  tolerance &&
              std::abs(fragment.negative_volume_fraction) <= tolerance);
@@ -2659,6 +2705,9 @@ void validateVolumePartition(
     mix(hash, revision.ownership_revision);
     mix(hash, revision.numbering_revision);
     mix(hash, revision.quadrature_policy_key);
+    mixCoefficientClassificationPolicy(
+        hash, revision.coefficient_classification_policy,
+        revision.coefficient_classification_band);
     mix(hash, policy.tolerance);
     mix(hash, policy.minimum_retained_volume_fraction);
     mix(hash, static_cast<std::uint64_t>(
@@ -2703,7 +2752,11 @@ bool FreeSurfaceGeometryRevision::sameSourceState(
            mesh_topology_revision == other.mesh_topology_revision &&
            ownership_revision == other.ownership_revision &&
            numbering_revision == other.numbering_revision &&
-           quadrature_policy_key == other.quadrature_policy_key;
+           quadrature_policy_key == other.quadrature_policy_key &&
+           coefficient_classification_policy ==
+               other.coefficient_classification_policy &&
+           coefficient_classification_band ==
+               other.coefficient_classification_band;
 }
 
 FreeSurfaceGeometrySnapshot::FreeSurfaceGeometrySnapshot(

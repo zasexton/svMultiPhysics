@@ -343,6 +343,10 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
     rule.provenance.marker = request.resolvedIntersectionMarker();
     rule.provenance.cut_topology_revision = fragment.stable_id;
     rule.provenance.predicate_policy_key = request.quadrature_policy_key;
+    rule.provenance.coefficient_classification_policy =
+        request.coefficient_classification_policy;
+    rule.provenance.coefficient_classification_band =
+        request.resolvedCoefficientClassificationBand();
     rule.provenance.source_value_revision =
         request.source_value_revision != 0u ? request.source_value_revision
                                             : request.source.value_revision;
@@ -549,6 +553,8 @@ bool GeneratedInterfaceBoundaryIntersectionRequest::valid() const noexcept
     return source.valid() && interface_marker >= 0 && boundary_marker >= 0 &&
            std::isfinite(isovalue) && std::isfinite(tolerance) &&
            tolerance > Real{0.0} && quadrature_order >= 0 &&
+           validLevelSetCoefficientClassificationPolicy(
+               coefficient_classification_policy) &&
            frame == geometry::CutGeometryFrame::Reference;
 }
 
@@ -741,6 +747,14 @@ buildGeneratedInterfaceBoundaryIntersectionDomain(
     if (!request.valid()) {
         throw std::invalid_argument(
             "generated interface-boundary intersection request is invalid");
+    }
+    const auto& interface_request = interface_domain.request();
+    if (request.coefficient_classification_policy !=
+            interface_request.coefficient_classification_policy ||
+        request.resolvedCoefficientClassificationBand() !=
+            interface_request.resolvedCoefficientClassificationBand()) {
+        throw std::invalid_argument(
+            "generated contact geometry and source interface do not share one coefficient-classification policy");
     }
     GeneratedInterfaceBoundaryIntersectionDomain domain(std::move(request));
     const auto& req = domain.request();
@@ -1010,6 +1024,10 @@ validateGeneratedInterfaceBoundaryProvenance(
             interface_request.ownership_revision ||
         contact_request.quadrature_policy_key !=
             interface_request.quadrature_policy_key ||
+        contact_request.coefficient_classification_policy !=
+            interface_request.coefficient_classification_policy ||
+        contact_request.resolvedCoefficientClassificationBand() !=
+            interface_request.resolvedCoefficientClassificationBand() ||
         contact_request.source_value_revision !=
             interface_request.source.value_revision) {
         ++summary.stale_revision_count;

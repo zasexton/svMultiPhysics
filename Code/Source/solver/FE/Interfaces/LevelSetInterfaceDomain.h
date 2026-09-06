@@ -62,6 +62,30 @@ enum class CutInterfaceDegeneracy : std::uint8_t {
     SmallFragment
 };
 
+enum class LevelSetCoefficientClassificationPolicy : std::uint8_t {
+    LegacyAbsoluteBand,
+    ExactRepresentedZero
+};
+
+[[nodiscard]] constexpr bool validLevelSetCoefficientClassificationPolicy(
+    LevelSetCoefficientClassificationPolicy policy) noexcept {
+    return policy ==
+               LevelSetCoefficientClassificationPolicy::LegacyAbsoluteBand ||
+           policy ==
+               LevelSetCoefficientClassificationPolicy::ExactRepresentedZero;
+}
+
+[[nodiscard]] constexpr Real resolveLevelSetCoefficientClassificationBand(
+    LevelSetCoefficientClassificationPolicy policy,
+    Real legacy_absolute_band) noexcept
+{
+    return policy ==
+                   LevelSetCoefficientClassificationPolicy::
+                       ExactRepresentedZero
+               ? Real{0.0}
+               : legacy_absolute_band;
+}
+
 struct LevelSetInterfaceSource {
     CutInterfaceSourceKind kind{CutInterfaceSourceKind::Field};
     FieldId field_id{INVALID_FIELD_ID};
@@ -149,6 +173,8 @@ struct CutInterfaceDomainRequest {
     int interface_marker{-1};
     Real isovalue{0.0};
     Real tolerance{1.0e-12};
+    LevelSetCoefficientClassificationPolicy coefficient_classification_policy{
+        LevelSetCoefficientClassificationPolicy::LegacyAbsoluteBand};
     int quadrature_order{1};
     int interface_quadrature_order{-1};
     int volume_quadrature_order{-1};
@@ -188,11 +214,25 @@ struct CutInterfaceDomainRequest {
                                             : quadrature_order;
     }
 
+    [[nodiscard]] Real resolvedCoefficientClassificationBand() const noexcept {
+        return resolveLevelSetCoefficientClassificationBand(
+            coefficient_classification_policy, tolerance);
+    }
+
     [[nodiscard]] bool valid() const noexcept {
         return interface_marker >= 0 && source.valid() &&
                std::isfinite(isovalue) &&
                std::isfinite(tolerance) &&
                tolerance > Real{0.0} &&
+               validLevelSetCoefficientClassificationPolicy(
+                   coefficient_classification_policy) &&
+               (coefficient_classification_policy !=
+                    LevelSetCoefficientClassificationPolicy::
+                        ExactRepresentedZero ||
+                ((implicit_geometry_mode.empty() ||
+                  implicit_geometry_mode == "LinearCorner") &&
+                 (implicit_quadrature_backend.empty() ||
+                  implicit_quadrature_backend == "LinearCorner"))) &&
                quadrature_order >= 0 &&
                resolvedInterfaceQuadratureOrder() >= 0 &&
                resolvedVolumeQuadratureOrder() >= 0 &&
@@ -473,6 +513,10 @@ struct CutInterfaceVolumeRegion {
         rule.provenance.cut_topology_revision = stable_id;
         rule.provenance.source_stable_id = stable_id;
         rule.provenance.predicate_policy_key = request.quadrature_policy_key;
+        rule.provenance.coefficient_classification_policy =
+            request.coefficient_classification_policy;
+        rule.provenance.coefficient_classification_band =
+            request.resolvedCoefficientClassificationBand();
         rule.provenance.source_value_revision = request.source.value_revision;
         rule.provenance.construction = rule.policy.kind;
         rule.provenance.frame = request.frame;
@@ -695,6 +739,10 @@ struct CutInterfaceFragment {
         rule.provenance.cut_topology_revision = stable_id;
         rule.provenance.source_stable_id = stable_id;
         rule.provenance.predicate_policy_key = request.quadrature_policy_key;
+        rule.provenance.coefficient_classification_policy =
+            request.coefficient_classification_policy;
+        rule.provenance.coefficient_classification_band =
+            request.resolvedCoefficientClassificationBand();
         rule.provenance.source_value_revision = request.source.value_revision;
         rule.provenance.construction = rule.policy.kind;
         rule.provenance.frame = request.frame;

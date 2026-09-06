@@ -22,6 +22,9 @@
 
 namespace svmp {
 namespace FE {
+namespace interfaces {
+enum class LevelSetCoefficientClassificationPolicy : std::uint8_t;
+}
 namespace geometry {
 
 enum class CutIntegrationSide : std::uint8_t {
@@ -78,6 +81,9 @@ struct CutQuadratureProvenance {
     int marker{-1};
     std::uint64_t cut_topology_revision{0};
     std::uint64_t predicate_policy_key{0};
+    interfaces::LevelSetCoefficientClassificationPolicy
+        coefficient_classification_policy{};
+    Real coefficient_classification_band{0.0};
     std::uint64_t source_value_revision{0};
     // Immediate generated-geometry parent, when this rule is derived from
     // another retained fragment (for example a contact rule from a surface).

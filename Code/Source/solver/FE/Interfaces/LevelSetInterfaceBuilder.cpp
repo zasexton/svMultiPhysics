@@ -251,7 +251,8 @@ struct SignedPoint {
     observation.phi_a = input.level_set_values[i];
     observation.phi_b = input.level_set_values[j];
     observation.isovalue = request.isovalue;
-    observation.signed_band = request.tolerance;
+    observation.signed_band =
+        request.resolvedCoefficientClassificationBand();
     observation.actual_signed_a = actual_signed_values[i];
     observation.actual_signed_b = actual_signed_values[j];
     observation.actual_denominator = denominator;
@@ -896,17 +897,19 @@ void orderPolygonPoints(StrictConstructionObservation& observation, std::vector<
     const std::vector<Real>& signed_values,
     std::size_t count,
     geometry::CutIntegrationSide side,
-    Real tolerance,
+    Real coefficient_band,
     const std::vector<Real>* original_values = nullptr,
     const std::vector<Real>* actual_signed_values = nullptr,
     Real isovalue = Real{0.0})
 {
     const auto polygon = makeSignedPolygon(
         points, signed_values, count, original_values, actual_signed_values,
-        isovalue, tolerance);
+        isovalue, coefficient_band);
     return side == geometry::CutIntegrationSide::Negative
-               ? clipPolygonToNegativeLevelSet(observation, polygon, tolerance)
-               : clipPolygonToPositiveLevelSet(observation, polygon, tolerance);
+               ? clipPolygonToNegativeLevelSet(observation, polygon,
+                                               coefficient_band)
+               : clipPolygonToPositiveLevelSet(observation, polygon,
+                                               coefficient_band);
 }
 
 [[nodiscard]] CutInterfaceReferenceSimplex makeReferenceSimplex(
@@ -1032,12 +1035,14 @@ referenceTrianglesFromPolygon(StrictConstructionObservation& observation, const 
     const std::vector<Real>& signed_values,
     std::size_t count,
     geometry::CutIntegrationSide side,
-    Real tolerance,
+    Real coefficient_band,
+    Real spatial_tolerance,
     int requested_order)
 {
     return polygonQuadrature2D(observation,
-        cutSidePolygon2D(observation, points, signed_values, count, side, tolerance),
-        tolerance,
+        cutSidePolygon2D(observation, points, signed_values, count, side,
+                         coefficient_band),
+        spatial_tolerance,
         requested_order);
 }
 
@@ -1172,7 +1177,8 @@ void addUniquePoint(StrictConstructionObservation& observation, std::vector<Iden
     const std::vector<Real>& signed_values,
     const std::vector<CutPointCandidate>& ordered_cut_points,
     geometry::CutIntegrationSide side,
-    Real tolerance,
+    Real coefficient_band,
+    Real spatial_tolerance,
     const std::vector<Real>* original_values = nullptr,
     const std::vector<Real>* actual_signed_values = nullptr,
     Real isovalue = Real{0.0})
@@ -1192,7 +1198,7 @@ void addUniquePoint(StrictConstructionObservation& observation, std::vector<Iden
             if (original_values != nullptr && actual_signed_values != nullptr) {
                 original = originalCorner(
                     points[index], (*original_values)[index], isovalue,
-                    tolerance, (*actual_signed_values)[index],
+                    coefficient_band, (*actual_signed_values)[index],
                     signed_values[index]);
             }
             signed_face.push_back(SignedPoint{
@@ -1202,8 +1208,10 @@ void addUniquePoint(StrictConstructionObservation& observation, std::vector<Iden
         }
         const auto clipped =
             side == geometry::CutIntegrationSide::Negative
-                ? clipPolygonToNegativeLevelSet(observation, signed_face, tolerance)
-                : clipPolygonToPositiveLevelSet(observation, signed_face, tolerance);
+                ? clipPolygonToNegativeLevelSet(observation, signed_face,
+                                               coefficient_band)
+                : clipPolygonToPositiveLevelSet(observation, signed_face,
+                                               coefficient_band);
         if (clipped.size() >= 3u) {
             std::vector<IdentifiedPoint> face_points;
             face_points.reserve(clipped.size());
@@ -1238,7 +1246,8 @@ void addUniquePoint(StrictConstructionObservation& observation, std::vector<Iden
                             face.end(),
                             [&](const IdentifiedPoint& existing) {
                                 return nearlySamePoint(
-                                    point.point, existing.point, tolerance);
+                                    point.point, existing.point,
+                                    spatial_tolerance);
                             });
                     });
                 if (coordinate_match) reused_face = &face;
@@ -1332,7 +1341,8 @@ referenceTetrahedraFromFaces(StrictConstructionObservation& observation,
     const IdentifiedFaces& faces,
     const std::vector<std::array<Real, 3>>& source_points,
     const std::vector<Real>& signed_values,
-    Real tolerance)
+    Real coefficient_band,
+    Real spatial_tolerance)
 {
     if (source_points.size() < 4u || signed_values.size() < 4u) {
         throw std::invalid_argument(
@@ -1366,14 +1376,18 @@ referenceTetrahedraFromFaces(StrictConstructionObservation& observation,
             coordinates[0] * (signed_values[1] - signed_values[0]) +
             coordinates[1] * (signed_values[2] - signed_values[0]) +
             coordinates[2] * (signed_values[3] - signed_values[0]);
-        if (!std::isfinite(value) || (value != 0 && std::abs(value) <= tolerance)) observation.unresolved();
-        return canonicalSignedValue(value, tolerance);
+        if (!std::isfinite(value) ||
+            (value != 0 && std::abs(value) <= coefficient_band)) {
+            observation.unresolved();
+        }
+        return canonicalSignedValue(value, coefficient_band);
     };
 
     std::vector<IdentifiedPoint> unique_points;
     for (const auto& face : faces) {
         for (const auto& point : face) {
-            addUniquePoint(observation, unique_points, point, tolerance);
+            addUniquePoint(observation, unique_points, point,
+                           spatial_tolerance);
         }
     }
     if (unique_points.empty()) {
@@ -1388,7 +1402,8 @@ referenceTetrahedraFromFaces(StrictConstructionObservation& observation,
 
     std::vector<CutInterfaceReferenceSimplex> tetrahedra;
     const Real minimum_volume =
-        std::max(Real{1.0e-30}, tolerance * tolerance * tolerance);
+        std::max(Real{1.0e-30}, spatial_tolerance * spatial_tolerance *
+                                  spatial_tolerance);
     for (const auto& face : faces) {
         if (face.size() < 3u) {
             continue;
@@ -1544,7 +1559,9 @@ std::uint64_t levelSetParentCornerTopologyKey(
     if (count == 0u || input.level_set_values.size() < count ||
         !std::isfinite(request.isovalue) ||
         !std::isfinite(request.tolerance) ||
-        request.tolerance <= Real{0.0}) {
+        request.tolerance <= Real{0.0} ||
+        !validLevelSetCoefficientClassificationPolicy(
+            request.coefficient_classification_policy)) {
         throw std::invalid_argument(
             "level-set parent-corner topology key requires a supported element and finite corner classification policy");
     }
@@ -1559,6 +1576,8 @@ std::uint64_t levelSetParentCornerTopologyKey(
         hash,
         static_cast<std::uint64_t>(
             request.aligned_zero_interface_parent_side));
+    const Real coefficient_band =
+        request.resolvedCoefficientClassificationBand();
     for (std::size_t i = 0u; i < count; ++i) {
         const Real value = input.level_set_values[i];
         if (!std::isfinite(value)) {
@@ -1567,9 +1586,9 @@ std::uint64_t levelSetParentCornerTopologyKey(
         }
         const Real signed_value = value - request.isovalue;
         const std::uint64_t sign_class =
-            signed_value < -request.tolerance
+            signed_value < -coefficient_band
                 ? 0u
-                : (signed_value > request.tolerance ? 2u : 1u);
+                : (signed_value > coefficient_band ? 2u : 1u);
         // Canonical reference-corner position is part of the topology.  This
         // distinguishes, for example, adjacent and opposite cuts of a quad.
         mixTopologyHash(hash, static_cast<std::uint64_t>(i));
@@ -1692,6 +1711,8 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
     if (!request.valid()) {
         throw std::invalid_argument("cutLinearLevelSetCell2D requires a valid interface request");
     }
+    const Real coefficient_band =
+        request.resolvedCoefficientClassificationBand();
 
     const std::size_t count = cornerCount(input.element_type);
     if (input.node_coordinates.size() < count || input.level_set_values.size() < count) {
@@ -1709,7 +1730,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
         const Real actual_signed =
             input.level_set_values[i] - request.isovalue;
         const Real signed_value =
-            canonicalSignedValue(actual_signed, request.tolerance);
+            canonicalSignedValue(actual_signed, coefficient_band);
         actual_signed_values.push_back(actual_signed);
         signed_values.push_back(signed_value);
         if (!std::isfinite(signed_value) ||
@@ -1734,8 +1755,8 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
     std::size_t zero_edge_count = 0u;
     for (std::size_t i = 0u; i < count; ++i) {
         const std::size_t j = (i + 1u) % count;
-        if (std::abs(signed_values[i]) <= request.tolerance &&
-            std::abs(signed_values[j]) <= request.tolerance) {
+        if (std::abs(signed_values[i]) <= coefficient_band &&
+            std::abs(signed_values[j]) <= coefficient_band) {
             ++zero_edge_count;
         }
     }
@@ -1762,7 +1783,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                 static_cast<Real>(count);
             const auto side =
                 centroid_value < Real{0.0} ||
-                        (std::abs(centroid_value) <= request.tolerance &&
+                        (std::abs(centroid_value) <= coefficient_band &&
                          negative_count >= positive_count)
                     ? geometry::CutIntegrationSide::Negative
                     : geometry::CutIntegrationSide::Positive;
@@ -1777,6 +1798,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                 dominant_values,
                 count,
                 side,
+                coefficient_band,
                 request.tolerance,
                 planar_volume_order);
             appendSideVolumeRegion(observation,
@@ -1810,6 +1832,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                                 signed_values,
                                 count,
                                 geometry::CutIntegrationSide::Negative,
+                                coefficient_band,
                                 request.tolerance,
                                 planar_volume_order);
         appendSideVolumeRegion(observation,
@@ -1829,7 +1852,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                              planar_volume_order));
         result.degeneracy = classifyZeroContact2D(signed_values,
                                                   count,
-                                                  request.tolerance);
+                                                  coefficient_band);
         observation.stamp(result);
         return result;
     }
@@ -1839,6 +1862,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                                 signed_values,
                                 count,
                                 geometry::CutIntegrationSide::Positive,
+                                coefficient_band,
                                 request.tolerance,
                                 planar_volume_order);
         appendSideVolumeRegion(observation,
@@ -1858,7 +1882,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                              planar_volume_order));
         result.degeneracy = classifyZeroContact2D(signed_values,
                                                   count,
-                                                  request.tolerance);
+                                                  coefficient_band);
         observation.stamp(result);
         return result;
     }
@@ -1870,8 +1894,8 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
         const std::size_t j = (i + 1u) % count;
         const Real di = signed_values[i];
         const Real dj = signed_values[j];
-        const bool i_zero = std::abs(di) <= request.tolerance;
-        const bool j_zero = std::abs(dj) <= request.tolerance;
+        const bool i_zero = std::abs(di) <= coefficient_band;
+        const bool j_zero = std::abs(dj) <= coefficient_band;
         if (i_zero && j_zero) {
             zero_edge = true;
             addUniqueCandidate(observation,
@@ -1974,7 +1998,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                          signed_values,
                          count,
                          geometry::CutIntegrationSide::Negative,
-                         request.tolerance,
+                         coefficient_band,
                          &input.level_set_values,
                          &actual_signed_values,
                          request.isovalue);
@@ -1983,7 +2007,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                          signed_values,
                          count,
                          geometry::CutIntegrationSide::Positive,
-                         request.tolerance,
+                         coefficient_band,
                          &input.level_set_values,
                          &actual_signed_values,
                          request.isovalue);
@@ -2107,6 +2131,8 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
     if (!request.valid()) {
         throw std::invalid_argument("cutLinearLevelSetCell3D requires a valid interface request");
     }
+    const Real coefficient_band =
+        request.resolvedCoefficientClassificationBand();
 
     const std::size_t count = cornerCount3D(input.element_type);
     if (input.node_coordinates.size() < count || input.level_set_values.size() < count) {
@@ -2124,7 +2150,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
         const Real actual_signed =
             input.level_set_values[i] - request.isovalue;
         const Real signed_value =
-            canonicalSignedValue(actual_signed, request.tolerance);
+            canonicalSignedValue(actual_signed, coefficient_band);
         actual_signed_values.push_back(actual_signed);
         signed_values.push_back(signed_value);
         if (!std::isfinite(signed_value) ||
@@ -2166,7 +2192,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                 static_cast<Real>(count);
             const auto side =
                 centroid_value < Real{0.0} ||
-                        (std::abs(centroid_value) <= request.tolerance &&
+                        (std::abs(centroid_value) <= coefficient_band &&
                          negative_count >= positive_count)
                     ? geometry::CutIntegrationSide::Negative
                     : geometry::CutIntegrationSide::Positive;
@@ -2181,6 +2207,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                 dominant_values,
                 {},
                 side,
+                coefficient_band,
                 request.tolerance);
             const auto full_quadrature =
                 polyhedronQuadratureFromFaces(observation, full_faces, request.tolerance);
@@ -2214,6 +2241,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                                  signed_values,
                                  {},
                                  geometry::CutIntegrationSide::Negative,
+                                 coefficient_band,
                                  request.tolerance);
         const auto full_quadrature =
             polyhedronQuadratureFromFaces(observation, full_faces, request.tolerance);
@@ -2232,7 +2260,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                              full_quadrature,
                              true));
         result.degeneracy =
-            classifyZeroContactTetrahedron(signed_values, request.tolerance);
+            classifyZeroContactTetrahedron(signed_values, coefficient_band);
         observation.stamp(result);
         return result;
     }
@@ -2242,6 +2270,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                                  signed_values,
                                  {},
                                  geometry::CutIntegrationSide::Positive,
+                                 coefficient_band,
                                  request.tolerance);
         const auto full_quadrature =
             polyhedronQuadratureFromFaces(observation, full_faces, request.tolerance);
@@ -2260,7 +2289,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                              full_quadrature,
                              true));
         result.degeneracy =
-            classifyZeroContactTetrahedron(signed_values, request.tolerance);
+            classifyZeroContactTetrahedron(signed_values, coefficient_band);
         observation.stamp(result);
         return result;
     }
@@ -2281,8 +2310,8 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
         const std::size_t j = edge[1];
         const Real di = signed_values[i];
         const Real dj = signed_values[j];
-        const bool i_zero = std::abs(di) <= request.tolerance;
-        const bool j_zero = std::abs(dj) <= request.tolerance;
+        const bool i_zero = std::abs(di) <= coefficient_band;
+        const bool j_zero = std::abs(dj) <= coefficient_band;
         if (i_zero && j_zero) {
             zero_edge = true;
             addUniqueCandidate(observation,
@@ -2381,6 +2410,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                              signed_values,
                              cut_points,
                              geometry::CutIntegrationSide::Negative,
+                             coefficient_band,
                              request.tolerance,
                              &input.level_set_values,
                              &actual_signed_values,
@@ -2390,6 +2420,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                              signed_values,
                              cut_points,
                              geometry::CutIntegrationSide::Positive,
+                             coefficient_band,
                              request.tolerance,
                              &input.level_set_values,
                              &actual_signed_values,
@@ -2420,12 +2451,14 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
             negative_faces,
             input.node_coordinates,
             signed_values,
+            coefficient_band,
             request.tolerance);
     auto positive_reference_subcells =
         referenceTetrahedraFromFaces(observation,
             positive_faces,
             input.node_coordinates,
             signed_values,
+            coefficient_band,
             request.tolerance);
     fragment.negative_volume_fraction = side_fractions.negative;
     fragment.positive_volume_fraction = side_fractions.positive;

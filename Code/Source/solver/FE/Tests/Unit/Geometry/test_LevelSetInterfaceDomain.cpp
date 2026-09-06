@@ -15,6 +15,38 @@ using namespace svmp::FE::interfaces;
 
 namespace {
 
+TEST(CoefficientClassificationPolicy,
+     RejectsInvalidAndUnsupportedBackendPolicies)
+{
+    auto request = CutInterfaceDomainRequest{};
+    request.source = LevelSetInterfaceSource::fromEvaluator("coefficient-policy");
+    request.interface_marker = 294;
+    request.coefficient_classification_policy =
+        static_cast<LevelSetCoefficientClassificationPolicy>(255);
+    EXPECT_FALSE(request.valid());
+
+    request.coefficient_classification_policy =
+        LevelSetCoefficientClassificationPolicy::ExactRepresentedZero;
+    EXPECT_TRUE(request.valid());
+    request.implicit_geometry_mode = "LinearCorner";
+    request.implicit_quadrature_backend = "LinearCorner";
+    EXPECT_TRUE(request.valid());
+    request.implicit_geometry_mode = "HighOrderImplicit";
+    EXPECT_FALSE(request.valid());
+    request.implicit_geometry_mode = "LinearCorner";
+    request.implicit_quadrature_backend = "SayeHyperrectangle";
+    EXPECT_FALSE(request.valid());
+
+    const LevelSetCellCutInput input{
+        .parent_cell = 0,
+        .element_type = ElementType::Triangle3,
+        .node_coordinates = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}},
+        .level_set_values = {0.25, -1.0, 1.0}};
+    request.coefficient_classification_policy =
+        static_cast<LevelSetCoefficientClassificationPolicy>(255);
+    EXPECT_THROW(cutLinearLevelSetCell2D(request, input), std::invalid_argument);
+}
+
 Real integrateCoordinate(const CutQuadratureRule& rule, std::size_t component)
 {
     Real value = 0.0;

@@ -845,10 +845,14 @@ interfaces::LevelSetInterfaceDomain linearQuadCutDomain(
 interfaces::LevelSetInterfaceDomain linearTriangleCutDomain(
     int marker,
     const std::array<FE::Real, 3>& level_set_values,
-    FE::Real tolerance = 1.0e-12)
+    FE::Real tolerance = 1.0e-12,
+    interfaces::LevelSetCoefficientClassificationPolicy policy =
+        interfaces::LevelSetCoefficientClassificationPolicy::
+            LegacyAbsoluteBand)
 {
     auto request = interfaceRequest(marker);
     request.tolerance = tolerance;
+    request.coefficient_classification_policy = policy;
     interfaces::LevelSetCellCutInput input;
     input.parent_cell = 0;
     input.element_type = FE::ElementType::Triangle3;
@@ -6648,6 +6652,161 @@ TEST(ProducerObservation, RealNonDyadicBoundaryTracesUseBoundedArithmetic)
             }
         }
     }
+}
+
+TEST(CoefficientClassificationPolicy, LegacyWallDefaultPreservesRecords)
+{
+    constexpr int marker = 289, wall = 7;
+    const SingleQuadBoundaryMesh mesh(
+        wall, 0, 1, 0, true, FE::ElementType::Triangle3,
+        {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}});
+    EXPECT_EQ(interfaceRequest(marker).coefficient_classification_policy,
+              interfaces::LevelSetCoefficientClassificationPolicy::
+                  LegacyAbsoluteBand);
+    EXPECT_EQ(contactRequest(marker, wall).coefficient_classification_policy,
+              interfaces::LevelSetCoefficientClassificationPolicy::
+                  LegacyAbsoluteBand);
+    EXPECT_EQ(activeRequest(marker, wall,
+                            FE::geometry::CutIntegrationSide::Negative)
+                  .coefficient_classification_policy,
+              interfaces::LevelSetCoefficientClassificationPolicy::
+                  LegacyAbsoluteBand);
+
+    for (const FE::Real sign : {-1.0, 1.0}) {
+        const std::array<FE::Real, 3> values{{sign * 0.25, -sign, sign}};
+        const auto source = linearTriangleCutDomain(marker, values);
+        const auto contact =
+            interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+                contactRequest(marker, wall), source, mesh);
+        ASSERT_EQ(contact.fragments().size(), 1u);
+        for (const auto side : {FE::geometry::CutIntegrationSide::Negative,
+                                FE::geometry::CutIntegrationSide::Positive}) {
+            std::size_t callback_count = 0u;
+            interfaces::GeneratedActiveBoundaryScalarField field;
+            field.value_at_node = [&](FE::GlobalIndex i) {
+                ++callback_count;
+                return values.at(static_cast<std::size_t>(i));
+            };
+            const auto boundary =
+                interfaces::buildGeneratedActiveBoundaryDomain(
+                    activeRequest(marker, wall, side), source, contact, mesh,
+                    field);
+            EXPECT_EQ(callback_count, 2u);
+            ASSERT_EQ(boundary.fragments().size(), 1u);
+            record_boundary_domain(
+                std::string("boundary-triangle-") +
+                    (sign < 0 ? "negative-" : "positive-") +
+                    (side == FE::geometry::CutIntegrationSide::Negative
+                         ? "negative"
+                         : "positive"),
+                boundary);
+        }
+    }
+}
+
+TEST(CoefficientClassificationPolicy,
+     WallCutIsScaleInvariantAndRelabelsSides)
+{
+    constexpr int marker = 297, wall = 7;
+    const auto exact = interfaces::LevelSetCoefficientClassificationPolicy::
+        ExactRepresentedZero;
+    const SingleQuadBoundaryMesh mesh(
+        wall, 0, 1, 0, true, FE::ElementType::Triangle3,
+        {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}});
+    for (const FE::Real scale : {1.0, 1.0e14, 1.0e-14}) {
+        for (const FE::Real sign : {-1.0, 1.0}) {
+            SCOPED_TRACE(::testing::Message() << "scale=" << scale
+                                              << " sign=" << sign);
+            const std::array<FE::Real, 3> values{{sign * scale * 0.25,
+                                                   -sign * scale,
+                                                   sign * scale}};
+            const auto source =
+                linearTriangleCutDomain(marker, values, 1.0e-12, exact);
+            auto contact_request = contactRequest(marker, wall);
+            contact_request.coefficient_classification_policy = exact;
+            const auto contact =
+                interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+                    contact_request, source, mesh);
+            ASSERT_EQ(contact.fragments().size(), 1u);
+            for (const auto side : {
+                     FE::geometry::CutIntegrationSide::Negative,
+                     FE::geometry::CutIntegrationSide::Positive}) {
+                std::size_t callback_count = 0u;
+                interfaces::GeneratedActiveBoundaryScalarField field;
+                field.value_at_node = [&](FE::GlobalIndex i) {
+                    ++callback_count;
+                    return values.at(static_cast<std::size_t>(i));
+                };
+                auto active_request = activeRequest(marker, wall, side);
+                active_request.coefficient_classification_policy = exact;
+                const auto boundary =
+                    interfaces::buildGeneratedActiveBoundaryDomain(
+                        active_request, source, contact, mesh, field);
+                EXPECT_EQ(callback_count, 2u);
+                ASSERT_EQ(boundary.fragments().size(), 1u);
+                const FE::Real expected_measure =
+                    side == FE::geometry::CutIntegrationSide::Negative
+                        ? (sign > 0 ? 0.8 : 0.2)
+                        : (sign > 0 ? 0.2 : 0.8);
+                EXPECT_NEAR(boundary.summary().measure, expected_measure,
+                            1.0e-14);
+            }
+        }
+    }
+}
+
+TEST(CoefficientClassificationPolicy,
+     PolicyIdentityChangesAndMixedLinkageIsRejected)
+{
+    constexpr int marker = 298, wall = 7;
+    const auto legacy = interfaces::LevelSetCoefficientClassificationPolicy::
+        LegacyAbsoluteBand;
+    const auto exact = interfaces::LevelSetCoefficientClassificationPolicy::
+        ExactRepresentedZero;
+    const std::array<FE::Real, 3> values{{0.25, -1.0, 1.0}};
+    const SingleQuadBoundaryMesh mesh(
+        wall, 0, 1, 0, true, FE::ElementType::Triangle3,
+        {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}});
+
+    const auto make_snapshot = [&](auto policy) {
+        const auto source =
+            linearTriangleCutDomain(marker, values, 1.0e-12, policy);
+        return interfaces::buildFreeSurfaceGeometrySnapshot(
+            source, {}, {}, mesh, snapshotPolicyWithoutBoundary(),
+            affineTriangleScalar(values), "coefficient_policy_identity");
+    };
+    const auto legacy_snapshot = make_snapshot(legacy);
+    const auto exact_snapshot = make_snapshot(exact);
+    ASSERT_TRUE(legacy_snapshot);
+    ASSERT_TRUE(exact_snapshot);
+    ASSERT_EQ(legacy_snapshot->rules().size(), exact_snapshot->rules().size());
+    EXPECT_NE(legacy_snapshot->revision().snapshot_revision_key,
+              exact_snapshot->revision().snapshot_revision_key);
+    for (std::size_t i = 0; i < legacy_snapshot->rules().size(); ++i) {
+        EXPECT_EQ(legacy_snapshot->rules()[i].reference_rule.measure,
+                  exact_snapshot->rules()[i].reference_rule.measure);
+        EXPECT_EQ(legacy_snapshot->rules()[i].source_topology_key,
+                  exact_snapshot->rules()[i].source_topology_key);
+    }
+
+    const auto exact_source =
+        linearTriangleCutDomain(marker, values, 1.0e-12, exact);
+    auto exact_contact_request = contactRequest(marker, wall);
+    exact_contact_request.coefficient_classification_policy = exact;
+    const auto exact_contact =
+        interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+            exact_contact_request, exact_source, mesh);
+    interfaces::GeneratedActiveBoundaryScalarField field;
+    field.value_at_node = [values](FE::GlobalIndex i) {
+        return values.at(static_cast<std::size_t>(i));
+    };
+    auto mixed_active_request = activeRequest(
+        marker, wall, FE::geometry::CutIntegrationSide::Negative);
+    mixed_active_request.coefficient_classification_policy = legacy;
+    EXPECT_THROW(interfaces::buildGeneratedActiveBoundaryDomain(
+                     mixed_active_request, exact_source, exact_contact, mesh,
+                     field),
+                 std::invalid_argument);
 }
 
 TEST(ProducerObservation, RealDyadicTriangleBoundaryCopiesRemainUnchecked)

@@ -55,6 +55,8 @@ struct GeneratedActiveBoundaryRequest {
     int active_boundary_marker{-1};
     geometry::CutIntegrationSide side{geometry::CutIntegrationSide::Negative};
     Real tolerance{1.0e-12};
+    LevelSetCoefficientClassificationPolicy coefficient_classification_policy{
+        LevelSetCoefficientClassificationPolicy::LegacyAbsoluteBand};
     int quadrature_order{1};
     geometry::CutGeometryFrame frame{geometry::CutGeometryFrame::Reference};
     std::uint64_t mesh_geometry_revision{0};
@@ -64,6 +66,10 @@ struct GeneratedActiveBoundaryRequest {
     std::uint64_t source_value_revision{0};
 
     [[nodiscard]] bool valid() const noexcept;
+    [[nodiscard]] Real resolvedCoefficientClassificationBand() const noexcept {
+        return resolveLevelSetCoefficientClassificationBand(
+            coefficient_classification_policy, tolerance);
+    }
     [[nodiscard]] int resolvedActiveBoundaryMarker() const;
 };
 

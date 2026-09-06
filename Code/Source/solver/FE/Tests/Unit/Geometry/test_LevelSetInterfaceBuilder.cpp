@@ -149,6 +149,176 @@ CutInterfaceDomainRequest make_request(int marker)
     return request;
 }
 
+TEST(CoefficientClassificationPolicy,
+     LegacyCellDefaultPreservesAbsoluteBandAndRecords)
+{
+    auto default_request = make_request(/*marker=*/70);
+    EXPECT_EQ(default_request.coefficient_classification_policy,
+              LevelSetCoefficientClassificationPolicy::LegacyAbsoluteBand);
+
+    const LevelSetCellCutInput tiny_input{
+        .parent_cell = 0,
+        .element_type = ElementType::Triangle3,
+        .node_coordinates = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}},
+        .level_set_values = {0.25e-14, -1.0e-14, 1.0e-14}};
+    const auto default_result =
+        cutLinearLevelSetCell2D(default_request, tiny_input);
+    EXPECT_TRUE(default_result.supported);
+    EXPECT_EQ(default_result.degeneracy,
+              CutInterfaceDegeneracy::FullZeroCell);
+    EXPECT_FALSE(default_result.hasActiveFragments());
+
+    auto explicit_request = default_request;
+    explicit_request.coefficient_classification_policy =
+        LevelSetCoefficientClassificationPolicy::LegacyAbsoluteBand;
+    const auto explicit_result =
+        cutLinearLevelSetCell2D(explicit_request, tiny_input);
+    EXPECT_EQ(explicit_result.degeneracy, default_result.degeneracy);
+    EXPECT_EQ(explicit_result.fragments.size(), default_result.fragments.size());
+    EXPECT_EQ(explicit_result.volume_regions.size(),
+              default_result.volume_regions.size());
+
+    explicit_request.aligned_zero_interface_parent_side =
+        geometry::CutIntegrationSide::Positive;
+    for (const Real sign : {-1.0, 1.0}) {
+        const LevelSetCellCutInput input{
+            .parent_cell = 0,
+            .element_type = ElementType::Triangle3,
+            .node_coordinates = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}},
+            .level_set_values = {sign * 0.25, -sign, sign}};
+        const auto result = cutLinearLevelSetCell2D(explicit_request, input);
+        ASSERT_TRUE(result.supported);
+        ASSERT_EQ(result.fragments.size(), 1u);
+        ASSERT_EQ(result.volume_regions.size(), 2u);
+        record_cell_result(sign < 0 ? "cell-triangle-negative"
+                                    : "cell-triangle-positive",
+                           result);
+    }
+}
+
+TEST(CoefficientClassificationPolicy,
+     ExactZeroAndNonzeroIsovalueUseRepresentedDifferences)
+{
+    auto request = make_request(/*marker=*/294);
+    request.coefficient_classification_policy =
+        LevelSetCoefficientClassificationPolicy::ExactRepresentedZero;
+    request.aligned_zero_interface_parent_side =
+        geometry::CutIntegrationSide::Positive;
+
+    const LevelSetCellCutInput aligned_input{
+        .parent_cell = 0,
+        .element_type = ElementType::Triangle3,
+        .node_coordinates = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}},
+        .level_set_values = {0.0, 0.0, 1.0}};
+    const auto aligned = cutLinearLevelSetCell2D(request, aligned_input);
+    ASSERT_TRUE(aligned.supported);
+    ASSERT_EQ(aligned.fragments.size(), 1u);
+    EXPECT_EQ(aligned.fragments.front().vertices[0].level_set_value, 0.0);
+    EXPECT_EQ(aligned.fragments.front().vertices[1].level_set_value, 0.0);
+
+    request.isovalue = 1.0;
+    const LevelSetCellCutInput shifted_input{
+        .parent_cell = 0,
+        .element_type = ElementType::Triangle3,
+        .node_coordinates = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}},
+        .level_set_values = {1.25, 0.0, 2.0}};
+    const auto shifted = cutLinearLevelSetCell2D(request, shifted_input);
+    ASSERT_TRUE(shifted.supported);
+    ASSERT_EQ(shifted.fragments.size(), 1u);
+    ASSERT_EQ(shifted.volume_regions.size(), 2u);
+    EXPECT_NEAR(shifted.fragments.front().measure, std::sqrt(0.34), 1.0e-14);
+    EXPECT_NEAR(shifted.volume_regions[0].measure, 0.2, 1.0e-14);
+    EXPECT_NEAR(shifted.volume_regions[1].measure, 0.3, 1.0e-14);
+}
+
+TEST(CoefficientClassificationPolicy, TriangleCellCutIsScaleInvariant)
+{
+    auto request = make_request(/*marker=*/295);
+    request.coefficient_classification_policy =
+        LevelSetCoefficientClassificationPolicy::ExactRepresentedZero;
+    request.aligned_zero_interface_parent_side =
+        geometry::CutIntegrationSide::Positive;
+    std::array<std::uint64_t, 2> reference_topology_keys{{0, 0}};
+    for (const Real scale : {1.0, 1.0e14, 1.0e-14}) {
+        for (const Real sign : {-1.0, 1.0}) {
+            SCOPED_TRACE(::testing::Message() << "scale=" << scale
+                                              << " sign=" << sign);
+            const LevelSetCellCutInput input{
+                .parent_cell = 0,
+                .element_type = ElementType::Triangle3,
+                .node_coordinates = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}},
+                .level_set_values = {sign * scale * 0.25,
+                                     -sign * scale,
+                                     sign * scale}};
+            const auto result = cutLinearLevelSetCell2D(request, input);
+            ASSERT_TRUE(result.supported);
+            ASSERT_EQ(result.fragments.size(), 1u);
+            ASSERT_EQ(result.volume_regions.size(), 2u);
+            const auto& fragment = result.fragments.front();
+            ASSERT_EQ(fragment.vertices.size(), 2u);
+            EXPECT_NEAR(fragment.vertices[0].point[0], 0.2, 1.0e-14);
+            EXPECT_NEAR(fragment.vertices[0].point[1], 0.0, 1.0e-14);
+            EXPECT_NEAR(fragment.vertices[1].point[0], 0.5, 1.0e-14);
+            EXPECT_NEAR(fragment.vertices[1].point[1], 0.5, 1.0e-14);
+            EXPECT_NEAR(fragment.measure, std::sqrt(0.34), 1.0e-14);
+            EXPECT_NEAR(result.volume_regions[0].measure,
+                        sign > 0 ? 0.2 : 0.3, 1.0e-14);
+            EXPECT_NEAR(result.volume_regions[1].measure,
+                        sign > 0 ? 0.3 : 0.2, 1.0e-14);
+            const std::size_t sign_index = sign > 0 ? 1u : 0u;
+            if (reference_topology_keys[sign_index] == 0) {
+                reference_topology_keys[sign_index] =
+                    fragment.parent_corner_topology_key;
+            }
+            EXPECT_EQ(fragment.parent_corner_topology_key,
+                      reference_topology_keys[sign_index]);
+        }
+    }
+    EXPECT_NE(reference_topology_keys[0], reference_topology_keys[1]);
+}
+
+TEST(CoefficientClassificationPolicy, TetrahedronCellCutIsScaleInvariant)
+{
+    auto request = make_request(/*marker=*/296);
+    request.coefficient_classification_policy =
+        LevelSetCoefficientClassificationPolicy::ExactRepresentedZero;
+    request.aligned_zero_interface_parent_side =
+        geometry::CutIntegrationSide::Positive;
+    for (const Real scale : {1.0, 1.0e14, 1.0e-14}) {
+        for (const Real sign : {-1.0, 1.0}) {
+            SCOPED_TRACE(::testing::Message() << "scale=" << scale
+                                              << " sign=" << sign);
+            const LevelSetCellCutInput input{
+                .parent_cell = 0,
+                .element_type = ElementType::Tetra4,
+                .node_coordinates = {{{0, 0, 0}}, {{1, 0, 0}},
+                                     {{0, 1, 0}}, {{0, 0, 1}}},
+                .level_set_values = {sign * scale * 0.25,
+                                     -sign * scale,
+                                     -sign * scale,
+                                     -sign * scale}};
+            const auto result = cutLinearLevelSetCell3D(request, input);
+            ASSERT_TRUE(result.supported);
+            ASSERT_EQ(result.fragments.size(), 1u);
+            ASSERT_EQ(result.volume_regions.size(), 2u);
+            const auto& fragment = result.fragments.front();
+            ASSERT_EQ(fragment.vertices.size(), 3u);
+            EXPECT_NEAR(fragment.measure, 0.02 * std::sqrt(3.0), 1.0e-14);
+            const Real small_volume = 1.0 / 750.0;
+            EXPECT_NEAR(result.volume_regions[0].measure,
+                        sign > 0 ? 1.0 / 6.0 - small_volume : small_volume,
+                        1.0e-14);
+            EXPECT_NEAR(result.volume_regions[1].measure,
+                        sign > 0 ? small_volume : 1.0 / 6.0 - small_volume,
+                        1.0e-14);
+            for (const auto& vertex : fragment.vertices) {
+                EXPECT_NEAR(vertex.point[0] + vertex.point[1] + vertex.point[2],
+                            0.2, 1.0e-14);
+            }
+        }
+    }
+}
+
 TEST(ProducerObservation, FiniteDyadicGradientNormOverflowStampsEveryRecord)
 {
     const auto request = make_request(70);

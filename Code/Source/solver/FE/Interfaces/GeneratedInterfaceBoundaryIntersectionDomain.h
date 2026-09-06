@@ -78,6 +78,8 @@ struct GeneratedInterfaceBoundaryIntersectionRequest {
     int boundary_marker{-1};
     int intersection_marker{-1};
     Real tolerance{1.0e-12};
+    LevelSetCoefficientClassificationPolicy coefficient_classification_policy{
+        LevelSetCoefficientClassificationPolicy::LegacyAbsoluteBand};
     int quadrature_order{1};
     // Generated contact sets use one strict contract: points, normals,
     // tangents, and d-2 weights are all parent-reference data. The assembler
@@ -91,6 +93,10 @@ struct GeneratedInterfaceBoundaryIntersectionRequest {
     bool keep_degenerate_fragments{false};
 
     [[nodiscard]] bool valid() const noexcept;
+    [[nodiscard]] Real resolvedCoefficientClassificationBand() const noexcept {
+        return resolveLevelSetCoefficientClassificationBand(
+            coefficient_classification_policy, tolerance);
+    }
     [[nodiscard]] int resolvedIntersectionMarker() const;
 };
 
