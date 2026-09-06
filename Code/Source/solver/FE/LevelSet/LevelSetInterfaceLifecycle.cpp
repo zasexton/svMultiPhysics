@@ -899,7 +899,8 @@ appendLinearFullCellFastPath(
 {
     const auto& request = domain.request();
     if (!linearFullCellFastPathApplies(
-            evaluator, cell_id, input, request.isovalue, request.tolerance)) {
+            evaluator, cell_id, input, request.isovalue,
+            request.resolvedCoefficientClassificationBand())) {
         return std::nullopt;
     }
 
@@ -1022,6 +1023,12 @@ appendLinearFullCellFastPath(
     mix(options.require_production_qualified_implicit_cut_backend ? 1u : 0u);
     mix(static_cast<std::uint64_t>(
         std::max(0, options.affected_cell_neighborhood_layers)));
+    if (options.coefficient_classification_policy !=
+        interfaces::LevelSetCoefficientClassificationPolicy::LegacyAbsoluteBand) {
+        // Preserve existing legacy keys while separating the opt-in policy.
+        mix(0x4c53434f45465031ull); // "LSCOEFP1"
+        mix(static_cast<std::uint64_t>(options.coefficient_classification_policy));
+    }
     return h;
 }
 
@@ -1272,7 +1279,7 @@ detectUnqualifiedSameSignHighOrderComponentForCell(
                     level_set_dofs,
                     evaluator,
                     domain.request().isovalue,
-                    domain.request().tolerance,
+                    domain.request().resolvedCoefficientClassificationBand(),
                     coefficients,
                     cell_id,
                     interface_fragment_count)) {
@@ -2097,6 +2104,19 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
     if (!(options.tolerance > 0.0)) {
         throw std::invalid_argument("generated level-set interface requires a positive tolerance");
     }
+    if (!interfaces::validLevelSetCoefficientClassificationPolicy(
+            options.coefficient_classification_policy)) {
+        throw std::invalid_argument(
+            "generated level-set interface requires a valid coefficient_classification_policy");
+    }
+    if (options.coefficient_classification_policy ==
+            interfaces::LevelSetCoefficientClassificationPolicy::ExactRepresentedZero &&
+        (options.geometry_mode != GeneratedInterfaceGeometryMode::LinearCorner ||
+         options.implicit_cut_quadrature_backend !=
+             ImplicitCutQuadratureBackend::LinearCorner)) {
+        throw std::invalid_argument(
+            "generated level-set interface coefficient_classification_policy=ExactRepresentedZero requires LinearCorner geometry with the LinearCorner backend");
+    }
     if (options.quadrature_order < 0) {
         throw std::invalid_argument("generated level-set interface requires nonnegative quadrature_order");
     }
@@ -2203,6 +2223,8 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
     request.interface_marker = marker;
     request.isovalue = options.isovalue;
     request.tolerance = options.tolerance;
+    request.coefficient_classification_policy =
+        options.coefficient_classification_policy;
     request.quadrature_order = options.quadrature_order;
     request.interface_quadrature_order = interface_quadrature_order;
     request.volume_quadrature_order = volume_quadrature_order;
@@ -2380,7 +2402,7 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
             std::span<const Cache::CellSlot>(cache_->cells.data(),
                                              cache_->cells.size()),
             request.isovalue,
-            request.tolerance,
+            request.resolvedCoefficientClassificationBand(),
             options.affected_cell_neighborhood_layers,
             static_cast<std::size_t>(mesh.numCells()));
         if (changed_cells.has_value() &&
@@ -2589,7 +2611,7 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
                                                 evaluator,
                                                 coefficients,
                                                 request.isovalue,
-                                                request.tolerance,
+                                                request.resolvedCoefficientClassificationBand(),
                                                 cell_id);
             if (cached_slot.valid &&
                 cached_slot.cell.signature == cell_signature.value) {

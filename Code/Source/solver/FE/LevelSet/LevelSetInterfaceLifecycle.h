@@ -90,6 +90,9 @@ struct LevelSetGeneratedInterfaceOptions {
     int requested_interface_marker{-1};
     Real isovalue{0.0};
     Real tolerance{1.0e-12};
+    interfaces::LevelSetCoefficientClassificationPolicy
+        coefficient_classification_policy{
+            interfaces::LevelSetCoefficientClassificationPolicy::LegacyAbsoluteBand};
     int quadrature_order{interfaces::defaultLevelSetCutVolumeQuadratureOrder(
         /*geometry_order=*/1,
         /*field_order=*/1,

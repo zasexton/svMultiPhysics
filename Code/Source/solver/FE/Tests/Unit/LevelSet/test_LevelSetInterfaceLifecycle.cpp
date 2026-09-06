@@ -2692,6 +2692,296 @@ void populateMeasureAssemblyContext(
 
 } // namespace
 
+class LevelSetInterfaceLifecycleCoefficientPolicy
+    : public ::testing::TestWithParam<FE::ElementType> {
+protected:
+    using Policy = FE::interfaces::LevelSetCoefficientClassificationPolicy;
+
+    void SetUp() override
+    {
+        if (GetParam() == FE::ElementType::Triangle3) {
+            mesh_ = std::make_shared<SingleTriangleMeshAccess>();
+        } else {
+            mesh_ = std::make_shared<SingleTetraMeshAccess>();
+        }
+        auto space = FE::spaces::Space(
+            FE::spaces::SpaceType::H1, mesh_, /*order=*/1, /*components=*/1);
+        system_ = std::make_unique<FE::systems::FESystem>(mesh_);
+        phi_ = system_->addField(FE::systems::FieldSpec{
+            .name = "phi", .space = space, .components = 1});
+        system_->setup({}, mesh_->dimension() == 2
+                               ? makeSingleTriangleSetupInputs()
+                               : makeSingleTetraSetupInputs());
+        solution_.resize(
+            static_cast<std::size_t>(system_->dofHandler().getNumDofs()));
+        options_.level_set_field_name = "phi";
+        options_.domain_id = "coefficient-policy";
+        options_.requested_interface_marker = 876;
+        options_.interface_quadrature_order = 2;
+        options_.volume_quadrature_order = 2;
+    }
+
+    void setCut(FE::Real scale)
+    {
+        for (FE::GlobalIndex vertex = 0; vertex < mesh_->numVertices(); ++vertex) {
+            const auto x = mesh_->getNodeCoordinates(vertex);
+            setFieldComponentValue(solution_, *system_, phi_, vertex,
+                                   scale * (x[0] + x[1] + x[2] - 0.5));
+        }
+    }
+
+    void setFullCell(FE::Real value)
+    {
+        for (FE::GlobalIndex vertex = 0; vertex < mesh_->numVertices(); ++vertex) {
+            setFieldComponentValue(solution_, *system_, phi_, vertex, value);
+        }
+    }
+
+    void expectMetadata(const level_set::LevelSetGeneratedInterfaceResult& result,
+                        Policy policy) const
+    {
+        const auto band = policy == Policy::ExactRepresentedZero
+                              ? FE::Real{0.0} : options_.tolerance;
+        const auto& request = result.domain.request();
+        EXPECT_EQ(request.coefficient_classification_policy, policy);
+        EXPECT_DOUBLE_EQ(request.resolvedCoefficientClassificationBand(), band);
+        EXPECT_DOUBLE_EQ(request.tolerance, options_.tolerance);
+        const auto check_rules = [&](const auto& rules) {
+            for (const auto& rule : rules) {
+                EXPECT_EQ(rule.provenance.coefficient_classification_policy, policy);
+                EXPECT_DOUBLE_EQ(rule.provenance.coefficient_classification_band, band);
+                EXPECT_EQ(rule.provenance.predicate_policy_key,
+                          request.quadrature_policy_key);
+                EXPECT_EQ(rule.provenance.source_value_revision,
+                          result.value_revision);
+            }
+        };
+        check_rules(result.domain.interfaceQuadratureRules());
+        check_rules(result.domain.volumeQuadratureRules());
+    }
+
+    void expectCut(const level_set::LevelSetGeneratedInterfaceResult& result) const
+    {
+        ASSERT_TRUE(result.success) << result.diagnostic;
+        const bool triangle = mesh_->dimension() == 2;
+        EXPECT_NEAR(result.summary.measure,
+                    triangle ? std::sqrt(0.5) : std::sqrt(3.0) / 8.0, 1.0e-12);
+        EXPECT_NEAR(result.summary.negative_volume_measure,
+                    triangle ? 0.125 : 1.0 / 48.0, 1.0e-12);
+        EXPECT_NEAR(result.summary.positive_volume_measure,
+                    triangle ? 0.375 : 7.0 / 48.0, 1.0e-12);
+        EXPECT_EQ(result.summary.active_fragment_count, 1u);
+        EXPECT_EQ(result.summary.active_volume_region_count, 2u);
+        ASSERT_EQ(result.domain.fragments().size(), 1u);
+        const auto& fragment = result.domain.fragments().front();
+        std::vector<std::array<FE::Real, 3>> expected{
+            {{0.5, 0.0, 0.0}}, {{0.0, 0.5, 0.0}}};
+        if (!triangle) {
+            expected.push_back({{0.0, 0.0, 0.5}});
+        }
+        std::vector<std::array<FE::Real, 3>> support;
+        for (const auto& vertex : fragment.vertices) {
+            support.push_back(vertex.point);
+            for (std::size_t d = 0; d < 3u; ++d) {
+                EXPECT_NEAR(vertex.parent_coordinate[d], vertex.point[d], 1.0e-12);
+            }
+        }
+        std::sort(support.begin(), support.end());
+        std::sort(expected.begin(), expected.end());
+        ASSERT_EQ(support.size(), expected.size());
+        for (std::size_t i = 0; i < support.size(); ++i) {
+            for (std::size_t d = 0; d < 3u; ++d) {
+                EXPECT_NEAR(support[i][d], expected[i][d], 1.0e-12);
+            }
+        }
+    }
+
+    std::shared_ptr<FE::assembly::IMeshAccess> mesh_;
+    std::unique_ptr<FE::systems::FESystem> system_;
+    FE::FieldId phi_{FE::INVALID_FIELD_ID};
+    std::vector<FE::Real> solution_;
+    level_set::LevelSetGeneratedInterfaceOptions options_;
+};
+
+TEST_P(LevelSetInterfaceLifecycleCoefficientPolicy, ExactCutsAreScaleInvariant)
+{
+    options_.coefficient_classification_policy = Policy::ExactRepresentedZero;
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    std::uint64_t policy_key = 0u;
+    for (const auto scale : {1.0e-14, 1.0, 1.0e14}) {
+        SCOPED_TRACE(scale);
+        setCut(scale);
+        const auto result = lifecycle.build(*system_, options_, solution_);
+        expectCut(result);
+        expectMetadata(result, Policy::ExactRepresentedZero);
+        EXPECT_EQ(result.cell_cache_misses, 1u);
+        if (policy_key != 0u) {
+            EXPECT_EQ(result.domain.request().quadrature_policy_key, policy_key);
+        }
+        policy_key = result.domain.request().quadrature_policy_key;
+    }
+}
+
+TEST_P(LevelSetInterfaceLifecycleCoefficientPolicy, LegacyDefaultRetainsAbsoluteBand)
+{
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    for (const auto scale : {1.0e-14, 1.0, 1.0e14}) {
+        SCOPED_TRACE(scale);
+        setCut(scale);
+        const auto result = lifecycle.build(*system_, options_, solution_);
+        expectMetadata(result, Policy::LegacyAbsoluteBand);
+        if (scale == 1.0e-14) {
+            EXPECT_FALSE(result.success);
+            EXPECT_EQ(result.summary.active_fragment_count, 0u);
+            EXPECT_EQ(result.summary.active_volume_region_count, 0u);
+            EXPECT_DOUBLE_EQ(result.summary.measure, 0.0);
+            EXPECT_DOUBLE_EQ(result.summary.negative_volume_measure, 0.0);
+            EXPECT_DOUBLE_EQ(result.summary.positive_volume_measure, 0.0);
+        } else {
+            expectCut(result);
+        }
+        auto explicit_legacy = options_;
+        explicit_legacy.coefficient_classification_policy = Policy::LegacyAbsoluteBand;
+        const auto repeated = lifecycle.build(*system_, explicit_legacy, solution_);
+        EXPECT_EQ(repeated.domain_cache_hits, 1u);
+        EXPECT_EQ(repeated.domain.request().quadrature_policy_key,
+                  result.domain.request().quadrature_policy_key);
+        EXPECT_DOUBLE_EQ(repeated.summary.measure, result.summary.measure);
+    }
+}
+
+TEST_P(LevelSetInterfaceLifecycleCoefficientPolicy,
+       ExactFullCellsReuseAcrossCoefficientScales)
+{
+    options_.coefficient_classification_policy = Policy::ExactRepresentedZero;
+    for (const auto sign : {-1.0, 1.0}) {
+        level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+        for (const auto scale : {1.0e-14, 1.0, 1.0e14}) {
+            SCOPED_TRACE(sign * scale);
+            setFullCell(sign * scale);
+            const auto result = lifecycle.build(*system_, options_, solution_);
+            ASSERT_TRUE(result.success) << result.diagnostic;
+            expectMetadata(result, Policy::ExactRepresentedZero);
+            EXPECT_EQ(result.linear_full_cell_fast_path_count, 1u);
+            EXPECT_EQ(result.summary.active_fragment_count, 0u);
+            EXPECT_EQ(result.summary.active_volume_region_count, 1u);
+            const FE::Real full_measure = mesh_->dimension() == 2 ? 0.5 : 1.0 / 6.0;
+            EXPECT_NEAR(result.summary.negative_volume_measure,
+                        sign < 0.0 ? full_measure : 0.0, 1.0e-12);
+            EXPECT_NEAR(result.summary.positive_volume_measure,
+                        sign > 0.0 ? full_measure : 0.0, 1.0e-12);
+            EXPECT_EQ(result.domain_cache_hits, scale == 1.0e-14 ? 0u : 1u);
+            EXPECT_EQ(result.cell_cache_misses, scale == 1.0e-14 ? 1u : 0u);
+            ASSERT_EQ(result.domain.volumeRegions().size(), 1u);
+            EXPECT_DOUBLE_EQ(result.domain.volumeRegions().front().min_level_set_value,
+                             sign * scale);
+            EXPECT_DOUBLE_EQ(result.domain.volumeRegions().front().max_level_set_value,
+                             sign * scale);
+        }
+    }
+}
+
+TEST_P(LevelSetInterfaceLifecycleCoefficientPolicy, PolicyTransitionsInvalidateDomainCache)
+{
+    setCut(1.0e-14);
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    std::uint64_t exact_key = 0u;
+    for (const auto policy : {Policy::ExactRepresentedZero,
+                              Policy::LegacyAbsoluteBand,
+                              Policy::ExactRepresentedZero}) {
+        SCOPED_TRACE(static_cast<int>(policy));
+        options_.coefficient_classification_policy = policy;
+        const auto result = lifecycle.build(*system_, options_, solution_);
+        expectMetadata(result, policy);
+        EXPECT_EQ(result.domain_cache_hits, 0u);
+        EXPECT_EQ(result.cell_cache_hits, 0u);
+        EXPECT_EQ(result.cell_cache_misses, 1u);
+        if (policy == Policy::ExactRepresentedZero) {
+            expectCut(result);
+            if (exact_key != 0u) {
+                EXPECT_EQ(result.domain.request().quadrature_policy_key, exact_key);
+            }
+            exact_key = result.domain.request().quadrature_policy_key;
+        } else {
+            EXPECT_FALSE(result.success);
+            EXPECT_EQ(result.summary.active_volume_region_count, 0u);
+            EXPECT_NE(result.domain.request().quadrature_policy_key, exact_key);
+        }
+        const auto repeated = lifecycle.build(*system_, options_, solution_);
+        EXPECT_EQ(repeated.domain_cache_hits, 1u);
+        EXPECT_EQ(repeated.cell_cache_misses, 0u);
+        expectMetadata(repeated, policy);
+    }
+}
+
+TEST_P(LevelSetInterfaceLifecycleCoefficientPolicy,
+       ExactUnchangedAndSideOnlyRequestsReuseDomain)
+{
+    setCut(1.0e-14);
+    options_.coefficient_classification_policy = Policy::ExactRepresentedZero;
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto initial = lifecycle.build(*system_, options_, solution_);
+    expectCut(initial);
+    for (const auto side : {FE::geometry::CutIntegrationSide::Negative,
+                            FE::geometry::CutIntegrationSide::Positive}) {
+        const auto repeated = lifecycle.build(*system_, options_, solution_);
+        expectCut(repeated);
+        expectMetadata(repeated, Policy::ExactRepresentedZero);
+        EXPECT_EQ(repeated.domain_cache_hits, 1u);
+        EXPECT_EQ(repeated.cell_cache_misses, 0u);
+        EXPECT_EQ(repeated.cell_refresh_candidate_count, 0u);
+        EXPECT_DOUBLE_EQ(repeated.backend_elapsed_seconds, 0.0);
+        EXPECT_EQ(repeated.domain.request().quadrature_policy_key,
+                  initial.domain.request().quadrature_policy_key);
+        FE::assembly::CutIntegrationContext context;
+        context.addGeneratedInterfaceDomain(repeated.domain, side);
+        EXPECT_FALSE(context.generatedVolumeRulesForMarkerAndSide(
+            options_.requested_interface_marker, side).empty());
+        const auto other_side = side == FE::geometry::CutIntegrationSide::Negative
+                                    ? FE::geometry::CutIntegrationSide::Positive
+                                    : FE::geometry::CutIntegrationSide::Negative;
+        EXPECT_TRUE(context.generatedVolumeRulesForMarkerAndSide(
+            options_.requested_interface_marker, other_side).empty());
+    }
+}
+
+TEST_P(LevelSetInterfaceLifecycleCoefficientPolicy, RejectsInvalidAndUnsupportedPolicy)
+{
+    setFullCell(1.0);
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto initial = lifecycle.build(*system_, options_, solution_);
+    ASSERT_TRUE(initial.success) << initial.diagnostic;
+    options_.coefficient_classification_policy = static_cast<Policy>(255);
+    EXPECT_THROW((void)lifecycle.build(*system_, options_, solution_),
+                 std::invalid_argument);
+    EXPECT_EQ(lifecycle.valueRevision(), initial.value_revision);
+
+    for (const auto backend : {level_set::ImplicitCutQuadratureBackend::HighOrderSubcell,
+                               level_set::ImplicitCutQuadratureBackend::Auto}) {
+        for (const auto fallback : {level_set::ImplicitCutFallbackPolicy::Fail,
+                                    level_set::ImplicitCutFallbackPolicy::LinearCorner}) {
+            options_.geometry_mode =
+                level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+            options_.implicit_cut_quadrature_backend = backend;
+            options_.implicit_cut_fallback_policy = fallback;
+            options_.coefficient_classification_policy = Policy::LegacyAbsoluteBand;
+            const auto legacy = lifecycle.build(*system_, options_, solution_);
+            ASSERT_TRUE(legacy.success) << legacy.diagnostic;
+            options_.coefficient_classification_policy = Policy::ExactRepresentedZero;
+            EXPECT_THROW((void)lifecycle.build(*system_, options_, solution_),
+                         std::invalid_argument);
+            EXPECT_EQ(lifecycle.valueRevision(), legacy.value_revision);
+        }
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    SimplexCells, LevelSetInterfaceLifecycleCoefficientPolicy,
+    ::testing::Values(FE::ElementType::Triangle3, FE::ElementType::Tetra4),
+    [](const ::testing::TestParamInfo<FE::ElementType>& info) {
+        return info.param == FE::ElementType::Triangle3 ? "Triangle3" : "Tetra4";
+    });
+
 TEST(LevelSetInterfaceLifecycle, BuildsDomainFromScalarField)
 {
     constexpr int interface_marker = 73;
