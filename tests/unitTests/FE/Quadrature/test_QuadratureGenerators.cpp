@@ -3,7 +3,7 @@
 
 /**
  * @file test_QuadratureGenerators.cpp
- * @brief Shared test support for bounded one-dimensional quadrature generators.
+ * @brief Tests for bounded one-dimensional quadrature generators.
  */
 
 #include <gtest/gtest.h>
@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <exception>
 #include <limits>
+#include <span>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -100,7 +101,7 @@ void expect_common_line_metadata(
 {
     EXPECT_EQ(rule.cell_family(), svmp::CellFamily::Line);
     EXPECT_EQ(rule.dimension(), 1u);
-    EXPECT_DOUBLE_EQ(rule.reference_cell_measure(), 2.0);
+    EXPECT_EQ(rule.reference_cell_measure(), 2.0);
     EXPECT_EQ(rule.polynomial_exactness(), expected_exactness);
     ASSERT_EQ(rule.num_points(), expected_num_points);
     ASSERT_EQ(rule.points().size(), expected_num_points);
@@ -110,8 +111,8 @@ void expect_common_line_metadata(
          point_index < rule.num_points();
          ++point_index) {
         SCOPED_TRACE(::testing::Message() << "point index=" << point_index);
-        EXPECT_DOUBLE_EQ(rule.point(point_index)[1], 0.0);
-        EXPECT_DOUBLE_EQ(rule.point(point_index)[2], 0.0);
+        EXPECT_EQ(rule.point(point_index)[1], 0.0);
+        EXPECT_EQ(rule.point(point_index)[2], 0.0);
     }
 }
 
@@ -164,12 +165,12 @@ void expect_line_rule_invariants(
 
     if (endpoint_policy == LineEndpointPolicy::Included) {
         ASSERT_GE(rule.num_points(), 2u);
-        EXPECT_DOUBLE_EQ(rule.point(0)[0], -1.0);
-        EXPECT_DOUBLE_EQ(rule.point(rule.num_points() - 1u)[0], 1.0);
+        EXPECT_EQ(rule.point(0)[0], -1.0);
+        EXPECT_EQ(rule.point(rule.num_points() - 1u)[0], 1.0);
     }
 
     if (rule.num_points() % 2u == 1u) {
-        EXPECT_DOUBLE_EQ(rule.point(rule.num_points() / 2u)[0], 0.0);
+        EXPECT_EQ(rule.point(rule.num_points() / 2u)[0], 0.0);
     }
 
     const long double measure_error = std::abs(
@@ -178,17 +179,11 @@ void expect_line_rule_invariants(
     EXPECT_LE(measure_error, static_cast<long double>(tolerance));
 }
 
-std::pair<long double, int> expect_advertised_line_exactness(
+void expect_advertised_line_exactness(
     const QuadratureRule& rule,
     double tolerance = kMomentTolerance)
 {
-    EXPECT_GE(rule.polynomial_exactness(), 0);
-    if (rule.polynomial_exactness() < 0) {
-        return {std::numeric_limits<long double>::infinity(), -1};
-    }
-
-    long double worst_error = 0.0L;
-    int worst_power = 0;
+    ASSERT_GE(rule.polynomial_exactness(), 0);
 
     for (int power = 0;
          power <= rule.polynomial_exactness();
@@ -199,14 +194,8 @@ std::pair<long double, int> expect_advertised_line_exactness(
         const long double error = std::abs(
             accumulate_line_moment(rule, nonnegative_power) -
             analytic_line_monomial_integral(nonnegative_power));
-        if (error > worst_error) {
-            worst_error = error;
-            worst_power = power;
-        }
         EXPECT_LE(error, static_cast<long double>(tolerance));
     }
-
-    return {worst_error, worst_power};
 }
 
 void expect_every_supported_line_rule(
@@ -216,18 +205,6 @@ void expect_every_supported_line_rule(
     int exactness_subtrahend,
     LineEndpointPolicy endpoint_policy)
 {
-    long double worst_structure_error = 0.0L;
-    int worst_structure_num_points = 0;
-    std::size_t worst_structure_point_index = 0u;
-    std::string_view worst_structure_component = "none";
-
-    long double worst_measure_error = 0.0L;
-    int worst_measure_num_points = 0;
-
-    long double worst_moment_error = 0.0L;
-    int worst_moment_num_points = 0;
-    int worst_moment_power = 0;
-
     for (int num_points = first_num_points;
          num_points <= last_num_points;
          ++num_points) {
@@ -240,115 +217,41 @@ void expect_every_supported_line_rule(
             static_cast<std::size_t>(num_points),
             2 * num_points - exactness_subtrahend);
         expect_line_rule_invariants(rule, endpoint_policy);
-        const auto [rule_moment_error, rule_moment_power] =
-            expect_advertised_line_exactness(rule);
-        if (worst_moment_num_points == 0 ||
-            rule_moment_error > worst_moment_error) {
-            worst_moment_error = rule_moment_error;
-            worst_moment_num_points = num_points;
-            worst_moment_power = rule_moment_power;
-        }
+        expect_advertised_line_exactness(rule);
+    }
+}
 
-        const long double measure_error = std::abs(
-            accumulate_line_moment(rule, 0u) -
-            static_cast<long double>(rule.reference_cell_measure()));
-        if (worst_measure_num_points == 0 ||
-            measure_error > worst_measure_error) {
-            worst_measure_error = measure_error;
-            worst_measure_num_points = num_points;
-        }
+void expect_canonical_rule(
+    const QuadratureRule& rule,
+    int expected_exactness,
+    std::span<const double> expected_points,
+    std::span<const double> expected_weights)
+{
+    SCOPED_TRACE(::testing::Message() << "num_points=" << expected_points.size());
+    ASSERT_EQ(rule.num_points(), expected_points.size());
+    ASSERT_EQ(rule.num_points(), expected_weights.size());
+    EXPECT_EQ(rule.polynomial_exactness(), expected_exactness);
 
-        const auto update_worst_structure = [
-            &worst_structure_error,
-            &worst_structure_num_points,
-            &worst_structure_point_index,
-            &worst_structure_component,
-            num_points](
-                long double error,
-                std::size_t point_index,
-                std::string_view component) {
-            if (worst_structure_num_points == 0 ||
-                error > worst_structure_error) {
-                worst_structure_error = error;
-                worst_structure_num_points = num_points;
-                worst_structure_point_index = point_index;
-                worst_structure_component = component;
-            }
-        };
-
-        for (std::size_t point_index = 0;
-             point_index < rule.num_points();
-             ++point_index) {
-            const std::size_t mirror_index =
-                rule.num_points() - 1u - point_index;
-            update_worst_structure(
-                std::abs(static_cast<long double>(
-                    rule.point(point_index)[1])),
-                point_index,
-                "inactive y coordinate");
-            update_worst_structure(
-                std::abs(static_cast<long double>(
-                    rule.point(point_index)[2])),
-                point_index,
-                "inactive z coordinate");
-            update_worst_structure(
-                std::abs(
-                    static_cast<long double>(
-                        rule.point(point_index)[0]) +
-                    static_cast<long double>(
-                        rule.point(mirror_index)[0])),
-                point_index,
-                "mirrored point");
-            update_worst_structure(
-                std::abs(
-                    static_cast<long double>(rule.weight(point_index)) -
-                    static_cast<long double>(rule.weight(mirror_index))),
-                point_index,
-                "mirrored weight");
+    // The exhaustive sweeps cover metadata, invariants, and advertised moments.
+    // These fixtures independently anchor the samples and the exactness limit.
+    for (std::size_t point_index = 0; point_index < rule.num_points(); ++point_index) {
+        SCOPED_TRACE(::testing::Message() << "point index=" << point_index);
+        const double expected_coordinate = expected_points[point_index];
+        if (expected_coordinate == -1.0 || expected_coordinate == 0.0 ||
+            expected_coordinate == 1.0) {
+            EXPECT_EQ(rule.point(point_index)[0], expected_coordinate);
+        } else {
+            EXPECT_NEAR(rule.point(point_index)[0], expected_coordinate, kFixtureTolerance);
         }
-
-        if (rule.num_points() % 2u == 1u) {
-            const std::size_t center_index = rule.num_points() / 2u;
-            update_worst_structure(
-                std::abs(static_cast<long double>(
-                    rule.point(center_index)[0])),
-                center_index,
-                "odd-rule center");
-        }
-
-        if (endpoint_policy == LineEndpointPolicy::Included) {
-            update_worst_structure(
-                std::abs(
-                    static_cast<long double>(rule.point(0u)[0]) + 1.0L),
-                0u,
-                "left endpoint");
-            const std::size_t right_endpoint_index =
-                rule.num_points() - 1u;
-            update_worst_structure(
-                std::abs(
-                    static_cast<long double>(
-                        rule.point(right_endpoint_index)[0]) -
-                    1.0L),
-                right_endpoint_index,
-                "right endpoint");
-        }
+        EXPECT_NEAR(rule.weight(point_index), expected_weights[point_index], kFixtureTolerance);
     }
 
-    EXPECT_LE(
-        worst_structure_error,
-        static_cast<long double>(kStructureTolerance))
-        << "worst num_points=" << worst_structure_num_points
-        << ", point index=" << worst_structure_point_index
-        << ", component=" << worst_structure_component;
-    EXPECT_LE(
-        worst_measure_error,
-        static_cast<long double>(kStructureTolerance))
-        << "worst num_points=" << worst_measure_num_points;
-    EXPECT_LE(
-        worst_moment_error,
-        static_cast<long double>(kMomentTolerance))
-        << "worst num_points=" << worst_moment_num_points
-        << ", power=" << worst_moment_power;
+    const std::size_t first_unadvertised_even_power =
+        static_cast<std::size_t>(expected_exactness + 1);
+    const long double first_unadvertised_error = std::abs(
+        accumulate_line_moment(rule, first_unadvertised_even_power) -
+        analytic_line_monomial_integral(first_unadvertised_even_power));
+    EXPECT_GT(first_unadvertised_error, static_cast<long double>(kMomentTolerance));
 }
 
 template <typename ExceptionType, typename Function>
@@ -425,70 +328,20 @@ TEST(QuadratureGeneratorTestSupport, ExercisesSharedLineRuleChecks)
 
 TEST(GaussLegendreImplementation, GeneratesCanonicalLowOrderRules)
 {
-    const auto expect_canonical_rule = [](
-        int num_points,
-        const auto& expected_points,
-        const auto& expected_weights) {
-        SCOPED_TRACE(
-            ::testing::Message() << "num_points=" << num_points);
-        const QuadratureRule rule = make_gauss_legendre_rule(num_points);
-
-        expect_common_line_metadata(
-            rule,
-            static_cast<std::size_t>(num_points),
-            2 * num_points - 1);
-        expect_line_rule_invariants(
-            rule,
-            LineEndpointPolicy::Excluded);
-        expect_advertised_line_exactness(rule);
-
-        ASSERT_EQ(rule.num_points(), expected_points.size());
-        ASSERT_EQ(rule.num_points(), expected_weights.size());
-        for (std::size_t point_index = 0;
-             point_index < rule.num_points();
-             ++point_index) {
-            SCOPED_TRACE(
-                ::testing::Message() << "point index=" << point_index);
-            if (expected_points[point_index] == 0.0) {
-                EXPECT_DOUBLE_EQ(rule.point(point_index)[0], 0.0);
-            } else {
-                EXPECT_NEAR(
-                    rule.point(point_index)[0],
-                    expected_points[point_index],
-                    kFixtureTolerance);
-            }
-            EXPECT_NEAR(
-                rule.weight(point_index),
-                expected_weights[point_index],
-                kFixtureTolerance);
-        }
-
-        const std::size_t first_unadvertised_even_power =
-            static_cast<std::size_t>(2 * num_points);
-        const long double first_unadvertised_error = std::abs(
-            accumulate_line_moment(
-                rule, first_unadvertised_even_power) -
-            analytic_line_monomial_integral(
-                first_unadvertised_even_power));
-        EXPECT_GT(
-            first_unadvertised_error,
-            static_cast<long double>(kMomentTolerance));
-    };
-
     expect_canonical_rule(
-        1,
+        make_gauss_legendre_rule(1), 1,
         std::array{0.0},
         std::array{2.0});
 
     const double two_point_abscissa = 1.0 / std::sqrt(3.0);
     expect_canonical_rule(
-        2,
+        make_gauss_legendre_rule(2), 3,
         std::array{-two_point_abscissa, two_point_abscissa},
         std::array{1.0, 1.0});
 
     const double three_point_abscissa = std::sqrt(3.0 / 5.0);
     expect_canonical_rule(
-        3,
+        make_gauss_legendre_rule(3), 5,
         std::array{
             -three_point_abscissa, 0.0, three_point_abscissa},
         std::array{5.0 / 9.0, 8.0 / 9.0, 5.0 / 9.0});
@@ -528,75 +381,18 @@ TEST(GaussLegendreImplementation, RejectsRequestsOutsideSupportedRange)
 
 TEST(GaussLobattoImplementation, GeneratesCanonicalLowOrderRules)
 {
-    const auto expect_canonical_rule = [](
-        int num_points,
-        const auto& expected_points,
-        const auto& expected_weights) {
-        SCOPED_TRACE(
-            ::testing::Message() << "num_points=" << num_points);
-        const QuadratureRule rule =
-            make_gauss_lobatto_rule(num_points);
-
-        expect_common_line_metadata(
-            rule,
-            static_cast<std::size_t>(num_points),
-            2 * num_points - 3);
-        expect_line_rule_invariants(
-            rule,
-            LineEndpointPolicy::Included);
-        expect_advertised_line_exactness(rule);
-
-        ASSERT_EQ(rule.num_points(), expected_points.size());
-        ASSERT_EQ(rule.num_points(), expected_weights.size());
-        for (std::size_t point_index = 0;
-             point_index < rule.num_points();
-             ++point_index) {
-            SCOPED_TRACE(
-                ::testing::Message() << "point index=" << point_index);
-            const double expected_coordinate =
-                expected_points[point_index];
-            if (expected_coordinate == -1.0 ||
-                expected_coordinate == 0.0 ||
-                expected_coordinate == 1.0) {
-                EXPECT_DOUBLE_EQ(
-                    rule.point(point_index)[0],
-                    expected_coordinate);
-            } else {
-                EXPECT_NEAR(
-                    rule.point(point_index)[0],
-                    expected_coordinate,
-                    kFixtureTolerance);
-            }
-            EXPECT_NEAR(
-                rule.weight(point_index),
-                expected_weights[point_index],
-                kFixtureTolerance);
-        }
-
-        const std::size_t first_unadvertised_even_power =
-            static_cast<std::size_t>(2 * num_points - 2);
-        const long double first_unadvertised_error = std::abs(
-            accumulate_line_moment(
-                rule, first_unadvertised_even_power) -
-            analytic_line_monomial_integral(
-                first_unadvertised_even_power));
-        EXPECT_GT(
-            first_unadvertised_error,
-            static_cast<long double>(kMomentTolerance));
-    };
-
     expect_canonical_rule(
-        2,
+        make_gauss_lobatto_rule(2), 1,
         std::array{-1.0, 1.0},
         std::array{1.0, 1.0});
     expect_canonical_rule(
-        3,
+        make_gauss_lobatto_rule(3), 3,
         std::array{-1.0, 0.0, 1.0},
         std::array{1.0 / 3.0, 4.0 / 3.0, 1.0 / 3.0});
 
     const double four_point_abscissa = 1.0 / std::sqrt(5.0);
     expect_canonical_rule(
-        4,
+        make_gauss_lobatto_rule(4), 5,
         std::array{
             -1.0, -four_point_abscissa, four_point_abscissa, 1.0},
         std::array{1.0 / 6.0, 5.0 / 6.0, 5.0 / 6.0, 1.0 / 6.0});
