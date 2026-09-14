@@ -3,7 +3,7 @@
 
 /**
  * @file GaussLobattoQuadrature.cpp
- * @brief Bounded generation and validation of Gauss-Lobatto-Legendre line rules.
+ * @brief Exactness-requested generation of bounded Gauss-Lobatto-Legendre line rules.
  * @ingroup FE_Quadrature
  */
 
@@ -24,6 +24,9 @@
 namespace svmp::FE::quadrature {
 namespace {
 
+constexpr int kMaximumPoints = 128;
+static_assert(max_gauss_lobatto_exactness() == 2 * kMaximumPoints - 3);
+
 // Defensively bound supported cosine-seeded Newton refinements for
 // deterministic termination.
 constexpr int kMaximumNewtonIterations = 100;
@@ -34,7 +37,7 @@ constexpr double kNewtonCorrectionTolerance =
 // Provide conservative O(n epsilon) accumulation headroom, qualified by those
 // sweeps.
 constexpr double kRuleValidationTolerance =
-    32.0 * static_cast<double>(max_gauss_lobatto_points()) *
+    32.0 * static_cast<double>(kMaximumPoints) *
     std::numeric_limits<double>::epsilon();
 
 std::pair<double, double> evaluate_adjacent_legendre_values(
@@ -188,16 +191,17 @@ std::pair<double, double> generate_interior_root_and_weight(int num_points, int 
 
 } // namespace
 
-QuadratureRule make_gauss_lobatto_rule(int num_points)
+QuadratureRule make_gauss_lobatto_rule(int requested_exactness)
 {
-    if (num_points < 2 || num_points > max_gauss_lobatto_points()) {
+    if (requested_exactness < 0 || requested_exactness > max_gauss_lobatto_exactness()) {
         std::ostringstream message;
         message << "Gauss-Lobatto-Legendre generator: "
-                << "num_points must be in [2, "
-                << max_gauss_lobatto_points() << ']';
+                << "requested_exactness must be in [0, "
+                << max_gauss_lobatto_exactness() << ']';
         svmp::raise<InvalidArgumentException>(message.str());
     }
 
+    const int num_points = requested_exactness / 2 + 2;
     std::vector<QuadPoint> points(
         static_cast<std::size_t>(num_points), QuadPoint::Zero());
     std::vector<double> weights(points.size());

@@ -3,7 +3,7 @@
 
 /**
  * @file test_QuadratureGenerators.cpp
- * @brief Tests for bounded one-dimensional quadrature generators.
+ * @brief Tests for exactness-requested one-dimensional quadrature generators.
  */
 
 #include <gtest/gtest.h>
@@ -42,13 +42,13 @@ constexpr double kFixtureTolerance =
 constexpr double kBasisConsistencyTolerance =
     128.0 * std::numeric_limits<double>::epsilon();
 
-static_assert(max_gauss_legendre_points() == 128);
-static_assert(noexcept(max_gauss_legendre_points()));
+static_assert(max_gauss_legendre_exactness() == 255);
+static_assert(noexcept(max_gauss_legendre_exactness()));
 static_assert(
     std::is_same_v<decltype(&make_gauss_legendre_rule),
                    QuadratureRule (*)(int)>);
-static_assert(max_gauss_lobatto_points() == 128);
-static_assert(noexcept(max_gauss_lobatto_points()));
+static_assert(max_gauss_lobatto_exactness() == 253);
+static_assert(noexcept(max_gauss_lobatto_exactness()));
 static_assert(
     std::is_same_v<decltype(&make_gauss_lobatto_rule),
                    QuadratureRule (*)(int)>);
@@ -207,14 +207,20 @@ void expect_every_supported_line_rule(
          ++num_points) {
         SCOPED_TRACE(
             ::testing::Message() << "num_points=" << num_points);
-        const QuadratureRule rule = generator(num_points);
+        const int expected_exactness = 2 * num_points - exactness_subtrahend;
+        // Both requests must select this minimum point count and report its
+        // actual exactness, not just echo the requested degree.
+        for (const int requested_exactness :
+             {expected_exactness - 1, expected_exactness}) {
+            SCOPED_TRACE(
+                ::testing::Message() << "requested_exactness=" << requested_exactness);
+            const QuadratureRule rule = generator(requested_exactness);
 
-        expect_common_line_metadata(
-            rule,
-            static_cast<std::size_t>(num_points),
-            2 * num_points - exactness_subtrahend);
-        expect_line_rule_invariants(rule, endpoint_policy);
-        expect_advertised_line_exactness(rule);
+            expect_common_line_metadata(
+                rule, static_cast<std::size_t>(num_points), expected_exactness);
+            expect_line_rule_invariants(rule, endpoint_policy);
+            expect_advertised_line_exactness(rule);
+        }
     }
 }
 
@@ -325,7 +331,7 @@ TEST(QuadratureGeneratorTestSupport, ExercisesSharedLineRuleChecks)
 TEST(GaussLegendreImplementation, GeneratesCanonicalLowOrderRules)
 {
     expect_canonical_rule(
-        make_gauss_legendre_rule(1), 1,
+        make_gauss_legendre_rule(0), 1,
         std::array{0.0},
         std::array{2.0});
 
@@ -337,7 +343,7 @@ TEST(GaussLegendreImplementation, GeneratesCanonicalLowOrderRules)
 
     const double three_point_abscissa = std::sqrt(3.0 / 5.0);
     expect_canonical_rule(
-        make_gauss_legendre_rule(3), 5,
+        make_gauss_legendre_rule(4), 5,
         std::array{
             -three_point_abscissa, 0.0, three_point_abscissa},
         std::array{5.0 / 9.0, 8.0 / 9.0, 5.0 / 9.0});
@@ -348,7 +354,7 @@ TEST(GaussLegendreImplementation, GeneratesEverySupportedRule)
     expect_every_supported_line_rule(
         &make_gauss_legendre_rule,
         1,
-        max_gauss_legendre_points(),
+        128,
         1,
         LineEndpointPolicy::Excluded);
 }
@@ -356,20 +362,19 @@ TEST(GaussLegendreImplementation, GeneratesEverySupportedRule)
 TEST(GaussLegendreImplementation, RejectsRequestsOutsideSupportedRange)
 {
     constexpr std::string_view expected_message =
-        "num_points must be in [1, 128]";
-    constexpr std::array invalid_point_counts{
+        "requested_exactness must be in [0, 255]";
+    constexpr std::array invalid_exactness{
         std::numeric_limits<int>::min(),
         -1,
-        0,
-        129,
+        256,
         std::numeric_limits<int>::max()};
 
-    for (const int num_points : invalid_point_counts) {
+    for (const int requested_exactness : invalid_exactness) {
         SCOPED_TRACE(
-            ::testing::Message() << "num_points=" << num_points);
+            ::testing::Message() << "requested_exactness=" << requested_exactness);
         expect_invalid_argument_with_message(
-            [num_points] {
-                (void)make_gauss_legendre_rule(num_points);
+            [requested_exactness] {
+                (void)make_gauss_legendre_rule(requested_exactness);
             },
             expected_message);
     }
@@ -378,11 +383,11 @@ TEST(GaussLegendreImplementation, RejectsRequestsOutsideSupportedRange)
 TEST(GaussLobattoImplementation, GeneratesCanonicalLowOrderRules)
 {
     expect_canonical_rule(
-        make_gauss_lobatto_rule(2), 1,
+        make_gauss_lobatto_rule(0), 1,
         std::array{-1.0, 1.0},
         std::array{1.0, 1.0});
     expect_canonical_rule(
-        make_gauss_lobatto_rule(3), 3,
+        make_gauss_lobatto_rule(2), 3,
         std::array{-1.0, 0.0, 1.0},
         std::array{1.0 / 3.0, 4.0 / 3.0, 1.0 / 3.0});
 
@@ -399,7 +404,7 @@ TEST(GaussLobattoImplementation, GeneratesEverySupportedRule)
     expect_every_supported_line_rule(
         &make_gauss_lobatto_rule,
         2,
-        max_gauss_lobatto_points(),
+        128,
         3,
         LineEndpointPolicy::Included);
 }
@@ -408,21 +413,19 @@ TEST(GaussLobattoImplementation, RejectsRequestsOutsideSupportedRange)
 {
     constexpr std::string_view expected_message =
         "Gauss-Lobatto-Legendre generator: "
-        "num_points must be in [2, 128]";
-    constexpr std::array invalid_point_counts{
+        "requested_exactness must be in [0, 253]";
+    constexpr std::array invalid_exactness{
         std::numeric_limits<int>::min(),
         -1,
-        0,
-        1,
-        129,
+        254,
         std::numeric_limits<int>::max()};
 
-    for (const int num_points : invalid_point_counts) {
+    for (const int requested_exactness : invalid_exactness) {
         SCOPED_TRACE(
-            ::testing::Message() << "num_points=" << num_points);
+            ::testing::Message() << "requested_exactness=" << requested_exactness);
         expect_invalid_argument_with_message(
-            [num_points] {
-                (void)make_gauss_lobatto_rule(num_points);
+            [requested_exactness] {
+                (void)make_gauss_lobatto_rule(requested_exactness);
             },
             expected_message);
     }
@@ -430,14 +433,13 @@ TEST(GaussLobattoImplementation, RejectsRequestsOutsideSupportedRange)
 
 TEST(GaussLobattoBasisConsistency, MatchesRepresentativeNodeDistributions)
 {
-    constexpr std::array point_counts{
-        2, 4, 65, max_gauss_lobatto_points()};
+    constexpr std::array point_counts{2, 4, 65, 128};
 
     for (const int num_points : point_counts) {
         SCOPED_TRACE(
             ::testing::Message() << "num_points=" << num_points);
         const QuadratureRule rule =
-            make_gauss_lobatto_rule(num_points);
+            make_gauss_lobatto_rule(2 * num_points - 3);
         ASSERT_EQ(
             rule.num_points(),
             static_cast<std::size_t>(num_points));

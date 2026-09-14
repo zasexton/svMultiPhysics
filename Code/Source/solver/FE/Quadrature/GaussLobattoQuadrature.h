@@ -19,39 +19,39 @@ namespace svmp::FE::quadrature {
  */
 
 /**
- * @brief Return the largest supported Gauss-Lobatto-Legendre point count.
- * @details The 128 total points include both endpoints. This project support
- * bound limits generator work and downstream product-rule growth while
- * providing endpoint-inclusive line exactness through degree 253; it is not a
- * mathematical or convergence limit.
- * @return The inclusive point-count limit, 128.
+ * @brief Return the largest supported Gauss-Lobatto-Legendre exactness request.
+ * @details Degree 253 corresponds to the internal 128-point project support
+ * bound, including both endpoints, which limits generator work and downstream
+ * product-rule growth; it is not a mathematical or convergence limit.
+ * @return The inclusive requested-exactness limit, 253.
  */
-[[nodiscard]] constexpr int max_gauss_lobatto_points() noexcept
+[[nodiscard]] constexpr int max_gauss_lobatto_exactness() noexcept
 {
-    return 128;
+    return 253;
 }
 
 /**
- * @brief Generate an @p num_points Gauss-Lobatto-Legendre rule on
- *        @f$[-1,1]@f$.
+ * @brief Generate a Gauss-Lobatto-Legendre rule on @f$[-1,1]@f$ with at least
+ *        the requested exactness.
  *
- * @details The returned line rule has exactly @f$-1@f$ as its first point and
- * exactly @f$+1@f$ as its last point. When present, its @f$n-2@f$ interior
- * points are the roots of @f$P'_{n-1}@f$, where @f$n@f$ is @p num_points.
- * Points are strictly increasing, weights are positive and aligned with their
- * points, and the rule has polynomial exactness @f$2n-3@f$.
+ * @details For @f$d@f$ = @p requested_exactness, integer division gives the
+ * minimum point count @f$n=\lfloor d/2\rfloor+2@f$. The returned metadata reports
+ * the actual polynomial exactness @f$2n-3@f$, which exceeds even requests by one.
+ * Degree zero produces two points with exactness one. The first and last points
+ * are exactly @f$-1@f$ and @f$+1@f$. When present, the @f$n-2@f$ interior points
+ * are the roots of @f$P'_{n-1}@f$. Points are strictly increasing, and weights
+ * are positive and aligned with their points.
  *
- * @param num_points Signed number of quadrature points; must be in the
- *        inclusive range
- *        @f$[2,\texttt{max\_gauss\_lobatto\_points()}]@f$.
+ * @param requested_exactness Minimum polynomial degree to integrate exactly;
+ *        must be in [0, 253], inclusive (see max_gauss_lobatto_exactness()).
  * @return A complete QuadratureRule value for CellFamily::Line.
- * @throws InvalidArgumentException If @p num_points is outside the supported
- *         range.
+ * @throws InvalidArgumentException If @p requested_exactness is outside the
+ *         supported range; checked before point-count conversion or allocation.
  * @throws ConvergenceException If root refinement or final numerical
  *         validation fails.
  */
 [[nodiscard]] QuadratureRule
-make_gauss_lobatto_rule(int num_points);
+make_gauss_lobatto_rule(int requested_exactness);
 
 /** @} */
 
