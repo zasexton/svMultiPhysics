@@ -118,8 +118,7 @@ void expect_common_line_metadata(
 
 void expect_line_rule_invariants(
     const QuadratureRule& rule,
-    LineEndpointPolicy endpoint_policy,
-    double tolerance = kStructureTolerance)
+    LineEndpointPolicy endpoint_policy)
 {
     ASSERT_GT(rule.num_points(), 0u);
     ASSERT_EQ(rule.points().size(), rule.weights().size());
@@ -159,8 +158,8 @@ void expect_line_rule_invariants(
         EXPECT_NEAR(
             coordinate,
             -rule.point(mirror_index)[0],
-            tolerance);
-        EXPECT_NEAR(weight, rule.weight(mirror_index), tolerance);
+            kStructureTolerance);
+        EXPECT_NEAR(weight, rule.weight(mirror_index), kStructureTolerance);
     }
 
     if (endpoint_policy == LineEndpointPolicy::Included) {
@@ -176,12 +175,10 @@ void expect_line_rule_invariants(
     const long double measure_error = std::abs(
         accumulate_line_moment(rule, 0u) -
         static_cast<long double>(rule.reference_cell_measure()));
-    EXPECT_LE(measure_error, static_cast<long double>(tolerance));
+    EXPECT_LE(measure_error, static_cast<long double>(kStructureTolerance));
 }
 
-void expect_advertised_line_exactness(
-    const QuadratureRule& rule,
-    double tolerance = kMomentTolerance)
+void expect_advertised_line_exactness(const QuadratureRule& rule)
 {
     ASSERT_GE(rule.polynomial_exactness(), 0);
 
@@ -194,7 +191,7 @@ void expect_advertised_line_exactness(
         const long double error = std::abs(
             accumulate_line_moment(rule, nonnegative_power) -
             analytic_line_monomial_integral(nonnegative_power));
-        EXPECT_LE(error, static_cast<long double>(tolerance));
+        EXPECT_LE(error, static_cast<long double>(kMomentTolerance));
     }
 }
 
@@ -254,19 +251,18 @@ void expect_canonical_rule(
     EXPECT_GT(first_unadvertised_error, static_cast<long double>(kMomentTolerance));
 }
 
-template <typename ExceptionType, typename Function>
-void expect_exception_with_message(
+template <typename Function>
+void expect_invalid_argument_with_message(
     Function&& function,
     std::string_view expected_substring)
 {
-    static_assert(std::is_base_of_v<std::exception, ExceptionType>);
     ASSERT_FALSE(expected_substring.empty());
 
     try {
         std::forward<Function>(function)();
-        FAIL() << "Expected requested exception containing: "
+        FAIL() << "Expected InvalidArgumentException containing: "
                << expected_substring;
-    } catch (const ExceptionType& exception) {
+    } catch (const InvalidArgumentException& exception) {
         const std::string_view actual_message{exception.what()};
         EXPECT_NE(
             actual_message.find(expected_substring),
@@ -318,7 +314,7 @@ TEST(QuadratureGeneratorTestSupport, ExercisesSharedLineRuleChecks)
         endpoint_rule,
         LineEndpointPolicy::Included);
     expect_advertised_line_exactness(endpoint_rule);
-    expect_exception_with_message<InvalidArgumentException>(
+    expect_invalid_argument_with_message(
         [] {
             (void)QuadratureRule(
                 svmp::CellFamily::Line, 1, {}, {});
@@ -371,7 +367,7 @@ TEST(GaussLegendreImplementation, RejectsRequestsOutsideSupportedRange)
     for (const int num_points : invalid_point_counts) {
         SCOPED_TRACE(
             ::testing::Message() << "num_points=" << num_points);
-        expect_exception_with_message<InvalidArgumentException>(
+        expect_invalid_argument_with_message(
             [num_points] {
                 (void)make_gauss_legendre_rule(num_points);
             },
@@ -424,7 +420,7 @@ TEST(GaussLobattoImplementation, RejectsRequestsOutsideSupportedRange)
     for (const int num_points : invalid_point_counts) {
         SCOPED_TRACE(
             ::testing::Message() << "num_points=" << num_points);
-        expect_exception_with_message<InvalidArgumentException>(
+        expect_invalid_argument_with_message(
             [num_points] {
                 (void)make_gauss_lobatto_rule(num_points);
             },
@@ -461,16 +457,13 @@ TEST(GaussLobattoBasisConsistency, MatchesRepresentativeNodeDistributions)
             if (point_index == 0u) {
                 EXPECT_EQ(quadrature_coordinate, -1.0);
                 EXPECT_EQ(basis_coordinate, -1.0);
-                EXPECT_EQ(quadrature_coordinate, basis_coordinate);
             } else if (point_index + 1u == rule.num_points()) {
                 EXPECT_EQ(quadrature_coordinate, 1.0);
                 EXPECT_EQ(basis_coordinate, 1.0);
-                EXPECT_EQ(quadrature_coordinate, basis_coordinate);
             } else if (num_points % 2 == 1 &&
                        point_index == rule.num_points() / 2u) {
                 EXPECT_EQ(quadrature_coordinate, 0.0);
                 EXPECT_EQ(basis_coordinate, 0.0);
-                EXPECT_EQ(quadrature_coordinate, basis_coordinate);
             } else {
                 EXPECT_NEAR(
                     quadrature_coordinate,
