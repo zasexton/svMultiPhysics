@@ -6710,6 +6710,22 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
                     "diagnostic_dynamic_contact_operator_angle_min_wall_tangential_normal_norm"
                 ] = min(tangent_norms)
 
+    # Current pressure and force scalars must describe the same sample. Keep
+    # the complete history below, but never fill a missing current channel
+    # with an older available value, including when refreshing this mapping.
+    for key in tuple(metrics):
+        if key.startswith((
+                "diagnostic_free_surface_pressure_representability_",
+                "diagnostic_free_surface_conservative_balance_")) or key in {
+                    "diagnostic_free_surface_pressure_virtual_work_norm",
+                    "diagnostic_free_surface_surface_energy_virtual_work_norm",
+                    "diagnostic_free_surface_physical_potential_virtual_work_norm",
+                    "latest_free_surface_conservative_balance",
+                    "latest_available_free_surface_conservative_balance",
+                    "latest_free_surface_pressure_representability",
+                }:
+            metrics.pop(key)
+
     conservative_balances = diagnostics.get(
         "free_surface_conservative_balances", [])
     if isinstance(conservative_balances, list):
@@ -6722,6 +6738,11 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         metrics[
             "diagnostic_free_surface_conservative_balance_available_count"
         ] = len(available_balances)
+        current_balance = (
+            conservative_balances[-1]
+            if conservative_balances and isinstance(conservative_balances[-1], dict)
+            else {}
+        )
         if conservative_balances:
             metrics["latest_free_surface_conservative_balance"] = (
                 conservative_balances[-1])
@@ -6740,8 +6761,8 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         metrics[
             "diagnostic_free_surface_pressure_representability_available_count"
         ] = len(available_representability_records)
-        if representability_records:
-            latest_representability = representability_records[-1]
+        if "pressure_representability_available" in current_balance:
+            latest_representability = current_balance
             metrics["latest_free_surface_pressure_representability"] = (
                 latest_representability)
             for source in (
@@ -6763,8 +6784,8 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
                 value = latest_representability.get(source)
                 if isinstance(value, (bool, int, float, str)):
                     metrics[f"diagnostic_free_surface_{source}"] = value
-        if available_balances:
-            latest_available = available_balances[-1]
+        if current_balance.get("available") in (1, True):
+            latest_available = current_balance
             metrics["latest_available_free_surface_conservative_balance"] = (
                 latest_available)
             for source, target in (
