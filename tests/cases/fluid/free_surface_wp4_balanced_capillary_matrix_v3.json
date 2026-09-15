@@ -1,7 +1,12 @@
 {
   "schema_version": 3,
+  "qualification_contract": {
+    "version": "wp4_gate_contract_20260906_v1",
+    "historical_registry_sha256": "9b07b2b5dbf98e3b3c115f6ad11499454e7f13718eaf85ae28142bc338eb2fbe",
+    "scientific_contracts": []
+  },
   "matrix_id": "free_surface_wp4_balanced_capillary_v3",
-  "status": "FROZEN_BEFORE_EXECUTION",
+  "status": "AWAITING_SCIENTIFIC_CONTRACTS",
   "work_package": "WP-4",
   "findings": [
     "FSR-03",
@@ -136,7 +141,7 @@
       32
     ],
     "conditional_spatial_level_cells_per_radius": 64,
-    "conditional_level_trigger": "nonmonotone_three_level_sequence_only",
+    "conditional_level_trigger": "unresolved_three_level_asymptotic_regime",
     "conditional_trigger_record_policy": "hash_bound_prior_three_level_analysis",
     "conditional_trigger_record_schema_version": 1,
     "conditional_level_by_dimension": {
@@ -158,7 +163,7 @@
     "safety_factor": 1.25,
     "minimum_observed_order": 0.8,
     "nonmonotone_three_level_disposition": "ADDITIONAL_LEVEL_REQUIRED",
-    "nonasymptotic_four_level_disposition": "FAIL"
+    "nonasymptotic_four_level_disposition": "INCONCLUSIVE"
   },
   "gates": {
     "exact_flat_scaled_residual_factor": 256.0,

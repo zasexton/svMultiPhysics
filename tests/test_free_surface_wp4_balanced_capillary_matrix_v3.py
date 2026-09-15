@@ -115,6 +115,7 @@ def write_prior_analysis(tmp_path, value, *specifications):
         "matrix_id": value["matrix_id"],
         "registry_sha256": runner.sha256_file(MATRIX_PATH),
         "runner_sha256": runner.sha256_file(RUNNER_PATH),
+        "qualification_contract_module_sha256": runner.sha256_file(RUNNER_PATH.with_name("free_surface_wp4_gate_contract.py")),
         "physical_runner_sha256": runner.sha256_file(runner.PHYSICAL_RUNNER),
         "pre_execution_manifest_sha256": runner.sha256_file(preflight),
         "expected_case_count": len(base_cases),
@@ -257,7 +258,7 @@ def test_v3_registry_is_frozen_and_parent_v2_bytes_are_pinned():
     value = registry()
     assert value["schema_version"] == 3
     assert value["matrix_id"] == "free_surface_wp4_balanced_capillary_v3"
-    assert value["status"] == "FROZEN_BEFORE_EXECUTION"
+    assert value["status"] == "AWAITING_SCIENTIFIC_CONTRACTS"
     assert runner.sha256_file(runner.PARENT_RUNNER_PATH) == (
         runner.EXPECTED_PARENT_RUNNER_SHA256
     )
@@ -723,7 +724,7 @@ def test_physical_studies_retain_geometry_angles_walls_signs_and_offsets():
     assert value["refinement"]["spatial_levels_cells_per_radius"] == [8, 16, 32]
     assert value["refinement"]["conditional_spatial_level_cells_per_radius"] == 64
     assert value["refinement"]["conditional_level_trigger"] == (
-        "nonmonotone_three_level_sequence_only"
+        "unresolved_three_level_asymptotic_regime"
     )
 
 
@@ -1109,6 +1110,40 @@ def test_physical_execution_adapter_uses_v3_argument_mapping(monkeypatch, tmp_pa
     assert option_values(
         observed["arguments"], "--interface-quadrature-order"
     ) == ["2"]
+
+
+def test_physical_arguments_select_sampled_admission_limit_without_relaxing_minimized_equilibrium(
+        tmp_path):
+    value = registry()
+    cases = runner.expand_cases(value)
+    sampled = next(
+        case for case in cases
+        if case["study_id"] == "closed_circle_sampled_analytic"
+    )
+    minimized = next(
+        case for case in cases
+        if case["study_id"] == "closed_circle_discrete_minimizer"
+    )
+    minimized_arguments = runner.physical_case_arguments(
+        value,
+        minimized,
+        solver=tmp_path / "solver",
+        qualification_log=tmp_path / "minimized-qualification.json",
+    )
+    assert option_values(
+        minimized_arguments,
+        "--max-free-surface-pressure-representability-relative-distance",
+    ) == ["1e-8"]
+    sampled_arguments = runner.physical_case_arguments(
+        value,
+        sampled,
+        solver=tmp_path / "solver",
+        qualification_log=tmp_path / "sampled-qualification.json",
+    )
+    assert option_values(
+        sampled_arguments,
+        "--max-free-surface-pressure-representability-relative-distance",
+    ) == ["1.0"]
 
 
 @pytest.mark.parametrize(
@@ -1526,6 +1561,8 @@ def test_timeout_tracks_session_changing_child_after_launcher_exit(
         assert diagnostics["termination"][
             "all_session_processes_terminated"
         ] is True
+        assert diagnostics["termination"]["remaining_processes"] == []
+        assert execution["containment_process_id"] not in diagnostics["termination"]["kill_process_group_ids"]
         assert wait_for_process_exit(child_pid) in {None, "Z"}
         assert control.poll() is None
     finally:
@@ -1534,6 +1571,44 @@ def test_timeout_tracks_session_changing_child_after_launcher_exit(
         if control.poll() is None:
             os.killpg(control.pid, signal.SIGKILL)
         control.wait()
+
+
+def test_descendant_kill_preserves_supervisor_until_reaping(monkeypatch):
+    signals = []
+    killed_children = set()
+    class Process:
+        pid = 100
+        returncode = None
+        def poll(self):
+            return self.returncode
+        def wait(self, timeout):
+            assert timeout == 0.05
+            assert ("group", 100, signal.SIGKILL) not in signals
+            assert killed_children == {101, 200}
+            self.returncode = 0
+            return 0
+    process = Process()
+    records = [
+        {"pid": 100, "process_group_id": 100, "state": "S"},
+        {"pid": 101, "process_group_id": 100, "state": "S"},
+        {"pid": 200, "process_group_id": 200, "state": "S"},
+    ]
+    def signal_group(group, number):
+        signals.append(("group", group, number))
+        if number == signal.SIGKILL:
+            killed_children.update(record["pid"] for record in records if record["process_group_id"] == group and record["pid"] != 100)
+    def signal_process(pid, number):
+        signals.append(("process", pid, number))
+        if number == signal.SIGKILL:
+            killed_children.add(pid)
+    monkeypatch.setattr(runner, "_owned_process_records", lambda *args: records if process.returncode is None else [])
+    monkeypatch.setattr(runner.os, "getpgrp", lambda: 999)
+    monkeypatch.setattr(runner.os, "killpg", signal_group)
+    monkeypatch.setattr(runner.os, "kill", signal_process)
+    result = runner._terminate_owned_processes(process, {}, grace_seconds=0.001)
+    assert result["all_owned_descendants_terminated"] is True
+    assert result["kill_process_group_ids"] == [200]
+    assert result["kill_process_ids"] == [101]
 
 
 def test_stack_tool_timeout_terminates_tool_descendants(monkeypatch, tmp_path):
@@ -1843,7 +1918,7 @@ def test_analysis_adapter_translates_cadence_and_limits_closure(
     assert observed["case_count"] == len(expected)
     assert observed["case_axes"] == {"reinitialization_cadence"}
     assert summary["disposition"] == {
-        "fsr03_closed": True,
+        "fsr03_closed": False,
         "fsr04_closed": False,
         "wp4_closed": False,
         "q2_closed": False,
@@ -2000,7 +2075,7 @@ def test_targeted_analysis_resolves_available_sequence_and_keeps_3d_inconclusive
     assert trigger_path.read_bytes() == original_trigger_bytes
 
 
-def test_targeted_analysis_promotes_unresolved_four_level_sequence_to_fail(
+def test_targeted_analysis_retains_unresolved_four_level_sequence_as_inconclusive(
     monkeypatch, tmp_path
 ):
     value = registry()
@@ -2031,7 +2106,7 @@ def test_targeted_analysis_promotes_unresolved_four_level_sequence_to_fail(
         trigger_path=trigger_path,
     )
     assert summary["conditional_level_dispositions"] == []
-    assert summary["qualification_outcome"] == "FAIL"
+    assert summary["qualification_outcome"] == "INCONCLUSIVE"
     assert summary["disposition"] == {
         "fsr03_closed": False,
         "fsr04_closed": False,

@@ -40,7 +40,7 @@ PHYSICAL_RUNNER = (
     / "open_vessel_free_surface/run_test05_velocity_growth_smoke.py"
 )
 EXPECTED_REGISTRY_SHA256 = (
-    "9b07b2b5dbf98e3b3c115f6ad11499454e7f13718eaf85ae28142bc338eb2fbe"
+    "7f11a0b6d742e2969d01f74bbca10293e3745a504ed4a1d0c9e98398b650c247"
 )
 EXPECTED_PARENT_RUNNER_SHA256 = (
     "480c0441a4da62dd7d5f16133c9dde7b16df90772c06f851bed6ff233f69d4c3"
@@ -49,10 +49,10 @@ EXPECTED_PARENT_REGISTRY_SHA256 = (
     "7605f4458191112bf0f03c38299b9b46838a11e9dcbf61c7196fecb0f89d7918"
 )
 EXPECTED_PHYSICAL_RUNNER_SHA256 = (
-    "e0651b2849388119db13312c991e64e20e9e1e2d2390c072aacd6bca95899b55"
+    "4a94467b18b35fd216f927a277a8335bcbde383eaf5d6e8f0895ce9aca1587f1"
 )
 EXPECTED_MATRIX_ID = "free_surface_wp4_balanced_capillary_v3"
-EXPECTED_STATUS = "FROZEN_BEFORE_EXECUTION"
+EXPECTED_STATUS = "AWAITING_SCIENTIFIC_CONTRACTS"
 EXACT_INVOCATION_WATCHDOG_SECONDS = 900
 EXACT_TERMINATION_GRACE_SECONDS = 2.0
 EXACT_DIAGNOSTIC_CAPTURE_SECONDS = 2.0
@@ -120,6 +120,11 @@ def _load_parent() -> Any:
 
 
 _v2 = _load_parent()
+_gate_spec = importlib.util.spec_from_file_location(
+    "free_surface_wp4_gate_contract", SCRIPT_DIRECTORY / "free_surface_wp4_gate_contract.py"
+)
+_gate = importlib.util.module_from_spec(_gate_spec)
+_gate_spec.loader.exec_module(_gate)
 MatrixError = _v2.MatrixError
 sha256_file = _v2.sha256_file
 read_json = _v2.read_json
@@ -138,6 +143,57 @@ _V2_RUN_PHYSICAL_CASES = _v2.run_physical_cases
 _V2_EVALUATE_EXACT_DOCUMENT = _v2.evaluate_exact_document
 _V2_RUN_EXACT_GROUPS = _v2.run_exact_groups
 _V2_ANALYZE_EVIDENCE = _v2.analyze_evidence
+assess_qualification_sequence = _gate.assess_sequence
+
+
+def bind_qualification_measurements(rows, declarations):
+    try:
+        return _gate.bind_measurements(rows, declarations)
+    except _gate.ContractError as error:
+        raise MatrixError(str(error)) from error
+
+
+def _dispatch_key(study, quantity):
+    return (study["initialization"], study["refinement_axis"], quantity,
+            "accepted_endpoint", study["dimension"],
+            "prescribed_contact" if study["case"].startswith("sessile") else "closed")
+
+
+def _declaration_key(declaration):
+    return tuple(declaration.get(key) for key in (
+        "initialization", "axis", "quantity", "phase", "dimension", "boundary"))
+
+
+def _study_quantities(registry, study):
+    return sorted(set(study["metrics"]) | set(registry["required_report_metrics"]))
+
+
+def _matrix_declaration_errors(registry, declaration):
+    errors = _gate.declaration_errors(declaration)
+    if isinstance(declaration, dict):
+        limits = registry["gates"]["invariance"].get(declaration.get("axis"), {}).get(declaration.get("quantity"))
+        if limits and _gate.number(declaration.get("maximum_spread")) and declaration["maximum_spread"] > limits["maximum_spread"]:
+            errors.append("declared scaling spread weakens the existing matrix limit")
+    return errors
+
+
+def qualification_readiness(registry):
+    contract = registry.get("qualification_contract", {})
+    declarations = contract.get("scientific_contracts", [])
+    required = {_dispatch_key(study, quantity) for study in registry["studies"] for quantity in _study_quantities(registry, study)}
+    available = {_declaration_key(item): item for item in declarations}
+    missing = []
+    for key in sorted(required):
+        declaration = available.get(key)
+        errors = _matrix_declaration_errors(registry, declaration)
+        if declaration is not None and declaration["axis"] in {"time_step", "bulk_redistance_cadence"} and declaration.get("reference") is None:
+            errors.append("fixed-mesh reference/uncertainty justification is missing")
+        if declaration is not None and declaration["axis"] == "physical_scale" and declaration.get("similarity") is None:
+            errors.append("physical similarity/norm transformation is missing")
+        if errors:
+            missing.append({"dispatch": list(key), "obligations": errors})
+    return {"contract_version": _gate.VERSION, "ready": not missing,
+            "required_contract_count": len(required), "missing_contracts": missing}
 
 SUPPORTED_CASE_DIMENSIONS = dict(_v2.SUPPORTED_CASE_DIMENSIONS)
 SUPPORTED_INITIALIZATIONS = set(_v2.SUPPORTED_INITIALIZATIONS)
@@ -152,6 +208,7 @@ SUPPORTED_EXACT_PROPERTY_COMPARISONS = set(
 )
 
 TOP_LEVEL_FIELDS = {
+    "qualification_contract",
     "schema_version",
     "matrix_id",
     "status",
@@ -443,7 +500,7 @@ def _validate_refinement(refinement: Any) -> None:
     if refinement["conditional_spatial_level_cells_per_radius"] != 64:
         raise MatrixError("conditional spatial level must be R/h = 64")
     if refinement["conditional_level_trigger"] != (
-        "nonmonotone_three_level_sequence_only"
+        "unresolved_three_level_asymptotic_regime"
     ):
         raise MatrixError("conditional spatial trigger changed")
     if (
@@ -488,7 +545,7 @@ def _validate_refinement(refinement: Any) -> None:
         "ADDITIONAL_LEVEL_REQUIRED"
     ):
         raise MatrixError("nonmonotone triplet disposition changed")
-    if refinement["nonasymptotic_four_level_disposition"] != "FAIL":
+    if refinement["nonasymptotic_four_level_disposition"] != "INCONCLUSIVE":
         raise MatrixError("nonasymptotic quartet disposition changed")
 
 
@@ -938,6 +995,21 @@ def _validate_literature(adaptations: Any, registry: dict[str, Any]) -> None:
 
 def validate_contract(registry: Any) -> dict[str, Any]:
     _require_fields(registry, TOP_LEVEL_FIELDS, "top-level fields")
+    successor = registry["qualification_contract"]
+    _require_fields(successor, {"version", "historical_registry_sha256", "scientific_contracts"}, "qualification contract fields")
+    if successor["version"] != _gate.VERSION or successor["historical_registry_sha256"] != "9b07b2b5dbf98e3b3c115f6ad11499454e7f13718eaf85ae28142bc338eb2fbe":
+        raise MatrixError("successor qualification contract identity changed")
+    declarations = successor["scientific_contracts"]
+    if not isinstance(declarations, list) or not all(isinstance(item, dict) for item in declarations):
+        raise MatrixError("scientific contracts must be an explicit list")
+    keys = [_declaration_key(item) for item in declarations]
+    required = {_dispatch_key(study, metric) for study in registry["studies"] for metric in _study_quantities(registry, study)}
+    if len(keys) != len(set(keys)) or set(keys) - required:
+        raise MatrixError("unknown or duplicate qualification dispatch combination")
+    if any(set(item) - _gate.FIELDS - {"field_source"} for item in declarations):
+        raise MatrixError("unknown scientific contract fields")
+    if any("spread" in error for item in declarations for error in _matrix_declaration_errors(registry, item)):
+        raise MatrixError("scientific scaling spread must preserve the matrix limit")
     if registry["schema_version"] != 3:
         raise MatrixError("V3 schema version changed")
     if registry["matrix_id"] != EXPECTED_MATRIX_ID:
@@ -1280,8 +1352,9 @@ def _conditional_record_header(
         "matrix_id": registry["matrix_id"],
         "matrix_sha256": sha256_file(DEFAULT_REGISTRY),
         "runner_sha256": sha256_file(SCRIPT_PATH),
+        "qualification_contract_module_sha256": sha256_file(SCRIPT_DIRECTORY / "free_surface_wp4_gate_contract.py"),
         "physical_runner_sha256": sha256_file(PHYSICAL_RUNNER),
-        "trigger_policy": "nonmonotone_three_level_sequence_only",
+        "trigger_policy": "unresolved_three_level_asymptotic_regime",
         "prior_analysis_file": "summary.json",
         "prior_pre_execution_manifest_file": registry["artifact_contract"][
             "pre_execution_manifest_file"
@@ -1334,6 +1407,7 @@ def _validate_prior_analysis_header(
         "matrix_id": registry["matrix_id"],
         "registry_sha256": sha256_file(DEFAULT_REGISTRY),
         "runner_sha256": sha256_file(SCRIPT_PATH),
+        "qualification_contract_module_sha256": sha256_file(SCRIPT_DIRECTORY / "free_surface_wp4_gate_contract.py"),
         "physical_runner_sha256": sha256_file(PHYSICAL_RUNNER),
         "expected_case_count": len(base_cases),
     }
@@ -1405,12 +1479,12 @@ def _conditional_sequence_records(
                         continue
                     if (
                         sequence.get("sample_count") != 3
-                        or sequence.get("monotone_to_reference") is not False
+                        or not isinstance(sequence.get("monotone_to_reference"), bool)
                         or sequence.get("gate_failures")
                         != ["asymptotic_tail_not_established"]
                     ):
                         raise MatrixError(
-                            "conditional trigger is not a nonmonotone three-level sequence"
+                            "conditional trigger is not an unresolved three-level sequence"
                         )
                     samples = sequence.get("samples")
                     if not isinstance(samples, list) or len(samples) != 3:
@@ -1437,7 +1511,7 @@ def _conditional_sequence_records(
                             "sequence_id": _canonical_sha256(identity),
                             **identity,
                             "prior_status": "ADDITIONAL_LEVEL_REQUIRED",
-                            "trigger_reason": "nonmonotone_three_level_sequence",
+                            "trigger_reason": "unresolved_three_level_asymptotic_regime",
                             "availability": conditional["availability"],
                             "disposition": conditional["disposition_when_required"],
                         }
@@ -1546,7 +1620,7 @@ def _conditional_expansion_keys(
             or sequence["refinement_axis"] != "resolution"
             or study["refinement_axis"] != "resolution"
             or sequence["prior_status"] != "ADDITIONAL_LEVEL_REQUIRED"
-            or sequence["trigger_reason"] != "nonmonotone_three_level_sequence"
+            or sequence["trigger_reason"] != "unresolved_three_level_asymptotic_regime"
         ):
             raise MatrixError("conditional trigger sequence is undeclared")
         identity, _ = _conditional_identity(
@@ -1729,6 +1803,14 @@ def physical_case_arguments(
         solver=solver,
         qualification_log=qualification_log,
     )
+    if case["initialization"] == "sampled_analytic":
+        option = "--max-free-surface-pressure-representability-relative-distance"
+        values = _option_values(arguments, option)
+        if values != ["1e-8"]:
+            raise MatrixError(
+                f"case {case['case_id']!r} has unexpected inherited sampled admission limit"
+            )
+        arguments[arguments.index(option) + 1] = "1.0"
     if case["case"] == "droplet2d":
         arguments.extend(
             ["--capillary-droplet-radius", str(case["radius"])]
@@ -2114,17 +2196,33 @@ def _capture_timeout_diagnostics(
 
 
 def _signal_owned_processes(
-    root_pid: int, identities: dict[int, int], signal_number: int
+    root_pid: int, identities: dict[int, int], signal_number: int,
+    *, preserve_root: bool = False, individual_pids: list[int] | None = None,
 ) -> list[int]:
     runner_process_group = os.getpgrp()
+    records = _owned_process_records(root_pid, identities)
+    root_group = next((record["process_group_id"] for record in records if record["pid"] == root_pid), None)
     process_groups = sorted(
         {
             record["process_group_id"]
-            for record in _owned_process_records(root_pid, identities)
+            for record in records
             if record["process_group_id"] != runner_process_group
             and record["state"] != "Z"
+            and not (preserve_root and record["process_group_id"] == root_group)
         }
     )
+    if preserve_root:
+        for record in records:
+            if (record["pid"] == root_pid or record["state"] == "Z"
+                    or record["process_group_id"] != root_group
+                    or record["process_group_id"] == runner_process_group):
+                continue
+            try:
+                os.kill(record["pid"], signal_number)
+            except ProcessLookupError:
+                continue
+            if individual_pids is not None:
+                individual_pids.append(record["pid"])
     signaled: list[int] = []
     for process_group in process_groups:
         try:
@@ -2156,8 +2254,10 @@ def _terminate_owned_processes(
         if not living:
             break
         time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+    killed_processes: list[int] = []
     killed_groups = set(
-        _signal_owned_processes(process.pid, identities, signal.SIGKILL)
+        _signal_owned_processes(process.pid, identities, signal.SIGKILL,
+                               preserve_root=True, individual_pids=killed_processes)
     )
     try:
         process.wait(timeout=max(0.05, grace))
@@ -2177,6 +2277,7 @@ def _terminate_owned_processes(
     return {
         "terminate_process_group_ids": sorted(terminated_groups),
         "kill_process_group_ids": sorted(killed_groups),
+        "kill_process_ids": sorted(killed_processes),
         "remaining_processes": remaining,
         "all_owned_descendants_terminated": all_terminated,
         "all_session_processes_terminated": all_terminated,
@@ -2470,6 +2571,139 @@ def _analysis_cases(
     return cases
 
 
+def _bound_metric_records(registry, expected_cases, evidence):
+    declarations = {_declaration_key(item): item for item in registry["qualification_contract"]["scientific_contracts"]}
+    records, errors = [], []
+    for case in expected_cases:
+        available = evidence.get(case["case_id"])
+        if available is None:
+            continue
+        observed, qualification, path = available
+        if observed.get("case_digest") != case["case_digest"]:
+            errors.append("case digest mismatch: " + case["case_id"])
+            continue
+        probes = qualification.get("probes")
+        if qualification.get("complete") is not True or not isinstance(probes, list) or len(probes) != 1:
+            errors.append("incomplete physical qualification: " + case["case_id"])
+            continue
+        probe = probes[0]
+        if probe.get("passed") is not True or probe.get("errors") not in (None, []):
+            errors.append("physical case did not pass: " + case["case_id"])
+        study = registry["studies"][case["study_index"]]
+        selected = [declarations.get(_dispatch_key(study, quantity)) for quantity in case["metrics"]]
+        if any(item is None or _matrix_declaration_errors(registry, item) for item in selected):
+            continue
+        try:
+            metrics = probe.get("metrics", {})
+            rows = bind_qualification_measurements(metrics.get("qualification_measurements"), selected)
+            context = metrics.get("qualification_context", {})
+            if context.get("active_domain") != case["axes"]["active_domain"]:
+                raise MatrixError("measurement binding differs from case active domain")
+            for row in rows.values():
+                if row["initialization"] != case["initialization"] or row["accepted_step"] != case["step_count"]:
+                    raise MatrixError("measurement binding differs from accepted case step/initialization")
+                if not math.isclose(row["accepted_time"], case["time_step"] * case["step_count"], rel_tol=1e-12, abs_tol=0.0):
+                    raise MatrixError("measurement binding differs from case physical horizon")
+            records.append({"case": case, "metrics": {name: row["value"] for name, row in rows.items()},
+                            "bound_measurements": rows, "context": context,
+                            "qualification_path": str(path), "qualification_sha256": sha256_file(path)})
+        except (MatrixError, TypeError, KeyError) as error:
+            errors.append(str(error))
+    unexpected = set(evidence) - {case["case_id"] for case in expected_cases}
+    if unexpected:
+        errors.append("unexpected physical cases: " + str(sorted(unexpected)))
+    return records, errors
+
+
+def _assess_bound_studies(registry, records, expected_cases, *, scaling):
+    declarations = {_declaration_key(item): item for item in registry["qualification_contract"]["scientific_contracts"]}
+    by_id = {record["case"]["case_id"]: record for record in records}
+    studies = {}
+    for study in registry["studies"]:
+        if (study["refinement_axis"] in {"phi_scale", "physical_scale"}) != scaling:
+            continue
+        cases = [case for case in expected_cases if case["study_id"] == study["id"]]
+        groups = {}
+        for case in cases:
+            key = _v2._group_key(case, omit_offset=True)
+            groups.setdefault(key, []).append(case)
+        grouped_results = {}
+        for group_key, group_cases in groups.items():
+            metrics = {}
+            for quantity in study["metrics"]:
+                contract = declarations.get(_dispatch_key(study, quantity))
+                offsets = {}
+                for case in group_cases:
+                    offset = json.dumps(case["axes"].get("offset_h", "none"), sort_keys=True, separators=(",", ":"))
+                    offsets.setdefault(offset, []).append(case)
+                sequences = {}
+                for offset, offset_cases in offsets.items():
+                    samples = []
+                    for case in offset_cases:
+                        record = by_id.get(case["case_id"])
+                        if record is None or quantity not in record["bound_measurements"]:
+                            continue
+                        row = record["bound_measurements"][quantity]
+                        sample = dict(record["context"], identity={key: row[key] for key in _gate.IDENTITY_FIELDS},
+                                      value=row["value"], level=case["level"]["value"], label=case["level"]["label"],
+                                      h=case["h"] if study["refinement_axis"] == "resolution" else case["level"]["value"])
+                        samples.append(sample)
+                    result = assess_qualification_sequence(contract, samples)
+                    legacy_gate = registry["gates"]["convergence"].get(quantity)
+                    sampled_residual = study["initialization"] == "sampled_analytic" and quantity in _gate.RESIDUALS
+                    if legacy_gate and not scaling and not sampled_residual and "grid_uncertainty" in result:
+                        relative_uncertainty = result["grid_uncertainty"] / legacy_gate["normalization"]
+                        result["retained_finest_gci_limit"] = legacy_gate["finest_gci_limit"]
+                        if relative_uncertainty > legacy_gate["finest_gci_limit"]:
+                            result["status"] = "FAIL"
+                            result["reasons"].append("grid uncertainty exceeds the retained quantity-specific matrix limit")
+                    if len(samples) != len(offset_cases) and result["status"] != "FAIL":
+                        result = _gate.disposition("INCONCLUSIVE", "required case measurements are missing")
+                    sequences[offset] = result
+                metrics[quantity] = {"status": _gate.aggregate(value["status"] for value in sequences.values()), "sequences": sequences}
+            grouped_results[group_key] = {"status": _gate.aggregate(value["status"] for value in metrics.values()), "metrics": metrics}
+        studies[study["id"]] = {"status": _gate.aggregate(value["status"] for value in grouped_results.values()), "groups": grouped_results}
+    return {"status": _gate.aggregate(value["status"] for value in studies.values()), "studies": studies}
+
+
+def _bound_physical_limits(registry, records, expected_cases):
+    by_id = {record["case"]["case_id"]: record for record in records}
+    results = []
+    for study in registry["studies"]:
+        cases = [case for case in expected_cases if case["study_id"] == study["id"]]
+        if not cases:
+            continue
+        axis = study["refinement_axis"]
+        finest = (max if axis == "resolution" else min)(case["level"]["value"] for case in cases)
+        for case in cases:
+            if axis not in {"phi_scale", "physical_scale"} and case["level"]["value"] != finest:
+                continue
+            record = by_id.get(case["case_id"], {})
+            checks = []
+            for quantity in case["metrics"]:
+                if quantity not in registry["gates"]["finest_level"]:
+                    continue
+                value = record.get("metrics", {}).get(quantity)
+                limit = registry["gates"]["finest_level"][quantity]
+                checks.append({"quantity": quantity, "value": value, "limit": limit,
+                               "status": "INCONCLUSIVE" if value is None else "PASS" if value <= limit else "FAIL"})
+            results.append({"case_id": case["case_id"], "status": _gate.aggregate(item["status"] for item in checks),
+                            "basis": "spatial_finest" if axis == "resolution" else "additional_physical_lane_bound", "metrics": checks})
+    return {"status": _gate.aggregate(item["status"] for item in results), "cases": results}
+
+
+def _retain_unresolved_disposition(node):
+    if not isinstance(node, dict):
+        return
+    for key in ("studies", "groups", "metrics", "sequences"):
+        if isinstance(node.get(key), dict):
+            for child in node[key].values():
+                _retain_unresolved_disposition(child)
+            node["status"] = _gate.aggregate(child.get("status", "INCONCLUSIVE") for child in node[key].values())
+    if node.get("sample_count") == 4 and node.get("gate_failures") == ["asymptotic_tail_not_established"]:
+        node["status"] = "INCONCLUSIVE"
+
+
 def analyze_evidence(
     registry: dict[str, Any],
     *,
@@ -2500,6 +2734,10 @@ def analyze_evidence(
         DEFAULT_REGISTRY=DEFAULT_REGISTRY,
         PHYSICAL_RUNNER=PHYSICAL_RUNNER,
         expand_cases=adapted_expansion,
+        _case_metric_records=lambda cases, evidence: _bound_metric_records(registry, cases, evidence),
+        analyze_convergence=lambda unused, records, cases: _assess_bound_studies(registry, records, cases, scaling=False),
+        analyze_invariance=lambda unused, records, cases: _assess_bound_studies(registry, records, cases, scaling=True),
+        analyze_finest_level=lambda unused, records, cases: _bound_physical_limits(registry, records, cases),
     ):
         summary = _V2_ANALYZE_EVIDENCE(
             adapted,
@@ -2508,6 +2746,13 @@ def analyze_evidence(
             include_conditional_level=False,
             exact_summary_path=exact_summary_path,
         )
+    _retain_unresolved_disposition(summary.get("convergence"))
+    if summary.get("convergence", {}).get("status") == "INCONCLUSIVE":
+        summary["errors"] = [error.replace("convergence disposition is FAIL", "convergence disposition is INCONCLUSIVE") for error in summary.get("errors", [])]
+    readiness = qualification_readiness(registry)
+    summary["qualification_readiness"] = readiness
+    summary["qualification_contract_version"] = _gate.VERSION
+    summary["qualification_contract_module_sha256"] = sha256_file(SCRIPT_DIRECTORY / "free_surface_wp4_gate_contract.py")
     summary["runner_sha256"] = sha256_file(SCRIPT_PATH)
     summary["conditional_trigger_record_sha256"] = (
         sha256_file(conditional_trigger_record_path)
@@ -2532,7 +2777,12 @@ def analyze_evidence(
     nonconditional_errors = [
         error
         for error in summary.get("errors", [])
-        if error != "convergence disposition is ADDITIONAL_LEVEL_REQUIRED"
+        if error not in {
+            "convergence disposition is ADDITIONAL_LEVEL_REQUIRED",
+            "convergence disposition is INCONCLUSIVE",
+            "invariance disposition is INCONCLUSIVE",
+            "finest-level disposition is INCONCLUSIVE",
+        }
     ]
     if nonconditional_errors:
         failure_status = True
@@ -2542,6 +2792,7 @@ def analyze_evidence(
         summary.get("passed") is True
         and not conditional_dispositions
         and not failure_status
+        and readiness["ready"]
     )
     summary["passed"] = passed
     available_conditional_required = any(
@@ -2560,7 +2811,10 @@ def analyze_evidence(
         else "ADDITIONAL_LEVEL_REQUIRED"
         if available_conditional_required
         else "INCONCLUSIVE"
-        if unavailable_conditional_required
+        if unavailable_conditional_required or not readiness["ready"] or any(
+            summary.get(section, {}).get("status") == "INCONCLUSIVE"
+            for section in ("convergence", "invariance", "finest_level")
+        )
         else "FAIL"
     )
     if unavailable_conditional_required:
@@ -2581,7 +2835,10 @@ def analyze_evidence(
         "higher-order and projected-force behavior are outside this matrix",
     ]
     write_json(output_root / "summary.json", summary)
-    if conditional_trigger_record_path is None and not failure_status:
+    if (conditional_trigger_record_path is None and not failure_status
+            and pre_execution_manifest_path.is_file()
+            and summary.get("exact_groups_passed") is True
+            and all(summary.get(section, {}).get("status") == "PASS" for section in ("invariance", "finest_level"))):
         trigger = build_conditional_trigger_record(
             registry, output_root / "summary.json"
         )
@@ -2878,6 +3135,8 @@ def build_pre_execution_manifest(
         "runner_path": str(SCRIPT_PATH),
         "runner_sha256": sha256_file(SCRIPT_PATH),
         "physical_runner_path": str(PHYSICAL_RUNNER),
+        "qualification_readiness": qualification_readiness(registry),
+        "qualification_contract_module_sha256": sha256_file(SCRIPT_DIRECTORY / "free_surface_wp4_gate_contract.py"),
         "physical_runner_sha256": sha256_file(PHYSICAL_RUNNER),
         "parent_matrix_sha256": sha256_file(PARENT_REGISTRY_PATH),
         "parent_runner_sha256": sha256_file(PARENT_RUNNER_PATH),
@@ -3050,6 +3309,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
         shard_count=args.shard_count,
     )
     numerical_actions = args.run_physical or args.run_exact or args.analyze
+    if (args.run_physical or args.run_exact) and not qualification_readiness(registry)["ready"]:
+        raise MatrixError("qualification launch is blocked by missing scientific contracts; inspect --validate-only readiness")
     if args.validate_only:
         if args.list_cases or args.dry_manifest or numerical_actions:
             raise MatrixError("--validate-only cannot be combined with other actions")
@@ -3058,6 +3319,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 {
                     "matrix_id": registry["matrix_id"],
                     "status": registry["status"],
+                    "qualification_readiness": qualification_readiness(registry),
                     "exact_category_count": len(registry["exact_groups"]),
                     "exact_invocation_count": len(exact_invocations(registry)),
                     "study_count": len(registry["studies"]),
