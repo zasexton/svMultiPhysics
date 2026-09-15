@@ -130,7 +130,7 @@ TEST_P(RcsPreconditioner, PreservesConstrainedSystem) {
 }
 
 INSTANTIATE_TEST_SUITE_P(Blocks, RcsPreconditioner,
-    testing::Combine(testing::Values(1, 2, 3, 4), testing::Values(1.0, 1e-11, 1e-15, 1e-17, 1e-20),
+    testing::Combine(testing::Values(1, 2, 3, 4, 5), testing::Values(1.0, 1e-11, 1e-15, 1e-17, 1e-20),
                      testing::Values(0, 1, 2)));
 
 } // namespace
