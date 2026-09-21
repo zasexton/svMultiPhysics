@@ -1233,8 +1233,12 @@ public:
     [[nodiscard]] bool fieldParticipatesInUnknownVector(FieldId field) const;
     [[nodiscard]] std::vector<FieldId> unknownFieldIdsInDofMapOrder() const;
     void setPrescribedFieldCoefficients(FieldId field, std::span<const Real> coefficients);
+    void setPrescribedFieldCoefficientPairs(FieldId field,
+                                            std::span<const Real> high,
+                                            std::span<const Real> low);
     void clearPrescribedFieldCoefficients(FieldId field);
     [[nodiscard]] std::span<const Real> prescribedFieldCoefficients(FieldId field) const;
+    [[nodiscard]] std::span<const Real> prescribedFieldCoefficientLowParts(FieldId field) const;
     [[nodiscard]] std::uint64_t prescribedFieldRevision(FieldId field) const;
     void bindMeshMotionField(MeshMotionFieldRole role, FieldId field);
     void bindMeshMotionField(std::string_view role_name, FieldId field);
@@ -2978,6 +2982,7 @@ private:
     std::vector<GlobalIndex> field_dof_offsets_{};
     struct PrescribedFieldBuffer {
         std::vector<Real> coefficients{};
+        std::vector<Real> low_parts{};
         std::uint64_t revision{0};
     };
     std::vector<PrescribedFieldBuffer> prescribed_field_buffers_{};

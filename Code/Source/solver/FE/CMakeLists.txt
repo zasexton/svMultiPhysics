@@ -2951,6 +2951,7 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Systems/test_SlidingInterfaceOperators.cpp
 		                Tests/Unit/Systems/test_ParameterRegistry.cpp
 		                Tests/Unit/Systems/test_FieldEvaluation.cpp
+                Tests/Unit/Systems/test_PrescribedFieldCoefficientPairs.cpp
 		                Tests/Unit/Systems/test_FEAdaptivityTransfer.cpp
 		                Tests/Unit/Systems/test_FEMovingMeshRestart.cpp
 		                Tests/Unit/Systems/test_GeometricNonlinearity.cpp

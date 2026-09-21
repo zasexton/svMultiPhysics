@@ -7,6 +7,8 @@
 
 #include "Systems/FESystem.h"
 
+#include "Core/CoefficientPair.h"
+
 #include "PostProcessing/DerivedResultEvaluator.h"
 
 #include "Systems/SystemAssembly.h"
@@ -9563,11 +9565,52 @@ void FESystem::setPrescribedFieldCoefficients(FieldId field, std::span<const Rea
                 "FESystem::setPrescribedFieldCoefficients: field '" + rec.name +
                     "' expects " + std::to_string(expected) + " coefficients, got " +
                     std::to_string(coefficients.size()));
+    std::vector<Real> replacement(coefficients.begin(), coefficients.end());
     if (idx >= prescribed_field_buffers_.size()) {
         prescribed_field_buffers_.resize(idx + 1u);
     }
     auto& buffer = prescribed_field_buffers_[idx];
-    buffer.coefficients.assign(coefficients.begin(), coefficients.end());
+    buffer.coefficients.swap(replacement);
+    buffer.low_parts.clear();
+    ++buffer.revision;
+}
+
+void FESystem::setPrescribedFieldCoefficientPairs(FieldId field,
+                                                 std::span<const Real> high,
+                                                 std::span<const Real> low)
+{
+    requireSetup();
+    const auto& rec = field_registry_.get(field);
+    FE_THROW_IF(rec.source_kind != FieldSourceKind::PrescribedData ||
+                    rec.components != 1 || !rec.space ||
+                    rec.space->value_dimension() != 1,
+                InvalidArgumentException,
+                "FESystem::setPrescribedFieldCoefficientPairs: field '" + rec.name +
+                    "' must be scalar prescribed data");
+    const auto idx = static_cast<std::size_t>(field);
+    FE_THROW_IF(idx >= field_dof_handlers_.size(), InvalidStateException,
+                "FESystem::setPrescribedFieldCoefficientPairs: field DOFs are not finalized");
+    const auto expected = static_cast<std::size_t>(field_dof_handlers_[idx].getNumDofs());
+    FE_THROW_IF(high.size() != expected || low.size() != expected,
+                InvalidArgumentException,
+                "FESystem::setPrescribedFieldCoefficientPairs: field '" + rec.name +
+                    "' requires two complete coefficient arrays");
+    for (std::size_t i = 0; i < expected; ++i) {
+        FE_THROW_IF(!isCanonicalCoefficientPair({high[i], low[i]}),
+                    InvalidArgumentException,
+                    "FESystem::setPrescribedFieldCoefficientPairs: field '" + rec.name +
+                        "' has a nonfinite or unrepresentable coefficient pair");
+    }
+
+    // Inputs may refer to either old buffer; prepare both before committing.
+    std::vector<Real> replacement_high(high.begin(), high.end());
+    std::vector<Real> replacement_low(low.begin(), low.end());
+    if (idx >= prescribed_field_buffers_.size()) {
+        prescribed_field_buffers_.resize(idx + 1u);
+    }
+    auto& buffer = prescribed_field_buffers_[idx];
+    buffer.coefficients.swap(replacement_high);
+    buffer.low_parts.swap(replacement_low);
     ++buffer.revision;
 }
 
@@ -9582,6 +9625,7 @@ void FESystem::clearPrescribedFieldCoefficients(FieldId field)
         return;
     }
     prescribed_field_buffers_[idx].coefficients.clear();
+    prescribed_field_buffers_[idx].low_parts.clear();
     ++prescribed_field_buffers_[idx].revision;
 }
 
@@ -9596,6 +9640,19 @@ std::span<const Real> FESystem::prescribedFieldCoefficients(FieldId field) const
         return {};
     }
     return std::span<const Real>(prescribed_field_buffers_[idx].coefficients);
+}
+
+std::span<const Real> FESystem::prescribedFieldCoefficientLowParts(FieldId field) const
+{
+    const auto& rec = field_registry_.get(field);
+    FE_THROW_IF(rec.source_kind != FieldSourceKind::PrescribedData, InvalidArgumentException,
+                "FESystem::prescribedFieldCoefficientLowParts: field '" + rec.name +
+                    "' is not a prescribed data field");
+    const auto idx = static_cast<std::size_t>(field);
+    if (idx >= prescribed_field_buffers_.size()) {
+        return {};
+    }
+    return std::span<const Real>(prescribed_field_buffers_[idx].low_parts);
 }
 
 std::uint64_t FESystem::prescribedFieldRevision(FieldId field) const
@@ -19157,6 +19214,10 @@ std::size_t FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers()
                     InvalidStateException,
                     "FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers: invalid field layout for '" +
                         rec.name + "'");
+        if (field_idx < prescribed_field_buffers_.size() &&
+            !prescribed_field_buffers_[field_idx].low_parts.empty()) {
+            continue;
+        }
 
         const auto mesh_role = toMeshMotionRole(role);
         const auto mesh_name = svmp::motion::standard_motion_field_name(mesh_role);
@@ -19233,6 +19294,12 @@ std::size_t FESystem::syncPrescribedVertexFieldsFromMeshFields()
             continue;
         }
 
+        const auto field_idx = static_cast<std::size_t>(rec.id);
+        if (field_idx < prescribed_field_buffers_.size() &&
+            !prescribed_field_buffers_[field_idx].low_parts.empty()) {
+            continue;
+        }
+
         const auto mesh_field = svmp::MeshFields::get_field_handle(
             local_mesh, svmp::EntityKind::Vertex, rec.name);
         if (mesh_field.id == 0) {
@@ -19249,7 +19316,6 @@ std::size_t FESystem::syncPrescribedVertexFieldsFromMeshFields()
         FE_CHECK_NOT_NULL(values,
                           "FESystem::syncPrescribedVertexFieldsFromMeshFields: mesh field data");
 
-        const auto field_idx = static_cast<std::size_t>(rec.id);
         FE_THROW_IF(field_idx >= field_dof_handlers_.size(), InvalidStateException,
                     "FESystem::syncPrescribedVertexFieldsFromMeshFields: invalid field layout for '" +
                         rec.name + "'");
@@ -22119,6 +22185,14 @@ std::optional<std::array<Real, 3>> FESystem::evaluateFieldAtPoint(FieldId field,
                 InvalidStateException,
                 "FESystem::evaluateFieldAtPoint: prescribed field '" +
                     rec.name + "' has no coefficients");
+    const auto prescribed_low_parts =
+        use_prescribed ? prescribedFieldCoefficientLowParts(field)
+                       : std::span<const Real>{};
+    FE_THROW_IF(!prescribed_low_parts.empty() &&
+                    prescribed_low_parts.size() != prescribed_coefficients.size(),
+                InvalidStateException,
+                "FESystem::evaluateFieldAtPoint: incomplete coefficient pair storage");
+    bool has_nonzero_low = false;
 
     std::unique_ptr<assembly::GlobalSystemView> solution_view;
     if (!use_prescribed && state.u_vector != nullptr) {
@@ -22137,6 +22211,8 @@ std::optional<std::array<Real, 3>> FESystem::evaluateFieldAtPoint(FieldId field,
                         InvalidArgumentException,
                         "FESystem::evaluateFieldAtPoint: prescribed field coefficients are smaller than required");
             coeffs.push_back(prescribed_coefficients[idx]);
+            has_nonzero_low = has_nonzero_low ||
+                (!prescribed_low_parts.empty() && prescribed_low_parts[idx] != Real{0});
         } else if (solution_view) {
             coeffs.push_back(solution_view->getVectorEntry(d));
         } else {
@@ -22145,6 +22221,32 @@ std::optional<std::array<Real, 3>> FESystem::evaluateFieldAtPoint(FieldId field,
                         "FESystem::evaluateFieldAtPoint: state.u is smaller than required by DOF index");
             coeffs.push_back(state.u[idx]);
         }
+    }
+
+    if (has_nonzero_low) {
+        const auto cell_type = mesh_access_ ? mesh_access_->getCellType(loc.cell_id)
+                                           : rec.space->element_type();
+        const auto& basis = rec.space->getElement(cell_type, loc.cell_id).basis();
+        FE_THROW_IF(basis.is_vector_valued(), InvalidStateException,
+                    "FESystem::evaluateFieldAtPoint: paired coefficients require a scalar basis");
+        std::vector<Real> values;
+        basis.evaluate_values(xi, values);
+        FE_THROW_IF(values.size() != cell_dofs_local.size(), InvalidStateException,
+                    "FESystem::evaluateFieldAtPoint: paired basis and coefficient extents differ");
+        using Work = long double;
+        Work sum = 0;
+        Work correction = 0;
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            const auto dof = static_cast<std::size_t>(cell_dofs_local[i]);
+            const CoefficientPair coefficient{prescribed_coefficients[dof],
+                                              prescribed_low_parts[dof]};
+            const Work term = static_cast<Work>(values[i]) * coefficient.value();
+            const Work next = sum + term;
+            correction += std::abs(sum) >= std::abs(term)
+                ? (sum - next) + term : (term - next) + sum;
+            sum = next;
+        }
+        return std::array<Real, 3>{static_cast<Real>(sum + correction), Real{0}, Real{0}};
     }
 
     const auto v = rec.space->evaluate(xi, coeffs);
@@ -22196,6 +22298,13 @@ bool FESystem::evaluateFieldAtVertices(FieldId field,
                 InvalidStateException,
                 "FESystem::evaluateFieldAtVertices: prescribed field '" +
                     rec.name + "' has no coefficients");
+    const auto prescribed_low_parts =
+        use_prescribed ? prescribedFieldCoefficientLowParts(field)
+                       : std::span<const Real>{};
+    FE_THROW_IF(!prescribed_low_parts.empty() &&
+                    prescribed_low_parts.size() != prescribed_coefficients.size(),
+                InvalidStateException,
+                "FESystem::evaluateFieldAtVertices: incomplete coefficient pair storage");
 
     const GlobalIndex offset = field_dof_offsets_[field_idx];
 
@@ -22215,6 +22324,10 @@ bool FESystem::evaluateFieldAtVertices(FieldId field,
             FE_THROW_IF(idx >= prescribed_coefficients.size(),
                         InvalidArgumentException,
                         "FESystem::evaluateFieldAtVertices: prescribed field coefficients are smaller than required");
+            if (!prescribed_low_parts.empty() && prescribed_low_parts[idx] != Real{0}) {
+                return static_cast<double>(CoefficientPair{
+                    prescribed_coefficients[idx], prescribed_low_parts[idx]}.value());
+            }
             return static_cast<double>(prescribed_coefficients[idx]);
         }
         if (solution_view) {
