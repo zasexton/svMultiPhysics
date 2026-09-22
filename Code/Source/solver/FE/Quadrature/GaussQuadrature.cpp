@@ -178,12 +178,14 @@ std::pair<double, double> generate_root_and_weight(int num_points, int root_inde
 
 QuadratureRule make_gauss_legendre_rule(int requested_exactness)
 {
-    if (requested_exactness < 0 || requested_exactness > max_gauss_legendre_exactness()) {
-        std::ostringstream message;
-        message << "Gauss-Legendre generator: requested_exactness must be in [0, "
-                << max_gauss_legendre_exactness() << ']';
-        svmp::raise<InvalidArgumentException>(message.str());
-    }
+    svmp::check<InvalidArgumentException>(
+      requested_exactness >= 0,
+      "requested_exactness cannot be negative.");
+      
+    svmp::check<InvalidArgumentException>(
+      requested_exactness <= max_gauss_legendre_exactness(),
+      "requested exactness cannot be greater than " + 
+        std::to_string(max_gauss_legendre_exactness() + ".");
 
     const int num_points = requested_exactness / 2 + 1;
     std::vector<QuadPoint> points(
