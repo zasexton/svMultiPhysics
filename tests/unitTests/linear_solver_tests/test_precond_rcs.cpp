@@ -1,6 +1,44 @@
 // SPDX-FileCopyrightText: Copyright (c) Stanford University, The Regents of the University of California, and others.
 // SPDX-License-Identifier: BSD-3-Clause
 
+/**
+ * @file test_precond_rcs.cpp
+ * @brief Matrix regression test for FSILS row and column scaling (RCS).
+ *
+ * @test RcsPreconditioner.PreservesConstrainedSystem verifies that
+ * precond::precond_rcs preserves a Dirichlet-constrained system and its solution.
+ *
+ * @par Setup and coverage
+ * A serial, three-node block tridiagonal matrix is stored in dense and FSILS
+ * formats. The exact solution is zero at fixed components and `row + 1`
+ * elsewhere; `b = A * exact` supplies the reference right-hand side.
+ * The 75 cases combine `(dof, scale, boundary)`:
+ * - Block sizes 1--5 exercise specialized and general scaling paths.
+ * - Scales `1`, `1e-11`, `1e-15`, `1e-17`, and `1e-20` expose diagonal
+ *   cancellation in the former update `(a - 1) + 1`.
+ * - Boundary modes 0, 1, and 2 exclude the face, fix the first component of
+ *   node 0, or fix all its components. Constrained rows retain only a unit
+ *   diagonal, exposing omissions in row maxima; coupled blocks expose
+ *   incomplete column scaling.
+ *
+ * @par Checks
+ * Weights must be finite and positive. Removing the returned scaling must
+ * recover the expected constrained operator and right-hand side. A dense solve
+ * followed by right scaling must recover the exact solution and satisfy the
+ * original free equations. Matrix, right-hand-side, and residual errors are
+ * normalized by `scale` (unit diagonals use one), so erased small entries
+ * cannot pass through an absolute tolerance.
+ *
+ * @par Reusing and running the test
+ * Keep an independent dense reference and a known solution when adapting this
+ * example. Update the FSILS block indices and diagonal pointers with the stencil,
+ * and choose coefficient scales that expose the target failure.
+ * Build with `-DENABLE_UNIT_TEST=ON`, then run beside the unit-test executable:
+ * @code{.sh}
+ * ./run_all_unit_tests --gtest_filter='Blocks/RcsPreconditioner.*'
+ * @endcode
+ */
+
 #include "precond.h"
 #include "FE/Math/DenseLinearAlgebra.h"
 
