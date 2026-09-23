@@ -185,7 +185,7 @@ QuadratureRule make_gauss_legendre_rule(int requested_exactness)
     svmp::check<InvalidArgumentException>(
       requested_exactness <= max_gauss_legendre_exactness(),
       "requested exactness cannot be greater than " + 
-        std::to_string(max_gauss_legendre_exactness() + ".");
+        std::to_string(max_gauss_legendre_exactness()) + ".");
 
     const int num_points = requested_exactness / 2 + 1;
     std::vector<QuadPoint> points(
