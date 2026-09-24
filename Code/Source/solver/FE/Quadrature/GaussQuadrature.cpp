@@ -37,7 +37,7 @@ constexpr double kNewtonCorrectionTolerance =
 // Provide conservative O(n epsilon) accumulation headroom, qualified by those
 // sweeps.
 constexpr double kRuleValidationTolerance =
-    32.0 * static_cast<double>(kMaximumPoints) *
+    32.0 * kMaximumPoints *
     std::numeric_limits<double>::epsilon();
 
 // Return (P_degree(x), P'_degree(x)) for degree >= 1. Advance the Legendre
@@ -52,14 +52,14 @@ std::pair<double, double> evaluate_legendre_with_derivative(
     double value = coordinate;
     double derivative = 1.0;
     for (int recurrence_degree = 2; recurrence_degree <= degree; ++recurrence_degree) {
-        const double degree_value = static_cast<double>(recurrence_degree);
-        const double recurrence_factor = static_cast<double>(2 * recurrence_degree - 1);
+        const double degree_value = recurrence_degree;
+        const double recurrence_factor = 2 * recurrence_degree - 1;
         const double next_value =
             (recurrence_factor * coordinate * value -
-             static_cast<double>(recurrence_degree - 1) * previous_value) / degree_value;
+             (recurrence_degree - 1) * previous_value) / degree_value;
         const double next_derivative =
             (recurrence_factor * (value + coordinate * derivative) -
-             static_cast<double>(recurrence_degree - 1) * previous_derivative) / degree_value;
+             (recurrence_degree - 1) * previous_derivative) / degree_value;
 
         previous_value = value;
         previous_derivative = derivative;
@@ -107,8 +107,7 @@ std::pair<double, double> generate_root_and_weight(int num_points, int root_inde
 {
     const double pi = std::numbers::pi_v<double>;
     double root = std::cos(
-        pi * (static_cast<double>(root_index) + 0.75) /
-        (static_cast<double>(num_points) + 0.5));
+        pi * (root_index + 0.75) / (num_points + 0.5));
     double correction = 0.0;
 
     for (int iteration = 1; iteration <= kMaximumNewtonIterations; ++iteration) {
