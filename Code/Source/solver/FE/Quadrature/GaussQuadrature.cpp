@@ -40,6 +40,9 @@ constexpr double kRuleValidationTolerance =
     32.0 * static_cast<double>(kMaximumPoints) *
     std::numeric_limits<double>::epsilon();
 
+// Return (P_degree(x), P'_degree(x)) for degree >= 1. Advance the Legendre
+// three-term recurrence and its derivative together, starting from P_0 = 1
+// and P_1 = x, without numerical differentiation.
 std::pair<double, double> evaluate_legendre_with_derivative(
     int degree,
     double coordinate) noexcept
@@ -67,6 +70,8 @@ std::pair<double, double> evaluate_legendre_with_derivative(
     return {value, derivative};
 }
 
+// Preserve the failed quantity and generator context in a convergence error.
+// A root index or iteration of -1 identifies a rule-wide validation check.
 [[noreturn]] void raise_generation_failure(
     int num_points,
     int root_index,
@@ -94,6 +99,10 @@ void require_generation(bool condition, int num_points, int root_index, int iter
     }
 }
 
+// Refine a nonnegative root of P_n with cosine-seeded Newton iteration, bounded
+// by the iteration and correction limits above. Recheck P_n/P'_n before forming
+// w = 2 / ((1 - x*x) * P'_n(x)^2). The caller mirrors (x, w); is_center assigns
+// the odd rule's center exactly to zero before the final validation.
 std::pair<double, double> generate_root_and_weight(int num_points, int root_index, bool is_center)
 {
     const double pi = std::numbers::pi_v<double>;
