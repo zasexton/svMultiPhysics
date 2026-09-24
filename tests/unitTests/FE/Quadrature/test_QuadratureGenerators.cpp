@@ -197,17 +197,18 @@ void expect_advertised_line_exactness(const QuadratureRule& rule)
 
 void expect_every_supported_line_rule(
     QuadratureRule (*generator)(int),
-    int first_num_points,
-    int last_num_points,
+    std::size_t first_num_points,
+    std::size_t last_num_points,
     int exactness_subtrahend,
     LineEndpointPolicy endpoint_policy)
 {
-    for (int num_points = first_num_points;
+    for (std::size_t num_points = first_num_points;
          num_points <= last_num_points;
          ++num_points) {
         SCOPED_TRACE(
             ::testing::Message() << "num_points=" << num_points);
-        const int expected_exactness = 2 * num_points - exactness_subtrahend;
+        const int expected_exactness =
+            static_cast<int>(2 * num_points) - exactness_subtrahend;
         // Both requests must select this minimum point count and report its
         // actual exactness, not just echo the requested degree.
         for (const int requested_exactness :
@@ -217,7 +218,7 @@ void expect_every_supported_line_rule(
             const QuadratureRule rule = generator(requested_exactness);
 
             expect_common_line_metadata(
-                rule, static_cast<std::size_t>(num_points), expected_exactness);
+                rule, num_points, expected_exactness);
             expect_line_rule_invariants(rule, endpoint_policy);
             expect_advertised_line_exactness(rule);
         }
@@ -473,16 +474,14 @@ TEST(GaussLobattoImplementation, RejectsRequestsOutsideSupportedRange)
  */
 TEST(GaussLobattoBasisConsistency, MatchesRepresentativeNodeDistributions)
 {
-    constexpr std::array point_counts{2, 4, 65, 128};
+    constexpr std::array<std::size_t, 4> point_counts{2, 4, 65, 128};
 
-    for (const int num_points : point_counts) {
+    for (const std::size_t num_points : point_counts) {
         SCOPED_TRACE(
             ::testing::Message() << "num_points=" << num_points);
         const QuadratureRule rule =
-            make_gauss_lobatto_rule(2 * num_points - 3);
-        ASSERT_EQ(
-            rule.num_points(),
-            static_cast<std::size_t>(num_points));
+            make_gauss_lobatto_rule(static_cast<int>(2 * num_points - 3));
+        ASSERT_EQ(rule.num_points(), num_points);
 
         for (std::size_t point_index = 0;
              point_index < rule.num_points();
@@ -494,7 +493,7 @@ TEST(GaussLobattoBasisConsistency, MatchesRepresentativeNodeDistributions)
             const double basis_coordinate =
                 svmp::FE::basis::line_coord_pm_one(
                     static_cast<int>(point_index),
-                    num_points - 1);
+                    static_cast<int>(num_points - 1));
 
             if (point_index == 0u) {
                 EXPECT_EQ(quadrature_coordinate, -1.0);

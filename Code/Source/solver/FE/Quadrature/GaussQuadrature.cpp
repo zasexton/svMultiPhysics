@@ -24,8 +24,8 @@
 namespace svmp::FE::quadrature {
 namespace {
 
-constexpr int kMaximumPoints = 128;
-static_assert(max_gauss_legendre_exactness() == 2 * kMaximumPoints - 1);
+constexpr std::size_t kMaximumPoints = 128;
+static_assert(max_gauss_legendre_exactness() == static_cast<int>(2 * kMaximumPoints - 1));
 
 // Defensively bound supported cosine-seeded Newton refinements for
 // deterministic termination.
@@ -44,14 +44,14 @@ constexpr double kRuleValidationTolerance =
 // three-term recurrence and its derivative together, starting from P_0 = 1
 // and P_1 = x, without numerical differentiation.
 std::pair<double, double> evaluate_legendre_with_derivative(
-    int degree,
+    std::size_t degree,
     double coordinate) noexcept
 {
     double previous_value = 1.0;
     double previous_derivative = 0.0;
     double value = coordinate;
     double derivative = 1.0;
-    for (int recurrence_degree = 2; recurrence_degree <= degree; ++recurrence_degree) {
+    for (std::size_t recurrence_degree = 2; recurrence_degree <= degree; ++recurrence_degree) {
         const double degree_value = recurrence_degree;
         const double recurrence_factor = 2 * recurrence_degree - 1;
         const double next_value =
@@ -73,7 +73,7 @@ std::pair<double, double> evaluate_legendre_with_derivative(
 // Preserve the failed quantity and generator context in a convergence error.
 // A root index or iteration of -1 identifies a rule-wide validation check.
 [[noreturn]] void raise_generation_failure(
-    int num_points,
+    std::size_t num_points,
     int root_index,
     int iteration,
     double diagnostic_value,
@@ -93,7 +93,8 @@ std::pair<double, double> evaluate_legendre_with_derivative(
 // by the iteration and correction limits above. Recheck P_n/P'_n before forming
 // w = 2 / ((1 - x*x) * P'_n(x)^2). The caller mirrors (x, w); is_center assigns
 // the odd rule's center exactly to zero before the final validation.
-std::pair<double, double> generate_root_and_weight(int num_points, int root_index, bool is_center)
+std::pair<double, double> generate_root_and_weight(
+    std::size_t num_points, int root_index, bool is_center)
 {
     const double pi = std::numbers::pi_v<double>;
     double root = std::cos(
@@ -189,17 +190,15 @@ QuadratureRule make_gauss_legendre_rule(int requested_exactness)
         "Gauss-Legendre generator: requested_exactness must be in [0, " +
             std::to_string(max_gauss_legendre_exactness()) + ']');
 
-    const int num_points = requested_exactness / 2 + 1;
-    std::vector<QuadPoint> points(
-        static_cast<std::size_t>(num_points), QuadPoint::Zero());
+    const std::size_t num_points = static_cast<std::size_t>(requested_exactness) / 2 + 1;
+    std::vector<QuadPoint> points(num_points, QuadPoint::Zero());
     std::vector<double> weights(points.size());
 
-    const int roots_to_refine = (num_points + 1) / 2;
-    for (int root_index = 0; root_index < roots_to_refine; ++root_index) {
-        const std::size_t left_index = static_cast<std::size_t>(root_index);
+    const std::size_t roots_to_refine = (num_points + 1) / 2;
+    for (std::size_t left_index = 0; left_index < roots_to_refine; ++left_index) {
         const std::size_t right_index = points.size() - 1u - left_index;
         const auto [root, weight] = generate_root_and_weight(
-            num_points, root_index, left_index == right_index);
+            num_points, static_cast<int>(left_index), left_index == right_index);
 
         points[left_index][0] = -root;
         points[right_index][0] = root;
@@ -227,7 +226,7 @@ QuadratureRule make_gauss_legendre_rule(int requested_exactness)
             "generated weights do not reproduce the reference measure");
     }
 
-    const int polynomial_exactness = 2 * num_points - 1;
+    const int polynomial_exactness = static_cast<int>(2 * num_points - 1);
     return QuadratureRule(
         svmp::CellFamily::Line, polynomial_exactness,
         std::move(points), std::move(weights));

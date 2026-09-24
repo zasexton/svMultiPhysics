@@ -25,8 +25,8 @@
 namespace svmp::FE::quadrature {
 namespace {
 
-constexpr int kMaximumPoints = 128;
-static_assert(max_gauss_lobatto_exactness() == 2 * kMaximumPoints - 3);
+constexpr std::size_t kMaximumPoints = 128;
+static_assert(max_gauss_lobatto_exactness() == static_cast<int>(2 * kMaximumPoints - 3));
 
 // Defensively bound supported cosine-seeded Newton refinements for
 // deterministic termination.
@@ -44,13 +44,13 @@ constexpr double kRuleValidationTolerance =
 // Return (P_degree(x), P_(degree-1)(x)) for degree >= 1 using the Legendre
 // three-term recurrence, starting from P_0 = 1 and P_1 = x.
 std::pair<double, double> evaluate_adjacent_legendre_values(
-    int degree,
+    std::size_t degree,
     double coordinate) noexcept
 {
     double previous_value = 1.0;
     double value = coordinate;
 
-    for (int recurrence_degree = 2; recurrence_degree <= degree; ++recurrence_degree) {
+    for (std::size_t recurrence_degree = 2; recurrence_degree <= degree; ++recurrence_degree) {
         const double next_value =
             ((2 * recurrence_degree - 1) * coordinate * value -
              (recurrence_degree - 1) * previous_value) / recurrence_degree;
@@ -63,7 +63,7 @@ std::pair<double, double> evaluate_adjacent_legendre_values(
 
 // Preserve the failed quantity and generator context in a convergence error.
 // A half-root index or iteration of -1 identifies a rule-wide validation check.
-[[noreturn]] void raise_generation_failure(int num_points, int half_root_index,
+[[noreturn]] void raise_generation_failure(std::size_t num_points, int half_root_index,
     int iteration, double diagnostic_value, std::string_view detail)
 {
     std::ostringstream message;
@@ -80,10 +80,10 @@ std::pair<double, double> evaluate_adjacent_legendre_values(
 // iteration on f(x) = x*P_(n-1)(x) - P_(n-2)(x). Recheck the final correction
 // before forming w = 2 / (n*(n-1)*P_(n-1)(x)^2). The caller mirrors the node and
 // handles endpoints; is_center assigns an odd rule's center exactly to zero.
-std::pair<double, double> generate_interior_root_and_weight(int num_points, int half_root_index,
-    bool is_center, double weight_denominator_scale)
+std::pair<double, double> generate_interior_root_and_weight(std::size_t num_points,
+    int half_root_index, bool is_center, double weight_denominator_scale)
 {
-    const int polynomial_degree = num_points - 1;
+    const std::size_t polynomial_degree = num_points - 1;
     const double num_points_value = num_points;
     const double degree_value = polynomial_degree;
     const double pi = std::numbers::pi_v<double>;
@@ -202,9 +202,8 @@ QuadratureRule make_gauss_lobatto_rule(int requested_exactness)
         "Gauss-Lobatto-Legendre generator: requested_exactness must be in [0, " +
             std::to_string(max_gauss_lobatto_exactness()) + ']');
 
-    const int num_points = requested_exactness / 2 + 2;
-    std::vector<QuadPoint> points(
-        static_cast<std::size_t>(num_points), QuadPoint::Zero());
+    const std::size_t num_points = static_cast<std::size_t>(requested_exactness) / 2 + 2;
+    std::vector<QuadPoint> points(num_points, QuadPoint::Zero());
     std::vector<double> weights(points.size());
 
     points.front()[0] = -1.0;
@@ -216,17 +215,15 @@ QuadratureRule make_gauss_lobatto_rule(int requested_exactness)
     weights.front() = endpoint_weight;
     weights.back() = endpoint_weight;
 
-    const int interior_roots_to_refine = (num_points - 1) / 2;
-    for (int half_root_index = 0;
+    const std::size_t interior_roots_to_refine = (num_points - 1) / 2;
+    for (std::size_t half_root_index = 0;
          half_root_index < interior_roots_to_refine; ++half_root_index) {
-        const std::size_t left_index =
-            1u + static_cast<std::size_t>(half_root_index);
+        const std::size_t left_index = 1u + half_root_index;
         const std::size_t right_index =
-            points.size() - 2u -
-            static_cast<std::size_t>(half_root_index);
+            points.size() - 2u - half_root_index;
         const auto [root, weight] =
             generate_interior_root_and_weight(
-                num_points, half_root_index, left_index == right_index,
+                num_points, static_cast<int>(half_root_index), left_index == right_index,
                 weight_denominator_scale);
 
         points[left_index][0] = -root;
@@ -255,7 +252,7 @@ QuadratureRule make_gauss_lobatto_rule(int requested_exactness)
             "generated weights do not reproduce the reference measure");
     }
 
-    const int polynomial_exactness = 2 * num_points - 3;
+    const int polynomial_exactness = static_cast<int>(2 * num_points - 3);
     return QuadratureRule(
         svmp::CellFamily::Line, polynomial_exactness,
         std::move(points), std::move(weights));
