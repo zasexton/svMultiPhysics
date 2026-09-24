@@ -38,8 +38,11 @@ namespace svmp::FE::quadrature {
  * minimum point count @f$n=\lfloor d/2\rfloor+1@f$. The returned metadata reports
  * the actual polynomial exactness @f$2n-1@f$, which exceeds even requests by one.
  * Degree zero produces one point with exactness one. Points are the roots of
- * @f$P_n@f$ in strictly increasing order inside @f$(-1,1)@f$; neither endpoint
- * is included. Weights are positive and aligned with their points.
+ * the Legendre polynomial @f$P_n@f$ of degree @f$n@f$, in strictly increasing
+ * order inside @f$(-1,1)@f$; neither endpoint is included. Weights are positive
+ * and aligned with their points.
+ *
+ * @see [NIST DLMF: Legendre polynomials](https://dlmf.nist.gov/18.3)
  *
  * @param requested_exactness Minimum polynomial degree to integrate exactly;
  *        must be in [0, 255], inclusive (see max_gauss_legendre_exactness()).
