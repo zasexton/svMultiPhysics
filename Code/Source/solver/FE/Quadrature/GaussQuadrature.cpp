@@ -85,10 +85,8 @@ std::pair<double, double> evaluate_legendre_with_derivative(
             << ", root_index=" << root_index
             << ", diagnostic_value=" << diagnostic_value;
 
-    const double residual = std::isfinite(diagnostic_value)
-                                ? std::abs(diagnostic_value)
-                                : 0.0;
-    svmp::raise<ConvergenceException>(message.str(), iteration, residual);
+    svmp::raise<ConvergenceException>(
+        message.str(), iteration, std::abs(diagnostic_value));
 }
 
 void require_generation(bool condition, int num_points, int root_index, int iteration,
