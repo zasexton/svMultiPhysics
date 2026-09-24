@@ -283,6 +283,11 @@ void expect_invalid_argument_with_message(
 
 } // namespace
 
+/**
+ * @test QuadratureGeneratorTestSupport.ExercisesSharedLineRuleChecks exercises
+ * the analytic moments, metadata, invariants, and exception-message helpers
+ * against explicit interior and endpoint-inclusive line rules.
+ */
 TEST(QuadratureGeneratorTestSupport, ExercisesSharedLineRuleChecks)
 {
     const double abscissa = std::sqrt(3.0 / 5.0);
@@ -328,6 +333,11 @@ TEST(QuadratureGeneratorTestSupport, ExercisesSharedLineRuleChecks)
         "at least one point");
 }
 
+/**
+ * @test GaussLegendreImplementation.GeneratesCanonicalLowOrderRules compares
+ * requests 0, 2, and 4 with analytic one-, two-, and three-point rules, including
+ * their weights and the actual exactness exceeding each request by one.
+ */
 TEST(GaussLegendreImplementation, GeneratesCanonicalLowOrderRules)
 {
     expect_canonical_rule(
@@ -349,6 +359,11 @@ TEST(GaussLegendreImplementation, GeneratesCanonicalLowOrderRules)
         std::array{5.0 / 9.0, 8.0 / 9.0, 5.0 / 9.0});
 }
 
+/**
+ * @test GaussLegendreImplementation.GeneratesEverySupportedRule checks every
+ * request from 0 through 255 for minimum point count, actual exactness, ordered
+ * symmetric interior samples, positive weights, and all advertised moments.
+ */
 TEST(GaussLegendreImplementation, GeneratesEverySupportedRule)
 {
     expect_every_supported_line_rule(
@@ -359,6 +374,11 @@ TEST(GaussLegendreImplementation, GeneratesEverySupportedRule)
         LineEndpointPolicy::Excluded);
 }
 
+/**
+ * @test GaussLegendreImplementation.RejectsRequestsOutsideSupportedRange checks
+ * that negative requests, the first unsupported degree, and integer extremes
+ * raise InvalidArgumentException with the supported-range diagnostic.
+ */
 TEST(GaussLegendreImplementation, RejectsRequestsOutsideSupportedRange)
 {
     constexpr std::string_view expected_message =
@@ -380,6 +400,11 @@ TEST(GaussLegendreImplementation, RejectsRequestsOutsideSupportedRange)
     }
 }
 
+/**
+ * @test GaussLobattoImplementation.GeneratesCanonicalLowOrderRules compares
+ * requests 0, 2, and 4 with analytic two-, three-, and four-point rules, including
+ * exact endpoints, weights, and the actual exactness exceeding each request.
+ */
 TEST(GaussLobattoImplementation, GeneratesCanonicalLowOrderRules)
 {
     expect_canonical_rule(
@@ -399,6 +424,11 @@ TEST(GaussLobattoImplementation, GeneratesCanonicalLowOrderRules)
         std::array{1.0 / 6.0, 5.0 / 6.0, 5.0 / 6.0, 1.0 / 6.0});
 }
 
+/**
+ * @test GaussLobattoImplementation.GeneratesEverySupportedRule checks every
+ * request from 0 through 253 for minimum point count, actual exactness, ordered
+ * symmetric samples, exact endpoints, positive weights, and advertised moments.
+ */
 TEST(GaussLobattoImplementation, GeneratesEverySupportedRule)
 {
     expect_every_supported_line_rule(
@@ -409,6 +439,11 @@ TEST(GaussLobattoImplementation, GeneratesEverySupportedRule)
         LineEndpointPolicy::Included);
 }
 
+/**
+ * @test GaussLobattoImplementation.RejectsRequestsOutsideSupportedRange checks
+ * that negative requests, the first unsupported degree, and integer extremes
+ * raise InvalidArgumentException with the supported-range diagnostic.
+ */
 TEST(GaussLobattoImplementation, RejectsRequestsOutsideSupportedRange)
 {
     constexpr std::string_view expected_message =
@@ -431,6 +466,11 @@ TEST(GaussLobattoImplementation, RejectsRequestsOutsideSupportedRange)
     }
 }
 
+/**
+ * @test GaussLobattoBasisConsistency.MatchesRepresentativeNodeDistributions
+ * compares 2-, 4-, 65-, and 128-point Lobatto rules with the independently
+ * computed Basis nodes, requiring exact endpoints and close interior values.
+ */
 TEST(GaussLobattoBasisConsistency, MatchesRepresentativeNodeDistributions)
 {
     constexpr std::array point_counts{2, 4, 65, 128};
