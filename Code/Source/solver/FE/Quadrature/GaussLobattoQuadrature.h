@@ -39,8 +39,11 @@ namespace svmp::FE::quadrature {
  * the actual polynomial exactness @f$2n-3@f$, which exceeds even requests by one.
  * Degree zero produces two points with exactness one. The first and last points
  * are exactly @f$-1@f$ and @f$+1@f$. When present, the @f$n-2@f$ interior points
- * are the roots of @f$P'_{n-1}@f$. Points are strictly increasing, and weights
- * are positive and aligned with their points.
+ * are the roots of @f$P'_{n-1}@f$, the derivative of the Legendre polynomial
+ * of degree @f$n-1@f$. Points are strictly increasing, and weights are positive
+ * and aligned with their points.
+ *
+ * @see [NIST DLMF: Legendre polynomials](https://dlmf.nist.gov/18.3)
  *
  * @param requested_exactness Minimum polynomial degree to integrate exactly;
  *        must be in [0, 253], inclusive (see max_gauss_lobatto_exactness()).
