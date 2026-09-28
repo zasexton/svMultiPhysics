@@ -1208,6 +1208,14 @@ svZeroDSolverInterfaceParameters::svZeroDSolverInterfaceParameters() {
   set_parameter("Initial_flows", 0.0, !required, initial_flows);
   set_parameter("Initial_pressures", 0.0, !required, initial_pressures);
 
+  // Finite-difference perturbation used for the coupled-BC tangent dP/dQ,
+  //   diff = max(rms(Q) * Finite_difference_relative_perturbation,
+  //              Finite_difference_absolute_perturbation).
+  set_parameter("Finite_difference_absolute_perturbation", 1.0e-7, !required,
+                finite_difference_absolute_perturbation);
+  set_parameter("Finite_difference_relative_perturbation", 1.0e-5, !required,
+                finite_difference_relative_perturbation);
+
   set_parameter("Configuration_file", "", required, configuration_file);
 
   set_parameter("Shared_library", "", required, shared_library);
@@ -2044,6 +2052,11 @@ DomainParameters::DomainParameters() {
 
   set_parameter("Penalty_parameter", 0.0, !required, penalty_parameter);
   set_parameter("Poisson_ratio", 0.3, !required, poisson_ratio);
+  
+  set_parameter("Darcy_permeability", 1e-15, !required, darcy_permeability);
+  set_parameter("Darcy_compressibility", 0.0, !required,
+                darcy_compressibility);
+  set_parameter("Darcy_fluid_viscosity", 1.0, !required, darcy_fluid_viscosity);
 
   set_parameter("Relative_tolerance", 1e-4, !required, relative_tolerance);
   set_parameter("Shell_thickness", 0.0, !required, shell_thickness);
@@ -2052,8 +2065,8 @@ DomainParameters::DomainParameters() {
   set_parameter("Time_step_for_integration", 0.0, !required,
                 time_step_for_integration);
 
-  set_parameter("Inverse_darcy_permeability", 0.0, !required,
-                inverse_darcy_permeability);
+  set_parameter("Brinkman_inverse_permeability", 0.0, !required,
+                brinkman_inverse_permeability);
 
   // Ionic model parameters.
   IonicModelFactory::visit(

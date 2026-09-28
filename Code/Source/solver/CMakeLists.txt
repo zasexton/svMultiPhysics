@@ -212,6 +212,7 @@ set(CSRCS
   cmm.h cmm.cpp
   consts.h consts.cpp
   contact.h contact.cpp
+  darcy.h darcy.cpp
   distribute.h distribute.cpp
   eq_assem.h eq_assem.cpp
   fluid.h fluid.cpp
@@ -257,18 +258,18 @@ set(CSRCS
   Timer.h
   ArtificialNeuralNetMaterial.h ArtificialNeuralNetMaterial.cpp
 
-  ionic_model.cpp
-  ionic_aliev_panfilov.cpp
-  ionic_bueno_orovio.cpp
-  ionic_fitzhugh_nagumo.cpp
-  ionic_ttp.cpp
+  IonicModel.cpp
+  IonicModelAlievPanfilov.cpp
+  IonicModelBuenoOrovio.cpp
+  IonicModelFitzHughNagumo.cpp
+  IonicModelTTP.cpp
 
-  active_stress.cpp
-  active_stress_uniform_steady.cpp
-  active_stress_uniform_unsteady.cpp
-  active_stress_ode.cpp
-  active_stress_nash_panfilov.cpp
-  active_stress_regazzoni.cpp
+  ActiveStress.cpp
+  ActiveStressUniformSteady.cpp
+  ActiveStressUniformUnsteady.cpp
+  ActiveStressODE.cpp
+  ActiveStressNashPanfilov.cpp
+  ActiveStressRegazzoni.cpp
 
   SPLIT.c
 
@@ -407,6 +408,12 @@ if(ENABLE_UNIT_TEST)
     gtest
     GTest::gtest_main 
     pthread   # link pthread on ubuntu20
+  )
+
+  # Define the path to the unit-test reference-data directory as a preprocessor
+  # macro.
+  target_compile_definitions(run_all_unit_tests PRIVATE
+    UNIT_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/unitTests/reference_data"
   )
 
   # gtest_discover_tests(runUnitTest)
