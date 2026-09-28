@@ -23,6 +23,31 @@
 
 namespace baf_ini_ns {
 
+namespace {
+
+void register_dirichlet(ComMod& com_mod, bcType& bc, const Vector<int>& nodes, int& lsPtr)
+{
+  if (bc.weakDir) {
+    bc.lsPtr = -1;
+    return;
+  }
+  bc.lsPtr = ++lsPtr;
+  Array<double> mask(com_mod.nsd, nodes.size());
+  const bool selective = std::any_of(bc.eDrn.begin(), bc.eDrn.end(), [](int value) { return value != 0; });
+  if (selective) {
+    mask = 1.0;
+    for (int i = 0; i < com_mod.nsd; ++i) {
+      if (bc.eDrn(i) != 0 && mask.size() != 0) {
+        mask.set_row(i, 0.0);
+      }
+    }
+  }
+  fsi_linear_solver::fsils_bc_create(com_mod.lhs, lsPtr, nodes.size(), com_mod.nsd,
+      fsi_linear_solver::BcType::BC_TYPE_Dir, nodes, mask);
+}
+
+}
+
 /// @brief This routine initializes required structure for boundaries,
 /// faces, those that interface with FSILS and cplBC.
 ///
@@ -88,6 +113,25 @@ void baf_ini(Simulation* simulation, SolutionStates& solutions)
       auto& bc = eq.bc[iBc];
       int iFa = bc.iFa;
       int iM = bc.iM;
+      if (!bc.node_set_name.empty()) {
+        const int components = eq.dof == nsd + 1 ? nsd : eq.dof;
+        int selected = 0;
+        for (int i = 0; i < nsd; ++i) {
+          if ((bc.eDrn(i) != 0 && bc.eDrn(i) != 1) || (i >= components && bc.eDrn(i) != 0)) {
+            throw std::runtime_error("Dirichlet node set '" + bc.node_set_name + "': invalid component mask.");
+          }
+          selected += bc.eDrn(i);
+        }
+        if (selected == 0) {
+          selected = components;
+        }
+        if (bc.gm.defined() && bc.gm.dof != selected) {
+          throw std::runtime_error("Dirichlet node set '" + bc.node_set_name + "': inconsistent component count in general values.");
+        }
+        bc.gx.resize(bc.node_ids.size());
+        bc.gx = 1.0;
+        continue;
+      }
       bc_ini(com_mod, cm_mod, bc, com_mod.msh[iM].fa[iFa], solutions);
 
       if (com_mod.msh[iM].lShl) {
@@ -210,7 +254,11 @@ void baf_ini(Simulation* simulation, SolutionStates& solutions)
       int iFa = bc.iFa;
       int iM = bc.iM;
       bc.lsPtr = 0;
-      fsi_ls_ini(com_mod, cm_mod, bc, com_mod.msh[iM].fa[iFa], lsPtr, solutions);
+      if (!bc.node_set_name.empty()) {
+        register_dirichlet(com_mod, bc, bc.node_ids, lsPtr);
+      } else {
+        fsi_ls_ini(com_mod, cm_mod, bc, com_mod.msh[iM].fa[iFa], lsPtr, solutions);
+      }
     }
   }
 
@@ -739,6 +787,11 @@ void fsi_ls_ini(ComMod& com_mod, const CmMod& cm_mod, bcType& lBc, const faceTyp
   dmsg << "lsPtr: " << lsPtr;
   #endif
 
+  if (btest(lBc.bType, iBC_Dir)) {
+    register_dirichlet(com_mod, lBc, lFa.gN, lsPtr);
+    return;
+  }
+
   int iM = lFa.iM;
   int nNo = lFa.nNo;
 
@@ -752,33 +805,7 @@ void fsi_ls_ini(ComMod& com_mod, const CmMod& cm_mod, bcType& lBc, const faceTyp
     gNodes(a) = lFa.gN(a);
   }
 
-  if (btest(lBc.bType, iBC_Dir)) {
-    if (lBc.weakDir) {
-      lBc.lsPtr = -1;
-    } else {
-      lsPtr = lsPtr + 1;
-      lBc.lsPtr = lsPtr;
-      sVl = 0.0;
-      bool eDrn = false;
-      for (int i = 0; i < nsd; i++) {
-        if (lBc.eDrn(i) != 0) {
-          eDrn = true;
-          break;
-        }
-      }
-
-      if (eDrn) {
-        sVl = 1.0;
-        for (int i = 0; i < nsd; i++) {
-          if ((lBc.eDrn(i) != 0) && (sVl.size() != 0)) {
-            sVl.set_row(i, 0.0);
-          }
-        }
-      }
-      fsils_bc_create(com_mod.lhs, lsPtr, lFa.nNo, nsd, BcType::BC_TYPE_Dir, gNodes, sVl); 
-    }
-    
-  } else if (btest(lBc.bType, iBC_Neu) || btest(lBc.bType, iBC_Coupled)) {
+  if (btest(lBc.bType, iBC_Neu) || btest(lBc.bType, iBC_Coupled)) {
     // For Coupled-DIR BCs: iBC_Dir was cleared in read_files but the face DOFs must still
     // be excluded from the linear solve (Ax=b). Register as BC_TYPE_Dir so the
     // preconditioner zeros out those rows/columns, preventing the solver from

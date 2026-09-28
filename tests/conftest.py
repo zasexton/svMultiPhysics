@@ -1,8 +1,10 @@
 import numpy as np
 
 import math
+import itertools
 import pytest
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -138,7 +140,37 @@ def n_proc(request):
     return request.param
 
 
-def run_by_name(folder, name, t_max, n_proc=1):
+def add_test_boundary_face(root, folder, points, cells, name="surface", x=0):
+    """Write one exterior triangle of a generated tetrahedral mesh as a VTP."""
+    for element, cell in enumerate(cells):
+        nodes = cell[np.isclose(points[cell, 0], x)]
+        if len(nodes) == 3:
+            break
+    else:
+        raise ValueError("No boundary triangle found")
+    vtk = ET.Element("VTKFile", type="PolyData", version="0.1", byte_order="LittleEndian")
+    piece = ET.SubElement(ET.SubElement(vtk, "PolyData"), "Piece", NumberOfPoints="3",
+                          NumberOfPolys="1", NumberOfVerts="0", NumberOfLines="0", NumberOfStrips="0")
+    for section, label, values, components in [
+        ("Points", "", points[nodes].ravel(), 3),
+        ("PointData", "GlobalNodeID", nodes + 1, 1),
+        ("CellData", "GlobalElementID", [element + 1], 1),
+        ("Polys", "connectivity", [0, 1, 2], 1),
+        ("Polys", "offsets", [3], 1),
+    ]:
+        parent = piece.find(section)
+        if parent is None:
+            parent = ET.SubElement(piece, section)
+        ET.SubElement(parent, "DataArray", type="Float64" if section == "Points" else "Int32",
+                      Name=label, NumberOfComponents=str(components), format="ascii").text = " ".join(map(str, values))
+    ET.ElementTree(vtk).write(folder / f"{name}.vtp")
+    face = ET.SubElement(root.find("Add_mesh"), "Add_face", name=name)
+    ET.SubElement(face, "Face_file_path").text = f"{name}.vtp"
+    return nodes + 1
+
+
+def run_by_name(folder, name, t_max, n_proc=1, *, exe=None, expected_error=None,
+                clean=True, timeout=120):
     """
     Run a test case and return results
     Args:
@@ -153,33 +185,34 @@ def run_by_name(folder, name, t_max, n_proc=1):
 
     # remove old results folders if they exist
     dir_path = os.path.join(folder, str(n_proc) + "-procs")
-    if os.path.exists(dir_path):
+    if clean and os.path.exists(dir_path):
         shutil.rmtree(dir_path)
 
     # run simulation (PETSc tests use a dedicated build; see cpp_exec_p)
-    exe = cpp_exec_p if "petsc" in folder else cpp_exec
-    cmd = " ".join(
-        [
-            "mpirun",
-            OVERSUBSCRIBE_FLAG if n_proc > 1 else "",
-            "-np",
-            str(n_proc),
-            exe,
-            name,
-        ]
-    )
+    exe = exe or (cpp_exec_p if "petsc" in str(folder) else cpp_exec)
+    cmd = ["mpirun"]
+    if n_proc > 1 and OVERSUBSCRIBE_FLAG:
+        cmd.append(OVERSUBSCRIBE_FLAG)
+    cmd.extend(["-np", str(n_proc), exe, name])
 
     # Run the command while capturing the return code and stderr output. This
     # way, if something goes wrong, we can raise an appropriate error message.
     completed = subprocess.run(
-        cmd, cwd=folder, shell=True, stderr=subprocess.PIPE, text=True
+        cmd, cwd=folder, capture_output=True, text=True, timeout=timeout
     )
+    if completed.stdout:
+        print(completed.stdout, end="")
 
     # Print the captured stderr to console, so it is visible. Notice that this
     # will print stderr after stdout, so they might be out of order (printing
     # them in order while capturing is apparently not easy through subprocess).
     if completed.stderr:
         print(completed.stderr, end="", file=sys.stderr)
+
+    if expected_error is not None:
+        assert completed.returncode != 0, "Invalid input unexpectedly succeeded"
+        assert re.search(expected_error, completed.stdout + completed.stderr, re.I)
+        return
 
     # If something went wrong, raise an error with the captured stderr output in
     # the message.
@@ -224,8 +257,8 @@ def run_with_reference(
         name_ref = "result_" + str(t_max).zfill(3) + ".vtu"
 
     # run simulation
-    folder = os.path.join("cases", base_folder, test_folder)
-    res = run_by_name(folder, name_inp, t_max, n_proc)
+    folder = os.path.join(this_file_dir, "cases", base_folder, test_folder)
+    res = run_by_name(folder, name_inp, t_max, n_proc, timeout=None)
 
     # read reference
     fname = os.path.join(folder, name_ref)
@@ -302,3 +335,69 @@ def run_with_reference(
     # check all fields first and then throw error if any failed
     if msg:
         raise AssertionError(msg)
+
+
+def make_interior_node_case(folder, nsd=2, physics="darcy"):
+    """Generate a small simplex mesh and editable input without surface files."""
+    grid = list(itertools.product(range(4), repeat=nsd))
+    lookup = {point: i for i, point in enumerate(grid)}
+    points = np.zeros((len(grid), 3))
+    points[:, :nsd] = np.asarray(grid) / 3.0
+    cells = []
+    for corner in itertools.product(range(3), repeat=nsd):
+        for axes in itertools.permutations(range(nsd)):
+            vertex = list(corner)
+            simplex = [lookup[tuple(vertex)]]
+            for axis in axes:
+                vertex[axis] += 1
+                simplex.append(lookup[tuple(vertex)])
+            if np.linalg.det((points[simplex[1:], :nsd] - points[simplex[0], :nsd]).T) < 0:
+                simplex[0], simplex[1] = simplex[1], simplex[0]
+            cells.append(simplex)
+    cells = np.asarray(cells)
+    ids = np.array([lookup[(2,) * nsd] + 1, lookup[(1,) * nsd] + 1])
+    meshio.write_points_cells(
+        folder / "mesh.vtu", points,
+        [("triangle" if nsd == 2 else "tetra", cells)],
+        point_data={"GlobalNodeID": np.arange(len(points)) + 1001},
+    )
+    material = ("<Darcy_permeability>1</Darcy_permeability>"
+                "<Darcy_fluid_viscosity>1</Darcy_fluid_viscosity>"
+                "<Darcy_compressibility>0</Darcy_compressibility>"
+                "<Fluid_density>1</Fluid_density>" if physics == "darcy" else
+                "<Conductivity>1</Conductivity><Density>0</Density>")
+    field = "Darcy_pressure" if physics == "darcy" else "Temperature"
+    root = ET.fromstring(f"""<svMultiPhysicsFile version="0.1">
+      <GeneralSimulationParameters>
+        <Continue_previous_simulation>false</Continue_previous_simulation>
+        <Number_of_spatial_dimensions>{nsd}</Number_of_spatial_dimensions>
+        <Number_of_time_steps>2</Number_of_time_steps>
+        <Time_step_size>0.1</Time_step_size>
+        <Spectral_radius_of_infinite_time_step>0</Spectral_radius_of_infinite_time_step>
+        <Save_results_to_VTK_format>true</Save_results_to_VTK_format>
+        <Name_prefix_of_saved_VTK_files>result</Name_prefix_of_saved_VTK_files>
+        <Increment_in_saving_VTK_files>1</Increment_in_saving_VTK_files>
+        <Start_saving_after_time_step>0</Start_saving_after_time_step>
+        <Increment_in_saving_restart_files>1</Increment_in_saving_restart_files>
+      </GeneralSimulationParameters>
+      <Add_mesh name="volume">
+        <Mesh_file_path>mesh.vtu</Mesh_file_path>
+        <Add_node_set name="interior"><Node_IDs>{ids[0]} {ids[1]}</Node_IDs></Add_node_set>
+      </Add_mesh>
+      <Add_equation type="{physics}">
+        <Coupled>true</Coupled><Min_iterations>1</Min_iterations>
+        <Max_iterations>6</Max_iterations><Tolerance>1e-11</Tolerance>
+        {material}<Source_term>0.25</Source_term>
+        <Output type="Spatial"><{field}>true</{field}></Output>
+        <LS type="CG"><Linear_algebra type="fsils"><Preconditioner>rcs</Preconditioner></Linear_algebra>
+          <Tolerance>1e-12</Tolerance><Max_iterations>500</Max_iterations></LS>
+        <Add_BC name="interior_pressure">
+          <Mesh_name>volume</Mesh_name><Node_set>interior</Node_set>
+          <Type>Dirichlet</Type><Time_dependence>General</Time_dependence>
+          <Temporal_and_spatial_values_file_path>values.dat</Temporal_and_spatial_values_file_path>
+        </Add_BC>
+      </Add_equation>
+    </svMultiPhysicsFile>""")
+    # Records intentionally reverse the node-set order.
+    (folder / "values.dat").write_text(f"1 2 2\n0 1\n{ids[1]} 7 7\n{ids[0]} 2 2\n")
+    return root, points, cells, ids

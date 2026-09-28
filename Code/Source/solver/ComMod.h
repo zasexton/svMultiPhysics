@@ -119,6 +119,10 @@ class bcType
     // The mesh index that corresponds to this BC
     int iM = -1;
 
+    // Named node targets do not have a face, including on ranks with no nodes.
+    std::string node_set_name;
+    Vector<int> node_ids;
+
     // Pointer to FSILS%bc
     int lsPtr = -1;
 

@@ -895,7 +895,7 @@ void initialize(Simulation* simulation, Vector<double>& timeP)
   temp_solutions.current.get_acceleration() = Ao;
   temp_solutions.current.get_velocity() = Yo;
   temp_solutions.current.get_displacement() = Do;
-  set_bc::set_bc_dir(com_mod, temp_solutions);
+  set_bc::set_bc_dir(com_mod, temp_solutions, true);
   // Copy back modified values
   Ao = temp_solutions.current.get_acceleration();
   Yo = temp_solutions.current.get_velocity();

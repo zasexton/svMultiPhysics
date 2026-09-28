@@ -52,6 +52,57 @@ You can run an individual test by navigating to the `./tests/cases/<physics>/<te
 
 For more options, simply call `pytest -h`.
 
+## Interior-node Dirichlet example
+
+The `interior_node` tests generate meshes and input files in pytest temporary
+directories. No downloaded mesh fixtures are needed for these tests. From the
+repository root, after building its solver and installing the usual test dependencies:
+
+```sh
+python -m pytest tests/test_heats.py tests/test_linear_elasticity.py -k interior_node -v
+```
+
+To generate and run a standalone 3D Darcy example, use the existing test helper:
+
+```sh
+python - <<'PY'
+from pathlib import Path
+import xml.etree.ElementTree as ET
+from tests.conftest import make_interior_node_case, run_by_name
+
+folder = Path("build/interior-node-example").resolve()
+folder.mkdir(parents=True, exist_ok=True)
+root, points, cells, ids = make_interior_node_case(folder, nsd=3)
+ET.ElementTree(root).write(folder / "solver.xml")
+run_by_name(folder, "solver.xml", t_max=2, n_proc=1)
+print(f"Input: {folder / 'solver.xml'}; prescribed input point IDs: {ids}")
+PY
+```
+
+The generated unit-cube tetrahedral mesh has no faces. Two disconnected interior
+nodes, input point indices 43 and 22, have prescribed pressures 2 and 7. The
+whitespace-separated `values.dat` file uses the existing general BC format:
+
+```text
+1 2 2
+0 1
+22 7 7
+43 2 2
+```
+
+The header gives components, times and nodes. After the time vector, each record
+gives the one-based input point index followed by the values for every time. Two
+identical samples hold each pressure constant. The complete XML, volume mesh and
+data remain in `build/interior-node-example`; VTK results are in its `1-procs`
+subdirectory. Change `n_proc` to 3 or 4 to exercise MPI with the same inputs.
+
+The scalar tests independently assemble the diffusion matrix, eliminate prescribed
+degrees of freedom, and compare the entire field and free-node residual. Other
+cases cover selected vector components, displacement/velocity histories, MPI ranks
+with empty selections, restart, multiple meshes/equations, overlap errors and input
+validation. The [solver input contract](../Code/Source/solver/README.md#dirichlet-values-at-arbitrary-mesh-nodes)
+describes masks, ID files, temporal data and unsupported options.
+
 ## Code coverage
 We expect that new code is fully covered with at least one integration test. We also strive to increase our coverage of existing code. You can have a look at our current code coverage [with Codecov](https://codecov.io/github/SimVascular/svMultiPhysics). It analyzes every pull request and checks the change of coverage (ideally increasing) and if any non-covered lines have been modified. We avoid modifying untested lines of codeas there is no guarantee that the code will still do the same thing as before.
 

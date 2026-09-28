@@ -18,6 +18,7 @@
 #include "ustruct.h"
 #include "utils.h"
 #include <cstdio>
+#include <map>
 #include <math.h>
 
 namespace set_bc {
@@ -786,6 +787,9 @@ void set_bc_cpl(ComMod& com_mod, CmMod& cm_mod, const SolutionStates& solutions)
 
     for (int iBc = 0; iBc < eq.nBc; iBc++) {
       auto& bc = eq.bc[iBc];
+      if (!bc.node_set_name.empty()) {
+        continue;
+      }
       int iFa = bc.iFa;
       int iM  = bc.iM;
    
@@ -931,7 +935,7 @@ void set_bc_cpl(ComMod& com_mod, CmMod& cm_mod, const SolutionStates& solutions)
 ///
 /// Reproduces 'SUBROUTINE SETBCDIR(lA, lY, lD)'
 //
-void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
+void set_bc_dir(ComMod& com_mod, SolutionStates& solutions, bool initializing)
 {
   // Local aliases for solution arrays
   auto& An = solutions.current.get_acceleration();
@@ -955,6 +959,15 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
 
   for (int iEq = 0; iEq < nEq; iEq++) {
     auto& eq = com_mod.eq[iEq];
+    const bool check_overlaps = std::any_of(eq.bc.begin(), eq.bc.end(), [](const auto& bc) {
+      return !bc.node_set_name.empty();
+    });
+    struct Prescription {
+      double value, derivative;
+      bool integral, nodal, inconsistent;
+    };
+    std::map<std::pair<int, int>, Prescription> prescribed;
+    int conflict = 0;
     #ifdef set_bc_dir
     dmsg << ">>>> iEq: " << iEq;
     dmsg << "eq.nBc: " << eq.nBc;
@@ -1022,12 +1035,14 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
       }
       int iFa = bc.iFa;
       int iM = bc.iM;
-      int nNo = com_mod.msh[iM].fa[iFa].nNo;
+      const auto& nodes = all_fun::bc_nodes(com_mod, bc);
+      const int nNo = nodes.size();
+      const auto* face = bc.node_set_name.empty() ? &com_mod.msh[iM].fa[iFa] : nullptr;
       #ifdef set_bc_dir
       dmsg << ">> lDof: " << lDof;
       dmsg << ">> iM: " << iM;
       dmsg << ">> iFa: " << iFa;
-      dmsg << ">> name: " << com_mod.msh[iM].fa[iFa].name ;
+      dmsg << ">> name: " << (face ? face->name : bc.node_set_name) ;
       dmsg << ">> nNo: " << nNo;
       #endif
 
@@ -1035,13 +1050,50 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
       Array<double> tmpY(lDof,nNo);
 
       // Modifies: tmpA, tmpY
-      set_bc::set_bc_dir_l(com_mod, bc, com_mod.msh[iM].fa[iFa], tmpA, tmpY, lDof);
+      set_bc::set_bc_dir_l(com_mod, bc, face, tmpA, tmpY, lDof);
+
+      if (check_overlaps) {
+        const bool nodal = !bc.node_set_name.empty();
+        const bool integral = utils::btest(bc.bType, enum_int(BoundaryConditionType::bType_impD));
+        const bool selective = std::find(eDir.begin(), eDir.end(), true) != eDir.end();
+        const auto equal = [](double x, double y) {
+          return std::isfinite(x) && std::isfinite(y) &&
+              std::abs(x-y) <= 1e-10 * std::max({1.0, std::abs(x), std::abs(y)});
+        };
+        for (int a = 0; a < nNo; ++a) {
+          int component = 0;
+          for (int i = 0; i <= e-s; ++i) {
+            if (selective && !eDir[i]) {
+              continue;
+            }
+            const double value = tmpY(component,a);
+            const double derivative = tmpA(component++,a);
+            if (nodal && (!std::isfinite(value) || !std::isfinite(derivative))) {
+              conflict = 1;
+            }
+            auto [entry, inserted] = prescribed.try_emplace(std::make_pair(nodes(a), i),
+                Prescription{value, derivative, integral, nodal, false});
+            if (!inserted) {
+              auto& previous = entry->second;
+              const bool same = previous.integral == integral && equal(previous.value, value) &&
+                  equal(previous.derivative, derivative);
+              // Remember disagreement between faces so a later node target is
+              // checked against every earlier prescription, independent of order.
+              if ((nodal || previous.nodal) && (!same || previous.inconsistent)) {
+                conflict = 1;
+              }
+              previous.inconsistent |= !same;
+              previous.nodal |= nodal;
+            }
+          }
+        }
+      }
 
       if (std::find(eDir.begin(), eDir.end(), true) != eDir.end()) {
         if (utils::btest(bc.bType, enum_int(BoundaryConditionType::bType_impD))) {
 
-          for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
-            int Ac = com_mod.msh[iM].fa[iFa].gN(a);
+          for (int a = 0; a < nNo; a++) {
+            int Ac = nodes(a);
             lDof = 0;
 
             for (int i = 0; i < nsd; i++) {
@@ -1054,8 +1106,8 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
           }
 
         } else {
-          for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
-            int Ac = com_mod.msh[iM].fa[iFa].gN(a);
+          for (int a = 0; a < nNo; a++) {
+            int Ac = nodes(a);
             lDof = 0;
             for (int i = 0; i < nsd; i++) {
               if (eDir[i]) {
@@ -1071,16 +1123,16 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
       //
       } else {
         if (utils::btest(bc.bType, enum_int(BoundaryConditionType::bType_impD))) {
-          for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
-            int Ac = com_mod.msh[iM].fa[iFa].gN(a);
+          for (int a = 0; a < nNo; a++) {
+            int Ac = nodes(a);
             for (int i = 0; i < tmpA.nrows(); i++) {
               Yn(i+s,Ac) = tmpA(i,a);
               Dn(i+s,Ac) = tmpY(i,a);
             }
           }
         } else {
-          for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
-            int Ac = com_mod.msh[iM].fa[iFa].gN(a);
+          for (int a = 0; a < nNo; a++) {
+            int Ac = nodes(a);
             for (int i = 0; i < lDof; i++) {
               An(i+s,Ac) = tmpA(i,a);
               Yn(i+s,Ac) = tmpY(i,a);
@@ -1097,13 +1149,48 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
         double c1i = 1.0 / c1;
         double c2  = (eq.gam - 1.0)*com_mod.dt;
 
+        if (!bc.node_set_name.empty()) {
+          const bool integral = utils::btest(bc.bType, enum_int(BoundaryConditionType::bType_impD));
+          const bool selective = std::find(eDir.begin(), eDir.end(), true) != eDir.end();
+          for (int a = 0; a < nNo; ++a) {
+            const int node = nodes(a);
+            for (int i = 0; i < nsd; ++i) {
+              if (selective && !eDir[i]) {
+                continue;
+              }
+              const int j = s + i;
+              // Prescribed nodes have a known displacement derivative. At
+              // initialization their displacement is an old state, not a step.
+              if (integral) {
+                An(j,node) = initializing ? Ao(j,node) :
+                    c1i*(Yn(j,node) - Yo(j,node) + c2*Ao(j,node));
+              } else {
+                Dn(j,node) = initializing ? Do(j,node) :
+                    Do(j,node) + c1*Yn(j,node) - c2*Yo(j,node);
+              }
+              com_mod.Ad(i,node) = Yn(j,node);
+            }
+          }
+          continue;
+        }
+
+        // An identical face condition must not repeat a node condition's
+        // kinematic update. If the face came first, the node update replaces it.
+        const auto nodal_update = [&](int node, int component) {
+          if (!check_overlaps) {
+            return false;
+          }
+          const auto entry = prescribed.find({node, component});
+          return entry != prescribed.end() && entry->second.nodal;
+        };
+
         if (std::find(eDir.begin(), eDir.end(), true) != eDir.end()) {
           if (utils::btest(bc.bType, enum_int(BoundaryConditionType::bType_impD))) {
 
-            for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
-              int Ac = com_mod.msh[iM].fa[iFa].gN(a);
+            for (int a = 0; a < nNo; a++) {
+              int Ac = nodes(a);
               for (int i = 0; i < nsd; i++) {
-                if (eDir[i]) {
+                if (eDir[i] && !nodal_update(Ac, i)) {
                   int j = s + i;
                   An(j,Ac) = c1i*(Yn(j,Ac) - Yo(j,Ac) + c2*Ao(j,Ac));
                   com_mod.Ad(i,Ac) = c1i*(Dn(j,Ac) - Do(j,Ac) + c2*com_mod.Ad(i,Ac));
@@ -1111,10 +1198,10 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
               }
             }
           } else {
-            for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
-              int Ac = com_mod.msh[iM].fa[iFa].gN(a);
+            for (int a = 0; a < nNo; a++) {
+              int Ac = nodes(a);
               for (int i = 0; i < nsd; i++) {
-                if (eDir[i]) {
+                if (eDir[i] && !nodal_update(Ac, i)) {
                   int j = s + i;
                   Dn(j,Ac) = c1*Yn(j,Ac) - c2*com_mod.Ad(i,Ac) + Do(j,Ac);
                   com_mod.Ad(i,Ac) = Yn(j,Ac);
@@ -1125,18 +1212,24 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
 
         } else {
           if (utils::btest(bc.bType, enum_int(BoundaryConditionType::bType_impD))) {
-            for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
-              int Ac = com_mod.msh[iM].fa[iFa].gN(a);
+            for (int a = 0; a < nNo; a++) {
+              int Ac = nodes(a);
               for (int i = 0; i < com_mod.Ad.nrows(); i++) {
+                if (nodal_update(Ac, i)) {
+                  continue;
+                }
                 An(i+s,Ac) = c1i*(Yn(i+s,Ac) - Yo(i+s,Ac) + c2*Ao(i+s,Ac));
                 com_mod.Ad(i,Ac) = c1i*(Dn(i+s,Ac) - Do(i+s,Ac) + c2*com_mod.Ad(i,Ac));
               }
             }
 
           } else {
-            for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
-              int Ac = com_mod.msh[iM].fa[iFa].gN(a);
+            for (int a = 0; a < nNo; a++) {
+              int Ac = nodes(a);
               for (int i = 0; i < com_mod.Ad.nrows(); i++) {
+                if (nodal_update(Ac, i)) {
+                  continue;
+                }
                 Dn(i+s,Ac) = c1*Yn(i+s,Ac) - c2*com_mod.Ad(i,Ac) + Do(i+s,Ac);
                 com_mod.Ad(i,Ac) = Yn(i+s,Ac);
               }
@@ -1145,6 +1238,15 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
         }
       }
     } // iBc
+    if (check_overlaps) {
+      if (!com_mod.cm.seq()) {
+        MPI_Allreduce(MPI_IN_PLACE, &conflict, 1, MPI_INT, MPI_MAX, com_mod.cm.com());
+      }
+      if (conflict) {
+        throw std::runtime_error("Conflicting or nonfinite Dirichlet prescriptions involving a node set in equation " +
+            std::to_string(iEq + 1) + "; check values, derivatives, and state/integral components.");
+      }
+    }
   } // iEq
 
 }
@@ -1155,7 +1257,7 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
 ///
 /// Reproduces 'SUBROUTINE SETBCDIRL(lBc, lFa, lA, lY, lDof)'
 //
-void set_bc_dir_l(ComMod& com_mod, const bcType& lBc, const faceType& lFa, Array<double>& lA, Array<double>& lY, int lDof)
+void set_bc_dir_l(ComMod& com_mod, const bcType& lBc, const faceType* lFa, Array<double>& lA, Array<double>& lY, int lDof)
 {
   using namespace consts;
 
@@ -1194,18 +1296,18 @@ void set_bc_dir_l(ComMod& com_mod, const bcType& lBc, const faceType& lFa, Array
     dirY = lBc.g;
   }
 
-  if (lDof == nsd) {
-    for (int a = 0; a < lFa.nNo; a++) {
+  if (lFa != nullptr && lDof == nsd) {
+    for (int a = 0; a < lA.ncols(); a++) {
 
       for (int i = 0; i < lA.nrows(); i++) {
-        double nV = lFa.nV(i,a);
+        double nV = lFa->nV(i,a);
         lA(i,a) = dirA * lBc.gx(a) * nV;
         lY(i,a) = dirY * lBc.gx(a) * nV;
       }
     }
 
   } else {
-    for (int a = 0; a < lFa.nNo; a++) {
+    for (int a = 0; a < lA.ncols(); a++) {
       for (int i = 0; i < lDof; i++) {
         lA(i,a) = dirA*lBc.gx(a);
         lY(i,a) = dirY*lBc.gx(a);
@@ -1309,7 +1411,7 @@ void set_bc_dir_wl(ComMod& com_mod, const bcType& lBc, const mshType& lM, const 
 
   Array<double> tmpA(lDof,nNo), tmpY(lDof,nNo);
 
-  set_bc::set_bc_dir_l(com_mod, lBc, lFa, tmpA, tmpY, lDof);
+  set_bc::set_bc_dir_l(com_mod, lBc, &lFa, tmpA, tmpY, lDof);
 
   if (utils::btest(lBc.bType, iBC_impD)) {
     tmpY = tmpA;
@@ -2133,5 +2235,4 @@ void set_bc_undef_neu_l(ComMod& com_mod, const bcType& lBc, const faceType& lFa)
 }
 
 };
-
 
