@@ -384,10 +384,10 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - Syntax-only compilation of all 36 affected translation units passed with the full FE/Physics/Application configuration.
 - [x] Export the W worktree's uncommitted diff to `/home/groups/amarsden/zsexton/svMultiPhysics-archives/wp4-worktree-20260929/` (2026-09-29, D8).
 - [x] Retire the W worktree (2026-09-29). The archive checksums were verified, and `git worktree remove --force` removed `/scratch/users/zsexton/wp4-application-regression-fixes-20260902`. Four older WP-4 scratch worktrees remain attached to the same scratch repository; they expire with the scratch purge.
-- [ ] Copy any scratch evidence worth keeping to `$GROUP_HOME` or Oak.
-  - There are about 740 free-surface entries under `/scratch/users/zsexton`, the oldest from 2026-08-25.
-  - Purge-eligibility starts around 2026-11-23.
-  - Do not touch files to extend their lifetime; copy what matters and let the rest expire.
+- [x] Archive the scratch evidence (2026-09-29).
+  - The results-only set (28,665 JSON, XML, Markdown, log, CSV/TSV and script files, about 1.2 GB) from the free-surface scratch directories of 2026-08-18 to 09-21 is in one tarball on Oak (172 MB): `/oak/stanford/groups/amarsden/zsexton/svMultiPhysics-archives/free-surface-scratch-results-20260929/`, with `README.txt`, `file-list.txt` and `SHA256SUMS`.
+  - Builds, binaries, source worktrees, caches and field output were left to the scratch purge (from about 2026-11-16).
+  - The July level-set review outputs were no longer in scratch.
 - [x] Remove the 26 superseded documents (§10.3) and repoint code comments and remaining documents to this tracker (2026-09-29).
 - [x] Fix the stale statements listed in §10.4 (2026-09-29).
   - `NavierStokesFreeSurface.md` and `LevelSet.md` were corrected against the current code.
@@ -402,6 +402,8 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - Suites: CTest FE (32 tests), Physics (7) and Application (4).
   - Script and logs: `jobs/` and `logs/` in the same directory; `logs/summary.txt` has the per-suite exit codes.
   - Record the outcome here and in §8.
+  - **Outcome, 2026-09-29: FAILED on a filesystem error, not a code error.** Configure passed. At 16:12 PDT (23:12 UTC) on `sh03-08n20`, at 43% of the build, the compiler got `Input/output error` closing `build/Source/solver/FE/CMakeFiles/svfe.dir/LevelSet/LevelSetStaticCapillaryEquilibrium.cpp.o.d`, which was left with 0 bytes.
+  - This was the only I/O error in the log. The job was not resubmitted pending a user decision: resubmit, or report to SRCC first.
 
 - [ ] **Tank at rest (2D and 3D).** Take a small subset of the existing hydrostatic matrix into CTest. The full 960-case matrix does not need to run routinely.
 - [ ] **2D linear sloshing** at 3 meshes and 3 time steps. Compare frequency and damping with linear theory. Proposal: frequency error ≤ 1% at the finest mesh with observed convergence; volume drift ≤ 1e-4 over the run.
@@ -792,6 +794,7 @@ Recorded on 2026-09-29. Re-check before acting.
 | Other run roots | `/scratch/users/zsexton/wp4-continuation-20260906`, `wp4-conditioning-20260914-jpcnJX`, `wp4-delegation-briefs-20260905-Z6OoSG`, `free-surface-refactor-20260904-905239de` | Historical |
 | Scratch volume | About 380 `wp4-*` and about 740 `wp*` / `free-surface*` entries under `/scratch/users/zsexton` | **Subject to the 90-day purge** (oldest 2026-08-25, so from about 2026-11-23). Copy anything to keep to `$GROUP_HOME` (`/home/groups/amarsden`) or Oak (`/oak/stanford/groups/amarsden`). |
 | Baseline worktree | `/scratch/users/zsexton/svmp-baseline-fef0d02f/` (`source/` is a detached worktree of the home repository at `fef0d02f`; `build/`, `logs/`, `jobs/`) | Build and test baseline for M1; job `45961287` |
+| Scratch results archive | `/oak/stanford/groups/amarsden/zsexton/svMultiPhysics-archives/free-surface-scratch-results-20260929/` | 28,665 result files from the Aug–Sep free-surface scratch directories (172 MB compressed) |
 | Sync backups | `/scratch/users/zsexton/sync-backup-20260929/` (patches of the pre-rebase commits, the obsolete untracked capability-ledger copy, syntax-check logs); local branch `pre-sync-backup-20260929` | Temporary; delete once the pushed state is confirmed |
 | Local branches | `free-surface-architecture-20260904` (`ae11dae`, 1 commit not in origin); `wp3-v5-qualification`, `wp3-v6-qualification` (merged); `issue-604`, `performance/solver-efficiency-review` (unrelated) | — |
 | Reference text | Gross & Reusken, *Numerical Methods for Two-phase Incompressible Flows* (2011): `/home/users/zsexton/wp4-references` (a PDF without an extension) | Kept outside Git |
