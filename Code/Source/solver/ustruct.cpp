@@ -1794,22 +1794,6 @@ void ustruct_r(ComMod& com_mod, const SolutionStates& solutions)
       }
     }
 
-    // These components already have prescribed displacement/velocity updates.
-    // Eliminate their kinematic correction before it enters the free-row residual.
-    for (const auto& bc : eq.bc) {
-      if (bc.node_set_name.empty()) {
-        continue;
-      }
-      const bool selective = std::any_of(bc.eDrn.begin(), bc.eDrn.end(), [](int value) { return value != 0; });
-      for (int node : bc.node_ids) {
-        for (int i = 0; i < nsd; ++i) {
-          if (!selective || bc.eDrn(i) != 0) {
-            Rd(i,node) = 0.0;
-          }
-        }
-      }
-    }
-
     if (nsd == 3) {
       Array<double> KU(4,tnNo);
 
