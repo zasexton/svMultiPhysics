@@ -341,8 +341,8 @@ Backend support is cell-family specific:
 
 | Backend | Supported generated-interface families | Current achieved interface / volume order | Current status |
 |---------|----------------------------------------|--------------------------------------------|----------------|
-| `LinearCorner` | 2D triangles/quads, 3D tetrahedra | 2D 5 / 5 for generated planar rules; 3D 1 / 2 | production linear fallback path |
-| `SayeHyperrectangle` | 2D quads and 3D hexes | 2D 5 / 5; 3D 1 / 2 | experimental high-order milestone |
+| `LinearCorner` | 2D triangles/quads, 3D tetrahedra | 2D 5 / 5 for generated planar rules; 3D 2 / 2 (planar polygon interfaces use a degree-2 triangle-fan rule; lower requested orders keep the centroid rule) | production path |
+| `SayeHyperrectangle` | 2D quads and 3D hexes | 2D 5 / 5; 3D 1 / 2 | 2D quadrilaterals reported as production-qualified by the backend capability; 3D experimental |
 | `HighOrderSubcell` | 2D triangles and 3D tetrahedra | 2D 5 / 5; 3D 2 / 2 for the qualified tetra sphere-cap fixture | experimental high-order milestone |
 | `Auto` | per-cell dispatch: quads/hexes to `SayeHyperrectangle`, triangles/tetrahedra to `HighOrderSubcell` | inherits the selected backend | experimental mixed supported-mesh dispatch |
 | `MomentFit` | none | unavailable | unavailable fail-closed driver |
@@ -398,6 +398,13 @@ remain unavailable and fail closed. Backend capabilities expose this distinction
 with `supports_refreshed_frozen_quadrature` and
 `supports_differentiated_quadrature`; unsupported families advertise neither.
 
+The Navier-Stokes unfitted surface-tension forms (`SurfaceStress`,
+`GeneratedCurvatureTraction`, `KinematicAreaGradientTraction`) do not yet have
+complete normal, point-location, and recovered-curvature derivatives. They
+therefore require `RefreshedFrozenQuadrature`. Cases with surface tension must
+set `Geometry_tangent_policy=RefreshedFrozenQuadrature` explicitly, even on the
+default `LinearCorner` path.
+
 ### Cut-Geometry Sensitivity Contract
 
 Differentiated generated-geometry rules are derivatives with respect to the
@@ -440,12 +447,22 @@ smooth derivative.
 
 ## Curvature and Capillary Contract
 
-The production unfitted capillary model is a named scalar curvature field used by
-the surface-tension form. The field may be either an unknown FE field or a
-prescribed projected field maintained from the level-set geometry. Raw
-pointwise `meanCurvatureFromLevelSet(phi)` is a diagnostic path for fitted or
-controlled studies; it is not production evidence for high-order unfitted
-surface tension.
+The default unfitted capillary form in Navier-Stokes is `SurfaceStress`. It is
+the first variation of the generated-interface measure, uses the generated
+normal, and needs no curvature field. The curvature-based forms need a named
+scalar curvature field:
+
+- `CurvatureTraction` and `GeneratedCurvatureTraction` use a supplied or
+  projected curvature field;
+- `KinematicAreaGradientTraction` uses a field recovered in
+  `KinematicAreaGradient` mode (see below).
+
+The field may be either an unknown FE field or a prescribed projected field
+maintained from the level-set geometry. Raw pointwise
+`meanCurvatureFromLevelSet(phi)` is a diagnostic path for fitted or controlled
+studies; it is not production evidence for unfitted surface tension.
+`Documentation/free_surface_program_tracker.md` records which route is being
+selected and why (decision D2, milestone M2).
 
 For unfitted generated interfaces, curvature inputs are signed with the
 generated-interface normal `grad(phi) / |grad(phi)|`, pointing from the negative
@@ -466,13 +483,28 @@ The supported curvature sources are:
 | Constant supplied curvature | The value is a prescribed verification or reduced-model input. It has no level-set derivative and cannot be used to claim geometry-coupled capillary convergence. |
 | Raw level-set curvature | Diagnostic only for unfitted generated interfaces. Production surface-tension cases must provide a named curvature field or a controlled supplied value. |
 
-The prescribed projected-curvature path uses local quadratic recovery on the
-active narrow band, optional supplemental generated-interface and cut-volume
-samples, bounded fallback policies, and optional graph smoothing. It is the
-current production-capable model only when benchmark gates also pass with zero
-forbidden fallback vertices and recorded curvature/pressure/stability metrics.
-It does not provide derivatives of curvature with respect to level-set DOFs or
-regenerated cut geometry.
+Projected curvature is computed by
+`FE/LevelSet/LevelSetCurvatureProjection.*`. `Curvature_projection_recovery_mode`
+selects one of three modes:
+
+| Recovery mode | Method |
+|---------------|--------|
+| `level_set_quadratic` (default) | Local weighted least-squares quadratic fit of `phi` on the active narrow band. Optional supplemental generated-interface and cut-volume samples, bounded fallback policies, and optional graph smoothing. |
+| `generated_interface_patch` | Fit of a local tangent graph to generated-interface quadrature samples. The level-set gradient still defines the normal. |
+| `kinematic_area_gradient` | Exact derivative of the `LinearCorner` interface measure, and of each declared Young wetted-wall measure weighted by `cos(theta_e)`, with respect to the nodal P1 level-set values on a fixed cut topology. The curvature solves `M kappa = -dE/dphi`, where `M_ij` is the integral of `N_i N_j / abs(grad(phi))` over the generated interface; the row sums of `M` equal the liquid-volume derivative. Affine P1 `Triangle3`/`Tetra4` only. Optional Helmholtz filter set by `Curvature_projection_kinematic_area_gradient_filter_coefficient`; `KinematicAreaGradientTraction` requires it to be 0. |
+
+In `kinematic_area_gradient` mode, a discrete volume-constrained stationary
+state gives an exactly constant `kappa`. That constant is balanced by a
+constant pressure. The unfiltered consistent-mass solve is poorly
+conditioned when basis functions barely touch the interface. The tracker (M2)
+therefore plans a parameter-free lumped (row-sum) mass variant with the same
+equilibrium property.
+
+None of these modes provides derivatives of curvature with respect to
+level-set DOFs or regenerated cut geometry. Recovered curvature is used as
+refreshed data. The `level_set_quadratic` path is suitable for production
+only when benchmark gates also pass with zero forbidden fallback vertices and
+recorded curvature, pressure, and stability metrics.
 
 Picard-style capillarity is valid only under an explicit convergence audit. A
 production run using prescribed projected curvature must refresh curvature after
@@ -500,9 +532,9 @@ Diagnostics and output expose the state needed to audit a generated interface:
 VTP/JSON debug output includes stored curved-interface quadrature points,
 normals, weights, parent/reference coordinates, root residuals, gradient norms,
 curved patch ids, requested/achieved orders, and fallback status. The optional
-tessellated visualization path and production curvature recovery are still open
-work items; do not advertise high-order surface tension from raw pointwise
-level-set curvature.
+tessellated visualization path and curvature recovery on high-order geometry
+are still open work items; do not advertise high-order surface tension from raw
+pointwise level-set curvature.
 
 ## Compatibility
 

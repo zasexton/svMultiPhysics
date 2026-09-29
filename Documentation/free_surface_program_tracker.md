@@ -383,13 +383,15 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - The branch was rebased onto `fc56527`. The redundant local commit `09976e2` was skipped because it is patch-identical to `2768303`.
   - Syntax-only compilation of all 36 affected translation units passed with the full FE/Physics/Application configuration.
 - [x] Export the W worktree's uncommitted diff to `/home/groups/amarsden/zsexton/svMultiPhysics-archives/wp4-worktree-20260929/` (2026-09-29, D8).
-- [ ] Retire the W worktree (`/scratch/users/zsexton/wp4-application-regression-fixes-20260902`) once the archive is confirmed. It is unchanged and still dirty.
+- [x] Retire the W worktree (2026-09-29). The archive checksums were verified, and `git worktree remove --force` removed `/scratch/users/zsexton/wp4-application-regression-fixes-20260902`. Four older WP-4 scratch worktrees remain attached to the same scratch repository; they expire with the scratch purge.
 - [ ] Copy any scratch evidence worth keeping to `$GROUP_HOME` or Oak.
   - There are about 740 free-surface entries under `/scratch/users/zsexton`, the oldest from 2026-08-25.
   - Purge-eligibility starts around 2026-11-23.
   - Do not touch files to extend their lifetime; copy what matters and let the rest expire.
 - [x] Remove the 26 superseded documents (§10.3) and repoint code comments and remaining documents to this tracker (2026-09-29).
-- [ ] Fix the stale statements listed in §10.4.
+- [x] Fix the stale statements listed in §10.4 (2026-09-29).
+  - `NavierStokesFreeSurface.md` and `LevelSet.md` were corrected against the current code.
+  - Both now also state that unfitted surface tension requires `Geometry_tangent_policy=RefreshedFrozenQuadrature`, which is not the active-cut default.
 - [ ] Create a `tests/cases/fluid/free_surface_benchmarks/` directory. Each benchmark gets one short driver script and one tolerance file, and runs in minutes to about an hour on one node.
 
 ### M1 — Tier-1 baseline on the current tip (unfitted, γ = 0)
@@ -778,7 +780,7 @@ Recorded on 2026-09-29. Re-check before acting.
 |---|---|---|
 | Authoritative branch | `origin/issue-449-modern-mesh-core` at `fc56527` (2026-09-21) | Clean; latest WP-4 commits |
 | Home checkout | `/home/users/zsexton/svMultiPhysics`, branch `issue-449-modern-mesh-core` | Synchronized with origin on 2026-09-29. The 53 previously uncommitted files were committed (§5 M0), and this tracker plus the document cleanup were committed on top. Still untracked, and deliberately left out: the WP-10 static-drop matrix, runner and test (`tests/cases/fluid/free_surface_wp10_static_drop_matrix.json`, `tests/cases/fluid/run_free_surface_wp10_static_drop_qualification.py`, `tests/test_free_surface_wp10_static_drop_qualification.py`) and the generated `svmp_fe_jit_dumps_tests_basis_baking/` directory. |
-| WP-4 worktree "W" | `/scratch/users/zsexton/wp4-application-regression-fixes-20260902` (linked worktree; common git dir `/scratch/users/zsexton/wp4-balanced-capillary-qualification-20260902/source/.git`) | HEAD `fc56527`. 56 dirty entries (about 11.8k inserted lines as of 09-14, including untracked `FE/Geometry/Affine{Triangle,Tetrahedron}LevelSetCut.h` and `FE/Basis/{Triangle,Tetrahedron}BarycentricEvaluation.h`). Contains a hash-only protected test file (`FE/Tests/Unit/LevelSet/test_LevelSetCurvatureProjection.cpp`). Coordination artifacts, about 220 files, under `.superpowers/sdd/plan_wp4_balanced_force_completion_20260903/`. Uncommitted work archived on 2026-09-29 to `/home/groups/amarsden/zsexton/svMultiPhysics-archives/wp4-worktree-20260929/` (D8); the worktree itself is unchanged. |
+| WP-4 worktree "W" | `/scratch/users/zsexton/wp4-application-regression-fixes-20260902` | **Removed 2026-09-29.** Its uncommitted work is archived in `/home/groups/amarsden/zsexton/svMultiPhysics-archives/wp4-worktree-20260929/` (D8). |
 | Latest WP-4 checkpoint | `/scratch/users/zsexton/wp4-continuation-20260921-szBnNq/checkpoint.md`; `W/.superpowers/sdd/.../delegation-checkpoint.md` | Paused; no live jobs |
 | Other run roots | `/scratch/users/zsexton/wp4-continuation-20260906`, `wp4-conditioning-20260914-jpcnJX`, `wp4-delegation-briefs-20260905-Z6OoSG`, `free-surface-refactor-20260904-905239de` | Historical |
 | Scratch volume | About 380 `wp4-*` and about 740 `wp*` / `free-surface*` entries under `/scratch/users/zsexton` | **Subject to the 90-day purge** (oldest 2026-08-25, so from about 2026-11-23). Copy anything to keep to `$GROUP_HOME` (`/home/groups/amarsden`) or Oak (`/oak/stanford/groups/amarsden`). |
@@ -801,8 +803,8 @@ Recorded on 2026-09-29. Re-check before acting.
 
 | Document | Content |
 |---|---|
-| `Code/Source/solver/FE/Docs/LevelSet.md` | FE level-set services and contracts. Stale points in §10.4. |
-| `Code/Source/solver/Physics/Docs/NavierStokesFreeSurface.md` | NS free-surface notes. **Stale**; see §10.4. |
+| `Code/Source/solver/FE/Docs/LevelSet.md` | FE level-set services and contracts, including the curvature recovery modes (corrected 2026-09-29) |
+| `Code/Source/solver/Physics/Docs/NavierStokesFreeSurface.md` | Navier-Stokes surface-tension forms and contact-line terms as currently implemented (corrected 2026-09-29) |
 | `Documentation/free_surface_discrete_energy_balance_method.md` | Discrete surface + Young energy; KKT; static initializer rationale |
 | `Documentation/free_surface_wp5_contact_line_architecture.md` | Contact-line conventions, Ren–E, prescribed-angle split, dissipation |
 | `Documentation/free_surface_wp7_combined_p1_method.md` | P1/P1 + aggregation + pressure facet jump; node-crossing results |
@@ -856,16 +858,19 @@ Frozen qualification records, matrices and runners that name these paths were le
 
 Both suspended plans were removed on 2026-09-29 after D2, D3 and D8 were adopted. Commit `5b46da55` is the last one that contains them.
 
-### 10.4 Known stale statements to correct in M0
+### 10.4 Known stale statements
 
-- **`NavierStokesFreeSurface.md`:**
-  - it says the traction is only `−γκn`, but the unfitted default is SurfaceStress;
-  - it describes the retired prescribed-angle level-set penalty;
-  - it says prescribed angle requires no slip, but optional slip exists;
-  - it describes a diffuse wet-wall indicator, but the code requires a sharp one.
-- **`LevelSet.md`:**
-  - it calls projected curvature "the production unfitted capillary model";
-  - it lists the 3D `LinearCorner` interface order as 1, but the code reports 2.
+None outstanding. On 2026-09-29 the following were corrected in
+`NavierStokesFreeSurface.md` and `LevelSet.md`:
+
+- the default unfitted capillary form, which is `SurfaceStress`;
+- the removed level-set contact-angle penalty;
+- optional prescribed-angle slip;
+- the sharp wetted-wall operator;
+- the 3D `LinearCorner` interface order, which is 2;
+- the capillary-curvature contract.
+
+Add new entries here when a document is found to disagree with the code.
 
 ---
 
