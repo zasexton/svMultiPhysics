@@ -10,6 +10,8 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 import meshio
+import vtk
+from vtk.util.numpy_support import numpy_to_vtk
 
 this_file_dir = os.path.abspath(os.path.dirname(__file__))
 cpp_exec = os.path.join(this_file_dir, "..", "build", "svMultiPhysics-build", "bin", "svmultiphysics")
@@ -148,22 +150,26 @@ def add_test_boundary_face(root, folder, points, cells, name="surface", x=0):
             break
     else:
         raise ValueError("No boundary triangle found")
-    vtk = ET.Element("VTKFile", type="PolyData", version="0.1", byte_order="LittleEndian")
-    piece = ET.SubElement(ET.SubElement(vtk, "PolyData"), "Piece", NumberOfPoints="3",
-                          NumberOfPolys="1", NumberOfVerts="0", NumberOfLines="0", NumberOfStrips="0")
-    for section, label, values, components in [
-        ("Points", "", points[nodes].ravel(), 3),
-        ("PointData", "GlobalNodeID", nodes + 1, 1),
-        ("CellData", "GlobalElementID", [element + 1], 1),
-        ("Polys", "connectivity", [0, 1, 2], 1),
-        ("Polys", "offsets", [3], 1),
+    vtk_points = vtk.vtkPoints()
+    vtk_points.SetData(numpy_to_vtk(points[nodes], deep=True))
+    polygons = vtk.vtkCellArray()
+    polygons.InsertNextCell(3, (0, 1, 2))
+    surface = vtk.vtkPolyData()
+    surface.SetPoints(vtk_points)
+    surface.SetPolys(polygons)
+    for attributes, label, values in [
+        (surface.GetPointData(), "GlobalNodeID", nodes + 1),
+        (surface.GetCellData(), "GlobalElementID", [element + 1]),
     ]:
-        parent = piece.find(section)
-        if parent is None:
-            parent = ET.SubElement(piece, section)
-        ET.SubElement(parent, "DataArray", type="Float64" if section == "Points" else "Int32",
-                      Name=label, NumberOfComponents=str(components), format="ascii").text = " ".join(map(str, values))
-    ET.ElementTree(vtk).write(folder / f"{name}.vtp")
+        array = numpy_to_vtk(np.asarray(values, dtype=np.int32), deep=True)
+        array.SetName(label)
+        attributes.AddArray(array)
+    writer = vtk.vtkXMLPolyDataWriter()
+    path = folder / f"{name}.vtp"
+    writer.SetFileName(str(path))
+    writer.SetInputData(surface)
+    if writer.Write() != 1:
+        raise OSError(f"Could not write {path}")
     face = ET.SubElement(root.find("Add_mesh"), "Add_face", name=name)
     ET.SubElement(face, "Face_file_path").text = f"{name}.vtp"
     return nodes + 1
@@ -356,48 +362,65 @@ def make_interior_node_case(folder, nsd=2, physics="darcy"):
             cells.append(simplex)
     cells = np.asarray(cells)
     ids = np.array([lookup[(2,) * nsd] + 1, lookup[(1,) * nsd] + 1])
-    meshio.write_points_cells(
-        folder / "mesh.vtu", points,
-        [("triangle" if nsd == 2 else "tetra", cells)],
-        point_data={"GlobalNodeID": np.arange(len(points)) + 1001},
-    )
-    material = ("<Darcy_permeability>1</Darcy_permeability>"
-                "<Darcy_fluid_viscosity>1</Darcy_fluid_viscosity>"
-                "<Darcy_compressibility>0</Darcy_compressibility>"
-                "<Fluid_density>1</Fluid_density>" if physics == "darcy" else
-                "<Conductivity>1</Conductivity><Density>0</Density>")
+    vtk_points = vtk.vtkPoints()
+    vtk_points.SetData(numpy_to_vtk(points, deep=True))
+    vtk_cells = vtk.vtkCellArray()
+    for cell in cells:
+        vtk_cells.InsertNextCell(len(cell), cell)
+    volume = vtk.vtkUnstructuredGrid()
+    volume.SetPoints(vtk_points)
+    volume.SetCells(vtk.VTK_TRIANGLE if nsd == 2 else vtk.VTK_TETRA, vtk_cells)
+    node_ids = numpy_to_vtk(np.arange(len(points)) + 1001, deep=True)
+    node_ids.SetName("GlobalNodeID")
+    volume.GetPointData().AddArray(node_ids)
+    writer = vtk.vtkXMLUnstructuredGridWriter()
+    writer.SetFileName(str(folder / "mesh.vtu"))
+    writer.SetInputData(volume)
+    if writer.Write() != 1:
+        raise OSError(f"Could not write {folder / 'mesh.vtu'}")
+    material = ({"Darcy_permeability": 1, "Darcy_fluid_viscosity": 1,
+                 "Darcy_compressibility": 0, "Fluid_density": 1} if physics == "darcy" else
+                {"Conductivity": 1, "Density": 0})
     field = "Darcy_pressure" if physics == "darcy" else "Temperature"
-    root = ET.fromstring(f"""<svMultiPhysicsFile version="0.1">
-      <GeneralSimulationParameters>
-        <Continue_previous_simulation>false</Continue_previous_simulation>
-        <Number_of_spatial_dimensions>{nsd}</Number_of_spatial_dimensions>
-        <Number_of_time_steps>2</Number_of_time_steps>
-        <Time_step_size>0.1</Time_step_size>
-        <Spectral_radius_of_infinite_time_step>0</Spectral_radius_of_infinite_time_step>
-        <Save_results_to_VTK_format>true</Save_results_to_VTK_format>
-        <Name_prefix_of_saved_VTK_files>result</Name_prefix_of_saved_VTK_files>
-        <Increment_in_saving_VTK_files>1</Increment_in_saving_VTK_files>
-        <Start_saving_after_time_step>0</Start_saving_after_time_step>
-        <Increment_in_saving_restart_files>1</Increment_in_saving_restart_files>
-      </GeneralSimulationParameters>
-      <Add_mesh name="volume">
-        <Mesh_file_path>mesh.vtu</Mesh_file_path>
-        <Add_node_set name="interior"><Node_IDs>{ids[0]} {ids[1]}</Node_IDs></Add_node_set>
-      </Add_mesh>
-      <Add_equation type="{physics}">
-        <Coupled>true</Coupled><Min_iterations>1</Min_iterations>
-        <Max_iterations>6</Max_iterations><Tolerance>1e-11</Tolerance>
-        {material}<Source_term>0.25</Source_term>
-        <Output type="Spatial"><{field}>true</{field}></Output>
-        <LS type="CG"><Linear_algebra type="fsils"><Preconditioner>rcs</Preconditioner></Linear_algebra>
-          <Tolerance>1e-12</Tolerance><Max_iterations>500</Max_iterations></LS>
-        <Add_BC name="interior_pressure">
-          <Mesh_name>volume</Mesh_name><Node_set>interior</Node_set>
-          <Type>Dirichlet</Type><Time_dependence>General</Time_dependence>
-          <Temporal_and_spatial_values_file_path>values.dat</Temporal_and_spatial_values_file_path>
-        </Add_BC>
-      </Add_equation>
-    </svMultiPhysicsFile>""")
+    root = ET.Element("svMultiPhysicsFile", version="0.1")
+    general = ET.SubElement(root, "GeneralSimulationParameters")
+    for tag, value in {
+        "Continue_previous_simulation": "false",
+        "Number_of_spatial_dimensions": nsd,
+        "Number_of_time_steps": 2,
+        "Time_step_size": 0.1,
+        "Spectral_radius_of_infinite_time_step": 0,
+        "Save_results_to_VTK_format": "true",
+        "Name_prefix_of_saved_VTK_files": "result",
+        "Increment_in_saving_VTK_files": 1,
+        "Start_saving_after_time_step": 0,
+        "Increment_in_saving_restart_files": 1,
+    }.items():
+        ET.SubElement(general, tag).text = str(value)
+    mesh = ET.SubElement(root, "Add_mesh", name="volume")
+    ET.SubElement(mesh, "Mesh_file_path").text = "mesh.vtu"
+    node_set = ET.SubElement(mesh, "Add_node_set", name="interior")
+    ET.SubElement(node_set, "Node_IDs").text = " ".join(map(str, ids))
+    equation = ET.SubElement(root, "Add_equation", type=physics)
+    for tag, value in {
+        "Coupled": "true", "Min_iterations": 1, "Max_iterations": 6,
+        "Tolerance": "1e-11", **material, "Source_term": 0.25,
+    }.items():
+        ET.SubElement(equation, tag).text = str(value)
+    output = ET.SubElement(equation, "Output", type="Spatial")
+    ET.SubElement(output, field).text = "true"
+    ls = ET.SubElement(equation, "LS", type="CG")
+    algebra = ET.SubElement(ls, "Linear_algebra", type="fsils")
+    ET.SubElement(algebra, "Preconditioner").text = "rcs"
+    ET.SubElement(ls, "Tolerance").text = "1e-12"
+    ET.SubElement(ls, "Max_iterations").text = "500"
+    bc = ET.SubElement(equation, "Add_BC", name="interior_pressure")
+    for tag, value in {
+        "Mesh_name": "volume", "Node_set": "interior", "Type": "Dirichlet",
+        "Time_dependence": "General",
+        "Temporal_and_spatial_values_file_path": "values.dat",
+    }.items():
+        ET.SubElement(bc, tag).text = value
     # Records intentionally reverse the node-set order.
     (folder / "values.dat").write_text(f"1 2 2\n0 1\n{ids[1]} 7 7\n{ids[0]} 2 2\n")
     return root, points, cells, ids
