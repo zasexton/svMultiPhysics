@@ -277,7 +277,7 @@ These are proposals. Each lists a recommended option and an alternative. Record 
 |---|---|---|---|
 | **D1** | Acceptance philosophy | **Adopted 2026-09-29.** Tiered capability goals (§1.2). Gates are literature-calibrated convergence and error bounds on physically relaxed states. Algebraic roundoff gates apply only to exactly representable states (flat, hydrostatic). | Keep the V3 gate contract. It needs an exactly-balanced construction and has no demonstrated path. |
 | **D2** | Capillary force route (unfitted) | **Adopted 2026-09-29, under principle P1.** Run the missing AD-2 comparison, M2 in §5: SurfaceStress, KAG with filter or stabilized mass, and unfiltered KAG, on the same static-drop, capillary-wave, sessile and Ren–E tests, then select. Allow the filter or stabilization for KAG. | Continue unfiltered KAG with the double-double mass solve (the 09-14 goal, milestones 1–6). |
-| **D3** | Static minimizer | Make it optional tooling. Reach equilibrium dynamically (viscous relaxation). Never gate physics on `‖g_proj‖ ≤ 1e-10`. If kept, it must use one geometry definition and a nonsmooth-aware stopping rule. | Keep it as the required initializer for all "minimized" lanes. |
+| **D3** | Static minimizer | **Adopted 2026-09-29.** Make it optional tooling. Reach equilibrium dynamically (viscous relaxation). Never gate physics on `‖g_proj‖ ≤ 1e-10`. If kept, it must use one geometry definition and a nonsmooth-aware stopping rule. | Keep it as the required initializer for all "minimized" lanes. |
 | **D4** | Contact angle | Variational Young term, Navier slip, strong no-penetration, and angle-preserving (scale-only) wall maintenance. Retire the repair-to-target as a production path, or keep it as an explicit alternative mode that is never combined with the Young term. | Keep both owners and finish the FSR-04 scheduling, strip and fixed-point work. |
 | **D5** | Fitted ALE | Unlock fitted SurfaceStress behind a flag, use slip (not Dirichlet-0) wall mesh BCs, and run fitted 2D sloshing, then a static drop and capillary wave. This gives an independent, well-balanced reference. | Leave fitted capillarity rejected and focus on unfitted only. |
 | **D6** | Process | Lightweight process (§12): a commit hash, a small benchmark script, a tolerance file, and a results row in this tracker. Raw outputs for accepted results go to group storage. Time-box investigations to about 3 working days before a method decision. Keep the author/committer identity rule, the commit-message vocabulary scan, and the job-mail settings. | Keep the frozen/immutable campaign process for every step. |
@@ -308,6 +308,19 @@ These are proposals. Each lists a recommended option and an alternative. Record 
     - unfiltered consistent-mass KAG, as a reference only.
   - Filtered or stabilized KAG is a fallback only.
   - The unfiltered-KAG double-double line of the 09-14 goal is not continued as the method path. Recording D8 (archiving the W worktree diff) is the follow-up.
+- **D3, 2026-09-29: the recommended option is adopted.**
+  - Static equilibria are reached dynamically. Each case starts from the sampled analytic shape and runs until the flow has relaxed, typically 5–10 viscous times `ρR²/μ`.
+  - Static-equilibrium results are always measured on the relaxed state.
+  - No physical result is gated on minimizer convergence (`‖g_proj‖`, volume error, or the minimized-state certificate).
+  - The static minimizer (`FE/LevelSet/LevelSetStaticCapillaryEquilibrium.*`, driven by `initializeDiscreteStaticCapillaryEquilibrium` in `ApplicationDriver.cpp`) remains optional tooling in two roles:
+    - a best-effort initializer that shortens relaxation;
+    - a small verification test that the balance equivalence (KKT ⇔ constant curvature ⇔ zero spurious flow) holds on meshes where the interface avoids mesh nodes.
+  - Before either role is used, the minimizer must use one geometry definition for the energy and its derivatives, and a kink-aware stopping rule (M8).
+  - The algebraic check of exact balance remains covered by the flat and hydrostatic tests.
+  - **Rationale:**
+    - D1 retired the minimized-state algebraic criteria as a standard.
+    - The minimizer carries algorithm settings that P1 disfavors.
+    - On the preserved 2D cap it stalled at `‖g_proj‖ = 0.022`, and the discrete energy may have no classical zero-gradient minimum.
 
 ---
 
@@ -319,7 +332,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
 
 ### M0 — Decisions and housekeeping (about 1–2 days)
 
-- [ ] Record the D1–D8 outcomes in §4. D1, D2 and principle P1 were recorded on 2026-09-29; D3–D8 are open.
+- [ ] Record the D1–D8 outcomes in §4. D1, D2, D3 and principle P1 were recorded on 2026-09-29; D4–D8 are open.
 - [x] Reconcile the home checkout (2026-09-29).
   - Its 53 modified files were committed. The Forms/JIT/Assembly/FESystem changes became `b9f59552` ("Add side-selected cut-adjacent facet integrals"). The refactoring-plan edits were already upstream and were dropped during the rebase.
   - The branch was rebased onto `fc56527`. The redundant local commit `09976e2` was skipped because it is patch-identical to `2768303`.
@@ -346,6 +359,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
 
 - [ ] **Protocol.**
   - Static drop in a box, fluid initially at rest, with the Laplace number La = ργD/μ² swept (for example 120, 1,200, 12,000).
+  - Start from the sampled analytic shape. No minimizer is required (D3).
   - R/h = 8, 16, 32, 64 in 2D.
   - Run to at least 5–10 viscous times `ρR²/μ` and report `max|u|(t)`.
   - At the end state report the pressure jump (mean interior minus exterior), volume and shape.
