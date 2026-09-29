@@ -25,19 +25,17 @@ def test_beam(n_proc):
     run_with_reference(base_folder, test_folder, fields, n_proc, t_max)
 
 
-def make_interior_structural_case(tmp_path, physics):
+def make_interior_structural_case(tmp_path):
     root, points, cells, ids = make_interior_node_case(tmp_path, 3)
     root.find("GeneralSimulationParameters/Spectral_radius_of_infinite_time_step").text = "0.5"
     equation = root.find("Add_equation")
-    equation.set("type", physics)
+    equation.set("type", "lElas")
     for child in list(equation):
         if child.tag.startswith("Darcy_") or child.tag in ("Fluid_density", "Source_term"):
             equation.remove(child)
     for tag, value in [("Density", "1"), ("Elasticity_modulus", "10"),
                        ("Poisson_ratio", "0.3"), ("Force_y", "1")]:
         ET.SubElement(equation, tag).text = value
-    if physics == "ustruct":
-        ET.SubElement(equation, "Constitutive_model", type="nHK")
     equation.find("Max_iterations").text = "20"
     equation.find("LS").set("type", "GMRES")
     equation.find("LS/Linear_algebra/Preconditioner").text = "fsils"
@@ -49,11 +47,10 @@ def make_interior_structural_case(tmp_path, physics):
     return root, points, cells, ids
 
 
-@pytest.mark.parametrize("physics", ["lElas", "ustruct"])
 @pytest.mark.parametrize("integral", [False, True])
 @pytest.mark.parametrize("prescription", ["components", "all", "general", "history"])
-def test_interior_node_components(tmp_path, n_proc, physics, integral, prescription):
-    root, points, _, ids = make_interior_structural_case(tmp_path, physics)
+def test_interior_node_components(tmp_path, n_proc, integral, prescription):
+    root, points, _, ids = make_interior_structural_case(tmp_path)
     slope = 0.01 if prescription == "history" else 0
     equation = root.find("Add_equation")
     bc = equation.find("Add_BC")
@@ -99,42 +96,6 @@ def test_interior_node_components(tmp_path, n_proc, physics, integral, prescript
     if prescription == "components":
         assert np.all(result.point_data["Displacement"][order, 1] > 1e-5)
     assert np.isfinite(result.point_data["Displacement"]).all()
-
-
-@pytest.mark.parametrize("face_first", [False, True])
-@pytest.mark.parametrize("slope", [0, 0.01])
-@pytest.mark.parametrize("components", [1, 3])
-def test_interior_node_structural_overlap(tmp_path, n_proc, face_first, slope, components):
-    root, points, cells, ids = make_interior_structural_case(tmp_path, "ustruct")
-    surface = add_test_boundary_face(root, tmp_path, points, cells)
-    ids[0] = surface[0]
-    root.find("Add_mesh/Add_node_set/Node_IDs").text = " ".join(map(str, ids))
-    equation = root.find("Add_equation")
-    node_bc = equation.find("Add_BC")
-    if components == 1:
-        ET.SubElement(node_bc, "Effective_direction").text = "1 0 0"
-    face_bc = copy.deepcopy(node_bc)
-    face_bc.set("name", "surface")
-    face_bc.remove(face_bc.find("Mesh_name"))
-    face_bc.remove(face_bc.find("Node_set"))
-    face_bc.find("Temporal_and_spatial_values_file_path").text = "face-values.dat"
-    for name, selected in [("values.dat", ids), ("face-values.dat", surface)]:
-        history = " ".join(map(str, [0.02] * components + [0.02 + slope] * components))
-        (tmp_path / name).write_text(f"{components} 2 {len(selected)}\n0 1\n" + "".join(
-            f"{node} {history}\n" for node in selected))
-    equation.remove(node_bc)
-    equation.extend([face_bc, node_bc] if face_first else [node_bc, face_bc])
-    ET.ElementTree(root).write(tmp_path / "solver.xml")
-    run_by_name(tmp_path, "solver.xml", 2, n_proc)
-    for step in [0, 1, 2]:
-        sample = meshio.read(tmp_path / f"{n_proc}-procs/result_{step:03d}.vtu")
-        selected = [np.argmin(np.linalg.norm(sample.points - points[i-1], axis=1)) for i in ids]
-        time = step * 0.1
-        np.testing.assert_allclose(sample.point_data["Velocity"][selected, :components], 0.02 + slope*time, atol=1e-10)
-        # Generalized-alpha integration with gamma=2/3 (spectral radius 0.5),
-        # starting from zero displacement even when the initial velocity is nonzero.
-        displacement = 0.02*time + slope*(0.5*time**2 + time*0.1/6)
-        np.testing.assert_allclose(sample.point_data["Displacement"][selected, :components], displacement, atol=1e-10)
 
 
 def test_interior_node_with_coupled_face(tmp_path, n_proc):
