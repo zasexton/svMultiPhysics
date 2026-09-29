@@ -279,7 +279,7 @@ These are proposals. Each lists a recommended option and an alternative. Record 
 | **D2** | Capillary force route (unfitted) | **Adopted 2026-09-29, under principle P1.** Run the missing AD-2 comparison, M2 in §5: SurfaceStress, KAG with filter or stabilized mass, and unfiltered KAG, on the same static-drop, capillary-wave, sessile and Ren–E tests, then select. Allow the filter or stabilization for KAG. | Continue unfiltered KAG with the double-double mass solve (the 09-14 goal, milestones 1–6). |
 | **D3** | Static minimizer | **Adopted 2026-09-29.** Make it optional tooling. Reach equilibrium dynamically (viscous relaxation). Never gate physics on `‖g_proj‖ ≤ 1e-10`. If kept, it must use one geometry definition and a nonsmooth-aware stopping rule. | Keep it as the required initializer for all "minimized" lanes. |
 | **D4** | Contact angle | **Adopted 2026-09-29 (single mechanism).** Variational Young term, Navier slip, strong no-penetration, and angle-preserving (scale-only) wall maintenance. Retire the repair-to-target as a production path, or keep it as an explicit alternative mode that is never combined with the Young term. | Keep both owners and finish the FSR-04 scheduling, strip and fixed-point work. |
-| **D5** | Fitted ALE | Unlock fitted SurfaceStress behind a flag, use slip (not Dirichlet-0) wall mesh BCs, and run fitted 2D sloshing, then a static drop and capillary wave. This gives an independent, well-balanced reference. | Leave fitted capillarity rejected and focus on unfitted only. |
+| **D5** | Fitted ALE | **Adopted 2026-09-29.** Unlock fitted SurfaceStress behind a flag, use slip (not Dirichlet-0) wall mesh BCs, and run fitted 2D sloshing, then a static drop and capillary wave. This gives an independent, well-balanced reference. | Leave fitted capillarity rejected and focus on unfitted only. |
 | **D6** | Process | Lightweight process (§12): a commit hash, a small benchmark script, a tolerance file, and a results row in this tracker. Raw outputs for accepted results go to group storage. Time-box investigations to about 3 working days before a method decision. Keep the author/committer identity rule, the commit-message vocabulary scan, and the job-mail settings. | Keep the frozen/immutable campaign process for every step. |
 | **D7** | Architecture refactor | Pause R3–R12. Do targeted extractions only when a milestone touches that code. Revisit once T1–T3 are working. | Resume the refactor in parallel now. |
 | **D8** | WP-4 September work in progress | Stop the conditioning/double-double line. Archive the dirty W worktree diff as a patch in `$GROUP_HOME`; do not integrate it. Keep committed `fc56527` as is. | Integrate the native pair implementation and continue milestones 1–3 of the 09-14 goal. |
@@ -334,6 +334,16 @@ These are proposals. Each lists a recommended option and an alternative. Record 
     - The two mechanisms impose different discrete angles, and each repair injects unaccounted work.
     - Continuous-P1 repair targets cannot represent a bent contact line (worst-cell error `atan(1/2)`).
     - The variational route is energy-consistent (Gerbeau–Lelièvre; Buscaglia–Ausas) and adds no numerical parameter (P1).
+- **D5, 2026-09-29: the recommended option is adopted.**
+  - The fitted ALE path is developed as an independent reference for the unfitted results.
+  - Wall mesh boundaries slide along the wall: a normal-only (slip) mesh condition replaces the Dirichlet-0 pinning in the fitted decks.
+  - Fitted `SurfaceStress` (Laplace–Beltrami on the moving boundary) is enabled behind an explicit flag. It is currently rejected as `fitted_surface_stress_current_frame_gradient_unqualified`.
+  - Fitted `CurvatureTraction` with pointwise curvature is withdrawn from use, because that curvature is identically zero on P1 faces.
+  - Order of work, as in M5:
+    - fitted 2D gravity sloshing, including the 05-26 step-12 failure;
+    - a static drop and a capillary wave;
+    - a 2D contact point with the D4 Young term and slip.
+  - Under P1, prefer the parameter-free fitted choices: the `Free` tangential policy and harmonic mesh motion. Any mesh-motion or kinematic-enforcement coefficient that remains (Nitsche or penalty) is fixed once from dimensional scaling, never tuned per case.
 
 ---
 
@@ -345,7 +355,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
 
 ### M0 — Decisions and housekeeping (about 1–2 days)
 
-- [ ] Record the D1–D8 outcomes in §4. D1–D4 and principle P1 were recorded on 2026-09-29; D5–D8 are open.
+- [ ] Record the D1–D8 outcomes in §4. D1–D5 and principle P1 were recorded on 2026-09-29; D6–D8 are open.
 - [x] Reconcile the home checkout (2026-09-29).
   - Its 53 modified files were committed. The Forms/JIT/Assembly/FESystem changes became `b9f59552` ("Add side-selected cut-adjacent facet integrals"). The refactoring-plan edits were already upstream and were dropped during the rebase.
   - The branch was rebased onto `fc56527`. The redundant local commit `09976e2` was skipped because it is patch-identical to `2768303`.
@@ -417,7 +427,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
 
 ### M5 — Fitted ALE reference path
 
-- [ ] Use slip (normal-only) mesh BCs on walls. The current fitted SPHERIC 10 deck pins walls with Dirichlet-0.
+- [ ] Use slip (normal-only) mesh BCs on walls (D5). The current fitted SPHERIC 10 deck pins walls with Dirichlet-0.
 - [ ] **2D fitted sloshing**, gravity only. Reproduce the 05-26 step-12 failure, fix it, then compare with linear theory.
 - [ ] Allow fitted `SurfaceStress` behind a flag (today it is rejected as `fitted_surface_stress_current_frame_gradient_unqualified`). Then run the static drop and the capillary wave. Remove fitted `CurvatureTraction` with pointwise curvature from use: it is identically zero on P1 faces.
 - [ ] **2D contact point** (a codimension-2 point) with Young term and slip. Compare with the static meniscus.
