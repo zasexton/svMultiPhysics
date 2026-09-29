@@ -935,7 +935,7 @@ void set_bc_cpl(ComMod& com_mod, CmMod& cm_mod, const SolutionStates& solutions)
 ///
 /// Reproduces 'SUBROUTINE SETBCDIR(lA, lY, lD)'
 //
-void set_bc_dir(ComMod& com_mod, SolutionStates& solutions, bool initializing)
+void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
 {
   // Local aliases for solution arrays
   auto& An = solutions.current.get_acceleration();
@@ -1149,48 +1149,13 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions, bool initializing)
         double c1i = 1.0 / c1;
         double c2  = (eq.gam - 1.0)*com_mod.dt;
 
-        if (!bc.node_set_name.empty()) {
-          const bool integral = utils::btest(bc.bType, enum_int(BoundaryConditionType::bType_impD));
-          const bool selective = std::find(eDir.begin(), eDir.end(), true) != eDir.end();
-          for (int a = 0; a < nNo; ++a) {
-            const int node = nodes(a);
-            for (int i = 0; i < nsd; ++i) {
-              if (selective && !eDir[i]) {
-                continue;
-              }
-              const int j = s + i;
-              // Prescribed nodes have a known displacement derivative. At
-              // initialization their displacement is an old state, not a step.
-              if (integral) {
-                An(j,node) = initializing ? Ao(j,node) :
-                    c1i*(Yn(j,node) - Yo(j,node) + c2*Ao(j,node));
-              } else {
-                Dn(j,node) = initializing ? Do(j,node) :
-                    Do(j,node) + c1*Yn(j,node) - c2*Yo(j,node);
-              }
-              com_mod.Ad(i,node) = Yn(j,node);
-            }
-          }
-          continue;
-        }
-
-        // An identical face condition must not repeat a node condition's
-        // kinematic update. If the face came first, the node update replaces it.
-        const auto nodal_update = [&](int node, int component) {
-          if (!check_overlaps) {
-            return false;
-          }
-          const auto entry = prescribed.find({node, component});
-          return entry != prescribed.end() && entry->second.nodal;
-        };
-
         if (std::find(eDir.begin(), eDir.end(), true) != eDir.end()) {
           if (utils::btest(bc.bType, enum_int(BoundaryConditionType::bType_impD))) {
 
-            for (int a = 0; a < nNo; a++) {
-              int Ac = nodes(a);
+            for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
+              int Ac = com_mod.msh[iM].fa[iFa].gN(a);
               for (int i = 0; i < nsd; i++) {
-                if (eDir[i] && !nodal_update(Ac, i)) {
+                if (eDir[i]) {
                   int j = s + i;
                   An(j,Ac) = c1i*(Yn(j,Ac) - Yo(j,Ac) + c2*Ao(j,Ac));
                   com_mod.Ad(i,Ac) = c1i*(Dn(j,Ac) - Do(j,Ac) + c2*com_mod.Ad(i,Ac));
@@ -1198,10 +1163,10 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions, bool initializing)
               }
             }
           } else {
-            for (int a = 0; a < nNo; a++) {
-              int Ac = nodes(a);
+            for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
+              int Ac = com_mod.msh[iM].fa[iFa].gN(a);
               for (int i = 0; i < nsd; i++) {
-                if (eDir[i] && !nodal_update(Ac, i)) {
+                if (eDir[i]) {
                   int j = s + i;
                   Dn(j,Ac) = c1*Yn(j,Ac) - c2*com_mod.Ad(i,Ac) + Do(j,Ac);
                   com_mod.Ad(i,Ac) = Yn(j,Ac);
@@ -1212,24 +1177,18 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions, bool initializing)
 
         } else {
           if (utils::btest(bc.bType, enum_int(BoundaryConditionType::bType_impD))) {
-            for (int a = 0; a < nNo; a++) {
-              int Ac = nodes(a);
+            for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
+              int Ac = com_mod.msh[iM].fa[iFa].gN(a);
               for (int i = 0; i < com_mod.Ad.nrows(); i++) {
-                if (nodal_update(Ac, i)) {
-                  continue;
-                }
                 An(i+s,Ac) = c1i*(Yn(i+s,Ac) - Yo(i+s,Ac) + c2*Ao(i+s,Ac));
                 com_mod.Ad(i,Ac) = c1i*(Dn(i+s,Ac) - Do(i+s,Ac) + c2*com_mod.Ad(i,Ac));
               }
             }
 
           } else {
-            for (int a = 0; a < nNo; a++) {
-              int Ac = nodes(a);
+            for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
+              int Ac = com_mod.msh[iM].fa[iFa].gN(a);
               for (int i = 0; i < com_mod.Ad.nrows(); i++) {
-                if (nodal_update(Ac, i)) {
-                  continue;
-                }
                 Dn(i+s,Ac) = c1*Yn(i+s,Ac) - c2*com_mod.Ad(i,Ac) + Do(i+s,Ac);
                 com_mod.Ad(i,Ac) = Yn(i+s,Ac);
               }

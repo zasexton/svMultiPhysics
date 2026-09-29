@@ -156,6 +156,8 @@ void read_bc(Simulation* simulation, EquationParameters* eq_params, eqType& lEq,
     const auto& time = bc_params->time_dependence.value();
     reject(time != "Steady" && time != "Unsteady" && time != "General", "Time_dependence");
     reject(simulation->com_mod.rmsh.isReqd, "topology-changing remeshing");
+    reject(lEq.phys == EquationType::phys_ustruct ||
+        (lEq.phys == EquationType::phys_FSI && simulation->com_mod.sstEq), "ustruct equation");
   }
   BoundaryConditionType coupled_bc_type = BoundaryConditionType::bType_Neu;
   std::string oned_input_file;
