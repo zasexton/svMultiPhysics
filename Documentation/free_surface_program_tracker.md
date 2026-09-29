@@ -392,9 +392,16 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
 - [x] Fix the stale statements listed in §10.4 (2026-09-29).
   - `NavierStokesFreeSurface.md` and `LevelSet.md` were corrected against the current code.
   - Both now also state that unfitted surface tension requires `Geometry_tangent_policy=RefreshedFrozenQuadrature`, which is not the active-cut default.
-- [ ] Create a `tests/cases/fluid/free_surface_benchmarks/` directory. Each benchmark gets one short driver script and one tolerance file, and runs in minutes to about an hour on one node.
+- [x] Create `tests/cases/fluid/free_surface_benchmarks/` (2026-09-29). Its README defines the layout (`generate_case.py`, `tolerances.json`, `verify.py`), the tolerance-file format, and the P1, D1 and D3 rules. It also lists the planned benchmarks.
 
 ### M1 — Tier-1 baseline on the current tip (unfitted, γ = 0)
+
+- [ ] **Baseline build and C++ suites at `fef0d02f`.** Submitted 2026-09-29 as Slurm job `45961287`: 8 CPUs, 32 GB, 12 h.
+  - Source: a clean worktree at `/scratch/users/zsexton/svmp-baseline-fef0d02f/source`, with all 955 LFS files present.
+  - Configuration: the September GCC 12.4.0 / OpenMPI 4.1.2 / LLVM 17.0.6 / VTK 9.4.1 stack, plus Boost 1.90.0 headers.
+  - Suites: CTest FE (32 tests), Physics (7) and Application (4).
+  - Script and logs: `jobs/` and `logs/` in the same directory; `logs/summary.txt` has the per-suite exit codes.
+  - Record the outcome here and in §8.
 
 - [ ] **Tank at rest (2D and 3D).** Take a small subset of the existing hydrostatic matrix into CTest. The full 960-case matrix does not need to run routinely.
 - [ ] **2D linear sloshing** at 3 meshes and 3 time steps. Compare frequency and damping with linear theory. Proposal: frequency error ≤ 1% at the finest mesh with observed convergence; volume drift ≤ 1e-4 over the run.
@@ -784,6 +791,7 @@ Recorded on 2026-09-29. Re-check before acting.
 | Latest WP-4 checkpoint | `/scratch/users/zsexton/wp4-continuation-20260921-szBnNq/checkpoint.md`; `W/.superpowers/sdd/.../delegation-checkpoint.md` | Paused; no live jobs |
 | Other run roots | `/scratch/users/zsexton/wp4-continuation-20260906`, `wp4-conditioning-20260914-jpcnJX`, `wp4-delegation-briefs-20260905-Z6OoSG`, `free-surface-refactor-20260904-905239de` | Historical |
 | Scratch volume | About 380 `wp4-*` and about 740 `wp*` / `free-surface*` entries under `/scratch/users/zsexton` | **Subject to the 90-day purge** (oldest 2026-08-25, so from about 2026-11-23). Copy anything to keep to `$GROUP_HOME` (`/home/groups/amarsden`) or Oak (`/oak/stanford/groups/amarsden`). |
+| Baseline worktree | `/scratch/users/zsexton/svmp-baseline-fef0d02f/` (`source/` is a detached worktree of the home repository at `fef0d02f`; `build/`, `logs/`, `jobs/`) | Build and test baseline for M1; job `45961287` |
 | Sync backups | `/scratch/users/zsexton/sync-backup-20260929/` (patches of the pre-rebase commits, the obsolete untracked capability-ledger copy, syntax-check logs); local branch `pre-sync-backup-20260929` | Temporary; delete once the pushed state is confirmed |
 | Local branches | `free-surface-architecture-20260904` (`ae11dae`, 1 commit not in origin); `wp3-v5-qualification`, `wp3-v6-qualification` (merged); `issue-604`, `performance/solver-efficiency-review` (unrelated) | — |
 | Reference text | Gross & Reusken, *Numerical Methods for Two-phase Incompressible Flows* (2011): `/home/users/zsexton/wp4-references` (a PDF without an extension) | Kept outside Git |
