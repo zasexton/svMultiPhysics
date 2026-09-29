@@ -257,10 +257,19 @@ public:
         AssemblyKernel& kernel,
         GlobalSystemView& matrix_view,
         GlobalSystemView* vector_view,
-        int interior_facet_marker = -1) override
+        int interior_facet_marker = -1,
+        geometry::CutIntegrationSide interior_facet_side =
+            geometry::CutIntegrationSide::Interface) override
     {
         return base_->assembleInteriorFaces(
-            mesh, test_space, trial_space, kernel, matrix_view, vector_view, interior_facet_marker);
+            mesh,
+            test_space,
+            trial_space,
+            kernel,
+            matrix_view,
+            vector_view,
+            interior_facet_marker,
+            interior_facet_side);
     }
 
     [[nodiscard]] AssemblyResult assembleCutVolumes(

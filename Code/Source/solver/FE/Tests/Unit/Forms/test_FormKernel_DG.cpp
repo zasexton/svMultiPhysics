@@ -306,6 +306,78 @@ TEST(FormKernelDGTest, MarkedInteriorFacesUseCutFacetSetHandle)
                  FEException);
 }
 
+TEST(FormKernelDGTest, SideSelectedInteriorFacesUseMatchingFacetSetHandle)
+{
+    TwoTetraSharedFaceMeshAccess mesh;
+    auto dof_map = createTwoTetraDG_DofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    constexpr int marker = 14;
+    const Real eta = 2.5;
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    auto negative_ir = compiler.compileBilinear(
+        (FormExpr::constant(eta) * inner(jump(u), jump(v)))
+            .dS(marker, CutVolumeSide::Negative));
+    auto positive_ir = compiler.compileBilinear(
+        (FormExpr::constant(eta) * inner(jump(u), jump(v)))
+            .dS(marker, CutVolumeSide::Positive));
+    FormKernel negative_kernel(std::move(negative_ir));
+    FormKernel positive_kernel(std::move(positive_ir));
+
+    assembly::CutIntegrationContext cut_context;
+    assembly::CutFacetSetHandle negative_handle;
+    negative_handle.marker = marker;
+    negative_handle.name = "negative-cut-adjacent-facets";
+    negative_handle.side = geometry::CutIntegrationSide::Negative;
+    negative_handle.facets = {0};
+    cut_context.addFacetSetHandle(std::move(negative_handle));
+
+    assembly::CutFacetSetHandle positive_handle;
+    positive_handle.marker = marker;
+    positive_handle.name = "positive-cut-adjacent-facets";
+    positive_handle.side = geometry::CutIntegrationSide::Positive;
+    cut_context.addFacetSetHandle(std::move(positive_handle));
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.setCutIntegrationContext(&cut_context);
+
+    assembly::DenseMatrixView negative_matrix(8);
+    negative_matrix.zero();
+    const auto negative_result = assembler.assembleInteriorFaces(
+        mesh,
+        space,
+        space,
+        negative_kernel,
+        negative_matrix,
+        nullptr,
+        marker,
+        geometry::CutIntegrationSide::Negative);
+    EXPECT_EQ(negative_result.interior_faces_assembled, 1);
+    const Real area = std::sqrt(3.0) / 2.0;
+    EXPECT_NEAR(negative_matrix.getMatrixEntry(1, 1),
+                eta * area / 6.0,
+                5e-11);
+
+    assembly::DenseMatrixView positive_matrix(8);
+    positive_matrix.zero();
+    const auto positive_result = assembler.assembleInteriorFaces(
+        mesh,
+        space,
+        space,
+        positive_kernel,
+        positive_matrix,
+        nullptr,
+        marker,
+        geometry::CutIntegrationSide::Positive);
+    EXPECT_EQ(positive_result.interior_faces_assembled, 0);
+    for (const auto value : positive_matrix.data()) {
+        EXPECT_DOUBLE_EQ(value, 0.0);
+    }
+}
+
 TEST(FormKernelDGTest, MarkedCutAdjacentInteriorFacesRequireCutContext)
 {
     TwoTetraSharedFaceMeshAccess mesh;

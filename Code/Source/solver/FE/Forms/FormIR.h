@@ -48,6 +48,10 @@ struct IntegralTerm {
     // slot carries an optional marker-backed interior facet-set id.
     int interface_marker{-1};
 
+    // For side-selected cut-adjacent interior facets. An empty value retains
+    // legacy marker-only interior-face dispatch.
+    std::optional<CutVolumeSide> interior_facet_side{};
+
     // For cut-volume integrals: selects the level-set side under interface_marker.
     CutVolumeSide cut_volume_side{CutVolumeSide::Negative};
 

@@ -1592,9 +1592,29 @@ public:
     [[nodiscard]] int interiorFaceMarker() const noexcept { return interior_face_marker_; }
 
     /**
+     * @brief Get active level-set side for a marked interior facet set
+     */
+    [[nodiscard]] geometry::CutIntegrationSide interiorFaceSide() const noexcept {
+        return interior_face_side_;
+    }
+
+    /**
      * @brief Set active interior facet-set marker
      */
-    void setInteriorFaceMarker(int marker) noexcept { interior_face_marker_ = marker; }
+    void setInteriorFaceMarker(int marker) noexcept {
+        interior_face_marker_ = marker;
+        interior_face_side_ = geometry::CutIntegrationSide::Interface;
+    }
+
+    /**
+     * @brief Set active interior facet-set marker and level-set side
+     */
+    void setInteriorFaceDomain(
+        int marker,
+        geometry::CutIntegrationSide side) noexcept {
+        interior_face_marker_ = marker;
+        interior_face_side_ = side;
+    }
 
     /**
      * @brief Get active cut-volume marker for cut-domain cell-style assembly
@@ -2056,6 +2076,8 @@ private:
     LocalIndex local_face_id_{0};
     int boundary_marker_{-1};
     int interior_face_marker_{-1};
+    geometry::CutIntegrationSide interior_face_side_{
+        geometry::CutIntegrationSide::Interface};
     int cut_volume_marker_{-1};
     geometry::CutIntegrationSide cut_volume_side_{geometry::CutIntegrationSide::Interface};
     int dim_{3};

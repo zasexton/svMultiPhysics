@@ -213,6 +213,18 @@ struct CutCellFormTerminals {
     return integrand.dS(facet_set_marker);
 }
 
+[[nodiscard]] inline FormExpr cutAdjacentFacetIntegral(
+    const FormExpr& integrand,
+    int facet_set_marker,
+    CutVolumeSide side)
+{
+    if (facet_set_marker < 0) {
+        throw std::invalid_argument(
+            "cutAdjacentFacetIntegral requires a nonnegative cut-adjacent facet-set marker");
+    }
+    return integrand.dS(facet_set_marker, side);
+}
+
 } // namespace forms
 } // namespace FE
 } // namespace svmp

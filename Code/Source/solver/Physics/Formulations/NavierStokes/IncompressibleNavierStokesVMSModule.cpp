@@ -5259,6 +5259,21 @@ void applyFreeSurfaceCutCellStabilization(
         bc.active_domain == FreeSurfaceActiveDomain::None
             ? "FullDomain"
             : cutVolumeSideName(activeDomainSide(bc.active_domain));
+    const auto facet_domain_side =
+        bc.active_domain == FreeSurfaceActiveDomain::None
+            ? std::optional<FE::forms::CutVolumeSide>{}
+            : std::optional<FE::forms::CutVolumeSide>{
+                  activeDomainSide(bc.active_domain)};
+    const auto integrate_cut_adjacent =
+        [&](const FE::forms::FormExpr& integrand) {
+            return facet_domain_side.has_value()
+                       ? FE::forms::cutAdjacentFacetIntegral(
+                             integrand,
+                             bc.interface_marker,
+                             *facet_domain_side)
+                       : FE::forms::cutAdjacentFacetIntegral(
+                             integrand, bc.interface_marker);
+        };
 
     std::ostringstream oss;
     oss << "IncompressibleNavierStokesVMSModule: cut-cell stabilization "
@@ -5333,12 +5348,10 @@ void applyFreeSurfaceCutCellStabilization(
             FE::forms::cutAdjacentFacetGradientJump(stabilized_pressure);
         const auto pressure_jump_q =
             FE::forms::cutAdjacentFacetGradientJump(q);
-        auto pressure_form =
-            FE::forms::cutAdjacentFacetIntegral(
-                cut_scale * pressure_penalty * gp_calibration * h3 /
-                    (mu_gp + FE::forms::FormExpr::constant(stabilization_epsilon)) *
-                    FE::forms::inner(pressure_jump_p, pressure_jump_q),
-                bc.interface_marker);
+        auto pressure_form = integrate_cut_adjacent(
+            cut_scale * pressure_penalty * gp_calibration * h3 /
+                (mu_gp + FE::forms::FormExpr::constant(stabilization_epsilon)) *
+                FE::forms::inner(pressure_jump_p, pressure_jump_q));
 
         if (pressure_derivative_order > 1) {
             const auto pressure_second_jump_p =
@@ -5348,11 +5361,10 @@ void applyFreeSurfaceCutCellStabilization(
                 FE::forms::cutAdjacentFacetSecondNormalDerivativeJump(q);
             pressure_form =
                 pressure_form +
-                FE::forms::cutAdjacentFacetIntegral(
+                integrate_cut_adjacent(
                     cut_scale * pressure_penalty * gp_calibration * h5 /
                         (mu_gp + FE::forms::FormExpr::constant(stabilization_epsilon)) *
-                        pressure_second_jump_p * pressure_second_jump_q,
-                    bc.interface_marker);
+                        pressure_second_jump_p * pressure_second_jump_q);
         }
         continuity_form = continuity_form + pressure_form;
         if (pressure_stabilization_form != nullptr) {

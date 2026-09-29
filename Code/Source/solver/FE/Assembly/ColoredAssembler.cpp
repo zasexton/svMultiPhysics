@@ -629,10 +629,18 @@ AssemblyResult ColoredAssembler::assembleInteriorFaces(
     AssemblyKernel& kernel,
     GlobalSystemView& matrix_view,
     GlobalSystemView* vector_view,
-    int interior_facet_marker)
+    int interior_facet_marker,
+    geometry::CutIntegrationSide interior_facet_side)
 {
     return base().assembleInteriorFaces(
-        mesh, test_space, trial_space, kernel, matrix_view, vector_view, interior_facet_marker);
+        mesh,
+        test_space,
+        trial_space,
+        kernel,
+        matrix_view,
+        vector_view,
+        interior_facet_marker,
+        interior_facet_side);
 }
 
 AssemblyResult ColoredAssembler::assembleCutVolumes(

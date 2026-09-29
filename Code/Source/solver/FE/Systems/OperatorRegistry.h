@@ -44,6 +44,7 @@ struct BoundaryTerm {
 
 struct InteriorFaceTerm {
     int marker{-1};
+    geometry::CutIntegrationSide side{geometry::CutIntegrationSide::Interface};
     FieldId test_field{INVALID_FIELD_ID};
     FieldId trial_field{INVALID_FIELD_ID};
     std::shared_ptr<assembly::AssemblyKernel> kernel;

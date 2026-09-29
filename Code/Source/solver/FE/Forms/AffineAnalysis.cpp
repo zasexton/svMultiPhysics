@@ -29,7 +29,10 @@ FormExpr wrapIntegral(const FormExpr& integrand, const IntegralTerm& term)
         case IntegralDomain::Boundary:
             return integrand.ds(term.boundary_marker);
         case IntegralDomain::InteriorFace:
-            return integrand.dS(term.interface_marker);
+            return term.interior_facet_side.has_value()
+                       ? integrand.dS(term.interface_marker,
+                                      *term.interior_facet_side)
+                       : integrand.dS(term.interface_marker);
         case IntegralDomain::InterfaceFace:
             return integrand.dI(term.interface_marker);
         case IntegralDomain::CutVolume:

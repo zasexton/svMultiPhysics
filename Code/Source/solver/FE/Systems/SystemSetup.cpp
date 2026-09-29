@@ -7618,6 +7618,7 @@ void FESystem::buildAssemblyPlans()
 
             plan.interior_terms.push_back(PlannedInteriorFaceTerm{
                 term.marker,
+                term.side,
                 term.test_field,
                 term.trial_field,
                 test_field.space.get(),

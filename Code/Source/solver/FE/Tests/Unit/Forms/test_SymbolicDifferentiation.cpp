@@ -250,6 +250,44 @@ TEST(SymbolicDifferentiationMeasureTest,
         nullptr);
 }
 
+TEST(SymbolicDifferentiationMeasureTest,
+     InteriorFacetSideSurvivesDifferentiation)
+{
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    FormCompiler compiler;
+
+    const auto tangent = differentiateResidual(
+        (u * u * v).dS(/*interior_facet_marker=*/46,
+                       CutVolumeSide::Positive));
+    const auto tangent_ir = compiler.compileBilinear(tangent);
+    ASSERT_FALSE(tangent_ir.terms().empty());
+    for (const auto& term : tangent_ir.terms()) {
+        EXPECT_EQ(term.domain, IntegralDomain::InteriorFace);
+        EXPECT_EQ(term.interface_marker, 46);
+        ASSERT_TRUE(term.interior_facet_side.has_value());
+        EXPECT_EQ(*term.interior_facet_side, CutVolumeSide::Positive);
+    }
+
+    constexpr FieldId state_field = 47;
+    const auto state = FormExpr::stateField(state_field, space, "state");
+    const auto direction = FormExpr::trialFunction(space, "direction");
+    const auto directional = directionalDerivativeWrtField(
+        (state * state * v).dS(/*interior_facet_marker=*/48,
+                              CutVolumeSide::Negative),
+        state_field,
+        direction);
+    const auto directional_ir = compiler.compileBilinear(directional);
+    ASSERT_FALSE(directional_ir.terms().empty());
+    for (const auto& term : directional_ir.terms()) {
+        EXPECT_EQ(term.domain, IntegralDomain::InteriorFace);
+        EXPECT_EQ(term.interface_marker, 48);
+        ASSERT_TRUE(term.interior_facet_side.has_value());
+        EXPECT_EQ(*term.interior_facet_side, CutVolumeSide::Negative);
+    }
+}
+
 TEST(SymbolicDifferentiationMultiFieldTest, DifferentiateWrtFieldIdMatchesAD)
 {
     SingleTetraMeshAccess mesh;

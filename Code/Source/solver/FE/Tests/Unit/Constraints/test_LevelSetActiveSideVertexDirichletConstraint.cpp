@@ -803,6 +803,7 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
     assembly::CutFacetSetHandle facet_handle;
     facet_handle.marker = marker;
     facet_handle.name = "pressure-ghost-support";
+    facet_handle.side = geometry::CutIntegrationSide::Negative;
     facet_handle.facets = {static_cast<MeshIndex>(shared_facet)};
     facet_handle.facet_metadata = {
         assembly::CutFacetSetFacetMetadata{.facet = static_cast<MeshIndex>(shared_facet),
@@ -811,6 +812,12 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
                                            .stabilization_scale = Real{1.0},
                                            .stable_id = 1u}};
     context->addFacetSetHandle(std::move(facet_handle));
+
+    assembly::CutFacetSetHandle opposite_handle;
+    opposite_handle.marker = marker;
+    opposite_handle.name = "opposite-pressure-ghost-support";
+    opposite_handle.side = geometry::CutIntegrationSide::Positive;
+    context->addFacetSetHandle(std::move(opposite_handle));
 
     system.setCutIntegrationContext(std::move(context));
     testing::internal::CaptureStdout();

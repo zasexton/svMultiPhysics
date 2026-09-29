@@ -141,6 +141,11 @@ public:
     /** @brief Check whether a generic symbolic tangent dispatch was compiled for a domain. */
     [[nodiscard]] bool hasCompiledTangentDispatch(IntegralDomain domain, int marker = -1) const noexcept;
 
+    /** @brief Check for one side-specific marked interior-face tangent dispatch. */
+    [[nodiscard]] bool hasCompiledInteriorFaceTangentDispatch(
+        int marker,
+        CutVolumeSide side) const noexcept;
+
     /** @brief Inject a pre-compiled cell kernel address from colocated compilation.
      *  Bypasses the normal maybeCompile() path. */
     void setExternalCellAddress(std::uintptr_t addr);
@@ -162,6 +167,8 @@ private:
         std::uintptr_t cell{0};
         std::uintptr_t interior_face{0};
         std::unordered_map<int, std::uintptr_t> interior_by_marker{};
+        std::unordered_map<std::uint64_t, std::uintptr_t>
+            interior_by_region{};
 
         std::uintptr_t boundary_all{0};
         std::unordered_map<int, std::uintptr_t> boundary_by_marker{};

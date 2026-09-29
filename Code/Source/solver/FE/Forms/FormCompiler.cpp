@@ -954,6 +954,8 @@ void collectIntegralTerms(
                                              IntegralDomain domain,
                                              int boundary_marker,
                                              int interface_marker,
+                                             std::optional<CutVolumeSide>
+                                                 interior_facet_side,
                                              std::optional<
                                                  ExteriorBoundaryMeasure>
                                                  exterior_boundary_measure,
@@ -965,27 +967,32 @@ void collectIntegralTerms(
             case FormExprType::Add: {
                 if (kids.size() != 2) throw std::logic_error("Add node must have 2 children");
                 self(self, makeExprFromNode(kids[0]), integrand_sign, domain, boundary_marker,
-                     interface_marker, exterior_boundary_measure,
+                     interface_marker, interior_facet_side,
+                     exterior_boundary_measure,
                      cut_volume_side);
                 self(self, makeExprFromNode(kids[1]), integrand_sign, domain, boundary_marker,
-                     interface_marker, exterior_boundary_measure,
+                     interface_marker, interior_facet_side,
+                     exterior_boundary_measure,
                      cut_volume_side);
                 return;
             }
             case FormExprType::Subtract: {
                 if (kids.size() != 2) throw std::logic_error("Subtract node must have 2 children");
                 self(self, makeExprFromNode(kids[0]), integrand_sign, domain, boundary_marker,
-                     interface_marker, exterior_boundary_measure,
+                     interface_marker, interior_facet_side,
+                     exterior_boundary_measure,
                      cut_volume_side);
                 self(self, makeExprFromNode(kids[1]), -integrand_sign, domain, boundary_marker,
-                     interface_marker, exterior_boundary_measure,
+                     interface_marker, interior_facet_side,
+                     exterior_boundary_measure,
                      cut_volume_side);
                 return;
             }
             case FormExprType::Negate: {
                 if (kids.size() != 1) throw std::logic_error("Negate node must have 1 child");
                 self(self, makeExprFromNode(kids[0]), -integrand_sign, domain, boundary_marker,
-                     interface_marker, exterior_boundary_measure,
+                     interface_marker, interior_facet_side,
+                     exterior_boundary_measure,
                      cut_volume_side);
                 return;
             }
@@ -1002,6 +1009,7 @@ void collectIntegralTerms(
         term.domain = domain;
         term.boundary_marker = boundary_marker;
         term.interface_marker = interface_marker;
+        term.interior_facet_side = interior_facet_side;
         term.exterior_boundary_measure =
             std::move(exterior_boundary_measure);
         term.cut_volume_side = cut_volume_side;
@@ -1036,6 +1044,7 @@ void collectIntegralTerms(
                                     IntegralDomain::Cell,
                                     /*boundary_marker=*/-1,
                                     /*interface_marker=*/-1,
+                                    /*interior_facet_side=*/std::nullopt,
                                     std::nullopt,
                                     CutVolumeSide::Negative);
             return;
@@ -1051,6 +1060,7 @@ void collectIntegralTerms(
                                     IntegralDomain::Boundary,
                                     /*boundary_marker=*/marker,
                                     /*interface_marker=*/-1,
+                                    /*interior_facet_side=*/std::nullopt,
                                     exterior == nullptr
                                         ? std::optional<
                                               ExteriorBoundaryMeasure>{}
@@ -1063,12 +1073,14 @@ void collectIntegralTerms(
         case FormExprType::InteriorFaceIntegral: {
             if (children.size() != 1) throw std::logic_error("InteriorFaceIntegral node must have 1 child");
             const int marker = n.interfaceMarker().value_or(-1);
+            const auto side = n.cutVolumeSide();
             collect_integrand_terms(collect_integrand_terms,
                                     makeExprFromNode(children[0]),
                                     sign,
                                     IntegralDomain::InteriorFace,
                                     /*boundary_marker=*/-1,
                                     /*interface_marker=*/marker,
+                                    /*interior_facet_side=*/side,
                                     std::nullopt,
                                     CutVolumeSide::Negative);
             return;
@@ -1084,6 +1096,7 @@ void collectIntegralTerms(
                                     IntegralDomain::InterfaceFace,
                                     /*boundary_marker=*/-1,
                                     /*interface_marker=*/marker,
+                                    /*interior_facet_side=*/std::nullopt,
                                     exterior == nullptr
                                         ? std::optional<
                                               ExteriorBoundaryMeasure>{}
@@ -1103,6 +1116,7 @@ void collectIntegralTerms(
                                     IntegralDomain::CutVolume,
                                     /*boundary_marker=*/-1,
                                     /*interface_marker=*/marker,
+                                    /*interior_facet_side=*/std::nullopt,
                                     std::nullopt,
                                     side);
             return;
@@ -1252,7 +1266,17 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
                     oss << "ds(" << t.boundary_marker << ")";
                 }
                 break;
-            case IntegralDomain::InteriorFace: oss << "dS"; break;
+            case IntegralDomain::InteriorFace:
+                if (t.interior_facet_side.has_value()) {
+                    oss << "dS(" << t.interface_marker << ","
+                        << (*t.interior_facet_side == CutVolumeSide::Negative
+                                ? "Negative"
+                                : "Positive")
+                        << ")";
+                } else {
+                    oss << "dS";
+                }
+                break;
             case IntegralDomain::InterfaceFace:
                 if (t.exterior_boundary_measure.has_value()) {
                     oss << "dExteriorBoundary(physical="
@@ -1590,8 +1614,14 @@ MixedFormIR FormCompiler::compileMixed(const FormExpr& form, FormKind kind)
                                           .boundary_marker);
                         break;
                     case IntegralDomain::InteriorFace:
-                        term_with_measure =
-                            block_terms[k].integrand.dS(block_terms[k].interface_marker);
+                        term_with_measure = block_terms[k]
+                                                .interior_facet_side
+                                                .has_value()
+                            ? block_terms[k].integrand.dS(
+                                  block_terms[k].interface_marker,
+                                  *block_terms[k].interior_facet_side)
+                            : block_terms[k].integrand.dS(
+                                  block_terms[k].interface_marker);
                         break;
                     case IntegralDomain::InterfaceFace:
                         term_with_measure =
@@ -1674,8 +1704,14 @@ MixedFormIR FormCompiler::compileMixed(const FormExpr& form, FormKind kind)
                                           .boundary_marker);
                         break;
                     case IntegralDomain::InteriorFace:
-                        term_with_measure =
-                            block_terms[k].integrand.dS(block_terms[k].interface_marker);
+                        term_with_measure = block_terms[k]
+                                                .interior_facet_side
+                                                .has_value()
+                            ? block_terms[k].integrand.dS(
+                                  block_terms[k].interface_marker,
+                                  *block_terms[k].interior_facet_side)
+                            : block_terms[k].integrand.dS(
+                                  block_terms[k].interface_marker);
                         break;
                     case IntegralDomain::InterfaceFace:
                         term_with_measure =

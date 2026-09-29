@@ -153,6 +153,22 @@ TEST(JITCacheKey, StructuralInputsChangeKey)
     expectKeyChanges("trial space hash", [](auto& in) { in.trial_space_hash ^= 0x40ULL; });
 }
 
+TEST(JITCacheKey, InteriorFacetSideChangesKey)
+{
+    auto generic = baseInputs();
+    generic.domain = IntegralDomain::InteriorFace;
+    generic.interface_marker = 42;
+
+    auto negative = generic;
+    negative.interior_facet_side = CutVolumeSide::Negative;
+    auto positive = generic;
+    positive.interior_facet_side = CutVolumeSide::Positive;
+
+    EXPECT_NE(keyFor(generic), keyFor(negative));
+    EXPECT_NE(keyFor(generic), keyFor(positive));
+    EXPECT_NE(keyFor(negative), keyFor(positive));
+}
+
 TEST(JITCacheKey, CellBatchAbiDoesNotAliasScalarAbi)
 {
     auto scalar = baseInputs();

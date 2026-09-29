@@ -1546,6 +1546,22 @@ TEST(IncompressibleTwoFluidModule,
   EXPECT_GT(negative_cut_terms, 0u);
   EXPECT_EQ(negative_cut_terms, positive_cut_terms);
 
+  const auto& equations = fixture.system.operatorDefinition("equations");
+  std::size_t negative_pressure_facet_terms = 0u;
+  std::size_t positive_pressure_facet_terms = 0u;
+  for (const auto& term : equations.interior) {
+    if (term.test_field == p_negative && term.trial_field == p_negative) {
+      ++negative_pressure_facet_terms;
+      EXPECT_EQ(term.side, FE::geometry::CutIntegrationSide::Negative);
+    }
+    if (term.test_field == p_positive && term.trial_field == p_positive) {
+      ++positive_pressure_facet_terms;
+      EXPECT_EQ(term.side, FE::geometry::CutIntegrationSide::Positive);
+    }
+  }
+  EXPECT_GT(negative_pressure_facet_terms, 0u);
+  EXPECT_GT(positive_pressure_facet_terms, 0u);
+
   const auto interface_records = static_cast<std::size_t>(std::count_if(
       fixture.system.formulationRecords().begin(),
       fixture.system.formulationRecords().end(),

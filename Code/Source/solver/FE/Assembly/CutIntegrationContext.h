@@ -335,6 +335,7 @@ struct CutFacetSetFacetMetadata {
 struct CutFacetSetHandle {
     int marker{-1};
     std::string name{};
+    geometry::CutIntegrationSide side{geometry::CutIntegrationSide::Interface};
     std::vector<MeshIndex> facets{};
     std::vector<CutFacetSetFacetMetadata> facet_metadata{};
     std::uint64_t stable_id{0};
@@ -435,6 +436,7 @@ public:
         facet_set_markers_.clear();
         facet_set_handles_.clear();
         facet_set_handle_indices_by_marker_.clear();
+        facet_set_handle_indices_by_marker_and_side_.clear();
         expected_source_value_revision_by_marker_.clear();
         generated_volume_rule_indices_by_marker_and_side_.clear();
         kinematic_data_.clear();
@@ -477,12 +479,19 @@ public:
         std::sort(handle.facets.begin(), handle.facets.end());
         handle.facets.erase(std::unique(handle.facets.begin(), handle.facets.end()),
                             handle.facets.end());
-        if (handle.stable_id == 0u) {
-            handle.stable_id = facetSetStableId(handle.marker, handle.facets);
+        if (handle.stable_id == 0u ||
+            handle.side != geometry::CutIntegrationSide::Interface) {
+            handle.stable_id =
+                facetSetStableId(handle.marker, handle.side, handle.facets);
         }
 
         const auto index = facet_set_handles_.size();
         facet_set_handle_indices_by_marker_[handle.marker] = index;
+        if (handle.side != geometry::CutIntegrationSide::Interface) {
+            auto& side_indices =
+                facet_set_handle_indices_by_marker_and_side_[handle.marker];
+            side_indices[volumeSideIndex(handle.side)] = index;
+        }
         facet_set_handles_.push_back(std::move(handle));
         markModified();
         return facet_set_handles_.back();
@@ -2261,6 +2270,42 @@ public:
         return &facet_set_handles_[it->second];
     }
 
+    [[nodiscard]] bool hasFacetSetHandleForMarkerAndSide(
+        int marker,
+        geometry::CutIntegrationSide side) const noexcept {
+        return facetSetHandleForMarkerAndSide(marker, side) != nullptr;
+    }
+
+    [[nodiscard]] const CutFacetSetHandle* facetSetHandleForMarkerAndSide(
+        int marker,
+        geometry::CutIntegrationSide side) const noexcept {
+        if (side == geometry::CutIntegrationSide::Interface) {
+            return facetSetHandleForMarker(marker);
+        }
+        if (side != geometry::CutIntegrationSide::Negative &&
+            side != geometry::CutIntegrationSide::Positive) {
+            return nullptr;
+        }
+        const auto side_index =
+            side == geometry::CutIntegrationSide::Negative ? 0u : 1u;
+        const auto marker_it =
+            facet_set_handle_indices_by_marker_and_side_.find(marker);
+        if (marker_it != facet_set_handle_indices_by_marker_and_side_.end()) {
+            const auto& index = marker_it->second[side_index];
+            if (index.has_value() && *index < facet_set_handles_.size()) {
+                return &facet_set_handles_[*index];
+            }
+        }
+        const auto generic = std::find_if(
+            facet_set_handles_.rbegin(),
+            facet_set_handles_.rend(),
+            [marker](const CutFacetSetHandle& handle) {
+                return handle.marker == marker &&
+                       handle.side == geometry::CutIntegrationSide::Interface;
+            });
+        return generic != facet_set_handles_.rend() ? &*generic : nullptr;
+    }
+
     [[nodiscard]] std::vector<const geometry::CutQuadratureRule*>
     interfaceRulesForMarker(int marker) const {
         std::vector<const geometry::CutQuadratureRule*> rules;
@@ -2908,6 +2953,7 @@ public:
 private:
     [[nodiscard]] static std::uint64_t facetSetStableId(
         int marker,
+        geometry::CutIntegrationSide side,
         const std::vector<MeshIndex>& facets) noexcept {
         std::uint64_t h = 1469598103934665603ull;
         const auto mix = [&h](std::uint64_t value) noexcept {
@@ -2915,6 +2961,10 @@ private:
             h *= 1099511628211ull;
         };
         mix(static_cast<std::uint64_t>(static_cast<std::int64_t>(marker)));
+        if (side != geometry::CutIntegrationSide::Interface) {
+            mix(0x73696465ull);
+            mix(static_cast<std::uint64_t>(side));
+        }
         for (const auto facet : facets) {
             mix(static_cast<std::uint64_t>(static_cast<std::int64_t>(facet)));
         }
@@ -3228,6 +3278,8 @@ private:
     std::vector<int> facet_set_markers_{};
     std::vector<CutFacetSetHandle> facet_set_handles_{};
     std::unordered_map<int, std::size_t> facet_set_handle_indices_by_marker_{};
+    std::unordered_map<int, std::array<std::optional<std::size_t>, 2>>
+        facet_set_handle_indices_by_marker_and_side_{};
     std::unordered_map<int, std::uint64_t> expected_source_value_revision_by_marker_{};
     std::vector<EmbeddedBoundaryKinematicData> kinematic_data_{};
     std::vector<CutStabilizationHook> stabilization_hooks_{};

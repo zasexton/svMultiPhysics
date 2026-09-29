@@ -1992,8 +1992,11 @@ private:
 class InteriorFaceIntegralNode final : public UnaryNode {
 public:
     InteriorFaceIntegralNode(std::shared_ptr<FormExprNode> child,
-                             int interior_facet_marker)
-        : UnaryNode(std::move(child)), interior_facet_marker_(interior_facet_marker)
+                             int interior_facet_marker,
+                             std::optional<CutVolumeSide> side = std::nullopt)
+        : UnaryNode(std::move(child))
+        , interior_facet_marker_(interior_facet_marker)
+        , side_(side)
     {
     }
 
@@ -2001,15 +2004,24 @@ public:
     [[nodiscard]] std::string toString() const override {
         std::string marker_str =
             interior_facet_marker_ >= 0 ? std::to_string(interior_facet_marker_) : "all";
+        if (side_.has_value()) {
+            marker_str += *side_ == CutVolumeSide::Negative
+                              ? "_negative"
+                              : "_positive";
+        }
         return "integral_F_" + marker_str + "(" + child_->toString() + ") dS";
     }
 
     [[nodiscard]] std::optional<int> interfaceMarker() const override {
         return interior_facet_marker_;
     }
+    [[nodiscard]] std::optional<CutVolumeSide> cutVolumeSide() const override {
+        return side_;
+    }
 
 private:
     int interior_facet_marker_{-1};
+    std::optional<CutVolumeSide> side_{};
 };
 
 class InterfaceIntegralNode final : public UnaryNode {
@@ -3314,6 +3326,17 @@ FormExpr FormExpr::dS(int interior_facet_marker) const
     return FormExpr(std::make_shared<InteriorFaceIntegralNode>(node_, interior_facet_marker));
 }
 
+FormExpr FormExpr::dS(int interior_facet_marker, CutVolumeSide side) const
+{
+    if (!node_) return {};
+    if (interior_facet_marker < 0) {
+        throw std::invalid_argument(
+            "FormExpr::dS side selection requires a nonnegative interior facet marker");
+    }
+    return FormExpr(std::make_shared<InteriorFaceIntegralNode>(
+        node_, interior_facet_marker, side));
+}
+
 FormExpr FormExpr::dI(int interface_marker) const
 {
     if (!node_) return {};
@@ -3525,7 +3548,8 @@ std::shared_ptr<FormExprNode> transformNodeShared(
         }
         case FormExprType::InteriorFaceIntegral: {
             const int marker = node->interfaceMarker().value_or(-1);
-            return std::make_shared<InteriorFaceIntegralNode>(new_kids[0], marker);
+            return std::make_shared<InteriorFaceIntegralNode>(
+                new_kids[0], marker, node->cutVolumeSide());
         }
         case FormExprType::InterfaceIntegral: {
             const int marker = node->interfaceMarker().value_or(-1);
