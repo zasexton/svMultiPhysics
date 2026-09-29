@@ -275,7 +275,7 @@ These are proposals. Each lists a recommended option and an alternative. Record 
 
 | # | Decision | Recommended | Alternative |
 |---|---|---|---|
-| **D1** | Acceptance philosophy | Tiered capability goals (§1.2). Gates are literature-calibrated convergence and error bounds on physically relaxed states. Algebraic roundoff gates apply only to exactly representable states (flat, hydrostatic). | Keep the V3 gate contract. It needs an exactly-balanced construction and has no demonstrated path. |
+| **D1** | Acceptance philosophy | **Adopted 2026-09-29.** Tiered capability goals (§1.2). Gates are literature-calibrated convergence and error bounds on physically relaxed states. Algebraic roundoff gates apply only to exactly representable states (flat, hydrostatic). | Keep the V3 gate contract. It needs an exactly-balanced construction and has no demonstrated path. |
 | **D2** | Capillary force route (unfitted) | Run the missing AD-2 comparison, M2 in §5: SurfaceStress, KAG with filter or stabilized mass, and unfiltered KAG, on the same static-drop, capillary-wave, sessile and Ren–E tests, then select. Allow the filter or stabilization for KAG. | Continue unfiltered KAG with the double-double mass solve (the 09-14 goal, milestones 1–6). |
 | **D3** | Static minimizer | Make it optional tooling. Reach equilibrium dynamically (viscous relaxation). Never gate physics on `‖g_proj‖ ≤ 1e-10`. If kept, it must use one geometry definition and a nonsmooth-aware stopping rule. | Keep it as the required initializer for all "minimized" lanes. |
 | **D4** | Contact angle | Variational Young term, Navier slip, strong no-penetration, and angle-preserving (scale-only) wall maintenance. Retire the repair-to-target as a production path, or keep it as an explicit alternative mode that is never combined with the Young term. | Keep both owners and finish the FSR-04 scheduling, strip and fixed-point work. |
@@ -284,17 +284,29 @@ These are proposals. Each lists a recommended option and an alternative. Record 
 | **D7** | Architecture refactor | Pause R3–R12. Do targeted extractions only when a milestone touches that code. Revisit once T1–T3 are working. | Resume the refactor in parallel now. |
 | **D8** | WP-4 September work in progress | Stop the conditioning/double-double line. Archive the dirty W worktree diff as a patch in `$GROUP_HOME`; do not integrate it. Keep committed `fc56527` as is. | Integrate the native pair implementation and continue milestones 1–3 of the 09-14 goal. |
 
+### Recorded decisions
+
+- **D1, 2026-09-29: the recommended option is adopted.**
+  - Progress is judged against the capability tiers in §1.2.
+  - Acceptance uses literature-calibrated convergence rates and error bounds, measured on physically relaxed states.
+  - Roundoff-level gates apply only to exactly representable states: flat interfaces and hydrostatics.
+  - **Rationale:** the V3 gates require an exact discrete equilibrium on sampled curved interfaces. No comparable published method meets them, and pursuing them stalled WP-4 (§3.1–§3.2).
+  - **Consequences:**
+    - The WP-4 V3 gate contract is no longer an acceptance standard and remains history only. This covers `tests/cases/fluid/free_surface_wp4_balanced_capillary_matrix_v3.json` and the W-only `wp4_qualification_gate_contract_20260906.md`.
+    - The tolerances marked "proposal" in §5 are the working acceptance criteria. Each is confirmed or adjusted once, before its first use.
+    - The Q0–Q7 texts remain reference material only (§7).
+
 ---
 
 ## 5. Remaining work
 
 The ordering assumes D1–D8 are accepted as recommended. If a decision goes the other way, adjust the affected milestone and note it here.
 
-Tolerances marked "proposal" should be confirmed or adjusted once, before first use, with a one-line justification in this file.
+Tolerances marked "proposal" are the working acceptance criteria under D1. Confirm or adjust each once, before first use, with a one-line justification in this file.
 
 ### M0 — Decisions and housekeeping (about 1–2 days)
 
-- [ ] Record the D1–D8 outcomes in §4.
+- [ ] Record the D1–D8 outcomes in §4. D1 was recorded on 2026-09-29; D2–D8 are open.
 - [x] Reconcile the home checkout (2026-09-29).
   - Its 53 modified files were committed. The Forms/JIT/Assembly/FESystem changes became `b9f59552` ("Add side-selected cut-adjacent facet integrals"). The refactoring-plan edits were already upstream and were dropped during the rebase.
   - The branch was rebased onto `fc56527`. The redundant local commit `09976e2` was skipped because it is patch-identical to `2768303`.
