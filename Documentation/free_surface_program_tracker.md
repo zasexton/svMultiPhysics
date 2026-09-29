@@ -107,7 +107,7 @@ WP-4 is titled "balanced capillary pressure, wall energy, and prescribed angle".
 
 **The balance argument is correct in exact arithmetic.** At a constrained stationary point, `κ_h` is constant, so a constant pressure balances the force exactly. The code review on 2026-09-29 checked this algebra.
 
-**Actual blockers.** These are recorded in `goal_wp4_conditioning_to_qualification_20260914.md` and in the scratch checkpoint:
+**Actual blockers.** These are recorded in `goal_wp4_conditioning_to_qualification_20260914.md` (removed; retrieve from commit `5b46da55`) and in the scratch checkpoint:
 
 1. **The static minimizer does not converge.** The preserved 2D cap case, job `42294456`, ran 147 iterations and 2,071 evaluations. It ended with projected gradient `0.0220` and volume error `2.7e-7`; both were required to reach `1e-10`. It had reached the 128 topology-transition allowance and failed in `authoritative_equilibrated_consistent_mass_solve_failed`.
 2. **The trace-mass solve is ill-conditioned.** The quotient condition number is about **3.4e14**. The best double-precision published `κ` for captured state "trial 39" reaches a scaled residual of `1.08e-10`, against a `1e-10` gate. The repair attempts were long-double recurrences, 80/120-digit oracles, about 33k "alternate rounding assessments", and finally storing curvature as a double-double pair (commit `fc56527`, 2026-09-21).
@@ -280,9 +280,9 @@ These are proposals. Each lists a recommended option and an alternative. Record 
 | **D3** | Static minimizer | **Adopted 2026-09-29.** Make it optional tooling. Reach equilibrium dynamically (viscous relaxation). Never gate physics on `‖g_proj‖ ≤ 1e-10`. If kept, it must use one geometry definition and a nonsmooth-aware stopping rule. | Keep it as the required initializer for all "minimized" lanes. |
 | **D4** | Contact angle | **Adopted 2026-09-29 (single mechanism).** Variational Young term, Navier slip, strong no-penetration, and angle-preserving (scale-only) wall maintenance. Retire the repair-to-target as a production path, or keep it as an explicit alternative mode that is never combined with the Young term. | Keep both owners and finish the FSR-04 scheduling, strip and fixed-point work. |
 | **D5** | Fitted ALE | **Adopted 2026-09-29.** Unlock fitted SurfaceStress behind a flag, use slip (not Dirichlet-0) wall mesh BCs, and run fitted 2D sloshing, then a static drop and capillary wave. This gives an independent, well-balanced reference. | Leave fitted capillarity rejected and focus on unfitted only. |
-| **D6** | Process | Lightweight process (§12): a commit hash, a small benchmark script, a tolerance file, and a results row in this tracker. Raw outputs for accepted results go to group storage. Time-box investigations to about 3 working days before a method decision. Keep the author/committer identity rule, the commit-message vocabulary scan, and the job-mail settings. | Keep the frozen/immutable campaign process for every step. |
-| **D7** | Architecture refactor | Pause R3–R12. Do targeted extractions only when a milestone touches that code. Revisit once T1–T3 are working. | Resume the refactor in parallel now. |
-| **D8** | WP-4 September work in progress | Stop the conditioning/double-double line. Archive the dirty W worktree diff as a patch in `$GROUP_HOME`; do not integrate it. Keep committed `fc56527` as is. | Integrate the native pair implementation and continue milestones 1–3 of the 09-14 goal. |
+| **D6** | Process | **Adopted 2026-09-29.** Lightweight process (§12): a commit hash, a small benchmark script, a tolerance file, and a results row in this tracker. Raw outputs for accepted results go to group storage. Time-box investigations to about 3 working days before a method decision. Keep the author/committer identity rule, the commit-message vocabulary scan, and the job-mail settings. | Keep the frozen/immutable campaign process for every step. |
+| **D7** | Architecture refactor | **Adopted 2026-09-29.** Pause R3–R12. Do targeted extractions only when a milestone touches that code. Revisit once T1–T3 are working. | Resume the refactor in parallel now. |
+| **D8** | WP-4 September work in progress | **Adopted 2026-09-29.** Stop the conditioning/double-double line. Archive the dirty W worktree diff as a patch in `$GROUP_HOME`; do not integrate it. Keep committed `fc56527` as is. | Integrate the native pair implementation and continue milestones 1–3 of the 09-14 goal. |
 
 ### Recorded decisions
 
@@ -344,6 +344,28 @@ These are proposals. Each lists a recommended option and an alternative. Record 
     - a static drop and a capillary wave;
     - a 2D contact point with the D4 Young term and slip.
   - Under P1, prefer the parameter-free fitted choices: the `Free` tangential policy and harmonic mesh motion. Any mesh-motion or kinematic-enforcement coefficient that remains (Nitsche or penalty) is fixed once from dimensional scaling, never tuned per case.
+- **D6, 2026-09-29: the lightweight process is adopted (§12).**
+  - Evidence for a result is:
+    - the commit hash;
+    - a short benchmark script with its tolerance file under `tests/cases/fluid/free_surface_benchmarks/`;
+    - one results row in this tracker;
+    - raw outputs in group storage for accepted results.
+  - Investigations are time-boxed to about 3 working days before a method decision is recorded in §4.
+  - Retired: the frozen/immutable campaign process (FROZEN_BEFORE_EXECUTION matrices, reciprocal hashes, no-rerun rules, a new version per harness failure), source, index and cache guards, hash-only protected files, multi-worker packet rules, and checkpoint prose in audit documents.
+  - Kept: the author/committer identity (Zachary Sexton), the commit-message vocabulary scan, and the begin/end/fail job-mail settings.
+  - Existing frozen matrices, runners and qualification records are left unchanged as history.
+- **D7, 2026-09-29: the refactor is paused.**
+  - Packages R3–R12 of `free_surface_architecture_refactoring_plan_20260904.md` are not scheduled.
+  - Code is extracted only when a milestone already touches it, using that plan's target architecture as guidance.
+  - Revisit once tiers T1–T3 are working.
+- **D8, 2026-09-29: the September WP-4 conditioning work is stopped.**
+  - The WP-4 worktree's uncommitted work is archived, not integrated, in `/home/groups/amarsden/zsexton/svMultiPhysics-archives/wp4-worktree-20260929/`:
+    - 51 modified files as `tracked-changes.patch`, including the formerly protected curvature-projection test;
+    - 5 untracked files as `untracked-files.tar.gz`;
+    - the `.superpowers/` coordination history;
+    - `README.txt` and `SHA256SUMS`.
+  - Committed `fc565279` is unchanged.
+  - The two suspended WP-4 plan documents were removed (§10.3).
 
 ---
 
@@ -355,12 +377,13 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
 
 ### M0 — Decisions and housekeeping (about 1–2 days)
 
-- [ ] Record the D1–D8 outcomes in §4. D1–D5 and principle P1 were recorded on 2026-09-29; D6–D8 are open.
+- [x] Record the D1–D8 outcomes in §4. All eight decisions and principle P1 were recorded on 2026-09-29.
 - [x] Reconcile the home checkout (2026-09-29).
   - Its 53 modified files were committed. The Forms/JIT/Assembly/FESystem changes became `b9f59552` ("Add side-selected cut-adjacent facet integrals"). The refactoring-plan edits were already upstream and were dropped during the rebase.
   - The branch was rebased onto `fc56527`. The redundant local commit `09976e2` was skipped because it is patch-identical to `2768303`.
   - Syntax-only compilation of all 36 affected translation units passed with the full FE/Physics/Application configuration.
-- [ ] Export the W worktree's uncommitted diff (56 entries, including untracked `FE/Geometry/Affine*LevelSetCut.h` and `FE/Basis/*BarycentricEvaluation.h`) as a patch into `$GROUP_HOME`. Then retire W or reset it to origin.
+- [x] Export the W worktree's uncommitted diff to `/home/groups/amarsden/zsexton/svMultiPhysics-archives/wp4-worktree-20260929/` (2026-09-29, D8).
+- [ ] Retire the W worktree (`/scratch/users/zsexton/wp4-application-regression-fixes-20260902`) once the archive is confirmed. It is unchanged and still dirty.
 - [ ] Copy any scratch evidence worth keeping to `$GROUP_HOME` or Oak.
   - There are about 740 free-surface entries under `/scratch/users/zsexton`, the oldest from 2026-08-25.
   - Purge-eligibility starts around 2026-11-23.
@@ -691,7 +714,7 @@ This section is compact and chronological. Detailed evidence is in the indexed d
 - Prescribed-angle review:
   - the penalty is retired and the Young term has one owner;
   - open items: scheduling tied to bulk redistancing, absolute tolerances breaking φ-scale invariance, a non-representable curved 3D strip, stage semantics, no fixed-point study.
-- Plan written (`plan_wp4_balanced_force_completion_20260903.md`).
+- Plan written (`plan_wp4_balanced_force_completion_20260903.md`; removed, retrieve from commit `5b46da55`).
 - Implemented: quadratic planar polygon quadrature, order admission, a production adjoint test (1e-12 on one tetrahedron), restoring-force and MPI-parity tests.
 - V3 frozen: 2,136 cases.
 
@@ -755,7 +778,7 @@ Recorded on 2026-09-29. Re-check before acting.
 |---|---|---|
 | Authoritative branch | `origin/issue-449-modern-mesh-core` at `fc56527` (2026-09-21) | Clean; latest WP-4 commits |
 | Home checkout | `/home/users/zsexton/svMultiPhysics`, branch `issue-449-modern-mesh-core` | Synchronized with origin on 2026-09-29. The 53 previously uncommitted files were committed (§5 M0), and this tracker plus the document cleanup were committed on top. Still untracked, and deliberately left out: the WP-10 static-drop matrix, runner and test (`tests/cases/fluid/free_surface_wp10_static_drop_matrix.json`, `tests/cases/fluid/run_free_surface_wp10_static_drop_qualification.py`, `tests/test_free_surface_wp10_static_drop_qualification.py`) and the generated `svmp_fe_jit_dumps_tests_basis_baking/` directory. |
-| WP-4 worktree "W" | `/scratch/users/zsexton/wp4-application-regression-fixes-20260902` (linked worktree; common git dir `/scratch/users/zsexton/wp4-balanced-capillary-qualification-20260902/source/.git`) | HEAD `fc56527`. 56 dirty entries (about 11.8k inserted lines as of 09-14, including untracked `FE/Geometry/Affine{Triangle,Tetrahedron}LevelSetCut.h` and `FE/Basis/{Triangle,Tetrahedron}BarycentricEvaluation.h`). Contains a hash-only protected test file (`FE/Tests/Unit/LevelSet/test_LevelSetCurvatureProjection.cpp`). Coordination artifacts, about 220 files, under `.superpowers/sdd/plan_wp4_balanced_force_completion_20260903/`. |
+| WP-4 worktree "W" | `/scratch/users/zsexton/wp4-application-regression-fixes-20260902` (linked worktree; common git dir `/scratch/users/zsexton/wp4-balanced-capillary-qualification-20260902/source/.git`) | HEAD `fc56527`. 56 dirty entries (about 11.8k inserted lines as of 09-14, including untracked `FE/Geometry/Affine{Triangle,Tetrahedron}LevelSetCut.h` and `FE/Basis/{Triangle,Tetrahedron}BarycentricEvaluation.h`). Contains a hash-only protected test file (`FE/Tests/Unit/LevelSet/test_LevelSetCurvatureProjection.cpp`). Coordination artifacts, about 220 files, under `.superpowers/sdd/plan_wp4_balanced_force_completion_20260903/`. Uncommitted work archived on 2026-09-29 to `/home/groups/amarsden/zsexton/svMultiPhysics-archives/wp4-worktree-20260929/` (D8); the worktree itself is unchanged. |
 | Latest WP-4 checkpoint | `/scratch/users/zsexton/wp4-continuation-20260921-szBnNq/checkpoint.md`; `W/.superpowers/sdd/.../delegation-checkpoint.md` | Paused; no live jobs |
 | Other run roots | `/scratch/users/zsexton/wp4-continuation-20260906`, `wp4-conditioning-20260914-jpcnJX`, `wp4-delegation-briefs-20260905-Z6OoSG`, `free-surface-refactor-20260904-905239de` | Historical |
 | Scratch volume | About 380 `wp4-*` and about 740 `wp*` / `free-surface*` entries under `/scratch/users/zsexton` | **Subject to the 90-day purge** (oldest 2026-08-25, so from about 2026-11-23). Copy anything to keep to `$GROUP_HOME` (`/home/groups/amarsden`) or Oak (`/oak/stanford/groups/amarsden`). |
@@ -790,7 +813,7 @@ Recorded on 2026-09-29. Re-check before acting.
 | `Documentation/free_surface_wp3_wp7_symmetric_nitsche_coercivity_method_v3.md` | Current Nitsche floor (v1 and v2 are H) |
 | `Documentation/free_surface_capability_ledger.md` | Implemented-vs-qualified inventory. Keep it in sync with §2.1, or fold it into §2.1. |
 | `Documentation/qualification_logs/` | Frozen evidence records (20 directories) |
-| `Documentation/free_surface_architecture_refactoring_plan_20260904.md` | Refactor target architecture (R0–R12). S under D7. |
+| `Documentation/free_surface_architecture_refactoring_plan_20260904.md` | Refactor target architecture (R0–R12); paused under D7 and used as guidance for targeted extractions. |
 | `Documentation/mesh_motion_math_first_formulation_guide.md`, `plan_ale_mesh_motion_data_and_coupled_displacement.md`, `plan_mesh_motion_math_first_formulations.md`, `plan_moving_mesh_infrastructure.md` | Mesh-motion infrastructure (R, with open items relevant to M5) |
 | `Documentation/plan_high_order_curved_implicit_level_set_quadrature.md`, `plan_high_order_implicit_geometry_completion.md` | High-order geometry. Experimental; 104 open items. |
 
@@ -827,11 +850,11 @@ Frozen qualification records, matrices and runners that name these paths were le
 | `free_surface_wp3_wp7_symmetric_nitsche_coercivity_method.md`, `..._v2.md` | H | Superseded by v3 |
 | `free_surface_refactor_job_ledger_20260904.md` | H | Refactor jobs (it still listed job `42161975` as running; that job completed on 2026-09-05) |
 | `tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/linear_sloshing_2d/LEVEL_SET_FREE_SURFACE_SUPPORT_STATUS.md` | H | 05-17 support status; stale on stabilization |
-| `plan_wp4_balanced_force_completion_20260903.md` | S (kept) | Unfiltered-KAG completion plan; Tasks 1–3 done, Task 4 blocked |
-| `goal_wp4_conditioning_to_qualification_20260914.md` | S (kept) | Conditioning/double-double goal; recommended to stop (D8) |
-| `W/Documentation/wp4_qualification_gate_contract_20260906.md` (untracked, W only) | S | V3 gate contract |
+| `plan_wp4_balanced_force_completion_20260903.md` | H (removed after D2, D3 and D8; retrieve from `5b46da55`) | Unfiltered-KAG completion plan; Tasks 1–3 done, Task 4 blocked |
+| `goal_wp4_conditioning_to_qualification_20260914.md` | H (removed after D2, D3 and D8; retrieve from `5b46da55`) | Conditioning/double-double goal; stopped by D8 |
+| `W/Documentation/wp4_qualification_gate_contract_20260906.md` (untracked, W only) | H | V3 gate contract; retired by D1; archived under D8 |
 
-The two tracked **S** documents stay until D2, D3 and D8 are decided; remove them then if the recommendations are adopted.
+Both suspended plans were removed on 2026-09-29 after D2, D3 and D8 were adopted. Commit `5b46da55` is the last one that contains them.
 
 ### 10.4 Known stale statements to correct in M0
 
@@ -843,7 +866,6 @@ The two tracked **S** documents stay until D2, D3 and D8 are decided; remove the
 - **`LevelSet.md`:**
   - it calls projected curvature "the production unfitted capillary model";
   - it lists the 3D `LinearCorner` interface order as 1, but the code reports 2.
-- **`free_surface_architecture_refactoring_plan_20260904.md`:** its implementation-status line still reads "in progress"; the refactor has been paused since 2026-09-05 (§3.10, D7).
 
 ---
 

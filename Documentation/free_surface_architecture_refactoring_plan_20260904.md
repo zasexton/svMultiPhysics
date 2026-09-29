@@ -18,7 +18,7 @@
 
 **Reviewed committed HEAD:** `905239de40b41aa3ca615305516b600e640d95e4`.
 
-**Implementation status:** Implementation authorized on 2026-09-04. R0 baseline capture, R1 configuration migration and R2 domain separation are in progress. The typed maintenance and cut-option slices and the first reusable FE volume selector are verified within their recorded scopes. R3-R12 remain pending. Physical qualification and the remaining configuration/domain migrations remain open. Completed work is recorded by checked items and dated progress entries below.
+**Implementation status:** Paused since 2026-09-05 under decision D7 in `free_surface_program_tracker.md`. R0 baseline capture and the first R1 configuration and R2 domain slices were completed and verified within their recorded scopes; the rest of R1 and R2 and all of R3–R12 are not scheduled. Code is extracted only when a free-surface milestone touches it, using this plan's target architecture as guidance.
 
 **Execution records:** Status and remaining work are tracked in the [free-surface program tracker](free_surface_program_tracker.md) (sections 3.10, 4 and 8.6); the refactor has been paused since 2026-09-05. The earlier coordination notes and job ledger were removed on 2026-09-29 and remain available with `git show fc565279:Documentation/free_surface_boundary_unfitted_audit_20260720.md` and `git show fc565279:Documentation/free_surface_refactor_job_ledger_20260904.md`. Commits use Zachary Sexton <zsexton@stanford.edu> and are pushed to `issue-449-modern-mesh-core` after their relevant checks.
 
