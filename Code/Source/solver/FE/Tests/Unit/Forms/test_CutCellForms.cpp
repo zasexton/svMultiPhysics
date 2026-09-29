@@ -1412,10 +1412,11 @@ TEST(CutCellForms, CutAdjacentFacetVocabularyReusesInteriorFaceOperators)
     EXPECT_EQ(cutAdjacentFacetSecondNormalDerivativeJump(u).toString(),
               inner(jump(hessian(u)), outer(n_minus, n_minus)).toString());
 
-    const auto residual = cutAdjacentFacetIntegral(
+    const auto integrand =
         cutAdjacentFacetJump(u) * cutAdjacentFacetJump(v) +
-            cutAdjacentFacetNormalGradientJump(u) * cutAdjacentFacetJump(v),
-        facet_set_marker);
+        cutAdjacentFacetNormalGradientJump(u) * cutAdjacentFacetJump(v);
+    const auto residual =
+        cutAdjacentFacetIntegral(integrand, facet_set_marker);
 
     FormCompiler compiler;
     const auto ir = compiler.compileResidual(residual);
@@ -1424,9 +1425,27 @@ TEST(CutCellForms, CutAdjacentFacetVocabularyReusesInteriorFaceOperators)
     for (const auto& term : ir.terms()) {
         EXPECT_EQ(term.domain, IntegralDomain::InteriorFace);
         EXPECT_EQ(term.interface_marker, facet_set_marker);
+        EXPECT_FALSE(term.interior_facet_side.has_value());
     }
+
+    const auto negative_residual = cutAdjacentFacetIntegral(
+        integrand, facet_set_marker, CutVolumeSide::Negative);
+    const auto negative_ir = compiler.compileResidual(negative_residual);
+    ASSERT_EQ(negative_ir.terms().size(), 2u);
+    for (const auto& term : negative_ir.terms()) {
+        ASSERT_TRUE(term.interior_facet_side.has_value());
+        EXPECT_EQ(*term.interior_facet_side, CutVolumeSide::Negative);
+    }
+    EXPECT_NE(negative_residual.toString().find("_negative"),
+              std::string::npos);
+    EXPECT_NE(negative_ir.dump().find("dS(37,Negative)"),
+              std::string::npos);
     EXPECT_THROW(
         (void)cutAdjacentFacetIntegral(cutAdjacentFacetJump(u), -1),
+        std::invalid_argument);
+    EXPECT_THROW(
+        (void)cutAdjacentFacetIntegral(
+            cutAdjacentFacetJump(u), -1, CutVolumeSide::Negative),
         std::invalid_argument);
 }
 

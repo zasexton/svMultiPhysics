@@ -224,6 +224,13 @@ void computeCellBatchWithFallback(
     return (marker_bits << 1U) | side_bit;
 }
 
+[[nodiscard]] std::uint64_t interiorFaceDispatchKey(
+    int marker,
+    CutVolumeSide side) noexcept
+{
+    return cutVolumeDispatchKey(marker, side);
+}
+
 void traceSpecialization(const JITKernelWrapper* wrapper,
                          const assembly::AssemblyKernel& fallback,
                          std::uint64_t revision,
@@ -1772,8 +1779,19 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
     try {
         const auto checks = assembly::jit::PackingChecks{.validate_alignment = false};
         const auto interior_face_address =
-            [](const CompiledDispatch& compiled, int marker) -> std::uintptr_t {
+            [](const CompiledDispatch& compiled,
+               int marker,
+               geometry::CutIntegrationSide side) -> std::uintptr_t {
                 if (marker >= 0) {
+                    if (side == geometry::CutIntegrationSide::Negative ||
+                        side == geometry::CutIntegrationSide::Positive) {
+                        const auto key = interiorFaceDispatchKey(
+                            marker, toFormsCutVolumeSide(side));
+                        const auto it = compiled.interior_by_region.find(key);
+                        return it == compiled.interior_by_region.end()
+                                   ? 0u
+                                   : it->second;
+                    }
                     const auto it = compiled.interior_by_marker.find(marker);
                     return it == compiled.interior_by_marker.end() ? 0u : it->second;
                 }
@@ -1844,7 +1862,9 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
 	            getSpecializedDispatch(KernelRole::Form, k->ir(), IntegralDomain::InteriorFace, ctx_minus, &ctx_plus);
 	        const auto& compiled = disp ? *disp : compiled_form_;
             const auto address =
-                interior_face_address(compiled, ctx_minus.interiorFaceMarker());
+                interior_face_address(compiled,
+                                      ctx_minus.interiorFaceMarker(),
+                                      ctx_minus.interiorFaceSide());
             if (address == 0u) {
                 fallback_marked_interior_face();
                 return;
@@ -1936,8 +1956,10 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
 	            const auto disp =
 	                getSpecializedDispatch(KernelRole::Tangent, k->tangentIR(), IntegralDomain::InteriorFace, ctx_minus, &ctx_plus);
 	            const auto& compiled = disp ? *disp : compiled_tangent_;
-	            tangent_address =
-                    interior_face_address(compiled, ctx_minus.interiorFaceMarker());
+            tangent_address =
+                    interior_face_address(compiled,
+                                          ctx_minus.interiorFaceMarker(),
+                                          ctx_minus.interiorFaceSide());
                 if (tangent_address == 0u) {
                     fallback_marked_interior_face();
                     return;
@@ -1947,8 +1969,10 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
 	            const auto disp =
 	                getSpecializedDispatch(KernelRole::Residual, k->residualIR(), IntegralDomain::InteriorFace, ctx_minus, &ctx_plus);
 	            const auto& compiled = disp ? *disp : compiled_residual_;
-	            residual_address =
-                    interior_face_address(compiled, ctx_minus.interiorFaceMarker());
+            residual_address =
+                    interior_face_address(compiled,
+                                          ctx_minus.interiorFaceMarker(),
+                                          ctx_minus.interiorFaceSide());
                 if (residual_address == 0u) {
                     fallback_marked_interior_face();
                     return;
@@ -2746,10 +2770,19 @@ bool JITKernelWrapper::hasCompiledTangentDispatch(IntegralDomain domain, int mar
         case IntegralDomain::InteriorFace:
             if (marker >= 0) {
                 return compiled_tangent_.interior_by_marker.find(marker) !=
-                       compiled_tangent_.interior_by_marker.end();
+                           compiled_tangent_.interior_by_marker.end() ||
+                       compiled_tangent_.interior_by_region.find(
+                           interiorFaceDispatchKey(
+                               marker, CutVolumeSide::Negative)) !=
+                           compiled_tangent_.interior_by_region.end() ||
+                       compiled_tangent_.interior_by_region.find(
+                           interiorFaceDispatchKey(
+                               marker, CutVolumeSide::Positive)) !=
+                           compiled_tangent_.interior_by_region.end();
             }
             return compiled_tangent_.interior_face != 0 ||
-                   !compiled_tangent_.interior_by_marker.empty();
+                   !compiled_tangent_.interior_by_marker.empty() ||
+                   !compiled_tangent_.interior_by_region.empty();
         case IntegralDomain::InterfaceFace:
             if (marker >= 0) {
                 return compiled_tangent_.interface_by_marker.find(marker) !=
@@ -2769,6 +2802,20 @@ bool JITKernelWrapper::hasCompiledTangentDispatch(IntegralDomain domain, int mar
             return !compiled_tangent_.cut_volume_by_region.empty();
     }
     return false;
+}
+
+bool JITKernelWrapper::hasCompiledInteriorFaceTangentDispatch(
+    int marker,
+    CutVolumeSide side) const noexcept
+{
+    std::lock_guard<std::mutex> lock(jit_mutex_);
+    if (!options_.enable || compiled_revision_ != revision_ ||
+        !compiled_tangent_.ok || marker < 0) {
+        return false;
+    }
+    return compiled_tangent_.interior_by_region.find(
+               interiorFaceDispatchKey(marker, side)) !=
+           compiled_tangent_.interior_by_region.end();
 }
 
 void JITKernelWrapper::setExternalCellAddress(std::uintptr_t addr)
@@ -3130,6 +3177,7 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::comp
     disp->message = r.message;
     disp->boundary_by_marker.reserve(r.kernels.size());
     disp->interior_by_marker.reserve(r.kernels.size());
+    disp->interior_by_region.reserve(r.kernels.size());
     disp->interface_by_marker.reserve(r.kernels.size());
     disp->cut_volume_by_region.reserve(r.kernels.size());
 
@@ -3148,6 +3196,10 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::comp
             case IntegralDomain::InteriorFace:
                 if (k.interface_marker < 0) {
                     disp->interior_face = k.address;
+                } else if (k.interior_facet_side.has_value()) {
+                    disp->interior_by_region[interiorFaceDispatchKey(
+                        k.interface_marker,
+                        *k.interior_facet_side)] = k.address;
                 } else {
                     disp->interior_by_marker[k.interface_marker] = k.address;
                 }
@@ -3392,6 +3444,7 @@ void JITKernelWrapper::maybeCompile()
         out.message = r.message;
         out.boundary_by_marker.reserve(r.kernels.size());
         out.interior_by_marker.reserve(r.kernels.size());
+        out.interior_by_region.reserve(r.kernels.size());
         out.interface_by_marker.reserve(r.kernels.size());
         out.cut_volume_by_region.reserve(r.kernels.size());
 
@@ -3410,6 +3463,10 @@ void JITKernelWrapper::maybeCompile()
                 case IntegralDomain::InteriorFace:
                     if (k.interface_marker < 0) {
                         out.interior_face = k.address;
+                    } else if (k.interior_facet_side.has_value()) {
+                        out.interior_by_region[interiorFaceDispatchKey(
+                            k.interface_marker,
+                            *k.interior_facet_side)] = k.address;
                     } else {
                         out.interior_by_marker[k.interface_marker] = k.address;
                     }

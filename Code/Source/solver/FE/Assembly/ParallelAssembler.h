@@ -296,7 +296,9 @@ public:
         AssemblyKernel& kernel,
         GlobalSystemView& matrix_view,
         GlobalSystemView* vector_view,
-        int interior_facet_marker = -1) override;
+        int interior_facet_marker = -1,
+        geometry::CutIntegrationSide interior_facet_side =
+            geometry::CutIntegrationSide::Interface) override;
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     [[nodiscard]] AssemblyResult assembleInterfaceFaces(

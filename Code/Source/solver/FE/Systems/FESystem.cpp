@@ -21581,6 +21581,42 @@ void FESystem::addInteriorFaceKernel(OperatorTag op,
                                      FieldId trial_field,
                                      std::shared_ptr<assembly::AssemblyKernel> kernel)
 {
+    addInteriorFaceKernel(std::move(op),
+                          interior_facet_marker,
+                          geometry::CutIntegrationSide::Interface,
+                          test_field,
+                          trial_field,
+                          std::move(kernel));
+}
+
+void FESystem::addInteriorFaceKernel(
+    OperatorTag op,
+    int interior_facet_marker,
+    geometry::CutIntegrationSide side,
+    FieldId field,
+    std::shared_ptr<assembly::AssemblyKernel> kernel)
+{
+    addInteriorFaceKernel(std::move(op),
+                          interior_facet_marker,
+                          side,
+                          field,
+                          field,
+                          std::move(kernel));
+}
+
+void FESystem::addInteriorFaceKernel(
+    OperatorTag op,
+    int interior_facet_marker,
+    geometry::CutIntegrationSide side,
+    FieldId test_field,
+    FieldId trial_field,
+    std::shared_ptr<assembly::AssemblyKernel> kernel)
+{
+    FE_THROW_IF(
+        side != geometry::CutIntegrationSide::Interface &&
+            interior_facet_marker < 0,
+        InvalidArgumentException,
+        "FESystem::addInteriorFaceKernel: side selection requires a nonnegative interior facet marker");
     invalidateSetup();
     validateKernelFieldScopes(field_registry_, test_field, trial_field,
                               analysis::DomainKind::InteriorFace,
@@ -21593,7 +21629,8 @@ void FESystem::addInteriorFaceKernel(OperatorTag op,
         field_registry_.markTimeDependent(trial_field, kernel->maxTemporalDerivativeOrder());
     }
     def.interior.push_back(
-        InteriorFaceTerm{interior_facet_marker, test_field, trial_field, std::move(kernel)});
+        InteriorFaceTerm{
+            interior_facet_marker, side, test_field, trial_field, std::move(kernel)});
 }
 
 void FESystem::addInterfaceFaceKernel(OperatorTag op, InterfaceId interface_marker, FieldId field,

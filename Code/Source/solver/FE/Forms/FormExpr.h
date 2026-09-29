@@ -877,6 +877,8 @@ public:
 	    [[nodiscard]] FormExpr dx() const;
 	    [[nodiscard]] FormExpr ds(int boundary_marker = -1) const;
 	    [[nodiscard]] FormExpr dS(int interior_facet_marker = -1) const;
+	    [[nodiscard]] FormExpr dS(int interior_facet_marker,
+                                 CutVolumeSide side) const;
 	    [[nodiscard]] FormExpr dI(int interface_marker = -1) const;
         [[nodiscard]] FormExpr dExteriorBoundary(
             const ExteriorBoundaryMeasure& measure) const;

@@ -5821,6 +5821,7 @@ svmp::FE::assembly::CutFacetSetHandle addGeneratedCutAdjacentFacetSet(
   svmp::FE::assembly::CutFacetSetHandle stored_handle;
   stored_handle.marker = handle.marker;
   stored_handle.name = handle.name;
+  stored_handle.side = cutIntegrationSide(active_side);
   stored_handle.facets = handle.facets;
   stored_handle.facet_metadata.reserve(handle.facet_metadata.size());
   for (const auto& facet : handle.facet_metadata) {
@@ -19888,6 +19889,15 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         globalSumSize(local_generated_pruned_volume_rules, comm);
     const auto global_generated_pruned_volume = static_cast<svmp::FE::Real>(
         globalSumDouble(static_cast<double>(local_generated_pruned_volume), comm));
+    if (request.volume_retention ==
+        application::core::ActiveCutVolumeRetention::ActiveAndInactive) {
+      const auto inactive_side =
+          request.active_side == LevelSetActiveSide::Negative
+              ? LevelSetActiveSide::Positive
+              : LevelSetActiveSide::Negative;
+      (void)addGeneratedCutAdjacentFacetSet(
+          *context, result.domain, mesh_access, inactive_side);
+    }
     const auto facet_set_handle = addGeneratedCutAdjacentFacetSet(
         *context, result.domain, mesh_access, request.active_side);
     const auto facet_scale_summary =

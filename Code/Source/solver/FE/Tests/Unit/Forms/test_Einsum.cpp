@@ -147,6 +147,31 @@ TEST(EinsumTest, IntegralRebuildPreservesExteriorBoundarySelection)
     }
 }
 
+TEST(EinsumTest, IntegralRebuildPreservesInteriorFacetSideSelection)
+{
+    auto base =
+        std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace space(base, 3);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const Index i("i");
+
+    const auto lowered = einsum(
+        (u(i) * v(i)).dS(/*interior_facet_marker=*/44,
+                         CutVolumeSide::Positive),
+        /*auto_extent=*/3);
+
+    FormCompiler compiler;
+    const auto ir = compiler.compileBilinear(lowered);
+    ASSERT_EQ(ir.terms().size(), 3u);
+    for (const auto& term : ir.terms()) {
+        EXPECT_EQ(term.domain, IntegralDomain::InteriorFace);
+        EXPECT_EQ(term.interface_marker, 44);
+        ASSERT_TRUE(term.interior_facet_side.has_value());
+        EXPECT_EQ(*term.interior_facet_side, CutVolumeSide::Positive);
+    }
+}
+
 TEST(EinsumTest, EinsumSupportsVectorOutputForOneFreeIndex)
 {
     SingleTetraMeshAccess mesh;

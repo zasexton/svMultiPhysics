@@ -3644,6 +3644,94 @@ TEST(CutIntegrationInfrastructure, BuildsCutAdjacentFacetSetFromGeneratedInterfa
     EXPECT_EQ(context.facetSetHandleForMarker(131), nullptr);
 }
 
+TEST(CutIntegrationInfrastructure, StoresCutAdjacentFacetSetsByLevelSetSide)
+{
+    constexpr int marker = 132;
+    CutIntegrationContext context;
+
+    CutFacetSetHandle negative_handle;
+    negative_handle.marker = marker;
+    negative_handle.name = "negative-cut-facets";
+    negative_handle.side = CutIntegrationSide::Negative;
+    negative_handle.facets = {20};
+    context.addFacetSetHandle(std::move(negative_handle));
+
+    CutFacetSetHandle positive_handle;
+    positive_handle.marker = marker;
+    positive_handle.name = "positive-cut-facets";
+    positive_handle.side = CutIntegrationSide::Positive;
+    positive_handle.facets = {20};
+    context.addFacetSetHandle(std::move(positive_handle));
+
+    EXPECT_TRUE(context.hasFacetSetHandleForMarkerAndSide(
+        marker, CutIntegrationSide::Negative));
+    EXPECT_TRUE(context.hasFacetSetHandleForMarkerAndSide(
+        marker, CutIntegrationSide::Positive));
+    const auto* negative = context.facetSetHandleForMarkerAndSide(
+        marker, CutIntegrationSide::Negative);
+    const auto* positive = context.facetSetHandleForMarkerAndSide(
+        marker, CutIntegrationSide::Positive);
+    ASSERT_NE(negative, nullptr);
+    ASSERT_NE(positive, nullptr);
+    EXPECT_EQ(negative->side, CutIntegrationSide::Negative);
+    EXPECT_EQ(positive->side, CutIntegrationSide::Positive);
+    EXPECT_NE(negative->stable_id, positive->stable_id);
+    EXPECT_EQ(context.facetSetHandleForMarker(marker), positive);
+
+    context.clear();
+    EXPECT_FALSE(context.hasFacetSetHandleForMarkerAndSide(
+        marker, CutIntegrationSide::Negative));
+    EXPECT_EQ(context.facetSetHandleForMarkerAndSide(
+                  marker, CutIntegrationSide::Positive),
+              nullptr);
+
+    CutFacetSetHandle legacy_handle;
+    legacy_handle.marker = marker;
+    legacy_handle.name = "legacy-cut-facets";
+    legacy_handle.facets = {21};
+    context.addFacetSetHandle(std::move(legacy_handle));
+    const auto* legacy = context.facetSetHandleForMarker(marker);
+    ASSERT_NE(legacy, nullptr);
+    EXPECT_EQ(context.facetSetHandleForMarkerAndSide(
+                  marker, CutIntegrationSide::Negative),
+              legacy);
+    EXPECT_EQ(context.facetSetHandleForMarkerAndSide(
+                  marker, CutIntegrationSide::Positive),
+              legacy);
+}
+
+TEST(CutIntegrationInfrastructure,
+     GenericCutAdjacentFacetFallbackIsIndependentOfInsertionOrder)
+{
+    constexpr int marker = 133;
+    CutIntegrationContext context;
+
+    CutFacetSetHandle generic_handle;
+    generic_handle.marker = marker;
+    generic_handle.name = "generic-cut-facets";
+    generic_handle.facets = {21};
+    context.addFacetSetHandle(std::move(generic_handle));
+
+    CutFacetSetHandle positive_handle;
+    positive_handle.marker = marker;
+    positive_handle.name = "positive-cut-facets";
+    positive_handle.side = CutIntegrationSide::Positive;
+    positive_handle.facets = {22};
+    context.addFacetSetHandle(std::move(positive_handle));
+
+    const auto* generic = context.facetSetHandleForMarkerAndSide(
+        marker, CutIntegrationSide::Negative);
+    const auto* positive = context.facetSetHandleForMarkerAndSide(
+        marker, CutIntegrationSide::Positive);
+    ASSERT_NE(generic, nullptr);
+    ASSERT_NE(positive, nullptr);
+    EXPECT_EQ(generic->side, CutIntegrationSide::Interface);
+    EXPECT_EQ(generic->facets, std::vector<MeshIndex>({21}));
+    EXPECT_EQ(positive->side, CutIntegrationSide::Positive);
+    EXPECT_EQ(positive->facets, std::vector<MeshIndex>({22}));
+    EXPECT_EQ(context.facetSetHandleForMarker(marker), positive);
+}
+
 TEST(CutIntegrationInfrastructure, CapsCutAdjacentFacetStabilizationScales)
 {
     CutIntegrationContext context;

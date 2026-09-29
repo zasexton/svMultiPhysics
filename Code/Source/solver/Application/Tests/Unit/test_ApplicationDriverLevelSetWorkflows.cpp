@@ -8441,6 +8441,21 @@ TEST(ApplicationDriverLevelSetWorkflows,
                        703,
                        svmp::FE::geometry::CutIntegrationSide::Positive)
                    .empty());
+  const auto* negative_facets = context->facetSetHandleForMarkerAndSide(
+      703,
+      svmp::FE::geometry::CutIntegrationSide::Negative);
+  const auto* positive_facets = context->facetSetHandleForMarkerAndSide(
+      703,
+      svmp::FE::geometry::CutIntegrationSide::Positive);
+  ASSERT_NE(negative_facets, nullptr);
+  ASSERT_NE(positive_facets, nullptr);
+  EXPECT_EQ(negative_facets->side,
+            svmp::FE::geometry::CutIntegrationSide::Negative);
+  EXPECT_EQ(positive_facets->side,
+            svmp::FE::geometry::CutIntegrationSide::Positive);
+  ASSERT_NE(context->facetSetHandleForMarker(703), nullptr);
+  EXPECT_EQ(context->facetSetHandleForMarker(703)->side,
+            svmp::FE::geometry::CutIntegrationSide::Negative);
 #endif
 }
 

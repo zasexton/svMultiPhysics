@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -28,6 +29,7 @@ struct JITCompiledKernel {
     IntegralDomain domain{IntegralDomain::Cell};
     int boundary_marker{-1};
     int interface_marker{-1};
+    std::optional<CutVolumeSide> interior_facet_side{};
     CutVolumeSide cut_volume_side{CutVolumeSide::Negative};
 
     std::uint64_t cache_key{0};

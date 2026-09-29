@@ -1291,7 +1291,8 @@ AssemblyResult ParallelAssembler::assembleInteriorFaces(
     AssemblyKernel& kernel,
     GlobalSystemView& matrix_view,
     GlobalSystemView* vector_view,
-    int interior_facet_marker)
+    int interior_facet_marker,
+    geometry::CutIntegrationSide interior_facet_side)
 {
     if (!initialized_) {
         initialize();
@@ -1302,7 +1303,8 @@ AssemblyResult ParallelAssembler::assembleInteriorFaces(
         return local_assembler_.assembleInteriorFaces(owned_mesh, test_space,
                                                       trial_space, kernel,
                                                       matrix_view, vector_view,
-                                                      interior_facet_marker);
+                                                      interior_facet_marker,
+                                                      interior_facet_side);
     }
 
     beginGhostAssemblyIfNeeded();
@@ -1312,17 +1314,20 @@ AssemblyResult ParallelAssembler::assembleInteriorFaces(
             if (&matrix_view == vector_view) {
                 GhostRoutingView routed(matrix_view, ghost_manager_, ghost_policy_);
                 return local_assembler_.assembleInteriorFaces(policy_mesh, test_space, trial_space, kernel, routed,
-                                                             &routed, interior_facet_marker);
+                                                             &routed, interior_facet_marker,
+                                                             interior_facet_side);
             }
             GhostRoutingView routed_matrix(matrix_view, ghost_manager_, ghost_policy_);
             GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
             return local_assembler_.assembleInteriorFaces(policy_mesh, test_space, trial_space, kernel, routed_matrix,
-                                                         &routed_vector, interior_facet_marker);
+                                                         &routed_vector, interior_facet_marker,
+                                                         interior_facet_side);
         }
 
         GhostRoutingView routed_matrix(matrix_view, ghost_manager_, ghost_policy_);
         return local_assembler_.assembleInteriorFaces(policy_mesh, test_space, trial_space, kernel, routed_matrix,
-                                                     nullptr, interior_facet_marker);
+                                                     nullptr, interior_facet_marker,
+                                                     interior_facet_side);
     });
 }
 

@@ -322,7 +322,10 @@ void expectJitMatchesInterpreterInteriorFacesResidual(
     int marker,
     const assembly::CutIntegrationContext* cut_context,
     Real vec_tol,
-    Real mat_tol)
+    Real mat_tol,
+    geometry::CutIntegrationSide side =
+        geometry::CutIntegrationSide::Interface,
+    bool require_jit = false)
 {
     FormCompiler compiler;
     auto ir_interp = compiler.compileResidual(residual);
@@ -348,13 +351,25 @@ void expectJitMatchesInterpreterInteriorFacesResidual(
     assembly::DenseVectorView R_interp(n);
     J_interp.zero();
     R_interp.zero();
-    (void)assembler.assembleInteriorFaces(mesh, space, space, *interp_kernel, J_interp, &R_interp, marker);
+    (void)assembler.assembleInteriorFaces(
+        mesh, space, space, *interp_kernel, J_interp, &R_interp, marker, side);
 
     assembly::DenseMatrixView J_jit(n);
     assembly::DenseVectorView R_jit(n);
     J_jit.zero();
     R_jit.zero();
-    (void)assembler.assembleInteriorFaces(mesh, space, space, jit_kernel, J_jit, &R_jit, marker);
+    (void)assembler.assembleInteriorFaces(
+        mesh, space, space, jit_kernel, J_jit, &R_jit, marker, side);
+
+    if (require_jit) {
+        ASSERT_TRUE(jit_kernel.isJITReady());
+        const auto form_side =
+            side == geometry::CutIntegrationSide::Negative
+                ? CutVolumeSide::Negative
+                : CutVolumeSide::Positive;
+        ASSERT_TRUE(jit_kernel.hasCompiledInteriorFaceTangentDispatch(
+            marker, form_side));
+    }
 
     expectDenseNear(R_jit, R_interp, vec_tol);
     expectDenseNear(J_jit, J_interp, mat_tol);
@@ -750,6 +765,66 @@ TEST(JITExtendedParityTest, CutAdjacentGradientPenaltyContinuousH1MatchesInterpr
         &cut_context,
         /*vec_tol=*/1e-12,
         /*mat_tol=*/1e-12);
+}
+
+TEST(JITExtendedParityTest, SideSelectedCutAdjacentTermsMatchInterpreter)
+{
+    constexpr int marker = 14;
+
+    TwoTetraSharedFaceMeshAccess mesh;
+    auto dof_map = createTwoTetraContinuousDofMap();
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto penalty = inner(cutAdjacentFacetGradientJump(u),
+                               cutAdjacentFacetGradientJump(v));
+    const auto residual =
+        cutAdjacentFacetIntegral(
+            penalty, marker, CutVolumeSide::Negative) +
+        cutAdjacentFacetIntegral(
+            FormExpr::constant(3.0) * penalty,
+            marker,
+            CutVolumeSide::Positive);
+
+    assembly::CutIntegrationContext cut_context;
+    for (const auto side : {geometry::CutIntegrationSide::Negative,
+                            geometry::CutIntegrationSide::Positive}) {
+        assembly::CutFacetSetHandle handle;
+        handle.marker = marker;
+        handle.name = side == geometry::CutIntegrationSide::Negative
+                          ? "negative-jit-cut-facets"
+                          : "positive-jit-cut-facets";
+        handle.side = side;
+        handle.facets = {0};
+        cut_context.addFacetSetHandle(std::move(handle));
+    }
+
+    const std::vector<Real> U = {0.12, -0.05, 0.08, 0.02, -0.07};
+    expectJitMatchesInterpreterInteriorFacesResidual(
+        mesh,
+        dof_map,
+        space,
+        residual,
+        U,
+        marker,
+        &cut_context,
+        /*vec_tol=*/1e-12,
+        /*mat_tol=*/1e-12,
+        geometry::CutIntegrationSide::Negative,
+        /*require_jit=*/true);
+    expectJitMatchesInterpreterInteriorFacesResidual(
+        mesh,
+        dof_map,
+        space,
+        residual,
+        U,
+        marker,
+        &cut_context,
+        /*vec_tol=*/1e-12,
+        /*mat_tol=*/1e-12,
+        geometry::CutIntegrationSide::Positive,
+        /*require_jit=*/true);
 }
 
 TEST(JITExtendedParityTest, NitscheBoundaryMatchesInterpreter)

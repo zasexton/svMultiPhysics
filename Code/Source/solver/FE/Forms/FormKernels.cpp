@@ -234,10 +234,21 @@ void runHomogeneousCellBatches(std::span<const assembly::AssemblyContext* const>
         return false;
     }
     const int active_marker = ctx.interiorFaceMarker();
-    if (term.interface_marker < 0) {
-        return active_marker < 0;
+    const bool marker_matches = term.interface_marker < 0
+                                    ? active_marker < 0
+                                    : term.interface_marker == active_marker;
+    if (!marker_matches) {
+        return false;
     }
-    return term.interface_marker == active_marker;
+    if (!term.interior_facet_side.has_value()) {
+        return ctx.interiorFaceSide() ==
+               geometry::CutIntegrationSide::Interface;
+    }
+    const auto expected_side =
+        *term.interior_facet_side == CutVolumeSide::Negative
+            ? geometry::CutIntegrationSide::Negative
+            : geometry::CutIntegrationSide::Positive;
+    return ctx.interiorFaceSide() == expected_side;
 }
 
 [[nodiscard]] FormExpr firstScalarProbeComponent(const FormExpr& expr,
@@ -15738,7 +15749,7 @@ namespace {
 // Symbolic tangent caching (per-process, in-memory)
 // ============================================================================
 
-inline constexpr std::uint32_t kSymbolicTangentCacheVersion = 6u;
+inline constexpr std::uint32_t kSymbolicTangentCacheVersion = 7u;
 inline constexpr std::size_t kSymbolicTangentCacheMaxEntries = 128u;
 
 [[nodiscard]] std::uint64_t fnv1aInit64() noexcept
@@ -16016,6 +16027,14 @@ using NodeHashMemo = std::unordered_map<const FormExprNode*, std::uint64_t>;
         hashPod64(h, static_cast<std::int32_t>(term.interface_marker));
         hashPod64(
             h,
+            term.interior_facet_side.has_value() ? std::uint8_t{1u}
+                                                  : std::uint8_t{0u});
+        if (term.interior_facet_side.has_value()) {
+            hashPod64(
+                h, static_cast<std::uint8_t>(*term.interior_facet_side));
+        }
+        hashPod64(
+            h,
             term.exterior_boundary_measure.has_value() ? std::uint8_t{1u}
                                                        : std::uint8_t{0u});
         if (term.exterior_boundary_measure.has_value()) {
@@ -16147,7 +16166,10 @@ private:
         case IntegralDomain::Boundary:
             return integrand.ds(term.boundary_marker);
         case IntegralDomain::InteriorFace:
-            return integrand.dS(term.interface_marker);
+            return term.interior_facet_side.has_value()
+                       ? integrand.dS(term.interface_marker,
+                                      *term.interior_facet_side)
+                       : integrand.dS(term.interface_marker);
         case IntegralDomain::InterfaceFace:
             return integrand.dI(term.interface_marker);
         case IntegralDomain::CutVolume:
@@ -16616,13 +16638,13 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
                         emitted_fields.push_back(domain.level_set_field);
                         append_term(
                             tangent_form,
-                            level_set_integrand_derivative(
-                                term,
-                                domain)
-                                .dS(term.interface_marker));
+                            wrapIntegralTermMeasure(
+                                level_set_integrand_derivative(term, domain),
+                                term));
                     }
                 } else {
-                    append_term(tangent_form, dI.dS(term.interface_marker));
+                    append_term(
+                        tangent_form, wrapIntegralTermMeasure(dI, term));
                 }
                 break;
             case IntegralDomain::InterfaceFace:

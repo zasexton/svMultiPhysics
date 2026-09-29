@@ -203,7 +203,11 @@ FormExpr rebuildWithIndexSubstitution(const std::shared_ptr<FormExprNode>& node,
             return integrand.ds(node->boundaryMarker().value_or(-1));
         }
         if (t == FormExprType::InteriorFaceIntegral) {
-            return integrand.dS(node->interfaceMarker().value_or(-1));
+            const int marker = node->interfaceMarker().value_or(-1);
+            if (const auto side = node->cutVolumeSide(); side.has_value()) {
+                return integrand.dS(marker, *side);
+            }
+            return integrand.dS(marker);
         }
         if (const auto* measure = node->exteriorBoundaryMeasure()) {
             return integrand.dExteriorBoundary(*measure);

@@ -6294,7 +6294,8 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
     AssemblyKernel& kernel,
     GlobalSystemView& matrix_view,
     GlobalSystemView* vector_view,
-    int interior_facet_marker)
+    int interior_facet_marker,
+    geometry::CutIntegrationSide interior_facet_side)
 {
     AssemblyResult result;
     auto start_time = std::chrono::steady_clock::now();
@@ -6338,10 +6339,20 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
     if (interior_facet_marker >= 0) {
         FE_THROW_IF(cut_integration_context_ == nullptr, FEException,
                     "StandardAssembler::assembleInteriorFaces: marked interior-face assembly requires a cut integration context");
-        facet_set_handle = cut_integration_context_->facetSetHandleForMarker(interior_facet_marker);
+        facet_set_handle =
+            interior_facet_side == geometry::CutIntegrationSide::Interface
+                ? cut_integration_context_->facetSetHandleForMarker(
+                      interior_facet_marker)
+                : cut_integration_context_->facetSetHandleForMarkerAndSide(
+                      interior_facet_marker, interior_facet_side);
         FE_THROW_IF(facet_set_handle == nullptr, FEException,
                     "StandardAssembler::assembleInteriorFaces: missing cut-adjacent facet set for marker " +
                         std::to_string(interior_facet_marker));
+    } else {
+        FE_THROW_IF(
+            interior_facet_side != geometry::CutIntegrationSide::Interface,
+            FEException,
+            "StandardAssembler::assembleInteriorFaces: side-selected assembly requires a marked interior facet set");
     }
 
     matrix_view.beginAssemblyPhase();
@@ -6573,7 +6584,8 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
             context_.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
             context_.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
-            context_.setInteriorFaceMarker(interior_facet_marker);
+            context_.setInteriorFaceDomain(
+                interior_facet_marker, interior_facet_side);
             context_.clearAllPreviousSolutionData();
             face_context_setter_time += face_now() - stage_start;
 
@@ -6638,7 +6650,8 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             context_plus.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
             context_plus.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
             context_plus.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
-            context_plus.setInteriorFaceMarker(interior_facet_marker);
+            context_plus.setInteriorFaceDomain(
+                interior_facet_marker, interior_facet_side);
             context_plus.clearAllPreviousSolutionData();
             face_context_setter_time += face_now() - stage_start;
 

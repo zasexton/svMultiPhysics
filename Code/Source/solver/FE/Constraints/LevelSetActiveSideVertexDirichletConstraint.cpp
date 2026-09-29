@@ -508,7 +508,8 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
 
     if (has_retained_generated_volume_support) {
         const auto* facet_set =
-            cut_context->facetSetHandleForMarker(interface_marker_);
+            cut_context->facetSetHandleForMarkerAndSide(
+                interface_marker_, toCutIntegrationSide(active_side_));
         if (facet_set != nullptr && facet_set->hasFacetMetadata()) {
             support_mode += "+cut_adjacent_facets";
             // A facet gradient jump evaluates the complete bases from both
@@ -527,7 +528,9 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
             }
         }
     } else if (interface_marker_ >= 0 && cut_context != nullptr &&
-               cut_context->facetSetHandleForMarker(interface_marker_) != nullptr) {
+               cut_context->facetSetHandleForMarkerAndSide(
+                   interface_marker_,
+                   toCutIntegrationSide(active_side_)) != nullptr) {
         support_mode += "+cut_adjacent_facets_skipped_no_retained_volume";
     }
 #else

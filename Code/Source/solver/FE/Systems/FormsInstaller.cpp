@@ -81,7 +81,11 @@ struct DomainDispatch {
     bool has_interior{false};
     bool has_interface{false};
     std::vector<int> boundary_markers{};
-    std::vector<int> interior_markers{};
+    struct InteriorFaceRegion {
+        int marker{-1};
+        std::optional<forms::CutVolumeSide> side{};
+    };
+    std::vector<InteriorFaceRegion> interior_regions{};
     std::vector<int> interface_markers{};
     struct CutVolumeRegion {
         int marker{-1};
@@ -154,6 +158,27 @@ template <typename T>
 [[nodiscard]] const char* sideLabel(forms::CutVolumeSide side) noexcept
 {
     return side == forms::CutVolumeSide::Negative ? "negative" : "positive";
+}
+
+[[nodiscard]] std::string interiorRegionLabel(
+    const std::vector<DomainDispatch::InteriorFaceRegion>& regions)
+{
+    if (regions.empty()) {
+        return "none";
+    }
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < regions.size(); ++i) {
+        if (i > 0u) {
+            oss << "|";
+        }
+        oss << regions[i].marker << ":";
+        if (regions[i].side.has_value()) {
+            oss << sideLabel(*regions[i].side);
+        } else {
+            oss << "unspecified";
+        }
+    }
+    return oss.str();
 }
 
 [[nodiscard]] std::string cutVolumeRegionLabel(
@@ -235,7 +260,7 @@ void logMixedBlockDiagnostic(const OperatorTag& op,
         << " cell=" << (dispatch.has_cell ? 1 : 0)
         << " boundary_markers='" << joinedMarkers(dispatch.boundary_markers) << "'"
         << " interior=" << (dispatch.has_interior ? 1 : 0)
-        << " interior_markers='" << joinedMarkers(dispatch.interior_markers) << "'"
+        << " interior_regions='" << interiorRegionLabel(dispatch.interior_regions) << "'"
         << " interface=" << (dispatch.has_interface ? 1 : 0)
         << " interface_markers='" << joinedMarkers(dispatch.interface_markers) << "'"
         << " cut_volume_regions='" << cutVolumeRegionLabel(dispatch.cut_volume_regions) << "'"
@@ -316,16 +341,30 @@ DomainDispatch analyzeDispatch(const forms::FormIR& ir)
     }
 
     if (!ir.hasInteriorFaceTerms()) {
-        out.interior_markers.clear();
+        out.interior_regions.clear();
     } else {
-        std::vector<int> markers;
+        std::vector<DomainDispatch::InteriorFaceRegion> regions;
         for (const auto& term : ir.terms()) {
             if (term.domain != forms::IntegralDomain::InteriorFace) continue;
-            markers.push_back(term.interface_marker);
+            regions.push_back(DomainDispatch::InteriorFaceRegion{
+                term.interface_marker, term.interior_facet_side});
         }
-        std::sort(markers.begin(), markers.end());
-        markers.erase(std::unique(markers.begin(), markers.end()), markers.end());
-        out.interior_markers = std::move(markers);
+        std::sort(regions.begin(),
+                  regions.end(),
+                  [](const auto& a, const auto& b) {
+                      if (a.marker != b.marker) {
+                          return a.marker < b.marker;
+                      }
+                      return a.side < b.side;
+                  });
+        regions.erase(
+            std::unique(regions.begin(),
+                        regions.end(),
+                        [](const auto& a, const auto& b) {
+                            return a.marker == b.marker && a.side == b.side;
+                        }),
+            regions.end());
+        out.interior_regions = std::move(regions);
     }
 
     if (!ir.hasInterfaceFaceTerms()) {
@@ -398,11 +437,21 @@ void registerKernel(
     for (int marker : dispatch.boundary_markers) {
         system.addBoundaryKernel(op, marker, test_field, trial_field, kernel);
     }
-    if (dispatch.has_interior && dispatch.interior_markers.empty()) {
+    if (dispatch.has_interior && dispatch.interior_regions.empty()) {
         system.addInteriorFaceKernel(op, test_field, trial_field, kernel);
     }
-    for (int marker : dispatch.interior_markers) {
-        system.addInteriorFaceKernel(op, marker, test_field, trial_field, kernel);
+    for (const auto& region : dispatch.interior_regions) {
+        if (region.side.has_value()) {
+            system.addInteriorFaceKernel(op,
+                                         region.marker,
+                                         toGeometrySide(*region.side),
+                                         test_field,
+                                         trial_field,
+                                         kernel);
+        } else {
+            system.addInteriorFaceKernel(
+                op, region.marker, test_field, trial_field, kernel);
+        }
     }
     for (int marker : dispatch.interface_markers) {
         system.addInterfaceFaceKernel(op, marker, test_field, trial_field, kernel);
@@ -435,11 +484,21 @@ void registerKernelDomains(
     for (int marker : dispatch.boundary_markers) {
         system.addBoundaryKernel(op, marker, test_field, trial_field, kernel);
     }
-    if (dispatch.has_interior && dispatch.interior_markers.empty()) {
+    if (dispatch.has_interior && dispatch.interior_regions.empty()) {
         system.addInteriorFaceKernel(op, test_field, trial_field, kernel);
     }
-    for (int marker : dispatch.interior_markers) {
-        system.addInteriorFaceKernel(op, marker, test_field, trial_field, kernel);
+    for (const auto& region : dispatch.interior_regions) {
+        if (region.side.has_value()) {
+            system.addInteriorFaceKernel(op,
+                                         region.marker,
+                                         toGeometrySide(*region.side),
+                                         test_field,
+                                         trial_field,
+                                         kernel);
+        } else {
+            system.addInteriorFaceKernel(
+                op, region.marker, test_field, trial_field, kernel);
+        }
     }
     for (int marker : dispatch.interface_markers) {
         system.addInterfaceFaceKernel(op, marker, test_field, trial_field, kernel);
@@ -459,7 +518,7 @@ void registerKernelDomains(
 [[nodiscard]] bool dispatchHasAnyTerm(const DomainDispatch& dispatch) noexcept
 {
     return dispatch.has_cell || dispatch.has_interior || dispatch.has_interface ||
-           !dispatch.boundary_markers.empty() || !dispatch.interior_markers.empty() ||
+           !dispatch.boundary_markers.empty() || !dispatch.interior_regions.empty() ||
            !dispatch.interface_markers.empty() ||
            !dispatch.cut_volume_regions.empty();
 }

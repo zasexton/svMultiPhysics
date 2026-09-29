@@ -1536,6 +1536,13 @@ public:
     void addInteriorFaceKernel(OperatorTag op, int interior_facet_marker,
                                FieldId test_field, FieldId trial_field,
                                std::shared_ptr<assembly::AssemblyKernel> kernel);
+    void addInteriorFaceKernel(OperatorTag op, int interior_facet_marker,
+                               geometry::CutIntegrationSide side, FieldId field,
+                               std::shared_ptr<assembly::AssemblyKernel> kernel);
+    void addInteriorFaceKernel(OperatorTag op, int interior_facet_marker,
+                               geometry::CutIntegrationSide side,
+                               FieldId test_field, FieldId trial_field,
+                               std::shared_ptr<assembly::AssemblyKernel> kernel);
 
     void addInterfaceFaceKernel(OperatorTag op, InterfaceId interface_marker, FieldId field,
                                 std::shared_ptr<assembly::AssemblyKernel> kernel);
@@ -2786,6 +2793,8 @@ private:
 
     struct PlannedInteriorFaceTerm {
         int marker{-1};
+        geometry::CutIntegrationSide side{
+            geometry::CutIntegrationSide::Interface};
         FieldId test_field{INVALID_FIELD_ID};
         FieldId trial_field{INVALID_FIELD_ID};
         const spaces::FunctionSpace* test_space{nullptr};

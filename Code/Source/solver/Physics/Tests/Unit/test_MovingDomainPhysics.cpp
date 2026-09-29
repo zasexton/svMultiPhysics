@@ -10403,6 +10403,47 @@ TEST(MovingDomainPhysics, NavierStokesInactiveActiveDomainKeepsFullCellVolumeKer
 }
 
 TEST(MovingDomainPhysics,
+     NavierStokesFullDomainCutStabilizationKeepsGenericFacetScope)
+{
+    constexpr int interface_marker = 48;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+    opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation =
+                ns::FreeSurfaceImplementation::UnfittedLevelSet,
+            .interface_marker = interface_marker,
+            .level_set_field_name = "phi",
+            .allow_full_domain_unfitted_free_surface = true,
+            .cut_cell_stabilization = {
+                .enabled = true,
+                .pressure_gradient_penalty = 0.25,
+            },
+        });
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    ASSERT_NO_THROW(module.registerOn(system));
+
+    const auto& equations = system.operatorDefinition("equations");
+    ASSERT_FALSE(equations.interior.empty());
+    for (const auto& term : equations.interior) {
+        EXPECT_EQ(term.marker, interface_marker);
+        EXPECT_EQ(term.side, FE::geometry::CutIntegrationSide::Interface);
+    }
+}
+
+TEST(MovingDomainPhysics,
      FreeSurfaceResidualWorkDeclarationRejectsInvalidChannelBeforeMutation)
 {
     FE::systems::FESystem system(makeMesh());

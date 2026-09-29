@@ -2714,7 +2714,8 @@ assembly::AssemblyResult assembleOperator(
                 oss << "assembleOperator: op='" << request.op << "' interior-face term test='" << test_field.name
                     << "' trial='" << trial_field.name << "' want_matrix=" << (want_matrix ? 1 : 0)
                     << " want_vector=" << (want_vector ? 1 : 0)
-                    << " marker=" << term.marker;
+                    << " marker=" << term.marker
+                    << " side=" << static_cast<int>(term.side);
                 traceLog(oss.str());
             }
             const auto term_t0 = std::chrono::steady_clock::now();
@@ -2722,13 +2723,13 @@ assembly::AssemblyResult assembleOperator(
             if (want_matrix) {
                 auto r = assembler.assembleInteriorFaces(
                     mesh, *term.test_space, *term.trial_space, *term.kernel, *matrix_out,
-                    want_vector ? vector_out : nullptr, term.marker);
+                    want_vector ? vector_out : nullptr, term.marker, term.side);
                 mergeAssemblyResult(total, r);
             } else {
                 assembly::DenseVectorView dummy_matrix(0);
                 auto r = assembler.assembleInteriorFaces(
                     mesh, *term.test_space, *term.trial_space, *term.kernel, dummy_matrix,
-                    vector_out, term.marker);
+                    vector_out, term.marker, term.side);
                 mergeAssemblyResult(total, r);
             }
 
@@ -2740,7 +2741,8 @@ assembly::AssemblyResult assembleOperator(
                 oss << "assembleOperator: op='" << request.op << "' interior-face term done test='"
                     << test_field.name << "' trial='" << trial_field.name << "' time="
                     << std::chrono::duration<double>(term_t1 - term_t0).count()
-                    << " marker=" << term.marker;
+                    << " marker=" << term.marker
+                    << " side=" << static_cast<int>(term.side);
                 traceLog(oss.str());
             }
         }

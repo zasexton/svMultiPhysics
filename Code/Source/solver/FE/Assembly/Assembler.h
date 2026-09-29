@@ -65,6 +65,7 @@
 #include "Core/FEException.h"
 #include "Core/ParameterValue.h"
 #include "Core/StateVariableMetadata.h"
+#include "Geometry/CutQuadrature.h"
 #include "Assembly/TimeIntegrationContext.h"
 #include "Assembly/Coloring.h"
 
@@ -1197,7 +1198,9 @@ public:
         AssemblyKernel& kernel,
         GlobalSystemView& matrix_view,
         GlobalSystemView* vector_view,
-        int interior_facet_marker = -1) = 0;
+        int interior_facet_marker = -1,
+        geometry::CutIntegrationSide interior_facet_side =
+            geometry::CutIntegrationSide::Interface) = 0;
 
     /**
      * @brief Assemble cell-style kernels on cut-volume quadrature rules.
