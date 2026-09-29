@@ -132,32 +132,26 @@ def test_interior_node_value_modes(tmp_path, mode):
         np.testing.assert_allclose(result.point_data["Darcy_pressure"].reshape(-1)[order], expected, atol=1e-9, rtol=0)
 
 
-@pytest.mark.parametrize("kind", ["identical", "conflict", "later", "integral"])
-@pytest.mark.parametrize("reverse", [False, True])
-def test_interior_node_overlap(tmp_path, n_proc, kind, reverse):
-    root, points, _, ids = make_interior_node_case(tmp_path)
+@pytest.mark.parametrize("other", ["node_set", "face"])
+def test_interior_node_overlap(tmp_path, n_proc, other):
+    """Reject any other Dirichlet prescription of a node-set component, even an identical one."""
+    root, points, cells, ids = make_interior_node_case(tmp_path, 3)
     equation = root.find("Add_equation")
-    first = equation.find("Add_BC")
-    second = copy.deepcopy(first)
-    second.set("name", "second_pressure")
-    if kind in ("conflict", "later"):
-        second.find("Temporal_and_spatial_values_file_path").text = "second.dat"
-        times = "0 0.1 1" if kind == "later" else "0 1"
-        histories = ["2 2 3", "7 7 8"] if kind == "later" else ["3 3", "8 8"]
-        (tmp_path / "second.dat").write_text(
-            f"1 {len(times.split())} 2\n{times}\n{ids[0]} {histories[0]}\n{ids[1]} {histories[1]}\n")
-    elif kind == "integral":
-        ET.SubElement(second, "Impose_on_state_variable_integral").text = "true"
-    equation.remove(first)
-    equation.extend([second, first] if reverse else [first, second])
+    node_bc = equation.find("Add_BC")
+    if other == "node_set":
+        second = copy.deepcopy(node_bc)
+        second.set("name", "second_pressure")
+    else:
+        ids[0] = add_test_boundary_face(root, tmp_path, points, cells)[0]
+        root.find("Add_mesh/Add_node_set/Node_IDs").text = " ".join(map(str, ids))
+        (tmp_path / "values.dat").write_text(f"1 2 2\n0 1\n{ids[0]} 2 2\n{ids[1]} 7 7\n")
+        second = ET.Element("Add_BC", name="surface")
+        for tag, value in [("Type", "Dirichlet"), ("Value", "2"), ("Zero_out_perimeter", "false")]:
+            ET.SubElement(second, tag).text = value
+    # Read the other condition first, so the check cannot rely on input order.
+    equation.insert(list(equation).index(node_bc), second)
     ET.ElementTree(root).write(tmp_path / "solver.xml")
-    error = None if kind == "identical" else "conflicting.*Dirichlet"
-    result = run_by_name(tmp_path, "solver.xml", 2, n_proc, expected_error=error)
-    if kind == "identical":
-        order = [np.argmin(np.linalg.norm(result.points - points[i-1], axis=1)) for i in ids]
-        np.testing.assert_allclose(result.point_data["Darcy_pressure"].reshape(-1)[order], [2, 7], atol=1e-10)
-    elif kind == "later":
-        assert (tmp_path / f"{n_proc}-procs/result_001.vtu").exists()
+    run_by_name(tmp_path, "solver.xml", 2, n_proc, expected_error="node set 'interior'.*also prescribe")
 
 
 def test_interior_node_restart(tmp_path):
@@ -265,35 +259,6 @@ def test_interior_node_invalid_definition(tmp_path, kind):
     run_by_name(tmp_path, "solver.xml", 2, expected_error=(
         "node set.*empty name" if kind == "empty_name" else "Ambiguous mesh" if kind == "ambiguous_mesh" else
         "exactly one|cannot open node-ID|Duplicate node set|requires Mesh_name|without active|node.*Coupling_interface"))
-
-
-@pytest.mark.parametrize("kind", ["identical", "conflict", "three_conditions"])
-@pytest.mark.parametrize("reverse", [False, True])
-def test_interior_node_face_overlap(tmp_path, n_proc, kind, reverse):
-    root, points, cells, ids = make_interior_node_case(tmp_path, 3)
-    surface = add_test_boundary_face(root, tmp_path, points, cells)
-    ids[0] = surface[0]
-    root.find("Add_mesh/Add_node_set/Node_IDs").text = " ".join(map(str, ids))
-    (tmp_path / "values.dat").write_text(f"1 2 2\n0 1\n{ids[0]} 2 2\n{ids[1]} 7 7\n")
-    equation = root.find("Add_equation")
-    node_bc = equation.find("Add_BC")
-    face_bc = ET.Element("Add_BC", name="surface")
-    for tag, value in [("Type", "Dirichlet"), ("Value", "2" if kind == "identical" else "3"),
-                       ("Zero_out_perimeter", "false")]:
-        ET.SubElement(face_bc, tag).text = value
-    conditions = [node_bc, face_bc]
-    if kind == "three_conditions":
-        identical_face = copy.deepcopy(face_bc)
-        identical_face.find("Value").text = "2"
-        conditions.append(identical_face)
-    equation.remove(node_bc)
-    equation.extend(reversed(conditions) if reverse else conditions)
-    ET.ElementTree(root).write(tmp_path / "solver.xml")
-    result = run_by_name(tmp_path, "solver.xml", 2, n_proc,
-                         expected_error=None if kind == "identical" else "conflicting.*Dirichlet")
-    if kind == "identical":
-        order = [np.argmin(np.linalg.norm(result.points - points[i-1], axis=1)) for i in ids]
-        np.testing.assert_allclose(result.point_data["Darcy_pressure"].reshape(-1)[order], [2, 7], atol=1e-10)
 
 
 @pytest.mark.parametrize("kind", ["remeshing", "merged_ids"])

@@ -46,6 +46,70 @@ void register_dirichlet(ComMod& com_mod, bcType& bc, const Vector<int>& nodes, i
       fsi_linear_solver::BcType::BC_TYPE_Dir, nodes, mask);
 }
 
+/// @brief Check node-set component masks and reject a node-set component that
+/// any other strong Dirichlet condition also prescribes, so the applied value
+/// never depends on input order. Overlapping face conditions are unchanged.
+void check_node_sets(const ComMod& com_mod, const CmMod& cm_mod, const eqType& eq)
+{
+  using namespace consts;
+
+  if (std::none_of(eq.bc.begin(), eq.bc.end(), [](const bcType& bc) { return !bc.node_set_name.empty(); })) {
+    return;
+  }
+
+  // Components a condition prescribes, following set_bc_dir().
+  const int nsd = com_mod.nsd;
+  const int components = eq.dof == nsd + 1 ? nsd : eq.dof;
+  const auto prescribed = [&](const bcType& bc) {
+    const bool selective = std::any_of(bc.eDrn.begin(), bc.eDrn.end(), [](int value) { return value != 0; });
+    std::vector<int> result;
+    for (int i = 0; i < nsd; ++i) {
+      if (selective ? bc.eDrn(i) != 0 : i < components) {
+        result.push_back(i);
+      }
+    }
+    return result;
+  };
+
+  Array<int> count(nsd, com_mod.tnNo);
+  for (const auto& bc : eq.bc) {
+    const bool coupled_dir = utils::btest(bc.bType, iBC_Coupled) &&
+        bc.coupled_bc.get_bc_type() == BoundaryConditionType::bType_Dir;
+    if (bc.weakDir || !(utils::btest(bc.bType, iBC_Dir) || coupled_dir)) {
+      continue;
+    }
+    const auto selected = prescribed(bc);
+    for (const int node : all_fun::bc_nodes(com_mod, bc)) {
+      for (const int i : selected) {
+        ++count(i, node);
+      }
+    }
+  }
+
+  for (const auto& bc : eq.bc) {
+    if (bc.node_set_name.empty()) {
+      continue;
+    }
+    const auto selected = prescribed(bc);
+    if (selected.empty() || selected.back() >= components) {
+      throw std::runtime_error("Dirichlet node set '" + bc.node_set_name + "': invalid component mask.");
+    }
+    if (bc.gm.defined() && bc.gm.dof != static_cast<int>(selected.size())) {
+      throw std::runtime_error("Dirichlet node set '" + bc.node_set_name + "': inconsistent component count in general values.");
+    }
+    int overlap = 0;
+    for (const int node : bc.node_ids) {
+      for (const int i : selected) {
+        overlap |= count(i, node) > 1;
+      }
+    }
+    if (com_mod.cm.reduce(cm_mod, overlap, MPI_MAX) != 0) {
+      throw std::runtime_error("Dirichlet node set '" + bc.node_set_name +
+          "' prescribes a component that another Dirichlet condition also prescribes.");
+    }
+  }
+}
+
 }
 
 /// @brief This routine initializes required structure for boundaries,
@@ -114,20 +178,6 @@ void baf_ini(Simulation* simulation, SolutionStates& solutions)
       int iFa = bc.iFa;
       int iM = bc.iM;
       if (!bc.node_set_name.empty()) {
-        const int components = eq.dof == nsd + 1 ? nsd : eq.dof;
-        int selected = 0;
-        for (int i = 0; i < nsd; ++i) {
-          if ((bc.eDrn(i) != 0 && bc.eDrn(i) != 1) || (i >= components && bc.eDrn(i) != 0)) {
-            throw std::runtime_error("Dirichlet node set '" + bc.node_set_name + "': invalid component mask.");
-          }
-          selected += bc.eDrn(i);
-        }
-        if (selected == 0) {
-          selected = components;
-        }
-        if (bc.gm.defined() && bc.gm.dof != selected) {
-          throw std::runtime_error("Dirichlet node set '" + bc.node_set_name + "': inconsistent component count in general values.");
-        }
         bc.gx.resize(bc.node_ids.size());
         bc.gx = 1.0;
         continue;
@@ -138,6 +188,7 @@ void baf_ini(Simulation* simulation, SolutionStates& solutions)
         shl_bc_ini(com_mod, cm_mod, bc, com_mod.msh[iM].fa[iFa], com_mod.msh[iM], solutions);
       }
     }
+    check_node_sets(com_mod, cm_mod, eq);
   }
 
   // cplBC faces are initialized here

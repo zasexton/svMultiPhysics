@@ -51,7 +51,7 @@ class MBType
 {
   public:
 
-    bool defined() { return dof != 0; };
+    bool defined() const { return dof != 0; };
 
     // Degrees of freedom of d(:,.,.)
     int dof = 0;

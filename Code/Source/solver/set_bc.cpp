@@ -18,7 +18,6 @@
 #include "ustruct.h"
 #include "utils.h"
 #include <cstdio>
-#include <map>
 #include <math.h>
 
 namespace set_bc {
@@ -959,15 +958,6 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
 
   for (int iEq = 0; iEq < nEq; iEq++) {
     auto& eq = com_mod.eq[iEq];
-    const bool check_overlaps = std::any_of(eq.bc.begin(), eq.bc.end(), [](const auto& bc) {
-      return !bc.node_set_name.empty();
-    });
-    struct Prescription {
-      double value, derivative;
-      bool integral, nodal, inconsistent;
-    };
-    std::map<std::pair<int, int>, Prescription> prescribed;
-    int conflict = 0;
     #ifdef set_bc_dir
     dmsg << ">>>> iEq: " << iEq;
     dmsg << "eq.nBc: " << eq.nBc;
@@ -1051,43 +1041,6 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
 
       // Modifies: tmpA, tmpY
       set_bc::set_bc_dir_l(com_mod, bc, face, tmpA, tmpY, lDof);
-
-      if (check_overlaps) {
-        const bool nodal = !bc.node_set_name.empty();
-        const bool integral = utils::btest(bc.bType, enum_int(BoundaryConditionType::bType_impD));
-        const bool selective = std::find(eDir.begin(), eDir.end(), true) != eDir.end();
-        const auto equal = [](double x, double y) {
-          return std::isfinite(x) && std::isfinite(y) &&
-              std::abs(x-y) <= 1e-10 * std::max({1.0, std::abs(x), std::abs(y)});
-        };
-        for (int a = 0; a < nNo; ++a) {
-          int component = 0;
-          for (int i = 0; i <= e-s; ++i) {
-            if (selective && !eDir[i]) {
-              continue;
-            }
-            const double value = tmpY(component,a);
-            const double derivative = tmpA(component++,a);
-            if (nodal && (!std::isfinite(value) || !std::isfinite(derivative))) {
-              conflict = 1;
-            }
-            auto [entry, inserted] = prescribed.try_emplace(std::make_pair(nodes(a), i),
-                Prescription{value, derivative, integral, nodal, false});
-            if (!inserted) {
-              auto& previous = entry->second;
-              const bool same = previous.integral == integral && equal(previous.value, value) &&
-                  equal(previous.derivative, derivative);
-              // Remember disagreement between faces so a later node target is
-              // checked against every earlier prescription, independent of order.
-              if ((nodal || previous.nodal) && (!same || previous.inconsistent)) {
-                conflict = 1;
-              }
-              previous.inconsistent |= !same;
-              previous.nodal |= nodal;
-            }
-          }
-        }
-      }
 
       if (std::find(eDir.begin(), eDir.end(), true) != eDir.end()) {
         if (utils::btest(bc.bType, enum_int(BoundaryConditionType::bType_impD))) {
@@ -1197,15 +1150,6 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
         }
       }
     } // iBc
-    if (check_overlaps) {
-      if (!com_mod.cm.seq()) {
-        MPI_Allreduce(MPI_IN_PLACE, &conflict, 1, MPI_INT, MPI_MAX, com_mod.cm.com());
-      }
-      if (conflict) {
-        throw std::runtime_error("Conflicting or nonfinite Dirichlet prescriptions involving a node set in equation " +
-            std::to_string(iEq + 1) + "; check values, derivatives, and state/integral components.");
-      }
-    }
   } // iEq
 
 }
