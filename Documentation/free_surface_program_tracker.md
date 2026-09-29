@@ -278,7 +278,7 @@ These are proposals. Each lists a recommended option and an alternative. Record 
 | **D1** | Acceptance philosophy | **Adopted 2026-09-29.** Tiered capability goals (§1.2). Gates are literature-calibrated convergence and error bounds on physically relaxed states. Algebraic roundoff gates apply only to exactly representable states (flat, hydrostatic). | Keep the V3 gate contract. It needs an exactly-balanced construction and has no demonstrated path. |
 | **D2** | Capillary force route (unfitted) | **Adopted 2026-09-29, under principle P1.** Run the missing AD-2 comparison, M2 in §5: SurfaceStress, KAG with filter or stabilized mass, and unfiltered KAG, on the same static-drop, capillary-wave, sessile and Ren–E tests, then select. Allow the filter or stabilization for KAG. | Continue unfiltered KAG with the double-double mass solve (the 09-14 goal, milestones 1–6). |
 | **D3** | Static minimizer | **Adopted 2026-09-29.** Make it optional tooling. Reach equilibrium dynamically (viscous relaxation). Never gate physics on `‖g_proj‖ ≤ 1e-10`. If kept, it must use one geometry definition and a nonsmooth-aware stopping rule. | Keep it as the required initializer for all "minimized" lanes. |
-| **D4** | Contact angle | Variational Young term, Navier slip, strong no-penetration, and angle-preserving (scale-only) wall maintenance. Retire the repair-to-target as a production path, or keep it as an explicit alternative mode that is never combined with the Young term. | Keep both owners and finish the FSR-04 scheduling, strip and fixed-point work. |
+| **D4** | Contact angle | **Adopted 2026-09-29 (single mechanism).** Variational Young term, Navier slip, strong no-penetration, and angle-preserving (scale-only) wall maintenance. Retire the repair-to-target as a production path, or keep it as an explicit alternative mode that is never combined with the Young term. | Keep both owners and finish the FSR-04 scheduling, strip and fixed-point work. |
 | **D5** | Fitted ALE | Unlock fitted SurfaceStress behind a flag, use slip (not Dirichlet-0) wall mesh BCs, and run fitted 2D sloshing, then a static drop and capillary wave. This gives an independent, well-balanced reference. | Leave fitted capillarity rejected and focus on unfitted only. |
 | **D6** | Process | Lightweight process (§12): a commit hash, a small benchmark script, a tolerance file, and a results row in this tracker. Raw outputs for accepted results go to group storage. Time-box investigations to about 3 working days before a method decision. Keep the author/committer identity rule, the commit-message vocabulary scan, and the job-mail settings. | Keep the frozen/immutable campaign process for every step. |
 | **D7** | Architecture refactor | Pause R3–R12. Do targeted extractions only when a milestone touches that code. Revisit once T1–T3 are working. | Resume the refactor in parallel now. |
@@ -321,6 +321,19 @@ These are proposals. Each lists a recommended option and an alternative. Record 
     - D1 retired the minimized-state algebraic criteria as a standard.
     - The minimizer carries algorithm settings that P1 disfavors.
     - On the preserved 2D cap it stalled at `‖g_proj‖ = 0.022`, and the discrete energy may have no classical zero-gradient minimum.
+- **D4, 2026-09-29: one contact-angle mechanism is adopted.**
+  - The contact angle is imposed only through the variational Young term in the momentum equation:
+    - with `SurfaceStress`, the line term `−γ cos θ_e ∫_CL v·m`;
+    - with KAG, the wall-area gradient inside `κ_h`.
+  - The contact line moves through Navier slip on the wetted wall, with the slip length taken from the case definition (P1). The Ren–E line friction is added for dynamic contact.
+  - Contact walls use a strong no-penetration constraint, because weak (Nitsche) wall constraints cannot hold a static line force (§6.4).
+  - Level-set wall maintenance preserves the current angle through the existing scale-only wall-aware mode.
+  - The accepted-endpoint repair to the target angle is retired as a production path and is never combined with the Young term. Its code is removed once M4 validates the single mechanism.
+  - The prescribed-angle completion stream of the 09-03 WP-4 plan (package D) is not pursued. That stream covered wall-repair scheduling, φ-scale invariance of the repair, the curved 3D wall strip, and the stage and fixed-point studies.
+  - **Rationale:**
+    - The two mechanisms impose different discrete angles, and each repair injects unaccounted work.
+    - Continuous-P1 repair targets cannot represent a bent contact line (worst-cell error `atan(1/2)`).
+    - The variational route is energy-consistent (Gerbeau–Lelièvre; Buscaglia–Ausas) and adds no numerical parameter (P1).
 
 ---
 
@@ -332,7 +345,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
 
 ### M0 — Decisions and housekeeping (about 1–2 days)
 
-- [ ] Record the D1–D8 outcomes in §4. D1, D2, D3 and principle P1 were recorded on 2026-09-29; D4–D8 are open.
+- [ ] Record the D1–D8 outcomes in §4. D1–D4 and principle P1 were recorded on 2026-09-29; D5–D8 are open.
 - [x] Reconcile the home checkout (2026-09-29).
   - Its 53 modified files were committed. The Forms/JIT/Assembly/FESystem changes became `b9f59552` ("Add side-selected cut-adjacent facet integrals"). The refactoring-plan edits were already upstream and were dropped during the rebase.
   - The branch was rebased onto `fc56527`. The redundant local commit `09976e2` was skipped because it is patch-identical to `2768303`.
@@ -391,11 +404,11 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
 
 ### M4 — Wetting (unfitted)
 
-- [ ] **Implement or confirm the D4 configuration:**
+- [ ] **Implement or confirm the D4 configuration** (decided 2026-09-29):
   - Young term;
   - Navier slip on the wetted wall;
   - strong no-penetration;
-  - scale-only wall maintenance (the dynamic-contact path already has this);
+  - scale-only wall maintenance. The dynamic-contact path already has this; enable it for `PrescribedAngle`, which today applies the repair to the target angle.
   - no repair-to-target.
 - [ ] **2D sessile relaxation** at 60°, 90° and 120°. Start from a *non-equilibrium* shape (for example a 90° cap for a 60° target) and relax to equilibrium at R/h = 16, 32, 64. Proposal: angle error ≤ 2° at R/h = 32 and decreasing; base radius and apex height within 2%.
 - [ ] **Capillary rise** against the prepared Gründing et al. envelope, using `free_surface_wp5_capillary_rise_reference.json` and the comparison runner.
@@ -511,7 +524,7 @@ Paths are relative to `Code/Source/solver/`, at `fc56527`.
 
 - Two geometry definitions (the snapshot versus the recovery/minimizer strict cut). See §3.2.
 - An unstabilized KAG trace mass. See §3.2.
-- Two owners of the prescribed angle; P1 repair targets are not representable. See §3.5.
+- Two owners of the prescribed angle; P1 repair targets are not representable (§3.5). Resolved by D4 in favour of the Young term; the implementation is in M4.
 - Explicit-in-geometry capillarity, with no semi-implicit term. See §3.6.
 - Weak walls cannot hold a static line force; contact walls need strong normal constraints.
 - Two liquid-volume measures coexist: the lumped nodal `M_q` from conservative transport and the sharp cut `V_h`. Reconciliation must preserve the target volume.
