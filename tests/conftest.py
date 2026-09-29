@@ -175,8 +175,7 @@ def add_test_boundary_face(root, folder, points, cells, name="surface", x=0):
     return nodes + 1
 
 
-def run_by_name(folder, name, t_max, n_proc=1, *, exe=None, expected_error=None,
-                clean=True, timeout=120):
+def run_by_name(folder, name, t_max, n_proc=1, *, expected_error=None, clean=True, timeout=120):
     """
     Run a test case and return results
     Args:
@@ -195,7 +194,7 @@ def run_by_name(folder, name, t_max, n_proc=1, *, exe=None, expected_error=None,
         shutil.rmtree(dir_path)
 
     # run simulation (PETSc tests use a dedicated build; see cpp_exec_p)
-    exe = exe or (cpp_exec_p if "petsc" in str(folder) else cpp_exec)
+    exe = cpp_exec_p if "petsc" in str(folder) else cpp_exec
     cmd = ["mpirun"]
     if n_proc > 1 and OVERSUBSCRIBE_FLAG:
         cmd.append(OVERSUBSCRIBE_FLAG)
@@ -343,7 +342,7 @@ def run_with_reference(
         raise AssertionError(msg)
 
 
-def make_interior_node_case(folder, nsd=2, physics="darcy"):
+def make_interior_node_case(folder, nsd=2):
     """Generate a small simplex mesh and editable input without surface files."""
     grid = list(itertools.product(range(4), repeat=nsd))
     lookup = {point: i for i, point in enumerate(grid)}
@@ -378,10 +377,6 @@ def make_interior_node_case(folder, nsd=2, physics="darcy"):
     writer.SetInputData(volume)
     if writer.Write() != 1:
         raise OSError(f"Could not write {folder / 'mesh.vtu'}")
-    material = ({"Darcy_permeability": 1, "Darcy_fluid_viscosity": 1,
-                 "Darcy_compressibility": 0, "Fluid_density": 1} if physics == "darcy" else
-                {"Conductivity": 1, "Density": 0})
-    field = "Darcy_pressure" if physics == "darcy" else "Temperature"
     root = ET.Element("svMultiPhysicsFile", version="0.1")
     general = ET.SubElement(root, "GeneralSimulationParameters")
     for tag, value in {
@@ -401,14 +396,15 @@ def make_interior_node_case(folder, nsd=2, physics="darcy"):
     ET.SubElement(mesh, "Mesh_file_path").text = "mesh.vtu"
     node_set = ET.SubElement(mesh, "Add_node_set", name="interior")
     ET.SubElement(node_set, "Node_IDs").text = " ".join(map(str, ids))
-    equation = ET.SubElement(root, "Add_equation", type=physics)
+    equation = ET.SubElement(root, "Add_equation", type="darcy")
     for tag, value in {
-        "Coupled": "true", "Min_iterations": 1, "Max_iterations": 6,
-        "Tolerance": "1e-11", **material, "Source_term": 0.25,
+        "Coupled": "true", "Min_iterations": 1, "Max_iterations": 6, "Tolerance": "1e-11",
+        "Darcy_permeability": 1, "Darcy_fluid_viscosity": 1, "Darcy_compressibility": 0,
+        "Fluid_density": 1, "Source_term": 0.25,
     }.items():
         ET.SubElement(equation, tag).text = str(value)
     output = ET.SubElement(equation, "Output", type="Spatial")
-    ET.SubElement(output, field).text = "true"
+    ET.SubElement(output, "Darcy_pressure").text = "true"
     ls = ET.SubElement(equation, "LS", type="CG")
     algebra = ET.SubElement(ls, "Linear_algebra", type="fsils")
     ET.SubElement(algebra, "Preconditioner").text = "rcs"
