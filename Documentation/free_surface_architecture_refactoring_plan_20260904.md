@@ -20,7 +20,7 @@
 
 **Implementation status:** Implementation authorized on 2026-09-04. R0 baseline capture, R1 configuration migration and R2 domain separation are in progress. The typed maintenance and cut-option slices and the first reusable FE volume selector are verified within their recorded scopes. R3-R12 remain pending. Physical qualification and the remaining configuration/domain migrations remain open. Completed work is recorded by checked items and dated progress entries below.
 
-**Execution records:** [Coordination notes](free_surface_boundary_unfitted_audit_20260720.md#2026-09-04-architecture-refactoring-coordination) and [owned Slurm job ledger](free_surface_refactor_job_ledger_20260904.md). Commits use Zachary Sexton <zsexton@stanford.edu> and are pushed to `issue-449-modern-mesh-core` after their relevant checks.
+**Execution records:** Status and remaining work are tracked in the [free-surface program tracker](free_surface_program_tracker.md) (sections 3.10, 4 and 8.6); the refactor has been paused since 2026-09-05. The earlier coordination notes and job ledger were removed on 2026-09-29 and remain available with `git show fc565279:Documentation/free_surface_boundary_unfitted_audit_20260720.md` and `git show fc565279:Documentation/free_surface_refactor_job_ledger_20260904.md`. Commits use Zachary Sexton <zsexton@stanford.edu> and are pushed to `issue-449-modern-mesh-core` after their relevant checks.
 
 **Contents:**
 
@@ -1010,7 +1010,7 @@ Each such change needs a concrete method specification, frozen comparison thresh
 
 ### 9.5 Migration handoff and removal gates
 
-Each extraction must leave a clear handoff for physical qualification work proceeding on the branch. Record the old and new symbols/paths, their owning targets, any public alias, whether formulas or defaults changed, and the exact focused checks/results. Put the dated coordination entry in `free_surface_boundary_unfitted_audit_20260720.md` and keep historical qualification source identities intact.
+Each extraction must leave a clear handoff for physical qualification work proceeding on the branch. Record the old and new symbols/paths, their owning targets, any public alias, whether formulas or defaults changed, and the exact focused checks/results. Put the dated coordination entry in `free_surface_program_tracker.md` and keep historical qualification source identities intact.
 
 Shared files such as `ApplicationDriver.cpp`, `FESystem`, Forms/JIT and the Navier-Stokes module need one integration owner at a time. Merge the required shared contract before moving its consumers. A work package can be reviewed independently, but its source changes must be based on the actual integrated branch revision and accounted-for local work.
 

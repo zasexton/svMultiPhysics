@@ -31,7 +31,7 @@
  * fails closed.
  * With aggregation active the velocity ghost penalty is unnecessary for
  * conditioning (see
- * Documentation/plan_ghost_penalty_eigen_calibration_20260611.md).
+ * Documentation/free_surface_program_tracker.md, section 8.2).
  *
  * Current scope: nodal Lagrange H1 scalar or Product fields on
  * ISO-parametric meshes, i.e. the mesh nodes of every band cell carry the

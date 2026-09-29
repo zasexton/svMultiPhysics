@@ -80,7 +80,9 @@ WP-10 records qualify only four stationary planar prerequisites: constant-state
 preservation, prescribed pressure jump, prescribed viscous-traction jump, and
 hydrostatics. None is a moving two-fluid or static-drop closure.
 
-The [historical level-set review](free_surface_level_set_review_20260713.md)
+The historical level-set review (summarized in
+[the program tracker](free_surface_program_tracker.md), section 8.3; full text via
+`git show fc565279:Documentation/free_surface_level_set_review_20260713.md`)
 describes scoped `n=16` capillary-wave and direct prescribed-velocity P1
 wall-advection results from executable SHA-256
 `c7b297bfc00b6c35a0865e15244e1b38a8863c9a0719e85f6dd690098fef2522`.

@@ -1,5 +1,10 @@
 # WP4 Conditioning-to-Qualification Goal and Implementation Plan
 
+> **Status (2026-09-29):** Suspended pending decisions D2, D3 and D8 in the
+> [free-surface program tracker](free_surface_program_tracker.md). The audit
+> referenced below was removed on 2026-09-29; retrieve it with
+> `git show fc565279:Documentation/free_surface_boundary_unfitted_audit_20260720.md`.
+
 > **For agentic workers:** Use `superpowers:subagent-driven-development` or `superpowers:executing-plans`, with regression-first implementation and evidence-backed completion. The explicit ownership, reuse, protection, and authority rules below take precedence over generic workflow defaults. Do not restart completed work, replace useful existing workers, or add redundant reviews to adopt a workflow. Steps use checkbox (`- [ ]`) syntax for final milestone tracking.
 
 **Goal:** Complete the remaining WP4 implementation and qualification by resolving the captured curvature mass-solve conditioning/publication blocker, making the preserved production minimizer pass its unchanged gates, completing the required three-dimensional and prescribed-angle integration, and producing a clean, reviewed, checksum-bound qualification record that justifies the precise audit closures.

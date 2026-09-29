@@ -5245,7 +5245,7 @@ void applyFreeSurfaceCutCellStabilization(
     // (the workable small-gamma regime is sub-coercive), and small-cut
     // aggregation now replaces the velocity penalty altogether for
     // vertex-covered (P1/iso-Q2) spaces. See
-    // Documentation/plan_ghost_penalty_eigen_calibration_20260611.md.
+    // Documentation/free_surface_program_tracker.md, section 8.2.
     constexpr FE::Real kCutPenaltyTransientCalibration{0.01};
     const auto gp_calibration =
         FE::forms::FormExpr::constant(kCutPenaltyTransientCalibration);

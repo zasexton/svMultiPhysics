@@ -1,5 +1,10 @@
 # WP-4 Balanced-Force Completion Implementation Plan
 
+> **Status (2026-09-29):** Suspended pending decisions D2, D3 and D8 in the
+> [free-surface program tracker](free_surface_program_tracker.md). The audit
+> referenced below was removed on 2026-09-29; retrieve it with
+> `git show fc565279:Documentation/free_surface_boundary_unfitted_audit_20260720.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Complete the balanced-force half of WP-4 by making the production total-energy-gradient traction quadrature-exact for affine P1 three-dimensional cuts, enforcing that contract, validating its discrete energy adjoint and restoring force, and freezing corrected qualification evidence.

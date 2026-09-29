@@ -16,9 +16,9 @@ Common reported quantities:
 - generated-interface measure and normals for level-set runs
 - mesh quality metrics for fitted ALE runs
 
-Focused unfitted level-set qualification evidence for the 2026-05-22
-active/inactive cut-volume retention review is recorded in
-`Documentation/unfitted_level_set_free_surface_qualification_log_20260522.md`.
+Current status, remaining work, and the history of these cases are tracked in
+`Documentation/free_surface_program_tracker.md`. The case definitions below remain
+current; dated status logs in this file are historical.
 
 ## Generated Literature Geometry Fixtures
 

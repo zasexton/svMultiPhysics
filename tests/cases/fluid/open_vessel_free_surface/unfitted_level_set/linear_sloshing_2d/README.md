@@ -4,9 +4,9 @@ This is a small-amplitude standing-wave free-surface regression test for the
 new OOP incompressible Navier-Stokes solver with an unfitted level-set active
 domain. Negative `phi` denotes liquid.
 
-See `LEVEL_SET_FREE_SURFACE_SUPPORT_STATUS.md` for the current support-status
-notes, known remaining issues, and acceptance criteria for considering the
-unfitted level-set free-surface method fully supported.
+See `Documentation/free_surface_program_tracker.md` for the current support
+status, known remaining issues, and the planned acceptance criteria for the
+unfitted level-set free-surface method.
 
 The analytic reference is the linearized inviscid potential-flow solution in a
 rectangular tank. It is exact for impermeable slip walls and zero surface

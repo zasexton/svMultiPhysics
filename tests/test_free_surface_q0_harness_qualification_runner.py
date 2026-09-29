@@ -193,6 +193,11 @@ def test_q0_contract_rejects_source_escape():
 def test_q0_source_hash_drift_is_rejected(monkeypatch):
     runner = load_runner()
     matrix = runner.load_matrix(MATRIX_PATH)
+    matrix["source_definitions"] = [
+        definition
+        for definition in matrix["source_definitions"]
+        if (ROOT / definition["path"]).is_file()
+    ]
     real_read_stable_bytes = runner.read_stable_bytes
     first_path = (ROOT / matrix["source_definitions"][0]["path"]).resolve()
 

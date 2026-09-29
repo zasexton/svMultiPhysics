@@ -25,7 +25,7 @@
  * insertions, the fused combined-insert path, JIT kernels, multi-field
  * offsets, post-setup constraint-structure changes (sparsity augmentation
  * runs at setup only), or out-of-pattern matrix writes — see
- * Documentation/plan_ghost_penalty_eigen_calibration_20260611.md for the
+ * Documentation/free_surface_program_tracker.md (section 8.2) for the
  * uncovered failure modes found on the d18 aggregation runs.
  */
 
