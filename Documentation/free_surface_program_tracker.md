@@ -276,7 +276,7 @@ These are proposals. Each lists a recommended option and an alternative. Record 
 | # | Decision | Recommended | Alternative |
 |---|---|---|---|
 | **D1** | Acceptance philosophy | **Adopted 2026-09-29.** Tiered capability goals (§1.2). Gates are literature-calibrated convergence and error bounds on physically relaxed states. Algebraic roundoff gates apply only to exactly representable states (flat, hydrostatic). | Keep the V3 gate contract. It needs an exactly-balanced construction and has no demonstrated path. |
-| **D2** | Capillary force route (unfitted) | Run the missing AD-2 comparison, M2 in §5: SurfaceStress, KAG with filter or stabilized mass, and unfiltered KAG, on the same static-drop, capillary-wave, sessile and Ren–E tests, then select. Allow the filter or stabilization for KAG. | Continue unfiltered KAG with the double-double mass solve (the 09-14 goal, milestones 1–6). |
+| **D2** | Capillary force route (unfitted) | **Adopted 2026-09-29, under principle P1.** Run the missing AD-2 comparison, M2 in §5: SurfaceStress, KAG with filter or stabilized mass, and unfiltered KAG, on the same static-drop, capillary-wave, sessile and Ren–E tests, then select. Allow the filter or stabilization for KAG. | Continue unfiltered KAG with the double-double mass solve (the 09-14 goal, milestones 1–6). |
 | **D3** | Static minimizer | Make it optional tooling. Reach equilibrium dynamically (viscous relaxation). Never gate physics on `‖g_proj‖ ≤ 1e-10`. If kept, it must use one geometry definition and a nonsmooth-aware stopping rule. | Keep it as the required initializer for all "minimized" lanes. |
 | **D4** | Contact angle | Variational Young term, Navier slip, strong no-penetration, and angle-preserving (scale-only) wall maintenance. Retire the repair-to-target as a production path, or keep it as an explicit alternative mode that is never combined with the Young term. | Keep both owners and finish the FSR-04 scheduling, strip and fixed-point work. |
 | **D5** | Fitted ALE | Unlock fitted SurfaceStress behind a flag, use slip (not Dirichlet-0) wall mesh BCs, and run fitted 2D sloshing, then a static drop and capillary wave. This gives an independent, well-balanced reference. | Leave fitted capillarity rejected and focus on unfitted only. |
@@ -295,6 +295,19 @@ These are proposals. Each lists a recommended option and an alternative. Record 
     - The WP-4 V3 gate contract is no longer an acceptance standard and remains history only. This covers `tests/cases/fluid/free_surface_wp4_balanced_capillary_matrix_v3.json` and the W-only `wp4_qualification_gate_contract_20260906.md`.
     - The tolerances marked "proposal" in §5 are the working acceptance criteria. Each is confirmed or adjusted once, before its first use.
     - The Q0–Q7 texts remain reference material only (§7).
+- **P1, 2026-09-29 (standing principle): prefer methods that need no additional parameter tuning.**
+  - When candidates meet the same acceptance criteria, choose the one without a tunable numerical coefficient.
+  - If a numerical parameter is unavoidable, fix its value once from analysis or dimensional scaling, document it in §6, and never tune it per case or per mesh.
+  - Physical inputs (surface tension, contact angle, slip length, mobility) come from the case definition and are not tuning parameters.
+  - Existing fixed constants (for example the 0.01 cut-pressure calibration and the aggregation guards) stay as they are; they are not re-tuned.
+- **D2, 2026-09-29: the recommended comparison is adopted, under P1.**
+  - The comparison runs the M2 static drop, the M3 capillary wave, and the M4 sessile and Ren–E cases, all with the same protocol.
+  - The candidate set follows P1:
+    - `SurfaceStress`, which is parameter-free;
+    - a new parameter-free KAG variant with a lumped (row-sum) mass;
+    - unfiltered consistent-mass KAG, as a reference only.
+  - Filtered or stabilized KAG is a fallback only.
+  - The unfiltered-KAG double-double line of the 09-14 goal is not continued as the method path. Recording D8 (archiving the W worktree diff) is the follow-up.
 
 ---
 
@@ -306,7 +319,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
 
 ### M0 — Decisions and housekeeping (about 1–2 days)
 
-- [ ] Record the D1–D8 outcomes in §4. D1 was recorded on 2026-09-29; D2–D8 are open.
+- [ ] Record the D1–D8 outcomes in §4. D1, D2 and principle P1 were recorded on 2026-09-29; D3–D8 are open.
 - [x] Reconcile the home checkout (2026-09-29).
   - Its 53 modified files were committed. The Forms/JIT/Assembly/FESystem changes became `b9f59552` ("Add side-selected cut-adjacent facet integrals"). The refactoring-plan edits were already upstream and were dropped during the rebase.
   - The branch was rebased onto `fc56527`. The redundant local commit `09976e2` was skipped because it is patch-identical to `2768303`.
@@ -336,17 +349,25 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - R/h = 8, 16, 32, 64 in 2D.
   - Run to at least 5–10 viscous times `ρR²/μ` and report `max|u|(t)`.
   - At the end state report the pressure jump (mean interior minus exterior), volume and shape.
-- [ ] **Candidates:**
-  - (a) SurfaceStress;
-  - (b) KAG with the Helmholtz filter (`c_l` about 1) or a normal-gradient-stabilized mass;
-  - (c) unfiltered KAG, for reference only.
+- [ ] **Candidates** (all without tunable parameters, per P1):
+  - (a) **`SurfaceStress`** (the current default).
+  - (b) **KAG with a lumped trace mass.** Set `κ_i = −g_i / m_i`, where `g` is the φ-gradient of the surface-plus-Young energy and `m_i` is the row sum of `M`.
+    - The code already computes `m_i` as `lumped_kinematic_mass`, and it equals ± the discrete liquid-volume derivative (`FE/LevelSet/LevelSetCurvatureProjection.cpp` about L3321–3330).
+    - At a discrete constrained stationary point, `g = μ ∂V/∂φ`, so `κ_i` is exactly constant. The exact balance by a constant pressure is therefore kept.
+    - The ill-conditioned solve becomes a diagonal division.
+    - Implementation: a mass-mode option in the curvature-projection options that bypasses the PCG/LSQR solve.
+    - To check: noise in `κ_i` at nodes with very small `m_i`, and its effect on spurious currents.
+  - (c) **Unfiltered consistent-mass KAG**, for reference only.
+  - **Fallback only if (a) and (b) both fail the D1 criteria:** KAG with the Helmholtz filter or a normal-gradient-stabilized mass. Its coefficient must be fixed once from dimensional scaling (P1), never tuned.
 - [ ] **Time step.** Check Δt against the capillary constraint (§3.6). If needed, add a semi-implicit surface-tension term (Bänsch/Hysing) or use Δt below the limit.
 - [ ] **Acceptance (proposal):**
   - pressure-jump error ≤ 1% at R/h = 32 with observed order ≥ 1;
   - final `Ca_sp` decreasing with h, and not worse than the 07-17 SurfaceStress level (speed/γ about 1e-5);
   - no growth of `max|u|` in time;
   - volume drift ≤ 1e-4.
-- [ ] **Selection.** Record the chosen default route and the reason in §4 (D2). Then run the 3D sphere at R/h = 8, 16, 32.
+- [ ] **Selection.** After the M2 static drop, the M3 capillary wave, and the M4 sessile and Ren–E comparisons, record the chosen default route and the reason in §4.
+  - Among candidates meeting the D1 criteria, prefer the one without tunable parameters (P1).
+  - Then run the 3D sphere at R/h = 8, 16, 32.
 - Optional accuracy improvement if spurious currents dominate: the Gross–Reusken improved Laplace–Beltrami (the projection uses a recovered, smoother normal).
 
 ### M3 — Dynamic capillarity
