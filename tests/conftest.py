@@ -87,6 +87,7 @@ RTOL = {
     "Calcium": 1.0e-10,
     "Cauchy_stress": 1.0e-4,
     "Concentration": 1.0e-10,
+    "Darcy_pressure": 1.0e-10,
     "Def_grad": 1.0e-10,
     "Divergence": 1.0e-9,
     "Displacement": 1.0e-10,

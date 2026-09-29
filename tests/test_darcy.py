@@ -6,7 +6,11 @@ import numpy as np
 import pytest
 import xml.etree.ElementTree as ET
 
-from .conftest import add_test_boundary_face, make_interior_node_case, run_by_name
+from .conftest import add_test_boundary_face, make_interior_node_case, run_by_name, run_with_reference
+
+
+def test_interior_node_pressure(n_proc):
+    run_with_reference("darcy", "interior_node_pressure", ["Darcy_pressure"], n_proc, 2)
 
 
 @pytest.mark.parametrize("nsd", [2, 3])
