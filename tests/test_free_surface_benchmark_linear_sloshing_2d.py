@@ -222,7 +222,7 @@ def test_time_step_study_runs_are_reported_but_not_gated(study, tmp_path, capsys
     meta["protocol_run"] = False
     (tmp_path / "dt_study/L16_diag/case.json").write_text(json.dumps(meta))
     assert ver.main([*runs, str(tmp_path / "dt_study/L16_diag")]) == 0
-    assert "[diagnostic (coupled_field), not gated]" in capsys.readouterr().out
+    assert "[diagnostic (coupled_field, H0=0.5078125), not gated]" in capsys.readouterr().out
     with pytest.raises(ValueError):
         gen.generate(16, tmp_path / "bad", steps_per_period=8)
 
@@ -238,3 +238,15 @@ def test_wet_extension_diagnostic_variant(tmp_path):
     assert "Use_wet_extension" not in (tmp_path / "p/solver.xml").read_text()
     with pytest.raises(ValueError):
         gen.generate(16, tmp_path / "bad", level_set_velocity="other")
+
+
+def test_mean_depth_diagnostic_variant(tmp_path):
+    case = gen.generate(16, tmp_path / "d", mean_depth=0.5 + 1 / 32)
+    assert not case["protocol_run"]
+    assert case["interface_cell_position"] == pytest.approx(0.5)
+    assert case["omega_inviscid"] == pytest.approx(
+        math.sqrt(math.pi * math.tanh(math.pi * (0.5 + 1 / 32))))
+    assert case["interface_band_vertex_gap_over_h"] > 0.3
+    assert gen.generate(16, tmp_path / "p")["interface_cell_position"] == pytest.approx(0.125)
+    with pytest.raises(ValueError):
+        gen.generate(16, tmp_path / "bad", mean_depth=0.7)
