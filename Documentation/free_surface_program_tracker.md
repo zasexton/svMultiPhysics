@@ -350,6 +350,20 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   - The extension lives on a separate auxiliary field and is parameter-free (P1). It never enters the momentum rows; the retired same-field dry-domain diffusion (FSR-01) stays retired.
   - Until it exists, the M2, M3 and M4 benchmark runs wait. The existing algebraic wet extension (`wall_compatible_normal`) is the comparison baseline.
   - Reason: advecting φ with the coupled fluid velocity leaves dry vertices at zero velocity, and the resulting lag failed `linear_sloshing_2d` at L/h = 64.
+  - **Implemented and merged 2026-09-30 (`6977c5ac`..`02da73ea`, new `Application/Core/LevelSetPdeVelocityExtension.{h,cpp}`).**
+    - The known set K is the wet vertices plus every vertex of the retained interface cells, the same seed as `wall_compatible_normal`, so w = u on the interface.
+    - On every other vertex w solves, with Dirichlet data from K, one of two parameter-free symmetric problems:
+      - `pde_harmonic`: (∇w, ∇v) = 0;
+      - `pde_normal`: ((n·∇)w, (n·∇)v) = 0 with n = ∇φ/|∇φ| per cell.
+    - The extension covers all dry vertices (no band). A band edge brought back a velocity jump; a band remains only as a diagnostic option.
+    - Wall-normal components are zero on dry wall vertices, using the fluid's strong wall conditions.
+    - Each rank contributes its owned dry cells; every rank assembles the same system in global-ID order and solves it by sparse LU, so the result is independent of the partition.
+    - Two couplings, selected by `Advection_velocity_extension_coupling`:
+      - `prescribed` writes w to the separate prescribed advection field, as D9 specified; the transport sees it one outer pass late.
+      - `monolithic` installs the same problem as frozen rows of the existing algebraic extension unknown; it never touches the momentum rows.
+    - Both the method and the coupling must be named; there is no default. The run fails closed on a singular solve, a zero ∇φ (normal operator), non-simplex dry cells, or amplification above 16×.
+    - Tests: 8 serial unit tests, 2-rank parity to 1e-13, driver selection tests and 48 Python tests. Application CTest 4/4 (job `46108807`).
+    - Recommended variant: `pde_harmonic` with `monolithic` coupling. It is always well-posed (each dry value is a convex combination of its neighbours) and keeps the coupled-field outer-pass counts. `prescribed` coupling raises static-drop start-up steps to 9–11 outer passes against the 12-pass cap. The replicated dry-region solve may need a distributed solve for large 3D decks.
 - **D10, 2026-09-30: space and time convergence are judged separately.** Spatial convergence is gated with the time-step error removed (a small fixed Δt or a converged-Δt reference), and a separate Δt study is run at a fixed mesh. Refining Δt with h let opposite-sign errors cancel.
 - **D11, 2026-09-30: volume criteria gate the maximum deviation over the run**, including any reversible oscillation of the P1 area.
 - **D12, 2026-09-30: sloshing damping error ≤ 5% at the finest level** (pass/fail), matching the capillary-wave criterion.
@@ -428,13 +442,30 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - max|u|/√(gH) ≤ 3.4e-13; pressure, interface and volume errors 0 to 5e-17. The gate is 1e-8 for this exactly representable state.
   - Newton makes no updates, so this checks balance, not the solve. A perturbed-start variant would exercise the solve.
 - [ ] **Tank at rest (original plan item).** Take a small subset of the existing hydrostatic matrix into CTest. The full 960-case matrix does not need to run routinely.
-- [ ] **2D linear sloshing: FAILS at the finest level (2026-09-30, job `46023412`).** Benchmark `tests/cases/fluid/free_surface_benchmarks/linear_sloshing_2d/` (merged 2026-09-30).
+- [ ] **2D linear sloshing: with the PDE extension, only the convergence-order part of the frequency criterion still fails (2026-09-30).** First run: job `46023412`. Benchmark `tests/cases/fluid/free_surface_benchmarks/linear_sloshing_2d/` (merged 2026-09-30).
   - Setup: free-slip walls; a reference from the exact viscous linear dispersion relation (ω = 1.7006, damping 9.52e-3); Δt = T0/(2L/h).
   - Frequency error −0.32% / +0.28% / +1.43% at L/h = 16/32/64 (limit 1% with convergence). Max area oscillation 5.5e-5 / 5.4e-5 / 6.5e-4 (limit 1e-4). Damping error 1.7% / 2.1% / 7.6%.
   - Diagnosed cause: with φ advected by the coupled fluid velocity and no velocity extension, dry vertices one row above the cut cells keep zero velocity and their φ lags. That lag grows with refinement (8% → 17% at half period) and drives a spurious cos(2kx) mode of 9.5% of the amplitude at L/h = 64.
   - With the existing wet-extension transport (the SPHERIC 05 option): frequency error −0.385% / −0.046% / +0.097%, area ≤ 4e-5. The frequency error is not strictly monotone, and the extension writes about 1 MB of map per step.
   - The Δt error alone is clean second order. Refining Δt with h lets opposite-sign time and space errors cancel, so gate the spatial study with the time error removed.
-  - `static_drop_2d` uses the same coupled transport, so M2 is exposed too.
+  - `static_drop_2d` used the same coupled transport, so M2 was exposed too.
+  - **PDE extension (D9), job `46089180`.** The spatial study runs 128 steps per period at every level, with the time error removed via the Δt study at L/h = 32 (observed order 2.11) (D10).
+
+    | Transport | Frequency error, L/h = 16 / 32 / 64 | Damping error at 64 (probe) | Max dA/A |
+    |---|---|---:|---:|
+    | `pde_harmonic` monolithic (protocol) | +0.019% / +0.062% / +0.074% | 3.3% | 3.2e-5 |
+    | `pde_normal` monolithic | +0.016% / +0.054% / +0.059% | 3.1% | 2.6e-5 |
+    | wet extension | +0.017% / +0.053% / +0.120% | 3.4% | 4.0e-5 |
+    | coupled field | +0.081% / +0.383% / +1.455% | 7.6% | 6.5e-4 |
+
+    - Protocol transport: the frequency limit (≤ 1%), damping (≤ 5%, D12) and volume (≤ 1e-4, D11) pass. The frequency error does not decrease (observed order −0.96), so the "observed convergence" part fails.
+    - The errors are at the level of the measurement uncertainty: probe and modal fits differ by up to 0.018%, and the viscous frequency shift is 0.020%.
+    - The modal-amplitude damping converges to the reference: γ/γ_ref = 1.028, 1.005, 0.999. The probe damping error is 3.3%.
+    - The spurious cos(2kx) mode drops from 9.5% to 2.0% of the amplitude. Cost is 3.83 s/step at L/h = 64 with 3.08 outer passes per step.
+    - Two-rank runs match serial to 1e-16 but need `Ghost_layers` = 3 (MPI defect 2).
+    - **Open questions (for the user):**
+      1. Frequency convergence: add an error floor below which the order test is skipped, gate on the modal fit, or accept the failure.
+      2. Whether the damping gate should use the modal amplitude instead of the probe.
 - [ ] **2D linear sloshing (original plan item)** at 3 meshes and 3 time steps. Compare frequency and damping with linear theory. Proposal: frequency error ≤ 1% at the finest mesh with observed convergence; volume drift ≤ 1e-4 over the run.
 - [ ] **SPHERIC 05 D18/D38** to t = 0.3 s and then further. Compare profiles with experiment. Proposal: no regression from the June RMSE of about 0.02 m, and no false wetting.
 - [ ] **Re-run SPHERIC 10 and 02** on the current tip. They were never re-run after the aggregation, sparsity and penalty fixes. Record whether the June pressure-spike and sliver-cut failures persist.
@@ -449,7 +480,12 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - Time step `Δt ≤ sqrt(ρh³/(4πγ))`, the capillary limit for a one-sided free surface.
   - A dry run of all 24 cases validates against the parser.
   - A smoke run at R/h = 8 with `SurfaceStress` (Sept 4 binary) accepted 5 of 5 steps, with pressure-jump error 0.14% and area drift 1.5e-7.
-  - Level-set advection uses the coupled velocity. Check this once against the wet-extension map at R/h = 8.
+  - Level-set transport check (job `46089180`, La = 12, `surface_stress`, 2·Δt_B): the PDE extension does not change the relaxed drop. At R/h = 8 and 16 the pressure-jump error, `Ca_sp` and growth ratio agree with coupled transport to 2–3 digits, and it costs 15–18% more per step. The protocol transport is now `pde_harmonic_monolithic`, with Δt = 2·Δt_B at La = 12 and Δt_B at La = 120.
+- [ ] **M2 La = 12 study submitted 2026-09-30 on `02da73ea`.**
+  - Three capillary forms (`surface_stress`, `kag_lumped`, `kag_consistent`) × R/h = 8, 16, 32, each as a serial single-rank job (MPI defects).
+  - Jobs `46119057`, `46119142`, `46119433`, `46119435`, `46119444`, `46119471`, `46119474`, `46119476`, `46119478`. They start after build job `46118906`, which installs `/scratch/users/zsexton/svmp-bin/svmultiphysics-02da73ea`.
+  - Cases and output: `/scratch/users/zsexton/free-surface-benchmarks/static_drop_2d/02da73ea/La12/<form>/L<level>`, with the job list in `jobs.txt`.
+  - Expected: about 5 min at R/h = 8, about 1 h at 16, and about 10–15 h at 32 (longer on SKX nodes).
 - [x] **Per-step cost must come down before the refinement study (added 2026-09-29; done 2026-09-30).**
   - Merged commits `b5837011`, `09b46072`, `889c75f2` and `67b4395a`:
     - a reference-element metadata cache;
@@ -535,7 +571,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - Metrics: amplitude from the exact cos(kx) coefficient of the P1 surface; frequency and damping from a damped-cosine fit; area as the maximum over the run (D11).
   - Protocol (D9, D10): `--transport` coupled / wet_extension / PDE extension, where the PDE extension becomes the default once it exists. One shared Δt at the λ/h = 64 capillary limit (2,900 steps) for the spatial study, plus a separate Δt/2, Δt/4 study at λ/h = 32.
   - Smoke run `46075460` (λ/h = 16, 0.1 period): amplitude within 7.5e-4 of the reference, area drift 4.9e-7 and growing.
-- [ ] **Capillary wave runs** (Prosperetti) at λ/h = 16, 32, 64 and three time steps. They wait on the PDE extension (D9). Note: the wet extension writes about 1 MB of JSON map per step; make that output opt-in before long runs. Proposal: frequency error ≤ 2% and damping error ≤ 5% at λ/h = 32 (the 07-17 n = 16 run already had 1.2% frequency error).
+- [ ] **Capillary wave runs** (Prosperetti) at λ/h = 16, 32, 64 and three time steps. The PDE extension (D9) has merged, but `capillary_wave_2d/generate_case.py` still has to route `--transport` to `pde_harmonic_monolithic` before the runs. Note: the wet extension writes about 1 MB of JSON map per step; make that output opt-in before long runs. Proposal: frequency error ≤ 2% and damping error ≤ 5% at λ/h = 32 (the 07-17 n = 16 run already had 1.2% frequency error).
 - [ ] **Oscillating 2D drop**: Lamb frequency and viscous damping.
 
 ### M4 — Wetting (unfitted)
@@ -576,7 +612,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
     1. Cycle acceptance: the inner solve meets the Newton tolerance, but there is no fresh zero-update check on a further topology.
     2. Whether to re-anchor the backward-Euler energy history after a topology change, since it is diagnostic only.
     3. Whether to remove `SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS`.
-  - **Area drift (not addressed here):** the liquid area grows by 0.7–1.0% over 300 steps with coupled transport, about 100× the 1e-4 limit. It is tied to D9 transport and conservation.
+  - **Area drift (not addressed here):** the liquid area grows by 0.7–1.0% over 300 steps with coupled transport, about 100× the 1e-4 limit. With `--transport pde_extension` (harmonic, monolithic) the maximum drift falls to 2.45e-3 at 60° and 1.6e-3 at 120°, with similar angles, but that is still over the limit. The sessile protocol default is still coupled.
 - [x] **Configuration details for the D4 runs (all in place after `6ab328c8`):**
   - Young term;
   - Navier slip on the wetted wall;
