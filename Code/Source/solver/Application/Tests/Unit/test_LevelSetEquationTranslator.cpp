@@ -2428,6 +2428,22 @@ TEST(LevelSetEquationTranslator,
   svmp::Physics::formulations::navier_stokes::
       forceLink_NavierStokesRegister();
   auto mesh = makeRegistryQuadMesh();
+  // Decision D4: a prescribed contact wall is a planar wall with Navier slip
+  // and a strong normal-only velocity condition, audited on the complete
+  // wall marker.  Give this fixture the right wall (outward normal +x).
+  auto& local_mesh = mesh->local_mesh();
+  local_mesh.register_label("prescribed_contact_wall", wall_marker);
+  for (svmp::index_t face = 0;
+       face < static_cast<svmp::index_t>(local_mesh.n_faces()); ++face) {
+    const auto vertices = local_mesh.face_vertices(face);
+    if (vertices.size() == 2u &&
+        std::all_of(vertices.begin(), vertices.end(), [&](svmp::index_t vertex) {
+          return local_mesh.X_ref().at(
+                     static_cast<std::size_t>(2 * vertex)) == 1.0;
+        })) {
+      local_mesh.set_boundary_label(face, wall_marker);
+    }
+  }
 
   svmp::Physics::EquationModuleInput level_set_input{};
   level_set_input.equation_type = "level_set";
@@ -2485,7 +2501,21 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "1.0 0.0 0.0"};
   free_surface.params["Contact_angle_degrees"] =
       svmp::Physics::ParameterValue{true, "60.0"};
+  free_surface.params["Wall_slip_model"] =
+      svmp::Physics::ParameterValue{true, "Navier"};
+  free_surface.params["Wall_slip_length"] =
+      svmp::Physics::ParameterValue{true, "0.2"};
   fluid_input.boundary_conditions.push_back(std::move(free_surface));
+
+  svmp::Physics::BoundaryConditionInput wall{};
+  wall.name = "prescribed_contact_wall";
+  wall.boundary_marker = wall_marker;
+  wall.params["Type"] =
+      svmp::Physics::ParameterValue{true, "Dirichlet"};
+  wall.params["Value"] = svmp::Physics::ParameterValue{true, "0.0"};
+  wall.params["Effective_direction"] =
+      svmp::Physics::ParameterValue{true, "1 0"};
+  fluid_input.boundary_conditions.push_back(std::move(wall));
 
   auto fluid_module =
       svmp::Physics::EquationModuleRegistry::instance().create(

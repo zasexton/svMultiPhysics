@@ -1961,6 +1961,16 @@ enum class ContactLineKind : std::uint8_t {
     return ContactLineKind::None;
 }
 
+// Input-facing name of a wall-owning contact law, used in validation messages
+// shared by PrescribedContactAngle and DynamicContactAngle walls.
+[[nodiscard]] std::string contactWallLawName(
+    const FreeSurfaceContactLine& contact_line)
+{
+    return contactLineKind(contact_line) == ContactLineKind::PrescribedAngle
+               ? "PrescribedContactAngle"
+               : "DynamicContactAngle";
+}
+
 [[nodiscard]] int contactLineWallBoundaryMarker(
     const FreeSurfaceContactLine& contact_line) noexcept
 {
@@ -2985,8 +2995,9 @@ void validateDynamicContactPlanarWallMarker(
     if (evidence.face_count == 0u || evidence.invalid_face_count != 0u) {
         std::ostringstream message;
         message
-            << "IncompressibleNavierStokesVMSModule: DynamicContactAngle "
-               "requires every face on Contact_line_wall_marker to be a "
+            << "IncompressibleNavierStokesVMSModule: "
+            << contactWallLawName(contact_line)
+            << " requires every face on Contact_line_wall_marker to be a "
                "first-order planar face with the configured physical "
                "outward wall_normal"
             << " wall_boundary_marker="
@@ -3763,6 +3774,7 @@ void logDynamicContactOperatorAngle(
     int dim)
 {
     const auto normal = normalizedWallNormal(contact_line);
+    const auto law = contactWallLawName(contact_line);
     constexpr FE::Real tolerance = FE::Real{1.0e-12};
     int axis = -1;
     for (int component = 0; component < 3; ++component) {
@@ -3771,19 +3783,22 @@ void logDynamicContactOperatorAngle(
         if (component >= dim) {
             if (magnitude > tolerance) {
                 throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: DynamicContactAngle wall_normal must lie in the velocity space dimension");
+                    "IncompressibleNavierStokesVMSModule: " + law +
+                    " wall_normal must lie in the velocity space dimension");
             }
             continue;
         }
         if (std::abs(magnitude - FE::Real{1.0}) <= tolerance) {
             if (axis >= 0) {
                 throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: DynamicContactAngle wall_normal must have exactly one axis-aligned component");
+                    "IncompressibleNavierStokesVMSModule: " + law +
+                    " wall_normal must have exactly one axis-aligned component");
             }
             axis = component;
         } else if (magnitude > tolerance) {
             throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: DynamicContactAngle currently requires an axis-aligned wall_normal because general linear-combination normal constraints are unavailable");
+                "IncompressibleNavierStokesVMSModule: " + law +
+                " currently requires an axis-aligned wall_normal because general linear-combination normal constraints are unavailable");
         }
     }
     if (axis < 0) {
@@ -3799,6 +3814,7 @@ void validateDynamicContactWallEssentialBC(
     int dim)
 {
     const int normal_axis = axisAlignedWallNormalAxis(contact_line, dim);
+    const auto law = contactWallLawName(contact_line);
     bool normal_is_constrained = false;
     bool saw_wall_bc = false;
     for (const auto& dirichlet : options.velocity_dirichlet) {
@@ -3814,25 +3830,29 @@ void validateDynamicContactWallEssentialBC(
             if (!FE::forms::bc::isZeroConstantScalarValue(
                     dirichlet.value[static_cast<std::size_t>(component)])) {
                 throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: DynamicContactAngle requires a stationary zero-valued normal wall essential condition");
+                    "IncompressibleNavierStokesVMSModule: " + law +
+                    " requires a stationary zero-valued normal wall essential condition");
             }
             if (component == normal_axis) {
                 normal_is_constrained = true;
             } else {
                 throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: DynamicContactAngle rejects tangential/full no-slip Dirichlet constraints on its Navier-slip wall");
+                    "IncompressibleNavierStokesVMSModule: " + law +
+                    " rejects tangential/full no-slip Dirichlet constraints on its Navier-slip wall");
             }
         }
     }
     for (const auto& dirichlet : options.velocity_dirichlet_weak) {
         if (dirichlet.boundary_marker == contactLineWallBoundaryMarker(contact_line)) {
             throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: DynamicContactAngle requires a strong zero normal-only wall essential condition; weak velocity Dirichlet data on the wall are unsupported");
+                "IncompressibleNavierStokesVMSModule: " + law +
+                " requires a strong zero normal-only wall essential condition; weak velocity Dirichlet data on the wall are unsupported");
         }
     }
     if (!saw_wall_bc || !normal_is_constrained) {
         throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: DynamicContactAngle requires an axis-aligned zero normal-only velocity Dirichlet condition on Contact_line_wall_marker");
+            "IncompressibleNavierStokesVMSModule: " + law +
+            " requires an axis-aligned zero normal-only velocity Dirichlet condition on Contact_line_wall_marker");
     }
 }
 
@@ -4586,12 +4606,20 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                     contact_line,
                     dim,
                     "prescribed contact angle");
-                if (contactLineHasNavierSlip(contact_line)) {
-                    validateDynamicContactWallEssentialBC(
-                        options, contact_line, dim);
-                    validateDynamicContactPlanarWallMarker(
-                        system, contact_line);
+                // Decision D4: the Young term in momentum is the only
+                // contact-angle mechanism.  On a no-slip wall the velocity
+                // test functions vanish, so that term does no work and
+                // nothing would impose the angle; the contact line moves
+                // through Navier slip on the wetted wall, held by a strong
+                // normal-only condition, exactly as for DynamicContactAngle.
+                if (!contactLineHasNavierSlip(contact_line)) {
+                    throw std::invalid_argument(
+                        "IncompressibleNavierStokesVMSModule: unfitted PrescribedContactAngle requires Navier slip on the wetted wall (Wall_slip_model=Navier with a positive literal Wall_slip_length) and a stationary zero normal-only strong velocity condition on Contact_line_wall_marker, as DynamicContactAngle; on a no-slip wall the Young term does no work and nothing imposes the contact angle (decision D4)");
                 }
+                validateDynamicContactWallEssentialBC(
+                    options, contact_line, dim);
+                validateDynamicContactPlanarWallMarker(
+                    system, contact_line);
             } else {
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: prescribed fitted contact angles are unsupported until a true fitted contact-line (codimension-two) integration entity is available; the condition must not be integrated over the complete free-surface boundary");
