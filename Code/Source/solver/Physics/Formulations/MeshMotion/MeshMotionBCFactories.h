@@ -164,6 +164,32 @@ toVectorEssentialBC(const DirichletBC& bc,
                     std::string_view value_prefix = "mesh_displacement")
 {
     const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(bc, context);
+    bool all_active = true;
+    bool any_active = false;
+    for (int d = 0; d < dim; ++d) {
+        const bool active = bc.active_components[static_cast<std::size_t>(d)];
+        all_active = all_active && active;
+        any_active = any_active || active;
+    }
+    if (!any_active) {
+        throw std::invalid_argument(
+            std::string(context) +
+            ": a mesh-motion Dirichlet condition must constrain at least one component");
+    }
+    if (!all_active) {
+        // Component-selected essential condition, e.g. a sliding wall that
+        // constrains only the wall-normal displacement of an axis-aligned
+        // boundary.  The unselected components keep the natural condition.
+        return FE::forms::bc::vectorComponentEssentialBC(
+            bc.value,
+            bc.active_components,
+            dim,
+            marker,
+            value_prefix,
+            field_symbol,
+            "Mesh-motion component Dirichlet",
+            FE::forms::bc::ComponentValueNameStyle::Component);
+    }
     auto values = FE::forms::bc::toVectorExpr(
         bc.value,
         dim,

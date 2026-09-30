@@ -30,6 +30,9 @@ struct PseudoElasticMeshMotionOptions {
     struct DirichletBC {
         int boundary_marker{-1};
         std::array<ScalarValue, 3> value{ScalarValue{0.0}, ScalarValue{0.0}, ScalarValue{0.0}};
+        /// Components constrained by this condition (see
+        /// HarmonicMeshMotionOptions::DirichletBC::active_components).
+        std::array<bool, 3> active_components{true, true, true};
     };
 
     struct NaturalBC {

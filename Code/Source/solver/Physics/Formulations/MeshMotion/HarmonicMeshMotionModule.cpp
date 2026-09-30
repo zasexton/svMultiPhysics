@@ -185,6 +185,45 @@ void HarmonicMeshMotionModule::registerOn(FE::systems::FESystem& system) const
         }
     }
 
+    // Consistent kinematic owners (fitted MeshNitsche free surfaces) of the
+    // target displacement: validate before any system mutation.  Their row
+    // constrains the normal mesh velocity, so the operator must act on the
+    // velocity as well (a displacement operator would leave a per-step P1
+    // flux defect that accumulates), and the combined boundary row must be
+    // coercive, gamma_N > 2 kappa.
+    for (const auto& declaration : system.meshNormalBoundaryConstraints()) {
+        if (!declaration.requires_mesh_flux_consistency ||
+            (existing_displacement.has_value() &&
+             declaration.mesh_displacement_field != *existing_displacement)) {
+            continue;
+        }
+        if (normal_markers.count(declaration.boundary_marker) != 0u) {
+            throw std::invalid_argument(
+                "HarmonicMeshMotionModule::registerOn: boundary " +
+                std::to_string(declaration.boundary_marker) +
+                " has both a mesh-motion normal constraint and a consistent "
+                "kinematic owner '" + declaration.owner_component + "'");
+        }
+        if (options_.quantity != HarmonicQuantity::Velocity) {
+            throw std::invalid_argument(
+                "HarmonicMeshMotionModule::registerOn: boundary " +
+                std::to_string(declaration.boundary_marker) +
+                " has a consistent kinematic owner (fitted MeshNitsche) that "
+                "constrains the normal mesh velocity; set the harmonic "
+                "quantity to velocity (Harmonic_quantity=velocity)");
+        }
+        const auto kappa_literal = literal_real(effective_kappa);
+        const auto gamma = declaration.mesh_flux_consistency_nitsche_gamma;
+        if (!kappa_literal || !(gamma > 2.0 * *kappa_literal)) {
+            throw std::invalid_argument(
+                "HarmonicMeshMotionModule::registerOn: the consistent Nitsche "
+                "row on boundary " +
+                std::to_string(declaration.boundary_marker) +
+                " requires a literal kappa with gamma_N > 2 kappa (gamma_N = " +
+                std::to_string(gamma) + ")");
+        }
+    }
+
     const auto binding = FE::systems::resolveMeshDisplacementBinding(
         system,
         FE::systems::MeshDisplacementBindingOptions{
@@ -256,7 +295,32 @@ void HarmonicMeshMotionModule::registerOn(FE::systems::FESystem& system) const
     const auto d_mesh = StateField(d_id, V, "d_mesh");
     const auto psi = TestField(d_id, V, "psi");
     const auto kappa = FE::forms::bc::toScalarExpr(effective_kappa, "mesh_motion_kappa");
-    auto residual = (kappa * inner(grad(d_mesh), grad(psi))).dx();
+    // The harmonic operator acts on the displacement or on the mesh velocity.
+    const auto q_mesh =
+        options_.quantity == HarmonicQuantity::Velocity ? dt(d_mesh) : d_mesh;
+    auto residual = (kappa * inner(grad(q_mesh), grad(psi))).dx();
+
+    // Nitsche consistency on boundaries whose normal mesh displacement is
+    // owned by another operator's consistent kinematic row (fitted-ALE
+    // MeshNitsche free surfaces).  That row penalizes the normal mismatch;
+    // removing this operator's own normal flux kappa ((grad d) n . n) there
+    // makes the boundary equation reduce to the kinematic relation, so the
+    // enforcement error does not depend on the penalty.  The tangential
+    // flux stays natural (the Free tangential policy).
+    std::set<int> flux_consistency_markers;
+    for (const auto& declaration : system.meshNormalBoundaryConstraints()) {
+        if (declaration.mesh_displacement_field != binding.displacement_field ||
+            !declaration.requires_mesh_flux_consistency) {
+            continue;
+        }
+        if (!flux_consistency_markers.insert(declaration.boundary_marker).second) {
+            continue;
+        }
+        const auto n = currentNormal();
+        residual = residual -
+                   (kappa * inner(grad(q_mesh) * n, n) * inner(psi, n))
+                       .ds(declaration.boundary_marker);
+    }
 
     FE::systems::BoundaryConditionManager bc_manager;
     bc_manager.install(options_.natural, [&](const auto& bc) {

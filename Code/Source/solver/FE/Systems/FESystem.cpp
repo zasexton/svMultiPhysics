@@ -1511,6 +1511,18 @@ generatedBoundaryTraceRealBits(Real value) noexcept
            descriptor.source == source;
 }
 
+// Enforcement of the fluid side of a fitted-ALE fluid-normal relation:
+// a weak penalty or Nitsche row on the fluid, or WeakConsistent when the
+// fluid keeps its natural (dynamic) traction condition and the kinematic
+// relation is enforced on the mesh displacement only.
+[[nodiscard]] bool isFittedRelatedFluidEnforcement(
+    analysis::EnforcementKind kind) noexcept
+{
+    return kind == analysis::EnforcementKind::WeakPenalty ||
+           kind == analysis::EnforcementKind::WeakNitsche ||
+           kind == analysis::EnforcementKind::WeakConsistent;
+}
+
 [[nodiscard]] bool meshNormalRelatedFluidDescriptorMatches(
     const analysis::BoundaryConditionDescriptor& descriptor,
     const MeshNormalBoundaryConstraintDeclaration& declaration,
@@ -1528,10 +1540,7 @@ generatedBoundaryTraceRealBits(Real value) noexcept
            descriptor.interface_marker == -1 &&
            descriptor.trace_kind ==
                analysis::TraceKind::NormalComponent &&
-           (descriptor.enforcement_kind ==
-                analysis::EnforcementKind::WeakPenalty ||
-            descriptor.enforcement_kind ==
-                analysis::EnforcementKind::WeakNitsche) &&
+           isFittedRelatedFluidEnforcement(descriptor.enforcement_kind) &&
            descriptor.related_variables == expected_related &&
            descriptor.source == source;
 }
@@ -10969,10 +10978,7 @@ FESystem::validatedFittedALENormalConstraint_(
                 std::string::npos ||
             !hasOperator(binding.operator_tag) ||
             !has_boundary_formulation ||
-            (related.enforcement_kind !=
-                 analysis::EnforcementKind::WeakPenalty &&
-             related.enforcement_kind !=
-                 analysis::EnforcementKind::WeakNitsche),
+            !isFittedRelatedFluidEnforcement(related.enforcement_kind),
         InvalidArgumentException,
         "FESystem: fitted-ALE measurement consumer provenance is not an "
         "installed boundary operator binding");
@@ -14175,10 +14181,7 @@ void FESystem::recordAcceptedMeshNormalBoundaryConstraints(
             FE_THROW_IF(
                 related.descriptor_source.find_first_not_of(" \t\r\n") ==
                         std::string::npos ||
-                    (related.enforcement_kind !=
-                         analysis::EnforcementKind::WeakPenalty &&
-                     related.enforcement_kind !=
-                         analysis::EnforcementKind::WeakNitsche),
+                    !isFittedRelatedFluidEnforcement(related.enforcement_kind),
                 InvalidArgumentException,
                 "FESystem::recordAcceptedMeshNormalBoundaryConstraints: "
                 "reciprocal fluid descriptor provenance is invalid");
@@ -14360,7 +14363,11 @@ void FESystem::emitAcceptedMeshNormalBoundaryConstraintHistory(
                         << (binding.related_fluid->enforcement_kind ==
                                     analysis::EnforcementKind::WeakNitsche
                                 ? "WeakNitsche"
-                                : "WeakPenalty");
+                                : binding.related_fluid->enforcement_kind ==
+                                          analysis::EnforcementKind::
+                                              WeakConsistent
+                                      ? "WeakConsistent"
+                                      : "WeakPenalty");
             }
             FE_LOG_INFO(message.str());
         }
