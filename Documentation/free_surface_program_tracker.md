@@ -493,13 +493,24 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
 
 ### M4 — Wetting (unfitted)
 
-- [ ] **Implement or confirm the D4 configuration** (decided 2026-09-29):
+- [x] **D4 implemented and merged 2026-09-30** (commits `36b6966d`, `6ff1377d`, `fecba23d`, `846c745c`).
+  - `PrescribedAngle` contact cells now use the angle-preserving wall maintenance: the kind `PreserveAcceptedAngle`, formerly `AcceptedDynamicAngle`.
+  - The target-angle reset (`RepairToPrescribedAngle`) is fenced off: `requireAnglePreservingWallMaintenance` throws on every rank if it reaches production maintenance. The implementation stays for verification until M4.
+  - Branch tests: `test_fe_levelset` 366 passed + 1 declared skip; MPI 19/19; Physics 7/7 (492 tests); `test_application` 377/377; `test_application_mpi` 32 tests.
+  - Current rule, to be tightened: prescribed walls with slip require a strong, normal-only, axis-aligned wall condition. Without slip nothing is checked, and on a no-slip wall the contact line is pinned. Making slip and the strong normal wall mandatory is in progress.
+- [ ] **Vertex crossings block moving-interface runs (found 2026-09-30).** In sessile smoke runs (R/h = 16), every configuration stops at or just after the first mesh-vertex crossing:
+  - generalized-α: a cut-topology rejection, and bisection closes in on the crossing without passing it;
+  - backward Euler with FSILS: `FsilsVector::dot: layout mismatch`;
+  - backward Euler with Eigen and `SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS=4`: one crossing is accepted, then "Backward-Euler kinetic work does not bind ..." aborts the run.
+
+  Fix in progress on `dev/vertex-crossing`: topology changes become normal accepted events; energy bookkeeping reports unavailable instead of aborting (D1/D6); the FSILS layout check is fixed; the restart budget gets a documented default. Before the crossing the physics looks right: 60° spreads (88.8° → 73.7°, base 0.627 → 0.656) and 120° recedes (91° → 103°). Area drift reached 4.6e-4 after 15 steps in the spreading case, a conservation issue to address separately.
+- [ ] **Configuration details for the D4 runs:**
   - Young term;
   - Navier slip on the wetted wall;
   - strong no-penetration;
   - scale-only wall maintenance. The dynamic-contact path already has this; enable it for `PrescribedAngle`, which today applies the repair to the target angle.
   - no repair-to-target.
-- [ ] **2D sessile relaxation** at 60°, 90° and 120°. Start from a *non-equilibrium* shape (for example a 90° cap for a 60° target) and relax to equilibrium at R/h = 16, 32, 64. Proposal: angle error ≤ 2° at R/h = 32 and decreasing; base radius and apex height within 2%.
+- [ ] **2D sessile relaxation** at 60°, 90° and 120°. Benchmark scripts merged 2026-09-30: `tests/cases/fluid/free_surface_benchmarks/sessile_drop_2d/` (angles by local circle fit, within 0.13° at R/h = 16 on exact caps; slip length R/8; La = 12). Runs wait on the vertex-crossing fix. Start from a *non-equilibrium* shape (for example a 90° cap for a 60° target) and relax to equilibrium at R/h = 16, 32, 64. Proposal: angle error ≤ 2° at R/h = 32 and decreasing; base radius and apex height within 2%.
 - [ ] **Capillary rise** against the prepared Gründing et al. envelope, using `free_surface_wp5_capillary_rise_reference.json` and the comparison runner.
 - [ ] **Ren–E** advancing and receding: refine the 08-30 pilot at 3 meshes and 3 time steps, with slip length ratio ℓ_s/h = 2, 4, 8.
 - [ ] **3D sessile** at one angle, then extend.
