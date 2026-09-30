@@ -192,3 +192,36 @@ def test_missing_and_incomplete_data_fail_clearly(study, tmp_path, capsys):
     gen.generate(16, smoke, max_steps=5)
     assert ver.main([str(smoke)]) == 2
     assert "no solver output" in capsys.readouterr().err
+
+
+def test_solver_log_summary(tmp_path):
+    import gzip
+    lines = [
+        "[svMultiPhysics::Application] TimeLoop: nonlinear_done step=0 time=0.0e+00 converged=1 "
+        "iters=5 ||r||=1.84e-11 outer_iters=5 inner_iters_total=5",
+        "[svMultiPhysics::Application] TimeLoop: nonlinear_done step=1 time=1.1e-01 converged=0 "
+        "iters=3 ||r||=2.30e-11 outer_iters=4 inner_iters_total=3",
+    ]
+    with gzip.open(tmp_path / "solver_run.log.gz", "wt") as handle:
+        handle.write("\n".join(lines) + "\n")
+    (tmp_path / "run.txt").write_text("exit=0 elapsed_s=10 end=now\n")
+    summary = ver.solver_log_summary(tmp_path)
+    assert summary["steps_logged"] == 2 and summary["nonconverged_steps"] == 1
+    assert summary["outer_passes_mean"] == 4.5 and summary["newton_iterations_mean"] == 4.0
+    assert summary["final_residual_max"] == 2.30e-11 and summary["wall_seconds_per_step"] == 5.0
+
+
+def test_time_step_study_runs_are_reported_but_not_gated(study, tmp_path, capsys):
+    runs = study({16: 4e-3, 32: 1e-3, 64: 2.5e-4})
+    extra = tmp_path / "dt_study" / "L16_T64"
+    case = gen.generate(16, extra, steps_per_period=64)
+    assert not case["protocol_time_step"] and case["steps"] == 256
+    # Reuse the synthetic writer on a protocol case, then mark it as a diagnostic run.
+    write_synthetic_run(tmp_path / "dt_study" / "L16_diag", 16, 5e-2)
+    meta = json.loads((tmp_path / "dt_study/L16_diag/case.json").read_text())
+    meta["protocol_time_step"] = False
+    (tmp_path / "dt_study/L16_diag/case.json").write_text(json.dumps(meta))
+    assert ver.main([*runs, str(tmp_path / "dt_study/L16_diag")]) == 0
+    assert "[time-step study, not gated]" in capsys.readouterr().out
+    with pytest.raises(ValueError):
+        gen.generate(16, tmp_path / "bad", steps_per_period=8)
