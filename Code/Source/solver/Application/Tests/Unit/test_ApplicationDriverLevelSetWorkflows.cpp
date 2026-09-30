@@ -9041,23 +9041,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_DOUBLE_EQ(
       baseline.backward_euler_kinetic_work->identity_residual,
       svmp::FE::Real{0.0});
-  EXPECT_THROW(
-      recordAcceptedFreeSurfaceDiscreteFunctionals(
-          sim,
-          /*accepted_step=*/3u,
-          svmp::FE::Real{0.15},
-          svmp::FE::Real{0.05},
-          accepted_state_revision,
-          accepted_state_revision,
-          {},
-          std::span<const svmp::FE::Real>(
-              solution.data(), solution.size()),
-          std::span<const svmp::FE::Real>(
-              solution.data(), solution.size())),
-      std::runtime_error);
-  EXPECT_EQ(
-      sim.fe_system->freeSurfaceDiscreteFunctionalHistory().size(),
-      1u);
+  bool backward_euler_kinetic_work_bound = false;
   ASSERT_NO_THROW(recordAcceptedFreeSurfaceDiscreteFunctionals(
       sim,
       /*accepted_step=*/3u,
@@ -9069,7 +9053,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
       std::span<const svmp::FE::Real>(
           solution.data(), solution.size()),
       std::span<const svmp::FE::Real>(
-          previous_solution.data(), previous_solution.size())));
+          previous_solution.data(), previous_solution.size()),
+      std::nullopt,
+      &backward_euler_kinetic_work_bound));
+  EXPECT_TRUE(backward_euler_kinetic_work_bound);
 
   const auto history = sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
   ASSERT_EQ(history.size(), 2u);
@@ -9191,6 +9178,40 @@ TEST(ApplicationDriverLevelSetWorkflows,
       std::span<const svmp::FE::Real>(
           previous_solution.data(), previous_solution.size())));
   EXPECT_EQ(sim.fe_system->freeSurfaceDiscreteFunctionalHistory().size(), 2u);
+
+  // The kinetic-work pairing is energy-ledger bookkeeping: a step whose
+  // previous velocity is not the recorded endpoint (as after a cut-topology
+  // change that re-projects it) is recorded without the pairing, reported,
+  // and the run continues.
+  backward_euler_kinetic_work_bound = true;
+  ASSERT_NO_THROW(recordAcceptedFreeSurfaceDiscreteFunctionals(
+      sim,
+      /*accepted_step=*/4u,
+      svmp::FE::Real{0.2},
+      svmp::FE::Real{0.05},
+      accepted_state_revision,
+      accepted_state_revision,
+      {},
+      std::span<const svmp::FE::Real>(
+          solution.data(), solution.size()),
+      std::span<const svmp::FE::Real>(
+          previous_solution.data(), previous_solution.size()),
+      std::nullopt,
+      &backward_euler_kinetic_work_bound));
+  EXPECT_FALSE(backward_euler_kinetic_work_bound);
+  const auto unbound_history =
+      sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
+  ASSERT_EQ(unbound_history.size(), 3u);
+  EXPECT_EQ(unbound_history.back().accepted_step, 4u);
+  ASSERT_TRUE(unbound_history.back().backward_euler_kinetic_work.has_value());
+  EXPECT_EQ(
+      unbound_history.back()
+          .backward_euler_kinetic_work->previous_velocity_revision,
+      previous_velocity_revision);
+  EXPECT_NE(
+      unbound_history.back()
+          .backward_euler_kinetic_work->previous_velocity_revision,
+      endpoint_velocity_revision);
 #endif
 }
 
