@@ -6,6 +6,7 @@
 #include "Application/Core/SimulationBuilder.h"
 #include "Application/Translators/EquationTranslator.h"
 #include "Application/Translators/LevelSetEquationTranslator.h"
+#include "Application/Translators/MeshTranslator.h"
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Interfaces/LevelSetInterfaceDomain.h"
 #include "FE/Spaces/SpaceFactory.h"
@@ -2936,6 +2937,126 @@ TEST(OpenVesselExamples, FittedAleCaseBuildsMeshMotionOopInputs)
             "equations");
   EXPECT_EQ(mesh_motion_input.equation_params.at("Kappa").value, "1.0");
   ASSERT_EQ(mesh_motion_input.boundary_conditions.size(), 3u);
+}
+
+TEST(OpenVesselExamples, FittedAleMeshNitscheDecksDeclareSlidingWallsAndDisjointFaces)
+{
+  // MeshNitsche versions of the fitted SPHERIC Test 10 decks
+  // (generate_spheric_test10_fitted_decks.py).  The legacy decks and their
+  // tests above stay unchanged.
+  struct DeckExpectation {
+    std::string case_name;
+    int dim;
+    std::vector<std::pair<std::string, std::string>> walls;  // name, Effective_direction
+  };
+  const std::vector<DeckExpectation> decks = {
+      {"spheric_test10_lateral_water_1x_2d_meshnitsche",
+       2,
+       {{"wall_left", "1 0"}, {"wall_right", "1 0"}, {"wall_bottom", "0 1"}}},
+      {"spheric_test10_lateral_water_1x_meshnitsche",
+       3,
+       {{"wall_left", "1 0 0"},
+        {"wall_right", "1 0 0"},
+        {"wall_bottom", "0 1 0"},
+        {"wall_front", "0 0 1"},
+        {"wall_back", "0 0 1"}}},
+  };
+
+  for (const auto& expected : decks) {
+    SCOPED_TRACE(expected.case_name);
+    const auto case_dir = openVesselCaseDir("fitted_ale") / expected.case_name;
+    tinyxml2::XMLDocument doc;
+    ASSERT_NO_THROW(loadXml(case_dir / "solver.xml", doc));
+    const auto* root = doc.FirstChildElement("svMultiPhysicsFile");
+    ASSERT_NE(root, nullptr);
+    EXPECT_TRUE(fs::exists(case_dir / "benchmark.json"));
+
+    const auto& general = child(*root, "GeneralSimulationParameters");
+    expectText(general, "Use_new_OOP_solver", "true");
+    expectText(general, "Number_of_spatial_dimensions", std::to_string(expected.dim));
+
+    const auto& mesh = childWithAttribute(*root, "Add_mesh", "name", "tank");
+    expectReferencedFileExists(case_dir, mesh, "Mesh_file_path");
+    for (const auto& [wall, direction] : expected.walls) {
+      (void)direction;
+      expectFace(case_dir, mesh, wall);
+    }
+    expectFace(case_dir, mesh, "free_surface");
+    const auto mesh_path = case_dir / text(mesh, "Mesh_file_path");
+    for (const auto* field : {"GlobalNodeID", "Pressure", "Velocity", "mesh_displacement",
+                              "mesh_velocity"}) {
+      EXPECT_TRUE(fileContains(mesh_path, std::string("Name=\"") + field + "\"")) << field;
+    }
+
+    // The fluid registers before mesh_motion (MeshNitsche consistency term).
+    const auto* first_equation = root->FirstChildElement("Add_equation");
+    ASSERT_NE(first_equation, nullptr);
+    EXPECT_STREQ(first_equation->Attribute("type"), "fluid");
+
+    const auto& fluid = childWithAttribute(*root, "Add_equation", "type", "fluid");
+    expectText(fluid, "Enable_ALE", "true");
+    expectText(fluid, "Mesh_velocity_source", "coupled_displacement");
+    expectText(fluid, "Mesh_displacement_field", "mesh_displacement");
+    expectText(fluid, "Hydrostatic_pressure_initialization", "false");
+    EXPECT_EQ(fluid.FirstChildElement("Node_pressure_constraints"), nullptr)
+        << "the free-surface traction fixes the pressure level";
+    EXPECT_EQ(fluid.FirstChildElement("Momentum_source_temporal_and_spatial_values_file_path"),
+              nullptr)
+        << "the committed deck holds the tank at rest";
+    expectEigenDirectSolver(fluid);
+    const auto& free_surface = expectBoundaryCondition(fluid, "free_surface", "Free_surface");
+    expectText(free_surface, "Implementation", "FittedALE");
+    expectText(free_surface, "Kinematic_enforcement", "MeshNitsche");
+    expectText(free_surface, "Kinematic_nitsche_gamma", "10");
+    expectText(free_surface, "Tangential_mesh_policy", "Free");
+    expectText(free_surface, "Normal_kinematic_policy", "MatchFluidNormalVelocity");
+    expectText(free_surface, "Surface_tension", "0.0");
+    expectText(free_surface, "External_pressure", "0.0");
+
+    const auto& mesh_motion = childWithAttribute(*root, "Add_equation", "type", "mesh_motion");
+    expectText(mesh_motion, "Model", "Harmonic");
+    expectText(mesh_motion, "Harmonic_quantity", "velocity");
+    expectText(mesh_motion, "Kappa", "1");
+    EXPECT_FALSE(hasChildWithAttribute(mesh_motion, "Add_BC", "name", "free_surface"));
+    for (const auto& [wall, direction] : expected.walls) {
+      SCOPED_TRACE(wall);
+      for (const auto* equation : {&fluid, &mesh_motion}) {
+        const auto& bc = expectBoundaryCondition(*equation, wall, "Dir");
+        expectText(bc, "Value", "0.0");
+        expectText(bc, "Effective_direction", direction);
+      }
+    }
+
+#if defined(MESH_HAS_VTK)
+    // Every boundary face is in exactly one face file, so each face set keeps
+    // its label and no overlap is reported.
+    ensure_mpi_initialized_for_open_vessel_builder();
+    MeshParameters mesh_params;
+    mesh_params.name.set("tank");
+    mesh_params.mesh_file_path.set((case_dir / text(mesh, "Mesh_file_path")).string());
+    std::vector<std::string> names;
+    for (const auto* face = mesh.FirstChildElement("Add_face"); face != nullptr;
+         face = face->NextSiblingElement("Add_face")) {
+      auto* params = new FaceParameters();
+      params->name.set(face->Attribute("name"));
+      params->face_file_path.set((case_dir / text(*face, "Face_file_path")).string());
+      mesh_params.face_parameters.push_back(params);
+      names.emplace_back(face->Attribute("name"));
+    }
+    testing::internal::CaptureStderr();
+    const auto loaded = application::translators::MeshTranslator::loadMesh(mesh_params);
+    const auto warnings = testing::internal::GetCapturedStderr();
+    ASSERT_NE(loaded, nullptr);
+    EXPECT_EQ(warnings.find("are also listed in face file"), std::string::npos) << warnings;
+    for (const auto& name : names) {
+      const auto label = loaded->base().label_from_name(name);
+      ASSERT_NE(label, svmp::INVALID_LABEL) << name;
+      const auto labeled = loaded->base().faces_with_label(label).size();
+      EXPECT_GT(labeled, 0u) << name;
+      EXPECT_EQ(labeled, loaded->base().get_set(svmp::EntityKind::Face, name).size()) << name;
+    }
+#endif
+  }
 }
 
 TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
