@@ -345,6 +345,14 @@ These are proposals. Each lists a recommended option and an alternative. Record 
     - a static drop and a capillary wave;
     - a 2D contact point with the D4 Young term and slip.
   - Under P1, prefer the parameter-free fitted choices: the `Free` tangential policy and harmonic mesh motion. Any mesh-motion or kinematic-enforcement coefficient that remains (Nitsche or penalty) is fixed once from dimensional scaling, never tuned per case.
+- **D9, 2026-09-30: level-set transport uses a new PDE velocity extension.**
+  - Moving-interface benchmarks (sloshing, static drop, capillary wave, sessile drop) will advect φ with an extension velocity from a new PDE-based extension.
+  - The extension lives on a separate auxiliary field and is parameter-free (P1). It never enters the momentum rows; the retired same-field dry-domain diffusion (FSR-01) stays retired.
+  - Until it exists, the M2, M3 and M4 benchmark runs wait. The existing algebraic wet extension (`wall_compatible_normal`) is the comparison baseline.
+  - Reason: advecting φ with the coupled fluid velocity leaves dry vertices at zero velocity, and the resulting lag failed `linear_sloshing_2d` at L/h = 64.
+- **D10, 2026-09-30: space and time convergence are judged separately.** Spatial convergence is gated with the time-step error removed (a small fixed Δt or a converged-Δt reference), and a separate Δt study is run at a fixed mesh. Refining Δt with h let opposite-sign errors cancel.
+- **D11, 2026-09-30: volume criteria gate the maximum deviation over the run**, including any reversible oscillation of the P1 area.
+- **D12, 2026-09-30: sloshing damping error ≤ 5% at the finest level** (pass/fail), matching the capillary-wave criterion.
 - **D6, 2026-09-29: the lightweight process is adopted (§12).**
   - Evidence for a result is:
     - the commit hash;
