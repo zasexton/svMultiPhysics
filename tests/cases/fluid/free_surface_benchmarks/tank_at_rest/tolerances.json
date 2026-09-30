@@ -1,0 +1,54 @@
+{
+  "benchmark": "tank_at_rest",
+  "milestone": "M1",
+  "fixed_on": "2026-09-29, before the first protocol run",
+  "levels": {
+    "cells_per_length": {
+      "2": [8, 16, 32],
+      "3": [8, 16]
+    }
+  },
+  "protocol": {
+    "fill_height": 0.52,
+    "run_length": "5 inviscid periods of the lowest sloshing mode, 20 steps per period, 20 outputs",
+    "note": "Every criterion applies to every run (each dimension and level). The state is exactly representable, so there is no convergence rate; see README.md."
+  },
+  "solver_tolerance_scale": {
+    "value": 1e-08,
+    "reason": "The sampled state (phi_h = y - H, u_h = 0, p_h = rho g (H - y)) is an exact solution of the discrete equations: the strong momentum residual grad p - rho f vanishes pointwise, so the Galerkin, VMS/PSPG, pressure-gradient facet-jump and aggregation-extension terms all vanish, and the level-set residual vanishes with u = 0. Deviations can only come from roundoff amplified by the Jacobian and from the solver stopping rules. 1e-8 is the relative tolerance given to every linear solve (the direct solver meets it with a wide margin); any term that is consistent but not exact on this state leaves an O(h^2) error, about 1e-3 to 1e-4 at these meshes, four or more orders above the gate."
+  },
+  "criteria": [
+    {
+      "id": "velocity",
+      "quantity": "max_speed_over_velocity_scale",
+      "definition": "max over all outputs and over the wet-support vertices (all vertices of the cells that contain liquid, including the dry vertices of cut cells) of |u_h|, divided by sqrt(g H)",
+      "limit": 1e-08,
+      "at_level": "each",
+      "source": "Decision D1 (algebraic gate for an exactly representable state), at the solver tolerance scale"
+    },
+    {
+      "id": "hydrostatic_pressure",
+      "quantity": "pressure_error_over_pressure_scale",
+      "definition": "max over all outputs and over the wet-support vertices of |p_h - rho g (H - y)|, divided by rho g H. On dry vertices of cut cells the reference is the signed continuation of the hydrostatic profile, which the P1 pressure must carry to be exact in the liquid part of the cell.",
+      "limit": 1e-08,
+      "at_level": "each",
+      "source": "Decision D1 (algebraic gate for an exactly representable state), at the solver tolerance scale"
+    },
+    {
+      "id": "interface_height",
+      "quantity": "interface_height_drift_over_fill_height",
+      "definition": "max over all outputs and over the zero crossings of phi_h on mesh edges of |y - H|, divided by H",
+      "limit": 1e-08,
+      "at_level": "each",
+      "source": "Decision D1 (algebraic gate for an exactly representable state), at the solver tolerance scale"
+    },
+    {
+      "id": "volume_drift",
+      "quantity": "liquid_volume_relative_drift_max",
+      "definition": "max over all outputs of |V(t) - V(0)| / V(0), V the exact area (2D) or volume (3D) of {phi_h < 0} and V(0) that of the sampled level set in mesh/mesh-complete.mesh.vtu",
+      "limit": 1e-08,
+      "at_level": "each",
+      "source": "Decision D1 (algebraic gate for an exactly representable state), at the solver tolerance scale"
+    }
+  ]
+}
