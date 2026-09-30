@@ -5114,7 +5114,7 @@ void logUnfittedContactLineMeasure(
     msg << "IncompressibleNavierStokesVMSModule: prescribed unfitted contact "
            "angle uses generated interface-boundary intersection geometry"
         << " diagnostic=unfitted_prescribed_contact_geometry"
-        << " level_set_geometry_owner=accepted_state_wall_aware_repair"
+        << " level_set_geometry_owner=none_angle_preserving_wall_maintenance"
         << " momentum_owner="
         << (usesKinematicAreaGradientTraction(bc)
                 ? "total_energy_gradient_traction"
@@ -5627,14 +5627,15 @@ void applyDynamicContactAngleResidual(
                 }
                 continue;
             }
-            // Accepted-state wall-aware repair enforces the geometric angle,
-            // while the momentum equation still needs the solid--liquid/
-            // solid--gas wall force.  SurfaceStress already supplies the
-            // dynamic conormal and therefore adds only -gamma*cos(theta_e);
-            // CurvatureTraction needs the full cos(theta_d)-cos(theta_e) line
-            // force.  If all wall-tangential test traces are essential, either
-            // form performs no virtual work and contributes only to the
-            // reaction.
+            // Decision D4: this solid--liquid/solid--gas wall force is the
+            // only contact-angle mechanism; accepted-state level-set wall
+            // maintenance only rescales contact cells.  SurfaceStress already
+            // supplies the dynamic conormal and therefore adds only
+            // -gamma*cos(theta_e); CurvatureTraction needs the full
+            // cos(theta_d)-cos(theta_e) line force.  If all wall-tangential
+            // test traces are essential (a no-slip wall), either form performs
+            // no virtual work and contributes only to the reaction, so nothing
+            // imposes the angle there.
             const auto phi_id = resolveLevelSetFieldId(bc, system);
             const auto& phi_record = system.fieldRecord(phi_id);
             const auto phi = StateField(
@@ -6556,7 +6557,7 @@ void registerFreeSurfacePrescribedAngleGeometry(
                 " interface_marker=" +
                 std::to_string(bc.interface_marker) +
                 " contact_marker=" + std::to_string(contact_marker) +
-                " level_set_geometry_owner=accepted_state_wall_aware_repair"
+                " level_set_geometry_owner=none_angle_preserving_wall_maintenance"
                 " momentum_owner=" +
                 std::string(usesKinematicAreaGradientTraction(bc)
                                 ? "total_energy_gradient_traction"
@@ -7522,9 +7523,11 @@ void installFittedFreeSurfaceMeshKinematics(
             << ']';
     }
     if (kind == ContactLineKind::PrescribedAngle) {
+        // Decision D4: the Young term in momentum is the only angle
+        // mechanism; level-set wall maintenance only rescales contact cells.
         out << ",\"level_set_geometry_owner\":"
-            << "\"accepted_state_wall_aware_repair\""
-            << ",\"prescribed_angle_operator\":\"wall_aware_geometry_only\"";
+            << "\"none_angle_preserving_wall_maintenance\""
+            << ",\"prescribed_angle_operator\":\"momentum_young_term_only\"";
         if (contactLineHasNavierSlip(contact_line)) {
             out << ",\"wall_slip_model\":\"Navier\""
                 << ",\"slip_length\":"
