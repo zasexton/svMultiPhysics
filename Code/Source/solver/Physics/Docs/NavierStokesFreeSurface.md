@@ -22,8 +22,8 @@ the exterior-pressure load `p_ext * dot(n_h, v)` on the interface.
 | `Surface_tension_form` | Capillary term in the momentum residual | Scope |
 |---|---|---|
 | `Automatic` (default) | `SurfaceStress` on unfitted level-set interfaces; `CurvatureTraction` on fitted ALE boundaries | — |
-| `SurfaceStress` (also `SurfaceEnergy`, `LaplaceBeltrami`, `Variational`) | `gamma * (I - n_h ⊗ n_h) : grad(v)` integrated over the generated interface rule. This is the Laplace–Beltrami form and the first variation of the discrete interface area. | Unfitted only; rejected on fitted boundaries |
-| `CurvatureTraction` | `(p_ext + gamma*kappa) * dot(n, v)` with a supplied or projected curvature. Unfitted interfaces use `n = grad(phi)/abs(grad(phi))`; fitted boundaries use the current-geometry normal and pointwise curvature, which is zero on affine faces. | Legacy and verification |
+| `SurfaceStress` (also `SurfaceEnergy`, `LaplaceBeltrami`, `Variational`) | `gamma * (I - n_h ⊗ n_h) : grad(v)` integrated over the generated interface rule (unfitted) or over the current fitted boundary. This is the Laplace–Beltrami form and the first variation of the discrete interface area. | Unfitted; fitted ALE only with `Allow_fitted_surface_stress=true` (below) |
+| `CurvatureTraction` | `(p_ext + gamma*kappa) * dot(n, v)` with a supplied or projected curvature. Unfitted interfaces use `n = grad(phi)/abs(grad(phi))`; fitted boundaries use the current-geometry normal and pointwise curvature, which is zero on affine faces. | Legacy and verification; on fitted P1 boundaries it applies no capillary load (withdrawn from use, see below) |
 | `GeneratedCurvatureTraction` | Same integrand, with the normal carried by the generated interface rule | Unfitted; experimental |
 | `KinematicAreaGradientTraction` | `gamma * kappa_h * dot(n_h, v)`, where `kappa_h` is recovered by `KinematicAreaGradient` curvature projection (FE `LevelSet.md`). It includes the declared Young wall energies, so no separate line force is assembled. | Unfitted; see its requirements below |
 
@@ -46,6 +46,101 @@ surface tension; supply `Curvature` or a projected curvature field instead.
   `Curvature_projection_kinematic_area_gradient_mass` may be `Consistent` or
   `Lumped`. With `Lumped` the filter coefficient defaults to 0 and may be
   omitted; with `Consistent` it defaults to 1 and must be set to 0.
+
+## Fitted ALE free surfaces
+
+A fitted free surface (`Implementation=FittedALE`) is a boundary of the
+liquid mesh. The mesh moves with a coupled displacement unknown
+(`Enable_ALE=true`, `Mesh_velocity_source=coupled_displacement`) solved by a
+`mesh_motion` equation. Decision D5 of the program tracker selects this path
+as the independent reference for the unfitted results.
+
+**Assembly frame.** Coupled-displacement ALE assembles the fluid, the mesh
+motion and the fitted boundary terms on the trial current configuration:
+the FE geometric-nonlinearity transaction moves the current coordinates at
+every trial state, and the application builds the FE system with the current
+configuration as its assembly frame whenever an equation requests coupled
+displacement. Fitted boundary integrals therefore use the ordinary boundary
+measure of that frame; the current normal is the normal of the same frame.
+(Until 2026-09-30 the application assembled such inputs on the reference
+frame and the fitted terms multiplied the boundary weights by the current
+surface measure a second time; see the tracker, M5.)
+
+**Kinematic enforcement.** `Kinematic_enforcement` is required for the
+qualified fitted contract:
+
+| Value | Fluid row on the free surface | Mesh row on the free surface |
+|---|---|---|
+| `MeshNitsche` (recommended) | none: the fluid keeps the natural dynamic condition `sigma n = -(p_ext + gamma kappa) n` | `gamma_N / h_n * (w - u).n (psi.n)` plus the Nitsche consistency `-kappa ((grad w) n . n)(psi.n)` of the harmonic mesh-velocity operator |
+| `Penalty` | `Kinematic_penalty * (u - w).n (v.n)` | `Kinematic_penalty * (w - u).n (psi.n)` |
+| `Nitsche` | Nitsche row for `u.n = w.n` whose consistency term cancels the fluid normal stress | `Kinematic_nitsche_gamma / h_n * (w - u).n (psi.n)` |
+
+With `Penalty` and `Nitsche` the kinematic relation is imposed on the fluid
+as well as on the mesh. The fluid row then replaces (Nitsche) or perturbs
+(Penalty, by the mesh stiffness flux) the normal dynamic condition, so these
+two modes do not reproduce free-surface dynamics; they remain for the
+existing prerequisite tests. `MeshNitsche` imposes the relation on the mesh
+only:
+
+- `w = dt(d)` is the mesh velocity. The harmonic `mesh_motion` equation must
+  act on it (`Harmonic_quantity=velocity`: `kappa grad(w):grad(psi)`), so the
+  mesh velocity is the harmonic extension of the free-surface normal
+  velocity and the displacement integrates it.
+- The penalty `gamma_N / h_n` balances that operator without a time scale.
+  With the P1 trace inverse inequality
+  `||d_n v||_F^2 <= (2/h_n)||grad v||_T^2`, `h_n = 2|T|/|F|`, the boundary
+  row is coercive for `gamma_N > 2 kappa`; the `mesh_motion` module checks it
+  with a literal `Kappa`. `Kinematic_nitsche_gamma` (`gamma_N`, default 10)
+  is the only numerical constant; the benchmarks fix it at 10 with `Kappa=1`
+  (principle P1).
+- With the consistency term the normal row reduces to the kinematic relation
+  up to the P1 defect of the harmonic flux, which is `O(h^2 k^2)` relative to
+  the normal velocity for a surface wavenumber `k` and does not accumulate
+  over time steps. A displacement operator
+  (`Harmonic_quantity=displacement`) would need a `deltat`-scaled penalty,
+  and its per-step defect would accumulate into a spurious relaxation of the
+  surface of rate `h^2 k^2 / (2 gamma_N deltat)`; this combination fails
+  closed.
+- The consistency term is added by the harmonic `mesh_motion` module on every
+  boundary whose normal relation declares it. The fluid equation must
+  therefore precede the `mesh_motion` equation in the input; the reverse
+  order and the pseudo-elastic mesh model fail closed.
+- `Kinematic_nitsche_symmetric` and `Kinematic_nitsche_scale_with_p` do not
+  apply and are rejected with `MeshNitsche`.
+
+The tangential mesh policy `Free` adds no tangential row, so free-surface
+nodes slide tangentially with the harmonic extension (principle P1).
+
+**Walls.** A fitted free surface meets a wall at a contact point (2D) or line
+(3D). For the fluid, free slip on an axis-aligned wall is a `Dir` condition
+with `Value 0` and `Effective_direction` selecting the wall-normal component.
+The `mesh_motion` equation accepts the same input: a zero-valued `Dir`
+condition with `Effective_direction` constrains only the selected
+displacement components, so the mesh slides along the wall and the contact
+point can move. A direction that selects every component or none constrains
+all components (the previous behavior).
+
+**Capillarity.** Fitted `CurvatureTraction` with
+`Use_current_geometry_curvature=true` uses the pointwise curvature of the
+boundary facets, which is identically zero on affine faces; it applies no
+capillary load on P1 meshes and logs a warning. It is kept for curved
+geometry but withdrawn from use in the fitted benchmarks. The fitted
+Laplace–Beltrami form is enabled explicitly:
+
+```xml
+<Surface_tension_form>SurfaceStress</Surface_tension_form>
+<Allow_fitted_surface_stress>true</Allow_fitted_surface_stress>
+```
+
+It assembles `p_ext n.v + gamma (I - n n) : grad(v)` over the current
+boundary, with the current normal and the current-frame gradient. On a
+regular polygon it is balanced exactly by the constant pressure
+`gamma/(R cos(pi/N))`, i.e. by `gamma/R` up to `O(h^2)` (focused test
+`FittedFreeSurfaceALE.SurfaceStressOnACircularDropBalancesAConstantPressure`).
+The opt-in requires an explicit `Surface_tension_form=SurfaceStress`, a
+literal surface tension, coupled mesh displacement (or a static mesh), and no
+fitted contact-line model; without it the request still fails closed as
+`fitted_surface_stress_current_frame_gradient_unqualified`.
 
 ## Unfitted contact lines
 

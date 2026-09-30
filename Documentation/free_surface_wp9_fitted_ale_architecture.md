@@ -622,6 +622,48 @@ restart continuity, broader partition equivalence, fault-complete publication,
 and the flat-translation, prescribed-shear, and sloshing campaigns remain
 open. Therefore WP-9, FSR-10, FSR-11, and Q4 remain unchecked.
 
+## 2026-09-30 M5 development: frame, kinematics, capillarity, walls
+
+This section records the fitted-path changes made for milestone M5
+(decision D5 in `free_surface_program_tracker.md`). It supersedes the
+statements above where they conflict.
+
+- **Assembly frame.** Coupled mesh-displacement ALE assembles on the trial
+  current configuration. The application now builds its FE system with the
+  current configuration whenever an equation requests
+  `Mesh_velocity_source=coupled_displacement`; before, the reference
+  override kept every volume term on the undeformed domain, so the free
+  surface had no gravity restoring force, and the fitted boundary terms
+  multiplied the boundary weights by the current surface measure a second
+  time (`integrand * currentMeasure()` on top of the physical boundary
+  weights). Fitted boundary terms now integrate over the assembly frame
+  with its current normal.
+- **Kinematics.** `Kinematic_enforcement=MeshNitsche` keeps the natural
+  dynamic condition on the fluid and enforces `(w - u).n = 0` on the mesh
+  only: the penalty `gamma_N / h_n (w - u).n (psi.n)` from the fluid module
+  plus the Nitsche consistency term of the harmonic mesh operator, which
+  must act on the mesh velocity (`Harmonic_quantity=velocity`) and satisfy
+  `gamma_N > 2 kappa`. The declaration carries
+  `requires_mesh_flux_consistency` and the Nitsche constant; the reciprocal
+  fluid descriptor is `WeakConsistent` (natural traction), which the FE
+  provenance checks now accept. `Penalty` and `Nitsche` keep their previous
+  meaning; both impose the kinematic relation on the fluid as well, which
+  replaces or perturbs the normal dynamic condition.
+- **Capillarity.** Fitted `SurfaceStress` is admitted with
+  `Allow_fitted_surface_stress=true` (coupled ALE or a static mesh, literal
+  surface tension, no fitted contact model). The capability artifact lists
+  it as `explicit_opt_in_unqualified` and drops the
+  `fitted_surface_stress_current_frame_gradient_unqualified` exclusion only
+  for such boundaries. Fitted `CurvatureTraction` with pointwise curvature
+  logs that it is zero on affine faces.
+- **Walls.** A zero-valued mesh-motion `Dir` condition with
+  `Effective_direction` constrains only the selected components (sliding
+  mesh walls).
+
+Focused tests: `Physics/Tests/Unit/test_FittedFreeSurfaceALE.cpp`.
+Benchmarks: `tests/cases/fluid/free_surface_benchmarks/fitted_sloshing_2d/`
+and the `fitted_static_drop_2d/` smoke case.
+
 ## Source evidence map
 
 - XML boundary allowlist:

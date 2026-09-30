@@ -109,6 +109,45 @@ residual = residual + (alpha * inner(d_mesh - d_target, psi)).ds(marker);
 Strong Dirichlet data may still be lowered through FE/Systems boundary
 constraint infrastructure; it should not obscure the weak residual algebra.
 
+Sliding (normal-only) walls use a component-selected strong condition. In
+XML, a zero-valued `Dir` condition of the `mesh_motion` equation with
+`Effective_direction` constrains only the selected components (the same
+input as a free-slip fluid wall):
+
+```xml
+<Add_BC name="wall_left">
+  <Type>Dir</Type>
+  <Value>0.0</Value>
+  <Effective_direction>1 0</Effective_direction>
+</Add_BC>
+```
+
+Programmatically, set `DirichletBC::active_components` (for example
+`{true, false, false}` on a wall `x = const`). The unselected components keep
+the natural zero-flux condition, so boundary nodes slide along the wall.
+
+The harmonic operator may act on the mesh velocity instead of the
+displacement (`HarmonicMeshMotionOptions::quantity = HarmonicQuantity::Velocity`,
+XML `<Harmonic_quantity>velocity</Harmonic_quantity>`):
+
+```cpp
+const auto w_mesh = dt(d_mesh);
+residual = (kappa * inner(grad(w_mesh), grad(psi))).dx();
+```
+
+A boundary whose normal mesh motion is owned by a consistent kinematic row
+of another operator (a fitted-ALE `MeshNitsche` free surface, whose row
+penalizes the normal mesh-velocity mismatch) is declared through
+`FESystem::declareMeshNormalBoundaryConstraint` with
+`requires_mesh_flux_consistency` and the row's Nitsche constant. The harmonic
+module registered after that declaration requires the velocity quantity and
+`gamma_N > 2 kappa`, and adds the Nitsche consistency term of its own
+operator there:
+
+```cpp
+residual = residual - (kappa * inner(grad(w_mesh) * n, n) * inner(psi, n)).ds(marker);
+```
+
 ## Geometry Frame Semantics
 
 `grad(...)`, `.dx()`, and `.ds()` use the active FE geometry configuration.
@@ -117,7 +156,12 @@ For ordinary static or prescribed-motion assembly, this is the FE system's
 configured current/reference geometry. For coupled ALE, the FE geometric
 nonlinearity policy updates current coordinates from the trial
 `mesh_displacement` state before assembly, so the same primitives assemble on
-the trial current geometry.
+the trial current geometry. This requires the FE system's assembly frame to
+be the current configuration (`FESystem(mesh, svmp::Configuration::Current)`);
+the application selects it whenever an equation requests
+`Mesh_velocity_source=coupled_displacement`. With a reference-frame FE
+system only the frame-explicit terminals (`currentNormal()`,
+`currentMeasure()`, ...) see the motion.
 
 Reference-configuration mesh PDEs should be added later as true mathematical
 primitives, such as `gradReference(u)` and `dxReference()`, rather than as
