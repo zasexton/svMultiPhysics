@@ -148,14 +148,15 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     assert gen.time_schedule(8, 120.0, 5.0, 100)["dt"] <= dt_b * (1 + 1e-12)
 
 
-def test_transport_default_and_pde_placeholder(tmp_path):
-    if gen.PDE_EXTENSION_METHOD:
-        assert gen.DEFAULT_TRANSPORT == "pde_extension"
-    else:
-        assert gen.DEFAULT_TRANSPORT == "wet_extension"
-        with pytest.raises(ValueError, match="PDE velocity extension"):
-            gen.generate(8, "surface_stress", 12.0, tmp_path / "p", transport="pde_extension")
-        assert not (tmp_path / "p").exists()
+def test_transport_default_is_the_pde_extension():
+    # D9: harmonic PDE extension with monolithic coupling, never combined with
+    # the wet-extension switch (the solver rejects that combination).
+    assert gen.DEFAULT_TRANSPORT == "pde_extension"
+    schedule = gen.time_schedule(8, 12.0, 5.0, 100)
+    pde = gen.solver_xml("surface_stress", schedule, 10, 1, "pde_extension")
+    assert "<Advection_velocity_extension_method>pde_harmonic<" in pde
+    assert "<Advection_velocity_extension_coupling>monolithic<" in pde
+    assert "Use_wet_extension" not in pde
 
 
 def test_generated_mesh_reads_back(tmp_path):

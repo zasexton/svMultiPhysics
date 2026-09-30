@@ -83,16 +83,12 @@ offers the same choices as `capillary_wave_2d`:
 
 | `--transport` | Solver input | Status |
 |---|---|---|
-| `pde_extension` | `Velocity_source=prescribed_data`, `Velocity_field_name=LevelSetAdvectionVelocity`, `Source_velocity_field_name=Velocity`, `Advection_velocity_extension_method=<PDE method>` (and `Advection_velocity_extension_coupling` if set) | the D9 protocol transport. It is not in the solver yet: `PDE_EXTENSION_METHOD` in `generate_case.py` is empty and selecting it stops with a message. The in-progress branch uses the method names `pde_harmonic` and `pde_normal` and the coupling `monolithic` or `prescribed`; set `PDE_EXTENSION_METHOD` (and `PDE_EXTENSION_COUPLING`) once one of them is merged. |
-| `wet_extension` (current default) | `Velocity_source=prescribed_data`, `Use_wet_extension_advection_velocity=true`, `Advection_velocity_extension_method=wall_compatible_normal` | the algebraic wet extension, the D9 comparison baseline |
+| `pde_extension` (default) | `Velocity_source=prescribed_data`, `Velocity_field_name=LevelSetAdvectionVelocity`, `Source_velocity_field_name=Velocity`, `Advection_velocity_extension_method=pde_harmonic`, `Advection_velocity_extension_coupling=monolithic` | the D9 protocol transport: the parameter-free harmonic PDE extension of the fluid velocity, as in `static_drop_2d`, `linear_sloshing_2d`, `capillary_wave_2d` and `sessile_drop_2d`. It writes no per-step files. The dry-region solve is replicated on every rank, which may need a distributed solve for large 3D meshes. |
+| `wet_extension` | `Velocity_source=prescribed_data`, `Use_wet_extension_advection_velocity=true`, `Advection_velocity_extension_method=wall_compatible_normal` | the algebraic wet extension, the D9 comparison baseline |
 | `coupled` | `Velocity_source=coupled_field` | the fluid velocity itself; dry vertices then carry zero velocity (D9 retires it) |
 
-The default rule is that of `capillary_wave_2d`: `pde_extension` once
-`PDE_EXTENSION_METHOD` is set, `wet_extension` until then. (`static_drop_2d`
-on the branch tip still hard-codes the coupled velocity, and the PDE branch
-gives it a `--level-set-velocity` option with the coupled velocity as its
-default; the 3D benchmark follows D9, which names the static drop among the
-benchmarks that use the extension.) The wet extension writes one JSON map per
+`generate_case.py` selects the extension through `PDE_EXTENSION_METHOD` and
+`PDE_EXTENSION_COUPLING`. The wet extension writes one JSON map per
 accepted step: about 1 MB per step on the 625-vertex 2D drop and 4.7 MB per
 step on the 1,989-vertex 3D tank (`tank_at_rest`, 1/h = 16). Scaled by the
 vertex count, that is about 37 MB per step and 18 GB per run at `R/h = 8`, so
@@ -178,7 +174,7 @@ through `mpiexec` and submit with `--export=NONE` (benchmark README,
 ```bash
 B=tests/cases/fluid/free_surface_benchmarks/static_sphere_3d
 OUT=$SCRATCH/free-surface-benchmarks/static_sphere_3d/$(git rev-parse --short HEAD)
-TRANSPORT=wet_extension        # pde_extension once the solver has it (D9)
+TRANSPORT=pde_extension        # protocol transport (D9)
 for form in surface_stress kag_lumped kag_consistent; do for L in 8 16 32; do
   d=$OUT/La12/$TRANSPORT/$form/L$L
   python3 $B/generate_case.py --level $L --capillary-form $form --laplace-number 12 \

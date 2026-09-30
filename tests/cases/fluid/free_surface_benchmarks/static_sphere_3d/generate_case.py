@@ -36,16 +36,13 @@ import numpy as np
 LEVELS = (8, 16, 32)                        # R/h
 CAPILLARY_FORMS = ("surface_stress", "kag_consistent", "kag_lumped")
 # Level-set advection velocity (decision D9), as in capillary_wave_2d.
-# "pde_extension" is the new PDE-based extension velocity: set
-# PDE_EXTENSION_METHOD (and PDE_EXTENSION_COUPLING if the merged solver needs
-# it) to its input values once the solver has it; the default then switches
-# to it automatically.  Until then the default is the algebraic
-# wall-compatible wet extension, the D9 comparison baseline; "coupled" is the
-# fluid velocity itself (dry vertices then carry zero velocity, which D9
-# retires).
+# "pde_extension" (default) is the harmonic PDE velocity extension with
+# monolithic coupling; "wet_extension" is the algebraic wall-compatible wet
+# extension, the D9 comparison baseline; "coupled" is the fluid velocity
+# itself (dry vertices then carry zero velocity, which D9 retires).
 TRANSPORTS = ("pde_extension", "wet_extension", "coupled")
-PDE_EXTENSION_METHOD: str | None = None
-PDE_EXTENSION_COUPLING: str | None = None
+PDE_EXTENSION_METHOD: str | None = "pde_harmonic"
+PDE_EXTENSION_COUPLING: str | None = "monolithic"
 DEFAULT_TRANSPORT = "pde_extension" if PDE_EXTENSION_METHOD else "wet_extension"
 DENSITY = 1.0                               # rho
 SURFACE_TENSION = 1.0                       # gamma
