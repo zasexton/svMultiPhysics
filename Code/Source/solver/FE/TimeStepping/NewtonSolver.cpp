@@ -132,6 +132,14 @@ constexpr NewtonCommunicator kSerialNewtonCommunicator = 0;
     return disabled;
 }
 
+// Diagnostic only: reassemble the residual that an accepted line-search step
+// would otherwise reuse, and fail if it differs from the reused one. Read at
+// every use so tests can toggle it.
+[[nodiscard]] bool verifyAcceptedLineSearchRefreshSkipRequested() noexcept
+{
+    return envBoolEnabled("SVMP_NEWTON_VERIFY_ACCEPTED_REFRESH_SKIP");
+}
+
 [[nodiscard]] bool pressureRowContributionDiagnosticEnabled() noexcept
 {
     static const bool enabled =
@@ -12376,6 +12384,7 @@ NewtonReport NewtonSolver::solveStep(
     NewtonReport aggregate{};
     backends::SolverReport last_nontrivial_linear{};
     int inner_iterations_total = 0;
+    int accepted_line_search_refresh_skips_total = 0;
     int external_state_discontinuity_restarts = 0;
     auto stopForExternalStateDiscontinuity =
         [&](int outer_iteration) -> NewtonReport {
@@ -12644,6 +12653,8 @@ NewtonReport NewtonSolver::solveStep(
                 workspace,
                 residual_addition);
             inner_iterations_total += inner_report.iterations;
+            accepted_line_search_refresh_skips_total +=
+                inner_report.accepted_line_search_refresh_skips;
             if (inner_report.iterations > 0 ||
                 inner_report.linear.iterations > 0) {
                 last_nontrivial_linear = inner_report.linear;
@@ -12662,6 +12673,8 @@ NewtonReport NewtonSolver::solveStep(
             aggregate.outer_iterations = outer + 1;
             aggregate.inner_iterations_total = inner_iterations_total;
             aggregate.iterations = inner_iterations_total;
+            aggregate.accepted_line_search_refresh_skips =
+                accepted_line_search_refresh_skips_total;
             aggregate.outer_state_change_norm = state_change_norm;
             aggregate.outer_dynamic_relaxation_enabled =
                 dynamic_relaxation.enabled;
@@ -13321,6 +13334,64 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
     double ptc_gamma_applied = 0.0;
     double ptc_prev_residual_norm = std::numeric_limits<double>::quiet_NaN();
     bool line_search_history_transaction_active = false;
+
+    // Accepted line-search steps synchronize the committed state. With
+    // master-bearing constraints that synchronization reprojects the current,
+    // history and rate vectors and invalidates the trial residual. When the
+    // constraint set is unchanged and the reprojection reproduces every one
+    // of those vectors bit for bit, the trial residual already is the
+    // residual of the committed state, so it is reused instead of being
+    // reassembled.
+    bool track_accepted_projection = false;
+    bool accepted_projection_left_state_unchanged = false;
+    std::vector<std::unique_ptr<backends::GenericVector>>
+        accepted_projection_snapshots;
+    std::unique_ptr<backends::GenericVector> accepted_projection_difference;
+    auto acceptedProjectionVectors = [&]() {
+        std::vector<backends::GenericVector*> vectors;
+        vectors.push_back(&history.u());
+        for (int k = 1; k <= history.historyDepth(); ++k) {
+            vectors.push_back(&history.uPrevK(k));
+        }
+        if (history.hasUDotState()) {
+            vectors.push_back(&history.uDot());
+        }
+        if (history.hasUDDotState()) {
+            vectors.push_back(&history.uDDot());
+        }
+        return vectors;
+    };
+    auto snapshotAcceptedProjectionVectors = [&]() {
+        const auto vectors = acceptedProjectionVectors();
+        while (accepted_projection_snapshots.size() < vectors.size()) {
+            accepted_projection_snapshots.push_back(
+                workspace.factory->createVector(vectors.front()->size()));
+        }
+        for (std::size_t i = 0; i < vectors.size(); ++i) {
+            accepted_projection_snapshots[i]->copyFrom(*vectors[i]);
+        }
+    };
+    // Collective: every rank must call it in the same branch.
+    auto acceptedProjectionChangedState = [&]() -> bool {
+        const auto vectors = acceptedProjectionVectors();
+        if (!accepted_projection_difference) {
+            accepted_projection_difference =
+                workspace.factory->createVector(vectors.front()->size());
+        }
+        bool changed = false;
+        for (std::size_t i = 0; i < vectors.size(); ++i) {
+            accepted_projection_difference->copyFrom(*vectors[i]);
+            axpy(*accepted_projection_difference,
+                 static_cast<Real>(-1.0),
+                 *accepted_projection_snapshots[i]);
+            const double difference = accepted_projection_difference->norm();
+            // A nonfinite difference counts as a change.
+            if (!(difference == 0.0)) {
+                changed = true;
+            }
+        }
+        return changed;
+    };
     auto invalidateConstraintDependentAlgebra = [&]() {
         have_residual = false;
         have_jacobian = false;
@@ -13402,8 +13473,20 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                     state.u_vector == &history.u() &&
                     !mpcStateDistributeDisabled() &&
                     anyRank(constraints.hasMasterBearingLines())) {
+                    // Only a first pass certifies an unchanged constraint
+                    // set; a later pass follows a semantic change.
+                    const bool track =
+                        track_accepted_projection && pass == 0 &&
+                        workspace.factory != nullptr;
+                    if (track) {
+                        snapshotAcceptedProjectionVectors();
+                    }
                     syncHistoryState();
                     invalidateConstraintDependentAlgebra();
+                    if (track) {
+                        accepted_projection_left_state_unchanged =
+                            !anyRank(acceptedProjectionChangedState());
+                    }
                 }
                 return;
             }
@@ -19205,8 +19288,65 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 // a rejection invokes RestoredNonlinearState from the base
                 // snapshot.
                 have_residual = true;
-                synchronizeState(trial_state_holder.view,
-                                 StateSyncPoint::AcceptedNonlinearState);
+                track_accepted_projection = true;
+                accepted_projection_left_state_unchanged = false;
+                try {
+                    synchronizeState(trial_state_holder.view,
+                                     StateSyncPoint::AcceptedNonlinearState);
+                } catch (...) {
+                    track_accepted_projection = false;
+                    throw;
+                }
+                track_accepted_projection = false;
+                if (!options_.accepted_state_sync_invalidates_residual &&
+                    !options_.synchronize_state &&
+                    !have_residual &&
+                    accepted_projection_left_state_unchanged) {
+                    // The constraint set is unchanged and the accepted
+                    // reprojection reproduced the current, history and rate
+                    // vectors bit for bit, so the residual assembled for
+                    // this trial is the residual of the committed state.
+                    // Solves with a synchronization callback keep the
+                    // reassembly, because the callback may change
+                    // residual-defining data at ResidualAssembly.
+                    have_residual = true;
+                    ++report.accepted_line_search_refresh_skips;
+                    if (verifyAcceptedLineSearchRefreshSkipRequested()) {
+                        auto reused =
+                            workspace.factory->createVector(r.size());
+                        reused->copyFrom(r);
+                        const std::string verify_phase =
+                            std::string(phase) + "_refresh_skip_verification";
+                        const double reassembled_norm = assembleResidualOnly(
+                            trial_state_holder.view,
+                            verify_phase.c_str(),
+                            StateSyncPoint::ResidualAssembly);
+                        auto difference =
+                            workspace.factory->createVector(r.size());
+                        difference->copyFrom(r);
+                        axpy(*difference, static_cast<Real>(-1.0), *reused);
+                        const double difference_norm = difference->norm();
+                        const bool identical =
+                            difference_norm == 0.0 &&
+                            reassembled_norm == synchronized_norm;
+                        if (activeSystemRank(sys) == 0) {
+                            std::ostringstream oss;
+                            oss << std::setprecision(17)
+                                << "NewtonSolver: accepted line-search refresh skip verification"
+                                << " diagnostic=accepted_refresh_skip_verification"
+                                << " phase='" << phase << "'"
+                                << " reused_norm=" << synchronized_norm
+                                << " reassembled_norm=" << reassembled_norm
+                                << " difference_norm=" << difference_norm
+                                << " identical=" << (identical ? 1 : 0);
+                            FE_LOG_INFO(oss.str());
+                        }
+                        FE_THROW_IF(
+                            !identical,
+                            systems::InvalidStateException,
+                            "NewtonSolver: reused accepted line-search residual differs from a reassembled residual");
+                    }
+                }
                 if (options_.accepted_state_sync_invalidates_residual ||
                     !have_residual) {
                     const std::string accepted_phase =

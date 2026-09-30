@@ -56,6 +56,7 @@
 #include "TimeStepping/TimeLoop.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <memory>
 #include <vector>
 
@@ -112,6 +113,8 @@ struct MpcRunResult {
     bool ran{false};
     bool success{false};
     int max_newton_iterations{0};
+    int accepted_line_search_refresh_skips{0};
+    std::vector<Real> final_solution{};
     double max_solution_error{0.0};
     double max_constraint_violation{0.0};
 };
@@ -208,10 +211,13 @@ struct MpcRunResult {
     svmp::FE::timestepping::TimeLoop loop(opts);
     svmp::FE::timestepping::TimeLoopCallbacks callbacks;
     int max_iters = 0;
+    int refresh_skips = 0;
     callbacks.on_nonlinear_done =
-        [&max_iters](const svmp::FE::timestepping::TimeHistory&,
-                     const svmp::FE::timestepping::NewtonReport& nr) {
+        [&max_iters, &refresh_skips](
+            const svmp::FE::timestepping::TimeHistory&,
+            const svmp::FE::timestepping::NewtonReport& nr) {
             max_iters = std::max(max_iters, nr.iterations);
+            refresh_skips += nr.accepted_line_search_refresh_skips;
         };
 
     svmp::FE::timestepping::TimeLoopReport rep;
@@ -224,6 +230,7 @@ struct MpcRunResult {
     result.ran = true;
     result.success = rep.success;
     result.max_newton_iterations = max_iters;
+    result.accepted_line_search_refresh_skips = refresh_skips;
 
     // Compare against the exact solution at the final time.
     std::vector<Real> u_num(static_cast<std::size_t>(n_dofs), Real(0));
@@ -242,6 +249,7 @@ struct MpcRunResult {
         max_err = std::max(max_err, std::abs(static_cast<double>(u_num[i]) - exact));
     }
     result.max_solution_error = max_err;
+    result.final_solution = u_num;
     result.max_constraint_violation = std::abs(
         static_cast<double>(u_num[3]) -
         0.5 * (static_cast<double>(u_num[0]) + static_cast<double>(u_num[1])));
@@ -308,6 +316,49 @@ TEST(MasterBearingConstraintTransient, GeneralizedAlphaMpcWithConstantSource)
     EXPECT_LE(result.max_newton_iterations, 3);
     EXPECT_LT(result.max_solution_error, 2e-2);
     EXPECT_LT(result.max_constraint_violation, 1e-10);
+#endif
+}
+
+TEST(MasterBearingConstraintTransient,
+     AcceptedLineSearchStepsReuseAVerifiedIdenticalResidual)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "This transient solve requires the Eigen backend.";
+#else
+    // With an unchanged master-bearing constraint set, the accepted
+    // line-search reprojection reproduces the state vectors bit for bit and
+    // the trial residual is reused. The verification switch reassembles the
+    // residual at every reuse and throws if it is not bitwise identical.
+    ASSERT_EQ(setenv("SVMP_NEWTON_VERIFY_ACCEPTED_REFRESH_SKIP", "1", 1), 0);
+    const auto verified = runMpcReactionProblem(
+        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha,
+        /*rho_inf=*/0.5,
+        /*dt=*/0.05,
+        /*t_end=*/0.5,
+        /*lambda=*/2.0,
+        /*source=*/3.0);
+    ASSERT_EQ(unsetenv("SVMP_NEWTON_VERIFY_ACCEPTED_REFRESH_SKIP"), 0);
+    ASSERT_TRUE(verified.ran);
+    EXPECT_TRUE(verified.success);
+    EXPECT_GT(verified.accepted_line_search_refresh_skips, 0);
+
+    // The verification reassembly must not change the trajectory either.
+    const auto plain = runMpcReactionProblem(
+        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha,
+        /*rho_inf=*/0.5,
+        /*dt=*/0.05,
+        /*t_end=*/0.5,
+        /*lambda=*/2.0,
+        /*source=*/3.0);
+    ASSERT_TRUE(plain.ran);
+    EXPECT_TRUE(plain.success);
+    EXPECT_EQ(plain.accepted_line_search_refresh_skips,
+              verified.accepted_line_search_refresh_skips);
+    ASSERT_EQ(plain.final_solution.size(), verified.final_solution.size());
+    for (std::size_t i = 0; i < plain.final_solution.size(); ++i) {
+        EXPECT_EQ(plain.final_solution[i], verified.final_solution[i])
+            << "dof=" << i;
+    }
 #endif
 }
 
