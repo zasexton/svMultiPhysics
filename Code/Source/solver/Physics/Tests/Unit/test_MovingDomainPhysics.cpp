@@ -4127,7 +4127,9 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceALEUsesCurrentBoundaryGeo
     module.registerOn(system);
 
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentNormal));
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentMeasure));
+    // Fitted boundary terms integrate over the assembly frame; the current
+    // surface measure is not applied a second time.
+    EXPECT_FALSE(formulationRecordsContain(system, FormExprType::CurrentMeasure));
 
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
 }
@@ -4253,7 +4255,9 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfacePenaltyKinematicsAddsBoun
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::MeshVelocity));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentNormal));
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentMeasure));
+    // Fitted boundary terms integrate over the assembly frame; the current
+    // surface measure is not applied a second time.
+    EXPECT_FALSE(formulationRecordsContain(system, FormExprType::CurrentMeasure));
 
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
 
@@ -4349,7 +4353,9 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceNitscheKinematicsAddsBoun
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::FacetArea));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::MeshVelocity));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentNormal));
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentMeasure));
+    // Fitted boundary terms integrate over the assembly frame; the current
+    // surface measure is not applied a second time.
+    EXPECT_FALSE(formulationRecordsContain(system, FormExprType::CurrentMeasure));
 
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
 
@@ -17149,7 +17155,9 @@ TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::MeshVelocity));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentNormal));
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentMeasure));
+    // Fitted boundary terms integrate over the assembly frame; the current
+    // surface measure is not applied a second time.
+    EXPECT_FALSE(formulationRecordsContain(system, FormExprType::CurrentMeasure));
 
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
     EXPECT_EQ(system.dofHandler().getNumDofs(), 28);

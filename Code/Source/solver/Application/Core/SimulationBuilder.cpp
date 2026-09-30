@@ -35,7 +35,9 @@
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -1064,6 +1066,79 @@ std::shared_ptr<const svmp::FE::backends::DofPermutation> build_fsils_dof_permut
   return perm;
 }
 
+std::string normalizedParameterToken(std::string raw)
+{
+  std::string out;
+  out.reserve(raw.size());
+  for (const char ch : raw) {
+    const auto c = static_cast<unsigned char>(ch);
+    if (ch == '_' || ch == '-' || std::isspace(c)) {
+      continue;
+    }
+    out.push_back(static_cast<char>(std::tolower(c)));
+  }
+  return out;
+}
+
+std::optional<std::string> definedParameterValue(const ParameterLists& list, const std::string& key)
+{
+  const auto it = list.params_map.find(key);
+  if (it == list.params_map.end()) {
+    return std::nullopt;
+  }
+  std::optional<std::string> out;
+  std::visit(
+      [&](const auto* parameter) {
+        if (parameter != nullptr && parameter->defined()) {
+          out = parameter->svalue();
+        }
+      },
+      it->second);
+  return out;
+}
+
+// Coupled mesh-displacement ALE assembles the fluid and mesh equations on the
+// trial current geometry: the FE geometric-nonlinearity transaction moves the
+// current coordinates at every trial state (FE ALEBinding and
+// Documentation/mesh_motion_math_first_formulation_guide.md).  The FE system
+// must then expose the current configuration as its assembly frame; with a
+// reference-frame override the volume terms would stay on the undeformed
+// domain while only frame-explicit terminals saw the motion.
+bool inputRequestsCoupledDisplacementALE(const Parameters& params)
+{
+  for (const auto* equation : params.equation_parameters) {
+    if (equation == nullptr) {
+      continue;
+    }
+    // The same keys and tokens as the Navier-Stokes translator; the last
+    // defined key wins there as well.
+    std::optional<std::string> enable;
+    for (const auto* key : {"Enable_ALE", "Use_ALE", "Moving_mesh", "Use_moving_mesh"}) {
+      if (auto value = definedParameterValue(*equation, key)) {
+        enable = std::move(value);
+      }
+    }
+    std::optional<std::string> source;
+    for (const auto* key : {"Mesh_velocity_source", "MeshVelocitySource",
+                            "ALE_mesh_velocity_source", "ALEMeshVelocitySource"}) {
+      if (auto value = definedParameterValue(*equation, key)) {
+        source = std::move(value);
+      }
+    }
+    if (!enable || !source) {
+      continue;
+    }
+    const auto enabled = normalizedParameterToken(*enable);
+    const auto kind = normalizedParameterToken(*source);
+    if ((enabled == "true" || enabled == "1" || enabled == "yes" || enabled == "on") &&
+        (kind == "coupled" || kind == "coupleddisplacement" || kind == "derived" ||
+         kind == "derivedfromdisplacement" || kind == "monolithic")) {
+      return true;
+    }
+  }
+  return false;
+}
+
 } // namespace
 
 namespace application {
@@ -1307,10 +1382,14 @@ void SimulationBuilder::createFESystem()
       participant_info.domain_id = loaded_participants.front().domain_id;
     }
 
+    const bool coupled_ale = inputRequestsCoupledDisplacementALE(params_);
     components_.fe_system = std::make_unique<svmp::FE::systems::FESystem>(
-        components_.primary_mesh, std::move(participant_info), svmp::Configuration::Reference);
+        components_.primary_mesh,
+        std::move(participant_info),
+        coupled_ale ? svmp::Configuration::Current : svmp::Configuration::Reference);
     oopCout() << "[svMultiPhysics::Application] SimulationBuilder: created FE system from primary mesh '"
-              << components_.primary_mesh_name << "'" << std::endl;
+              << components_.primary_mesh_name << "' assembly_frame="
+              << (coupled_ale ? "current (coupled mesh-displacement ALE)" : "reference") << std::endl;
     return;
   }
 

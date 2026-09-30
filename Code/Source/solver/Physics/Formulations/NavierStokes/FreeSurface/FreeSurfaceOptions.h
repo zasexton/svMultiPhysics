@@ -58,7 +58,16 @@ enum class FreeSurfaceActiveDomainMethod : std::uint8_t {
 enum class FreeSurfaceKinematicEnforcement : std::uint8_t {
     None,
     Penalty,
-    Nitsche
+    Nitsche,
+    // Fitted ALE only.  The fluid keeps its natural dynamic traction
+    // condition on the free surface (no fluid kinematic row).  The normal
+    // kinematics (w - u).n = 0 are enforced on the mesh displacement by a
+    // consistent Nitsche row: the penalty
+    //     gamma_N * deltat_eff / h_n * (w - u).n * (psi.n)
+    // installed by the Navier-Stokes module, plus the consistency term that
+    // removes the mesh-motion operator's own normal flux, installed by the
+    // mesh-motion module on the boundaries this relation declares.
+    MeshNitsche
 };
 
 enum class FreeSurfaceNormalKinematicPolicy : std::uint8_t {
@@ -246,6 +255,12 @@ struct FreeSurfaceBoundary {
     // -gamma*cos(theta_e), not with a second cos(theta_d) force.
     FreeSurfaceSurfaceTensionForm surface_tension_form{
         FreeSurfaceSurfaceTensionForm::Automatic};
+    // Explicit opt-in for SurfaceStress on a fitted ALE boundary.  The
+    // fitted form integrates gamma (I - n n) : grad(v) over the current
+    // boundary with the current normal and the current-frame gradient; it
+    // requires coupled mesh displacement (the assembly frame is then the
+    // current configuration) or a static mesh.
+    bool allow_fitted_surface_stress{false};
 
     // Fitted ALE can use current mesh geometry or a supplied curvature
     // expression/value.  Unfitted level-set surface tension requires a
