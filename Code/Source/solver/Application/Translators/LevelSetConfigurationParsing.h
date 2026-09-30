@@ -137,6 +137,12 @@ inline constexpr std::array<std::string_view, 4> wet_extension_enable{
     "Use_wet_extension_advection_velocity", "UseWetExtensionAdvectionVelocity",
     "Update_advection_velocity_from_wet_region",
     "UpdateAdvectionVelocityFromWetRegion"};
+inline constexpr std::array<std::string_view, 4>
+    advection_velocity_extension_method{
+        "Advection_velocity_extension_method",
+        "AdvectionVelocityExtensionMethod",
+        "Wet_extension_advection_velocity_method",
+        "WetExtensionAdvectionVelocityMethod"};
 inline constexpr std::array<std::string_view, 6> wet_extension_source{
     "Advection_velocity_from_field", "AdvectionVelocityFromField",
     "Source_velocity_field_name",    "SourceVelocityFieldName",

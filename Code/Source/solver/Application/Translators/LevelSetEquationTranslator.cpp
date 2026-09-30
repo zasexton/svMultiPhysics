@@ -1,6 +1,7 @@
 #include "Application/Translators/LevelSetEquationTranslator.h"
 
 #include "Application/Core/LevelSetEquationInputSnapshot.h"
+#include "Application/Core/LevelSetPdeVelocityExtension.h"
 #include "Application/Translators/LevelSetConfigurationParsing.h"
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Core/JITRuntimePolicy.h"
@@ -1919,14 +1920,48 @@ translate_level_set_transport_input(
   const auto wet_enabled = wet_reader.boolean(
       level_set_aliases::wet_extension_enable,
       "use_wet_extension_advection_velocity");
+  const auto extension_method = wet_reader.string(
+      level_set_aliases::advection_velocity_extension_method,
+      "advection_velocity_extension_method");
+  const bool pde_velocity_extension =
+      extension_method.has_value() &&
+      application::core::pdeVelocityExtensionOperatorFromToken(
+          extension_method->text)
+          .has_value();
   std::optional<parsing::LevelSetSelectedParameter> wet_source;
   bool wet_extension_enabled = wet_enabled.value_or(false);
-  if (!wet_extension_enabled) {
+  if (pde_velocity_extension) {
+    // The PDE extension is recomputed from the physical velocity at every
+    // geometry refresh and written into a prescribed advection field.  It is
+    // never promoted to an algebraic unknown.
+    if (wet_extension_enabled) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Advection_velocity_extension_method=" +
+          trim_copy(extension_method->text) +
+          " (PDE extension) cannot be combined with "
+          "Use_wet_extension_advection_velocity=true.");
+    }
+    if (options.velocity.source !=
+        ls::LevelSetVelocitySource::PrescribedData) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] The PDE velocity extension requires "
+          "Velocity_source=prescribed_data.");
+    }
+    wet_source = wet_reader.string(level_set_aliases::wet_extension_source,
+                                   "advection_velocity_from_field");
+    options.velocity.auto_register_field = true;
+    append_installation_selections(input_observations, wet_reader, "equation");
+    append_installation_derived(input_observations,
+                                "velocity_auto_register_field",
+                                "derived:pde_velocity_extension", "equation");
+  } else if (!wet_extension_enabled) {
     wet_source = wet_reader.string(level_set_aliases::wet_extension_source,
                                    "advection_velocity_from_field");
     wet_extension_enabled = wet_source.has_value();
   }
-  if (wet_extension_enabled) {
+  if (pde_velocity_extension) {
+    // Handled above.
+  } else if (wet_extension_enabled) {
     if (options.velocity.source !=
         ls::LevelSetVelocitySource::PrescribedData) {
       throw std::runtime_error(
