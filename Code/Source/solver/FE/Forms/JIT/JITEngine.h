@@ -67,6 +67,15 @@ public:
     [[nodiscard]] std::string dataLayoutString() const;
     [[nodiscard]] std::string cpuName() const;
     [[nodiscard]] std::string cpuFeaturesString() const;
+
+    /**
+     * @brief Directory holding this engine's on-disk cached objects.
+     *
+     * Empty when the engine uses no filesystem object cache.  Derived from
+     * JITOptions::cache_directory, else $SVMP_JIT_CACHE_DIR, else
+     * ~/.cache/svMultiPhysics/jit_cache (see Forms/JIT/README.md).
+     */
+    [[nodiscard]] std::string objectCacheDirectory() const;
     [[nodiscard]] JITObjectCacheStats objectCacheStats() const;
     void resetObjectCacheStats();
 

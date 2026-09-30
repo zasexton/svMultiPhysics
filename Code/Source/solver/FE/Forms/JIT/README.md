@@ -48,3 +48,34 @@ Known limitations:
 - Numerical behavior is controlled by `JITOptions::fast_math_mode`; strict mode
   is the default, with contract-only and relaxed modes available when callers
   choose the performance/semantics tradeoff explicitly.
+
+## Object Cache
+
+Compiled kernel objects are cached in memory and, by default, on disk so later
+runs can skip LLVM code generation.  The on-disk cache directory is chosen as:
+
+1. `JITOptions::cache_directory`, when set in code;
+2. otherwise, when `JITOptions::cache_kernels` is true, the environment
+   variable `SVMP_JIT_CACHE_DIR`, when set and non-empty;
+3. otherwise `$HOME/.cache/svMultiPhysics/jit_cache`.
+
+For example, `export SVMP_JIT_CACHE_DIR=$SCRATCH/svmp-jit-cache` moves the
+cache off a small home filesystem, and a per-job directory isolates concurrent
+jobs.  `JITEngine::objectCacheDirectory()` reports the directory in use.
+
+If the directory was created by a different LLVM version, objects go to an
+`llvm-<version>` subdirectory.  Objects are stored under `objects-v2/`, one
+`<module>.objcache` file per module, each with a header recording the module
+id, the object size and an FNV-1a 64-bit checksum of both
+(`JITObjectCacheFile.h`).  On load, a file whose header, size, module id or
+checksum does not match is rejected, deleted and recompiled (with a warning),
+so a truncated or corrupted object is never linked or executed.  Raw objects
+left in the cache root by earlier builds are ignored.
+
+The directory may be shared by processes on many hosts, for example on a
+parallel filesystem.  Objects are published by writing an exclusively created
+temporary file named
+`<module>.objcache.tmp.<host>.<pid>.<random>.<counter>` and renaming it into
+place, so concurrent writers never share a temporary file and readers only see
+complete files.  Stale temporary files left by killed processes are harmless
+and can be deleted while no job is using the cache.

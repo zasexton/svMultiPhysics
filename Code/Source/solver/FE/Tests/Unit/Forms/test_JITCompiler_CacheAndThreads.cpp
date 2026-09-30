@@ -11,7 +11,9 @@
 #include "Forms/FormExpr.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITCompiler.h"
+#include "Forms/JIT/JITEngine.h"
 #include "Forms/JIT/JITKernelWrapper.h"
+#include "Forms/JIT/JITObjectCacheFile.h"
 #include "Spaces/H1Space.h"
 #include "Tests/Unit/Forms/JITTestHelpers.h"
 
@@ -20,9 +22,12 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -111,6 +116,147 @@ public:
 private:
     std::filesystem::path path_;
 };
+
+class ScopedJITCacheEnvVar {
+public:
+    ScopedJITCacheEnvVar(const char* key, const char* value)
+        : key_(key)
+    {
+        if (const char* current = std::getenv(key); current != nullptr) {
+            prior_ = std::string(current);
+        }
+        ::setenv(key_.c_str(), value, 1);
+    }
+
+    ~ScopedJITCacheEnvVar()
+    {
+        if (prior_) {
+            ::setenv(key_.c_str(), prior_->c_str(), 1);
+        } else {
+            ::unsetenv(key_.c_str());
+        }
+    }
+
+    ScopedJITCacheEnvVar(const ScopedJITCacheEnvVar&) = delete;
+    ScopedJITCacheEnvVar& operator=(const ScopedJITCacheEnvVar&) = delete;
+
+private:
+    std::string key_;
+    std::optional<std::string> prior_;
+};
+
+[[nodiscard]] std::string readBinaryFile(const std::filesystem::path& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+void writeBinaryFile(const std::filesystem::path& path, const std::string& bytes)
+{
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+}
+
+[[nodiscard]] bool pathIsWithin(const std::filesystem::path& path, const std::filesystem::path& root)
+{
+    const auto p = path.lexically_normal().string();
+    const auto r = root.lexically_normal().string();
+    return p.size() > r.size() && p.compare(0u, r.size(), r) == 0;
+}
+
+enum class DiskObjectCorruption {
+    StoredChecksum,   // header checksum altered; object bytes still a valid ELF
+    ObjectByteFlip,   // one bit flipped inside the object bytes
+    Truncation,       // tail of the file missing (e.g. interrupted copy)
+};
+
+// Compile once to publish an object, corrupt it on disk, and check that a
+// fresh compiler rejects it (no disk hit), recompiles, republishes a valid
+// object, and that a third compiler then loads the repaired object from disk.
+void expectCorruptDiskObjectRejectedAndRecompiled(DiskObjectCorruption corruption,
+                                                  std::string_view label,
+                                                  std::uint32_t parameter_slot)
+{
+    ScopedTempDir cache_dir(label);
+
+    jit::ValidationOptions v;
+    v.strictness = jit::Strictness::Strict;
+    const auto integrand = FormExpr::parameterRef(parameter_slot);
+
+    auto options_first = makeUnitTestJITOptions();
+    options_first.cache_directory = cache_dir.path().string();
+    options_first.dump_directory = (cache_dir.path() / "dump_first").string();
+    auto compiler_first = jit::JITCompiler::getOrCreate(options_first);
+    ASSERT_NE(compiler_first, nullptr);
+    const auto first = compiler_first->compileFunctional(integrand, IntegralDomain::Cell, v);
+    ASSERT_TRUE(first.ok) << first.message;
+    ASSERT_EQ(first.kernels.size(), 1u);
+
+    const auto& symbol = first.kernels.front().symbol;
+    const auto path = objectCacheFileForSymbol(cache_dir.path(), symbol);
+    ASSERT_FALSE(path.empty());
+    EXPECT_EQ(path.parent_path().filename().string(), jit::objcache::kFormatSubdirectory);
+
+    std::string bytes = readBinaryFile(path);
+    const auto published = jit::objcache::decodeFile(symbol, bytes);
+    ASSERT_EQ(published.status, jit::objcache::FileStatus::Valid)
+        << jit::objcache::toString(published.status);
+    const auto object_offset = static_cast<std::size_t>(published.object.data() - bytes.data());
+    const std::size_t object_size = published.object.size();
+    ASSERT_GT(object_size, 64u);
+
+    switch (corruption) {
+        case DiskObjectCorruption::StoredChecksum:
+            bytes[jit::objcache::kChecksumOffset] =
+                static_cast<char>(static_cast<unsigned char>(bytes[jit::objcache::kChecksumOffset]) ^ 0x5Au);
+            break;
+        case DiskObjectCorruption::ObjectByteFlip: {
+            const std::size_t pos = object_offset + object_size / 2u;
+            bytes[pos] = static_cast<char>(static_cast<unsigned char>(bytes[pos]) ^ 0x01u);
+            break;
+        }
+        case DiskObjectCorruption::Truncation:
+            bytes.resize(bytes.size() - 64u);
+            break;
+    }
+    writeBinaryFile(path, bytes);
+    ASSERT_NE(jit::objcache::decodeFile(symbol, readBinaryFile(path)).status, jit::objcache::FileStatus::Valid);
+
+    auto options_second = options_first;
+    options_second.dump_directory = (cache_dir.path() / "dump_second").string();
+    auto compiler_second = jit::JITCompiler::getOrCreate(options_second);
+    ASSERT_NE(compiler_second, nullptr);
+    compiler_second->resetCacheStats();
+
+    const auto second = compiler_second->compileFunctional(integrand, IntegralDomain::Cell, v);
+    ASSERT_TRUE(second.ok) << second.message;
+    ASSERT_EQ(second.kernels.size(), 1u);
+    EXPECT_NE(second.kernels.front().address, 0u);
+    EXPECT_EQ(second.kernels.front().cache_key, first.kernels.front().cache_key);
+    EXPECT_EQ(second.kernels.front().symbol, symbol);
+
+    const auto second_stats = compiler_second->cacheStats();
+    EXPECT_EQ(second_stats.object.disk_hits, 0u);
+    EXPECT_GE(second_stats.object.misses, 1u);
+    EXPECT_GE(second_stats.object.notify_compiled, 1u);
+
+    // The recompiled object was republished in the checked format.
+    const auto repaired_path = objectCacheFileForSymbol(cache_dir.path(), symbol);
+    ASSERT_FALSE(repaired_path.empty());
+    const std::string repaired = readBinaryFile(repaired_path);
+    EXPECT_EQ(jit::objcache::decodeFile(symbol, repaired).status, jit::objcache::FileStatus::Valid);
+
+    auto options_third = options_first;
+    options_third.dump_directory = (cache_dir.path() / "dump_third").string();
+    auto compiler_third = jit::JITCompiler::getOrCreate(options_third);
+    ASSERT_NE(compiler_third, nullptr);
+    compiler_third->resetCacheStats();
+    const auto third = compiler_third->compileFunctional(integrand, IntegralDomain::Cell, v);
+    ASSERT_TRUE(third.ok) << third.message;
+    ASSERT_EQ(third.kernels.size(), 1u);
+    EXPECT_NE(third.kernels.front().address, 0u);
+    EXPECT_GE(compiler_third->cacheStats().object.disk_hits, 1u);
+}
 
 } // namespace
 
@@ -562,6 +708,68 @@ TEST(JITCompilerCache, WrongSymbolDiskObjectIsRejectedAndRecompiled)
     const auto stats = compiler_probe->cacheStats();
     EXPECT_GE(stats.object.misses, 1u);
     EXPECT_GE(stats.object.notify_compiled, 1u);
+}
+
+TEST(JITCompilerCache, DiskObjectWithBadChecksumIsRejectedAndRecompiled)
+{
+    requireLLVMJITOrSkip();
+    expectCorruptDiskObjectRejectedAndRecompiled(
+        DiskObjectCorruption::StoredChecksum, "jit_objcache_bad_checksum", 790);
+}
+
+TEST(JITCompilerCache, DiskObjectWithFlippedObjectByteIsRejectedAndRecompiled)
+{
+    requireLLVMJITOrSkip();
+    expectCorruptDiskObjectRejectedAndRecompiled(
+        DiskObjectCorruption::ObjectByteFlip, "jit_objcache_byte_flip", 791);
+}
+
+TEST(JITCompilerCache, TruncatedDiskObjectIsRejectedAndRecompiled)
+{
+    requireLLVMJITOrSkip();
+    expectCorruptDiskObjectRejectedAndRecompiled(
+        DiskObjectCorruption::Truncation, "jit_objcache_truncated", 792);
+}
+
+TEST(JITCompilerCache, CacheDirectoryEnvironmentVariableSetsDefaultDirectory)
+{
+    requireLLVMJITOrSkip();
+
+    ScopedTempDir env_dir("jit_objcache_env_dir");
+    ScopedTempDir explicit_dir("jit_objcache_env_explicit");
+    ScopedJITCacheEnvVar env(jit::objcache::kCacheDirectoryEnvVar, env_dir.path().string().c_str());
+
+    auto options = makeUnitTestJITOptions();
+    ASSERT_TRUE(options.cache_directory.empty());
+    ASSERT_TRUE(options.cache_kernels);
+    options.dump_directory = (env_dir.path() / "dump_engine").string();
+
+    {
+        auto engine = jit::JITEngine::create(options);
+        ASSERT_NE(engine, nullptr);
+        EXPECT_TRUE(pathIsWithin(engine->objectCacheDirectory(), env_dir.path()))
+            << engine->objectCacheDirectory();
+    }
+
+    // End to end: objects compiled with no explicit directory land under $SVMP_JIT_CACHE_DIR.
+    options.dump_directory = (env_dir.path() / "dump_compiler").string();
+    auto compiler = jit::JITCompiler::getOrCreate(options);
+    ASSERT_NE(compiler, nullptr);
+    jit::ValidationOptions v;
+    v.strictness = jit::Strictness::Strict;
+    const auto result = compiler->compileFunctional(FormExpr::parameterRef(793), IntegralDomain::Cell, v);
+    ASSERT_TRUE(result.ok) << result.message;
+    ASSERT_EQ(result.kernels.size(), 1u);
+    EXPECT_FALSE(objectCacheFileForSymbol(env_dir.path(), result.kernels.front().symbol).empty());
+
+    // An explicit JITOptions::cache_directory still takes precedence.
+    auto explicit_options = options;
+    explicit_options.cache_directory = explicit_dir.path().string();
+    explicit_options.dump_directory = (explicit_dir.path() / "dump_engine").string();
+    auto explicit_engine = jit::JITEngine::create(explicit_options);
+    ASSERT_NE(explicit_engine, nullptr);
+    EXPECT_TRUE(pathIsWithin(explicit_engine->objectCacheDirectory(), explicit_dir.path()))
+        << explicit_engine->objectCacheDirectory();
 }
 
 TEST(JITKernelWrapper, EnsureCompiledIsExplicitAndIdempotent)
