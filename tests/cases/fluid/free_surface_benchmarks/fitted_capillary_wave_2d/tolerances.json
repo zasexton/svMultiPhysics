@@ -1,0 +1,55 @@
+{
+  "benchmark": "fitted_capillary_wave_2d",
+  "milestone": "M3 (reference) / M5",
+  "fixed_on": "2026-09-30, before the first protocol run",
+  "levels": {
+    "lambda_over_h": [16, 32, 64]
+  },
+  "protocol": {
+    "laplace_number": 3000,
+    "amplitude_over_wavelength": 0.01,
+    "periods": 4,
+    "snapshots": 100,
+    "time_step": "The capillary_wave_2d step shared by all levels (decision D10): the largest dt within the one-sided capillary limit sqrt(rho h^3/(4 pi gamma)) of lambda/h = 64 that divides the run into 100 output intervals, dt = 5.5027e-4, 2900 steps; 0.12, 0.35 and 1.00 times the limit of lambda/h = 16, 32, 64.",
+    "time_step_study_level": 32,
+    "time_step_study_dt_divisors": [1, 2, 4],
+    "time_step_study": "lambda/h = 32 at dt, dt/2, dt/4 (generate_case.py --dt-divisor 1, 2, 4); the dt run is the lambda/h = 32 run of the spatial study. Richardson extrapolation of omega and beta to dt -> 0 (order from the three steps, limit from the two smallest) gives the time error e_t(dt) of the shared step, which is removed from every spatial-study frequency and damping rate. The time-step study itself is reported, not gated.",
+    "reference": "Prosperetti initial-value solution (capillary_wave_2d/prosperetti_reference.py), fitted with the same damped-cosine model on the same output times as the simulation",
+    "note": "Same physical case, metrics and criteria as capillary_wave_2d, so the fitted and unfitted M3 results are judged alike; only the time-error removal (D10, as in fitted_sloshing_2d) is added. Definitions are in README.md."
+  },
+  "criteria": [
+    {
+      "id": "frequency",
+      "study": "spatial",
+      "quantity": "frequency_spatial_relative_error",
+      "definition": "|omega_sim - e_t^omega(dt) - omega_ref| / omega_ref. omega_sim is the angular frequency of the least-squares fit exp(-beta t)(c1 cos(omega t) + c2 sin(omega t)) to the exact cos(kx) coefficient a_h(t) of the P1 free surface over all outputs including t = 0; omega_ref is the same fit to Prosperetti's a(t) at the same times; e_t^omega(dt) from the time-step study.",
+      "limit": 0.02,
+      "at_level": [32],
+      "minimum_observed_order": 1.0,
+      "order_levels": [16, 32, 64],
+      "order_method": "least-squares slope of log(error) against log(lambda/h) over order_levels; pairwise orders are reported",
+      "source": "Tracker section 5, M3 working criterion (decision D1): frequency error <= 2% at lambda/h = 32 with convergence over 16/32/64, as in capillary_wave_2d/tolerances.json (order >= 1); time error removed as decided in D10."
+    },
+    {
+      "id": "damping",
+      "study": "spatial",
+      "quantity": "damping_spatial_relative_error",
+      "definition": "|beta_sim - e_t^beta(dt) - beta_ref| / beta_ref, beta the amplitude decay rate of the same two fits and e_t^beta(dt) from the time-step study.",
+      "limit": 0.05,
+      "at_level": [32, 64],
+      "minimum_observed_order": 1.0,
+      "order_levels": [16, 32, 64],
+      "order_method": "least-squares slope of log(error) against log(lambda/h) over order_levels; pairwise orders are reported",
+      "source": "Tracker section 5, M3 working criterion (decision D1): damping error <= 5% at lambda/h = 32 with convergence over 16/32/64, also applied at the finest level as in decision D12; identical to capillary_wave_2d/tolerances.json."
+    },
+    {
+      "id": "volume",
+      "study": "all",
+      "quantity": "liquid_area_relative_deviation_max",
+      "definition": "max over all outputs (and t = 0) of |A(t) - A(0)| / A(0), A the exact area of the current liquid mesh (reference points plus mesh displacement), A(0) that of the initial mesh (the region under the sampled P1 surface).",
+      "limit": 0.0001,
+      "at_level": "each protocol run (spatial and time-step studies)",
+      "source": "Tracker section 5 volume limit 1e-4 (M1-M3, decision D1), gated on the maximum deviation over the run (decision D11); as capillary_wave_2d/tolerances.json and fitted_sloshing_2d/tolerances.json."
+    }
+  ]
+}
