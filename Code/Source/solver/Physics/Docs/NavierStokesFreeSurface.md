@@ -42,7 +42,9 @@ surface tension; supply `Curvature` or a projected curvature field instead.
 - a prescribed, projected `Curvature_field_name`, distinct from the level-set field;
 - `Curvature_projection_recovery_mode=KinematicAreaGradient`;
 - interface quadrature order of at least 2;
-- `Curvature_projection_kinematic_area_gradient_filter_coefficient=0`.
+- `Curvature_projection_kinematic_area_gradient_filter_coefficient=0`;
+  `Curvature_projection_kinematic_area_gradient_mass` may be `Consistent` or
+  `Lumped`.
 
 ## Unfitted contact lines
 

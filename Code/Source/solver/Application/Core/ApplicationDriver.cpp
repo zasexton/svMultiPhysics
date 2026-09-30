@@ -4257,6 +4257,8 @@ canonicalLevelSetMaintenanceRequestSchedule(
         words,
         curvature_options
             .kinematic_area_gradient_filter_coefficient);
+    appendMaintenanceScheduleEnum(
+        words, curvature_options.kinematic_area_gradient_mass);
     appendMaintenanceScheduleBool(
         words,
         curvature_options
@@ -7084,6 +7086,10 @@ void logLevelSetMaintenanceCoverageDiagnostics(
         << " curvature_projection_recovery_mode="
         << svmp::FE::level_set::levelSetCurvatureRecoveryModeName(
                effectiveCurvatureProjectionOptions(request).recovery_mode)
+        << " curvature_projection_kinematic_area_gradient_mass="
+        << svmp::FE::level_set::levelSetKinematicAreaGradientMassName(
+               effectiveCurvatureProjectionOptions(request)
+                   .kinematic_area_gradient_mass)
         << std::endl;
   }
 
@@ -16341,6 +16347,8 @@ void mixCurvatureProjectionOptionsSignature(
   mixCurvatureSignatureReal(
       seed, options.kinematic_area_gradient_filter_coefficient);
   mixCurvatureSignature(
+      seed, static_cast<std::uint64_t>(options.kinematic_area_gradient_mass));
+  mixCurvatureSignature(
       seed,
       options.kinematic_area_gradient_negative_liquid_side ? 1u : 0u);
   mixCurvatureSignature(
@@ -16631,7 +16639,7 @@ void bindKinematicAreaGradientTractionMaintenance(
     if (curvature_options
             .kinematic_area_gradient_filter_coefficient != 0.0) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Total-energy traction requires Curvature_projection_kinematic_area_gradient_filter_coefficient=0 so the recovered curvature is the exact consistent-mass representation of the discrete functional derivative.");
+          "[svMultiPhysics::Application] Total-energy traction requires Curvature_projection_kinematic_area_gradient_filter_coefficient=0 so the recovered curvature is the exact consistent- or lumped-mass representation of the discrete functional derivative.");
     }
     const auto marker =
         generatedCutContextMarkerForMaintenance(system, request);
@@ -17177,6 +17185,9 @@ void logLevelSetCurvatureProjectionDiagnostic(
       << result.kinematic_area_gradient_mass_weighted_rms_deviation
       << " kinematic_area_gradient_filter_coefficient="
       << result.kinematic_area_gradient_filter_coefficient
+      << " kinematic_area_gradient_mass="
+      << svmp::FE::level_set::levelSetKinematicAreaGradientMassName(
+             result.kinematic_area_gradient_mass)
       << " kinematic_area_gradient_min_filter_radius_cells="
       << result.kinematic_area_gradient_min_filter_radius_cells
       << " kinematic_area_gradient_max_filter_radius_cells="
