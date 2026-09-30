@@ -102,6 +102,16 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
     assert case["linear_solver"] == "fsils"
     assert case["time_integration_scheme"] == "GeneralizedAlpha"
     assert "SVMP_" not in text
+    assert case["transport"] == "coupled"
+    level_set_eq = root.find("Add_equation[@type='level_set']")
+    assert level_set_eq.find("Velocity_source").text.strip() == "coupled_field"
+    wet = gen.solver_xml("surface_stress", 60, gen.time_schedule(16, 5.0, 100), 10, 1,
+                         transport="wet_extension")
+    assert "<Use_wet_extension_advection_velocity>true" in wet
+    assert "wall_compatible_normal" in wet
+    with pytest.raises(ValueError, match="not available yet"):
+        gen.solver_xml("surface_stress", 60, gen.time_schedule(16, 5.0, 100), 10, 1,
+                       transport="pde_extension")
     assert root.find("GeneralSimulationParameters/Number_of_time_steps").text == str(case["steps"])
     assert case["dt"] <= math.sqrt(case["h"] ** 3 / (4.0 * math.pi)) * (1 + 1e-12)
     assert case["steps"] * case["dt"] == pytest.approx(5.0 * case["viscous_time"])
