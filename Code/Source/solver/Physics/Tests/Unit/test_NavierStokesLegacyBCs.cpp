@@ -25,6 +25,7 @@
 #include "FE/TimeStepping/TimeSteppingUtils.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <filesystem>
@@ -33,6 +34,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -185,6 +187,43 @@ InletOutletMarkers labelBeamInletOutlet(svmp::Mesh& mesh_mut)
     }
 
     return svmp::create_mesh(std::move(base), comm);
+}
+
+// Single tetra whose x = 0 and y = 0 faces carry the given wall markers
+// (outward normals -x and -y); the remaining faces carry free_marker.
+[[nodiscard]] std::shared_ptr<svmp::Mesh> buildSingleTetraTwoWallMesh(
+    int free_marker,
+    int x_wall_marker,
+    int y_wall_marker)
+{
+    auto base = std::make_shared<svmp::MeshBase>();
+    const std::vector<svmp::real_t> x_ref = {
+        0.0, 0.0, 0.0,
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0,
+    };
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 4};
+    const std::vector<svmp::index_t> cell2vertex = {0, 1, 2, 3};
+    svmp::CellShape shape{};
+    shape.family = svmp::CellFamily::Tetra;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(/*spatial_dim=*/3, x_ref, cell2vertex_offsets, cell2vertex, {shape});
+    base->finalize();
+    for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(base->n_faces()); ++f) {
+        bool on_x_wall = true;
+        bool on_y_wall = true;
+        for (const auto vertex : base->face_vertices(f)) {
+            on_x_wall = on_x_wall && x_ref[3u * static_cast<std::size_t>(vertex)] == 0.0;
+            on_y_wall = on_y_wall && x_ref[3u * static_cast<std::size_t>(vertex) + 1u] == 0.0;
+        }
+        const int marker = on_x_wall ? x_wall_marker
+                           : on_y_wall ? y_wall_marker
+                                       : free_marker;
+        base->set_boundary_label(f, static_cast<svmp::label_t>(marker));
+    }
+    return svmp::create_mesh(std::move(base));
 }
 
 void writeTemporalSpatialValuesFile(
@@ -2030,7 +2069,10 @@ TEST(NavierStokesLegacyBCs,
     constexpr int interface_marker = 203;
     constexpr int first_wall_marker = 88;
     constexpr int second_wall_marker = 89;
-    auto mesh = buildSingleTetraBoundaryMesh(mesh_marker);
+    // Decision D4: each prescribed contact wall is a planar wall with Navier
+    // slip and a strong normal-only velocity condition.
+    auto mesh = buildSingleTetraTwoWallMesh(
+        mesh_marker, first_wall_marker, second_wall_marker);
     ASSERT_TRUE(mesh);
 
     svmp::Physics::EquationModuleInput input{};
@@ -2056,9 +2098,23 @@ TEST(NavierStokesLegacyBCs,
         defined(std::to_string(first_wall_marker) + "; " +
                 std::to_string(second_wall_marker));
     bc.params["Contact_line_wall_normals"] =
-        defined("1.0 0.0 0.0; 0.0 1.0 0.0");
+        defined("-1.0 0.0 0.0; 0.0 -1.0 0.0");
     bc.params["Contact_angle_degrees"] = defined("90.0");
+    bc.params["Wall_slip_model"] = defined("Navier");
+    bc.params["Wall_slip_length"] = defined("0.2");
     input.boundary_conditions.push_back(std::move(bc));
+    for (const auto& [wall_marker, direction] :
+         std::array<std::pair<int, const char*>, 2>{{
+             {first_wall_marker, "1 0 0"},
+             {second_wall_marker, "0 1 0"}}}) {
+        svmp::Physics::BoundaryConditionInput wall{};
+        wall.name = "contact_wall_" + std::to_string(wall_marker);
+        wall.boundary_marker = wall_marker;
+        wall.params["Type"] = defined("Dirichlet");
+        wall.params["Value"] = defined("0.0");
+        wall.params["Effective_direction"] = defined(direction);
+        input.boundary_conditions.push_back(std::move(wall));
+    }
 
     svmp::FE::systems::FESystem system(mesh);
     auto scalar_space =

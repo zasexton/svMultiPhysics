@@ -143,22 +143,16 @@ It requires `Wall_slip_model=Navier` with a positive literal
 `Wall_slip_length`, literal Newtonian viscosity,
 `Active_domain_method=CutVolume`, and `Active_domain_smoothing_width=0`.
 The slip length is a physical input of the case.
-`DynamicRenE` always uses it. For `PrescribedAngle` it is optional:
-supply both `Wall_slip_model` and `Wall_slip_length`, or neither.
 
-- With Navier slip, `PrescribedAngle` has the same wall requirements as
-  `DynamicRenE`: a stationary, zero, normal-only strong velocity condition
-  on an axis-aligned planar wall. Tangential or full no-slip constraints and
-  weak velocity Dirichlet data on that wall are rejected. This is the
-  configuration of decision D4.
-- Without slip, no velocity condition on the contact wall is required or
-  checked. The usual choice is a no-slip (full Dirichlet) wall. The velocity
-  test functions then vanish on the wall, so the Young line term does no
-  work and the contact line can move only through level-set transport. The
-  retired geometric reset (next section) used to impose the angle in this
-  case; now nothing does, and the contact angle keeps whatever the level set
-  carries. Whether `PrescribedAngle` without slip should be rejected is an
-  open decision.
+Both unfitted contact laws require it (decision D4): the Young term in
+momentum is the only contact-angle mechanism, and on a no-slip wall the
+velocity test functions vanish, so that term would do no work and nothing
+would impose the angle. `PrescribedAngle` and `DynamicRenE` therefore share
+the wall requirements: Navier slip on the wetted wall and a stationary,
+zero, normal-only strong velocity condition on an axis-aligned planar wall
+whose faces carry the configured outward normal. Tangential or full no-slip
+constraints and weak velocity Dirichlet data on that wall are rejected, and
+so is an unfitted `PrescribedAngle` without `Wall_slip_model=Navier`.
 
 ### Level-set wall maintenance
 
@@ -210,10 +204,11 @@ redistancing.
 Fitted prescribed and dynamic contact are rejected until a fitted
 codimension-two integration entity exists.
 
-`PrescribedAngle` with Navier slip additionally requires the slip
-conditions above: literal Newtonian viscosity, `CutVolume` with zero
-smoothing width, an axis-aligned planar wall, and a stationary, zero,
-normal-only strong velocity condition on that wall.
+`PrescribedAngle` additionally requires the slip conditions above:
+`Wall_slip_model=Navier` with a positive literal `Wall_slip_length`, literal
+Newtonian viscosity, `CutVolume` with zero smoothing width, an axis-aligned
+planar wall, and a stationary, zero, normal-only strong velocity condition
+on that wall.
 
 `DynamicRenE` additionally requires:
 

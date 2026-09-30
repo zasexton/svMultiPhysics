@@ -275,6 +275,8 @@ def _write_solver_xml(case_dir: Path,
     <Contact_line_wall_face>{contact["wall"]}</Contact_line_wall_face>
     <Contact_line_wall_normal>{normal}</Contact_line_wall_normal>
     <Contact_angle_degrees>{float(contact['equilibrium_contact_angle_degrees']):.16g}</Contact_angle_degrees>
+    <Wall_slip_model>Navier</Wall_slip_model>
+    <Wall_slip_length>{float(contact['slip_length']):.16g}</Wall_slip_length>
     <Active_domain_smoothing_width>0.0</Active_domain_smoothing_width>"""
 
     solver = f"""<?xml version=\"1.0\" encoding=\"UTF-8\" ?>
@@ -554,6 +556,9 @@ def write_sessile_sphere_case(
         "wall_normal": list(frame["wall_normal"]),
         "wall_tangent_axes": list(frame["wall_tangent_axes"]),
         "equilibrium_contact_angle_degrees": contact_angle_degrees,
+        # Decision D4: the contact line moves through Navier slip; the slip
+        # length is a physical input, R/8 as in sessile_drop_2d.
+        "slip_length": radius / 8.0,
     }
     _write_solver_xml(
         case_dir, steps, time_step_size, surface_tension, contact=contact,
@@ -599,7 +604,8 @@ def write_sessile_sphere_case(
             "initial_contact_angle_degrees": contact_angle_degrees,
             "dynamic": False,
             "contact_line_model": "PrescribedContactAngle",
-            "level_set_geometry_owner": "accepted_state_wall_aware_repair",
+            "level_set_geometry_owner": (
+                "none_angle_preserving_wall_maintenance"),
             "momentum_owner": "young_wall_energy",
         },
         "initial_pressure_extension": (
