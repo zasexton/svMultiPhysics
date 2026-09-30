@@ -464,6 +464,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
     - Now: host/PID/random temporary names with exclusive create, then rename; a checksummed cache-file format whose mismatches are rejected, deleted and recompiled; objects in an `objects-v2/` subdirectory; an `SVMP_JIT_CACHE_DIR` override.
     - `FE_LOG_LEVEL` and the other `FE_LOG_*` settings now take effect: they are read on first logger use, so the linker can no longer drop them.
     - FE CTest 34/34, including the new logger targets. The failing field-op test passed 20/20 repeats.
+  - Integrated build and regression of `45bc5b09` (with the JIT and logger fixes), job `46076509`: FE 32/32, Physics 7/7 and Application 4/4 CTest entries passed. The stable solver binary for benchmark runs is `/scratch/users/zsexton/svmp-bin/svmultiphysics-45bc5b09`.
   - The smoke run took 5.5 s per step on a 625-vertex 2D mesh. Each step needed 9–10 outer geometry passes against a cap of 12, driven by the 1e-10 absolute level-set gate, and wrote about 0.35 MB of log.
   - Extrapolated, R/h = 32 at La = 12 needs about 6 days, and R/h = 64 needs weeks to months. The same cost limits M1, M3 and M4.
   - Profile one R/h = 8 step, then reduce the unnecessary outer passes and per-step output. Any convergence gate must be scaled or derived rather than tuned (P1).
