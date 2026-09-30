@@ -481,11 +481,12 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - A dry run of all 24 cases validates against the parser.
   - A smoke run at R/h = 8 with `SurfaceStress` (Sept 4 binary) accepted 5 of 5 steps, with pressure-jump error 0.14% and area drift 1.5e-7.
   - Level-set transport check (job `46089180`, La = 12, `surface_stress`, 2·Δt_B): the PDE extension does not change the relaxed drop. At R/h = 8 and 16 the pressure-jump error, `Ca_sp` and growth ratio agree with coupled transport to 2–3 digits, and it costs 15–18% more per step. The protocol transport is now `pde_harmonic_monolithic`, with Δt = 2·Δt_B at La = 12 and Δt_B at La = 120.
-- [ ] **M2 La = 12 study submitted 2026-09-30 on `02da73ea`.**
+- [ ] **M2 La = 12 study submitted 2026-09-30 on binary `35a81fd3`** (`/scratch/users/zsexton/svmp-bin/svmultiphysics-35a81fd3`).
   - Three capillary forms (`surface_stress`, `kag_lumped`, `kag_consistent`) × R/h = 8, 16, 32, each as a serial single-rank job (MPI defects).
-  - Jobs `46119057`, `46119142`, `46119433`, `46119435`, `46119444`, `46119471`, `46119474`, `46119476`, `46119478`. They start after build job `46118906`, which installs `/scratch/users/zsexton/svmp-bin/svmultiphysics-02da73ea`.
-  - Cases and output: `/scratch/users/zsexton/free-surface-benchmarks/static_drop_2d/02da73ea/La12/<form>/L<level>`, with the job list in `jobs.txt`.
+  - Jobs `46130396`, `46130397`, `46130399`, `46130400`, `46130403`, `46130406`, `46130407`, `46130408`, `46130409`.
+  - Cases and output: `/scratch/users/zsexton/free-surface-benchmarks/static_drop_2d/35a81fd3/La12/<form>/L<level>`, with the job list in `jobs.txt`.
   - Expected: about 5 min at R/h = 8, about 1 h at 16, and about 10–15 h at 32 (longer on SKX nodes).
+  - The first submission on `02da73ea` was held and cancelled when the face-sampling fix arrived. Job `46121663` then showed the fix leaves the unfitted static drop (R/h = 8, full run), sloshing (L/h = 16, full run) and capillary wave (100 steps) bitwise identical at the same cost.
 - [x] **Per-step cost must come down before the refinement study (added 2026-09-29; done 2026-09-30).**
   - Merged commits `b5837011`, `09b46072`, `889c75f2` and `67b4395a`:
     - a reference-element metadata cache;
@@ -604,9 +605,9 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - Protocol (D9, D10): `--transport` coupled / wet_extension / PDE extension, where the PDE extension becomes the default once it exists. One shared Δt at the λ/h = 64 capillary limit (2,900 steps) for the spatial study, plus a separate Δt/2, Δt/4 study at λ/h = 32.
   - Smoke run `46075460` (λ/h = 16, 0.1 period): amplitude within 7.5e-4 of the reference, area drift 4.9e-7 and growing.
 - [ ] **Capillary wave runs** (Prosperetti) at λ/h = 16, 32, 64 and three time steps. The PDE extension (D9) has merged, and `capillary_wave_2d/generate_case.py` now defaults to it (`3a9e3ba5`). Note: the wet extension writes about 1 MB of JSON map per step; make that output opt-in before long runs. Proposal: frequency error ≤ 2% and damping error ≤ 5% at λ/h = 32 (the 07-17 n = 16 run already had 1.2% frequency error).
-  - **Submitted 2026-09-30 on binary `02da73ea`:** `surface_stress` with `pde_extension` transport at λ/h = 16, 32 and 64 (shared Δt), plus Δt/2 and Δt/4 at λ/h = 32 (D10).
-    - Jobs `46120312`, `46120345`, `46120361`, `46120366`, `46120368`, starting after build `46118906`.
-    - Output in `/scratch/users/zsexton/free-surface-benchmarks/capillary_wave_2d/3a9e3ba5/pde_extension/surface_stress/`.
+  - **Submitted 2026-09-30 on binary `35a81fd3`:** `surface_stress` with `pde_extension` transport at λ/h = 16, 32 and 64 (shared Δt), plus Δt/2 and Δt/4 at λ/h = 32 (D10).
+    - Jobs `46130411`, `46130412`, `46130432`, `46130438`, `46130568`.
+    - Output in `/scratch/users/zsexton/free-surface-benchmarks/capillary_wave_2d/35a81fd3/pde_extension/surface_stress/`.
     - The KAG forms follow once M2 has compared the capillary routes.
 - [ ] **Oscillating 2D drop**: Lamb frequency and viscous damping.
 
@@ -664,7 +665,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
 
 Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch tests: FE 32/32, Physics 7/7 and Application 4/4 (job `46104940`); 77 benchmark Python tests. Output is in `/scratch/users/zsexton/free-surface-benchmarks/fitted_ale/`.
 
-- [x] **Shared FE assembly bug fixed (`f157011b`).** `StandardAssembler::prepareContextFace` left the face rule in `cached_quad_rule_`, so every non-primary field on a boundary, interior or interface mesh face was evaluated at the canonical face points rather than the face-to-cell mapped points. Constants were exact; anything varying in space was wrong. In the fitted path it caused an 11% slow wave, linear Newton convergence and instability. The fix changes every face integral that uses a non-primary field (fitted kinematics, FSI interface, DG and other boundary terms). The effect on the unfitted benchmarks is being checked (job `46121663`, before and after the fix).
+- [x] **Shared FE assembly bug fixed (`f157011b`).** `StandardAssembler::prepareContextFace` left the face rule in `cached_quad_rule_`, so every non-primary field on a boundary, interior or interface mesh face was evaluated at the canonical face points rather than the face-to-cell mapped points. Constants were exact; anything varying in space was wrong. In the fitted path it caused an 11% slow wave, linear Newton convergence and instability. The fix changes every face integral that uses a non-primary field (fitted kinematics, FSI interface, DG and other boundary terms). The unfitted static drop, sloshing and capillary wave are bitwise identical before and after the fix, at the same cost (job `46121663`).
 - [x] Sliding mesh walls: a mesh `Dir` with `Value 0` and `Effective_direction` constrains only the selected components (`DirichletBC::active_components`), with the same input as a free-slip fluid wall.
 - [x] **2D fitted sloshing passes D10–D12** (`fitted_sloshing_2d`, job `46104905`).
   - Setup: the same tank, mode, amplitude, viscosity and exact viscous reference as `linear_sloshing_2d`, on a liquid-only mesh.
