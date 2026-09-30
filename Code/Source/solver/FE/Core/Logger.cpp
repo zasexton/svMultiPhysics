@@ -40,6 +40,7 @@
 
 #include "Logger.h"
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <thread>
@@ -48,71 +49,77 @@ namespace svmp {
 namespace FE {
 
 // ============================================================================
-// Logger Initialization
+// Logger Environment Configuration
 // ============================================================================
 
 namespace {
 
-/**
- * @brief Initialize logger from environment variables
- */
-class LoggerInitializer {
-public:
-    LoggerInitializer() {
-        auto& logger = Logger::instance();
+std::string to_upper_ascii(std::string_view text) {
+    std::string out(text);
+    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
+        return static_cast<char>(std::toupper(c));
+    });
+    return out;
+}
 
-        // Check FE_LOG_LEVEL environment variable
-        if (const char* env_level = std::getenv("FE_LOG_LEVEL")) {
-            std::string level_str(env_level);
-            std::transform(level_str.begin(), level_str.end(), level_str.begin(), ::toupper);
-
-            if (level_str == "DEBUG") {
-                logger.set_level(LogLevel::DEBUG);
-            } else if (level_str == "INFO") {
-                logger.set_level(LogLevel::INFO);
-            } else if (level_str == "WARNING" || level_str == "WARN") {
-                logger.set_level(LogLevel::WARNING);
-            } else if (level_str == "ERROR") {
-                logger.set_level(LogLevel::ERROR);
-            } else if (level_str == "CRITICAL" || level_str == "CRIT") {
-                logger.set_level(LogLevel::CRITICAL);
-            } else if (level_str == "OFF") {
-                logger.set_level(LogLevel::OFF);
-            }
-        }
-
-        // Check FE_LOG_FILE environment variable
-        if (const char* env_file = std::getenv("FE_LOG_FILE")) {
-            logger.set_file_output(env_file);
-        }
-
-        // Check FE_LOG_CONSOLE environment variable
-        if (const char* env_console = std::getenv("FE_LOG_CONSOLE")) {
-            std::string console_str(env_console);
-            std::transform(console_str.begin(), console_str.end(), console_str.begin(), ::tolower);
-            logger.set_console_output(console_str != "false" && console_str != "0");
-        }
-
-        // Check FE_LOG_SHOW_RANK environment variable
-        if (const char* env_rank = std::getenv("FE_LOG_SHOW_RANK")) {
-            std::string rank_str(env_rank);
-            std::transform(rank_str.begin(), rank_str.end(), rank_str.begin(), ::tolower);
-            logger.set_show_rank(rank_str != "false" && rank_str != "0");
-        }
-
-        // Check FE_LOG_SHOW_TIME environment variable
-        if (const char* env_time = std::getenv("FE_LOG_SHOW_TIME")) {
-            std::string time_str(env_time);
-            std::transform(time_str.begin(), time_str.end(), time_str.begin(), ::tolower);
-            logger.set_show_timestamp(time_str != "false" && time_str != "0");
-        }
-    }
-};
-
-// Static initialization
-static LoggerInitializer logger_init;
+/// Matches the historical parsing: anything except "false" or "0" enables.
+bool env_flag_enabled(const char* value) {
+    const std::string upper = to_upper_ascii(value);
+    return upper != "FALSE" && upper != "0";
+}
 
 } // anonymous namespace
+
+std::optional<LogLevel> parse_log_level(std::string_view name) {
+    const std::string level = to_upper_ascii(name);
+    if (level == "DEBUG") {
+        return LogLevel::DEBUG;
+    }
+    if (level == "INFO") {
+        return LogLevel::INFO;
+    }
+    if (level == "WARNING" || level == "WARN") {
+        return LogLevel::WARNING;
+    }
+    if (level == "ERROR") {
+        return LogLevel::ERROR;
+    }
+    if (level == "CRITICAL" || level == "CRIT") {
+        return LogLevel::CRITICAL;
+    }
+    if (level == "OFF") {
+        return LogLevel::OFF;
+    }
+    return std::nullopt;
+}
+
+// Called from the (header-inline) constructor, i.e. lazily on first use of
+// Logger::instance().  This replaces a namespace-scope static initializer in
+// this file: the linker omits this object file from static-library links when
+// nothing else references it, and FE_LOG_LEVEL was then silently ignored.
+void Logger::apply_environment() {
+    if (const char* env_level = std::getenv("FE_LOG_LEVEL")) {
+        if (const auto level = parse_log_level(env_level)) {
+            min_level_ = *level;
+        }
+    }
+
+    if (const char* env_file = std::getenv("FE_LOG_FILE")) {
+        set_file_output(env_file);
+    }
+
+    if (const char* env_console = std::getenv("FE_LOG_CONSOLE")) {
+        console_output_ = env_flag_enabled(env_console);
+    }
+
+    if (const char* env_rank = std::getenv("FE_LOG_SHOW_RANK")) {
+        show_rank_ = env_flag_enabled(env_rank);
+    }
+
+    if (const char* env_time = std::getenv("FE_LOG_SHOW_TIME")) {
+        show_timestamp_ = env_flag_enabled(env_time);
+    }
+}
 
 // ============================================================================
 // Utility Functions
