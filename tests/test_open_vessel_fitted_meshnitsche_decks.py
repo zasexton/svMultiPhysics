@@ -123,8 +123,20 @@ def test_forced_variant_writes_the_roll_tables(dim, tmp_path):
     root = ET.parse(out / "solver.xml").getroot()
     fluid = list(root.iter("Add_equation"))[0]
     body = fluid.find("Momentum_source_temporal_and_spatial_values_file_path").text
-    first = (out / body).read_text().splitlines()[0].split()
+    lines = (out / body).read_text().splitlines()
+    first = lines[0].split()
     assert first == [str(dim), "5", str(meta["mesh"]["points"])]
+    # By default the table depends on x only (the solver's exact x-only
+    # interpolant): nodes with equal x carry equal values at every time.
+    n_nodes, n_times = meta["mesh"]["points"], 5
+    values = np.array([[float(v) for v in line.split()]
+                       for k, line in enumerate(lines[1 + n_times:]) if k % (n_times + 1) != 0])
+    values = values.reshape(n_nodes, n_times, dim)
+    points = pv.read(out / "mesh/water/mesh-complete.mesh.vtu").points
+    for x in np.unique(np.round(points[:, 0], 12)):
+        group = values[np.isclose(points[:, 0], x)]
+        assert np.allclose(group, group[0], rtol=0.0, atol=1e-12)
+    assert np.ptp(values[..., 0]) > 0.0          # rotated gravity and Euler terms act
     omega = fluid.find("Rotating_frame_angular_velocity_temporal_values_file_path")
     assert (omega is not None) == (dim == 3)
     assert root.find("GeneralSimulationParameters/Number_of_time_steps").text == "40"
