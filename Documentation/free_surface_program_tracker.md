@@ -415,8 +415,19 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
     - Verified in test jobs `45973957` and `45974084`: bare launches fail; `mpiexec -n 1`, `srun --mpi=pmix --exact`, and bare launches with the Slurm/PMI variables removed all work.
     - Rule: submit with `--export=NONE` and launch MPI programs through `mpiexec` (benchmarks README).
 
-- [ ] **Tank at rest (2D and 3D).** Take a small subset of the existing hydrostatic matrix into CTest. The full 960-case matrix does not need to run routinely.
-- [ ] **2D linear sloshing** at 3 meshes and 3 time steps. Compare frequency and damping with linear theory. Proposal: frequency error ≤ 1% at the finest mesh with observed convergence; volume drift ≤ 1e-4 over the run.
+- [x] **Tank at rest (2D and 3D): PASS (2026-09-30, job `46023412`).** Benchmark `tests/cases/fluid/free_surface_benchmarks/tank_at_rest/` (merged 2026-09-30).
+  - Free-slip walls (strong zero normal velocity through `Effective_direction`). The fill height is off vertex rows.
+  - max|u|/√(gH) ≤ 3.4e-13; pressure, interface and volume errors 0 to 5e-17. The gate is 1e-8 for this exactly representable state.
+  - Newton makes no updates, so this checks balance, not the solve. A perturbed-start variant would exercise the solve.
+- [ ] **Tank at rest (original plan item).** Take a small subset of the existing hydrostatic matrix into CTest. The full 960-case matrix does not need to run routinely.
+- [ ] **2D linear sloshing: FAILS at the finest level (2026-09-30, job `46023412`).** Benchmark `tests/cases/fluid/free_surface_benchmarks/linear_sloshing_2d/` (merged 2026-09-30).
+  - Setup: free-slip walls; a reference from the exact viscous linear dispersion relation (ω = 1.7006, damping 9.52e-3); Δt = T0/(2L/h).
+  - Frequency error −0.32% / +0.28% / +1.43% at L/h = 16/32/64 (limit 1% with convergence). Max area oscillation 5.5e-5 / 5.4e-5 / 6.5e-4 (limit 1e-4). Damping error 1.7% / 2.1% / 7.6%.
+  - Diagnosed cause: with φ advected by the coupled fluid velocity and no velocity extension, dry vertices one row above the cut cells keep zero velocity and their φ lags. That lag grows with refinement (8% → 17% at half period) and drives a spurious cos(2kx) mode of 9.5% of the amplitude at L/h = 64.
+  - With the existing wet-extension transport (the SPHERIC 05 option): frequency error −0.385% / −0.046% / +0.097%, area ≤ 4e-5. The frequency error is not strictly monotone, and the extension writes about 1 MB of map per step.
+  - The Δt error alone is clean second order. Refining Δt with h lets opposite-sign time and space errors cancel, so gate the spatial study with the time error removed.
+  - `static_drop_2d` uses the same coupled transport, so M2 is exposed too.
+- [ ] **2D linear sloshing (original plan item)** at 3 meshes and 3 time steps. Compare frequency and damping with linear theory. Proposal: frequency error ≤ 1% at the finest mesh with observed convergence; volume drift ≤ 1e-4 over the run.
 - [ ] **SPHERIC 05 D18/D38** to t = 0.3 s and then further. Compare profiles with experiment. Proposal: no regression from the June RMSE of about 0.02 m, and no false wetting.
 - [ ] **Re-run SPHERIC 10 and 02** on the current tip. They were never re-run after the aggregation, sparsity and penalty fixes. Record whether the June pressure-spike and sliver-cut failures persist.
 - [ ] **MMS traveling interface** refinement (the June matrix) as a regression.
