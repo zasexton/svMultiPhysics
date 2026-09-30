@@ -19,6 +19,7 @@ import argparse
 import cmath
 import json
 import math
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -128,8 +129,8 @@ def reference(g: float = GRAVITY, depth: float = MEAN_DEPTH, nu: float = KINEMAT
 
 
 def time_schedule(level: int, periods: float = PERIODS,
-                  steps_per_period: int | None = None) -> dict:
-    ref = reference()
+                  steps_per_period: int | None = None, depth: float = MEAN_DEPTH) -> dict:
+    ref = reference(depth=depth)
     if steps_per_period is None:
         steps_per_period = STEPS_PER_PERIOD_PER_LEVEL * level
     cadence = max(1, steps_per_period // SNAPSHOTS_PER_PERIOD)
@@ -139,12 +140,12 @@ def time_schedule(level: int, periods: float = PERIODS,
             "steps_per_period": steps_per_period, "output_cadence": cadence}
 
 
-def initial_fields(points: np.ndarray, k: float) -> dict:
+def initial_fields(points: np.ndarray, k: float, depth: float = MEAN_DEPTH) -> dict:
     """Linear standing wave at t = 0: eta = A cos(k x), u = 0, and the linear pressure."""
     x, y = points[:, 0], points[:, 1]
-    phi = y - MEAN_DEPTH - AMPLITUDE * np.cos(k * x)
-    pressure = (EXTERNAL_PRESSURE + DENSITY * GRAVITY * (MEAN_DEPTH - y)
-                + DENSITY * GRAVITY * AMPLITUDE * np.cosh(k * y) / math.cosh(k * MEAN_DEPTH)
+    phi = y - depth - AMPLITUDE * np.cos(k * x)
+    pressure = (EXTERNAL_PRESSURE + DENSITY * GRAVITY * (depth - y)
+                + DENSITY * GRAVITY * AMPLITUDE * np.cosh(k * y) / math.cosh(k * depth)
                 * np.cos(k * x))
     return {"phi": phi, "pressure": pressure}
 
@@ -390,7 +391,8 @@ def solver_xml(schedule: dict, steps: int, cadence: int,
 # ---------------------------------------------------------------------------
 def generate(level: int, output_dir: Path, *, periods: float = PERIODS,
              steps_per_period: int | None = None, level_set_velocity: str = "coupled_field",
-             max_steps: int | None = None, force: bool = False) -> dict:
+             mean_depth: float = MEAN_DEPTH, max_steps: int | None = None,
+             force: bool = False) -> dict:
     if level not in LEVELS:
         raise ValueError(f"--level must be one of {LEVELS}")
     if not periods > 0.0:
@@ -398,12 +400,14 @@ def generate(level: int, output_dir: Path, *, periods: float = PERIODS,
     if output_dir.exists() and any(output_dir.iterdir()) and not force:
         raise FileExistsError(f"{output_dir} is not empty (use --force)")
 
-    ref = reference()
+    if not AMPLITUDE < mean_depth < TANK_HEIGHT - 2.0 * AMPLITUDE:
+        raise ValueError("--mean-depth must leave the surface band inside the tank")
+    ref = reference(depth=mean_depth)
     if level_set_velocity not in LEVEL_SET_VELOCITY:
         raise ValueError(f"--level-set-velocity must be one of {LEVEL_SET_VELOCITY}")
     if steps_per_period is not None and steps_per_period < SNAPSHOTS_PER_PERIOD:
         raise ValueError(f"--steps-per-period must be at least {SNAPSHOTS_PER_PERIOD}")
-    schedule = time_schedule(level, periods, steps_per_period)
+    schedule = time_schedule(level, periods, steps_per_period, mean_depth)
     steps, cadence, truncated = schedule["steps"], schedule["output_cadence"], False
     if max_steps is not None:
         if max_steps < 1:
@@ -413,9 +417,9 @@ def generate(level: int, output_dir: Path, *, periods: float = PERIODS,
 
     points, cells, faces, (nx, ny) = structured_triangle_mesh(level)
     h = TANK_LENGTH / level
-    fields = initial_fields(points, ref["wavenumber"])
+    fields = initial_fields(points, ref["wavenumber"], mean_depth)
     rows = np.arange(ny + 1) * h
-    band = (MEAN_DEPTH - AMPLITUDE, MEAN_DEPTH + AMPLITUDE)
+    band = (mean_depth - AMPLITUDE, mean_depth + AMPLITUDE)
     gap = float(np.min(np.minimum(np.abs(rows - band[0]), np.abs(rows - band[1]))))
     if np.any((rows >= band[0]) & (rows <= band[1])):
         gap = 0.0
@@ -450,7 +454,8 @@ def generate(level: int, output_dir: Path, *, periods: float = PERIODS,
         "density": DENSITY,
         "gravity": GRAVITY,
         "kinematic_viscosity": KINEMATIC_VISCOSITY,
-        "mean_depth": MEAN_DEPTH,
+        "mean_depth": mean_depth,
+        "interface_cell_position": (mean_depth % h) / h,
         "amplitude": AMPLITUDE,
         "mode": MODE,
         **ref,
@@ -465,7 +470,8 @@ def generate(level: int, output_dir: Path, *, periods: float = PERIODS,
         "steps_per_period": schedule["steps_per_period"],
         "level_set_velocity": level_set_velocity,
         "protocol_run": (schedule["steps_per_period"] == STEPS_PER_PERIOD_PER_LEVEL * level
-                         and level_set_velocity == "coupled_field"),
+                         and level_set_velocity == "coupled_field"
+                         and mean_depth == MEAN_DEPTH),
         "steps_protocol": schedule["steps"],
         "steps": steps,
         "end_time": steps * schedule["dt"],
@@ -493,6 +499,9 @@ def main(argv=None) -> int:
                         default="coupled_field",
                         help="diagnostic runs only (protocol value coupled_field); verify.py "
                              "reports such runs but does not gate them")
+    parser.add_argument("--mean-depth", type=float, default=MEAN_DEPTH,
+                        help="diagnostic runs only (protocol value 0.5 + 1/128); verify.py "
+                             "reports such runs but does not gate them")
     parser.add_argument("--max-steps", type=int, default=None,
                         help="smoke runs only: stop after this many steps; verify.py rejects "
                              "such runs for acceptance")
@@ -500,14 +509,19 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     case = generate(args.level, args.output_dir, periods=args.periods,
                     steps_per_period=args.steps_per_period,
-                    level_set_velocity=args.level_set_velocity, max_steps=args.max_steps,
+                    level_set_velocity=args.level_set_velocity, mean_depth=args.mean_depth,
+                    max_steps=args.max_steps,
                     force=args.force)
     print(f"wrote {args.output_dir}")
     for key in ("level_cells_per_length", "n_vertices", "n_triangles", "mean_depth",
                 "omega_inviscid", "omega_reference", "damping_rate_reference",
                 "damping_rate_lamb", "dt", "steps_per_period", "steps", "output_cadence",
-                "end_time", "interface_band_vertex_gap_over_h", "truncated"):
+                "end_time", "interface_cell_position", "interface_band_vertex_gap_over_h",
+                "protocol_run", "truncated"):
         print(f"  {key} = {case[key]}")
+    if case["interface_band_vertex_gap_over_h"] == 0.0:
+        print("WARNING: a vertex row lies inside the surface band; the interface will cross "
+              "vertices", file=sys.stderr)
     return 0
 
 

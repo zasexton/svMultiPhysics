@@ -307,6 +307,7 @@ def analyse_run(run: Path, *, allow_short: bool = False) -> dict:
         "outputs": int(times.size - 1),
         "steps_per_period": case["steps_per_period"],
         "level_set_velocity": case.get("level_set_velocity", "coupled_field"),
+        "mean_depth": case["mean_depth"],
         "protocol_run": bool(case.get("protocol_run", case.get("protocol_time_step", True))),
         "omega_reference": omega_ref,
         "omega_inviscid": case["omega_inviscid"],
@@ -429,7 +430,7 @@ def main(argv=None) -> int:
     # Diagnostic runs (generate_case.py --steps-per-period or
     # --level-set-velocity) are reported beside the study, never gated.
     everything = sorted(runs, key=lambda r: (not r["protocol_run"], r["level_set_velocity"],
-                                             r["level"], r["steps_per_period"]))
+                                             r["mean_depth"], r["level"], r["steps_per_period"]))
     runs = [r for r in everything if r["protocol_run"]]
     seen = [r["level"] for r in runs]
     if len(seen) != len(set(seen)) or not set(seen) <= set(tolerances["levels"]["cells_per_length"]):
@@ -448,7 +449,8 @@ def main(argv=None) -> int:
               f"{r['fit_rms_residual_over_amplitude']:>8.1e} {r['liquid_area_relative_drift_max']:>9.2e}"
               + ("  [TRUNCATED SMOKE RUN]" if r["truncated"] else "")
               + ("" if r["protocol_run"] else
-                 f"  [diagnostic ({r['level_set_velocity']}), not gated]"))
+                 f"  [diagnostic ({r['level_set_velocity']}, H0={r['mean_depth']:.7g}), "
+                 "not gated]"))
     print(f"reference: omega = {everything[0]['omega_reference']:.10f} (inviscid "
           f"{everything[0]['omega_inviscid']:.10f}), gamma = "
           f"{everything[0]['damping_rate_reference']:.6e} "
