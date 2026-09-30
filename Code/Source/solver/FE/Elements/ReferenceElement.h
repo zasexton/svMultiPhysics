@@ -69,7 +69,19 @@ public:
      */
     static ReferenceElement create(ElementType type);
 
+    /**
+     * @brief Shared immutable metadata for the given element type
+     *
+     * Returns the same object as `create()` would copy. The object is built
+     * once per element type (thread-safe) and lives for the rest of the
+     * process, so hot loops can query topology and the reference measure
+     * without rebuilding it. Unknown element types throw on every request.
+     */
+    static const ReferenceElement& shared(ElementType type);
+
 private:
+    static ReferenceElement build(ElementType type);
+
     ElementType type_{ElementType::Unknown};
     int dimension_{-1};
     std::size_t num_nodes_{0};

@@ -146,7 +146,7 @@ std::optional<LocalIndex> local_face_index_from_stored_face(const svmp::MeshBase
               face_key.begin() + static_cast<std::ptrdiff_t>(face_corner_count));
 
     const ElementType cell_type = element_type_from_mesh_cell(mesh, cell_id);
-    const auto ref = elements::ReferenceElement::create(cell_type);
+    const auto& ref = elements::ReferenceElement::shared(cell_type);
     for (std::size_t lf = 0; lf < ref.num_faces(); ++lf) {
         const auto& ref_face = ref.face_nodes(lf);
         if (ref_face.size() != face_corner_count || ref_face.size() > 4u) {

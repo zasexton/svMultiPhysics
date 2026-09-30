@@ -6595,7 +6595,7 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             const ElementType cell_type_minus = mesh.getCellType(cell_minus);
             const ElementType cell_type_plus = mesh.getCellType(cell_plus);
             if (cell_type_minus == cell_type_plus) {
-                elements::ReferenceElement ref = elements::ReferenceElement::create(cell_type_minus);
+                const elements::ReferenceElement& ref = elements::ReferenceElement::shared(cell_type_minus);
                 const auto& face_nodes_minus = ref.face_nodes(static_cast<std::size_t>(local_face_minus));
                 const auto& face_nodes_plus = ref.face_nodes(static_cast<std::size_t>(local_face_plus));
                 if (face_nodes_minus.size() == face_nodes_plus.size() &&
@@ -7102,8 +7102,8 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
                 std::span<const LocalIndex> align_iface{};
                 if (test_force_face_reference || trial_force_face_reference) {
                     const ElementType selected_cell_type = mesh.getCellType(volume_cell);
-                    elements::ReferenceElement ref =
-                        elements::ReferenceElement::create(selected_cell_type);
+                    const elements::ReferenceElement& ref =
+                        elements::ReferenceElement::shared(selected_cell_type);
                     const auto& face_nodes =
                         ref.face_nodes(static_cast<std::size_t>(local_face));
                     if (face_nodes.size() == 2u || face_nodes.size() == 3u ||
@@ -7351,7 +7351,7 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
         const ElementType cell_type_minus = mesh.getCellType(cell_minus);
         const ElementType cell_type_plus = mesh.getCellType(cell_plus);
         if (cell_type_minus == cell_type_plus) {
-            elements::ReferenceElement ref = elements::ReferenceElement::create(cell_type_minus);
+            const elements::ReferenceElement& ref = elements::ReferenceElement::shared(cell_type_minus);
             const auto& face_nodes_minus = ref.face_nodes(static_cast<std::size_t>(local_face_minus));
             const auto& face_nodes_plus = ref.face_nodes(static_cast<std::size_t>(local_face_plus));
             if (face_nodes_minus.size() == face_nodes_plus.size() &&
@@ -16955,7 +16955,7 @@ void StandardAssembler::prepareContextFace(
     const auto& trial_element = getElement(trial_space, cell_id, cell_type);
 
     // 3. Determine face element type from reference topology
-    elements::ReferenceElement ref = elements::ReferenceElement::create(cell_type);
+    const elements::ReferenceElement& ref = elements::ReferenceElement::shared(cell_type);
     const auto& face_nodes = ref.face_nodes(static_cast<std::size_t>(local_face_id));
 
     ElementType face_type = ElementType::Unknown;
@@ -18241,7 +18241,7 @@ void StandardAssembler::applyVectorBasisGlobalToLocal(
 
     // Face DOFs: apply dense (possibly mixing) transform P = O^{-1}.
     if (needs_faces) {
-        const elements::ReferenceElement ref = elements::ReferenceElement::create(cell_type);
+        const elements::ReferenceElement& ref = elements::ReferenceElement::shared(cell_type);
         const auto n_faces = static_cast<int>(ref.num_faces());
         FE_THROW_IF(n_faces <= 0, FEException,
                     "StandardAssembler::applyVectorBasisGlobalToLocal: vector basis has face DOFs but cell has no faces");
@@ -18414,7 +18414,7 @@ void StandardAssembler::applyVectorBasisOutputOrientation(
         }
 
         if (needs_faces) {
-            const elements::ReferenceElement ref = elements::ReferenceElement::create(cell_type);
+            const elements::ReferenceElement& ref = elements::ReferenceElement::shared(cell_type);
             const auto n_faces = static_cast<int>(ref.num_faces());
             FE_THROW_IF(n_faces <= 0, FEException,
                         "StandardAssembler::applyVectorBasisOutputOrientation: vector basis has face DOFs but cell has no faces");

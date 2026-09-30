@@ -3954,8 +3954,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 "cell DOF ordering for owner face signatures");
         }
         check_cell_pairable(cell);
-        const auto ref =
-            elements::ReferenceElement::create(mesh.getCellType(cell));
+        const auto& ref =
+            elements::ReferenceElement::shared(mesh.getCellType(cell));
         OwnedCellFaces record{.cell = key};
         record.faces.reserve(ref.num_faces());
         for (std::size_t face = 0; face < ref.num_faces(); ++face) {
@@ -4450,7 +4450,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                         return;
                     }
                     const auto cell_type = mesh.getCellType(cell);
-                    const auto ref = elements::ReferenceElement::create(cell_type);
+                    const auto& ref = elements::ReferenceElement::shared(cell_type);
                     const auto& face_nodes =
                         ref.face_nodes(static_cast<std::size_t>(local_face));
                     mesh.getCellNodes(cell, face_cell_nodes);

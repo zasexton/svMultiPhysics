@@ -11,6 +11,12 @@
 #include "Core/FEException.h"
 #include "Quadrature/QuadratureFactory.h"
 
+#include <array>
+#include <atomic>
+#include <limits>
+#include <memory>
+#include <type_traits>
+
 namespace svmp {
 namespace FE {
 namespace elements {
@@ -165,7 +171,7 @@ const std::vector<LocalIndex>& ReferenceElement::face_nodes(std::size_t face_id)
     return faces_[face_id];
 }
 
-ReferenceElement ReferenceElement::create(ElementType type) {
+ReferenceElement ReferenceElement::build(ElementType type) {
     ReferenceElement ref;
     ref.type_ = type;
     ref.dimension_ = element_dimension(type);
@@ -184,6 +190,37 @@ ReferenceElement ReferenceElement::create(ElementType type) {
     // Reference measure is shared between high-order variants and their base
     ref.reference_measure_ = compute_reference_measure(type);
     return ref;
+}
+
+const ReferenceElement& ReferenceElement::shared(ElementType type) {
+    // Reference-element metadata depends only on the element type, but
+    // building it constructs a quadrature rule for the reference measure.
+    // Assembly, face lookup and constraint construction request it for every
+    // face and cell, so the immutable result is built once per type and
+    // published through a lock-free slot. Construction failures (unknown
+    // types) are not cached and keep throwing on every request.
+    using Underlying = std::underlying_type_t<ElementType>;
+    constexpr std::size_t slot_count =
+        static_cast<std::size_t>(std::numeric_limits<Underlying>::max()) + 1u;
+    static std::array<std::atomic<const ReferenceElement*>, slot_count> slots{};
+
+    auto& slot = slots[static_cast<std::size_t>(static_cast<Underlying>(type))];
+    if (const auto* cached = slot.load(std::memory_order_acquire)) {
+        return *cached;
+    }
+    auto built = std::make_unique<const ReferenceElement>(build(type));
+    const ReferenceElement* expected = nullptr;
+    if (slot.compare_exchange_strong(expected, built.get(),
+                                     std::memory_order_acq_rel,
+                                     std::memory_order_acquire)) {
+        // Published entries live for the rest of the process.
+        return *built.release();
+    }
+    return *expected;
+}
+
+ReferenceElement ReferenceElement::create(ElementType type) {
+    return shared(type);
 }
 
 } // namespace elements
