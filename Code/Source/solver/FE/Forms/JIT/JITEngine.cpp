@@ -11,12 +11,12 @@
 #include "Core/Logger.h"
 #include "Forms/JIT/ExternalCalls.h"
 #include "Forms/JIT/HardwareProfile.h"
+#include "Forms/JIT/JITObjectCacheFile.h"
 #include "Forms/JIT/LLVMJITBuildInfo.h"
 #include "Forms/Tensor/SpectralEigen.h"
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -254,30 +254,17 @@ public:
             return;
         }
 
-        const auto tmp_path = tempPathFor(final_path);
-
+        // The directory may be shared by processes on many hosts: publish a
+        // checked image (module id, size, checksum) through a uniquely named,
+        // exclusively created temporary file and an atomic rename.
         try {
-            {
-                std::ofstream os(tmp_path, std::ios::binary | std::ios::trunc);
-                if (!os.good()) {
-                    return;
-                }
-                os.write(obj_buffer.getBufferStart(), static_cast<std::streamsize>(obj_buffer.getBufferSize()));
-                os.flush();
-                if (!os.good()) {
-                    return;
-                }
-            }
-
-            std::filesystem::rename(tmp_path, final_path, ec);
-            if (ec) {
-                std::filesystem::remove(tmp_path, ec);
-            } else if (counters_ != nullptr) {
+            const std::string image = objcache::encodeFile(
+                module_id, std::string_view(obj_buffer.getBufferStart(), obj_buffer.getBufferSize()));
+            if (objcache::writeFileAtomically(final_path, image) && counters_ != nullptr) {
                 counters_->bytes_written.fetch_add(static_cast<std::uint64_t>(obj_buffer.getBufferSize()),
                                                    std::memory_order_relaxed);
             }
         } catch (...) {
-            std::filesystem::remove(tmp_path, ec);
         }
     }
 
@@ -313,15 +300,37 @@ public:
             return nullptr;
         }
 
-        auto buf_or_err = llvm::MemoryBuffer::getFile(path.string(), /*IsText=*/false);
-        if (!buf_or_err) {
+        // IsVolatile: read into private memory instead of mapping the file,
+        // so the bytes validated below are exactly the bytes that get linked.
+        auto file_or_err = llvm::MemoryBuffer::getFile(path.string(),
+                                                       /*IsText=*/false,
+                                                       /*RequiresNullTerminator=*/false,
+                                                       /*IsVolatile=*/true);
+        if (!file_or_err) {
             if (counters_ != nullptr) {
                 counters_->misses.fetch_add(1u, std::memory_order_relaxed);
             }
             return nullptr;
         }
 
-        auto buf = std::move(*buf_or_err);
+        // Integrity check: a truncated, corrupted or misplaced object must
+        // never reach the linker.  Reject it, drop it and let the caller
+        // recompile (the fresh object is then republished).
+        const auto& file = *file_or_err;
+        const auto decoded = objcache::decodeFile(
+            module_id, std::string_view(file->getBufferStart(), file->getBufferSize()));
+        if (decoded.status != objcache::FileStatus::Valid) {
+            if (counters_ != nullptr) {
+                counters_->misses.fetch_add(1u, std::memory_order_relaxed);
+            }
+            FE_LOG_WARNING("LLVM JIT: rejected object cache file " + path.string() + " (" +
+                           objcache::toString(decoded.status) + "); recompiling");
+            std::filesystem::remove(path, ec);
+            return nullptr;
+        }
+
+        auto buf = llvm::MemoryBuffer::getMemBufferCopy(
+            llvm::StringRef(decoded.object.data(), decoded.object.size()), path.string());
         auto object_or_error = llvm::object::ObjectFile::createObjectFile(buf->getMemBufferRef());
         if (!object_or_error) {
             llvm::consumeError(object_or_error.takeError());
@@ -424,20 +433,9 @@ private:
         return directory_ / (sanitizeFilename(module_id) + ".objcache");
     }
 
-    [[nodiscard]] std::filesystem::path tempPathFor(const std::filesystem::path& final_path) noexcept
-    {
-        const auto now =
-            static_cast<std::uint64_t>(std::chrono::high_resolution_clock::now().time_since_epoch().count());
-        const auto salt = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(this));
-        const auto ctr = tmp_counter_.fetch_add(1u, std::memory_order_relaxed);
-        const auto nonce = now ^ salt ^ ctr;
-        return std::filesystem::path(final_path.string() + ".tmp." + std::to_string(nonce));
-    }
-
     std::filesystem::path directory_{};
     std::mutex mutex_{};
     std::unordered_map<std::string, std::unique_ptr<llvm::MemoryBuffer>> objects_by_module_id_{};
-    std::atomic<std::uint64_t> tmp_counter_{0u};
     ObjectCacheCounters* counters_{nullptr};
 };
 
@@ -977,6 +975,7 @@ struct JITEngine::Impl {
     std::unique_ptr<llvm::ObjectCache> object_cache{};
     FileSystemObjectCache* filesystem_object_cache{nullptr};
     InMemoryObjectCache* in_memory_object_cache{nullptr};
+    std::string object_cache_directory{};
     std::unique_ptr<llvm::orc::LLJIT> jit{};
     std::string target_triple{};
     std::string data_layout{};
@@ -999,20 +998,19 @@ std::unique_ptr<JITEngine> JITEngine::create(const JITOptions& options)
         // optimization level) are derived automatically from the hardware
         // profile and calibration.  No runtime overrides needed.
 
-        // Resolve effective cache directory: default to ~/.cache/svMultiPhysics/jit_cache/
-        // when no explicit directory is set but caching is enabled.
-        std::string effective_cache_dir = options.cache_directory;
-        if (effective_cache_dir.empty() && options.cache_kernels) {
-            if (const char* home = std::getenv("HOME")) {
-                effective_cache_dir = std::string(home) + "/.cache/svMultiPhysics/jit_cache";
-            }
-        }
+        // Resolve the effective cache directory: an explicit
+        // JITOptions::cache_directory wins; otherwise, when caching is
+        // enabled, $SVMP_JIT_CACHE_DIR or ~/.cache/svMultiPhysics/jit_cache.
+        const std::string effective_cache_dir =
+            objcache::resolveCacheDirectory(options.cache_directory, options.cache_kernels);
 
         if (!effective_cache_dir.empty()) {
             const auto cache_dir =
                 validatedObjectCacheDirectory(effective_cache_dir,
                                               llvmVersionString(),
-                                              options.cache_diagnostics);
+                                              options.cache_diagnostics) /
+                objcache::kFormatSubdirectory;
+            engine->impl_->object_cache_directory = cache_dir.string();
             auto cache = std::make_unique<FileSystemObjectCache>(
                 cache_dir, &engine->impl_->object_cache_counters);
             engine->impl_->filesystem_object_cache = cache.get();
@@ -1229,6 +1227,17 @@ std::string JITEngine::cpuName() const
     std::lock_guard<std::mutex> lock(mutex_);
     if (impl_ == nullptr) return {};
     return impl_->cpu_name;
+#else
+    return {};
+#endif
+}
+
+std::string JITEngine::objectCacheDirectory() const
+{
+#if SVMP_FE_ENABLE_LLVM_JIT
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (impl_ == nullptr) return {};
+    return impl_->object_cache_directory;
 #else
     return {};
 #endif

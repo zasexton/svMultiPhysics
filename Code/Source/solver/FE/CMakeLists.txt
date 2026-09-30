@@ -1219,6 +1219,7 @@ set(FE_FORMS_HEADERS
 	    Forms/JIT/JITCacheKey.h
 	    Forms/JIT/JITCompiler.h
 	    Forms/JIT/JITEngine.h
+	    Forms/JIT/JITObjectCacheFile.h
 	    Forms/JIT/JITFormKernel.h
 	    Forms/JIT/KernelIR.h
 	    Forms/JIT/JITValidation.h
@@ -1264,6 +1265,7 @@ set(FE_FORMS_SOURCES
 	    Forms/JIT/JITCacheKey.cpp
 	    Forms/JIT/JITCompiler.cpp
 	    Forms/JIT/JITEngine.cpp
+	    Forms/JIT/JITObjectCacheFile.cpp
 	    Forms/JIT/KernelIR.cpp
 	    Forms/JIT/JITValidation.cpp
 	    Forms/JIT/LLVMGen.cpp
@@ -2743,6 +2745,7 @@ if(FE_BUILD_TESTS)
 					                    Tests/Unit/Forms/test_JIT_Scaling.cpp
 					                    Tests/Unit/Forms/test_JIT_SpecializationPerformance.cpp
 					                    Tests/Unit/Forms/test_JIT_DiskCache.cpp
+					                    Tests/Unit/Forms/test_JIT_ObjectCacheFile.cpp
 					                    Tests/Unit/Forms/test_JIT_MemoryOverhead.cpp
 						                    Tests/Unit/Forms/test_LLVMGen_FunctionalKernels.cpp
 					                    Tests/Unit/Forms/test_LLVMGen_ScalarOps.cpp
