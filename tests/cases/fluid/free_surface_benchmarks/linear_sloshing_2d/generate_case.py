@@ -50,6 +50,11 @@ WALLS = ("wall_left", "wall_right", "wall_bottom", "wall_top")
 # Free slip: strong zero velocity on the wall-normal component only.  The top
 # wall is dry and carries no condition.
 EFFECTIVE_DIRECTION = {"wall_left": "1 0", "wall_right": "1 0", "wall_bottom": "0 1"}
+# Level-set advection velocity.  The protocol advects phi with the coupled
+# fluid velocity (as static_drop_2d).  "wet_extension" is a diagnostic
+# alternative: the wall-compatible extension of the wet velocity used by the
+# SPHERIC Test 05 decks.
+LEVEL_SET_VELOCITY = ("coupled_field", "wet_extension")
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +266,21 @@ def linear_solver_block() -> str:
     </LS>"""
 
 
-def solver_xml(schedule: dict, steps: int, cadence: int) -> str:
+def level_set_velocity_block(mode: str) -> str:
+    if mode == "coupled_field":
+        return """    <Velocity_source>coupled_field</Velocity_source>
+    <Velocity_field_name>Velocity</Velocity_field_name>
+    <Auto_register_velocity_field>true</Auto_register_velocity_field>"""
+    return """    <Velocity_source>prescribed_data</Velocity_source>
+    <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
+    <Auto_register_velocity_field>true</Auto_register_velocity_field>
+    <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
+    <Source_velocity_field_name>Velocity</Source_velocity_field_name>
+    <Wet_extension_advection_velocity_method>wall_compatible_normal</Wet_extension_advection_velocity_method>"""
+
+
+def solver_xml(schedule: dict, steps: int, cadence: int,
+               level_set_velocity: str = "coupled_field") -> str:
     faces = "\n".join(
         f'    <Add_face name="{w}"><Face_file_path>mesh/mesh-surfaces/{w}.vtp</Face_file_path></Add_face>'
         for w in WALLS)
@@ -307,9 +326,7 @@ def solver_xml(schedule: dict, steps: int, cadence: int) -> str:
     <Level_set_field_name>{LEVEL_SET_FIELD}</Level_set_field_name>
     <Operator_tag>equations</Operator_tag>
     <Level_set_source>prescribed_data</Level_set_source>
-    <Velocity_source>coupled_field</Velocity_source>
-    <Velocity_field_name>Velocity</Velocity_field_name>
-    <Auto_register_velocity_field>true</Auto_register_velocity_field>
+{level_set_velocity_block(level_set_velocity)}
     <Enable_SUPG>true</Enable_SUPG>
     <SUPG_tau_scale>0.5</SUPG_tau_scale>
     <SUPG_transient_scale>2.0</SUPG_transient_scale>
@@ -372,8 +389,8 @@ def solver_xml(schedule: dict, steps: int, cadence: int) -> str:
 
 # ---------------------------------------------------------------------------
 def generate(level: int, output_dir: Path, *, periods: float = PERIODS,
-             steps_per_period: int | None = None, max_steps: int | None = None,
-             force: bool = False) -> dict:
+             steps_per_period: int | None = None, level_set_velocity: str = "coupled_field",
+             max_steps: int | None = None, force: bool = False) -> dict:
     if level not in LEVELS:
         raise ValueError(f"--level must be one of {LEVELS}")
     if not periods > 0.0:
@@ -382,6 +399,8 @@ def generate(level: int, output_dir: Path, *, periods: float = PERIODS,
         raise FileExistsError(f"{output_dir} is not empty (use --force)")
 
     ref = reference()
+    if level_set_velocity not in LEVEL_SET_VELOCITY:
+        raise ValueError(f"--level-set-velocity must be one of {LEVEL_SET_VELOCITY}")
     if steps_per_period is not None and steps_per_period < SNAPSHOTS_PER_PERIOD:
         raise ValueError(f"--steps-per-period must be at least {SNAPSHOTS_PER_PERIOD}")
     schedule = time_schedule(level, periods, steps_per_period)
@@ -415,7 +434,8 @@ def generate(level: int, output_dir: Path, *, periods: float = PERIODS,
     for wall in WALLS:
         node_ids, parents = faces[wall]
         write_face_vtp(mesh_dir / "mesh-surfaces" / f"{wall}.vtp", points, node_ids, parents)
-    (output_dir / "solver.xml").write_text(solver_xml(schedule, steps, cadence), encoding="utf-8")
+    (output_dir / "solver.xml").write_text(solver_xml(schedule, steps, cadence, level_set_velocity),
+                                           encoding="utf-8")
 
     case = {
         "benchmark": "linear_sloshing_2d",
@@ -443,7 +463,9 @@ def generate(level: int, output_dir: Path, *, periods: float = PERIODS,
         "periods": periods,
         "dt": schedule["dt"],
         "steps_per_period": schedule["steps_per_period"],
-        "protocol_time_step": schedule["steps_per_period"] == STEPS_PER_PERIOD_PER_LEVEL * level,
+        "level_set_velocity": level_set_velocity,
+        "protocol_run": (schedule["steps_per_period"] == STEPS_PER_PERIOD_PER_LEVEL * level
+                         and level_set_velocity == "coupled_field"),
         "steps_protocol": schedule["steps"],
         "steps": steps,
         "end_time": steps * schedule["dt"],
@@ -467,13 +489,18 @@ def main(argv=None) -> int:
     parser.add_argument("--steps-per-period", type=int, default=None,
                         help="diagnostic time-step studies only (protocol value 2 L/h); "
                              "verify.py reports such runs but does not gate them")
+    parser.add_argument("--level-set-velocity", choices=LEVEL_SET_VELOCITY,
+                        default="coupled_field",
+                        help="diagnostic runs only (protocol value coupled_field); verify.py "
+                             "reports such runs but does not gate them")
     parser.add_argument("--max-steps", type=int, default=None,
                         help="smoke runs only: stop after this many steps; verify.py rejects "
                              "such runs for acceptance")
     parser.add_argument("--force", action="store_true", help="allow a non-empty output dir")
     args = parser.parse_args(argv)
     case = generate(args.level, args.output_dir, periods=args.periods,
-                    steps_per_period=args.steps_per_period, max_steps=args.max_steps,
+                    steps_per_period=args.steps_per_period,
+                    level_set_velocity=args.level_set_velocity, max_steps=args.max_steps,
                     force=args.force)
     print(f"wrote {args.output_dir}")
     for key in ("level_cells_per_length", "n_vertices", "n_triangles", "mean_depth",

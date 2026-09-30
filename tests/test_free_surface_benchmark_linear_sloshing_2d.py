@@ -215,13 +215,26 @@ def test_time_step_study_runs_are_reported_but_not_gated(study, tmp_path, capsys
     runs = study({16: 4e-3, 32: 1e-3, 64: 2.5e-4})
     extra = tmp_path / "dt_study" / "L16_T64"
     case = gen.generate(16, extra, steps_per_period=64)
-    assert not case["protocol_time_step"] and case["steps"] == 256
+    assert not case["protocol_run"] and case["steps"] == 256
     # Reuse the synthetic writer on a protocol case, then mark it as a diagnostic run.
     write_synthetic_run(tmp_path / "dt_study" / "L16_diag", 16, 5e-2)
     meta = json.loads((tmp_path / "dt_study/L16_diag/case.json").read_text())
-    meta["protocol_time_step"] = False
+    meta["protocol_run"] = False
     (tmp_path / "dt_study/L16_diag/case.json").write_text(json.dumps(meta))
     assert ver.main([*runs, str(tmp_path / "dt_study/L16_diag")]) == 0
-    assert "[time-step study, not gated]" in capsys.readouterr().out
+    assert "[diagnostic (coupled_field), not gated]" in capsys.readouterr().out
     with pytest.raises(ValueError):
         gen.generate(16, tmp_path / "bad", steps_per_period=8)
+
+
+def test_wet_extension_diagnostic_variant(tmp_path):
+    case = gen.generate(16, tmp_path / "w", level_set_velocity="wet_extension")
+    text = (tmp_path / "w/solver.xml").read_text()
+    assert not case["protocol_run"] and case["level_set_velocity"] == "wet_extension"
+    assert "<Use_wet_extension_advection_velocity>true" in text
+    assert "<Velocity_field_name>LevelSetAdvectionVelocity" in text
+    protocol = gen.generate(16, tmp_path / "p")
+    assert protocol["protocol_run"]
+    assert "Use_wet_extension" not in (tmp_path / "p/solver.xml").read_text()
+    with pytest.raises(ValueError):
+        gen.generate(16, tmp_path / "bad", level_set_velocity="other")

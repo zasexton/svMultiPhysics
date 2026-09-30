@@ -306,7 +306,8 @@ def analyse_run(run: Path, *, allow_short: bool = False) -> dict:
         "periods_simulated": float(periods),
         "outputs": int(times.size - 1),
         "steps_per_period": case["steps_per_period"],
-        "protocol_time_step": bool(case.get("protocol_time_step", True)),
+        "level_set_velocity": case.get("level_set_velocity", "coupled_field"),
+        "protocol_run": bool(case.get("protocol_run", case.get("protocol_time_step", True))),
         "omega_reference": omega_ref,
         "omega_inviscid": case["omega_inviscid"],
         "damping_rate_reference": gamma_ref,
@@ -425,10 +426,11 @@ def main(argv=None) -> int:
         print("ERROR: truncated smoke runs are not acceptance evidence: " + ", ".join(truncated),
               file=sys.stderr)
         return 2
-    # Runs with a non-protocol time step (generate_case.py --steps-per-period)
-    # form a diagnostic time-step study: reported, never gated.
-    everything = sorted(runs, key=lambda r: (r["level"], r["steps_per_period"]))
-    runs = [r for r in everything if r["protocol_time_step"]]
+    # Diagnostic runs (generate_case.py --steps-per-period or
+    # --level-set-velocity) are reported beside the study, never gated.
+    everything = sorted(runs, key=lambda r: (not r["protocol_run"], r["level_set_velocity"],
+                                             r["level"], r["steps_per_period"]))
+    runs = [r for r in everything if r["protocol_run"]]
     seen = [r["level"] for r in runs]
     if len(seen) != len(set(seen)) or not set(seen) <= set(tolerances["levels"]["cells_per_length"]):
         print(f"ERROR: duplicate or unknown levels {seen}", file=sys.stderr)
@@ -445,7 +447,8 @@ def main(argv=None) -> int:
               f"{r['damping_rate_over_lamb']:>8.4f} {r['fit_amplitude_over_initial']:>8.4f} "
               f"{r['fit_rms_residual_over_amplitude']:>8.1e} {r['liquid_area_relative_drift_max']:>9.2e}"
               + ("  [TRUNCATED SMOKE RUN]" if r["truncated"] else "")
-              + ("" if r["protocol_time_step"] else "  [time-step study, not gated]"))
+              + ("" if r["protocol_run"] else
+                 f"  [diagnostic ({r['level_set_velocity']}), not gated]"))
     print(f"reference: omega = {everything[0]['omega_reference']:.10f} (inviscid "
           f"{everything[0]['omega_inviscid']:.10f}), gamma = "
           f"{everything[0]['damping_rate_reference']:.6e} "
