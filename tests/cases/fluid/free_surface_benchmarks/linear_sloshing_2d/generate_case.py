@@ -122,9 +122,11 @@ def reference(g: float = GRAVITY, depth: float = MEAN_DEPTH, nu: float = KINEMAT
     }
 
 
-def time_schedule(level: int, periods: float = PERIODS) -> dict:
+def time_schedule(level: int, periods: float = PERIODS,
+                  steps_per_period: int | None = None) -> dict:
     ref = reference()
-    steps_per_period = STEPS_PER_PERIOD_PER_LEVEL * level
+    if steps_per_period is None:
+        steps_per_period = STEPS_PER_PERIOD_PER_LEVEL * level
     cadence = max(1, steps_per_period // SNAPSHOTS_PER_PERIOD)
     steps = int(round(periods * steps_per_period))
     steps -= steps % cadence
@@ -370,7 +372,8 @@ def solver_xml(schedule: dict, steps: int, cadence: int) -> str:
 
 # ---------------------------------------------------------------------------
 def generate(level: int, output_dir: Path, *, periods: float = PERIODS,
-             max_steps: int | None = None, force: bool = False) -> dict:
+             steps_per_period: int | None = None, max_steps: int | None = None,
+             force: bool = False) -> dict:
     if level not in LEVELS:
         raise ValueError(f"--level must be one of {LEVELS}")
     if not periods > 0.0:
@@ -379,7 +382,9 @@ def generate(level: int, output_dir: Path, *, periods: float = PERIODS,
         raise FileExistsError(f"{output_dir} is not empty (use --force)")
 
     ref = reference()
-    schedule = time_schedule(level, periods)
+    if steps_per_period is not None and steps_per_period < SNAPSHOTS_PER_PERIOD:
+        raise ValueError(f"--steps-per-period must be at least {SNAPSHOTS_PER_PERIOD}")
+    schedule = time_schedule(level, periods, steps_per_period)
     steps, cadence, truncated = schedule["steps"], schedule["output_cadence"], False
     if max_steps is not None:
         if max_steps < 1:
@@ -438,6 +443,7 @@ def generate(level: int, output_dir: Path, *, periods: float = PERIODS,
         "periods": periods,
         "dt": schedule["dt"],
         "steps_per_period": schedule["steps_per_period"],
+        "protocol_time_step": schedule["steps_per_period"] == STEPS_PER_PERIOD_PER_LEVEL * level,
         "steps_protocol": schedule["steps"],
         "steps": steps,
         "end_time": steps * schedule["dt"],
@@ -458,13 +464,17 @@ def main(argv=None) -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--periods", type=float, default=PERIODS,
                         help="run length in inviscid periods (protocol value 4)")
+    parser.add_argument("--steps-per-period", type=int, default=None,
+                        help="diagnostic time-step studies only (protocol value 2 L/h); "
+                             "verify.py reports such runs but does not gate them")
     parser.add_argument("--max-steps", type=int, default=None,
                         help="smoke runs only: stop after this many steps; verify.py rejects "
                              "such runs for acceptance")
     parser.add_argument("--force", action="store_true", help="allow a non-empty output dir")
     args = parser.parse_args(argv)
     case = generate(args.level, args.output_dir, periods=args.periods,
-                    max_steps=args.max_steps, force=args.force)
+                    steps_per_period=args.steps_per_period, max_steps=args.max_steps,
+                    force=args.force)
     print(f"wrote {args.output_dir}")
     for key in ("level_cells_per_length", "n_vertices", "n_triangles", "mean_depth",
                 "omega_inviscid", "omega_reference", "damping_rate_reference",

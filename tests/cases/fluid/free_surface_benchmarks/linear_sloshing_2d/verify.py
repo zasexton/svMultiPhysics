@@ -306,6 +306,7 @@ def analyse_run(run: Path, *, allow_short: bool = False) -> dict:
         "periods_simulated": float(periods),
         "outputs": int(times.size - 1),
         "steps_per_period": case["steps_per_period"],
+        "protocol_time_step": bool(case.get("protocol_time_step", True)),
         "omega_reference": omega_ref,
         "omega_inviscid": case["omega_inviscid"],
         "damping_rate_reference": gamma_ref,
@@ -424,30 +425,36 @@ def main(argv=None) -> int:
         print("ERROR: truncated smoke runs are not acceptance evidence: " + ", ".join(truncated),
               file=sys.stderr)
         return 2
+    # Runs with a non-protocol time step (generate_case.py --steps-per-period)
+    # form a diagnostic time-step study: reported, never gated.
+    everything = sorted(runs, key=lambda r: (r["level"], r["steps_per_period"]))
+    runs = [r for r in everything if r["protocol_time_step"]]
     seen = [r["level"] for r in runs]
     if len(seen) != len(set(seen)) or not set(seen) <= set(tolerances["levels"]["cells_per_length"]):
         print(f"ERROR: duplicate or unknown levels {seen}", file=sys.stderr)
         return 2
-    runs.sort(key=lambda r: r["level"])
     verdicts = evaluate_study(runs, tolerances)
     all_pass = all(v["passed"] for v in verdicts)
 
     print(f"{'L/h':>4} {'steps/T':>7} {'periods':>7} {'omega':>12} {'freq err':>10} "
           f"{'gamma':>10} {'g/g_ref':>8} {'g/g_Lamb':>8} {'A_fit/A':>8} {'fit rms':>8} {'dA/A max':>9}")
-    for r in runs:
+    for r in everything:
         print(f"{r['level']:>4} {r['steps_per_period']:>7} {r['periods_simulated']:>7.3g} "
               f"{r['omega']:>12.8f} {r['frequency_signed_error']:>+10.3e} "
               f"{r['damping_rate']:>10.4e} {r['damping_rate_over_reference']:>8.4f} "
               f"{r['damping_rate_over_lamb']:>8.4f} {r['fit_amplitude_over_initial']:>8.4f} "
               f"{r['fit_rms_residual_over_amplitude']:>8.1e} {r['liquid_area_relative_drift_max']:>9.2e}"
-              + ("  [TRUNCATED SMOKE RUN]" if r["truncated"] else ""))
-    print(f"reference: omega = {runs[0]['omega_reference']:.10f} (inviscid "
-          f"{runs[0]['omega_inviscid']:.10f}), gamma = {runs[0]['damping_rate_reference']:.6e} "
-          f"(Lamb 2 nu k^2 = {runs[0]['damping_rate_lamb']:.6e})")
-    for r in runs:
+              + ("  [TRUNCATED SMOKE RUN]" if r["truncated"] else "")
+              + ("" if r["protocol_time_step"] else "  [time-step study, not gated]"))
+    print(f"reference: omega = {everything[0]['omega_reference']:.10f} (inviscid "
+          f"{everything[0]['omega_inviscid']:.10f}), gamma = "
+          f"{everything[0]['damping_rate_reference']:.6e} "
+          f"(Lamb 2 nu k^2 = {everything[0]['damping_rate_lamb']:.6e})")
+    for r in everything:
         log = r["solver_log"]
         if log:
-            print(f"L/h={r['level']} solver log: {log['steps_logged']} steps, "
+            print(f"L/h={r['level']} steps/T={r['steps_per_period']} solver log: "
+                  f"{log['steps_logged']} steps, "
                   f"{log['nonconverged_steps']} not converged, {log['outer_passes_mean']:.2f} outer "
                   f"passes and {log['newton_iterations_mean']:.2f} Newton iterations per step, "
                   f"max final residual {log['final_residual_max']:.2e}"
@@ -457,7 +464,7 @@ def main(argv=None) -> int:
         tag = ("PASS" if v["passed"] else "FAIL") if v["gated"] else "INFO"
         print(f"  [{tag}] {v['id']}: " + "; ".join(v["details"]))
     if args.json:
-        args.json.write_text(json.dumps({"benchmark": tolerances["benchmark"], "runs": runs,
+        args.json.write_text(json.dumps({"benchmark": tolerances["benchmark"], "runs": everything,
                                          "criteria": verdicts, "passed": bool(all_pass)},
                                         indent=2) + "\n")
     print("\nOVERALL:", "PASS" if all_pass else "FAIL")

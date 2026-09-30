@@ -178,3 +178,19 @@ def test_missing_truncated_and_unknown_data_fail_clearly(pyvista, tmp_path, caps
     assert ver.main([str(smoke), "--allow-truncated"]) == 0
     with pytest.raises(ValueError):
         gen.generate(3, 32, tmp_path / "bad")
+
+
+def test_solver_log_summary(tmp_path):
+    lines = [
+        "[svMultiPhysics::Application] TimeLoop: nonlinear_done step=0 time=0.0e+00 converged=1 "
+        "iters=0 ||r||=4.15e-16 outer_iters=1 inner_iters_total=0",
+        "[svMultiPhysics::Application] TimeLoop: nonlinear_done step=1 time=1.8e-01 converged=1 "
+        "iters=2 ||r||=1.01e-15 outer_iters=1 inner_iters_total=2",
+    ]
+    (tmp_path / "solver_run.log").write_text("noise\n" + "\n".join(lines) + "\n")
+    (tmp_path / "run.txt").write_text("start\nexit=0 elapsed_s=17 end=now\n")
+    summary = ver.solver_log_summary(tmp_path)
+    assert summary == {"steps_logged": 2, "nonconverged_steps": 0, "newton_iterations_total": 2,
+                       "outer_passes_mean": 1.0, "final_residual_max": 1.01e-15,
+                       "wall_seconds": 17}
+    assert ver.solver_log_summary(tmp_path / "missing") is None
