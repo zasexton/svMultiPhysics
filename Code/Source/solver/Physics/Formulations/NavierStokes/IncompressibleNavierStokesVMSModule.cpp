@@ -4060,7 +4060,9 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
          bc.kinematic_enforcement ==
              FreeSurfaceKinematicEnforcement::Penalty ||
          bc.kinematic_enforcement ==
-             FreeSurfaceKinematicEnforcement::Nitsche) &&
+             FreeSurfaceKinematicEnforcement::Nitsche ||
+         bc.kinematic_enforcement ==
+             FreeSurfaceKinematicEnforcement::MeshNitsche) &&
         (bc.normal_kinematic_policy ==
              FreeSurfaceNormalKinematicPolicy::None ||
          bc.normal_kinematic_policy ==
@@ -4369,9 +4371,40 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                 "IncompressibleNavierStokesVMSModule: the legacy same-field dry-domain velocity diffusion is retired because it modifies physical momentum; use the separate algebraic level-set advection velocity extension and small-cut aggregation");
         }
     } else {
-        if (usesSurfaceStress(bc)) {
+        if (usesSurfaceStress(bc) && !bc.allow_fitted_surface_stress) {
             throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: fitted-ALE SurfaceStress is not yet qualified for current-frame test-function gradients; use Automatic/CurvatureTraction for fitted boundaries");
+                "IncompressibleNavierStokesVMSModule: fitted-ALE SurfaceStress is not yet qualified for current-frame test-function gradients; set Allow_fitted_surface_stress=true to opt in, or use Automatic/CurvatureTraction for fitted boundaries");
+        }
+        if (bc.allow_fitted_surface_stress) {
+            if (bc.surface_tension_form !=
+                FreeSurfaceSurfaceTensionForm::SurfaceStress) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: Allow_fitted_surface_stress requires an explicit Surface_tension_form=SurfaceStress");
+            }
+            // The fitted Laplace-Beltrami form gamma (I - n n) : grad(v)
+            // is evaluated in the assembly (active) frame with the current
+            // boundary normal.  The two frames coincide for a static mesh
+            // and for coupled mesh displacement, whose nonlinear geometry
+            // transaction moves the active coordinates to the current
+            // configuration at every trial state.  Prescribed mesh motion
+            // may assemble on the reference configuration, where grad(v)
+            // would not be the current-frame gradient.
+            if (ale_enabled &&
+                options.mesh_velocity_source !=
+                    ALEMeshVelocitySource::CoupledDisplacement) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: fitted SurfaceStress requires a static mesh or ALE with a coupled mesh-displacement unknown, so that the assembly frame is the current configuration");
+            }
+            (void)constantScalarValueOrThrow(
+                bc.surface_tension, "fitted SurfaceStress surface_tension");
+            if (!bc.contact_lines.empty()) {
+                for (const auto& contact : bc.contact_lines) {
+                    if (contactLineKind(contact) != ContactLineKind::None) {
+                        throw std::invalid_argument(
+                            "IncompressibleNavierStokesVMSModule: fitted SurfaceStress is admitted only without a fitted contact-line model; its conormal line force would need a codimension-two integration entity");
+                    }
+                }
+            }
         }
         if (usesGeneratedCurvatureTraction(bc)) {
             throw std::invalid_argument(
@@ -4426,11 +4459,13 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             if (bc.kinematic_enforcement !=
                     FreeSurfaceKinematicEnforcement::Penalty &&
                 bc.kinematic_enforcement !=
-                    FreeSurfaceKinematicEnforcement::Nitsche) {
+                    FreeSurfaceKinematicEnforcement::Nitsche &&
+                bc.kinematic_enforcement !=
+                    FreeSurfaceKinematicEnforcement::MeshNitsche) {
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: the qualified "
                     "fitted-ALE free-surface contract requires explicit "
-                    "Penalty or Nitsche normal enforcement");
+                    "Penalty, Nitsche, or MeshNitsche normal enforcement");
             }
         }
         if (bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None &&
@@ -4481,11 +4516,21 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             bc.kinematic_penalty,
             "penalty free-surface kinematic_penalty");
     }
-    if (bc.kinematic_enforcement == FreeSurfaceKinematicEnforcement::Nitsche &&
+    if ((bc.kinematic_enforcement == FreeSurfaceKinematicEnforcement::Nitsche ||
+         bc.kinematic_enforcement ==
+             FreeSurfaceKinematicEnforcement::MeshNitsche) &&
         (!std::isfinite(bc.kinematic_nitsche_gamma) ||
          !(bc.kinematic_nitsche_gamma > FE::Real{0.0}))) {
         throw std::invalid_argument(
             "IncompressibleNavierStokesVMSModule: Nitsche free-surface kinematics require a finite positive boundary-local kinematic_nitsche_gamma");
+    }
+    if (bc.kinematic_enforcement ==
+            FreeSurfaceKinematicEnforcement::MeshNitsche &&
+        (isUnfittedLevelSet(bc) || !ale_enabled ||
+         options.mesh_velocity_source !=
+             ALEMeshVelocitySource::CoupledDisplacement)) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: MeshNitsche free-surface kinematics require a fitted ALE boundary with a coupled mesh-displacement unknown");
     }
 
     for (std::size_t i = 0; i < bc.contact_lines.size(); ++i) {
@@ -5412,11 +5457,16 @@ void applyFreeSurfaceCutCellStabilization(
     if (isUnfittedLevelSet(bc)) {
         return integrand.dI(bc.interface_marker);
     }
-    const auto weighted_integrand =
-        useFittedCurrentGeometry(bc, ale_enabled)
-            ? integrand * FE::forms::currentMeasure()
-            : integrand;
-    return weighted_integrand.dExteriorBoundary(
+    // Fitted boundaries integrate over the assembly (active) frame.  The
+    // boundary quadrature weights already carry the active surface measure,
+    // so the current measure must not be applied a second time.  With ALE
+    // the active frame is the current configuration: the coupled
+    // mesh-displacement transaction (FE ALEBinding) moves the active
+    // coordinates at every trial state, and fitted SurfaceStress and
+    // MeshNitsche require that coupling.  The current normal used by the
+    // fitted terms is then the normal of the integration frame as well.
+    (void)ale_enabled;
+    return integrand.dExteriorBoundary(
         FE::forms::ExteriorBoundaryMeasure::fullPhysical(
             bc.boundary_marker));
 }
@@ -5468,6 +5518,8 @@ struct ActiveVolumeDomain {
         return "Penalty";
     case FreeSurfaceKinematicEnforcement::Nitsche:
         return "Nitsche";
+    case FreeSurfaceKinematicEnforcement::MeshNitsche:
+        return "MeshNitsche";
     }
     return "Unknown";
 }
@@ -6720,15 +6772,16 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
     }
 
     const auto phi = freeSurfaceLevelSet(bc, system);
-    const auto n = usesGeneratedInterfaceNormal(bc)
-        ? (useFittedCurrentGeometry(bc, ale_enabled)
+    // Fitted boundaries use the boundary normal of the integration frame:
+    // the current normal with ALE (the active frame is the current
+    // configuration) and the static facet normal otherwise.
+    const auto n = isUnfittedLevelSet(bc)
+        ? (usesGeneratedInterfaceNormal(bc)
+               ? generatedInterfaceOutwardNormal(bc)
+               : unfittedInterfaceNormal(bc, phi))
+        : (useFittedCurrentGeometry(bc, ale_enabled)
                ? currentNormal()
-               : generatedInterfaceOutwardNormal(bc))
-        : (isUnfittedLevelSet(bc)
-               ? unfittedInterfaceNormal(bc, phi)
-               : (useFittedCurrentGeometry(bc, ale_enabled)
-                      ? currentNormal()
-                      : FormExpr::normal()));
+               : FormExpr::normal());
     const auto gamma = bc::toScalarExpr(
         bc.surface_tension,
         freeSurfaceValueName("ns_free_surface_surface_tension", bc));
@@ -6743,6 +6796,12 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
             return unfittedTractionCurvature(bc, system, phi);
         }
         if (!isUnfittedLevelSet(bc) && bc.use_current_geometry_curvature) {
+            FE_LOG_WARNING(
+                std::string("IncompressibleNavierStokesVMSModule: fitted CurvatureTraction with pointwise current-geometry curvature marker=") +
+                std::to_string(bc.boundary_marker) +
+                " is identically zero on affine (P1) faces and applies no capillary load there;"
+                " use Surface_tension_form=SurfaceStress with Allow_fitted_surface_stress=true"
+                " diagnostic=fitted_pointwise_curvature_zero_on_affine_faces");
             return currentMeanCurvature();
         }
         return bc::toScalarExpr(
@@ -6938,6 +6997,17 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
     switch (bc.kinematic_enforcement) {
     case FreeSurfaceKinematicEnforcement::None:
         return;
+    case FreeSurfaceKinematicEnforcement::MeshNitsche:
+        // The fluid keeps the natural dynamic condition assembled above;
+        // the normal kinematics are owned by the mesh-displacement row
+        // (installFittedFreeSurfaceMeshKinematics and the mesh-motion
+        // consistency term).  A fluid kinematic row here would replace the
+        // normal dynamic condition by u.n = w.n.
+        if (isUnfittedLevelSet(bc)) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: MeshNitsche free-surface kinematics are only supported on fitted ALE boundaries");
+        }
+        return;
     case FreeSurfaceKinematicEnforcement::Penalty: {
         if (bc.normal_kinematic_policy !=
             FreeSurfaceNormalKinematicPolicy::MatchFluidNormalVelocity) {
@@ -7091,6 +7161,18 @@ systemTangentialMeshPolicy(FreeSurfaceTangentialMeshPolicy policy)
         "mesh policy source");
 }
 
+[[nodiscard]] std::string fittedFluidNormalDescriptorSource(
+    const FreeSurfaceBoundary& bc)
+{
+    if (bc.kinematic_enforcement ==
+        FreeSurfaceKinematicEnforcement::MeshNitsche) {
+        return "Fitted free-surface fluid natural dynamic condition on marker " +
+               std::to_string(bc.boundary_marker);
+    }
+    return "Fitted free-surface fluid normal kinematic row on marker " +
+           std::to_string(bc.boundary_marker);
+}
+
 void installFittedFreeSurfaceMeshKinematics(
     FE::systems::FESystem& system,
     const FreeSurfaceBoundary& bc,
@@ -7201,6 +7283,19 @@ void installFittedFreeSurfaceMeshKinematics(
             case FreeSurfaceKinematicEnforcement::Nitsche:
                 return FormExpr::constant(bc.kinematic_nitsche_gamma) /
                        hNormal();
+            case FreeSurfaceKinematicEnforcement::MeshNitsche:
+                // Nitsche penalty of the mesh-side kinematic row on the
+                // normal mesh-velocity mismatch.  It balances the harmonic
+                // mesh operator acting on the mesh velocity,
+                // kappa grad(dt(d)):grad(psi) (dimensionless kappa, harmonic
+                // quantity `velocity`), without a time scale; the mesh-motion
+                // module adds the consistency term and checks coercivity,
+                // gamma_N > 2 kappa (P1 trace inverse inequality with
+                // h_n = 2|T|/|F|).  A penalty on the velocity mismatch of a
+                // displacement operator would need deltat and would let the
+                // P1 flux defect accumulate from step to step.
+                return FormExpr::constant(bc.kinematic_nitsche_gamma) /
+                       hNormal();
             case FreeSurfaceKinematicEnforcement::None:
                 break;
             }
@@ -7301,8 +7396,7 @@ void installFittedFreeSurfaceMeshKinematics(
             std::move(mesh_descriptor), options.operator_tag);
 
         const auto fluid_source =
-            "Fitted free-surface fluid normal kinematic row on marker " +
-            std::to_string(bc.boundary_marker);
+            fittedFluidNormalDescriptorSource(bc);
         FE::analysis::BoundaryConditionDescriptor fluid_descriptor;
         fluid_descriptor.primary_variable =
             FE::analysis::VariableKey::field(velocity_field);
@@ -7316,7 +7410,10 @@ void installFittedFreeSurfaceMeshKinematics(
             bc.kinematic_enforcement ==
                     FreeSurfaceKinematicEnforcement::Nitsche
                 ? FE::analysis::EnforcementKind::WeakNitsche
-                : FE::analysis::EnforcementKind::WeakPenalty;
+                : bc.kinematic_enforcement ==
+                          FreeSurfaceKinematicEnforcement::MeshNitsche
+                      ? FE::analysis::EnforcementKind::WeakConsistent
+                      : FE::analysis::EnforcementKind::WeakPenalty;
         fluid_descriptor.source = fluid_source;
         system.addBoundaryConditionDescriptor(
             std::move(fluid_descriptor), options.operator_tag);
@@ -7892,16 +7989,29 @@ tangentialPolicyProvenance(
                            : "supported_configuration_envelope")
                 << ",\"supported_requests\":{"
                 << "\"surface_tension_form\":["
-                << "\"Automatic\",\"CurvatureTraction\"],"
-                << "\"contact_line_model\":[\"None\",\"Pinned\"]}"
-                << ",\"exclusion_disposition\":"
+                << (boundary.allow_fitted_surface_stress
+                        ? "\"Automatic\",\"CurvatureTraction\","
+                          "\"SurfaceStress\"],"
+                        : "\"Automatic\",\"CurvatureTraction\"],")
+                << "\"contact_line_model\":[\"None\",\"Pinned\"]}";
+            if (boundary.allow_fitted_surface_stress) {
+                out << ",\"fitted_surface_stress\":{"
+                    << "\"opt_in\":true,"
+                    << "\"form\":\"gamma_I_minus_n_outer_n_colon_grad_v\","
+                    << "\"frame\":\"current_configuration\","
+                    << "\"qualification\":\"explicit_opt_in_unqualified\"}";
+            }
+            out << ",\"exclusion_disposition\":"
                 << "\"fail_closed_before_system_mutation\""
-                << ",\"exclusions\":[{"
-                << "\"feature\":\"surface_tension_form\","
-                << "\"value\":\"SurfaceStress\","
-                << "\"reason_code\":"
-                << "\"fitted_surface_stress_current_frame_gradient_unqualified\""
-                << "},{\"feature\":\"surface_tension_form\","
+                << ",\"exclusions\":[{";
+            if (!boundary.allow_fitted_surface_stress) {
+                out << "\"feature\":\"surface_tension_form\","
+                    << "\"value\":\"SurfaceStress\","
+                    << "\"reason_code\":"
+                    << "\"fitted_surface_stress_current_frame_gradient_unqualified\""
+                    << "},{";
+            }
+            out << "\"feature\":\"surface_tension_form\","
                 << "\"value\":\"GeneratedCurvatureTraction\","
                 << "\"reason_code\":"
                 << "\"generated_curvature_traction_unfitted_only\""
@@ -8393,6 +8503,42 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                     "IncompressibleNavierStokesVMSModule: duplicate fitted "
                     "free-surface normal relation on marker " +
                     std::to_string(effective_bc.boundary_marker));
+            }
+            if (installs_normal_relation &&
+                effective_bc.kinematic_enforcement ==
+                    FreeSurfaceKinematicEnforcement::MeshNitsche &&
+                displacement_field.has_value()) {
+                // The mesh-motion module adds the Nitsche consistency term of
+                // its own operator on the boundaries this relation declares,
+                // so it must register after the declaration exists.
+                const bool mesh_operator_installed = std::any_of(
+                    system.formulationRecords().begin(),
+                    system.formulationRecords().end(),
+                    [&](const auto& record) {
+                        const bool volume = std::find(
+                            record.active_domains.begin(),
+                            record.active_domains.end(),
+                            FE::analysis::DomainKind::Cell) !=
+                            record.active_domains.end();
+                        const bool mesh_rows = std::any_of(
+                            record.block_couplings.begin(),
+                            record.block_couplings.end(),
+                            [&](const auto& coupling) {
+                                return coupling.first == *displacement_field &&
+                                       coupling.second == *displacement_field;
+                            });
+                        return volume && mesh_rows;
+                    });
+                if (mesh_operator_installed) {
+                    throw std::invalid_argument(
+                        "IncompressibleNavierStokesVMSModule: MeshNitsche "
+                        "free-surface kinematics on marker " +
+                        std::to_string(effective_bc.boundary_marker) +
+                        " require the fluid equation to be registered before "
+                        "the mesh-motion equation, which adds the Nitsche "
+                        "consistency term of its operator on the declared "
+                        "boundary");
+                }
             }
             if (installs_normal_relation &&
                 displacement_field.has_value()) {
@@ -8928,6 +9074,14 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                     .owner_component =
                         "IncompressibleNavierStokesVMSModule."
                         "FreeSurfaceBoundary",
+                    .requires_mesh_flux_consistency =
+                        boundary.kinematic_enforcement ==
+                        FreeSurfaceKinematicEnforcement::MeshNitsche,
+                    .mesh_flux_consistency_nitsche_gamma =
+                        boundary.kinematic_enforcement ==
+                                FreeSurfaceKinematicEnforcement::MeshNitsche
+                            ? boundary.kinematic_nitsche_gamma
+                            : FE::Real{0.0},
                 });
         }
     }
@@ -10578,8 +10732,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             options_.operator_tag,
             "Fitted free-surface mesh normal kinematic row on marker " +
                 std::to_string(marker),
-            "Fitted free-surface fluid normal kinematic row on marker " +
-                std::to_string(marker));
+            fittedFluidNormalDescriptorSource(*fitted_boundary));
         system.registerFittedALENormalOperatorStageMeasurement(
             displacement_field,
             marker,

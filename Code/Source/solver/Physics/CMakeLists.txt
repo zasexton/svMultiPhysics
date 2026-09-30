@@ -328,6 +328,7 @@ if(PHYSICS_BUILD_TESTS)
         Tests/Unit/test_NavierStokesOutletFactory.cpp
         Tests/Unit/test_IncompressibleTwoFluidInterface.cpp
         Tests/Unit/test_MovingDomainPhysics.cpp
+        Tests/Unit/test_FittedFreeSurfaceALE.cpp
         Tests/Unit/test_SharpBoundaryOperatorMPI.cpp
         Tests/Unit/test_FreeSurfaceCutStability.cpp
         Tests/Unit/test_CoreUtilities.cpp

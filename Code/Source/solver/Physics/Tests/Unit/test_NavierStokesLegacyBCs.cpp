@@ -1398,7 +1398,9 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicBCTranslation_UsesCurrentG
     ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::BoundaryIntegral));
     ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::MeshVelocity));
     ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::CurrentNormal));
-    ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::CurrentMeasure));
+    // Fitted boundary terms integrate over the assembly frame; the current
+    // surface measure is not applied a second time.
+    ASSERT_FALSE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::CurrentMeasure));
     ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::CurrentMeanCurvature));
     ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::FacetArea));
     ASSERT_NO_THROW(system.setup());

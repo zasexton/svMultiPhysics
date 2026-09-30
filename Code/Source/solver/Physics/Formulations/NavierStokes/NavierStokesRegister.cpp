@@ -2656,9 +2656,12 @@ parse_free_surface_kinematic_enforcement(std::string_view raw, std::string_view 
   if (token == "nitsche") {
     return FreeSurfaceKinematicEnforcement::Nitsche;
   }
+  if (token == "meshnitsche") {
+    return FreeSurfaceKinematicEnforcement::MeshNitsche;
+  }
   throw std::runtime_error(
       "[svMultiPhysics::Physics] " + std::string(context) +
-      " must be one of None, Penalty, or Nitsche.");
+      " must be one of None, Penalty, Nitsche, or MeshNitsche.");
 }
 
 svmp::Physics::formulations::navier_stokes::FreeSurfaceActiveDomain
@@ -3832,6 +3835,11 @@ void append_free_surface_bc(
     fs.surface_tension_form = parse_free_surface_surface_tension_form(
         *surface_tension_form, "Free-surface Surface_tension_form");
   }
+  if (const auto allow_fitted_surface_stress = first_defined_bool(
+          bc.params,
+          {"Allow_fitted_surface_stress", "AllowFittedSurfaceStress"})) {
+    fs.allow_fitted_surface_stress = *allow_fitted_surface_stress;
+  }
   if (const auto curvature = first_defined_double(bc.params, {"Curvature"})) {
     fs.curvature = IncompressibleNavierStokesVMSOptions::ScalarValue{
         static_cast<svmp::FE::Real>(*curvature)};
@@ -3973,9 +3981,12 @@ void append_free_surface_bc(
        kinematic_nitsche_symmetric.has_value() ||
        kinematic_nitsche_scale_with_p.has_value()) &&
       fs.kinematic_enforcement != FreeSurfaceKinematicEnforcement::Nitsche &&
+      !(fs.kinematic_enforcement == FreeSurfaceKinematicEnforcement::MeshNitsche &&
+        !kinematic_nitsche_symmetric.has_value() &&
+        !kinematic_nitsche_scale_with_p.has_value()) &&
       !explicit_legacy_configuration) {
     throw std::runtime_error(
-        "[svMultiPhysics::Physics] Boundary-local free-surface Nitsche settings require Kinematic_enforcement=Nitsche; unused Nitsche settings are accepted only by the explicit schema-1 legacy mode.");
+        "[svMultiPhysics::Physics] Boundary-local free-surface Nitsche settings require Kinematic_enforcement=Nitsche (MeshNitsche accepts Kinematic_nitsche_gamma only); unused Nitsche settings are accepted only by the explicit schema-1 legacy mode.");
   }
 
   const auto small_cut_aggregation = first_defined_bool(
@@ -4248,9 +4259,10 @@ void validate_fitted_surface_contact_capability(
       continue;
     }
     if (boundary.surface_tension_form ==
-        FreeSurfaceSurfaceTensionForm::SurfaceStress) {
+            FreeSurfaceSurfaceTensionForm::SurfaceStress &&
+        !boundary.allow_fitted_surface_stress) {
       throw std::invalid_argument(
-          "IncompressibleNavierStokesVMSModule: fitted-ALE SurfaceStress is not yet qualified for current-frame test-function gradients; use Automatic/CurvatureTraction for fitted boundaries");
+          "IncompressibleNavierStokesVMSModule: fitted-ALE SurfaceStress is not yet qualified for current-frame test-function gradients; set Allow_fitted_surface_stress=true to opt in, or use Automatic/CurvatureTraction for fitted boundaries");
     }
     if (boundary.surface_tension_form ==
         FreeSurfaceSurfaceTensionForm::GeneratedCurvatureTraction) {
