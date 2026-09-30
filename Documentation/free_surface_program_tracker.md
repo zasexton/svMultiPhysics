@@ -544,20 +544,46 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - `PrescribedAngle` contact cells now use the angle-preserving wall maintenance: the kind `PreserveAcceptedAngle`, formerly `AcceptedDynamicAngle`.
   - The target-angle reset (`RepairToPrescribedAngle`) is fenced off: `requireAnglePreservingWallMaintenance` throws on every rank if it reaches production maintenance. The implementation stays for verification until M4.
   - Branch tests: `test_fe_levelset` 366 passed + 1 declared skip; MPI 19/19; Physics 7/7 (492 tests); `test_application` 377/377; `test_application_mpi` 32 tests.
-  - Current rule, to be tightened: prescribed walls with slip require a strong, normal-only, axis-aligned wall condition. Without slip nothing is checked, and on a no-slip wall the contact line is pinned. Making slip and the strong normal wall mandatory is in progress.
-- [ ] **Vertex crossings block moving-interface runs (found 2026-09-30).** In sessile smoke runs (R/h = 16), every configuration stops at or just after the first mesh-vertex crossing:
+  - Follow-up merged 2026-09-30 (`6ab328c8`): unfitted `PrescribedAngle` now requires Navier slip and the strong, normal-only, planar wall condition, as `DynamicRenE` already did. Without slip the setup fails with an explicit message. The rule covers axis-aligned planar walls only, and the orientation test covers ±z only (8 cases).
+  - The historical runners `run_test05_velocity_growth_smoke.py` and `static_capillary_3d.py` now use slip, with slip length R/8 in the latter, so those decks differ from their earlier runs.
+- [x] **Vertex crossings block moving-interface runs (found and fixed 2026-09-30).** In sessile smoke runs (R/h = 16), every configuration stops at or just after the first mesh-vertex crossing:
   - generalized-α: a cut-topology rejection, and bisection closes in on the crossing without passing it;
   - backward Euler with FSILS: `FsilsVector::dot: layout mismatch`;
   - backward Euler with Eigen and `SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS=4`: one crossing is accepted, then "Backward-Euler kinetic work does not bind ..." aborts the run.
 
-  Fix in progress on `dev/vertex-crossing`: topology changes become normal accepted events; energy bookkeeping reports unavailable instead of aborting (D1/D6); the FSILS layout check is fixed; the restart budget gets a documented default. Before the crossing the physics looks right: 60° spreads (88.8° → 73.7°, base 0.627 → 0.656) and 120° recedes (91° → 103°). Area drift reached 4.6e-4 after 15 steps in the spreading case, a conservation issue to address separately.
-- [ ] **Configuration details for the D4 runs:**
+  Before the crossing the physics looked right: 60° spreads (88.8° → 73.7°, base 0.627 → 0.656) and 120° recedes (91° → 103°).
+
+  Fix merged 2026-09-30 (`cce6a0fd`..`6dd474d0`):
+  - **Causes:**
+    - Generalized-α rejected any topology change seen at the start of an attempt, and its final check required the endpoint topology to equal the stage topology, so bisection could never pass the crossing.
+    - Some steps cycle A→B→A across a switching surface, which no step size removes.
+    - `FsilsVector::dot` compared layout pointers, but small-cut aggregation rebuilds the layout object.
+    - After a topology change the new constraints re-project the previous velocity, so the backward-Euler kinetic-work pairing threw.
+  - **Changes:**
+    - The initial canonicalization adopts the new epoch (not counted against the budget).
+    - The generalized-α endpoint may start a new topology.
+    - A revisited topology ends the step on that frozen epoch once the inner solve converges (`frozen_epoch_after_cycle=1`, `cut_topology_cycle action=accept_on_frozen_epoch`).
+    - FSILS layouts are compared field by field.
+    - An unpaired backward-Euler record is logged (`backward_euler_kinetic_work_binding status=unavailable`) and marks the energy history non-contiguous.
+    - New key `GeneralSimulationParameters/Max_cut_topology_restarts_per_step`: the default is the outer iteration limit, and 0 restores stop-and-reject. The old environment variable applies only when the key is absent.
+  - **Branch tests:** FE 32/32 (job `46089334`), Physics 7/7 and Application 4/4 (jobs `46089334`, `46099710`), pytest 72.
+  - **Validation (job `46084684`, serial, R/h = 16, 300 steps to t = 1.31, 11% of T = 12.25):** all six configurations (60° and 120°; generalized-α + FSILS, backward Euler + FSILS, backward Euler + Eigen) reached 300 accepted steps with none rejected.
+    - Topology changes per run: 48–138; cycles: 8–23 (3–8% of steps).
+    - Backward Euler matches generalized-α within 0.3° and 0.1% in base; FSILS and Eigen give identical results.
+    - A static drop without crossings is bit-identical to the pre-change build.
+    - Cost: 0.77 s/step (60°) and 2.0 s/step (120°), so the full protocol takes about 0.6–1.6 h at R/h = 16, 6–13 h at 32 and 2.3–6 days at 64.
+  - **Open questions (for the user):**
+    1. Cycle acceptance: the inner solve meets the Newton tolerance, but there is no fresh zero-update check on a further topology.
+    2. Whether to re-anchor the backward-Euler energy history after a topology change, since it is diagnostic only.
+    3. Whether to remove `SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS`.
+  - **Area drift (not addressed here):** the liquid area grows by 0.7–1.0% over 300 steps with coupled transport, about 100× the 1e-4 limit. It is tied to D9 transport and conservation.
+- [x] **Configuration details for the D4 runs (all in place after `6ab328c8`):**
   - Young term;
   - Navier slip on the wetted wall;
   - strong no-penetration;
-  - scale-only wall maintenance. The dynamic-contact path already has this; enable it for `PrescribedAngle`, which today applies the repair to the target angle.
+  - scale-only wall maintenance (`PreserveAcceptedAngle`), as on the dynamic-contact path;
   - no repair-to-target.
-- [ ] **2D sessile relaxation** at 60°, 90° and 120°. Benchmark scripts merged 2026-09-30: `tests/cases/fluid/free_surface_benchmarks/sessile_drop_2d/` (angles by local circle fit, within 0.13° at R/h = 16 on exact caps; slip length R/8; La = 12). Runs wait on the vertex-crossing fix. Start from a *non-equilibrium* shape (for example a 90° cap for a 60° target) and relax to equilibrium at R/h = 16, 32, 64. Proposal: angle error ≤ 2° at R/h = 32 and decreasing; base radius and apex height within 2%.
+- [ ] **2D sessile relaxation** at 60°, 90° and 120°. Benchmark scripts merged 2026-09-30: `tests/cases/fluid/free_surface_benchmarks/sessile_drop_2d/` (angles by local circle fit, within 0.13° at R/h = 16 on exact caps; slip length R/8; La = 12). Unblocked by the vertex-crossing fix. Generalized-α + FSILS is the single default configuration; `--transport coupled|wet_extension|pde_extension` selects the transport (`pde_extension` refused until D9 lands). The first 300 steps (above) show 60° at 59.5/59.3° with base error 2.8% and apex error 4.8%, still slowing down, and 120° at 115.3/118.6°, still receding (base error 13%). `verify.py` requires the last output at the end time. Start from a *non-equilibrium* shape (for example a 90° cap for a 60° target) and relax to equilibrium at R/h = 16, 32, 64. Proposal: angle error ≤ 2° at R/h = 32 and decreasing; base radius and apex height within 2%.
 - [ ] **Capillary rise** against the prepared Gründing et al. envelope, using `free_surface_wp5_capillary_rise_reference.json` and the comparison runner.
 - [ ] **Ren–E** advancing and receding: refine the 08-30 pilot at 3 meshes and 3 time steps, with slip length ratio ℓ_s/h = 2, 4, 8.
 - [ ] **3D sessile** at one angle, then extend.
