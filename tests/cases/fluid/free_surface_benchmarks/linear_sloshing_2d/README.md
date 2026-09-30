@@ -250,6 +250,65 @@ protocol runs but never gates them:
 
 ## Results
 
+### Revised protocol, D9 to D12 (2026-09-30)
+
+**Source `b4b376a0` on branch `dev/pde-velocity-extension`, solver built from
+the same commit, Slurm job `46089180`. Protocol transport
+`pde_harmonic_monolithic`. Result: FAIL on the frequency convergence
+criterion only; the frequency limit, the damping and the volume criteria
+pass.**
+
+Spatial study (all levels at 128 steps per period); "spatial" is the probe
+frequency error with the time error of that step removed.  The time-step
+study at `L/h = 32` (64, 128, 256 steps per period; raw errors -0.038%,
++0.039%, +0.056%) has observed temporal order 2.11 and gives
+`e_time(128) = -0.0235%`, the same for every transport to 1e-6.
+
+| Transport | spatial error at L/h = 16 / 32 / 64 | observed order | damping error at 64 (probe) | max `dA/A` over all runs | s/step at 64 | outer passes/step |
+|---|---|---:|---:|---:|---:|---:|
+| `pde_harmonic_monolithic` (protocol) | +0.019% / +0.062% / +0.074% | -0.96 | 3.3% | 3.2e-5 | 3.83 | 3.08 |
+| `pde_normal_monolithic` | +0.016% / +0.054% / +0.059% | -0.93 | 3.1% | 2.6e-5 | 3.84 | 3.08 |
+| `pde_harmonic_prescribed` | +0.019% / +0.062% / +0.074% | -0.96 | 3.3% | 3.2e-5 | 3.67 | 4.09 |
+| `wet_extension` | +0.017% / +0.053% / +0.120% | -1.41 | 3.4% | 4.0e-5 | 3.88 | 3.08 |
+| `coupled_field` (first protocol) | +0.081% / +0.383% / +1.455% | -2.08 | 7.6% | 6.5e-4 | 3.29 | 3.11 |
+
+| Criterion (protocol transport) | Result |
+|---|---|
+| `frequency` | **FAIL**: 0.074% <= 1% at `L/h = 64`, but not decreasing (0.019%, 0.062%, 0.074%); observed order -0.96 |
+| `damping` | PASS: 3.3% <= 5% |
+| `volume_drift` | PASS: at most 3.2e-5 on all five runs |
+
+Observations:
+
+- The PDE extension removes the growing error of the coupled-field
+  transport: at `L/h = 64` the frequency error falls from 1.46% to 0.074%,
+  the area oscillation from 6.5e-4 to 3.2e-5 and the damping error from 7.6%
+  to 3.3%.  The symmetric mode `cos(2 k x)` stays at 2.0% of `A` (9.5% with
+  the coupled field), the level expected from second-order theory for a
+  release from rest.
+- The monolithic and prescribed couplings reach the same solution to four
+  digits (the same fixed point); the prescribed coupling needs one more outer
+  pass per step.  The harmonic and least-squares normal operators differ by
+  at most 0.015% in frequency and 0.2% in damping.
+- With every extension the spatial error grows from about 0.02% to
+  0.05–0.07% and then flattens.  This variation is of the order of the
+  measurement and modelling uncertainty: the probe and modal-amplitude fits
+  differ by up to 0.018% at `L/h = 64` (modal spatial errors +0.019%,
+  +0.050%, +0.056%), and the viscous frequency shift in the reference is
+  itself 0.020%.  An observed order cannot be demonstrated at this level;
+  the criterion needs a decision (for example an error floor below which it
+  is not applied).
+- The probe damping error reflects the wall probe, where a slow mean-level
+  change (0.5% of `A`) and the second harmonic enter the fit.  The damping of
+  the modal amplitude converges to the linear viscous rate
+  (`gamma/gamma_ref` = 1.028, 1.005, 0.999 at `L/h` = 16, 32, 64).
+- Per-step cost with the PDE extension is 16% above the coupled field at
+  `L/h = 64` (3.83 against 3.29 s/step), about the same as the algebraic wet
+  extension, which additionally writes a 3.5 MB map file per step.
+
+Raw output: `/scratch/users/zsexton/free-surface-benchmarks/pde-extension/campaign-b4b376a0/`
+(`sloshing_verify.txt`, `sloshing_verify.json`).
+
 ### First protocol (2026-09-30, superseded)
 
 The first protocol advected `phi` with the fluid velocity, refined the time
@@ -295,9 +354,9 @@ Observations:
 Raw output: `/scratch/users/zsexton/free-surface-benchmarks/linear_sloshing_2d/m1-7aac1e29/`
 (`verify.txt`, `verify.json`).
 
-### Diagnostic runs (not gated)
+#### Diagnostic runs of the first protocol (not gated)
 
-Three diagnostic series were run after the protocol study, with the options
+Three diagnostic series were run after the first protocol study, with the options
 `--steps-per-period`, `--mean-depth` and `--level-set-velocity` of
 `generate_case.py` (source `f57e1e02` to `4dc2cfb9`, Slurm jobs `46033465` and
 `46041062`). `verify.py` reports such runs but never gates them. "Spatial"

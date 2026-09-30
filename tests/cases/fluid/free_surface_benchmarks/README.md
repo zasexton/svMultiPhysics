@@ -65,6 +65,8 @@ change it once, with a one-line justification in the tracker.
 - **No tuning (P1).** A benchmark must not require a numerical parameter chosen per case or per mesh. Physical inputs (surface tension, viscosity, contact angle, slip length) come from the case definition.
 - **Relaxed states (D1, D3).** Static equilibria start from the sampled analytic shape and run until the flow relaxes, typically 5–10 viscous times. Metrics are taken from the relaxed state, and the history of the maximum velocity is reported.
 - **Surface tension inputs.** Set `Geometry_tangent_policy=RefreshedFrozenQuadrature`, which unfitted surface tension requires. Check the time step against the capillary limit `sqrt(rho*h^3/(2*pi*gamma))`.
+- **Level-set advection (D9).** Moving-interface benchmarks advect `phi` with the harmonic PDE extension of the fluid velocity, monolithically coupled: `Velocity_source=prescribed_data`, `Velocity_field_name=LevelSetAdvectionVelocity`, `Auto_register_velocity_field=true`, `Source_velocity_field_name=Velocity`, `Advection_velocity_extension_method=pde_harmonic`, `Advection_velocity_extension_coupling=monolithic` (`linear_sloshing_2d` README, "Level-set advection velocity").
+- **Space and time (D10, D11).** Gate spatial convergence with the time-step error removed and run a separate time-step study; volume criteria gate the maximum deviation over the run.
 - **Cost.** Each resolution level should run in minutes to about an hour on one node, submitted through Slurm with an explicit time limit and begin/end/fail mail.
 - **Launching the solver.** Start every MPI-linked binary with `mpiexec -n <N> --bind-to none` (or `srun --mpi=pmix -n <N> --exact`), never bare.
   - Submit with `sbatch --export=NONE` and set the environment in the job script.
