@@ -908,3 +908,155 @@ TEST(LevelSetMaintenanceConfiguration,
         << canonical;
   }
 }
+
+namespace {
+
+LegacyLevelSetMaintenanceInput makeKinematicAreaGradientInput() {
+  auto input = makeLegacyInput();
+  put(input.equation_parameters, "Enable_curvature_projection", "true");
+  put(input.equation_parameters, "Curvature_field_name", "kappa");
+  put(input.equation_parameters, "Curvature_projection_recovery_mode",
+      "KinematicAreaGradient");
+  return input;
+}
+
+const std::string kLumpedNonzeroFilterDiagnostic =
+    "[svMultiPhysics::Application] "
+    "Curvature_projection_kinematic_area_gradient_mass=Lumped is parameter "
+    "free and implies a zero "
+    "Curvature_projection_kinematic_area_gradient_filter_coefficient; omit "
+    "the filter coefficient or set it to 0.";
+
+constexpr std::string_view kFilterKey =
+    "curvature_projection_kinematic_area_gradient_filter_coefficient";
+
+} // namespace
+
+TEST(LevelSetMaintenanceConfiguration,
+     LumpedKinematicAreaGradientMassDefaultsFilterCoefficientToZero) {
+  using Mass = svmp::FE::level_set::LevelSetKinematicAreaGradientMass;
+  auto input = makeKinematicAreaGradientInput();
+  put(input.equation_parameters,
+      "Curvature_projection_kinematic_area_gradient_mass", "Lumped");
+
+  const auto resolved =
+      application::core::resolveLegacyLevelSetMaintenanceConfiguration(
+          input, std::span<const ActiveCutVolumeRequest>{});
+  ASSERT_TRUE(resolved.has_value());
+  ASSERT_TRUE(*resolved);
+  const auto &options = (*resolved)->curvature_projection;
+  EXPECT_EQ(options.kinematic_area_gradient_mass, Mass::Lumped);
+  EXPECT_EQ(options.kinematic_area_gradient_filter_coefficient,
+            svmp::FE::Real{0.0});
+  EXPECT_EQ(findObservation((*resolved)->input_observations, kFilterKey,
+                            "legacy_getter"),
+            nullptr);
+  const auto *derived = findObservation((*resolved)->input_observations,
+                                        kFilterKey, "derived");
+  ASSERT_NE(derived, nullptr);
+  EXPECT_FALSE(derived->supplied);
+  EXPECT_TRUE(derived->selected_spelling.empty());
+  EXPECT_EQ(derived->source_layer,
+            "derived:curvature_projection_kinematic_area_gradient_mass");
+
+  // An explicit zero, under any spelling, is accepted and recorded as input.
+  put(input.equation_parameters,
+      "ProjectedCurvatureKinematicAreaGradientFilterCoefficient", "0");
+  const auto explicit_zero =
+      application::core::resolveLegacyLevelSetMaintenanceConfiguration(
+          input, std::span<const ActiveCutVolumeRequest>{});
+  ASSERT_TRUE(explicit_zero.has_value());
+  ASSERT_TRUE(*explicit_zero);
+  EXPECT_EQ((*explicit_zero)
+                ->curvature_projection.kinematic_area_gradient_filter_coefficient,
+            svmp::FE::Real{0.0});
+  EXPECT_EQ(findObservation((*explicit_zero)->input_observations, kFilterKey,
+                            "derived"),
+            nullptr);
+  const auto *selected = findObservation((*explicit_zero)->input_observations,
+                                         kFilterKey, "legacy_getter");
+  ASSERT_NE(selected, nullptr);
+  EXPECT_EQ(selected->selected_spelling,
+            "ProjectedCurvatureKinematicAreaGradientFilterCoefficient");
+}
+
+TEST(LevelSetMaintenanceConfiguration,
+     LumpedKinematicAreaGradientMassRejectsExplicitNonzeroFilterCoefficient) {
+  auto input = makeKinematicAreaGradientInput();
+  put(input.equation_parameters,
+      "Curvature_projection_kinematic_area_gradient_mass", "Lumped");
+  put(input.equation_parameters,
+      "Curvature_projection_kinematic_area_gradient_filter_coefficient", "0.5");
+  const auto resolve = [&] {
+    return application::core::resolveLegacyLevelSetMaintenanceConfiguration(
+        input, std::span<const ActiveCutVolumeRequest>{});
+  };
+  EXPECT_EQ((exceptionMessage<std::invalid_argument>([&] { (void)resolve(); })),
+            kLumpedNonzeroFilterDiagnostic);
+
+  // An explicit coefficient equal to the consistent default is still an
+  // explicit nonzero filter, whichever spellings select the two controls.
+  input.equation_parameters.erase(
+      "Curvature_projection_kinematic_area_gradient_mass");
+  input.equation_parameters.erase(
+      "Curvature_projection_kinematic_area_gradient_filter_coefficient");
+  put(input.equation_parameters, "ProjectedCurvatureKinematicAreaGradientMass",
+      "row_sum");
+  put(input.equation_parameters,
+      "Projected_curvature_kinematic_area_gradient_filter_coefficient", "1.0");
+  EXPECT_EQ((exceptionMessage<std::invalid_argument>([&] { (void)resolve(); })),
+            kLumpedNonzeroFilterDiagnostic);
+}
+
+TEST(LevelSetMaintenanceConfiguration,
+     ConsistentKinematicAreaGradientMassKeepsFilterCoefficientDefault) {
+  using Mass = svmp::FE::level_set::LevelSetKinematicAreaGradientMass;
+  const auto fe_default =
+      svmp::FE::level_set::LevelSetCurvatureProjectionOptions{}
+          .kinematic_area_gradient_filter_coefficient;
+  ASSERT_EQ(fe_default, svmp::FE::Real{1.0});
+  const auto resolve = [](const LegacyLevelSetMaintenanceInput &input) {
+    const auto resolved =
+        application::core::resolveLegacyLevelSetMaintenanceConfiguration(
+            input, std::span<const ActiveCutVolumeRequest>{});
+    EXPECT_TRUE(resolved.has_value());
+    return resolved.value_or(nullptr);
+  };
+
+  // Mass key omitted, then Consistent selected explicitly: the filter keeps
+  // the FE default and no derived provenance is recorded.
+  auto input = makeKinematicAreaGradientInput();
+  for (const bool explicit_mass : {false, true}) {
+    if (explicit_mass) {
+      put(input.equation_parameters,
+          "Curvature_projection_kinematic_area_gradient_mass", "Consistent");
+    }
+    const auto configuration = resolve(input);
+    ASSERT_TRUE(configuration) << explicit_mass;
+    EXPECT_EQ(configuration->curvature_projection.kinematic_area_gradient_mass,
+              Mass::Consistent)
+        << explicit_mass;
+    EXPECT_EQ(configuration->curvature_projection
+                  .kinematic_area_gradient_filter_coefficient,
+              fe_default)
+        << explicit_mass;
+    EXPECT_EQ(
+        findObservation(configuration->input_observations, kFilterKey,
+                        "derived"),
+        nullptr)
+        << explicit_mass;
+  }
+
+  // Explicit coefficients are used unchanged with the consistent mass.
+  for (const std::string value : {"0.75", "0"}) {
+    put(input.equation_parameters,
+        "Curvature_projection_kinematic_area_gradient_filter_coefficient",
+        value);
+    const auto configuration = resolve(input);
+    ASSERT_TRUE(configuration) << value;
+    EXPECT_EQ(configuration->curvature_projection
+                  .kinematic_area_gradient_filter_coefficient,
+              static_cast<svmp::FE::Real>(std::stod(value)))
+        << value;
+  }
+}

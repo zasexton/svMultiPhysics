@@ -6710,6 +6710,58 @@ TEST(ApplicationDriverLevelSetWorkflows,
       effectiveCurvatureProjectionOptions(changed_requests.front()));
   EXPECT_NE(lumped_signature, consistent_signature);
 
+  // Lumped implies a zero filter: omitting the filter key is the same
+  // request as the explicit zero above, word for word and in the cache
+  // signature.
+  auto implied = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Enable_curvature_projection>true</Enable_curvature_projection>
+    <Curvature_field_name>kappa_projected</Curvature_field_name>
+    <Curvature_projection_recovery_mode>KinematicAreaGradient</Curvature_projection_recovery_mode>
+    <Curvature_projection_kinematic_area_gradient_mass>Lumped</Curvature_projection_kinematic_area_gradient_mass>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  const auto implied_requests = legacyMaintenanceRequestsForTest(*implied);
+  ASSERT_EQ(implied_requests.size(), 1u);
+  const auto implied_options =
+      effectiveCurvatureProjectionOptions(implied_requests.front());
+  EXPECT_EQ(implied_options.kinematic_area_gradient_mass,
+            svmp::FE::level_set::LevelSetKinematicAreaGradientMass::Lumped);
+  EXPECT_EQ(implied_options.kinematic_area_gradient_filter_coefficient, 0.0);
+  const auto implied_canonical = canonicalLevelSetMaintenanceRequestSchedule(
+      implied_requests,
+      LevelSetMaintenanceScheduleStage::TransientInitialization,
+      /*completed_step=*/0);
+  ASSERT_TRUE(implied_canonical.supported);
+  EXPECT_EQ(implied_canonical.words, canonical.words);
+  std::uint64_t implied_signature = 0u;
+  mixCurvatureProjectionOptionsSignature(implied_signature, implied_options);
+  EXPECT_EQ(implied_signature, lumped_signature);
+
+  auto nonzero_filter = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Enable_curvature_projection>true</Enable_curvature_projection>
+    <Curvature_field_name>kappa_projected</Curvature_field_name>
+    <Curvature_projection_recovery_mode>KinematicAreaGradient</Curvature_projection_recovery_mode>
+    <Curvature_projection_kinematic_area_gradient_filter_coefficient>0.25</Curvature_projection_kinematic_area_gradient_filter_coefficient>
+    <Curvature_projection_kinematic_area_gradient_mass>Lumped</Curvature_projection_kinematic_area_gradient_mass>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  EXPECT_EQ(
+      (maintenanceCompatibilityExceptionMessage<std::invalid_argument>(
+          [&] { (void)legacyMaintenanceRequestsForTest(*nonzero_filter); })),
+      "[svMultiPhysics::Application] "
+      "Curvature_projection_kinematic_area_gradient_mass=Lumped is parameter "
+      "free and implies a zero "
+      "Curvature_projection_kinematic_area_gradient_filter_coefficient; omit "
+      "the filter coefficient or set it to 0.");
+
   auto alias = parseWorkflowParametersXml(R"xml(
 <svMultiPhysicsFile>
   <Add_equation type="level_set">
@@ -6725,6 +6777,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(effectiveCurvatureProjectionOptions(alias_requests.front())
                 .kinematic_area_gradient_mass,
             svmp::FE::level_set::LevelSetKinematicAreaGradientMass::Lumped);
+  EXPECT_EQ(effectiveCurvatureProjectionOptions(alias_requests.front())
+                .kinematic_area_gradient_filter_coefficient,
+            0.0);
 
   auto invalid = parseWorkflowParametersXml(R"xml(
 <svMultiPhysicsFile>

@@ -4013,6 +4013,19 @@ TEST(LevelSetCurvatureProjection,
     EXPECT_THROW(
         (void)level_set::parseLevelSetKinematicAreaGradientMass("diagonal"),
         std::invalid_argument);
+
+    // Lumped implies a zero filter; the options default stays the
+    // consistent-mode coefficient.
+    static_assert(
+        level_set::levelSetKinematicAreaGradientDefaultFilterCoefficient(
+            Mass::Lumped) == FE::Real{0.0});
+    EXPECT_EQ(level_set::levelSetKinematicAreaGradientDefaultFilterCoefficient(
+                  Mass::Consistent),
+              FE::Real{1.0});
+    EXPECT_EQ(level_set::LevelSetCurvatureProjectionOptions{}
+                  .kinematic_area_gradient_filter_coefficient,
+              level_set::levelSetKinematicAreaGradientDefaultFilterCoefficient(
+                  Mass::Consistent));
 }
 
 TEST(LevelSetCurvatureProjection,
@@ -4029,16 +4042,25 @@ TEST(LevelSetCurvatureProjection,
         level_set::LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
     options.kinematic_area_gradient_mass = Mass::Lumped;
     std::vector<FE::Real> curvature;
-    // The default filter coefficient is nonzero; the lumped mode has no
-    // parameter and must not silently ignore one.
+    // The options default is the consistent-mode coefficient, which the FE
+    // layer cannot tell from an explicit one. Lumped has no parameter and
+    // must reject, not ignore, any nonzero coefficient.
     EXPECT_THROW((void)level_set::projectLevelSetMeanCurvatureToVertices(
                      mesh, phi, options, curvature),
                  std::invalid_argument);
     options.kinematic_area_gradient_filter_coefficient = FE::Real{0.5};
-    EXPECT_THROW((void)level_set::projectLevelSetMeanCurvatureToVertices(
-                     mesh, phi, options, curvature),
-                 std::invalid_argument);
-    options.kinematic_area_gradient_filter_coefficient = FE::Real{0.0};
+    try {
+        (void)level_set::projectLevelSetMeanCurvatureToVertices(
+            mesh, phi, options, curvature);
+        ADD_FAILURE() << "lumped mass accepted a nonzero filter coefficient";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find("defaults to zero"),
+                  std::string::npos)
+            << error.what();
+    }
+    options.kinematic_area_gradient_filter_coefficient =
+        level_set::levelSetKinematicAreaGradientDefaultFilterCoefficient(
+            Mass::Lumped);
     options.recovery_mode =
         level_set::LevelSetCurvatureRecoveryMode::LevelSetQuadratic;
     EXPECT_THROW((void)level_set::projectLevelSetMeanCurvatureToVertices(

@@ -44,7 +44,8 @@ surface tension; supply `Curvature` or a projected curvature field instead.
 - interface quadrature order of at least 2;
 - `Curvature_projection_kinematic_area_gradient_filter_coefficient=0`;
   `Curvature_projection_kinematic_area_gradient_mass` may be `Consistent` or
-  `Lumped`.
+  `Lumped`. With `Lumped` the filter coefficient defaults to 0 and may be
+  omitted; with `Consistent` it defaults to 1 and must be set to 0.
 
 ## Unfitted contact lines
 
