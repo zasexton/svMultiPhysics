@@ -1,0 +1,70 @@
+{
+  "benchmark": "static_sphere_3d",
+  "milestone": "M2",
+  "fixed_on": "2026-09-30, before the first protocol run; the criteria mirror static_drop_2d/tolerances.json",
+  "levels": {
+    "R_over_h": [
+      8,
+      16,
+      32
+    ]
+  },
+  "protocol": {
+    "laplace_numbers": [
+      12,
+      120
+    ],
+    "viscous_times": 5,
+    "snapshots": 100,
+    "time_step": "dt <= m * dt_B, dt_B = sqrt(rho*h^3/(4*pi*gamma)) = (1/sqrt(2)) * sqrt(rho*h^3/(2*pi*gamma)), rounded down so that the run is 100 equal output intervals; m = 2 at La = 12 and m = 1 at La = 120, taken from the 2D step-0 measurement (tracker M2, jobs 46075447 and 46076505). The 3D values of m are assumed from 2D and must be checked once in 3D (README.md). The gated metrics are relaxed steady-state values, so the time step does not enter them (decision D10).",
+    "transport": "Level-set advection velocity (decision D9): pde_extension once the solver has it, wet_extension until then, coupled for comparison. Criteria apply separately to each (capillary form, transport, Laplace number) refinement study.",
+    "note": "R/h = 32 (5.3 million tetrahedra, about 4,000 steps at La = 12) may not be affordable with the current per-step cost; without it the pressure-jump criterion cannot be evaluated (README.md, Expected cost per level)."
+  },
+  "criteria": [
+    {
+      "id": "pressure_jump",
+      "quantity": "pressure_jump_relative_error",
+      "definition": "|(p_in - p_ext) - 2*gamma/R_eff| / (2*gamma/R_eff) at the end of the run. p_in is the volume-weighted mean of the P1 pressure over the tetrahedra lying entirely inside the ball of radius R_eff/2 about the liquid centroid; R_eff = (3V/(4*pi))^(1/3), V the exact volume of {phi_h < 0}.",
+      "limit": 0.01,
+      "at_level": 32,
+      "minimum_observed_order": 1.0,
+      "order_levels": [
+        8,
+        16,
+        32
+      ],
+      "order_method": "least-squares slope of log(error) against log(R/h) over order_levels; pairwise orders are reported",
+      "source": "Decision D1 working criterion (tracker section 5, M2: pressure-jump error <= 1% at R/h = 32 with observed order >= 1), as for static_drop_2d"
+    },
+    {
+      "id": "parasitic_capillary_number",
+      "quantity": "parasitic_capillary_number_final",
+      "definition": "Ca_sp = mu * max|u_h| / gamma, max over the vertices with phi_h < 0, taking the largest value over the outputs in the final quarter of the run (t > 3T/4).",
+      "at_level": "each",
+      "monotone": "strictly_decreasing",
+      "monotone_levels": [
+        8,
+        16,
+        32
+      ],
+      "source": "Decision of 2026-09-29 recorded in the tracker (section 5, M2), as for static_drop_2d: no absolute limit; the spurious flow must decrease strictly under refinement, and no_velocity_growth must hold. Absolute values are reported.",
+      "per_level": "reported, not gated"
+    },
+    {
+      "id": "no_velocity_growth",
+      "quantity": "max_speed_growth_ratio",
+      "definition": "max|u_h| (liquid vertices) at the end of the run divided by the largest max|u_h| over the outputs in the third quarter of the run (T/2 <= t <= 3T/4). A ratio <= 1 means the final value lies within the envelope of the preceding quarter.",
+      "limit": 1.0,
+      "at_level": "each",
+      "source": "Decision D1 working criterion (tracker section 5, M2: no growth of max|u| in time)"
+    },
+    {
+      "id": "volume_drift",
+      "quantity": "liquid_volume_relative_deviation_max",
+      "definition": "max over the run of |V(t) - V(0)| / V(0), with V the exact volume of {phi_h < 0} and V(0) that of the sampled initial level set in mesh/mesh-complete.mesh.vtu. The maximum is taken over all outputs and, when the solver log is present and its per-step wet volume matches the snapshot volume at every output to 1e-8, over every step of the log.",
+      "limit": 0.0001,
+      "at_level": "each",
+      "source": "Decision D1 working criterion (tracker section 5, M2: volume drift <= 1e-4), measured as the maximum deviation over the run (decision D11)"
+    }
+  ]
+}
