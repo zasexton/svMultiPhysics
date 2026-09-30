@@ -2153,10 +2153,29 @@ std::vector<FE::Real> unfittedContactAngleResidualVector(
         throw std::invalid_argument(
             "unfittedContactAngleResidualVector supports only +-z walls");
     }
+    const bool reverse_wall_orientation = outward_wall_normal[2] > 0.0;
     const auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(
         wall_marker,
         /*expose_all_faces=*/false,
-        /*reverse_wall_orientation=*/outward_wall_normal[2] > 0.0);
+        reverse_wall_orientation);
+    // The reversed tetra maps reference (x, y, z) to physical (y, x, -z).
+    // Normals, gradients and the contact tangent below are physical; the cut
+    // context and the nodal level-set values are given in the reference
+    // frame, so they are mapped as covectors (the tangent as the pseudo-
+    // vector of the reflected frame).
+    const auto to_reference_covector =
+        [reverse_wall_orientation](const std::array<FE::Real, 3>& physical) {
+            return reverse_wall_orientation
+                ? std::array<FE::Real, 3>{physical[1], physical[0], -physical[2]}
+                : physical;
+        };
+    const std::array<FE::Real, 3> physical_contact_tangent{1.0, 0.0, 0.0};
+    const std::array<FE::Real, 3> reference_contact_tangent =
+        reverse_wall_orientation
+        ? std::array<FE::Real, 3>{-physical_contact_tangent[1],
+                                  -physical_contact_tangent[0],
+                                  physical_contact_tangent[2]}
+        : physical_contact_tangent;
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
@@ -2240,11 +2259,14 @@ std::vector<FE::Real> unfittedContactAngleResidualVector(
         wall_marker,
         contact_marker,
         phi,
-        outward_wall_normal,
-        generated_interface_normal.value_or(level_set_gradient),
+        to_reference_covector(outward_wall_normal),
+        to_reference_covector(
+            generated_interface_normal.value_or(level_set_gradient)),
         /*contact_point=*/{0.10, 0.20, 0.30},
-        /*contact_tangent=*/{1.0, 0.0, 0.0},
-        FE::geometry::CutIntegrationSide::Negative,
+        reference_contact_tangent,
+        active_domain == ns::FreeSurfaceActiveDomain::LevelSetPositive
+            ? FE::geometry::CutIntegrationSide::Positive
+            : FE::geometry::CutIntegrationSide::Negative,
         /*active_boundary_measure=*/FE::Real{0.25}));
     system.setup({}, makeSingleTetraSetupInputs());
     if (kappa != FE::INVALID_FIELD_ID) {
@@ -2255,7 +2277,7 @@ std::vector<FE::Real> unfittedContactAngleResidualVector(
     std::vector<FE::Real> solution(
         static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
     const auto phi_values = affineScalarTetraCoefficients(
-        FE::Real{0.0}, level_set_gradient);
+        FE::Real{0.0}, to_reference_covector(level_set_gradient));
     for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
         setFieldComponentValue(solution,
                                system,
@@ -14981,7 +15003,12 @@ TEST(MovingDomainPhysics,
             wall_marker,
             contact_marker,
             phi,
-            rule_normal));
+            rule_normal,
+            /*interface_normal=*/{0.0, 1.0, 0.0},
+            /*contact_point=*/{0.10, 0.20, 0.30},
+            /*contact_tangent=*/{1.0, 0.0, 0.0},
+            FE::geometry::CutIntegrationSide::Negative,
+            /*active_boundary_measure=*/FE::Real{0.25}));
     };
 
     EXPECT_NO_THROW(install_with_normal(
