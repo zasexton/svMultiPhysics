@@ -1318,6 +1318,49 @@ TEST(FsilsBackend, FactoryCachesSerialMatrixLayoutForSubsequentVectors)
     EXPECT_THROW((void)factory.createVector(/*size=*/3), InvalidArgumentException);
 }
 
+TEST(FsilsBackend, DotAcceptsStructurallyEqualLayoutsFromRebuiltMatrices)
+{
+    // A vector keeps the layout of the matrix that existed when it was
+    // created.  Rebuilding the matrix yields a new layout object with the same
+    // node layout; dot must accept that pair, as copyFrom does, and still
+    // reject a layout with a different global DOF permutation.
+    auto permutation = makeIdentityPermutation(/*size=*/4);
+    FsilsFactory factory(/*dof_per_node=*/2, permutation);
+    const auto pattern = make_dense_pattern(/*n=*/4);
+
+    auto first_matrix = factory.createMatrix(pattern);
+    auto first = factory.createVector(/*size=*/4);
+    auto second_matrix = factory.createMatrix(pattern);
+    auto second = factory.createVector(/*size=*/4);
+    auto* first_fsils = dynamic_cast<FsilsVector*>(first.get());
+    auto* second_fsils = dynamic_cast<FsilsVector*>(second.get());
+    ASSERT_NE(first_fsils, nullptr);
+    ASSERT_NE(second_fsils, nullptr);
+    ASSERT_NE(first_fsils->shared(), second_fsils->shared());
+
+    auto first_values = first->localSpan();
+    auto second_values = second->localSpan();
+    ASSERT_EQ(first_values.size(), second_values.size());
+    Real expected = 0.0;
+    for (std::size_t i = 0; i < first_values.size(); ++i) {
+        first_values[i] = static_cast<Real>(i) + 1.0;
+        second_values[i] = 2.0 - static_cast<Real>(i);
+        expected += first_values[i] * second_values[i];
+    }
+    EXPECT_DOUBLE_EQ(first->dot(*second), expected);
+    EXPECT_DOUBLE_EQ(second->dot(*first), expected);
+    EXPECT_NO_THROW(second->copyFrom(*first));
+
+    auto reversed = std::make_shared<DofPermutation>(*permutation);
+    std::reverse(reversed->forward.begin(), reversed->forward.end());
+    std::reverse(reversed->inverse.begin(), reversed->inverse.end());
+    FsilsFactory other_factory(/*dof_per_node=*/2, reversed);
+    auto other_matrix = other_factory.createMatrix(pattern);
+    auto other = other_factory.createVector(/*size=*/4);
+    EXPECT_THROW((void)first->dot(*other), InvalidArgumentException);
+    EXPECT_THROW(other->copyFrom(*first), InvalidArgumentException);
+}
+
 TEST(FsilsBackend, BackendFactoryCreatesFsilsByKindAndNameAndRejectsInvalidArguments)
 {
     auto permutation = makeIdentityPermutation(/*size=*/4);

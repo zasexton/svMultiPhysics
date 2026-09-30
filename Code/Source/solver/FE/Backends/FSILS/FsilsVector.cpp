@@ -24,6 +24,39 @@ namespace backends {
 
 namespace {
 
+// FsilsVector stores values in the old local-node ordering.  Sparsity and
+// FSILS' internal lhs.map may change when a matrix is rebuilt, but raw local
+// values of two vectors correspond exactly when this old ordering, the node
+// ownership and the global DOF permutation agree.
+[[nodiscard]] bool fsilsLayoutsCompatible(const FsilsShared* lhs,
+                                          const FsilsShared* rhs) noexcept
+{
+    if (lhs == rhs) {
+        return true;
+    }
+    if (lhs == nullptr || rhs == nullptr) {
+        return false;
+    }
+    const auto same_permutation = [](const std::shared_ptr<const DofPermutation>& a,
+                                     const std::shared_ptr<const DofPermutation>& b) noexcept {
+        if (a == b) {
+            return true;
+        }
+        if (!a || !b) {
+            return false;
+        }
+        return a->forward == b->forward && a->inverse == b->inverse;
+    };
+    return lhs->global_dofs == rhs->global_dofs &&
+           lhs->dof == rhs->dof &&
+           lhs->gnNo == rhs->gnNo &&
+           lhs->owned_node_start == rhs->owned_node_start &&
+           lhs->owned_node_count == rhs->owned_node_count &&
+           lhs->owned_nodes == rhs->owned_nodes &&
+           lhs->ghost_nodes == rhs->ghost_nodes &&
+           same_permutation(lhs->dof_permutation, rhs->dof_permutation);
+}
+
 [[nodiscard]] std::size_t hashGlobalIndexSpan(std::span<const GlobalIndex> values) noexcept
 {
     std::uint64_t hash = 1469598103934665603ull;
@@ -677,41 +710,7 @@ void FsilsVector::copyFrom(const GenericVector& other)
                 InvalidArgumentException,
                 "FsilsVector::copyFrom: local size mismatch");
 
-    const auto compatible_layout = [](const FsilsShared* lhs,
-                                      const FsilsShared* rhs) noexcept {
-        if (lhs == rhs) {
-            return true;
-        }
-        if (lhs == nullptr || rhs == nullptr) {
-            return false;
-        }
-
-        const auto same_permutation = [](const std::shared_ptr<const DofPermutation>& a,
-                                         const std::shared_ptr<const DofPermutation>& b) noexcept {
-            if (a == b) {
-                return true;
-            }
-            if (!a || !b) {
-                return false;
-            }
-            return a->forward == b->forward && a->inverse == b->inverse;
-        };
-
-        // FsilsVector stores values in the old local-node ordering. Sparsity
-        // and FSILS' internal lhs.map may change when a matrix is rebuilt, but
-        // raw local copies remain valid exactly when this old ordering and the
-        // global DOF permutation agree.
-        return lhs->global_dofs == rhs->global_dofs &&
-               lhs->dof == rhs->dof &&
-               lhs->gnNo == rhs->gnNo &&
-               lhs->owned_node_start == rhs->owned_node_start &&
-               lhs->owned_node_count == rhs->owned_node_count &&
-               lhs->owned_nodes == rhs->owned_nodes &&
-               lhs->ghost_nodes == rhs->ghost_nodes &&
-               same_permutation(lhs->dof_permutation, rhs->dof_permutation);
-    };
-
-    FE_THROW_IF(!compatible_layout(shared_.get(), o->shared_.get()),
+    FE_THROW_IF(!fsilsLayoutsCompatible(shared_.get(), o->shared_.get()),
                 InvalidArgumentException,
                 "FsilsVector::copyFrom: layout mismatch");
     std::copy(o->data_.begin(), o->data_.end(), data_.begin());
@@ -724,7 +723,14 @@ Real FsilsVector::dot(const GenericVector& other) const
     FE_THROW_IF(!o, InvalidArgumentException, "FsilsVector::dot: backend mismatch");
     FE_THROW_IF(o->global_size_ != global_size_, InvalidArgumentException, "FsilsVector::dot: global size mismatch");
     FE_THROW_IF(o->data_.size() != data_.size(), InvalidArgumentException, "FsilsVector::dot: local size mismatch");
-    FE_THROW_IF(o->shared_ != shared_, InvalidArgumentException, "FsilsVector::dot: layout mismatch");
+    // A vector keeps the layout object of the matrix that existed when it
+    // was created.  Rebuilding the matrix (for example when small-cut
+    // aggregation re-augments the constraint structure) creates a new layout
+    // object for later vectors even when the node layout is unchanged, so the
+    // layouts are compared structurally, as in copyFrom.
+    FE_THROW_IF(!fsilsLayoutsCompatible(shared_.get(), o->shared_.get()),
+                InvalidArgumentException,
+                "FsilsVector::dot: layout mismatch");
 
     Real sum = 0.0;
 
