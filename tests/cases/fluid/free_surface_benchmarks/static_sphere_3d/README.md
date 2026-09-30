@@ -255,10 +255,11 @@ cut regions once per cell, rule or boundary face account for about 75% of a
 rebuild (`MeshAccess::globalEntityIdsAvailable`, the per-face scans in
 `buildGeneratedActiveBoundaryDomain`, and the rule-to-region lookup in
 `buildFreeSurfaceGeometrySnapshot`). Fixing them does not change results and
-makes the rebuild scale linearly. For the KAG forms, most of the projection
-time is a finite-difference cross-check of the analytic interface-area
-gradient (24 extra strict cuts per cut cell) whose result is only reported
-as a diagnostic. With these changes alone (none alters results), a pass at
+makes the rebuild scale linearly. For the KAG forms, about 60% of a
+projection is a finite-difference cross-check of the analytic interface-area
+gradient (24 extra strict cuts per cut cell, 131,760 per projection) whose
+result is only reported as a diagnostic, and about 30% is a duplicate search
+over all 162,600 supplemental curvature samples for every new sample. With these changes alone (none alters results), a pass at
 `R/h = 8` would still cost about two minutes, so the run would take two to
 four days serially, and `R/h = 16` (8 times the cells, 2.8 times the steps)
 months. The 3D study therefore also needs a working MPI run (4 ranks fail
