@@ -1,0 +1,62 @@
+{
+  "benchmark": "capillary_wave_2d",
+  "milestone": "M3",
+  "fixed_on": "2026-09-30, before the first protocol run",
+  "levels": {
+    "lambda_over_h": [
+      16,
+      32,
+      64
+    ]
+  },
+  "protocol": {
+    "laplace_number": 3000,
+    "laplace_number_definition": "La = rho*gamma*lambda/mu^2 (Popinet 2009, section 5.3); Oh = 1/sqrt(La) = 0.0183, epsilon = nu*k^2/omega0 = 0.0458",
+    "amplitude_over_wavelength": 0.01,
+    "periods": 4,
+    "snapshots": 100,
+    "time_step": "dt <= sqrt(rho*h^3/(4*pi*gamma)) = (1/sqrt(2)) * sqrt(rho*h^3/(2*pi*gamma)), rounded down so that the run is 100 equal output intervals; dt_divisor 2 and 4 are the temporal refinement runs",
+    "reference": "Prosperetti initial-value solution for a free surface (Phys. Fluids 19, 195 (1976); Phys. Fluids 24, 1217 (1981), one-fluid limit), fitted with the same damped-cosine model on the same output times as the simulation",
+    "note": "Criteria apply separately to each (capillary form, Laplace number, time-step divisor) refinement study; the protocol study uses divisor 1. See README.md for the definitions and the cost of each level."
+  },
+  "criteria": [
+    {
+      "id": "frequency",
+      "quantity": "frequency_relative_error",
+      "definition": "|omega_sim - omega_ref| / omega_ref. omega_sim is the angular frequency of the least-squares fit exp(-beta t)(c1 cos(omega t) + c2 sin(omega t)) to the cos(kx) mode amplitude a_h(t) over all outputs including t = 0; omega_ref is the same fit to Prosperetti's a(t) sampled at the same times.",
+      "limit": 0.02,
+      "at_level": 32,
+      "minimum_observed_order": 1.0,
+      "order_levels": [
+        16,
+        32,
+        64
+      ],
+      "order_method": "least-squares slope of log(error) against log(lambda/h) over order_levels; pairwise orders are reported",
+      "source": "Decision D1 working criterion (tracker section 5, M3: frequency error <= 2% at lambda/h = 32, with convergence over 16/32/64). First order is the rate expected for the force on a piecewise-planar interface (Gross and Reusken 2011, ch. 7), as for the static-drop pressure jump."
+    },
+    {
+      "id": "damping",
+      "quantity": "damping_rate_relative_error",
+      "definition": "|beta_sim - beta_ref| / beta_ref with beta the amplitude decay rate of the same two fits.",
+      "limit": 0.05,
+      "at_level": 32,
+      "minimum_observed_order": 1.0,
+      "order_levels": [
+        16,
+        32,
+        64
+      ],
+      "order_method": "least-squares slope of log(error) against log(lambda/h) over order_levels; pairwise orders are reported",
+      "source": "Decision D1 working criterion (tracker section 5, M3: damping error <= 5% at lambda/h = 32, with convergence over 16/32/64)."
+    },
+    {
+      "id": "volume_drift",
+      "quantity": "liquid_area_relative_drift_max",
+      "definition": "max over all outputs of |A(t) - A(0)| / A(0), with A the exact area of {phi_h < 0} and A(0) that of the sampled initial level set in mesh/mesh-complete.mesh.vtu",
+      "limit": 0.0001,
+      "at_level": "each",
+      "source": "Decision D1 working criterion (tracker section 5: volume drift <= 1e-4, as for M1 and M2, applied to M3). A(0) includes the whole liquid layer (depth ~ lambda); mean_level_drift_over_amplitude reports the same drift relative to a0."
+    }
+  ]
+}
