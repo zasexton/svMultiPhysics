@@ -8,6 +8,11 @@ walls, which are the mirror planes of the standing cosine mode.  The
 amplitude history is compared with Prosperetti's initial-value solution
 (prosperetti_reference.py) by verify.py.
 
+Every level uses the same time step, the capillary limit of the finest level
+(decision D10), so the refinement study measures the spatial error alone;
+--dt-divisor 2 and 4 give the separate time-step study at one level.
+--transport selects the level-set advection velocity (decision D9).
+
 The case is written for the new OOP solver: solver.xml, an affine Triangle3
 background mesh with the initial fields, the four wall face files, and
 case.json with every parameter that verify.py needs.  See README.md.
@@ -34,7 +39,16 @@ import prosperetti_reference as reference  # noqa: E402
 # ---------------------------------------------------------------------------
 LEVELS = (16, 32, 64)                       # wavelength / h
 CAPILLARY_FORMS = ("surface_stress", "kag_consistent", "kag_lumped")
-DT_DIVISORS = (1, 2, 4)                     # time-step refinement at a fixed level
+DT_DIVISORS = (1, 2, 4)                     # time-step study at a fixed level (D10)
+# Level-set advection velocity (decision D9).  "pde_extension" is the new
+# PDE-based extension velocity: set PDE_EXTENSION_METHOD to its input value
+# for Advection_velocity_extension_method once the solver has it, and make it
+# the default.  Until then the default is the algebraic wall-compatible wet
+# extension, the D9 comparison baseline; "coupled" is the fluid velocity
+# itself (dry vertices then carry zero velocity, which D9 retires).
+TRANSPORTS = ("pde_extension", "wet_extension", "coupled")
+PDE_EXTENSION_METHOD: str | None = None
+DEFAULT_TRANSPORT = "pde_extension" if PDE_EXTENSION_METHOD else "wet_extension"
 DENSITY = 1.0                               # rho
 SURFACE_TENSION = 1.0                       # gamma
 WAVELENGTH = 1.0                            # lambda (length unit)
@@ -102,19 +116,27 @@ def physical_parameters(laplace: float) -> dict:
 
 def time_schedule(level: int, laplace: float, periods: float, snapshots: int,
                   dt_divisor: int = 1) -> dict:
+    """Time step shared by all levels (D10), refined by dt_divisor.
+
+    Protocol step: the largest dt within the capillary limit of the finest
+    level, DT_SAFETY * sqrt(rho h_min^3 / (2 pi gamma)), that divides the run
+    into `snapshots` equal output intervals.  It is below the limit of every
+    coarser level.  A divisor d refines it exactly to dt/d (d times the
+    cadence).
+    """
     h = WAVELENGTH / level
+    h_min = WAVELENGTH / max(LEVELS)
     phys = physical_parameters(laplace)
     end_time = periods * phys["inviscid_period"]
-    dt_max = DT_SAFETY * capillary_dt_limit(h)
-    # Protocol step: the largest dt <= dt_max giving `snapshots` equal output
-    # intervals.  A divisor d refines it exactly to dt/d (d times the cadence).
+    dt_max = DT_SAFETY * capillary_dt_limit(h_min)
     cadence = max(1, math.ceil(end_time / (snapshots * dt_max))) * dt_divisor
     steps = snapshots * cadence
     return {
         "h": h,
         "end_time": end_time,
         "dt_capillary_limit": capillary_dt_limit(h),
-        "dt_max": dt_max / dt_divisor,
+        "dt_capillary_limit_finest_level": capillary_dt_limit(h_min),
+        "dt_max": dt_max,
         "dt": end_time / steps,
         "steps": steps,
         "output_cadence": cadence,
@@ -264,6 +286,31 @@ def fsils_gmres_block() -> str:
     </LS>"""
 
 
+def level_set_velocity_block(transport: str) -> str:
+    """Level-set advection velocity keys (decision D9)."""
+    if transport == "coupled":
+        return """    <Velocity_source>coupled_field</Velocity_source>
+    <Velocity_field_name>Velocity</Velocity_field_name>
+    <Auto_register_velocity_field>true</Auto_register_velocity_field>"""
+    if transport == "wet_extension":
+        method = "wall_compatible_normal"
+    elif transport == "pde_extension":
+        if not PDE_EXTENSION_METHOD:
+            raise ValueError("--transport pde_extension: the PDE velocity extension (decision D9) "
+                             "is not in the solver yet; set PDE_EXTENSION_METHOD in "
+                             "generate_case.py to its input value once it is, or use "
+                             "--transport wet_extension or coupled")
+        method = PDE_EXTENSION_METHOD
+    else:
+        raise ValueError(f"--transport must be one of {TRANSPORTS}")
+    return f"""    <Velocity_source>prescribed_data</Velocity_source>
+    <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
+    <Auto_register_velocity_field>true</Auto_register_velocity_field>
+    <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
+    <Source_velocity_field_name>Velocity</Source_velocity_field_name>
+    <Advection_velocity_extension_method>{method}</Advection_velocity_extension_method>"""
+
+
 def wall_bc(name: str) -> str:
     direction = WALL_EFFECTIVE_DIRECTION[name]
     effective = (f"\n      <Effective_direction>{direction}</Effective_direction>"
@@ -274,7 +321,9 @@ def wall_bc(name: str) -> str:
     </Add_BC>"""
 
 
-def solver_xml(form: str, schedule: dict, steps: int, cadence: int) -> str:
+def solver_xml(form: str, schedule: dict, steps: int, cadence: int,
+               transport: str = DEFAULT_TRANSPORT) -> str:
+    velocity = level_set_velocity_block(transport)
     kag = form in ("kag_consistent", "kag_lumped")
     curvature_projection = ""
     if kag:
@@ -294,7 +343,7 @@ def solver_xml(form: str, schedule: dict, steps: int, cadence: int) -> str:
         f'    <Add_face name="{w}"><Face_file_path>mesh/mesh-surfaces/{w}.vtp</Face_file_path></Add_face>'
         for w in WALLS)
     return f"""<?xml version="1.0" encoding="UTF-8" ?>
-<!-- capillary_wave_2d benchmark, capillary form {form}; generated by generate_case.py -->
+<!-- capillary_wave_2d benchmark, capillary form {form}, transport {transport}; generated by generate_case.py -->
 <svMultiPhysicsFile version="0.1">
   <GeneralSimulationParameters>
     <Use_new_OOP_solver>true</Use_new_OOP_solver>
@@ -330,9 +379,7 @@ def solver_xml(form: str, schedule: dict, steps: int, cadence: int) -> str:
     <Level_set_field_name>{LEVEL_SET_FIELD}</Level_set_field_name>
     <Operator_tag>equations</Operator_tag>
     <Level_set_source>prescribed_data</Level_set_source>
-    <Velocity_source>coupled_field</Velocity_source>
-    <Velocity_field_name>Velocity</Velocity_field_name>
-    <Auto_register_velocity_field>true</Auto_register_velocity_field>
+{velocity}
     <Enable_SUPG>true</Enable_SUPG>
     <SUPG_tau_scale>0.5</SUPG_tau_scale>
     <SUPG_transient_scale>2.0</SUPG_transient_scale>
@@ -402,7 +449,7 @@ def generate(level: int, form: str, output_dir: Path, *,
              laplace: float = DEFAULT_LAPLACE_NUMBER,
              periods: float = DEFAULT_PERIODS,
              snapshots: int = DEFAULT_SNAPSHOTS,
-             dt_divisor: int = 1,
+             dt_divisor: int = 1, transport: str = DEFAULT_TRANSPORT,
              max_steps: int | None = None, force: bool = False) -> dict:
     if level not in LEVELS:
         raise ValueError(f"--level must be one of {LEVELS}")
@@ -410,6 +457,7 @@ def generate(level: int, form: str, output_dir: Path, *,
         raise ValueError(f"--capillary-form must be one of {CAPILLARY_FORMS}")
     if dt_divisor not in DT_DIVISORS:
         raise ValueError(f"--dt-divisor must be one of {DT_DIVISORS}")
+    level_set_velocity_block(transport)                 # validates the transport choice
     if not (math.isfinite(laplace) and laplace > 0.0):
         raise ValueError("--laplace-number must be positive and finite")
     if not (periods > 0.0 and snapshots >= 4):
@@ -444,7 +492,7 @@ def generate(level: int, form: str, output_dir: Path, *,
     for wall in WALLS:
         node_ids, parents = faces[wall]
         write_face_vtp(mesh_dir / "mesh-surfaces" / f"{wall}.vtp", points, node_ids, parents)
-    (output_dir / "solver.xml").write_text(solver_xml(form, schedule, steps, cadence),
+    (output_dir / "solver.xml").write_text(solver_xml(form, schedule, steps, cadence, transport),
                                            encoding="utf-8")
 
     case = {
@@ -452,6 +500,7 @@ def generate(level: int, form: str, output_dir: Path, *,
         "generator": "tests/cases/fluid/free_surface_benchmarks/capillary_wave_2d/generate_case.py",
         "level_lambda_over_h": level,
         "capillary_form": form,
+        "transport": transport,
         "laplace_number": laplace,
         "density": DENSITY,
         "surface_tension": SURFACE_TENSION,
@@ -470,6 +519,7 @@ def generate(level: int, form: str, output_dir: Path, *,
         "n_triangles": int(cells.shape[0]),
         "external_pressure": EXTERNAL_PRESSURE,
         "level_set_field": LEVEL_SET_FIELD,
+        "interface_domain_id": INTERFACE_DOMAIN_ID,
         "liquid_side": "phi<0",
         "wall_conditions": {w: ("u.n = 0 (free slip)" if WALL_EFFECTIVE_DIRECTION[w] else
                                 "u = 0 (dry)") for w in WALLS},
@@ -486,7 +536,9 @@ def generate(level: int, form: str, output_dir: Path, *,
         "periods": periods,
         "end_time_protocol": schedule["end_time"],
         "dt_capillary_limit": schedule["dt_capillary_limit"],
+        "dt_capillary_limit_finest_level": schedule["dt_capillary_limit_finest_level"],
         "dt_safety_factor": DT_SAFETY,
+        "time_step_rule": "shared by all levels: capillary limit of the finest level (D10)",
         "dt_divisor": dt_divisor,
         "dt": schedule["dt"],
         "steps_protocol": schedule["steps"],
@@ -507,6 +559,9 @@ def main(argv=None) -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--level", type=int, required=True, choices=LEVELS, help="lambda/h")
     parser.add_argument("--capillary-form", default="surface_stress", choices=CAPILLARY_FORMS)
+    parser.add_argument("--transport", default=DEFAULT_TRANSPORT, choices=TRANSPORTS,
+                        help="level-set advection velocity (decision D9); default "
+                             f"{DEFAULT_TRANSPORT}, pde_extension once the solver has it")
     parser.add_argument("--laplace-number", type=float, default=DEFAULT_LAPLACE_NUMBER,
                         help="La = rho*gamma*lambda/mu^2 (protocol value 3000)")
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -515,20 +570,24 @@ def main(argv=None) -> int:
     parser.add_argument("--snapshots", type=int, default=DEFAULT_SNAPSHOTS,
                         help="number of VTU outputs over the run (protocol value 100)")
     parser.add_argument("--dt-divisor", type=int, default=1, choices=DT_DIVISORS,
-                        help="divide the protocol time step by this factor "
-                             "(temporal refinement study; protocol value 1)")
+                        help="divide the shared protocol time step by this factor "
+                             "(time-step study at one level, D10; protocol value 1)")
     parser.add_argument("--max-steps", type=int, default=None,
                         help="smoke runs only: stop after this many steps; the case is "
                              "marked truncated and verify.py rejects it for acceptance")
     parser.add_argument("--force", action="store_true", help="allow a non-empty output dir")
     args = parser.parse_args(argv)
 
-    case = generate(args.level, args.capillary_form, args.output_dir,
-                    laplace=args.laplace_number, periods=args.periods,
-                    snapshots=args.snapshots, dt_divisor=args.dt_divisor,
-                    max_steps=args.max_steps, force=args.force)
+    try:
+        case = generate(args.level, args.capillary_form, args.output_dir,
+                        laplace=args.laplace_number, periods=args.periods,
+                        snapshots=args.snapshots, dt_divisor=args.dt_divisor,
+                        transport=args.transport, max_steps=args.max_steps, force=args.force)
+    except (ValueError, FileExistsError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     print(f"wrote {args.output_dir}")
-    for key in ("level_lambda_over_h", "capillary_form", "laplace_number", "viscosity",
+    for key in ("level_lambda_over_h", "capillary_form", "transport", "laplace_number", "viscosity",
                 "epsilon", "omega0", "normal_mode_omega", "normal_mode_damping_rate",
                 "end_time", "dt", "dt_capillary_limit", "dt_divisor", "steps",
                 "output_cadence", "n_vertices", "n_triangles", "min_abs_phi_over_h",

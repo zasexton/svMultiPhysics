@@ -1,5 +1,6 @@
 """Checks of the capillary_wave_2d benchmark scripts on synthetic data (no solver run)."""
 
+import gzip
 import importlib.util
 import json
 import math
@@ -178,6 +179,12 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     text = (tmp_path / "c/solver.xml").read_text()
     assert "<Geometry_tangent_policy>RefreshedFrozenQuadrature" in text
     assert "<Surface_tension_form>SurfaceStress" in text and "Curvature_field" not in text
+    # D9: interim default transport is the wall-compatible wet extension.
+    assert case["transport"] == gen.DEFAULT_TRANSPORT == "wet_extension"
+    level_set = root.find("Add_equation[@type='level_set']")
+    assert level_set.findtext("Velocity_source") == "prescribed_data"
+    assert level_set.findtext("Use_wet_extension_advection_velocity") == "true"
+    assert level_set.findtext("Advection_velocity_extension_method") == "wall_compatible_normal"
     assert root.find("GeneralSimulationParameters/Number_of_time_steps").text == str(case["steps"])
     fluid = root.find("Add_equation[@type='fluid']")
     bcs = {bc.get("name"): bc for bc in fluid.findall("Add_BC")}
@@ -186,9 +193,13 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     assert bcs["wall_bottom"].findtext("Effective_direction") == "0 1"
     assert bcs["wall_top"].find("Effective_direction") is None
     assert float(fluid.findtext("Viscosity/Value")) == pytest.approx(1.0 / math.sqrt(3000.0))
-    assert case["dt"] <= math.sqrt(case["h"] ** 3 / (4.0 * math.pi)) * (1 + 1e-12)
+    # D10: one time step for all levels, within the capillary limit of the finest.
+    h_min = 1.0 / max(gen.LEVELS)
+    assert case["dt"] <= math.sqrt(h_min ** 3 / (4.0 * math.pi)) * (1 + 1e-12)
     assert case["steps"] * case["dt"] == pytest.approx(4.0 * 2.0 * math.pi / OMEGA0)
-    assert case["steps"] == 100 * case["output_cadence"]
+    assert case["steps"] == 100 * case["output_cadence"] == 2900
+    for level in gen.LEVELS:
+        assert gen.time_schedule(level, 3000.0, 4.0, 100)["dt"] == case["dt"]
     assert case["min_abs_phi_over_h"] > 0.02 and case["top_gap_over_h"] > 2.0
     assert case["epsilon"] == pytest.approx(0.0458, abs=1e-4)
     for wall in gen.WALLS:
@@ -200,6 +211,22 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     consistent = gen.solver_xml("kag_consistent", gen.time_schedule(16, 3000.0, 4.0, 100), 10, 1)
     assert "KinematicAreaGradientTraction" in consistent
     assert "kinematic_area_gradient_mass" not in consistent
+
+
+def test_transport_options(tmp_path, monkeypatch):
+    schedule = gen.time_schedule(16, 3000.0, 4.0, 100)
+    coupled = gen.solver_xml("surface_stress", schedule, 10, 1, transport="coupled")
+    assert "<Velocity_source>coupled_field" in coupled and "Use_wet_extension" not in coupled
+    # The PDE extension (D9) is a placeholder until the solver has it ...
+    with pytest.raises(ValueError, match="not in the solver yet"):
+        gen.generate(16, "surface_stress", tmp_path / "p", transport="pde_extension")
+    assert gen.main(["--level", "16", "--transport", "pde_extension",
+                     "--output-dir", str(tmp_path / "q")]) == 2
+    # ... and then only its method value changes.
+    monkeypatch.setattr(gen, "PDE_EXTENSION_METHOD", "pde_normal")
+    pde = gen.solver_xml("surface_stress", schedule, 10, 1, transport="pde_extension")
+    assert "<Advection_velocity_extension_method>pde_normal<" in pde
+    assert "<Velocity_source>prescribed_data" in pde
 
 
 def test_mesh_is_mirror_symmetric_about_the_node_line():
@@ -306,10 +333,40 @@ def test_time_step_runs_are_reported_but_not_gated(study, tmp_path, capsys):
     assert case["dt_divisor"] == 2
     assert ver.main([*runs, str(extra)]) == 0
     out = capsys.readouterr().out
-    assert "time-step study surface_stress, La = 3000, lambda/h = 32" in out
+    assert "time-step study surface_stress, transport wet_extension, La = 3000, lambda/h = 32" in out
     assert "dt/2: omega err 3.000e-03, beta err 1.000e-02" in out
     assert ver.main([str(extra)]) == 1                  # no protocol-time-step run at all
     assert "criteria cannot be applied" in capsys.readouterr().out
+
+
+def test_spatial_study_requires_one_shared_time_step(study, tmp_path, capsys):
+    runs = study()
+    case_file = Path(runs[2]) / "case.json"
+    case = json.loads(case_file.read_text())
+    case["dt"] *= 1.5
+    case_file.write_text(json.dumps(case))
+    assert ver.main(runs) == 2
+    assert "one shared step (D10)" in capsys.readouterr().err
+
+
+def test_area_criterion_uses_every_logged_step(study, tmp_path, capsys):
+    # D11: an area excursion between two outputs is caught from the solver log.
+    runs = study()
+    run = Path(runs[1])
+    area0 = gen.BOX_WIDTH * gen.MEAN_LEVEL
+    lines = [f"[svMultiPhysics::Application] Wet volume diagnostic step={n} time=0 field='phi' "
+             f"domain_id='capillary_wave_surface' marker=1 physical_wet_volume={v!r} "
+             f"initial_wet_volume={area0!r}\n"
+             for n, v in enumerate([area0, area0 * (1 + 3e-5), area0 * (1 + 2e-4), area0])]
+    with gzip.open(run / "solver_run.log.gz", "wt") as log:
+        log.write("unrelated line\n" + "".join(lines))
+    out_json = tmp_path / "log.json"
+    assert ver.main([*runs, "--json", str(out_json)]) == 1
+    assert "[FAIL] volume_drift" in capsys.readouterr().out
+    r = json.loads(out_json.read_text())["groups"][0]["runs"][1]
+    assert r["liquid_area_logged_steps"] == 4
+    assert r["liquid_area_relative_drift_max"] == pytest.approx(2e-4, rel=1e-9)
+    assert r["liquid_area_relative_drift_max_outputs"] < 1e-12
 
 
 def test_missing_incomplete_and_truncated_data(study, tmp_path, capsys):

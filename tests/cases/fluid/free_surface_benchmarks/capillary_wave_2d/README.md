@@ -6,7 +6,14 @@ viscous damping rate of the unfitted level-set free surface against
 Prosperetti's initial-value solution (milestone M3 in
 `Documentation/free_surface_program_tracker.md`). The same case is run for
 the three capillary routes compared in decision D2: `SurfaceStress`, KAG
-with a lumped trace mass, and KAG with the consistent trace mass.
+with a lumped trace mass, and KAG with the consistent trace mass (the two KAG
+forms are generated but have not been run).
+
+The protocol follows decisions D9 to D11 of 2026-09-30: `phi` is advected
+with the PDE velocity extension once it exists (`--transport`, below); the
+spatial study uses one time step for all levels, with a separate time-step
+study at one mesh; and the area criterion gates the maximum deviation over
+the whole run.
 
 Files:
 
@@ -106,33 +113,46 @@ Checks, all in the test file:
 
 Every value below is fixed for all levels and all capillary forms
 (principle P1). The solver inputs are those of `static_drop_2d` (its README
-gives the source of each); only the geometry, the walls and the viscosity
-differ.
+gives the source of each); only the geometry, the walls, the viscosity and
+the level-set advection velocity differ.
 
 | Input | Value | Source |
 |---|---|---|
 | Mesh | affine `Triangle3`, `h = lambda/level`, diagonals alternating with cell parity; 8 x 20, 16 x 40, 32 x 80 cells (189, 697, 2673 vertices) | geometry choice. With an even number of columns the mesh is mirror-symmetric about `x = lambda/4`, the node line of the mode, so crest and trough see the same mesh. |
 | Mean-level offset | `sqrt(2)/100 lambda` above `y = lambda` | irrational, so the mean level lies on no grid line of the nested dyadic meshes and the sampled surface cannot pass exactly through a vertex. Among the simple irrational offsets tried (`pi/100`, `e/100`, `pi/1000`, `sqrt(2)/100`, ...) it is one of the two that keep `min abs(phi)/h` at or above 0.03 on all three levels: 0.066, 0.13, 0.030 at `lambda/h` = 16, 32, 64 (printed by `generate_case.py`). The static drop, by comparison, starts from 1.8e-3 to 6.8e-3. It has no physical effect (depth paragraph above). |
 | Walls | `Dir`, value 0; `Effective_direction 1 0` (sides), `0 1` (bottom); full no-slip on the dry top | free-slip mirror planes and bottom (see Physical setup) |
-| Free surface, cut stabilization, capillary forms, level-set transport, time integration, nonlinear and linear solves | identical to `static_drop_2d` (`SurfaceStress` / KAG keys, `RefreshedFrozenQuadrature`, `Interface_quadrature_order=2`, aggregation, pressure-gradient facet penalty 1.0, `Velocity_source=coupled_field`, SUPG 0.5/2.0, no reinitialization or volume correction, generalized-alpha `rho_inf = 0.5`, FSILS GMRES) | production values, see `static_drop_2d/README.md` |
+| Free surface, cut stabilization, capillary forms, level-set discretization, time integration, nonlinear and linear solves | identical to `static_drop_2d` (`SurfaceStress` / KAG keys, `RefreshedFrozenQuadrature`, `Interface_quadrature_order=2`, aggregation, pressure-gradient facet penalty 1.0, SUPG 0.5/2.0, no reinitialization or volume correction, generalized-alpha `rho_inf = 0.5`, FSILS GMRES) | production values, see `static_drop_2d/README.md` |
+| Level-set advection velocity | `--transport`, see below | decision D9 |
 
-**Level-set velocity at the walls.** The July capillary-wave deck advected
-`phi` with the wall-compatible wet extension. Here the coupled fluid
-velocity is used, as in `static_drop_2d`: its strong `u_x = 0` holds at
-every side-wall vertex, dry or wet, so the advection never moves `phi`
-through a wall, and no per-step extension map is written. This should be
-checked once against the wet-extension variant at `lambda/h = 16`.
+**Level-set transport (decision D9).** `generate_case.py --transport`
+selects the velocity that advects `phi`:
 
-**Time step.** As in `static_drop_2d`, the one-sided capillary limit
-`dt <= sqrt(rho h^3 / (4 pi gamma))`, i.e. the tracker form
-`sqrt(rho h^3/(2 pi gamma))` times the fixed factor `1/sqrt(2)` derived
-from the free-surface density sum. For this case the number of steps per
-inviscid period at the limit is `sqrt(2) (lambda/h)^(3/2)`, independent of
-`La`: 90.5, 256 and 724. `generate_case.py` rounds `dt` down so that the
-run is exactly 100 equal output intervals: 400, 1100 and 2900 steps.
-`--dt-divisor 2` or `4` divides that protocol step exactly by 2 or 4 (the
-"three time steps" of the tracker); such runs are reported in a time-step
-study and are not gated.
+| `--transport` | Solver input | Status |
+|---|---|---|
+| `pde_extension` | `Velocity_source=prescribed_data`, `Use_wet_extension_advection_velocity=true`, `Advection_velocity_extension_method=<PDE method>` | the D9 protocol transport, a parameter-free PDE extension velocity on an auxiliary field. It is not in the solver yet: `PDE_EXTENSION_METHOD` in `generate_case.py` is empty, and selecting it stops with a message. When the method lands, set that constant to its input value; the default then switches to `pde_extension` automatically. If the method needs other keys, adjust `level_set_velocity_block`. |
+| `wet_extension` (current default) | same keys with `wall_compatible_normal` | the algebraic wall-compatible wet extension, the D9 comparison baseline. It writes one JSON map per accepted step (about 1 MB per step in the static-drop smoke run), so a 2900-step run produces gigabytes; keep such runs on `$SCRATCH`. |
+| `coupled` | `Velocity_source=coupled_field` | the fluid velocity itself, used by the smoke run below. Dry vertices then carry zero velocity; D9 retires this transport after it failed `linear_sloshing_2d` at `L/h = 64`. |
+
+The side walls hold `u_x = 0` strongly at every wall vertex, so none of the
+three moves `phi` through a wall. Criteria are applied separately to each
+(capillary form, transport) study.
+
+**Time step (decision D10).** The capillary limit is, as in
+`static_drop_2d`, the one-sided `dt <= sqrt(rho h^3 / (4 pi gamma))`: the
+tracker form `sqrt(rho h^3/(2 pi gamma))` times the fixed factor `1/sqrt(2)`
+derived from the free-surface density sum. All three levels use the limit
+of the finest level, `lambda/h = 64`, rounded down so that the run is
+exactly 100 equal output intervals: `dt = 5.50e-4`, 2900 steps, `omega dt =
+0.0086`. It lies below the limit of every coarser level (by factors 8 and
+2.8 at 16 and 32), and the spatial study carries no level-dependent time
+error, so opposite-sign space and time errors cannot cancel. The expected
+generalized-alpha phase error at `omega dt = 0.0086` is of order
+`(omega dt)^2/12 = 6e-6`.
+
+The separate time-step study runs `lambda/h = 32` with `--dt-divisor 1, 2, 4`
+(`dt`, `dt/2`, `dt/4`, exactly nested). `verify.py` reports it next to the
+spatial study, with the change of the fitted frequency and damping relative
+to the smallest step, and does not gate it.
 
 **Run length.** 4 inviscid periods (`t omega0 = 8 pi = 25`, Popinet's
 horizon), with 100 VTU snapshots, 25 per period.
@@ -150,7 +170,7 @@ output on the output mesh, plus `phi` of `mesh/mesh-complete.mesh.vtu` for
 | Fit | `a(t) = exp(-beta t) (c1 cos(omega t) + c2 sin(omega t))` by least squares over all outputs including `t = 0`: a coarse scan (`omega` in `[0.5, 1.5] omega0`, `beta` in `[-0.05, 0.5] omega0`) followed by Levenberg-Marquardt. The same fit is applied to Prosperetti's `a(t)` at the same times. |
 | `frequency_relative_error` | `abs(omega_sim - omega_ref) / omega_ref` |
 | `damping_rate_relative_error` | `abs(beta_sim - beta_ref) / beta_ref` |
-| `liquid_area_relative_drift_max` | `max_t abs(A(t) - A(0)) / A(0)` |
+| `liquid_area_relative_drift_max` | `max_t abs(A(t) - A(0)) / A(0)` over the whole run (decision D11): over the outputs and, when `solver_run.log` or `solver_run.log.gz` is in the case directory, over the solver's per-step `Wet volume diagnostic` area of every accepted step (the same exact P1 area; the two agree to round-off on the smoke run). The output-only value and the number of logged steps are reported. |
 | Reported only | `a_h(0)/a0 - 1` (sampling error, second order: -1.3%, -0.32%, -0.08%); `amplitude_rms_error`, the RMS over the outputs of `a_h(t)/a_h(0) - a(t)/a0` (Popinet's error measure); its maximum; `mean_level_drift_over_amplitude`; the elevation of the contact points relative to the mean level; the fit residual; the normal mode, `omega0` and `2 nu k^2`; the histories |
 
 Comparing with the fitted reference rather than with the normal mode makes
@@ -168,20 +188,22 @@ cells, non-finite values, a run that stopped before its end time) and on a
 
 ## Tolerances and their sources
 
-Each criterion applies to each (capillary form, `La`) refinement study at
-the protocol time step.
+Each criterion applies to each (capillary form, transport, `La`) spatial
+study at the shared protocol time step; `verify.py` refuses a study whose
+levels use different time steps (D10).
 
 | Criterion | Limit | Where | Source |
 |---|---|---|---|
 | `frequency` | at most 0.02, observed order at least 1 | 0.02 at `lambda/h = 32`; order over 16/32/64 | D1 working criterion, tracker M3 |
-| `damping` | at most 0.05, observed order at least 1 | 0.05 at `lambda/h = 32`; order over 16/32/64 | D1 working criterion, tracker M3 |
-| `volume_drift` | at most 1e-4 | every level | D1 working criterion (the volume limit of tracker M1 and M2, applied to M3) |
+| `damping` | at most 0.05, observed order at least 1 | 0.05 at `lambda/h = 32` and at the finest level 64; order over 16/32/64 | D1 working criterion, tracker M3; the finest-level check as in D12 |
+| `volume_drift` | at most 1e-4 | every level, maximum over the run | D1 working criterion (the volume limit of tracker M1 and M2, applied to M3), gated as in D11 |
 
-"Convergence over 16/32/64" is read as an observed order of at least 1, the
-rate expected for the capillary force on a piecewise-planar interface (Gross
-and Reusken 2011, ch. 7) and the rate required of the static-drop pressure
-jump. `A(0)` includes the whole layer, so the area criterion corresponds to
-a mean-level drift of `1e-4 y0 = 0.01 a0`; `mean_level_drift_over_amplitude`
+"Convergence over 16/32/64" is an observed order of at least 1 on the
+spatial study at the shared time step (D10, confirmed 2026-09-30): the rate
+expected for the capillary force on a piecewise-planar interface (Gross and
+Reusken 2011, ch. 7) and the rate required of the static-drop pressure jump.
+`A(0)` includes the whole layer, so the area criterion corresponds to a
+mean-level drift of `1e-4 y0 = 0.01 a0`; `mean_level_drift_over_amplitude`
 reports the drift relative to `a0`.
 
 The July 2026 number (n = 16: frequency error 1.2%, tracker section 8.3)
@@ -201,9 +223,10 @@ solver through `mpiexec` from a job submitted with `--export=NONE`:
 B=tests/cases/fluid/free_surface_benchmarks/capillary_wave_2d
 OUT=$SCRATCH/free-surface-benchmarks/capillary_wave_2d/$(git rev-parse --short HEAD)
 SVMP=/path/to/build/bin/svmultiphysics
+TRANSPORT=wet_extension        # pde_extension once the solver has it (D9)
 for form in surface_stress kag_lumped kag_consistent; do for L in 16 32 64; do
-  d=$OUT/$form/L$L
-  python3 $B/generate_case.py --level $L --capillary-form $form --output-dir $d
+  d=$OUT/$TRANSPORT/$form/L$L
+  python3 $B/generate_case.py --level $L --capillary-form $form --transport $TRANSPORT --output-dir $d
   cat > $d/run.sbatch <<EOS
 #!/bin/bash
 set -o pipefail
@@ -216,20 +239,29 @@ EOS
          --job-name=capwave_${form}_L$L --output=$d/slurm-%j.out $d/run.sbatch
 done; done
 # after the jobs end:
-python3 $B/verify.py $OUT/surface_stress/L{16,32,64} --json $OUT/surface_stress.json
+python3 $B/verify.py $OUT/$TRANSPORT/surface_stress/L{16,32,64} \
+    --json $OUT/$TRANSPORT/surface_stress.json
 ```
 
-For the time-step study add `--dt-divisor 2` and `--dt-divisor 4` runs at
-one level (for example 32) and pass them to `verify.py` together with the
-protocol runs. For a quick schema check use `--max-steps 10`; `verify.py`
-refuses such runs unless `--allow-truncated` is given.
+For the time-step study (D10) add `--dt-divisor 2` and `--dt-divisor 4` runs
+at `lambda/h = 32` and pass them to `verify.py` together with the spatial
+study; the `--dt-divisor 1` run at 32 is shared. `verify.py` reads
+`solver_run.log.gz` for the per-step areas (D11), so keep the log beside the
+output. For a quick schema check use `--max-steps 10`; `verify.py` refuses
+such runs unless `--allow-truncated` is given.
 
 ## Smoke run
 
 Slurm job `46075460` (2026-09-30, node `sh03-08n19`, AMD EPYC 7543, one
-rank through `mpiexec -n 1 --bind-to none`), baseline binary at `fef0d02f`,
-`SurfaceStress`, `La = 3000`. Case, log and `verify_smoke.json` are in
-`$SCRATCH/free-surface-benchmarks/capillary_wave_2d/smoke/`.
+rank through `mpiexec -n 1 --bind-to none`), baseline binary at `fef0d02f`
+(before the solver speed-ups), `SurfaceStress`, `La = 3000`. Case, log and
+`verify_smoke.json` are in
+`$SCRATCH/free-surface-benchmarks/capillary_wave_2d/smoke/`. The run predates
+decisions D9 and D10: it advected `phi` with the coupled fluid velocity
+(now `--transport coupled`) and used the earlier
+level-dependent step (the capillary limit of each level, `dt = 3.99e-3` at
+`lambda/h = 16` and `1.45e-3` at 32). The wet-extension and PDE transports
+have not been run in this case.
 
 - **`lambda/h = 16`, `--max-steps 10`** (0.1 inviscid period): the input
   parsed, all 10 steps were accepted, and the solver exited normally
@@ -239,7 +271,8 @@ rank through `mpiexec -n 1 --bind-to none`), baseline binary at `fef0d02f`,
   7.5e-4 and RMS 5.2e-4; the contact points followed the mode (wall
   elevations +0.00808 and -0.00818 at the end, against `a = 0.00815`);
   liquid-area drift 4.9e-7, growing over the ten steps (roughly as `t^3.5`
-  so far). Frequency and damping are reported as not evaluable, as intended
+  so far). The current `verify.py` also parses the 11 per-step
+  `Wet volume diagnostic` lines of this log (D11) and finds the same maximum. Frequency and damping are reported as not evaluable, as intended
   for a history shorter than one period.
 - **`lambda/h = 32`, `--max-steps 5`**, run in the same job for the cost
   estimate only: exit 0; RMS amplitude difference 1.5e-5, area drift 7.6e-9.
@@ -252,24 +285,30 @@ rank through `mpiexec -n 1 --bind-to none`), baseline binary at `fef0d02f`,
 
 ## Expected cost per level
 
-**Measured** (job `46075460`, step-accepted timestamps in the log, excluding
-the first step): 0.675 s/step at `lambda/h = 16` (189 vertices) and 2.31 s/step
-at `lambda/h = 32` (697 vertices). Between the two the cost grows as
-(vertices)^0.94; `lambda/h = 64` is extrapolated with exponent 0.94 to 1.
-The solver writes about 0.3 MB of log per step at every level, so compress
-the log (`gzip -1`) for protocol runs.
+**Measured** with the baseline binary `fef0d02f` and the coupled transport
+(job `46075460`, step-accepted timestamps in the log, excluding the first
+step): 0.675 s/step at `lambda/h = 16` (189 vertices) and 2.31 s/step at
+`lambda/h = 32` (697 vertices), with about 8 outer passes per step. Between
+the two the cost grows as (vertices)^0.94; `lambda/h = 64` is extrapolated
+with exponent 0.94 to 1. The solver writes about 0.3 MB of log per step, so
+compress the log (`gzip -1`) for protocol runs.
 
-| lambda/h | vertices | steps (dt/1) | s/step | time, this node type | request |
-|---:|---:|---:|---:|---|---|
-| 16 | 189 | 400 | 0.675 (measured) | 5 min | 30 min |
-| 32 | 697 | 1,100 | 2.31 (measured) | 43 min | 3 h |
-| 64 | 2,673 | 2,900 | about 8.2 to 8.9 | about 7 h | 24 h |
-| 32, dt/2 | 697 | 2,200 | 2.3 | 1.4 h | 4 h |
-| 32, dt/4 | 697 | 4,400 | 2.3 | 2.8 h | 8 h |
+With the shared time step (D10) every level takes 2900 steps; the time-step
+study adds 5800 and 11600 steps at `lambda/h = 32`.
 
-On `sh02` nodes the static drop ran 1.5 to 2 times slower per step, so the
-requests leave a factor of about three. One capillary form therefore needs
-about 8 node-hours for 16/32/64 and 4 more for the time-step study. The KAG
-forms add a curvature projection to every outer pass and were not timed.
-Memory is small: 0.66 GB peak RSS for the batch step (both smoke runs). The speed-up branch in
-progress would shorten the `lambda/h = 64` runs most.
+| Run | vertices | steps | s/step (baseline) | time, baseline | time, tip (about 3x faster, estimate) |
+|---|---:|---:|---:|---|---|
+| `lambda/h = 16` | 189 | 2,900 | 0.675 (measured) | 33 min | about 11 min |
+| `lambda/h = 32` | 697 | 2,900 | 2.31 (measured) | 1.9 h | about 40 min |
+| `lambda/h = 64` | 2,673 | 2,900 | about 8.2 to 8.9 | about 7 h | about 2.5 h |
+| `lambda/h = 32`, dt/2 | 697 | 5,800 | 2.31 | 3.7 h | about 1.3 h |
+| `lambda/h = 32`, dt/4 | 697 | 11,600 | 2.31 | 7.4 h | about 2.5 h |
+
+The tip column assumes the speed-up measured on the static drop at
+`45bc5b09` (3.41 to 1.08 s/step, `static_drop_2d/README.md`); this case has
+not been timed on the tip. Node generations differ by up to about 1.8x, and
+the wet-extension and PDE transports and the KAG forms (about 50% more per
+step on the static drop) were not timed here. Requests of 1 h, 3 h and 12 h
+for the three levels and 6 h and 12 h for the time-step runs cover the
+baseline timings and leave a margin of about three on the tip. Memory is small: 0.66 GB peak RSS for the batch
+step of the smoke job.
