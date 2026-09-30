@@ -66,6 +66,9 @@ change it once, with a one-line justification in the tracker.
 - **Relaxed states (D1, D3).** Static equilibria start from the sampled analytic shape and run until the flow relaxes, typically 5–10 viscous times. Metrics are taken from the relaxed state, and the history of the maximum velocity is reported.
 - **Surface tension inputs.** Set `Geometry_tangent_policy=RefreshedFrozenQuadrature`, which unfitted surface tension requires. Check the time step against the capillary limit `sqrt(rho*h^3/(2*pi*gamma))`.
 - **Cost.** Each resolution level should run in minutes to about an hour on one node, submitted through Slurm with an explicit time limit and begin/end/fail mail.
+- **Launching the solver.** Start every MPI-linked binary with `mpiexec -n <N> --bind-to none` (or `srun --mpi=pmix -n <N> --exact`), never bare.
+  - Submit with `sbatch --export=NONE` and set the environment in the job script.
+  - Reason: this Open MPI build uses Slurm's PMI when started without a launcher. A job submitted from inside an interactive `sh_dev` session inherits that session's `srun` contact variables, so a bare process contacts the interactive `srun` and hangs. That `srun` prints `PMK_KVS_Barrier task count inconsistent` in the user's terminal.
 
 ## Planned benchmarks
 

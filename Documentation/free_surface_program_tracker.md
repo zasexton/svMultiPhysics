@@ -405,6 +405,15 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - Record the outcome here and in §8.
   - **Outcome, 2026-09-29: FAILED on a filesystem error, not a code error.** Configure passed. At 16:12 PDT (23:12 UTC) on `sh03-08n20`, at 43% of the build, the compiler got `Input/output error` closing `build/Source/solver/FE/CMakeFiles/svfe.dir/LevelSet/LevelSetStaticCapillaryEquilibrium.cpp.o.d`, which was left with 0 bytes.
   - This was the only I/O error in the log. The job was not resubmitted pending a user decision: resubmit, or report to SRCC first.
+  - **Resubmitted as `45968323` (user decision).**
+    - The build completed in 930 s, and **the FE suite passed 32/32**.
+    - The job was then cancelled during the Physics suite because of the MPI launch problem below. Its logs are in `logs/run-45968323/`.
+  - **Physics and Application suites:** tests-only job `45975100` (`jobs/tests_only.sbatch`, submitted with `sbatch --export=NONE`). CTest runs with the Slurm/PMI variables removed.
+    - A `tests` symlink beside `build/` points at the source fixtures. Some Application tests search upward from their working directory for `tests/cases/fluid/open_vessel_free_surface`.
+  - **MPI launch rule (found 2026-09-29).** Jobs submitted from inside the interactive `sh_dev` session inherit that session's `srun` PMI contact variables.
+    - An MPI binary started without `mpiexec` in such a job contacts the interactive `srun`, which prints `PMK_KVS_Barrier task count inconsistent` in the user's terminal, and then hangs.
+    - Verified in test jobs `45973957` and `45974084`: bare launches fail; `mpiexec -n 1`, `srun --mpi=pmix --exact`, and bare launches with the Slurm/PMI variables removed all work.
+    - Rule: submit with `--export=NONE` and launch MPI programs through `mpiexec` (benchmarks README).
 
 - [ ] **Tank at rest (2D and 3D).** Take a small subset of the existing hydrostatic matrix into CTest. The full 960-case matrix does not need to run routinely.
 - [ ] **2D linear sloshing** at 3 meshes and 3 time steps. Compare frequency and damping with linear theory. Proposal: frequency error ≤ 1% at the finest mesh with observed convergence; volume drift ≤ 1e-4 over the run.
@@ -441,6 +450,15 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
     - The ill-conditioned solve becomes a diagonal division.
     - Implementation: a mass-mode option in the curvature-projection options that bypasses the PCG/LSQR solve.
     - To check: noise in `κ_i` at nodes with very small `m_i`, and its effect on spurious currents.
+    - **Implemented 2026-09-29 on local branch `dev/lumped-kag-mass`** (commits `0e990caf` and `04e911d1`; not yet merged). Worktree: `/scratch/users/zsexton/svmp-dev-lumped-kag/source`.
+      - Option `Curvature_projection_kinematic_area_gradient_mass` = `Consistent` | `Lumped`. Lumped requires filter 0.
+      - Tests: full `test_fe_levelset` 371 passed, 1 declared skip, 0 failed; `test_fe_levelset_mpi` 21/21, with lumped matching serial bitwise on 2 ranks; `test_application` 376/376.
+      - Curvature quality on a sampled circle (n = 12/24/48/96):
+        - The mass-weighted mean converges at second order, the same as consistent mode.
+        - The trace error stays near 5.5% of 1/R and does not converge.
+        - Nodal errors at vertices with a sliver of interface in their support grow to 23–347.
+        - Filtered consistent mode (`c_l = 1`) does converge, with trace error 0.044 → 0.0022.
+      - The M2 static drop will show whether the lumped noise shows up as spurious currents.
   - (c) **Unfiltered consistent-mass KAG**, for reference only.
   - **Fallback only if (a) and (b) both fail the D1 criteria:** KAG with the Helmholtz filter or a normal-gradient-stabilized mass. Its coefficient must be fixed once from dimensional scaling (P1), never tuned.
 - [ ] **Time step.** Check Δt against the capillary constraint (§3.6). If needed, add a semi-implicit surface-tension term (Bänsch/Hysing) or use Δt below the limit.
