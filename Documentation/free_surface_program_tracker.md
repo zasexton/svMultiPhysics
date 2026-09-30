@@ -431,7 +431,16 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - A dry run of all 24 cases validates against the parser.
   - A smoke run at R/h = 8 with `SurfaceStress` (Sept 4 binary) accepted 5 of 5 steps, with pressure-jump error 0.14% and area drift 1.5e-7.
   - Level-set advection uses the coupled velocity. Check this once against the wet-extension map at R/h = 8.
-- [ ] **Per-step cost must come down before the refinement study (added 2026-09-29).**
+- [x] **Per-step cost must come down before the refinement study (added 2026-09-29; done 2026-09-30).**
+  - Merged commits `b5837011`, `09b46072`, `889c75f2` and `67b4395a`:
+    - a reference-element metadata cache;
+    - snapshot-currency checks once per content change;
+    - reuse of the exact trial residual after an accepted line-search step;
+    - a scaled outer gate, accepting when the fresh residual is at most max(absolute tolerance, relative tolerance × the step's first fresh residual), with no new parameter.
+  - Results (SKX nodes, `surface_stress`, La = 12): R/h = 8 went from 3.41 to 1.08 s/step (7.7 → 4.0 outer passes), and R/h = 16 from 13.62 to 3.91 s/step. `kag_consistent`, which previously failed at step 0 by stalling at 1.1e-10, now completes.
+  - The first three changes leave all output fields bitwise identical. The gate changes fields by at most 0.2% of the spurious max|u|, and benchmark metrics agree to 4–5 digits.
+  - Integrated build and regression of `67b4395a`: job `46039315`.
+  - Follow-up: JIT object-cache temporary names lack a process ID or host. One unexplained garbage result appeared in 1 of 8 `FE_Forms_Tests` runs while many jobs shared the cache; it did not reproduce in 30+ reruns. Add process ID and host to the temporary name, and consider a per-job cache.
   - The smoke run took 5.5 s per step on a 625-vertex 2D mesh. Each step needed 9–10 outer geometry passes against a cap of 12, driven by the 1e-10 absolute level-set gate, and wrote about 0.35 MB of log.
   - Extrapolated, R/h = 32 at La = 12 needs about 6 days, and R/h = 64 needs weeks to months. The same cost limits M1, M3 and M4.
   - Profile one R/h = 8 step, then reduce the unnecessary outer passes and per-step output. Any convergence gate must be scaled or derived rather than tuned (P1).

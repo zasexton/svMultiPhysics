@@ -191,56 +191,54 @@ they can be compared with the literature and between capillary forms.
 ## How to run the refinement study
 
 Use the Python stack from the benchmark README (numpy; pyvista for
-`verify.py`). Put generated cases and output under `$SCRATCH`:
+`verify.py`). Put generated cases and output under `$SCRATCH`. Launch the
+solver through `mpiexec` and submit with `--export=NONE` (benchmark README,
+"Launching the solver"); `run_case.sbatch` below is a minimal job script that
+does both and compresses the log.
 
 ```bash
 B=tests/cases/fluid/free_surface_benchmarks/static_drop_2d
 OUT=$SCRATCH/free-surface-benchmarks/static_drop_2d/$(git rev-parse --short HEAD)
 SVMP=/path/to/build/bin/svmultiphysics
-for La in 12 120; do for form in surface_stress kag_lumped kag_consistent; do for L in 8 16 32; do
-  d=$OUT/La$La/$form/L$L
-  python3 $B/generate_case.py --level $L --capillary-form $form --laplace-number $La --output-dir $d
-  sbatch --partition=amarsden --time=<see table> --nodes=1 --ntasks=1 --mem=8G \
-         --mail-user=$USER@stanford.edu --mail-type=BEGIN,END,FAIL --chdir=$d \
-         --job-name=drop_${form}_La${La}_L$L \
-         --wrap="set -o pipefail; $SVMP solver.xml 2>&1 | gzip -1 > solver_run.log.gz"
-done; done; done
+JOB=/path/to/run_case.sbatch   # sets PATH/LD_LIBRARY_PATH, then runs
+                               # timeout -k 30 <s> mpiexec -n 1 --bind-to none $SVMP solver.xml
+for form in surface_stress kag_lumped kag_consistent; do for L in 8 16 32; do
+  d=$OUT/La12/$form/L$L
+  python3 $B/generate_case.py --level $L --capillary-form $form --laplace-number 12 --output-dir $d
+  sbatch --export=NONE --time=<see table> --job-name=drop_${form}_L$L \
+         --output=$d/slurm-%j.out $JOB $d $SVMP <timeout_s>
+done; done
 # after the jobs end:
 python3 $B/verify.py $OUT/La12/surface_stress/L{8,16,32} --json $OUT/La12_surface_stress.json
 ```
 
-The solver writes about 0.35 MB of log per step at every level, which is
-why the log is compressed. VTU snapshots are 0.13 MB at `R/h = 8` and scale
-with the vertex count. For a quick schema check use `--max-steps 5`;
-`verify.py` refuses such runs unless `--allow-truncated` is given.
+The solver log is about 0.17 MB per step, so compress it. VTU snapshots are
+0.13 MB at `R/h = 8` and scale with the vertex count. For a quick schema
+check use `--max-steps 5`; `verify.py` refuses such runs unless
+`--allow-truncated` is given.
 
 ## Expected cost per level
 
-**Measured.** The smoke run took 5.5 s per step at `R/h = 8`, serial. That
-run used the 2026-09-04 build and the wet-extension transport variant. Each
-step takes about 10 outer geometry fixed-point passes, because the
-level-set absolute gate of 1e-10 must hold on a fresh pass.
+Measured on 2026-09-30 after the solver speed-ups (commit `67b4395a`): the
+scaled outer gate, the reference-element cache, once-per-revision snapshot
+checks and the reused line-search residual. `surface_stress`, La = 12, serial,
+on `CPU_GEN:SKX` nodes:
 
-**Extrapolated** to finer levels assuming cost roughly proportional to
-(vertices)^0.9. Re-measure on the rebuilt solver from the `R/h = 8` run.
+| R/h | vertices | s/step | outer passes/step | La = 12: steps, time |
+|---:|---:|---:|---:|---|
+| 8 | 625 | 1.08 (measured) | 4.0 | 1,000, about 20 min |
+| 16 | 2,401 | 3.91 (measured) | 3.6 | 2,800, about 3 h |
+| 32 | 9,409 | about 8 (estimate) | – | 7,900, about 18 h |
 
-| R/h | vertices | s/step (est.) | La = 12: steps, time | La = 120: steps, time |
-|---:|---:|---:|---|---|
-| 8 | 625 | 5.5 (measured) | 1,000, 1.5 h | 3,200, 4.9 h |
-| 16 | 2,401 | about 18 | 2,800, about 14 h | 8,800, about 45 h |
-| 32 | 9,409 | about 63 | 7,900, about 6 days | 24,900, about 18 days |
-| 64 | 37,249 | about 220 | 22,300, about 8 weeks | 70,300, about 6 months |
+Before the speed-ups the same case took 3.41 and 13.62 s/step on the same
+node type. Timings vary by node generation (up to about 1.8x), so compare
+timings on one node type. `kag_consistent` costs about 50% more per step.
 
-**Compromise.** The one-hour-per-level target cannot be met at any `La`
-with the capillary time step and the present per-step cost. Even at
-`La = 2` (Oh = 1, the cheapest relaxation) `R/h = 32` needs 3,300 steps.
-
-- `La = 12` is the primary study. At 8/16/32 it fits the 7-day `amarsden`
-  limit only just: request 4 h, 2 days and 7 days.
-- `La = 120` is run at 8/16 (request 12 h and 3 days).
-- `La` of 1,200 and above, and `R/h = 64`, are deferred until the per-step
-  cost falls, for example through fewer outer fixed-point passes, lighter
-  per-pass diagnostics, or MPI. MPI is untested for this case.
-- The run length is not shortened, because D3 asks for relaxed states.
+The time step is the one-sided capillary limit
+`sqrt(rho*h^3/(4*pi*gamma))`. The semi-implicit surface-tension design note
+(`Documentation/free_surface_semi_implicit_surface_tension_design.md`)
+suggests that at La = 12 viscosity may allow a 3–7x larger step; a
+measurement of outer-pass convergence against the time step decides this
+before the M2 study. `La` of 1,200 and above, and `R/h = 64`, remain deferred.
 
 Memory is small: 0.26 GB RSS at `R/h = 8`.
