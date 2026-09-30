@@ -281,7 +281,7 @@ std::vector<Real> ElementTransform::hcurl_tangential_trace_2d(
 
 std::pair<std::vector<LocalIndex>, std::vector<math::Vector<Real, 3>>>
 ElementTransform::facet_vertices(ElementType element_type, int facet_id) {
-    ReferenceElement ref = ReferenceElement::create(element_type);
+    const ReferenceElement& ref = ReferenceElement::shared(element_type);
     const int dim = element_dimension(element_type);
 
     std::vector<LocalIndex> vertex_indices;

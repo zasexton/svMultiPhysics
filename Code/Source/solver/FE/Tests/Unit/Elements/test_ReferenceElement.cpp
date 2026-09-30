@@ -9,6 +9,10 @@
 #include "FE/Basis/NodeOrderingConventions.h"
 #include "FE/Quadrature/QuadratureFactory.h"
 
+#include <cstring>
+#include <thread>
+#include <vector>
+
 using namespace svmp::FE;
 using namespace svmp::FE::elements;
 
@@ -145,4 +149,68 @@ TEST(ReferenceElement, PyramidConnectivity) {
         bool has_apex = (fn[0] == 4u) || (fn[1] == 4u) || (fn[2] == 4u);
         EXPECT_TRUE(has_apex);
     }
+}
+
+TEST(ReferenceElement, SharedInstanceIsBuiltOncePerTypeAndMatchesCreate) {
+    const ElementType types[] = {
+        ElementType::Line2, ElementType::Triangle3, ElementType::Quad4,
+        ElementType::Tetra4, ElementType::Hex8, ElementType::Wedge6,
+        ElementType::Pyramid5, ElementType::Line3, ElementType::Triangle6,
+        ElementType::Quad9, ElementType::Quad8, ElementType::Tetra10,
+        ElementType::Hex27, ElementType::Hex20, ElementType::Wedge15,
+        ElementType::Wedge18, ElementType::Pyramid13, ElementType::Pyramid14};
+    for (const auto type : types) {
+        const ReferenceElement& shared = ReferenceElement::shared(type);
+        EXPECT_EQ(&shared, &ReferenceElement::shared(type));
+        const ReferenceElement created = ReferenceElement::create(type);
+        EXPECT_EQ(created.type(), shared.type());
+        EXPECT_EQ(created.dimension(), shared.dimension());
+        EXPECT_EQ(created.num_nodes(), shared.num_nodes());
+        // The cached measure must be the bitwise value of a fresh build.
+        const Real measure = created.reference_measure();
+        const Real cached = shared.reference_measure();
+        EXPECT_EQ(std::memcmp(&measure, &cached, sizeof(Real)), 0);
+        ASSERT_EQ(created.num_edges(), shared.num_edges());
+        for (std::size_t e = 0; e < created.num_edges(); ++e) {
+            EXPECT_EQ(created.edge_nodes(e), shared.edge_nodes(e));
+        }
+        ASSERT_EQ(created.num_faces(), shared.num_faces());
+        for (std::size_t f = 0; f < created.num_faces(); ++f) {
+            EXPECT_EQ(created.face_nodes(f), shared.face_nodes(f));
+        }
+    }
+}
+
+TEST(ReferenceElement, SharedLookupIsThreadSafe) {
+    constexpr int n_threads = 8;
+    std::vector<const ReferenceElement*> seen(n_threads, nullptr);
+    std::vector<std::thread> threads;
+    for (int t = 0; t < n_threads; ++t) {
+        threads.emplace_back([t, &seen]() {
+            const ReferenceElement* first = nullptr;
+            for (int i = 0; i < 1000; ++i) {
+                const auto& ref = ReferenceElement::shared(ElementType::Wedge18);
+                if (first == nullptr) {
+                    first = &ref;
+                }
+                if (&ref != first) {
+                    first = nullptr;
+                    break;
+                }
+            }
+            seen[static_cast<std::size_t>(t)] = first;
+        });
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    for (const auto* ptr : seen) {
+        EXPECT_EQ(ptr, &ReferenceElement::shared(ElementType::Wedge18));
+    }
+}
+
+TEST(ReferenceElement, UnknownTypeKeepsFailingAndIsNotCached) {
+    EXPECT_THROW((void)ReferenceElement::shared(ElementType::Unknown), FEException);
+    EXPECT_THROW((void)ReferenceElement::shared(ElementType::Unknown), FEException);
+    EXPECT_THROW((void)ReferenceElement::create(ElementType::Unknown), FEException);
 }
