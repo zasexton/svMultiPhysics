@@ -660,9 +660,44 @@ statements above where they conflict.
   `Effective_direction` constrains only the selected components (sliding
   mesh walls).
 
+- **Face field sampling (FE).** Boundary, interior and interface mesh-face
+  integrals evaluated non-primary fields through a basis cache keyed on the
+  face quadrature rule, i.e. at canonical face points instead of the
+  face-to-cell mapped points (fixed in `0084fdff`). Constants were exact,
+  varying fields were not; in the fitted path this corrupted the fluid
+  velocity in the mesh kinematic row.
+
 Focused tests: `Physics/Tests/Unit/test_FittedFreeSurfaceALE.cpp`.
 Benchmarks: `tests/cases/fluid/free_surface_benchmarks/fitted_sloshing_2d/`
-and the `fitted_static_drop_2d/` smoke case.
+(passes the D10-D12 criteria) and the `fitted_static_drop_2d/` smoke case.
+
+### Step-12 failure of the fitted SPHERIC Test 10 deck
+
+At `6b253cb1` the fitted deck
+`tests/cases/fluid/open_vessel_free_surface/fitted_ale/spheric_test10_lateral_water_1x`
+(tank at rest, no roll forcing, `Kinematic_enforcement=Nitsche`, pinned
+mesh walls, a node pressure gauge) fails at step 0, not step 12: the
+configured unpreconditioned Eigen GMRES does not converge ("linear solve did
+not converge (PTC retries exhausted)", job `46088152`). With a direct solver
+it completes 40 steps (job `46088910`) but the liquid at rest accelerates:
+the mean free-surface velocity grows as about `-4.8 t` m/s (half of `g`), the
+peak speed reaches 0.51 m/s at 40 ms at the wall/surface corner, the surface
+sinks 1.5 mm in a closed tank, and Newton needs 3 to 5 iterations. The
+causes are the assembly-frame and doubled-measure defects and the face
+field-sampling defect above; with them fixed (`a6a8a72d`, job `46109392`) the
+same deck stays at rest to 1e-12 m/s with one Newton iteration per step.
+The historical failure at step 12 is the growth of this spurious motion.
+
+The deck's `Nitsche` mode is not a free-surface model: its fluid row
+replaces the normal dynamic condition by `u.n = w.n` (hence the pressure
+gauge). A MeshNitsche variant of the deck (slip mesh walls, mesh-velocity
+harmonic, no gauge; job `46109392`) is not at rest either: the fluid and
+mesh Dirichlet values are not applied at the wall nodes on the free-surface
+edge (velocity 1e-2 m/s there after one step, zero on every other wall
+node), so liquid leaves through the contact line (0.5% volume in 40 steps).
+The deck's face files look malformed (`free_surface.vtp` spans
+y = 0.0698 to 0.093 and `wall_bottom.vtp` reaches y = 0.0232); the 3D fitted
+meshes need to be regenerated before a 3D campaign.
 
 ## Source evidence map
 

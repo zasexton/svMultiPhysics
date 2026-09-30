@@ -116,4 +116,60 @@ points).
 
 ## Results
 
-Pending the protocol runs.
+**2026-09-30, source and solver `a6a8a72d`, Slurm job `46104905` (one node,
+six cases in parallel, one rank each). Result: PASS.**
+
+Spatial study (`dt = T0/512`; "spatial" is the frequency error with the
+time error `e_t(T0/512) = -1.24e-5` removed):
+
+| L/h | vertices | `omega` | raw error | spatial error | `gamma/gamma_ref` | damping error | `max dA/A` | Newton/step | s/step | wall |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 16 | 153 | 1.6986093 | -1.18e-3 | -1.17e-3 | 1.0665 | 6.6% | 5.8e-7 | 2.0 | 0.06 | 128 s |
+| 32 | 561 | 1.7001474 | -2.80e-4 | -2.67e-4 | 0.9963 | 0.37% | 1.0e-7 | 2.0 | 0.23 | 466 s |
+| 64 | 2,145 | 1.7005905 | -1.90e-5 | -6.6e-6 | 0.9888 | 1.1% | 2.1e-8 | 2.0 | 0.93 | 1,907 s |
+
+Time-step study (`L/h = 32`; `omega(dt -> 0) = 1.7001684` from the 256 and
+512 runs, Richardson order 2.13):
+
+| steps/T | `omega` | time error `/omega_ref` | `gamma/gamma_ref` | `max dA/A` | wall |
+|---:|---:|---:|---:|---:|---:|
+| 64 | 1.6984653 | -1.00e-3 | 0.9949 | 8.6e-8 | 63 s |
+| 128 | 1.6997666 | -2.36e-4 | 0.9956 | 9.4e-8 | 118 s |
+| 256 | 1.7000764 | -5.41e-5 | 0.9961 | 9.9e-8 | 229 s |
+| 512 | 1.7001473 | -1.24e-5 | 0.9963 | 1.0e-7 | 466 s |
+
+| Criterion | Result |
+|---|---|
+| `frequency` | PASS: 6.6e-6 at `L/h = 64` (limit 1e-2); decreasing; observed order 3.73 (pairwise 2.13, 5.33) |
+| `time_step_study` | PASS: observed order 2.11 (pairwise 2.08, 2.13, 2.13); the generalized-alpha estimate `-4.2e-3 (32/S)^2` gives -1.05e-3 at 64 steps |
+| `damping` | PASS: 1.1% at `L/h = 64` (limit 5%) |
+| `volume` | PASS: at most 5.8e-7 (limit 1e-4) |
+
+Observations:
+
+- The 16 to 32 pair converges at second order. At `L/h = 64` the spatial
+  error (6.6e-6) is of the size of the removed time error (1.2e-5) and of
+  the fit-to-fit spread (the modal fit gives -1.0e-4), so the 32 to 64
+  pairwise order (5.3) only says that the error has reached that floor.
+- The damping rate is within 0.4% and 1.1% of the exact viscous value at 32
+  and 64; at 16 it is 6.6% high. The Lamb estimate `2 nu k^2` is 3.6% above
+  `gamma_ref` (free-surface vorticity layer); the fitted runs resolve the
+  difference.
+- The free-surface end nodes stay on the walls (offset 0) and slide with
+  the wave; every step took two Newton iterations with final residuals at
+  most 1e-10.
+- Comparison with `linear_sloshing_2d` (unfitted, same reference): at
+  `L/h = 64` the unfitted spatial frequency error is +1.5% with the coupled
+  level-set transport and +0.13% with the wet extension; the fitted path
+  gives 7e-6.
+- Before the face field-sampling fix (`0084fdff`) the same setup ran 11%
+  slow at `L/h = 16` and the mesh-velocity formulation was unstable (the
+  fluid velocity in the mesh kinematic row was sampled at the wrong face
+  points). With a displacement-type harmonic operator and a
+  `deltat`-scaled penalty the P1 flux defect accumulated into a relaxation
+  of rate `h^2 k^2/(2 gamma_N deltat)`: the damping error grew from 4x to
+  15x `gamma_ref` when `dt` was divided by 4 at `L/h = 16`
+  (diagnostic jobs `46094542`, `46097669`, `46098738`, `46103854`).
+
+Raw output: `/scratch/users/zsexton/free-surface-benchmarks/fitted_ale/sloshing/m5-a6a8a72d/`
+(`verify.txt`, `verify.json`).
