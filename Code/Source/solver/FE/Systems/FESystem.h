@@ -252,6 +252,20 @@ struct MeshNormalBoundaryConstraintDeclaration {
     std::string owner_component{};
     std::optional<MeshNormalBoundaryConstraintConsumerBinding>
         consumer_binding{};
+    /**
+     * The relation owns the normal mesh motion on this boundary through a
+     * consistent (Nitsche) mesh row: the mesh-motion operator must remove its
+     * own normal flux on the boundary, i.e. add the Nitsche consistency term
+     * of its operator.  Set only for fitted-ALE MeshNitsche kinematics.
+     */
+    bool requires_mesh_flux_consistency{false};
+    /**
+     * Nitsche constant gamma_N of that mesh row, whose penalty is
+     * gamma_N / h_n on the normal mesh-velocity mismatch.  The consistent
+     * operator is coercive for gamma_N > 2 kappa (P1 trace inverse
+     * inequality with h_n = 2|T|/|F|); the mesh-motion module checks it.
+     */
+    Real mesh_flux_consistency_nitsche_gamma{0.0};
 };
 
 struct MeshNormalBoundaryConstraintHistoryRecord {

@@ -240,6 +240,44 @@ parse_vector_value(const svmp::Physics::ParameterMap& params,
   return values;
 }
 
+// Component mask of a zero-valued mesh-motion Dirichlet condition.
+//
+// As for the fluid velocity, `Effective_direction` on a Dirichlet condition
+// with the single literal value 0 selects the constrained Cartesian
+// components: `1 0` on a wall x = const constrains only the x displacement,
+// so the mesh slides along the wall (normal-only, "slip" mesh motion).  A
+// direction that selects every component or none constrains all components
+// (the historical behavior).  For a nonzero single value the direction keeps
+// its historical meaning as the direction of the prescribed displacement and
+// every component is constrained.
+std::array<bool, 3> parse_zero_dirichlet_component_mask(const svmp::Physics::ParameterMap& params,
+                                                        int dim,
+                                                        const std::string& context)
+{
+  std::array<bool, 3> active{true, true, true};
+  const auto raw_direction =
+      get_defined_string(params, {"Effective_direction", "EffectiveDirection"});
+  if (!raw_direction) {
+    return active;
+  }
+  const auto parsed = parse_real_list(get_defined_string(params, {"Value"}).value_or("0.0"), context);
+  if (parsed.size() != 1u || parsed.front() != 0.0) {
+    return active;
+  }
+  const auto direction = parse_int_list(*raw_direction);
+  int selected = 0;
+  std::array<bool, 3> mask{false, false, false};
+  for (int d = 0; d < dim; ++d) {
+    const auto idx = static_cast<std::size_t>(d);
+    mask[idx] = idx < direction.size() && direction[idx] != 0;
+    selected += mask[idx] ? 1 : 0;
+  }
+  if (selected == 0 || selected == dim) {
+    return active;
+  }
+  return mask;
+}
+
 svmp::FE::forms::GeometryTangentPath parse_geometry_tangent_path(std::string_view raw,
                                                                  std::string_view context)
 {
@@ -403,6 +441,17 @@ void apply_harmonic_params(const svmp::Physics::ParameterMap& params,
   if (const auto value = get_defined_real(params, {"Stiffness", "Mesh_motion_stiffness"}, "Stiffness")) {
     options.stiffness = *value;
   }
+  if (const auto value = get_defined_string(params, {"Harmonic_quantity", "HarmonicQuantity"})) {
+    const auto token = normalized_token(*value);
+    if (token == "displacement" || token == "meshdisplacement") {
+      options.quantity = mm::HarmonicQuantity::Displacement;
+    } else if (token == "velocity" || token == "meshvelocity") {
+      options.quantity = mm::HarmonicQuantity::Velocity;
+    } else {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Harmonic_quantity must be 'displacement' or 'velocity'.");
+    }
+  }
 }
 
 void apply_pseudo_elastic_params(const svmp::Physics::ParameterMap& params,
@@ -472,6 +521,8 @@ void apply_mesh_motion_bcs(const svmp::Physics::EquationModuleInput& input,
       typename Options::DirichletBC dirichlet{};
       dirichlet.boundary_marker = bc.boundary_marker;
       dirichlet.value = parse_vector_value(bc.params, {"Value"}, dim, "Mesh-motion Dirichlet Value");
+      dirichlet.active_components = parse_zero_dirichlet_component_mask(
+          bc.params, dim, "Mesh-motion Dirichlet '" + bc.name + "'");
       options.dirichlet.push_back(std::move(dirichlet));
       continue;
     }

@@ -15,6 +15,7 @@
 #include "FE/Spaces/FunctionSpace.h"
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -25,12 +26,27 @@ namespace Physics {
 namespace formulations {
 namespace mesh_motion {
 
+/// Quantity the harmonic operator acts on.  `Displacement` solves
+/// kappa grad(d):grad(psi) = 0 for the mesh displacement; `Velocity` solves
+/// it for the mesh velocity dt(d), so the displacement integrates a harmonic
+/// velocity field (used by fitted-ALE MeshNitsche free surfaces, whose
+/// kinematic row constrains the normal mesh velocity).
+enum class HarmonicQuantity : std::uint8_t {
+    Displacement,
+    Velocity
+};
+
 struct HarmonicMeshMotionOptions {
     using ScalarValue = FE::forms::bc::ScalarValue;
 
     struct DirichletBC {
         int boundary_marker{-1};
         std::array<ScalarValue, 3> value{ScalarValue{0.0}, ScalarValue{0.0}, ScalarValue{0.0}};
+        /// Components constrained by this condition.  A partial mask
+        /// constrains only the selected Cartesian components strongly; the
+        /// others keep the natural (zero-flux) condition.  With the wall
+        /// normal selected this is a sliding (slip) mesh boundary.
+        std::array<bool, 3> active_components{true, true, true};
     };
 
     struct NaturalBC {
@@ -48,6 +64,7 @@ struct HarmonicMeshMotionOptions {
     std::string operator_tag{"equations"};
     ScalarValue kappa{ScalarValue{1.0}};
     std::optional<ScalarValue> stiffness{};
+    HarmonicQuantity quantity{HarmonicQuantity::Displacement};
 
     bool auto_register_field{true};
     bool bind_as_mesh_displacement{true};

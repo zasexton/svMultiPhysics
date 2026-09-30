@@ -57,6 +57,16 @@ void PseudoElasticMeshMotionModule::registerOn(FE::systems::FESystem& system) co
             "cannot be installed after accepted normal-constraint history "
             "has begun");
     }
+    for (const auto& declaration : system.meshNormalBoundaryConstraints()) {
+        if (declaration.requires_mesh_flux_consistency) {
+            throw std::invalid_argument(
+                "PseudoElasticMeshMotionModule::registerOn: boundary " +
+                std::to_string(declaration.boundary_marker) +
+                " requires the mesh-motion Nitsche consistency term of a "
+                "consistent kinematic owner (fitted MeshNitsche); only the "
+                "harmonic mesh motion provides it");
+        }
+    }
 
     const auto validate_positive_literal =
         [](const PseudoElasticMeshMotionOptions::ScalarValue& value, const char* name) {
