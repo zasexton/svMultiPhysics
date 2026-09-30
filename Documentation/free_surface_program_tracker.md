@@ -479,6 +479,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
     5. Rate initialization regularizes 0 empty rows in serial but thousands in parallel.
   - Consequence: M2 and M3 run serially as concurrent single-rank jobs, preferably on `-C CPU_GEN:MLN` nodes (about 2× faster than SKX).
   - Estimates: M2 La = 12 at R/h = 8/16/32 for three forms is about 24 h wall time (70 core-hours). M3 is about 3 h wall time per (form, transport) combination.
+- [ ] **MPI correctness fixes (started 2026-09-30, branch `dev/mpi-correctness`, worktree `/scratch/users/zsexton/svmp-dev-mpi/`).** Fix the five defects above. Acceptance: static drop at R/h = 16 and 32 and sloshing at L32 complete on 1, 2, 4 and 8 ranks and match serial to solver tolerance, with serial Newton iteration counts and identical empty-row counts.
 - [ ] **Protocol.**
   - Static drop in a box, fluid initially at rest. The Laplace number La = ργD/μ² is swept over 12 and 120; 1,200 and above are deferred until the per-step cost is reduced.
   - Start from the sampled analytic shape. No minimizer is required (D3).
