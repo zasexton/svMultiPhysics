@@ -3142,6 +3142,110 @@ TEST(FreeSurfaceGeometrySnapshot,
 }
 
 TEST(FreeSurfaceGeometrySnapshot,
+     CurrencyChecksAreMemoizedPerContentChangeAndStayFailClosed)
+{
+    constexpr int interface_marker = 131;
+    const SingleQuadBoundaryMesh mesh;
+    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+        verticalInterfaceWithVolumes(interface_marker),
+        {},
+        {},
+        mesh,
+        {},
+        verticalScalar(),
+        "snapshot_currency_memo");
+    ASSERT_NE(snapshot, nullptr);
+
+    FE::assembly::CutIntegrationContext context;
+    context.addFreeSurfaceGeometrySnapshot(snapshot);
+    const auto expect_current =
+        [interface_marker](const FE::assembly::CutIntegrationContext& ctx) {
+            EXPECT_NO_THROW(ctx.assertAllFreeSurfaceGeometrySnapshotsCurrent());
+            EXPECT_NO_THROW(
+                ctx.assertFreeSurfaceGeometrySnapshotCurrentForMarker(
+                    interface_marker));
+            EXPECT_NO_THROW(
+                ctx.assertGeneratedInterfaceRulesCurrentForMarker(
+                    interface_marker));
+            EXPECT_NO_THROW(
+                ctx.assertGeneratedVolumeRulesCurrentForMarkerAndSide(
+                    interface_marker,
+                    FE::geometry::CutIntegrationSide::Negative));
+        };
+    const auto expect_stale_source =
+        [interface_marker](const FE::assembly::CutIntegrationContext& ctx) {
+            const std::string expected =
+                "free-surface geometry snapshot revision does not match the "
+                "current source value revision";
+            const auto message_of = [](const auto& check) {
+                try {
+                    check();
+                } catch (const std::invalid_argument& error) {
+                    return std::string(error.what());
+                }
+                return std::string("no exception");
+            };
+            EXPECT_EQ(message_of([&] {
+                          ctx.assertAllFreeSurfaceGeometrySnapshotsCurrent();
+                      }),
+                      expected);
+            EXPECT_EQ(message_of([&] {
+                          ctx.assertFreeSurfaceGeometrySnapshotCurrentForMarker(
+                              interface_marker);
+                      }),
+                      expected);
+            EXPECT_EQ(message_of([&] {
+                          ctx.assertGeneratedInterfaceRulesCurrentForMarker(
+                              interface_marker);
+                      }),
+                      expected);
+            EXPECT_EQ(message_of([&] {
+                          ctx.assertGeneratedVolumeRulesCurrentForMarkerAndSide(
+                              interface_marker,
+                              FE::geometry::CutIntegrationSide::Negative);
+                      }),
+                      expected);
+        };
+
+    // Repeated checks of an unchanged context pass (the later calls are
+    // served from the memo).
+    expect_current(context);
+    expect_current(context);
+    const FE::assembly::CutIntegrationContext copy = context;
+    expect_current(copy);
+
+    // A content change after the checks passed must invalidate every memo
+    // entry, and the defect must keep throwing on repeated calls.
+    const auto source_revision = snapshot->revision().source_value_revision;
+    ASSERT_NE(source_revision, 0u);
+    context.setExpectedGeneratedSourceValueRevision(
+        interface_marker, source_revision + 1u);
+    expect_stale_source(context);
+    expect_stale_source(context);
+    expect_current(copy);
+
+    // Restoring the consistent revision makes the context current again.
+    context.setExpectedGeneratedSourceValueRevision(
+        interface_marker, source_revision);
+    expect_current(context);
+
+    // A failed mutation that is rolled back leaves the context current.
+    EXPECT_THROW(context.addFreeSurfaceGeometrySnapshot(snapshot),
+                 std::invalid_argument);
+    expect_current(context);
+
+    // Assigning a stale context over a validated one must not reuse the
+    // validated state of the assignee.
+    FE::assembly::CutIntegrationContext assigned = copy;
+    expect_current(assigned);
+    FE::assembly::CutIntegrationContext stale = copy;
+    stale.setExpectedGeneratedSourceValueRevision(
+        interface_marker, source_revision + 2u);
+    assigned = stale;
+    expect_stale_source(assigned);
+}
+
+TEST(FreeSurfaceGeometrySnapshot,
      CompletedSnapshotPublicationRejectsDirectVolumeExtension)
 {
     constexpr int interface_marker = 278;
