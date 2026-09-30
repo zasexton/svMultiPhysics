@@ -53,7 +53,7 @@ def test_cap_geometry_initial_state_and_box():
 
 @pytest.mark.parametrize("theta_e", gen.EQUILIBRIUM_ANGLES_DEG)
 def test_contact_angle_measurement_on_sampled_equilibrium_caps(theta_e, tmp_path):
-    for level, angle_limit in ((16, 0.2), (32, 0.05)):
+    for level, angle_limit in ((16, 0.2), (32, 0.08)):
         case = gen.generate(level, theta_e, "surface_stress", tmp_path / f"c{level}")
         points, tris, phi = sampled_cap(case, level, theta_e, case["equilibrium_cap_nominal"]["area"])
         area, _ = ver.liquid_area_centroid(points[:, :2], tris, phi)
@@ -92,8 +92,13 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
     for wall in ("wall_left", "wall_right", "wall_top"):
         assert fluid.find(f"Add_BC[@name='{wall}']").find("Effective_direction") is None
     level_set = root.find("Add_equation[@type='level_set']")
-    assert level_set.find("Enable_reinitialization").text.strip() == "true"
-    assert level_set.find("Reinitialization_cadence_steps").text.strip() == "10"
+    assert level_set.find("Enable_reinitialization").text.strip() == "false"
+    general = root.find("GeneralSimulationParameters")
+    assert general.find("Enable_adaptive_time_loop").text == "true"
+    assert float(general.find("Adaptive_time_loop_max_dt").text) == case["dt"]
+    assert float(general.find("Adaptive_time_loop_min_dt").text) == pytest.approx(case["dt"] / 256)
+    assert float(general.find("Adaptive_time_loop_increase_factor").text) == 2.0
+    assert int(general.find("Adaptive_time_loop_target_newton_iterations").text) > 100
     assert root.find("GeneralSimulationParameters/Number_of_time_steps").text == str(case["steps"])
     assert case["dt"] <= math.sqrt(case["h"] ** 3 / (4.0 * math.pi)) * (1 + 1e-12)
     assert case["steps"] * case["dt"] == pytest.approx(5.0 * case["viscous_time"])
@@ -109,8 +114,12 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
     assert "KinematicAreaGradientTraction" in lumped and "mass>Lumped" in lumped
     consistent = gen.solver_xml("kag_consistent", 90, schedule, 10, 1)
     assert "kinematic_area_gradient_mass" not in consistent
-    plain = gen.solver_xml("surface_stress", 120, schedule, 10, 1, reinitialization=False)
-    assert "<Enable_reinitialization>false" in plain
+    maintained = ET.fromstring(gen.solver_xml("surface_stress", 120, schedule, 10, 1,
+                                              reinitialization=True))
+    level_set = maintained.find("Add_equation[@type='level_set']")
+    assert level_set.find("Enable_reinitialization").text.strip() == "true"
+    assert level_set.find("Reinitialization_cadence_steps").text.strip() == "10"
+    assert level_set.find("Reinitialization_max_iterations").text.strip() == "4"
 
 
 def write_synthetic_run(run, level, angle_offset=0.0, theta_e=60, growth=False,

@@ -6,9 +6,9 @@ exterior pressure p_ext = 0.  It starts as a circular cap with a
 non-equilibrium contact angle theta_0 and relaxes, at fixed area, to the
 circular cap with the Young angle theta_e.  The contact angle is imposed only
 by the variational Young term in the momentum equation (decision D4):
-PrescribedAngle contact line, Navier slip on the wetted wall, a strong
-normal-only zero velocity on the wall, and angle-preserving (scale-only)
-level-set wall maintenance.
+PrescribedAngle contact line, Navier slip on the wetted wall, and a strong
+normal-only zero velocity on the wall.  Level-set wall maintenance, when
+enabled, only rescales contact cells.
 
 The case is written for the new OOP solver: solver.xml, an affine Triangle3
 background mesh with the initial fields, the four wall face files, and
@@ -52,7 +52,21 @@ DEFAULT_SNAPSHOTS = 100                     # VTU outputs per run
 # one-sided density sum of a free surface (rho_liquid + rho_void = rho):
 #   dt <= sqrt(rho h^3 / (4 pi gamma)) = SAFETY * sqrt(rho h^3 / (2 pi gamma)).
 DT_SAFETY = 1.0 / math.sqrt(2.0)
-# Existing production reinitialization values (D18/D38 and sloshing decks).
+# Step retry.  Generalized-alpha refreshes the cut geometry at the operator
+# stage, while the final acceptance gate checks the endpoint; a step whose
+# endpoint crosses a mesh vertex that the stage has not crossed is rejected
+# with CutTopologyChanged, and a fixed-step time loop then aborts.  The
+# adaptive time loop is used only to retry such a step by bisection: dt never
+# exceeds the capillary-limited step, the target Newton count lies above any
+# reachable count (so iteration counts never shrink dt), and the increase
+# factor 2 undoes one bisection per accepted step.
+RETRY_DECREASE_FACTOR = 0.5
+RETRY_INCREASE_FACTOR = 2.0
+RETRY_MAX_BISECTIONS = 8
+RETRY_TARGET_NEWTON_ITERATIONS = 1000
+RETRY_MAX_STEPS_MULTIPLIER = 4
+# Existing production reinitialization values (D18/D38 and sloshing decks),
+# used only with --reinitialization.
 REINITIALIZATION_CADENCE_STEPS = 10
 REINITIALIZATION_MAX_ITERATIONS = 4
 MIN_PHI_OVER_H_WARNING = 1.0e-6             # "vertex touch" warning threshold
@@ -297,7 +311,7 @@ def fsils_gmres_block() -> str:
 
 
 def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, cadence: int,
-               reinitialization: bool = True) -> str:
+               reinitialization: bool = False) -> str:
     kag = form in ("kag_consistent", "kag_lumped")
     curvature_projection = ""
     if kag:
@@ -353,6 +367,14 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
     <Increment_in_saving_VTK_files>{cadence}</Increment_in_saving_VTK_files>
     <Start_saving_after_time_step>{cadence}</Start_saving_after_time_step>
     <Increment_in_saving_restart_files>{steps}</Increment_in_saving_restart_files>
+    <Enable_adaptive_time_loop>true</Enable_adaptive_time_loop>
+    <Adaptive_time_loop_min_dt>{schedule['dt'] * RETRY_DECREASE_FACTOR ** RETRY_MAX_BISECTIONS:.17g}</Adaptive_time_loop_min_dt>
+    <Adaptive_time_loop_max_dt>{schedule['dt']:.17g}</Adaptive_time_loop_max_dt>
+    <Adaptive_time_loop_max_retries>{RETRY_MAX_BISECTIONS}</Adaptive_time_loop_max_retries>
+    <Adaptive_time_loop_decrease_factor>{RETRY_DECREASE_FACTOR:g}</Adaptive_time_loop_decrease_factor>
+    <Adaptive_time_loop_increase_factor>{RETRY_INCREASE_FACTOR:g}</Adaptive_time_loop_increase_factor>
+    <Adaptive_time_loop_target_newton_iterations>{RETRY_TARGET_NEWTON_ITERATIONS}</Adaptive_time_loop_target_newton_iterations>
+    <Adaptive_time_loop_max_steps_multiplier>{RETRY_MAX_STEPS_MULTIPLIER}</Adaptive_time_loop_max_steps_multiplier>
     <Convert_BIN_to_VTK_format>0</Convert_BIN_to_VTK_format>
     <Verbose>1</Verbose>
     <Warning>0</Warning>
@@ -451,7 +473,7 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
              initial_deg: float | None = None,
              viscous_times: float = DEFAULT_VISCOUS_TIMES,
              snapshots: int = DEFAULT_SNAPSHOTS,
-             reinitialization: bool = True,
+             reinitialization: bool = False,
              max_steps: int | None = None, force: bool = False) -> dict:
     if level not in LEVELS:
         raise ValueError(f"--level must be one of {LEVELS}")
@@ -520,6 +542,10 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
         "capillary_form": form,
         "contact_line_model": "PrescribedAngle",
         "reinitialization": bool(reinitialization),
+        "step_retry": {"decrease_factor": RETRY_DECREASE_FACTOR,
+                       "increase_factor": RETRY_INCREASE_FACTOR,
+                       "max_bisections": RETRY_MAX_BISECTIONS,
+                       "target_newton_iterations": RETRY_TARGET_NEWTON_ITERATIONS},
         "laplace_number": LAPLACE_NUMBER,
         "density": DENSITY,
         "surface_tension": SURFACE_TENSION,
@@ -581,8 +607,10 @@ def main(argv=None) -> int:
                         help="run length in units rho*R^2/mu (protocol value 5)")
     parser.add_argument("--snapshots", type=int, default=DEFAULT_SNAPSHOTS,
                         help="number of VTU outputs over the run (protocol value 100)")
-    parser.add_argument("--no-reinitialization", action="store_true",
-                        help="disable the wall-aware level-set maintenance (diagnostic only)")
+    parser.add_argument("--reinitialization", action="store_true",
+                        help="enable projection reinitialization with the production values "
+                             "(every 10 steps, at most 4 iterations; contact cells are only "
+                             "rescaled).  Off in the protocol, as in static_drop_2d.")
     parser.add_argument("--max-steps", type=int, default=None,
                         help="smoke runs only: stop after this many steps; the case is "
                              "marked truncated and verify.py rejects it for acceptance")
@@ -591,11 +619,12 @@ def main(argv=None) -> int:
 
     case = generate(args.level, args.contact_angle, args.capillary_form, args.output_dir,
                     initial_deg=args.initial_angle, viscous_times=args.viscous_times,
-                    snapshots=args.snapshots, reinitialization=not args.no_reinitialization,
+                    snapshots=args.snapshots, reinitialization=args.reinitialization,
                     max_steps=args.max_steps, force=args.force)
     print(f"wrote {args.output_dir}")
     for key in ("level_R_over_h", "equilibrium_angle_degrees", "initial_angle_degrees",
-                "capillary_form", "viscosity", "slip_length_over_h", "viscous_time",
+                "capillary_form", "reinitialization", "viscosity", "slip_length_over_h",
+                "viscous_time",
                 "end_time", "dt", "dt_capillary_limit", "steps", "output_cadence",
                 "box", "n_vertices", "n_triangles", "min_abs_phi_over_h",
                 "initial_contact_vertex_gap_over_h", "dry_gap_over_h", "truncated"):

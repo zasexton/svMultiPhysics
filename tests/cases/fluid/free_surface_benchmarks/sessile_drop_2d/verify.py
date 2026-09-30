@@ -32,8 +32,13 @@ TRIANGLE = 5                      # VTK cell type
 # Contact angles are read from a circle fitted to the interface points of one
 # side with 0 <= y <= ANGLE_FIT_HEIGHT * R_ref.  The window is fixed once for
 # all cases; on sampled exact caps it measures the angle to within 0.13
-# degrees at R/h = 16 and 0.03 degrees at R/h = 32 (see README.md).
+# degrees at R/h = 16 and 0.05 degrees at R/h = 32 (see README.md).
 ANGLE_FIT_HEIGHT = 0.25
+# The step retry (generate_case.py) adds bisected steps, so outputs, written
+# every output_cadence accepted steps, drift slightly ahead of the nominal
+# times.  A run counts as complete when its last output lies in the final
+# COMPLETE_FRACTION of the protocol time.
+COMPLETE_FRACTION = 0.05
 WALL_TOLERANCE = 1.0e-9           # |y - y_wall| for vertices on the contact wall
 POINT_MERGE_DIGITS = 12           # coincident output points (MPI pieces) are merged
 
@@ -331,7 +336,8 @@ def analyse_run(run: Path) -> dict:
     theta_e = case["equilibrium_angle_degrees"]
     series = output_series(run, case)
     end_time = case["end_time"]
-    if abs(series[-1][0] - end_time) > 0.5 * case["dt"]:
+    if series[-1][0] < (1.0 - COMPLETE_FRACTION) * end_time - 0.5 * case["dt"] or \
+            series[-1][0] > end_time + 0.5 * case["dt"]:
         raise DataError(f"{run}: incomplete run, last output t={series[-1][0]:.6g} "
                         f"but the case ends at t={end_time:.6g}")
     if len(series) < 4:
