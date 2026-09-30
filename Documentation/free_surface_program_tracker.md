@@ -561,6 +561,38 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
 - [ ] **Selection.** After the M2 static drop, the M3 capillary wave, and the M4 sessile and Ren–E comparisons, record the chosen default route and the reason in §4.
   - Among candidates meeting the D1 criteria, prefer the one without tunable parameters (P1).
   - Then run the 3D sphere at R/h = 8, 16, 32.
+- [ ] **3D readiness (2026-09-30; benchmark merged as `e687c6bd`, `12f30793`, `6350285e`).**
+  - **Benchmark.** `tests/cases/fluid/free_surface_benchmarks/static_sphere_3d/` (16 Python tests), ready but unrun.
+    - A sphere in the cube [0,3R]³, on an affine Tetra4 Kuhn mesh that is conforming and symmetric.
+    - An irrational centre offset (min |φ|/h of 1.2e-3, 2.9e-4 and 6.5e-5 at R/h = 8, 16, 32).
+    - Reference 2γ/R_eff, with R_eff from the exact P1 volume.
+    - 2·Δt_B at La = 12, assumed from 2D (`--dt-multiple` to check).
+    - PDE-extension transport by default; tolerances copied from `static_drop_2d`.
+  - **Smoke run (job `46097410`, R/h = 8, pre-vertex-fix binary): every capillary form stopped at step 0.**
+    1. The functional-consistency check `freeSurfaceFunctionalValueNear` (`FESystem.cpp`) allows 512 ulp. It compares the liquid volume summed per rule with the sum over about 0.3 M quadrature weights, and in 3D the rounding difference is larger. A rounding bound derived from the term count (or compensated sums) would fix it without changing the solution.
+    2. The start-up transient moved φ across the nearest vertex, and the old binary aborted ("external-state discontinuity requires an adaptive step controller"). The merged vertex-crossing fix should cover this but is not yet checked in 3D.
+  - **Cost (SKX, serial).**
+    - R/h = 8 (82,944 cells): about 245 s per outer pass, so 16–25 min per step and 6–9 days per run (KAG several times more); peak RSS 6.1 GB.
+    - R/h = 16: needs about 25 GB for snapshots, over the 16 GB allocation.
+    - R/h = 32 (5.3 M cells): not feasible on one node.
+    - Per pass at R/h = 8: setup cut context 122–153 s; aggregation constraints 30–33 s; Newton 65–69 s (3 iterations, 13.3 s per Jacobian, 9.5 s of it cut volumes); cut rebuild 120–142 s; KAG curvature projection about 400 s each, 2–3 per pass.
+  - **Results-neutral speed-ups found by profiling** (raw data in `/scratch/users/zsexton/free-surface-benchmarks/profiling-3d/`):
+    1. cache `MeshAccess::globalEntityIdsAvailable()` (scans every cell and face, called per cell, region or fragment; about 60 s per rebuild);
+    2. make the KAG finite-difference diagnostic in `LevelSetCurvatureProjection.cpp` opt-in (131,760 strict cuts per projection; about 5 min each);
+    3. index fragments by cell in `buildGeneratedActiveBoundaryDomain` (about 56 s per rebuild);
+    4. hash the duplicate search in `collectLevelSetCurvatureSupplementalSamples` (about 30% of a KAG projection);
+    5. a stable-id map in `buildFreeSurfaceGeometrySnapshot` (about 23 s per rebuild);
+    6. stop the DOF-layout revision from invalidating the cut context every step (40% of a 3D tank step);
+    7. skip aggregation when the topology is unchanged;
+    8. classification-only records for fully dry cells (needed for R/h = 16 memory);
+    9. basis tabulation and cache keys (25–35% of assembly).
+
+    Items 1–5 bring a `SurfaceStress` pass to about 2 min, which is still 2–4 days per R/h = 8 run.
+  - **Open questions (for the user):**
+    1. 3D gating: R/h = 32 is not affordable, so gate at R/h = 16 with the order over 8/16, or report 3D without gating.
+    2. For R/h = 16 memory: implement item 8, or allow a job larger than 16 GB.
+    3. Keep the 3R box or move to 2.75R (23% fewer cells).
+    4. Make the wet-extension map output opt-in; it is about 37 MB per step at R/h = 8.
 - Optional accuracy improvement if spurious currents dominate: the Gross–Reusken improved Laplace–Beltrami (the projection uses a recovered, smoother normal).
 
 ### M3 — Dynamic capillarity
