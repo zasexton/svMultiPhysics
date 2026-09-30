@@ -1,0 +1,96 @@
+{
+  "benchmark": "static_drop_2d",
+  "milestone": "M2",
+  "fixed_on": "2026-09-29, before the first protocol run",
+  "levels": {
+    "R_over_h": [
+      8,
+      16,
+      32,
+      64
+    ]
+  },
+  "protocol": {
+    "laplace_numbers": [
+      12,
+      120
+    ],
+    "viscous_times": 5,
+    "snapshots": 100,
+    "time_step": "dt <= sqrt(rho*h^3/(4*pi*gamma)) = (1/sqrt(2)) * sqrt(rho*h^3/(2*pi*gamma)), rounded down so that the run is 100 equal output intervals",
+    "note": "Criteria apply separately to each (capillary form, Laplace number) refinement study. See README.md for the definitions and the cost of each level."
+  },
+  "criteria": [
+    {
+      "id": "pressure_jump",
+      "quantity": "pressure_jump_relative_error",
+      "definition": "|(p_in - p_ext) - gamma/R_eff| / (gamma/R_eff) at the end of the run. p_in is the area-weighted mean of the P1 pressure over the triangles lying entirely inside the disc of radius R_eff/2 about the liquid centroid; R_eff = sqrt(A/pi), A the exact area of {phi_h < 0}.",
+      "limit": 0.01,
+      "at_level": 32,
+      "minimum_observed_order": 1.0,
+      "order_levels": [
+        8,
+        16,
+        32
+      ],
+      "order_method": "least-squares slope of log(error) against log(R/h) over order_levels; pairwise orders are reported",
+      "source": "Decision D1 working criterion (tracker section 5, M2: pressure-jump error <= 1% at R/h = 32 with observed order >= 1)"
+    },
+    {
+      "id": "parasitic_capillary_number",
+      "quantity": "parasitic_capillary_number_final",
+      "definition": "Ca_sp = mu * max|u_h| / gamma, max over the vertices with phi_h < 0 (July spatial definition), taking the largest value over the outputs in the final quarter of the run (t > 3T/4).",
+      "at_level": "each",
+      "monotone": "strictly_decreasing",
+      "monotone_levels": [
+        8,
+        16,
+        32
+      ],
+      "source": "Decision of 2026-09-29 recorded in the tracker (section 5, M2): no absolute limit. The spurious flow must decrease strictly under refinement, and no_velocity_growth must hold; absolute values are reported. The earlier July-based limit was dropped because the July 'speed per surface tension' was a start-up transient in SI units, not a capillary number (see reference_july_2026 and README.md).",
+      "reference_july_2026": {
+        "document": "git show fc565279:Documentation/free_surface_level_set_review_20260713.md, line 238",
+        "runner": "tests/cases/fluid/open_vessel_free_surface/run_test05_velocity_growth_smoke.py --high-order-capillary-droplet-equilibrium-smoke, via run_fs16_physical_matrix.py (n = 8, 16, 32)",
+        "definition": "speed per surface tension = max over the vertices with initial phi < 0 of |u_h| in the last output, divided by gamma, in SI units (1/(Pa s))",
+        "setup": "SurfaceStress, R = 0.3 m circle centred in the unit box, Quad4 n x n cells (R/h = 2.4, 4.8, 9.6), high-order implicit cuts, rho = 998.2 kg/m^3, mu = 1.003e-3 Pa s, gamma = 0.5 N/m, La = 2.98e8, pressure preloaded to gamma/R, 3 steps of dt = 1e-3 s (t = 3e-3 s = 3.4e-8 viscous times)",
+        "values": {
+          "n8": 2.57998e-05,
+          "n16": 1.18936e-05,
+          "n32": 2.52693e-05
+        },
+        "as_capillary_number_mu_times_value": {
+          "n8": 2.5877e-08,
+          "n16": 1.1929e-08,
+          "n32": 2.5345e-08
+        },
+        "as_speed_over_sqrt_gamma_over_rho_R": {
+          "n8": 0.0003157,
+          "n16": 0.0001455,
+          "n32": 0.0003092
+        },
+        "startup_force_imbalance_rho_R2_u_over_gamma_t": {
+          "n8": 0.773,
+          "n16": 0.356,
+          "n32": 0.757
+        }
+      },
+      "per_level": "reported, not gated"
+    },
+    {
+      "id": "no_velocity_growth",
+      "quantity": "max_speed_growth_ratio",
+      "definition": "max|u_h| (liquid vertices) at the end of the run divided by the largest max|u_h| over the outputs in the third quarter of the run (T/2 <= t <= 3T/4). A ratio <= 1 means the final value lies within the envelope of the preceding quarter.",
+      "limit": 1.0,
+      "at_level": "each",
+      "source": "Decision D1 working criterion (tracker section 5, M2: no growth of max|u| in time)"
+    },
+    {
+      "id": "volume_drift",
+      "quantity": "liquid_area_relative_drift_max",
+      "definition": "max over all outputs of |A(t) - A(0)| / A(0), with A the exact area of {phi_h < 0} and A(0) that of the sampled initial level set in mesh/mesh-complete.mesh.vtu",
+      "limit": 0.0001,
+      "at_level": "each",
+      "source": "Decision D1 working criterion (tracker section 5, M2: volume drift <= 1e-4)"
+    }
+  ]
+}

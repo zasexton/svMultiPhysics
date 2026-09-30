@@ -190,6 +190,7 @@ The audit's AD-2 asked to "evaluate the alternatives on the same static and movi
 The data that do exist point in different directions:
 
 - **SurfaceStress** (Laplace–Beltrami on the generated interface, the current default) produced a closed drop with pressure-jump error 3.15% → 0.32% → 0.0067% at n = 8/16/32 (07-17). It was not accepted because speed/γ (about 1–2.6e-5) was nonmonotone and above a fixed 1e-5 gate.
+  - Correction (2026-09-29): that speed figure was read after only 3 steps of 1 ms, in SI units for water, at R/h ≤ 9.6. It measured the start-up transient, not a relaxed spurious current, so it says little either way about spurious currents. The pressure-jump convergence stands.
 - **KAG** on a sampled circle (09-04), measured after *one* step, gave 27% → 13% → 6.2%. This was with the analytic initial pressure; from zero pressure the result was about 114%.
 - For **moving contact lines** the order reverses. At resolution 16, KAG gave correct-sign Ren–E speeds (error 0.25–0.44), while SurfaceStress failed advancing cases (errors 128.66, and 17.38 with the wrong sign).
 
@@ -414,8 +415,20 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
 
 ### M2 — Capillary force route comparison and static drop (unfitted, 2D then 3D)
 
+- [x] **Benchmark written (2026-09-29):** `tests/cases/fluid/free_surface_benchmarks/static_drop_2d/`, with `generate_case.py`, `tolerances.json`, `verify.py`, a README and 10 synthetic-data tests.
+  - Setup: box `[0,3]²`, R = 1, a fixed off-grid centre to avoid vertex touches, and ρ = γ = 1.
+  - Laplace numbers 12 (primary) and 120, over 5 viscous times.
+  - Time step `Δt ≤ sqrt(ρh³/(4πγ))`, the capillary limit for a one-sided free surface.
+  - A dry run of all 24 cases validates against the parser.
+  - A smoke run at R/h = 8 with `SurfaceStress` (Sept 4 binary) accepted 5 of 5 steps, with pressure-jump error 0.14% and area drift 1.5e-7.
+  - Level-set advection uses the coupled velocity. Check this once against the wet-extension map at R/h = 8.
+- [ ] **Per-step cost must come down before the refinement study (added 2026-09-29).**
+  - The smoke run took 5.5 s per step on a 625-vertex 2D mesh. Each step needed 9–10 outer geometry passes against a cap of 12, driven by the 1e-10 absolute level-set gate, and wrote about 0.35 MB of log.
+  - Extrapolated, R/h = 32 at La = 12 needs about 6 days, and R/h = 64 needs weeks to months. The same cost limits M1, M3 and M4.
+  - Profile one R/h = 8 step, then reduce the unnecessary outer passes and per-step output. Any convergence gate must be scaled or derived rather than tuned (P1).
+  - Target: the La = 12 study at R/h = 8/16/32 completes within about a day.
 - [ ] **Protocol.**
-  - Static drop in a box, fluid initially at rest, with the Laplace number La = ργD/μ² swept (for example 120, 1,200, 12,000).
+  - Static drop in a box, fluid initially at rest. The Laplace number La = ργD/μ² is swept over 12 and 120; 1,200 and above are deferred until the per-step cost is reduced.
   - Start from the sampled analytic shape. No minimizer is required (D3).
   - R/h = 8, 16, 32, 64 in 2D.
   - Run to at least 5–10 viscous times `ρR²/μ` and report `max|u|(t)`.
@@ -431,9 +444,9 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - (c) **Unfiltered consistent-mass KAG**, for reference only.
   - **Fallback only if (a) and (b) both fail the D1 criteria:** KAG with the Helmholtz filter or a normal-gradient-stabilized mass. Its coefficient must be fixed once from dimensional scaling (P1), never tuned.
 - [ ] **Time step.** Check Δt against the capillary constraint (§3.6). If needed, add a semi-implicit surface-tension term (Bänsch/Hysing) or use Δt below the limit.
-- [ ] **Acceptance (proposal):**
+- [x] **Acceptance** (working criteria; fixed in `static_drop_2d/tolerances.json` on 2026-09-29):
   - pressure-jump error ≤ 1% at R/h = 32 with observed order ≥ 1;
-  - final `Ca_sp` decreasing with h, and not worse than the 07-17 SurfaceStress level (speed/γ about 1e-5);
+  - final `Ca_sp` strictly decreasing with h, with absolute values reported. There is no absolute limit (decided 2026-09-29), because the July speed/γ figure was a start-up transient in SI units, not a capillary number;
   - no growth of `max|u|` in time;
   - volume drift ≤ 1e-4.
 - [ ] **Selection.** After the M2 static drop, the M3 capillary wave, and the M4 sessile and Ren–E comparisons, record the chosen default route and the reason in §4.
