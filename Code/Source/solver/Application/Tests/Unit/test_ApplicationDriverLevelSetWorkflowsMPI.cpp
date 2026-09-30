@@ -2361,6 +2361,42 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
 }
 
 TEST(ApplicationDriverLevelSetWorkflowsMPI,
+     RepairToTargetWallConstraintFailsClosedOnEveryRank)
+{
+  int rank = 0;
+  int size = 1;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  ASSERT_GE(size, 2) << "This collective guard test requires two ranks.";
+
+  // Decision D4: only rank 0 holds a retired repair-to-target constraint,
+  // and every rank must reject the maintenance request together.
+  svmp::FE::level_set::LevelSetWallContactConstraint preserved{
+      .kind = svmp::FE::level_set::LevelSetWallContactConstraintKind::
+          PreserveAcceptedAngle,
+      .interface_marker = 1722,
+      .boundary_marker = 152,
+      .parent_cell_global_id = 30 + rank,
+      .geometry_revision = 74u,
+  };
+  auto retired = preserved;
+  retired.kind = svmp::FE::level_set::LevelSetWallContactConstraintKind::
+      RepairToPrescribedAngle;
+  const svmp::MeshComm comm(MPI_COMM_WORLD);
+  const std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
+      all_preserved{preserved};
+  EXPECT_NO_THROW(requireAnglePreservingWallMaintenance(
+      all_preserved, comm, "phi"));
+  const std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
+      mixed{rank == 0 ? retired : preserved};
+  EXPECT_THROW(requireAnglePreservingWallMaintenance(mixed, comm, "phi"),
+               std::logic_error);
+}
+
+// The prescribed physical frame built below is read only by the retired
+// repair-to-target kind (decision D4); production harvests
+// PreserveAcceptedAngle constraints without it.
+TEST(ApplicationDriverLevelSetWorkflowsMPI,
      AcceptedSnapshotPrescribedFrameIsPartitionInvariantAndConflictsFailClosed)
 {
   int rank = 0;

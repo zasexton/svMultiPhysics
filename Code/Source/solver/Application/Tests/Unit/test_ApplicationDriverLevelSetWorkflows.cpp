@@ -14280,6 +14280,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
 #endif
 }
 
+// The prescribed physical frame is read only by the retired repair-to-target
+// kind (decision D4).  It stays tested until that kind is removed after M4.
 TEST(ApplicationDriverLevelSetWorkflows,
      AcceptedSnapshotPrescribedFrameIsCompleteAndFailsClosed)
 {
@@ -14374,6 +14376,40 @@ TEST(ApplicationDriverLevelSetWorkflows,
           stale,
           svmp::FE::level_set::LevelSetWallContactConstraintKind::
               RepairToPrescribedAngle,
+          interface_marker,
+          revision,
+          parameters,
+          /*dimension=*/2),
+      std::runtime_error);
+
+  // Production (decision D4) harvests PreserveAcceptedAngle constraints.
+  // They carry only the accepted identity: no target angle or frame is read,
+  // so a missing Young datum or a degenerate rule does not matter.
+  const auto preserved = makeAcceptedSnapshotWallConstraint(
+      missing,
+      svmp::FE::level_set::LevelSetWallContactConstraintKind::
+          PreserveAcceptedAngle,
+      interface_marker,
+      revision,
+      svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters{},
+      /*dimension=*/2);
+  EXPECT_EQ(preserved.kind,
+            svmp::FE::level_set::LevelSetWallContactConstraintKind::
+                PreserveAcceptedAngle);
+  EXPECT_EQ(preserved.parent_cell_global_id, parent);
+  EXPECT_EQ(preserved.geometry_revision, revision);
+  EXPECT_DOUBLE_EQ(preserved.target_angle_radians, 0.0);
+  EXPECT_EQ(preserved.physical_wall_normal,
+            (std::array<svmp::FE::Real, 3>{{0.0, 0.0, 0.0}}));
+  EXPECT_TRUE(acceptedWallConstraintFrameIsComplete(
+      preserved,
+      svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters{},
+      /*dimension=*/2));
+  EXPECT_THROW(
+      (void)makeAcceptedSnapshotWallConstraint(
+          stale,
+          svmp::FE::level_set::LevelSetWallContactConstraintKind::
+              PreserveAcceptedAngle,
           interface_marker,
           revision,
           parameters,
@@ -14522,35 +14558,32 @@ TEST(ApplicationDriverLevelSetWorkflows,
   ASSERT_TRUE(staged.repair.converged);
   ASSERT_EQ(staged.wall_context.local_constraints.size(), 2u);
   EXPECT_EQ(staged.wall_context.global_prescribed_contact_rules, 2u);
+  // Decision D4: the prescribed wall is maintained by rescaling only.  No
+  // target angle or repair frame reaches the projection.
   for (const auto& constraint : staged.wall_context.local_constraints) {
-    EXPECT_DOUBLE_EQ(
-        constraint.target_angle_radians,
-        svmp::FE::Real{1.57079632679489661923132169163975144});
+    EXPECT_EQ(constraint.kind,
+              svmp::FE::level_set::LevelSetWallContactConstraintKind::
+                  PreserveAcceptedAngle);
+    EXPECT_DOUBLE_EQ(constraint.target_angle_radians, 0.0);
     EXPECT_TRUE(acceptedWallConstraintFrameIsComplete(
         constraint,
         parameters,
         /*dimension=*/2));
-    EXPECT_NE(std::abs(constraint.accepted_contact_line_tangent[2]), 0.0);
   }
-  EXPECT_LE(staged.repair.max_prescribed_contact_value_residual,
-            svmp::FE::Real{1.0e-9});
-  EXPECT_LE(staged.repair.max_prescribed_contact_angle_error_radians,
+  EXPECT_TRUE(staged.repair.wall_contact_constraints_satisfied);
+  EXPECT_LE(staged.repair.max_wall_contact_scale_residual,
             svmp::FE::Real{1.0e-12});
-  EXPECT_DOUBLE_EQ(staged.repair.max_contact_line_displacement,
+  EXPECT_DOUBLE_EQ(staged.repair.max_prescribed_contact_value_residual,
                    svmp::FE::Real{0.0});
-  ::testing::Test::RecordProperty(
-      "application_prescribed_target_angle_max_error_degrees",
-      staged.repair.max_prescribed_contact_angle_error_radians *
-          svmp::FE::Real{180.0} /
-          std::acos(svmp::FE::Real{-1.0}));
-  ::testing::Test::RecordProperty(
-      "application_prescribed_target_contact_displacement_max",
-      staged.repair.max_contact_line_displacement);
+  EXPECT_DOUBLE_EQ(staged.repair.max_prescribed_contact_angle_error_radians,
+                   svmp::FE::Real{0.0});
   testing::internal::CaptureStdout();
   const bool changed = applyLevelSetMaintenance(sim, history, requests);
   const auto output = testing::internal::GetCapturedStdout();
   ASSERT_TRUE(changed);
   EXPECT_NE(output.find("wall_contact_model=prescribed_angle"),
+            std::string::npos);
+  EXPECT_NE(output.find("wall_contact_maintenance=preserve_accepted_angle"),
             std::string::npos);
   EXPECT_NE(output.find("prescribed_contact_rules=2"),
             std::string::npos);
@@ -14586,6 +14619,298 @@ TEST(ApplicationDriverLevelSetWorkflows,
           {}),
       std::runtime_error);
 #endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     PrescribedWallMaintenancePreservesAcceptedContactPointAndAngle)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  // Decision D4: endpoint maintenance of a PrescribedAngle wall keeps the
+  // accepted contact points and angles (about 100.6 and 82.9 degrees here)
+  // instead of resetting them to the declared 60 degree Young angle.  The
+  // momentum Young term is the only contact-angle mechanism.
+  constexpr int wall_marker = 31;
+  constexpr int interface_marker = 707;
+  const svmp::FE::Real pi = std::acos(svmp::FE::Real{-1.0});
+  const svmp::FE::Real young_angle = pi / svmp::FE::Real{3.0};
+  auto mesh = makeWorkflowQuadPatch2x2Mesh();
+  for (const auto face : mesh->local_mesh().boundary_faces()) {
+    mesh->local_mesh().set_boundary_label(face, wall_marker);
+  }
+  const auto mesh_field = svmp::MeshFields::attach_field(
+      mesh->local_mesh(),
+      svmp::EntityKind::Vertex,
+      "phi",
+      svmp::FieldScalarType::Float64,
+      1);
+  ASSERT_NE(svmp::MeshFields::field_data_as<svmp::real_t>(
+                mesh->local_mesh(), mesh_field),
+            nullptr);
+
+  auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
+      svmp::FE::ElementType::Quad4,
+      /*order=*/1);
+  auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
+  const auto phi = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "phi",
+      .space = scalar_space,
+      .components = 1});
+  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+  parameters.liquid_side =
+      svmp::FE::geometry::CutIntegrationSide::Negative;
+  parameters.surface_tension = svmp::FE::Real{1.0};
+  parameters.young_wall_coefficients.push_back(
+      svmp::FE::interfaces::FreeSurfaceYoungWallCoefficient{
+          .boundary_marker = wall_marker,
+          .equilibrium_contact_angle_radians = young_angle,
+      });
+  system->declareFreeSurfaceDiscreteFunctional(
+      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+          .interface_marker = interface_marker,
+          .level_set_field = phi,
+          .geometry_domain_id = "prescribed_wall_angle_preserving",
+          .parameters = parameters,
+          .owner_component =
+              "ApplicationDriverLevelSetWorkflows.PrescribedWallAnglePreserving",
+      });
+  svmp::FE::interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey key{};
+  key.source =
+      svmp::FE::interfaces::LevelSetInterfaceSource::fromField(phi);
+  key.domain_id = "prescribed_wall_angle_preserving";
+  key.isovalue = 0.0;
+  key.interface_marker = interface_marker;
+  key.boundary_marker = wall_marker;
+  system->registerGeneratedEmbeddedInterfaceMarker(
+      svmp::FE::interfaces::
+          stableGeneratedInterfaceBoundaryIntersectionMarker(key));
+  ASSERT_NO_THROW(system->setup({}));
+
+  // A tilted interface x = 0.6 + 0.15 y with a nonuniform gradient
+  // magnitude, so the redistancing has work to do in and next to the
+  // contact cells.
+  std::vector<svmp::FE::Real> vertex_values(mesh->n_vertices(), 0.0);
+  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+    const auto point = workflowVertexPoint(*mesh, vertex);
+    vertex_values[vertex] =
+        (svmp::FE::Real{2.0} + svmp::FE::Real{0.5} * point[1]) *
+        (point[0] - svmp::FE::Real{0.6} - svmp::FE::Real{0.15} * point[1]);
+  }
+  const auto coefficients = projectWorkflowVertexValues(
+      *system,
+      phi,
+      vertex_values,
+      /*components=*/1u,
+      "ApplicationDriver angle-preserving prescribed-wall phi");
+  std::vector<svmp::FE::Real> solution(
+      static_cast<std::size_t>(system->dofHandler().getNumDofs()), 0.0);
+  writeWorkflowFieldSlice(*system, phi, coefficients, solution);
+
+  application::core::SimulationComponents sim;
+  sim.primary_mesh = mesh;
+  sim.fe_system = std::move(system);
+  auto params = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi</Level_set_field_name>
+      <Generated_interface_domain_id>prescribed_wall_angle_preserving</Generated_interface_domain_id>
+      <Interface_marker>707</Interface_marker>
+      <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
+      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+  ASSERT_NO_THROW((void)refreshActiveCutIntegrationContextFromSolution(
+      sim,
+      *params,
+      std::span<const svmp::FE::Real>(solution.data(), solution.size()),
+      lifecycle,
+      "application-driver-angle-preserving-prescribed-wall-before"));
+
+  struct AcceptedContact {
+    std::array<svmp::FE::Real, 3> point{};
+    svmp::FE::Real angle{0.0};
+  };
+  // Contact point and through-liquid angle of every retained contact rule:
+  // cos(theta) = -dot(n, n_wall) with the liquid on the negative side.
+  const auto accepted_contacts = [&]() {
+    std::map<svmp::FE::GlobalIndex, AcceptedContact> contacts;
+    const auto* context = sim.fe_system->cutIntegrationContext();
+    if (context == nullptr) {
+      ADD_FAILURE() << "no cut integration context";
+      return contacts;
+    }
+    for (const auto& snapshot : context->freeSurfaceGeometrySnapshots()) {
+      if (!snapshot) {
+        continue;
+      }
+      for (const auto& record : snapshot->rules()) {
+        if (record.role != svmp::FE::interfaces::
+                               FreeSurfaceGeometryRuleRole::Contact ||
+            record.retention != svmp::FE::interfaces::
+                                    FreeSurfaceGeometryRetention::Retained ||
+            record.physical_boundary_marker != wall_marker) {
+          continue;
+        }
+        EXPECT_EQ(record.physical_rule.points.size(), 1u);
+        if (record.physical_rule.points.empty()) {
+          continue;
+        }
+        const auto& sample = record.physical_rule.points.front();
+        const auto dot = [](const auto& a, const auto& b) {
+          return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        };
+        const auto cosine =
+            -dot(sample.normal, sample.boundary_normal) /
+            std::sqrt(dot(sample.normal, sample.normal) *
+                      dot(sample.boundary_normal, sample.boundary_normal));
+        contacts.emplace(
+            record.reference_rule.provenance.parent_entity_global_id,
+            AcceptedContact{
+                .point = sample.physical_point,
+                .angle = std::acos(std::clamp(
+                    cosine, svmp::FE::Real{-1.0}, svmp::FE::Real{1.0})),
+            });
+      }
+    }
+    return contacts;
+  };
+  const auto before = accepted_contacts();
+  ASSERT_EQ(before.size(), 2u);
+  for (const auto& [parent, contact] : before) {
+    SCOPED_TRACE(parent);
+    const bool bottom = contact.point[1] < svmp::FE::Real{1.0};
+    EXPECT_NEAR(contact.point[0],
+                bottom ? svmp::FE::Real{0.6} : svmp::FE::Real{0.9},
+                1.0e-12);
+    EXPECT_GT(std::abs(contact.angle - young_angle),
+              svmp::FE::Real{20.0} * pi / svmp::FE::Real{180.0});
+  }
+
+  auto factory = svmp::FE::backends::BackendFactory::create(
+      svmp::FE::backends::BackendKind::FSILS);
+  ASSERT_NE(factory, nullptr);
+  auto history = svmp::FE::timestepping::TimeHistory::allocate(
+      *factory, sim.fe_system->dofHandler().getNumDofs());
+  history.setTime(0.1);
+  history.setDt(0.05);
+  history.setPrevDt(0.05);
+  history.setStepIndex(1);
+  scatterFeOrderedSolution(history.u(), solution);
+  scatterFeOrderedSolution(history.uPrev(), solution);
+  scatterFeOrderedSolution(history.uPrev2(), solution);
+
+  application::core::ResolvedLevelSetMaintenanceCompatibilityConfiguration request_configuration;
+  request_configuration.transport.level_set.field_name = "phi";
+  request_configuration.transport.reinitialization.enabled = true;
+  request_configuration.transport.reinitialization.cadence_steps = 1;
+  request_configuration.transport.reinitialization.max_iterations = 100;
+  request_configuration.transport.reinitialization.signed_distance_tolerance = 1.0e-10;
+  auto request = freezeMaintenanceConfiguration(
+      std::move(request_configuration));
+  auto staged_solution = solution;
+  const auto staged = stageLevelSetProjectionReinitialization(
+      sim,
+      history,
+      request,
+      phi,
+      svmp::FE::Real{0.1},
+      staged_solution,
+      {},
+      {},
+      {});
+  ASSERT_TRUE(staged.repair.success) << staged.repair.diagnostic;
+  ASSERT_TRUE(staged.repair.converged) << staged.repair.diagnostic;
+  ASSERT_TRUE(staged.applied);
+  ASSERT_EQ(staged.wall_context.local_constraints.size(), 2u);
+  EXPECT_EQ(staged.wall_context.global_prescribed_contact_rules, 2u);
+  for (const auto& constraint : staged.wall_context.local_constraints) {
+    EXPECT_EQ(constraint.kind,
+              svmp::FE::level_set::LevelSetWallContactConstraintKind::
+                  PreserveAcceptedAngle);
+  }
+  EXPECT_TRUE(staged.repair.wall_contact_constraints_satisfied);
+  EXPECT_EQ(staged.repair.wall_contact_cells, 2u);
+  EXPECT_LE(staged.repair.max_wall_contact_scale_residual,
+            svmp::FE::Real{1.0e-12});
+  EXPECT_DOUBLE_EQ(staged.repair.max_prescribed_contact_angle_error_radians,
+                   svmp::FE::Real{0.0});
+  EXPECT_GT(staged.repair.max_abs_update, svmp::FE::Real{0.1});
+
+  ASSERT_NO_THROW((void)refreshActiveCutIntegrationContextFromSolution(
+      sim,
+      *params,
+      std::span<const svmp::FE::Real>(
+          staged_solution.data(), staged_solution.size()),
+      lifecycle,
+      "application-driver-angle-preserving-prescribed-wall-after"));
+  const auto after = accepted_contacts();
+  ASSERT_EQ(after.size(), before.size());
+  svmp::FE::Real max_contact_displacement = 0.0;
+  svmp::FE::Real max_angle_change = 0.0;
+  for (const auto& [parent, contact] : before) {
+    const auto found = after.find(parent);
+    ASSERT_NE(found, after.end()) << "parent " << parent;
+    max_contact_displacement = std::max(
+        max_contact_displacement,
+        std::hypot(found->second.point[0] - contact.point[0],
+                   found->second.point[1] - contact.point[1]));
+    max_angle_change = std::max(
+        max_angle_change, std::abs(found->second.angle - contact.angle));
+    EXPECT_GT(std::abs(found->second.angle - young_angle),
+              svmp::FE::Real{20.0} * pi / svmp::FE::Real{180.0});
+  }
+  EXPECT_LE(max_contact_displacement, 1.0e-12);
+  EXPECT_LE(max_angle_change, 1.0e-12);
+  ::testing::Test::RecordProperty(
+      "application_prescribed_preserved_contact_displacement_max",
+      ::testing::PrintToString(max_contact_displacement));
+  ::testing::Test::RecordProperty(
+      "application_prescribed_preserved_angle_change_max_degrees",
+      ::testing::PrintToString(max_angle_change * svmp::FE::Real{180.0} /
+                               pi));
+#endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     ProductionWallMaintenanceRejectsRepairToTargetConstraints)
+{
+  // Decision D4: production redistancing only rescales accepted contact
+  // cells.  The retired repair-to-target kind fails closed.
+  const svmp::FE::level_set::LevelSetWallContactConstraint preserved{
+      .kind = svmp::FE::level_set::LevelSetWallContactConstraintKind::
+          PreserveAcceptedAngle,
+      .interface_marker = 708,
+      .boundary_marker = 32,
+      .parent_cell_global_id = 3,
+      .geometry_revision = 5u,
+  };
+  auto retired = preserved;
+  retired.kind = svmp::FE::level_set::LevelSetWallContactConstraintKind::
+      RepairToPrescribedAngle;
+  const std::vector none{preserved};
+  EXPECT_NO_THROW(requireAnglePreservingWallMaintenance(
+      std::span<const svmp::FE::level_set::LevelSetWallContactConstraint>{},
+      svmp::MeshComm::world(),
+      "phi"));
+  EXPECT_NO_THROW(requireAnglePreservingWallMaintenance(
+      none, svmp::MeshComm::world(), "phi"));
+  const std::vector mixed{preserved, retired};
+  try {
+    requireAnglePreservingWallMaintenance(
+        mixed, svmp::MeshComm::world(), "phi");
+    ADD_FAILURE() << "a repair-to-target constraint was accepted";
+  } catch (const std::logic_error& error) {
+    EXPECT_NE(std::string(error.what()).find("decision D4"),
+              std::string::npos);
+  }
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
@@ -20872,7 +21197,7 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
       constraints{{
           svmp::FE::level_set::LevelSetWallContactConstraint{
               .kind = svmp::FE::level_set::
-                  LevelSetWallContactConstraintKind::RepairToPrescribedAngle,
+                  LevelSetWallContactConstraintKind::PreserveAcceptedAngle,
               .interface_marker = 911,
               .boundary_marker = 41,
               .parent_cell_global_id = parent_global_id,

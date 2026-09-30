@@ -12796,6 +12796,11 @@ makeAcceptedSnapshotWallConstraint(
       .parent_cell_global_id = parent,
       .geometry_revision = snapshot_revision,
   };
+  // Production maintenance uses PreserveAcceptedAngle for every contact law
+  // (decision D4): it needs only the accepted identity above.  The physical
+  // frame below serves the retired repair-to-target kind, which production
+  // redistancing rejects (requireAnglePreservingWallMaintenance); it is
+  // removed together with that kind after milestone M4.
   if (kind != Kind::RepairToPrescribedAngle) {
     return constraint;
   }
@@ -13155,6 +13160,33 @@ canonicalizeAcceptedWallConstraints(
   return unique;
 }
 
+// Decision D4 gives the contact angle one owner, the momentum-side Young
+// term.  Production redistancing may therefore only rescale accepted contact
+// cells.  The retired repair-to-target kind would reset them to the declared
+// angle and so combine a second, geometric angle mechanism with the Young
+// term; it fails closed on every rank.
+void requireAnglePreservingWallMaintenance(
+    std::span<const svmp::FE::level_set::LevelSetWallContactConstraint>
+        constraints,
+    const svmp::MeshComm& comm,
+    std::string_view field_name)
+{
+  const bool local_angle_preserving = std::all_of(
+      constraints.begin(), constraints.end(), [](const auto& constraint) {
+        return constraint.kind ==
+               svmp::FE::level_set::LevelSetWallContactConstraintKind::
+                   PreserveAcceptedAngle;
+      });
+  if (globalMinDouble(local_angle_preserving ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::logic_error(
+        "[svMultiPhysics::Application] Wall-aware level-set maintenance for field '" +
+        std::string(field_name) +
+        "' received a repair-to-target wall-contact constraint.  Production "
+        "maintenance only rescales accepted contact cells; the momentum "
+        "Young term is the sole contact-angle mechanism (decision D4).");
+  }
+}
+
 std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
 captureAcceptedContactStageWallConstraints(
     application::core::SimulationComponents& sim,
@@ -13444,19 +13476,29 @@ resolveLevelSetWallAwareMaintenanceContext(
         "[svMultiPhysics::Application] Wall-aware level-set maintenance requires unique accepted contact stages with nonnegative interface markers.");
   }
 
+  // Decision D4: the momentum-side Young term is the only owner of the
+  // contact angle.  Every contact wall, prescribed or dynamic, is therefore
+  // maintained by PreserveAcceptedAngle, which only rescales the accepted
+  // contact cells.  Walls differ only in which accepted state supplies their
+  // contact rules.
+  enum class WallContactRuleSource : std::uint8_t {
+    EndpointSnapshot,
+    AcceptedDynamicStage
+  };
+  constexpr auto preserve_accepted_angle =
+      svmp::FE::level_set::LevelSetWallContactConstraintKind::
+          PreserveAcceptedAngle;
   bool dynamic_stage_initialized = false;
   for (const auto& declaration : declarations) {
     if (declaration.level_set_field != level_set_field) {
       continue;
     }
-    std::map<int, svmp::FE::level_set::LevelSetWallContactConstraintKind>
-        contact_law_by_wall;
+    std::map<int, WallContactRuleSource> contact_source_by_wall;
     for (const auto& coefficient :
          declaration.parameters.young_wall_coefficients) {
-      contact_law_by_wall.emplace(
+      contact_source_by_wall.emplace(
           coefficient.boundary_marker,
-          svmp::FE::level_set::LevelSetWallContactConstraintKind::
-              RepairToPrescribedAngle);
+          WallContactRuleSource::EndpointSnapshot);
     }
     for (const auto& coefficient :
          declaration.parameters.dynamic_contact_coefficients) {
@@ -13467,11 +13509,10 @@ resolveLevelSetWallAwareMaintenanceContext(
       // A dynamic law supersedes the equilibrium Young datum on the same
       // wall.  The latter remains the momentum-side energy coefficient; the
       // accepted stage owns the redistancing geometry.
-      contact_law_by_wall[coefficient.boundary_marker] =
-          svmp::FE::level_set::LevelSetWallContactConstraintKind::
-              PreserveAcceptedAngle;
+      contact_source_by_wall[coefficient.boundary_marker] =
+          WallContactRuleSource::AcceptedDynamicStage;
     }
-    if (contact_law_by_wall.empty()) {
+    if (contact_source_by_wall.empty()) {
       continue;
     }
 
@@ -13633,11 +13674,14 @@ resolveLevelSetWallAwareMaintenanceContext(
         if (constraint.interface_marker != declaration.interface_marker) {
           continue;
         }
-        const auto law =
-            contact_law_by_wall.find(constraint.boundary_marker);
+        const auto source =
+            contact_source_by_wall.find(constraint.boundary_marker);
+        const bool accepted_stage_wall =
+            source != contact_source_by_wall.end() &&
+            source->second == WallContactRuleSource::AcceptedDynamicStage &&
+            constraint.kind == preserve_accepted_angle;
         local_constraints_valid =
-            law != contact_law_by_wall.end() &&
-            law->second == constraint.kind &&
+            accepted_stage_wall &&
             constraint.parent_cell_global_id !=
                 svmp::FE::INVALID_GLOBAL_INDEX &&
             constraint.geometry_revision ==
@@ -13648,8 +13692,7 @@ resolveLevelSetWallAwareMaintenanceContext(
                 declaration.parameters,
                 sim.fe_system->meshAccess().dimension()) &&
             local_constraints_valid;
-        if (law == contact_law_by_wall.end() ||
-            law->second != constraint.kind ||
+        if (!accepted_stage_wall ||
             constraint.parent_cell_global_id ==
                 svmp::FE::INVALID_GLOBAL_INDEX ||
             constraint.geometry_revision !=
@@ -13676,9 +13719,8 @@ resolveLevelSetWallAwareMaintenanceContext(
         resolved.local_constraints.push_back(constraint);
         ++local_rule_count_by_wall[constraint.boundary_marker];
       }
-      for (const auto& [boundary_marker, kind] : contact_law_by_wall) {
-        if (kind == svmp::FE::level_set::
-                        LevelSetWallContactConstraintKind::RepairToPrescribedAngle) {
+      for (const auto& [boundary_marker, source] : contact_source_by_wall) {
+        if (source != WallContactRuleSource::AcceptedDynamicStage) {
           continue;
         }
         const auto global_rule_count = globalSumSize(
@@ -13775,9 +13817,8 @@ resolveLevelSetWallAwareMaintenanceContext(
           "[svMultiPhysics::Application] Wall-aware level-set maintenance snapshot provenance does not match interface marker " +
           std::to_string(declaration.interface_marker) + ".");
     }
-    for (const auto& [boundary_marker, kind] : contact_law_by_wall) {
-      if (kind != svmp::FE::level_set::
-                      LevelSetWallContactConstraintKind::RepairToPrescribedAngle) {
+    for (const auto& [boundary_marker, source] : contact_source_by_wall) {
+      if (source != WallContactRuleSource::EndpointSnapshot) {
         continue;
       }
       std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
@@ -13805,7 +13846,7 @@ resolveLevelSetWallAwareMaintenanceContext(
         try {
           wall_constraints.push_back(makeAcceptedSnapshotWallConstraint(
               record,
-              kind,
+              preserve_accepted_angle,
               declaration.interface_marker,
               snapshot_revision,
               declaration.parameters,
@@ -13821,7 +13862,7 @@ resolveLevelSetWallAwareMaintenanceContext(
       }
       if (globalMinDouble(local_frames_valid ? 1.0 : 0.0, comm) != 1.0) {
         throw std::runtime_error(
-            "[svMultiPhysics::Application] Wall-aware level-set maintenance rejected an unavailable, degenerate, or stale prescribed physical contact frame" +
+            "[svMultiPhysics::Application] Wall-aware level-set maintenance rejected a prescribed-angle contact rule with incomplete or stale provenance" +
             (local_frame_diagnostic.empty()
                  ? std::string{"."}
                  : std::string{": "} + local_frame_diagnostic));
@@ -14864,6 +14905,10 @@ stageLevelSetProjectionReinitialization(
     reinitialization_input = accepted_contact_stage_solution;
   }
 
+  requireAnglePreservingWallMaintenance(
+      staged.wall_context.local_constraints,
+      comm,
+      request.configuration->transport.level_set.field_name);
   std::vector<svmp::FE::Real> repaired;
   staged.repair =
       svmp::FE::level_set::repairLevelSetSignedDistanceByProjection(
@@ -15162,6 +15207,10 @@ bool applyLevelSetMaintenance(
                   : (wall_context.has_global_contact_constraints
                          ? "prescribed_angle"
                          : "none"))
+          << " wall_contact_maintenance="
+          << (wall_context.has_global_contact_constraints
+                  ? "preserve_accepted_angle"
+                  : "none")
           << " accepted_contact_stage_alpha_f="
           << (wall_context.requires_accepted_dynamic_stage
                   ? wall_context.stage_alpha_f
