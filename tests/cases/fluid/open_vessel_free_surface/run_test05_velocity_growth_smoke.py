@@ -2093,17 +2093,16 @@ def configure_sessile_solver_xml(case_dir: Path,
              f"{equilibrium_angle_degrees:.16g}")
     set_text(free_surface, "Active_domain_smoothing_width",
              f"{smoothing_width:.16g}")
+    # Decision D4: both contact laws move the contact line through Navier
+    # slip on the wetted wall; only the dynamic law adds line friction.
+    set_text(free_surface, "Wall_slip_model", "Navier")
+    set_text(free_surface, "Wall_slip_length", f"{slip_length:.16g}")
     if contact_line_model == "dynamic":
         set_text(free_surface, "Contact_line_mobility", f"{mobility:.16g}")
-        set_text(free_surface, "Wall_slip_model", "Navier")
-        set_text(free_surface, "Wall_slip_length", f"{slip_length:.16g}")
     else:
-        for name in (
-                "Contact_line_mobility", "Wall_slip_model",
-                "Wall_slip_length"):
-            element = free_surface.find(name)
-            if element is not None:
-                free_surface.remove(element)
+        element = free_surface.find("Contact_line_mobility")
+        if element is not None:
+            free_surface.remove(element)
 
     ET.indent(tree, space="  ")
     tree.write(solver_xml, encoding="utf-8", xml_declaration=True)
@@ -2382,8 +2381,10 @@ def write_sessile2d_case(case_dir: Path,
                 "line_friction": 1.0 / mobility,
                 "slip_length": slip_length,
             } if contact_line_model == "dynamic" else {
+                "wall_slip_model": "Navier",
+                "slip_length": slip_length,
                 "level_set_geometry_owner": (
-                    "accepted_state_wall_aware_repair"),
+                    "none_angle_preserving_wall_maintenance"),
                 "momentum_owner": "young_wall_energy",
             }),
             "curvature_projection_narrow_band_width": 1.0 / max(nx, ny),

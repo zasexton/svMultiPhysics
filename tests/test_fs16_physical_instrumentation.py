@@ -589,14 +589,16 @@ def test_stationary_sessile_case_supports_prescribed_contact_angle_ownership():
             "Contact_line_model") == "PrescribedContactAngle"
         assert level_set.findtext("Enable_bound_preserving_limiter") == "false"
         assert free_surface.find("Contact_line_mobility") is None
-        assert free_surface.find("Wall_slip_model") is None
-        assert free_surface.find("Wall_slip_length") is None
+        # Decision D4: prescribed contact lines move through Navier slip.
+        assert free_surface.findtext("Wall_slip_model") == "Navier"
+        assert free_surface.findtext("Wall_slip_length") == "0.1"
 
         benchmark = runner.load_benchmark(case_dir)
         contact = benchmark["sessile_contact"]
         assert contact["contact_line_model"] == "PrescribedContactAngle"
+        assert contact["slip_length"] == 0.1
         assert contact["level_set_geometry_owner"] == (
-            "accepted_state_wall_aware_repair")
+            "none_angle_preserving_wall_maintenance")
         assert contact["momentum_owner"] == "young_wall_energy"
         assert "mobility" not in contact
         assert "ren_e_relation" not in contact

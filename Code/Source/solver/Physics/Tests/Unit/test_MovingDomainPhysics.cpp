@@ -119,12 +119,31 @@ FreeSurfaceContactLine pinnedContactLine(int wall_marker = -1,
     };
 }
 
+// Decision D4: an unfitted prescribed contact angle requires Navier slip on
+// the wetted wall and a strong zero normal-only velocity condition on a
+// planar wall.  The helpers below supply both; a test that wants the rejected
+// no-slip configuration passes slip_length = std::nullopt.
+constexpr FE::Real kPrescribedContactSlipLength = FE::Real{0.2};
+
+void addNormalOnlyWallCondition(
+    ns::IncompressibleNavierStokesVMSOptions& options,
+    int wall_marker,
+    const std::array<FE::Real, 3>& wall_normal)
+{
+    ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC wall{};
+    wall.boundary_marker = wall_marker;
+    for (std::size_t axis = 0; axis < 3u; ++axis) {
+        wall.active_components[axis] = std::abs(wall_normal[axis]) > 0.5;
+    }
+    options.velocity_dirichlet.push_back(wall);
+}
+
 FreeSurfaceContactLine prescribedContactLine(
     int wall_marker,
     FE::Real angle,
     std::array<FE::Real, 3> wall_normal,
     int contact_marker = -1,
-    std::optional<FE::Real> slip_length = std::nullopt)
+    std::optional<FE::Real> slip_length = kPrescribedContactSlipLength)
 {
     return FreeSurfaceContactLine{
         .configuration = FreeSurfaceContactLine::PrescribedAngle{
@@ -1515,14 +1534,13 @@ void expectInvalidPreinstalledContactGeometryRejectedBeforeMutation(
     auto pressure_space = makePressureSpace(mesh);
     auto options = baseNavierStokesOptions();
     options.enable_convection = false;
-    if (dynamic) {
-        options.velocity_dirichlet.push_back(
-            ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
-                .boundary_marker = wall_marker,
-                .value = {0.0, 0.0, 0.0},
-                .active_components = {false, false, true},
-            });
-    }
+    // Both contact laws require a strong normal-only wall condition (D4).
+    options.velocity_dirichlet.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
+            .boundary_marker = wall_marker,
+            .value = {0.0, 0.0, 0.0},
+            .active_components = {false, false, true},
+        });
     auto boundary =
         ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
             .implementation =
@@ -2128,11 +2146,24 @@ std::vector<FE::Real> unfittedContactAngleResidualVector(
 {
     constexpr int interface_marker = 66;
     constexpr int wall_marker = 16;
-    const auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(wall_marker);
+    // D4 requires a planar wall whose faces carry the configured outward
+    // normal: the tetra's wall face points to -z, or to +z when reversed.
+    if (std::abs(std::abs(outward_wall_normal[2]) - FE::Real{1.0}) >
+        FE::Real{1.0e-14}) {
+        throw std::invalid_argument(
+            "unfittedContactAngleResidualVector supports only +-z walls");
+    }
+    const auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(
+        wall_marker,
+        /*expose_all_faces=*/false,
+        /*reverse_wall_orientation=*/outward_wall_normal[2] > 0.0);
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
     opts.enable_convection = false;
+    // The wall condition is independent of the contact law, so the runs with
+    // and without the contact line share it.
+    addNormalOnlyWallCondition(opts, wall_marker, outward_wall_normal);
 
     auto free_surface =
         ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
@@ -2210,7 +2241,11 @@ std::vector<FE::Real> unfittedContactAngleResidualVector(
         contact_marker,
         phi,
         outward_wall_normal,
-        generated_interface_normal.value_or(level_set_gradient)));
+        generated_interface_normal.value_or(level_set_gradient),
+        /*contact_point=*/{0.10, 0.20, 0.30},
+        /*contact_tangent=*/{1.0, 0.0, 0.0},
+        FE::geometry::CutIntegrationSide::Negative,
+        /*active_boundary_measure=*/FE::Real{0.25}));
     system.setup({}, makeSingleTetraSetupInputs());
     if (kappa != FE::INVALID_FIELD_ID) {
         system.setPrescribedFieldCoefficients(
@@ -11133,11 +11168,14 @@ TEST(MovingDomainPhysics,
 {
     constexpr int interface_marker = 44;
     constexpr int wall_marker = 12;
-    const auto mesh = makeMesh();
+    constexpr std::array<FE::Real, 3> wall_normal{0.0, 0.0, -1.0};
+    const auto mesh =
+        std::make_shared<SingleTetraBoundaryMeshAccess>(wall_marker);
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
     opts.enable_convection = false;
+    addNormalOnlyWallCondition(opts, wall_marker, wall_normal);
 
     opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
         .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
@@ -11148,7 +11186,7 @@ TEST(MovingDomainPhysics,
             prescribedContactLine(
                 wall_marker,
                 1.0471975511965977462,
-                {1.0, 0.0, 0.0}),
+                wall_normal),
         },
     });
 
@@ -11290,8 +11328,13 @@ TEST(MovingDomainPhysics,
             .parameters.young_wall_coefficients.front()
             .boundary_marker,
         wall_marker);
-    EXPECT_TRUE(
-        declarations.front().parameters.dynamic_contact_coefficients.empty());
+    // The required Navier slip records the wall's slip dissipation law.
+    ASSERT_EQ(
+        declarations.front().parameters.dynamic_contact_coefficients.size(),
+        1u);
+    EXPECT_EQ(
+        declarations.front().parameters.dynamic_contact_coefficients.front().law,
+        FE::interfaces::FreeSurfaceContactLaw::PrescribedAngle);
     EXPECT_TRUE(system.hasOperator("equations"));
     EXPECT_FALSE(system.hasOperator("level_set"));
     EXPECT_TRUE(
@@ -11330,11 +11373,14 @@ TEST(MovingDomainPhysics,
     constexpr int interface_marker = 46;
     constexpr int wall_marker = 14;
     constexpr FE::Real angle = FE::Real{1.0471975511965977462};
-    const auto mesh = makeMesh();
+    constexpr std::array<FE::Real, 3> wall_normal{0.0, 0.0, -1.0};
+    const auto mesh =
+        std::make_shared<SingleTetraBoundaryMeshAccess>(wall_marker);
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
     opts.enable_convection = false;
+    addNormalOnlyWallCondition(opts, wall_marker, wall_normal);
     opts.free_surface.push_back(
         ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
             .implementation =
@@ -11352,7 +11398,7 @@ TEST(MovingDomainPhysics,
                 prescribedContactLine(
                     wall_marker,
                     angle,
-                    {1.0, 0.0, 0.0}),
+                    wall_normal),
             },
         });
 
@@ -11418,8 +11464,12 @@ TEST(MovingDomainPhysics,
             .parameters.young_wall_coefficients.front()
             .boundary_marker,
         wall_marker);
-    EXPECT_TRUE(
-        declarations.front().parameters.dynamic_contact_coefficients.empty());
+    ASSERT_EQ(
+        declarations.front().parameters.dynamic_contact_coefficients.size(),
+        1u);
+    EXPECT_EQ(
+        declarations.front().parameters.dynamic_contact_coefficients.front().law,
+        FE::interfaces::FreeSurfaceContactLaw::PrescribedAngle);
 }
 
 TEST(MovingDomainPhysics,
@@ -11428,11 +11478,13 @@ TEST(MovingDomainPhysics,
     constexpr int interface_marker = 45;
     constexpr int wall_marker = 13;
     constexpr FE::Real angle = FE::Real{1.0471975511965977462};
-    const auto mesh = makeMesh();
+    const auto mesh =
+        std::make_shared<SingleTetraBoundaryMeshAccess>(wall_marker);
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
     opts.enable_convection = false;
+    addNormalOnlyWallCondition(opts, wall_marker, {0.0, 0.0, -1.0});
     opts.free_surface.push_back(
         ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
             .implementation =
@@ -11450,7 +11502,7 @@ TEST(MovingDomainPhysics,
                 prescribedContactLine(
                     wall_marker,
                     angle,
-                    {1.0, 0.0, 0.0}),
+                    {0.0, 0.0, -1.0}),
             },
         });
 
@@ -11519,11 +11571,13 @@ TEST(MovingDomainPhysics,
 {
     constexpr int interface_marker = 47;
     constexpr int wall_marker = 15;
-    const auto mesh = makeMesh();
+    const auto mesh =
+        std::make_shared<SingleTetraBoundaryMeshAccess>(wall_marker);
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
     opts.enable_convection = false;
+    addNormalOnlyWallCondition(opts, wall_marker, {0.0, 0.0, -1.0});
     opts.free_surface.push_back(
         ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
             .implementation =
@@ -11535,7 +11589,7 @@ TEST(MovingDomainPhysics,
                 prescribedContactLine(
                     wall_marker,
                     FE::Real{1.0471975511965977462},
-                    {1.0, 0.0, 0.0}),
+                    {0.0, 0.0, -1.0}),
             },
         });
 
@@ -11596,11 +11650,13 @@ TEST(MovingDomainPhysics,
     constexpr int interface_marker = 54;
     constexpr int wall_marker = 22;
     constexpr std::string_view owner_tag = "coupled_level_set_system";
-    const auto mesh = makeMesh();
+    const auto mesh =
+        std::make_shared<SingleTetraBoundaryMeshAccess>(wall_marker);
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
     opts.enable_convection = false;
+    addNormalOnlyWallCondition(opts, wall_marker, {0.0, 0.0, -1.0});
     opts.free_surface.push_back(
         ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
             .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
@@ -11611,7 +11667,7 @@ TEST(MovingDomainPhysics,
                 prescribedContactLine(
                     wall_marker,
                     1.0471975511965977462,
-                    {1.0, 0.0, 0.0}),
+                    {0.0, 0.0, -1.0}),
             },
         });
 
@@ -11661,7 +11717,8 @@ TEST(MovingDomainPhysics,
 {
     constexpr int interface_marker = 154;
     constexpr int wall_marker = 24;
-    const auto mesh = makeMesh();
+    const auto mesh =
+        std::make_shared<SingleTetraBoundaryMeshAccess>(wall_marker);
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
@@ -11677,7 +11734,7 @@ TEST(MovingDomainPhysics,
                 prescribedContactLine(
                     wall_marker,
                     1.0471975511965977462,
-                    {1.0, 0.0, 0.0}),
+                    {0.0, 0.0, -1.0}),
             },
         });
 
@@ -12252,8 +12309,10 @@ TEST(MovingDomainPhysics,
     constexpr FE::Real pi = 3.14159265358979323846;
     FE::Real maximum_added_residual{0.0};
     std::size_t orientation_case_count{0u};
+    // D4 requires a planar wall with the configured normal, and the tetra
+    // offers the z-oriented wall face in both orientations.
     for (const FE::Real angle : {pi / 3.0, 2.0 * pi / 3.0}) {
-        for (int axis = 0; axis < 3; ++axis) {
+        for (int axis = 2; axis < 3; ++axis) {
             for (const FE::Real orientation : {-1.0, 1.0}) {
                 std::array<FE::Real, 3> wall{0.0, 0.0, 0.0};
                 wall[static_cast<std::size_t>(axis)] = orientation;
@@ -12299,7 +12358,7 @@ TEST(MovingDomainPhysics,
         }
     }
     EXPECT_EQ(maximum_added_residual, FE::Real{0.0});
-    EXPECT_EQ(orientation_case_count, 24u);
+    EXPECT_EQ(orientation_case_count, 8u);
     RecordProperty("retired_contact_residual_orientation_case_count",
                    orientation_case_count);
     RecordProperty("retired_contact_residual_maximum_added_value",
@@ -14768,7 +14827,8 @@ TEST(MovingDomainPhysics, NavierStokesContactAngleRejectsInvalidParameters)
 {
     constexpr int interface_marker = 155;
     constexpr int wall_marker = 25;
-    const auto mesh = makeMesh();
+    const auto mesh =
+        std::make_shared<SingleTetraBoundaryMeshAccess>(wall_marker);
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
 
@@ -14798,7 +14858,7 @@ TEST(MovingDomainPhysics, NavierStokesContactAngleRejectsInvalidParameters)
     };
 
     auto invalid_angle = prescribedContactLine(
-        wall_marker, 3.2, {1.0, 0.0, 0.0});
+        wall_marker, 3.2, {0.0, 0.0, -1.0});
     expect_rejected(invalid_angle);
 
     auto zero_angle = invalid_angle;
@@ -14861,25 +14921,27 @@ TEST(MovingDomainPhysics, NavierStokesPrescribedContactAngleRejectsOutOfPlaneNor
 TEST(MovingDomainPhysics,
      NavierStokesPrescribedContactAngleValidatesMappedPhysicalWallNormal)
 {
+    // Decision D4: a prescribed contact wall is an axis-aligned planar wall
+    // with Navier slip and a strong normal-only condition.  The rule-carried
+    // reference normal is still mapped to the physical frame and compared
+    // with the configured normal, including on a scaled (tiny) cell.
     constexpr int interface_marker = 157;
     constexpr int wall_marker = 27;
     constexpr FE::Real inv_sqrt_five =
         FE::Real{0.44721359549995793928};
 
     const auto install_with_normal = [&](std::array<FE::Real, 3> wall_normal,
+                                         std::array<FE::Real, 3> rule_normal,
                                          FE::Real coordinate_scale = FE::Real{1.0}) {
         const auto mesh =
             std::make_shared<SingleTetraBoundaryMeshAccess>(wall_marker);
-        // J has first column scale*(1,0,1/2). Therefore the reference covector
-        // (0,0,1) carried by the generated rule maps with J^{-T} to
-        // (-1/2,0,1), normalized below.
-        mesh->setCurrentNodeCoordinates(1, {coordinate_scale, 0.0,
-                                            FE::Real{0.5} * coordinate_scale});
+        mesh->setCurrentNodeCoordinates(1, {coordinate_scale, 0.0, 0.0});
         mesh->setCurrentNodeCoordinates(2, {0.0, coordinate_scale, 0.0});
         mesh->setCurrentNodeCoordinates(3, {0.0, 0.0, coordinate_scale});
         auto u_space = makeVelocitySpace(mesh);
         auto p_space = makePressureSpace(mesh);
         auto opts = baseNavierStokesOptions();
+        addNormalOnlyWallCondition(opts, wall_marker, {0.0, 0.0, -1.0});
         opts.free_surface.push_back(
             ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
                 .implementation =
@@ -14919,18 +14981,68 @@ TEST(MovingDomainPhysics,
             wall_marker,
             contact_marker,
             phi,
-            {0.0, 0.0, 1.0}));
+            rule_normal));
     };
 
     EXPECT_NO_THROW(install_with_normal(
-        {-inv_sqrt_five, 0.0, 2.0 * inv_sqrt_five}));
+        {0.0, 0.0, -1.0}, {0.0, 0.0, -1.0}));
     EXPECT_NO_THROW(install_with_normal(
-        {-inv_sqrt_five, 0.0, 2.0 * inv_sqrt_five}, FE::Real{1e-16}));
-    EXPECT_THROW(install_with_normal({0.0, 0.0, 1.0}),
+        {0.0, 0.0, -1.0}, {0.0, 0.0, -1.0}, FE::Real{1e-16}));
+    // An opposite rule-carried normal fails closed.
+    EXPECT_THROW(install_with_normal({0.0, 0.0, -1.0}, {0.0, 0.0, 1.0}),
                  std::invalid_argument);
+    // A tilted wall cannot carry the normal-only condition.
     EXPECT_THROW(install_with_normal(
-                     {inv_sqrt_five, 0.0, -2.0 * inv_sqrt_five}),
+                     {-inv_sqrt_five, 0.0, 2.0 * inv_sqrt_five},
+                     {-inv_sqrt_five, 0.0, 2.0 * inv_sqrt_five}),
                  std::invalid_argument);
+    // Without Navier slip the prescribed angle is rejected (D4).
+    const auto mesh =
+        std::make_shared<SingleTetraBoundaryMeshAccess>(wall_marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    addNormalOnlyWallCondition(opts, wall_marker, {0.0, 0.0, -1.0});
+    opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation =
+                ns::FreeSurfaceImplementation::UnfittedLevelSet,
+            .interface_marker = interface_marker,
+            .level_set_field_name = "phi_no_slip",
+            .active_domain =
+                ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            .contact_lines = {
+                prescribedContactLine(
+                    wall_marker,
+                    1.0,
+                    {0.0, 0.0, -1.0},
+                    /*contact_marker=*/-1,
+                    /*slip_length=*/std::nullopt)},
+        });
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi_no_slip",
+        .space = p_space,
+        .components = 1,
+    });
+    system.addOperator("level_set_owner");
+    (void)FE::systems::installFormulation(
+        system,
+        "level_set_owner",
+        {phi},
+        (FE::forms::StateField(phi, *p_space, "phi_no_slip_owner") *
+         FE::forms::TestField(phi, *p_space, "eta_no_slip_owner"))
+            .dx());
+    ns::IncompressibleNavierStokesVMSModule module(
+        u_space, p_space, std::move(opts));
+    try {
+        module.registerOn(system);
+        FAIL() << "Expected a no-slip prescribed contact angle to be rejected";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find("requires Navier slip"),
+                  std::string::npos)
+            << error.what();
+    }
 }
 
 TEST(MovingDomainPhysics,
@@ -15694,7 +15806,7 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedPrescribedContactAngleRequiresWall
             prescribedContactLine(
                 /*wall_marker=*/-1,
                 1.0471975511965977462,
-                {1.0, 0.0, 0.0}),
+                {0.0, 0.0, -1.0}),
         },
     });
 
@@ -15713,10 +15825,12 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedPrescribedContactAngleHonorsExplic
 {
     constexpr int interface_marker = 47;
     constexpr int wall_marker = 13;
-    const auto mesh = makeMesh();
+    const auto mesh =
+        std::make_shared<SingleTetraBoundaryMeshAccess>(wall_marker);
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
+    addNormalOnlyWallCondition(opts, wall_marker, {0.0, 0.0, -1.0});
 
     opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
         .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
@@ -15727,7 +15841,7 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedPrescribedContactAngleHonorsExplic
             prescribedContactLine(
                 wall_marker,
                 1.0471975511965977462,
-                {1.0, 0.0, 0.0}),
+                {0.0, 0.0, -1.0}),
         },
     });
 
@@ -15809,7 +15923,8 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedPrescribedContactAngleRequiresLeve
 {
     constexpr int interface_marker = 45;
     constexpr int wall_marker = 15;
-    const auto mesh = makeMesh();
+    const auto mesh =
+        std::make_shared<SingleTetraBoundaryMeshAccess>(wall_marker);
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
@@ -15823,7 +15938,7 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedPrescribedContactAngleRequiresLeve
             prescribedContactLine(
                 wall_marker,
                 1.0471975511965977462,
-                {1.0, 0.0, 0.0}),
+                {0.0, 0.0, -1.0}),
         },
     });
 
@@ -15843,7 +15958,8 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedPrescribedContactAngleRequiresLine
 {
     constexpr int interface_marker = 49;
     constexpr int wall_marker = 16;
-    const auto mesh = makeMesh();
+    const auto mesh =
+        std::make_shared<SingleTetraBoundaryMeshAccess>(wall_marker);
     auto u_space = makeVelocitySpace(mesh);
     auto p1_space = makePressureSpace(mesh);
 
@@ -15859,7 +15975,7 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedPrescribedContactAngleRequiresLine
                     ns::FreeSurfaceActiveDomain::LevelSetNegative,
                 .contact_lines = {
                     prescribedContactLine(
-                        wall_marker, 1.0, {1.0, 0.0, 0.0})},
+                        wall_marker, 1.0, {0.0, 0.0, -1.0})},
             });
         return opts;
     };
