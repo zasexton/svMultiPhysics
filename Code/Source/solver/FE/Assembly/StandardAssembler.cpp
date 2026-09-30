@@ -17964,7 +17964,18 @@ void StandardAssembler::prepareContextFace(
         context.setEntityMeasures(h, cell_volume, facet_area);
     }
 
-    cached_quad_rule_ = std::move(quad_rule);
+    // Do not expose the face rule to the field-solution basis caches.  Its
+    // points are canonical face coordinates, while the field bases of
+    // populateFieldSolutionData must be evaluated at the face-to-cell mapped
+    // reference points (context.quadraturePoints()), which differ for every
+    // local face.  With the face rule cached, every non-primary field
+    // evaluated on a boundary or interior face (for example the fluid
+    // velocity in a mesh-displacement boundary row) was sampled at the wrong
+    // points: exact for constants, wrong for anything that varies in space.
+    (void)quad_rule;
+    cached_quad_rule_.reset();
+    cached_field_bcache_.clear();
+    cached_field_recipes_valid_ = false;
 }
 
 AssemblyContext::Vector3D StandardAssembler::computeFaceNormal(
