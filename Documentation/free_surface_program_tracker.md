@@ -459,7 +459,11 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - Results (SKX nodes, `surface_stress`, La = 12): R/h = 8 went from 3.41 to 1.08 s/step (7.7 → 4.0 outer passes), and R/h = 16 from 13.62 to 3.91 s/step. `kag_consistent`, which previously failed at step 0 by stalling at 1.1e-10, now completes.
   - The first three changes leave all output fields bitwise identical. The gate changes fields by at most 0.2% of the spurious max|u|, and benchmark metrics agree to 4–5 digits.
   - Integrated build and regression of `67b4395a`: job `46039315`.
-  - Follow-up: JIT object-cache temporary names lack a process ID or host. One unexplained garbage result appeared in 1 of 8 `FE_Forms_Tests` runs while many jobs shared the cache; it did not reproduce in 30+ reruns. Add process ID and host to the temporary name, and consider a per-job cache.
+  - Follow-up resolved 2026-09-30: JIT object-cache hardening.
+    - Cause: temporary names had no host or process ID and files were opened with truncate, so colliding writers could produce a corrupt object that still loaded.
+    - Now: host/PID/random temporary names with exclusive create, then rename; a checksummed cache-file format whose mismatches are rejected, deleted and recompiled; objects in an `objects-v2/` subdirectory; an `SVMP_JIT_CACHE_DIR` override.
+    - `FE_LOG_LEVEL` and the other `FE_LOG_*` settings now take effect: they are read on first logger use, so the linker can no longer drop them.
+    - FE CTest 34/34, including the new logger targets. The failing field-op test passed 20/20 repeats.
   - The smoke run took 5.5 s per step on a 625-vertex 2D mesh. Each step needed 9–10 outer geometry passes against a cap of 12, driven by the 1e-10 absolute level-set gate, and wrote about 0.35 MB of log.
   - Extrapolated, R/h = 32 at La = 12 needs about 6 days, and R/h = 64 needs weeks to months. The same cost limits M1, M3 and M4.
   - Profile one R/h = 8 step, then reduce the unnecessary outer passes and per-step output. Any convergence gate must be scaled or derived rather than tuned (P1).
