@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -482,5 +483,91 @@ TEST(MeshTranslatorFaceLabels, LabelsFullTetra10FaceFromQuadraticTriangleSurface
             svmp::CellFamily::Triangle);
   EXPECT_EQ(mesh->base().face_shapes()[static_cast<std::size_t>(face_id)].order, 2);
   EXPECT_EQ(mesh->base().get_set(svmp::EntityKind::Face, "bottom").size(), 1u);
+#endif
+}
+
+TEST(MeshTranslatorFaceLabels, WarnsWhenFaceFilesOverlapAndKeepsTheLastLabel)
+{
+#ifndef MESH_HAS_VTK
+  GTEST_SKIP() << "VTK support is required for face-file translator coverage.";
+#else
+  ensure_mpi_initialized_for_mesh_translator();
+  auto volume_path = unique_temp_path("svmp_meshtranslator_overlap_volume");
+  const auto first_path = unique_temp_path("svmp_meshtranslator_overlap_wall");
+  const auto second_path = unique_temp_path("svmp_meshtranslator_overlap_surface");
+  volume_path.replace_extension(".vtu");
+  write_volume_mesh(volume_path);
+
+  // The same boundary triangle in two face files, as the legacy fitted
+  // SPHERIC Test 10 decks did for the wall faces of the top cell row.
+  const std::vector<svmp::real_t> triangle = {
+      0.0, 0.0, 0.0,
+      1.0, 0.0, 0.0,
+      0.0, 1.0, 0.0,
+  };
+  write_face_mesh(first_path, triangle, {100, 101, 102});
+  write_face_mesh(second_path, triangle, {100, 101, 102});
+
+  MeshParameters mesh_params;
+  mesh_params.name.set("mesh");
+  mesh_params.mesh_file_path.set(volume_path.string());
+  for (const auto& [name, path] :
+       {std::pair<std::string, std::filesystem::path>{"wall", first_path},
+        std::pair<std::string, std::filesystem::path>{"free_surface", second_path}}) {
+    auto* face = new FaceParameters();
+    face->name.set(name);
+    face->face_file_path.set(path.string());
+    mesh_params.face_parameters.push_back(face);
+  }
+
+  testing::internal::CaptureStderr();
+  auto mesh = application::translators::MeshTranslator::loadMesh(mesh_params);
+  const auto warnings = testing::internal::GetCapturedStderr();
+  std::filesystem::remove(volume_path);
+  std::filesystem::remove(first_path);
+  std::filesystem::remove(second_path);
+
+  ASSERT_NE(mesh, nullptr);
+  EXPECT_NE(warnings.find("1 boundary face(s) of face file 'wall' are also listed in face file "
+                          "'free_surface'"),
+            std::string::npos)
+      << warnings;
+  const auto wall = mesh->base().label_from_name("wall");
+  const auto surface = mesh->base().label_from_name("free_surface");
+  ASSERT_NE(wall, svmp::INVALID_LABEL);
+  ASSERT_NE(surface, svmp::INVALID_LABEL);
+  EXPECT_TRUE(mesh->base().faces_with_label(wall).empty());
+  EXPECT_EQ(mesh->base().faces_with_label(surface).size(), 1u);
+  EXPECT_EQ(mesh->base().get_set(svmp::EntityKind::Face, "wall").size(), 1u);
+  EXPECT_EQ(mesh->base().get_set(svmp::EntityKind::Face, "free_surface").size(), 1u);
+#endif
+}
+
+TEST(MeshTranslatorFaceLabels, DisjointFaceFilesDoNotWarn)
+{
+#ifndef MESH_HAS_VTK
+  GTEST_SKIP() << "VTK support is required for face-file translator coverage.";
+#else
+  ensure_mpi_initialized_for_mesh_translator();
+  auto volume_path = unique_temp_path("svmp_meshtranslator_disjoint_volume");
+  const auto face_path = unique_temp_path("svmp_meshtranslator_disjoint_face");
+  volume_path.replace_extension(".vtu");
+  write_volume_mesh(volume_path);
+  write_face_mesh(face_path,
+                  {
+                      0.0, 0.0, 0.0,
+                      1.0, 0.0, 0.0,
+                      0.0, 1.0, 0.0,
+                  },
+                  {100, 101, 102});
+
+  testing::internal::CaptureStderr();
+  auto mesh = load_volume_with_face(volume_path, "bottom", face_path);
+  const auto warnings = testing::internal::GetCapturedStderr();
+  std::filesystem::remove(volume_path);
+  std::filesystem::remove(face_path);
+
+  ASSERT_NE(mesh, nullptr);
+  EXPECT_EQ(warnings.find("are also listed in face file"), std::string::npos) << warnings;
 #endif
 }

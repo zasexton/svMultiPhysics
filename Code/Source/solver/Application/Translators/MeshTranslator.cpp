@@ -16,9 +16,11 @@
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -399,6 +401,39 @@ std::optional<MatchedBoundaryFace> match_owned_cell_boundary_face(
   return std::nullopt;
 }
 
+// A boundary face carries one boundary label, and boundary conditions select
+// faces by label.  When a face is listed in several <Add_face> files it keeps
+// the label of the last one, so the conditions of the earlier faces silently
+// miss it (for example wall Dirichlet data on the nodes of a free-surface
+// edge).  Report every such overlap; face files are expected to be disjoint.
+void warn_overlapping_face_files(const std::vector<std::vector<std::string>>& names_per_face)
+{
+  std::map<std::pair<std::string, std::string>, std::size_t> overlaps;
+  for (const auto& names : names_per_face) {
+    if (names.size() < 2) {
+      continue;
+    }
+    const auto& final_name = names.back();
+    for (std::size_t i = 0; i + 1 < names.size(); ++i) {
+      if (names[i] != final_name) {
+        ++overlaps[{names[i], final_name}];
+      }
+    }
+  }
+  if (overlaps.empty()) {
+    return;
+  }
+  const int rank = svmp::MeshComm::world().rank();
+  for (const auto& [pair, count] : overlaps) {
+    std::cerr << "[svMultiPhysics::Application] WARNING (rank " << rank << "): MeshTranslator: "
+              << count << " boundary face(s) of face file '" << pair.first
+              << "' are also listed in face file '" << pair.second
+              << "'. A boundary face carries one label, so these faces are labeled '"
+              << pair.second << "' (the last listed) and boundary conditions on '" << pair.first
+              << "' do not act on them. Face files should be disjoint." << std::endl;
+  }
+}
+
 } // namespace
 
 namespace application {
@@ -624,6 +659,8 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
       }
     }
 
+    warn_overlapping_face_files(boundary_sets);
+
     mesh.base().set_faces_from_arrays(std::move(boundary_shapes),
                                       std::move(boundary_offsets),
                                       std::move(boundary_connectivity),
@@ -659,6 +696,7 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
     boundary_face_by_vertices.emplace(make_face_vertex_key(verts), f);
   }
 
+  std::vector<std::vector<std::string>> names_per_face(static_cast<std::size_t>(mesh.n_faces()));
   svmp::label_t next_label = 1;
   for (const auto* face : face_params) {
     if (!face) {
@@ -736,6 +774,10 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
 
       svmp::MeshLabels::set_boundary_label(mesh.base(), it_face->second, label);
       mesh.add_to_set(svmp::EntityKind::Face, face_name, it_face->second);
+      const auto face_index = static_cast<std::size_t>(it_face->second);
+      if (face_index < names_per_face.size()) {
+        names_per_face[face_index].push_back(face_name);
+      }
       ++local_matched;
     }
 
@@ -745,6 +787,7 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
           << "': no local matches (this is expected on non-owning MPI ranks)." << std::endl;
     }
   }
+  warn_overlapping_face_files(names_per_face);
 }
 
 void MeshTranslator::applyDomainLabels(svmp::Mesh& mesh, const MeshParameters& params)
