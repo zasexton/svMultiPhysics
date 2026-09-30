@@ -11316,7 +11316,11 @@ TEST(MovingDomainPhysics,
     ASSERT_TRUE(effective.has_value());
     EXPECT_NE(effective->json.find(
                   "\"prescribed_angle_operator\":"
-                  "\"wall_aware_geometry_only\""),
+                  "\"momentum_young_term_only\""),
+              std::string::npos);
+    EXPECT_NE(effective->json.find(
+                  "\"level_set_geometry_owner\":"
+                  "\"none_angle_preserving_wall_maintenance\""),
               std::string::npos);
 }
 
