@@ -302,6 +302,10 @@ Observations:
   change (0.5% of `A`) and the second harmonic enter the fit.  The damping of
   the modal amplitude converges to the linear viscous rate
   (`gamma/gamma_ref` = 1.028, 1.005, 0.999 at `L/h` = 16, 32, 64).
+- Two-rank runs at `L/h = 16` (24 steps; FSILS GMRES and three ghost layers,
+  which the distributed small-cut aggregation needs) reproduce the serial
+  probe elevation and area to 1e-16 for both couplings and both operators
+  (jobs `46089180` and `46100049`).
 - Per-step cost with the PDE extension is 16% above the coupled field at
   `L/h = 64` (3.83 against 3.29 s/step), about the same as the algebraic wet
   extension, which additionally writes a 3.5 MB map file per step.
