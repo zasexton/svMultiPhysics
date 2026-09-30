@@ -12796,7 +12796,7 @@ makeAcceptedSnapshotWallConstraint(
       .parent_cell_global_id = parent,
       .geometry_revision = snapshot_revision,
   };
-  if (kind != Kind::PrescribedAngle) {
+  if (kind != Kind::RepairToPrescribedAngle) {
     return constraint;
   }
   if (dimension != 2 && dimension != 3) {
@@ -13036,7 +13036,7 @@ makeAcceptedSnapshotWallConstraint(
 {
   using Kind =
       svmp::FE::level_set::LevelSetWallContactConstraintKind;
-  if (constraint.kind != Kind::PrescribedAngle) {
+  if (constraint.kind != Kind::RepairToPrescribedAngle) {
     return true;
   }
   const auto coefficient = std::find_if(
@@ -13250,7 +13250,7 @@ captureAcceptedContactStageWallConstraints(
       }
       contact_law_by_wall[coefficient.boundary_marker] =
           svmp::FE::level_set::LevelSetWallContactConstraintKind::
-              AcceptedDynamicAngle;
+              PreserveAcceptedAngle;
     }
     bool local_parent_ids_valid = true;
     bool local_frames_valid = true;
@@ -13456,7 +13456,7 @@ resolveLevelSetWallAwareMaintenanceContext(
       contact_law_by_wall.emplace(
           coefficient.boundary_marker,
           svmp::FE::level_set::LevelSetWallContactConstraintKind::
-              PrescribedAngle);
+              RepairToPrescribedAngle);
     }
     for (const auto& coefficient :
          declaration.parameters.dynamic_contact_coefficients) {
@@ -13469,7 +13469,7 @@ resolveLevelSetWallAwareMaintenanceContext(
       // accepted stage owns the redistancing geometry.
       contact_law_by_wall[coefficient.boundary_marker] =
           svmp::FE::level_set::LevelSetWallContactConstraintKind::
-              AcceptedDynamicAngle;
+              PreserveAcceptedAngle;
     }
     if (contact_law_by_wall.empty()) {
       continue;
@@ -13678,7 +13678,7 @@ resolveLevelSetWallAwareMaintenanceContext(
       }
       for (const auto& [boundary_marker, kind] : contact_law_by_wall) {
         if (kind == svmp::FE::level_set::
-                        LevelSetWallContactConstraintKind::PrescribedAngle) {
+                        LevelSetWallContactConstraintKind::RepairToPrescribedAngle) {
           continue;
         }
         const auto global_rule_count = globalSumSize(
@@ -13777,7 +13777,7 @@ resolveLevelSetWallAwareMaintenanceContext(
     }
     for (const auto& [boundary_marker, kind] : contact_law_by_wall) {
       if (kind != svmp::FE::level_set::
-                      LevelSetWallContactConstraintKind::PrescribedAngle) {
+                      LevelSetWallContactConstraintKind::RepairToPrescribedAngle) {
         continue;
       }
       std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>

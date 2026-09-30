@@ -21,9 +21,25 @@
 
 namespace svmp::FE::level_set {
 
+/**
+ * How redistancing treats the parent cells of an accepted wall-contact rule.
+ *
+ * PreserveAcceptedAngle rescales every connected contact patch by one common
+ * positive factor.  The accepted finite-element contact point and unit normal,
+ * and therefore the contact angle, are unchanged.  Production maintenance uses
+ * this kind for every contact law: the contact angle is imposed only by the
+ * momentum-side Young term (decision D4 in
+ * Documentation/free_surface_program_tracker.md).
+ *
+ * RepairToPrescribedAngle resets each contact cell to a unit-gradient affine
+ * target through the accepted contact point with the declared angle.  D4
+ * retires it as a production path; it is kept for verification until
+ * milestone M4 has validated the single mechanism, and the application
+ * rejects it before production redistancing.
+ */
 enum class LevelSetWallContactConstraintKind : std::uint8_t {
-    PrescribedAngle,
-    AcceptedDynamicAngle
+    RepairToPrescribedAngle,
+    PreserveAcceptedAngle
 };
 
 /**
@@ -35,12 +51,13 @@ enum class LevelSetWallContactConstraintKind : std::uint8_t {
  */
 struct LevelSetWallContactConstraint {
     LevelSetWallContactConstraintKind kind{
-        LevelSetWallContactConstraintKind::PrescribedAngle};
+        LevelSetWallContactConstraintKind::PreserveAcceptedAngle};
     int interface_marker{-1};
     int boundary_marker{-1};
     GlobalIndex parent_cell_global_id{INVALID_GLOBAL_INDEX};
     std::uint64_t geometry_revision{0u};
-    // PrescribedAngle uses the convention
+    // The remaining fields are read only by RepairToPrescribedAngle, which
+    // uses the convention
     //   grad(phi) . physical_wall_normal
     //       = -cos(target_angle_radians) |grad(phi)|.
     // The caller supplies the physical wall-normal orientation used by this
@@ -48,8 +65,8 @@ struct LevelSetWallContactConstraint {
     Real target_angle_radians{0.0};
     std::array<Real, 3> physical_wall_normal{{0.0, 0.0, 0.0}};
     // The accepted contact point and oriented contact-line tangent form the
-    // physical frame held fixed by the prescribed update.  In two dimensions
-    // the tangent is the oriented out-of-plane direction.
+    // physical frame held fixed by the repair.  In two dimensions the tangent
+    // is the oriented out-of-plane direction.
     std::array<Real, 3> accepted_contact_point{{0.0, 0.0, 0.0}};
     std::array<Real, 3> accepted_contact_line_tangent{{0.0, 0.0, 0.0}};
 };
@@ -121,12 +138,13 @@ struct LevelSetSignedDistanceRepairResult {
  * taken from their unique owners, cut primitives and zero-crossing guards are
  * gathered from owned cells, and every rank evaluates the same immutable
  * global projection snapshot.  Locally owned wall-contact constraints are
- * gathered and canonicalized the same way.  AcceptedDynamicAngle patches are
+ * gathered and canonicalized the same way.  PreserveAcceptedAngle patches are
  * projected onto a positive common coefficient scale, leaving their accepted
- * finite-element crossing and unit normal unchanged.  PrescribedAngle patches
- * instead receive a unit-gradient affine target through the accepted contact
- * point and oriented contact-line frame, satisfying the declared wall-normal
- * angle relation.  Consequently, convergence applies to the unconstrained
+ * finite-element crossing and unit normal unchanged.  RepairToPrescribedAngle
+ * patches (retired from production by decision D4) instead receive a
+ * unit-gradient affine target through the accepted contact point and oriented
+ * contact-line frame, satisfying the declared wall-normal angle relation.
+ * Consequently, convergence applies to the unconstrained
  * signed-distance error and the appropriate constrained optimum; the total
  * discrepancy remains visible in the result.  The output candidate is
  * assigned only after all collective validation and projection work

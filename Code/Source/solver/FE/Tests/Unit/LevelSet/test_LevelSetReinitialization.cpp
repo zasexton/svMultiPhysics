@@ -968,7 +968,7 @@ TEST(LevelSetReinitialization,
     const std::array constraints{
         level_set::LevelSetWallContactConstraint{
             .kind = level_set::LevelSetWallContactConstraintKind::
-                AcceptedDynamicAngle,
+                PreserveAcceptedAngle,
             .interface_marker = 77,
             .boundary_marker = 5,
             .parent_cell_global_id = 0,
@@ -1024,6 +1024,117 @@ TEST(LevelSetReinitialization,
 }
 
 TEST(LevelSetReinitialization,
+     PreserveAcceptedAngleKeepsNonOrthogonalContactPointAndAngle)
+{
+    // Production maintenance for PrescribedAngle and DynamicRenE walls
+    // (decision D4): an accepted 30 degree contact is only rescaled, even
+    // when the declared Young angle differs.  The retired repair would reset
+    // the same cell to the declared angle (see the tests below).
+    EXPECT_EQ(level_set::LevelSetWallContactConstraint{}.kind,
+              level_set::LevelSetWallContactConstraintKind::
+                  PreserveAcceptedAngle);
+    const QuadScalarFieldFixture fixture;
+    const auto& field_dofs = fixture.system.fieldDofHandler(fixture.phi);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+
+    const FE::Real pi = std::acos(FE::Real{-1.0});
+    const FE::Real accepted_angle = pi / FE::Real{6.0};
+    const FE::Real declared_young_angle = pi / FE::Real{3.0};
+    constexpr FE::Real contact_x = 0.35;
+    std::vector<FE::Real> accepted(
+        static_cast<std::size_t>(field_dofs.getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(dofs.size(), 1u);
+        const auto point = fixture.mesh->getNodeCoordinates(vertex);
+        accepted[static_cast<std::size_t>(dofs.front())] =
+            FE::Real{4.0} *
+            (std::sin(accepted_angle) * (point[0] - contact_x) +
+             std::cos(accepted_angle) * point[1]);
+    }
+    // Bottom wall y = 0 with outward wall normal (0, -1): the liquid
+    // (phi < 0) angle satisfies cos(theta) = grad(phi)_y / |grad(phi)|.
+    const auto contact_geometry = [&](const std::vector<FE::Real>& values) {
+        const FE::Real origin = vertexValue(*entity_map, values, 0);
+        const FE::Real gx = vertexValue(*entity_map, values, 1) - origin;
+        const FE::Real gy = vertexValue(*entity_map, values, 3) - origin;
+        const FE::Real angle = std::acos(std::clamp(
+            gy / std::hypot(gx, gy), FE::Real{-1.0}, FE::Real{1.0}));
+        return std::pair<FE::Real, FE::Real>{-origin / gx, angle};
+    };
+    const auto [accepted_contact_x, accepted_contact_angle] =
+        contact_geometry(accepted);
+    ASSERT_NEAR(accepted_contact_x, contact_x, 1.0e-14);
+    ASSERT_NEAR(accepted_contact_angle, accepted_angle, 1.0e-14);
+
+    level_set::LevelSetReinitializationOptions options{};
+    options.signed_distance_tolerance = 1.0e-12;
+    options.interface_band_width = 2.0;
+    options.max_iterations = 100;
+    options.pseudo_time_step_scale = 0.5;
+    options.max_zero_set_displacement = 1.0e-12;
+    // Only the kind and the accepted identity are read for this kind; the
+    // declared angle and frame are ignored.
+    const std::array constraints{
+        level_set::LevelSetWallContactConstraint{
+            .kind = level_set::LevelSetWallContactConstraintKind::
+                PreserveAcceptedAngle,
+            .interface_marker = 94,
+            .boundary_marker = 10,
+            .parent_cell_global_id = 0,
+            .geometry_revision = 34u,
+            .target_angle_radians = declared_young_angle,
+            .physical_wall_normal = {{0.0, -1.0, 0.0}},
+            .accepted_contact_point = {{contact_x, 0.0, 0.0}},
+            .accepted_contact_line_tangent = {{0.0, 0.0, 1.0}},
+        }};
+
+    std::vector<FE::Real> repaired;
+    const auto result = level_set::repairLevelSetSignedDistanceByProjection(
+        *fixture.mesh,
+        field_dofs,
+        options,
+        accepted,
+        repaired,
+        constraints);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    ASSERT_TRUE(result.converged) << result.diagnostic;
+    EXPECT_TRUE(result.wall_contact_constraints_satisfied);
+    EXPECT_EQ(result.wall_contact_cells, 1u);
+    EXPECT_LE(result.max_wall_contact_scale_residual, 1.0e-14);
+    EXPECT_DOUBLE_EQ(result.max_prescribed_contact_value_residual, 0.0);
+    EXPECT_DOUBLE_EQ(result.max_prescribed_contact_angle_error_radians, 0.0);
+
+    const FE::Real scale = repaired[0] / accepted[0];
+    EXPECT_GT(scale, 0.0);
+    EXPECT_LT(std::abs(scale - FE::Real{0.25}), FE::Real{0.75});
+    for (std::size_t i = 0; i < repaired.size(); ++i) {
+        EXPECT_NEAR(repaired[i], scale * accepted[i], 1.0e-13)
+            << "coefficient " << i;
+    }
+    const auto [repaired_contact_x, repaired_contact_angle] =
+        contact_geometry(repaired);
+    const FE::Real contact_displacement =
+        std::abs(repaired_contact_x - accepted_contact_x);
+    const FE::Real angle_change_degrees =
+        std::abs(repaired_contact_angle - accepted_contact_angle) *
+        FE::Real{180.0} / pi;
+    EXPECT_LE(contact_displacement, 1.0e-13);
+    EXPECT_LE(angle_change_degrees, 1.0e-10);
+    EXPECT_GT(std::abs(repaired_contact_angle - declared_young_angle),
+              FE::Real{0.5});
+    RecordProperty("preserved_contact_angle_change_max_degrees",
+                   ::testing::PrintToString(angle_change_degrees));
+    RecordProperty("preserved_contact_displacement_max",
+                   ::testing::PrintToString(contact_displacement));
+}
+
+// The three RepairToPrescribedAngle tests below verify the retained FE
+// repair-to-target implementation.  Decision D4 retired it from production;
+// it is removed once milestone M4 validates the single Young-term mechanism.
+TEST(LevelSetReinitialization,
      PrescribedAngleConstraintEnforcesTargetInTwoDimensions)
 {
     const QuadScalarFieldFixture fixture;
@@ -1058,7 +1169,7 @@ TEST(LevelSetReinitialization,
     const std::array constraints{
         level_set::LevelSetWallContactConstraint{
             .kind = level_set::LevelSetWallContactConstraintKind::
-                PrescribedAngle,
+                RepairToPrescribedAngle,
             .interface_marker = 91,
             .boundary_marker = 7,
             .parent_cell_global_id = 0,
@@ -1149,7 +1260,7 @@ TEST(LevelSetReinitialization,
     const std::array constraints{
         level_set::LevelSetWallContactConstraint{
             .kind = level_set::LevelSetWallContactConstraintKind::
-                PrescribedAngle,
+                RepairToPrescribedAngle,
             .interface_marker = 92,
             .boundary_marker = 8,
             .parent_cell_global_id = 0,
@@ -1232,7 +1343,7 @@ TEST(LevelSetReinitialization,
     const std::array constraints{
         level_set::LevelSetWallContactConstraint{
             .kind = level_set::LevelSetWallContactConstraintKind::
-                PrescribedAngle,
+                RepairToPrescribedAngle,
             .interface_marker = 93,
             .boundary_marker = 9,
             .parent_cell_global_id = 0,
@@ -1943,7 +2054,7 @@ constexpr FE::Real workingGeometryGate = 8.0e-12;
 [[nodiscard]] level_set::LevelSetWallContactConstraint workingQuadWall(
     FE::Real angle, FE::Real contact_x)
 {
-    return {.kind = level_set::LevelSetWallContactConstraintKind::PrescribedAngle,
+    return {.kind = level_set::LevelSetWallContactConstraintKind::RepairToPrescribedAngle,
             .interface_marker = 93,
             .boundary_marker = 9,
             .parent_cell_global_id = 0,
@@ -2212,7 +2323,7 @@ TEST(LevelSetWorkingScale, ObliqueTetraTargetIsACompatibleFixedPoint)
     const std::array<FE::Real, 3> normal{{0.6 * std::sin(angle),
                                        0.8 * std::sin(angle), std::cos(angle)}};
     const std::array constraints{level_set::LevelSetWallContactConstraint{
-        .kind = level_set::LevelSetWallContactConstraintKind::PrescribedAngle,
+        .kind = level_set::LevelSetWallContactConstraintKind::RepairToPrescribedAngle,
         .interface_marker = 92, .boundary_marker = 8,
         .parent_cell_global_id = 0, .geometry_revision = 32u,
         .target_angle_radians = angle,
