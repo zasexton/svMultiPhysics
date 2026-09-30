@@ -63,8 +63,9 @@ LINEAR_SOLVERS = ("fsils", "eigen_direct")
 # Level-set transport velocity.  "coupled": the fluid velocity itself (the
 # current default, as static_drop_2d).  "wet_extension": the wall-compatible
 # wet extension of the D18 and capillary-rise decks.  "pde_extension": the
-# PDE-based velocity extension chosen for moving-interface benchmarks
-# (tracker D9); a placeholder until that extension lands.
+# harmonic PDE velocity extension with monolithic coupling, chosen for
+# moving-interface benchmarks (tracker D9; linear_sloshing_2d README,
+# "Level-set advection velocity").
 TRANSPORTS = ("coupled", "wet_extension", "pde_extension")
 # Existing production reinitialization values (D18/D38 and sloshing decks),
 # used only with --reinitialization.
@@ -340,8 +341,13 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
     <Source_velocity_field_name>Velocity</Source_velocity_field_name>
     <Wet_extension_advection_velocity_method>wall_compatible_normal</Wet_extension_advection_velocity_method>"""
     elif transport == "pde_extension":
-        raise ValueError("the PDE velocity extension (tracker D9) is not available yet; "
-                         "use --transport coupled or wet_extension")
+        transport_xml = """
+    <Velocity_source>prescribed_data</Velocity_source>
+    <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
+    <Auto_register_velocity_field>true</Auto_register_velocity_field>
+    <Source_velocity_field_name>Velocity</Source_velocity_field_name>
+    <Advection_velocity_extension_method>pde_harmonic</Advection_velocity_extension_method>
+    <Advection_velocity_extension_coupling>monolithic</Advection_velocity_extension_coupling>"""
     else:
         raise ValueError(f"transport must be one of {TRANSPORTS}")
     if time_integration not in TIME_INTEGRATION_SCHEMES:
@@ -644,8 +650,8 @@ def main(argv=None) -> int:
     parser.add_argument("--linear-solver", default="fsils", choices=LINEAR_SOLVERS,
                         help="linear solver (protocol: fsils; eigen_direct for comparison)")
     parser.add_argument("--transport", default="coupled", choices=TRANSPORTS,
-                        help="level-set transport velocity (pde_extension is a placeholder "
-                             "until the PDE extension of tracker D9 lands)")
+                        help="level-set transport velocity (pde_extension: the harmonic PDE "
+                             "velocity extension of tracker D9, monolithic coupling)")
     parser.add_argument("--time-integration", default="generalized_alpha",
                         choices=tuple(TIME_INTEGRATION_SCHEMES),
                         help="time integration (protocol: generalized_alpha; backward_euler "
