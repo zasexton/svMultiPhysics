@@ -284,7 +284,7 @@ def evaluate(runs: list[dict], tolerances: dict) -> tuple[list[dict], dict]:
             by_key = dict(spatial)
             key_name = "L/h"
         if study == "all":
-            pool = list(spatial.values()) + timing
+            pool = list({r["run"]: r for r in list(spatial.values()) + timing}.values())
             for r in pool:
                 value = r[q]
                 passed = limit is None or value <= limit
