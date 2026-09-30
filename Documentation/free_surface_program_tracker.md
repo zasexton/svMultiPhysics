@@ -630,9 +630,31 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
 
 ### M5 — Fitted ALE reference path
 
-- [ ] Use slip (normal-only) mesh BCs on walls (D5). The current fitted SPHERIC 10 deck pins walls with Dirichlet-0.
-- [ ] **2D fitted sloshing**, gravity only. Reproduce the 05-26 step-12 failure, fix it, then compare with linear theory.
-- [ ] Allow fitted `SurfaceStress` behind a flag (today it is rejected as `fitted_surface_stress_current_frame_gradient_unqualified`). Then run the static drop and the capillary wave. Remove fitted `CurvatureTraction` with pointwise curvature from use: it is identically zero on P1 faces.
+Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch tests: FE 32/32, Physics 7/7 and Application 4/4 (job `46104940`); 77 benchmark Python tests. Output is in `/scratch/users/zsexton/free-surface-benchmarks/fitted_ale/`.
+
+- [x] **Shared FE assembly bug fixed (`f157011b`).** `StandardAssembler::prepareContextFace` left the face rule in `cached_quad_rule_`, so every non-primary field on a boundary, interior or interface mesh face was evaluated at the canonical face points rather than the face-to-cell mapped points. Constants were exact; anything varying in space was wrong. In the fitted path it caused an 11% slow wave, linear Newton convergence and instability. The fix changes every face integral that uses a non-primary field (fitted kinematics, FSI interface, DG and other boundary terms). The effect on the unfitted benchmarks is being checked (job `46121663`, before and after the fix).
+- [x] Sliding mesh walls: a mesh `Dir` with `Value 0` and `Effective_direction` constrains only the selected components (`DirichletBC::active_components`), with the same input as a free-slip fluid wall.
+- [x] **2D fitted sloshing passes D10–D12** (`fitted_sloshing_2d`, job `46104905`).
+  - Setup: the same tank, mode, amplitude, viscosity and exact viscous reference as `linear_sloshing_2d`, on a liquid-only mesh.
+  - Formulation: `Kinematic_enforcement=MeshNitsche` (the mesh row carries γ_N/h (w−u)·n (ψ·n); γ_N = 10 is fixed from the P1 trace inverse inequality), the `Free` tangential policy, and a harmonic operator on the mesh velocity (`Harmonic_quantity=velocity`). A displacement operator needs a Δt-scaled penalty whose flux defect accumulates into spurious damping (4× the reference at T0/64).
+  - Frequency error (time error removed by Richardson extrapolation from the Δt study): −1.17e-3 / −2.67e-4 / −6.6e-6 at L/h = 16/32/64, least-squares order 3.7. The Δt study has order 2.11.
+  - Damping error 6.6% / 0.37% / 1.1%; max dA/A 5.8e-7. Every step takes 2 Newton iterations; 0.93 s/step at L/h = 64.
+  - The unfitted L/h = 64 errors are +1.5% (coupled transport) and +0.074% (PDE extension).
+- [x] **Fitted `SurfaceStress`** is admitted behind `Allow_fitted_surface_stress=true`. It requires an explicit form, coupled ALE or a static mesh, a literal γ and no fitted contact model.
+  - Static drop (`fitted_static_drop_2d`, job `46109392`): the relaxed pressure equals γ/(R cos(π/N)) of the inscribed polygon to 7 digits. The error against γ/R is 2.15e-3 / 5.36e-4 / 1.34e-4 at R/h = 8/16/32 (second order). Spurious μ|u|/γ peaks at 3.9e-8 and decays to roundoff; area is conserved to 1e-10.
+  - Fitted `CurvatureTraction` with pointwise curvature now warns that it is zero on affine faces; it is not used.
+- [x] **Fitted formulation fixes.** Coupled-displacement ALE is now assembled in the current configuration (the reference override had removed the gravity restoring force), and the surface Jacobian is no longer counted twice in `integrand*currentMeasure()`. The fluid equation must precede `mesh_motion`.
+- [x] **The 05-26 step-12 failure is explained.**
+  - At the old tip, the fitted SPHERIC 10 decks failed at step 0: unpreconditioned Eigen GMRES in 3D, and a Newton stall with FSILS in 2D.
+  - With a direct solver the 3D tank "at rest" accelerated at about g/2 at the surface; that spurious growth was the historical failure.
+  - After the frame, measure and face-sampling fixes the deck stays at rest to 1e-12 m/s.
+  - Its legacy `Nitsche` mode replaces the normal dynamic condition and needs a pressure gauge, so it is not a free-surface model.
+- [ ] **Open questions (for the user):**
+  1. Confirm current-frame assembly for coupled ALE.
+  2. Retire the legacy fitted `Penalty`/`Nitsche` kinematics for free surfaces, or keep them as legacy only, and make `MeshNitsche` the qualified default.
+- [ ] Regenerate the SPHERIC fitted meshes and convert those decks to `MeshNitsche` with sliding walls. A MeshNitsche variant of the 3D deck leaks 0.5% of its volume through the contact line in 40 steps: wall Dirichlet values are not applied at wall nodes on the surface edge, and `free_surface.vtp` looks malformed (it spans y = 0.0698–0.093). The Application tests pin the current deck contents.
+- [ ] A mesh-quality policy for long or violent fitted runs: the mesh-velocity operator has no restoring term back to the reference mesh.
+- [ ] Fitted capillary wave (Prosperetti), as an independent reference for M3.
 - [ ] **2D contact point** (a codimension-2 point) with Young term and slip. Compare with the static meniscus.
 
 ### M6 — Violent and long-horizon one-phase flows (T1/T5)
