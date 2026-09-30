@@ -1,0 +1,80 @@
+{
+  "benchmark": "sessile_drop_2d",
+  "milestone": "M4",
+  "fixed_on": "2026-09-30, before the first protocol run",
+  "levels": {
+    "R_over_h": [
+      16,
+      32,
+      64
+    ]
+  },
+  "protocol": {
+    "equilibrium_angles_degrees": [
+      60,
+      90,
+      120
+    ],
+    "initial_angles_degrees": {
+      "60": 90,
+      "90": 120,
+      "120": 90
+    },
+    "configuration": "Decision D4: Contact_line_model=PrescribedAngle, Wall_slip_model=Navier on the wetted wall, strong zero normal-only velocity on the contact wall, angle-preserving (scale-only) level-set wall maintenance; Surface_tension_form=SurfaceStress by default",
+    "laplace_number": 12,
+    "slip_length": "R/8 (physical input; l_s/h = 2, 4, 8 at R/h = 16, 32, 64)",
+    "viscous_times": 5,
+    "snapshots": 100,
+    "time_step": "dt <= sqrt(rho*h^3/(4*pi*gamma)) = (1/sqrt(2)) * sqrt(rho*h^3/(2*pi*gamma)), rounded down so that the run is 100 equal output intervals",
+    "reference": "circular cap on y = 0 with the Young angle and the area A(0) of the sampled initial level set: R_ref = sqrt(A(0)/(theta_e - sin(theta_e) cos(theta_e))), base half-width R_ref sin(theta_e), apex height R_ref (1 - cos(theta_e))",
+    "note": "Criteria apply separately to each (capillary form, equilibrium angle) refinement study. See README.md for the definitions and the cost of each level."
+  },
+  "criteria": [
+    {
+      "id": "contact_angle",
+      "quantity": "contact_angle_error_degrees",
+      "definition": "max over the two contact points of |theta - theta_e| at the end of the run, in degrees. theta is measured through the liquid from a circle fitted to the interface points (edge zero crossings of phi_h) of that side with 0 <= y <= 0.25 R_ref, at the circle point closest to the wall zero crossing of phi_h.",
+      "limit": 2.0,
+      "at_level": 32,
+      "monotone": "strictly_decreasing",
+      "monotone_levels": [
+        16,
+        32,
+        64
+      ],
+      "source": "Tracker section 5, M4 working criterion: angle error <= 2 degrees at R/h = 32 and decreasing"
+    },
+    {
+      "id": "base_radius",
+      "quantity": "base_radius_relative_error",
+      "definition": "|b - b_ref| / b_ref at the end of the run; b is half the distance between the two wall zero crossings of phi_h",
+      "limit": 0.02,
+      "at_level": 32,
+      "source": "Tracker section 5, M4 working criterion: base radius within 2% (applied at R/h = 32, the level of the angle criterion)"
+    },
+    {
+      "id": "apex_height",
+      "quantity": "apex_height_relative_error",
+      "definition": "|H - H_ref| / H_ref at the end of the run; H is the largest height above the wall of the interface points (edge zero crossings of phi_h)",
+      "limit": 0.02,
+      "at_level": 32,
+      "source": "Tracker section 5, M4 working criterion: apex height within 2% (applied at R/h = 32, the level of the angle criterion)"
+    },
+    {
+      "id": "volume_drift",
+      "quantity": "liquid_area_relative_drift_max",
+      "definition": "max over all outputs of |A(t) - A(0)| / A(0), with A the exact area of {phi_h < 0} and A(0) that of the sampled initial level set in mesh/mesh-complete.mesh.vtu",
+      "limit": 0.0001,
+      "at_level": "each",
+      "source": "Decision D1 working criterion (tracker section 5, M2 and M4: volume drift <= 1e-4)"
+    },
+    {
+      "id": "no_velocity_growth",
+      "quantity": "max_speed_growth_ratio",
+      "definition": "max|u_h| (liquid vertices) at the end of the run divided by the largest max|u_h| over the outputs in the third quarter of the run (T/2 <= t <= 3T/4). A ratio <= 1 means the final value lies within the envelope of the preceding quarter.",
+      "limit": 1.0,
+      "at_level": "each",
+      "source": "Decision D1 working criterion (tracker section 5: no growth of max|u| in time)"
+    }
+  ]
+}
