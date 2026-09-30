@@ -236,26 +236,42 @@ check use `--max-steps 5`; `verify.py` refuses such runs unless
 
 ## Expected cost per level
 
-Measured on 2026-09-30 after the solver speed-ups (commit `67b4395a`): the
-scaled outer gate, the reference-element cache, once-per-revision snapshot
-checks and the reused line-search residual. `surface_stress`, La = 12, serial,
-on `CPU_GEN:SKX` nodes:
+Measured on 2026-09-30 (Slurm job `46089180`, source `b4b376a0`, after the
+solver speed-ups of `67b4395a`): `surface_stress`, La = 12, `2 dt_B`, serial,
+8 runs sharing one node.
 
-| R/h | vertices | s/step | outer passes/step | La = 12: steps, time |
-|---:|---:|---:|---:|---|
-| 8 | 625 | 1.08 (measured) | 4.0 | 1,000, about 20 min |
-| 16 | 2,401 | 3.91 (measured) | 3.6 | 2,800, about 3 h |
-| 32 | 9,409 | about 8 (estimate) | – | 7,900, about 18 h |
+| R/h | vertices | steps | transport | s/step | outer passes/step (mean, max) | time |
+|---:|---:|---:|---|---:|---|---:|
+| 8 | 625 | 500 | `coupled_field` | 0.55 | 3.6, 6 | 4.6 min |
+| 8 | 625 | 500 | `pde_harmonic_monolithic` (protocol) | 0.63 | 3.6, 6 | 5.3 min |
+| 8 | 625 | 500 | `pde_harmonic_prescribed` | 0.62 | 4.5, 11 | 5.2 min |
+| 16 | 2,401 | 1,400 | `coupled_field` | 1.98 | 3.2, 6 | 46 min |
+| 16 | 2,401 | 1,400 | `pde_harmonic_monolithic` (protocol) | 2.34 | 3.2, 6 | 55 min |
+| 32 | 9,409 | 3,950 | `pde_harmonic_monolithic` | about 9 (estimate) | – | about 10 h |
 
-Before the speed-ups the same case took 3.41 and 13.62 s/step on the same
-node type. Timings vary by node generation (up to about 1.8x), so compare
-timings on one node type. `kag_consistent` costs about 50% more per step.
-
-The time step is the one-sided capillary limit
-`sqrt(rho*h^3/(4*pi*gamma))`. The semi-implicit surface-tension design note
-(`Documentation/free_surface_semi_implicit_surface_tension_design.md`)
-suggests that at La = 12 viscosity may allow a 3–7x larger step; a
-measurement of outer-pass convergence against the time step decides this
-before the M2 study. `La` of 1,200 and above, and `R/h = 64`, remain deferred.
+The PDE extension adds about 15–18% per step.  With the prescribed coupling
+the start-up steps need up to 11 outer passes against the 12-pass cap, which
+is why the protocol uses the monolithic coupling.  Timings vary by node
+generation (up to about 1.8x).  `kag_consistent` costs about 50% more per
+step.  `La` of 1,200 and above, and `R/h = 64`, remain deferred.
 
 Memory is small: 0.26 GB RSS at `R/h = 8`.
+
+## Level-set transport check (2026-09-30)
+
+A short comparison at `R/h = 8` and 16 (La = 12, `surface_stress`, `2 dt_B`,
+5 viscous times; job `46089180`) confirms that the PDE extension does not
+change the relaxed drop:
+
+| R/h | transport | pressure-jump error | `Ca_sp` (final quarter) | growth ratio | max `dA/A` |
+|---:|---|---:|---:|---:|---:|
+| 8 | `coupled_field` | 6.73e-4 | 2.52e-4 | 0.746 | 1.2e-5 |
+| 8 | `pde_harmonic_monolithic` | 6.76e-4 | 2.49e-4 | 0.741 | 1.1e-5 |
+| 8 | `pde_normal_monolithic` | 6.76e-4 | 2.49e-4 | 0.742 | 1.1e-5 |
+| 8 | `pde_harmonic_prescribed` | 6.76e-4 | 2.49e-4 | 0.741 | 1.1e-5 |
+| 16 | `coupled_field` | 1.49e-4 | 1.32e-4 | 0.705 | 3.2e-7 |
+| 16 | `pde_harmonic_monolithic` | 1.49e-4 | 1.32e-4 | 0.705 | 3.9e-7 |
+| 16 | `pde_normal_monolithic` | 1.49e-4 | 1.32e-4 | 0.705 | 6.7e-7 |
+
+All runs completed the 5 viscous times.  Raw output:
+`/scratch/users/zsexton/free-surface-benchmarks/pde-extension/campaign-b4b376a0/static_drop/`.
