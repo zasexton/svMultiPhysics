@@ -110,4 +110,9 @@ PdeVelocityExtensionReport extendVelocityByPde(
     std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>* rows =
         nullptr);
 
+// Combines one rank-local revision key per rank (in rank order) into a key
+// that is identical on every rank of the communicator.
+[[nodiscard]] std::uint64_t communicatorCombinedRevision(
+    std::uint64_t local_key, const svmp::MeshComm& comm);
+
 } // namespace application::core

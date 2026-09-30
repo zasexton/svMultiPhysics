@@ -14,13 +14,20 @@ It wraps the older regression case
 changes explained below: free-slip walls instead of prescribed analytic wall
 velocity, and a viscosity large enough for the damping to be measured.
 
+The protocol was revised on 2026-09-30 for decisions D9 to D12 of the
+tracker: the level set is advected with the PDE extension of the fluid
+velocity (D9), space and time errors are studied separately (D10), the volume
+criterion gates the maximum deviation over the run (D11), and the damping
+error is gated at 5% (D12).  The first protocol and its results are kept in
+"Results" below.
+
 Files:
 
 | File | Role |
 |---|---|
 | `generate_case.py` | writes `solver.xml`, the mesh with the initial fields, the wall faces and `case.json` (including the reference frequency and damping rate) for one level |
 | `verify.py` | reads the solver output of the levels, fits frequency and damping, applies `tolerances.json` |
-| `tolerances.json` | acceptance criteria and their sources, fixed on 2026-09-29 before the first protocol run |
+| `tolerances.json` | acceptance criteria and their sources, fixed on 2026-09-29 and revised for D9 to D12 on 2026-09-30, each time before the first run |
 | `tests/test_free_surface_benchmark_linear_sloshing_2d.py` | checks of the two scripts on synthetic data |
 
 ## Physical setup
@@ -129,19 +136,54 @@ none was chosen for this case.
 | Mesh | affine `Triangle3`, diagonals alternating with cell parity (mirror-symmetric about `x = L/2`), `L/h = 16, 32, 64` (187, 693, 2,665 vertices) | geometry choice |
 | Free surface | `UnfittedLevelSet`, `Active_domain=LevelSetNegative`, `Active_domain_method=CutVolume`, `Generated_interface_geometry=LinearCorner`, `Surface_tension=0` | production unfitted path |
 | Cut stabilization | pressure-gradient facet penalty 1.0, `Use_cut_metadata_scale=false`, `Small_cut_aggregation=true`, no velocity extension | production defaults |
-| Level-set transport | P1, advected by the fluid velocity (`Velocity_source=coupled_field`), SUPG with tau scale 0.5 and transient scale 2.0; no reinitialization, no volume correction, no interface kinematic term | as `static_drop_2d`; the volume drift is a measured quantity |
-| Time integration | generalized-alpha, `rho_inf = 0.5`; `dt = T0 / (2 L/h)`: 32, 64, 128 steps per period; 4 periods; 32 outputs per period | see below |
+| Level-set transport | P1, SUPG with tau scale 0.5 and transient scale 2.0; no reinitialization, no volume correction, no interface kinematic term; advected by the harmonic PDE extension of the fluid velocity with monolithic coupling (`Advection_velocity_extension_method=pde_harmonic`, `Advection_velocity_extension_coupling=monolithic`) | decision D9; see "Level-set advection velocity" |
+| Time integration | generalized-alpha, `rho_inf = 0.5`; spatial study: 128 steps per inviscid period at every level; time-step study: 64, 128 and 256 steps per period at `L/h = 32`; 4 periods; 32 outputs per period | decision D10; see below |
 | Nonlinear solve | relative tolerance 1e-4 per equation, at most 8 Newton iterations; level-set absolute floor 1e-10 | production decks |
 | Linear solve | Eigen direct (sparse LU), tolerances 1e-8 / 1e-10 | small 2D meshes; the older case used the same solver |
 
-**Time step.** The time step is refined with the mesh, so the three runs are
-one combined space-time refinement study (the tracker's "3 meshes and 3 time
-steps"). For the oscillator `y' = i omega y`, the first-order
-generalized-alpha method with `rho_inf = 0.5` has a relative phase error of
-`-4.2e-3`, `-1.1e-3` and `-2.7e-4` at 32, 64 and 128 steps per period
-(second order), and a numerical damping rate of `7e-5`, `9e-6` and `1e-6`
-times `omega`, against the physical `gamma/omega = 5.6e-3`. The level-set
-Courant number is below 0.02 at every level.
+**Level-set advection velocity (D9).** The fluid velocity is defined only on
+the wet vertices and on the vertices of the cut cells; the vertices beyond are
+inactive and their velocity is zero.  Advecting `phi` with the fluid velocity
+itself freezes `phi` one row above the cut cells, and the level set on the dry
+vertices of the cut row then lags the flow increasingly with refinement (the
+first protocol failed at `L/h = 64` for this reason).  The advection velocity
+`w` is therefore the PDE extension of the fluid velocity `u`
+(`Application/Core/LevelSetPdeVelocityExtension.h`):
+
+- `w = u` on every wet vertex and every vertex of the retained interface
+  cells, so that `w_h = u_h` on the interface;
+- on the remaining (dry) vertices `w` solves, with that Dirichlet data,
+  `(grad w, grad v) = 0` over the dry cells (harmonic, the protocol value) or
+  `((n.grad) w, (n.grad) v) = 0` with `n = grad phi_h / |grad phi_h|` (the
+  least-squares normal extension, `pde_normal`: `w` constant along the
+  level-set normals).  Both are linear, symmetric and parameter-free (P1);
+- velocity components that a strong homogeneous wall condition constrains
+  (here the wall-normal component of the free-slip walls) are zero on dry wall
+  vertices; the others have the natural condition.  The domain is every dry
+  vertex, so there is no band edge.
+
+With the monolithic coupling the discrete problem is installed, at every
+geometry refresh, as frozen rows of an auxiliary unknown (each dry value is
+the operator-weighted average of its neighbors), so the Newton tangent
+contains the dependence of the transport on `u`.  The extension never enters
+the momentum rows.  The prescribed coupling instead solves the same system
+once per geometry refresh and writes the result into a prescribed field; the
+transport then sees it lagged by one outer pass, which costs extra outer
+passes (see the diagnostics below).  Neither coupling writes per-step files.
+
+**Time step (D10).** Space and time are studied separately, because the
+first protocol refined the time step with the mesh and opposite-sign time and
+space errors cancelled.  All levels of the spatial study use the same step,
+128 steps per inviscid period.  The time-step study runs `L/h = 32` at 64, 128
+and 256 steps per period.  Its time error at 128 steps per period,
+`e_time = (4/3)(e(128) - e(256))` (second order; the observed temporal order
+is reported), is subtracted from every spatial frequency error.  For the
+oscillator `y' = i omega y`, the first-order generalized-alpha method with
+`rho_inf = 0.5` has a relative phase error of `-1.1e-3`, `-2.7e-4` and
+`-6.7e-5` at 64, 128 and 256 steps per period and a numerical damping rate of
+`9e-6`, `1e-6` and `1.4e-7` times `omega`, against the physical
+`gamma/omega = 5.6e-3`; the damping therefore needs no time correction.  The
+level-set Courant number is below 0.02 at every level.
 
 ## Metrics (`verify.py`)
 
@@ -152,7 +194,8 @@ All quantities come from the solver's VTU/PVTU point data (`phi`,
 |---|---|
 | probe elevation `eta_p(t)` | height of the lowest upward zero crossing of `phi_h` on the left wall `x = 0` (a mesh line, so `phi_h` is linear between its vertices), minus `H0` |
 | fit | least-squares fit of `eta_p(t) = c + exp(-gamma t)(a cos(omega t) + b sin(omega t))` over all outputs: a scan over `omega` picks the start, then Levenberg-Marquardt refines all five parameters |
-| `frequency_relative_error` | `abs(omega - omega_ref)/omega_ref` |
+| `frequency_relative_error` | `abs(omega - omega_ref)/omega_ref` (signed value reported) |
+| `frequency_spatial_error` | `abs(omega/omega_ref - 1 - e_time)` on the spatial study, `e_time` from the time-step study (D10) |
 | `damping_rate_relative_error` | `abs(gamma - gamma_ref)/gamma_ref` |
 | `liquid_area_relative_drift_max` | max over outputs of `abs(A(t) - A(0))/A(0)`, `A` the exact area of `{phi_h < 0}` (cut triangles clipped by the linear `phi_h`) |
 | Reported only | signed frequency error; error against `omega0`; `gamma/(2 nu k^2)`; fitted amplitude over `A`; fit residual; the same fit applied to the modal amplitude `a1(t)` from a least-squares fit `y = sum_{n<4} a_n cos(n k x)` to all interface points; maximum liquid speed; the histories; from `solver_run.log(.gz)` if present: outer passes and Newton iterations per step, the largest final residual, and the wall time |
@@ -168,9 +211,12 @@ time, no crossing on the probe line) and on `--max-steps` smoke runs unless
 
 | Criterion | Limit | Where | Source |
 |---|---|---|---|
-| `frequency` | error at most 0.01; strictly decreasing; observed order at least 1 | limit at `L/h = 64`; monotonicity and order over 16/32/64 | tracker M1 working criterion ("frequency error <= 1% at the finest mesh with observed convergence"). "Observed convergence" is read as a strictly decreasing error with an observed order of at least 1, the reading used for M2 in `static_drop_2d`; the expected order is 2 |
-| `damping` | reported, no limit | every level, with its observed order | the tracker asks for a comparison with linear theory but sets no limit |
-| `volume_drift` | at most 1e-4 | every level | tracker M1 working criterion |
+| `frequency` | spatial error (time error removed) at most 0.01; strictly decreasing; observed order at least 1 | limit at `L/h = 64`; monotonicity and order over 16/32/64 | tracker M1 working criterion ("frequency error <= 1% at the finest mesh with observed convergence"), with the time error removed (D10). "Observed convergence" is read as a strictly decreasing error with an observed order of at least 1, as for M2 in `static_drop_2d`; the expected order is 2 |
+| `damping` | at most 0.05 | `L/h = 64` of the spatial study | decision D12 |
+| `volume_drift` | maximum deviation over the run at most 1e-4 | every run of the spatial and time-step studies | tracker M1 working criterion; decision D11 |
+
+Runs with another level-set velocity or mean depth are reported beside the
+protocol runs as comparisons and are never gated.
 
 ## How to run
 
@@ -181,27 +227,37 @@ solver through `mpiexec` in a batch job (benchmark README):
 ```bash
 B=tests/cases/fluid/free_surface_benchmarks/linear_sloshing_2d
 OUT=$SCRATCH/free-surface-benchmarks/linear_sloshing_2d/$(git rev-parse --short HEAD)
-for L in 16 32 64; do python3 $B/generate_case.py --level $L --output-dir $OUT/L$L; done
+for L in 16 32 64; do python3 $B/generate_case.py --level $L --output-dir $OUT/L${L}_T128; done
+for T in 64 256; do
+  python3 $B/generate_case.py --level 32 --steps-per-period $T --output-dir $OUT/L32_T$T
+done
 # in each case directory, inside a Slurm job:
 #   mpiexec -n 1 --bind-to none /path/to/svmultiphysics solver.xml 2>&1 | gzip -1 > solver_run.log.gz
-python3 $B/verify.py $OUT/L16 $OUT/L32 $OUT/L64 --json $OUT/verify.json
+python3 $B/verify.py $OUT/L*_T* --json $OUT/verify.json
 ```
 
-Diagnostic options of `generate_case.py`; `verify.py` reports such runs
-beside the study but never gates them:
+Other options of `generate_case.py`; `verify.py` reports such runs beside the
+protocol runs but never gates them:
 
-- `--steps-per-period N`: time-step study at a fixed mesh (protocol `2 L/h`).
+- `--level-set-velocity`: `pde_harmonic_monolithic` (protocol),
+  `pde_normal_monolithic`, `pde_harmonic_prescribed`, `pde_normal_prescribed`,
+  `coupled_field` (the fluid velocity itself, the first protocol) or
+  `wet_extension` (the algebraic wall-compatible extension of the SPHERIC
+  Test 05 decks; it writes one JSON map per step under
+  `velocity_extension_maps/`, 1.8 GB for an `L/h = 64` run).
 - `--mean-depth H0`: moves the rest level, and with it the interface's
   position in its cell row; the reference is recomputed for `H0`.
-- `--level-set-velocity wet_extension`: advects `phi` with the
-  wall-compatible extension of the wet velocity used by the SPHERIC Test 05
-  decks. It writes one JSON map per step under `velocity_extension_maps/`
-  (1.8 GB for the `L/h = 64` run).
 
 ## Results
 
-**2026-09-30, source `7aac1e29`, solver built at `fef0d02f`, Slurm job
-`46023412`. Result: FAIL** (frequency and volume drift at `L/h = 64`).
+### First protocol (2026-09-30, superseded)
+
+The first protocol advected `phi` with the fluid velocity, refined the time
+step with the mesh (`dt = T0/(2 L/h)`), reported the damping without a limit,
+and gated the volume drift at every level.
+
+**Source `7aac1e29`, solver built at `fef0d02f`, Slurm job `46023412`.
+Result: FAIL** (frequency and volume drift at `L/h = 64`).
 
 | L/h | steps/T | `omega` | frequency error (signed) | `gamma/gamma_ref` | `gamma/(2 nu k^2)` | fitted `A/A0` | fit residual `/A` | `max dA/A` | final `dA/A` | s/step | wall |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|

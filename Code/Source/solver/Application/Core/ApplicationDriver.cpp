@@ -18598,7 +18598,8 @@ bool updateLevelSetAdvectionVelocitiesFromState(
             }
           }
           const auto& mesh_access = system.meshAccess();
-          pde_map_revision_key =
+          // The frozen-map revision must agree across ranks.
+          pde_map_revision_key = application::core::communicatorCombinedRevision(
               application::core::velocityExtensionMapRevision(
                   mesh_access.geometryRevision(),
                   mesh_access.topologyRevision(),
@@ -18609,7 +18610,8 @@ bool updateLevelSetAdvectionVelocitiesFromState(
                                           oriented_level_set.size()),
                   std::span<const std::uint8_t>(trace_seed.data(),
                                                 trace_seed.size()))
-                  .key();
+                  .key(),
+              extension_comm);
           pde_algebraic = true;
         }
         const auto pde_report = application::core::extendVelocityByPde(

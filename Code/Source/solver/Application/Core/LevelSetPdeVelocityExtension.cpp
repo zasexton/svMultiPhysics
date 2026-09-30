@@ -288,6 +288,20 @@ pdeVelocityExtensionOperatorFromToken(std::string_view token)
   return std::nullopt;
 }
 
+std::uint64_t communicatorCombinedRevision(std::uint64_t local_key,
+                                          const svmp::MeshComm& comm)
+{
+  const auto keys = allGatherV(std::vector<std::uint64_t>{local_key}, comm);
+  std::uint64_t hash = 1469598103934665603ull;
+  for (const auto key : keys) {
+    for (std::size_t byte = 0u; byte < sizeof(key); ++byte) {
+      hash ^= (key >> (byte * 8u)) & 0xffu;
+      hash *= 1099511628211ull;
+    }
+  }
+  return hash == 0u ? 1u : hash;
+}
+
 PdeVelocityExtensionReport extendVelocityByPde(
     const svmp::Mesh& mesh,
     const svmp::MeshComm& comm,
