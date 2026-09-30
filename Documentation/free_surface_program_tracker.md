@@ -468,6 +468,16 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - Extrapolated, R/h = 32 at La = 12 needs about 6 days, and R/h = 64 needs weeks to months. The same cost limits M1, M3 and M4.
   - Profile one R/h = 8 step, then reduce the unnecessary outer passes and per-step output. Any convergence gate must be scaled or derived rather than tuned (P1).
   - Target: the La = 12 study at R/h = 8/16/32 completes within about a day.
+- [x] **MPI check (2026-09-30; jobs `46084708`, `46086154`, `46089257`; results in `/scratch/users/zsexton/free-surface-benchmarks/mpi-check/`). Parallel runs are not usable yet: only 4 of 16 multi-rank runs completed.**
+  - 2 ranks matched serial to solver tolerance for the static drop at R/h = 32 (speed-up 1.7×) and for sloshing (1.2×).
+  - Defects found:
+    1. Deadlock on 4+ ranks with a flat interface. `reimposeAcceptedMasterBearingState` (ApplicationDriver) skips the collective `history.updateGhosts()` based on the rank-local `hasMasterBearingLines()`.
+    2. The default `<Ghost_layers>` of 0 fails small-cut aggregation (`incomplete_distributed_aggregation_halo`); 8 ranks fail even with 8 layers.
+    3. The static-drop assembled system depends on the partition (the initial residual changes with rank count), while sloshing agrees. Capillary or aggregation assembly is suspected.
+    4. Parallel Newton converges linearly: the Jacobian and residual are inconsistent in parallel.
+    5. Rate initialization regularizes 0 empty rows in serial but thousands in parallel.
+  - Consequence: M2 and M3 run serially as concurrent single-rank jobs, preferably on `-C CPU_GEN:MLN` nodes (about 2× faster than SKX).
+  - Estimates: M2 La = 12 at R/h = 8/16/32 for three forms is about 24 h wall time (70 core-hours). M3 is about 3 h wall time per (form, transport) combination.
 - [ ] **Protocol.**
   - Static drop in a box, fluid initially at rest. The Laplace number La = ργD/μ² is swept over 12 and 120; 1,200 and above are deferred until the per-step cost is reduced.
   - Start from the sampled analytic shape. No minimizer is required (D3).
