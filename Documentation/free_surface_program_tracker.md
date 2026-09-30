@@ -507,7 +507,13 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
 
 ### M3 — Dynamic capillarity
 
-- [ ] **Capillary wave** (Prosperetti) at λ/h = 16, 32, 64 and three time steps. Proposal: frequency error ≤ 2% and damping error ≤ 5% at λ/h = 32 (the 07-17 n = 16 run already had 1.2% frequency error).
+- [x] **Capillary-wave benchmark written (2026-09-30):** `tests/cases/fluid/free_surface_benchmarks/capillary_wave_2d/`.
+  - Setup: half-wavelength domain with mirror side walls, a0 = 0.01λ, La = 3000 (ε = νk²/ω0 = 0.046).
+  - Reference: Prosperetti's viscous initial-value solution (`prosperetti_reference.py`), checked against a Laplace-transform derivation to 1e-10 and against the inviscid and weak-damping limits. At this La, ω0 and 2νk² are off by 1.4% and 18%, so the comparison always uses the full viscous solution.
+  - Metrics: amplitude from the exact cos(kx) coefficient of the P1 surface; frequency and damping from a damped-cosine fit; area as the maximum over the run (D11).
+  - Protocol (D9, D10): `--transport` coupled / wet_extension / PDE extension, where the PDE extension becomes the default once it exists. One shared Δt at the λ/h = 64 capillary limit (2,900 steps) for the spatial study, plus a separate Δt/2, Δt/4 study at λ/h = 32.
+  - Smoke run `46075460` (λ/h = 16, 0.1 period): amplitude within 7.5e-4 of the reference, area drift 4.9e-7 and growing.
+- [ ] **Capillary wave runs** (Prosperetti) at λ/h = 16, 32, 64 and three time steps. They wait on the PDE extension (D9). Note: the wet extension writes about 1 MB of JSON map per step; make that output opt-in before long runs. Proposal: frequency error ≤ 2% and damping error ≤ 5% at λ/h = 32 (the 07-17 n = 16 run already had 1.2% frequency error).
 - [ ] **Oscillating 2D drop**: Lamb frequency and viscous damping.
 
 ### M4 — Wetting (unfitted)
