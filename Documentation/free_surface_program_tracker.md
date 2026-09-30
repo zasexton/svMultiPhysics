@@ -397,7 +397,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
 
 ### M1 — Tier-1 baseline on the current tip (unfitted, γ = 0)
 
-- [ ] **Baseline build and C++ suites at `fef0d02f`.** Submitted 2026-09-29 as Slurm job `45961287`: 8 CPUs, 32 GB, 12 h.
+- [x] **Baseline build and C++ suites at `fef0d02f`: all passed (2026-09-30).** Submitted 2026-09-29 as Slurm job `45961287`: 8 CPUs, 32 GB, 12 h.
   - Source: a clean worktree at `/scratch/users/zsexton/svmp-baseline-fef0d02f/source`, with all 955 LFS files present.
   - Configuration: the September GCC 12.4.0 / OpenMPI 4.1.2 / LLVM 17.0.6 / VTK 9.4.1 stack, plus Boost 1.90.0 headers.
   - Suites: CTest FE (32 tests), Physics (7) and Application (4).
@@ -408,7 +408,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - **Resubmitted as `45968323` (user decision).**
     - The build completed in 930 s, and **the FE suite passed 32/32**.
     - The job was then cancelled during the Physics suite because of the MPI launch problem below. Its logs are in `logs/run-45968323/`.
-  - **Physics and Application suites:** tests-only job `45975100` (`jobs/tests_only.sbatch`, submitted with `sbatch --export=NONE`). CTest runs with the Slurm/PMI variables removed.
+  - **Physics and Application suites:** tests-only job `45975100` (`jobs/tests_only.sbatch`, submitted with `sbatch --export=NONE`). CTest runs with the Slurm/PMI variables removed. **Result: Physics 7/7 (2,129 s) and Application 4/4 (4,520 s) CTest entries passed.** Together with FE 32/32, the whole C++ baseline is green on `fef0d02f`.
     - A `tests` symlink beside `build/` points at the source fixtures. Some Application tests search upward from their working directory for `tests/cases/fluid/open_vessel_free_surface`.
   - **MPI launch rule (found 2026-09-29).** Jobs submitted from inside the interactive `sh_dev` session inherit that session's `srun` PMI contact variables.
     - An MPI binary started without `mpiexec` in such a job contacts the interactive `srun`, which prints `PMK_KVS_Barrier task count inconsistent` in the user's terminal, and then hangs.
