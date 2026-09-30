@@ -491,14 +491,25 @@ selects one of three modes:
 |---------------|--------|
 | `level_set_quadratic` (default) | Local weighted least-squares quadratic fit of `phi` on the active narrow band. Optional supplemental generated-interface and cut-volume samples, bounded fallback policies, and optional graph smoothing. |
 | `generated_interface_patch` | Fit of a local tangent graph to generated-interface quadrature samples. The level-set gradient still defines the normal. |
-| `kinematic_area_gradient` | Exact derivative of the `LinearCorner` interface measure, and of each declared Young wetted-wall measure weighted by `cos(theta_e)`, with respect to the nodal P1 level-set values on a fixed cut topology. The curvature solves `M kappa = -dE/dphi`, where `M_ij` is the integral of `N_i N_j / abs(grad(phi))` over the generated interface; the row sums of `M` equal the liquid-volume derivative. Affine P1 `Triangle3`/`Tetra4` only. Optional Helmholtz filter set by `Curvature_projection_kinematic_area_gradient_filter_coefficient`; `KinematicAreaGradientTraction` requires it to be 0. |
+| `kinematic_area_gradient` | Exact derivative of the `LinearCorner` interface measure, and of each declared Young wetted-wall measure weighted by `cos(theta_e)`, with respect to the nodal P1 level-set values on a fixed cut topology. The curvature solves `M kappa = -dE/dphi`, where `M_ij` is the integral of `N_i N_j / abs(grad(phi))` over the generated interface; the row sums of `M` equal the liquid-volume derivative. Affine P1 `Triangle3`/`Tetra4` only. Optional Helmholtz filter set by `Curvature_projection_kinematic_area_gradient_filter_coefficient`; `KinematicAreaGradientTraction` requires it to be 0. `Curvature_projection_kinematic_area_gradient_mass` selects `Consistent` (default) or `Lumped` (see below). |
 
 In `kinematic_area_gradient` mode, a discrete volume-constrained stationary
 state gives an exactly constant `kappa`. That constant is balanced by a
 constant pressure. The unfiltered consistent-mass solve is poorly
-conditioned when basis functions barely touch the interface. The tracker (M2)
-therefore plans a parameter-free lumped (row-sum) mass variant with the same
-equilibrium property.
+conditioned when basis functions barely touch the interface.
+`Curvature_projection_kinematic_area_gradient_mass=Lumped` replaces it by the
+parameter-free row-sum mass (tracker M2, candidate b): `kappa_i = -g_i / m_i`
+on every vertex with `m_i > 0` and zero elsewhere, where `g = dE/dphi` and
+`m_i` is the row sum of `M`. There is no linear solve, and the equilibrium
+property is the same because `m` is the liquid-volume derivative up to sign.
+The mass-weighted mean curvature `sum(-g) / sum(m)` agrees in both modes up
+to the consistent solve tolerance. `Lumped` requires a zero filter
+coefficient and fails closed otherwise; the filter coefficient default is
+nonzero, so set it to 0 explicitly. The result reports the mass mode, zero linear iterations, and
+row-sum weighted curvature statistics. On sampled (non-equilibrium) data the
+lumped nodal values are not pointwise accurate: a vertex whose support holds
+only a sliver of the interface can carry a large value with a very small row
+sum, so judge accuracy with mass-weighted or trace norms.
 
 None of these modes provides derivatives of curvature with respect to
 level-set DOFs or regenerated cut geometry. Recovered curvature is used as

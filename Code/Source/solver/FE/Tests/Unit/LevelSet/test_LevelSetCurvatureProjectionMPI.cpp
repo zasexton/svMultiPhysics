@@ -603,6 +603,174 @@ TEST(LevelSetCurvatureProjectionMPI,
 }
 
 TEST(LevelSetCurvatureProjectionMPI,
+     LumpedMassMatchesSerialAcrossOwnershipAndLocalNumberingPermutations)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    ASSERT_EQ(size, 2) << "This test requires exactly two ranks.";
+
+    constexpr int subdivisions{32};
+    constexpr FE::Real radius{0.347};
+    const FE::Real pi = std::acos(FE::Real{-1.0});
+    const FE::Real contact_angle = pi / FE::Real{3.0};
+    auto distributed = makeCurvatureSystem(
+        subdivisions,
+        rank,
+        size,
+        MPI_COMM_WORLD,
+        /*reverse_local_numbering=*/rank == 1,
+        radius,
+        contact_angle);
+    auto serial = makeCurvatureSystem(
+        subdivisions,
+        /*rank=*/0,
+        /*size=*/1,
+        MPI_COMM_SELF,
+        /*reverse_local_numbering=*/false,
+        radius,
+        contact_angle);
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.recovery_mode =
+        level_set::LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
+    options.kinematic_area_gradient_filter_coefficient = FE::Real{0.0};
+    options.kinematic_area_gradient_mass =
+        level_set::LevelSetKinematicAreaGradientMass::Lumped;
+    options.kinematic_area_gradient_young_walls.push_back(
+        {1, contact_angle});
+    std::vector<FE::Real> distributed_curvature;
+    const auto distributed_result =
+        level_set::projectLevelSetMeanCurvatureToVertices(
+            *distributed.system,
+            distributed.phi_field,
+            distributed.phi,
+            std::span<const level_set::LevelSetCurvatureProjectionSample>{},
+            options,
+            distributed_curvature);
+    std::vector<FE::Real> serial_curvature;
+    const auto serial_result =
+        level_set::projectLevelSetMeanCurvatureToVertices(
+            *serial.system,
+            serial.phi_field,
+            serial.phi,
+            std::span<const level_set::LevelSetCurvatureProjectionSample>{},
+            options,
+            serial_curvature);
+    ASSERT_TRUE(distributed_result.success)
+        << distributed_result.diagnostic;
+    ASSERT_TRUE(serial_result.success) << serial_result.diagnostic;
+    EXPECT_TRUE(distributed_result
+                    .kinematic_area_gradient_collective_replication);
+    EXPECT_EQ(distributed_result.kinematic_area_gradient_parallel_size, 2);
+    for (const auto* result : {&distributed_result, &serial_result}) {
+        EXPECT_EQ(result->kinematic_area_gradient_mass,
+                  level_set::LevelSetKinematicAreaGradientMass::Lumped);
+        EXPECT_EQ(result->kinematic_area_gradient_linear_iterations, 0u);
+        EXPECT_FALSE(result->kinematic_area_gradient_minimum_norm_solver);
+    }
+    EXPECT_EQ(
+        distributed_result.kinematic_area_gradient_total_energy_derivative,
+        serial_result.kinematic_area_gradient_total_energy_derivative);
+    EXPECT_EQ(
+        distributed_result.kinematic_area_gradient_liquid_volume_derivative,
+        serial_result.kinematic_area_gradient_liquid_volume_derivative);
+
+    const auto distributed_global = curvatureByGlobalVertex(
+        *distributed.mesh, distributed_curvature);
+    const auto serial_global = curvatureByGlobalVertex(
+        *serial.mesh, serial_curvature);
+    ASSERT_EQ(distributed_global.size(), serial_global.size());
+    FE::Real maximum_serial_difference{0.0};
+    for (std::size_t vertex = 0; vertex < serial_global.size(); ++vertex) {
+        maximum_serial_difference = std::max(
+            maximum_serial_difference,
+            std::abs(distributed_global[vertex] - serial_global[vertex]));
+    }
+    EXPECT_DOUBLE_EQ(maximum_serial_difference, FE::Real{0.0});
+    EXPECT_DOUBLE_EQ(
+        distributed_result
+            .kinematic_area_gradient_mass_weighted_mean_curvature,
+        serial_result.kinematic_area_gradient_mass_weighted_mean_curvature);
+
+    // m_i kappa_i = -dE/dphi_i in global DOF order on every rank.
+    const auto& energy =
+        distributed_result.kinematic_area_gradient_total_energy_derivative;
+    const auto& volume =
+        distributed_result.kinematic_area_gradient_liquid_volume_derivative;
+    const auto& dofs =
+        distributed.system->fieldDofHandler(distributed.phi_field);
+    const auto* entity_map = dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+    FE::Real maximum_identity_residual{0.0};
+    for (FE::GlobalIndex local = 0;
+         local < distributed.mesh->numVertices();
+         ++local) {
+        const auto vertex_dofs = entity_map->getVertexDofs(local);
+        ASSERT_EQ(vertex_dofs.size(), 1u);
+        const auto dof = static_cast<std::size_t>(vertex_dofs.front());
+        ASSERT_LT(dof, energy.size());
+        const FE::Real mass = std::abs(volume[dof]);
+        const FE::Real value =
+            distributed_curvature[static_cast<std::size_t>(local)];
+        if (mass == FE::Real{0.0}) {
+            EXPECT_EQ(value, FE::Real{0.0});
+            continue;
+        }
+        maximum_identity_residual = std::max(
+            maximum_identity_residual,
+            std::abs(mass * value + energy[dof]) /
+                std::max(std::abs(energy[dof]),
+                         std::numeric_limits<FE::Real>::min()));
+    }
+    EXPECT_LE(maximum_identity_residual,
+              FE::Real{4.0} * std::numeric_limits<FE::Real>::epsilon());
+    RecordProperty("kinematic_collective_lumped_max_serial_difference",
+                   maximum_serial_difference);
+    RecordProperty("kinematic_collective_lumped_identity_residual",
+                   maximum_identity_residual);
+}
+
+TEST(LevelSetCurvatureProjectionMPI,
+     RejectsRankAsymmetricKinematicAreaGradientMassCollectively)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    ASSERT_EQ(size, 2) << "This test requires exactly two ranks.";
+    const FE::Real pi = std::acos(FE::Real{-1.0});
+    auto distributed = makeCurvatureSystem(
+        /*subdivisions=*/12,
+        rank,
+        size,
+        MPI_COMM_WORLD,
+        /*reverse_local_numbering=*/rank == 1,
+        FE::Real{0.347},
+        pi / FE::Real{3.0});
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.recovery_mode =
+        level_set::LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
+    options.kinematic_area_gradient_filter_coefficient = FE::Real{0.0};
+    options.kinematic_area_gradient_mass = rank == 0
+        ? level_set::LevelSetKinematicAreaGradientMass::Lumped
+        : level_set::LevelSetKinematicAreaGradientMass::Consistent;
+    std::vector<FE::Real> curvature;
+    const auto result = level_set::projectLevelSetMeanCurvatureToVertices(
+        *distributed.system,
+        distributed.phi_field,
+        distributed.phi,
+        std::span<const level_set::LevelSetCurvatureProjectionSample>{},
+        options,
+        curvature);
+    EXPECT_FALSE(result.success);
+    EXPECT_NE(result.diagnostic.find("identical options"),
+              std::string::npos)
+        << result.diagnostic;
+}
+
+TEST(LevelSetCurvatureProjectionMPI,
      RejectsRankAsymmetricRecoveryOptionsCollectively)
 {
     int rank = 0;
