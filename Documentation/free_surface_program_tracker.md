@@ -494,7 +494,13 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - Design note (2026-09-30): `Documentation/free_surface_semi_implicit_surface_tension_design.md`. It corrects §3.6: the outer geometry fixed point already makes accepted steps implicit in geometry. The capillary limit therefore appears as slow or divergent outer-loop convergence, contracting by about x/(1+b) per pass with x = Δt²ω² and b = 2νk²Δt, not as an unstable step.
   - At La = 12, viscosity may already permit 3–7 × the benchmark Δt.
   - Proposed, pending approval: a default-off lagged normal-increment term, `γ Δt_eff ∫ ∇_Γ((u − u_ref)·n_h)·∇_Γ(v·n_h)`. It is zero at convergence, so the accepted solution and the energy balance are unchanged, and it has no tunable parameter. The literal Bänsch/Hysing term is not recommended here, because it would double-count the step displacement. KAG stays explicit in geometry.
-  - A "step 0" measurement of outer-pass counts versus Δt/Δt_B (0.5–8), at R/h = 8 and 16 and La = 12/120/1200, is running before the M2 time step is fixed.
+  - **Step-0 measurement done (2026-09-30; jobs `46075447` and `46076505`; results in `/scratch/users/zsexton/free-surface-benchmarks/static_drop_2d/step0/`).**
+    - The per-pass contraction ρ fits A·r²/(1 + B·r) with r = Δt/Δt_B, within about 6%. The one-mode model has the right shape but is 4–12 × too pessimistic.
+    - Steps accepted with default settings (12-pass cap): up to 2·Δt_B at La = 12, and up to Δt_B at La = 120 and 1,200.
+    - The loop diverges (ρ = 1) at about 10–14·Δt_B for La = 12, 4–6·Δt_B for La = 120, and about 3·Δt_B for La = 1,200.
+    - With γ = 0, a step takes 1–2 passes, so the extra passes come entirely from capillary geometry feedback.
+    - **M2 time step at La = 12: 2·Δt_B**, which halves the step count. Use 4·Δt_B once the pass cap is about 25; the cap is a budget and does not change the converged state. Not beyond 4·Δt_B without the lagged-increment term, which mainly pays off at La ≥ 120.
+    - A translating drop with γ = 0 stops at its first vertex crossing, confirming that M2 also depends on the vertex-crossing fix.
 - [x] **Acceptance** (working criteria; fixed in `static_drop_2d/tolerances.json` on 2026-09-29):
   - pressure-jump error ≤ 1% at R/h = 32 with observed order ≥ 1;
   - final `Ca_sp` strictly decreasing with h, with absolute values reported. There is no absolute limit (decided 2026-09-29), because the July speed/γ figure was a start-up transient in SI units, not a capillary number;
