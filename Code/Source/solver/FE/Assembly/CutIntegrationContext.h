@@ -31,6 +31,7 @@
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -711,6 +712,7 @@ public:
             }
 
             content_revision_ = old_content_revision;
+            invalidateSnapshotCurrencyMemo();
             throw;
         }
     }
@@ -1087,6 +1089,7 @@ public:
             generated_pruned_volume_measure_ =
                 old_generated_pruned_volume_measure;
             content_revision_ = old_content_revision;
+            invalidateSnapshotCurrencyMemo();
             throw;
         }
     }
@@ -1202,6 +1205,7 @@ public:
             generated_interface_boundary_provenance_by_marker_.erase(
                 marker);
             content_revision_ = old_content_revision;
+            invalidateSnapshotCurrencyMemo();
             throw;
         }
     }
@@ -1323,6 +1327,7 @@ public:
             }
             generated_active_boundary_provenance_by_marker_.erase(marker);
             content_revision_ = old_content_revision;
+            invalidateSnapshotCurrencyMemo();
             throw;
         }
     }
@@ -1659,6 +1664,7 @@ public:
             generated_pruned_volume_measure_ =
                 old_generated_pruned_volume_measure;
             content_revision_ = old_content_revision;
+            invalidateSnapshotCurrencyMemo();
             throw;
         }
     }
@@ -1686,6 +1692,21 @@ public:
     }
 
     void assertFreeSurfaceGeometrySnapshotCurrentForMarker(int marker) const {
+        const auto key = snapshotCurrencyKey(
+            SnapshotCurrencyCheck::Marker, marker, 0u);
+        if (snapshot_currency_memo_.passed(key, snapshot_validation_epoch_)) {
+            return;
+        }
+        validateFreeSurfaceGeometrySnapshotCurrentForMarker(marker);
+        snapshot_currency_memo_.record(key, snapshot_validation_epoch_);
+    }
+
+private:
+    // Uncached structural check behind
+    // assertFreeSurfaceGeometrySnapshotCurrentForMarker. Registration is
+    // tested with per-call index masks, so the cost is linear in the number
+    // of rules; failures throw the same messages as before.
+    void validateFreeSurfaceGeometrySnapshotCurrentForMarker(int marker) const {
         const auto bound =
             free_surface_snapshot_revision_by_marker_.find(marker);
         if (bound == free_surface_snapshot_revision_by_marker_.end()) {
@@ -1756,14 +1777,21 @@ public:
         }
         const auto interface_rules =
             generated_interface_rule_indices_by_marker_.find(marker);
+        std::vector<unsigned char> registered_interface_rule(
+            interface_rules_.size(), 0u);
+        if (interface_rules !=
+            generated_interface_rule_indices_by_marker_.end()) {
+            for (const auto index : interface_rules->second) {
+                if (index < registered_interface_rule.size()) {
+                    registered_interface_rule[index] = 1u;
+                }
+            }
+        }
         const auto validate_interface_rule =
             [&](std::size_t index) {
                 const bool registered =
-                    interface_rules !=
-                        generated_interface_rule_indices_by_marker_.end() &&
-                    std::find(interface_rules->second.begin(),
-                              interface_rules->second.end(),
-                              index) != interface_rules->second.end();
+                    index < registered_interface_rule.size() &&
+                    registered_interface_rule[index] != 0u;
                 if (!registered || index >= interface_rules_.size() ||
                     interface_rules_[index].provenance.marker != marker ||
                     interface_rules_[index].provenance.source_value_revision !=
@@ -1789,14 +1817,20 @@ public:
         }
         const auto volume_rules =
             generated_volume_rule_indices_by_marker_.find(marker);
+        std::vector<unsigned char> registered_volume_rule(
+            volume_rules_.size(), 0u);
+        if (volume_rules != generated_volume_rule_indices_by_marker_.end()) {
+            for (const auto index : volume_rules->second) {
+                if (index < registered_volume_rule.size()) {
+                    registered_volume_rule[index] = 1u;
+                }
+            }
+        }
         const auto validate_volume_rule =
             [&](std::size_t index) {
                 const bool registered =
-                    volume_rules !=
-                        generated_volume_rule_indices_by_marker_.end() &&
-                    std::find(volume_rules->second.begin(),
-                              volume_rules->second.end(),
-                              index) != volume_rules->second.end();
+                    index < registered_volume_rule.size() &&
+                    registered_volume_rule[index] != 0u;
                 if (!registered || index >= volume_rules_.size() ||
                     volume_rules_[index].provenance.marker != marker ||
                     volume_rules_[index].provenance.source_value_revision !=
@@ -1842,7 +1876,19 @@ public:
         }
     }
 
+public:
     void assertAllFreeSurfaceGeometrySnapshotsCurrent() const {
+        const auto key =
+            snapshotCurrencyKey(SnapshotCurrencyCheck::All, 0, 0u);
+        if (snapshot_currency_memo_.passed(key, snapshot_validation_epoch_)) {
+            return;
+        }
+        validateAllFreeSurfaceGeometrySnapshotsCurrent();
+        snapshot_currency_memo_.record(key, snapshot_validation_epoch_);
+    }
+
+private:
+    void validateAllFreeSurfaceGeometrySnapshotsCurrent() const {
         for (const auto& [marker, revision_key] :
              free_surface_snapshot_revision_by_marker_) {
             (void)revision_key;
@@ -1899,6 +1945,7 @@ public:
         }
     }
 
+public:
     template <typename MeshAccessLike>
     [[nodiscard]] bool
     freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(
@@ -2040,6 +2087,31 @@ public:
     }
 
     void assertGeneratedInterfaceRulesCurrentForMarker(int marker) const {
+        const auto key = snapshotCurrencyKey(
+            SnapshotCurrencyCheck::GeneratedInterfaceRules, marker, 0u);
+        if (snapshot_currency_memo_.passed(key, snapshot_validation_epoch_)) {
+            return;
+        }
+        validateGeneratedInterfaceRulesCurrentForMarker(marker);
+        snapshot_currency_memo_.record(key, snapshot_validation_epoch_);
+    }
+
+    void assertGeneratedVolumeRulesCurrentForMarkerAndSide(
+        int marker,
+        geometry::CutIntegrationSide side) const {
+        const auto key = snapshotCurrencyKey(
+            SnapshotCurrencyCheck::GeneratedVolumeRules,
+            marker,
+            static_cast<std::uint32_t>(side));
+        if (snapshot_currency_memo_.passed(key, snapshot_validation_epoch_)) {
+            return;
+        }
+        validateGeneratedVolumeRulesCurrentForMarkerAndSide(marker, side);
+        snapshot_currency_memo_.record(key, snapshot_validation_epoch_);
+    }
+
+private:
+    void validateGeneratedInterfaceRulesCurrentForMarker(int marker) const {
         assertFreeSurfaceGeometrySnapshotCurrentForMarker(marker);
         const auto expected_it = expected_source_value_revision_by_marker_.find(marker);
         if (expected_it == expected_source_value_revision_by_marker_.end()) {
@@ -2063,7 +2135,7 @@ public:
         }
     }
 
-    void assertGeneratedVolumeRulesCurrentForMarkerAndSide(
+    void validateGeneratedVolumeRulesCurrentForMarkerAndSide(
         int marker,
         geometry::CutIntegrationSide side) const {
         assertFreeSurfaceGeometrySnapshotCurrentForMarker(marker);
@@ -2098,6 +2170,7 @@ public:
         }
     }
 
+public:
     [[nodiscard]] const std::vector<CutCellAssemblyMetadata>& metadata() const noexcept {
         return metadata_;
     }
@@ -3245,7 +3318,65 @@ private:
         if (content_revision_ == 0u) {
             ++content_revision_;
         }
+        invalidateSnapshotCurrencyMemo();
     }
+
+    // Snapshot-currency checks depend only on this context's own rules,
+    // metadata, bindings and published snapshots. Every change to them goes
+    // through markModified() or a rollback path, and both advance this
+    // epoch. Unlike content_revision_, a rollback never rewinds it, so a
+    // memo entry can never be mistaken for a later state with the same
+    // content revision.
+    void invalidateSnapshotCurrencyMemo() noexcept {
+        ++snapshot_validation_epoch_;
+    }
+
+    enum class SnapshotCurrencyCheck : std::uint64_t {
+        Marker = 1u,
+        All = 2u,
+        GeneratedInterfaceRules = 3u,
+        GeneratedVolumeRules = 4u,
+    };
+
+    [[nodiscard]] static std::uint64_t snapshotCurrencyKey(
+        SnapshotCurrencyCheck check,
+        int marker,
+        std::uint32_t side) noexcept {
+        return (static_cast<std::uint64_t>(check) << 56u) ^
+               (static_cast<std::uint64_t>(side & 0xffu) << 48u) ^
+               static_cast<std::uint64_t>(static_cast<std::uint32_t>(marker));
+    }
+
+    // Records which checks passed at which validation epoch. Failures are
+    // never recorded, so a defective state keeps throwing on every call.
+    // Copies start empty: a copied context revalidates once.
+    class SnapshotCurrencyMemo {
+    public:
+        SnapshotCurrencyMemo() = default;
+        SnapshotCurrencyMemo(const SnapshotCurrencyMemo&) noexcept {}
+        SnapshotCurrencyMemo& operator=(const SnapshotCurrencyMemo&) noexcept {
+            std::lock_guard<std::mutex> lock(mutex_);
+            passed_epoch_by_key_.clear();
+            return *this;
+        }
+
+        [[nodiscard]] bool passed(std::uint64_t key,
+                                  std::uint64_t epoch) const {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto it = passed_epoch_by_key_.find(key);
+            return it != passed_epoch_by_key_.end() && it->second == epoch;
+        }
+
+        void record(std::uint64_t key, std::uint64_t epoch) const {
+            std::lock_guard<std::mutex> lock(mutex_);
+            passed_epoch_by_key_[key] = epoch;
+        }
+
+    private:
+        mutable std::mutex mutex_{};
+        mutable std::unordered_map<std::uint64_t, std::uint64_t>
+            passed_epoch_by_key_{};
+    };
 
     std::vector<CutCellAssemblyMetadata> metadata_{};
     std::vector<geometry::CutQuadratureRule> volume_rules_{};
@@ -3288,6 +3419,8 @@ private:
     std::size_t generated_pruned_volume_rule_count_{0u};
     Real generated_pruned_volume_measure_{0.0};
     std::uint64_t content_revision_{0u};
+    std::uint64_t snapshot_validation_epoch_{1u};
+    SnapshotCurrencyMemo snapshot_currency_memo_{};
 };
 
 } // namespace assembly
