@@ -2284,6 +2284,12 @@ if(FE_BUILD_TESTS)
                 ${GTEST_LIBRARIES}
         )
         add_test(NAME FE_Core_Tests COMMAND test_fe_core)
+        # FE_LOG_LEVEL is read when the logger is first used, so the
+        # environment-driven logger tests run in their own process.
+        add_test(NAME FE_Core_Logger_Environment_Tests
+                 COMMAND test_fe_core --gtest_filter=LoggerEnvironment.*)
+        set_tests_properties(FE_Core_Logger_Environment_Tests PROPERTIES
+                             ENVIRONMENT "FE_LOG_LEVEL=WARNING")
     endif()
 
     # MovingMesh module tests (physics-neutral FE implementation of Mesh motion backends)

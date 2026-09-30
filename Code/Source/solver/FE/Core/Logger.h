@@ -51,6 +51,8 @@
 #include <iomanip>
 #include <vector>
 #include <functional>
+#include <optional>
+#include <string_view>
 #include <thread>
 
 #if FE_HAS_MPI
@@ -89,6 +91,14 @@ inline const char* log_level_to_string(LogLevel level) {
         default:                 return "UNKNOWN";
     }
 }
+
+/**
+ * @brief Parse a log level name as accepted by FE_LOG_LEVEL
+ *
+ * Case-insensitive: DEBUG, INFO, WARNING (or WARN), ERROR, CRITICAL (or CRIT),
+ * OFF.  Returns std::nullopt for anything else.
+ */
+std::optional<LogLevel> parse_log_level(std::string_view name);
 
 // ============================================================================
 // Timer Class for Performance Logging
@@ -177,6 +187,13 @@ struct LogMessage {
  * - Performance timing integration
  * - Compile-time log level filtering
  * - Formatted output with timestamps
+ *
+ * Environment variables, read when the logger is first used:
+ * - FE_LOG_LEVEL: minimum level (see parse_log_level(); default INFO)
+ * - FE_LOG_FILE: also write to this file (rank suffix added in MPI runs)
+ * - FE_LOG_CONSOLE, FE_LOG_SHOW_RANK, FE_LOG_SHOW_TIME: "false" or "0"
+ *   disables console output, the rank prefix or the timestamp
+ * Explicit set_*() calls made afterwards take precedence.
  */
 class Logger {
 public:
@@ -372,7 +389,19 @@ private:
     Logger() : min_level_(LogLevel::INFO),
                console_output_(true),
                show_rank_(true),
-               show_timestamp_(true) {}
+               show_timestamp_(true) {
+        apply_environment();
+    }
+
+    /**
+     * @brief Apply the FE_LOG_* environment variables (see class comment)
+     *
+     * Runs from the constructor, i.e. on first use of instance().  It is
+     * defined out of line in Logger.cpp, so every binary that uses the logger
+     * also links that object file; a namespace-scope static initializer there
+     * was silently dropped by the linker from static-library builds.
+     */
+    void apply_environment();
 
     ~Logger() {
         if (file_stream_.is_open()) {
