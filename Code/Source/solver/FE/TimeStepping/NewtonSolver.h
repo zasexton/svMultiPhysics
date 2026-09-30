@@ -362,6 +362,9 @@ struct NewtonReport {
     int iterations{0};
     int outer_iterations{0};
     int inner_iterations_total{0};
+    // Accepted line-search steps whose trial residual was reused because
+    // the accepted reprojection left the constraints and state unchanged.
+    int accepted_line_search_refresh_skips{0};
     double outer_state_change_norm{0.0};
     bool outer_dynamic_relaxation_enabled{false};
     int outer_dynamic_relaxation_updates{0};
