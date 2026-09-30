@@ -95,6 +95,9 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
     assert level_set.find("Enable_reinitialization").text.strip() == "false"
     general = root.find("GeneralSimulationParameters")
     assert general.find("Transient_time_integration_scheme").text == "BackwardEuler"
+    assert fluid.find("LS").get("type") == "Direct"
+    assert fluid.find("LS/Linear_algebra").get("type") == "eigen"
+    assert case["linear_solver"] == "eigen_direct"
     assert case["solver_environment"] == {"SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS": "4"}
     assert general.find("Enable_adaptive_time_loop").text == "true"
     assert float(general.find("Adaptive_time_loop_max_dt").text) == case["dt"]
@@ -116,6 +119,8 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
     assert "KinematicAreaGradientTraction" in lumped and "mass>Lumped" in lumped
     consistent = gen.solver_xml("kag_consistent", 90, schedule, 10, 1)
     assert "kinematic_area_gradient_mass" not in consistent
+    gmres = gen.solver_xml("surface_stress", 90, schedule, 10, 1, linear_solver="fsils")
+    assert '<LS type="GMRES">' in gmres and 'Linear_algebra type="fsils"' in gmres
     maintained = ET.fromstring(gen.solver_xml("surface_stress", 120, schedule, 10, 1,
                                               reinitialization=True))
     level_set = maintained.find("Add_equation[@type='level_set']")

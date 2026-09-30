@@ -64,6 +64,13 @@ DT_SAFETY = 1.0 / math.sqrt(2.0)
 # for, so the restart applies.  See README.md.
 TIME_INTEGRATION_SCHEME = "BackwardEuler"
 SOLVER_ENVIRONMENT = {"SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS": "4"}
+# Linear solver.  Backward Euler also evaluates the free-surface residual-work
+# pairing, and with FSILS vectors that pairing stops with "FsilsVector::dot:
+# layout mismatch" in the first step (the scratch vector keeps the layout from
+# before the aggregation constraints re-augment the system).  The serial
+# Eigen direct solver avoids it; the problem is 2D and small.  "fsils" keeps
+# the static_drop_2d GMRES block for diagnosis.
+LINEAR_SOLVERS = ("eigen_direct", "fsils")
 # Step retry, for a step whose topology changes more often than the restart
 # budget allows.  The adaptive time loop only retries by bisection: dt never
 # exceeds the capillary-limited step, the target Newton count lies above any
@@ -307,7 +314,18 @@ def write_face_vtp(path: Path, points, node_ids, parent_cells) -> None:
 # ---------------------------------------------------------------------------
 # Solver input
 # ---------------------------------------------------------------------------
-def fsils_gmres_block() -> str:
+def linear_solver_block(solver: str = "eigen_direct") -> str:
+    if solver == "eigen_direct":
+        return """    <LS type="Direct">
+      <Linear_algebra type="eigen">
+        <Preconditioner>none</Preconditioner>
+      </Linear_algebra>
+      <Max_iterations>1</Max_iterations>
+      <Tolerance>1.0e-8</Tolerance>
+      <Absolute_tolerance>1.0e-10</Absolute_tolerance>
+    </LS>"""
+    if solver != "fsils":
+        raise ValueError(f"linear solver must be one of {LINEAR_SOLVERS}")
     return """    <LS type="GMRES">
       <Linear_algebra type="fsils">
         <Preconditioner>rcs</Preconditioner>
@@ -320,7 +338,7 @@ def fsils_gmres_block() -> str:
 
 
 def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, cadence: int,
-               reinitialization: bool = False) -> str:
+               reinitialization: bool = False, linear_solver: str = "eigen_direct") -> str:
     kag = form in ("kag_consistent", "kag_lumped")
     curvature_projection = ""
     if kag:
@@ -418,7 +436,7 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
     <Output type="Volume_integral">
       <Volume>true</Volume>
     </Output>
-{fsils_gmres_block()}
+{linear_solver_block(linear_solver)}
   </Add_equation>
 
   <Add_equation type="fluid">
@@ -443,7 +461,7 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
     <Output type="Volume_integral">
       <Volume>true</Volume>
     </Output>
-{fsils_gmres_block()}
+{linear_solver_block(linear_solver)}
 {walls}
     <Add_BC name="free_surface">
       <Type>Free_surface</Type>
@@ -483,7 +501,7 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
              initial_deg: float | None = None,
              viscous_times: float = DEFAULT_VISCOUS_TIMES,
              snapshots: int = DEFAULT_SNAPSHOTS,
-             reinitialization: bool = False,
+             reinitialization: bool = False, linear_solver: str = "eigen_direct",
              max_steps: int | None = None, force: bool = False) -> dict:
     if level not in LEVELS:
         raise ValueError(f"--level must be one of {LEVELS}")
@@ -540,7 +558,8 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
         node_ids, parents = faces[wall]
         write_face_vtp(mesh_dir / "mesh-surfaces" / f"{wall}.vtp", points, node_ids, parents)
     (output_dir / "solver.xml").write_text(
-        solver_xml(form, equilibrium_deg, schedule, steps, cadence, reinitialization),
+        solver_xml(form, equilibrium_deg, schedule, steps, cadence, reinitialization,
+                   linear_solver),
         encoding="utf-8")
 
     case = {
@@ -553,6 +572,7 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
         "contact_line_model": "PrescribedAngle",
         "reinitialization": bool(reinitialization),
         "time_integration_scheme": TIME_INTEGRATION_SCHEME,
+        "linear_solver": linear_solver,
         "solver_environment": dict(SOLVER_ENVIRONMENT),
         "step_retry": {"decrease_factor": RETRY_DECREASE_FACTOR,
                        "increase_factor": RETRY_INCREASE_FACTOR,
@@ -623,6 +643,8 @@ def main(argv=None) -> int:
                         help="enable projection reinitialization with the production values "
                              "(every 10 steps, at most 4 iterations; contact cells are only "
                              "rescaled).  Off in the protocol, as in static_drop_2d.")
+    parser.add_argument("--linear-solver", default="eigen_direct", choices=LINEAR_SOLVERS,
+                        help="linear solver (protocol: eigen_direct; fsils for diagnosis)")
     parser.add_argument("--max-steps", type=int, default=None,
                         help="smoke runs only: stop after this many steps; the case is "
                              "marked truncated and verify.py rejects it for acceptance")
@@ -632,6 +654,7 @@ def main(argv=None) -> int:
     case = generate(args.level, args.contact_angle, args.capillary_form, args.output_dir,
                     initial_deg=args.initial_angle, viscous_times=args.viscous_times,
                     snapshots=args.snapshots, reinitialization=args.reinitialization,
+                    linear_solver=args.linear_solver,
                     max_steps=args.max_steps, force=args.force)
     print(f"wrote {args.output_dir}")
     for key in ("level_R_over_h", "equilibrium_angle_degrees", "initial_angle_degrees",
