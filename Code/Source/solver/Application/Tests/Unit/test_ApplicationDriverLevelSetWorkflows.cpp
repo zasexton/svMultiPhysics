@@ -5761,6 +5761,67 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
+     TransientCutTopologyStageSchemeEndpointMayStartANewTopology)
+{
+  // Generalized-alpha converges at the operator stage and then finalizes the
+  // endpoint.  An interface that passes a mesh vertex between the stage and
+  // the endpoint puts the endpoint in a new topology; that endpoint is
+  // accepted and becomes the committed topology of the next step.
+  constexpr std::uint64_t accepted_key = 0x3a11u;
+  constexpr std::uint64_t endpoint_key = 0x3a12u;
+  constexpr std::uint64_t other_key = 0x3a13u;
+  const auto report = [](std::uint64_t topology_key) {
+    ActiveCutContextRefreshReport result;
+    result.topology_key = topology_key;
+    return result;
+  };
+
+  TransientCutTopologyAttemptTracker tracker;
+  tracker.beginAttempt();
+  tracker.observe(report(accepted_key), "before_physics_solve");
+  tracker.observe(report(accepted_key), "outer_fixed_point");
+  EXPECT_FALSE(tracker.endpointPhase());
+  tracker.observe(report(endpoint_key), "endpoint_candidate");
+  EXPECT_TRUE(tracker.endpointPhase());
+  tracker.observe(report(endpoint_key), "projected_endpoint_candidate");
+  tracker.observe(report(endpoint_key), "final_candidate_topology_gate");
+  EXPECT_FALSE(tracker.attemptTainted());
+  EXPECT_FALSE(tracker.candidateMustReject(endpoint_key));
+  // The gate still requires the cached key to be the last observation.
+  EXPECT_TRUE(tracker.candidateMustReject(other_key));
+  ASSERT_NO_THROW(tracker.completeAttempt(endpoint_key));
+  ASSERT_TRUE(tracker.acceptedTopologyKey().has_value());
+  EXPECT_EQ(*tracker.acceptedTopologyKey(), endpoint_key);
+
+  // The next attempt starts from the new committed topology, and an
+  // unacknowledged stage change still taints it.
+  tracker.beginAttempt();
+  EXPECT_FALSE(tracker.endpointPhase());
+  tracker.observe(report(endpoint_key), "before_physics_solve");
+  tracker.observe(report(other_key), "outer_fixed_point");
+  EXPECT_TRUE(tracker.attemptTainted());
+  tracker.observe(report(other_key), "endpoint_candidate");
+  tracker.observe(report(other_key), "final_candidate_topology_gate");
+  EXPECT_TRUE(tracker.candidateMustReject(other_key));
+
+  // An invalid (zero) endpoint topology fails closed.
+  TransientCutTopologyAttemptTracker invalid_endpoint;
+  invalid_endpoint.beginAttempt();
+  invalid_endpoint.observe(report(accepted_key), "before_physics_solve");
+  invalid_endpoint.observe(report(0u), "endpoint_candidate");
+  EXPECT_TRUE(invalid_endpoint.attemptTainted());
+
+  // A solved-state scheme (no endpoint refresh) still requires the gate
+  // topology to equal the epoch the solve converged in.
+  TransientCutTopologyAttemptTracker solved_state;
+  solved_state.beginAttempt();
+  solved_state.observe(report(accepted_key), "before_physics_solve");
+  solved_state.observe(
+      report(endpoint_key), "final_candidate_topology_gate");
+  EXPECT_TRUE(solved_state.candidateMustReject(endpoint_key));
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
      TransientCutTopologyRestartAdvancesAttemptEpochOnlyAtCommit)
 {
   constexpr std::uint64_t accepted_key = 0x51a7u;

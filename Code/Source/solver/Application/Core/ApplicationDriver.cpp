@@ -4717,6 +4717,21 @@ struct ActiveCutContextRefreshReport {
   svmp::FE::Real positive_physical_volume{0.0};
 };
 
+// Tracks the cut topology of one time-step attempt.  A topology change is a
+// normal event for a moving interface: the nonlinear solve adopts a new
+// attempt epoch through acknowledgeNonlinearRestart whenever an outer
+// fixed-point refresh (including the canonicalization of the predicted entry
+// state) regenerates a different topology, and the converged state is valid
+// in the epoch it was solved in.  An attempt is tainted only by a topology
+// that the solve did not acknowledge.
+//
+// For a stage scheme (generalized-alpha) the nonlinear solve converges at the
+// operator stage, and the time loop then finalizes the endpoint
+// (endpoint_candidate refresh).  From that point the endpoint may lie in a
+// different topology than the solved stage, for example when the interface
+// passes a vertex between the stage and the endpoint.  Such an endpoint is
+// accepted and becomes the committed topology of the next step; observations
+// after the endpoint refresh only have to be self-consistent.
 class TransientCutTopologyAttemptTracker {
 public:
   void beginAttempt() noexcept
@@ -4724,6 +4739,7 @@ public:
     attempt_active_ = true;
     attempt_tainted_ = false;
     final_candidate_observed_ = false;
+    endpoint_phase_ = false;
     attempt_topology_key_ = accepted_topology_key_;
     last_observed_topology_key_.reset();
     first_mismatched_topology_key_.reset();
@@ -4748,6 +4764,15 @@ public:
     last_observed_topology_key_ = report.topology_key;
     if (normalized_provenance == "final_candidate_topology_gate") {
       final_candidate_observed_ = true;
+    }
+    if (normalized_provenance == "endpoint_candidate") {
+      endpoint_phase_ = true;
+    }
+    if (endpoint_phase_ && accepted_topology_key_.has_value()) {
+      if (report.topology_key == 0u) {
+        taint(report.topology_key, normalized_provenance);
+      }
+      return;
     }
 
     if (!accepted_topology_key_.has_value()) {
@@ -4793,16 +4818,23 @@ public:
   [[nodiscard]] bool candidateMustReject(
       const std::optional<std::uint64_t>& cached_topology_key) const noexcept
   {
-    return !attempt_active_ || !accepted_topology_key_.has_value() ||
-           *accepted_topology_key_ == 0u ||
-           !attempt_topology_key_.has_value() ||
-           *attempt_topology_key_ == 0u || attempt_tainted_ ||
-           !final_candidate_observed_ ||
-           !last_observed_topology_key_.has_value() ||
-           !cached_topology_key.has_value() ||
-           *cached_topology_key == 0u ||
-           *last_observed_topology_key_ != *cached_topology_key ||
-           *cached_topology_key != *attempt_topology_key_;
+    const bool inconsistent =
+        !attempt_active_ || !accepted_topology_key_.has_value() ||
+        *accepted_topology_key_ == 0u ||
+        !attempt_topology_key_.has_value() ||
+        *attempt_topology_key_ == 0u || attempt_tainted_ ||
+        !final_candidate_observed_ ||
+        !last_observed_topology_key_.has_value() ||
+        !cached_topology_key.has_value() ||
+        *cached_topology_key == 0u ||
+        *last_observed_topology_key_ != *cached_topology_key;
+    if (inconsistent) {
+      return true;
+    }
+    // A solved-state scheme (backward Euler) accepts exactly the state whose
+    // topology the solve converged in.  A stage scheme may finalize its
+    // endpoint in a new topology (see the class comment).
+    return !endpoint_phase_ && *cached_topology_key != *attempt_topology_key_;
   }
 
   void completeAttempt(
@@ -4825,6 +4857,11 @@ public:
   [[nodiscard]] bool attemptTainted() const noexcept
   {
     return attempt_tainted_;
+  }
+
+  [[nodiscard]] bool endpointPhase() const noexcept
+  {
+    return endpoint_phase_;
   }
 
   [[nodiscard]] const std::optional<std::uint64_t>&
@@ -4889,6 +4926,7 @@ private:
   bool attempt_active_{false};
   bool attempt_tainted_{false};
   bool final_candidate_observed_{false};
+  bool endpoint_phase_{false};
 };
 
 struct WetVolumeDiagnostic {
@@ -28908,9 +28946,35 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   opts.newton.external_state_fixed_point.max_iterations = std::max(
       1,
       parseIntEnv("SVMP_GENERATED_STATE_OUTER_MAX_ITERATIONS", 12));
+  // A cut-topology change during a step is a normal event for a moving
+  // interface: each outer fixed-point refresh may regenerate a new topology,
+  // and the solve continues on it.  The number of such epoch changes is
+  // therefore bounded by the outer iteration limit, which is the default.
+  // Max_cut_topology_restarts_per_step overrides it (0 restores the
+  // stop-and-reject behavior); the legacy environment variable is honored
+  // only when the XML key is absent.
+  const char* cut_topology_restart_limit_source = "outer_iteration_limit";
+  int cut_topology_restart_limit =
+      opts.newton.external_state_fixed_point.max_iterations;
+  {
+    const auto& limit_parameter =
+        params.general_simulation_parameters
+            .max_cut_topology_restarts_per_step;
+    if (limit_parameter.defined() && limit_parameter.value() >= 0) {
+      cut_topology_restart_limit = limit_parameter.value();
+      cut_topology_restart_limit_source = "xml";
+    } else if (std::getenv(
+                   "SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS") !=
+               nullptr) {
+      cut_topology_restart_limit = std::max(
+          0,
+          parseIntEnv("SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS",
+                      cut_topology_restart_limit));
+      cut_topology_restart_limit_source = "environment";
+    }
+  }
   opts.newton.external_state_fixed_point.max_discontinuity_restarts =
-      parseIntEnv(
-          "SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS", 0);
+      cut_topology_restart_limit;
   applyGeneratedStateOuterRelaxationEnvOptions(opts.newton);
   const bool refresh_generated_geometry_within_solve =
       has_transient_generated_state &&
@@ -28926,6 +28990,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         << ", max_discontinuity_restarts="
         << opts.newton.external_state_fixed_point
                .max_discontinuity_restarts
+        << " (" << cut_topology_restart_limit_source << ")"
         << ", dynamic_relaxation="
         << (opts.newton.external_state_fixed_point.dynamic_relaxation.enabled
                 ? "enabled"
