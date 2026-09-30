@@ -21,6 +21,7 @@
 #include <functional>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -154,11 +155,16 @@ struct NewtonOptions {
      * ProjectedOuterFixedPointState so all remaining generated data see the
      * projected iterate and transient history. A complete inner Newton solve
      * then holds that generated state fixed. The process is
-     * repeated until a newly refreshed problem satisfies the configured
-     * absolute residual tolerances before taking any inner Newton update.
+     * repeated until a newly refreshed problem satisfies the acceptance gate
+     * before taking any inner Newton update.
      * Relative tolerances are deliberately disabled in the inner solves because
      * each refresh defines a new residual reference; accepting a per-inner
      * relative reduction would not prove convergence of R(u,G(u)).
+     * Instead, the gate of every later refresh is fixed once per step from the
+     * first fresh residual of that step: max(abs_tolerance, rel_tolerance *
+     * ||R(u_0,G(u_0))||), and likewise for each field residual criterion
+     * (see scaledExternalStateOuterGate). With zero relative tolerances this
+     * is the absolute gate.
      *
      * Callbacks must be reproducible from the supplied SystemStateView and must
      * not commit irreversible side effects.  On failure the algebraic/history,
@@ -365,6 +371,18 @@ struct NewtonReport {
     // Accepted line-search steps whose trial residual was reused because
     // the accepted reprojection left the constraints and state unchanged.
     int accepted_line_search_refresh_skips{0};
+    // External-state fixed point acceptance gate of this step (see
+    // scaledExternalStateOuterGate). NaN/empty when no gate was derived.
+    bool outer_gate_scaled{false};
+    double outer_gate_reference_residual{
+        std::numeric_limits<double>::quiet_NaN()};
+    double outer_gate_residual_tolerance{
+        std::numeric_limits<double>::quiet_NaN()};
+    std::vector<double> outer_gate_field_reference_residuals{};
+    std::vector<double> outer_gate_field_tolerances{};
+    // Initial residual norm of each configured field criterion, in
+    // NewtonOptions::field_residual_criteria order.
+    std::vector<double> field_criterion_residual_norm0{};
     double outer_state_change_norm{0.0};
     bool outer_dynamic_relaxation_enabled{false};
     int outer_dynamic_relaxation_updates{0};
@@ -497,6 +515,37 @@ struct NewtonWorkspace {
                residual_base != nullptr && residual_minus != nullptr;
     }
 };
+
+/**
+ * @brief Acceptance gate for the external-state (generated geometry) fixed point.
+ *
+ * The first refreshed residual of a time step, before any Newton update,
+ * defines the reference. A later refresh is accepted when its fresh residual
+ * satisfies
+ *
+ *   ||R|| <= max(abs_tolerance, rel_tolerance * reference)
+ *
+ * and each field criterion i satisfies the same rule with its own absolute
+ * and relative tolerances and reference. The absolute tolerance is a floor
+ * that always applies. A zero or nonfinite relative tolerance or reference
+ * leaves the corresponding gate at its absolute tolerance, and component
+ * (auxiliary-block) convergence keeps the absolute monolithic gate.
+ */
+struct ExternalStateOuterGate {
+    bool scaled{false};
+    double reference_residual{std::numeric_limits<double>::quiet_NaN()};
+    double residual_tolerance{0.0};
+    std::vector<double> field_reference_residuals{};
+    std::vector<double> field_tolerances{};
+};
+
+[[nodiscard]] ExternalStateOuterGate scaledExternalStateOuterGate(
+    double abs_tolerance,
+    double rel_tolerance,
+    double reference_residual,
+    bool component_residual_convergence,
+    std::span<const NewtonOptions::FieldResidualCriterion> field_criteria,
+    std::span<const double> field_reference_residuals);
 
 /**
  * @brief Newton-Raphson driver for systems assembled through FE/Systems.

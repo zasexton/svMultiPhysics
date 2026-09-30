@@ -11262,6 +11262,47 @@ void applyAuxiliaryDelta(systems::FESystem& system,
 
 } // namespace
 
+ExternalStateOuterGate scaledExternalStateOuterGate(
+    double abs_tolerance,
+    double rel_tolerance,
+    double reference_residual,
+    bool component_residual_convergence,
+    std::span<const NewtonOptions::FieldResidualCriterion> field_criteria,
+    std::span<const double> field_reference_residuals)
+{
+    const auto scaled_tolerance =
+        [](double absolute, double relative, double reference) {
+            if (!(relative > 0.0) || !std::isfinite(relative) ||
+                !(reference > 0.0) || !std::isfinite(reference)) {
+                return absolute;
+            }
+            return std::max(absolute, relative * reference);
+        };
+
+    ExternalStateOuterGate gate;
+    gate.reference_residual = reference_residual;
+    gate.residual_tolerance =
+        component_residual_convergence
+            ? abs_tolerance
+            : scaled_tolerance(abs_tolerance, rel_tolerance, reference_residual);
+    gate.scaled = gate.residual_tolerance != abs_tolerance;
+    gate.field_reference_residuals.reserve(field_criteria.size());
+    gate.field_tolerances.reserve(field_criteria.size());
+    for (std::size_t i = 0; i < field_criteria.size(); ++i) {
+        const auto& criterion = field_criteria[i];
+        const double reference =
+            i < field_reference_residuals.size()
+                ? field_reference_residuals[i]
+                : std::numeric_limits<double>::quiet_NaN();
+        const double tolerance = scaled_tolerance(
+            criterion.abs_tolerance, criterion.rel_tolerance, reference);
+        gate.field_reference_residuals.push_back(reference);
+        gate.field_tolerances.push_back(tolerance);
+        gate.scaled = gate.scaled || tolerance != criterion.abs_tolerance;
+    }
+    return gate;
+}
+
 NewtonSolver::NewtonSolver(NewtonOptions options)
     : NewtonSolver(std::move(options), false)
 {
@@ -12377,6 +12418,15 @@ NewtonReport NewtonSolver::solveStep(
     for (auto& criterion : inner_options.field_residual_criteria) {
         criterion.rel_tolerance = 0.0;
     }
+    // Refreshes after the first one of this step use the scaled gate: their
+    // inner solves run with absolute tolerances max(abs, rel * reference),
+    // where the reference is the first fresh residual of the step (see
+    // scaledExternalStateOuterGate). Every other acceptance condition is
+    // unchanged.
+    const NewtonOptions unscaled_inner_options = inner_options;
+    std::optional<NewtonSolver> scaled_inner_solver;
+    ExternalStateOuterGate outer_gate;
+    bool outer_gate_derived = false;
     NewtonSolver inner_solver(
         std::move(inner_options),
         /*defer_pressure_representability_distance_gate=*/true);
@@ -12645,13 +12695,75 @@ NewtonReport NewtonSolver::solveStep(
                 "NewtonSolver: external-state refresh opened a mesh-coordinate transaction");
 
             previous_outer_iterate->copyFrom(history.u());
-            auto inner_report = inner_solver.solveStepFrozenExternalState(
+            const NewtonSolver& active_inner_solver =
+                scaled_inner_solver ? *scaled_inner_solver : inner_solver;
+            auto inner_report = active_inner_solver.solveStepFrozenExternalState(
                 transient,
                 linear,
                 solve_time,
                 history,
                 workspace,
                 residual_addition);
+            if (!outer_gate_derived) {
+                outer_gate_derived = true;
+                outer_gate = scaledExternalStateOuterGate(
+                    options_.abs_tolerance,
+                    options_.rel_tolerance,
+                    inner_report.residual_norm0,
+                    inner_report.component_residual_convergence,
+                    std::span<const NewtonOptions::FieldResidualCriterion>(
+                        options_.field_residual_criteria.data(),
+                        options_.field_residual_criteria.size()),
+                    std::span<const double>(
+                        inner_report.field_criterion_residual_norm0.data(),
+                        inner_report.field_criterion_residual_norm0.size()));
+                if (outer_gate.scaled) {
+                    NewtonOptions scaled_options = unscaled_inner_options;
+                    scaled_options.abs_tolerance =
+                        outer_gate.residual_tolerance;
+                    for (std::size_t i = 0;
+                         i < scaled_options.field_residual_criteria.size();
+                         ++i) {
+                        scaled_options.field_residual_criteria[i]
+                            .abs_tolerance = outer_gate.field_tolerances[i];
+                    }
+                    scaled_inner_solver.emplace(NewtonSolver(
+                        std::move(scaled_options),
+                        /*defer_pressure_representability_distance_gate=*/
+                        true));
+                }
+                if (activeSystemRank(system) == 0) {
+                    std::ostringstream oss;
+                    oss << std::setprecision(17)
+                        << "NewtonSolver: external-state fixed point gate"
+                        << " diagnostic=outer_fixed_point_gate"
+                        << " scaled=" << (outer_gate.scaled ? 1 : 0)
+                        << " reference_residual="
+                        << outer_gate.reference_residual
+                        << " abs_tolerance=" << options_.abs_tolerance
+                        << " rel_tolerance=" << options_.rel_tolerance
+                        << " residual_gate=" << outer_gate.residual_tolerance
+                        << " component_residual_convergence="
+                        << (inner_report.component_residual_convergence ? 1
+                                                                        : 0);
+                    for (std::size_t i = 0;
+                         i < options_.field_residual_criteria.size();
+                         ++i) {
+                        const auto& criterion =
+                            options_.field_residual_criteria[i];
+                        oss << " field='"
+                            << system.fieldRecord(criterion.field).name
+                            << "' field_reference_residual="
+                            << outer_gate.field_reference_residuals[i]
+                            << " field_abs_tolerance="
+                            << criterion.abs_tolerance
+                            << " field_rel_tolerance="
+                            << criterion.rel_tolerance
+                            << " field_gate=" << outer_gate.field_tolerances[i];
+                    }
+                    FE_LOG_INFO(oss.str());
+                }
+            }
             inner_iterations_total += inner_report.iterations;
             accepted_line_search_refresh_skips_total +=
                 inner_report.accepted_line_search_refresh_skips;
@@ -12675,6 +12787,14 @@ NewtonReport NewtonSolver::solveStep(
             aggregate.iterations = inner_iterations_total;
             aggregate.accepted_line_search_refresh_skips =
                 accepted_line_search_refresh_skips_total;
+            aggregate.outer_gate_scaled = outer_gate.scaled;
+            aggregate.outer_gate_reference_residual =
+                outer_gate.reference_residual;
+            aggregate.outer_gate_residual_tolerance =
+                outer_gate.residual_tolerance;
+            aggregate.outer_gate_field_reference_residuals =
+                outer_gate.field_reference_residuals;
+            aggregate.outer_gate_field_tolerances = outer_gate.field_tolerances;
             aggregate.outer_state_change_norm = state_change_norm;
             aggregate.outer_dynamic_relaxation_enabled =
                 dynamic_relaxation.enabled;
@@ -12775,6 +12895,21 @@ NewtonReport NewtonSolver::solveStep(
                     aggregate.converged = false;
                     restoreEntryState();
                     return aggregate;
+                }
+                if (activeSystemRank(system) == 0) {
+                    std::ostringstream oss;
+                    oss << std::setprecision(17)
+                        << "NewtonSolver: external-state fixed point accepted"
+                        << " diagnostic=outer_fixed_point_accept"
+                        << " outer_iterations=" << (outer + 1)
+                        << " inner_iterations_total=" << inner_iterations_total
+                        << " fresh_residual=" << inner_report.residual_norm
+                        << " residual_gate="
+                        << (outer == 0 ? options_.abs_tolerance
+                                       : outer_gate.residual_tolerance)
+                        << " scaled_gate="
+                        << ((outer > 0 && outer_gate.scaled) ? 1 : 0);
+                    FE_LOG_INFO(oss.str());
                 }
                 aggregate.converged = true;
                 if (inner_iterations_total > 0 &&
@@ -16316,6 +16451,11 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             report.residual_norm0 = current_residual_norm;
             report.field_residual_norm0 = initial_residual_components.field;
             report.auxiliary_residual_norm0 = initial_residual_components.auxiliary;
+            report.field_criterion_residual_norm0.clear();
+            for (const auto& state : field_residual_states) {
+                report.field_criterion_residual_norm0.push_back(
+                    state.current_norm);
+            }
             for (auto& state : field_residual_states) {
                 state.initial_norm = state.current_norm;
                 state.relative_reference_available =

@@ -3292,6 +3292,274 @@ TEST(NewtonSolverExternalStateFixedPoint,
     EXPECT_NEAR(refreshed_states[2], 0.5, 1e-13);
 }
 
+TEST(NewtonSolverExternalStateOuterGate, ScalesWithTheFirstFreshResidual)
+{
+    using svmp::FE::timestepping::scaledExternalStateOuterGate;
+    using Criterion =
+        svmp::FE::timestepping::NewtonOptions::FieldResidualCriterion;
+    const std::vector<Criterion> criteria{
+        Criterion{.field = 0, .abs_tolerance = 1e-10, .rel_tolerance = 1e-4},
+        Criterion{.field = 1, .abs_tolerance = 1e-10, .rel_tolerance = 0.0}};
+    const std::vector<double> references{6.7e-4, 3.0e-2};
+    const auto gate = scaledExternalStateOuterGate(
+        1e-10, 1e-4, 0.4, false, criteria, references);
+    EXPECT_TRUE(gate.scaled);
+    EXPECT_EQ(gate.reference_residual, 0.4);
+    EXPECT_EQ(gate.residual_tolerance, 1e-4 * 0.4);
+    ASSERT_EQ(gate.field_tolerances.size(), 2u);
+    EXPECT_EQ(gate.field_tolerances[0], 1e-4 * 6.7e-4);
+    // A criterion without a relative tolerance keeps its absolute gate.
+    EXPECT_EQ(gate.field_tolerances[1], 1e-10);
+    EXPECT_EQ(gate.field_reference_residuals, references);
+}
+
+TEST(NewtonSolverExternalStateOuterGate, AbsoluteToleranceIsAFloor)
+{
+    using svmp::FE::timestepping::scaledExternalStateOuterGate;
+    using Criterion =
+        svmp::FE::timestepping::NewtonOptions::FieldResidualCriterion;
+    const std::vector<Criterion> criteria{
+        Criterion{.field = 0, .abs_tolerance = 1e-6, .rel_tolerance = 1e-4}};
+    const std::vector<double> references{1e-3};
+    const auto gate = scaledExternalStateOuterGate(
+        1e-3, 1e-4, 0.4, false, criteria, references);
+    EXPECT_FALSE(gate.scaled);
+    EXPECT_EQ(gate.residual_tolerance, 1e-3);
+    EXPECT_EQ(gate.field_tolerances.front(), 1e-6);
+}
+
+TEST(NewtonSolverExternalStateOuterGate,
+     ZeroTinyOrNonfiniteReferencesKeepTheAbsoluteGate)
+{
+    using svmp::FE::timestepping::scaledExternalStateOuterGate;
+    using Criterion =
+        svmp::FE::timestepping::NewtonOptions::FieldResidualCriterion;
+    const std::vector<Criterion> criteria{
+        Criterion{.field = 0, .abs_tolerance = 1e-10, .rel_tolerance = 1e-4}};
+    for (const double reference :
+         {0.0, 1e-300, -1.0, std::numeric_limits<double>::infinity(),
+          std::numeric_limits<double>::quiet_NaN()}) {
+        const std::vector<double> references{reference};
+        const auto gate = scaledExternalStateOuterGate(
+            1e-10, 1e-4, reference, false, criteria, references);
+        EXPECT_FALSE(gate.scaled) << "reference=" << reference;
+        EXPECT_EQ(gate.residual_tolerance, 1e-10) << "reference=" << reference;
+        EXPECT_EQ(gate.field_tolerances.front(), 1e-10)
+            << "reference=" << reference;
+    }
+    // Missing field references and zero relative tolerances also keep the
+    // absolute gates; component convergence keeps the monolithic one.
+    const auto missing = scaledExternalStateOuterGate(
+        1e-10, 0.0, 0.4, false, criteria, std::span<const double>{});
+    EXPECT_FALSE(missing.scaled);
+    EXPECT_EQ(missing.residual_tolerance, 1e-10);
+    EXPECT_EQ(missing.field_tolerances.front(), 1e-10);
+    const auto component = scaledExternalStateOuterGate(
+        1e-10, 1e-4, 0.4, true, {}, {});
+    EXPECT_FALSE(component.scaled);
+    EXPECT_EQ(component.residual_tolerance, 1e-10);
+}
+
+namespace {
+
+struct ContractingRefreshRun {
+    svmp::FE::timestepping::NewtonReport report{};
+    double u{0.0};
+    std::vector<double> refreshed_states{};
+};
+
+// Frozen problem m*u = 1 with a generated coefficient m = 1 + c*u that is
+// regenerated from the current state at every outer refresh. The outer
+// fixed point therefore contracts geometrically, like generated geometry.
+ContractingRefreshRun runContractingRefreshProblem(
+    double u0,
+    double c,
+    double abs_tolerance,
+    double rel_tolerance,
+    std::optional<std::pair<double, double>> field_tolerances = std::nullopt)
+{
+    double generated_measure = 1.0 + c * u0;
+    auto problem = makeRefreshedGeometryRootProblem(
+        /*target=*/1.0, /*dt=*/0.1, /*u0=*/{u0}, &generated_measure);
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    ContractingRefreshRun run;
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 5;
+    options.abs_tolerance = abs_tolerance;
+    options.rel_tolerance = rel_tolerance;
+    options.use_line_search = false;
+    if (field_tolerances) {
+        options.field_residual_criteria.push_back(
+            svmp::FE::timestepping::NewtonOptions::FieldResidualCriterion{
+                .field = problem.u_field,
+                .abs_tolerance = field_tolerances->first,
+                .rel_tolerance = field_tolerances->second});
+    }
+    options.external_state_fixed_point.enabled = true;
+    options.external_state_fixed_point.max_iterations = 60;
+    options.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView& state, SyncPoint point) {
+            const auto u = static_cast<double>(state.u.front());
+            generated_measure = 1.0 + c * u;
+            if (point == SyncPoint::OuterFixedPointState) {
+                run.refreshed_states.push_back(u);
+            }
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+    run.report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    run.u = scalarFromDofVector(problem.history.u());
+    return run;
+}
+
+} // namespace
+
+TEST(NewtonSolverExternalStateFixedPoint,
+     ScaledGateAcceptsEarlierThanTheAbsoluteGate)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    constexpr double c = 0.2;
+    const double u_star = (-1.0 + std::sqrt(1.0 + 4.0 * c)) / (2.0 * c);
+
+    const auto absolute = runContractingRefreshProblem(2.0, c, 1e-13, 0.0);
+    ASSERT_TRUE(absolute.report.converged);
+    EXPECT_FALSE(absolute.report.outer_gate_scaled);
+    EXPECT_EQ(absolute.report.outer_gate_residual_tolerance, 1e-13);
+    EXPECT_LE(absolute.report.residual_norm, 1e-13);
+
+    const auto scaled = runContractingRefreshProblem(2.0, c, 1e-13, 1e-4);
+    ASSERT_TRUE(scaled.report.converged);
+    EXPECT_TRUE(scaled.report.outer_gate_scaled);
+    const double reference = scaled.report.outer_gate_reference_residual;
+    ASSERT_TRUE(std::isfinite(reference));
+    EXPECT_GT(reference, 0.0);
+    // The reference is the first fresh residual of the step, identical in
+    // both runs because the first refresh happens at the same state.
+    EXPECT_EQ(reference, absolute.report.outer_gate_reference_residual);
+    EXPECT_EQ(scaled.report.outer_gate_residual_tolerance, 1e-4 * reference);
+    EXPECT_LE(scaled.report.residual_norm,
+              scaled.report.outer_gate_residual_tolerance);
+    EXPECT_LT(scaled.report.outer_iterations,
+              absolute.report.outer_iterations);
+    EXPECT_GE(absolute.report.outer_iterations,
+              scaled.report.outer_iterations + 4);
+    // The accepted state is within the requested relative accuracy of the
+    // consistent fixed point, and both runs share every refresh up to the
+    // scaled acceptance.
+    EXPECT_NEAR(scaled.u, u_star, 1e-3 * u_star);
+    EXPECT_NEAR(absolute.u, u_star, 1e-10);
+    ASSERT_LE(scaled.refreshed_states.size(),
+              absolute.refreshed_states.size());
+    for (std::size_t i = 0; i < scaled.refreshed_states.size(); ++i) {
+        EXPECT_EQ(scaled.refreshed_states[i], absolute.refreshed_states[i])
+            << "refresh=" << i;
+    }
+}
+
+TEST(NewtonSolverExternalStateFixedPoint,
+     ScaledGateKeepsTheAbsoluteFloor)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    constexpr double c = 0.2;
+    // rel * reference is far below the absolute tolerance, so the gate must
+    // be the absolute one and the refresh sequence must match rel = 0.
+    const auto relative = runContractingRefreshProblem(2.0, c, 1e-3, 1e-8);
+    const auto absolute = runContractingRefreshProblem(2.0, c, 1e-3, 0.0);
+    ASSERT_TRUE(relative.report.converged);
+    ASSERT_TRUE(absolute.report.converged);
+    EXPECT_FALSE(relative.report.outer_gate_scaled);
+    EXPECT_EQ(relative.report.outer_gate_residual_tolerance, 1e-3);
+    EXPECT_EQ(relative.report.outer_iterations,
+              absolute.report.outer_iterations);
+    EXPECT_EQ(relative.u, absolute.u);
+    EXPECT_LE(relative.report.residual_norm, 1e-3);
+}
+
+TEST(NewtonSolverExternalStateFixedPoint,
+     ZeroOrTinyFirstResidualIsAcceptedOnTheFirstRefresh)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    // With c = 2 the consistent state u = 0.5 is exact in floating point.
+    const auto exact = runContractingRefreshProblem(0.5, 2.0, 1e-12, 1e-4);
+    ASSERT_TRUE(exact.report.converged);
+    EXPECT_EQ(exact.report.outer_iterations, 1);
+    EXPECT_EQ(exact.report.inner_iterations_total, 0);
+    EXPECT_EQ(exact.report.outer_gate_reference_residual, 0.0);
+    EXPECT_FALSE(exact.report.outer_gate_scaled);
+    EXPECT_EQ(exact.report.outer_gate_residual_tolerance, 1e-12);
+    EXPECT_EQ(exact.u, 0.5);
+
+    // A first residual below the absolute tolerance is accepted at once.
+    const auto tiny = runContractingRefreshProblem(0.5 + 1e-13, 2.0, 1e-12, 1e-4);
+    ASSERT_TRUE(tiny.report.converged);
+    EXPECT_EQ(tiny.report.outer_iterations, 1);
+    EXPECT_EQ(tiny.report.inner_iterations_total, 0);
+
+    // A small first residual above the floor: rel * reference < abs, so the
+    // absolute gate applies and the refreshes match the rel = 0 run.
+    const auto small_relative =
+        runContractingRefreshProblem(0.5 + 1e-9, 2.0, 1e-12, 1e-4);
+    const auto small_absolute =
+        runContractingRefreshProblem(0.5 + 1e-9, 2.0, 1e-12, 0.0);
+    ASSERT_TRUE(small_relative.report.converged);
+    ASSERT_TRUE(small_absolute.report.converged);
+    EXPECT_FALSE(small_relative.report.outer_gate_scaled);
+    EXPECT_GT(small_relative.report.outer_iterations, 1);
+    EXPECT_EQ(small_relative.report.outer_iterations,
+              small_absolute.report.outer_iterations);
+    EXPECT_EQ(small_relative.u, small_absolute.u);
+}
+
+TEST(NewtonSolverExternalStateFixedPoint,
+     ScaledFieldGateAcceptsEarlierThanTheAbsoluteFieldGate)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    constexpr double c = 0.2;
+    // A loose monolithic gate leaves the field criterion in control.
+    const auto absolute = runContractingRefreshProblem(
+        2.0, c, 1.0, 0.0, std::make_pair(1e-13, 0.0));
+    const auto scaled = runContractingRefreshProblem(
+        2.0, c, 1.0, 0.0, std::make_pair(1e-13, 1e-4));
+    ASSERT_TRUE(absolute.report.converged);
+    ASSERT_TRUE(scaled.report.converged);
+    ASSERT_EQ(scaled.report.outer_gate_field_tolerances.size(), 1u);
+    ASSERT_EQ(scaled.report.outer_gate_field_reference_residuals.size(), 1u);
+    const double reference =
+        scaled.report.outer_gate_field_reference_residuals.front();
+    EXPECT_GT(reference, 0.0);
+    EXPECT_TRUE(scaled.report.outer_gate_scaled);
+    EXPECT_EQ(scaled.report.outer_gate_field_tolerances.front(),
+              1e-4 * reference);
+    EXPECT_FALSE(absolute.report.outer_gate_scaled);
+    EXPECT_EQ(absolute.report.outer_gate_field_tolerances.front(), 1e-13);
+    EXPECT_LT(scaled.report.outer_iterations,
+              absolute.report.outer_iterations);
+}
+
 TEST(NewtonSolverExternalStateFixedPoint,
      InitialExternalStateDiscontinuityStopsBeforeAnyInnerSolveAndRestores)
 {
