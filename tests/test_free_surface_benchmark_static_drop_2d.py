@@ -75,7 +75,13 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     assert "<Surface_tension_form>KinematicAreaGradientTraction" in text
     assert "<Curvature_projection_kinematic_area_gradient_mass>Lumped" in text
     assert root.find("GeneralSimulationParameters/Number_of_time_steps").text == str(case["steps"])
-    assert case["dt"] <= math.sqrt(case["h"] ** 3 / (4.0 * math.pi)) * (1 + 1e-12)
+    dt_b = math.sqrt(case["h"] ** 3 / (4.0 * math.pi))
+    # La = 12 runs at twice the one-sided capillary limit (step-0 measurement).
+    assert case["dt_multiple_of_capillary_limit"] == 2.0
+    assert dt_b < case["dt"] <= 2.0 * dt_b * (1 + 1e-12)
+    slow = gen.time_schedule(8, 120.0, 5.0, 100)
+    assert slow["dt_multiple_of_capillary_limit"] == 1.0
+    assert slow["dt"] <= dt_b * (1 + 1e-12)
     assert case["steps"] * case["dt"] == pytest.approx(5.0 * case["viscous_time"])
     assert case["viscosity"] == pytest.approx(math.sqrt(2.0 / 12.0))
     assert case["min_abs_phi_over_h"] > 1e-3
@@ -85,6 +91,14 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     assert "kinematic_area_gradient_mass" not in consistent
     stress = gen.solver_xml("surface_stress", gen.time_schedule(8, 12.0, 5.0, 100), 10, 1)
     assert "SurfaceStress" in stress and "Curvature_field" not in stress
+    pde = gen.solver_xml("surface_stress", gen.time_schedule(8, 12.0, 5.0, 100), 10, 1,
+                         "pde_harmonic_monolithic")
+    assert "<Advection_velocity_extension_method>pde_harmonic<" in pde
+    assert "<Advection_velocity_extension_coupling>monolithic<" in pde
+    assert "<Velocity_source>prescribed_data" in pde
+    assert "Use_wet_extension_advection_velocity" not in pde
+    with pytest.raises(ValueError):
+        gen.generate(8, "surface_stress", 12.0, tmp_path / "bad", level_set_velocity="wet")
 
 
 def write_synthetic_run(run, level, speed_scale, growth=False, pressure_error=None, drop_last=False):

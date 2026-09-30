@@ -143,6 +143,10 @@ inline constexpr std::array<std::string_view, 4>
         "AdvectionVelocityExtensionMethod",
         "Wet_extension_advection_velocity_method",
         "WetExtensionAdvectionVelocityMethod"};
+inline constexpr std::array<std::string_view, 2>
+    advection_velocity_extension_coupling{
+        "Advection_velocity_extension_coupling",
+        "AdvectionVelocityExtensionCoupling"};
 inline constexpr std::array<std::string_view, 6> wet_extension_source{
     "Advection_velocity_from_field", "AdvectionVelocityFromField",
     "Source_velocity_field_name",    "SourceVelocityFieldName",

@@ -22,6 +22,7 @@
 #include <cmath>
 #include <exception>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -297,7 +298,8 @@ PdeVelocityExtensionReport extendVelocityByPde(
     std::size_t target_components,
     std::span<const WallVelocityExtensionConstraint> walls,
     const PdeVelocityExtensionOptions& options,
-    std::vector<double>& extended)
+    std::vector<double>& extended,
+    std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>* rows)
 {
   const auto n_vertices = mesh.n_vertices();
   const int dim = mesh.dim();
@@ -769,6 +771,89 @@ PdeVelocityExtensionReport extendVelocityByPde(
     for (std::size_t i = 0; i < vertices.size(); ++i) {
       if (unknown[i] >= 0) {
         solution[i * 3u + component] = xs[static_cast<std::size_t>(unknown[i])];
+      }
+    }
+  }
+
+  // ---- owner-local algebraic rows (monolithic coupling) ---------------------
+  if (rows != nullptr) {
+    rows->clear();
+    std::unordered_map<std::int64_t, std::size_t> local_by_gid;
+    local_by_gid.reserve(n_vertices);
+    for (std::size_t v = 0; v < n_vertices; ++v) {
+      local_by_gid.emplace(static_cast<std::int64_t>(vertex_gids[v]), v);
+    }
+    // Operator row of every owned dry vertex, accumulated in the canonical
+    // (sorted cell) order used for the solve.
+    std::unordered_map<std::int64_t, std::map<std::int64_t, double>> row_entries;
+    for (std::size_t v = 0; v < n_vertices; ++v) {
+      if (domain[v] != 0u && ownsVertex(mesh, comm, v)) {
+        row_entries.emplace(static_cast<std::int64_t>(vertex_gids[v]),
+                            std::map<std::int64_t, double>{});
+      }
+    }
+    for (const auto& cell : cells) {
+      const auto count = static_cast<std::size_t>(cell.count);
+      for (std::size_t a = 0; a < count; ++a) {
+        const auto found = row_entries.find(cell.vertex_gid[a]);
+        if (found == row_entries.end()) {
+          continue;
+        }
+        for (std::size_t b = 0; b < count; ++b) {
+          found->second[cell.vertex_gid[b]] += cell.matrix[a * count + b];
+        }
+      }
+    }
+    for (std::size_t v = 0; v < n_vertices; ++v) {
+      if (!ownsVertex(mesh, comm, v)) {
+        continue;
+      }
+      for (std::size_t c = 0; c < target_components; ++c) {
+        svmp::FE::level_set::VelocityExtensionConstraintRow row;
+        row.vertex = static_cast<svmp::FE::GlobalIndex>(v);
+        row.component = static_cast<int>(c);
+        if (known_mask[v] != 0u) {
+          if (c < copy_components) {
+            row.dependencies.push_back(
+                svmp::FE::level_set::VelocityExtensionDependency{
+                    .field = svmp::FE::level_set::
+                        VelocityExtensionDependencyField::SourceVelocity,
+                    .vertex = static_cast<svmp::FE::GlobalIndex>(v),
+                    .component = static_cast<int>(c),
+                    .coefficient = 1.0});
+          }
+        } else if (domain[v] != 0u && c < copy_components &&
+                   wall_mask[c][v] == 0u) {
+          const auto gid = static_cast<std::int64_t>(vertex_gids[v]);
+          const auto& entries = row_entries.at(gid);
+          const auto diagonal = entries.find(gid);
+          if (diagonal == entries.end() || !(diagonal->second > 0.0)) {
+            throw std::runtime_error(
+                std::string("PDE velocity extension (") +
+                std::string(pdeVelocityExtensionOperatorName(options.op)) +
+                ") found a dry vertex with a non-positive operator diagonal; "
+                "its algebraic row is undefined");
+          }
+          for (const auto& [neighbor_gid, value] : entries) {
+            if (neighbor_gid == gid) {
+              continue;
+            }
+            const auto local = local_by_gid.find(neighbor_gid);
+            if (local == local_by_gid.end()) {
+              throw std::runtime_error(
+                  "PDE velocity extension row depends on a vertex that is not "
+                  "present on its owner rank (ghost layer too thin)");
+            }
+            row.dependencies.push_back(
+                svmp::FE::level_set::VelocityExtensionDependency{
+                    .field = svmp::FE::level_set::
+                        VelocityExtensionDependencyField::ExtensionVelocity,
+                    .vertex = static_cast<svmp::FE::GlobalIndex>(local->second),
+                    .component = static_cast<int>(c),
+                    .coefficient = -value / diagonal->second});
+          }
+        }
+        rows->push_back(std::move(row));
       }
     }
   }

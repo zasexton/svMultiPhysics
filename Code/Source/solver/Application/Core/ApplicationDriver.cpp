@@ -18285,6 +18285,10 @@ bool updateLevelSetAdvectionVelocitiesFromState(
         algebraic_rows;
     std::shared_ptr<const application::core::VelocityExtensionMapSnapshot>
         algebraic_map_snapshot;
+    // Set when a PDE extension installs its rows (no map snapshot and no
+    // per-step map artifact).
+    bool pde_algebraic = false;
+    std::uint64_t pde_map_revision_key = 0u;
 
     auto record_speed = [&](std::size_t v) {
       double speed2 = 0.0;
@@ -18578,13 +18582,35 @@ bool updateLevelSetAdvectionVelocitiesFromState(
               application::core::pdeVelocityExtensionOperatorFromToken(
                   request.extension_method)) {
         if (algebraic_extension) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] The PDE velocity extension "
-              "writes a prescribed advection field; field '" +
-              target_rec.name +
-              "' is an algebraic extension unknown. Keep "
-              "Velocity_source=prescribed_data without "
-              "Use_wet_extension_advection_velocity.");
+          // Monolithic coupling: the same discrete problem is installed as
+          // frozen owner-local rows of the extension unknown.
+          std::uint64_t free_surface_geometry_revision = 0u;
+          if (const auto* cut_context = system.cutIntegrationContext()) {
+            free_surface_geometry_revision = cut_context->contentRevision();
+            if (const auto marker =
+                    interfaceVelocitySampleMarker(system, request);
+                marker.has_value() &&
+                cut_context->hasFreeSurfaceGeometrySnapshotForMarker(
+                    *marker)) {
+              free_surface_geometry_revision =
+                  cut_context->freeSurfaceGeometrySnapshotRevisionForMarker(
+                      *marker);
+            }
+          }
+          const auto& mesh_access = system.meshAccess();
+          pde_map_revision_key =
+              application::core::velocityExtensionMapRevision(
+                  mesh_access.geometryRevision(),
+                  mesh_access.topologyRevision(),
+                  mesh_access.ownershipRevision(),
+                  mesh_access.numberingRevision(),
+                  free_surface_geometry_revision,
+                  std::span<const double>(oriented_level_set.data(),
+                                          oriented_level_set.size()),
+                  std::span<const std::uint8_t>(trace_seed.data(),
+                                                trace_seed.size()))
+                  .key();
+          pde_algebraic = true;
         }
         const auto pde_report = application::core::extendVelocityByPde(
             mesh,
@@ -18606,7 +18632,8 @@ bool updateLevelSetAdvectionVelocitiesFromState(
                                    : 0,
                 .enforce_wall_impermeability =
                     request.enforce_wall_impermeability},
-            extended);
+            extended,
+            pde_algebraic ? &algebraic_rows : nullptr);
         wall_extension_report.extended_vertices =
             pde_report.extension_vertices;
         wall_extension_report.vertices_outside_band =
@@ -18804,10 +18831,14 @@ bool updateLevelSetAdvectionVelocitiesFromState(
     }
     std::size_t unassigned = 0u;
     if (algebraic_extension) {
-      if (!algebraic_map_snapshot || algebraic_rows.empty()) {
+      if ((!algebraic_map_snapshot && !pde_algebraic) ||
+          algebraic_rows.empty()) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Algebraic wet-extension refresh produced no immutable map snapshot or owned constraint rows.");
       }
+      const std::uint64_t installed_map_revision_key =
+          pde_algebraic ? pde_map_revision_key
+                        : algebraic_map_snapshot->revision().key();
 
       std::vector<svmp::FE::Real> projected_coefficients(
           static_cast<std::size_t>(target_dofs.getNumDofs()),
@@ -18858,10 +18889,10 @@ bool updateLevelSetAdvectionVelocitiesFromState(
       const bool map_changed =
           !extension_constraint->hasFrozenMap() ||
           extension_constraint->frozenMapRevision() !=
-              algebraic_map_snapshot->revision().key();
+              installed_map_revision_key;
       extension_constraint->setFrozenRows(
           std::move(algebraic_rows),
-          algebraic_map_snapshot->revision().key());
+          installed_map_revision_key);
       state_view->beginAssemblyPhase();
       state_view->setVectorEntries(
           std::span<const svmp::FE::GlobalIndex>(state_dofs.data(),
@@ -18876,7 +18907,7 @@ bool updateLevelSetAdvectionVelocitiesFromState(
         application::core::oopCout()
             << "[svMultiPhysics::Application] Accepted algebraic wet-extension map refresh"
             << " map_revision="
-            << algebraic_map_snapshot->revision().key()
+            << installed_map_revision_key
             << " map_changed=" << (map_changed ? 1 : 0)
             << " reprojected_owned_dofs=" << state_dofs.size()
             << std::endl;
@@ -18977,6 +19008,7 @@ bool updateLevelSetAdvectionVelocitiesFromState(
           << " map_revision="
           << (algebraic_map_snapshot
                   ? algebraic_map_snapshot->revision().key()
+                  : pde_algebraic ? pde_map_revision_key
                   : 0u)
           << " regression_condition_guard="
           << kVelocityExtensionMaxRegressionCondition

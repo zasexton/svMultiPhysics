@@ -17,7 +17,8 @@
     ],
     "viscous_times": 5,
     "snapshots": 100,
-    "time_step": "dt <= sqrt(rho*h^3/(4*pi*gamma)) = (1/sqrt(2)) * sqrt(rho*h^3/(2*pi*gamma)), rounded down so that the run is 100 equal output intervals",
+    "time_step": "dt <= m * dt_B, dt_B = sqrt(rho*h^3/(4*pi*gamma)) = (1/sqrt(2)) * sqrt(rho*h^3/(2*pi*gamma)), rounded down so that the run is 100 equal output intervals; m = 2 at La = 12 and m = 1 at La = 120. Changed on 2026-09-30 from m = 1 at every La: the step-0 measurement (tracker, jobs 46075447 and 46076505) found that the outer geometry loop accepts 2 dt_B at La = 12 and only dt_B at La = 120 with its default 12-pass cap. The gated metrics are relaxed steady-state values, so the time step does not enter them (decision D10; README.md).",
+    "level_set_velocity": "Level-set advection velocity (decision D9): see README.md for the value in use and its validation.",
     "note": "Criteria apply separately to each (capillary form, Laplace number) refinement study. See README.md for the definitions and the cost of each level."
   },
   "criteria": [

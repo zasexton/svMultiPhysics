@@ -41,7 +41,14 @@ MEAN_DEPTH = 0.5 + 1.0 / 128.0
 AMPLITUDE = 0.005
 MODE = 1                                    # k = MODE * pi / L
 PERIODS = 4                                 # run length in inviscid periods
-STEPS_PER_PERIOD_PER_LEVEL = 2              # dt = T0 / (2 L/h): 32, 64, 128 steps per period
+# Decision D10: space and time are studied separately.  The spatial study runs
+# every level at the same small step (128 steps per inviscid period); a
+# separate time-step study runs the middle level at 64, 128 and 256 steps per
+# period.  The time error at 128 steps per period is estimated from that study
+# and removed from the spatial errors (README.md).
+SPATIAL_STEPS_PER_PERIOD = 128
+TIME_STUDY_LEVEL = 32
+TIME_STUDY_STEPS_PER_PERIOD = (64, 128, 256)
 SNAPSHOTS_PER_PERIOD = 32
 PROBE_X = 0.0                               # wave gauge on the left wall (antinode)
 EXTERNAL_PRESSURE = 0.0
@@ -51,11 +58,15 @@ WALLS = ("wall_left", "wall_right", "wall_bottom", "wall_top")
 # Free slip: strong zero velocity on the wall-normal component only.  The top
 # wall is dry and carries no condition.
 EFFECTIVE_DIRECTION = {"wall_left": "1 0", "wall_right": "1 0", "wall_bottom": "0 1"}
-# Level-set advection velocity.  The protocol advects phi with the coupled
-# fluid velocity (as static_drop_2d).  "wet_extension" is a diagnostic
-# alternative: the wall-compatible extension of the wet velocity used by the
-# SPHERIC Test 05 decks.
-LEVEL_SET_VELOCITY = ("coupled_field", "wet_extension")
+# Level-set advection velocity (decision D9).  The protocol advects phi with
+# the PDE extension of the fluid velocity into the dry region.  The other
+# values are comparisons: the fluid velocity itself (coupled_field), the
+# algebraic wall-compatible wet extension of the SPHERIC Test 05 decks
+# (wet_extension) and the other PDE operator.
+LEVEL_SET_VELOCITY = ("coupled_field", "wet_extension",
+                      "pde_harmonic_monolithic", "pde_harmonic_prescribed",
+                      "pde_normal_monolithic", "pde_normal_prescribed")
+PROTOCOL_LEVEL_SET_VELOCITY = "pde_harmonic_monolithic"
 
 
 # ---------------------------------------------------------------------------
@@ -132,12 +143,22 @@ def time_schedule(level: int, periods: float = PERIODS,
                   steps_per_period: int | None = None, depth: float = MEAN_DEPTH) -> dict:
     ref = reference(depth=depth)
     if steps_per_period is None:
-        steps_per_period = STEPS_PER_PERIOD_PER_LEVEL * level
+        steps_per_period = SPATIAL_STEPS_PER_PERIOD
     cadence = max(1, steps_per_period // SNAPSHOTS_PER_PERIOD)
     steps = int(round(periods * steps_per_period))
     steps -= steps % cadence
     return {"dt": ref["period_inviscid"] / steps_per_period, "steps": steps,
             "steps_per_period": steps_per_period, "output_cadence": cadence}
+
+
+def study_roles(level: int, steps_per_period: int) -> list[str]:
+    """Which protocol studies (D10) a run with this level and step belongs to."""
+    roles = []
+    if level in LEVELS and steps_per_period == SPATIAL_STEPS_PER_PERIOD:
+        roles.append("spatial")
+    if level == TIME_STUDY_LEVEL and steps_per_period in TIME_STUDY_STEPS_PER_PERIOD:
+        roles.append("time")
+    return roles
 
 
 def initial_fields(points: np.ndarray, k: float, depth: float = MEAN_DEPTH) -> dict:
@@ -272,6 +293,14 @@ def level_set_velocity_block(mode: str) -> str:
         return """    <Velocity_source>coupled_field</Velocity_source>
     <Velocity_field_name>Velocity</Velocity_field_name>
     <Auto_register_velocity_field>true</Auto_register_velocity_field>"""
+    if mode.startswith("pde_"):
+        method, coupling = mode.rsplit("_", 1)
+        return f"""    <Velocity_source>prescribed_data</Velocity_source>
+    <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
+    <Auto_register_velocity_field>true</Auto_register_velocity_field>
+    <Source_velocity_field_name>Velocity</Source_velocity_field_name>
+    <Advection_velocity_extension_method>{method}</Advection_velocity_extension_method>
+    <Advection_velocity_extension_coupling>{coupling}</Advection_velocity_extension_coupling>"""
     return """    <Velocity_source>prescribed_data</Velocity_source>
     <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
     <Auto_register_velocity_field>true</Auto_register_velocity_field>
@@ -281,7 +310,7 @@ def level_set_velocity_block(mode: str) -> str:
 
 
 def solver_xml(schedule: dict, steps: int, cadence: int,
-               level_set_velocity: str = "coupled_field") -> str:
+               level_set_velocity: str = PROTOCOL_LEVEL_SET_VELOCITY) -> str:
     faces = "\n".join(
         f'    <Add_face name="{w}"><Face_file_path>mesh/mesh-surfaces/{w}.vtp</Face_file_path></Add_face>'
         for w in WALLS)
@@ -390,7 +419,8 @@ def solver_xml(schedule: dict, steps: int, cadence: int,
 
 # ---------------------------------------------------------------------------
 def generate(level: int, output_dir: Path, *, periods: float = PERIODS,
-             steps_per_period: int | None = None, level_set_velocity: str = "coupled_field",
+             steps_per_period: int | None = None,
+             level_set_velocity: str = PROTOCOL_LEVEL_SET_VELOCITY,
              mean_depth: float = MEAN_DEPTH, max_steps: int | None = None,
              force: bool = False) -> dict:
     if level not in LEVELS:
@@ -469,8 +499,9 @@ def generate(level: int, output_dir: Path, *, periods: float = PERIODS,
         "dt": schedule["dt"],
         "steps_per_period": schedule["steps_per_period"],
         "level_set_velocity": level_set_velocity,
-        "protocol_run": (schedule["steps_per_period"] == STEPS_PER_PERIOD_PER_LEVEL * level
-                         and level_set_velocity == "coupled_field"
+        "study_roles": study_roles(level, schedule["steps_per_period"]),
+        "protocol_run": (bool(study_roles(level, schedule["steps_per_period"]))
+                         and level_set_velocity == PROTOCOL_LEVEL_SET_VELOCITY
                          and mean_depth == MEAN_DEPTH),
         "steps_protocol": schedule["steps"],
         "steps": steps,
@@ -493,12 +524,14 @@ def main(argv=None) -> int:
     parser.add_argument("--periods", type=float, default=PERIODS,
                         help="run length in inviscid periods (protocol value 4)")
     parser.add_argument("--steps-per-period", type=int, default=None,
-                        help="diagnostic time-step studies only (protocol value 2 L/h); "
-                             "verify.py reports such runs but does not gate them")
+                        help=f"time steps per inviscid period: {SPATIAL_STEPS_PER_PERIOD} "
+                             f"for the spatial study (default); {TIME_STUDY_STEPS_PER_PERIOD} "
+                             f"at L/h = {TIME_STUDY_LEVEL} for the time-step study")
     parser.add_argument("--level-set-velocity", choices=LEVEL_SET_VELOCITY,
-                        default="coupled_field",
-                        help="diagnostic runs only (protocol value coupled_field); verify.py "
-                             "reports such runs but does not gate them")
+                        default=PROTOCOL_LEVEL_SET_VELOCITY,
+                        help=f"level-set advection velocity (protocol value "
+                             f"{PROTOCOL_LEVEL_SET_VELOCITY}); verify.py reports other values "
+                             "as comparisons but does not gate them")
     parser.add_argument("--mean-depth", type=float, default=MEAN_DEPTH,
                         help="diagnostic runs only (protocol value 0.5 + 1/128); verify.py "
                              "reports such runs but does not gate them")
@@ -517,7 +550,7 @@ def main(argv=None) -> int:
                 "omega_inviscid", "omega_reference", "damping_rate_reference",
                 "damping_rate_lamb", "dt", "steps_per_period", "steps", "output_cadence",
                 "end_time", "interface_cell_position", "interface_band_vertex_gap_over_h",
-                "protocol_run", "truncated"):
+                "study_roles", "protocol_run", "truncated"):
         print(f"  {key} = {case[key]}")
     if case["interface_band_vertex_gap_over_h"] == 0.0:
         print("WARNING: a vertex row lies inside the surface band; the interface will cross "

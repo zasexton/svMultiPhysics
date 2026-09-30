@@ -86,7 +86,7 @@ def test_probe_elevation_modal_fit_and_area():
         ver.probe_elevation(points, phi, 0.01, 1 / 32)
 
 
-def test_generated_case_has_free_slip_walls_and_refined_time_step(tmp_path):
+def test_generated_case_has_free_slip_walls_and_the_d10_schedule(tmp_path):
     case = gen.generate(16, tmp_path / "c")
     text = (tmp_path / "c/solver.xml").read_text()
     root = ET.parse(tmp_path / "c/solver.xml").getroot()
@@ -97,12 +97,23 @@ def test_generated_case_has_free_slip_walls_and_refined_time_step(tmp_path):
     assert "wall_top" not in bcs
     assert "<Surface_tension>0.0</Surface_tension>" in text
     assert float(root.find(".//Viscosity/Value").text) == pytest.approx(5e-4)
-    assert case["steps_per_period"] == 32 and case["steps"] == 128
+    # D9: the protocol advects phi with the PDE extension (prescribed field).
+    assert case["level_set_velocity"] == gen.PROTOCOL_LEVEL_SET_VELOCITY
+    method, coupling = gen.PROTOCOL_LEVEL_SET_VELOCITY.rsplit("_", 1)
+    assert f"<Advection_velocity_extension_method>{method}<" in text
+    assert f"<Advection_velocity_extension_coupling>{coupling}<" in text
+    assert "Use_wet_extension_advection_velocity" not in text
+    # D10: every level of the spatial study uses the same step.
+    assert case["steps_per_period"] == 128 and case["steps"] == 512
+    assert case["study_roles"] == ["spatial"] and case["protocol_run"]
     assert case["end_time"] == pytest.approx(4 * case["period_inviscid"])
     assert case["interface_band_vertex_gap_over_h"] > 0.04
+    assert gen.study_roles(32, 128) == ["spatial", "time"]
+    assert gen.study_roles(32, 64) == ["time"] and gen.study_roles(32, 256) == ["time"]
+    assert gen.study_roles(16, 64) == [] and gen.study_roles(64, 256) == []
     for level in (32, 64):
         schedule = gen.time_schedule(level)
-        assert schedule["steps_per_period"] == 2 * level
+        assert schedule["steps_per_period"] == 128
         assert schedule["steps"] // schedule["output_cadence"] == 128
     # The initial pressure vanishes on the free surface to second order in A.
     x = np.linspace(0.0, 1.0, 11)
@@ -111,14 +122,16 @@ def test_generated_case_has_free_slip_walls_and_refined_time_step(tmp_path):
     assert np.max(np.abs(p)) < 2 * math.pi * gen.AMPLITUDE ** 2
 
 
-def write_synthetic_run(run, level, omega_error, *, samples_per_period=8, area_leak=0.0,
-                        drop_last=False):
+def write_synthetic_run(run, level, omega_error, *, steps_per_period=128,
+                        level_set_velocity=None, damping_scale=1.0,
+                        samples_per_period=8, area_leak=0.0, drop_last=False):
     """Emulate solver output: a damped standing wave with a prescribed frequency error."""
-    case = gen.generate(level, run)
+    case = gen.generate(level, run, steps_per_period=steps_per_period,
+                        level_set_velocity=level_set_velocity or gen.PROTOCOL_LEVEL_SET_VELOCITY)
     points, tris, _, _ = gen.structured_triangle_mesh(level)
     k = case["wavenumber"]
     omega = case["omega_reference"] * (1.0 + omega_error)
-    gamma = case["damping_rate_reference"]
+    gamma = case["damping_rate_reference"] * damping_scale
     n = round(case["periods"] * samples_per_period)
     entries = []
     for i in range(1, n + 1):
@@ -137,53 +150,79 @@ def write_synthetic_run(run, level, omega_error, *, samples_per_period=8, area_l
     return case
 
 
+TIME_COEFFICIENT = -4.2e-3 * 32 ** 2        # e_time(spp) = C / spp^2 (generalized alpha)
+
+
 @pytest.fixture
 def study(tmp_path):
+    """Spatial study (all levels at 128 steps/T) plus the time study at L/h = 32."""
     pytest.importorskip("pyvista")
-
     calls = []
 
-    def make(errors, **kwargs):
+    def make(spatial_errors, *, time_study=True, transport=None, **kwargs):
         calls.append(len(calls))
+        base = tmp_path / f"study{len(calls)}"
         runs = []
-        for level, err in errors.items():
-            run = tmp_path / f"study{len(calls)}" / f"L{level}"
-            write_synthetic_run(run, level, err, **kwargs)
+        for level, err in spatial_errors.items():
+            run = base / f"L{level}_T128"
+            write_synthetic_run(run, level, err + TIME_COEFFICIENT / 128 ** 2,
+                                level_set_velocity=transport, **kwargs)
             runs.append(str(run))
+        if time_study:
+            for spp in (64, 256):
+                run = base / f"L32_T{spp}"
+                write_synthetic_run(run, 32, spatial_errors[32] + TIME_COEFFICIENT / spp ** 2,
+                                    steps_per_period=spp, level_set_velocity=transport,
+                                    **kwargs)
+                runs.append(str(run))
         return runs
     return make
 
 
-def test_converging_study_passes(study, tmp_path, capsys):
+def test_converging_study_passes_with_the_time_error_removed(study, tmp_path, capsys):
     out = tmp_path / "report.json"
     runs = study({16: 4e-3, 32: 1e-3, 64: 2.5e-4})
     assert ver.main([*runs, "--json", str(out)]) == 0
     report = json.loads(out.read_text())
-    r16 = report["runs"][0]
-    assert r16["frequency_signed_error"] == pytest.approx(4e-3, rel=1e-6)
-    assert r16["damping_rate_over_reference"] == pytest.approx(1.0, abs=1e-6)
-    assert r16["liquid_area_relative_drift_max"] < 1e-5
+    group = report["groups"][0]
+    assert group["protocol"]
+    assert group["time_study"]["observed_temporal_order"] == pytest.approx(2.0, abs=1e-3)
+    assert group["time_study"]["time_error_at_spatial_step"] == pytest.approx(
+        TIME_COEFFICIENT / 128 ** 2, rel=1e-4)
+    spatial = {r["level"]: r for r in group["runs"] if r["steps_per_period"] == 128}
+    assert spatial[16]["frequency_spatial_signed_error"] == pytest.approx(4e-3, rel=1e-4)
+    assert spatial[64]["frequency_spatial_signed_error"] == pytest.approx(2.5e-4, rel=1e-3)
+    assert spatial[64]["damping_rate_over_reference"] == pytest.approx(1.0, abs=1e-6)
     text = capsys.readouterr().out
-    assert "observed order 2.00" in text and "[INFO] damping" in text
+    assert "observed order 2.00" in text and "[PASS] damping" in text
 
 
-def test_stagnating_or_large_frequency_error_fails(study, capsys):
+def test_cancelling_space_and_time_errors_no_longer_pass(study, capsys):
+    # Raw errors that decrease only because the time error cancels the
+    # spatial error: once the time error is removed the study must fail.
     assert ver.main(study({16: 4e-3, 32: 4e-3, 64: 4e-3})) == 1
     assert "[FAIL] frequency" in capsys.readouterr().out
     assert ver.main(study({16: 8e-2, 32: 4e-2, 64: 2e-2})) == 1
     assert "L/h=64: 0.02 > 0.01" in capsys.readouterr().out
 
 
-def test_volume_leak_fails(study, capsys):
+def test_damping_limit_is_five_percent_at_the_finest_level(study, capsys):
+    assert ver.main(study({16: 4e-3, 32: 1e-3, 64: 2.5e-4}, damping_scale=1.08)) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] damping" in out and "[PASS] frequency" in out
+
+
+def test_volume_criterion_gates_every_run(study, capsys):
     assert ver.main(study({16: 4e-3, 32: 1e-3, 64: 2.5e-4}, area_leak=1e-5)) == 1
     out = capsys.readouterr().out
-    assert "[FAIL] volume_drift" in out and "[PASS] frequency" in out
+    assert "[FAIL] volume_drift" in out and "steps/T=64" in out
 
 
 def test_missing_and_incomplete_data_fail_clearly(study, tmp_path, capsys):
-    runs = study({16: 4e-3, 32: 1e-3})
-    assert ver.main(runs) == 1
+    assert ver.main(study({16: 4e-3, 32: 1e-3}, time_study=True)) == 1
     assert "missing run at L/h=64" in capsys.readouterr().out
+    assert ver.main(study({16: 4e-3, 32: 1e-3, 64: 2.5e-4}, time_study=False)) == 1
+    assert "time-step study incomplete" in capsys.readouterr().out
     incomplete = tmp_path / "incomplete"
     write_synthetic_run(incomplete, 16, 0.0, drop_last=True)
     assert ver.main([str(incomplete)]) == 2
@@ -192,6 +231,16 @@ def test_missing_and_incomplete_data_fail_clearly(study, tmp_path, capsys):
     gen.generate(16, smoke, max_steps=5)
     assert ver.main([str(smoke)]) == 2
     assert "no solver output" in capsys.readouterr().err
+
+
+def test_other_transports_are_reported_but_not_gated(study, capsys):
+    runs = study({16: 4e-3, 32: 1e-3, 64: 2.5e-4})
+    others = study({16: 5e-2, 32: 5e-2, 64: 5e-2}, transport="coupled_field")
+    assert ver.main([*runs, *others]) == 0
+    out = capsys.readouterr().out
+    assert "[comparison, not gated]" in out and "[INFO] frequency" in out
+    assert ver.main(others) == 1
+    assert "no runs of the protocol transport" in capsys.readouterr().out
 
 
 def test_solver_log_summary(tmp_path):
@@ -209,22 +258,6 @@ def test_solver_log_summary(tmp_path):
     assert summary["steps_logged"] == 2 and summary["nonconverged_steps"] == 1
     assert summary["outer_passes_mean"] == 4.5 and summary["newton_iterations_mean"] == 4.0
     assert summary["final_residual_max"] == 2.30e-11 and summary["wall_seconds_per_step"] == 5.0
-
-
-def test_time_step_study_runs_are_reported_but_not_gated(study, tmp_path, capsys):
-    runs = study({16: 4e-3, 32: 1e-3, 64: 2.5e-4})
-    extra = tmp_path / "dt_study" / "L16_T64"
-    case = gen.generate(16, extra, steps_per_period=64)
-    assert not case["protocol_run"] and case["steps"] == 256
-    # Reuse the synthetic writer on a protocol case, then mark it as a diagnostic run.
-    write_synthetic_run(tmp_path / "dt_study" / "L16_diag", 16, 5e-2)
-    meta = json.loads((tmp_path / "dt_study/L16_diag/case.json").read_text())
-    meta["protocol_run"] = False
-    (tmp_path / "dt_study/L16_diag/case.json").write_text(json.dumps(meta))
-    assert ver.main([*runs, str(tmp_path / "dt_study/L16_diag")]) == 0
-    assert "[diagnostic (coupled_field, H0=0.5078125), not gated]" in capsys.readouterr().out
-    with pytest.raises(ValueError):
-        gen.generate(16, tmp_path / "bad", steps_per_period=8)
 
 
 def test_wet_extension_diagnostic_variant(tmp_path):
