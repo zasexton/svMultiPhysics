@@ -8,6 +8,12 @@ See `Documentation/free_surface_program_tracker.md` for the current support
 status, known remaining issues, and the planned acceptance criteria for the
 unfitted level-set free-surface method.
 
+The milestone M1 benchmark for this mode is
+`tests/cases/fluid/free_surface_benchmarks/linear_sloshing_2d/`. It uses
+free-slip walls instead of the prescribed wall velocity below (which drives
+the tank at the analytic frequency), a three-level refinement study, and a
+tolerance file.
+
 The analytic reference is the linearized inviscid potential-flow solution in a
 rectangular tank. It is exact for impermeable slip walls and zero surface
 tension, not for viscous no-slip Navier-Stokes. The solver XML uses exact
