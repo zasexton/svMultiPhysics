@@ -462,6 +462,10 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - (c) **Unfiltered consistent-mass KAG**, for reference only.
   - **Fallback only if (a) and (b) both fail the D1 criteria:** KAG with the Helmholtz filter or a normal-gradient-stabilized mass. Its coefficient must be fixed once from dimensional scaling (P1), never tuned.
 - [ ] **Time step.** Check Δt against the capillary constraint (§3.6). If needed, add a semi-implicit surface-tension term (Bänsch/Hysing) or use Δt below the limit.
+  - Design note (2026-09-30): `Documentation/free_surface_semi_implicit_surface_tension_design.md`. It corrects §3.6: the outer geometry fixed point already makes accepted steps implicit in geometry. The capillary limit therefore appears as slow or divergent outer-loop convergence, contracting by about x/(1+b) per pass with x = Δt²ω² and b = 2νk²Δt, not as an unstable step.
+  - At La = 12, viscosity may already permit 3–7 × the benchmark Δt.
+  - Proposed, pending approval: a default-off lagged normal-increment term, `γ Δt_eff ∫ ∇_Γ((u − u_ref)·n_h)·∇_Γ(v·n_h)`. It is zero at convergence, so the accepted solution and the energy balance are unchanged, and it has no tunable parameter. The literal Bänsch/Hysing term is not recommended here, because it would double-count the step displacement. KAG stays explicit in geometry.
+  - A "step 0" measurement of outer-pass counts versus Δt/Δt_B (0.5–8), at R/h = 8 and 16 and La = 12/120/1200, is running before the M2 time step is fixed.
 - [x] **Acceptance** (working criteria; fixed in `static_drop_2d/tolerances.json` on 2026-09-29):
   - pressure-jump error ≤ 1% at R/h = 32 with observed order ≥ 1;
   - final `Ca_sp` strictly decreasing with h, with absolute values reported. There is no absolute limit (decided 2026-09-29), because the July speed/γ figure was a start-up transient in SI units, not a capillary number;
@@ -847,6 +851,7 @@ Recorded on 2026-09-29. Re-check before acting.
 |---|---|
 | `Code/Source/solver/FE/Docs/LevelSet.md` | FE level-set services and contracts, including the curvature recovery modes (corrected 2026-09-29) |
 | `Code/Source/solver/Physics/Docs/NavierStokesFreeSurface.md` | Navier-Stokes surface-tension forms and contact-line terms as currently implemented (corrected 2026-09-29) |
+| `Documentation/free_surface_semi_implicit_surface_tension_design.md` | Relaxing the capillary time-step limit: outer-loop analysis and the proposed lagged normal-increment term (pending approval) |
 | `Documentation/free_surface_discrete_energy_balance_method.md` | Discrete surface + Young energy; KKT; static initializer rationale |
 | `Documentation/free_surface_wp5_contact_line_architecture.md` | Contact-line conventions, Ren–E, prescribed-angle split, dissipation |
 | `Documentation/free_surface_wp7_combined_p1_method.md` | P1/P1 + aggregation + pressure facet jump; node-crossing results |
