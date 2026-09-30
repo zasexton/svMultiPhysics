@@ -142,28 +142,62 @@ P_wall = I - n_wall ⊗ n_wall.
 It requires `Wall_slip_model=Navier` with a positive literal
 `Wall_slip_length`, literal Newtonian viscosity,
 `Active_domain_method=CutVolume`, and `Active_domain_smoothing_width=0`.
+The slip length is a physical input of the case.
 `DynamicRenE` always uses it. For `PrescribedAngle` it is optional:
-supply both `Wall_slip_model` and `Wall_slip_length`, or neither. With
-neither, the wall is no-slip.
+supply both `Wall_slip_model` and `Wall_slip_length`, or neither.
+
+- With Navier slip, `PrescribedAngle` has the same wall requirements as
+  `DynamicRenE`: a stationary, zero, normal-only strong velocity condition
+  on an axis-aligned planar wall. Tangential or full no-slip constraints and
+  weak velocity Dirichlet data on that wall are rejected. This is the
+  configuration of decision D4.
+- Without slip, no velocity condition on the contact wall is required or
+  checked. The usual choice is a no-slip (full Dirichlet) wall. The velocity
+  test functions then vanish on the wall, so the Young line term does no
+  work and the contact line can move only through level-set transport. The
+  retired geometric reset (next section) used to impose the angle in this
+  case; now nothing does, and the contact angle keeps whatever the level set
+  carries. Whether `PrescribedAngle` without slip should be rejected is an
+  open decision.
 
 ### Level-set wall maintenance
 
 There is no contact-angle residual in the level-set equation. The former
-penalty `penalty*(dot(n,n_wall) + cos(theta))*eta` has been removed. Contact
-geometry is maintained by the wall-aware projection redistancing at accepted
-endpoints (`FE/LevelSet/LevelSetReinitialization.h`):
+penalty `penalty*(dot(n,n_wall) + cos(theta))*eta` has been removed.
 
-- `DynamicRenE` contact cells are rescaled by a common positive factor, which
-  keeps the accepted contact point and angle unchanged.
-- `PrescribedAngle` contact cells are reset to a unit-gradient affine target
-  through the accepted contact point with the prescribed angle.
+Decision D4 in the program tracker gives the contact angle one owner: the
+Young term in the momentum equation (table above). Level-set maintenance
+therefore never imposes an angle. When reinitialization is enabled, the
+wall-aware projection redistancing at accepted endpoints
+(`FE/LevelSet/LevelSetReinitialization.h`) treats both contact laws the same
+way:
 
-Decision D4 in the program tracker keeps only the momentum-side Young term
-as the angle mechanism. That means Navier slip on the wetted wall, strong
-no-penetration, and angle-preserving (scale-only) maintenance for
-`PrescribedAngle` as well. The reset to the target angle is retired as a
-production path and is removed once that configuration is validated
-(milestone M4).
+- The parent cells of every retained contact rule on a `PrescribedAngle` or
+  `DynamicRenE` wall form contact patches, connected through shared
+  level-set coefficients. Each patch is rescaled by one common positive
+  factor, fitted to the signed distance
+  (`LevelSetWallContactConstraintKind::PreserveAcceptedAngle`). The accepted
+  contact point and interface normal in those cells, and so the contact
+  angle, are unchanged. The declared angle is not read.
+- Cells away from the contact patches relax toward signed distance as usual,
+  with the zero set held within `max_zero_set_displacement`.
+- `PrescribedAngle` walls take their contact rules from the accepted endpoint
+  geometry snapshot. `DynamicRenE` walls take them from the accepted dynamic
+  contact stage, which also supplies the redistancing input.
+- The maintenance log line reports `wall_contact_maintenance=preserve_accepted_angle`
+  (or `none` when no contact rule exists) and the number of contact rules per
+  law (`prescribed_contact_rules`, `dynamic_contact_rules`).
+
+With reinitialization disabled, nothing modifies the contact cells between
+steps; the contact line moves only with the transported level set.
+
+The former reset of `PrescribedAngle` contact cells to a unit-gradient affine
+target with the declared angle (`RepairToPrescribedAngle`) is retired as a
+production path. It combined a second, geometric angle mechanism with the
+Young term, and the two disagree on the discrete angle. The FE implementation
+stays, for verification only, until milestone M4 has validated the single
+mechanism. The application rejects that kind on every rank before production
+redistancing.
 
 ### Requirements and rejected combinations
 
@@ -175,6 +209,11 @@ production path and is removed once that configuration is validated
 
 Fitted prescribed and dynamic contact are rejected until a fitted
 codimension-two integration entity exists.
+
+`PrescribedAngle` with Navier slip additionally requires the slip
+conditions above: literal Newtonian viscosity, `CutVolume` with zero
+smoothing width, an axis-aligned planar wall, and a stationary, zero,
+normal-only strong velocity condition on that wall.
 
 `DynamicRenE` additionally requires:
 
