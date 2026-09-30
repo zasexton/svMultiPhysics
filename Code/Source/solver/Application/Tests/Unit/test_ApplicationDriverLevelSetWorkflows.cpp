@@ -100,6 +100,7 @@ void expectMaintenanceConfigurationUnchanged(
   EXPECT_EQ(actual.supplemental_sample_weight, expected.supplemental_sample_weight);
   EXPECT_EQ(actual.recovery_mode, expected.recovery_mode);
   EXPECT_EQ(actual.kinematic_area_gradient_filter_coefficient, expected.kinematic_area_gradient_filter_coefficient);
+  EXPECT_EQ(actual.kinematic_area_gradient_mass, expected.kinematic_area_gradient_mass);
   EXPECT_EQ(actual.kinematic_area_gradient_negative_liquid_side, expected.kinematic_area_gradient_negative_liquid_side);
   EXPECT_EQ(actual.narrow_band_width, expected.narrow_band_width);
   EXPECT_EQ(actual.smoothing_iterations, expected.smoothing_iterations);
@@ -6655,6 +6656,89 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_NE(canonical.words, changed_filter.words);
   recordMaintenanceSchedule(
       "r1_curvature_controls_filter", changed_filter);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     ParsesAndCanonicalizesKinematicAreaGradientMassControl)
+{
+  auto params = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Enable_curvature_projection>true</Enable_curvature_projection>
+    <Curvature_field_name>kappa_projected</Curvature_field_name>
+    <Curvature_projection_recovery_mode>KinematicAreaGradient</Curvature_projection_recovery_mode>
+    <Curvature_projection_kinematic_area_gradient_filter_coefficient>0.0</Curvature_projection_kinematic_area_gradient_filter_coefficient>
+    <Curvature_projection_kinematic_area_gradient_mass>Lumped</Curvature_projection_kinematic_area_gradient_mass>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+
+  const auto requests = legacyMaintenanceRequestsForTest(*params);
+  ASSERT_EQ(requests.size(), 1u);
+  const auto lumped_options =
+      effectiveCurvatureProjectionOptions(requests.front());
+  EXPECT_EQ(lumped_options.kinematic_area_gradient_mass,
+            svmp::FE::level_set::LevelSetKinematicAreaGradientMass::Lumped);
+  EXPECT_DOUBLE_EQ(lumped_options.kinematic_area_gradient_filter_coefficient,
+                   0.0);
+
+  const auto canonical = canonicalLevelSetMaintenanceRequestSchedule(
+      requests,
+      LevelSetMaintenanceScheduleStage::TransientInitialization,
+      /*completed_step=*/0);
+  ASSERT_TRUE(canonical.supported);
+  auto changed_requests = requests;
+  changed_requests.front() = withMaintenanceConfiguration(
+      changed_requests.front(), [&](auto& configured) {
+        configured.curvature_projection.kinematic_area_gradient_mass =
+            svmp::FE::level_set::LevelSetKinematicAreaGradientMass::Consistent;
+      });
+  const auto changed = canonicalLevelSetMaintenanceRequestSchedule(
+      changed_requests,
+      LevelSetMaintenanceScheduleStage::TransientInitialization,
+      /*completed_step=*/0);
+  EXPECT_NE(canonical.words, changed.words);
+  recordMaintenanceSchedule("r1_curvature_controls_mass", changed);
+
+  // The projected-curvature cache signature must not alias the two modes.
+  std::uint64_t lumped_signature = 0u;
+  std::uint64_t consistent_signature = 0u;
+  mixCurvatureProjectionOptionsSignature(lumped_signature, lumped_options);
+  mixCurvatureProjectionOptionsSignature(
+      consistent_signature,
+      effectiveCurvatureProjectionOptions(changed_requests.front()));
+  EXPECT_NE(lumped_signature, consistent_signature);
+
+  auto alias = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Enable_curvature_projection>true</Enable_curvature_projection>
+    <Curvature_field_name>kappa_projected</Curvature_field_name>
+    <ProjectedCurvatureKinematicAreaGradientMass>row_sum</ProjectedCurvatureKinematicAreaGradientMass>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  const auto alias_requests = legacyMaintenanceRequestsForTest(*alias);
+  ASSERT_EQ(alias_requests.size(), 1u);
+  EXPECT_EQ(effectiveCurvatureProjectionOptions(alias_requests.front())
+                .kinematic_area_gradient_mass,
+            svmp::FE::level_set::LevelSetKinematicAreaGradientMass::Lumped);
+
+  auto invalid = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Enable_curvature_projection>true</Enable_curvature_projection>
+    <Curvature_projection_kinematic_area_gradient_mass>diagonal</Curvature_projection_kinematic_area_gradient_mass>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  EXPECT_EQ(
+      (maintenanceCompatibilityExceptionMessage<std::invalid_argument>(
+          [&] { (void)legacyMaintenanceRequestsForTest(*invalid); })),
+      "level-set kinematic-area-gradient mass 'diagonal' must be consistent "
+      "or lumped");
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,

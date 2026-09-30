@@ -963,6 +963,15 @@ resolveLegacyLevelSetMaintenanceConfiguration(
        "ProjectedCurvatureKinematicAreaGradientFilterCoefficient"},
       "curvature_projection_kinematic_area_gradient_filter_coefficient",
       result->curvature_projection.kinematic_area_gradient_filter_coefficient);
+  if (const auto mass = reader.string(
+          {"Curvature_projection_kinematic_area_gradient_mass",
+           "CurvatureProjectionKinematicAreaGradientMass",
+           "Projected_curvature_kinematic_area_gradient_mass",
+           "ProjectedCurvatureKinematicAreaGradientMass"},
+          "curvature_projection_kinematic_area_gradient_mass")) {
+    result->curvature_projection.kinematic_area_gradient_mass =
+        ls::parseLevelSetKinematicAreaGradientMass(mass->text);
+  }
   apply_real_list({"Curvature_projection_narrow_band_width",
                    "CurvatureProjectionNarrowBandWidth",
                    "Projected_curvature_narrow_band_width",
