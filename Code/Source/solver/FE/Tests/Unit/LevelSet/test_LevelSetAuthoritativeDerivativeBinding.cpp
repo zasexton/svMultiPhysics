@@ -367,6 +367,15 @@ TEST(LevelSetAuthoritativeDerivativeBinding, RejectsParameterDisagreement)
     fixture.options.isovalue = 0.125;
     expectUnavailable(fixture.project(curvature), curvature, "isovalue_mismatch");
     fixture.options = original;
+    fixture.options.kinematic_area_gradient_mass =
+        ls::LevelSetKinematicAreaGradientMass::Lumped;
+    fixture.options.kinematic_area_gradient_filter_coefficient = 0.5;
+    expectUnavailable(fixture.project(curvature), curvature,
+                      "authoritative_mass_mode_unsupported");
+    fixture.options.kinematic_area_gradient_filter_coefficient = 0.0;
+    expectUnavailable(fixture.project(curvature), curvature,
+                      "source_branch_unverified");
+    fixture.options = original;
     fixture.options.kinematic_area_gradient_negative_liquid_side = false;
     expectUnavailable(fixture.project(curvature), curvature, "liquid_side_mismatch");
     fixture.options = original;

@@ -87,6 +87,35 @@ LevelSetCurvatureSmoothingMode parseLevelSetCurvatureSmoothingMode(
         "' must be local_graph or mass_stiffness_operator");
 }
 
+const char* levelSetKinematicAreaGradientMassName(
+    LevelSetKinematicAreaGradientMass mass) noexcept
+{
+    switch (mass) {
+        case LevelSetKinematicAreaGradientMass::Consistent:
+            return "consistent";
+        case LevelSetKinematicAreaGradientMass::Lumped:
+            return "lumped";
+    }
+    return "unknown";
+}
+
+LevelSetKinematicAreaGradientMass parseLevelSetKinematicAreaGradientMass(
+    std::string_view value)
+{
+    const auto token = normalizedCurvatureToken(value);
+    if (token.empty() || token == "consistent" ||
+        token == "consistentmass") {
+        return LevelSetKinematicAreaGradientMass::Consistent;
+    }
+    if (token == "lumped" || token == "lumpedmass" || token == "rowsum" ||
+        token == "rowsummass") {
+        return LevelSetKinematicAreaGradientMass::Lumped;
+    }
+    throw std::invalid_argument(
+        "level-set kinematic-area-gradient mass '" + std::string(value) +
+        "' must be consistent or lumped");
+}
+
 const char* levelSetCurvatureRecoveryModeName(
     LevelSetCurvatureRecoveryMode mode) noexcept
 {
@@ -361,6 +390,9 @@ void mixKinematicProjectionReal(
         signature, static_cast<std::uint64_t>(options.recovery_mode));
     mixKinematicProjectionReal(
         signature, options.kinematic_area_gradient_filter_coefficient);
+    mixKinematicProjectionSignature(
+        signature,
+        static_cast<std::uint64_t>(options.kinematic_area_gradient_mass));
     mixKinematicProjectionSignature(
         signature,
         options.kinematic_area_gradient_negative_liquid_side ? 1u : 0u);
@@ -3563,32 +3595,47 @@ void accumulateDifferentiatedTriangleMeasure(
         }
     }
 
+    // The row sums are +/- the liquid-volume derivative, so at a discrete
+    // volume-constrained stationary point (dE/dphi = mu dV/dphi) the lumped
+    // division gives exactly constant curvature, as the consistent solve does.
+    const bool lumped_mass = options.kinematic_area_gradient_mass ==
+                             LevelSetKinematicAreaGradientMass::Lumped;
+    if (lumped_mass) {
+        for (std::size_t vertex = 0u; vertex < n_vertices; ++vertex) {
+            if (lumped_kinematic_mass[vertex] > Real{0.0}) {
+                solved_curvature[vertex] =
+                    rhs[vertex] / lumped_kinematic_mass[vertex];
+            }
+        }
+    }
     result.kinematic_area_gradient_minimum_norm_solver =
+        !lumped_mass &&
         options.kinematic_area_gradient_filter_coefficient == Real{0.0};
     const bool mass_system_solved =
-        result.kinematic_area_gradient_minimum_norm_solver
-        ? solveKinematicAreaMassMinimumNorm(
-              regularized_mass,
-              std::span<const Real>(rhs.data(), rhs.size()),
-              std::span<const std::size_t>(
-                  component_ids.data(), component_ids.size()),
-              components.size(),
-              std::span<const Real>(
-                  component_scaling_null.data(),
-                  component_scaling_null.size()),
-              solved_curvature,
-              result.kinematic_area_gradient_linear_iterations,
-              result.kinematic_area_gradient_relative_linear_residual)
-        : solveKinematicAreaMassSystem(
-              regularized_mass,
-              std::span<const Real>(rhs.data(), rhs.size()),
-              std::span<const std::size_t>{},
-              /*null_component_count=*/0u,
-              std::span<const Real>{},
-              /*use_diagonal_preconditioner=*/true,
-              solved_curvature,
-              result.kinematic_area_gradient_linear_iterations,
-              result.kinematic_area_gradient_relative_linear_residual);
+        lumped_mass ||
+        (result.kinematic_area_gradient_minimum_norm_solver
+             ? solveKinematicAreaMassMinimumNorm(
+                   regularized_mass,
+                   std::span<const Real>(rhs.data(), rhs.size()),
+                   std::span<const std::size_t>(
+                       component_ids.data(), component_ids.size()),
+                   components.size(),
+                   std::span<const Real>(
+                       component_scaling_null.data(),
+                       component_scaling_null.size()),
+                   solved_curvature,
+                   result.kinematic_area_gradient_linear_iterations,
+                   result.kinematic_area_gradient_relative_linear_residual)
+             : solveKinematicAreaMassSystem(
+                   regularized_mass,
+                   std::span<const Real>(rhs.data(), rhs.size()),
+                   std::span<const std::size_t>{},
+                   /*null_component_count=*/0u,
+                   std::span<const Real>{},
+                   /*use_diagonal_preconditioner=*/true,
+                   solved_curvature,
+                   result.kinematic_area_gradient_linear_iterations,
+                   result.kinematic_area_gradient_relative_linear_residual));
     if (!mass_system_solved) {
         result.diagnostic =
             "kinematic-area-gradient curvature recovery could not solve its consistent interface system";
@@ -3612,18 +3659,25 @@ void accumulateDifferentiatedTriangleMeasure(
             lumped_kinematic_mass[vertex];
         mass_weighted_curvature +=
             lumped_kinematic_mass[vertex] * kappa;
-        for (const auto& [column, value] : kinematic_mass[vertex]) {
-            mass_weighted_curvature_squared +=
-                kappa * value * solved_curvature[column];
-        }
         active_vertices[vertex] = 1u;
         fitted[vertex] = 1u;
         ++result.fitted_vertices;
         Real applied{0.0};
         Real identity_scale = std::abs(area_gradient[vertex]);
-        for (const auto& [column, value] : regularized_mass[vertex]) {
-            applied += value * solved_curvature[column];
-            identity_scale += std::abs(value * solved_curvature[column]);
+        if (lumped_mass) {
+            applied = lumped_kinematic_mass[vertex] * kappa;
+            identity_scale += std::abs(applied);
+            mass_weighted_curvature_squared += applied * kappa;
+        } else {
+            for (const auto& [column, value] : kinematic_mass[vertex]) {
+                mass_weighted_curvature_squared +=
+                    kappa * value * solved_curvature[column];
+            }
+            for (const auto& [column, value] : regularized_mass[vertex]) {
+                applied += value * solved_curvature[column];
+                identity_scale +=
+                    std::abs(value * solved_curvature[column]);
+            }
         }
         const Real identity_residual =
             std::abs(area_gradient[vertex] + applied);
@@ -4432,6 +4486,7 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
             }));
     result.supplemental_sample_weight = options.supplemental_sample_weight;
     result.recovery_mode = options.recovery_mode;
+    result.kinematic_area_gradient_mass = options.kinematic_area_gradient_mass;
     result.narrow_band_width = options.narrow_band_width;
     result.smoothing_mode = options.smoothing_mode;
     switch (options.recovery_mode) {
@@ -4475,6 +4530,25 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
         options.smoothing_iterations != 0) {
         throw std::invalid_argument(
             "kinematic-area-gradient curvature recovery owns its regularization and cannot be combined with post-projection smoothing");
+    }
+    switch (options.kinematic_area_gradient_mass) {
+        case LevelSetKinematicAreaGradientMass::Consistent:
+            break;
+        case LevelSetKinematicAreaGradientMass::Lumped:
+            if (options.recovery_mode !=
+                LevelSetCurvatureRecoveryMode::KinematicAreaGradient) {
+                throw std::invalid_argument(
+                    "lumped kinematic-area-gradient mass requires kinematic-area-gradient curvature recovery");
+            }
+            if (options.kinematic_area_gradient_filter_coefficient !=
+                Real{0.0}) {
+                throw std::invalid_argument(
+                    "lumped kinematic-area-gradient mass is parameter free and requires a zero filter coefficient");
+            }
+            break;
+        default:
+            throw std::invalid_argument(
+                "level-set curvature projection received an unknown kinematic-area-gradient mass");
     }
     if (workspace != nullptr) {
         workspace->free_surface_snapshot_revision_key =
@@ -5028,6 +5102,8 @@ projectKinematicAreaGradientCollectively(
     LevelSetCurvatureProjectionResult failure_result;
     failure_result.vertices = level_set_vertex_values.size();
     failure_result.recovery_mode = options.recovery_mode;
+    failure_result.kinematic_area_gradient_mass =
+        options.kinematic_area_gradient_mass;
     failure_result.kinematic_area_gradient_parallel_size =
         local_mesh.parallelSize();
     curvature_vertex_values.assign(
@@ -5327,6 +5403,15 @@ void validateAuthoritativeDerivativeBinding(
         LevelSetCurvatureRecoveryMode::KinematicAreaGradient) {
         throw std::invalid_argument("authoritative_recovery_mode_unsupported");
     }
+    const bool parameter_free_lumped_mass =
+        options.kinematic_area_gradient_mass ==
+            LevelSetKinematicAreaGradientMass::Lumped &&
+        options.kinematic_area_gradient_filter_coefficient == Real{0.0};
+    if (options.kinematic_area_gradient_mass !=
+            LevelSetKinematicAreaGradientMass::Consistent &&
+        !parameter_free_lumped_mass) {
+        throw std::invalid_argument("authoritative_mass_mode_unsupported");
+    }
     const auto selected_side =
         options.kinematic_area_gradient_negative_liquid_side
             ? geometry::CutIntegrationSide::Negative
@@ -5402,6 +5487,7 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
     curvature_vertex_values.clear();
     LevelSetCurvatureProjectionResult result;
     result.recovery_mode = options.recovery_mode;
+    result.kinematic_area_gradient_mass = options.kinematic_area_gradient_mass;
     result.vertices = producer_vertex_values.size();
     try {
         if (binding.input_source.kind !=
@@ -5433,6 +5519,7 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
     curvature_vertex_values.clear();
     LevelSetCurvatureProjectionResult result;
     result.recovery_mode = options.recovery_mode;
+    result.kinematic_area_gradient_mass = options.kinematic_area_gradient_mass;
     KinematicProjectionCollectiveContext context;
 #if FE_HAS_MPI
     int initialized = 0;

@@ -616,7 +616,9 @@ KinematicCurvatureEvaluation evaluateKinematicCurvature(
     FE::Real radius,
     const std::array<FE::Real, 3>& center,
     FE::Real signed_level_set_scale = FE::Real{1.0},
-    FE::Real filter_coefficient = FE::Real{1.0})
+    FE::Real filter_coefficient = FE::Real{1.0},
+    level_set::LevelSetKinematicAreaGradientMass mass =
+        level_set::LevelSetKinematicAreaGradientMass::Consistent)
 {
     std::vector<FE::Real> phi(
         static_cast<std::size_t>(mesh.numVertices()), FE::Real{0.0});
@@ -637,6 +639,7 @@ KinematicCurvatureEvaluation evaluateKinematicCurvature(
     options.recovery_mode =
         level_set::LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
     options.kinematic_area_gradient_filter_coefficient = filter_coefficient;
+    options.kinematic_area_gradient_mass = mass;
     KinematicCurvatureEvaluation evaluation;
     evaluation.result = level_set::projectLevelSetMeanCurvatureToVertices(
         mesh, phi, options, evaluation.curvature);
@@ -686,7 +689,9 @@ KinematicCurvatureEvaluation evaluateSessileKinematicCurvature(
     FE::Real wall_coordinate,
     bool include_young_wall,
     FE::Real signed_level_set_scale = FE::Real{1.0},
-    FE::Real filter_coefficient = FE::Real{1.0})
+    FE::Real filter_coefficient = FE::Real{1.0},
+    level_set::LevelSetKinematicAreaGradientMass mass =
+        level_set::LevelSetKinematicAreaGradientMass::Consistent)
 {
     const std::array<FE::Real, 3> center{{
         FE::Real{0.0},
@@ -706,6 +711,7 @@ KinematicCurvatureEvaluation evaluateSessileKinematicCurvature(
     options.recovery_mode =
         level_set::LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
     options.kinematic_area_gradient_filter_coefficient = filter_coefficient;
+    options.kinematic_area_gradient_mass = mass;
     options.kinematic_area_gradient_negative_liquid_side =
         signed_level_set_scale > FE::Real{0.0};
     if (include_young_wall) {
@@ -3903,6 +3909,488 @@ TEST(LevelSetCurvatureProjection,
         result
             .kinematic_area_gradient_max_relative_regularized_identity_residual,
         FE::Real{1.0e-7});
+}
+
+namespace {
+
+// Defining identity of the lumped mass: m_i kappa_i = -dE/dphi_i on every
+// vertex of the interface support, where m_i is the magnitude of the
+// reported liquid-volume derivative. Vertices off the support keep zero
+// curvature. Returns the largest relative residual.
+FE::Real lumpedRowSumIdentityResidual(
+    const level_set::LevelSetCurvatureProjectionResult& result,
+    const std::vector<FE::Real>& curvature,
+    std::size_t& supported_vertices)
+{
+    const auto& energy =
+        result.kinematic_area_gradient_total_energy_derivative;
+    const auto& volume =
+        result.kinematic_area_gradient_liquid_volume_derivative;
+    supported_vertices = 0u;
+    if (energy.size() != curvature.size() ||
+        volume.size() != curvature.size()) {
+        ADD_FAILURE() << "lumped identity data have incompatible sizes";
+        return std::numeric_limits<FE::Real>::infinity();
+    }
+    FE::Real maximum_residual{0.0};
+    for (std::size_t vertex = 0u; vertex < curvature.size(); ++vertex) {
+        const FE::Real mass = std::abs(volume[vertex]);
+        if (mass == FE::Real{0.0}) {
+            EXPECT_EQ(curvature[vertex], FE::Real{0.0}) << vertex;
+            continue;
+        }
+        ++supported_vertices;
+        const FE::Real rhs = -energy[vertex];
+        maximum_residual = std::max(
+            maximum_residual,
+            std::abs(mass * curvature[vertex] - rhs) /
+                std::max(std::abs(rhs),
+                         std::numeric_limits<FE::Real>::min()));
+    }
+    return maximum_residual;
+}
+
+std::vector<FE::Real> sampledCircleLevelSet(
+    const SimplexMeshAccess& mesh,
+    FE::Real radius,
+    const std::array<FE::Real, 3>& center)
+{
+    std::vector<FE::Real> phi(
+        static_cast<std::size_t>(mesh.numVertices()), FE::Real{0.0});
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        const auto point = mesh.getNodeCoordinates(vertex);
+        phi[static_cast<std::size_t>(vertex)] =
+            std::hypot(point[0] - center[0], point[1] - center[1]) - radius;
+    }
+    return phi;
+}
+
+// Root-mean-square trace error sqrt((k - e)^T M (k - e) / sum(m)) of a nodal
+// triangle-mesh curvature field in the consistent interface mass M. The
+// level-set scaling null direction of M does not change it, so it compares
+// lumped and minimum-norm consistent fields on equal terms.
+FE::Real consistentTraceRootMeanSquareError(
+    const SimplexMeshAccess& mesh,
+    const std::vector<FE::Real>& phi,
+    const std::vector<FE::Real>& curvature,
+    FE::Real exact,
+    FE::Real kinematic_mass)
+{
+    std::vector<FE::Real> error(curvature.size(), FE::Real{0.0});
+    for (std::size_t vertex = 0u; vertex < curvature.size(); ++vertex) {
+        error[vertex] = curvature[vertex] - exact;
+    }
+    const FE::Real weighted_square =
+        -consistentKinematicCurvatureDirectionalDerivative(
+            mesh, phi, error, error);
+    return std::sqrt(std::max(weighted_square, FE::Real{0.0}) /
+                     kinematic_mass);
+}
+
+} // namespace
+
+TEST(LevelSetCurvatureProjection,
+     ParsesKinematicAreaGradientMassModesAndRejectsUnknownTokens)
+{
+    using Mass = level_set::LevelSetKinematicAreaGradientMass;
+    EXPECT_EQ(level_set::LevelSetCurvatureProjectionOptions{}
+                  .kinematic_area_gradient_mass,
+              Mass::Consistent);
+    EXPECT_EQ(level_set::parseLevelSetKinematicAreaGradientMass("Consistent"),
+              Mass::Consistent);
+    EXPECT_EQ(level_set::parseLevelSetKinematicAreaGradientMass(""),
+              Mass::Consistent);
+    EXPECT_EQ(level_set::parseLevelSetKinematicAreaGradientMass("Lumped"),
+              Mass::Lumped);
+    EXPECT_EQ(level_set::parseLevelSetKinematicAreaGradientMass("row-sum"),
+              Mass::Lumped);
+    EXPECT_STREQ(
+        level_set::levelSetKinematicAreaGradientMassName(Mass::Consistent),
+        "consistent");
+    EXPECT_STREQ(
+        level_set::levelSetKinematicAreaGradientMassName(Mass::Lumped),
+        "lumped");
+    EXPECT_THROW(
+        (void)level_set::parseLevelSetKinematicAreaGradientMass("diagonal"),
+        std::invalid_argument);
+}
+
+TEST(LevelSetCurvatureProjection,
+     KinematicAreaGradientLumpedMassRejectsFilterAndOtherRecoveryModes)
+{
+    using Mass = level_set::LevelSetKinematicAreaGradientMass;
+    auto mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/12, FE::Real{-0.70}, FE::Real{0.70});
+    const auto phi = sampledCircleLevelSet(
+        mesh, FE::Real{0.437},
+        {{FE::Real{0.013}, FE::Real{-0.021}, FE::Real{0.0}}});
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.recovery_mode =
+        level_set::LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
+    options.kinematic_area_gradient_mass = Mass::Lumped;
+    std::vector<FE::Real> curvature;
+    // The default filter coefficient is nonzero; the lumped mode has no
+    // parameter and must not silently ignore one.
+    EXPECT_THROW((void)level_set::projectLevelSetMeanCurvatureToVertices(
+                     mesh, phi, options, curvature),
+                 std::invalid_argument);
+    options.kinematic_area_gradient_filter_coefficient = FE::Real{0.5};
+    EXPECT_THROW((void)level_set::projectLevelSetMeanCurvatureToVertices(
+                     mesh, phi, options, curvature),
+                 std::invalid_argument);
+    options.kinematic_area_gradient_filter_coefficient = FE::Real{0.0};
+    options.recovery_mode =
+        level_set::LevelSetCurvatureRecoveryMode::LevelSetQuadratic;
+    EXPECT_THROW((void)level_set::projectLevelSetMeanCurvatureToVertices(
+                     mesh, phi, options, curvature),
+                 std::invalid_argument);
+    options.recovery_mode =
+        level_set::LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
+    options.kinematic_area_gradient_mass = static_cast<Mass>(7);
+    EXPECT_THROW((void)level_set::projectLevelSetMeanCurvatureToVertices(
+                     mesh, phi, options, curvature),
+                 std::invalid_argument);
+    options.kinematic_area_gradient_mass = Mass::Lumped;
+    const auto result = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, options, curvature);
+    EXPECT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.kinematic_area_gradient_mass, Mass::Lumped);
+}
+
+TEST(LevelSetCurvatureProjection,
+     KinematicAreaGradientLumpedMassSatisfiesRowSumIdentityWithoutLinearSolve)
+{
+    using Mass = level_set::LevelSetKinematicAreaGradientMass;
+    const auto check = [](const KinematicCurvatureEvaluation& lumped,
+                          const KinematicCurvatureEvaluation& consistent,
+                          const std::string& name) {
+        const auto& result = lumped.result;
+        ASSERT_TRUE(result.success) << name << ": " << result.diagnostic;
+        ASSERT_TRUE(consistent.result.success)
+            << name << ": " << consistent.result.diagnostic;
+        EXPECT_EQ(result.kinematic_area_gradient_mass, Mass::Lumped);
+        EXPECT_EQ(consistent.result.kinematic_area_gradient_mass,
+                  Mass::Consistent);
+        EXPECT_EQ(result.kinematic_area_gradient_linear_iterations, 0u);
+        EXPECT_GT(
+            consistent.result.kinematic_area_gradient_linear_iterations, 0u);
+        EXPECT_FALSE(result.kinematic_area_gradient_minimum_norm_solver);
+        EXPECT_DOUBLE_EQ(
+            result.kinematic_area_gradient_relative_linear_residual,
+            FE::Real{0.0});
+
+        std::size_t supported{0u};
+        const FE::Real identity_residual =
+            lumpedRowSumIdentityResidual(result, lumped.curvature, supported);
+        EXPECT_GT(supported, 0u);
+        EXPECT_EQ(supported, result.fitted_vertices);
+        EXPECT_EQ(result.kinematic_area_gradient_operator_vertices, supported);
+        const FE::Real roundoff =
+            FE::Real{4.0} * std::numeric_limits<FE::Real>::epsilon();
+        EXPECT_LE(identity_residual, roundoff) << name;
+        EXPECT_LE(
+            result
+                .kinematic_area_gradient_max_relative_regularized_identity_residual,
+            roundoff)
+            << name;
+
+        // Both modes report sum(-dE/dphi) / sum(m) as the row-sum weighted
+        // mean, so the pressure-jump quantity does not depend on the mass.
+        FE::Real rhs_sum{0.0};
+        FE::Real mass_sum{0.0};
+        for (std::size_t vertex = 0u;
+             vertex < lumped.curvature.size();
+             ++vertex) {
+            rhs_sum -=
+                result.kinematic_area_gradient_total_energy_derivative[vertex];
+            mass_sum += std::abs(
+                result.kinematic_area_gradient_liquid_volume_derivative[vertex]);
+        }
+        const FE::Real mean =
+            result.kinematic_area_gradient_mass_weighted_mean_curvature;
+        EXPECT_NEAR(mean, rhs_sum / mass_sum,
+                    FE::Real{1.0e-12} * std::abs(mean))
+            << name;
+        EXPECT_DOUBLE_EQ(result.kinematic_area_gradient_kinematic_mass,
+                         consistent.result.kinematic_area_gradient_kinematic_mass);
+        EXPECT_NEAR(
+            mean,
+            consistent.result
+                .kinematic_area_gradient_mass_weighted_mean_curvature,
+            FE::Real{1.0e-8} * std::abs(mean))
+            << name;
+        ::testing::Test::RecordProperty(
+            name + "_lumped_identity_residual", identity_residual);
+        ::testing::Test::RecordProperty(
+            name + "_consistent_linear_iterations",
+            consistent.result.kinematic_area_gradient_linear_iterations);
+    };
+
+    const std::array<FE::Real, 3> circle_center{{0.013, -0.021, 0.0}};
+    auto circle_mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/24, FE::Real{-0.70}, FE::Real{0.70});
+    check(evaluateKinematicCurvature(circle_mesh, FE::Real{0.437},
+                                     circle_center, FE::Real{1.0},
+                                     FE::Real{0.0}, Mass::Lumped),
+          evaluateKinematicCurvature(circle_mesh, FE::Real{0.437},
+                                     circle_center, FE::Real{1.0},
+                                     FE::Real{0.0}, Mass::Consistent),
+          "kinematic_lumped_circle");
+
+    const std::array<FE::Real, 3> sphere_center{{0.017, -0.011, 0.009}};
+    auto sphere_mesh = makeStructuredTetrahedronMesh(
+        /*subdivisions=*/6, FE::Real{-0.65}, FE::Real{0.65});
+    check(evaluateKinematicCurvature(sphere_mesh, FE::Real{0.391},
+                                     sphere_center, FE::Real{1.0},
+                                     FE::Real{0.0}, Mass::Lumped),
+          evaluateKinematicCurvature(sphere_mesh, FE::Real{0.391},
+                                     sphere_center, FE::Real{1.0},
+                                     FE::Real{0.0}, Mass::Consistent),
+          "kinematic_lumped_sphere");
+
+    // The right-hand side includes the Young wall-energy derivative.
+    const FE::Real pi = std::acos(FE::Real{-1.0});
+    constexpr FE::Real wall_coordinate{-0.70};
+    auto sessile_mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/48, wall_coordinate, FE::Real{0.70});
+    const auto sessile_lumped = evaluateSessileKinematicCurvature(
+        sessile_mesh, FE::Real{0.347}, pi / FE::Real{3.0}, wall_coordinate,
+        true, FE::Real{1.0}, FE::Real{0.0}, Mass::Lumped);
+    EXPECT_GT(
+        sessile_lumped.result.kinematic_area_gradient_young_wall_gradient_norm,
+        FE::Real{0.0});
+    check(sessile_lumped,
+          evaluateSessileKinematicCurvature(
+              sessile_mesh, FE::Real{0.347}, pi / FE::Real{3.0},
+              wall_coordinate, true, FE::Real{1.0}, FE::Real{0.0},
+              Mass::Consistent),
+          "kinematic_lumped_sessile_60");
+}
+
+TEST(LevelSetCurvatureProjection,
+     KinematicAreaGradientLumpedMassIsRoundoffBalancedForAffineFlatInterfaces)
+{
+    for (const int dimension : {2, 3}) {
+        auto mesh = dimension == 2
+            ? makeStructuredTriangleMesh(
+                  /*subdivisions=*/12, FE::Real{-0.70}, FE::Real{0.70})
+            : makeStructuredTetrahedronMesh(
+                  /*subdivisions=*/6, FE::Real{-0.65}, FE::Real{0.65});
+        std::vector<FE::Real> phi(
+            static_cast<std::size_t>(mesh.numVertices()), FE::Real{0.0});
+        for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices();
+             ++vertex) {
+            phi[static_cast<std::size_t>(vertex)] =
+                mesh.getNodeCoordinates(vertex)[
+                    static_cast<std::size_t>(dimension - 1)] -
+                FE::Real{0.013};
+        }
+
+        level_set::LevelSetCurvatureProjectionOptions options;
+        options.recovery_mode =
+            level_set::LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
+        options.kinematic_area_gradient_filter_coefficient = FE::Real{0.0};
+        options.kinematic_area_gradient_mass =
+            level_set::LevelSetKinematicAreaGradientMass::Lumped;
+        std::vector<FE::Real> curvature;
+        const auto result = level_set::projectLevelSetMeanCurvatureToVertices(
+            mesh, phi, options, curvature);
+
+        ASSERT_TRUE(result.success) << result.diagnostic;
+        EXPECT_GT(result.fitted_vertices, 0u);
+        EXPECT_EQ(result.kinematic_area_gradient_linear_iterations, 0u);
+        EXPECT_LE(result.kinematic_area_gradient_total_energy_gradient_norm,
+                  FE::Real{1.0e-13});
+        FE::Real maximum_curvature{0.0};
+        for (const auto value : curvature) {
+            maximum_curvature = std::max(maximum_curvature, std::abs(value));
+        }
+        EXPECT_LE(maximum_curvature, FE::Real{1.0e-12});
+        RecordProperty(
+            "kinematic_lumped_affine_flat_" + std::to_string(dimension) +
+                "d_max_abs_curvature",
+            maximum_curvature);
+    }
+}
+
+TEST(LevelSetCurvatureProjection,
+     KinematicAreaGradientLumpedMassRecoversSampledCircleUnderRefinement)
+{
+    // Sampled signed-distance circle, not a discrete equilibrium. The
+    // row-sum weighted mean sum(-dE/dphi) / sum(m) is shared by both masses
+    // and converges to 1/R (measured relative error 9.5e-3, 2.5e-3, 4.4e-4
+    // and 1.6e-4 for n = 12, 24, 48, 96). Nodal values do not converge
+    // pointwise in either mode. A lumped vertex whose support holds only a
+    // sliver of interface at distance delta from another vertex gets
+    // kappa_i ~ kappa h / delta with a mass weight of order delta^2
+    // (measured maximum nodal error 23 to 347 for 1/R = 2.29). In the
+    // consistent-mass trace norm the lumped error stays near 5.5% of 1/R,
+    // and the unfiltered minimum-norm consistent error near 200%. The bounds
+    // below are loose regression limits on these measurements.
+    using Mass = level_set::LevelSetKinematicAreaGradientMass;
+    constexpr FE::Real radius{0.437};
+    constexpr std::array<FE::Real, 3> center{{0.013, -0.021, 0.0}};
+    const FE::Real exact = FE::Real{1.0} / radius;
+    constexpr std::array<int, 4> levels{{12, 24, 48, 96}};
+    std::array<FE::Real, levels.size()> lumped_trace_errors{};
+    std::array<FE::Real, levels.size()> lumped_mean_errors{};
+    std::array<FE::Real, levels.size()> consistent_trace_errors{};
+    std::array<FE::Real, levels.size()> mean_relative_errors{};
+    for (std::size_t level = 0; level < levels.size(); ++level) {
+        auto mesh = makeStructuredTriangleMesh(
+            levels[level], FE::Real{-0.70}, FE::Real{0.70});
+        const auto lumped = evaluateKinematicCurvature(
+            mesh, radius, center, FE::Real{1.0}, FE::Real{0.0},
+            Mass::Lumped);
+        const auto consistent = evaluateKinematicCurvature(
+            mesh, radius, center, FE::Real{1.0}, FE::Real{0.0},
+            Mass::Consistent);
+        ASSERT_TRUE(lumped.result.success) << lumped.result.diagnostic;
+        ASSERT_TRUE(consistent.result.success)
+            << consistent.result.diagnostic;
+        const auto phi = sampledCircleLevelSet(mesh, radius, center);
+        lumped_trace_errors[level] = consistentTraceRootMeanSquareError(
+            mesh, phi, lumped.curvature, exact,
+            lumped.result.kinematic_area_gradient_kinematic_mass);
+        consistent_trace_errors[level] = consistentTraceRootMeanSquareError(
+            mesh, phi, consistent.curvature, exact,
+            consistent.result.kinematic_area_gradient_kinematic_mass);
+        lumped_mean_errors[level] = lumped.mean_absolute_error;
+        mean_relative_errors[level] =
+            std::abs(lumped.result
+                         .kinematic_area_gradient_mass_weighted_mean_curvature -
+                     exact) /
+            exact;
+        // The trace error of the consistent field is its reported
+        // mass-weighted error; this cross-checks the test helper.
+        EXPECT_NEAR(consistent_trace_errors[level],
+                    consistent.mass_weighted_root_mean_square_error,
+                    FE::Real{1.0e-6} * exact);
+
+        const std::string suffix = "_n" + std::to_string(levels[level]);
+        RecordProperty("kinematic_lumped_circle_mean_abs_error" + suffix,
+                       lumped.mean_absolute_error);
+        RecordProperty("kinematic_lumped_circle_max_abs_error" + suffix,
+                       lumped.maximum_absolute_error);
+        RecordProperty("kinematic_lumped_circle_row_sum_rms_error" + suffix,
+                       lumped.mass_weighted_root_mean_square_error);
+        RecordProperty("kinematic_lumped_circle_trace_rms_error" + suffix,
+                       lumped_trace_errors[level]);
+        RecordProperty("kinematic_consistent_circle_mean_abs_error" + suffix,
+                       consistent.mean_absolute_error);
+        RecordProperty("kinematic_consistent_circle_max_abs_error" + suffix,
+                       consistent.maximum_absolute_error);
+        RecordProperty("kinematic_consistent_circle_trace_rms_error" + suffix,
+                       consistent_trace_errors[level]);
+        RecordProperty("kinematic_circle_mean_relative_error" + suffix,
+                       mean_relative_errors[level]);
+        RecordProperty("kinematic_consistent_circle_linear_iterations" + suffix,
+                       consistent.result
+                           .kinematic_area_gradient_linear_iterations);
+    }
+    const FE::Real mean_order =
+        std::log(mean_relative_errors[0] / mean_relative_errors[3]) /
+        std::log(FE::Real{8.0});
+    const FE::Real nodal_mean_error_order =
+        std::log(lumped_mean_errors[0] / lumped_mean_errors[3]) /
+        std::log(FE::Real{8.0});
+    RecordProperty("kinematic_circle_mean_order_12_96", mean_order);
+    RecordProperty("kinematic_lumped_circle_nodal_mean_error_order_12_96",
+                   nodal_mean_error_order);
+
+    for (std::size_t level = 0; level < levels.size(); ++level) {
+        EXPECT_LT(mean_relative_errors[level], FE::Real{0.02})
+            << levels[level];
+        if (level > 0u) {
+            EXPECT_LT(mean_relative_errors[level],
+                      mean_relative_errors[level - 1u])
+                << levels[level];
+        }
+        EXPECT_LT(lumped_trace_errors[level], FE::Real{0.10} * exact)
+            << levels[level];
+        EXPECT_LT(lumped_trace_errors[level],
+                  FE::Real{0.25} * consistent_trace_errors[level])
+            << levels[level];
+    }
+    EXPECT_GT(mean_order, FE::Real{1.0});
+}
+
+TEST(LevelSetCurvatureProjection,
+     KinematicAreaGradientLumpedMassRespectsLiquidSideAndOrientation)
+{
+    using Mass = level_set::LevelSetKinematicAreaGradientMass;
+    constexpr FE::Real radius{0.437};
+    constexpr std::array<FE::Real, 3> center{{0.013, -0.021, 0.0}};
+    auto mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/20, FE::Real{-0.70}, FE::Real{0.70});
+    const auto base = evaluateKinematicCurvature(
+        mesh, radius, center, FE::Real{1.0}, FE::Real{0.0}, Mass::Lumped);
+    const auto reversed = evaluateKinematicCurvature(
+        mesh, radius, center, FE::Real{-3.40}, FE::Real{0.0}, Mass::Lumped);
+    ASSERT_TRUE(base.result.success) << base.result.diagnostic;
+    ASSERT_TRUE(reversed.result.success) << reversed.result.diagnostic;
+    ASSERT_EQ(base.curvature.size(), reversed.curvature.size());
+    FE::Real maximum_orientation_sum{0.0};
+    for (std::size_t vertex = 0; vertex < base.curvature.size(); ++vertex) {
+        maximum_orientation_sum = std::max(
+            maximum_orientation_sum,
+            std::abs(base.curvature[vertex] + reversed.curvature[vertex]));
+    }
+    EXPECT_GT(base.result.kinematic_area_gradient_mass_weighted_mean_curvature,
+              FE::Real{0.0});
+    EXPECT_LT(
+        reversed.result.kinematic_area_gradient_mass_weighted_mean_curvature,
+        FE::Real{0.0});
+    EXPECT_LT(maximum_orientation_sum, FE::Real{1.0e-9} / radius);
+    RecordProperty("kinematic_lumped_max_orientation_sum",
+                   maximum_orientation_sum);
+
+    // Sessile cap with a Young wall. The positive scale puts the liquid on
+    // the negative side; the negative scale puts it on the positive side.
+    const FE::Real pi = std::acos(FE::Real{-1.0});
+    constexpr FE::Real wall_coordinate{-0.70};
+    auto sessile_mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/64, wall_coordinate, FE::Real{0.70});
+    const auto negative_liquid = evaluateSessileKinematicCurvature(
+        sessile_mesh, FE::Real{0.347}, FE::Real{0.41} * pi, wall_coordinate,
+        true, FE::Real{1.0}, FE::Real{0.0}, Mass::Lumped);
+    const auto positive_liquid = evaluateSessileKinematicCurvature(
+        sessile_mesh, FE::Real{0.347}, FE::Real{0.41} * pi, wall_coordinate,
+        true, FE::Real{-2.75}, FE::Real{0.0}, Mass::Lumped);
+    ASSERT_TRUE(negative_liquid.result.success)
+        << negative_liquid.result.diagnostic;
+    ASSERT_TRUE(positive_liquid.result.success)
+        << positive_liquid.result.diagnostic;
+    std::size_t supported{0u};
+    for (const auto value :
+         negative_liquid.result
+             .kinematic_area_gradient_liquid_volume_derivative) {
+        EXPECT_LE(value, FE::Real{0.0});
+        supported += value != FE::Real{0.0} ? 1u : 0u;
+    }
+    EXPECT_GT(supported, 0u);
+    for (const auto value :
+         positive_liquid.result
+             .kinematic_area_gradient_liquid_volume_derivative) {
+        EXPECT_GE(value, FE::Real{0.0});
+    }
+    FE::Real maximum_sessile_sum{0.0};
+    for (std::size_t vertex = 0; vertex < negative_liquid.curvature.size();
+         ++vertex) {
+        maximum_sessile_sum = std::max(
+            maximum_sessile_sum,
+            std::abs(negative_liquid.curvature[vertex] +
+                     positive_liquid.curvature[vertex]));
+    }
+    EXPECT_GT(negative_liquid.result
+                  .kinematic_area_gradient_mass_weighted_mean_curvature,
+              FE::Real{0.0});
+    EXPECT_LT(positive_liquid.result
+                  .kinematic_area_gradient_mass_weighted_mean_curvature,
+              FE::Real{0.0});
+    EXPECT_LT(maximum_sessile_sum, FE::Real{1.0e-9} / FE::Real{0.347});
+    RecordProperty("kinematic_lumped_young_max_orientation_sum",
+                   maximum_sessile_sum);
 }
 
 TEST(LevelSetCurvatureProjection,

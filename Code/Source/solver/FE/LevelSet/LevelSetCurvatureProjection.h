@@ -52,6 +52,20 @@ parseLevelSetCurvatureRecoveryMode(std::string_view value);
 [[nodiscard]] LevelSetCurvatureSmoothingMode
 parseLevelSetCurvatureSmoothingMode(std::string_view value);
 
+// Interface mass that represents KinematicAreaGradient curvature. Consistent
+// solves (M + l^2 L) kappa = -dE/dphi. Lumped sets kappa_i = -g_i / m_i with
+// the row sums m_i of M, needs no linear solve, and has no parameter.
+enum class LevelSetKinematicAreaGradientMass : std::uint8_t {
+    Consistent = 0,
+    Lumped = 1,
+};
+
+[[nodiscard]] const char* levelSetKinematicAreaGradientMassName(
+    LevelSetKinematicAreaGradientMass mass) noexcept;
+
+[[nodiscard]] LevelSetKinematicAreaGradientMass
+parseLevelSetKinematicAreaGradientMass(std::string_view value);
+
 struct LevelSetKinematicAreaGradientYoungWall {
     int boundary_marker{-1};
     Real equilibrium_contact_angle_radians{0.0};
@@ -77,6 +91,10 @@ struct LevelSetCurvatureProjectionOptions {
     // graph-edge length and R_Gamma is the equal-measure circle/sphere radius.
     // It is ignored by the other recovery modes; zero disables regularization.
     Real kinematic_area_gradient_filter_coefficient{1.0};
+    // Lumped mass requires kinematic-area-gradient recovery and a zero
+    // filter coefficient.
+    LevelSetKinematicAreaGradientMass kinematic_area_gradient_mass{
+        LevelSetKinematicAreaGradientMass::Consistent};
     bool kinematic_area_gradient_negative_liquid_side{true};
     std::vector<LevelSetKinematicAreaGradientYoungWall>
         kinematic_area_gradient_young_walls{};
@@ -137,6 +155,10 @@ struct LevelSetCurvatureProjectionResult {
     std::size_t kinematic_area_gradient_tie_break_vertices{0};
     std::size_t kinematic_area_gradient_linear_iterations{0};
     bool kinematic_area_gradient_minimum_norm_solver{false};
+    // Lumped mass reports zero linear iterations and residual, and weights the
+    // curvature statistics and identity residuals with the row sums.
+    LevelSetKinematicAreaGradientMass kinematic_area_gradient_mass{
+        LevelSetKinematicAreaGradientMass::Consistent};
     std::size_t kinematic_area_gradient_young_wall_count{0};
     std::size_t kinematic_area_gradient_young_wall_boundary_faces{0};
     std::size_t kinematic_area_gradient_young_wall_cut_faces{0};
