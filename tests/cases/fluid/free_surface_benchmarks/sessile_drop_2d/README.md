@@ -92,11 +92,11 @@ free-surface decks; none was chosen for this case.
 | Cut stabilization | pressure-gradient facet penalty 1.0, `Use_cut_metadata_scale=false`, `Small_cut_aggregation=true`, no velocity extension | production defaults, as `static_drop_2d` |
 | `surface_stress` (default) | `Surface_tension_form=SurfaceStress` | D2 candidate (a) |
 | `kag_lumped`, `kag_consistent` | as in `static_drop_2d` | D2 candidates (b) and (c) |
-| Level-set transport | P1, advected by the fluid velocity (`Velocity_source=coupled_field`), SUPG with the production constants (tau scale 0.5, transient scale 2.0); no volume correction, no discontinuity capturing, no bound limiter | as `static_drop_2d`; the area drift is a measured quantity |
+| Level-set transport | P1, advected by the fluid velocity (`Velocity_source=coupled_field`, `--transport coupled`), SUPG with the production constants (tau scale 0.5, transient scale 2.0); no volume correction, no discontinuity capturing, no bound limiter | as `static_drop_2d`; the area drift is a measured quantity. `--transport wet_extension` writes the wall-compatible wet extension of the D18 and capillary-rise decks; `--transport pde_extension` is the placeholder for the PDE velocity extension of tracker D9 and is refused until that extension lands |
 | Level-set maintenance | none in the protocol. `--reinitialization` enables projection reinitialization every 10 steps with at most 4 iterations; the zero set then moves by at most `1e-10` per call, and contact cells are only rescaled | the transport of `static_drop_2d`, so that the D2 comparison uses one transport. The optional values are those of the D18/D38 and sloshing decks. In the first smoke run (below) that projection did not converge in 4 iterations and was skipped, so it would not have changed the state |
-| Time integration | backward Euler, with `SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS=4` in the solver environment | the only configuration found that moves the interface across a mesh vertex; see "Vertex crossings" below. `static_drop_2d` uses generalized-alpha |
+| Time integration | generalized-alpha, `rho_inf = 0.5`, fixed step; no environment variable. `--time-integration backward_euler` for comparison runs | as `static_drop_2d`. Vertex crossings are accepted within a step with the default restart budget, see "Vertex crossings" below |
 | Nonlinear solve | relative tolerance 1e-4 per equation, at most 8 Newton iterations (fluid) and 4 (level set) | as `static_drop_2d` |
-| Linear solve | serial Eigen direct solver | see "Vertex crossings"; `--linear-solver fsils` writes the FSILS GMRES block of `static_drop_2d` |
+| Linear solve | FSILS GMRES, as `static_drop_2d` | `--linear-solver eigen_direct` writes the serial Eigen direct solver, for comparison runs |
 
 **Time step.** As in `static_drop_2d`, the capillary limit of a one-sided free
 surface is `dt <= sqrt(rho h^3 / (4 pi gamma))`, the Brackbill–Kothe–Zemach
@@ -104,54 +104,39 @@ limit `sqrt(rho h^3 / (2 pi gamma))` with the fixed factor `1/sqrt(2)` that
 follows from the one-sided density sum. `generate_case.py` rounds `dt` down
 so that the run is exactly 100 equal output intervals.
 
-**Vertex crossings.** Every transient active-cut solve holds the cut topology
-fixed within a step attempt (the transient cut-topology gate). A moving
-contact line or interface crosses mesh vertices all the time, so the time
-integration must accept such steps. Three configurations were tried in the
-smoke runs below:
+**Vertex crossings.** A moving contact line or interface crosses mesh
+vertices all the time, and every crossing changes the cut topology during a
+step. The solver treats that as a normal event (branch `dev/vertex-crossing`):
 
-1. **Generalized-alpha, fixed step** (the `static_drop_2d` setting). The
-   geometry is refreshed at the operator stage `t_n + alpha_f dt`, while the
-   final gate checks the endpoint. The first step whose endpoint crossed a
-   vertex was rejected with `CutTopologyChanged`, and the fixed-step loop
-   aborted after 14 steps.
-2. **Generalized-alpha with a bisection retry.** Every attempt starts from
-   the extrapolated stage `u_n + alpha_f dt uDot_n`. A topology change seen
-   there, in the initial canonicalization, is terminal even with restarts
-   enabled. Accepted steps therefore only approach the crossing time, and
-   both cases failed at `dt/256`.
-3. **Backward Euler with bounded restarts** (the committed configuration).
-   Each attempt starts from `u_n`, and the gate checks the state that is
-   solved for. A crossing seen in a later outer pass is accepted through
-   the bounded nonlinear restart; its budget has no XML key and is set with
-   `SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS=4` (default 0). With
-   FSILS vectors, backward Euler stopped in its first step in the
-   free-surface residual-work pairing ("FsilsVector::dot: layout mismatch").
-   `FsilsVector::dot` compares layout pointers, and the scratch vector
-   keeps the layout from before the aggregation constraints re-augment the
-   system. The serial Eigen direct solver avoids that. The first crossing
-   was then accepted with one restart. The run then stopped when the
-   accepted step was recorded: "Backward-Euler kinetic work does not bind to
-   one complete latest accepted declaration group and velocity endpoint".
+- Inside a step, each outer fixed-point pass regenerates the cut geometry.
+  When the topology differs from the one the inner Newton solve used, the
+  solve restarts on the new topology. The number of such restarts per step
+  is bounded by the outer iteration limit (12) by default;
+  `GeneralSimulationParameters/Max_cut_topology_restarts_per_step` overrides
+  it (0 restores the old stop-and-reject behaviour).
+- A topology change found in the initial canonicalization of an attempt (the
+  generalized-alpha stage predictor `u_n + alpha_f dt uDot_n`, or the
+  backward-Euler start `u_n`) is adopted instead of rejecting the attempt.
+- For generalized-alpha, the endpoint may lie in a newer topology than the
+  stage: the endpoint gate still rejects missing geometry, and the stage
+  solve itself still has to converge on the topology it used.
+- A topology that returns to one already visited in the same step (a cycle
+  A -> B -> A across a switching surface; a smaller step does not remove
+  it) ends the step on that revisited epoch once the inner solve converges
+  there. The log line is `diagnostic=cut_topology_cycle
+  action=accept_on_frozen_epoch`.
+- `FsilsVector::dot` and `copyFrom` compare vector layouts structurally.
+  Small-cut aggregation re-augments the constraints and rebuilds the FSILS
+  layout object, so the scratch and matrix vectors held different but equal
+  layouts.
+- The backward-Euler kinetic-work bookkeeping of the discrete energy ledger
+  cannot bind to the previous endpoint after a topology change (the new
+  constraints re-project the previous velocity). It now logs
+  `diagnostic=backward_euler_kinetic_work_binding status=unavailable`,
+  records the step without that pairing and continues; the ledger is then no
+  longer contiguous. Generalized-alpha does not use this pairing.
 
-So no configuration yet runs this benchmark to relaxation. The last failure
-is in the backward-Euler energy bookkeeping, not in the discretization, and
-needs a solver fix (see "Open points").
-
-**Step retry.** The adaptive time loop is enabled only as a retry by
-bisection, for a step whose topology changes more often than the restart
-budget allows:
-
-- `Adaptive_time_loop_max_dt` is the capillary-limited `dt`, so the limit
-  above always holds;
-- decrease factor 0.5, at most 8 bisections (`min_dt = dt/256`);
-- increase factor 2, which undoes one bisection per accepted step;
-- target Newton count 1000, above any reachable count, so that Newton
-  iteration counts never change `dt`.
-
-These values follow from the retry role; none is tuned. Outputs are written
-every `output_cadence` accepted steps, so after retries they fall slightly
-before the nominal times; `verify.py` uses the times in `result.pvd`.
+Outputs are written at the nominal times; there is no step retry.
 
 **Run length.** `T = 5 t_mu = 12.25`, the lower end of the 5 to 10 viscous
 times of D3. This is 30 visco-capillary times and 12 capillary times.
@@ -182,7 +167,7 @@ merged.
 | `liquid_area_relative_drift_max` | `max_t abs(A(t) - A(0)) / A(0)`, with `A(0)` from `phi` in `mesh/mesh-complete.mesh.vtu` |
 | `max_speed(t)` | `max abs(u_h)` over the vertices with `phi_h < 0` |
 | `max_speed_growth_ratio` | `max_speed(T)` divided by the largest `max_speed` over the outputs with `T/2 <= t <= 3T/4`, as in `static_drop_2d` |
-| Reported only | the P1 angle in each wall triangle holding a contact point; the height–base angle `2 atan(H/b)` and the angle of one circle fitted to the whole interface (both equal `theta_e` for a circular cap); the left–right asymmetry; errors against the nominal cap; the base change over the last quarter; `mu max_speed / gamma` in the last quarter; the histories of area, speed, base and both angles |
+| Reported only | the P1 angle in each wall triangle holding a contact point; the height–base angle `2 atan(H/b)` and the angle of one circle fitted to the whole interface (both equal `theta_e` for a circular cap); the left–right asymmetry; errors against the nominal cap and against the cap with the final area (D10, below); the base change over the last quarter; `mu max_speed / gamma` in the last quarter; the histories of area, speed, base and both angles |
 
 **Why a local circle fit.** The relaxed interface is a circle, so the fit has
 no model error at equilibrium. On sampled exact caps, the local fit
@@ -197,9 +182,8 @@ cases and levels.
 Observed orders of the angle error are printed when it decreases. `verify.py`
 exits with status 2 and a message on missing or inconsistent data: no
 `case.json`, no output, missing arrays, non-triangle cells, non-finite values,
-other than two wall contact points at the end, or a run whose last output lies
-before `0.95 T` (retries shift the outputs slightly ahead of the nominal
-times). It also exits with status 2 on a `--max-steps` smoke run unless
+other than two wall contact points at the end, or a run whose last output is
+more than half a step away from `T`. It also exits with status 2 on a `--max-steps` smoke run unless
 `--allow-truncated` is given.
 
 ## Tolerances and their sources
@@ -214,12 +198,23 @@ Each criterion applies to each (capillary form, `theta_e`) refinement study.
 | `volume_drift` | at most 1e-4 | every level | D1 working criterion |
 | `no_velocity_growth` | growth ratio at most 1 | every level | D1 working criterion |
 
+The area criterion gates the maximum drift over the whole run, not its final
+value (decision D11); `liquid_area_relative_drift_max` is that maximum.
+
+Spatial convergence is judged with the time-step error removed (decision
+D10). The end state is a static equilibrium, whose discrete form does not
+depend on `dt`; `dt` enters the end-state metrics only through the area that
+the transport gains or loses on the way. The angle does not depend on the
+area. `verify.py` therefore also reports the base and apex errors against the
+cap with the final liquid area (`*_relative_error_final_area`), which remove
+that contribution; the criteria themselves are unchanged.
+
 ## How to run the refinement study
 
 Use the Python stack of the benchmark README (numpy; pyvista for
 `verify.py`). Put generated cases and output under `$SCRATCH`, and start the
-solver through `mpiexec` in a job submitted with `sbatch --export=NONE`. Set
-the variables listed in `case.json` under `solver_environment`:
+solver through `mpiexec` in a job submitted with `sbatch --export=NONE`. The
+case needs no environment variable:
 
 ```bash
 B=tests/cases/fluid/free_surface_benchmarks/sessile_drop_2d
@@ -229,8 +224,7 @@ for a in 60 90 120; do for L in 16 32; do
   d=$OUT/surface_stress/theta$a/L$L
   python3 $B/generate_case.py --level $L --contact-angle $a --output-dir $d
   # job script: set PATH/LD_LIBRARY_PATH, then
-  #   cd $d && SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS=4 \
-  #     mpiexec -n 1 --bind-to none $SVMP solver.xml 2>&1 | gzip -1 > solver_run.log.gz
+  #   cd $d && mpiexec -n 1 --bind-to none $SVMP solver.xml 2>&1 | gzip -1 > solver_run.log.gz
 done; done
 python3 $B/verify.py $OUT/surface_stress/theta60/L{16,32,64} --json $OUT/theta60.json
 ```
@@ -240,26 +234,78 @@ unless `--allow-truncated` is given.
 
 ## Expected cost per level
 
-**Measured** on the smoke runs at `R/h = 16`, serial, on a node shared with
-the regression suites: about 4.1 s per step for `theta_e = 60` (624
-vertices) with generalized-alpha and FSILS GMRES, 4.4 s with backward Euler
-and the Eigen direct solver, and 12.6 s for `theta_e = 120` (1,479 vertices,
-backward Euler). The log grows by about 0.35 MB per step.
+**Measured** in the vertex-crossing validation at `R/h = 16` (job 46084684,
+below), serial, with eight runs sharing one 8-core node: generalized-alpha
+with FSILS GMRES takes 0.77 s per step for `theta_e = 60` (624 vertices) and
+2.0 s per step for `theta_e = 120` (1,479 vertices). Backward Euler takes
+0.87 s and 2.4 s with FSILS, and 0.95 s and 3.0 s with the Eigen direct
+solver. The log grows by about 0.2 MB per step (about 8 MB per 300 steps
+compressed). The smoke runs before these fixes measured 4 to 13 s per step
+on a node shared with the regression suites.
 
-**Extrapolated** from the 60 degree rate (4.1 s) with cost proportional to
-(vertices)^0.9, as in `static_drop_2d`, before any retries:
+**Extrapolated** from the 60 degree rate (0.77 s) with cost proportional to
+(vertices)^0.9, as in `static_drop_2d`. The 120 degree case measured 20%
+above this rule at `R/h = 16`, because its receding contact line crosses
+more vertices per step (81 against 50 topology changes in 300 steps).
 
 | R/h | steps | 60 deg | 90 deg | 120 deg |
 |---:|---:|---|---|---|
-| 16 | 2,800 | 624 vertices, about 3 h | 1,032, about 5 h | 1,479, about 7 h |
-| 32 | 7,900 | 2,387, about 30 h | 3,995, about 2 days | 5,757, about 3 days |
-| 64 | 22,300 | 9,333, about 12 days | 15,717, about 19 days | 22,713, about 27 days |
+| 16 | 2,800 | 624 vertices, about 0.6 h | 1,032, about 0.9 h | 1,479, about 1.3 h (1.6 h measured rate) |
+| 32 | 7,900 | 2,387, about 6 h | 3,995, about 9 h | 5,757, about 13 h |
+| 64 | 22,300 | 9,333, about 2.3 days | 15,717, about 3.6 days | 22,713, about 5 days |
 
-`R/h = 16` and 32 fit the 7-day `amarsden` limit; `R/h = 64` does not at
-the present per-step cost (tracker M2: "per-step cost must come down"). The
-run length is not shortened, because D3 asks for relaxed states.
+Every level fits the 7-day `amarsden` limit serially at these rates; the 120
+degree case at `R/h = 64` has little margin (about 6 days with the measured
+20% excess). The run length is not shortened, because D3 asks for relaxed
+states.
 
-## Smoke runs (2026-09-30)
+## Vertex-crossing validation (2026-09-30)
+
+Job 46084684, build of `8f37ce57` (branch `dev/vertex-crossing`), `R/h = 16`,
+`SurfaceStress`, coupled transport, 300 steps each (`t = 1.31`, 11% of `T`),
+serial. Raw output:
+`$SCRATCH/free-surface-benchmarks/sessile_drop_2d/vertex-8f37ce57/`.
+
+| Configuration | `theta_e` | accepted, rejected | topology changes | cycles ended on a revisited epoch | ledger records without kinetic-work pairing |
+|---|---:|---|---:|---:|---:|
+| generalized-alpha, FSILS | 60 | 300, 0 | 50 | 12 | 0 |
+| backward Euler, FSILS | 60 | 300, 0 | 48 | 11 | 24 |
+| backward Euler, Eigen direct | 60 | 300, 0 | 48 | 11 | 24 |
+| generalized-alpha, FSILS | 120 | 300, 0 | 81 | 8 | 0 |
+| backward Euler, FSILS | 120 | 300, 0 | 138 | 23 | 83 |
+| backward Euler, Eigen direct | 120 | 300, 0 | 138 | 23 | 83 |
+
+Histories from `verify.py` through a truncated view, generalized-alpha with
+FSILS (angles from the local circle fit):
+
+| `theta_e` | `t` | left, right angle (deg) | base half-width | `max abs(u)` | `(A - A(0))/A(0)` |
+|---:|---:|---|---:|---:|---:|
+| 60 | 0.004 | 89.0, 88.7 | 0.626 | 0.437 | -2e-7 |
+| 60 | 0.33 | 65.3, 68.4 | 0.731 | 0.241 | 5.2e-3 |
+| 60 | 0.66 | 61.2, 61.2 | 0.791 | 0.155 | 8.1e-3 |
+| 60 | 0.99 | 61.0, 62.2 | 0.818 | 0.098 | 9.6e-3 |
+| 60 | 1.31 | 59.5, 59.3 | 0.841 | 0.069 | 1.00e-2 |
+| 120 | 0.004 | 90.8, 90.9 | 1.268 | 0.370 | 5e-8 |
+| 120 | 0.33 | 116.3, 114.8 | 1.160 | 0.249 | 4.0e-4 |
+| 120 | 0.66 | 117.4, 118.3 | 1.088 | 0.228 | 3.3e-3 |
+| 120 | 0.99 | 119.8, 118.6 | 1.027 | 0.227 | 5.8e-3 |
+| 120 | 1.31 | 115.3, 118.6 | 0.978 | 0.182 | 6.7e-3 |
+
+The reference base half-width is 0.866 for both angles. At `t = 1.31` the
+60 degree cap has a base error of 2.8% and an apex error of 4.8% and is
+still slowing down; the 120 degree cap is still receding (base error 13%).
+Backward Euler gives the same histories to within 0.3 degrees and 0.1% in
+base at the sampled times, with a final drift of 9.8e-3 (60) and 6.9e-3
+(120). FSILS and the Eigen direct solver give identical backward-Euler
+results. The area grows in both cases; the maximum drift is about 100 times
+the `volume_drift` limit. The drift was already present in the smoke runs
+before these fixes (below) and is not addressed here (transport, tracker
+D9). `--transport wet_extension` was not run.
+
+A 20-step static drop (`static_drop_2d`, `R/h = 8`, no crossings) gives
+bit-identical output with the baseline build of `11aba0a2`.
+
+## Smoke runs before the vertex-crossing fixes (2026-09-30)
 
 All at `R/h = 16` with `SurfaceStress` and truncated with `--max-steps`. The
 first run used the build of `9b15dbbc`; the others used the build of
@@ -291,12 +337,11 @@ the `volume_drift` criterion (1e-4) will fail. Conservative transport (WP-6) is 
 
 ## Open points
 
-- A solver fix for vertex crossings: either the backward-Euler kinetic-work
-  bookkeeping after a topology restart, or a generalized-alpha attempt that
-  may start in the predicted topology (M7 lists exact-node topology events
-  for the two-fluid static drop). `FsilsVector::dot` could compare layouts
-  structurally, as `FsilsVector::copyFrom` does.
-- The restart budget is an environment variable; an XML key would make the
-  case self-describing.
-- The area drift of the spreading case, above.
-- The per-step cost limits `R/h = 64`.
+- The area drift of both cases (about 1e-2 over 11% of the run), above;
+  the PDE velocity extension of tracker D9 is the planned transport.
+- A step that cycles between two topologies ends on the revisited one
+  without a fresh zero-update certificate on a third epoch; the inner solve
+  on that epoch still meets the Newton tolerance.
+- With backward Euler the energy ledger loses its kinetic-work pairing after
+  the first topology change that re-projects the previous velocity, and is
+  reported as not contiguous from there on.

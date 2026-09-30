@@ -34,11 +34,8 @@ TRIANGLE = 5                      # VTK cell type
 # all cases; on sampled exact caps it measures the angle to within 0.13
 # degrees at R/h = 16 and 0.05 degrees at R/h = 32 (see README.md).
 ANGLE_FIT_HEIGHT = 0.25
-# The step retry (generate_case.py) adds bisected steps, so outputs, written
-# every output_cadence accepted steps, drift slightly ahead of the nominal
-# times.  A run counts as complete when its last output lies in the final
-# COMPLETE_FRACTION of the protocol time.
-COMPLETE_FRACTION = 0.05
+# The case runs with a fixed step, so a complete run has its last output at
+# the protocol end time, to within half a step.
 WALL_TOLERANCE = 1.0e-9           # |y - y_wall| for vertices on the contact wall
 POINT_MERGE_DIGITS = 12           # coincident output points (MPI pieces) are merged
 
@@ -336,8 +333,7 @@ def analyse_run(run: Path) -> dict:
     theta_e = case["equilibrium_angle_degrees"]
     series = output_series(run, case)
     end_time = case["end_time"]
-    if series[-1][0] < (1.0 - COMPLETE_FRACTION) * end_time - 0.5 * case["dt"] or \
-            series[-1][0] > end_time + 0.5 * case["dt"]:
+    if abs(series[-1][0] - end_time) > 0.5 * case["dt"]:
         raise DataError(f"{run}: incomplete run, last output t={series[-1][0]:.6g} "
                         f"but the case ends at t={end_time:.6g}")
     if len(series) < 4:
@@ -368,6 +364,10 @@ def analyse_run(run: Path) -> dict:
     bases, left, right = map(np.asarray, (bases, left, right))
 
     final = drop_geometry(snap, case, reference["radius"])
+    # Decision D10: the end state is a static equilibrium whose discrete form
+    # does not depend on dt; dt enters only through the area gained or lost
+    # in transport.  The cap with the final area removes that contribution.
+    final_area_cap = equilibrium_cap(float(areas[-1]), math.radians(theta_e))
     angle_errors = [abs(final["contact_angle_left"] - theta_e),
                     abs(final["contact_angle_right"] - theta_e)]
     t_end = times[-1]
@@ -407,6 +407,12 @@ def analyse_run(run: Path) -> dict:
                                               / nominal["base_half_width"],
         "apex_height_relative_error_nominal": abs(final["apex_height"] - nominal["apex_height"])
                                               / nominal["apex_height"],
+        "base_radius_relative_error_final_area": abs(final["base_half_width"]
+                                                     - final_area_cap["base_half_width"])
+                                                 / final_area_cap["base_half_width"],
+        "apex_height_relative_error_final_area": abs(final["apex_height"]
+                                                     - final_area_cap["apex_height"])
+                                                 / final_area_cap["apex_height"],
         "base_change_last_quarter": float(abs(bases[-1] - base_three_quarter)
                                           / reference["base_half_width"]),
         "initial_liquid_area": area0,

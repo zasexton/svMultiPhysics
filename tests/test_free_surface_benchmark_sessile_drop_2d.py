@@ -204,7 +204,22 @@ def test_synthetic_refinement_study_passes(study, tmp_path):
     assert run32["contact_angle_asymmetry_degrees"] < 0.05
     assert run32["base_radius_relative_error"] < 0.02
     assert run32["liquid_area_relative_drift_max"] == 0.0
+    assert run32["base_radius_relative_error_final_area"] == \
+        pytest.approx(run32["base_radius_relative_error"])
     assert len(run32["history"]["contact_angle_left"]) == 8
+
+
+def test_final_area_errors_remove_the_transported_area(tmp_path):
+    # Decision D10: the cap with the final area removes the area that the
+    # transport gained, the only way dt enters the equilibrium end state.
+    pytest.importorskip("pyvista")
+    run = tmp_path / "grown"
+    write_synthetic_run(run, 32, area_shift=-1.0e-2)
+    result = ver.analyse_run(run)
+    assert result["liquid_area_relative_drift_final"] > 1.0e-2
+    assert result["base_radius_relative_error"] > 1.0e-2
+    assert result["base_radius_relative_error_final_area"] < \
+        0.5 * result["base_radius_relative_error"]
 
 
 def test_angle_error_growth_and_area_drift_fail(study, capsys):
