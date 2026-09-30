@@ -120,6 +120,15 @@ displacement components, so the mesh slides along the wall and the contact
 point can move. A direction that selects every component or none constrains
 all components (the previous behavior).
 
+The wall and free-surface face files must be disjoint. A boundary face
+carries one label, the name of the last face file that lists it, and every
+boundary condition acts on the faces of its label; a wall face also listed
+in the free-surface file becomes a free-surface face, and the wall
+conditions then miss the nodes of the contact line. The application warns
+when a face is listed in several face files (the legacy fitted SPHERIC
+Test 10 3D deck leaked through its contact line for this reason; see the
+WP-9 architecture note).
+
 **Capillarity.** Fitted `CurvatureTraction` with
 `Use_current_geometry_curvature=true` uses the pointwise curvature of the
 boundary facets, which is identically zero on affine faces; it applies no

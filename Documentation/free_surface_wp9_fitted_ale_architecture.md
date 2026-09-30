@@ -699,6 +699,31 @@ The deck's face files look malformed (`free_surface.vtp` spans
 y = 0.0698 to 0.093 and `wall_bottom.vtp` reaches y = 0.0232); the 3D fitted
 meshes need to be regenerated before a 3D campaign.
 
+**Root cause of the contact-line leak (2026-09-30).** The face files
+overlap. `generate_validation_meshes.py` selects a face for a tank plane
+when its centroid lies within `0.35 h` of the plane, so `free_surface.vtp`
+also holds all 88 wall faces of the top cell row, and each wall file holds
+the edge faces of its neighbours. A boundary face carries one boundary
+label, which `MeshTranslator` set to the last face file listed, and boundary
+conditions select faces by label (`MeshAccess::forEachBoundaryFace`). The
+top-row wall faces therefore became free-surface faces (natural traction
+against the hydrostatic wall pressure), and no wall-labeled face was left
+at the nodes of the free-surface edge, so the fluid and mesh wall Dirichlet
+conditions missed them. The FE treatment of Dirichlet conditions shared by
+several boundaries is not involved: each component-wise condition
+constrains its own degrees of freedom on the faces of its label. Controls
+(job `46129890`, 100 steps): the legacy face files with the MeshNitsche,
+free-slip and sliding-wall input lose 4.2% of the volume with wall-normal
+velocities up to 1.0 m/s; the regenerated, disjoint face files with the
+leaking variant's input (no-slip fluid walls) keep the tank at rest
+(|u| <= 1.3e-16 m/s, volume and wall-normal motion exactly zero).
+`MeshTranslator` now warns when a face is listed in several face files, and
+the new decks `fitted_ale/spheric_test10_lateral_water_1x_meshnitsche` (3D)
+and `..._2d_meshnitsche` (2D) have disjoint face sets
+(`generate_spheric_test10_fitted_decks.py`; see `fitted_ale/README.md`).
+The unfitted SPHERIC 02, 05 and 10 decks written by
+`generate_validation_meshes.py` have overlapping face sets as well.
+
 ## Source evidence map
 
 - XML boundary allowlist:

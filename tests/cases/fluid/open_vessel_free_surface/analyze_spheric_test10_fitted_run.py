@@ -8,7 +8,8 @@ RUN_DIR holds benchmark.json, mesh/water/mesh-complete.mesh.vtu (the
 reference configuration at t = 0) and the solver output result.pvd with
 result_NNN.vtu (serial) or .pvtu (MPI).  For every output the script reports
 the liquid volume (area in 2D) of the current mesh, the largest speed, the
-mesh quality (smallest triangle angle in 2D; smallest tetrahedron dihedral
+largest wall-normal velocity and displacement over all wall nodes, the mesh
+quality (smallest triangle angle in 2D; smallest tetrahedron dihedral
 angle and smallest volume ratio V/V0 in 3D), the heights of the contact
 points on the end walls, and the pressure at Sensor 1 (left wall, y = 93 mm):
 interpolated linearly along the left-wall nodes in the current
@@ -142,6 +143,15 @@ def analyse(run: Path, reference_file: Path | None = None) -> dict:
     if dim == 3:        # the left-wall nodes of the sensor plane z = 0.031
         wall_gid = np.array([g for g in wall_gid
                              if abs(ref["points"][index[int(g)], 2] - sensor[2]) < 1e-9])
+    # Wall-normal velocity and displacement at every node of every wall face
+    # (strong zero conditions, including the nodes shared by two walls and by
+    # a wall and the free surface).
+    wall_normals = {"wall_left": 0, "wall_right": 0, "wall_bottom": 1, "wall_front": 2, "wall_back": 2}
+    wall_sets = {}
+    for name, axis in wall_normals.items():
+        path = run / f"mesh/water/mesh-surfaces/{name}.vtp"
+        if path.is_file() and axis < dim:
+            wall_sets[name] = (axis, np.asarray(_pyvista().read(path).point_data["GlobalNodeID"]).astype(np.int64))
     surface = _pyvista().read(run / "mesh/water/mesh-surfaces/free_surface.vtp")
     surface_gid = np.asarray(surface.point_data["GlobalNodeID"]).astype(np.int64)
     length = meta["dimensions_m"]["tank_length"]
@@ -164,6 +174,15 @@ def analyse(run: Path, reference_file: Path | None = None) -> dict:
                "contact_height_left": float(np.max(left)) if left.size else float("nan"),
                "contact_height_right": float(np.max(right)) if right.size else float("nan"),
                "sensor1_pressure_pa": sensor_pressure(state, wall_nodes, sensor[1])}
+        normal_u, normal_d = 0.0, 0.0
+        for axis, gids in wall_sets.values():
+            idx = np.array([local[int(g)] for g in gids])
+            ref_idx = np.array([index[int(g)] for g in gids])
+            normal_u = max(normal_u, float(np.max(np.abs(state["velocity"][idx, axis]))))
+            normal_d = max(normal_d, float(np.max(np.abs(state["points"][idx, axis]
+                                                           - ref["points"][ref_idx, axis]))))
+        row["wall_normal_velocity_max"] = normal_u
+        row["wall_normal_displacement_max"] = normal_d
         if dim == 2:
             row["min_angle_deg"] = minimum_triangle_angle(state["points"], state["cells"])
         else:
@@ -181,6 +200,8 @@ def analyse(run: Path, reference_file: Path | None = None) -> dict:
         "max_speed": max(r["max_speed"] for r in rows),
         "inverted_cells_max": max(r["inverted_cells"] for r in rows),
         "min_volume_ratio": min(r["min_volume_ratio"] for r in rows),
+        "wall_normal_velocity_max": max(r["wall_normal_velocity_max"] for r in rows),
+        "wall_normal_displacement_max": max(r["wall_normal_displacement_max"] for r in rows),
         "history": rows,
     }
     quality = "min_angle_deg" if dim == 2 else "min_dihedral_deg"
@@ -219,6 +240,8 @@ def main(argv=None) -> int:
           f"({result['steps_planned']} steps planned, dt = {result['dt']})")
     print(f"  volume deviation max {result['volume_relative_deviation_max']:.3e}, final "
           f"{result['volume_relative_deviation_final']:.3e}; max speed {result['max_speed']:.3e} m/s")
+    print(f"  wall-normal velocity max {result['wall_normal_velocity_max']:.3e} m/s, wall-normal "
+          f"displacement max {result['wall_normal_displacement_max']:.3e} m (all wall nodes)")
     print(f"  mesh quality: {q} {result[q + '_initial']:.2f} initially, min {result[q + '_min']:.2f} "
           f"at t = {result[q + '_time_of_min']:.4f}; min V/V0 {result['min_volume_ratio']:.3f}; "
           f"inverted cells {result['inverted_cells_max']}")
