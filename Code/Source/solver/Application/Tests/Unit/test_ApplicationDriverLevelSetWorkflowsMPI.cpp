@@ -2412,7 +2412,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   const auto constraint = makeAcceptedSnapshotWallConstraint(
       record,
       svmp::FE::level_set::LevelSetWallContactConstraintKind::
-          PrescribedAngle,
+          RepairToPrescribedAngle,
       interface_marker,
       revision,
       parameters,
@@ -2482,7 +2482,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   const auto positive_constraint = makeAcceptedSnapshotWallConstraint(
       record,
       svmp::FE::level_set::LevelSetWallContactConstraintKind::
-          PrescribedAngle,
+          RepairToPrescribedAngle,
       interface_marker,
       revision,
       positive_parameters,

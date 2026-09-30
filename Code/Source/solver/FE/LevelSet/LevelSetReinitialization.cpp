@@ -727,9 +727,9 @@ void validateWallContactConstraint(
 {
     const bool known_kind =
         constraint.kind ==
-            LevelSetWallContactConstraintKind::PrescribedAngle ||
+            LevelSetWallContactConstraintKind::RepairToPrescribedAngle ||
         constraint.kind ==
-            LevelSetWallContactConstraintKind::AcceptedDynamicAngle;
+            LevelSetWallContactConstraintKind::PreserveAcceptedAngle;
     if (!known_kind || constraint.interface_marker < 0 ||
         constraint.boundary_marker < 0 ||
         constraint.parent_cell_global_id == INVALID_GLOBAL_INDEX ||
@@ -738,7 +738,7 @@ void validateWallContactConstraint(
             "level-set wall-contact constraint requires a known kind, nonnegative markers, a valid global parent cell, and a nonzero geometry revision");
     }
     if (constraint.kind !=
-        LevelSetWallContactConstraintKind::PrescribedAngle) {
+        LevelSetWallContactConstraintKind::RepairToPrescribedAngle) {
         return;
     }
 
@@ -1359,7 +1359,7 @@ struct AffineFieldFit {
     std::span<const LevelSetWallContactConstraint> constraints)
 {
     return std::any_of(constraints.begin(), constraints.end(), [](const auto& constraint) {
-        return constraint.kind == LevelSetWallContactConstraintKind::PrescribedAngle;
+        return constraint.kind == LevelSetWallContactConstraintKind::RepairToPrescribedAngle;
     });
 }
 
@@ -1647,12 +1647,12 @@ template <typename ForEachDofPoint>
     std::vector<unsigned char> in_cut_patch(expected, 0u);
     std::vector<unsigned char> in_wall_contact_patch(expected, 0u);
     std::vector<unsigned char> in_prescribed_contact_patch(expected, 0u);
-    std::vector<unsigned char> in_dynamic_contact_patch(expected, 0u);
+    std::vector<unsigned char> in_preserved_contact_patch(expected, 0u);
     std::vector<unsigned char> prescribed_target_bound(expected, 0u);
     std::vector<Real> prescribed_contact_target(expected, Real{0.0});
     for (const auto& cell : primitive_set.cut_cells) {
         std::optional<std::size_t> first;
-        std::optional<std::size_t> first_dynamic_contact;
+        std::optional<std::size_t> first_preserved_contact;
         const auto constraint_position =
             wall_constraint_by_parent.find(cell.parent_cell);
         const bool wall_contact_cell =
@@ -1660,11 +1660,11 @@ template <typename ForEachDofPoint>
         const bool prescribed_contact_cell =
             wall_contact_cell &&
             constraint_position->second.kind ==
-                LevelSetWallContactConstraintKind::PrescribedAngle;
-        const bool dynamic_contact_cell =
+                LevelSetWallContactConstraintKind::RepairToPrescribedAngle;
+        const bool preserved_contact_cell =
             wall_contact_cell &&
             constraint_position->second.kind ==
-                LevelSetWallContactConstraintKind::AcceptedDynamicAngle;
+                LevelSetWallContactConstraintKind::PreserveAcceptedAngle;
         std::optional<PrescribedContactFrame> prescribed_frame;
         if (prescribed_contact_cell) {
             prescribed_frame = prescribedContactFrame(
@@ -1685,13 +1685,13 @@ template <typename ForEachDofPoint>
             if (wall_contact_cell) {
                 in_wall_contact_patch[index] = 1u;
             }
-            if (dynamic_contact_cell) {
-                in_dynamic_contact_patch[index] = 1u;
-                if (first_dynamic_contact.has_value()) {
-                    wall_contact_components.unite(*first_dynamic_contact,
+            if (preserved_contact_cell) {
+                in_preserved_contact_patch[index] = 1u;
+                if (first_preserved_contact.has_value()) {
+                    wall_contact_components.unite(*first_preserved_contact,
                                                   index);
                 } else {
-                    first_dynamic_contact = index;
+                    first_preserved_contact = index;
                 }
             }
             if (prescribed_contact_cell) {
@@ -1724,9 +1724,9 @@ template <typename ForEachDofPoint>
     }
     for (std::size_t i = 0; i < expected; ++i) {
         if (in_prescribed_contact_patch[i] != 0u &&
-            in_dynamic_contact_patch[i] != 0u) {
+            in_preserved_contact_patch[i] != 0u) {
             throw std::invalid_argument(
-                "level-set wall-contact projection cannot overlap prescribed and accepted-dynamic contact patches");
+                "level-set wall-contact projection cannot overlap repair-to-prescribed and angle-preserving contact patches");
         }
     }
     result.wall_contact_dofs = static_cast<std::size_t>(std::count(
@@ -1754,7 +1754,7 @@ template <typename ForEachDofPoint>
 
     std::vector<Real> seed(expected, Real{0.0});
     std::map<std::size_t, PositiveWorkingFit> component_working_fits;
-    std::map<std::size_t, PositiveWorkingFit> dynamic_working_fits;
+    std::map<std::size_t, PositiveWorkingFit> preserved_working_fits;
     if (canonical_prescribed) {
         Real amplitude = Real{0.0};
         for (std::size_t i = 0; i < expected; ++i) {
@@ -1777,11 +1777,11 @@ template <typename ForEachDofPoint>
             }
         }
         for (std::size_t i = 0; i < expected; ++i) {
-            if (in_dynamic_contact_patch[i] == 0u) continue;
+            if (in_preserved_contact_patch[i] == 0u) continue;
             const auto root = wall_contact_components.find(i);
-            if (!dynamic_working_fits.contains(root)) {
-                dynamic_working_fits.emplace(root, positiveWorkingFit(seed, signed_distance_target,
-                    [&](std::size_t j) { return in_dynamic_contact_patch[j] != 0u && wall_contact_components.find(j) == root; }));
+            if (!preserved_working_fits.contains(root)) {
+                preserved_working_fits.emplace(root, positiveWorkingFit(seed, signed_distance_target,
+                    [&](std::size_t j) { return in_preserved_contact_patch[j] != 0u && wall_contact_components.find(j) == root; }));
             }
         }
     }
@@ -1812,7 +1812,7 @@ template <typename ForEachDofPoint>
 
         std::map<std::size_t, std::pair<Real, Real>> wall_contact_scale_sums;
         for (std::size_t i = 0; i < expected; ++i) {
-            if (in_dynamic_contact_patch[i] == 0u) {
+            if (in_preserved_contact_patch[i] == 0u) {
                 continue;
             }
             auto& sums = wall_contact_scale_sums[
@@ -1844,9 +1844,9 @@ template <typename ForEachDofPoint>
                 target[i] = canonical_prescribed
                                 ? component_working_fits.at(root).apply(seed[i])
                                 : component_target_scale.at(root) * input_coefficients[i];
-            } else if (in_dynamic_contact_patch[i] != 0u) {
+            } else if (in_preserved_contact_patch[i] != 0u) {
                 target[i] = canonical_prescribed
-                                ? dynamic_working_fits.at(wall_contact_components.find(i)).apply(seed[i])
+                                ? preserved_working_fits.at(wall_contact_components.find(i)).apply(seed[i])
                                 : wall_contact_target_scale.at(wall_contact_components.find(i)) * input_coefficients[i];
             } else {
                 target[i] = signed_distance_target[i];
@@ -2000,11 +2000,11 @@ template <typename ForEachDofPoint>
         if (canonical_prescribed) {
             std::map<std::size_t, PositiveWorkingFit> repaired_fits;
             for (std::size_t i = 0; i < expected; ++i) {
-                if (in_dynamic_contact_patch[i] == 0u) continue;
+                if (in_preserved_contact_patch[i] == 0u) continue;
                 const auto root = wall_contact_components.find(i);
                 if (!repaired_fits.contains(root)) {
                     repaired_fits.emplace(root, positiveWorkingFit(working_start, repaired_coefficients,
-                        [&](std::size_t j) { return in_dynamic_contact_patch[j] != 0u && wall_contact_components.find(j) == root; }));
+                        [&](std::size_t j) { return in_preserved_contact_patch[j] != 0u && wall_contact_components.find(j) == root; }));
                 }
                 constraint_scale = std::max({constraint_scale, std::abs(working_start[i]),
                                              std::abs(repaired_coefficients[i])});
@@ -2015,7 +2015,7 @@ template <typename ForEachDofPoint>
         } else {
             std::map<std::size_t, std::pair<Real, Real>> repaired_scale_sums;
             for (std::size_t i = 0; i < expected; ++i) {
-                if (in_dynamic_contact_patch[i] == 0u) {
+                if (in_preserved_contact_patch[i] == 0u) {
                     continue;
                 }
                 auto& sums = repaired_scale_sums[
@@ -2042,7 +2042,7 @@ template <typename ForEachDofPoint>
                 repaired_scales[root] = fitted;
             }
             for (std::size_t i = 0; i < expected; ++i) {
-                if (in_dynamic_contact_patch[i] == 0u) {
+                if (in_preserved_contact_patch[i] == 0u) {
                     continue;
                 }
                 const auto found = repaired_scales.find(
@@ -2060,7 +2060,7 @@ template <typename ForEachDofPoint>
         const Real constraint_tolerance =
             Real{4096.0} * std::numeric_limits<Real>::epsilon() *
             constraint_scale;
-        const bool dynamic_constraints_satisfied =
+        const bool preserved_constraints_satisfied =
             positive_scales &&
             result.max_wall_contact_scale_residual <=
                 constraint_tolerance;
@@ -2071,7 +2071,7 @@ template <typename ForEachDofPoint>
                 wall_constraint_by_parent.find(cell.parent_cell);
             if (constraint_position == wall_constraint_by_parent.end() ||
                 constraint_position->second.kind !=
-                    LevelSetWallContactConstraintKind::PrescribedAngle) {
+                    LevelSetWallContactConstraintKind::RepairToPrescribedAngle) {
                 continue;
             }
             const auto& constraint = constraint_position->second;
@@ -2190,7 +2190,7 @@ template <typename ForEachDofPoint>
         }
 
         result.wall_contact_constraints_satisfied =
-            dynamic_constraints_satisfied &&
+            preserved_constraints_satisfied &&
             prescribed_constraints_satisfied;
         if (!result.wall_contact_constraints_satisfied) {
             result.success = false;
@@ -2199,9 +2199,10 @@ template <typename ForEachDofPoint>
             publish_protected();
             return result;
         }
-        // AcceptedDynamicAngle patches remain a positive common scale, so
-        // their accepted crossing and unit normal are unchanged.  Prescribed
-        // patches instead match the wall-frame target above.
+        // PreserveAcceptedAngle patches remain a positive common scale, so
+        // their accepted crossing and unit normal are unchanged.  Retired
+        // RepairToPrescribedAngle patches instead match the wall-frame target
+        // above.
     }
 
     if (!displacement.topology_preserved) {

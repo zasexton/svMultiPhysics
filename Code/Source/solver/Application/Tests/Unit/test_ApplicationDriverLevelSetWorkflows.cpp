@@ -14187,7 +14187,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   const auto constraint = makeAcceptedSnapshotWallConstraint(
       record,
       svmp::FE::level_set::LevelSetWallContactConstraintKind::
-          PrescribedAngle,
+          RepairToPrescribedAngle,
       interface_marker,
       revision,
       parameters,
@@ -14222,7 +14222,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       (void)makeAcceptedSnapshotWallConstraint(
           missing,
           svmp::FE::level_set::LevelSetWallContactConstraintKind::
-              PrescribedAngle,
+              RepairToPrescribedAngle,
           interface_marker,
           revision,
           parameters,
@@ -14234,7 +14234,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       (void)makeAcceptedSnapshotWallConstraint(
           stale,
           svmp::FE::level_set::LevelSetWallContactConstraintKind::
-              PrescribedAngle,
+              RepairToPrescribedAngle,
           interface_marker,
           revision,
           parameters,
@@ -20733,7 +20733,7 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
       constraints{{
           svmp::FE::level_set::LevelSetWallContactConstraint{
               .kind = svmp::FE::level_set::
-                  LevelSetWallContactConstraintKind::PrescribedAngle,
+                  LevelSetWallContactConstraintKind::RepairToPrescribedAngle,
               .interface_marker = 911,
               .boundary_marker = 41,
               .parent_cell_global_id = parent_global_id,

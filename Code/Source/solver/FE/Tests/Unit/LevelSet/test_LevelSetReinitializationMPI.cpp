@@ -146,7 +146,7 @@ TEST(LevelSetReinitializationMPI,
         local_wall_constraints.push_back(
             level_set::LevelSetWallContactConstraint{
                 .kind = level_set::LevelSetWallContactConstraintKind::
-                    AcceptedDynamicAngle,
+                    PreserveAcceptedAngle,
                 .interface_marker = 81,
                 .boundary_marker = 6,
                 .parent_cell_global_id = 10,
@@ -282,7 +282,7 @@ TEST(LevelSetReinitializationMPI,
         local_wall_constraints.push_back(
             level_set::LevelSetWallContactConstraint{
                 .kind = level_set::LevelSetWallContactConstraintKind::
-                    PrescribedAngle,
+                    RepairToPrescribedAngle,
                 .interface_marker = 82,
                 .boundary_marker = 7,
                 .parent_cell_global_id = 10,
