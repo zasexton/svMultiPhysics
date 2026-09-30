@@ -109,9 +109,12 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
                          transport="wet_extension")
     assert "<Use_wet_extension_advection_velocity>true" in wet
     assert "wall_compatible_normal" in wet
-    with pytest.raises(ValueError, match="not available yet"):
-        gen.solver_xml("surface_stress", 60, gen.time_schedule(16, 5.0, 100), 10, 1,
-                       transport="pde_extension")
+    pde = gen.solver_xml("surface_stress", 60, gen.time_schedule(16, 5.0, 100), 10, 1,
+                         transport="pde_extension")
+    assert "<Advection_velocity_extension_method>pde_harmonic<" in pde
+    assert "<Advection_velocity_extension_coupling>monolithic<" in pde
+    assert "<Velocity_source>prescribed_data<" in pde
+    assert "Use_wet_extension_advection_velocity" not in pde
     assert root.find("GeneralSimulationParameters/Number_of_time_steps").text == str(case["steps"])
     assert case["dt"] <= math.sqrt(case["h"] ** 3 / (4.0 * math.pi)) * (1 + 1e-12)
     assert case["steps"] * case["dt"] == pytest.approx(5.0 * case["viscous_time"])

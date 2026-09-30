@@ -92,7 +92,7 @@ free-surface decks; none was chosen for this case.
 | Cut stabilization | pressure-gradient facet penalty 1.0, `Use_cut_metadata_scale=false`, `Small_cut_aggregation=true`, no velocity extension | production defaults, as `static_drop_2d` |
 | `surface_stress` (default) | `Surface_tension_form=SurfaceStress` | D2 candidate (a) |
 | `kag_lumped`, `kag_consistent` | as in `static_drop_2d` | D2 candidates (b) and (c) |
-| Level-set transport | P1, advected by the fluid velocity (`Velocity_source=coupled_field`, `--transport coupled`), SUPG with the production constants (tau scale 0.5, transient scale 2.0); no volume correction, no discontinuity capturing, no bound limiter | as `static_drop_2d`; the area drift is a measured quantity. `--transport wet_extension` writes the wall-compatible wet extension of the D18 and capillary-rise decks; `--transport pde_extension` is the placeholder for the PDE velocity extension of tracker D9 and is refused until that extension lands |
+| Level-set transport | P1, advected by the fluid velocity (`Velocity_source=coupled_field`, `--transport coupled`), SUPG with the production constants (tau scale 0.5, transient scale 2.0); no volume correction, no discontinuity capturing, no bound limiter | as `static_drop_2d`; the area drift is a measured quantity. `--transport wet_extension` writes the wall-compatible wet extension of the D18 and capillary-rise decks; `--transport pde_extension` writes the harmonic PDE velocity extension of tracker D9 with monolithic coupling (`Advection_velocity_extension_method=pde_harmonic`, `Advection_velocity_extension_coupling=monolithic`; `linear_sloshing_2d` README, "Level-set advection velocity") |
 | Level-set maintenance | none in the protocol. `--reinitialization` enables projection reinitialization every 10 steps with at most 4 iterations; the zero set then moves by at most `1e-10` per call, and contact cells are only rescaled | the transport of `static_drop_2d`, so that the D2 comparison uses one transport. The optional values are those of the D18/D38 and sloshing decks. In the first smoke run (below) that projection did not converge in 4 iterations and was skipped, so it would not have changed the state |
 | Time integration | generalized-alpha, `rho_inf = 0.5`, fixed step; no environment variable. `--time-integration backward_euler` for comparison runs | as `static_drop_2d`. Vertex crossings are accepted within a step with the default restart budget, see "Vertex crossings" below |
 | Nonlinear solve | relative tolerance 1e-4 per equation, at most 8 Newton iterations (fluid) and 4 (level set) | as `static_drop_2d` |
@@ -338,7 +338,8 @@ the `volume_drift` criterion (1e-4) will fail. Conservative transport (WP-6) is 
 ## Open points
 
 - The area drift of both cases (about 1e-2 over 11% of the run), above;
-  the PDE velocity extension of tracker D9 is the planned transport.
+  the PDE velocity extension of tracker D9 (`--transport pde_extension`) is
+  the planned transport and has not yet been run on this case.
 - A step that cycles between two topologies ends on the revisited one
   without a fresh zero-update certificate on a third epoch; the inner solve
   on that epoch still meets the Newton tolerance.
