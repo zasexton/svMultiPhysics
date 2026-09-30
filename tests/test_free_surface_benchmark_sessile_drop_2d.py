@@ -94,6 +94,8 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
     level_set = root.find("Add_equation[@type='level_set']")
     assert level_set.find("Enable_reinitialization").text.strip() == "false"
     general = root.find("GeneralSimulationParameters")
+    assert general.find("Transient_time_integration_scheme").text == "BackwardEuler"
+    assert case["solver_environment"] == {"SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS": "4"}
     assert general.find("Enable_adaptive_time_loop").text == "true"
     assert float(general.find("Adaptive_time_loop_max_dt").text) == case["dt"]
     assert float(general.find("Adaptive_time_loop_min_dt").text) == pytest.approx(case["dt"] / 256)
