@@ -40,15 +40,14 @@ import prosperetti_reference as reference  # noqa: E402
 LEVELS = (16, 32, 64)                       # wavelength / h
 CAPILLARY_FORMS = ("surface_stress", "kag_consistent", "kag_lumped")
 DT_DIVISORS = (1, 2, 4)                     # time-step study at a fixed level (D10)
-# Level-set advection velocity (decision D9).  "pde_extension" is the new
-# PDE-based extension velocity: set PDE_EXTENSION_METHOD to its input value
-# for Advection_velocity_extension_method once the solver has it, and make it
-# the default.  Until then the default is the algebraic wall-compatible wet
-# extension, the D9 comparison baseline; "coupled" is the fluid velocity
-# itself (dry vertices then carry zero velocity, which D9 retires).
+# Level-set advection velocity (decision D9).  "pde_extension" (default) is
+# the harmonic PDE velocity extension with monolithic coupling, as in
+# linear_sloshing_2d, static_drop_2d and sessile_drop_2d.  "wet_extension" is
+# the algebraic wall-compatible wet extension, the D9 comparison baseline;
+# "coupled" is the fluid velocity itself (dry vertices then carry zero
+# velocity, which D9 retires).
 TRANSPORTS = ("pde_extension", "wet_extension", "coupled")
-PDE_EXTENSION_METHOD: str | None = None
-DEFAULT_TRANSPORT = "pde_extension" if PDE_EXTENSION_METHOD else "wet_extension"
+DEFAULT_TRANSPORT = "pde_extension"
 DENSITY = 1.0                               # rho
 SURFACE_TENSION = 1.0                       # gamma
 WAVELENGTH = 1.0                            # lambda (length unit)
@@ -292,17 +291,16 @@ def level_set_velocity_block(transport: str) -> str:
         return """    <Velocity_source>coupled_field</Velocity_source>
     <Velocity_field_name>Velocity</Velocity_field_name>
     <Auto_register_velocity_field>true</Auto_register_velocity_field>"""
-    if transport == "wet_extension":
-        method = "wall_compatible_normal"
-    elif transport == "pde_extension":
-        if not PDE_EXTENSION_METHOD:
-            raise ValueError("--transport pde_extension: the PDE velocity extension (decision D9) "
-                             "is not in the solver yet; set PDE_EXTENSION_METHOD in "
-                             "generate_case.py to its input value once it is, or use "
-                             "--transport wet_extension or coupled")
-        method = PDE_EXTENSION_METHOD
-    else:
+    if transport == "pde_extension":
+        return """    <Velocity_source>prescribed_data</Velocity_source>
+    <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
+    <Auto_register_velocity_field>true</Auto_register_velocity_field>
+    <Source_velocity_field_name>Velocity</Source_velocity_field_name>
+    <Advection_velocity_extension_method>pde_harmonic</Advection_velocity_extension_method>
+    <Advection_velocity_extension_coupling>monolithic</Advection_velocity_extension_coupling>"""
+    if transport != "wet_extension":
         raise ValueError(f"--transport must be one of {TRANSPORTS}")
+    method = "wall_compatible_normal"
     return f"""    <Velocity_source>prescribed_data</Velocity_source>
     <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
     <Auto_register_velocity_field>true</Auto_register_velocity_field>
@@ -560,8 +558,8 @@ def main(argv=None) -> int:
     parser.add_argument("--level", type=int, required=True, choices=LEVELS, help="lambda/h")
     parser.add_argument("--capillary-form", default="surface_stress", choices=CAPILLARY_FORMS)
     parser.add_argument("--transport", default=DEFAULT_TRANSPORT, choices=TRANSPORTS,
-                        help="level-set advection velocity (decision D9); default "
-                             f"{DEFAULT_TRANSPORT}, pde_extension once the solver has it")
+                        help="level-set advection velocity (decision D9; default "
+                             f"{DEFAULT_TRANSPORT}, the harmonic PDE extension)")
     parser.add_argument("--laplace-number", type=float, default=DEFAULT_LAPLACE_NUMBER,
                         help="La = rho*gamma*lambda/mu^2 (protocol value 3000)")
     parser.add_argument("--output-dir", type=Path, required=True)

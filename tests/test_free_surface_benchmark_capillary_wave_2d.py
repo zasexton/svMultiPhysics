@@ -179,12 +179,13 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     text = (tmp_path / "c/solver.xml").read_text()
     assert "<Geometry_tangent_policy>RefreshedFrozenQuadrature" in text
     assert "<Surface_tension_form>SurfaceStress" in text and "Curvature_field" not in text
-    # D9: interim default transport is the wall-compatible wet extension.
-    assert case["transport"] == gen.DEFAULT_TRANSPORT == "wet_extension"
+    # D9: the default transport is the harmonic PDE extension, monolithic coupling.
+    assert case["transport"] == gen.DEFAULT_TRANSPORT == "pde_extension"
     level_set = root.find("Add_equation[@type='level_set']")
     assert level_set.findtext("Velocity_source") == "prescribed_data"
-    assert level_set.findtext("Use_wet_extension_advection_velocity") == "true"
-    assert level_set.findtext("Advection_velocity_extension_method") == "wall_compatible_normal"
+    assert level_set.find("Use_wet_extension_advection_velocity") is None
+    assert level_set.findtext("Advection_velocity_extension_method") == "pde_harmonic"
+    assert level_set.findtext("Advection_velocity_extension_coupling") == "monolithic"
     assert root.find("GeneralSimulationParameters/Number_of_time_steps").text == str(case["steps"])
     fluid = root.find("Add_equation[@type='fluid']")
     bcs = {bc.get("name"): bc for bc in fluid.findall("Add_BC")}
@@ -213,20 +214,21 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     assert "kinematic_area_gradient_mass" not in consistent
 
 
-def test_transport_options(tmp_path, monkeypatch):
+def test_transport_options(tmp_path):
     schedule = gen.time_schedule(16, 3000.0, 4.0, 100)
     coupled = gen.solver_xml("surface_stress", schedule, 10, 1, transport="coupled")
     assert "<Velocity_source>coupled_field" in coupled and "Use_wet_extension" not in coupled
-    # The PDE extension (D9) is a placeholder until the solver has it ...
-    with pytest.raises(ValueError, match="not in the solver yet"):
-        gen.generate(16, "surface_stress", tmp_path / "p", transport="pde_extension")
-    assert gen.main(["--level", "16", "--transport", "pde_extension",
-                     "--output-dir", str(tmp_path / "q")]) == 2
-    # ... and then only its method value changes.
-    monkeypatch.setattr(gen, "PDE_EXTENSION_METHOD", "pde_normal")
+    wet = gen.solver_xml("surface_stress", schedule, 10, 1, transport="wet_extension")
+    assert "<Use_wet_extension_advection_velocity>true<" in wet
+    assert "<Advection_velocity_extension_method>wall_compatible_normal<" in wet
+    # The PDE extension is selected by method and coupling, never together
+    # with the wet-extension switch (the solver rejects that combination).
     pde = gen.solver_xml("surface_stress", schedule, 10, 1, transport="pde_extension")
-    assert "<Advection_velocity_extension_method>pde_normal<" in pde
-    assert "<Velocity_source>prescribed_data" in pde
+    assert "<Advection_velocity_extension_method>pde_harmonic<" in pde
+    assert "<Advection_velocity_extension_coupling>monolithic<" in pde
+    assert "<Velocity_source>prescribed_data" in pde and "Use_wet_extension" not in pde
+    with pytest.raises(ValueError, match="must be one of"):
+        gen.solver_xml("surface_stress", schedule, 10, 1, transport="bogus")
 
 
 def test_mesh_is_mirror_symmetric_about_the_node_line():
@@ -333,7 +335,7 @@ def test_time_step_runs_are_reported_but_not_gated(study, tmp_path, capsys):
     assert case["dt_divisor"] == 2
     assert ver.main([*runs, str(extra)]) == 0
     out = capsys.readouterr().out
-    assert "time-step study surface_stress, transport wet_extension, La = 3000, lambda/h = 32" in out
+    assert "time-step study surface_stress, transport pde_extension, La = 3000, lambda/h = 32" in out
     assert "dt/2: omega err 3.000e-03, beta err 1.000e-02" in out
     assert ver.main([str(extra)]) == 1                  # no protocol-time-step run at all
     assert "criteria cannot be applied" in capsys.readouterr().out

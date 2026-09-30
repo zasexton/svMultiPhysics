@@ -10,7 +10,7 @@ with a lumped trace mass, and KAG with the consistent trace mass (the two KAG
 forms are generated but have not been run).
 
 The protocol follows decisions D9 to D11 of 2026-09-30: `phi` is advected
-with the PDE velocity extension once it exists (`--transport`, below); the
+with the harmonic PDE velocity extension (`--transport`, below); the
 spatial study uses one time step for all levels, with a separate time-step
 study at one mesh; and the area criterion gates the maximum deviation over
 the whole run.
@@ -129,8 +129,8 @@ selects the velocity that advects `phi`:
 
 | `--transport` | Solver input | Status |
 |---|---|---|
-| `pde_extension` | `Velocity_source=prescribed_data`, `Use_wet_extension_advection_velocity=true`, `Advection_velocity_extension_method=<PDE method>` | the D9 protocol transport, a parameter-free PDE extension velocity on an auxiliary field. It is not in the solver yet: `PDE_EXTENSION_METHOD` in `generate_case.py` is empty, and selecting it stops with a message. When the method lands, set that constant to its input value; the default then switches to `pde_extension` automatically. If the method needs other keys, adjust `level_set_velocity_block`. |
-| `wet_extension` (current default) | same keys with `wall_compatible_normal` | the algebraic wall-compatible wet extension, the D9 comparison baseline. It writes one JSON map per accepted step (about 1 MB per step in the static-drop smoke run), so a 2900-step run produces gigabytes; keep such runs on `$SCRATCH`. |
+| `pde_extension` (default) | `Velocity_source=prescribed_data`, `Advection_velocity_extension_method=pde_harmonic`, `Advection_velocity_extension_coupling=monolithic` | the D9 protocol transport: the parameter-free harmonic PDE extension of the fluid velocity into the dry region, with monolithic coupling, as in `linear_sloshing_2d`, `static_drop_2d` and `sessile_drop_2d` (validation in the `linear_sloshing_2d` README). It writes no per-step files. |
+| `wet_extension` | `Velocity_source=prescribed_data`, `Use_wet_extension_advection_velocity=true`, `Advection_velocity_extension_method=wall_compatible_normal` | the algebraic wall-compatible wet extension, the D9 comparison baseline. It writes one JSON map per accepted step (about 1 MB per step in the static-drop smoke run), so a 2900-step run produces gigabytes; keep such runs on `$SCRATCH`. |
 | `coupled` | `Velocity_source=coupled_field` | the fluid velocity itself, used by the smoke run below. Dry vertices then carry zero velocity; D9 retires this transport after it failed `linear_sloshing_2d` at `L/h = 64`. |
 
 The side walls hold `u_x = 0` strongly at every wall vertex, so none of the
@@ -223,7 +223,7 @@ solver through `mpiexec` from a job submitted with `--export=NONE`:
 B=tests/cases/fluid/free_surface_benchmarks/capillary_wave_2d
 OUT=$SCRATCH/free-surface-benchmarks/capillary_wave_2d/$(git rev-parse --short HEAD)
 SVMP=/path/to/build/bin/svmultiphysics
-TRANSPORT=wet_extension        # pde_extension once the solver has it (D9)
+TRANSPORT=pde_extension        # protocol transport (D9)
 for form in surface_stress kag_lumped kag_consistent; do for L in 16 32 64; do
   d=$OUT/$TRANSPORT/$form/L$L
   python3 $B/generate_case.py --level $L --capillary-form $form --transport $TRANSPORT --output-dir $d
