@@ -486,6 +486,7 @@ def write_surfaces(
     points = grid.points
     faces = boundary_faces(grid_tets(grid))
 
+    owners: dict[tuple[int, ...], list[str]] = {}
     for spec in specs:
         selected = [
             face
@@ -494,7 +495,21 @@ def write_surfaces(
         ]
         if not selected:
             raise RuntimeError(f"surface {spec.name!r} did not select any boundary faces")
+        for face in selected:
+            owners.setdefault(tuple(sorted(face)), []).append(spec.name)
         polydata_from_faces(points, selected).save(surface_dir / f"{spec.name}.vtp", binary=False)
+    # The centroid predicates below use a tolerance of 0.35 h, so faces of one
+    # plane near an edge are also selected for the adjacent plane.  The solver
+    # keeps one boundary label per face (the last face file listed), so such
+    # faces lose the conditions of the other files.  Report the overlaps; the
+    # fitted MeshNitsche decks use generate_spheric_test10_fitted_decks.py,
+    # which writes disjoint face sets.
+    shared: dict[tuple[str, ...], int] = {}
+    for names in owners.values():
+        if len(names) > 1:
+            shared[tuple(names)] = shared.get(tuple(names), 0) + 1
+    for names, count in sorted(shared.items()):
+        warnings.warn(f"{surface_dir}: {count} boundary faces are in several face files {names}")
 
 
 def plane_predicate(axis: int, value: float, tol: float) -> Callable[[np.ndarray, np.ndarray], bool]:
