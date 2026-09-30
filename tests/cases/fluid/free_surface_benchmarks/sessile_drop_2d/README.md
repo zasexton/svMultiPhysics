@@ -337,9 +337,15 @@ the `volume_drift` criterion (1e-4) will fail. Conservative transport (WP-6) is 
 
 ## Open points
 
-- The area drift of both cases (about 1e-2 over 11% of the run), above;
-  the PDE velocity extension of tracker D9 (`--transport pde_extension`) is
-  the planned transport and has not yet been run on this case.
+- The area drift of both cases (about 1e-2 over 11% of the run), above.
+  A first comparison with the PDE velocity extension of tracker D9
+  (`--transport pde_extension`; job `46108807`, branch
+  `dev/pde-velocity-extension` at `0e4ef8e7`, `R/h = 16`, `SurfaceStress`,
+  generalized-alpha, FSILS, 300 steps) reduces the maximum area drift about
+  fourfold, from 1.00e-2 to 2.45e-3 at 60 degrees and from 6.7e-3 to 1.6e-3
+  at 120 degrees, with the same angle histories to within 2.3 degrees (final
+  angles 61.8/60.9 and 115.1/118.7 degrees) and about 15% more time per
+  step.  The drift is still above the 1e-4 criterion.
 - A step that cycles between two topologies ends on the revisited one
   without a fresh zero-update certificate on a third epoch; the inner solve
   on that epoch still meets the Newton tolerance.
