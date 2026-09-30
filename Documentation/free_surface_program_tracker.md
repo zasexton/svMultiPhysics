@@ -571,7 +571,11 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - Metrics: amplitude from the exact cos(kx) coefficient of the P1 surface; frequency and damping from a damped-cosine fit; area as the maximum over the run (D11).
   - Protocol (D9, D10): `--transport` coupled / wet_extension / PDE extension, where the PDE extension becomes the default once it exists. One shared Δt at the λ/h = 64 capillary limit (2,900 steps) for the spatial study, plus a separate Δt/2, Δt/4 study at λ/h = 32.
   - Smoke run `46075460` (λ/h = 16, 0.1 period): amplitude within 7.5e-4 of the reference, area drift 4.9e-7 and growing.
-- [ ] **Capillary wave runs** (Prosperetti) at λ/h = 16, 32, 64 and three time steps. The PDE extension (D9) has merged, but `capillary_wave_2d/generate_case.py` still has to route `--transport` to `pde_harmonic_monolithic` before the runs. Note: the wet extension writes about 1 MB of JSON map per step; make that output opt-in before long runs. Proposal: frequency error ≤ 2% and damping error ≤ 5% at λ/h = 32 (the 07-17 n = 16 run already had 1.2% frequency error).
+- [ ] **Capillary wave runs** (Prosperetti) at λ/h = 16, 32, 64 and three time steps. The PDE extension (D9) has merged, and `capillary_wave_2d/generate_case.py` now defaults to it (`3a9e3ba5`). Note: the wet extension writes about 1 MB of JSON map per step; make that output opt-in before long runs. Proposal: frequency error ≤ 2% and damping error ≤ 5% at λ/h = 32 (the 07-17 n = 16 run already had 1.2% frequency error).
+  - **Submitted 2026-09-30 on binary `02da73ea`:** `surface_stress` with `pde_extension` transport at λ/h = 16, 32 and 64 (shared Δt), plus Δt/2 and Δt/4 at λ/h = 32 (D10).
+    - Jobs `46120312`, `46120345`, `46120361`, `46120366`, `46120368`, starting after build `46118906`.
+    - Output in `/scratch/users/zsexton/free-surface-benchmarks/capillary_wave_2d/3a9e3ba5/pde_extension/surface_stress/`.
+    - The KAG forms follow once M2 has compared the capillary routes.
 - [ ] **Oscillating 2D drop**: Lamb frequency and viscous damping.
 
 ### M4 — Wetting (unfitted)
