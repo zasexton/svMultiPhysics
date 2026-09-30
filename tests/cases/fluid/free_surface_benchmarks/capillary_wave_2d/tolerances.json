@@ -1,7 +1,7 @@
 {
   "benchmark": "capillary_wave_2d",
   "milestone": "M3",
-  "fixed_on": "2026-09-30, before the first protocol run",
+  "fixed_on": "2026-09-30, before the first protocol run; decisions D9-D11 applied the same day",
   "levels": {
     "lambda_over_h": [
       16,
@@ -15,9 +15,11 @@
     "amplitude_over_wavelength": 0.01,
     "periods": 4,
     "snapshots": 100,
-    "time_step": "dt <= sqrt(rho*h^3/(4*pi*gamma)) = (1/sqrt(2)) * sqrt(rho*h^3/(2*pi*gamma)), rounded down so that the run is 100 equal output intervals; dt_divisor 2 and 4 are the temporal refinement runs",
+    "time_step": "One time step shared by all levels (decision D10): the largest dt within the one-sided capillary limit of the finest level, sqrt(rho*h^3/(4*pi*gamma)) with h = lambda/64 (= (1/sqrt(2)) * sqrt(rho*h^3/(2*pi*gamma))), that divides the run into 100 equal output intervals: dt = 5.50e-4, 2900 steps. The spatial study at 16/32/64 therefore carries no level-dependent time error.",
     "reference": "Prosperetti initial-value solution for a free surface (Phys. Fluids 19, 195 (1976); Phys. Fluids 24, 1217 (1981), one-fluid limit), fitted with the same damped-cosine model on the same output times as the simulation",
-    "note": "Criteria apply separately to each (capillary form, Laplace number, time-step divisor) refinement study; the protocol study uses divisor 1. See README.md for the definitions and the cost of each level."
+    "note": "Criteria apply separately to each (capillary form, transport, Laplace number) spatial study at the shared protocol time step (dt divisor 1). See README.md for the definitions and the cost of each level.",
+    "time_step_study": "Separate, at lambda/h = 32: dt, dt/2, dt/4 (generate_case.py --dt-divisor 1, 2, 4); reported only (D10)",
+    "transport": "Level-set advection with the PDE velocity extension of decision D9 once it is in the solver (generate_case.py --transport pde_extension); until then wet_extension (wall_compatible_normal), the D9 comparison baseline. Criteria apply per (capillary form, transport) study."
   },
   "criteria": [
     {
@@ -32,7 +34,7 @@
         32,
         64
       ],
-      "order_method": "least-squares slope of log(error) against log(lambda/h) over order_levels; pairwise orders are reported",
+      "order_method": "least-squares slope of log(error) against log(lambda/h) over order_levels, on the spatial study at the shared time step (D10); pairwise orders are reported",
       "source": "Decision D1 working criterion (tracker section 5, M3: frequency error <= 2% at lambda/h = 32, with convergence over 16/32/64). First order is the rate expected for the force on a piecewise-planar interface (Gross and Reusken 2011, ch. 7), as for the static-drop pressure jump."
     },
     {
@@ -40,23 +42,26 @@
       "quantity": "damping_rate_relative_error",
       "definition": "|beta_sim - beta_ref| / beta_ref with beta the amplitude decay rate of the same two fits.",
       "limit": 0.05,
-      "at_level": 32,
+      "at_level": [
+        32,
+        64
+      ],
       "minimum_observed_order": 1.0,
       "order_levels": [
         16,
         32,
         64
       ],
-      "order_method": "least-squares slope of log(error) against log(lambda/h) over order_levels; pairwise orders are reported",
-      "source": "Decision D1 working criterion (tracker section 5, M3: damping error <= 5% at lambda/h = 32, with convergence over 16/32/64)."
+      "order_method": "least-squares slope of log(error) against log(lambda/h) over order_levels, on the spatial study at the shared time step (D10); pairwise orders are reported",
+      "source": "Decision D1 working criterion (tracker section 5, M3: damping error <= 5% at lambda/h = 32, with convergence over 16/32/64), also applied at the finest level (lambda/h = 64) as in decision D12."
     },
     {
       "id": "volume_drift",
       "quantity": "liquid_area_relative_drift_max",
-      "definition": "max over all outputs of |A(t) - A(0)| / A(0), with A the exact area of {phi_h < 0} and A(0) that of the sampled initial level set in mesh/mesh-complete.mesh.vtu",
+      "definition": "max over the whole run of |A(t) - A(0)| / A(0) (decision D11): over all VTU outputs and, when solver_run.log[.gz] is present, over the per-step 'Wet volume diagnostic' areas of every accepted step. A is the exact area of {phi_h < 0}; A(0) that of the sampled initial level set in mesh/mesh-complete.mesh.vtu",
       "limit": 0.0001,
       "at_level": "each",
-      "source": "Decision D1 working criterion (tracker section 5: volume drift <= 1e-4, as for M1 and M2, applied to M3). A(0) includes the whole liquid layer (depth ~ lambda); mean_level_drift_over_amplitude reports the same drift relative to a0."
+      "source": "Decision D1 working criterion (tracker section 5: volume drift <= 1e-4, as for M1 and M2, applied to M3), gated on the maximum deviation over the run (decision D11). A(0) includes the whole liquid layer (depth ~ lambda); mean_level_drift_over_amplitude reports the same drift relative to a0."
     }
   ]
 }

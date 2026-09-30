@@ -6,12 +6,14 @@ Usage:
 
 Each RUN_DIR is a case written by generate_case.py (it holds case.json and
 mesh/mesh-complete.mesh.vtu) in which the solver has run, leaving
-result.pvd and result_NNN.vtu (serial) or result_NNN.pvtu (MPI).  Runs are
-grouped by (capillary form, Laplace number); the criteria are applied to
-each group across its resolution levels, at the protocol time step.  Runs
-with a refined time step (generate_case.py --dt-divisor 2 or 4) are
-reported in a time-step study at their level.  Metric definitions
-are in README.md.
+result.pvd and result_NNN.vtu (serial) or result_NNN.pvtu (MPI), and
+optionally solver_run.log or solver_run.log.gz, whose per-step wet-volume
+lines enter the area criterion (decision D11).  Runs are grouped by
+(capillary form, level-set transport, Laplace number); the criteria are
+applied to each group across its resolution levels, which must share the
+protocol time step (decision D10).  Runs with a refined time step
+(generate_case.py --dt-divisor 2 or 4) are reported in a time-step study at
+their level.  Metric definitions are in README.md.
 
 Exit status: 0 if every criterion passes, 1 if any criterion fails, 2 if
 input data are missing or invalid.
@@ -20,6 +22,7 @@ input data are missing or invalid.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import math
 import re
@@ -258,6 +261,34 @@ def output_series(run: Path, case: dict) -> list[tuple[float, Path]]:
     return series
 
 
+_WET_VOLUME = re.compile(r"Wet volume diagnostic step=(\d+) .*?domain_id='([^']*)'.*?"
+                         r"physical_wet_volume=([-+0-9.eE]+)")
+
+
+def logged_wet_volumes(run: Path, domain_id: str) -> dict[int, float]:
+    """Per-step liquid area from the solver's 'Wet volume diagnostic' log lines.
+
+    The solver prints one such line per accepted step (step 0 is the initial
+    state).  Returns {} when no log is present.
+    """
+    for name in ("solver_run.log", "solver_run.log.gz"):
+        path = run / name
+        if path.is_file():
+            break
+    else:
+        return {}
+    opener = gzip.open if path.suffix == ".gz" else open
+    volumes: dict[int, float] = {}
+    with opener(path, "rt", errors="replace") as log:
+        for line in log:
+            if "Wet volume diagnostic step=" not in line:
+                continue
+            m = _WET_VOLUME.search(line)
+            if m and m.group(2) == domain_id:
+                volumes[int(m.group(1))] = float(m.group(3))
+    return volumes
+
+
 def snapshot_measures(snap: dict, case: dict) -> dict:
     k = case["wavenumber"]
     x_min, x_max = case["box"][0], case["box"][1]
@@ -296,6 +327,13 @@ def analyse_run(run: Path) -> dict:
     amp = np.array([m["amplitude"] for _, m in rows])
     area = np.array([m["area"] for _, m in rows])
 
+    # D11: the area criterion is the maximum deviation over the whole run.
+    # The outputs are sampled every `output_cadence` steps; the solver log,
+    # when present, adds the area of every accepted step.
+    logged = logged_wet_volumes(run, case.get("interface_domain_id", "capillary_wave_surface"))
+    logged_drift = (max(abs(v - area[0]) for v in logged.values()) / area[0]) if logged else 0.0
+    output_drift = float(np.max(np.abs(area - area[0])) / area[0])
+
     params = dict(wavenumber=case["wavenumber"], kinematic_viscosity=case["kinematic_viscosity"],
                   surface_tension=case["surface_tension"], density=case["density"])
     a0 = case["initial_amplitude"]
@@ -309,7 +347,9 @@ def analyse_run(run: Path) -> dict:
         "run": str(run),
         "level": case["level_lambda_over_h"],
         "capillary_form": case["capillary_form"],
+        "transport": case.get("transport", "coupled"),
         "laplace_number": case["laplace_number"],
+        "dt": case["dt"],
         "dt_divisor": case.get("dt_divisor", 1),
         "truncated": bool(case.get("truncated", False)),
         "end_time": float(times[-1]),
@@ -319,8 +359,10 @@ def analyse_run(run: Path) -> dict:
         "amplitude_rms_error": float(np.sqrt(np.mean(normalized_error ** 2))),
         "amplitude_max_error": float(np.max(np.abs(normalized_error))),
         "initial_liquid_area": float(area[0]),
-        "liquid_area_relative_drift_max": float(np.max(np.abs(area - area[0])) / area[0]),
-        "mean_level_drift_over_amplitude": float(np.max(np.abs(area - area[0])) / width / a0),
+        "liquid_area_relative_drift_max": max(output_drift, logged_drift),
+        "liquid_area_relative_drift_max_outputs": output_drift,
+        "liquid_area_logged_steps": len(logged),
+        "mean_level_drift_over_amplitude": max(output_drift, logged_drift) * area[0] / width / a0,
         "reference_omega0": omega0,
         "reference_weak_damping_rate": mode["weak_damping_rate"],
         "reference_normal_mode_omega": mode["omega"],
@@ -354,7 +396,7 @@ def evaluate_group(runs: list[dict], tolerances: dict) -> list[dict]:
         q, limit = crit["quantity"], crit.get("limit")
         messages, ok = [], True
         at = crit.get("at_level", "each")
-        levels = sorted(by_level) if at == "each" else [at]
+        levels = sorted(by_level) if at == "each" else (list(at) if isinstance(at, list) else [at])
         for level in levels:
             if level not in by_level:
                 ok = False
@@ -422,21 +464,28 @@ def main(argv=None) -> int:
     groups: dict[tuple, list] = {}
     for a in analysed:
         if a["dt_divisor"] == 1:
-            groups.setdefault((a["capillary_form"], a["laplace_number"]), []).append(a)
+            groups.setdefault((a["capillary_form"], a["transport"], a["laplace_number"]),
+                              []).append(a)
     levels = set(tolerances["levels"]["lambda_over_h"])
     report, all_pass = [], bool(groups)
     if not groups:
         print("no run at the protocol time step (dt divisor 1): the criteria cannot be applied")
-    for (form, laplace), runs in sorted(groups.items()):
+    for (form, transport, laplace), runs in sorted(groups.items()):
         seen = [r["level"] for r in runs]
         if len(seen) != len(set(seen)) or not set(seen) <= levels:
-            print(f"ERROR: group {form}, La={laplace:g}: duplicate or unknown levels {seen}",
+            print(f"ERROR: group {form}, {transport}, La={laplace:g}: duplicate or unknown "
+                  f"levels {seen}", file=sys.stderr)
+            return 2
+        steps = sorted({r["dt"] for r in runs})
+        if steps[-1] > steps[0] * (1.0 + 1e-12):
+            print(f"ERROR: group {form}, {transport}, La={laplace:g}: the levels use different "
+                  f"time steps {steps}; the spatial study needs one shared step (D10)",
                   file=sys.stderr)
             return 2
         runs.sort(key=lambda r: r["level"])
         verdicts = evaluate_group(runs, tolerances)
         all_pass &= all(v["passed"] for v in verdicts)
-        print(f"\n== {form}, La = {laplace:g}" +
+        print(f"\n== {form}, transport {transport}, La = {laplace:g}, dt = {runs[0]['dt']:.6g}" +
               ("  [TRUNCATED SMOKE RUNS]" if any(r["truncated"] for r in runs) else ""))
         print(f"{'l/h':>4} {'periods':>7} {'omega':>9} {'omega err':>9} {'beta':>8} "
               f"{'beta err':>9} {'rms err':>8} {'dA/A max':>9} {'a_h(0)/a0-1':>11}")
@@ -456,28 +505,43 @@ def main(argv=None) -> int:
               f"{ref['reference_omega0']:.6g}, 2 nu k^2 = {ref['reference_weak_damping_rate']:.6g}")
         for v in verdicts:
             print(f"  [{'PASS' if v['passed'] else 'FAIL'}] {v['id']}: " + "; ".join(v["details"]))
-        report.append({"capillary_form": form, "laplace_number": laplace, "dt_divisor": 1,
+        report.append({"capillary_form": form, "transport": transport,
+                       "laplace_number": laplace, "dt_divisor": 1,
                        "runs": runs, "criteria": verdicts,
                        "passed": all(v["passed"] for v in verdicts)})
 
     # Temporal refinement at a fixed level (reported only).
     by_level: dict[tuple, list] = {}
     for a in analysed:
-        by_level.setdefault((a["capillary_form"], a["laplace_number"], a["level"]), []).append(a)
+        by_level.setdefault((a["capillary_form"], a["transport"], a["laplace_number"], a["level"]),
+                            []).append(a)
     temporal = []
-    for (form, laplace, level), runs in sorted(by_level.items()):
+    for (form, transport, laplace, level), runs in sorted(by_level.items()):
         if len({r["dt_divisor"] for r in runs}) < 2:
             continue
         runs.sort(key=lambda r: r["dt_divisor"])
-        print(f"\n-- time-step study {form}, La = {laplace:g}, lambda/h = {level} (reported only)")
+        finest = runs[-1]["fit"] or {}
+        print(f"\n-- time-step study {form}, transport {transport}, La = {laplace:g}, "
+              f"lambda/h = {level} (reported only; change relative to dt/{runs[-1]['dt_divisor']})")
+        rows = []
         for r in runs:
+            fit = r["fit"] or {}
+            d_omega = (abs(fit["omega"] - finest["omega"]) / finest["omega"]
+                       if fit and finest else None)
+            d_beta = (abs(fit["beta"] - finest["beta"]) / finest["beta"]
+                      if fit and finest else None)
             print(f"   dt/{r['dt_divisor']}: omega err {_fmt(r['frequency_relative_error'], '.3e')}, "
                   f"beta err {_fmt(r['damping_rate_relative_error'], '.3e')}, "
-                  f"rms err {r['amplitude_rms_error']:.3e}")
-        temporal.append({"capillary_form": form, "laplace_number": laplace, "level": level,
-                         "rows": [{k: r[k] for k in ("dt_divisor", "frequency_relative_error",
-                                                     "damping_rate_relative_error",
-                                                     "amplitude_rms_error")} for r in runs]})
+                  f"rms err {r['amplitude_rms_error']:.3e}; omega change {_fmt(d_omega, '.3e')}, "
+                  f"beta change {_fmt(d_beta, '.3e')}")
+            rows.append({"dt_divisor": r["dt_divisor"], "dt": r["dt"],
+                         "frequency_relative_error": r["frequency_relative_error"],
+                         "damping_rate_relative_error": r["damping_rate_relative_error"],
+                         "amplitude_rms_error": r["amplitude_rms_error"],
+                         "omega_change_from_smallest_dt": d_omega,
+                         "beta_change_from_smallest_dt": d_beta})
+        temporal.append({"capillary_form": form, "transport": transport, "laplace_number": laplace,
+                         "level": level, "rows": rows})
     if args.json:
         args.json.write_text(json.dumps({"benchmark": tolerances["benchmark"],
                                          "groups": report, "time_step_study": temporal,
