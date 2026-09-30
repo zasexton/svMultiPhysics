@@ -1,0 +1,41 @@
+{
+  "benchmark": "fitted_static_drop_2d",
+  "milestone": "M5",
+  "fixed_on": "2026-09-30, before the first smoke run",
+  "status": "smoke: pressure and spurious velocity are reported; the pressure-jump limit is the M2 working criterion of static_drop_2d and applies at R/h = 32 only",
+  "levels": {"rings_R_over_h": [8, 16, 32]},
+  "criteria": [
+    {
+      "id": "pressure_jump",
+      "quantity": "pressure_jump_relative_error",
+      "definition": "|mean(p) - gamma/R| / (gamma/R) on the final state, p_ext = 0",
+      "limit": 0.01,
+      "at_level": 32,
+      "source": "static_drop_2d M2 working criterion (tracker section 5, M2); the fitted regular polygon balances gamma / (R cos(pi/N)) exactly, so the expected error is 1/cos(pi/N) - 1 = 5.4e-4 at N = 192"
+    },
+    {
+      "id": "pressure_jump_16",
+      "quantity": "pressure_jump_relative_error",
+      "definition": "as pressure_jump",
+      "limit": null,
+      "at_level": 16,
+      "source": "reported"
+    },
+    {
+      "id": "spurious_velocity",
+      "quantity": "spurious_capillary_number_max",
+      "definition": "max over outputs t > 0 of mu max|u| / gamma",
+      "limit": null,
+      "at_level": 16,
+      "source": "reported (static_drop_2d reports the same quantity)"
+    },
+    {
+      "id": "area",
+      "quantity": "liquid_area_relative_deviation_max",
+      "definition": "max over outputs of |A(t) - A(0)| / A(0), A the area of the current mesh",
+      "limit": null,
+      "at_level": 16,
+      "source": "reported"
+    }
+  ]
+}
