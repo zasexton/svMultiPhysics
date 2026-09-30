@@ -94,16 +94,14 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
     level_set = root.find("Add_equation[@type='level_set']")
     assert level_set.find("Enable_reinitialization").text.strip() == "false"
     general = root.find("GeneralSimulationParameters")
-    assert general.find("Transient_time_integration_scheme").text == "BackwardEuler"
-    assert fluid.find("LS").get("type") == "Direct"
-    assert fluid.find("LS/Linear_algebra").get("type") == "eigen"
-    assert case["linear_solver"] == "eigen_direct"
-    assert case["solver_environment"] == {"SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS": "4"}
-    assert general.find("Enable_adaptive_time_loop").text == "true"
-    assert float(general.find("Adaptive_time_loop_max_dt").text) == case["dt"]
-    assert float(general.find("Adaptive_time_loop_min_dt").text) == pytest.approx(case["dt"] / 256)
-    assert float(general.find("Adaptive_time_loop_increase_factor").text) == 2.0
-    assert int(general.find("Adaptive_time_loop_target_newton_iterations").text) > 100
+    assert general.find("Transient_time_integration_scheme") is None
+    assert float(general.find("Spectral_radius_of_infinite_time_step").text) == 0.5
+    assert general.find("Enable_adaptive_time_loop") is None
+    assert fluid.find("LS").get("type") == "GMRES"
+    assert fluid.find("LS/Linear_algebra").get("type") == "fsils"
+    assert case["linear_solver"] == "fsils"
+    assert case["time_integration_scheme"] == "GeneralizedAlpha"
+    assert "SVMP_" not in text
     assert root.find("GeneralSimulationParameters/Number_of_time_steps").text == str(case["steps"])
     assert case["dt"] <= math.sqrt(case["h"] ** 3 / (4.0 * math.pi)) * (1 + 1e-12)
     assert case["steps"] * case["dt"] == pytest.approx(5.0 * case["viscous_time"])
@@ -119,8 +117,11 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
     assert "KinematicAreaGradientTraction" in lumped and "mass>Lumped" in lumped
     consistent = gen.solver_xml("kag_consistent", 90, schedule, 10, 1)
     assert "kinematic_area_gradient_mass" not in consistent
-    gmres = gen.solver_xml("surface_stress", 90, schedule, 10, 1, linear_solver="fsils")
-    assert '<LS type="GMRES">' in gmres and 'Linear_algebra type="fsils"' in gmres
+    direct = gen.solver_xml("surface_stress", 90, schedule, 10, 1, linear_solver="eigen_direct",
+                            time_integration="backward_euler")
+    assert '<LS type="Direct">' in direct and 'Linear_algebra type="eigen"' in direct
+    assert "<Transient_time_integration_scheme>BackwardEuler" in direct
+    assert "Spectral_radius_of_infinite_time_step" not in direct
     maintained = ET.fromstring(gen.solver_xml("surface_stress", 120, schedule, 10, 1,
                                               reinitialization=True))
     level_set = maintained.find("Add_equation[@type='level_set']")
