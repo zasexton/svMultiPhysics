@@ -60,6 +60,12 @@ DT_SAFETY = 1.0 / math.sqrt(2.0)
 TIME_INTEGRATION_SCHEMES = {"generalized_alpha": "GeneralizedAlpha",
                             "backward_euler": "BackwardEuler"}
 LINEAR_SOLVERS = ("fsils", "eigen_direct")
+# Level-set transport velocity.  "coupled": the fluid velocity itself (the
+# current default, as static_drop_2d).  "wet_extension": the wall-compatible
+# wet extension of the D18 and capillary-rise decks.  "pde_extension": the
+# PDE-based velocity extension chosen for moving-interface benchmarks
+# (tracker D9); a placeholder until that extension lands.
+TRANSPORTS = ("coupled", "wet_extension", "pde_extension")
 # Existing production reinitialization values (D18/D38 and sloshing decks),
 # used only with --reinitialization.
 REINITIALIZATION_CADENCE_STEPS = 10
@@ -318,7 +324,26 @@ def linear_solver_block(solver: str = "fsils") -> str:
 
 def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, cadence: int,
                reinitialization: bool = False, linear_solver: str = "fsils",
-               time_integration: str = "generalized_alpha") -> str:
+               time_integration: str = "generalized_alpha",
+               transport: str = "coupled") -> str:
+    if transport == "coupled":
+        transport_xml = """
+    <Velocity_source>coupled_field</Velocity_source>
+    <Velocity_field_name>Velocity</Velocity_field_name>
+    <Auto_register_velocity_field>true</Auto_register_velocity_field>"""
+    elif transport == "wet_extension":
+        transport_xml = """
+    <Velocity_source>prescribed_data</Velocity_source>
+    <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
+    <Auto_register_velocity_field>true</Auto_register_velocity_field>
+    <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
+    <Source_velocity_field_name>Velocity</Source_velocity_field_name>
+    <Wet_extension_advection_velocity_method>wall_compatible_normal</Wet_extension_advection_velocity_method>"""
+    elif transport == "pde_extension":
+        raise ValueError("the PDE velocity extension (tracker D9) is not available yet; "
+                         "use --transport coupled or wet_extension")
+    else:
+        raise ValueError(f"transport must be one of {TRANSPORTS}")
     if time_integration not in TIME_INTEGRATION_SCHEMES:
         raise ValueError(f"time integration must be one of {tuple(TIME_INTEGRATION_SCHEMES)}")
     scheme = TIME_INTEGRATION_SCHEMES[time_integration]
@@ -400,10 +425,7 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
     <Module_options>jit=true; jit_specialization=true</Module_options>
     <Level_set_field_name>{LEVEL_SET_FIELD}</Level_set_field_name>
     <Operator_tag>equations</Operator_tag>
-    <Level_set_source>prescribed_data</Level_set_source>
-    <Velocity_source>coupled_field</Velocity_source>
-    <Velocity_field_name>Velocity</Velocity_field_name>
-    <Auto_register_velocity_field>true</Auto_register_velocity_field>
+    <Level_set_source>prescribed_data</Level_set_source>{transport_xml}
     <Enable_SUPG>true</Enable_SUPG>
     <SUPG_tau_scale>0.5</SUPG_tau_scale>
     <SUPG_transient_scale>2.0</SUPG_transient_scale>{maintenance}
@@ -481,6 +503,7 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
              snapshots: int = DEFAULT_SNAPSHOTS,
              reinitialization: bool = False, linear_solver: str = "fsils",
              time_integration: str = "generalized_alpha",
+             transport: str = "coupled",
              max_steps: int | None = None, force: bool = False) -> dict:
     if level not in LEVELS:
         raise ValueError(f"--level must be one of {LEVELS}")
@@ -538,7 +561,7 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
         write_face_vtp(mesh_dir / "mesh-surfaces" / f"{wall}.vtp", points, node_ids, parents)
     (output_dir / "solver.xml").write_text(
         solver_xml(form, equilibrium_deg, schedule, steps, cadence, reinitialization,
-                   linear_solver, time_integration),
+                   linear_solver, time_integration, transport),
         encoding="utf-8")
 
     case = {
@@ -552,6 +575,7 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
         "reinitialization": bool(reinitialization),
         "time_integration_scheme": TIME_INTEGRATION_SCHEMES[time_integration],
         "linear_solver": linear_solver,
+        "transport": transport,
         "laplace_number": LAPLACE_NUMBER,
         "density": DENSITY,
         "surface_tension": SURFACE_TENSION,
@@ -619,6 +643,9 @@ def main(argv=None) -> int:
                              "rescaled).  Off in the protocol, as in static_drop_2d.")
     parser.add_argument("--linear-solver", default="fsils", choices=LINEAR_SOLVERS,
                         help="linear solver (protocol: fsils; eigen_direct for comparison)")
+    parser.add_argument("--transport", default="coupled", choices=TRANSPORTS,
+                        help="level-set transport velocity (pde_extension is a placeholder "
+                             "until the PDE extension of tracker D9 lands)")
     parser.add_argument("--time-integration", default="generalized_alpha",
                         choices=tuple(TIME_INTEGRATION_SCHEMES),
                         help="time integration (protocol: generalized_alpha; backward_euler "
@@ -634,10 +661,11 @@ def main(argv=None) -> int:
                     snapshots=args.snapshots, reinitialization=args.reinitialization,
                     linear_solver=args.linear_solver,
                     time_integration=args.time_integration,
+                    transport=args.transport,
                     max_steps=args.max_steps, force=args.force)
     print(f"wrote {args.output_dir}")
     for key in ("level_R_over_h", "equilibrium_angle_degrees", "initial_angle_degrees",
-                "capillary_form", "time_integration_scheme", "linear_solver",
+                "capillary_form", "time_integration_scheme", "linear_solver", "transport",
                 "reinitialization", "viscosity", "slip_length_over_h",
                 "viscous_time",
                 "end_time", "dt", "dt_capillary_limit", "steps", "output_cadence",
