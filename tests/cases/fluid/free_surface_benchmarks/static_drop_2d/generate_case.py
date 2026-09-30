@@ -52,7 +52,7 @@ DT_MULTIPLE = {12.0: 2.0, 120.0: 1.0}
 LEVEL_SET_VELOCITY = ("coupled_field",
                       "pde_harmonic_monolithic", "pde_harmonic_prescribed",
                       "pde_normal_monolithic", "pde_normal_prescribed")
-DEFAULT_LEVEL_SET_VELOCITY = "coupled_field"
+DEFAULT_LEVEL_SET_VELOCITY = "pde_harmonic_monolithic"   # decision D9
 MIN_PHI_OVER_H_WARNING = 1.0e-6             # "vertex touch" warning threshold
 LEVEL_SET_FIELD = "phi"
 CURVATURE_FIELD = "kappa"

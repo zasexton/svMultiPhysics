@@ -195,3 +195,15 @@ def test_missing_and_incomplete_data_fail_clearly(study, tmp_path, capsys):
     gen.generate(8, "surface_stress", 12.0, empty)
     assert ver.main([str(empty)]) == 2
     assert "no solver output" in capsys.readouterr().err
+
+
+def test_default_transport_is_the_harmonic_pde_extension(tmp_path):
+    case = gen.generate(8, "surface_stress", 12.0, tmp_path / "c")
+    text = (tmp_path / "c/solver.xml").read_text()
+    assert case["level_set_velocity"] == "pde_harmonic_monolithic"
+    assert "<Advection_velocity_extension_method>pde_harmonic<" in text
+    assert "<Advection_velocity_extension_coupling>monolithic<" in text
+    old = gen.generate(8, "surface_stress", 12.0, tmp_path / "old",
+                       level_set_velocity="coupled_field")
+    assert "<Velocity_source>coupled_field<" in (tmp_path / "old/solver.xml").read_text()
+    assert old["dt"] == case["dt"]

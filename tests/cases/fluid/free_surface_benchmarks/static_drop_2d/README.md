@@ -14,7 +14,7 @@ Files:
 |---|---|
 | `generate_case.py` | writes `solver.xml`, the mesh with the initial fields, the wall faces and `case.json` for one level |
 | `verify.py` | reads the solver output of one or more levels, computes the metrics, applies `tolerances.json` |
-| `tolerances.json` | acceptance criteria and their sources, fixed on 2026-09-29 before the first run |
+| `tolerances.json` | acceptance criteria and their sources, fixed on 2026-09-29 before the first run; time step revised on 2026-09-30 (see "Time step") |
 | `tests/test_free_surface_benchmark_static_drop_2d.py` | checks of the two scripts on synthetic data |
 
 ## Physical setup
@@ -69,19 +69,26 @@ none was chosen for this case.
 | `surface_stress` | `Surface_tension_form=SurfaceStress` | D2 candidate (a) |
 | `kag_lumped` | `Surface_tension_form=KinematicAreaGradientTraction`, projected P1 field `kappa` (`Enable_curvature_projection`, `Curvature_field_name`), `Curvature_projection_recovery_mode=KinematicAreaGradient`, filter coefficient 0, cadence 1, `Curvature_projection_kinematic_area_gradient_mass=Lumped` | D2 candidate (b). With `Lumped` the filter coefficient defaults to 0, so the explicit 0 is optional. |
 | `kag_consistent` | as `kag_lumped` without the mass key (default `Consistent`) | D2 candidate (c), reference only |
-| Level-set transport | P1, advected by the fluid velocity (`Velocity_source=coupled_field`), SUPG with the production constants (tau scale 0.5, transient scale 2.0); no reinitialization, no volume correction, no discontinuity capturing, no bound limiter | the volume drift is a measured quantity, so it is not corrected |
+| Level-set transport | P1, SUPG with the production constants (tau scale 0.5, transient scale 2.0); no reinitialization, no volume correction, no discontinuity capturing, no bound limiter; advected by the harmonic PDE extension of the fluid velocity with monolithic coupling (`Advection_velocity_extension_method=pde_harmonic`, `Advection_velocity_extension_coupling=monolithic`; generator value `pde_harmonic_monolithic`) | decision D9; the volume drift is a measured quantity, so it is not corrected |
 | Time integration | generalized-alpha, `rho_inf = 0.5` | all free-surface decks |
 | Nonlinear solve | relative tolerance 1e-4 per equation, at most 8 Newton iterations; the level-set block also has the absolute gate 1e-10 taken from its linear-solver block | production decks |
 | Linear solve | FSILS GMRES with the RCS preconditioner, 100 iterations, Krylov dimension 50, tolerances 1e-8 / 1e-10 | September capillary decks (monolithic phi/u/p system) |
 
-**Why the level set is not advected with the wet-extension map.** The D18
-and capillary-wave decks advect `phi` with the wall-compatible wet
-extension. That machinery exists for contact with walls, which this drop
-never has. It also writes one JSON map per accepted step: 1.0 MB at
-`R/h = 8` in the smoke run below, growing with the vertex count. At
-`R/h = 32` and `La = 12` that would be about 120 GB and 7,900 files per run.
-All three capillary forms use the same transport, so the comparison stays
-fair.
+**Level-set advection velocity (D9).** The fluid velocity is zero on the
+inactive vertices beyond the cut cells, so advecting `phi` with it freezes the
+level set one row outside the interface (`linear_sloshing_2d` failed its
+first protocol for this reason).  The level set is therefore advected with the
+harmonic PDE extension of the fluid velocity: `w = u` on the wet vertices and
+on every vertex of the retained interface cells, and `(grad w, grad v) = 0`
+over the dry cells elsewhere, with the constrained components of the no-slip
+walls set to zero on dry wall vertices (the drop never reaches them).  It is
+parameter-free and writes no per-step files; the algebraic wet extension of
+the SPHERIC Test 05 decks writes one JSON map per step (about 120 GB for an
+`R/h = 32` run).  With the monolithic coupling the extension rows are part of
+the Newton system; the prescribed coupling lags the extension by one outer
+pass, which more than doubles the outer passes of this capillary case
+(`linear_sloshing_2d` README, "Level-set advection velocity"; results below).
+`--level-set-velocity coupled_field` reproduces the earlier transport.
 
 **Time step.** The Brackbill, Kothe and Zemach (1992) capillary limit is
 `dt < sqrt(<rho> h^3 / (2 pi gamma))` with `<rho> = (rho_1 + rho_2)/2`.
@@ -94,10 +101,20 @@ dt <= sqrt(rho h^3 / (4 pi gamma)) = (1/sqrt(2)) * sqrt(rho h^3 / (2 pi gamma)).
 ```
 
 The factor `1/sqrt(2)` relative to the tracker's form of the limit is
-derived from this one-sided density sum; it is not tuned. Viscosity only
-relaxes the limit (Galusinski and Vigneaux 2008), so no further factor is
-applied. `generate_case.py` then rounds `dt` down so that the run is exactly
-100 equal output intervals.
+derived from this one-sided density sum; it is not tuned. Viscosity relaxes
+the limit (Galusinski and Vigneaux 2008).
+
+The protocol step is `m dt_B`, with `dt_B` the limit above, `m = 2` at
+`La = 12` and `m = 1` at `La = 120`.  The step-0 measurement (tracker,
+2026-09-30, jobs `46075447` and `46076505`) found that the outer geometry loop
+accepts `2 dt_B` at `La = 12` and only `dt_B` at `La = 120` with its default
+12-pass cap.  `generate_case.py` then rounds `dt` down so that the run is
+exactly 100 equal output intervals.
+
+The step is kept per level (it scales as `h^(3/2)`) rather than fixed across
+levels as decision D10 asks of the transient benchmarks: every gated metric
+is taken on the relaxed steady state after 5 viscous times, where the time
+derivative vanishes, so the time-step error does not enter the metrics.
 
 **Run length.** `T = 5 t_mu`, the lower end of the 5 to 10 viscous times of
 D3. There are 100 VTU snapshots, one every `T/100`.
