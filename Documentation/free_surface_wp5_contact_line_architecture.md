@@ -16,7 +16,9 @@ and wall-aware level-set maintenance. The retired prescribed-angle
 codimension-two level-set residual and its penalty parameter are absent from
 the production residual. Prescribed-angle geometry is instead owned by
 accepted-state wall-aware repair, while its momentum contribution is the
-Young wall-energy variation.
+Young wall-energy variation. (Superseded by decision D4: the Young term is now the
+only prescribed-angle mechanism, and wall-aware maintenance only rescales
+contact cells.)
 
 Focused serial tests cover sign and orientation reversals, both liquid-side
 conventions, the two surface-tension forms, velocity and level-set
@@ -263,6 +265,13 @@ tangent and wall normal. The affine target
 accepted contact point and enforces the target angle in two and three
 dimensions. Positive rescaling of the incoming level set does not change
 the prescribed result.
+
+**Superseded (decision D4, 2026-09-29).** Production maintenance no longer
+uses this repair. Prescribed-angle contact cells are rescaled like dynamic
+ones (`PreserveAcceptedAngle`), and the momentum Young term is the only
+contact-angle mechanism. The repair above (`RepairToPrescribedAngle`) is kept
+for verification until milestone M4; see
+`Code/Source/solver/Physics/Docs/NavierStokesFreeSurface.md`.
 
 Distributed repair gathers the complete constraint payload, requires one
 owner for every coefficient and coordinate, rejects mixed snapshot revisions
