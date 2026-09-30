@@ -16639,7 +16639,7 @@ void bindKinematicAreaGradientTractionMaintenance(
     if (curvature_options
             .kinematic_area_gradient_filter_coefficient != 0.0) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Total-energy traction requires Curvature_projection_kinematic_area_gradient_filter_coefficient=0 so the recovered curvature is the exact consistent- or lumped-mass representation of the discrete functional derivative.");
+          "[svMultiPhysics::Application] Total-energy traction requires Curvature_projection_kinematic_area_gradient_filter_coefficient=0 (the default with Curvature_projection_kinematic_area_gradient_mass=Lumped) so the recovered curvature is the exact consistent- or lumped-mass representation of the discrete functional derivative.");
     }
     const auto marker =
         generatedCutContextMarkerForMaintenance(system, request);

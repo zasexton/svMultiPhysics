@@ -956,13 +956,16 @@ resolveLegacyLevelSetMaintenanceConfiguration(
     result->curvature_projection.recovery_mode =
         ls::parseLevelSetCurvatureRecoveryMode(mode->text);
   }
-  apply_real_list(
+  // The filter default depends on the mass mode: Lumped is parameter free
+  // and implies a zero filter, Consistent keeps the FE default. An explicit
+  // nonzero coefficient with Lumped is rejected here instead of at the first
+  // projection.
+  const auto filter_coefficient = reader.real(
       {"Curvature_projection_kinematic_area_gradient_filter_coefficient",
        "CurvatureProjectionKinematicAreaGradientFilterCoefficient",
        "Projected_curvature_kinematic_area_gradient_filter_coefficient",
        "ProjectedCurvatureKinematicAreaGradientFilterCoefficient"},
-      "curvature_projection_kinematic_area_gradient_filter_coefficient",
-      result->curvature_projection.kinematic_area_gradient_filter_coefficient);
+      "curvature_projection_kinematic_area_gradient_filter_coefficient");
   if (const auto mass = reader.string(
           {"Curvature_projection_kinematic_area_gradient_mass",
            "CurvatureProjectionKinematicAreaGradientMass",
@@ -971,6 +974,34 @@ resolveLegacyLevelSetMaintenanceConfiguration(
           "curvature_projection_kinematic_area_gradient_mass")) {
     result->curvature_projection.kinematic_area_gradient_mass =
         ls::parseLevelSetKinematicAreaGradientMass(mass->text);
+  }
+  {
+    const auto mass = result->curvature_projection.kinematic_area_gradient_mass;
+    const auto mass_default =
+        ls::levelSetKinematicAreaGradientDefaultFilterCoefficient(mass);
+    auto &coefficient =
+        result->curvature_projection.kinematic_area_gradient_filter_coefficient;
+    if (filter_coefficient.has_value()) {
+      coefficient = *filter_coefficient;
+      if (mass == ls::LevelSetKinematicAreaGradientMass::Lumped &&
+          coefficient != mass_default) {
+        throw std::invalid_argument(
+            "[svMultiPhysics::Application] "
+            "Curvature_projection_kinematic_area_gradient_mass=Lumped is "
+            "parameter free and implies a zero "
+            "Curvature_projection_kinematic_area_gradient_filter_coefficient; "
+            "omit the filter coefficient or set it to 0.");
+      }
+    } else {
+      coefficient = mass_default;
+      if (mass == ls::LevelSetKinematicAreaGradientMass::Lumped) {
+        append_equation_observations();
+        appendDerivedObservation(
+            result->input_observations,
+            "curvature_projection_kinematic_area_gradient_filter_coefficient",
+            "derived:curvature_projection_kinematic_area_gradient_mass");
+      }
+    }
   }
   apply_real_list({"Curvature_projection_narrow_band_width",
                    "CurvatureProjectionNarrowBandWidth",

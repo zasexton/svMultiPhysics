@@ -66,6 +66,16 @@ enum class LevelSetKinematicAreaGradientMass : std::uint8_t {
 [[nodiscard]] LevelSetKinematicAreaGradientMass
 parseLevelSetKinematicAreaGradientMass(std::string_view value);
 
+// Filter coefficient that a mass mode takes when the caller supplies none:
+// 1 for Consistent and 0 for Lumped, which is parameter free. An explicit
+// nonzero coefficient with Lumped is rejected, never ignored.
+[[nodiscard]] constexpr Real levelSetKinematicAreaGradientDefaultFilterCoefficient(
+    LevelSetKinematicAreaGradientMass mass) noexcept
+{
+    return mass == LevelSetKinematicAreaGradientMass::Lumped ? Real{0.0}
+                                                             : Real{1.0};
+}
+
 struct LevelSetKinematicAreaGradientYoungWall {
     int boundary_marker{-1};
     Real equilibrium_contact_angle_radians{0.0};
@@ -90,9 +100,14 @@ struct LevelSetCurvatureProjectionOptions {
     // ell_h = c_l sqrt(h_Gamma R_Gamma), where h_Gamma is the mean active
     // graph-edge length and R_Gamma is the equal-measure circle/sphere radius.
     // It is ignored by the other recovery modes; zero disables regularization.
-    Real kinematic_area_gradient_filter_coefficient{1.0};
+    // The initializer is the Consistent default. A caller that selects Lumped
+    // without a coefficient of its own sets
+    // levelSetKinematicAreaGradientDefaultFilterCoefficient(Lumped), i.e. 0.
+    Real kinematic_area_gradient_filter_coefficient{
+        levelSetKinematicAreaGradientDefaultFilterCoefficient(
+            LevelSetKinematicAreaGradientMass::Consistent)};
     // Lumped mass requires kinematic-area-gradient recovery and a zero
-    // filter coefficient.
+    // filter coefficient; a nonzero coefficient is rejected.
     LevelSetKinematicAreaGradientMass kinematic_area_gradient_mass{
         LevelSetKinematicAreaGradientMass::Consistent};
     bool kinematic_area_gradient_negative_liquid_side{true};

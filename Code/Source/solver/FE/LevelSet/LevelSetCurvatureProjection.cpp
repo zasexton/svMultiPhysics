@@ -4540,10 +4540,13 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
                 throw std::invalid_argument(
                     "lumped kinematic-area-gradient mass requires kinematic-area-gradient curvature recovery");
             }
+            // Lumped implies a zero filter coefficient (its default); an
+            // explicit nonzero coefficient is rejected, never ignored.
             if (options.kinematic_area_gradient_filter_coefficient !=
-                Real{0.0}) {
+                levelSetKinematicAreaGradientDefaultFilterCoefficient(
+                    LevelSetKinematicAreaGradientMass::Lumped)) {
                 throw std::invalid_argument(
-                    "lumped kinematic-area-gradient mass is parameter free and requires a zero filter coefficient");
+                    "lumped kinematic-area-gradient mass is parameter free: its filter coefficient defaults to zero and a nonzero one is rejected");
             }
             break;
         default:
@@ -5403,10 +5406,13 @@ void validateAuthoritativeDerivativeBinding(
         LevelSetCurvatureRecoveryMode::KinematicAreaGradient) {
         throw std::invalid_argument("authoritative_recovery_mode_unsupported");
     }
+    // Same rule as the unbound path: Lumped only with its zero default.
     const bool parameter_free_lumped_mass =
         options.kinematic_area_gradient_mass ==
             LevelSetKinematicAreaGradientMass::Lumped &&
-        options.kinematic_area_gradient_filter_coefficient == Real{0.0};
+        options.kinematic_area_gradient_filter_coefficient ==
+            levelSetKinematicAreaGradientDefaultFilterCoefficient(
+                LevelSetKinematicAreaGradientMass::Lumped);
     if (options.kinematic_area_gradient_mass !=
             LevelSetKinematicAreaGradientMass::Consistent &&
         !parameter_free_lumped_mass) {
