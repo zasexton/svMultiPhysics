@@ -4732,6 +4732,13 @@ struct ActiveCutContextRefreshReport {
 // passes a vertex between the stage and the endpoint.  Such an endpoint is
 // accepted and becomes the committed topology of the next step; observations
 // after the endpoint refresh only have to be self-consistent.
+//
+// When an outer refresh returns to an epoch already visited in the attempt,
+// the fixed point alternates across a nonsmooth switching surface (a
+// level-set value at a vertex whose sign flips with the topology it was
+// solved in).  The solve then finishes on that frozen epoch
+// (acknowledgeFrozenEpoch), and the candidate is accepted although its
+// regenerated topology lies on the other side; the next step starts there.
 class TransientCutTopologyAttemptTracker {
 public:
   void beginAttempt() noexcept
@@ -4740,7 +4747,12 @@ public:
     attempt_tainted_ = false;
     final_candidate_observed_ = false;
     endpoint_phase_ = false;
+    frozen_epoch_ = false;
     attempt_topology_key_ = accepted_topology_key_;
+    visited_epochs_.clear();
+    if (accepted_topology_key_.has_value()) {
+      visited_epochs_.push_back(*accepted_topology_key_);
+    }
     last_observed_topology_key_.reset();
     first_mismatched_topology_key_.reset();
     first_mismatch_provenance_size_ = 0u;
@@ -4768,7 +4780,8 @@ public:
     if (normalized_provenance == "endpoint_candidate") {
       endpoint_phase_ = true;
     }
-    if (endpoint_phase_ && accepted_topology_key_.has_value()) {
+    if ((endpoint_phase_ || frozen_epoch_) &&
+        accepted_topology_key_.has_value()) {
       if (report.topology_key == 0u) {
         taint(report.topology_key, normalized_provenance);
       }
@@ -4780,6 +4793,7 @@ public:
           report.topology_key != 0u) {
         accepted_topology_key_ = report.topology_key;
         attempt_topology_key_ = report.topology_key;
+        visited_epochs_.assign(1u, report.topology_key);
         return;
       }
       taint(report.topology_key, normalized_provenance);
@@ -4804,6 +4818,32 @@ public:
     attempt_topology_key_ = last_observed_topology_key_;
     attempt_tainted_ = false;
     final_candidate_observed_ = false;
+    if (std::find(visited_epochs_.begin(),
+                  visited_epochs_.end(),
+                  *attempt_topology_key_) == visited_epochs_.end()) {
+      visited_epochs_.push_back(*attempt_topology_key_);
+    }
+  }
+
+  // True when the latest refresh left the attempt epoch for a topology that
+  // already served as an epoch of this attempt.
+  [[nodiscard]] bool revisitPending() const noexcept
+  {
+    return attempt_active_ && attempt_tainted_ &&
+           last_observed_topology_key_.has_value() &&
+           *last_observed_topology_key_ != 0u &&
+           std::find(visited_epochs_.begin(),
+                     visited_epochs_.end(),
+                     *last_observed_topology_key_) != visited_epochs_.end();
+  }
+
+  void acknowledgeFrozenEpoch()
+  {
+    if (!attempt_active_ || attempt_tainted_) {
+      throw std::logic_error(
+          "[svMultiPhysics::Application] A transient cut-topology frozen epoch was acknowledged outside a consistent attempt.");
+    }
+    frozen_epoch_ = true;
   }
 
   void requireAcceptedBaseline() const
@@ -4832,9 +4872,11 @@ public:
       return true;
     }
     // A solved-state scheme (backward Euler) accepts exactly the state whose
-    // topology the solve converged in.  A stage scheme may finalize its
-    // endpoint in a new topology (see the class comment).
-    return !endpoint_phase_ && *cached_topology_key != *attempt_topology_key_;
+    // topology the solve converged in, unless the solve finished on a frozen
+    // epoch after a cycle.  A stage scheme may finalize its endpoint in a new
+    // topology (see the class comment).
+    return !endpoint_phase_ && !frozen_epoch_ &&
+           *cached_topology_key != *attempt_topology_key_;
   }
 
   void completeAttempt(
@@ -4862,6 +4904,11 @@ public:
   [[nodiscard]] bool endpointPhase() const noexcept
   {
     return endpoint_phase_;
+  }
+
+  [[nodiscard]] bool frozenEpoch() const noexcept
+  {
+    return frozen_epoch_;
   }
 
   [[nodiscard]] const std::optional<std::uint64_t>&
@@ -4927,6 +4974,8 @@ private:
   bool attempt_tainted_{false};
   bool final_candidate_observed_{false};
   bool endpoint_phase_{false};
+  bool frozen_epoch_{false};
+  std::vector<std::uint64_t> visited_epochs_{};
 };
 
 struct WetVolumeDiagnostic {
@@ -29769,6 +29818,26 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                      .value_or(0u)
               << " action=continue_on_refreshed_epoch"
               << std::endl;
+        };
+    opts.newton.external_state_epoch_revisited =
+        [cut_topology_attempt_tracker](TransientStateSyncPoint point) {
+          return point ==
+                     TransientStateSyncPoint::OuterFixedPointState &&
+                 cut_topology_attempt_tracker->revisitPending();
+        };
+    opts.newton.acknowledge_external_state_frozen_epoch =
+        [cut_topology_attempt_tracker]() {
+          cut_topology_attempt_tracker->acknowledgeFrozenEpoch();
+          oopCout()
+              << "[svMultiPhysics::Application] Transient cut-topology cycle"
+              << " diagnostic=cut_topology_cycle"
+              << " committed_topology_key="
+              << cut_topology_attempt_tracker->acceptedTopologyKey()
+                     .value_or(0u)
+              << " frozen_attempt_topology_key="
+              << cut_topology_attempt_tracker->attemptTopologyKey()
+                     .value_or(0u)
+              << " action=accept_on_frozen_epoch" << std::endl;
         };
   }
   callbacks.on_before_physics_solve =
