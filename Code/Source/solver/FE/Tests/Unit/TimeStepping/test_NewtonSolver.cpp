@@ -3724,6 +3724,108 @@ TEST(NewtonSolverExternalStateFixedPoint,
 }
 
 TEST(NewtonSolverExternalStateFixedPoint,
+     RevisitedExternalStateEpochFinishesOnTheFrozenEpoch)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    // A generated state that switches at u = 0.75 has no self-consistent
+    // fixed point: measure 2 gives u = 0.5 (measure 1) and measure 1 gives
+    // u = 1 (measure 2).  The owner reports the return to a visited epoch;
+    // the solver finishes on that frozen epoch and accepts its converged
+    // state.  Without the revisit hook the same problem exhausts the outer
+    // iteration limit.
+    for (const bool report_revisits : {true, false}) {
+        SCOPED_TRACE(report_revisits);
+        double generated_measure = 1.0;
+        auto problem = makeRefreshedGeometryRootProblem(
+            /*target=*/1.0,
+            /*dt=*/0.1,
+            /*u0=*/{2.0},
+            &generated_measure);
+
+        using SyncPoint =
+            svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+        double epoch = 0.0;
+        std::vector<double> visited;
+        int frozen_acknowledgments = 0;
+
+        svmp::FE::timestepping::NewtonOptions options;
+        options.residual_op = "op";
+        options.jacobian_op = "op";
+        options.max_iterations = 3;
+        options.abs_tolerance = 1e-13;
+        options.rel_tolerance = 0.0;
+        options.use_line_search = false;
+        options.external_state_fixed_point.enabled = true;
+        options.external_state_fixed_point.max_iterations = 6;
+        options.external_state_fixed_point.max_discontinuity_restarts = 6;
+        options.synchronize_state =
+            [&](const svmp::FE::systems::SystemStateView& state,
+                SyncPoint) {
+                ASSERT_FALSE(state.u.empty());
+                const auto u = static_cast<double>(state.u.front());
+                generated_measure = u > 0.75 ? 2.0 : 1.0;
+            };
+        options.external_state_discontinuity = [&](SyncPoint) {
+            if (visited.empty()) {
+                // The canonicalized entry defines the first epoch.
+                epoch = generated_measure;
+                visited.push_back(epoch);
+                return false;
+            }
+            return generated_measure != epoch;
+        };
+        options.acknowledge_external_state_discontinuity = [&](SyncPoint) {
+            epoch = generated_measure;
+            if (std::find(visited.begin(), visited.end(), epoch) ==
+                visited.end()) {
+                visited.push_back(epoch);
+            }
+        };
+        if (report_revisits) {
+            options.external_state_epoch_revisited = [&](SyncPoint) {
+                return std::find(visited.begin(),
+                                 visited.end(),
+                                 generated_measure) != visited.end();
+            };
+            options.acknowledge_external_state_frozen_epoch = [&]() {
+                ++frozen_acknowledgments;
+            };
+        }
+
+        svmp::FE::timestepping::NewtonSolver newton(options);
+        svmp::FE::timestepping::NewtonWorkspace workspace;
+        newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+        problem.history.repack(*problem.factory);
+
+        const auto report = newton.solveStep(
+            *problem.transient,
+            *problem.linear,
+            /*solve_time=*/problem.history.dt(),
+            problem.history,
+            workspace);
+
+        if (report_revisits) {
+            EXPECT_TRUE(report.converged);
+            EXPECT_TRUE(report.external_state_cycle_frozen_epoch);
+            EXPECT_EQ(frozen_acknowledgments, 1);
+            EXPECT_EQ(report.outer_iterations, 3);
+            // Epochs 2 (u = 2), 1 (u = 0.5), then back to 2: the state is
+            // the converged solution of the frozen measure-2 problem.
+            EXPECT_DOUBLE_EQ(epoch, 2.0);
+            EXPECT_NEAR(
+                scalarFromDofVector(problem.history.u()), 0.5, 1e-13);
+        } else {
+            EXPECT_FALSE(report.converged);
+            EXPECT_FALSE(report.external_state_cycle_frozen_epoch);
+            EXPECT_EQ(report.outer_iterations, 6);
+        }
+    }
+}
+
+TEST(NewtonSolverExternalStateFixedPoint,
      ExternalStateDiscontinuityStopsBeforeRefreshedInnerSolveAndRestores)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN

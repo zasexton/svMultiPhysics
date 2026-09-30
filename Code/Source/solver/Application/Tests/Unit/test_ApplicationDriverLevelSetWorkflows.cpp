@@ -5822,6 +5822,58 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
+     TransientCutTopologyCycleFinishesOnFrozenEpoch)
+{
+  // The outer fixed point alternates A -> B -> A across a switching
+  // surface.  The return to A is reported as a revisit; after the frozen
+  // epoch is acknowledged the candidate is accepted although its gate
+  // topology is B, and B becomes the committed topology.
+  constexpr std::uint64_t a_key = 0x7a01u;
+  constexpr std::uint64_t b_key = 0x7a02u;
+  const auto report = [](std::uint64_t topology_key) {
+    ActiveCutContextRefreshReport result;
+    result.topology_key = topology_key;
+    return result;
+  };
+
+  TransientCutTopologyAttemptTracker tracker;
+  tracker.beginAttempt();
+  tracker.observe(report(a_key), "before_physics_solve");
+  tracker.observe(report(a_key), "outer_fixed_point");
+  EXPECT_FALSE(tracker.revisitPending());
+  tracker.observe(report(b_key), "outer_fixed_point");
+  EXPECT_TRUE(tracker.attemptTainted());
+  EXPECT_FALSE(tracker.revisitPending());
+  ASSERT_NO_THROW(tracker.acknowledgeNonlinearRestart());
+  tracker.observe(report(a_key), "outer_fixed_point");
+  EXPECT_TRUE(tracker.revisitPending());
+  ASSERT_NO_THROW(tracker.acknowledgeNonlinearRestart());
+  EXPECT_FALSE(tracker.revisitPending());
+  EXPECT_EQ(*tracker.attemptTopologyKey(), a_key);
+  ASSERT_NO_THROW(tracker.acknowledgeFrozenEpoch());
+  EXPECT_TRUE(tracker.frozenEpoch());
+  tracker.observe(report(b_key), "final_candidate_topology_gate");
+  EXPECT_FALSE(tracker.attemptTainted());
+  EXPECT_FALSE(tracker.candidateMustReject(b_key));
+  ASSERT_NO_THROW(tracker.completeAttempt(b_key));
+  EXPECT_EQ(*tracker.acceptedTopologyKey(), b_key);
+
+  // The frozen state does not carry over to the next attempt.
+  tracker.beginAttempt();
+  EXPECT_FALSE(tracker.frozenEpoch());
+  tracker.observe(report(b_key), "before_physics_solve");
+  tracker.observe(report(a_key), "final_candidate_topology_gate");
+  EXPECT_TRUE(tracker.candidateMustReject(a_key));
+
+  // A frozen epoch cannot be acknowledged on a tainted attempt.
+  TransientCutTopologyAttemptTracker tainted;
+  tainted.beginAttempt();
+  tainted.observe(report(a_key), "before_physics_solve");
+  tainted.observe(report(b_key), "outer_fixed_point");
+  EXPECT_THROW(tainted.acknowledgeFrozenEpoch(), std::logic_error);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
      TransientCutTopologyRestartAdvancesAttemptEpochOnlyAtCommit)
 {
   constexpr std::uint64_t accepted_key = 0x51a7u;

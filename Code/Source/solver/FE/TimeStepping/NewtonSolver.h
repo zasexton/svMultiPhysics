@@ -303,6 +303,31 @@ struct NewtonOptions {
     std::function<void(StateSynchronizationPoint)>
         acknowledge_external_state_discontinuity{};
 
+    /**
+     * @brief Detect a return to an epoch already visited in this attempt.
+     *
+     * Invoked after a collective discontinuity decision at a later outer
+     * refresh.  A true result (combined across ranks) means the outer fixed
+     * point alternates across a nonsmooth switching surface, for example a
+     * level-set value at a mesh vertex whose sign flips with the topology it
+     * was solved in.  No self-consistent epoch exists then.  The solver
+     * acknowledges the revisited epoch, solves the frozen problem on it to
+     * the usual inner tolerances, and accepts that state without a further
+     * refresh (NewtonReport::external_state_cycle_frozen_epoch).  Without the
+     * hook the fixed point keeps refreshing until the outer iteration limit.
+     */
+    std::function<bool(StateSynchronizationPoint)>
+        external_state_epoch_revisited{};
+
+    /**
+     * @brief Notify the owner that the attempt finishes on a frozen epoch.
+     *
+     * Runs on every active rank after the frozen inner solve converged and
+     * before the solver returns, so the owner can accept a candidate whose
+     * regenerated state differs from the epoch it was solved in.
+     */
+    std::function<void()> acknowledge_external_state_frozen_epoch{};
+
     // Set when synchronize_state can change residual-defining external state
     // (for example generated cut geometry, projected curvature, affine
     // constraints, transient MPC histories, or an extended advection
@@ -373,6 +398,9 @@ struct NewtonReport {
     // True when the initial canonicalization adopted the epoch of the entry
     // state (see ExternalStateFixedPointOptions::max_discontinuity_restarts).
     bool external_state_initial_epoch_adopted{false};
+    // True when the outer fixed point revisited an epoch and the step was
+    // solved on that frozen epoch (see external_state_epoch_revisited).
+    bool external_state_cycle_frozen_epoch{false};
     int iterations{0};
     int outer_iterations{0};
     int inner_iterations_total{0};

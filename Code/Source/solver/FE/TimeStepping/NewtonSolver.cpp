@@ -12200,6 +12200,13 @@ NewtonReport NewtonSolver::solveStep(
             }
             return anyRank(options_.external_state_discontinuity(point));
         };
+    auto externalStateEpochRevisited =
+        [&, this](NewtonOptions::StateSynchronizationPoint point) {
+            if (!options_.external_state_epoch_revisited) {
+                return false;
+            }
+            return anyRank(options_.external_state_epoch_revisited(point));
+        };
 
     auto restoreEntryHistoryAndRates = [&]() {
         FE_THROW_IF(
@@ -12412,6 +12419,8 @@ NewtonReport NewtonSolver::solveStep(
     inner_options.synchronize_state = {};
     inner_options.external_state_discontinuity = {};
     inner_options.acknowledge_external_state_discontinuity = {};
+    inner_options.external_state_epoch_revisited = {};
+    inner_options.acknowledge_external_state_frozen_epoch = {};
     inner_options.accepted_state_sync_invalidates_residual = false;
     inner_options.min_iterations = 0;
     inner_options.rel_tolerance = 0.0;
@@ -12437,6 +12446,7 @@ NewtonReport NewtonSolver::solveStep(
     int accepted_line_search_refresh_skips_total = 0;
     int external_state_discontinuity_restarts = 0;
     bool initial_epoch_adopted = false;
+    bool finish_on_frozen_epoch = false;
     auto stopForExternalStateDiscontinuity =
         [&](int outer_iteration) -> NewtonReport {
         aggregate.converged = false;
@@ -12669,6 +12679,13 @@ NewtonReport NewtonSolver::solveStep(
                             .max_discontinuity_restarts) {
                         return stopForExternalStateDiscontinuity(outer + 1);
                     }
+                    // A return to an epoch already visited in this attempt
+                    // means the fixed point alternates across a switching
+                    // surface.  Finish on the revisited epoch (see
+                    // NewtonOptions::external_state_epoch_revisited).
+                    finish_on_frozen_epoch = externalStateEpochRevisited(
+                        NewtonOptions::StateSynchronizationPoint::
+                            OuterFixedPointState);
                     ++external_state_discontinuity_restarts;
                     discontinuity_restart_consumed = true;
                     if (options_
@@ -12879,6 +12896,42 @@ NewtonReport NewtonSolver::solveStep(
                     traceLog(oss.str());
                 }
                 restoreEntryState();
+                return aggregate;
+            }
+
+            if (finish_on_frozen_epoch) {
+                // The inner solve converged on the revisited, frozen epoch.
+                // A further refresh would switch the epoch again, so accept
+                // this state; its regenerated state belongs to the other
+                // side of the switching surface and is picked up by the next
+                // step.
+                if (!applyDeferredFreeSurfaceDistanceGates(
+                        aggregate, outer + 1)) {
+                    aggregate.converged = false;
+                    restoreEntryState();
+                    return aggregate;
+                }
+                if (options_.acknowledge_external_state_frozen_epoch) {
+                    options_.acknowledge_external_state_frozen_epoch();
+                }
+                if (activeSystemRank(system) == 0) {
+                    std::ostringstream oss;
+                    oss << std::setprecision(17)
+                        << "NewtonSolver: external-state fixed point accepted"
+                        << " diagnostic=outer_fixed_point_accept"
+                        << " outer_iterations=" << (outer + 1)
+                        << " inner_iterations_total=" << inner_iterations_total
+                        << " fresh_residual=" << inner_report.residual_norm
+                        << " frozen_epoch_after_cycle=1"
+                        << " restarts=" << external_state_discontinuity_restarts;
+                    FE_LOG_INFO(oss.str());
+                }
+                aggregate.converged = true;
+                aggregate.external_state_cycle_frozen_epoch = true;
+                if (inner_iterations_total > 0 &&
+                    aggregate.linear.iterations == 0) {
+                    aggregate.linear = last_nontrivial_linear;
+                }
                 return aggregate;
             }
 
