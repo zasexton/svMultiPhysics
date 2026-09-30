@@ -1,0 +1,49 @@
+{
+  "benchmark": "linear_sloshing_2d",
+  "milestone": "M1",
+  "fixed_on": "2026-09-29, before the first protocol run",
+  "levels": {
+    "cells_per_length": [16, 32, 64]
+  },
+  "protocol": {
+    "mean_depth": 0.5078125,
+    "amplitude": 0.005,
+    "kinematic_viscosity": 0.0005,
+    "run_length": "4 inviscid periods",
+    "time_step": "dt = T0 / (2 L/h): 32, 64 and 128 steps per period at L/h = 16, 32, 64 (time step refined with the mesh)",
+    "note": "The three runs form one refinement study. Definitions and the reference solution are in README.md."
+  },
+  "criteria": [
+    {
+      "id": "frequency",
+      "quantity": "frequency_relative_error",
+      "definition": "|omega - omega_ref| / omega_ref. omega is fitted to the free-surface elevation history at the left-wall probe (x = 0) with eta(t) = c + exp(-gamma t) (a cos(omega t) + b sin(omega t)) over all outputs; omega_ref = Im(s) of the linear viscous standing wave with free-slip walls (README.md).",
+      "limit": 0.01,
+      "at_level": 64,
+      "monotone": "strictly_decreasing",
+      "monotone_levels": [16, 32, 64],
+      "minimum_observed_order": 1.0,
+      "order_levels": [16, 32, 64],
+      "order_method": "least-squares slope of log(error) against log(L/h) over order_levels; pairwise orders are reported",
+      "source": "Tracker section 5, M1 working criterion: frequency error <= 1% at the finest mesh with observed convergence. 'Observed convergence' is read as a strictly decreasing error with an observed order of at least 1, the reading used for M2 in static_drop_2d; the expected order is 2."
+    },
+    {
+      "id": "damping",
+      "quantity": "damping_rate_relative_error",
+      "definition": "|gamma - gamma_ref| / gamma_ref, gamma from the same fit and gamma_ref = -Re(s) of the linear viscous standing wave (README.md). The Lamb estimate 2 nu k^2 is reported beside it.",
+      "limit": null,
+      "at_level": "each",
+      "report_order": true,
+      "order_levels": [16, 32, 64],
+      "source": "Reported only. The tracker (section 5, M1) asks for a comparison of the damping with linear theory but sets no limit."
+    },
+    {
+      "id": "volume_drift",
+      "quantity": "liquid_area_relative_drift_max",
+      "definition": "max over all outputs of |A(t) - A(0)| / A(0), A the exact area of {phi_h < 0} and A(0) that of the sampled initial level set in mesh/mesh-complete.mesh.vtu",
+      "limit": 0.0001,
+      "at_level": "each",
+      "source": "Tracker section 5, M1 working criterion: volume drift <= 1e-4 over the run"
+    }
+  ]
+}
