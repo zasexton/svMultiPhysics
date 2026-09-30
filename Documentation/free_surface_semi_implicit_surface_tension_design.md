@@ -1,6 +1,6 @@
 # Semi-implicit surface tension for the unfitted level-set free surface (design note)
 
-**Status:** proposal, 2026-09-29. No code has been changed.
+**Status:** proposal, 2026-09-29; step-0 measurements added 2026-09-30 (§1.1). No code has been changed.
 **Base:** `origin/issue-449-modern-mesh-core` at `bfb3d53c`.
 **Scope:** tracker §3.6, §5 M2 ("Time step" and the per-step cost item), §6.1. The design must respect D1–D8 and principle P1.
 *Model* marks results of the single-mode analysis in §1. *(Unverified)* marks claims not yet checked against the original source.
@@ -15,7 +15,7 @@
 - **Forms:** the term can be written with the current vocabulary. A reference-velocity field and its refresh hook are missing.
 - **KAG stays explicit in geometry.**
 - **No tunable parameter** is introduced.
-- **Measure first.** At La = 12 the model says viscosity already allows 3–7 times the current Δt.
+- **Measured (§1.1).** The per-pass contraction follows the form of (1) but is 4–12 times smaller than the model predicts. At La = 12 the outer loop converges up to 10–14 times `Δt_B`, and `2Δt_B` works with the current settings. At La ≥ 120 the loop limit is 3–6 times `Δt_B`, so (4) matters most there.
 
 ## 1. The limit and the step counts it forces
 
@@ -58,7 +58,7 @@ The table uses the `static_drop_2d` settings: ρ = γ = R = 1, μ = sqrt(2/La), 
 
 The benchmark README rounds the La = 12 row to 1,000 / 2,800 / 7,900 / 22,300 steps.
 
-The R/h = 8 smoke run needed 9–10 passes per step. That matches `ρ_c ≈ 0.33` with the absolute 1e-10 gate. It is consistent with the model but does not prove it.
+The R/h = 8 smoke run needed 9–10 passes per step. The measured contraction factor at that point is 0.065, not the model's 0.33 (§1.1).
 
 **Model caveats:**
 
@@ -66,6 +66,40 @@ The R/h = 8 smoke run needed 9–10 passes per step. That matches `ρ_c ≈ 0.33
 - it does not represent sliver cuts or P1 interpolation.
 
 **Capillary wave.** At `Δt_B` a run needs `sqrt(2)(λ/h)^{3/2}` steps per period: 91, 256 and 724 at λ/h = 16, 32 and 64. At low Ohnesorge number viscosity does not relax this.
+
+### 1.1 Measured contraction (step 0, 2026-09-30)
+
+**Setup:**
+
+- `static_drop_2d` with `surface_stress`, 10 steps per case;
+- baseline binary `fef0d02f`, Slurm jobs `46075447` and `46076505`;
+- runs and scripts under `/scratch/users/zsexton/free-surface-benchmarks/static_drop_2d/step0/`.
+
+**Measurement.** `ρ` is the median ratio of successive fresh-pass residuals, skipping the first pass. Each cell of the table gives `ρ` and, in parentheses, the median passes per step.
+
+- The default is at most 12 passes with an absolute gate of 1e-10.
+- \* marks a case that failed on the 12-pass cap but was accepted 10/10 when rerun with `SVMP_GENERATED_STATE_OUTER_MAX_ITERATIONS=60`.
+- "topo" means that step 0 was rejected with `CutTopologyChanged` while the loop was diverging.
+
+| La | R/h | Δt/Δt_B = 0.5 | 1 | 2 | 4 | 8 | ρ = 1 at (fit) |
+|---:|---:|---|---|---|---|---|---:|
+| 12 | 8 | 0.024 (6) | 0.065 (8) | 0.160 (10) | 0.36 (16)\* | 0.79 (fails at 60) | 10 |
+| 12 | 16 | 0.018 (6) | 0.047 (7) | 0.112 (9) | 0.25 (13)\* | 0.54 (26)\* | 14 |
+| 120 | 8 | 0.034 (7) | 0.113 (9) | 0.34 (16)\* | 0.93 (fails at 60) | 2.1, topo | 4.4 |
+| 120 | 16 | 0.027 (6) | 0.088 (9) | 0.25 (13)\* | 0.68 (40)\* | 1.5, topo | 5.7 |
+| 1200 | 8 | 0.040 (7) | 0.149 (11) | 0.53 (29)\* | 1.6, topo | topo | 2.9 |
+| 1200 | 16 | 0.033 (7) | 0.123 (10) | 0.42 (23)\* | 1.3 (cap) | 3.2, topo | 3.5 |
+
+**Findings:**
+
+- **The form of (1) is confirmed.** The fit `ρ = A r²/(1 + B r)`, with `r = Δt/Δt_B`, reproduces all 29 measured points, converging and diverging, to within about 6%. The fitted values are A = 0.13–0.18 against the model's 2.47, and B ≈ 0.26 times the model's b.
+- **The model is 4–12 times too pessimistic.** Part of the gap is the generalized-α `Δt_eff = 0.533 Δt`, which the backward-Euler model ignores. The rest corresponds to a slowest mode of wavelength about 3h rather than 2h.
+- **γ = 0 controls:**
+  - A static drop needs 1 pass per step.
+  - A drop in rigid translation (u = 0.1) needs 2 passes: the fresh residual drops by about 1e-9 in one pass. The observed 6–12 passes are therefore due entirely to capillary geometry feedback.
+  - The translating drop fails at the first vertex crossing with "external-state discontinuity requires an adaptive step controller". `SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS=4` does not change this. **Any fixed-step run whose interface crosses a vertex ends there.** This is a risk for the multi-day M2 runs.
+- **The La = 12 limit is ρ = 1 at 10–14 times `Δt_B`.** The practical optimum is lower, because passes grow as `log(gate)/log ρ`. Passes per unit simulated time are 7.5, 4.8, 3.5–4 and 3.3 or more at `r` = 1, 2, 4 and 8.
+- **The semi-implicit term (4) matters mainly at La ≥ 120** (ρ = 1 at 3–6 times `Δt_B`) and for the capillary wave.
 
 ## 2. Methods in the literature
 
@@ -251,7 +285,7 @@ Once the loop converges independently of Δt, the remaining limits are:
 
 **Risks:**
 
-1. **The La = 12 premise** may not hold (§1).
+1. **At La = 12 the gain from (4) is limited.** The current loop already converges up to 10–14 times `Δt_B` (§1.1).
 2. **Vertex crossings within large steps** make the fixed-point map nonsmooth, and the loop may cycle (`max_discontinuity_restarts`, step rejection).
 3. **The approximation may be worse than the model** at sliver cuts, and under aggregation and SUPG.
 4. **Conditioning** may suffer from interface stiffness `γΔt_eff` under FSILS GMRES/RCS.
@@ -267,14 +301,14 @@ Once the loop converges independently of Δt, the remaining limits are:
 
 **Recommendation:**
 
-1. **Run step 0 now.** It takes hours and needs no code.
+1. **Step 0 is done (§1.1).** Use `Δt = 2Δt_B` for M2 at La = 12 now. Use `4Δt_B` once the outer gate is scaled or the pass cap is raised.
 2. **If the loop fails near `Δt_B` at La ≥ 120 or at low Ohnesorge number, implement (4) for `SurfaceStress`.** Default the option to off and time-box the work to 3 days (D6).
 3. **Implement neither the literal Bänsch/Hysing term nor a semi-implicit KAG operator.**
-4. **Keep M2 La = 12 at `Δt_B`,** or at a measured `Δt_P`, until (4) is validated.
+4. **Handle vertex crossings before the multi-day M2 runs.** A fixed-step run ends at the first cut-topology change (§1.1). Either add an adaptive step controller or monitor the smallest `|φ|/h`.
 
 **Decisions needed:**
 
 - accept the lagged-increment interpretation;
-- run step 0 before the M2 launch;
+- adopt `Δt = 2Δt_B` (later `4Δt_B`) for M2 at La = 12;
 - after validation, use a fixed physical Δt with a Δt refinement in M2 and M3;
 - decide whether frozen-map support is in scope.
