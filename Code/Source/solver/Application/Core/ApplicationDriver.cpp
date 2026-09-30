@@ -11921,8 +11921,12 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
     std::span<const svmp::FE::Real>
         backward_euler_previous_solution = {},
     std::optional<std::uint64_t>
-        accepted_extension_map_revision = std::nullopt)
+        accepted_extension_map_revision = std::nullopt,
+    bool* backward_euler_kinetic_work_bound = nullptr)
 {
+  if (backward_euler_kinetic_work_bound != nullptr) {
+    *backward_euler_kinetic_work_bound = true;
+  }
   const auto declarations =
       sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
@@ -12009,6 +12013,14 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
       [](const auto& state) {
         return state.backward_euler_kinetic_work.has_value();
       });
+  // The backward-Euler kinetic work of this step is computed from the actual
+  // previous and endpoint solutions.  Binding it to the previously recorded
+  // endpoint is energy-ledger bookkeeping (diagnostic under D1/D6): when the
+  // binding cannot be established (for example after a cut-topology change,
+  // whose new constraints re-project the previous state), the binding is
+  // reported unavailable and the run continues; the caller then treats the
+  // complete energy history as non-contiguous.
+  std::string local_binding_failure;
   if (has_backward_euler_work) {
     if (dt == svmp::FE::Real{0.0}) {
       for (const auto& state : accepted_states) {
@@ -12019,50 +12031,70 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
             *state.backward_euler_kinetic_work;
         if (work.previous_velocity_revision !=
             work.endpoint_velocity_revision) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] A zero-duration backward-Euler kinetic baseline requires identical velocity endpoints.");
+          local_binding_failure =
+              "zero_duration_baseline_with_distinct_velocity_endpoints";
         }
       }
     } else if (existing_history.empty()) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Backward-Euler kinetic work requires a previously accepted free-surface endpoint.");
+      local_binding_failure = "no_previously_accepted_endpoint";
     } else if (accepted_step >
                existing_history.back().accepted_step) {
       if (existing_history.size() < declarations.size()) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Backward-Euler kinetic work cannot bind to incomplete accepted functional history.");
-      }
-      const auto previous_group_begin =
-          existing_history.size() - declarations.size();
-      const auto previous_group_step =
-          existing_history[previous_group_begin].accepted_step;
-      const auto previous_group_time =
-          existing_history[previous_group_begin].accepted_time;
-      for (std::size_t index = 0u;
-           index < accepted_states.size();
-           ++index) {
-        const auto& current =
-            accepted_states[index].backward_euler_kinetic_work;
-        if (!current.has_value()) {
-          continue;
-        }
-        const auto& previous =
-            existing_history[previous_group_begin + index];
-        if (previous.accepted_step != previous_group_step ||
-            previous.accepted_time != previous_group_time ||
-            freeSurfaceDiscreteFunctionalDeclarationContentKey(
-                previous.declaration) !=
-                freeSurfaceDiscreteFunctionalDeclarationContentKey(
-                    declarations[index]) ||
-            !previous.backward_euler_kinetic_work.has_value() ||
-            current->previous_velocity_revision !=
-                previous.backward_euler_kinetic_work
-                    ->endpoint_velocity_revision) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Backward-Euler kinetic work does not bind to one complete latest accepted declaration group and velocity endpoint.");
+        local_binding_failure = "incomplete_accepted_functional_history";
+      } else {
+        const auto previous_group_begin =
+            existing_history.size() - declarations.size();
+        const auto previous_group_step =
+            existing_history[previous_group_begin].accepted_step;
+        const auto previous_group_time =
+            existing_history[previous_group_begin].accepted_time;
+        for (std::size_t index = 0u;
+             index < accepted_states.size();
+             ++index) {
+          const auto& current =
+              accepted_states[index].backward_euler_kinetic_work;
+          if (!current.has_value()) {
+            continue;
+          }
+          const auto& previous =
+              existing_history[previous_group_begin + index];
+          if (previous.accepted_step != previous_group_step ||
+              previous.accepted_time != previous_group_time ||
+              freeSurfaceDiscreteFunctionalDeclarationContentKey(
+                  previous.declaration) !=
+                  freeSurfaceDiscreteFunctionalDeclarationContentKey(
+                      declarations[index])) {
+            local_binding_failure =
+                "latest_accepted_group_not_declaration_aligned";
+          } else if (!previous.backward_euler_kinetic_work.has_value()) {
+            local_binding_failure =
+                "previous_endpoint_without_kinetic_work";
+          } else if (current->previous_velocity_revision !=
+                     previous.backward_euler_kinetic_work
+                         ->endpoint_velocity_revision) {
+            local_binding_failure =
+                "previous_velocity_differs_from_recorded_endpoint";
+          }
         }
       }
     }
+  }
+  const bool binding_available =
+      globalMinDouble(local_binding_failure.empty() ? 1.0 : 0.0, comm) ==
+      1.0;
+  if (backward_euler_kinetic_work_bound != nullptr) {
+    *backward_euler_kinetic_work_bound = binding_available;
+  }
+  if (!binding_available) {
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] Backward-Euler kinetic work"
+        << " diagnostic=backward_euler_kinetic_work_binding"
+        << " status=unavailable"
+        << " accepted_step=" << accepted_step
+        << " reason="
+        << (local_binding_failure.empty() ? "failure_on_another_rank"
+                                          : local_binding_failure)
+        << " action=record_unbound_and_continue" << std::endl;
   }
   const auto* accepted_cut_context =
       sim.fe_system->cutIntegrationContext();
@@ -33163,6 +33195,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             << " complete_energy_record_connected=false"
             << std::endl;
       }
+      bool backward_euler_kinetic_work_bound = true;
       const auto accepted_functional_states =
           recordAcceptedFreeSurfaceDiscreteFunctionals(
               sim,
@@ -33178,7 +33211,14 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               std::span<const svmp::FE::Real>(
                   backward_euler_previous_solution.data(),
                   backward_euler_previous_solution.size()),
-              accepted_functional_extension_map_revision);
+              accepted_functional_extension_map_revision,
+              &backward_euler_kinetic_work_bound);
+      if (!backward_euler_kinetic_work_bound) {
+        // The complete energy ledger cannot telescope across an unbound
+        // kinetic-work record; it reports every later record as lacking a
+        // complete preceding history.
+        free_surface_energy_history_contiguous = false;
+      }
       if (pending_accepted_step_maintenance_energy_account
               .has_value() &&
           pending_accepted_step_maintenance_energy_account
