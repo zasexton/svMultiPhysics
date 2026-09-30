@@ -450,9 +450,10 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
     - The ill-conditioned solve becomes a diagonal division.
     - Implementation: a mass-mode option in the curvature-projection options that bypasses the PCG/LSQR solve.
     - To check: noise in `κ_i` at nodes with very small `m_i`, and its effect on spurious currents.
-    - **Implemented 2026-09-29 on local branch `dev/lumped-kag-mass`** (commits `0e990caf` and `04e911d1`; not yet merged). Worktree: `/scratch/users/zsexton/svmp-dev-lumped-kag/source`.
-      - Option `Curvature_projection_kinematic_area_gradient_mass` = `Consistent` | `Lumped`. Lumped requires filter 0.
-      - Tests: full `test_fe_levelset` 371 passed, 1 declared skip, 0 failed; `test_fe_levelset_mpi` 21/21, with lumped matching serial bitwise on 2 ranks; `test_application` 376/376.
+    - **Implemented and merged 2026-09-30** (commits `cd602301`, `1557d24d`, `41931bf2`).
+      - Option `Curvature_projection_kinematic_area_gradient_mass` = `Consistent` | `Lumped`. With `Lumped` the filter coefficient defaults to 0, and an explicit nonzero value is rejected when the input is read.
+      - After the rebase and the zero-filter default (job `46020877`): `test_fe_levelset` 371 passed + 1 declared skip; `test_fe_levelset_mpi` 21/21; binding 10/10 + MPI 1/1; `test_application` 379/379.
+      - Before the rebase: lumped matched serial bitwise on 2 ranks.
       - Curvature quality on a sampled circle (n = 12/24/48/96):
         - The mass-weighted mean converges at second order, the same as consistent mode.
         - The trace error stays near 5.5% of 1/R and does not converge.
