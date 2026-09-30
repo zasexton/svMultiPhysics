@@ -42,6 +42,17 @@ DEFAULT_SNAPSHOTS = 100                     # VTU outputs per run
 # the one-sided density sum of a free surface (rho_liquid + rho_void = rho):
 #   dt <= sqrt(rho h^3 / (4 pi gamma)) = SAFETY * sqrt(rho h^3 / (2 pi gamma)).
 DT_SAFETY = 1.0 / math.sqrt(2.0)
+# Multiple of that limit dt_B used as the time step, per Laplace number.  The
+# step-0 measurement (tracker, 2026-09-30, jobs 46075447 and 46076505) found
+# that the outer geometry loop accepts 2 dt_B at La = 12 and dt_B at La = 120
+# with its default 12-pass cap.  Other Laplace numbers use dt_B.
+DT_MULTIPLE = {12.0: 2.0, 120.0: 1.0}
+# Level-set advection velocity: the fluid velocity itself (coupled_field) or
+# the PDE extension of it into the dry region (pde_harmonic, pde_normal).
+LEVEL_SET_VELOCITY = ("coupled_field",
+                      "pde_harmonic_monolithic", "pde_harmonic_prescribed",
+                      "pde_normal_monolithic", "pde_normal_prescribed")
+DEFAULT_LEVEL_SET_VELOCITY = "coupled_field"
 MIN_PHI_OVER_H_WARNING = 1.0e-6             # "vertex touch" warning threshold
 LEVEL_SET_FIELD = "phi"
 CURVATURE_FIELD = "kappa"
@@ -59,13 +70,17 @@ def capillary_dt_limit(h: float) -> float:
     return math.sqrt(DENSITY * h ** 3 / (2.0 * math.pi * SURFACE_TENSION))
 
 
+def dt_multiple(laplace: float) -> float:
+    return DT_MULTIPLE.get(float(laplace), 1.0)
+
+
 def time_schedule(level: int, laplace: float, viscous_times: float,
                   snapshots: int) -> dict:
     h = RADIUS / level
     mu = viscosity_from_laplace(laplace)
     viscous_time = DENSITY * RADIUS ** 2 / mu
     end_time = viscous_times * viscous_time
-    dt_max = DT_SAFETY * capillary_dt_limit(h)
+    dt_max = dt_multiple(laplace) * DT_SAFETY * capillary_dt_limit(h)
     cadence = max(1, math.ceil(end_time / (snapshots * dt_max)))
     steps = snapshots * cadence
     return {
@@ -76,6 +91,7 @@ def time_schedule(level: int, laplace: float, viscous_times: float,
         "end_time": end_time,
         "dt_capillary_limit": capillary_dt_limit(h),
         "dt_max": dt_max,
+        "dt_multiple_of_capillary_limit": dt_multiple(laplace),
         "dt": end_time / steps,
         "steps": steps,
         "output_cadence": cadence,
@@ -236,7 +252,22 @@ def fsils_gmres_block() -> str:
     </LS>"""
 
 
-def solver_xml(form: str, schedule: dict, steps: int, cadence: int) -> str:
+def level_set_velocity_block(mode: str) -> str:
+    if mode == "coupled_field":
+        return """    <Velocity_source>coupled_field</Velocity_source>
+    <Velocity_field_name>Velocity</Velocity_field_name>
+    <Auto_register_velocity_field>true</Auto_register_velocity_field>"""
+    method, coupling = mode.rsplit("_", 1)
+    return f"""    <Velocity_source>prescribed_data</Velocity_source>
+    <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
+    <Auto_register_velocity_field>true</Auto_register_velocity_field>
+    <Source_velocity_field_name>Velocity</Source_velocity_field_name>
+    <Advection_velocity_extension_method>{method}</Advection_velocity_extension_method>
+    <Advection_velocity_extension_coupling>{coupling}</Advection_velocity_extension_coupling>"""
+
+
+def solver_xml(form: str, schedule: dict, steps: int, cadence: int,
+               level_set_velocity: str = DEFAULT_LEVEL_SET_VELOCITY) -> str:
     kag = form in ("kag_consistent", "kag_lumped")
     curvature_projection = ""
     if kag:
@@ -295,9 +326,7 @@ def solver_xml(form: str, schedule: dict, steps: int, cadence: int) -> str:
     <Level_set_field_name>{LEVEL_SET_FIELD}</Level_set_field_name>
     <Operator_tag>equations</Operator_tag>
     <Level_set_source>prescribed_data</Level_set_source>
-    <Velocity_source>coupled_field</Velocity_source>
-    <Velocity_field_name>Velocity</Velocity_field_name>
-    <Auto_register_velocity_field>true</Auto_register_velocity_field>
+{level_set_velocity_block(level_set_velocity)}
     <Enable_SUPG>true</Enable_SUPG>
     <SUPG_tau_scale>0.5</SUPG_tau_scale>
     <SUPG_transient_scale>2.0</SUPG_transient_scale>
@@ -366,7 +395,10 @@ def solver_xml(form: str, schedule: dict, steps: int, cadence: int) -> str:
 def generate(level: int, form: str, laplace: float, output_dir: Path, *,
              viscous_times: float = DEFAULT_VISCOUS_TIMES,
              snapshots: int = DEFAULT_SNAPSHOTS,
+             level_set_velocity: str = DEFAULT_LEVEL_SET_VELOCITY,
              max_steps: int | None = None, force: bool = False) -> dict:
+    if level_set_velocity not in LEVEL_SET_VELOCITY:
+        raise ValueError(f"--level-set-velocity must be one of {LEVEL_SET_VELOCITY}")
     if level not in LEVELS:
         raise ValueError(f"--level must be one of {LEVELS}")
     if form not in CAPILLARY_FORMS:
@@ -411,7 +443,8 @@ def generate(level: int, form: str, laplace: float, output_dir: Path, *,
     for wall in WALLS:
         node_ids, parents = faces[wall]
         write_face_vtp(mesh_dir / "mesh-surfaces" / f"{wall}.vtp", points, node_ids, parents)
-    (output_dir / "solver.xml").write_text(solver_xml(form, schedule, steps, cadence),
+    (output_dir / "solver.xml").write_text(solver_xml(form, schedule, steps, cadence,
+                                                      level_set_velocity),
                                            encoding="utf-8")
 
     case = {
@@ -443,6 +476,8 @@ def generate(level: int, form: str, laplace: float, output_dir: Path, *,
         "end_time_protocol": schedule["end_time"],
         "dt_capillary_limit": schedule["dt_capillary_limit"],
         "dt_safety_factor": DT_SAFETY,
+        "dt_multiple_of_capillary_limit": schedule["dt_multiple_of_capillary_limit"],
+        "level_set_velocity": level_set_velocity,
         "dt": schedule["dt"],
         "steps_protocol": schedule["steps"],
         "steps": steps,
@@ -472,15 +507,21 @@ def main(argv=None) -> int:
     parser.add_argument("--max-steps", type=int, default=None,
                         help="smoke runs only: stop after this many steps; the case is "
                              "marked truncated and verify.py rejects it for acceptance")
+    parser.add_argument("--level-set-velocity", choices=LEVEL_SET_VELOCITY,
+                        default=DEFAULT_LEVEL_SET_VELOCITY,
+                        help=f"level-set advection velocity (protocol value "
+                             f"{DEFAULT_LEVEL_SET_VELOCITY})")
     parser.add_argument("--force", action="store_true", help="allow a non-empty output dir")
     args = parser.parse_args(argv)
 
     case = generate(args.level, args.capillary_form, args.laplace_number, args.output_dir,
                     viscous_times=args.viscous_times, snapshots=args.snapshots,
+                    level_set_velocity=args.level_set_velocity,
                     max_steps=args.max_steps, force=args.force)
     print(f"wrote {args.output_dir}")
     for key in ("level_R_over_h", "capillary_form", "laplace_number", "viscosity",
-                "viscous_time", "end_time", "dt", "dt_capillary_limit", "steps",
+                "viscous_time", "end_time", "dt", "dt_capillary_limit",
+                "dt_multiple_of_capillary_limit", "level_set_velocity", "steps",
                 "output_cadence", "n_vertices", "n_triangles", "min_abs_phi_over_h",
                 "wall_gap_over_h", "truncated"):
         print(f"  {key} = {case[key]}")

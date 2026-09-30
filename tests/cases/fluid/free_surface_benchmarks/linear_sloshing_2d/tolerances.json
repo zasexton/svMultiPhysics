@@ -1,7 +1,7 @@
 {
   "benchmark": "linear_sloshing_2d",
   "milestone": "M1",
-  "fixed_on": "2026-09-29, before the first protocol run",
+  "fixed_on": "2026-09-29; revised 2026-09-30 for decisions D9 to D12 before the first run of the revised protocol",
   "levels": {
     "cells_per_length": [16, 32, 64]
   },
@@ -10,14 +10,23 @@
     "amplitude": 0.005,
     "kinematic_viscosity": 0.0005,
     "run_length": "4 inviscid periods",
-    "time_step": "dt = T0 / (2 L/h): 32, 64 and 128 steps per period at L/h = 16, 32, 64 (time step refined with the mesh)",
-    "note": "The three runs form one refinement study. Definitions and the reference solution are in README.md."
+    "level_set_velocity": "pde_harmonic_monolithic",
+    "spatial_study": {
+      "levels": [16, 32, 64],
+      "steps_per_period": 128
+    },
+    "time_study": {
+      "level": 32,
+      "steps_per_period": [64, 128, 256]
+    },
+    "time_error_removal": "Decision D10. The spatial study runs every level at 128 steps per inviscid period. The time error at that step is estimated from the time-step study as e_time = (4/3) (e(128) - e(256)) (second-order scheme; the observed temporal order is reported) and subtracted from every spatial frequency error. The damping and volume criteria use the spatial runs directly: the generalized-alpha damping at 128 steps per period is 1e-6 omega, about 0.02% of the physical rate.",
+    "note": "Runs with another level-set velocity or mean depth are reported as comparisons and never gated. Definitions and the reference solution are in README.md."
   },
   "criteria": [
     {
       "id": "frequency",
-      "quantity": "frequency_relative_error",
-      "definition": "|omega - omega_ref| / omega_ref. omega is fitted to the free-surface elevation history at the left-wall probe (x = 0) with eta(t) = c + exp(-gamma t) (a cos(omega t) + b sin(omega t)) over all outputs; omega_ref = Im(s) of the linear viscous standing wave with free-slip walls (README.md).",
+      "quantity": "frequency_spatial_error",
+      "definition": "|omega/omega_ref - 1 - e_time| on the spatial study, with omega fitted to the free-surface elevation history at the left-wall probe (x = 0) as eta(t) = c + exp(-gamma t) (a cos(omega t) + b sin(omega t)) over all outputs, omega_ref = Im(s) of the linear viscous standing wave with free-slip walls, and e_time the time error of the spatial-study step from the time-step study (README.md)",
       "limit": 0.01,
       "at_level": 64,
       "monotone": "strictly_decreasing",
@@ -25,25 +34,23 @@
       "minimum_observed_order": 1.0,
       "order_levels": [16, 32, 64],
       "order_method": "least-squares slope of log(error) against log(L/h) over order_levels; pairwise orders are reported",
-      "source": "Tracker section 5, M1 working criterion: frequency error <= 1% at the finest mesh with observed convergence. 'Observed convergence' is read as a strictly decreasing error with an observed order of at least 1, the reading used for M2 in static_drop_2d; the expected order is 2."
+      "source": "Tracker section 5, M1 working criterion: frequency error <= 1% at the finest mesh with observed convergence ('observed convergence' read as a strictly decreasing error with an observed order of at least 1, as for M2 in static_drop_2d); decision D10: judged with the time-step error removed"
     },
     {
       "id": "damping",
       "quantity": "damping_rate_relative_error",
-      "definition": "|gamma - gamma_ref| / gamma_ref, gamma from the same fit and gamma_ref = -Re(s) of the linear viscous standing wave (README.md). The Lamb estimate 2 nu k^2 is reported beside it.",
-      "limit": null,
-      "at_level": "each",
-      "report_order": true,
-      "order_levels": [16, 32, 64],
-      "source": "Reported only. The tracker (section 5, M1) asks for a comparison of the damping with linear theory but sets no limit."
+      "definition": "|gamma - gamma_ref| / gamma_ref at L/h = 64 on the spatial study, gamma from the same fit and gamma_ref = -Re(s) of the linear viscous standing wave (README.md)",
+      "limit": 0.05,
+      "at_level": 64,
+      "source": "Decision D12: sloshing damping error <= 5% at the finest level, matching the capillary-wave criterion"
     },
     {
       "id": "volume_drift",
       "quantity": "liquid_area_relative_drift_max",
-      "definition": "max over all outputs of |A(t) - A(0)| / A(0), A the exact area of {phi_h < 0} and A(0) that of the sampled initial level set in mesh/mesh-complete.mesh.vtu",
+      "definition": "max over all outputs of |A(t) - A(0)| / A(0), A the exact area of {phi_h < 0} and A(0) that of the sampled initial level set in mesh/mesh-complete.mesh.vtu, on every run of the protocol (spatial and time-step studies)",
       "limit": 0.0001,
-      "at_level": "each",
-      "source": "Tracker section 5, M1 working criterion: volume drift <= 1e-4 over the run"
+      "at_level": "each_run",
+      "source": "Tracker section 5, M1 working criterion (volume drift <= 1e-4 over the run); decision D11: the maximum deviation over the run, including reversible oscillation of the P1 area"
     }
   ]
 }

@@ -1932,8 +1932,10 @@ translate_level_set_transport_input(
   bool wet_extension_enabled = wet_enabled.value_or(false);
   if (pde_velocity_extension) {
     // The PDE extension is recomputed from the physical velocity at every
-    // geometry refresh and written into a prescribed advection field.  It is
-    // never promoted to an algebraic unknown.
+    // geometry refresh.  Its coupling is explicit: "prescribed" writes it into
+    // a prescribed advection field (the transport sees it lagged by one outer
+    // pass); "monolithic" installs the same discrete problem as frozen rows of
+    // an algebraic extension unknown, so Newton sees dR_phi/du.
     if (wet_extension_enabled) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Advection_velocity_extension_method=" +
@@ -1949,6 +1951,36 @@ translate_level_set_transport_input(
     }
     wet_source = wet_reader.string(level_set_aliases::wet_extension_source,
                                    "advection_velocity_from_field");
+    const auto coupling = wet_reader.string(
+        level_set_aliases::advection_velocity_extension_coupling,
+        "advection_velocity_extension_coupling");
+    const auto coupling_token =
+        coupling.has_value() ? normalized_token(coupling->text) : std::string{};
+    if (coupling_token == "monolithic") {
+      options.velocity.algebraic_extension_source_field_name =
+          wet_source.has_value() ? trim_copy(wet_source->text)
+                                 : std::string{"Velocity"};
+      if (options.velocity.algebraic_extension_source_field_name.empty() ||
+          options.velocity.algebraic_extension_source_field_name ==
+              options.velocity.field_name) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] The PDE velocity extension source "
+            "must name a distinct physical velocity field.");
+      }
+      options.velocity.source = ls::LevelSetVelocitySource::CoupledField;
+      append_installation_derived(input_observations, "velocity_source",
+                                  "derived:pde_velocity_extension_monolithic",
+                                  "equation");
+    } else if (coupling_token != "prescribed") {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Advection_velocity_extension_method=" +
+          trim_copy(extension_method->text) +
+          " requires Advection_velocity_extension_coupling=monolithic or "
+          "prescribed" +
+          (coupling.has_value() ? " (got '" + trim_copy(coupling->text) + "')"
+                                : std::string{}) +
+          ".");
+    }
     options.velocity.auto_register_field = true;
     append_installation_selections(input_observations, wet_reader, "equation");
     append_installation_derived(input_observations,

@@ -84,8 +84,18 @@ struct PdeVelocityExtensionReport {
 
 // level_set: one value per local vertex (only its gradient is used).
 // source: source_components values per local vertex.
-// known: communicator-consistent mask of the known vertices.
-// extended: resized to n_vertices * target_components on return.
+// known: mask of the known vertices (made communicator-consistent inside).
+// extended: resized to n_vertices * target_components on return; it holds
+// the solution of the dry-region system.
+// rows (optional): the same discrete problem as owner-local algebraic rows
+// for the monolithic coupling, one per owned vertex and component:
+//   known vertex:          w_c = u_c                       (source dependency),
+//   dry vertex:            w_{i,c} = sum_j (-A_ij / A_ii) w_{j,c}
+//                          over the vertices j sharing a dry-region cell
+//                          with i (extension dependencies),
+//   wall-constrained or outside the band:  w_c = 0.
+// Together with the physical velocity these rows determine exactly the
+// extension returned in `extended`.
 PdeVelocityExtensionReport extendVelocityByPde(
     const svmp::Mesh& mesh,
     const svmp::MeshComm& comm,
@@ -96,6 +106,8 @@ PdeVelocityExtensionReport extendVelocityByPde(
     std::size_t target_components,
     std::span<const WallVelocityExtensionConstraint> walls,
     const PdeVelocityExtensionOptions& options,
-    std::vector<double>& extended);
+    std::vector<double>& extended,
+    std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>* rows =
+        nullptr);
 
 } // namespace application::core

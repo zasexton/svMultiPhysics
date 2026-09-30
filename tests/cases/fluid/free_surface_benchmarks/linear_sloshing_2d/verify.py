@@ -342,67 +342,110 @@ def analyse_run(run: Path, *, allow_short: bool = False) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Criteria
+# Studies (decision D10) and criteria
 # ---------------------------------------------------------------------------
-def evaluate_study(runs: list[dict], tolerances: dict) -> list[dict]:
-    by_level = {r["level"]: r for r in runs}
+def remove_time_error(group: list[dict], protocol: dict) -> dict:
+    """Estimate the time error of the spatial-study step and remove it.
+
+    The time-step study runs one level at dt, dt/2 and dt/4 around the spatial
+    step dt_s (steps per period 64, 128, 256 with dt_s at 128).  With the
+    scheme's second order, e(dt_s) - e(dt_s/2) = (3/4) e_time(dt_s), so
+    e_time(dt_s) = (4/3) (e(dt_s) - e(dt_s/2)).  The observed temporal order
+    from the three runs is reported as a check of that assumption.
+    """
+    spatial_spp = protocol["spatial_study"]["steps_per_period"]
+    level = protocol["time_study"]["level"]
+    spps = sorted(protocol["time_study"]["steps_per_period"])
+    by_spp = {r["steps_per_period"]: r for r in group if r["level"] == level}
+    summary = {"available": all(spp in by_spp for spp in spps)}
+    if not summary["available"]:
+        summary["missing_steps_per_period"] = [spp for spp in spps if spp not in by_spp]
+        return summary
+    errors = [by_spp[spp]["frequency_signed_error"] for spp in spps]
+    finer = spps[spps.index(spatial_spp) + 1]
+    time_error = (4.0 / 3.0) * (by_spp[spatial_spp]["frequency_signed_error"]
+                                - by_spp[finer]["frequency_signed_error"])
+    d1, d2 = errors[0] - errors[1], errors[1] - errors[2]
+    summary.update({
+        "steps_per_period": spps,
+        "signed_errors": errors,
+        "observed_temporal_order": (math.log2(d1 / d2) if d1 != 0.0 and d2 != 0.0
+                                    and d1 / d2 > 0.0 else float("nan")),
+        "time_error_at_spatial_step": time_error,
+        "damping_rate_over_reference": [by_spp[spp]["damping_rate_over_reference"]
+                                        for spp in spps],
+    })
+    for r in group:
+        if r["steps_per_period"] == spatial_spp:
+            r["frequency_spatial_signed_error"] = r["frequency_signed_error"] - time_error
+            r["frequency_spatial_error"] = abs(r["frequency_spatial_signed_error"])
+    return summary
+
+
+def evaluate_study(group: list[dict], tolerances: dict) -> list[dict]:
+    protocol = tolerances["protocol"]
+    spatial_spp = protocol["spatial_study"]["steps_per_period"]
+    spatial = {r["level"]: r for r in group if r["steps_per_period"] == spatial_spp}
     results = []
     for crit in tolerances["criteria"]:
         q, limit = crit["quantity"], crit.get("limit")
         messages, ok = [], True
         at = crit.get("at_level", "each")
-        levels = sorted(by_level) if at == "each" else [at]
-        for level in levels:
-            if level not in by_level:
+        if at == "each_run":
+            targets = [(f"L/h={r['level']} steps/T={r['steps_per_period']}", r)
+                       for r in sorted(group, key=lambda r: (r["level"], r["steps_per_period"]))]
+            for level in protocol["spatial_study"]["levels"]:
+                if level not in spatial:
+                    ok = False
+                    messages.append(f"missing spatial run at L/h={level}")
+        else:
+            levels = sorted(spatial) if at == "each" else [at]
+            targets = []
+            for level in levels:
+                if level not in spatial:
+                    ok = False
+                    messages.append(f"missing run at L/h={level}")
+                else:
+                    targets.append((f"L/h={level}", spatial[level]))
+        for label, run in targets:
+            if q not in run:
                 ok = False
-                messages.append(f"missing run at L/h={level}")
+                messages.append(f"{label}: {q} unavailable (time-step study incomplete)")
                 continue
-            value = by_level[level][q]
-            if limit is None:
-                messages.append(f"L/h={level}: {value:.4g} (reported)")
-                continue
+            value = run[q]
             passed = value <= limit
             ok &= passed
-            messages.append(f"L/h={level}: {value:.4g} {'<=' if passed else '>'} {limit:g}")
+            messages.append(f"{label}: {value:.4g} {'<=' if passed else '>'} {limit:g}")
+        need = crit.get("monotone_levels") or crit.get("order_levels") or []
+        values = [spatial[lv].get(q) if lv in spatial else None for lv in need]
+        complete = bool(need) and all(v is not None for v in values)
         if crit.get("monotone") == "strictly_decreasing":
-            need = crit["monotone_levels"]
-            missing = [lv for lv in need if lv not in by_level]
-            if missing:
+            if not complete:
                 ok = False
-                messages.append(f"monotonicity needs L/h={missing}")
+                messages.append("monotonicity needs every spatial level")
             else:
-                vals = [by_level[lv][q] for lv in need]
-                passed = all(b < a for a, b in zip(vals, vals[1:]))
+                passed = all(b < a for a, b in zip(values, values[1:]))
                 ok &= passed
                 messages.append("decreasing over L/h=" + "/".join(map(str, need)) +
                                 (": yes" if passed else ": NO (" +
-                                 ", ".join(f"{v:.3g}" for v in vals) + ")"))
-        if "minimum_observed_order" in crit or crit.get("report_order"):
-            need = crit["order_levels"]
-            missing = [lv for lv in need if lv not in by_level]
-            errs = [by_level[lv][q] for lv in need if lv in by_level]
-            if missing:
-                if "minimum_observed_order" in crit:
-                    ok = False
-                messages.append(f"order needs L/h={missing}")
-            elif min(errs) <= 0.0:
-                if "minimum_observed_order" in crit:
-                    ok = False
+                                 ", ".join(f"{v:.3g}" for v in values) + ")"))
+        if "minimum_observed_order" in crit:
+            if not complete:
+                ok = False
+                messages.append("order needs every spatial level")
+            elif min(values) <= 0.0:
+                ok = False
                 messages.append("order undefined for a zero error")
             else:
-                order = observed_order(need, errs)
-                pairs = ", ".join(f"{observed_order(need[i:i + 2], errs[i:i + 2]):.2f}"
+                order = observed_order(need, values)
+                pairs = ", ".join(f"{observed_order(need[i:i + 2], values[i:i + 2]):.2f}"
                                   for i in range(len(need) - 1))
-                if "minimum_observed_order" in crit:
-                    passed = order >= crit["minimum_observed_order"]
-                    ok &= passed
-                    messages.append(f"observed order {order:.2f} (pairwise {pairs}) "
-                                    f"{'>=' if passed else '<'} {crit['minimum_observed_order']}")
-                else:
-                    messages.append(f"observed order {order:.2f} (pairwise {pairs}) (reported)")
+                passed = order >= crit["minimum_observed_order"]
+                ok &= passed
+                messages.append(f"observed order {order:.2f} (pairwise {pairs}) "
+                                f"{'>=' if passed else '<'} {crit['minimum_observed_order']}")
         results.append({"id": crit["id"], "quantity": q, "passed": bool(ok),
-                        "gated": limit is not None or "minimum_observed_order" in crit
-                        or "monotone" in crit, "details": messages})
+                        "details": messages})
     return results
 
 
@@ -427,51 +470,73 @@ def main(argv=None) -> int:
         print("ERROR: truncated smoke runs are not acceptance evidence: " + ", ".join(truncated),
               file=sys.stderr)
         return 2
-    # Diagnostic runs (generate_case.py --steps-per-period or
-    # --level-set-velocity) are reported beside the study, never gated.
-    everything = sorted(runs, key=lambda r: (not r["protocol_run"], r["level_set_velocity"],
-                                             r["mean_depth"], r["level"], r["steps_per_period"]))
-    runs = [r for r in everything if r["protocol_run"]]
-    seen = [r["level"] for r in runs]
-    if len(seen) != len(set(seen)) or not set(seen) <= set(tolerances["levels"]["cells_per_length"]):
-        print(f"ERROR: duplicate or unknown levels {seen}", file=sys.stderr)
-        return 2
-    verdicts = evaluate_study(runs, tolerances)
-    all_pass = all(v["passed"] for v in verdicts)
-
-    print(f"{'L/h':>4} {'steps/T':>7} {'periods':>7} {'omega':>12} {'freq err':>10} "
-          f"{'gamma':>10} {'g/g_ref':>8} {'g/g_Lamb':>8} {'A_fit/A':>8} {'fit rms':>8} {'dA/A max':>9}")
-    for r in everything:
-        print(f"{r['level']:>4} {r['steps_per_period']:>7} {r['periods_simulated']:>7.3g} "
-              f"{r['omega']:>12.8f} {r['frequency_signed_error']:>+10.3e} "
-              f"{r['damping_rate']:>10.4e} {r['damping_rate_over_reference']:>8.4f} "
-              f"{r['damping_rate_over_lamb']:>8.4f} {r['fit_amplitude_over_initial']:>8.4f} "
-              f"{r['fit_rms_residual_over_amplitude']:>8.1e} {r['liquid_area_relative_drift_max']:>9.2e}"
-              + ("  [TRUNCATED SMOKE RUN]" if r["truncated"] else "")
-              + ("" if r["protocol_run"] else
-                 f"  [diagnostic ({r['level_set_velocity']}, H0={r['mean_depth']:.7g}), "
-                 "not gated]"))
-    print(f"reference: omega = {everything[0]['omega_reference']:.10f} (inviscid "
-          f"{everything[0]['omega_inviscid']:.10f}), gamma = "
-          f"{everything[0]['damping_rate_reference']:.6e} "
-          f"(Lamb 2 nu k^2 = {everything[0]['damping_rate_lamb']:.6e})")
-    for r in everything:
-        log = r["solver_log"]
-        if log:
-            print(f"L/h={r['level']} steps/T={r['steps_per_period']} solver log: "
-                  f"{log['steps_logged']} steps, "
-                  f"{log['nonconverged_steps']} not converged, {log['outer_passes_mean']:.2f} outer "
-                  f"passes and {log['newton_iterations_mean']:.2f} Newton iterations per step, "
-                  f"max final residual {log['final_residual_max']:.2e}"
-                  + (f", {log['wall_seconds']} s wall ({log['wall_seconds_per_step']:.2f} s/step)"
-                     if "wall_seconds" in log else ""))
-    for v in verdicts:
-        tag = ("PASS" if v["passed"] else "FAIL") if v["gated"] else "INFO"
-        print(f"  [{tag}] {v['id']}: " + "; ".join(v["details"]))
+    protocol = tolerances["protocol"]
+    groups: dict[tuple, list] = {}
+    for r in runs:
+        groups.setdefault((r["level_set_velocity"], r["mean_depth"]), []).append(r)
+    for key, group in groups.items():
+        seen = [(r["level"], r["steps_per_period"]) for r in group]
+        if len(seen) != len(set(seen)) or not {lv for lv, _ in seen} <= set(
+                tolerances["levels"]["cells_per_length"]):
+            print(f"ERROR: duplicate or unknown (level, steps/T) runs {seen} for {key}",
+                  file=sys.stderr)
+            return 2
+    protocol_key = (protocol["level_set_velocity"], protocol["mean_depth"])
+    order = sorted(groups, key=lambda k: (k != protocol_key, k))
+    report, protocol_verdicts = [], None
+    for key in order:
+        group = sorted(groups[key], key=lambda r: (r["level"], r["steps_per_period"]))
+        time_summary = remove_time_error(group, protocol)
+        verdicts = evaluate_study(group, tolerances)
+        is_protocol = key == protocol_key
+        if is_protocol:
+            protocol_verdicts = verdicts
+        print(f"\n== level-set velocity {key[0]}, H0 = {key[1]:.7g}"
+              + ("  [PROTOCOL]" if is_protocol else "  [comparison, not gated]"))
+        print(f"{'L/h':>4} {'steps/T':>7} {'omega':>12} {'freq err':>10} {'spatial':>10} "
+              f"{'g/g_ref':>8} {'g/g_Lamb':>8} {'fit rms':>8} {'dA/A max':>9} {'s/step':>7}")
+        for r in group:
+            spatial = r.get("frequency_spatial_signed_error")
+            log = r.get("solver_log") or {}
+            print(f"{r['level']:>4} {r['steps_per_period']:>7} {r['omega']:>12.8f} "
+                  f"{r['frequency_signed_error']:>+10.3e} "
+                  + (f"{spatial:>+10.3e} " if spatial is not None else f"{'-':>10} ")
+                  + f"{r['damping_rate_over_reference']:>8.4f} {r['damping_rate_over_lamb']:>8.4f} "
+                  f"{r['fit_rms_residual_over_amplitude']:>8.1e} "
+                  f"{r['liquid_area_relative_drift_max']:>9.2e} "
+                  + (f"{log['wall_seconds_per_step']:>7.2f}" if "wall_seconds_per_step" in log
+                     else f"{'-':>7}")
+                  + ("  [TRUNCATED SMOKE RUN]" if r["truncated"] else ""))
+        if time_summary["available"]:
+            print(f"time-step study at L/h={protocol['time_study']['level']}: observed temporal "
+                  f"order {time_summary['observed_temporal_order']:.2f}; time error at "
+                  f"{protocol['spatial_study']['steps_per_period']} steps/T "
+                  f"{time_summary['time_error_at_spatial_step']:+.3e} (removed from the "
+                  "spatial errors)")
+        else:
+            print("time-step study incomplete: missing steps/T "
+                  f"{time_summary['missing_steps_per_period']} at "
+                  f"L/h={protocol['time_study']['level']}")
+        for v in verdicts:
+            tag = ("PASS" if v["passed"] else "FAIL") if is_protocol else "INFO"
+            print(f"  [{tag}] {v['id']}: " + "; ".join(v["details"]))
+        report.append({"level_set_velocity": key[0], "mean_depth": key[1],
+                       "protocol": is_protocol, "time_study": time_summary,
+                       "runs": group, "criteria": verdicts})
+    everything = [r for g in report for r in g["runs"]]
+    if everything:
+        print(f"\nreference: omega = {everything[0]['omega_reference']:.10f} (inviscid "
+              f"{everything[0]['omega_inviscid']:.10f}), gamma = "
+              f"{everything[0]['damping_rate_reference']:.6e} "
+              f"(Lamb 2 nu k^2 = {everything[0]['damping_rate_lamb']:.6e})")
+    if protocol_verdicts is None:
+        print(f"\nno runs of the protocol transport {protocol_key[0]}; nothing is gated")
+        all_pass = False
+    else:
+        all_pass = all(v["passed"] for v in protocol_verdicts)
     if args.json:
-        args.json.write_text(json.dumps({"benchmark": tolerances["benchmark"], "runs": everything,
-                                         "criteria": verdicts, "passed": bool(all_pass)},
-                                        indent=2) + "\n")
+        args.json.write_text(json.dumps({"benchmark": tolerances["benchmark"], "groups": report,
+                                         "passed": bool(all_pass)}, indent=2) + "\n")
     print("\nOVERALL:", "PASS" if all_pass else "FAIL")
     return 0 if all_pass else 1
 

@@ -356,3 +356,58 @@ TEST(LevelSetPdeVelocityExtension, RejectsInvalidInput)
                                          options, out),
                std::runtime_error);
 }
+
+TEST(LevelSetPdeVelocityExtension, AlgebraicRowsAreSatisfiedByTheSolvedExtension)
+{
+  const auto mesh = makeSquareTriangleMesh(8);
+  const auto s = makeSetup(
+      *mesh, [](double x, double y) { return y - 0.41 - 0.05 * std::sin(5 * x); },
+      [](double x, double y) {
+        return std::array<double, 2>{std::sin(2 * x) * std::cosh(y),
+                                     std::cos(2 * x) * std::sinh(y)};
+      });
+  const std::vector<WallVelocityExtensionConstraint> walls{
+      {.boundary_label = kSideWall, .constrained_components = {true, false, false}},
+      {.boundary_label = kBottomWall, .constrained_components = {false, true, false}}};
+  for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
+                        PdeVelocityExtensionOperator::LeastSquaresNormal}) {
+    std::vector<double> w;
+    std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> rows;
+    PdeVelocityExtensionOptions options;
+    options.op = op;
+    (void)extendVelocityByPde(*mesh, svmp::MeshComm::self(), s.phi, s.source, 2u,
+                              s.known, 2u,
+                              std::span<const WallVelocityExtensionConstraint>(walls),
+                              options, w, &rows);
+    ASSERT_EQ(rows.size(), 2u * mesh->n_vertices());
+    double max_residual = 0.0;
+    bool harmonic_rows_are_convex = true;
+    for (const auto& row : rows) {
+      double residual = w[2 * static_cast<std::size_t>(row.vertex) +
+                          static_cast<std::size_t>(row.component)];
+      double sum = 0.0;
+      bool from_extension = false;
+      for (const auto& dep : row.dependencies) {
+        const auto index = 2 * static_cast<std::size_t>(dep.vertex) +
+                           static_cast<std::size_t>(dep.component);
+        const bool source = dep.field ==
+            svmp::FE::level_set::VelocityExtensionDependencyField::SourceVelocity;
+        residual -= dep.coefficient * (source ? s.source[index] : w[index]);
+        sum += dep.coefficient;
+        from_extension = from_extension || !source;
+        harmonic_rows_are_convex = harmonic_rows_are_convex && dep.coefficient >= -1e-14;
+      }
+      if (from_extension) {
+        EXPECT_NEAR(sum, 1.0, 1e-12);  // constants are reproduced
+      }
+      max_residual = std::max(max_residual, std::abs(residual));
+    }
+    EXPECT_LT(max_residual, 1e-11)
+        << application::core::pdeVelocityExtensionOperatorName(op);
+    if (op == PdeVelocityExtensionOperator::Harmonic) {
+      // Right-triangle P1 stiffness has nonpositive off-diagonals: each dry
+      // value is a convex combination of its neighbors.
+      EXPECT_TRUE(harmonic_rows_are_convex);
+    }
+  }
+}

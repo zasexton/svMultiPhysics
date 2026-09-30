@@ -294,6 +294,8 @@ bool is_oop_equation_extension_parameter(const std::string& name)
     "WetExtensionAdvectionVelocityMethod",
     "Advection_velocity_extension_method",
     "AdvectionVelocityExtensionMethod",
+    "Advection_velocity_extension_coupling",
+    "AdvectionVelocityExtensionCoupling",
     "Wet_extension_band_layers",
     "WetExtensionBandLayers",
     "Advection_velocity_extension_band_layers",
