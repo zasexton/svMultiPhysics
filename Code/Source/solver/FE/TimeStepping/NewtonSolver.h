@@ -193,12 +193,15 @@ struct NewtonOptions {
 
         bool enabled{false};
         int max_iterations{12};
-        // Later outer refreshes may cross a nonsmooth generated-state epoch.
-        // Zero retains the transactional stop-and-restore behavior.  A
-        // positive value permits this many acknowledged restarts on the
-        // newly refreshed frozen problem before stopping.  A discontinuity
-        // in the initial canonicalization is always terminal because no
-        // rollback fingerprint for the new epoch exists yet.
+        // Outer refreshes may cross a nonsmooth generated-state epoch (for
+        // example a cut-topology change when a moving interface passes a mesh
+        // vertex).  Zero retains the transactional stop-and-restore behavior.
+        // A positive value permits this many acknowledged restarts on the
+        // newly refreshed frozen problem before stopping, and also lets the
+        // initial canonicalization adopt the epoch of the entry (predicted)
+        // state, which does not count against the budget: the canonical
+        // entry and its rollback fingerprint are then defined in that epoch.
+        // The outer iteration limit bounds the work in either case.
         int max_discontinuity_restarts{0};
         DynamicRelaxationOptions dynamic_relaxation{};
     };
@@ -286,11 +289,13 @@ struct NewtonOptions {
         external_state_discontinuity{};
 
     /**
-     * @brief Acknowledge a bounded later-outer generated-state restart.
+     * @brief Acknowledge a generated-state epoch change within an attempt.
      *
      * This hook runs on every active rank after the collective discontinuity
      * decision and before solving the newly refreshed frozen problem.  It is
-     * not invoked for an initial discontinuity or after the restart budget is
+     * invoked for a later-outer restart within the restart budget, and for a
+     * discontinuity found by the initial canonicalization when the budget is
+     * positive (epoch adoption).  It is not invoked once the budget is
      * exhausted.  A generated-state owner can use it to advance only its
      * current nonlinear-attempt epoch; committed state must remain unchanged
      * until the enclosing time-step candidate is committed.
@@ -365,6 +370,9 @@ struct NewtonReport {
     std::string failure_message{};
     bool external_state_discontinuity{false};
     int external_state_discontinuity_restarts{0};
+    // True when the initial canonicalization adopted the epoch of the entry
+    // state (see ExternalStateFixedPointOptions::max_discontinuity_restarts).
+    bool external_state_initial_epoch_adopted{false};
     int iterations{0};
     int outer_iterations{0};
     int inner_iterations_total{0};

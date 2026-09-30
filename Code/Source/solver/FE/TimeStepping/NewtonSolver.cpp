@@ -12436,12 +12436,15 @@ NewtonReport NewtonSolver::solveStep(
     int inner_iterations_total = 0;
     int accepted_line_search_refresh_skips_total = 0;
     int external_state_discontinuity_restarts = 0;
+    bool initial_epoch_adopted = false;
     auto stopForExternalStateDiscontinuity =
         [&](int outer_iteration) -> NewtonReport {
         aggregate.converged = false;
         aggregate.external_state_discontinuity = true;
         aggregate.external_state_discontinuity_restarts =
             external_state_discontinuity_restarts;
+        aggregate.external_state_initial_epoch_adopted =
+            initial_epoch_adopted;
         aggregate.outer_iterations = outer_iteration;
         aggregate.inner_iterations_total = inner_iterations_total;
         aggregate.iterations = inner_iterations_total;
@@ -12617,8 +12620,27 @@ NewtonReport NewtonSolver::solveStep(
         if (externalStateDiscontinuityDetected(
                 NewtonOptions::StateSynchronizationPoint::
                     OuterFixedPointState)) {
-            return stopForExternalStateDiscontinuity(
-                /*outer_iteration=*/1);
+            // The entry (predicted) state already lies in a different
+            // generated-state epoch than the committed state, for example a
+            // cut topology after a moving interface passed a mesh vertex.
+            // With restarts enabled and an owner that can advance its attempt
+            // epoch, adopt it: the canonical entry and its rollback
+            // fingerprint are defined below in this epoch, so a later rollback
+            // reproduces it.  Otherwise keep the stop-and-restore behavior.
+            if (options_.external_state_fixed_point
+                        .max_discontinuity_restarts <= 0 ||
+                !options_.acknowledge_external_state_discontinuity) {
+                return stopForExternalStateDiscontinuity(
+                    /*outer_iteration=*/1);
+            }
+            options_.acknowledge_external_state_discontinuity(
+                NewtonOptions::StateSynchronizationPoint::
+                    OuterFixedPointState);
+            system.clearLocalCondensedRecovery();
+            if (auto* registry = system.auxiliaryInputRegistryIfPresent()) {
+                registry->invalidateAll();
+            }
+            initial_epoch_adopted = true;
         }
         entry_u->copyFrom(history.u());
         entry_auxiliary_state = system.checkpointAuxiliaryState();
@@ -12782,6 +12804,8 @@ NewtonReport NewtonSolver::solveStep(
             aggregate = inner_report;
             aggregate.external_state_discontinuity_restarts =
                 external_state_discontinuity_restarts;
+            aggregate.external_state_initial_epoch_adopted =
+                initial_epoch_adopted;
             aggregate.outer_iterations = outer + 1;
             aggregate.inner_iterations_total = inner_iterations_total;
             aggregate.iterations = inner_iterations_total;

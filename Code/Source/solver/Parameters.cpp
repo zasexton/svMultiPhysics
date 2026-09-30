@@ -3241,6 +3241,9 @@ GeneralSimulationParameters::GeneralSimulationParameters()
   set_parameter("Adaptive_time_loop_increase_factor", 1.0, !required, adaptive_time_loop_increase_factor);
   set_parameter("Adaptive_time_loop_target_newton_iterations", 6, !required, adaptive_time_loop_target_newton_iterations, {1,int_inf});
   set_parameter("Adaptive_time_loop_max_steps_multiplier", 8, !required, adaptive_time_loop_max_steps_multiplier, {1,int_inf});
+  // -1: bounded only by the outer fixed-point iteration limit (every outer
+  // refresh may start a new cut-topology epoch).  0 restores stop-and-reject.
+  set_parameter("Max_cut_topology_restarts_per_step", -1, !required, max_cut_topology_restarts_per_step, {-1,int_inf});
   set_parameter("Newton_line_search_fail_on_no_reduction", false, !required, newton_line_search_fail_on_no_reduction);
   set_parameter("Newton_line_search_max_iterations", 10, !required, newton_line_search_max_iterations, {1,int_inf});
   set_parameter("Newton_absolute_tolerance", 1.0e-10, !required, newton_absolute_tolerance);

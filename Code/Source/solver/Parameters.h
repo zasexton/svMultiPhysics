@@ -1547,6 +1547,9 @@ class GeneralSimulationParameters : public ParameterLists
 
     Parameter<int> adaptive_time_loop_max_retries;
     Parameter<int> adaptive_time_loop_max_steps_multiplier;
+    // Cut-topology epoch changes allowed within one nonlinear attempt; -1
+    // (default) means "as many as there are outer fixed-point refreshes".
+    Parameter<int> max_cut_topology_restarts_per_step;
     Parameter<int> adaptive_time_loop_target_newton_iterations;
     Parameter<int> newton_max_iterations;
     Parameter<int> newton_line_search_max_iterations;
