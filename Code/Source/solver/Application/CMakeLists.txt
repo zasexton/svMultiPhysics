@@ -13,6 +13,7 @@ add_library(svapplication STATIC
   Core/LevelSetCurvatureSamples.cpp
   Core/LevelSetMaintenanceHistory.cpp
   Core/LevelSetMaintenanceTransactionConsensus.cpp
+  Core/LevelSetPdeVelocityExtension.cpp
   Core/LevelSetVelocityExtensionMap.cpp
   Core/MeshCollection.cpp
   Core/SimulationBuilder.cpp

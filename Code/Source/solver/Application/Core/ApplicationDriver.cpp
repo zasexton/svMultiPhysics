@@ -7,6 +7,7 @@
 #include "Application/Core/LevelSetMaintenanceConfiguration.h"
 #include "Application/Core/LevelSetMaintenanceHistory.h"
 #include "Application/Core/LevelSetMaintenanceTransactionConsensus.h"
+#include "Application/Core/LevelSetPdeVelocityExtension.h"
 #include "Application/Core/LevelSetVelocityExtensionMap.h"
 #include "Application/Core/NearestPointIndex.h"
 #include "Application/Core/OopMpiLog.h"
@@ -4600,6 +4601,9 @@ struct LevelSetAdvectionVelocityRequest {
   std::string operator_tag{"level_set"};
   std::string extension_method{"wall_compatible_normal"};
   int extension_band_layers{4};
+  // Set when the input names the band layers.  The PDE methods extend over
+  // every dry vertex unless this is set (diagnostic truncation only).
+  bool extension_band_layers_explicit{false};
   bool enforce_wall_impermeability{true};
   std::vector<std::string> wall_face_names{};
   std::vector<WallConstraint> wall_constraints{};
@@ -5075,7 +5079,25 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
              "SourceVelocityFieldName",
              "Physical_velocity_field_name",
              "PhysicalVelocityFieldName"});
-    if (!enabled && !source_field.has_value()) {
+    const auto method_parameter =
+        first_defined_parameter(eq_params, {"Wet_extension_advection_velocity_method",
+                                           "WetExtensionAdvectionVelocityMethod",
+                                           "Advection_velocity_extension_method",
+                                           "AdvectionVelocityExtensionMethod"});
+    const auto pde_operator =
+        method_parameter.has_value()
+            ? application::core::pdeVelocityExtensionOperatorFromToken(
+                  *method_parameter)
+            : std::nullopt;
+    if (pde_operator.has_value() && enabled) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Advection_velocity_extension_method=" +
+          trim_copy(*method_parameter) +
+          " selects the prescribed PDE extension; it cannot be combined with "
+          "Use_wet_extension_advection_velocity=true, which selects the "
+          "algebraic wet extension.");
+    }
+    if (!enabled && !source_field.has_value() && !pde_operator.has_value()) {
       continue;
     }
 
@@ -5128,11 +5150,10 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
           "the generated prescribed advection field.");
     }
 
-    if (const auto extension_method =
-            first_defined_parameter(eq_params, {"Wet_extension_advection_velocity_method",
-                                               "WetExtensionAdvectionVelocityMethod",
-                                               "Advection_velocity_extension_method",
-                                               "AdvectionVelocityExtensionMethod"})) {
+    if (pde_operator.has_value()) {
+      request.extension_method = std::string(
+          application::core::pdeVelocityExtensionOperatorName(*pde_operator));
+    } else if (const auto extension_method = method_parameter) {
       const auto token = normalized_token(*extension_method);
       if (token != "nearestactivevertex" &&
           token != "nearestactive" &&
@@ -5147,8 +5168,8 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
         throw std::runtime_error(
             "[svMultiPhysics::Application] Unsupported wet-extension level-set "
             "advection velocity method '" + trim_copy(*extension_method) +
-            "'. The supported method is wall_compatible_normal; legacy nearest-* "
-            "names are accepted as aliases for the corrected method.");
+            "'. The supported methods are wall_compatible_normal (legacy "
+            "nearest-* names are aliases), pde_harmonic and pde_normal.");
       }
       request.extension_method = "wall_compatible_normal";
     }
@@ -5162,6 +5183,7 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
             "[svMultiPhysics::Application] Wet-extension band layers must be positive.");
       }
       request.extension_band_layers = *band_layers;
+      request.extension_band_layers_explicit = true;
     }
     if (const auto wall_compatible = first_defined_bool_parameter(
             eq_params,
@@ -18052,6 +18074,16 @@ std::size_t syncActiveLevelSetVertexFieldsFromSolution(
   return changed_fields;
 }
 
+// Methods whose extension is seeded by the wet vertices plus every vertex of
+// the retained interface cells (so the extension equals u on the interface).
+bool usesTraceSeedVelocityExtension(std::string_view method)
+{
+  return method == "wall_compatible_normal" ||
+         method == "nearest_interface_point" ||
+         application::core::pdeVelocityExtensionOperatorFromToken(method)
+             .has_value();
+}
+
 bool updateLevelSetAdvectionVelocitiesFromState(
     application::core::SimulationComponents& sim,
     const svmp::FE::systems::SystemStateView& state,
@@ -18138,8 +18170,7 @@ bool updateLevelSetAdvectionVelocitiesFromState(
         static_cast<std::size_t>(target_rec.components);
     const auto copy_components =
         std::min(source_components, target_components);
-    if (request.extension_method == "wall_compatible_normal" ||
-        request.extension_method == "nearest_interface_point") {
+    if (usesTraceSeedVelocityExtension(request.extension_method)) {
       const auto require_p1_field = [](const auto& record,
                                        std::string_view role) {
         if (!record.space || record.space->is_variable_order() ||
@@ -18269,8 +18300,7 @@ bool updateLevelSetAdvectionVelocitiesFromState(
       }
     };
 
-    if (request.extension_method == "wall_compatible_normal" ||
-        request.extension_method == "nearest_interface_point") {
+    if (usesTraceSeedVelocityExtension(request.extension_method)) {
       if (mesh_dim < 1 || mesh_dim > 3) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] nearest_interface_point level-set "
@@ -18544,7 +18574,68 @@ bool updateLevelSetAdvectionVelocitiesFromState(
       const auto oriented_level_set = orientedLevelSetForVelocityExtension(
           phi_values, request.isovalue, request.active_side);
 
-      if (algebraic_extension) {
+      if (const auto pde_operator =
+              application::core::pdeVelocityExtensionOperatorFromToken(
+                  request.extension_method)) {
+        if (algebraic_extension) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] The PDE velocity extension "
+              "writes a prescribed advection field; field '" +
+              target_rec.name +
+              "' is an algebraic extension unknown. Keep "
+              "Velocity_source=prescribed_data without "
+              "Use_wet_extension_advection_velocity.");
+        }
+        const auto pde_report = application::core::extendVelocityByPde(
+            mesh,
+            extension_comm,
+            std::span<const double>(oriented_level_set.data(),
+                                    oriented_level_set.size()),
+            std::span<const double>(source_values.data(),
+                                    source_values.size()),
+            source_components,
+            std::span<const std::uint8_t>(trace_seed.data(),
+                                          trace_seed.size()),
+            target_components,
+            std::span<const WallVelocityExtensionConstraint>(
+                wall_constraints),
+            application::core::PdeVelocityExtensionOptions{
+                .op = *pde_operator,
+                .band_layers = request.extension_band_layers_explicit
+                                   ? request.extension_band_layers
+                                   : 0,
+                .enforce_wall_impermeability =
+                    request.enforce_wall_impermeability},
+            extended);
+        wall_extension_report.extended_vertices =
+            pde_report.extension_vertices;
+        wall_extension_report.vertices_outside_band =
+            pde_report.outside_vertices;
+        wall_extension_report.max_wall_normal_velocity =
+            pde_report.max_wall_normal_velocity;
+        wall_extension_report.max_seed_speed = pde_report.max_known_speed;
+        wall_extension_report.max_extended_speed =
+            pde_report.max_extended_speed;
+        if (trace_updates) {
+          application::core::oopCout()
+              << "[svMultiPhysics::Application] PDE velocity extension"
+              << " method=" << request.extension_method
+              << " known_vertices=" << pde_report.known_vertices
+              << " extension_vertices=" << pde_report.extension_vertices
+              << " outside_vertices=" << pde_report.outside_vertices
+              << " extension_cells=" << pde_report.extension_cells
+              << " unknowns=" << pde_report.unknowns[0] << ","
+              << pde_report.unknowns[1] << "," << pde_report.unknowns[2]
+              << " wall_fixed=" << pde_report.wall_fixed[0] << ","
+              << pde_report.wall_fixed[1] << "," << pde_report.wall_fixed[2]
+              << " max_relative_residual="
+              << pde_report.max_relative_residual
+              << " max_known_speed=" << pde_report.max_known_speed
+              << " max_extended_speed=" << pde_report.max_extended_speed
+              << " max_wall_normal_velocity="
+              << pde_report.max_wall_normal_velocity << std::endl;
+        }
+      } else if (algebraic_extension) {
         std::uint64_t free_surface_geometry_revision = 0u;
         if (const auto* cut_context = system.cutIntegrationContext()) {
           free_surface_geometry_revision = cut_context->contentRevision();

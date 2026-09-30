@@ -16276,6 +16276,77 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
+     PdeExtensionIsSelectedOnlyByAnExplicitMethodValue)
+{
+  const auto xml = [](const std::string& method, const std::string& extra) {
+    return R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Velocity_source>prescribed_data</Velocity_source>
+    <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
+    <Advection_velocity_extension_method>)xml" +
+           method + "</Advection_velocity_extension_method>" + extra + R"xml(
+  </Add_equation>
+  <Add_equation type="fluid">
+    <Add_BC name="wall_left">
+      <Type>Dir</Type>
+      <Value>0.0</Value>
+      <Effective_direction>1 0</Effective_direction>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml";
+  };
+
+  for (const std::string method : {"pde_harmonic", "pde_normal"}) {
+    auto params = parseWorkflowParametersXml(xml(method, "").c_str());
+    const auto requests = levelSetAdvectionVelocityRequests(*params);
+    ASSERT_EQ(requests.size(), 1u);
+    EXPECT_EQ(requests.front().extension_method, method);
+    EXPECT_FALSE(requests.front().extension_band_layers_explicit);
+    EXPECT_EQ(requests.front().source_velocity_field_name, "Velocity");
+    ASSERT_EQ(requests.front().wall_constraints.size(), 1u);
+    EXPECT_EQ(requests.front().wall_constraints[0].effective_direction,
+              (std::vector<int>{1, 0}));
+    EXPECT_TRUE(usesTraceSeedVelocityExtension(method));
+  }
+
+  // The PDE method cannot be combined with the algebraic wet extension.
+  auto both = parseWorkflowParametersXml(
+      xml("pde_harmonic",
+          "<Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>")
+          .c_str());
+  EXPECT_THROW((void)levelSetAdvectionVelocityRequests(*both),
+               std::runtime_error);
+
+  // An unknown method name fails and lists the supported methods.
+  auto unknown = parseWorkflowParametersXml(
+      xml("harmonic",
+          "<Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>")
+          .c_str());
+  try {
+    (void)levelSetAdvectionVelocityRequests(*unknown);
+    ADD_FAILURE() << "unknown extension method accepted";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("pde_harmonic"),
+              std::string::npos);
+  }
+
+  // Without a method value, no PDE request is created silently.
+  auto none = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Velocity_source>prescribed_data</Velocity_source>
+    <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  EXPECT_TRUE(levelSetAdvectionVelocityRequests(*none).empty());
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
      WetExtensionExplicitWallFailsClosedForNonzeroDirichletData)
 {
   auto params = parseWorkflowParametersXml(R"xml(
