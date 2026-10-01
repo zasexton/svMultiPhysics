@@ -17283,8 +17283,16 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
         }
     }
 
-    free_surface_discrete_functional_history_.reserve(
-        free_surface_discrete_functional_history_.size() + states.size());
+    // Grow geometrically: reserving exactly one more group reallocated and
+    // moved the whole history on every accepted step.
+    const auto required_history_capacity =
+        free_surface_discrete_functional_history_.size() + states.size();
+    if (required_history_capacity >
+        free_surface_discrete_functional_history_.capacity()) {
+        free_surface_discrete_functional_history_.reserve(std::max(
+            required_history_capacity,
+            2u * free_surface_discrete_functional_history_.capacity()));
+    }
     for (std::size_t i = 0; i < states.size(); ++i) {
         const auto& accepted = states[i];
         const auto& declaration =
