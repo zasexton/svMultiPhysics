@@ -43,6 +43,16 @@ std::string_view preconditionerToString(PreconditionerType pc) noexcept
     }
 }
 
+std::string_view rightPreconditionerToString(RightPreconditionerType pc) noexcept
+{
+    switch (pc) {
+        case RightPreconditionerType::None: return "none";
+        case RightPreconditionerType::BlockILU0: return "block-ilu0";
+        case RightPreconditionerType::Simple: return "simple";
+        default: return "unknown";
+    }
+}
+
 std::string_view fieldSplitKindToString(FieldSplitKind kind) noexcept
 {
     switch (kind) {

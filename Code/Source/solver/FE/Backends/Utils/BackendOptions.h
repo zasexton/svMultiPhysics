@@ -71,6 +71,14 @@ enum class FsilsBlockSchurMomentumApproximation : std::uint8_t {
     ASM
 };
 
+/// Right preconditioner applied inside the Krylov iteration on top of the
+/// scaling preconditioner (FSILS GMRES).  `None` keeps the legacy kernel.
+enum class RightPreconditionerType : std::uint8_t {
+    None,
+    BlockILU0,   ///< Block ILU(0) of the scaled operator (nodal blocks).
+    Simple       ///< SIMPLE splitting for a scalar constraint field.
+};
+
 struct FieldSplitOptions {
     /// `Auto` lets the backend choose additive / multiplicative / Schur mode
     /// from mixed-layout metadata when available.
@@ -634,6 +642,20 @@ struct SolverOptions {
     FsilsBlockSchurMomentumApproximation fsils_blockschur_momentum_approximation{
         FsilsBlockSchurMomentumApproximation::Auto};
 
+    /// Right preconditioner inside the Krylov iteration (opt-in; FSILS GMRES).
+    RightPreconditionerType right_preconditioner{RightPreconditionerType::None};
+
+    /// Name of the block holding the scalar constraint unknown for
+    /// RightPreconditionerType::Simple (e.g. "Pressure").  When empty the
+    /// constraint block of the saddle-point annotation is used.
+    std::string right_preconditioner_constraint_block{};
+
+    /// Reuse a preconditioner or factorization across solves (Newton iterations,
+    /// outer passes, time steps) and refresh it by the break-even rule of
+    /// PreconditionerReusePolicy.  Applies to the FSILS right preconditioners
+    /// and to the Eigen ILU and direct factorizations.  Off by default.
+    bool reuse_preconditioner{false};
+
     // Backend-specific pass-through key/value list (optional).
     // - PETSc: key maps to an option name (with or without '-' prefix).
     // - Trilinos: key maps to a Teuchos::ParameterList entry.
@@ -680,6 +702,7 @@ struct SolverReport {
 [[nodiscard]] std::string_view solverMethodToString(SolverMethod m) noexcept;
 [[nodiscard]] std::string_view preconditionerToString(PreconditionerType pc) noexcept;
 [[nodiscard]] std::string_view fieldSplitKindToString(FieldSplitKind kind) noexcept;
+[[nodiscard]] std::string_view rightPreconditionerToString(RightPreconditionerType pc) noexcept;
 [[nodiscard]] std::string_view
 fsilsBlockSchurPreconditionerToString(FsilsBlockSchurSchurPreconditioner pc) noexcept;
 [[nodiscard]] std::string_view
