@@ -2936,6 +2936,14 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
   constexpr int adaptive_min_sD = 50;
   const bool use_adaptive_restart = allow_heuristic_early_stop && (ls.sD >= adaptive_min_sD);
 
+  // Ratio of the unscaled (true) to the scaled residual norm at the start of
+  // the current cycle.  The Arnoldi residual is the scaled one; multiplying by
+  // this ratio estimates the unscaled residual, so a cycle can end once the
+  // true criterion is expected to hold instead of only at the cycle end.  The
+  // true residual is still verified at the start of the next cycle.
+  const bool estimate_unscaled = right_pc != nullptr || ls.estimate_unscaled_residual;
+  double unscaled_to_scaled = 0.0;
+
   for (int l = 0; l < ls.mItr; l++) {
     restart_cycles++;
     ls.dB = ls.fNorm;
@@ -3024,6 +3032,9 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
 
     if (std::abs(err[0]) <= std::numeric_limits<double>::epsilon()) {
       break;
+    }
+    if (estimate_unscaled) {
+      unscaled_to_scaled = ls.fNorm / std::abs(err[0]);
     }
 
     update_recycle_scores_from_gamma(err[0]);
@@ -3302,7 +3313,8 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       tp_givens += TP() - tp0;
       ++tp_givens_calls;
 
-      if (std::abs(err(i+1)) < scaled_eps) {
+      if (std::abs(err(i+1)) < scaled_eps ||
+          (estimate_unscaled && unscaled_to_scaled * std::abs(err(i+1)) <= eps)) {
         scaled_residual_met_target = true;
         break;
       }

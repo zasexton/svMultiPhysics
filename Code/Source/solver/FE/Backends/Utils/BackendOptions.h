@@ -656,6 +656,11 @@ struct SolverOptions {
     /// and to the Eigen ILU and direct factorizations.  Off by default.
     bool reuse_preconditioner{false};
 
+    /// FSILS GMRES: end restart cycles on an estimate of the unscaled residual
+    /// instead of only at the cycle end (always on with a right
+    /// preconditioner).  Off by default.
+    bool fsils_gmres_unscaled_residual_estimate{false};
+
     // Backend-specific pass-through key/value list (optional).
     // - PETSc: key maps to an option name (with or without '-' prefix).
     // - Trilinos: key maps to a Teuchos::ParameterList entry.
