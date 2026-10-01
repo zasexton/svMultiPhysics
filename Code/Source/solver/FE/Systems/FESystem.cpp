@@ -8189,10 +8189,59 @@ FESystem::refreshConstraintStateForCurrentRevisions(double time,
     const bool include_mesh_field_values =
         deps.structural.mesh_field_values || deps.value.mesh_field_values;
     const auto current = captureConstraintRevisionSnapshot(include_mesh_field_values);
-    const bool structural_changed =
-        constraints::structural_dependency_changed(deps, constraint_revision_snapshot_, current);
+    // The revision snapshot is rank-local (local mesh revisions and a byte
+    // hash of the local mesh fields), while setup() and several constraint
+    // value updates (e.g. small-cut aggregation) are collective. Combine the
+    // structural decision and every per-constraint value decision over the
+    // communicator so all ranks take the same branch.
+    const std::size_t n_value_flags =
+        constraint_defs_.size() + system_constraint_defs_.size();
+    std::vector<int> refresh_flags(n_value_flags + 1u, 0);
+    refresh_flags[0] =
+        constraints::structural_dependency_changed(deps, constraint_revision_snapshot_, current)
+            ? 1
+            : 0;
+    {
+        std::size_t k = 1u;
+        for (const auto& c : constraint_defs_) {
+            FE_CHECK_NOT_NULL(c.get(), "FESystem::refreshConstraintStateForCurrentRevisions: constraint");
+            refresh_flags[k++] = constraints::value_dependency_changed(
+                                     c->dependencyDeclaration(), constraint_revision_snapshot_, current)
+                                     ? 1
+                                     : 0;
+        }
+        for (const auto& c : system_constraint_defs_) {
+            FE_CHECK_NOT_NULL(c.get(), "FESystem::refreshConstraintStateForCurrentRevisions: system constraint");
+            refresh_flags[k++] = constraints::value_dependency_changed(
+                                     c->dependencyDeclaration(), constraint_revision_snapshot_, current)
+                                     ? 1
+                                     : 0;
+        }
+    }
+#if FE_HAS_MPI
+    {
+        int mpi_initialized = 0;
+        int mpi_finalized = 0;
+        MPI_Initialized(&mpi_initialized);
+        MPI_Finalized(&mpi_finalized);
+        const auto communicator = activeMpiCommunicator();
+        int communicator_size = 1;
+        if (mpi_initialized != 0 && mpi_finalized == 0 && communicator != MPI_COMM_NULL) {
+            MPI_Comm_size(communicator, &communicator_size);
+        }
+        if (communicator_size > 1) {
+            MPI_Allreduce(MPI_IN_PLACE,
+                          refresh_flags.data(),
+                          static_cast<int>(refresh_flags.size()),
+                          MPI_INT,
+                          MPI_MAX,
+                          communicator);
+        }
+    }
+#endif
+    const bool structural_changed = refresh_flags[0] != 0;
     const bool value_changed =
-        constraints::value_dependency_changed(deps, constraint_revision_snapshot_, current);
+        std::any_of(refresh_flags.begin() + 1, refresh_flags.end(), [](int f) { return f != 0; });
 
     if (!structural_changed && !value_changed) {
         result.reason = "constraint dependencies unchanged";
@@ -8221,17 +8270,16 @@ FESystem::refreshConstraintStateForCurrentRevisions(double time,
     finalized_small_cut_aggregation_prolongations_.clear();
     bool any_update = false;
     try {
+        std::size_t k = 1u;
         for (const auto& c : constraint_defs_) {
             FE_CHECK_NOT_NULL(c.get(), "FESystem::refreshConstraintStateForCurrentRevisions: constraint");
-            const auto decl = c->dependencyDeclaration();
-            if (constraints::value_dependency_changed(decl, constraint_revision_snapshot_, current)) {
+            if (refresh_flags[k++] != 0) {
                 any_update = c->updateValues(affine_constraints_, time) || any_update;
             }
         }
         for (auto& c : system_constraint_defs_) {
             FE_CHECK_NOT_NULL(c.get(), "FESystem::refreshConstraintStateForCurrentRevisions: system constraint");
-            const auto decl = c->dependencyDeclaration();
-            if (constraints::value_dependency_changed(decl, constraint_revision_snapshot_, current)) {
+            if (refresh_flags[k++] != 0) {
                 any_update = c->updateValues(*this, affine_constraints_, time, dt) || any_update;
             }
         }
