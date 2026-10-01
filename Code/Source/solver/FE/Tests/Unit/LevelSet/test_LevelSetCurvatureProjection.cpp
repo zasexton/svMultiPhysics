@@ -618,7 +618,8 @@ KinematicCurvatureEvaluation evaluateKinematicCurvature(
     FE::Real signed_level_set_scale = FE::Real{1.0},
     FE::Real filter_coefficient = FE::Real{1.0},
     level_set::LevelSetKinematicAreaGradientMass mass =
-        level_set::LevelSetKinematicAreaGradientMass::Consistent)
+        level_set::LevelSetKinematicAreaGradientMass::Consistent,
+    bool finite_difference_check = true)
 {
     std::vector<FE::Real> phi(
         static_cast<std::size_t>(mesh.numVertices()), FE::Real{0.0});
@@ -640,6 +641,8 @@ KinematicCurvatureEvaluation evaluateKinematicCurvature(
         level_set::LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
     options.kinematic_area_gradient_filter_coefficient = filter_coefficient;
     options.kinematic_area_gradient_mass = mass;
+    options.kinematic_area_gradient_finite_difference_check =
+        finite_difference_check;
     KinematicCurvatureEvaluation evaluation;
     evaluation.result = level_set::projectLevelSetMeanCurvatureToVertices(
         mesh, phi, options, evaluation.curvature);
@@ -691,7 +694,8 @@ KinematicCurvatureEvaluation evaluateSessileKinematicCurvature(
     FE::Real signed_level_set_scale = FE::Real{1.0},
     FE::Real filter_coefficient = FE::Real{1.0},
     level_set::LevelSetKinematicAreaGradientMass mass =
-        level_set::LevelSetKinematicAreaGradientMass::Consistent)
+        level_set::LevelSetKinematicAreaGradientMass::Consistent,
+    bool finite_difference_check = true)
 {
     const std::array<FE::Real, 3> center{{
         FE::Real{0.0},
@@ -714,6 +718,8 @@ KinematicCurvatureEvaluation evaluateSessileKinematicCurvature(
     options.kinematic_area_gradient_mass = mass;
     options.kinematic_area_gradient_negative_liquid_side =
         signed_level_set_scale > FE::Real{0.0};
+    options.kinematic_area_gradient_finite_difference_check =
+        finite_difference_check;
     if (include_young_wall) {
         options.kinematic_area_gradient_young_walls.push_back(
             {1, contact_angle});
@@ -3422,6 +3428,146 @@ TEST(LevelSetCurvatureProjection,
 }
 
 TEST(LevelSetCurvatureProjection,
+     KinematicAreaGradientFiniteDifferenceCheckOnlyAddsItsDiagnostic)
+{
+    // The cross-check is opt-in. With or without it, the projection must be
+    // bitwise identical; only the disagreement and the measure-evaluation
+    // counts differ.
+    const auto expect_same_projection =
+        [](const KinematicCurvatureEvaluation& checked,
+           const KinematicCurvatureEvaluation& unchecked,
+           int dimension,
+           const char* label) {
+            const auto& on = checked.result;
+            const auto& off = unchecked.result;
+            ASSERT_TRUE(on.success) << label << ": " << on.diagnostic;
+            ASSERT_TRUE(off.success) << label << ": " << off.diagnostic;
+            EXPECT_TRUE(on.kinematic_area_gradient_finite_difference_check)
+                << label;
+            EXPECT_FALSE(off.kinematic_area_gradient_finite_difference_check)
+                << label;
+            EXPECT_EQ(on.kinematic_area_gradient_measure_evaluations,
+                      static_cast<std::size_t>(6 * (dimension + 1)) *
+                          on.kinematic_area_gradient_cut_cells)
+                << label;
+            EXPECT_EQ(on.kinematic_area_gradient_young_wall_measure_evaluations,
+                      static_cast<std::size_t>(6 * dimension) *
+                          on.kinematic_area_gradient_young_wall_cut_faces)
+                << label;
+            EXPECT_LT(on.kinematic_area_gradient_max_relative_fd_disagreement,
+                      FE::Real{1.0e-4})
+                << label;
+            EXPECT_EQ(off.kinematic_area_gradient_measure_evaluations, 0u)
+                << label;
+            EXPECT_EQ(
+                off.kinematic_area_gradient_young_wall_measure_evaluations,
+                0u)
+                << label;
+            EXPECT_EQ(off.kinematic_area_gradient_max_relative_fd_disagreement,
+                      FE::Real{0.0})
+                << label;
+
+            EXPECT_EQ(checked.curvature, unchecked.curvature) << label;
+            EXPECT_EQ(on.kinematic_area_gradient_total_energy_derivative,
+                      off.kinematic_area_gradient_total_energy_derivative)
+                << label;
+            EXPECT_EQ(on.kinematic_area_gradient_liquid_volume_derivative,
+                      off.kinematic_area_gradient_liquid_volume_derivative)
+                << label;
+            EXPECT_FALSE(
+                on.kinematic_area_gradient_total_energy_derivative.empty())
+                << label;
+            EXPECT_EQ(on.kinematic_area_gradient_cut_cells,
+                      off.kinematic_area_gradient_cut_cells)
+                << label;
+            EXPECT_EQ(on.kinematic_area_gradient_young_wall_cut_faces,
+                      off.kinematic_area_gradient_young_wall_cut_faces)
+                << label;
+            EXPECT_EQ(on.kinematic_area_gradient_interface_measure,
+                      off.kinematic_area_gradient_interface_measure)
+                << label;
+            EXPECT_EQ(on.kinematic_area_gradient_kinematic_mass,
+                      off.kinematic_area_gradient_kinematic_mass)
+                << label;
+            EXPECT_EQ(on.kinematic_area_gradient_surface_gradient_norm,
+                      off.kinematic_area_gradient_surface_gradient_norm)
+                << label;
+            EXPECT_EQ(on.kinematic_area_gradient_young_wall_gradient_norm,
+                      off.kinematic_area_gradient_young_wall_gradient_norm)
+                << label;
+            EXPECT_EQ(on.kinematic_area_gradient_total_energy_gradient_norm,
+                      off.kinematic_area_gradient_total_energy_gradient_norm)
+                << label;
+            EXPECT_EQ(
+                on.kinematic_area_gradient_mass_weighted_mean_curvature,
+                off.kinematic_area_gradient_mass_weighted_mean_curvature)
+                << label;
+            EXPECT_EQ(on.kinematic_area_gradient_linear_iterations,
+                      off.kinematic_area_gradient_linear_iterations)
+                << label;
+            EXPECT_EQ(on.kinematic_area_gradient_relative_linear_residual,
+                      off.kinematic_area_gradient_relative_linear_residual)
+                << label;
+        };
+
+    using Mass = level_set::LevelSetKinematicAreaGradientMass;
+    auto circle_mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/24, FE::Real{-0.70}, FE::Real{0.70});
+    const std::array<FE::Real, 3> circle_center{
+        {FE::Real{0.013}, FE::Real{-0.021}, FE::Real{0.0}}};
+    for (const bool consistent : {true, false}) {
+        const auto mass = consistent ? Mass::Consistent : Mass::Lumped;
+        const FE::Real filter = consistent ? FE::Real{1.0} : FE::Real{0.0};
+        expect_same_projection(
+            evaluateKinematicCurvature(circle_mesh, FE::Real{0.437},
+                                       circle_center, FE::Real{1.0},
+                                       filter, mass, true),
+            evaluateKinematicCurvature(circle_mesh, FE::Real{0.437},
+                                       circle_center, FE::Real{1.0},
+                                       filter, mass, false),
+            2,
+            consistent ? "circle consistent" : "circle lumped");
+    }
+
+    auto sphere_mesh = makeStructuredTetrahedronMesh(
+        /*subdivisions=*/10, FE::Real{-0.65}, FE::Real{0.65});
+    const std::array<FE::Real, 3> sphere_center{
+        {FE::Real{0.017}, FE::Real{-0.011}, FE::Real{0.009}}};
+    expect_same_projection(
+        evaluateKinematicCurvature(sphere_mesh, FE::Real{0.391},
+                                   sphere_center, FE::Real{1.0},
+                                   FE::Real{0.0}, Mass::Lumped, true),
+        evaluateKinematicCurvature(sphere_mesh, FE::Real{0.391},
+                                   sphere_center, FE::Real{1.0},
+                                   FE::Real{0.0}, Mass::Lumped, false),
+        3,
+        "sphere lumped");
+
+    const FE::Real pi = std::acos(FE::Real{-1.0});
+    constexpr FE::Real wall_coordinate{-0.70};
+    auto sessile_mesh = makeStructuredTriangleMesh(
+        /*subdivisions=*/32, wall_coordinate, FE::Real{0.70});
+    const auto sessile_checked = evaluateSessileKinematicCurvature(
+        sessile_mesh, FE::Real{0.347}, pi / FE::Real{3.0}, wall_coordinate,
+        true, FE::Real{1.0}, FE::Real{0.0}, Mass::Lumped, true);
+    const auto sessile_unchecked = evaluateSessileKinematicCurvature(
+        sessile_mesh, FE::Real{0.347}, pi / FE::Real{3.0}, wall_coordinate,
+        true, FE::Real{1.0}, FE::Real{0.0}, Mass::Lumped, false);
+    EXPECT_GT(sessile_checked.result
+                  .kinematic_area_gradient_young_wall_measure_evaluations,
+              0u);
+    EXPECT_GT(sessile_unchecked.result
+                  .kinematic_area_gradient_young_wall_gradient_norm,
+              FE::Real{0.0});
+    expect_same_projection(sessile_checked, sessile_unchecked, 2,
+                           "sessile Young wall lumped");
+
+    // The default is off.
+    EXPECT_FALSE(level_set::LevelSetCurvatureProjectionOptions{}
+                     .kinematic_area_gradient_finite_difference_check);
+}
+
+TEST(LevelSetCurvatureProjection,
      KinematicAreaGradientIsRoundoffBalancedForAffineFlatInterface)
 {
     auto mesh = makeStructuredTriangleMesh(
@@ -3437,11 +3583,13 @@ TEST(LevelSetCurvatureProjection,
     options.recovery_mode =
         level_set::LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
     options.kinematic_area_gradient_filter_coefficient = FE::Real{0.0};
+    options.kinematic_area_gradient_finite_difference_check = true;
     std::vector<FE::Real> curvature;
     const auto result = level_set::projectLevelSetMeanCurvatureToVertices(
         mesh, phi, options, curvature);
 
     ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_TRUE(result.kinematic_area_gradient_finite_difference_check);
     EXPECT_TRUE(result.kinematic_area_gradient_minimum_norm_solver);
     EXPECT_LE(result.kinematic_area_gradient_total_energy_gradient_norm,
               FE::Real{1.0e-13});

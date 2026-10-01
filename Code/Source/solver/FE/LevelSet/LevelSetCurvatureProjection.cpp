@@ -396,6 +396,10 @@ void mixKinematicProjectionReal(
     mixKinematicProjectionSignature(
         signature,
         options.kinematic_area_gradient_negative_liquid_side ? 1u : 0u);
+    // The check can fail a projection, so ranks must agree on it.
+    mixKinematicProjectionSignature(
+        signature,
+        options.kinematic_area_gradient_finite_difference_check ? 1u : 0u);
     mixKinematicProjectionSignature(
         signature,
         static_cast<std::uint64_t>(
@@ -2818,6 +2822,10 @@ void accumulateDifferentiatedTriangleMeasure(
     std::vector<Real> lumped_interface_measure(n_vertices, Real{0.0});
     std::vector<std::map<std::size_t, Real>> kinematic_mass(n_vertices);
     std::string failure;
+    const bool finite_difference_check =
+        options.kinematic_area_gradient_finite_difference_check;
+    result.kinematic_area_gradient_finite_difference_check =
+        finite_difference_check;
 
     Real global_value_scale{0.0};
     for (const auto value : level_set_vertex_values) {
@@ -3021,10 +3029,14 @@ void accumulateDifferentiatedTriangleMeasure(
             return;
         }
 
+        // Optional verification of local_gradient; it does not enter the
+        // operator assembled below.
         const Real nominal_step =
             std::pow(std::numeric_limits<Real>::epsilon(), Real{1.0 / 7.0}) *
             cell_value_scale;
-        for (std::size_t i = 0; i < corner_count; ++i) {
+        for (std::size_t i = 0;
+             finite_difference_check && i < corner_count;
+             ++i) {
             const Real margin =
                 std::abs(input.level_set_values[i] - options.isovalue);
             const Real smooth_margin_floor =
@@ -3223,11 +3235,21 @@ void accumulateDifferentiatedTriangleMeasure(
                     return;
                 }
 
+                for (std::size_t local = 0; local < face_corner_count;
+                     ++local) {
+                    const auto node = static_cast<std::size_t>(
+                        nodes[face_corners[local]]);
+                    young_wall_gradient[node] +=
+                        coefficient * local_wall_gradient[local];
+                }
+
+                // Optional verification of local_wall_gradient.
                 const Real nominal_step =
                     std::pow(std::numeric_limits<Real>::epsilon(),
                              Real{1.0 / 7.0}) *
                     face_value_scale;
-                for (std::size_t local = 0; local < face_corner_count;
+                for (std::size_t local = 0;
+                     finite_difference_check && local < face_corner_count;
                      ++local) {
                     const Real margin = std::abs(signed_values[local]);
                     const Real step =
@@ -3313,10 +3335,6 @@ void accumulateDifferentiatedTriangleMeasure(
                             result
                                 .kinematic_area_gradient_max_relative_fd_disagreement,
                             disagreement);
-                    const auto node = static_cast<std::size_t>(
-                        nodes[face_corners[local]]);
-                    young_wall_gradient[node] +=
-                        coefficient * local_wall_gradient[local];
                 }
             });
         if (!failure.empty()) {

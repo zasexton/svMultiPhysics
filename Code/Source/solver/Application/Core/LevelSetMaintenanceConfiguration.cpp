@@ -1003,6 +1003,14 @@ resolveLegacyLevelSetMaintenanceConfiguration(
       }
     }
   }
+  apply_boolean_list(
+      {"Curvature_projection_kinematic_area_gradient_finite_difference_check",
+       "CurvatureProjectionKinematicAreaGradientFiniteDifferenceCheck",
+       "Projected_curvature_kinematic_area_gradient_finite_difference_check",
+       "ProjectedCurvatureKinematicAreaGradientFiniteDifferenceCheck"},
+      "curvature_projection_kinematic_area_gradient_finite_difference_check",
+      result->curvature_projection
+          .kinematic_area_gradient_finite_difference_check);
   apply_real_list({"Curvature_projection_narrow_band_width",
                    "CurvatureProjectionNarrowBandWidth",
                    "Projected_curvature_narrow_band_width",

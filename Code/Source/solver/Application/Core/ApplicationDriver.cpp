@@ -17308,7 +17308,8 @@ void logLevelSetCurvatureProjectionDiagnostic(
     std::size_t cut_signature_cache_misses = 0u)
 {
   const auto curvature_options = effectiveCurvatureProjectionOptions(request);
-  application::core::oopCout()
+  auto& out = application::core::oopCout();
+  out
       << "[svMultiPhysics::Application] Level-set curvature projected"
       << " field='" << request.configuration->transport.level_set.field_name << "'"
       << " curvature_field='" << request.configuration->curvature_field_name << "'"
@@ -17392,9 +17393,15 @@ void logLevelSetCurvatureProjectionDiagnostic(
       << result.kinematic_area_gradient_young_wall_gradient_norm
       << " kinematic_area_gradient_total_energy_gradient_norm="
       << result.kinematic_area_gradient_total_energy_gradient_norm
-      << " kinematic_area_gradient_max_relative_fd_disagreement="
-      << result.kinematic_area_gradient_max_relative_fd_disagreement
-      << " kinematic_area_gradient_linear_iterations="
+      << " kinematic_area_gradient_finite_difference_check="
+      << (result.kinematic_area_gradient_finite_difference_check ? 1 : 0);
+  // The finite-difference cross-check is opt-in; without it there is no
+  // disagreement to report.
+  if (result.kinematic_area_gradient_finite_difference_check) {
+    out << " kinematic_area_gradient_max_relative_fd_disagreement="
+        << result.kinematic_area_gradient_max_relative_fd_disagreement;
+  }
+  out << " kinematic_area_gradient_linear_iterations="
       << result.kinematic_area_gradient_linear_iterations
       << " kinematic_area_gradient_minimum_norm_solver="
       << (result.kinematic_area_gradient_minimum_norm_solver ? 1 : 0)

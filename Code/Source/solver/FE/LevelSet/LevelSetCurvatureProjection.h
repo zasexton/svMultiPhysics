@@ -113,6 +113,13 @@ struct LevelSetCurvatureProjectionOptions {
     bool kinematic_area_gradient_negative_liquid_side{true};
     std::vector<LevelSetKinematicAreaGradientYoungWall>
         kinematic_area_gradient_young_walls{};
+    // Verification only: cross-check every analytic interface-measure and
+    // Young-wall derivative against Richardson-extrapolated central
+    // differences of the strict cut measure (six extra cuts per corner, i.e.
+    // 24 per cut tetrahedron) and report the largest relative disagreement.
+    // The recovered curvature and derivatives do not depend on it. Off by
+    // default; when off, the disagreement is not evaluated.
+    bool kinematic_area_gradient_finite_difference_check{false};
     Real narrow_band_width{0.0};
     int smoothing_iterations{0};
     Real smoothing_relaxation{0.25};
@@ -210,6 +217,10 @@ struct LevelSetCurvatureProjectionResult {
     std::vector<Real> kinematic_area_gradient_total_energy_derivative{};
     std::vector<Real> kinematic_area_gradient_liquid_volume_derivative{};
     bool kinematic_area_gradient_derivatives_global_dof_order{false};
+    // True when the finite-difference cross-check ran. Otherwise the
+    // disagreement below and both measure-evaluation counts are not
+    // evaluated and stay zero.
+    bool kinematic_area_gradient_finite_difference_check{false};
     Real kinematic_area_gradient_max_relative_fd_disagreement{0.0};
     Real kinematic_area_gradient_max_regularized_identity_residual{0.0};
     Real kinematic_area_gradient_max_relative_regularized_identity_residual{
