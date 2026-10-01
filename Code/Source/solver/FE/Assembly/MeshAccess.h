@@ -14,6 +14,9 @@
 
 #include "Mesh/Mesh.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <mutex>
 #include <vector>
 
 namespace svmp {
@@ -106,6 +109,30 @@ private:
     mutable bool cell2face_ready_{false};
     mutable std::vector<MeshOffset> cell2face_offsets_;
     mutable std::vector<MeshIndex> cell2face_data_;
+
+    // Memoized globalEntityIdsAvailable().  The answer is reused only while
+    // the mesh topology, numbering and ownership revisions and the cell/face
+    // id storage (size and address) are unchanged; otherwise it is recomputed.
+    // A copied MeshAccess starts with an empty cache.
+    struct GlobalEntityIdCache {
+        std::mutex mutex{};
+        bool valid{false};
+        bool available{false};
+        std::uint64_t topology_revision{0};
+        std::uint64_t numbering_revision{0};
+        std::uint64_t ownership_revision{0};
+        std::size_t n_cells{0};
+        std::size_t n_faces{0};
+        const void* cell_ids{nullptr};
+        const void* face_ids{nullptr};
+        std::size_t cell_id_count{0};
+        std::size_t face_id_count{0};
+
+        GlobalEntityIdCache() = default;
+        GlobalEntityIdCache(const GlobalEntityIdCache&) {}
+        GlobalEntityIdCache& operator=(const GlobalEntityIdCache&) = delete;
+    };
+    mutable GlobalEntityIdCache global_entity_id_cache_{};
 
     void ensureCellToFace() const;
 };
