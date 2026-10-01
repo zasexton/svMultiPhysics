@@ -4702,6 +4702,11 @@ struct ActiveCutContextRefreshReport {
   std::uint64_t request_policy_key{0};
   std::uint64_t value_revision{0};
   std::map<int, std::uint64_t> evaluated_state_source_revisions{};
+  // Non-owning handle to the context installed by a rebuild, so that a
+  // refresh cache can retain it for restored states without keeping every
+  // report's context alive.
+  std::weak_ptr<const svmp::FE::assembly::CutIntegrationContext>
+      installed_context{};
   std::size_t cell_count{0};
   std::size_t corner_linearized_cell_count{0};
   std::size_t interface_fragments{0};
@@ -20917,6 +20922,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
 
   report.topology_key =
       activeCutContextTopologyFingerprint(topology_bindings, comm);
+  report.installed_context = context;
   sim.fe_system->setCutIntegrationContext(std::move(context));
   sim.fe_system->rebuildConstraintState();
   application::core::oopCout()
@@ -20951,6 +20957,9 @@ struct ActiveCutContextRefreshSignature {
   std::uint64_t system_space_revision{0};
   std::uint64_t system_dof_layout_revision{0};
   std::uint64_t system_block_layout_revision{0};
+  // Content key of the level-set field DOF layouts that the generated
+  // geometry reads (see activeCutLevelSetDofLayoutKey).
+  std::uint64_t level_set_dof_layout_key{0};
   SolutionSignatureKind solution_signature_kind{
       SolutionSignatureKind::LevelSetFieldByteHash};
   std::uint64_t solution_hash{0};
@@ -20959,6 +20968,19 @@ struct ActiveCutContextRefreshSignature {
   [[nodiscard]] bool operator==(
       const ActiveCutContextRefreshSignature& other) const noexcept
   {
+    // FESystem::setup() advances the system DOF and block layout revisions
+    // whenever it runs, also when it redistributes an identical layout (for
+    // example after a mesh-field value change in every time step). A
+    // level-set byte hash together with the DOF layout content key already
+    // identifies the geometry input, so the counters are compared only for
+    // value-revision signatures, whose counter is meaningful only for an
+    // unchanged vector layout.
+    const bool layout_revisions_match =
+        solution_signature_kind !=
+            SolutionSignatureKind::VectorValueRevision ||
+        (system_dof_layout_revision == other.system_dof_layout_revision &&
+         system_block_layout_revision ==
+             other.system_block_layout_revision);
     return request_policy_key == other.request_policy_key &&
            mesh_geometry_revision == other.mesh_geometry_revision &&
            mesh_topology_revision == other.mesh_topology_revision &&
@@ -20971,8 +20993,8 @@ struct ActiveCutContextRefreshSignature {
            mesh_coordinate_configuration_key ==
                other.mesh_coordinate_configuration_key &&
            system_space_revision == other.system_space_revision &&
-           system_dof_layout_revision == other.system_dof_layout_revision &&
-           system_block_layout_revision == other.system_block_layout_revision &&
+           layout_revisions_match &&
+           level_set_dof_layout_key == other.level_set_dof_layout_key &&
            solution_signature_kind == other.solution_signature_kind &&
            solution_hash == other.solution_hash &&
            solution_size == other.solution_size;
@@ -20987,6 +21009,34 @@ struct ActiveCutContextRefreshCache {
   std::function<void(
       const ActiveCutContextRefreshReport&,
       std::string_view)> observer{};
+  // Context installed by the most recent rebuild through this cache, i.e.
+  // the one described by last_signature while it is still installed.
+  std::weak_ptr<const svmp::FE::assembly::CutIntegrationContext>
+      last_context{};
+
+  // Generated geometry of the entry state of the current nonlinear attempt.
+  // A rollback to that state (RestoredOuterFixedPointState, and
+  // RestoredTimeStepState when the accepted state has the same level set)
+  // reinstalls it instead of rebuilding an identical context; see
+  // reinstallRetainedActiveCutContextForRestoredState. It keeps one extra
+  // context, including its free-surface snapshot, alive from the second
+  // rebuild of the attempt until the attempt ends, so it is opt-in
+  // (SVMP_RETAIN_RESTORED_CUT_CONTEXT=1): the peak memory of a 3D run grows
+  // by one snapshot while only failed attempts can use it.
+  struct RetainedContext {
+    ActiveCutContextRefreshSignature signature{};
+    std::shared_ptr<const svmp::FE::assembly::CutIntegrationContext>
+        context{};
+    std::map<int, std::uint64_t> evaluated_state_source_revisions{};
+    std::optional<std::uint64_t> topology_key{};
+  };
+  enum class RestorePinState : std::uint8_t {
+    Idle,     // no attempt entry is being recorded
+    Armed,    // before_physics_solve ran; the entry sync has not started
+    Pinning,  // inside the entry synchronization of the attempt
+  };
+  std::optional<RetainedContext> retained_restore_context{};
+  RestorePinState restore_pin_state{RestorePinState::Idle};
 
   void invalidateGeneratedState() noexcept
   {
@@ -20994,6 +21044,9 @@ struct ActiveCutContextRefreshCache {
     last_vector_signature.reset();
     evaluated_state_source_revisions.clear();
     topology_key.reset();
+    last_context.reset();
+    retained_restore_context.reset();
+    restore_pin_state = RestorePinState::Idle;
   }
 };
 
@@ -21061,9 +21114,64 @@ const char* activeCutRefreshSignatureKindName(
   return "unknown";
 }
 
+// Content key of the level-set field DOF layouts read by the generated cut
+// geometry: field identity, monolithic offset, DOF count and the cell and
+// vertex DOF maps. Unlike FESystem::dofLayoutRevision(), it does not change
+// when setup() redistributes an identical layout.
+std::uint64_t activeCutLevelSetDofLayoutKey(
+    const svmp::FE::systems::FESystem& system,
+    const std::vector<ActiveCutVolumeRequest>& requests)
+{
+  const auto mix = [](std::uint64_t& h, std::uint64_t value) noexcept {
+    mixCutContextHash(h, avalancheCutTopologyFingerprint(value));
+  };
+  std::set<std::string> field_names;
+  for (const auto& request : requests) {
+    field_names.insert(request.level_set_field_name);
+  }
+  std::uint64_t h = kCutContextHashOffset;
+  mix(h, static_cast<std::uint64_t>(field_names.size()));
+  for (const auto& field_name : field_names) {
+    mixCutContextHash(h, field_name);
+    const auto field = system.findFieldByName(field_name);
+    mix(h, static_cast<std::uint64_t>(field));
+    if (field == svmp::FE::INVALID_FIELD_ID) {
+      continue;
+    }
+    const auto& dofs = system.fieldDofHandler(field);
+    mix(h, static_cast<std::uint64_t>(system.fieldDofOffset(field)));
+    mix(h, static_cast<std::uint64_t>(dofs.getNumDofs()));
+    const auto n_cells = dofs.getDofMap().getNumCells();
+    mix(h, static_cast<std::uint64_t>(n_cells));
+    for (svmp::FE::GlobalIndex cell = 0; cell < n_cells; ++cell) {
+      const auto cell_dofs = dofs.getCellDofs(cell);
+      mix(h, static_cast<std::uint64_t>(cell_dofs.size()));
+      for (const auto dof : cell_dofs) {
+        mix(h, static_cast<std::uint64_t>(dof));
+      }
+    }
+    const auto* entity_map = dofs.getEntityDofMap();
+    mix(h, entity_map != nullptr ? 1u : 0u);
+    if (entity_map == nullptr) {
+      continue;
+    }
+    const auto n_vertices = entity_map->numVertices();
+    mix(h, static_cast<std::uint64_t>(n_vertices));
+    for (svmp::FE::GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
+      const auto vertex_dofs = entity_map->getVertexDofs(vertex);
+      mix(h, static_cast<std::uint64_t>(vertex_dofs.size()));
+      for (const auto dof : vertex_dofs) {
+        mix(h, static_cast<std::uint64_t>(dof));
+      }
+    }
+  }
+  return h;
+}
+
 void populateActiveCutContextRefreshDependencies(
     ActiveCutContextRefreshSignature& signature,
-    const svmp::FE::systems::FESystem& system)
+    const svmp::FE::systems::FESystem& system,
+    const std::vector<ActiveCutVolumeRequest>& requests)
 {
   const auto& mesh = system.meshAccess();
   signature.mesh_geometry_revision = mesh.geometryRevision();
@@ -21079,6 +21187,8 @@ void populateActiveCutContextRefreshDependencies(
   signature.system_space_revision = system.spaceRevision();
   signature.system_dof_layout_revision = system.dofLayoutRevision();
   signature.system_block_layout_revision = system.blockLayoutRevision();
+  signature.level_set_dof_layout_key =
+      activeCutLevelSetDofLayoutKey(system, requests);
 }
 
 void logActiveCutContextRefreshSkipped(
@@ -21114,7 +21224,9 @@ void logActiveCutContextRefreshSkipped(
       << " system_dof_layout_revision="
       << signature.system_dof_layout_revision
       << " system_block_layout_revision="
-      << signature.system_block_layout_revision << std::endl;
+      << signature.system_block_layout_revision
+      << " level_set_dof_layout_key="
+      << signature.level_set_dof_layout_key << std::endl;
 }
 
 bool activeCutLevelSetFieldLayoutIsAvailable(
@@ -21206,7 +21318,8 @@ std::optional<ActiveCutContextRefreshSignature> activeCutContextRefreshSignature
   }
   ActiveCutContextRefreshSignature signature;
   signature.request_policy_key = activeCutVolumeRequestPolicyKey(requests);
-  populateActiveCutContextRefreshDependencies(signature, *sim.fe_system);
+  populateActiveCutContextRefreshDependencies(
+      signature, *sim.fe_system, requests);
   signature.solution_signature_kind =
       ActiveCutContextRefreshSignature::SolutionSignatureKind::
           LevelSetFieldByteHash;
@@ -21237,7 +21350,8 @@ std::optional<ActiveCutContextRefreshSignature> activeCutContextRefreshSignature
         ActiveCutContextRefreshSignature signature;
         signature.request_policy_key =
             activeCutVolumeRequestPolicyKey(requests);
-        populateActiveCutContextRefreshDependencies(signature, *sim.fe_system);
+        populateActiveCutContextRefreshDependencies(
+            signature, *sim.fe_system, requests);
         signature.solution_signature_kind =
             ActiveCutContextRefreshSignature::SolutionSignatureKind::
                 LevelSetFieldByteHash;
@@ -21258,7 +21372,8 @@ std::optional<ActiveCutContextRefreshSignature> activeCutContextRefreshSignature
 
   ActiveCutContextRefreshSignature signature;
   signature.request_policy_key = activeCutVolumeRequestPolicyKey(requests);
-  populateActiveCutContextRefreshDependencies(signature, *sim.fe_system);
+  populateActiveCutContextRefreshDependencies(
+      signature, *sim.fe_system, requests);
   signature.solution_signature_kind =
       ActiveCutContextRefreshSignature::SolutionSignatureKind::
           VectorValueRevision;
@@ -21340,6 +21455,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolutionCach
     cache.evaluated_state_source_revisions =
         report.evaluated_state_source_revisions;
     cache.topology_key = report.topology_key;
+    cache.last_context = report.installed_context;
   }
   observeActiveCutContextRefresh(cache, report, provenance);
   return report;
@@ -21503,6 +21619,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCachedFromVector
     cache.evaluated_state_source_revisions =
         report.evaluated_state_source_revisions;
     cache.topology_key = report.topology_key;
+    cache.last_context = report.installed_context;
   }
   observeActiveCutContextRefresh(cache, report, provenance);
   return report;
@@ -21586,6 +21703,252 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCached(
       cache,
       provenance,
       solution_source);
+}
+
+void armActiveCutRestoreRetention(
+    ActiveCutContextRefreshCache& cache) noexcept
+{
+  cache.retained_restore_context.reset();
+  cache.restore_pin_state =
+      ActiveCutContextRefreshCache::RestorePinState::Armed;
+}
+
+void releaseActiveCutRestoreRetention(
+    ActiveCutContextRefreshCache& cache) noexcept
+{
+  cache.retained_restore_context.reset();
+  cache.restore_pin_state =
+      ActiveCutContextRefreshCache::RestorePinState::Idle;
+}
+
+// Called after every outer fixed-point refresh. Between
+// armActiveCutRestoreRetention() (before_physics_solve) and the second outer
+// pass of the attempt, it retains the installed context, so that at the end
+// of the entry synchronization the cache holds the geometry of the canonical
+// entry state, which RestoredOuterFixedPointState rolls back to. Only with
+// SVMP_RETAIN_RESTORED_CUT_CONTEXT=1 (see ActiveCutContextRefreshCache).
+void retainActiveCutContextAtAttemptEntry(
+    const application::core::SimulationComponents& sim,
+    ActiveCutContextRefreshCache& cache,
+    bool outer_fixed_point_state,
+    bool projected_outer_fixed_point_state)
+{
+  using PinState = ActiveCutContextRefreshCache::RestorePinState;
+  if (!parseBoolEnv("SVMP_RETAIN_RESTORED_CUT_CONTEXT", false)) {
+    cache.retained_restore_context.reset();
+    cache.restore_pin_state = PinState::Idle;
+    return;
+  }
+  if (outer_fixed_point_state) {
+    if (cache.restore_pin_state == PinState::Armed) {
+      cache.restore_pin_state = PinState::Pinning;
+    } else if (cache.restore_pin_state == PinState::Pinning) {
+      // A later outer pass: the entry geometry is already retained.
+      cache.restore_pin_state = PinState::Idle;
+      return;
+    }
+  }
+  if (cache.restore_pin_state != PinState::Pinning ||
+      (!outer_fixed_point_state && !projected_outer_fixed_point_state)) {
+    return;
+  }
+  auto context = cache.last_context.lock();
+  if (!sim.fe_system || !context || !cache.last_signature.has_value() ||
+      context.get() != sim.fe_system->cutIntegrationContext() ||
+      cache.evaluated_state_source_revisions.empty() ||
+      !cache.topology_key.has_value() || *cache.topology_key == 0u) {
+    cache.retained_restore_context.reset();
+    return;
+  }
+  ActiveCutContextRefreshCache::RetainedContext retained;
+  retained.signature = *cache.last_signature;
+  retained.context = std::move(context);
+  retained.evaluated_state_source_revisions =
+      cache.evaluated_state_source_revisions;
+  retained.topology_key = cache.topology_key;
+  cache.retained_restore_context = std::move(retained);
+}
+
+// Reinstalls the retained entry geometry for a restored state when the
+// restored state provably has the same generated-geometry input: an equal
+// content signature (level-set bytes, level-set DOF layout content, mesh
+// revisions and request policy) and a retained context whose snapshots and
+// source revisions are still current. The installed context is replaced and
+// the constraints are rebuilt exactly as after a refresh that rebuilds the
+// same geometry. Every decision is collective. Returns nullopt when the
+// caller must refresh normally (which also covers an installed context that
+// already has this content).
+std::optional<ActiveCutContextRefreshReport>
+reinstallRetainedActiveCutContextForRestoredState(
+    application::core::SimulationComponents& sim,
+    const Parameters& params,
+    const svmp::FE::systems::SystemStateView& state,
+    ActiveCutContextRefreshCache& cache,
+    const char* provenance)
+{
+  if (!sim.fe_system) {
+    return std::nullopt;
+  }
+  const auto requests = activeCutVolumeRequests(params);
+  const auto request_policy_key =
+      requireActiveCutRequestConsensus(*sim.fe_system, requests);
+  if (requests.empty()) {
+    return std::nullopt;
+  }
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const bool local_available =
+      cache.retained_restore_context.has_value() &&
+      cache.retained_restore_context->context != nullptr &&
+      !parseBoolEnv("SVMP_DISABLE_ACTIVE_CUT_REFRESH_CACHE", false) &&
+      parseBoolEnv("SVMP_RETAIN_RESTORED_CUT_CONTEXT", false);
+  if (globalAnyBool(!local_available, comm)) {
+    return std::nullopt;
+  }
+
+  std::vector<svmp::FE::Real> fe_solution;
+  std::optional<ActiveCutContextRefreshSignature> signature;
+  bool local_retained_matches = false;
+  std::exception_ptr local_signature_failure;
+  try {
+    fe_solution = gatherFeOrderedSolution(state, comm);
+    signature = activeCutContextRefreshSignature(
+        sim,
+        requests,
+        std::span<const svmp::FE::Real>(
+            fe_solution.data(), fe_solution.size()));
+    const auto& retained = *cache.retained_restore_context;
+    // Every rebuild that changes the level set rewrites its mesh vertex
+    // field and so advances the mesh field-layout revision. That revision is
+    // not a geometry input, and the reinstall below rewrites the field from
+    // the restored state exactly as a rebuild would, so it is excluded here.
+    std::optional<ActiveCutContextRefreshSignature> comparable;
+    if (signature.has_value()) {
+      comparable = retained.signature;
+      comparable->mesh_field_layout_revision =
+          signature->mesh_field_layout_revision;
+    }
+    if (comparable.has_value() && *signature == *comparable &&
+        retained.topology_key.has_value() &&
+        *retained.topology_key != 0u &&
+        !retained.evaluated_state_source_revisions.empty() &&
+        retained.context->freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(
+            sim.fe_system->meshAccess())) {
+      local_retained_matches = true;
+      for (const auto& [marker, source_revision] :
+           retained.evaluated_state_source_revisions) {
+        if (source_revision == 0u ||
+            !retained.context->hasFreeSurfaceGeometrySnapshotForMarker(
+                marker) ||
+            !retained.context->hasExpectedGeneratedSourceValueRevision(
+                marker) ||
+            retained.context->expectedGeneratedSourceValueRevision(
+                marker) != source_revision) {
+          local_retained_matches = false;
+          break;
+        }
+      }
+    }
+  } catch (...) {
+    local_signature_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_signature_failure,
+      comm,
+      "restored_active_cut_signature_before_reuse_consensus");
+  const bool installed_context_matches =
+      activeCutContextMatchesRefreshCache(
+          *sim.fe_system,
+          cache,
+          comm,
+          "restored_active_cut_installed_context_before_reuse_consensus") &&
+      signature.has_value() && cache.last_signature.has_value() &&
+      *signature == *cache.last_signature;
+  if (!globalAnyBool(!installed_context_matches, comm) ||
+      globalAnyBool(!local_retained_matches, comm)) {
+    return std::nullopt;
+  }
+
+  const auto retained = *cache.retained_restore_context;
+  std::size_t synchronized_level_set_fields{0u};
+  std::exception_ptr local_sync_failure;
+  try {
+    synchronized_level_set_fields =
+        syncActiveLevelSetVertexFieldsFromSolution(
+            sim,
+            requests,
+            std::span<const svmp::FE::Real>(
+                fe_solution.data(), fe_solution.size()));
+  } catch (...) {
+    local_sync_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_sync_failure,
+      comm,
+      "restored_active_cut_source_sync_before_reinstall");
+  sim.fe_system->setCutIntegrationContext(retained.context);
+  sim.fe_system->rebuildConstraintState();
+  const char* solution_source =
+      state.u_vector != nullptr ? "state_vector_fe_ordered"
+                                : "state_span_assumed_fe_ordered";
+  application::core::oopCout()
+      << "[svMultiPhysics::Application] Active pressure support constraint refresh"
+      << " diagnostic=active_pressure_constraint_refresh"
+      << " provenance=" << (provenance != nullptr ? provenance : "unknown")
+      << " solution_source=" << solution_source
+      << " synchronized_level_set_fields="
+      << synchronized_level_set_fields
+      << " support_source=retained_cut_context"
+      << " constraints=" << sim.fe_system->constraints().numConstraints()
+      << std::endl;
+  std::ostringstream reuse_line;
+  reuse_line
+      << "[svMultiPhysics::Application] Restored-state cut context reused"
+      << " diagnostic=cut_context_restored_reuse"
+      << " provenance=" << (provenance != nullptr ? provenance : "unknown")
+      << " solution_source=" << solution_source
+      << " solution_hash=" << retained.signature.solution_hash
+      << " level_set_dof_layout_key="
+      << retained.signature.level_set_dof_layout_key
+      << " cut_context_topology_key=" << *retained.topology_key
+      << " active_cut_request_policy_key=" << request_policy_key;
+  for (const auto& [marker, source_revision] :
+       retained.evaluated_state_source_revisions) {
+    reuse_line << " marker_" << marker << "_source_value_revision="
+               << source_revision;
+  }
+  application::core::oopCout() << reuse_line.str() << std::endl;
+
+  // As after a rebuild, the cache records the signature of the state after
+  // the mesh field was rewritten.
+  std::optional<ActiveCutContextRefreshSignature> refreshed_signature;
+  try {
+    refreshed_signature = activeCutContextRefreshSignature(
+        sim,
+        requests,
+        std::span<const svmp::FE::Real>(
+            fe_solution.data(), fe_solution.size()));
+  } catch (...) {
+    refreshed_signature.reset();
+  }
+  cache.last_signature =
+      refreshed_signature.has_value() ? *refreshed_signature : *signature;
+  cache.last_vector_signature.reset();
+  cache.evaluated_state_source_revisions =
+      retained.evaluated_state_source_revisions;
+  cache.topology_key = retained.topology_key;
+  cache.last_context = retained.context;
+
+  ActiveCutContextRefreshReport report{};
+  report.refreshed = true;
+  report.request_policy_key = request_policy_key;
+  report.topology_key = *retained.topology_key;
+  report.evaluated_state_source_revisions =
+      retained.evaluated_state_source_revisions;
+  report.value_revision =
+      retained.evaluated_state_source_revisions.rbegin()->second;
+  report.installed_context = retained.context;
+  observeActiveCutContextRefresh(cache, report, provenance);
+  return report;
 }
 
 struct PrescribedFieldCoefficientCheckpoint {
@@ -30234,10 +30597,14 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                          RestoredProjectedTimeStepState) {
           return;
         }
-        if (point ==
+        const bool restoring_generated_state =
+            point ==
                 TransientStateSyncPoint::RestoredOuterFixedPointState ||
-            point == TransientStateSyncPoint::RestoredTimeStepState) {
-          cut_refresh_cache->last_signature.reset();
+            point == TransientStateSyncPoint::RestoredTimeStepState;
+        if (restoring_generated_state) {
+          // A restore changes the source vector. Value-revision counters are
+          // per vector, so only a content signature may prove that the
+          // installed (or the retained entry) geometry is still current.
           cut_refresh_cache->last_vector_signature.reset();
           curvature_projection_cache->entries.clear();
         }
@@ -30268,9 +30635,25 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             per_step_only_generated_state) {
           return;
         }
-        const auto report = refreshActiveCutIntegrationContextCached(
-            sim, params, state, *cut_lifecycle, *cut_refresh_cache,
-            stateSyncPointName(point));
+        std::optional<ActiveCutContextRefreshReport> restored_report;
+        if (restoring_generated_state) {
+          restored_report =
+              reinstallRetainedActiveCutContextForRestoredState(
+                  sim, params, state, *cut_refresh_cache,
+                  stateSyncPointName(point));
+        }
+        const auto report =
+            restored_report.has_value()
+                ? *restored_report
+                : refreshActiveCutIntegrationContextCached(
+                      sim, params, state, *cut_lifecycle,
+                      *cut_refresh_cache, stateSyncPointName(point));
+        retainActiveCutContextAtAttemptEntry(
+            sim,
+            *cut_refresh_cache,
+            point == TransientStateSyncPoint::OuterFixedPointState,
+            point ==
+                TransientStateSyncPoint::ProjectedOuterFixedPointState);
         if (report.refreshed &&
             report.request_policy_key != expected_cut_request_policy_key) {
           throw std::runtime_error(
@@ -30369,6 +30752,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   }
   callbacks.on_before_physics_solve =
       [&](svmp::FE::timestepping::TimeHistory& h, double /*solve_time*/, double /*dt*/) {
+        armActiveCutRestoreRetention(*cut_refresh_cache);
         const auto before_solve_cut_report =
             refreshActiveCutIntegrationContextCached(
                 sim,
@@ -32280,6 +32664,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   };
   double vtk_total_time = 0.0;
   callbacks.on_step_accepted = [&](svmp::FE::timestepping::TimeHistory& h) {
+    releaseActiveCutRestoreRetention(*cut_refresh_cache);
     requireCollectiveLevelSetMaintenanceRequestSchedule(
         level_set_maintenance,
         LevelSetMaintenanceScheduleStage::

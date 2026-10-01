@@ -20609,6 +20609,188 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
 }
 
 TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       IdenticalDofRedistributionKeepsTheCutContextCurrent)
+{
+  const auto solution = gatherFeOrderedSolution(history().u());
+  const std::span<const svmp::FE::Real> span(solution.data(),
+                                             solution.size());
+  (void)refreshActiveCutIntegrationContextFromSolutionCached(
+      sim_, *params_, span, lifecycle_, refresh_cache_,
+      "before_physics_solve", "staged_fe_solution");
+  const auto* installed = sim_.fe_system->cutIntegrationContext();
+  ASSERT_NE(installed, nullptr);
+  const auto before = activeCutContextRefreshSignature(
+      sim_, active_requests_, span);
+  ASSERT_TRUE(before.has_value());
+
+  // setup() redistributes the same layout and advances the system DOF and
+  // block layout revisions, as the per-step structural constraint refresh
+  // does in a transient run.
+  const auto dof_layout_revision = sim_.fe_system->dofLayoutRevision();
+  const auto block_layout_revision = sim_.fe_system->blockLayoutRevision();
+  ASSERT_NO_THROW(sim_.fe_system->setup({}));
+  ASSERT_NE(sim_.fe_system->dofLayoutRevision(), dof_layout_revision);
+  ASSERT_NE(sim_.fe_system->blockLayoutRevision(), block_layout_revision);
+  const auto after = activeCutContextRefreshSignature(
+      sim_, active_requests_, span);
+  ASSERT_TRUE(after.has_value());
+  EXPECT_NE(after->system_dof_layout_revision,
+            before->system_dof_layout_revision);
+  EXPECT_EQ(after->level_set_dof_layout_key,
+            before->level_set_dof_layout_key);
+  EXPECT_EQ(*after, *before);
+
+  const auto unchanged =
+      refreshActiveCutIntegrationContextFromSolutionCached(
+          sim_, *params_, span, lifecycle_, refresh_cache_,
+          "outer_fixed_point", "staged_fe_solution");
+  EXPECT_FALSE(unchanged.refreshed);
+  EXPECT_EQ(sim_.fe_system->cutIntegrationContext(), installed);
+  EXPECT_EQ(unchanged.topology_key, refresh_cache_.topology_key.value_or(0u));
+
+  // A value-revision signature is meaningful only for an unchanged vector
+  // layout, so its fast path still observes the layout revisions.
+  auto vector_before = *before;
+  vector_before.solution_signature_kind =
+      ActiveCutContextRefreshSignature::SolutionSignatureKind::
+          VectorValueRevision;
+  auto vector_after = *after;
+  vector_after.solution_signature_kind =
+      vector_before.solution_signature_kind;
+  EXPECT_FALSE(vector_after == vector_before);
+  // A different level-set DOF layout always invalidates.
+  auto relabeled = *after;
+  relabeled.level_set_dof_layout_key ^= 1u;
+  EXPECT_FALSE(relabeled == *before);
+
+  // The level set itself still drives the refresh.
+  auto moved = solution;
+  const auto offset = static_cast<std::size_t>(
+      sim_.fe_system->fieldDofOffset(phi_));
+  moved[offset] += svmp::FE::Real{1.0e-7};
+  const auto rebuilt =
+      refreshActiveCutIntegrationContextFromSolutionCached(
+          sim_, *params_,
+          std::span<const svmp::FE::Real>(moved.data(), moved.size()),
+          lifecycle_, refresh_cache_, "outer_fixed_point",
+          "staged_fe_solution");
+  EXPECT_TRUE(rebuilt.refreshed);
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       RestoredStateReinstallsTheRetainedEntryGeometry)
+{
+  const auto entry_solution = gatherFeOrderedSolution(history().u());
+  auto moved_solution = entry_solution;
+  const auto offset = static_cast<std::size_t>(
+      sim_.fe_system->fieldDofOffset(phi_));
+  moved_solution[offset] += svmp::FE::Real{1.0e-7};
+  const auto state_for = [](const std::vector<svmp::FE::Real>& values) {
+    svmp::FE::systems::SystemStateView state;
+    state.u = std::span<const svmp::FE::Real>(values.data(), values.size());
+    return state;
+  };
+  const auto refresh = [&](const std::vector<svmp::FE::Real>& values,
+                           const char* provenance) {
+    return refreshActiveCutIntegrationContextCached(
+        sim_, *params_, state_for(values), lifecycle_, refresh_cache_,
+        provenance);
+  };
+
+  // Without the opt-in nothing is retained.
+  {
+    armActiveCutRestoreRetention(refresh_cache_);
+    retainActiveCutContextAtAttemptEntry(
+        sim_, refresh_cache_, /*outer_fixed_point_state=*/true,
+        /*projected_outer_fixed_point_state=*/false);
+    EXPECT_FALSE(refresh_cache_.retained_restore_context.has_value());
+  }
+  WorkflowScopedEnvVar retain(
+      "SVMP_RETAIN_RESTORED_CUT_CONTEXT", std::string("1"));
+
+  // Attempt entry: before_physics_solve arms the retention, the entry outer
+  // fixed-point synchronization retains the installed geometry.
+  armActiveCutRestoreRetention(refresh_cache_);
+  (void)refresh(entry_solution, "before_physics_solve");
+  const auto entry = refresh(entry_solution, "outer_fixed_point");
+  retainActiveCutContextAtAttemptEntry(
+      sim_, refresh_cache_, /*outer_fixed_point_state=*/true,
+      /*projected_outer_fixed_point_state=*/false);
+  (void)refresh(entry_solution, "projected_outer_fixed_point");
+  retainActiveCutContextAtAttemptEntry(
+      sim_, refresh_cache_, false, /*projected_outer_fixed_point_state=*/true);
+  ASSERT_TRUE(refresh_cache_.retained_restore_context.has_value());
+  const auto* entry_context = sim_.fe_system->cutIntegrationContext();
+  ASSERT_NE(entry_context, nullptr);
+  EXPECT_EQ(refresh_cache_.retained_restore_context->context.get(),
+            entry_context);
+  const auto entry_revisions = refresh_cache_.evaluated_state_source_revisions;
+  const auto entry_topology_key = refresh_cache_.topology_key.value_or(0u);
+  ASSERT_NE(entry_topology_key, 0u);
+
+  // A later outer pass moves the level set and rebuilds; it ends the
+  // retention window without replacing the retained geometry.
+  const auto later = refresh(moved_solution, "outer_fixed_point");
+  retainActiveCutContextAtAttemptEntry(sim_, refresh_cache_, true, false);
+  EXPECT_TRUE(later.refreshed);
+  ASSERT_NE(sim_.fe_system->cutIntegrationContext(), entry_context);
+  ASSERT_TRUE(refresh_cache_.retained_restore_context.has_value());
+  EXPECT_EQ(refresh_cache_.retained_restore_context->context.get(),
+            entry_context);
+
+  // A restored state with other content is not served by the retained
+  // geometry.
+  auto other_solution = entry_solution;
+  other_solution[offset] -= svmp::FE::Real{2.0e-7};
+  EXPECT_FALSE(reinstallRetainedActiveCutContextForRestoredState(
+                   sim_, *params_, state_for(other_solution),
+                   refresh_cache_, "restored_outer_fixed_point")
+                   .has_value());
+  EXPECT_NE(sim_.fe_system->cutIntegrationContext(), entry_context);
+
+  // Rolling back to the entry state reinstalls the retained geometry.
+  const auto restored = reinstallRetainedActiveCutContextForRestoredState(
+      sim_, *params_, state_for(entry_solution), refresh_cache_,
+      "restored_outer_fixed_point");
+  ASSERT_TRUE(restored.has_value());
+  EXPECT_TRUE(restored->refreshed);
+  EXPECT_EQ(restored->topology_key, entry_topology_key);
+  EXPECT_EQ(restored->evaluated_state_source_revisions, entry_revisions);
+  EXPECT_EQ(sim_.fe_system->cutIntegrationContext(), entry_context);
+  EXPECT_EQ(refresh_cache_.evaluated_state_source_revisions, entry_revisions);
+
+  // The reinstalled geometry is current: an ordinary refresh of the same
+  // state (for example the accepted state after a time-step rollback) skips,
+  // and a second reinstall is unnecessary.
+  const auto after_restore = refresh(entry_solution, "restored_time_step");
+  EXPECT_FALSE(after_restore.refreshed);
+  EXPECT_EQ(sim_.fe_system->cutIntegrationContext(), entry_context);
+  EXPECT_FALSE(reinstallRetainedActiveCutContextForRestoredState(
+                   sim_, *params_, state_for(entry_solution),
+                   refresh_cache_, "restored_time_step")
+                   .has_value());
+  EXPECT_EQ(entry.topology_key, entry_topology_key);
+
+  // Disabled reuse falls back to rebuilding.
+  (void)refresh(moved_solution, "outer_fixed_point");
+  {
+    WorkflowScopedEnvVar disable(
+        "SVMP_RETAIN_RESTORED_CUT_CONTEXT", std::string("0"));
+    EXPECT_FALSE(reinstallRetainedActiveCutContextForRestoredState(
+                     sim_, *params_, state_for(entry_solution),
+                     refresh_cache_, "restored_outer_fixed_point")
+                     .has_value());
+  }
+
+  releaseActiveCutRestoreRetention(refresh_cache_);
+  EXPECT_FALSE(refresh_cache_.retained_restore_context.has_value());
+  EXPECT_FALSE(reinstallRetainedActiveCutContextForRestoredState(
+                   sim_, *params_, state_for(entry_solution),
+                   refresh_cache_, "restored_outer_fixed_point")
+                   .has_value());
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
        CachedRefreshRebuildsARevisionStaleContextOnBothInputPaths)
 {
   const auto clone_current_context = [&]() {
