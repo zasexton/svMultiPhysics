@@ -1316,14 +1316,16 @@ void SimulationBuilder::loadMeshes()
   oopCout() << "[svMultiPhysics::Application] SimulationBuilder: meshes declared=" << declared << std::endl;
 
   // Distributed small-cut aggregation slaves a DOF to the vertices of a root
-  // cell a few cells away, and every rank that assembles with the slave (its
-  // owned cells, their face neighbors, and cells touching its owned DOFs) must
-  // carry those masters; otherwise a less preferred root is used and the
-  // discretization depends on the partition. Ghost layers are face-adjacent:
-  // on simplices the cells touching an owned vertex reach up to three layers
-  // out and a root two cells from its slave adds three more, so request six
-  // layers when the deck leaves <Ghost_layers> unset.
-  constexpr int kAggregationGhostLayers = 6;
+  // cell a few cells away. Every rank that condenses the slave (in its owned
+  // cells or their face neighbors) must carry those masters, otherwise a less
+  // preferred root is used and the discretization depends on the partition;
+  // every rank owning a row that couples to the slave must carry them too,
+  // otherwise its Jacobian rows lose the condensed master columns. Ghost
+  // layers are face-adjacent: on simplices the cells touching an owned vertex
+  // reach three layers out, the cut cells around a slave three more, and the
+  // preferred roots lie at most two cells beyond those in practice, so request
+  // eight layers when the deck leaves <Ghost_layers> unset.
+  constexpr int kAggregationGhostLayers = 8;
   int minimum_ghost_layers = 0;
   if (svmp::MeshComm::world().size() > 1) {
     for (const auto& request : application::core::activeCutVolumeRequests(params_)) {
