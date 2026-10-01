@@ -12,6 +12,8 @@
 #include "Backends/Utils/BackendOptions.h"
 #include "Backends/Utils/PreconditionerReusePolicy.h"
 
+#include <mpi.h>
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -98,6 +100,9 @@ int invertDenseBlock(int d, const double* block, double* inverse);
  * Reuse follows PreconditionerReusePolicy.  A reused preconditioner is
  * combined with the current diagonal scalings, so that for the current scaled
  * operator D1 A D2 it approximates D1 A_old D2 rather than the old scaling.
+ * Refresh decisions are made collectively (structure changes are OR-reduced
+ * and the setup cost uses global operation counts), so every rank refreshes
+ * on the same solves.
  */
 class FsilsKrylovPreconditioner {
 public:
@@ -176,6 +181,8 @@ private:
     bool configured_{false};
 
     int dof_{0};
+    int n_tasks_{1};
+    MPI_Comm comm_{MPI_COMM_SELF};
     int lhs_nnz_{0};
     int nNo_{0};
     FsilsOwnedBlockGraph graph_{};

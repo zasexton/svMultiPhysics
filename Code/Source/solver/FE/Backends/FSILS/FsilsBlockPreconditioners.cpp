@@ -472,9 +472,16 @@ FsilsKrylovPreconditioner::prepare(const fe_fsi_linear_solver::FSILS_lhsType& lh
         return nullptr;
     }
     const std::uint64_t signature = FsilsOwnedBlockGraph::computeSignature(lhs);
-    const bool structure_changed = signature != graph_.signature || dof != dof_ ||
-                                   static_cast<int>(lhs.nnz) != lhs_nnz_ ||
-                                   static_cast<int>(lhs.nNo) != nNo_;
+    const bool local_structure_changed = signature != graph_.signature || dof != dof_ ||
+                                         static_cast<int>(lhs.nnz) != lhs_nnz_ ||
+                                         static_cast<int>(lhs.nNo) != nNo_;
+    n_tasks_ = lhs.commu.nTasks;
+    comm_ = lhs.commu.comm;
+    int changed = local_structure_changed ? 1 : 0;
+    if (n_tasks_ > 1) {
+        MPI_Allreduce(MPI_IN_PLACE, &changed, 1, MPI_INT, MPI_LOR, comm_);
+    }
+    const bool structure_changed = changed != 0;
     auto decision = policy_.beforeSolve(reuse_, structure_changed);
     if (force_refresh) {
         decision = {true, PreconditionerReusePolicy::Reason::StaleFailure};
@@ -803,8 +810,11 @@ void FsilsKrylovPreconditioner::finish(int iterations, bool converged, bool fres
         const double matvec = 2.0 * static_cast<double>(lhs_nnz_) * static_cast<double>(dof_) *
                               static_cast<double>(dof_);
         const double orthogonalization = 4.0 * owned * (0.5 * basis + 1.0);
-        const double iteration_flops = matvec + apply_flops_ + orthogonalization;
-        refresh_cost_iterations = iteration_flops > 0.0 ? setup_flops_ / iteration_flops : 0.0;
+        double flops[2] = {setup_flops_, matvec + apply_flops_ + orthogonalization};
+        if (n_tasks_ > 1) {
+            MPI_Allreduce(MPI_IN_PLACE, flops, 2, MPI_DOUBLE, MPI_SUM, comm_);
+        }
+        refresh_cost_iterations = flops[1] > 0.0 ? flops[0] / flops[1] : 0.0;
     }
     policy_.recordSolve(iterations, fresh, refresh_cost_iterations);
 
