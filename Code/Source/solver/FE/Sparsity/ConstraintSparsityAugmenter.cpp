@@ -477,12 +477,22 @@ AugmentationStats ConstraintSparsityAugmenter::exchangeOffRankSlaveRowFill(
                 invalid_owner = 1;
                 continue;
             }
+            // Condensation never writes into a constrained column (Dirichlet
+            // columns are eliminated, slave columns are moved to their
+            // masters, which pass 1 already added to the row).
             auto& buffer = outgoing[static_cast<std::size_t>(owner)];
             buffer.push_back(static_cast<std::int64_t>(master));
-            buffer.push_back(static_cast<std::int64_t>(slave_row.size()));
+            const auto count_position = buffer.size();
+            buffer.push_back(0);
+            std::int64_t n_sent = 0;
             for (const GlobalIndex col : slave_row) {
+                if (constraint_query_->isConstrained(col)) {
+                    continue;
+                }
                 buffer.push_back(static_cast<std::int64_t>(col));
+                ++n_sent;
             }
+            buffer[count_position] = n_sent;
         }
     }
 

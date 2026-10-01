@@ -452,7 +452,8 @@ TEST(ConstraintSparsityAugmenterMPITest, OffRankMasterRowReceivesSlaveRowFill) {
 
     if (my_rank == 1) {
         EXPECT_TRUE(pattern.hasEntry(2, 0));
-        EXPECT_TRUE(pattern.hasEntry(2, 1));
+        // The slave column itself is never written after condensation.
+        EXPECT_FALSE(pattern.hasEntry(2, 1));
         EXPECT_GT(stats.n_fill_entries, 0);
     } else {
         EXPECT_EQ(stats.n_fill_entries, 0);
@@ -472,7 +473,6 @@ TEST(ConstraintSparsityAugmenterMPITest, OffRankMasterRowReceivesSlaveRowFill) {
     filtered.finalize();
     if (my_rank == 1) {
         EXPECT_FALSE(filtered.hasEntry(2, 0));
-        EXPECT_TRUE(filtered.hasEntry(2, 1));
         EXPECT_EQ(filtered_stats.n_unavailable_fill_columns, 1);
     }
 }
