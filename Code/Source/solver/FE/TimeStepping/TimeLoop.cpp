@@ -4220,8 +4220,13 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 if (!mpcAcceptedStateDistributeDisabled()) {
                     const auto& accepted_constraints =
                         transient.system().constraints();
-                    if (!accepted_constraints.empty() &&
-                        accepted_constraints.hasMasterBearingLines()) {
+                    // Constraint lines are rank-local; updateGhosts() is
+                    // collective, so the decision must be communicator-wide.
+                    if (candidateStageBooleanMinMax(
+                            transient.system(),
+                            !accepted_constraints.empty() &&
+                                accepted_constraints.hasMasterBearingLines())
+                            .second) {
                         history.updateGhosts();
                         accepted_constraints.distributeMasterBearing(history.u());
                         accepted_constraints.distributeMasterBearing(history.uPrev());
