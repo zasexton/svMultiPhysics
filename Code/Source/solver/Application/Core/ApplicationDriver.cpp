@@ -11366,7 +11366,12 @@ void reimposeAcceptedMasterBearingState(
     return;
   }
   const auto& constraints = system.constraints();
-  if (constraints.empty() || !constraints.hasMasterBearingLines()) {
+  // Constraint lines are rank-local (a partition that does not touch the
+  // interface holds no master-bearing line), while updateGhosts() below is
+  // collective: decide on every rank of the FE communicator together.
+  if (!globalAnyBool(!constraints.empty() &&
+                         constraints.hasMasterBearingLines(),
+                     activeFESystemCommunicator(system))) {
     return;
   }
   history.updateGhosts();
