@@ -5008,6 +5008,26 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 		                }
 		            }
 		        }
+#if FE_HAS_MPI
+		        if (opts.use_constraints_in_assembly && dist_pattern) {
+		            // Collective: a master row owned by another rank than its
+		            // slave row receives that row's fill. Constraint sets are
+		            // rank-local, so every rank takes part.
+		            std::shared_ptr<sparsity::IConstraintQuery> fill_query;
+		            if (dist_mode == DistSparsityMode::NodalInterleaved) {
+		                FE_THROW_IF(!nodal_map.has_value(), InvalidStateException,
+		                            "FESystem::setup: missing nodal mapping for constraint sparsity augmentation");
+		                fill_query = std::make_shared<PermutedAffineConstraintsQuery>(
+		                    affine_constraints_,
+		                    std::span<const GlobalIndex>(nodal_map->fe_to_fs),
+		                    std::span<const GlobalIndex>(nodal_map->fs_to_fe));
+		            } else {
+		                fill_query = std::make_shared<AffineConstraintsQuery>(affine_constraints_);
+		            }
+		            sparsity::ConstraintSparsityAugmenter fill_augmenter(std::move(fill_query));
+		            fill_augmenter.exchangeOffRankSlaveRowFill(*dist_pattern, activeMpiCommunicator());
+		        }
+#endif
 
 	        if (pattern && opts.sparsity_options.ensure_diagonal) {
 	            pattern->ensureDiagonal();
@@ -6459,7 +6479,8 @@ FESystem::buildActiveDistributedSparsityPatternFromBase(
         rebuilt->addEntries(row, std::span<const GlobalIndex>(cols.data(), cols.size()));
     }
 
-    if (use_constraints_in_assembly_ && !affine_constraints_.empty()) {
+    if (use_constraints_in_assembly_) {
+        std::shared_ptr<sparsity::IConstraintQuery> query;
         if (base.dofIndexing() ==
             sparsity::DistributedSparsityPattern::DofIndexing::NodalInterleaved) {
             FE_THROW_IF(dof_permutation_ == nullptr ||
@@ -6468,17 +6489,42 @@ FESystem::buildActiveDistributedSparsityPatternFromBase(
                         InvalidStateException,
                         "FESystem::buildActiveDistributedSparsityPatternFromBase: "
                         "missing nodal-interleaved DOF permutation for constraint sparsity refresh");
-            auto query = std::make_shared<PermutedAffineConstraintsQuery>(
+            query = std::make_shared<PermutedAffineConstraintsQuery>(
                 affine_constraints_,
                 std::span<const GlobalIndex>(dof_permutation_->forward),
                 std::span<const GlobalIndex>(dof_permutation_->inverse));
-            sparsity::ConstraintSparsityAugmenter augmenter(std::move(query));
-            augmenter.augment(*rebuilt, sparsity::AugmentationMode::EliminationFill);
         } else {
-            auto query = std::make_shared<AffineConstraintsQuery>(affine_constraints_);
-            sparsity::ConstraintSparsityAugmenter augmenter(std::move(query));
+            query = std::make_shared<AffineConstraintsQuery>(affine_constraints_);
+        }
+        sparsity::ConstraintSparsityAugmenter augmenter(std::move(query));
+        if (!affine_constraints_.empty()) {
             augmenter.augment(*rebuilt, sparsity::AugmentationMode::EliminationFill);
         }
+#if FE_HAS_MPI
+        // Collective (constraint sets are rank-local): a master row owned by
+        // another rank than its slave row receives that row's fill. Keep the
+        // backend node layout of the base pattern: columns outside it would
+        // need a wider halo.
+        std::unordered_set<GlobalIndex> base_ghost_rows;
+        if (base.numGhostRows() > 0) {
+            const auto ghost_rows = base.getGhostRowMap();
+            base_ghost_rows.insert(ghost_rows.begin(), ghost_rows.end());
+        }
+        const auto fill = augmenter.exchangeOffRankSlaveRowFill(
+            *rebuilt,
+            activeMpiCommunicator(),
+            [&](GlobalIndex col) { return base_ghost_rows.count(col) != 0u; });
+        long long unavailable = static_cast<long long>(fill.n_unavailable_fill_columns);
+        MPI_Allreduce(MPI_IN_PLACE, &unavailable, 1, MPI_LONG_LONG, MPI_SUM,
+                      activeMpiCommunicator());
+        if (unavailable > 0) {
+            FE_LOG_WARNING(
+                "FESystem: constraint sparsity refresh diagnostic=off_rank_constraint_fill_outside_halo"
+                " rejected_columns=" + std::to_string(unavailable) +
+                " (master rows coupled to off-rank slaves reach beyond the ghost layers;"
+                " increase <Ghost_layers>)");
+        }
+#endif
     }
 
     if (last_setup_options_.sparsity_options.ensure_diagonal) {
@@ -6628,7 +6674,27 @@ FESystem::buildActiveDistributedSparsityPatternFromBase(
 void FESystem::refreshSparsityForConstraintStructureChange()
 {
     const auto signature = computeConstraintStructureSignature(affine_constraints_);
-    if (signature == constraint_structure_signature_) {
+    // The signature covers rank-local lines only, while the rebuild below is
+    // collective and a line change on one rank alters the fill of master rows
+    // owned by another: rebuild on every rank if any rank changed.
+    int structure_changed = signature != constraint_structure_signature_ ? 1 : 0;
+#if FE_HAS_MPI
+    {
+        int mpi_initialized = 0;
+        int mpi_finalized = 0;
+        MPI_Initialized(&mpi_initialized);
+        MPI_Finalized(&mpi_finalized);
+        const auto communicator = activeMpiCommunicator();
+        int communicator_size = 1;
+        if (mpi_initialized != 0 && mpi_finalized == 0 && communicator != MPI_COMM_NULL) {
+            MPI_Comm_size(communicator, &communicator_size);
+        }
+        if (communicator_size > 1) {
+            MPI_Allreduce(MPI_IN_PLACE, &structure_changed, 1, MPI_INT, MPI_MAX, communicator);
+        }
+    }
+#endif
+    if (structure_changed == 0) {
         return;
     }
     const auto old_signature = constraint_structure_signature_;

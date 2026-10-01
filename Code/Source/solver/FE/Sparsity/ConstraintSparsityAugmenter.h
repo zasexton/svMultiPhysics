@@ -271,6 +271,7 @@ struct AugmentationStats {
     GlobalIndex n_diagonal_added{0};      ///< Number of diagonal entries added
     GlobalIndex original_nnz{0};          ///< NNZ before augmentation
     GlobalIndex augmented_nnz{0};         ///< NNZ after augmentation
+    GlobalIndex n_unavailable_fill_columns{0}; ///< Off-rank fill columns rejected by the caller
 };
 
 /**
@@ -448,6 +449,23 @@ public:
     [[nodiscard]] SparsityPattern buildReducedPattern(const SparsityPattern& original);
 
 #if FE_HAS_MPI
+    /**
+     * @brief Complete EliminationFill across ranks (collective)
+     *
+     * augment(DistributedSparsityPattern&) propagates a constrained row's
+     * couplings only into master rows owned by the same rank. When a master
+     * is owned elsewhere, the rank owning the slave row sends that row's
+     * (already master-expanded) columns to the master's owner, which adds
+     * them to the master row. Call on every rank after augment() and before
+     * finalize(). When `column_available` is given, received ghost columns it
+     * rejects are skipped and counted in n_unavailable_fill_columns (use it to
+     * keep an existing backend node layout).
+     */
+    AugmentationStats exchangeOffRankSlaveRowFill(
+        DistributedSparsityPattern& pattern,
+        MPI_Comm comm,
+        const std::function<bool(GlobalIndex)>& column_available = {});
+
     /**
      * @brief Build a reduced distributed pattern (ReducedSystem mode)
      *

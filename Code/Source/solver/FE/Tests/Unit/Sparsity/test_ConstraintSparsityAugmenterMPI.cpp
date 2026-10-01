@@ -421,6 +421,62 @@ TEST(ConstraintSparsityAugmenterMPITest, DistributedRefreshFromBaseUsesCurrentMa
     }
 }
 
+TEST(ConstraintSparsityAugmenterMPITest, OffRankMasterRowReceivesSlaveRowFill) {
+    int my_rank = 0;
+    int n_ranks = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &n_ranks);
+
+    if (n_ranks != 2) {
+        GTEST_SKIP() << "Requires exactly 2 MPI ranks";
+    }
+
+    // Rank 0 owns rows {0,1}, rank 1 owns {2,3}. Slave 1 (rank 0) has master
+    // 2 (rank 1); row 1 couples to column 0. Condensation moves row 1 into
+    // row 2, so row 2 must hold column 0 even though only rank 0 knows row 1.
+    const GlobalIndex n_global = 4;
+    const IndexRange owned{static_cast<GlobalIndex>(2 * my_rank),
+                           static_cast<GlobalIndex>(2 * my_rank + 2)};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+    pattern.ensureDiagonal();
+    if (my_rank == 0) {
+        pattern.addEntry(1, 0);
+    }
+
+    auto constraints = std::make_shared<SimpleConstraintSet>();
+    constraints->addConstraint(1, 2);
+    ConstraintSparsityAugmenter augmenter(constraints);
+    augmenter.augment(pattern, AugmentationMode::EliminationFill);
+    const auto stats = augmenter.exchangeOffRankSlaveRowFill(pattern, MPI_COMM_WORLD);
+    pattern.finalize();
+
+    if (my_rank == 1) {
+        EXPECT_TRUE(pattern.hasEntry(2, 0));
+        EXPECT_TRUE(pattern.hasEntry(2, 1));
+        EXPECT_GT(stats.n_fill_entries, 0);
+    } else {
+        EXPECT_EQ(stats.n_fill_entries, 0);
+    }
+
+    // A caller-supplied column filter keeps an existing node layout and
+    // reports what it rejected.
+    DistributedSparsityPattern filtered(owned, owned, n_global, n_global);
+    filtered.ensureDiagonal();
+    if (my_rank == 0) {
+        filtered.addEntry(1, 0);
+    }
+    ConstraintSparsityAugmenter filtering_augmenter(constraints);
+    filtering_augmenter.augment(filtered, AugmentationMode::EliminationFill);
+    const auto filtered_stats = filtering_augmenter.exchangeOffRankSlaveRowFill(
+        filtered, MPI_COMM_WORLD, [](GlobalIndex col) { return col != 0; });
+    filtered.finalize();
+    if (my_rank == 1) {
+        EXPECT_FALSE(filtered.hasEntry(2, 0));
+        EXPECT_TRUE(filtered.hasEntry(2, 1));
+        EXPECT_EQ(filtered_stats.n_unavailable_fill_columns, 1);
+    }
+}
+
 TEST(FESystemSparsityRefreshMPITest, RebuildConstraintStateRefreshesDistributedPattern) {
     MPI_Comm comm = MPI_COMM_WORLD;
     int my_rank = 0;

@@ -413,6 +413,139 @@ SparsityPattern ConstraintSparsityAugmenter::buildReducedPattern(
 }
 
 #if FE_HAS_MPI
+AugmentationStats ConstraintSparsityAugmenter::exchangeOffRankSlaveRowFill(
+    DistributedSparsityPattern& pattern,
+    MPI_Comm comm,
+    const std::function<bool(GlobalIndex)>& column_available)
+{
+    FE_THROW_IF(pattern.isFinalized(), InvalidArgumentException,
+                "Cannot augment finalized pattern");
+    FE_THROW_IF(!constraint_query_, InvalidArgumentException,
+                "No constraints configured");
+
+    int world_size = 1;
+    int my_rank = 0;
+    MPI_Comm_size(comm, &world_size);
+    MPI_Comm_rank(comm, &my_rank);
+
+    last_stats_ = AugmentationStats{};
+    last_stats_.original_nnz = pattern.getLocalNnz();
+    if (world_size <= 1) {
+        last_stats_.augmented_nnz = last_stats_.original_nnz;
+        return last_stats_;
+    }
+
+    const auto& owned_rows = pattern.ownedRows();
+    const auto& owned_cols = pattern.ownedCols();
+
+    // Owned rows are one contiguous range per rank.
+    const std::int64_t local_range[2] = {static_cast<std::int64_t>(owned_rows.first),
+                                         static_cast<std::int64_t>(owned_rows.last)};
+    std::vector<std::int64_t> ranges(2u * static_cast<std::size_t>(world_size), 0);
+    MPI_Allgather(local_range, 2, MPI_INT64_T, ranges.data(), 2, MPI_INT64_T, comm);
+    const auto row_owner = [&](GlobalIndex row) {
+        for (int r = 0; r < world_size; ++r) {
+            const auto first = ranges[2u * static_cast<std::size_t>(r)];
+            const auto last = ranges[2u * static_cast<std::size_t>(r) + 1u];
+            if (static_cast<std::int64_t>(row) >= first && static_cast<std::int64_t>(row) < last) {
+                return r;
+            }
+        }
+        return -1;
+    };
+
+    // Per destination rank: [master_row, n_cols, cols...]*
+    std::vector<std::vector<std::int64_t>> outgoing(static_cast<std::size_t>(world_size));
+    int invalid_owner = 0;
+    for (const GlobalIndex slave : constraint_query_->getAllConstrainedDofs()) {
+        if (!owned_rows.contains(slave)) {
+            continue;
+        }
+        auto masters = options_.compute_transitive_closure
+            ? getTransitiveMasters(slave)
+            : constraint_query_->getMasterDofs(slave);
+        std::sort(masters.begin(), masters.end());
+        masters.erase(std::unique(masters.begin(), masters.end()), masters.end());
+        const auto& slave_row = pattern.building_rows_[
+            static_cast<std::size_t>(slave - owned_rows.first)];
+        for (const GlobalIndex master : masters) {
+            if (master < 0 || master >= pattern.globalRows() || owned_rows.contains(master)) {
+                continue;
+            }
+            const int owner = row_owner(master);
+            if (owner < 0 || owner >= world_size || owner == my_rank) {
+                invalid_owner = 1;
+                continue;
+            }
+            auto& buffer = outgoing[static_cast<std::size_t>(owner)];
+            buffer.push_back(static_cast<std::int64_t>(master));
+            buffer.push_back(static_cast<std::int64_t>(slave_row.size()));
+            for (const GlobalIndex col : slave_row) {
+                buffer.push_back(static_cast<std::int64_t>(col));
+            }
+        }
+    }
+
+    std::vector<int> send_counts(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> send_displs(static_cast<std::size_t>(world_size), 0);
+    std::vector<std::int64_t> send_buffer;
+    for (int r = 0; r < world_size; ++r) {
+        const auto& buffer = outgoing[static_cast<std::size_t>(r)];
+        if (buffer.size() + send_buffer.size() >
+            static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+            invalid_owner = 1;  // reported collectively below
+            break;
+        }
+        send_displs[static_cast<std::size_t>(r)] = static_cast<int>(send_buffer.size());
+        send_counts[static_cast<std::size_t>(r)] = static_cast<int>(buffer.size());
+        send_buffer.insert(send_buffer.end(), buffer.begin(), buffer.end());
+    }
+    MPI_Allreduce(MPI_IN_PLACE, &invalid_owner, 1, MPI_INT, MPI_MAX, comm);
+    FE_THROW_IF(invalid_owner != 0, InvalidArgumentException,
+                "exchangeOffRankSlaveRowFill: a master row has no owning rank");
+    std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
+    MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, comm);
+    std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
+    std::size_t recv_total = 0;
+    for (int r = 0; r < world_size; ++r) {
+        recv_displs[static_cast<std::size_t>(r)] = static_cast<int>(recv_total);
+        recv_total += static_cast<std::size_t>(recv_counts[static_cast<std::size_t>(r)]);
+    }
+    std::vector<std::int64_t> recv_buffer(recv_total);
+    MPI_Alltoallv(send_buffer.data(), send_counts.data(), send_displs.data(), MPI_INT64_T,
+                  recv_buffer.data(), recv_counts.data(), recv_displs.data(), MPI_INT64_T,
+                  comm);
+
+    std::size_t position = 0;
+    while (position + 2u <= recv_buffer.size()) {
+        const auto master = static_cast<GlobalIndex>(recv_buffer[position++]);
+        const auto n_cols = static_cast<std::size_t>(recv_buffer[position++]);
+        FE_THROW_IF(position + n_cols > recv_buffer.size() || !owned_rows.contains(master),
+                    InvalidArgumentException,
+                    "exchangeOffRankSlaveRowFill: malformed slave-row fill message");
+        auto& master_row = pattern.building_rows_[
+            static_cast<std::size_t>(master - owned_rows.first)];
+        for (std::size_t k = 0; k < n_cols; ++k) {
+            const auto col = static_cast<GlobalIndex>(recv_buffer[position++]);
+            if (col < 0 || col >= pattern.globalCols()) {
+                continue;
+            }
+            if (!options_.include_ghost_columns && !owned_cols.contains(col)) {
+                continue;
+            }
+            if (column_available && !owned_cols.contains(col) && !column_available(col)) {
+                ++last_stats_.n_unavailable_fill_columns;
+                continue;
+            }
+            insertSortedUnique(master_row, col);
+        }
+    }
+
+    last_stats_.augmented_nnz = pattern.getLocalNnz();
+    last_stats_.n_fill_entries = last_stats_.augmented_nnz - last_stats_.original_nnz;
+    return last_stats_;
+}
+
 ReducedDistributedPatternResult ConstraintSparsityAugmenter::buildReducedDistributedPattern(
     const DistributedSparsityPattern& original,
     MPI_Comm comm) const
