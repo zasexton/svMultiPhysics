@@ -769,6 +769,10 @@ resolveLegacyLevelSetMaintenanceConfiguration(
       "volume_correction_maximum_cumulative_interface_displacement_fraction",
       result->transport.volume_correction
           .maximum_cumulative_interface_displacement_fraction);
+  apply_boolean_list(
+      {"Enable_kinematic_reconciliation", "EnableKinematicReconciliation"},
+      "enable_kinematic_reconciliation",
+      result->transport.kinematic_reconciliation.enabled);
   append_equation_observations();
 
   apply_boolean_list({"Enable_static_capillary_equilibrium_initialization",
@@ -1054,6 +1058,7 @@ resolveLegacyLevelSetMaintenanceConfiguration(
                        result->transport.conservative_phase.enabled ||
                        result->transport.reinitialization.enabled ||
                        result->transport.volume_correction.enabled ||
+                       result->transport.kinematic_reconciliation.enabled ||
                        result->static_capillary_equilibrium_enabled ||
                        result->curvature_projection_enabled;
   if (!enabled) {

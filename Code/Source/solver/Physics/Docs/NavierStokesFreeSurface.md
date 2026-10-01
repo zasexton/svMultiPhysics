@@ -286,8 +286,11 @@ way:
   (or `none` when no contact rule exists) and the number of contact rules per
   law (`prescribed_contact_rules`, `dynamic_contact_rules`).
 
-With reinitialization disabled, nothing modifies the contact cells between
-steps; the contact line moves only with the transported level set.
+With reinitialization disabled, only the optional kinematic reconciliation
+(`Enable_kinematic_reconciliation`, `FE/Docs/LevelSet.md`) changes the
+transported level set between steps. It does not read the angle: it moves the
+discrete interface, contact cells included, so that each step's change of the
+liquid area equals the interface flux of the transport velocity.
 
 The former reset of `PrescribedAngle` contact cells to a unit-gradient affine
 target with the declared angle (`RepairToPrescribedAngle`) is retired as a
