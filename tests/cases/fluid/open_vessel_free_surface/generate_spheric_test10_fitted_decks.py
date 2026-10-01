@@ -427,17 +427,15 @@ def write_body_force(path: Path, dim: int, times: np.ndarray, increments: list) 
 
 
 def write_forcing(case_dir: Path, dim: int, points: np.ndarray, reference_file: Path,
-                  end_time: float, *, depth_dependence: bool = False) -> dict:
+                  end_time: float, *, x_only: bool = False) -> dict:
     """Tank-frame roll forcing tables (generate_spheric_test10_roll_body_force.py).
 
-    By default the Euler and centrifugal terms alpha y_r and omega^2 y_r are
-    evaluated at the mid-depth y_c = H/2 of the still liquid, so the table
-    depends on x only and the solver interpolates it exactly along x (its
-    x-only interpolant, a binary search).  A table that also varies with y
-    falls back to an inverse-distance search over all nodes at every
-    quadrature point, which costs about 18 s per step on the 2D deck (job
-    46129890).  The neglected part is at most alpha_max H/2 = 0.057 m/s^2
-    (0.6% of g) in the x component.
+    The Euler and centrifugal terms are evaluated at every node.  With
+    x_only (diagnostic) the terms alpha y_r and omega^2 y_r are evaluated at
+    the mid-depth y_c = H/2 instead, so the table depends on x only and the
+    solver uses its x-only interpolant.  That is not a small change: the
+    y-dependent Euler term is rotational, and over the first 0.2 s the 2D
+    velocity differs by 34% (jobs 46129890, 46132346).
     """
     rbf = _load("generate_spheric_test10_roll_body_force")
     reference = rbf.load_reference(reference_file)
@@ -446,7 +444,7 @@ def write_forcing(case_dir: Path, dim: int, points: np.ndarray, reference_file: 
     axis = np.array(ROTATION_AXIS_POINT[:2] + (ROTATION_AXIS_POINT[2] if dim == 3 else 0.0,))
     base = np.array([0.0, -GRAVITY, 0.0])
     sample_points = points.copy()
-    if not depth_dependence:
+    if x_only:
         sample_points[:, 1] = 0.5 * FILL_HEIGHT
     increments = [rbf.roll_incremental_acceleration(sample_points, axis_point=axis, base_force=base,
                                                     theta=float(th), omega=float(om),
@@ -462,9 +460,8 @@ def write_forcing(case_dir: Path, dim: int, points: np.ndarray, reference_file: 
             "model": "tank frame: rotated gravity, Euler and centrifugal accelerations as a nodal "
                      "body-force table on the reference nodes (interpolated by the solver at the "
                      "current quadrature points)",
-            "depth_dependence": ("evaluated at every node" if depth_dependence else
-                                 "alpha y_r and omega^2 y_r evaluated at y_c = H/2 (x-only table); "
-                                 "neglected part <= alpha_max H/2 = 0.057 m/s^2")}
+            "depth_dependence": ("alpha y_r and omega^2 y_r evaluated at y_c = H/2 (x-only "
+                                 "table, diagnostic)" if x_only else "evaluated at every node")}
     if dim == 3:
         omega = bc / "test10_lateral_water_1x_roll_angular_velocity.dat"
         rbf.write_angular_velocity(omega, times=times, omega=sampled["omega_rad_s"])
@@ -478,7 +475,7 @@ def write_forcing(case_dir: Path, dim: int, points: np.ndarray, reference_file: 
 
 
 def write_deck(dim: int, case_dir: Path, *, reference_file: Path | None = None,
-               end_time: float | None = None, depth_dependence: bool = False,
+               end_time: float | None = None, x_only: bool = False,
                force: bool = False) -> dict:
     if case_dir.exists():
         if not force and any(case_dir.iterdir()):
@@ -500,8 +497,7 @@ def write_deck(dim: int, case_dir: Path, *, reference_file: Path | None = None,
     steps, cadence = STEPS_AT_REST, 1
     if reference_file is not None:
         end = FORCED_END_TIME if end_time is None else end_time
-        forcing = write_forcing(case_dir, dim, points, reference_file, end,
-                                depth_dependence=depth_dependence)
+        forcing = write_forcing(case_dir, dim, points, reference_file, end, x_only=x_only)
         steps, cadence = int(round(end / DT)), FORCED_OUTPUT_CADENCE
     faces = list(sets)
     (case_dir / "solver.xml").write_text(
@@ -526,9 +522,9 @@ def main(argv=None) -> int:
                         help="write the forced variant (requires --output-dir)")
     parser.add_argument("--end-time", type=float, default=None,
                         help=f"forced run length in s (default {FORCED_END_TIME})")
-    parser.add_argument("--forcing-depth-dependence", action="store_true",
-                        help="evaluate the Euler and centrifugal terms at every node (slow: the "
-                             "solver then searches all nodes at each quadrature point)")
+    parser.add_argument("--forcing-x-only", action="store_true",
+                        help="diagnostic: evaluate the Euler and centrifugal terms at mid-depth "
+                             "(x-only table)")
     parser.add_argument("--force", action="store_true", help="replace a non-empty output dir")
     args = parser.parse_args(argv)
     dims = args.dim or [2, 3]
@@ -539,7 +535,7 @@ def main(argv=None) -> int:
     for dim in dims:
         case_dir = args.output_dir or (ROOT / (DECK_2D if dim == 2 else DECK_3D))
         meta = write_deck(dim, case_dir, reference_file=args.roll_forcing,
-                          end_time=args.end_time, depth_dependence=args.forcing_depth_dependence,
+                          end_time=args.end_time, x_only=args.forcing_x_only,
                           force=args.force or args.output_dir is None)
         print(f"wrote {case_dir}: {meta['mesh']['points']} points, {meta['mesh']['cells']} cells, "
               f"faces {meta['mesh']['face_sets']}, steps {meta['time']['steps']}")
