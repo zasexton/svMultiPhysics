@@ -612,7 +612,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
       |---|---|
       | `dev/perf-rebuild-path` | items 1, 3 and 5 above |
       | `dev/perf-reuse-unchanged` | items 6 and 7 |
-      | `dev/perf-kernels` | item 2 and the cache-key and full-cell basis part of item 9 |
+      | `dev/perf-kernels` | item 2 and the cache-key and full-cell basis part of item 9. **Merged 2026-10-01 (`7cdc8842`, `371f521c`), bitwise identical on the whole reference set; FE 34/34, Physics 7/7, Application 4/4.** The finite-difference check is now opt-in (`Curvature_projection_kinematic_area_gradient_finite_difference_check`). 2D `kag_lumped` drop R/h = 8: 141.9 → 96.6 s (KAG's extra cost over `surface_stress` falls from +51% to +5%). 3D sphere proxy R/h = 8, step 0: 2,288 → 990 s; the check alone was 54% of the step. Per Jacobian: 14.0 → 12.1 s. |
       | `dev/perf-cut-integration-reuse` | reuse of cut-cell quadrature and basis data within a frozen geometry epoch; cut cells are about 70% of a 3D Jacobian assembly |
       | `dev/perf-linear-solver` | measure the solve; evaluate the existing FSILS and Eigen preconditioners; reuse the preconditioner across Newton iterations; a parameter-free block preconditioner. New options are opt-in; any default change needs approval. |
 
