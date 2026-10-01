@@ -560,20 +560,61 @@ void removeDuplicatePolygonVertices(std::vector<Point>& points,
     return hash;
 }
 
+// Interface fragments and volume regions grouped by parent cell, and active
+// contact fragments grouped by parent cell and face, each group in source
+// order.  Built once per active-boundary construction so that the per-face
+// lookups visit only the records of the face's parent cell, in the same order
+// as a scan of the full source lists.
+struct CellSourceIndex {
+    using IndexList = std::vector<std::size_t>;
+    using ContactList =
+        std::vector<const GeneratedInterfaceBoundaryIntersectionFragment*>;
+
+    std::unordered_map<MeshIndex, IndexList> fragments;
+    std::unordered_map<MeshIndex, IndexList> regions;
+    std::map<std::pair<MeshIndex, MeshIndex>, ContactList> contacts;
+
+    CellSourceIndex(
+        const LevelSetInterfaceDomain& domain,
+        const GeneratedInterfaceBoundaryIntersectionDomain& contact_domain)
+    {
+        const auto& source_fragments = domain.fragments();
+        for (std::size_t i = 0; i < source_fragments.size(); ++i) {
+            fragments[source_fragments[i].parent_cell].push_back(i);
+        }
+        const auto& source_regions = domain.volumeRegions();
+        for (std::size_t i = 0; i < source_regions.size(); ++i) {
+            regions[source_regions[i].parent_cell].push_back(i);
+        }
+        for (const auto& fragment : contact_domain.fragments()) {
+            if (fragment.active()) {
+                contacts[{fragment.parent_cell, fragment.parent_face}]
+                    .push_back(&fragment);
+            }
+        }
+    }
+
+    [[nodiscard]] static const IndexList& of(
+        const std::unordered_map<MeshIndex, IndexList>& lists,
+        MeshIndex cell)
+    {
+        static const IndexList empty{};
+        const auto found = lists.find(cell);
+        return found == lists.end() ? empty : found->second;
+    }
+};
+
 [[nodiscard]] std::vector<const GeneratedInterfaceBoundaryIntersectionFragment*>
 contactFragmentsForFace(
-    const GeneratedInterfaceBoundaryIntersectionDomain& contact_domain,
+    const CellSourceIndex& index,
     MeshIndex cell,
     MeshIndex face)
 {
-    std::vector<const GeneratedInterfaceBoundaryIntersectionFragment*> out;
-    for (const auto& fragment : contact_domain.fragments()) {
-        if (fragment.active() && fragment.parent_cell == cell &&
-            fragment.parent_face == face) {
-            out.push_back(&fragment);
-        }
+    const auto found = index.contacts.find({cell, face});
+    if (found == index.contacts.end()) {
+        return {};
     }
-    return out;
+    return found->second;
 }
 
 [[nodiscard]] bool matchesAuthoritativeContactVertex(
@@ -601,22 +642,27 @@ contactFragmentsForFace(
 
 [[nodiscard]] bool hasAuthoritativeInterfaceFragment(
     const LevelSetInterfaceDomain& domain,
+    const CellSourceIndex& index,
     MeshIndex cell) noexcept
 {
+    const auto& candidates = CellSourceIndex::of(index.fragments, cell);
     return std::any_of(
-        domain.fragments().begin(),
-        domain.fragments().end(),
-        [cell](const auto& fragment) {
+        candidates.begin(),
+        candidates.end(),
+        [&domain, cell](std::size_t i) {
+            const auto& fragment = domain.fragments()[i];
             return fragment.active() && fragment.parent_cell == cell;
         });
 }
 
 [[nodiscard]] std::optional<geometry::CutIntegrationSide>
 authoritativeFullCellSide(const LevelSetInterfaceDomain& domain,
+                          const CellSourceIndex& index,
                           MeshIndex cell)
 {
     std::optional<geometry::CutIntegrationSide> side;
-    for (const auto& region : domain.volumeRegions()) {
+    for (const auto i : CellSourceIndex::of(index.regions, cell)) {
+        const auto& region = domain.volumeRegions()[i];
         if (!region.active() || region.parent_cell != cell ||
             !region.full_cell_equivalent) {
             continue;
@@ -667,6 +713,7 @@ struct RepresentedImplicitProvenance {
 
 [[nodiscard]] RepresentedImplicitProvenance representedImplicitForCell(
     const LevelSetInterfaceDomain& domain,
+    const CellSourceIndex& index,
     MeshIndex cell)
 {
     RepresentedImplicitProvenance represented;
@@ -693,13 +740,15 @@ struct RepresentedImplicitProvenance {
         represented.backend = selected_backend;
         represented.fallback_status = selected_fallback;
     };
-    for (const auto& fragment : domain.fragments()) {
+    for (const auto i : CellSourceIndex::of(index.fragments, cell)) {
+        const auto& fragment = domain.fragments()[i];
         if (fragment.active() && fragment.parent_cell == cell) {
             merge(fragment.implicit_quadrature_backend,
                   fragment.implicit_fallback_status);
         }
     }
-    for (const auto& region : domain.volumeRegions()) {
+    for (const auto i : CellSourceIndex::of(index.regions, cell)) {
+        const auto& region = domain.volumeRegions()[i];
         if (region.active() && region.parent_cell == cell) {
             merge(region.implicit_quadrature_backend,
                   region.implicit_fallback_status);
@@ -1057,6 +1106,7 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
     const auto& req = domain.request();
     const Real coefficient_band =
         req.resolvedCoefficientClassificationBand();
+    const CellSourceIndex source_index(interface_domain, contact_domain);
 
     mesh.forEachBoundaryFace(
         req.boundary_marker,
@@ -1066,7 +1116,7 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
             }
             const auto type = mesh.getCellType(cell);
             const auto represented = representedImplicitForCell(
-                interface_domain, static_cast<MeshIndex>(cell));
+                interface_domain, source_index, static_cast<MeshIndex>(cell));
             const auto local_face = mesh.getLocalFaceIndex(face, cell);
             const auto corners = localFaceCorners(type, local_face);
             if (corners.size() < 2u) {
@@ -1082,11 +1132,15 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
             const auto reference_nodes = referenceCellNodes(type, cell_nodes.size());
             std::vector<Point> face_points;
             StrictConstructionObservation observation;
-            for (const auto& source : interface_domain.fragments()) {
+            for (const auto i : CellSourceIndex::of(
+                     source_index.fragments, static_cast<MeshIndex>(cell))) {
+                const auto& source = interface_domain.fragments()[i];
                 if (source.parent_cell == static_cast<MeshIndex>(cell))
                     observation.combine(source.construction_observation);
             }
-            for (const auto& source : interface_domain.volumeRegions()) {
+            for (const auto i : CellSourceIndex::of(
+                     source_index.regions, static_cast<MeshIndex>(cell))) {
+                const auto& source = interface_domain.volumeRegions()[i];
                 if (source.parent_cell == static_cast<MeshIndex>(cell))
                     observation.combine(source.construction_observation);
             }
@@ -1123,9 +1177,11 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
             }
             if (!hasAuthoritativeInterfaceFragment(
                     interface_domain,
+                    source_index,
                     static_cast<MeshIndex>(cell))) {
                 const auto full_side = authoritativeFullCellSide(
                     interface_domain,
+                    source_index,
                     static_cast<MeshIndex>(cell));
                 if (!full_side.has_value()) {
                     throw std::invalid_argument(
@@ -1189,7 +1245,7 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
             }
 
             const auto contacts = contactFragmentsForFace(
-                contact_domain,
+                source_index,
                 static_cast<MeshIndex>(cell),
                 static_cast<MeshIndex>(face));
             bool cut_face = false;
