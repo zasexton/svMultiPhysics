@@ -554,6 +554,10 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
     std::string support_mode = "cell_patch";
 #endif
 
+    // The INFO diagnostic at the end is built only when the logger prints
+    // it; the per-entity counts and inactive lists exist only for it.
+    const bool log_constraint_diagnostic =
+        Logger::instance().get_level() <= LogLevel::INFO;
     std::vector<GlobalIndex> inactive_vertices;
     inactive_vertices.reserve(static_cast<std::size_t>(n_vertices));
     std::vector<GlobalIndex> inactive_dofs;
@@ -589,20 +593,26 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
             ++active_sign_vertices_without_support;
         }
 
-        inactive_vertices.push_back(vertex);
+        if (log_constraint_diagnostic) {
+            inactive_vertices.push_back(vertex);
+        }
     }
 
     for (GlobalIndex local_dof = 0; local_dof < n_field_dofs; ++local_dof) {
         if (has_active_dof_support[static_cast<std::size_t>(local_dof)] !=
             static_cast<unsigned char>(0)) {
             ++active_support_dofs;
-            incrementEntityDofCount(
-                active_support_by_entity, *entity_map, local_dof);
+            if (log_constraint_diagnostic) {
+                incrementEntityDofCount(
+                    active_support_by_entity, *entity_map, local_dof);
+            }
             continue;
         }
 
-        inactive_dofs.push_back(local_dof);
-        incrementEntityDofCount(inactive_by_entity, *entity_map, local_dof);
+        if (log_constraint_diagnostic) {
+            inactive_dofs.push_back(local_dof);
+            incrementEntityDofCount(inactive_by_entity, *entity_map, local_dof);
+        }
         const GlobalIndex dof = offset + local_dof;
         if (owned.contains(dof)) {
             // Precedence: a DOF already slaved by another constraint (e.g.
@@ -615,8 +625,10 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
             }
             constraints.addDirichlet(dof, inactive_value_);
             ++constrained_dofs;
-            incrementEntityDofCount(
-                constrained_owned_by_entity, *entity_map, local_dof);
+            if (log_constraint_diagnostic) {
+                incrementEntityDofCount(
+                    constrained_owned_by_entity, *entity_map, local_dof);
+            }
         }
     }
 
@@ -692,6 +704,9 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
         FE_LOG_INFO(sample.str());
     }
 
+    if (!log_constraint_diagnostic) {
+        return;
+    }
     std::ostringstream oss;
     oss << "LevelSetActiveSideVertexDirichletConstraint: diagnostic=level_set_active_side_vertex_constraint"
         << " field='" << rec.name << "'"
