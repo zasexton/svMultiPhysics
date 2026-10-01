@@ -2170,13 +2170,11 @@ TEST(TimeLoopFsilsConvergenceMPI,
         << "A rank-local sparsity change must advance the resolved-insertion "
            "layout generation on every communicator rank";
 
-    if (rank == 0) {
-        EXPECT_GT(trial_revision, base_revision);
-        EXPECT_GT(restored_revision, trial_revision);
-    } else {
-        EXPECT_EQ(trial_revision, base_revision);
-        EXPECT_EQ(restored_revision, base_revision);
-    }
+    // Only rank zero's lines change, but the constraint-structure refresh
+    // is decided over the communicator (a slave row on one rank feeds master
+    // rows owned by another), so every rank advances its pattern revision.
+    EXPECT_GT(trial_revision, base_revision);
+    EXPECT_GT(restored_revision, trial_revision);
 
     int trial_min = 0;
     int trial_max = 0;
