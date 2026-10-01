@@ -38,11 +38,13 @@
 #include "ns_solver.h"
 #include "precond.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <chrono>
 #include <cstdlib>
 #include <memory>
 #include <sstream>
+#include <vector>
 
 namespace fe_fsi_linear_solver {
 
@@ -261,6 +263,45 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
                        ls.RI, Rv, row_scaling_v_ptr);
         Val.set_row(0,Valv);
         R.set_row(0,Rv);
+      } else if (ls.right_pc_hook.active()) {
+        // Right-preconditioned GMRES.  The scaled operator in Val is left
+        // untouched by GMRES, so a solve that fails with a reused
+        // preconditioner can be repeated once with a fresh one.
+        const Array<double>* row_scale = nullptr;
+        const Array<double>* col_scale = nullptr;
+        if (prec == PreconditionerType::PREC_RCS) {
+          row_scale = &Wr;
+          col_scale = &Wc;
+        } else if (prec == PreconditionerType::PREC_FSILS) {
+          row_scale = &Wc;
+          col_scale = &Wc;
+        }
+        const auto system =
+            fe_fsi_linear_solver::distributed_solver_bundles::make_vector_linear_system(lhs, dof, Val);
+        bool fresh = false;
+        ls.RI.right_pc = ls.right_pc_hook.prepare(lhs, dof, Val, row_scale, col_scale, false, fresh);
+        std::vector<double> rhs_copy;
+        if (ls.RI.right_pc != nullptr && !fresh) {
+          rhs_copy.assign(R.data(), R.data() + R.size());
+        }
+        gmres::gmres_v(system, ls.RI, R, row_scaling);
+        bool retried = false;
+        int stale_iterations = 0;
+        if (!ls.RI.suc && ls.RI.right_pc != nullptr && !fresh) {
+          stale_iterations = ls.RI.itr;
+          std::copy(rhs_copy.begin(), rhs_copy.end(), R.data());
+          ls.RI.right_pc = ls.right_pc_hook.prepare(lhs, dof, Val, row_scale, col_scale, true, fresh);
+          gmres::gmres_v(system, ls.RI, R, row_scaling);
+          retried = true;
+        }
+        if (ls.right_pc_hook.finish) {
+          ls.right_pc_hook.finish(ls.RI.itr, ls.RI.suc, fresh, retried);
+        }
+        if (retried && lhs.commu.task == 0) {
+          fprintf(stderr, "[fsils_solve] right preconditioner refreshed after a failed reuse "
+                          "(stale_iterations=%d fresh_iterations=%d)\n", stale_iterations, ls.RI.itr);
+        }
+        ls.RI.right_pc = nullptr;
       } else {
         gmres::gmres_v(fe_fsi_linear_solver::distributed_solver_bundles::make_vector_linear_system(lhs, dof, Val),
                        ls.RI, R, row_scaling);

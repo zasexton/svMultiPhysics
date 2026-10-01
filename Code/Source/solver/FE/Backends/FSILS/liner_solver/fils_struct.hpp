@@ -33,6 +33,7 @@
 
 #include "CmMod.h"
 #include "Array3.h"
+#include "right_precond.h"
 
 #include "mpi.h"
 
@@ -523,6 +524,10 @@ class FSILS_subLsType
     /// Krylov space is more important than extra orthogonality work.
     bool disable_reorth{false};
 
+    /// Optional right preconditioner for the vector GMRES kernel (not owned).
+    /// Null keeps the unpreconditioned kernel.
+    const FSILS_rightPreconditioner* right_pc{nullptr};
+
     /// Schur-complement preconditioner selection used by the BlockSchur path.
     SchurPreconditionerType schur_preconditioner{SchurPreconditionerType::ALGEBRAIC_SHAT};
 
@@ -732,6 +737,10 @@ class FSILS_lsType
     /// internal FSILS node ordering and skips the old->internal / internal->old
     /// permutation copies around the solver kernel.
     bool ri_internal_order{false};
+
+    /// Optional source of a right preconditioner for GMRES solves (inactive
+    /// unless set after fsils_ls_create()).
+    FSILS_rightPreconditionerHook right_pc_hook{};
     
     FSILS_subLsType GM;
     FSILS_subLsType CG;

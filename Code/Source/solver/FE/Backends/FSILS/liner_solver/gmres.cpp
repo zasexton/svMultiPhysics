@@ -2443,6 +2443,16 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       [](const auto& face) { return face.coupledFlag; });
 
   ls.ws.ensure_gmres_v(dof, nNo, ls.sD);
+  // Optional right preconditioner: Krylov space of A M^{-1}, x = M^{-1} V y.
+  const fe_fsi_linear_solver::FSILS_rightPreconditioner* const right_pc = ls.right_pc;
+  Array<double> pc_z;
+  Array<double> pc_t;
+  if (right_pc != nullptr) {
+    pc_z.resize(dof, nNo);
+    pc_t.resize(dof, nNo);
+    pc_z = 0.0;
+    pc_t = 0.0;
+  }
   auto& h = ls.ws.h;
   auto& u = ls.ws.u3;
   auto& X = ls.ws.X2;
@@ -2462,6 +2472,8 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
   double tp_spmv = 0.0, tp_bc_mul = 0.0, tp_dot_gs = 0.0;
   double tp_allreduce = 0.0, tp_gs_update = 0.0, tp_norm = 0.0;
   double tp_vecops = 0.0, tp_givens = 0.0, tp_recon = 0.0, tp_panel_copy = 0.0;
+  double tp_right_pc = 0.0;
+  int tp_right_pc_calls = 0;
   int tp_reorth_count = 0, tp_restarts = 0;
   int tp_spmv_calls = 0, tp_bc_mul_calls = 0, tp_dot_calls = 0, tp_allreduce_calls = 0;
   int tp_gs_update_calls = 0, tp_norm_calls = 0, tp_vecops_calls = 0;
@@ -2536,7 +2548,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
     ls.ws.ensure_gmres_basis_panel_v(dof, static_cast<int>(nNo), ls.sD);
     basis_panel = ls.ws.basis_panel_v.data();
   }
-  const int recycle_k_req = std::min(enh.recycle_k, ls.sD);
+  const int recycle_k_req = (right_pc != nullptr) ? 0 : std::min(enh.recycle_k, ls.sD);
   if (recycle_k_req > 0) {
     ls.ws.ensure_recycle_v(dof, nNo, recycle_k_req);
   }
@@ -3045,10 +3057,19 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       auto u_slice_prev = u.rslice(i);
       auto u_slice_next = u.rslice(i+1);
 
+      Array<double>* arnoldi_input = &u_slice_prev;
+      if (right_pc != nullptr) {
+        tp0 = TP();
+        right_pc->apply(u_slice_prev, pc_z);
+        tp_right_pc += TP() - tp0;
+        ++tp_right_pc_calls;
+        arnoldi_input = &pc_z;
+      }
+
       tp0 = TP();
-      halo.sync_owned_to_ghost_vector(dof, u_slice_prev);
+      halo.sync_owned_to_ghost_vector(dof, *arnoldi_input);
       A.apply(
-          dso::ghost_synced_input(dof, u_slice_prev),
+          dso::ghost_synced_input(dof, *arnoldi_input),
           dso::owned_only_output(dof, u_slice_next));
       if (gmres_debug_trace_enabled() && l == 0 && i < 3) {
         const double arnoldi_image_norm = norm::fsi_ls_normv(dof, mynNo, lhs.commu, u_slice_next);
@@ -3064,7 +3085,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       ++tp_spmv_calls;
 
       tp0 = TP();
-      add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, u_slice_prev, u_slice_next);
+      add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, *arnoldi_input, u_slice_next);
       tp_bc_mul += TP() - tp0;
       ++tp_bc_mul_calls;
 
@@ -3318,8 +3339,20 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       break;
     }
 
-    fused_recon_v(dof, nNo, u, last_i, X, y);
-    tp_recon += TP() - tp0;
+    double recon_pc_time = 0.0;
+    if (right_pc != nullptr) {
+      pc_t = 0.0;
+      fused_recon_v(dof, nNo, u, last_i, pc_t, y);
+      const double tp_pc0 = TP();
+      right_pc->apply(pc_t, pc_z);
+      recon_pc_time = TP() - tp_pc0;
+      tp_right_pc += recon_pc_time;
+      ++tp_right_pc_calls;
+      omp_la::omp_sum_v(dof, nNo, 1.0, X, pc_z);
+    } else {
+      fused_recon_v(dof, nNo, u, last_i, X, y);
+    }
+    tp_recon += TP() - tp0 - recon_pc_time;
     ++tp_recon_calls;
 
     // Recycling correction: X += U * ( -B * y ), where B(:,i) = C^T*(A*v_i).
@@ -3403,7 +3436,8 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
 
   // ===== PRINT TIMING PROFILE =====
   double tp_total = tp_spmv + tp_bc_mul + tp_dot_gs + tp_allreduce +
-                    tp_gs_update + tp_norm + tp_vecops + tp_givens + tp_recon + tp_panel_copy;
+                    tp_gs_update + tp_norm + tp_vecops + tp_givens + tp_recon + tp_panel_copy +
+                    tp_right_pc;
   if ((enh.profile || enh.verbose) && lhs.commu.task == 0 && tp_total > 0.0) {
     auto pct = [&](double t) { return 100.0 * t / tp_total; };
     fprintf(stderr,
@@ -3433,6 +3467,10 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       tp_givens, pct(tp_givens), tp_givens_calls,
       tp_recon, pct(tp_recon), tp_recon_calls,
       dof, (long long)nNo, (long long)mynNo, (long long)lhs.nnz, ls.sD);
+    if (right_pc != nullptr) {
+      fprintf(stderr, "  Right preconditioner: %10.6f s  (%5.1f%%)  calls=%d\n",
+              tp_right_pc, pct(tp_right_pc), tp_right_pc_calls);
+    }
   }
   // ==================================
 }

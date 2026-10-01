@@ -1414,6 +1414,7 @@ set(FE_BACKENDS_HEADERS
     Backends/FSILS/liner_solver/omp_la.h
     Backends/FSILS/liner_solver/pc_gmres.h
     Backends/FSILS/liner_solver/precond.h
+    Backends/FSILS/liner_solver/right_precond.h
     Backends/FSILS/liner_solver/spar_mul.h
 
     Backends/PETSc/PetscUtils.h
