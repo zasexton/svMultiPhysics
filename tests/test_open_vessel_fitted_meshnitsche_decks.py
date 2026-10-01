@@ -116,27 +116,38 @@ def test_forced_variant_writes_the_roll_tables(dim, tmp_path):
     reference = tmp_path / "lateral_water_1x.txt"
     header = ("Time[s]\tPressure[mbar]\tPosition_smooth_splines [deg]\tVelocity[deg\\s]\t"
               "Aceleration[deg\\s2]\tPosition_original [deg]\n")
-    rows = "".join(f"{t:.2f}\t0\t{2.0 * t:.6f}\t2.0\t0.0\t0\n" for t in np.arange(0.0, 0.051, 0.01))
+    rows = "".join(f"{t:.2f}\t0\t{2.0 * t:.6f}\t2.0\t10.0\t0\n" for t in np.arange(0.0, 0.051, 0.01))
     reference.write_text(header + rows, encoding="latin1")
+
+    def table(out, meta):
+        root = ET.parse(out / "solver.xml").getroot()
+        fluid = list(root.iter("Add_equation"))[0]
+        body = fluid.find("Momentum_source_temporal_and_spatial_values_file_path").text
+        lines = (out / body).read_text().splitlines()
+        n_nodes, n_times = meta["mesh"]["points"], 5
+        assert lines[0].split() == [str(dim), str(n_times), str(n_nodes)]
+        values = np.array([[float(v) for v in line.split()]
+                           for k, line in enumerate(lines[1 + n_times:]) if k % (n_times + 1) != 0])
+        return root, fluid, values.reshape(n_nodes, n_times, dim)
+
     out = tmp_path / "forced"
     meta = gen.write_deck(dim, out, reference_file=reference, end_time=0.04)
-    root = ET.parse(out / "solver.xml").getroot()
-    fluid = list(root.iter("Add_equation"))[0]
-    body = fluid.find("Momentum_source_temporal_and_spatial_values_file_path").text
-    lines = (out / body).read_text().splitlines()
-    first = lines[0].split()
-    assert first == [str(dim), "5", str(meta["mesh"]["points"])]
-    # By default the table depends on x only (the solver's exact x-only
-    # interpolant): nodes with equal x carry equal values at every time.
-    n_nodes, n_times = meta["mesh"]["points"], 5
-    values = np.array([[float(v) for v in line.split()]
-                       for k, line in enumerate(lines[1 + n_times:]) if k % (n_times + 1) != 0])
-    values = values.reshape(n_nodes, n_times, dim)
-    points = pv.read(out / "mesh/water/mesh-complete.mesh.vtu").points
-    for x in np.unique(np.round(points[:, 0], 12)):
-        group = values[np.isclose(points[:, 0], x)]
-        assert np.allclose(group, group[0], rtol=0.0, atol=1e-12)
-    assert np.ptp(values[..., 0]) > 0.0          # rotated gravity and Euler terms act
+    root, fluid, values = table(out, meta)
     omega = fluid.find("Rotating_frame_angular_velocity_temporal_values_file_path")
     assert (omega is not None) == (dim == 3)
     assert root.find("GeneralSimulationParameters/Number_of_time_steps").text == "40"
+    points = pv.read(out / "mesh/water/mesh-complete.mesh.vtu").points
+    # The tank-frame acceleration is affine in the position: the Euler term
+    # alpha y_r makes the x component vary with y at fixed x.
+    alpha = np.deg2rad(10.0)
+    column = np.isclose(points[:, 0], 0.0)
+    ys = points[column, 1]
+    assert np.allclose(np.polyfit(ys, values[column, 2, 0], 1)[0], alpha, rtol=1e-6)
+
+    # The x-only diagnostic table: equal values at equal x.
+    out_x = tmp_path / "forced_x"
+    meta_x = gen.write_deck(dim, out_x, reference_file=reference, end_time=0.04, x_only=True)
+    _, _, values_x = table(out_x, meta_x)
+    for x in np.unique(np.round(points[:, 0], 12)):
+        group = values_x[np.isclose(points[:, 0], x)]
+        assert np.allclose(group, group[0], rtol=0.0, atol=1e-12)
