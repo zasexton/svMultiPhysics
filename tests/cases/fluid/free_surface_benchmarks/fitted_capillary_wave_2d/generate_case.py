@@ -103,11 +103,11 @@ def time_schedule(level: int, dt_divisor: int = 1,
 # ---------------------------------------------------------------------------
 # Mesh
 # ---------------------------------------------------------------------------
-def surface_elevation(x: np.ndarray) -> np.ndarray:
-    return MEAN_LEVEL + AMPLITUDE * np.cos(WAVENUMBER * x)
+def surface_elevation(x: np.ndarray, amplitude: float = AMPLITUDE) -> np.ndarray:
+    return MEAN_LEVEL + amplitude * np.cos(WAVENUMBER * x)
 
 
-def liquid_triangle_mesh(level: int):
+def liquid_triangle_mesh(level: int, amplitude: float = AMPLITUDE):
     """Liquid region under the initial surface, split into right triangles.
 
     A structured grid of level/2 x level cells on [0, lambda/2] x [0, 1] is
@@ -122,7 +122,7 @@ def liquid_triangle_mesh(level: int):
     xs = np.linspace(0.0, WIDTH, nx + 1)
     ss = np.linspace(0.0, 1.0, ny + 1)
     xx, ssg = np.meshgrid(xs, ss)                   # row j = y index
-    yy = ssg * surface_elevation(xx)
+    yy = ssg * surface_elevation(xx, amplitude)
     points = np.column_stack([xx.ravel(), yy.ravel(), np.zeros(xx.size)])
 
     def vid(i: int, j: int) -> int:
@@ -153,10 +153,11 @@ def liquid_triangle_mesh(level: int):
     return points, cells, faces, (nx, ny)
 
 
-def initial_pressure(points: np.ndarray) -> np.ndarray:
+def initial_pressure(points: np.ndarray, amplitude: float = AMPLITUDE) -> np.ndarray:
     """Linear pressure of the released state (capillary_wave_2d): harmonic,
-    zero normal derivative at the bottom, gamma * kappa at the mean level."""
-    return CW.initial_pressure(points)
+    zero normal derivative at the bottom, gamma * kappa at the mean level;
+    linear in the amplitude (p_ext = 0)."""
+    return CW.initial_pressure(points) * (amplitude / AMPLITUDE)
 
 
 def polygon_area(points: np.ndarray, cells: np.ndarray) -> float:
@@ -264,11 +265,12 @@ def solver_xml(schedule: dict, steps: int, cadence: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-def study_role(level: int, dt_divisor: int, dt_over_capillary_limit: float | None) -> str | None:
+def study_role(level: int, dt_divisor: int, dt_over_capillary_limit: float | None,
+               amplitude: float = AMPLITUDE) -> str | None:
     """'spatial' (shared step, every level), 'time' (refined step at the
     time-study level) or None (diagnostic).  The spatial run at the
     time-study level is also the coarsest point of the time-step study."""
-    if dt_over_capillary_limit is not None:
+    if dt_over_capillary_limit is not None or amplitude != AMPLITUDE:
         return None
     if dt_divisor == 1 and level in LEVELS:
         return "spatial"
@@ -279,6 +281,7 @@ def study_role(level: int, dt_divisor: int, dt_over_capillary_limit: float | Non
 
 def generate(level: int, output_dir: Path, *, dt_divisor: int = 1,
              dt_over_capillary_limit: float | None = None,
+             amplitude_over_wavelength: float | None = None,
              max_steps: int | None = None, force: bool = False) -> dict:
     if level not in LEVELS:
         raise ValueError(f"--level must be one of {LEVELS}")
@@ -286,6 +289,11 @@ def generate(level: int, output_dir: Path, *, dt_divisor: int = 1,
         raise ValueError(f"--dt-divisor must be one of {DT_DIVISORS}")
     if dt_over_capillary_limit is not None and dt_divisor != 1:
         raise ValueError("--dt-over-capillary-limit replaces the protocol step; use --dt-divisor 1")
+    amplitude = AMPLITUDE
+    if amplitude_over_wavelength is not None:
+        if not 0.0 < amplitude_over_wavelength <= 0.05:
+            raise ValueError("--amplitude-over-wavelength must lie in (0, 0.05]")
+        amplitude = amplitude_over_wavelength * WAVELENGTH
     if output_dir.exists() and any(output_dir.iterdir()) and not force:
         raise FileExistsError(f"{output_dir} is not empty (use --force)")
 
@@ -297,7 +305,7 @@ def generate(level: int, output_dir: Path, *, dt_divisor: int = 1,
         if max_steps < steps:
             steps, cadence, truncated = max_steps, 1, True
 
-    points, cells, faces, (nx, ny) = liquid_triangle_mesh(level)
+    points, cells, faces, (nx, ny) = liquid_triangle_mesh(level, amplitude)
     n_points = points.shape[0]
     mesh_dir = output_dir / "mesh"
     (mesh_dir / "mesh-surfaces").mkdir(parents=True, exist_ok=True)
@@ -305,7 +313,7 @@ def generate(level: int, output_dir: Path, *, dt_divisor: int = 1,
     LS.write_vtu(mesh_dir / "mesh-complete.mesh.vtu", points, cells,
                  {"GlobalNodeID": ("Int64", np.arange(n_points)),
                   "Velocity": ("Float64", zeros3),
-                  "Pressure": ("Float64", initial_pressure(points)),
+                  "Pressure": ("Float64", initial_pressure(points, amplitude)),
                   "mesh_displacement": ("Float64", zeros3),
                   "mesh_velocity": ("Float64", zeros3)},
                  {"GlobalElementID": ("Int64", np.arange(cells.shape[0]))})
@@ -314,7 +322,7 @@ def generate(level: int, output_dir: Path, *, dt_divisor: int = 1,
         LS.write_face_vtp(mesh_dir / "mesh-surfaces" / f"{name}.vtp", points, node_ids, parents)
     (output_dir / "solver.xml").write_text(solver_xml(schedule, steps, cadence), encoding="utf-8")
 
-    role = study_role(level, dt_divisor, dt_over_capillary_limit)
+    role = study_role(level, dt_divisor, dt_over_capillary_limit, amplitude)
     h = schedule["h"]
     case = {
         "benchmark": "fitted_capillary_wave_2d",
@@ -333,7 +341,7 @@ def generate(level: int, output_dir: Path, *, dt_divisor: int = 1,
         "kinematic_viscosity": schedule["kinematic_viscosity"],
         "wavelength": WAVELENGTH,
         "wavenumber": WAVENUMBER,
-        "initial_amplitude": AMPLITUDE,
+        "initial_amplitude": amplitude,
         "mean_level": MEAN_LEVEL,
         "width": WIDTH,
         "external_pressure": EXTERNAL_PRESSURE,
@@ -383,6 +391,9 @@ def main(argv=None) -> int:
     parser.add_argument("--dt-over-capillary-limit", type=float, default=None,
                         help="diagnostic runs only: a step of about this multiple of the "
                              "level's capillary limit (never gated)")
+    parser.add_argument("--amplitude-over-wavelength", type=float, default=None,
+                        help="diagnostic runs only: initial amplitude a0/lambda (protocol value "
+                             f"{CW.AMPLITUDE_OVER_WAVELENGTH}; never gated)")
     parser.add_argument("--max-steps", type=int, default=None,
                         help="smoke runs only: stop after this many steps; verify.py rejects "
                              "such runs for acceptance")
@@ -391,6 +402,7 @@ def main(argv=None) -> int:
     try:
         case = generate(args.level, args.output_dir, dt_divisor=args.dt_divisor,
                         dt_over_capillary_limit=args.dt_over_capillary_limit,
+                        amplitude_over_wavelength=args.amplitude_over_wavelength,
                         max_steps=args.max_steps, force=args.force)
     except (ValueError, FileExistsError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
