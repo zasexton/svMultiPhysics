@@ -435,6 +435,7 @@ struct DistributedAggregationResult {
     std::size_t canonical_owned_aggregate_dofs{0u};
     std::size_t canonical_owned_pinned_dofs{0u};
     std::size_t canonical_strong_suppressed_dofs{0u};
+    std::size_t canonical_halo_limited_root_choices{0u};
     std::vector<SmallCutAggregationProlongationRow> canonical_rows{};
 };
 
@@ -758,6 +759,7 @@ resolveDistributedAggregationDeclarations(
     std::string_view field_name,
     const GlobalCandidateMap& global_candidates,
     const LocalAggregationDeclarationMap& local_candidates,
+    const std::set<GlobalIndex>& assembled_candidate_dofs,
     bool slave_all_cut,
     bool allow_unaggregated)
 {
@@ -1074,16 +1076,13 @@ resolveDistributedAggregationDeclarations(
                                       local_declaration_decode_exception,
                                       "root_proposal_decode");
 
-    // Root selection has to account for the overlap on every rank that will
-    // assemble a slave.  Choosing the lexicographically first root and only
-    // then checking its masters can reject an otherwise usable aggregate: a
-    // second rank may have proposed a slightly more distant root whose basis
-    // is visible on all slave-relevant ranks.  Gather relevance for every DOF
-    // mentioned by any proposal so unavailable roots can be removed before
-    // applying the deterministic (distance, physical root cell GID, rank)
-    // ordering. Algebraic master DOFs are deliberately excluded because
-    // owner-contiguous numbering changes when the physical mesh is
-    // repartitioned.
+    // Gather ownership, relevance and pre-existing constraints for every DOF
+    // mentioned by any proposal. The root itself is chosen by the
+    // partition-independent (distance, physical root cell GID) ordering
+    // alone; choosing among roots by which ranks can see their masters would
+    // change the discretization with the partition. Algebraic master DOFs are
+    // deliberately excluded from the ordering because owner-contiguous
+    // numbering changes when the physical mesh is repartitioned.
     const auto& partition = system.dofHandler().getPartition();
     std::set<GlobalIndex> proposal_dofs;
     std::vector<std::int64_t> local_proposal_visibility_words;
@@ -1106,7 +1105,8 @@ resolveDistributedAggregationDeclarations(
         }
     }
 
-    // [dof, owned, preconstrained] for locally relevant proposal DOFs.
+    // [dof, owned, preconstrained, assembled] for locally relevant proposal
+    // DOFs; `assembled` marks candidate DOFs this rank assembles with.
     for (const auto dof : proposal_dofs) {
         if (!partition.isRelevant(dof)) {
             continue;
@@ -1117,6 +1117,11 @@ resolveDistributedAggregationDeclarations(
             partition.isOwned(dof) ? 1 : 0);
         local_proposal_visibility_words.push_back(
             existing_constraints.isConstrained(dof) ? 1 : 0);
+        local_proposal_visibility_words.push_back(
+            (partition.isOwned(dof) ||
+             assembled_candidate_dofs.count(dof) != 0u)
+                ? 1
+                : 0);
     }
     } catch (...) {
         local_proposal_visibility_exception = std::current_exception();
@@ -1141,6 +1146,7 @@ resolveDistributedAggregationDeclarations(
         int rank{-1};
         bool owned{false};
         bool preconstrained{false};
+        bool needed{false};
     };
     std::map<GlobalIndex, std::vector<ProposalDofVisibility>>
         proposal_visibility_by_dof;
@@ -1154,7 +1160,7 @@ resolveDistributedAggregationDeclarations(
             gathered_proposal_visibility
                 .counts[static_cast<std::size_t>(rank)]);
         while (position < end) {
-            if (end - position < 3u) {
+            if (end - position < 4u) {
                 throw std::runtime_error(
                     "SmallCutAggregationConstraint: malformed proposal-DOF "
                     "visibility declaration");
@@ -1166,6 +1172,8 @@ resolveDistributedAggregationDeclarations(
             visibility.owned =
                 gathered_proposal_visibility.words[position++] != 0;
             visibility.preconstrained =
+                gathered_proposal_visibility.words[position++] != 0;
+            visibility.needed =
                 gathered_proposal_visibility.words[position++] != 0;
             proposal_visibility_by_dof[dof].push_back(visibility);
         }
@@ -1362,9 +1370,13 @@ resolveDistributedAggregationDeclarations(
         }
 
         std::vector<const RankedDeclaration*> available_rooted;
+        // Proposals that are complete but whose masters some assembling rank
+        // cannot see: the geometrically preferred root may be among them.
+        std::vector<const RankedDeclaration*> halo_eligible_rooted;
         std::string first_unavailable_reason;
         for (const auto* declaration : rooted) {
             bool available = true;
+            bool halo_eligible = false;
             for (const auto slave : support.component_dofs) {
                 if (globallyPreconstrained(slave)) {
                     continue;
@@ -1412,29 +1424,31 @@ resolveDistributedAggregationDeclarations(
                     }
                     break;
                 }
+                // Every rank that assembles with the slave's line must carry
+                // all masters. Ranks that merely see the slave deeper in the
+                // halo carry no line and impose nothing. (The legacy
+                // fail-open debug mode keeps its stricter all-relevant-ranks
+                // rule.)
                 for (const auto& visibility : slave_visibility->second) {
-                    std::vector<GlobalIndex> missing_masters;
-                    for (const auto& entry : line_it->entries) {
-                        if (!relevantOnRank(entry.master_dof,
-                                            visibility.rank)) {
-                            missing_masters.push_back(entry.master_dof);
-                        }
-                    }
-                    if (missing_masters.empty()) {
+                    if (!allow_unaggregated && !visibility.needed) {
                         continue;
                     }
-                    available = false;
-                    if (first_unavailable_reason.empty()) {
-                        std::ostringstream reason;
-                        reason << " reason=canonical_master_not_relevant"
-                               << " rank=" << visibility.rank
-                               << " masters=";
-                        for (const auto master : missing_masters) {
-                            reason << master << ",";
+                    const bool masters_visible = std::all_of(
+                        line_it->entries.begin(), line_it->entries.end(),
+                        [&](const auto& entry) {
+                            return relevantOnRank(entry.master_dof,
+                                                  visibility.rank);
+                        });
+                    if (!masters_visible) {
+                        available = false;
+                        halo_eligible = true;
+                        if (first_unavailable_reason.empty()) {
+                            first_unavailable_reason =
+                                " reason=canonical_master_not_relevant rank=" +
+                                std::to_string(visibility.rank);
                         }
-                        first_unavailable_reason = reason.str();
+                        break;
                     }
-                    break;
                 }
                 if (!available) {
                     break;
@@ -1442,6 +1456,8 @@ resolveDistributedAggregationDeclarations(
             }
             if (available) {
                 available_rooted.push_back(declaration);
+            } else if (halo_eligible) {
+                halo_eligible_rooted.push_back(declaration);
             }
         }
         if (available_rooted.empty()) {
@@ -1473,6 +1489,22 @@ resolveDistributedAggregationDeclarations(
                 physicalRootKey(b->declaration),
                 b->rank);
         });
+        // The (distance, root cell GID) order is partition independent; when
+        // the halo hides the preferred root from an assembling rank, the
+        // next visible root is used and the choice becomes partition
+        // dependent. Count it so the diagnostic says so.
+        if (std::any_of(halo_eligible_rooted.begin(),
+                        halo_eligible_rooted.end(),
+                        [&](const auto* hidden) {
+                            return detail::smallCutAggregationPhysicalRootLess(
+                                physicalRootKey(hidden->declaration),
+                                hidden->rank,
+                                physicalRootKey(
+                                    available_rooted.front()->declaration),
+                                available_rooted.front()->rank);
+                        })) {
+            ++result.canonical_halo_limited_root_choices;
+        }
         const auto* chosen_provider = available_rooted.front();
         const auto& chosen = chosen_provider->declaration;
         std::vector<const RankedDeclaration*> providers;
@@ -1575,6 +1607,11 @@ resolveDistributedAggregationDeclarations(
         local_visibility_words.push_back(partition.isOwned(slave) ? 1 : 0);
         local_visibility_words.push_back(
             existing_constraints.isConstrained(slave) ? 1 : 0);
+        local_visibility_words.push_back(
+            (partition.isOwned(slave) ||
+             assembled_candidate_dofs.count(slave) != 0u)
+                ? 1
+                : 0);
         local_visibility_words.push_back(static_cast<std::int64_t>(
             missing_masters.size()));
         for (const auto master : missing_masters) {
@@ -1604,6 +1641,7 @@ resolveDistributedAggregationDeclarations(
         int rank{-1};
         bool owned{false};
         bool preconstrained{false};
+        bool needed{false};
         std::vector<GlobalIndex> missing_masters{};
     };
     std::map<GlobalIndex, std::vector<Visibility>> visibility_by_slave;
@@ -1613,7 +1651,7 @@ resolveDistributedAggregationDeclarations(
         const auto end = position + static_cast<std::size_t>(
             gathered_visibility.counts[static_cast<std::size_t>(rank)]);
         while (position < end) {
-            if (end - position < 4u) {
+            if (end - position < 5u) {
                 throw std::runtime_error(
                     "SmallCutAggregationConstraint: malformed canonical-line "
                     "visibility declaration");
@@ -1625,6 +1663,7 @@ resolveDistributedAggregationDeclarations(
             visibility.owned = gathered_visibility.words[position++] != 0;
             visibility.preconstrained =
                 gathered_visibility.words[position++] != 0;
+            visibility.needed = gathered_visibility.words[position++] != 0;
             const auto missing_count = gathered_visibility.words[position++];
             if (missing_count < 0 ||
                 static_cast<std::uint64_t>(missing_count) >
@@ -1701,7 +1740,8 @@ resolveDistributedAggregationDeclarations(
             continue;
         }
         for (const auto& visibility : found->second) {
-            if (!visibility.missing_masters.empty()) {
+            // A rank that assembles with the line must carry every master.
+            if (visibility.needed && !visibility.missing_masters.empty()) {
                 ++failure_count;
                 if (failure_count <= 4u) {
                     failures << " dof=" << slave
@@ -1722,9 +1762,10 @@ resolveDistributedAggregationDeclarations(
             "incomplete_distributed_aggregation_halo field='" +
             std::string(field_name) + "' inconsistent_candidate_dofs=" +
             std::to_string(failure_count) + failures.str() +
-            " Increase mesh/DOF overlap until every rank that assembles a "
-            "canonical slave also carries all of its nonzero aggregate "
-            "masters; refusing owner-wins constraint resolution.");
+            " Increase mesh/DOF overlap (<Ghost_layers>) until every rank "
+            "that assembles with a canonical slave carries all of its "
+            "nonzero aggregate masters; refusing owner-wins constraint "
+            "resolution.");
     }
 
     result.canonical_strong_suppressed_dofs =
@@ -1747,7 +1788,14 @@ resolveDistributedAggregationDeclarations(
         } else {
             ++result.canonical_owned_aggregate_dofs;
         }
-        if (partition.isRelevant(slave)) {
+        // Install where the slave is relevant and every master is present;
+        // the validation above proved that no rank assembling with the line
+        // lacks a master.
+        if (partition.isRelevant(slave) &&
+            std::all_of(line.entries.begin(), line.entries.end(),
+                        [&](const auto& entry) {
+                            return partition.isRelevant(entry.master_dof);
+                        })) {
             result.relevant_lines.push_back(line);
         }
     }
@@ -1793,6 +1841,7 @@ resolveDistributedAggregationDeclarations(
     std::string_view,
     const GlobalCandidateMap& global_candidates,
     const LocalAggregationDeclarationMap& local_candidates,
+    const std::set<GlobalIndex>&,
     bool slave_all_cut,
     bool allow_unaggregated)
 {
@@ -5075,12 +5124,72 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
 
     DistributedAggregationResult distributed_result;
     if (max_lines == std::numeric_limits<std::size_t>::max()) {
+        // Candidate DOFs this rank assembles with: DOFs of its owned cells
+        // (condensed here under reverse scatter), of their face neighbors
+        // (reached by facet terms), and of every local cell holding an owned
+        // DOF (whose couplings, condensed, land in owned rows and their
+        // sparsity). Such a rank needs the canonical line and all masters.
+        std::set<GlobalIndex> assembled_candidate_dofs;
+        {
+            std::set<GlobalIndex> candidate_component_dofs;
+            for (const auto& [dof, candidate] : global_candidates) {
+                static_cast<void>(dof);
+                candidate_component_dofs.insert(
+                    candidate.component_dofs.begin(),
+                    candidate.component_dofs.end());
+            }
+            const auto& assembly_partition =
+                system.dofHandler().getPartition();
+            const auto n_local_cells = mesh.numCells();
+            std::vector<unsigned char> assembled_cell(
+                static_cast<std::size_t>(std::max<GlobalIndex>(0, n_local_cells)),
+                static_cast<unsigned char>(0));
+            auto mark_cell = [&](GlobalIndex cell) {
+                if (cell >= 0 && cell < n_local_cells) {
+                    assembled_cell[static_cast<std::size_t>(cell)] = 1u;
+                }
+            };
+            for (GlobalIndex cell = 0; cell < n_local_cells; ++cell) {
+                if (mesh.isOwnedCell(cell)) {
+                    mark_cell(cell);
+                }
+            }
+            mesh.forEachInteriorFace(
+                [&](GlobalIndex, GlobalIndex first, GlobalIndex second) {
+                    if (first >= 0 && first < n_local_cells &&
+                        mesh.isOwnedCell(first)) {
+                        mark_cell(second);
+                    }
+                    if (second >= 0 && second < n_local_cells &&
+                        mesh.isOwnedCell(second)) {
+                        mark_cell(first);
+                    }
+                });
+            for (GlobalIndex cell = 0; cell < n_local_cells; ++cell) {
+                const auto cell_dofs = dh.getCellDofs(cell);
+                const bool assembled =
+                    assembled_cell[static_cast<std::size_t>(cell)] != 0u ||
+                    std::any_of(cell_dofs.begin(), cell_dofs.end(),
+                                [&](GlobalIndex dof) {
+                                    return assembly_partition.isOwned(offset + dof);
+                                });
+                if (!assembled) {
+                    continue;
+                }
+                for (const auto dof : cell_dofs) {
+                    if (candidate_component_dofs.count(offset + dof) != 0u) {
+                        assembled_candidate_dofs.insert(offset + dof);
+                    }
+                }
+            }
+        }
         distributed_result = resolveDistributedAggregationDeclarations(
             system,
             constraints,
             rec.name,
             global_candidates,
             local_aggregation_declarations,
+            assembled_candidate_dofs,
             slave_all_cut,
             allow_unaggregated);
     } else {
@@ -5407,6 +5516,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         << distributed_result.canonical_owned_pinned_dofs
         << " canonical_strong_suppressed_dofs="
         << distributed_result.canonical_strong_suppressed_dofs
+        << " canonical_halo_limited_root_choices="
+        << distributed_result.canonical_halo_limited_root_choices
         << " canonical_active_feature_count="
         << canonical_active_features.size()
         << " canonical_rooted_active_feature_count="
@@ -6000,10 +6111,22 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
             if (!partition.isRelevant(pending_row.slave_dof)) {
                 continue;
             }
-            const auto local =
-                extract_closed_row(pending_row.slave_dof);
             const auto& canonical =
                 canonical_closed_rows.at(pending_row.slave_dof);
+            // A rank that sees the slave only deeper in the halo, where some
+            // master is absent, carries no line for it by design.
+            if (canonical.constrained &&
+                !closed_constraints.isConstrained(pending_row.slave_dof) &&
+                !std::all_of(canonical.entries.begin(),
+                             canonical.entries.end(),
+                             [&](const ConstraintEntry& entry) {
+                                 return partition.isRelevant(
+                                     entry.master_dof);
+                             })) {
+                continue;
+            }
+            const auto local =
+                extract_closed_row(pending_row.slave_dof);
             if (local.constrained != canonical.constrained ||
                 aggregationDigestReal(local.inhomogeneity) !=
                     aggregationDigestReal(
