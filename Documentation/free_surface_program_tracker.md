@@ -589,6 +589,21 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
     9. basis tabulation and cache keys (25–35% of assembly).
 
     Items 1–5 bring a `SurfaceStress` pass to about 2 min, which is still 2–4 days per R/h = 8 run.
+  - **FE performance work (started 2026-09-30).**
+    - Every change must leave outputs bitwise identical against the shared reference set. The reference is job `46134332`, run with binary `35a81fd3`: plan `/scratch/users/zsexton/free-surface-benchmarks/perf-reference/jobs/reference.txt`, compared with `perf-reference/tools/cmp_runs.py`.
+    - Running:
+
+      | Branch | Speed-ups |
+      |---|---|
+      | `dev/perf-rebuild-path` | items 1, 3 and 4 above |
+      | `dev/perf-reuse-unchanged` | items 6 and 7 |
+      | `dev/perf-kernels` | item 2 and the cache-key and full-cell basis part of item 9 |
+      | `dev/perf-cut-integration-reuse` | reuse of cut-cell quadrature and basis data within a frozen geometry epoch; cut cells are about 70% of a 3D Jacobian assembly |
+      | `dev/perf-linear-solver` | measure the solve; evaluate the existing FSILS and Eigen preconditioners; reuse the preconditioner across Newton iterations; a parameter-free block preconditioner. New options are opt-in; any default change needs approval. |
+
+    - Queued until the branches above merge:
+      - item 8, classification-only records for fully dry cells (3D memory);
+      - multithreaded assembly in `StandardAssembler`.
   - **Open questions (for the user):**
     1. 3D gating: R/h = 32 is not affordable, so gate at R/h = 16 with the order over 8/16, or report 3D without gating.
     2. For R/h = 16 memory: implement item 8, or allow a job larger than 16 GB.
