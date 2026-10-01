@@ -343,6 +343,43 @@ TEST(PreconditionerReusePolicy, ZeroSetupCostRefreshesEverySolve)
     EXPECT_EQ(policy.beforeSolve(true, false).reason, Reason::Initial);
 }
 
+TEST(PreconditionerReusePolicy, ExcessUsesTheConvergenceRateOfTheFreshSolve)
+{
+    PreconditionerReusePolicy policy;
+    policy.recordRefresh();
+    policy.recordSolve(20, true, 10.0, 1e-8);  // rate: 1e-8 in 20 iterations
+    EXPECT_NEAR(policy.expectedFreshIterations(1e-2), 5.0, 1e-12);
+    EXPECT_NEAR(policy.expectedFreshIterations(1e-8), 20.0, 1e-12);
+    EXPECT_NEAR(policy.expectedFreshIterations(0.0), 20.0, 1e-12);  // unknown reduction
+
+    // A solve that stops early on a looser (absolute) target is not stale.
+    policy.recordSolve(5, false, 0.0, 1e-2);
+    EXPECT_DOUBLE_EQ(policy.excessIterations(), 0.0);
+    EXPECT_FALSE(policy.beforeSolve(true, false).refresh);
+
+    // Ten iterations more than the fresh rate predicts reach the setup cost.
+    policy.recordSolve(30, false, 0.0, 1e-8);
+    EXPECT_NEAR(policy.excessIterations(), 10.0, 1e-9);
+    const auto d = policy.beforeSolve(true, false);
+    EXPECT_TRUE(d.refresh);
+    EXPECT_EQ(d.reason, Reason::BreakEven);
+}
+
+TEST(PreconditionerReusePolicy, StaleBudgetIsExpectedIterationsPlusRemainingAllowance)
+{
+    PreconditionerReusePolicy policy;
+    EXPECT_EQ(policy.staleIterationBudget(1e-8), 0);
+    policy.recordRefresh();
+    policy.recordSolve(20, true, 10.0, 1e-8);
+    EXPECT_EQ(policy.staleIterationBudget(1e-8), 30);
+    policy.recordSolve(24, false, 0.0, 1e-8);  // 4 extra iterations
+    EXPECT_EQ(policy.staleIterationBudget(1e-8), 26);
+    EXPECT_EQ(policy.staleIterationBudget(1e-4), 16);
+    policy.recordSolve(40, false, 0.0, 1e-8);  // allowance exhausted
+    EXPECT_EQ(policy.staleIterationBudget(1e-8), 20);
+    EXPECT_GE(policy.staleIterationBudget(0.5), 1);
+}
+
 // ---------------------------------------------------------------------------
 // Block kernels
 // ---------------------------------------------------------------------------
