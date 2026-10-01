@@ -19524,6 +19524,39 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetMaintenance,
+     KinematicReconciliationAloneCreatesAScheduledRequest)
+{
+  auto params = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+
+  const auto requests = legacyMaintenanceRequestsForTest(*params);
+  ASSERT_EQ(requests.size(), 1u);
+  const auto& transport = requests.front().configuration->transport;
+  EXPECT_TRUE(transport.kinematic_reconciliation.enabled);
+  EXPECT_FALSE(transport.reinitialization.enabled);
+  EXPECT_FALSE(transport.volume_correction.enabled);
+  EXPECT_FALSE(svmp::FE::level_set::shouldApplyLevelSetKinematicReconciliation(
+      transport.kinematic_reconciliation, 0));
+  EXPECT_TRUE(svmp::FE::level_set::shouldApplyLevelSetKinematicReconciliation(
+      transport.kinematic_reconciliation, 1));
+  const auto initial = canonicalLevelSetMaintenanceRequestSchedule(
+      requests, LevelSetMaintenanceScheduleStage::TransientInitialization, 0);
+  const auto post_step = canonicalLevelSetMaintenanceRequestSchedule(
+      requests, LevelSetMaintenanceScheduleStage::AcceptedEndpointPostStep, 1);
+  ASSERT_TRUE(initial.supported);
+  ASSERT_TRUE(post_step.supported);
+  ASSERT_GT(post_step.words.size(), 5u);
+  EXPECT_NE(post_step.words[4] & (1ull << 12u), 0u);
+  EXPECT_EQ(initial.words[4] & (1ull << 12u), 0u);
+}
+
+TEST(ApplicationDriverLevelSetMaintenance,
      ParsesAndSchedulesConservativePhaseBoundaryFluxPolicy)
 {
   auto params = parseWorkflowParametersXml(R"xml(

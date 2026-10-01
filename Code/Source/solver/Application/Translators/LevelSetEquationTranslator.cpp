@@ -676,9 +676,13 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
       << ",\"maximum_cumulative_interface_displacement_fraction\":"
       << json_real(options.volume_correction
                        .maximum_cumulative_interface_displacement_fraction)
-      << "},\"kinematic_reconciliation\":{\"enabled\":"
-      << json_bool(options.kinematic_reconciliation.enabled)
-      << "}}"
+      << '}';
+  // Present only when enabled, so existing configurations keep their
+  // artifact unchanged.
+  if (options.kinematic_reconciliation.enabled) {
+    out << ",\"kinematic_reconciliation\":{\"enabled\":true}";
+  }
+  out << '}'
       << ",\"boundaries\":{\"inflow\":[";
   for (std::size_t i = 0; i < inflow.size(); ++i) {
     if (i != 0u) out << ',';

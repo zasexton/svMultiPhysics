@@ -1649,6 +1649,40 @@ TEST(LevelSetEquationTranslator, TranslatesTemporalSpatialInflowBoundary)
 #endif
 }
 
+TEST(LevelSetEquationTranslator, ReportsKinematicReconciliationOnlyWhenEnabled)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  for (const bool enabled : {false, true}) {
+    auto mesh = makeRegistryQuadMesh();
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "level_set";
+    input.mesh_name = "quad";
+    input.mesh = mesh->local_mesh_ptr();
+    input.equation_params["Level_set_field_name"] =
+        svmp::Physics::ParameterValue{true, "phi"};
+    input.equation_params["Velocity_source"] =
+        svmp::Physics::ParameterValue{true, "constant"};
+    input.equation_params["Constant_velocity"] =
+        svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
+    input.equation_params["Enable_kinematic_reconciliation"] =
+        svmp::Physics::ParameterValue{true, enabled ? "true" : "false"};
+
+    svmp::FE::systems::FESystem system(mesh);
+    auto module = application::translators::level_set::createModule(input, system);
+    ASSERT_TRUE(module);
+    const auto artifact = module->effectiveConfigurationArtifact();
+    ASSERT_TRUE(artifact.has_value());
+    EXPECT_EQ(artifact->json.find("\"kinematic_reconciliation\":{\"enabled\":true}") !=
+                  std::string::npos,
+              enabled);
+    EXPECT_EQ(artifact->json.find("kinematic_reconciliation") != std::string::npos,
+              enabled);
+  }
+#endif
+}
+
 TEST(LevelSetEquationTranslator, TranslatesConservativePhaseControls)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
