@@ -30,6 +30,7 @@
 #include "Forms/PointEvaluator.h"
 #include "Auxiliary/AuxiliaryDerivativeProvider.h"
 #include "Systems/SystemsExceptions.h"
+#include "Systems/FreeSurfaceFunctionalRounding.h"
  #include "Core/Logger.h"
 
 #include "Assembly/AssemblyKernel.h"
@@ -10344,6 +10345,10 @@ bool sameFreeSurfaceAcceptedContactLineKinematics(
     return true;
 }
 
+// Identities between a few scalar operations, and sums whose term count is
+// not carried by the accepted state (rule counts, MPI rank counts), keep this
+// fixed bound.  Sums of the same terms with known counts use the derived
+// bound of FreeSurfaceFunctionalRounding.h instead.
 bool freeSurfaceFunctionalValueNear(Real actual, Real expected) noexcept
 {
     const auto scale = std::max(
@@ -15990,6 +15995,20 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
             "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: " +
                 std::string(quantity) + " is inconsistent");
     };
+    // Two sums of the same nonnegative terms, each with its term count; their
+    // difference is bounded by floating-point summation error analysis.
+    const auto require_same_terms_near = [](Real actual,
+                                            std::uint64_t actual_terms,
+                                            Real expected,
+                                            std::uint64_t expected_terms,
+                                            std::string_view quantity) {
+        FE_THROW_IF(
+            !freeSurfaceNonnegativeSummationsAgree(
+                actual, actual_terms, expected, expected_terms),
+            InvalidArgumentException,
+            "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: " +
+                std::string(quantity) + " is inconsistent");
+    };
     constexpr Real contact_pi =
         Real{3.141592653589793238462643383279502884};
     for (std::size_t i = 0; i < states.size(); ++i) {
@@ -16250,9 +16269,14 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
                 "active-volume energy does not match its declaration or "
                 "geometry revision");
-            require_near(
+            // The state sums the per-rule measures and the energy sums
+            // every weight of those rules: the same terms, counted by the
+            // energy's quadrature points on both sides.
+            require_same_terms_near(
                 energy.owned_liquid_volume,
+                energy.owned_quadrature_point_count,
                 state.owned_liquid_volume,
+                energy.owned_quadrature_point_count,
                 "active-volume energy liquid measure");
             require_near(
                 energy.total_energy,
@@ -16289,9 +16313,11 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
                 "active-volume dissipation does not match its declaration "
                 "or geometry revision");
-            require_near(
+            require_same_terms_near(
                 dissipation.owned_liquid_volume,
+                dissipation.owned_quadrature_point_count,
                 state.owned_liquid_volume,
+                dissipation.owned_quadrature_point_count,
                 "active-volume dissipation liquid measure");
             if (accepted.active_volume_energy.has_value()) {
                 const auto& energy = *accepted.active_volume_energy;
@@ -16302,9 +16328,11 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                     "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
                     "active-volume energy and dissipation quadrature "
                     "coverage differ");
-                require_near(
+                require_same_terms_near(
                     dissipation.owned_liquid_volume,
+                    dissipation.owned_quadrature_point_count,
                     energy.owned_liquid_volume,
+                    energy.owned_quadrature_point_count,
                     "active-volume energy/dissipation liquid measure");
             }
         }
@@ -16340,9 +16368,11 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
                 "exterior-pressure power does not match its declaration or "
                 "geometry revision");
-            require_near(
+            require_same_terms_near(
                 pressure.owned_liquid_gas_area,
+                pressure.owned_quadrature_point_count,
                 state.owned_liquid_gas_area,
+                pressure.owned_quadrature_point_count,
                 "exterior-pressure surface measure");
             require_near(
                 pressure.external_pressure_power,
@@ -16389,17 +16419,23 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
                 "backward-Euler kinetic work does not match its declaration "
                 "or contains an invalid value");
-            require_near(
+            require_same_terms_near(
                 work.owned_liquid_volume,
+                work.owned_quadrature_point_count,
                 state.owned_liquid_volume,
+                work.owned_quadrature_point_count,
                 "backward-Euler kinetic-work liquid measure");
-            require_near(
+            require_same_terms_near(
                 work.owned_liquid_volume,
+                work.owned_quadrature_point_count,
                 energy.owned_liquid_volume,
+                energy.owned_quadrature_point_count,
                 "backward-Euler and stored-energy liquid measures");
-            require_near(
+            require_same_terms_near(
                 work.kinetic_energy_after,
+                work.owned_quadrature_point_count,
                 energy.kinetic_energy,
+                energy.owned_quadrature_point_count,
                 "backward-Euler endpoint kinetic energy");
             require_near(
                 work.kinetic_energy_change_on_endpoint_domain,
@@ -16424,9 +16460,11 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                     "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
                     "zero-duration kinetic baseline endpoint revisions "
                     "differ");
-                require_near(
+                require_same_terms_near(
                     work.kinetic_energy_before_on_endpoint_domain,
+                    work.owned_quadrature_point_count,
                     work.kinetic_energy_after,
+                    work.owned_quadrature_point_count,
                     "zero-duration kinetic baseline");
                 require_near(
                     work.step_integrated_inertia_work,
@@ -16877,18 +16915,30 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 wall_slip_dissipation_sum +=
                     wall.wall_slip_dissipation;
             }
-            require_near(contact_state.owned_contact_measure,
-                         dynamic_contact_measure_sum,
-                         "contact-stage total measure");
-            require_near(contact_state.line_friction_dissipation,
-                         line_dissipation_sum,
-                         "contact-stage line-friction dissipation");
-            require_near(contact_state.owned_wetted_wall_measure,
-                         dynamic_wetted_wall_measure_sum,
-                         "contact-stage sharp wetted-wall measure");
-            require_near(contact_state.wall_slip_dissipation,
-                         wall_slip_dissipation_sum,
-                         "contact-stage wall-slip dissipation");
+            // Contact-stage totals are sums of the nonnegative per-wall
+            // values, as are the sums above.
+            const auto contact_wall_count =
+                static_cast<std::uint64_t>(contact_state.walls.size());
+            require_same_terms_near(contact_state.owned_contact_measure,
+                                    contact_wall_count,
+                                    dynamic_contact_measure_sum,
+                                    contact_wall_count,
+                                    "contact-stage total measure");
+            require_same_terms_near(contact_state.line_friction_dissipation,
+                                    contact_wall_count,
+                                    line_dissipation_sum,
+                                    contact_wall_count,
+                                    "contact-stage line-friction dissipation");
+            require_same_terms_near(contact_state.owned_wetted_wall_measure,
+                                    contact_wall_count,
+                                    dynamic_wetted_wall_measure_sum,
+                                    contact_wall_count,
+                                    "contact-stage sharp wetted-wall measure");
+            require_same_terms_near(contact_state.wall_slip_dissipation,
+                                    contact_wall_count,
+                                    wall_slip_dissipation_sum,
+                                    contact_wall_count,
+                                    "contact-stage wall-slip dissipation");
             require_near(contact_state.total_dissipation,
                          contact_state.line_friction_dissipation +
                              contact_state.wall_slip_dissipation,

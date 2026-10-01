@@ -1030,6 +1030,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/FEAdaptivityTransfer.h
     Systems/FESystem.h
     Systems/FormsInstaller.h
+    Systems/FreeSurfaceFunctionalRounding.h
     Systems/BoundedUpdatePolicy.h
     Systems/BoundaryDistanceService.h
     Systems/FieldRegistry.h
@@ -2976,6 +2977,7 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Systems/test_MaterialStateProvider.cpp
 		                Tests/Unit/Systems/test_FESystem.cpp
 		                Tests/Unit/Systems/test_FESystemMultiMesh.cpp
+		                Tests/Unit/Systems/test_FreeSurfaceFunctionalRounding.cpp
 		                Tests/Unit/Systems/test_AssemblerSelection.cpp
 		                Tests/Unit/Systems/test_MultiFieldRectangularAssembly.cpp
                 Tests/Unit/Systems/test_NavierStokesCoupled.cpp
