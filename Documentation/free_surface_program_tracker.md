@@ -548,6 +548,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
     - No capillary-assembly bug was found.
   - Speed-up per step on a shared node: static drop R/h = 32 1.87× / 3.08× / 3.67× on 2/4/8 ranks; sloshing L/h = 64 1.52× / 2.02× / 2.30×.
   - Open: a few rank-local throws before collectives on error paths (NewtonSolver line search, `LevelSetVolume::build`, FSILS `dot`, PDE extension). No end-to-end multi-rank cut-case CTest yet.
+  - Integrated check on `ac273512` (job `46205355`): serial outputs bitwise identical to the shared baseline on all 9 reference cases. FE 34/34, Physics 7/7, Application 4/4. With perf C, the Application suite now takes 1,824 s, down from 3,139 s.
 - **Run policy since 2026-10-01:** long runs with FSILS linear algebra use 4 ranks on one node (`run_case_mpi.sbatch`). Bitwise comparisons between builds stay serial, and decks with Eigen linear algebra stay serial (benchmarks README).
 - [ ] **Protocol.**
   - Static drop in a box, fluid initially at rest. The Laplace number La = ργD/μ² is swept over 12 and 120; 1,200 and above are deferred until the per-step cost is reduced.
@@ -645,7 +646,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
       - classification-only records for fully dry cells (item 8, 3D memory), after `dev/perf-cut-integration-reuse`;
       - multithreaded assembly in `StandardAssembler`, after the assembler branches;
       - perf C follow-ups, after `dev/perf-cut-integration-reuse`: deduplicate the per-component physical transforms of product-space velocity, and cache field evaluations in full cells (about 10% of cut-volume time);
-      - constraint-build cost (about 3 s per 3D tank step at 1/h = 16), after `dev/mpi-correctness`.
+      - constraint-build cost (about 3 s per 3D tank step at 1/h = 16): started 2026-10-01 after the MPI merge, branch `dev/perf-constraint-build`.
     - Started 2026-10-01: `dev/perf-build-jit`, a build-configuration and JIT study.
       - Variants: LTO and PGO (expected bitwise); `-march=x86-64-v3` with and without FP contraction; JIT opt level, CPU target and contraction.
       - It also checks that JIT cache objects are keyed by CPU features, since jobs run on both SKX (AVX-512) and MLN (AVX2) nodes.
