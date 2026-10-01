@@ -487,6 +487,19 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - Cases and output: `/scratch/users/zsexton/free-surface-benchmarks/static_drop_2d/35a81fd3/La12/<form>/L<level>`, with the job list in `jobs.txt`.
   - Expected: about 5 min at R/h = 8, about 1 h at 16, and about 10–15 h at 32 (longer on SKX nodes).
   - The first submission on `02da73ea` was held and cancelled when the face-sampling fix arrived. Job `46121663` then showed the fix leaves the unfitted static drop (R/h = 8, full run), sloshing (L/h = 16, full run) and capillary wave (100 steps) bitwise identical at the same cost.
+  - **Partial results (2026-09-30; R/h = 32 still running).**
+
+    | Form | R/h | dp/(γ/R) − 1 | Ca_sp (final quarter) | growth | max dA/A | wall time |
+    |---|---:|---:|---:|---:|---:|---:|
+    | `surface_stress` | 8 | 6.76e-4 | 2.49e-4 | 0.741 | 1.1e-5 | 9 min |
+    | `surface_stress` | 16 | 1.49e-4 | 1.32e-4 | 0.705 | 3.9e-7 | 1.5 h |
+    | `kag_lumped` | 8 | −1.81e-4 | 1.48e-3 | **1.334** | 8.7e-5 | 18 min |
+    | `kag_lumped` | 16 | 7.68e-5 | 3.90e-4 | 0.874 | 5.9e-6 | 2.3 h |
+    | `kag_consistent` | 8 | 8.65e-4 | 5.52e-3 | 0.415 | 1.1e-4 | 21 min |
+    | `kag_consistent` | 16 | **stopped at step 111** (t = 0.97) | | | | |
+
+    - `kag_lumped` has the smallest pressure-jump error, but its spurious currents are 2–6× those of `surface_stress`, and at R/h = 8 max|u| grows (growth 1.33 > 1, failing no_velocity_growth).
+    - `kag_consistent` at R/h = 16: the outer geometry loop reached its 12-pass cap with the state change stalled at 6.8e-10 against a 1e-10 gate. The projected curvature had spikes up to 2.0e4 against a mean of 1.0 (RMS deviation 1.9). Without an adaptive step controller the run then aborted. This is evidence for D2: consistent-mass KAG curvature is oscillatory and its outer loop is not robust. Its R/h = 8 spurious currents are also 22× those of `surface_stress`.
 - [x] **Per-step cost must come down before the refinement study (added 2026-09-29; done 2026-09-30).**
   - Merged commits `b5837011`, `09b46072`, `889c75f2` and `67b4395a`:
     - a reference-element metadata cache;
@@ -625,6 +638,20 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
     - Jobs `46130411`, `46130412`, `46130432`, `46130438`, `46130568`.
     - Output in `/scratch/users/zsexton/free-surface-benchmarks/capillary_wave_2d/35a81fd3/pde_extension/surface_stress/`.
     - The KAG forms follow once M2 has compared the capillary routes.
+  - **Result: all three gates fail** (verified with `verify.py`):
+
+    | λ/h | frequency error | damping error | max dA/A |
+    |---:|---:|---:|---:|
+    | 16 | 0.80% | 26% | 1.1e-5 |
+    | 32 | 0.66% | 7.8% | 1.3e-4 |
+    | 64 | 0.23% | 0.06% | 7.3e-5 |
+
+    - The frequency limit is met, but its observed order is 0.91 < 1.
+    - Damping exceeds 5% at λ/h = 32.
+    - The area deviation exceeds 1e-4 at λ/h = 32.
+    - The Δt study at λ/h = 32 is not clean: damping error 7.8% / 9.3% / 12.1% at Δt, Δt/2, Δt/4, which grows as Δt shrinks.
+    - The fitted capillary wave (M5) has 7–25× smaller frequency errors and 2–200× smaller area deviations.
+    - Part of the frequency plateau at a0 = 0.01λ is a finite-amplitude effect that the linear reference does not contain. The fitted runs at a0 = 0.0025λ converge, with the amplitude dependence matching −0.10 to −0.16 (a0k)².
 - [ ] **Oscillating 2D drop**: Lamb frequency and viscous damping.
 
 ### M4 — Wetting (unfitted)
@@ -701,9 +728,36 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
 - [ ] **Open questions (for the user):**
   1. Confirm current-frame assembly for coupled ALE.
   2. Retire the legacy fitted `Penalty`/`Nitsche` kinematics for free surfaces, or keep them as legacy only, and make `MeshNitsche` the qualified default.
-- [ ] Regenerate the SPHERIC fitted meshes and convert those decks to `MeshNitsche` with sliding walls. A MeshNitsche variant of the 3D deck leaks 0.5% of its volume through the contact line in 40 steps: wall Dirichlet values are not applied at wall nodes on the surface edge, and `free_surface.vtp` looks malformed (it spans y = 0.0698–0.093). The Application tests pin the current deck contents.
+- [x] **Fitted 3D contact-line leak: root cause found and fixed (2026-09-30, merged `7698d5b7`).**
+  - Cause: the legacy face files overlap. `generate_validation_meshes.py` classified faces by centroid with tolerance 0.35h, so `free_surface.vtp` also held all 88 top-row wall faces (12 overlapping file pairs).
+  - A boundary face carries one label, which goes to the last face file listed (`MeshTranslator.cpp:595`, `:737`). The top-row wall faces therefore became free-surface faces with natural traction.
+  - It is not a Dirichlet precedence problem: wall-normal velocity and displacement stay exactly 0 at every wall node, including shared edges, in a forced 3D run.
+  - Fix: new decks with disjoint face sets. `MeshTranslator` and `generate_validation_meshes.py` now warn on overlapping face files; labels and outputs are unchanged.
+- [x] **New `MeshNitsche` SPHERIC 10 decks** (`fitted_ale/..._meshnitsche`, 2D section 120×12 and 3D; written by `generate_spheric_test10_fitted_decks.py`; the legacy decks and their pinned tests are unchanged).
+  - At rest over 1,000 steps: max|u| 7.9e-15 (3D) and 3.2e-14 m/s (2D), volume constant to roundoff.
+  - 2D forced run (job `46155727`, full forcing table, no Coriolis because the solver supports it only in 3D): reached 1.514 s of 8.35 s.
+    - Up to 1.40 s: volume change ≤ 4.6e-6, minimum angle ≥ 29.5°.
+    - Sensor 1 first peak: 3.38 mbar at 0.925 s against 3.86 mbar measured at 0.953 s (RMS difference 0.18 mbar over 0–1.4 s).
+    - It ends when the run-up at the left wall shears the wall cells (minimum angle 0.6° at 1.51 s) and Newton fails. The mesh-velocity operator has no restoring term, so this needs a mesh-quality policy.
+  - Performance side fix (`d92af1cd`, Physics `NavierStokesRegister.cpp`): spacetime forcing tables now use a bucket grid and bisection, 16 → 2.0 s per step, bitwise identical.
+- [ ] **Unfitted SPHERIC 02, 05 and 10 decks also have overlapping face sets.** In Test 05, for example, bottom faces get the free-slip front/back label. This may have affected the June results. Regenerate those decks; they have pinned tests.
 - [ ] A mesh-quality policy for long or violent fitted runs: the mesh-velocity operator has no restoring term back to the reference mesh.
-- [ ] Fitted capillary wave (Prosperetti), as an independent reference for M3.
+- [x] **Fitted capillary wave** (`fitted_capillary_wave_2d`, job `46129890`; same setup, reference and gates as `capillary_wave_2d`).
+
+  | λ/h | frequency error | damping error | max dA/A |
+  |---:|---:|---:|---:|
+  | 16 | −4.1e-4 | +3.31% | 4.9e-6 |
+  | 32 | −7.3e-4 | +0.51% | 1.4e-6 |
+  | 64 | −4.3e-4 | −0.17% | 3.7e-7 |
+
+  - Damping (order 2.14) and volume pass, and the frequency is within the 2% limit, but the frequency observed order is −0.04, so that gate fails.
+  - The plateau is a finite-amplitude effect: at a0 = 0.0025λ the errors are +1.3e-4, −3.8e-5 and +2.6e-5.
+  - Runs at 3.6–7.2× the capillary time-step limit are stable, because the geometry is solved inside Newton.
+  - The Δt study converges at first order (error ≤ 1e-4), which is unexplained.
+- [ ] **Open questions (for the user):**
+  1. Capillary-wave frequency-order gate: lower the protocol amplitude to 0.0025λ, or use an amplitude-corrected reference. This affects unfitted M3 too.
+  2. Overlapping face files: keep them as a warning or fail closed?
+  3. Extend the Coriolis term to 2D, or run the forced SPHERIC case in 3D.
 - [ ] **2D contact point** (a codimension-2 point) with Young term and slip. Compare with the static meniscus.
 
 ### M6 — Violent and long-horizon one-phase flows (T1/T5)
