@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <random>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -8708,6 +8709,191 @@ TEST(ApplicationDriverLevelSetWorkflows,
   ASSERT_NE(context->facetSetHandleForMarker(703), nullptr);
   EXPECT_EQ(context->facetSetHandleForMarker(703)->side,
             svmp::FE::geometry::CutIntegrationSide::Negative);
+#endif
+}
+
+namespace {
+
+struct VelocityEvaluatorIdentityCase {
+  std::shared_ptr<svmp::Mesh> mesh{};
+  svmp::FE::ElementType element_type{svmp::FE::ElementType::Tetra4};
+  int order{1};
+  int components{3};
+};
+
+std::array<svmp::FE::Real, 3> velocityEvaluatorReferencePoint(
+    svmp::FE::ElementType element_type,
+    std::mt19937_64& generator)
+{
+  std::uniform_real_distribution<svmp::FE::Real> unit(0.0, 1.0);
+  if (element_type == svmp::FE::ElementType::Quad4) {
+    return {{2.0 * unit(generator) - 1.0, 2.0 * unit(generator) - 1.0,
+             0.0}};
+  }
+  const bool tetrahedron =
+      element_type == svmp::FE::ElementType::Tetra4;
+  std::array<svmp::FE::Real, 4> weights{{
+      unit(generator), unit(generator), unit(generator),
+      tetrahedron ? unit(generator) : svmp::FE::Real{0.0}}};
+  const auto total = weights[0] + weights[1] + weights[2] + weights[3];
+  return {{weights[1] / total, weights[2] / total,
+           tetrahedron ? weights[3] / total : svmp::FE::Real{0.0}}};
+}
+
+std::uint64_t velocityEvaluatorBits(svmp::FE::Real value)
+{
+  return std::bit_cast<std::uint64_t>(value);
+}
+
+} // namespace
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     FreeSurfaceVelocityEvaluatorMatchesGenericSpaceEvaluationBitwise)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  // The accepted-step diagnostics evaluate the velocity through cached cell
+  // coefficients, affine inverse Jacobians, and a direct product-space
+  // evaluation.  Every value and gradient must equal, bit for bit, the
+  // generic FunctionSpace evaluation with per-point coefficient gathering and
+  // per-point geometry mappings, including when cells are revisited.
+  std::vector<VelocityEvaluatorIdentityCase> cases;
+  cases.push_back(VelocityEvaluatorIdentityCase{
+      .mesh = makeWorkflowRadialCapillaryMesh(
+                  3, false, -1, 1, 2, false, 1, 0.3, {{0.1, -0.2, 0.05}})
+                  .mesh,
+      .element_type = svmp::FE::ElementType::Tetra4,
+      .order = 2,
+      .components = 3});
+  cases.push_back(VelocityEvaluatorIdentityCase{
+      .mesh = makeWorkflowRadialCapillaryMesh(
+                  2, false, -1, 1, 2, false, 1, 0.7, {{-0.3, 0.4, 0.0}})
+                  .mesh,
+      .element_type = svmp::FE::ElementType::Triangle3,
+      .order = 1,
+      .components = 2});
+  cases.push_back(VelocityEvaluatorIdentityCase{
+      .mesh = makeWorkflowBiquadraticQuadMesh(),
+      .element_type = svmp::FE::ElementType::Quad4,
+      .order = 2,
+      .components = 2});
+
+  std::size_t compared_points = 0u;
+  for (auto& identity_case : cases) {
+    auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
+        identity_case.element_type, identity_case.order);
+    auto velocity_space = std::make_shared<svmp::FE::spaces::ProductSpace>(
+        scalar_space, identity_case.components);
+    auto system =
+        std::make_unique<svmp::FE::systems::FESystem>(identity_case.mesh);
+    const auto velocity = system->addField(svmp::FE::systems::FieldSpec{
+        .name = "Velocity",
+        .space = velocity_space,
+        .components = identity_case.components});
+    ASSERT_NO_THROW(system->setup({}));
+
+    std::mt19937_64 generator(
+        1234u + static_cast<std::uint64_t>(identity_case.order) * 17u +
+        static_cast<std::uint64_t>(identity_case.components));
+    std::uniform_real_distribution<svmp::FE::Real> coefficient(-2.0, 2.0);
+    std::vector<svmp::FE::Real> solution(
+        static_cast<std::size_t>(system->dofHandler().getNumDofs()));
+    for (auto& value : solution) {
+      value = coefficient(generator);
+    }
+
+    application::core::SimulationComponents sim;
+    sim.primary_mesh = identity_case.mesh;
+    sim.fe_system = std::move(system);
+    const std::span<const svmp::FE::Real> solution_view(
+        solution.data(), solution.size());
+    const auto evaluators = std::array{
+        makeFreeSurfaceVelocityEvaluator(
+            sim, velocity, solution_view, "Velocity evaluator identity"),
+        makeFreeSurfaceVelocityEvaluator(
+            sim,
+            velocity,
+            solution_view,
+            "Velocity evaluator identity",
+            /*allow_scalar_product_fast_path=*/false)};
+
+    const auto& record = sim.fe_system->fieldRecord(velocity);
+    const auto offset = sim.fe_system->fieldDofOffset(velocity);
+    const auto& mesh_access = sim.fe_system->meshAccess();
+    const auto cell_count = mesh_access.numCells();
+    ASSERT_GT(cell_count, 0);
+    // Visit every cell several times, interleaved, with one to four points
+    // per visit, so cached cell data is both reused and invalidated.
+    std::vector<svmp::FE::GlobalIndex> visits;
+    for (int pass = 0; pass < 3; ++pass) {
+      for (svmp::FE::GlobalIndex cell = 0; cell < cell_count; ++cell) {
+        visits.push_back(cell);
+        visits.push_back((cell * 5 + pass) % cell_count);
+      }
+    }
+    std::uniform_int_distribution<int> points_per_visit(1, 4);
+    const svmp::FE::geometry::CutQuadratureProvenance provenance{};
+    for (const auto cell : visits) {
+      const auto cell_dofs =
+          sim.fe_system->fieldDofHandler(velocity).getCellDofs(cell);
+      std::vector<svmp::FE::Real> coefficients;
+      for (const auto dof : cell_dofs) {
+        coefficients.push_back(
+            solution[static_cast<std::size_t>(offset + dof)]);
+      }
+      const auto mapping = createCellGeometryMapping(mesh_access, cell);
+      ASSERT_NE(mapping, nullptr);
+      const int count = points_per_visit(generator);
+      for (int point = 0; point < count; ++point) {
+        const auto reference_point = velocityEvaluatorReferencePoint(
+            identity_case.element_type, generator);
+        const svmp::FE::spaces::FunctionSpace::Value xi{
+            reference_point[0], reference_point[1], reference_point[2]};
+        const auto expected_value =
+            record.space->evaluate(xi, coefficients);
+        const auto reference_jacobian =
+            record.space->evaluate_jacobian(xi, coefficients);
+        svmp::FE::math::Vector<svmp::FE::Real, 3> mapped_xi{};
+        mapped_xi[0] = reference_point[0];
+        mapped_xi[1] = reference_point[1];
+        mapped_xi[2] = reference_point[2];
+        const auto inverse_jacobian = mapping->jacobian_inverse(mapped_xi);
+        svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalPhysicalGradient
+            expected_gradient{};
+        for (std::size_t component = 0u; component < 3u; ++component) {
+          for (std::size_t physical = 0u; physical < 3u; ++physical) {
+            for (std::size_t reference = 0u; reference < 3u; ++reference) {
+              expected_gradient[component][physical] +=
+                  reference_jacobian(component, reference) *
+                  inverse_jacobian(reference, physical);
+            }
+          }
+        }
+        for (const auto& evaluator : evaluators) {
+          const auto value =
+              evaluator.value(cell, reference_point, provenance);
+          const auto gradient = evaluator.physical_gradient(
+              cell, reference_point, provenance);
+          for (std::size_t component = 0u; component < 3u; ++component) {
+            EXPECT_EQ(velocityEvaluatorBits(value[component]),
+                      velocityEvaluatorBits(expected_value[component]))
+                << "cell=" << cell << " component=" << component;
+            for (std::size_t physical = 0u; physical < 3u; ++physical) {
+              EXPECT_EQ(
+                  velocityEvaluatorBits(gradient[component][physical]),
+                  velocityEvaluatorBits(
+                      expected_gradient[component][physical]))
+                  << "cell=" << cell << " component=" << component
+                  << " direction=" << physical;
+            }
+          }
+        }
+        ++compared_points;
+      }
+    }
+  }
+  EXPECT_GT(compared_points, 100u);
 #endif
 }
 

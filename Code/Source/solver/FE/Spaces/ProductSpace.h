@@ -47,6 +47,9 @@ public:
     const elements::Element& element() const noexcept override { return base_->element(); }
     std::shared_ptr<const elements::Element> element_ptr() const noexcept override { return base_->element_ptr(); }
 
+    /// Scalar space replicated for every component
+    const std::shared_ptr<FunctionSpace>& base_space() const noexcept { return base_; }
+
     /// Number of scalar DOFs per component
     std::size_t scalar_dofs_per_component() const noexcept { return base_->dofs_per_element(); }
 
