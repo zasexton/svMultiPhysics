@@ -29,6 +29,7 @@
 #include "FE/LevelSet/LevelSetConservativePhaseState.h"
 #include "FE/LevelSet/LevelSetImplicitCutQuadratureBackend.h"
 #include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
+#include "FE/LevelSet/LevelSetKinematicReconciliation.h"
 #include "FE/LevelSet/LevelSetReinitialization.h"
 #include "FE/LevelSet/LevelSetStaticCapillaryEquilibrium.h"
 #include "FE/LevelSet/LevelSetTransport.h"
@@ -3870,6 +3871,11 @@ std::uint64_t levelSetMaintenanceRequestActionBits(
   const bool all_request_volume_due =
       svmp::FE::level_set::shouldApplyLevelSetVolumeCorrection(
           request.configuration->transport.volume_correction, completed_step);
+  const bool accepted_kinematic_due =
+      !request.configuration->transport.conservative_phase.enabled &&
+      svmp::FE::level_set::shouldApplyLevelSetKinematicReconciliation(
+          request.configuration->transport.kinematic_reconciliation,
+          completed_step);
   const bool artifact_due =
       request.configuration->transport.conservative_phase.enabled &&
       request.configuration->transport.conservative_phase.write_flux_artifacts &&
@@ -3884,7 +3890,8 @@ std::uint64_t levelSetMaintenanceRequestActionBits(
       request.configuration->transport.conservative_phase.enabled ||
       request.configuration->transport.bound_preserving.enabled ||
       accepted_reinitialization_due ||
-      all_request_volume_due;
+      all_request_volume_due ||
+      accepted_kinematic_due;
   std::uint64_t bits = 0u;
   bits |= request.configuration->transport.conservative_phase.enabled ? (1ull << 0u) : 0u;
   bits |= request.configuration->transport.bound_preserving.enabled ? (1ull << 1u) : 0u;
@@ -3906,6 +3913,7 @@ std::uint64_t levelSetMaintenanceRequestActionBits(
   bits |= request.configuration->static_capillary_equilibrium_enabled
               ? (1ull << 11u)
               : 0u;
+  bits |= accepted_kinematic_due ? (1ull << 12u) : 0u;
   return bits;
 }
 
@@ -4125,6 +4133,9 @@ canonicalLevelSetMaintenanceRequestSchedule(
         words,
         request.configuration->transport.volume_correction
             .maximum_cumulative_interface_displacement_fraction);
+    appendMaintenanceScheduleBool(
+        words,
+        request.configuration->transport.kinematic_reconciliation.enabled);
     appendMaintenanceScheduleActiveCutRequest(
         words, request.configuration->volume_cut_request);
 
@@ -7160,7 +7171,8 @@ void logLevelSetMaintenanceCoverageDiagnostics(
 
   std::set<std::string> transport_maintained_fields;
   for (const auto& request : maintenance_requests) {
-    if (request.configuration->transport.reinitialization.enabled || request.configuration->transport.volume_correction.enabled) {
+    if (request.configuration->transport.reinitialization.enabled || request.configuration->transport.volume_correction.enabled ||
+        request.configuration->transport.kinematic_reconciliation.enabled) {
       transport_maintained_fields.insert(request.configuration->transport.level_set.field_name);
     }
     application::core::oopCout()
@@ -7172,6 +7184,8 @@ void logLevelSetMaintenanceCoverageDiagnostics(
         << (request.configuration->transport.bound_preserving.enabled ? "enabled" : "disabled")
         << " volume_correction="
         << (request.configuration->transport.volume_correction.enabled ? "enabled" : "disabled")
+        << " kinematic_reconciliation="
+        << (request.configuration->transport.kinematic_reconciliation.enabled ? "enabled" : "disabled")
         << " curvature_projection="
         << (request.configuration->curvature_projection_enabled ? "enabled" : "disabled")
         << " curvature_field='"
@@ -15156,6 +15170,102 @@ using LevelSetMaintenanceCandidateValidator = std::function<void(
     std::span<const svmp::FE::Real>,
     std::span<const LevelSetVolumeCorrectionMaintenanceEvent>)>;
 
+// Accepted state from which the next transport step starts.  The kinematic
+// reconciliation of that step compares the transported endpoint with it.
+struct LevelSetKinematicBaseline {
+  svmp::FE::FieldId level_set_field{svmp::FE::INVALID_FIELD_ID};
+  svmp::FE::FieldId velocity_field{svmp::FE::INVALID_FIELD_ID};
+  int step{-1};
+  std::vector<svmp::FE::Real> level_set{};
+  std::vector<svmp::FE::Real> velocity{};
+};
+
+// Transport-velocity coefficients in the velocity field's DOF numbering,
+// from the unknown vector or from prescribed-data storage.
+std::vector<svmp::FE::Real> levelSetTransportVelocityCoefficients(
+    const svmp::FE::systems::FESystem& system,
+    svmp::FE::FieldId velocity_field,
+    std::span<const svmp::FE::Real> fe_solution)
+{
+  const auto count = static_cast<std::size_t>(
+      system.fieldDofHandler(velocity_field).getNumDofs());
+  const auto& record = system.fieldRecord(velocity_field);
+  if (record.source_kind ==
+      svmp::FE::systems::FieldSourceKind::PrescribedData) {
+    const auto coefficients =
+        system.prescribedFieldCoefficients(velocity_field);
+    if (coefficients.size() != count) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set kinematic reconciliation "
+          "found no complete coefficients for prescribed transport velocity '" +
+          record.name + "'.");
+    }
+    return {coefficients.begin(), coefficients.end()};
+  }
+  const auto raw_offset = system.fieldDofOffset(velocity_field);
+  if (!system.fieldParticipatesInUnknownVector(velocity_field) ||
+      raw_offset < 0 ||
+      static_cast<std::size_t>(raw_offset) > fe_solution.size() ||
+      count > fe_solution.size() - static_cast<std::size_t>(raw_offset)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Level-set kinematic reconciliation "
+        "could not read transport velocity '" + record.name +
+        "' from the solution vector.");
+  }
+  const auto begin =
+      fe_solution.begin() + static_cast<std::ptrdiff_t>(raw_offset);
+  return {begin, begin + static_cast<std::ptrdiff_t>(count)};
+}
+
+LevelSetKinematicBaseline makeLevelSetKinematicBaseline(
+    const svmp::FE::systems::FESystem& system,
+    const LevelSetMaintenanceRequest& request,
+    std::span<const svmp::FE::Real> fe_solution,
+    int step)
+{
+  const auto& transport = request.configuration->transport;
+  if (transport.conservative_phase.enabled ||
+      transport.velocity.source ==
+          svmp::FE::level_set::LevelSetVelocitySource::ConstantVector ||
+      transport.velocity.source ==
+          svmp::FE::level_set::LevelSetVelocitySource::
+              MaterialInterfacePhasePair) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Level-set kinematic reconciliation "
+        "for field '" + transport.level_set.field_name +
+        "' requires a nodal transport-velocity field and no conservative "
+        "phase transport.");
+  }
+  LevelSetKinematicBaseline baseline;
+  baseline.level_set_field =
+      system.findFieldByName(transport.level_set.field_name);
+  baseline.velocity_field =
+      system.findFieldByName(transport.velocity.field_name);
+  if (baseline.level_set_field == svmp::FE::INVALID_FIELD_ID ||
+      baseline.velocity_field == svmp::FE::INVALID_FIELD_ID) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Level-set kinematic reconciliation "
+        "could not find field '" + transport.level_set.field_name +
+        "' or its transport velocity '" + transport.velocity.field_name +
+        "'.");
+  }
+  const auto offset = static_cast<std::size_t>(
+      system.fieldDofOffset(baseline.level_set_field));
+  const auto count = static_cast<std::size_t>(
+      system.fieldDofHandler(baseline.level_set_field).getNumDofs());
+  if (offset > fe_solution.size() || count > fe_solution.size() - offset) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Level-set kinematic reconciliation "
+        "field slice exceeds the solution vector.");
+  }
+  const auto begin = fe_solution.begin() + static_cast<std::ptrdiff_t>(offset);
+  baseline.level_set.assign(begin, begin + static_cast<std::ptrdiff_t>(count));
+  baseline.velocity = levelSetTransportVelocityCoefficients(
+      system, baseline.velocity_field, fe_solution);
+  baseline.step = step;
+  return baseline;
+}
+
 bool applyLevelSetMaintenance(
     application::core::SimulationComponents& sim,
     svmp::FE::timestepping::TimeHistory& history,
@@ -15170,7 +15280,8 @@ bool applyLevelSetMaintenance(
     const LevelSetMaintenanceCandidateValidator& validate_candidate = {},
     const LevelSetMaintenanceStageObserver& observe_stage = {},
     std::vector<std::string>* deferred_commit_logs = nullptr,
-    bool* rate_publication_started = nullptr)
+    bool* rate_publication_started = nullptr,
+    std::span<const LevelSetKinematicBaseline> kinematic_baselines = {})
 {
   if (rate_publication_started != nullptr) {
     *rate_publication_started = false;
@@ -15216,7 +15327,11 @@ bool applyLevelSetMaintenance(
         svmp::FE::level_set::shouldApplyLevelSetVolumeCorrection(
             request.configuration->transport.volume_correction,
             completed_step);
-    if (!do_reinit && !do_volume) {
+    const bool do_kinematic =
+        svmp::FE::level_set::shouldApplyLevelSetKinematicReconciliation(
+            request.configuration->transport.kinematic_reconciliation,
+            completed_step);
+    if (!do_reinit && !do_volume && !do_kinematic) {
       continue;
     }
 
@@ -15228,6 +15343,105 @@ bool applyLevelSetMaintenance(
       throw std::runtime_error(
           "[svMultiPhysics::Application] Level-set maintenance could not find field '" +
           request.configuration->transport.level_set.field_name + "'.");
+    }
+
+    if (do_kinematic) {
+      // Reconcile the transport step before any representation change: the
+      // baseline is the accepted state the transport started from.
+      const auto baseline = std::find_if(
+          kinematic_baselines.begin(),
+          kinematic_baselines.end(),
+          [field](const auto& candidate) {
+            return candidate.level_set_field == field;
+          });
+      if (baseline == kinematic_baselines.end() ||
+          baseline->step != completed_step - 1) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Level-set kinematic reconciliation "
+            "for field '" +
+            request.configuration->transport.level_set.field_name +
+            "' has no accepted baseline from the previous step.");
+      }
+      const auto before_reconciliation = fe_solution;
+      const auto offset =
+          static_cast<std::size_t>(sim.fe_system->fieldDofOffset(field));
+      const auto count = static_cast<std::size_t>(
+          sim.fe_system->fieldDofHandler(field).getNumDofs());
+      if (offset > fe_solution.size() || count > fe_solution.size() - offset) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Level-set kinematic reconciliation "
+            "field slice exceeds the solution vector.");
+      }
+      const std::span<const svmp::FE::Real> transported(
+          fe_solution.data() + offset, count);
+      const auto transported_velocity =
+          levelSetTransportVelocityCoefficients(
+              *sim.fe_system, baseline->velocity_field, fe_solution);
+      const auto volume_options = levelSetVolumeOptionsForMaintenance(request);
+      std::vector<svmp::FE::Real> reconciled;
+      const auto result =
+          svmp::FE::level_set::reconcileLevelSetWithKinematicFlux(
+              sim.fe_system->meshAccess(),
+              sim.fe_system->fieldDofHandler(field),
+              sim.fe_system->fieldDofHandler(baseline->velocity_field),
+              volume_options.isovalue,
+              volume_options.tolerance,
+              static_cast<svmp::FE::Real>(history.dt()),
+              baseline->level_set,
+              transported,
+              baseline->velocity,
+              transported_velocity,
+              reconciled);
+      if (!result.success) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Level-set kinematic reconciliation "
+            "failed for field '" +
+            request.configuration->transport.level_set.field_name + "': " +
+            result.diagnostic);
+      }
+      if (result.applied) {
+        std::copy(reconciled.begin(), reconciled.end(),
+                  fe_solution.begin() + static_cast<std::ptrdiff_t>(offset));
+        changed = true;
+        modified_level_set_fields.insert(field);
+        if (observe_stage) {
+          observe_stage(
+              application::core::LevelSetMaintenanceWorkSubstage::
+                  GeometryReconciliation,
+              before_reconciliation,
+              fe_solution);
+        }
+      }
+      std::ostringstream log;
+      log << std::setprecision(17)
+          << "[svMultiPhysics::Application] Level-set kinematic reconciliation"
+          << " field='" << request.configuration->transport.level_set.field_name
+          << "' step=" << completed_step
+          << " dt=" << history.dt()
+          << " applied=" << (result.applied ? "true" : "false")
+          << " converged=" << (result.converged ? "true" : "false")
+          << " iterations=" << result.iterations
+          << " previous_interface_cells=" << result.previous_interface_cells
+          << " current_interface_cells=" << result.current_interface_cells
+          << " corrected_dofs=" << result.corrected_dofs
+          << " sign_preserving_redistributed_dofs="
+          << result.sign_preserving_redistributed_dofs
+          << " sign_preserving_skipped_dofs="
+          << result.sign_preserving_skipped_dofs
+          << " degeneracy_frozen_dofs=" << result.degeneracy_frozen_dofs
+          << " previous_negative_volume=" << result.previous_negative_volume
+          << " transported_negative_volume="
+          << result.transported_negative_volume
+          << " reconciled_negative_volume="
+          << result.reconciled_negative_volume
+          << " previous_interface_flux=" << result.previous_interface_flux
+          << " current_interface_flux=" << result.current_interface_flux
+          << " kinematic_volume_change=" << result.kinematic_volume_change
+          << " transported_volume_error=" << result.transported_volume_error
+          << " reconciled_volume_error=" << result.reconciled_volume_error
+          << " max_abs_correction=" << result.max_abs_correction
+          << " status='" << result.diagnostic << "'";
+      staged_commit_logs.push_back(log.str());
     }
 
     if (do_reinit) {
@@ -29765,6 +29979,33 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       }
     }
   };
+  // Accepted states that the kinematic reconciliation of the next step
+  // compares against: captured before the first step and after every
+  // accepted step, once its maintenance has committed or rolled back.
+  std::vector<LevelSetKinematicBaseline> kinematic_baselines;
+  const auto capture_kinematic_baselines =
+      [&](svmp::FE::timestepping::TimeHistory& history) {
+        kinematic_baselines.clear();
+        const bool any_enabled = std::any_of(
+            level_set_maintenance.begin(),
+            level_set_maintenance.end(),
+            [](const auto& request) {
+              return request.configuration->transport
+                  .kinematic_reconciliation.enabled;
+            });
+        if (!any_enabled) {
+          return;
+        }
+        const auto solution = gatherFeOrderedSolution(
+            history.u(), activeFESystemCommunicator(*sim.fe_system));
+        for (const auto& request : level_set_maintenance) {
+          if (request.configuration->transport.kinematic_reconciliation
+                  .enabled) {
+            kinematic_baselines.push_back(makeLevelSetKinematicBaseline(
+                *sim.fe_system, request, solution, history.stepIndex()));
+          }
+        }
+      };
   callbacks.on_step_start = [&](const svmp::FE::timestepping::TimeHistory& h) {
     if (evaluate_free_surface_residual_work &&
         pending_free_surface_residual_work_stage.has_value()) {
@@ -32032,7 +32273,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                       request.configuration->transport.reinitialization, h.stepIndex()) ||
                   svmp::FE::level_set::
                       shouldApplyLevelSetVolumeCorrection(
-                          request.configuration->transport.volume_correction, h.stepIndex()));
+                          request.configuration->transport.volume_correction, h.stepIndex()) ||
+                  svmp::FE::level_set::
+                      shouldApplyLevelSetKinematicReconciliation(
+                          request.configuration->transport
+                              .kinematic_reconciliation,
+                          h.stepIndex()));
         });
     const bool postaccept_maintenance_topology_tracking_required =
         maintenance_work_due && track_transient_cut_topology;
@@ -32709,7 +32955,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           validate_candidate,
           observe_stage,
           &maintenance_commit_logs,
-          &maintenance_rate_publication_started);
+          &maintenance_rate_publication_started,
+          kinematic_baselines);
       if (postaccept_maintenance_topology_tracking_required &&
           !level_set_maintenance_changed) {
         // Even a no-op maintenance schedule receives an explicit final
@@ -34329,6 +34576,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           << " cut_adjacent_facets=" << cut_report.cut_adjacent_facets
           << std::endl;
     }
+    capture_kinematic_baselines(h);
     logWetVolumeDiagnostics(
         activeCutVolumeRequests(params),
         sim.fe_system->cutIntegrationContext(),
@@ -34544,6 +34792,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << " attempt=" << attempt_index << " old_dt=" << old_dt << " new_dt=" << new_dt << std::endl;
   };
 
+  capture_kinematic_baselines(*sim.time_history);
   svmp::FE::timestepping::TimeLoop loop(opts);
   oopCout() << "[svMultiPhysics::Application] TimeLoop: entering loop.run()" << std::endl;
   auto loop_start = std::chrono::steady_clock::now();
