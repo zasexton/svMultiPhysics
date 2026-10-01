@@ -123,4 +123,109 @@ python3 $B/verify.py $OUT/L16 $OUT/L32 $OUT/L64 $OUT/L32_dt2 $OUT/L32_dt4 --json
 
 ## Results
 
-Pending.
+**2026-09-30, cases from `93b1bf06`, solver binary `35a81fd3` (the same
+fitted code), Slurm job `46129890` (one node, all cases side by side, one
+rank each). Result: FAIL on the frequency convergence order only.**
+
+Spatial study (`dt = 5.5027e-4` on every level; "spatial" is the error with
+the time error of that step removed, `e_t = +8.5e-5` in `omega` and
+`-5.2e-4` in `beta`, relative):
+
+| lambda/h | vertices | `omega` | raw error | spatial error | `beta` | raw error | spatial error | RMS `a_h` error | `max dA/A` | Newton/step | s/step | wall |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 16 | 153 | 15.52231 | -3.2e-4 | -4.1e-4 | 1.25101 | +3.26% | +3.31% | 6.0e-3 | 4.9e-6 | 2.0 | 0.10 | 299 s |
+| 32 | 561 | 15.51733 | -6.4e-4 | -7.3e-4 | 1.21710 | +0.46% | +0.51% | 4.0e-3 | 1.4e-6 | 2.0 | 0.35 | 1,025 s |
+| 64 | 2,145 | 15.52191 | -3.5e-4 | -4.3e-4 | 1.20890 | -0.22% | -0.17% | 2.6e-3 | 3.7e-7 | 2.0 | 1.58 | 4,576 s |
+
+Reference fit: `omega_ref = 15.52730`, `beta_ref = 1.211580`.
+
+Time-step study (`lambda/h = 32`):
+
+| step | `omega` | change from the previous step | `beta` | `max dA/A` | wall |
+|---|---:|---:|---:|---:|---:|
+| `dt` | 15.517331 | | 1.217102 | 1.4e-6 | 1,025 s |
+| `dt/2` | 15.516708 | -4.0e-5 | 1.217299 | 1.4e-6 | 2,043 s |
+| `dt/4` | 15.516380 | -2.1e-5 | 1.217433 | 1.4e-6 | 3,967 s |
+
+Richardson: `omega(dt -> 0) = 15.516012` (order 0.92), `beta(dt -> 0) =
+1.217727` (order 0.54). The time error of the shared step is below 1e-4 in
+`omega` and 6e-4 in `beta`, and converges at first order rather than the
+second order of `fitted_sloshing_2d`; it does not affect the verdicts.
+
+| Criterion | Result |
+|---|---|
+| `frequency` | **FAIL**: 7.3e-4 at `lambda/h = 32` (limit 0.02, passed); observed order -0.04 (pairwise -0.84, 0.75) < 1 |
+| `damping` | PASS: 0.51% at 32 and 0.17% at 64 (limit 5%); observed order 2.14 (pairwise 2.70, 1.58) |
+| `volume` | PASS: at most 4.9e-6 (limit 1e-4); the area oscillates reversibly (no drift) with an amplitude that falls at second order |
+
+Capillary time-step limit (diagnostic runs, not gated; same metrics, time
+error included):
+
+| lambda/h | `dt` | `dt` / one-sided limit | steps per period | `omega` error | `beta` error | Newton/step |
+|---:|---:|---:|---:|---:|---:|---:|
+| 16 | 1.60e-2 | 3.6 | 25 | -4.9e-3 | +1.9% | 4.2 |
+| 64 | 2.00e-3 | 3.6 | 200 | -2.3e-4 | -0.24% | 3.0 |
+| 64 | 3.99e-3 | 7.2 | 100 | -3.7e-4 | -0.32% | 3.0 |
+
+Steps of 3.6 and 7.2 times the capillary limit are stable and accurate:
+the fitted surface, its normal and the Laplace–Beltrami term are implicit in
+the Newton loop, so the explicit-capillarity limit does not bind this
+discretization. The protocol keeps it anyway.
+
+Observations:
+
+- All three frequency errors lie between -4e-4 and -7e-4, 30 to 50 times
+  below the limit; the order criterion fails because the error does not
+  decrease with h. The reference is linear, while the simulation keeps the
+  finite amplitude `a0 k = 0.063`, and the size of the plateau,
+  `-0.1 to -0.2 (a0 k)^2`, matches a finite-amplitude frequency shift.
+  The small-amplitude diagnostic (`--amplitude-over-wavelength 0.0025`,
+  cases from `f4ff0b13`, binary `4a62a971`, job `46155727`) confirms it:
+
+  | lambda/h | raw frequency error | raw damping error | RMS `a_h` error | `max dA/A` |
+  |---:|---:|---:|---:|---:|
+  | 16 | +1.3e-4 | +3.70% | 7.5e-3 | 3.0e-7 |
+  | 32 | -3.8e-5 | +0.79% | 1.4e-3 | 8.6e-8 |
+  | 64 | +2.6e-5 | +0.10% | 5.2e-4 | 2.3e-8 |
+
+  At a quarter of the amplitude the frequency error falls to the size of
+  the time error (about 1e-4 and below) at `lambda/h = 32` and 64, and the
+  damping converges at order 2.2 and 3.0. The difference between the two
+  amplitudes, scaled to the full one (`x 16/15`), is -4.8e-4, -6.5e-4 and
+  -4.0e-4 at 16/32/64, i.e. -0.10 to -0.16 `(a0 k)^2`: the plateau is the
+  finite-amplitude frequency shift of the nonlinear simulation, which the
+  linear reference does not contain. Judging the frequency order at the
+  protocol amplitude needs a smaller amplitude or a reference with the
+  amplitude correction (open decision); the criteria were not changed.
+- The damping converges at second order to 0.17% at `lambda/h = 64`. The
+  sampled amplitude `a_h(0)/a0 - 1` is -1.3%, -0.32% and -0.08%
+  (second-order P1 sampling, as in `capillary_wave_2d`), and the RMS
+  amplitude error of the normalized history (Popinet's measure) is 6.0e-3,
+  4.0e-3 and 2.6e-3.
+- Every step took two Newton iterations (final residuals at most 5e-9); the
+  surface end nodes stay on the walls; the smallest triangle angle falls
+  from 42.9° to 41.6° at most.
+
+Comparison with the unfitted M3 runs (`capillary_wave_2d`, `surface_stress`
+with the PDE extension, the same step, binary `35a81fd3`, jobs `46130411`,
+`46130412`, `46130432`; raw errors, as that benchmark reports them;
+`verify.py` output in `.../runs/fitted_capillary_wave/unfitted_m3_verify.txt`):
+
+| lambda/h | frequency error, unfitted | fitted | damping error, unfitted | fitted | `max dA/A`, unfitted | fitted |
+|---:|---:|---:|---:|---:|---:|---:|
+| 16 | +0.80% | -0.03% | +26.4% | +3.3% | 1.1e-5 | 4.9e-6 |
+| 32 | +0.66% | -0.06% | +7.8% | +0.46% | 1.3e-4 | 1.4e-6 |
+| 64 | +0.23% | -0.03% | +0.06% | -0.22% | 7.3e-5 | 3.7e-7 |
+
+The unfitted study fails all three criteria: frequency order 0.91 (errors
+0.80%, 0.66%, 0.23%), damping 7.8% at `lambda/h = 32`, and area 1.3e-4 at
+32. Its time-step study at 32 moves `omega` by 0.2% and `beta` by 4% between
+`dt` and `dt/4`, against 4e-5 and 0.03% for the fitted path. The fitted
+frequency errors are 7 to 25 times smaller at every level, the damping
+errors 8 and 17 times smaller at 16 and 32 (at 64 both are below 0.25%:
+0.06% unfitted, 0.22% fitted), and the area deviation 2 to 200 times
+smaller.
+
+Raw output: `/scratch/users/zsexton/svmp-dev-fitted2/runs/fitted_capillary_wave/93b1bf06/`
+(`verify.txt`, `verify.json`) and `.../f4ff0b13/` (small-amplitude
+diagnostic, `verify_amp0025.txt`).
