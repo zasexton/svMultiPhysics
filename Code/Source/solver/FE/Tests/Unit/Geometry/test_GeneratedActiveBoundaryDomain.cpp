@@ -1283,6 +1283,190 @@ FE::Real intervalMonomialMoment(FE::Real lower,
            static_cast<FE::Real>(exponent);
 }
 
+// A row of unit Quad4 cells [c, c + 1] x [0, 1].  The bottom edge of cell c
+// is boundary face c (local face 0) and carries the wall marker.  Boundary
+// faces are visited in reverse cell order, so traversal order differs from
+// the source order of the interface records.
+class QuadStripBoundaryMesh final : public FE::assembly::IMeshAccess {
+public:
+    QuadStripBoundaryMesh(FE::GlobalIndex cell_count, int marker)
+        : cell_count_(cell_count), marker_(marker)
+    {
+    }
+
+    [[nodiscard]] FE::GlobalIndex numCells() const override {
+        return cell_count_;
+    }
+    [[nodiscard]] FE::GlobalIndex numOwnedCells() const override {
+        return cell_count_;
+    }
+    [[nodiscard]] FE::GlobalIndex numBoundaryFaces() const override {
+        return cell_count_;
+    }
+    [[nodiscard]] FE::GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 2; }
+    [[nodiscard]] bool globalEntityIdsAvailable() const override { return false; }
+    [[nodiscard]] FE::GlobalIndex getCellGlobalId(
+        FE::GlobalIndex cell) const override {
+        return cell;
+    }
+    [[nodiscard]] FE::GlobalIndex getBoundaryFaceGlobalId(
+        FE::GlobalIndex face) const override {
+        return face;
+    }
+    [[nodiscard]] int parallelRank() const override { return 0; }
+    [[nodiscard]] int parallelSize() const override { return 1; }
+    [[nodiscard]] int getCellOwnerRank(FE::GlobalIndex) const override {
+        return 0;
+    }
+    [[nodiscard]] int getBoundaryFaceOwnerRank(
+        FE::GlobalIndex, FE::GlobalIndex) const override {
+        return 0;
+    }
+    [[nodiscard]] bool isOwnedCell(FE::GlobalIndex cell) const override {
+        return cell >= 0 && cell < cell_count_;
+    }
+    [[nodiscard]] FE::ElementType getCellType(FE::GlobalIndex) const override {
+        return FE::ElementType::Quad4;
+    }
+    [[nodiscard]] int getCellGeometryOrder(FE::GlobalIndex) const override {
+        return 1;
+    }
+    void getCellNodes(FE::GlobalIndex cell,
+                      std::vector<FE::GlobalIndex>& nodes) const override {
+        const FE::GlobalIndex top = cell_count_ + 1;
+        nodes = {cell, cell + 1, top + cell + 1, top + cell};
+    }
+    [[nodiscard]] std::array<FE::Real, 3> getNodeCoordinates(
+        FE::GlobalIndex node) const override {
+        const FE::GlobalIndex top = cell_count_ + 1;
+        return node < top
+                   ? std::array<FE::Real, 3>{{static_cast<FE::Real>(node), 0.0, 0.0}}
+                   : std::array<FE::Real, 3>{
+                         {static_cast<FE::Real>(node - top), 1.0, 0.0}};
+    }
+    void getCellCoordinates(
+        FE::GlobalIndex cell,
+        std::vector<std::array<FE::Real, 3>>& coordinates) const override {
+        std::vector<FE::GlobalIndex> nodes;
+        getCellNodes(cell, nodes);
+        coordinates.clear();
+        for (const auto node : nodes) {
+            coordinates.push_back(getNodeCoordinates(node));
+        }
+    }
+    [[nodiscard]] FE::LocalIndex getLocalFaceIndex(
+        FE::GlobalIndex face,
+        FE::GlobalIndex cell) const override {
+        return face == cell ? FE::LocalIndex{0} : FE::INVALID_LOCAL_INDEX;
+    }
+    [[nodiscard]] int getBoundaryFaceMarker(FE::GlobalIndex face) const override {
+        return face >= 0 && face < cell_count_ ? marker_ : -1;
+    }
+    [[nodiscard]] std::pair<FE::GlobalIndex, FE::GlobalIndex>
+    getInteriorFaceCells(FE::GlobalIndex) const override {
+        return {-1, -1};
+    }
+    void forEachCell(
+        std::function<void(FE::GlobalIndex)> callback) const override {
+        for (FE::GlobalIndex cell = 0; cell < cell_count_; ++cell) {
+            callback(cell);
+        }
+    }
+    void forEachOwnedCell(
+        std::function<void(FE::GlobalIndex)> callback) const override {
+        forEachCell(std::move(callback));
+    }
+    void forEachBoundaryFace(
+        int marker,
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex)> callback)
+        const override {
+        if (marker >= 0 && marker != marker_) {
+            return;
+        }
+        for (FE::GlobalIndex cell = cell_count_ - 1; cell >= 0; --cell) {
+            callback(cell, cell);
+        }
+    }
+    void forEachInteriorFace(
+        std::function<void(FE::GlobalIndex,
+                           FE::GlobalIndex,
+                           FE::GlobalIndex)>) const override {
+    }
+
+private:
+    FE::GlobalIndex cell_count_{0};
+    int marker_{-1};
+};
+
+interfaces::CutInterfaceVolumeRegion stripFullCellRegion(
+    FE::MeshIndex cell,
+    FE::geometry::CutIntegrationSide side,
+    std::string fallback_status)
+{
+    const FE::Real value =
+        side == FE::geometry::CutIntegrationSide::Negative ? -1.0 : 1.0;
+    interfaces::CutInterfaceVolumeRegion region;
+    region.parent_cell = cell;
+    region.side = side;
+    region.centroid = {{0.0, 0.0, 0.0}};
+    region.normal = {{1.0, 0.0, 0.0}};
+    region.parent_measure = 4.0;
+    region.measure = 4.0;
+    region.volume_fraction = 1.0;
+    region.min_level_set_value = value;
+    region.max_level_set_value = value;
+    region.topology_id = "strip-full-cell";
+    region.implicit_quadrature_backend = "LinearCorner";
+    region.implicit_fallback_status = std::move(fallback_status);
+    region.full_cell_equivalent = true;
+    region.achieved_quadrature_order = 2;
+    return region;
+}
+
+// The vertical segment x = 0 of the reference square, in the given cell.
+interfaces::CutInterfaceFragment stripVerticalFragment(FE::MeshIndex cell)
+{
+    interfaces::CutInterfaceFragment fragment;
+    fragment.parent_cell = cell;
+    fragment.kind = interfaces::CutInterfaceFragmentKind::Segment;
+    fragment.measure = 2.0;
+    fragment.normal = {{1.0, 0.0, 0.0}};
+    fragment.min_gradient_norm = 1.0;
+    fragment.vertices = {
+        interfaces::CutInterfaceVertex{
+            .point = {{0.0, -1.0, 0.0}},
+            .parent_coordinate = {{0.0, -1.0, 0.0}}},
+        interfaces::CutInterfaceVertex{
+            .point = {{0.0, 1.0, 0.0}},
+            .parent_coordinate = {{0.0, 1.0, 0.0}}},
+    };
+    constexpr FE::Real gauss_offset =
+        FE::Real{0.57735026918962576451};
+    for (const FE::Real y : {-gauss_offset, gauss_offset}) {
+        fragment.quadrature_points.push_back(
+            interfaces::CutInterfaceQuadraturePoint{
+                .point = {{0.0, y, 0.0}},
+                .parent_coordinate = {{0.0, y, 0.0}},
+                .normal = fragment.normal,
+                .weight = 1.0,
+                .reference_measure_factor = 2.0,
+                .gradient_norm = 1.0});
+    }
+    return fragment;
+}
+
+std::map<FE::MeshIndex, const interfaces::GeneratedActiveBoundaryFragment*>
+activeFragmentsByCell(const interfaces::GeneratedActiveBoundaryDomain& domain)
+{
+    std::map<FE::MeshIndex, const interfaces::GeneratedActiveBoundaryFragment*>
+        by_cell;
+    for (const auto& fragment : domain.fragments()) {
+        EXPECT_TRUE(by_cell.emplace(fragment.parent_cell, &fragment).second);
+    }
+    return by_cell;
+}
+
 } // namespace
 
 TEST(GeneratedActiveBoundaryDomain,
@@ -7039,4 +7223,240 @@ TEST(ProducerObservation, PositivePieceFilteringSnapshotConstructionIsRejected)
                            error.what());
         }
     }
+}
+
+TEST(GeneratedActiveBoundaryDomain,
+     StripFacesUseOnlyTheirParentCellSources)
+{
+    using Side = FE::geometry::CutIntegrationSide;
+    using Branch = interfaces::LinearCornerStrictBranch;
+    constexpr int interface_marker = 151;
+    constexpr int wall_marker = 21;
+    const QuadStripBoundaryMesh mesh(4, wall_marker);
+
+    // Source records are listed out of cell order, and every cell carries a
+    // distinct fallback status so that each face's provenance identifies the
+    // records it was built from.
+    interfaces::LevelSetInterfaceDomain domain(interfaceRequest(interface_marker));
+    domain.addVolumeRegion(stripFullCellRegion(3, Side::Negative, "status-3"));
+    domain.addVolumeRegion(stripFullCellRegion(1, Side::Positive, "status-1"));
+    auto unresolved = stripFullCellRegion(2, Side::Negative, "status-2");
+    unresolved.construction_observation = Branch::ModifiedOrUnresolved;
+    domain.addVolumeRegion(std::move(unresolved));
+    domain.addVolumeRegion(stripFullCellRegion(0, Side::Negative, "status-0"));
+    // An inactive record on cell 3 with a conflicting phase and status takes
+    // no part in the phase or backend selection.  Its construction
+    // observation still reaches the faces of its own parent cell, exactly as
+    // with a scan of the full source list.
+    auto inactive = stripFullCellRegion(3, Side::Positive, "conflicting");
+    inactive.measure = 0.0;
+    inactive.construction_observation = Branch::ModifiedOrUnresolved;
+    domain.addVolumeRegion(std::move(inactive));
+    ASSERT_FALSE(domain.volumeRegions().back().active());
+
+    const auto contact =
+        interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+            contactRequest(interface_marker, wall_marker), domain, mesh);
+    EXPECT_EQ(contact.summary().active_fragment_count, 0u);
+    interfaces::GeneratedActiveBoundaryScalarField field;
+    field.value_at_node = [](FE::GlobalIndex) { return FE::Real{-1.0}; };
+    const auto negative = interfaces::buildGeneratedActiveBoundaryDomain(
+        activeRequest(interface_marker, wall_marker, Side::Negative),
+        domain, contact, mesh, field);
+    const auto positive = interfaces::buildGeneratedActiveBoundaryDomain(
+        activeRequest(interface_marker, wall_marker, Side::Positive),
+        domain, contact, mesh, field);
+
+    struct Expected {
+        FE::MeshIndex cell;
+        const char* fallback_status;
+        Branch observation;
+    };
+    const auto check = [](const interfaces::GeneratedActiveBoundaryDomain& active,
+                          const std::vector<Expected>& expected) {
+        const auto by_cell = activeFragmentsByCell(active);
+        ASSERT_EQ(by_cell.size(), expected.size());
+        for (const auto& item : expected) {
+            SCOPED_TRACE(item.cell);
+            const auto found = by_cell.find(item.cell);
+            ASSERT_NE(found, by_cell.end());
+            const auto& fragment = *found->second;
+            EXPECT_EQ(fragment.parent_face, item.cell);
+            EXPECT_EQ(fragment.represented_implicit_quadrature_backend,
+                      "LinearCorner");
+            EXPECT_EQ(fragment.represented_implicit_fallback_status,
+                      item.fallback_status);
+            EXPECT_EQ(fragment.construction_observation, item.observation);
+            EXPECT_TRUE(fragment.full_face_equivalent);
+            EXPECT_NEAR(fragment.measure, 2.0, 1.0e-14);
+        }
+    };
+    check(negative, {{0, "status-0", Branch::Unchecked},
+                     {2, "status-2", Branch::ModifiedOrUnresolved},
+                     {3, "status-3", Branch::ModifiedOrUnresolved}});
+    check(positive, {{1, "status-1", Branch::Unchecked}});
+
+    const auto partition = interfaces::validateGeneratedActiveBoundaryPartition(
+        negative, positive, domain, contact, mesh);
+    EXPECT_EQ(partition.boundary_face_count, 4u);
+    EXPECT_NEAR(partition.negative_boundary_measure, 6.0, 1.0e-14);
+    EXPECT_NEAR(partition.positive_boundary_measure, 2.0, 1.0e-14);
+    EXPECT_NEAR(partition.max_partition_error, 0.0, 1.0e-14);
+}
+
+TEST(GeneratedActiveBoundaryDomain,
+     StripRejectsConflictingSourcesWithinOneParentCell)
+{
+    using Side = FE::geometry::CutIntegrationSide;
+    constexpr int interface_marker = 152;
+    constexpr int wall_marker = 22;
+    const QuadStripBoundaryMesh mesh(3, wall_marker);
+    interfaces::GeneratedActiveBoundaryScalarField field;
+    field.value_at_node = [](FE::GlobalIndex) { return FE::Real{-1.0}; };
+    const auto build = [&](const interfaces::LevelSetInterfaceDomain& domain) {
+        const auto contact =
+            interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+                contactRequest(interface_marker, wall_marker), domain, mesh);
+        return interfaces::buildGeneratedActiveBoundaryDomain(
+            activeRequest(interface_marker, wall_marker, Side::Negative),
+            domain, contact, mesh, field);
+    };
+
+    // The same records spread over different cells are accepted.
+    interfaces::LevelSetInterfaceDomain spread(interfaceRequest(interface_marker));
+    spread.addVolumeRegion(stripFullCellRegion(0, Side::Negative, "None"));
+    spread.addVolumeRegion(stripFullCellRegion(1, Side::Positive, "other"));
+    spread.addVolumeRegion(stripFullCellRegion(2, Side::Negative, "None"));
+    EXPECT_EQ(build(spread).fragments().size(), 2u);
+
+    // Two fallback states on one parent cell.
+    interfaces::LevelSetInterfaceDomain mixed_status(
+        interfaceRequest(interface_marker));
+    mixed_status.addVolumeRegion(stripFullCellRegion(1, Side::Negative, "None"));
+    mixed_status.addVolumeRegion(stripFullCellRegion(0, Side::Negative, "None"));
+    mixed_status.addVolumeRegion(stripFullCellRegion(2, Side::Negative, "None"));
+    mixed_status.addVolumeRegion(stripFullCellRegion(1, Side::Negative, "other"));
+    EXPECT_THROW((void)build(mixed_status), std::invalid_argument);
+
+    // Two authoritative full-cell phases on one parent cell.
+    interfaces::LevelSetInterfaceDomain mixed_phase(
+        interfaceRequest(interface_marker));
+    mixed_phase.addVolumeRegion(stripFullCellRegion(2, Side::Negative, "None"));
+    mixed_phase.addVolumeRegion(stripFullCellRegion(0, Side::Negative, "None"));
+    mixed_phase.addVolumeRegion(stripFullCellRegion(1, Side::Negative, "None"));
+    mixed_phase.addVolumeRegion(stripFullCellRegion(2, Side::Positive, "None"));
+    EXPECT_THROW((void)build(mixed_phase), std::invalid_argument);
+}
+
+TEST(GeneratedActiveBoundaryDomain,
+     StripRebuildFollowsRefreshedGeometry)
+{
+    using Side = FE::geometry::CutIntegrationSide;
+    constexpr int interface_marker = 153;
+    constexpr int wall_marker = 23;
+    const QuadStripBoundaryMesh mesh(4, wall_marker);
+    interfaces::GeneratedActiveBoundaryScalarField field;
+    field.value_at_node = [](FE::GlobalIndex) { return FE::Real{-1.0}; };
+    const auto build = [&](std::uint64_t geometry_revision,
+                           const std::array<Side, 4>& sides) {
+        auto request = interfaceRequest(interface_marker);
+        request.mesh_geometry_revision = geometry_revision;
+        interfaces::LevelSetInterfaceDomain domain(request);
+        for (FE::MeshIndex cell = 0; cell < 4; ++cell) {
+            domain.addVolumeRegion(stripFullCellRegion(
+                cell, sides[static_cast<std::size_t>(cell)], "None"));
+        }
+        auto contact_request = contactRequest(interface_marker, wall_marker);
+        contact_request.mesh_geometry_revision = geometry_revision;
+        const auto contact =
+            interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+                std::move(contact_request), domain, mesh);
+        auto active_request =
+            activeRequest(interface_marker, wall_marker, Side::Negative);
+        active_request.mesh_geometry_revision = geometry_revision;
+        return interfaces::buildGeneratedActiveBoundaryDomain(
+            std::move(active_request), domain, contact, mesh, field);
+    };
+    const auto cells_of = [](const interfaces::GeneratedActiveBoundaryDomain& active) {
+        std::vector<FE::MeshIndex> cells;
+        for (const auto& [cell, fragment] : activeFragmentsByCell(active)) {
+            (void)fragment;
+            cells.push_back(cell);
+        }
+        return cells;
+    };
+
+    const auto initial = build(
+        11u, {{Side::Negative, Side::Negative, Side::Positive, Side::Positive}});
+    EXPECT_EQ(cells_of(initial), (std::vector<FE::MeshIndex>{0, 1}));
+    const auto refreshed = build(
+        21u, {{Side::Positive, Side::Negative, Side::Positive, Side::Negative}});
+    EXPECT_EQ(cells_of(refreshed), (std::vector<FE::MeshIndex>{1, 3}));
+    EXPECT_EQ(refreshed.request().mesh_geometry_revision, 21u);
+    EXPECT_EQ(cells_of(initial), (std::vector<FE::MeshIndex>{0, 1}));
+}
+
+TEST(GeneratedActiveBoundaryDomain,
+     StripCutFaceUsesItsOwnAuthoritativeContact)
+{
+    using Side = FE::geometry::CutIntegrationSide;
+    constexpr int interface_marker = 154;
+    constexpr int wall_marker = 24;
+    const QuadStripBoundaryMesh mesh(3, wall_marker);
+
+    // phi = x - 1.5: cell 0 is wet, cell 1 is cut at its midline, cell 2 is
+    // dry.  Only the wall face of cell 1 has a contact point.
+    interfaces::LevelSetInterfaceDomain domain(interfaceRequest(interface_marker));
+    domain.addVolumeRegion(stripFullCellRegion(2, Side::Positive, "None"));
+    domain.addFragment(stripVerticalFragment(1));
+    domain.addVolumeRegion(stripFullCellRegion(0, Side::Negative, "None"));
+    const auto contact =
+        interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+            contactRequest(interface_marker, wall_marker), domain, mesh);
+    ASSERT_EQ(contact.summary().active_fragment_count, 1u);
+    const auto& contact_fragment = contact.fragments().front();
+    EXPECT_EQ(contact_fragment.parent_cell, 1);
+    EXPECT_EQ(contact_fragment.parent_face, 1);
+
+    interfaces::GeneratedActiveBoundaryScalarField field;
+    field.value_at_node = [&mesh](FE::GlobalIndex node) {
+        return mesh.getNodeCoordinates(node)[0] - FE::Real{1.5};
+    };
+    const auto negative = interfaces::buildGeneratedActiveBoundaryDomain(
+        activeRequest(interface_marker, wall_marker, Side::Negative),
+        domain, contact, mesh, field);
+    const auto positive = interfaces::buildGeneratedActiveBoundaryDomain(
+        activeRequest(interface_marker, wall_marker, Side::Positive),
+        domain, contact, mesh, field);
+
+    const auto check = [&contact_fragment](
+                           const interfaces::GeneratedActiveBoundaryDomain& active,
+                           FE::MeshIndex full_cell) {
+        const auto by_cell = activeFragmentsByCell(active);
+        ASSERT_EQ(by_cell.size(), 2u);
+        ASSERT_EQ(by_cell.count(full_cell), 1u);
+        ASSERT_EQ(by_cell.count(1), 1u);
+        const auto& full = *by_cell.at(full_cell);
+        EXPECT_TRUE(full.full_face_equivalent);
+        EXPECT_TRUE(full.source_contact_stable_ids.empty());
+        EXPECT_NEAR(full.measure, 2.0, 1.0e-14);
+        const auto& cut = *by_cell.at(1);
+        EXPECT_FALSE(cut.full_face_equivalent);
+        EXPECT_NEAR(cut.measure, 1.0, 1.0e-14);
+        EXPECT_EQ(cut.source_contact_stable_ids,
+                  (std::vector<std::uint64_t>{contact_fragment.stable_id}));
+        EXPECT_EQ(cut.source_interface_stable_ids,
+                  (std::vector<std::uint64_t>{
+                      contact_fragment.source_interface_stable_id}));
+    };
+    check(negative, 0);
+    check(positive, 2);
+
+    const auto partition = interfaces::validateGeneratedActiveBoundaryPartition(
+        negative, positive, domain, contact, mesh);
+    EXPECT_EQ(partition.boundary_face_count, 3u);
+    EXPECT_EQ(partition.orphan_source_reference_count, 0u);
+    EXPECT_NEAR(partition.negative_boundary_measure, 3.0, 1.0e-14);
+    EXPECT_NEAR(partition.positive_boundary_measure, 3.0, 1.0e-14);
+    EXPECT_NEAR(partition.max_partition_error, 0.0, 1.0e-14);
 }
