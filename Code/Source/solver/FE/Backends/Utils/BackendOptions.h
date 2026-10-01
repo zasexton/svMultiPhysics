@@ -657,8 +657,11 @@ struct SolverOptions {
     bool reuse_preconditioner{false};
 
     /// FSILS GMRES: end restart cycles on an estimate of the unscaled residual
-    /// instead of only at the cycle end (always on with a right
-    /// preconditioner).  Off by default.
+    /// instead of only at the cycle end.  Off by default.  The estimate lets a
+    /// solve stop as soon as max(abs_tol, rel_tol ||b||) holds; inputs whose
+    /// Newton absolute tolerance equals the linear one can then need extra
+    /// Newton iterations, because the scaled-residual test otherwise
+    /// over-solves the absolute-tolerance regime.
     bool fsils_gmres_unscaled_residual_estimate{false};
 
     // Backend-specific pass-through key/value list (optional).

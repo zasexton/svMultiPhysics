@@ -2941,7 +2941,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
   // this ratio estimates the unscaled residual, so a cycle can end once the
   // true criterion is expected to hold instead of only at the cycle end.  The
   // true residual is still verified at the start of the next cycle.
-  const bool estimate_unscaled = right_pc != nullptr || ls.estimate_unscaled_residual;
+  const bool estimate_unscaled = ls.estimate_unscaled_residual;
   double unscaled_to_scaled = 0.0;
   // Optional iteration budget of this call (solves with a reused preconditioner).
   const int itr_budget = ls.max_total_itr;

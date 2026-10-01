@@ -237,6 +237,11 @@ std::vector<ReplayConfig> allConfigs()
         };
     };
     configs.push_back({"fsils-gmres-rcs-bilu0", "fsils", right_pc(RightPreconditionerType::BlockILU0, false)});
+    configs.push_back({"fsils-gmres-rcs-bilu0-est", "fsils", [right_pc](const FsilsSystemSnapshot& s) {
+                           auto o = right_pc(RightPreconditionerType::BlockILU0, false)(s);
+                           o.fsils_gmres_unscaled_residual_estimate = true;
+                           return o;
+                       }});
     configs.push_back({"fsils-gmres-rcs-bilu0-reuse", "fsils", right_pc(RightPreconditionerType::BlockILU0, true)});
     configs.push_back({"fsils-gmres-rcs-simple", "fsils", right_pc(RightPreconditionerType::Simple, false)});
     configs.push_back({"fsils-gmres-rcs-simple-reuse", "fsils", right_pc(RightPreconditionerType::Simple, true)});
