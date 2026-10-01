@@ -433,9 +433,11 @@ def write_forcing(case_dir: Path, dim: int, points: np.ndarray, reference_file: 
     The Euler and centrifugal terms are evaluated at every node.  With
     x_only (diagnostic) the terms alpha y_r and omega^2 y_r are evaluated at
     the mid-depth y_c = H/2 instead, so the table depends on x only and the
-    solver uses its x-only interpolant.  That is not a small change: the
-    y-dependent Euler term is rotational, and over the first 0.2 s the 2D
-    velocity differs by 34% (jobs 46129890, 46132346).
+    solver uses its x-only interpolant.  On the 2D deck that changes the
+    velocity by 34% at 0.2 s, when the start is driven by the angular
+    acceleration (the y-dependent Euler term is rotational), and the
+    contact-point heights by 2% of their excursion later (jobs 46129890,
+    46132346, 46155727).
     """
     rbf = _load("generate_spheric_test10_roll_body_force")
     reference = rbf.load_reference(reference_file)
