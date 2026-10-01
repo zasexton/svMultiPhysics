@@ -280,14 +280,19 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
             fe_fsi_linear_solver::distributed_solver_bundles::make_vector_linear_system(lhs, dof, Val);
         bool fresh = false;
         ls.RI.right_pc = ls.right_pc_hook.prepare(lhs, dof, Val, row_scale, col_scale, false, fresh);
+        // The retry below runs collective kernels: decide it on all ranks.
+        int any_stale = (ls.RI.right_pc != nullptr && !fresh) ? 1 : 0;
+        if (lhs.commu.nTasks > 1) {
+          MPI_Allreduce(MPI_IN_PLACE, &any_stale, 1, MPI_INT, MPI_LOR, lhs.commu.comm);
+        }
         std::vector<double> rhs_copy;
-        if (ls.RI.right_pc != nullptr && !fresh) {
+        if (any_stale != 0) {
           rhs_copy.assign(R.data(), R.data() + R.size());
         }
         gmres::gmres_v(system, ls.RI, R, row_scaling);
         bool retried = false;
         int stale_iterations = 0;
-        if (!ls.RI.suc && ls.RI.right_pc != nullptr && !fresh) {
+        if (!ls.RI.suc && any_stale != 0) {
           stale_iterations = ls.RI.itr;
           std::copy(rhs_copy.begin(), rhs_copy.end(), R.data());
           ls.RI.right_pc = ls.right_pc_hook.prepare(lhs, dof, Val, row_scale, col_scale, true, fresh);
