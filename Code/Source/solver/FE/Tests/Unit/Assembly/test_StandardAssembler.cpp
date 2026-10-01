@@ -42,6 +42,7 @@
 #include "Systems/MaterialStateProvider.h"
 #include "Constraints/AffineConstraints.h"
 #include "Elements/LagrangeElement.h"
+#include "Basis/LagrangeBasis.h"
 #include "Geometry/MappingFactory.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 
@@ -49,6 +50,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 #include <memory>
 #include <numeric>
@@ -3120,6 +3122,125 @@ TEST(StandardAssemblerFaces, BoundaryFacesSampleNonPrimaryFieldsAtMappedPoints) 
     }
 }
 
+// Records how a non-primary field is sampled on a boundary face: it must be
+// evaluated at the face-to-cell mapped points context.quadraturePoints(),
+// not at the canonical points of the face rule.
+class FaceFieldSamplingProbeKernel final : public AssemblyKernel {
+public:
+    explicit FaceFieldSamplingProbeKernel(FieldId field) : field_(field) {}
+
+    [[nodiscard]] static Real exact(const AssemblyContext::Point3D& x)
+    {
+        return Real{1.0} + Real{2.0} * x[0] + Real{3.0} * x[1] + Real{5.0} * x[2] +
+               x[0] * x[1];
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::QuadraturePoints | RequiredData::IntegrationWeights;
+    }
+
+    [[nodiscard]] std::vector<FieldRequirement> fieldRequirements() const override
+    {
+        return {FieldRequirement{field_,
+                                 RequiredData::SolutionValues | RequiredData::SolutionGradients}};
+    }
+
+    void computeCell(const AssemblyContext& /*ctx*/, KernelOutput& /*output*/) override {}
+
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override { return true; }
+
+    void computeBoundaryFace(const AssemblyContext& ctx,
+                             int /*boundary_marker*/,
+                             KernelOutput& output) override
+    {
+        const auto n = ctx.numTestDofs();
+        output.local_vector.assign(static_cast<std::size_t>(n), 0.0);
+        output.has_vector = true;
+        output.has_matrix = false;
+        output.n_test_dofs = n;
+        output.n_trial_dofs = n;
+        for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+            const auto x = ctx.quadraturePoint(q);
+            const auto g = ctx.fieldGradient(field_, q);
+            max_value_error = std::max(max_value_error,
+                                       std::abs(ctx.fieldValue(field_, q) - exact(x)));
+            max_gradient_error = std::max(
+                {max_gradient_error,
+                 std::abs(g[0] - (Real{2.0} + x[1])),
+                 std::abs(g[1] - (Real{3.0} + x[0])),
+                 std::abs(g[2] - Real{5.0})});
+            max_abs_z = std::max(max_abs_z, std::abs(x[2]));
+            ++samples;
+        }
+    }
+
+    Real max_value_error{0.0};
+    Real max_gradient_error{0.0};
+    Real max_abs_z{0.0};
+    int samples{0};
+
+private:
+    FieldId field_{INVALID_FIELD_ID};
+};
+
+TEST(StandardAssemblerFaces, BoundaryFaceSamplesQuadraticFieldGradientsAtMappedPoints) {
+    constexpr FieldId kField = 403;
+    spaces::H1Space field_space(ElementType::Tetra4, /*order=*/2);
+    const auto n_field = static_cast<GlobalIndex>(field_space.dofs_per_element());
+    const auto* lagrange = dynamic_cast<const basis::LagrangeBasis*>(
+        &field_space.getElement(ElementType::Tetra4, 0).basis());
+    ASSERT_NE(lagrange, nullptr);
+    ASSERT_EQ(lagrange->nodes().size(), static_cast<std::size_t>(n_field));
+
+    dofs::DofMap dof_map(1, 4, 4);
+    dof_map.setCellDofs(0, std::vector<GlobalIndex>{0, 1, 2, 3});
+    dof_map.setNumDofs(4);
+    dof_map.setNumLocalDofs(4);
+    dof_map.finalize();
+    auto field_map = createSingleCellDofMap(n_field);
+
+    // The quadratic field is represented exactly by its P2 interpolant.
+    std::vector<Real> solution(static_cast<std::size_t>(4 + n_field), Real{0.0});
+    for (std::size_t i = 0; i < lagrange->nodes().size(); ++i) {
+        const auto& node = lagrange->nodes()[i];
+        solution[4u + i] = FaceFieldSamplingProbeKernel::exact({node[0], node[1], node[2]});
+    }
+    std::array<FieldSolutionAccess, 1> field_access = {{
+        FieldSolutionAccess{
+            .field = kField,
+            .space = &field_space,
+            .dof_map = &field_map,
+            .dof_offset = 4,
+        },
+    }};
+
+    MockFunctionSpace space;
+    for (LocalIndex local_face = 0; local_face < 4; ++local_face) {
+        SingleTetraBoundaryMeshAccess mesh(local_face);
+        DenseVectorView rhs(4);
+        StandardAssembler assembler;
+        assembler.setDofMap(dof_map);
+        assembler.setFieldSolutionAccess(field_access);
+        assembler.setCurrentSolution(solution);
+        assembler.initialize();
+
+        FaceFieldSamplingProbeKernel kernel(kField);
+        const auto result =
+            assembler.assembleBoundaryFaces(mesh, /*marker=*/1, space, kernel, nullptr, &rhs);
+        ASSERT_TRUE(result.success) << "local face " << local_face;
+        EXPECT_EQ(result.boundary_faces_assembled, 1) << "local face " << local_face;
+        EXPECT_GT(kernel.samples, 0) << "local face " << local_face;
+        EXPECT_LT(kernel.max_value_error, 1e-12) << "local face " << local_face;
+        EXPECT_LT(kernel.max_gradient_error, 1e-11) << "local face " << local_face;
+        if (local_face != 0) {
+            // Off the z = 0 face the mapped points differ from the canonical
+            // face-rule points, so a canonical-point sample would be caught.
+            EXPECT_GT(kernel.max_abs_z, 0.05) << "local face " << local_face;
+        }
+    }
+}
+
 TEST(StandardAssemblerMovingDomain, BoundaryFacePreparesReferenceAndCurrentGeometry) {
     MovingTetraBoundaryMeshAccess mesh;
 
@@ -4400,6 +4521,452 @@ TEST(StandardAssemblerCutVolumes, ReusesCutVolumeBasisCacheForHDivVectorBasis)
     EXPECT_EQ(diagnostics.insertions, 0u);
     EXPECT_EQ(diagnostics.evictions, 0u);
     expectDenseSystemNear(second, first, 1e-12, "H(div) vector cut-volume basis cache reuse");
+}
+
+// ---------------------------------------------------------------------------
+// Per-epoch cut-volume integration cache
+// ---------------------------------------------------------------------------
+
+// One partial cut rule on cell 0 with five interior points. `point_shift`
+// moves one point without changing any weight, measure or provenance key, so
+// the context's content signature stays the same.
+CutIntegrationContext makeEpochCacheCutVolumeContext(int marker,
+                                                     std::uint64_t topology_revision = 51u,
+                                                     Real point_shift = Real{0.0})
+{
+    const std::array<std::array<Real, 3>, 5> points{{
+        {{Real{0.10}, Real{0.20}, Real{0.15}}},
+        {{Real{0.30}, Real{0.10}, Real{0.20}}},
+        {{Real{0.15}, Real{0.35}, Real{0.05}}},
+        {{Real{0.20}, Real{0.20}, Real{0.30}}},
+        {{Real{0.05}, Real{0.10}, Real{0.10}}},
+    }};
+    geometry::CutQuadratureRule rule;
+    rule.kind = geometry::CutQuadratureKind::Volume;
+    rule.side = geometry::CutIntegrationSide::Negative;
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        geometry::CutQuadraturePoint qp;
+        qp.point = points[i];
+        if (i == 2u) {
+            qp.point[0] += point_shift;
+        }
+        qp.parent_coordinate = qp.point;
+        qp.normal = {{Real{0.0}, Real{0.0}, Real{1.0}}};
+        qp.weight = Real{0.01} + Real{0.002} * static_cast<Real>(i);
+        rule.measure += qp.weight;
+        rule.points.push_back(qp);
+    }
+    rule.parent_measure = Real{1.0} / Real{6.0};
+    rule.volume_fraction = rule.measure / rule.parent_measure;
+    rule.exact_polynomial_order = 2;
+    rule.provenance.parent_entity = 0;
+    rule.provenance.marker = marker;
+    rule.provenance.cut_topology_revision = topology_revision;
+    rule.provenance.predicate_policy_key = 59u;
+    rule.provenance.source_value_revision = 61u;
+
+    CutCellAssemblyMetadata metadata;
+    metadata.cell = 0;
+    metadata.parent_entity = 0;
+    metadata.volume_fraction = rule.volume_fraction;
+    metadata.side = rule.side;
+    metadata.provenance_id = "unit-cut-volume-epoch-cache";
+    metadata.cut_topology_id = "unit-cut-volume-epoch-cache";
+    metadata.revision_key = rule.provenance.cut_topology_revision;
+    metadata.cut_topology_revision = rule.provenance.cut_topology_revision;
+    metadata.quadrature_policy_key = rule.provenance.predicate_policy_key;
+    metadata.source_value_revision = rule.provenance.source_value_revision;
+
+    CutIntegrationContext context;
+    context.addGeneratedVolumeRule(marker, std::move(metadata), std::move(rule));
+    return context;
+}
+
+std::array<std::array<Real, 3>, 4> skewedEpochCacheTetraNodes()
+{
+    return {{
+        {{Real{0.10}, Real{-0.20}, Real{0.05}}},
+        {{Real{1.70}, Real{0.30}, Real{-0.10}}},
+        {{Real{0.40}, Real{1.30}, Real{0.20}}},
+        {{Real{-0.30}, Real{0.25}, Real{0.90}}},
+    }};
+}
+
+// Uses every basis array the cut-volume path restores: values, reference and
+// physical gradients and Hessians of test and trial bases, plus the entity
+// measures.
+class CutVolumeEpochProbeKernel final : public AssemblyKernel {
+public:
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        const auto n_test = ctx.numTestDofs();
+        const auto n_trial = ctx.numTrialDofs();
+        const auto n_qpts = ctx.numQuadraturePoints();
+        output.reserve(n_test, n_trial, /*need_matrix=*/true, /*need_vector=*/true);
+        const Real h = ctx.cellDiameter();
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const Real w = ctx.integrationWeight(q);
+            for (LocalIndex i = 0; i < n_test; ++i) {
+                const Real phi = ctx.basisValue(i, q);
+                const auto g = ctx.physicalGradient(i, q);
+                const auto gr = ctx.referenceGradient(i, q);
+                const auto H = ctx.physicalHessian(i, q);
+                const auto Hr = ctx.referenceHessian(i, q);
+                output.local_vector[static_cast<std::size_t>(i)] +=
+                    w * (phi * (Real{1.0} + H[0][0] + H[1][1] + H[2][2]) +
+                         Real{0.2} * (g[0] - g[1] + g[2]) +
+                         Real{0.03} * (gr[0] + Hr[0][1]) + Real{0.01} * h * phi);
+                for (LocalIndex j = 0; j < n_trial; ++j) {
+                    const Real psi = ctx.trialBasisValue(j, q);
+                    const auto tg = ctx.trialPhysicalGradient(j, q);
+                    const auto tgr = ctx.trialReferenceGradient(j, q);
+                    const auto tH = ctx.trialPhysicalHessian(j, q);
+                    const auto tHr = ctx.trialReferenceHessian(j, q);
+                    Real gg = 0.0;
+                    Real hh = 0.0;
+                    for (std::size_t r = 0; r < 3u; ++r) {
+                        gg += g[r] * tg[r];
+                        for (std::size_t c = 0; c < 3u; ++c) {
+                            hh += H[r][c] * tH[r][c];
+                        }
+                    }
+                    output.local_matrix[static_cast<std::size_t>(i * n_trial + j)] +=
+                        w * (phi * psi + Real{0.3} * gg + Real{0.05} * hh +
+                             Real{0.02} * (gr[1] * tgr[2] + Hr[2][2] * tHr[1][1]));
+                }
+            }
+        }
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::BasisValues | RequiredData::PhysicalGradients |
+               RequiredData::BasisHessians | RequiredData::IntegrationWeights |
+               RequiredData::EntityMeasures;
+    }
+};
+
+void expectDenseSystemBitwiseEqual(const TestDenseSystemView& actual,
+                                   const TestDenseSystemView& expected,
+                                   const char* label)
+{
+    ASSERT_EQ(actual.matrix().size(), expected.matrix().size()) << label;
+    ASSERT_EQ(actual.vectorData().size(), expected.vectorData().size()) << label;
+    bool any_nonzero = false;
+    for (std::size_t i = 0; i < actual.matrix().size(); ++i) {
+        EXPECT_EQ(std::memcmp(&actual.matrix()[i], &expected.matrix()[i], sizeof(Real)), 0)
+            << label << " matrix[" << i << "] " << actual.matrix()[i] << " vs "
+            << expected.matrix()[i];
+        any_nonzero = any_nonzero || actual.matrix()[i] != Real{0.0};
+    }
+    for (std::size_t i = 0; i < actual.vectorData().size(); ++i) {
+        EXPECT_EQ(std::memcmp(&actual.vectorData()[i], &expected.vectorData()[i], sizeof(Real)), 0)
+            << label << " vector[" << i << "] " << actual.vectorData()[i] << " vs "
+            << expected.vectorData()[i];
+    }
+    EXPECT_TRUE(any_nonzero) << label;
+}
+
+AssemblyOptions epochCacheDisabledOptions()
+{
+    AssemblyOptions options;
+    options.cut_volume_epoch_cache_max_bytes = 0u;
+    return options;
+}
+
+TEST(StandardAssemblerCutVolumeEpochCache, ReusesRuleAndBasisWithinEpoch)
+{
+    constexpr int marker = 417;
+    ConfigurableSingleTetraMeshAccess mesh(skewedEpochCacheTetraNodes(),
+                                           std::array<GlobalIndex, 4>{0, 1, 2, 3});
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/2);
+    const auto n_dofs = static_cast<GlobalIndex>(space.dofs_per_element());
+    auto dof_map = createSingleCellDofMap(n_dofs);
+    const auto cut_context = makeEpochCacheCutVolumeContext(marker);
+    CutVolumeEpochProbeKernel kernel;
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    TestDenseSystemView first(n_dofs);
+    TestDenseSystemView second(n_dofs);
+
+    auto result = assembler.assembleCutVolumes(
+        mesh, cut_context, marker, geometry::CutIntegrationSide::Negative, space, space, kernel,
+        &first, &first, /*assemble_matrix=*/true, /*assemble_vector=*/true);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.elements_assembled, 1);
+    auto diagnostics = assembler.cutVolumeEpochCacheDiagnostics();
+    EXPECT_GT(diagnostics.max_bytes, 0u);
+    EXPECT_EQ(diagnostics.epochs, 1u);
+    EXPECT_EQ(diagnostics.rule_misses, 1u);
+    EXPECT_EQ(diagnostics.rule_hits, 0u);
+    EXPECT_EQ(diagnostics.basis_misses, 1u);
+    EXPECT_EQ(diagnostics.basis_hits, 0u);
+    EXPECT_EQ(diagnostics.entries, 1u);
+    EXPECT_EQ(diagnostics.tabulations, 1u);
+    EXPECT_GT(diagnostics.bytes, 0u);
+
+    // Next Newton iteration in the same epoch: nothing is recomputed.
+    assembler.resetCutVolumeEpochCacheDiagnostics();
+    result = assembler.assembleCutVolumes(
+        mesh, cut_context, marker, geometry::CutIntegrationSide::Negative, space, space, kernel,
+        &second, &second, /*assemble_matrix=*/true, /*assemble_vector=*/true);
+    ASSERT_TRUE(result.success);
+    diagnostics = assembler.cutVolumeEpochCacheDiagnostics();
+    EXPECT_EQ(diagnostics.epochs, 0u);
+    EXPECT_EQ(diagnostics.rule_hits, 1u);
+    EXPECT_EQ(diagnostics.rule_misses, 0u);
+    EXPECT_EQ(diagnostics.basis_hits, 1u);
+    EXPECT_EQ(diagnostics.basis_misses, 0u);
+    EXPECT_EQ(diagnostics.tabulations_stored, 0u);
+    expectDenseSystemBitwiseEqual(second, first, "epoch cache hit");
+
+    // Same numbers as the uncached path.
+    StandardAssembler uncached(epochCacheDisabledOptions());
+    uncached.setDofMap(dof_map);
+    TestDenseSystemView reference(n_dofs);
+    result = uncached.assembleCutVolumes(
+        mesh, cut_context, marker, geometry::CutIntegrationSide::Negative, space, space, kernel,
+        &reference, &reference, /*assemble_matrix=*/true, /*assemble_vector=*/true);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(uncached.cutVolumeEpochCacheDiagnostics().entries, 0u);
+    EXPECT_EQ(uncached.cutVolumeEpochCacheDiagnostics().max_bytes, 0u);
+    expectDenseSystemBitwiseEqual(first, reference, "epoch cache miss vs uncached");
+    expectDenseSystemBitwiseEqual(second, reference, "epoch cache hit vs uncached");
+}
+
+TEST(StandardAssemblerCutVolumeEpochCache, FusedMixedSpacesMatchUncachedBitwise)
+{
+    constexpr int marker = 418;
+    ConfigurableSingleTetraMeshAccess mesh(skewedEpochCacheTetraNodes(),
+                                           std::array<GlobalIndex, 4>{0, 1, 2, 3});
+    auto scalar_p1 = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+    spaces::ProductSpace velocity(scalar_p1, /*components=*/3);
+    spaces::H1Space pressure(ElementType::Tetra4, /*order=*/2);
+    const auto n_u = static_cast<GlobalIndex>(velocity.dofs_per_element());
+    const auto n_p = static_cast<GlobalIndex>(pressure.dofs_per_element());
+    auto u_map = createSingleCellDofMap(n_u);
+    auto p_map = createSingleCellDofMap(n_p);
+    const auto cut_context = makeEpochCacheCutVolumeContext(marker);
+
+    CutVolumeEpochProbeKernel uu;
+    CutVolumeEpochProbeKernel up;
+    CutVolumeEpochProbeKernel pu;
+    CutVolumeEpochProbeKernel pp;
+    const auto make_terms = [&](TestDenseSystemView& system) {
+        const auto term = [&](const spaces::FunctionSpace& test,
+                              const spaces::FunctionSpace& trial,
+                              CutVolumeEpochProbeKernel& kernel,
+                              const dofs::DofMap& row_map,
+                              GlobalIndex row_offset,
+                              const dofs::DofMap& col_map,
+                              GlobalIndex col_offset) {
+            FusedCellTerm t;
+            t.test_space = &test;
+            t.trial_space = &trial;
+            t.kernel = &kernel;
+            t.row_dof_map = &row_map;
+            t.col_dof_map = &col_map;
+            t.row_dof_offset = row_offset;
+            t.col_dof_offset = col_offset;
+            t.matrix_view = &system;
+            t.vector_view = &system;
+            t.assemble_matrix = true;
+            t.assemble_vector = true;
+            return t;
+        };
+        std::vector<FusedCellTerm> terms;
+        terms.push_back(term(velocity, velocity, uu, u_map, 0, u_map, 0));
+        terms.push_back(term(velocity, pressure, up, u_map, 0, p_map, n_u));
+        terms.push_back(term(pressure, velocity, pu, p_map, n_u, u_map, 0));
+        terms.push_back(term(pressure, pressure, pp, p_map, n_u, p_map, n_u));
+        return terms;
+    };
+
+    StandardAssembler cached;
+    cached.setDofMap(u_map);
+    StandardAssembler uncached(epochCacheDisabledOptions());
+    uncached.setDofMap(u_map);
+
+    TestDenseSystemView first(n_u + n_p);
+    TestDenseSystemView second(n_u + n_p);
+    TestDenseSystemView reference(n_u + n_p);
+    auto first_terms = make_terms(first);
+    auto second_terms = make_terms(second);
+    auto reference_terms = make_terms(reference);
+
+    auto result = cached.assembleCutVolumesFused(
+        mesh, cut_context, marker, geometry::CutIntegrationSide::Negative, first_terms);
+    ASSERT_TRUE(result.success);
+    auto diagnostics = cached.cutVolumeEpochCacheDiagnostics();
+    // (u,u) stores the velocity test arrays, (u,p) the pressure trial arrays,
+    // (p,u) the pressure test and velocity trial arrays; (p,p) reuses one.
+    EXPECT_EQ(diagnostics.basis_misses, 3u);
+    EXPECT_EQ(diagnostics.basis_hits, 1u);
+    EXPECT_EQ(diagnostics.tabulations, 4u);
+
+    cached.resetCutVolumeEpochCacheDiagnostics();
+    result = cached.assembleCutVolumesFused(
+        mesh, cut_context, marker, geometry::CutIntegrationSide::Negative, second_terms);
+    ASSERT_TRUE(result.success);
+    diagnostics = cached.cutVolumeEpochCacheDiagnostics();
+    EXPECT_EQ(diagnostics.basis_misses, 0u);
+    EXPECT_EQ(diagnostics.basis_hits, 4u);
+    EXPECT_EQ(diagnostics.rule_hits, 1u);
+
+    result = uncached.assembleCutVolumesFused(
+        mesh, cut_context, marker, geometry::CutIntegrationSide::Negative, reference_terms);
+    ASSERT_TRUE(result.success);
+    expectDenseSystemBitwiseEqual(first, reference, "fused epoch cache miss vs uncached");
+    expectDenseSystemBitwiseEqual(second, reference, "fused epoch cache hit vs uncached");
+}
+
+TEST(StandardAssemblerCutVolumeEpochCache, RebuildsOnContentChangeOnly)
+{
+    constexpr int marker = 419;
+    constexpr int other_marker = 421;
+    ConfigurableSingleTetraMeshAccess mesh(skewedEpochCacheTetraNodes(),
+                                           std::array<GlobalIndex, 4>{0, 1, 2, 3});
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/2);
+    const auto n_dofs = static_cast<GlobalIndex>(space.dofs_per_element());
+    auto dof_map = createSingleCellDofMap(n_dofs);
+    CutVolumeEpochProbeKernel kernel;
+
+    StandardAssembler cached;
+    cached.setDofMap(dof_map);
+    StandardAssembler uncached(epochCacheDisabledOptions());
+    uncached.setDofMap(dof_map);
+
+    const auto assemble_and_compare = [&](const CutIntegrationContext& cut_context,
+                                          int assembled_marker,
+                                          const char* label) {
+        TestDenseSystemView actual(n_dofs);
+        TestDenseSystemView expected(n_dofs);
+        // Twice through the cache: the second call must hit and agree too.
+        for (int pass = 0; pass < 2; ++pass) {
+            actual.zero();
+            const auto result = cached.assembleCutVolumes(
+                mesh, cut_context, assembled_marker, geometry::CutIntegrationSide::Negative,
+                space, space, kernel, &actual, &actual, /*assemble_matrix=*/true,
+                /*assemble_vector=*/true);
+            ASSERT_TRUE(result.success) << label;
+        }
+        const auto result = uncached.assembleCutVolumes(
+            mesh, cut_context, assembled_marker, geometry::CutIntegrationSide::Negative, space,
+            space, kernel, &expected, &expected, /*assemble_matrix=*/true,
+            /*assemble_vector=*/true);
+        ASSERT_TRUE(result.success) << label;
+        expectDenseSystemBitwiseEqual(actual, expected, label);
+    };
+
+    const auto first = makeEpochCacheCutVolumeContext(marker, /*topology_revision=*/51u);
+    assemble_and_compare(first, marker, "initial epoch");
+    auto diagnostics = cached.cutVolumeEpochCacheDiagnostics();
+    EXPECT_EQ(diagnostics.resets, 1u);
+    EXPECT_EQ(diagnostics.epochs, 1u);
+
+    // A new content key whose rule is bitwise unchanged: new generation, and
+    // the cell's data is reused because it is the same content.
+    cached.resetCutVolumeEpochCacheDiagnostics();
+    const auto relabeled = makeEpochCacheCutVolumeContext(marker, /*topology_revision=*/52u);
+    assemble_and_compare(relabeled, marker, "new content key, same rule");
+    diagnostics = cached.cutVolumeEpochCacheDiagnostics();
+    EXPECT_EQ(diagnostics.epochs, 1u);
+    EXPECT_EQ(diagnostics.rule_hits, 2u);
+    EXPECT_EQ(diagnostics.rule_misses, 0u);
+    EXPECT_EQ(diagnostics.basis_hits, 2u);
+    EXPECT_EQ(diagnostics.basis_misses, 0u);
+
+    // A new content key with a changed rule: rebuilt.
+    cached.resetCutVolumeEpochCacheDiagnostics();
+    const auto moved = makeEpochCacheCutVolumeContext(marker, /*topology_revision=*/53u,
+                                                      /*point_shift=*/Real{0.03});
+    assemble_and_compare(moved, marker, "new content key, moved point");
+    diagnostics = cached.cutVolumeEpochCacheDiagnostics();
+    EXPECT_EQ(diagnostics.epochs, 1u);
+    EXPECT_EQ(diagnostics.rule_invalidations, 1u);
+    EXPECT_EQ(diagnostics.rule_misses, 1u);
+    EXPECT_EQ(diagnostics.basis_misses, 1u);
+    EXPECT_EQ(diagnostics.basis_hits, 1u);
+
+    // The content key does not see point coordinates; a moved point under an
+    // unchanged key is still caught by the entry's own content check.
+    cached.resetCutVolumeEpochCacheDiagnostics();
+    const auto moved_again = makeEpochCacheCutVolumeContext(marker, /*topology_revision=*/53u,
+                                                            /*point_shift=*/Real{0.05});
+    assemble_and_compare(moved_again, marker, "moved point under an unchanged key");
+    diagnostics = cached.cutVolumeEpochCacheDiagnostics();
+    EXPECT_EQ(diagnostics.epochs, 0u);
+    EXPECT_EQ(diagnostics.rule_invalidations, 1u);
+    EXPECT_EQ(diagnostics.rule_misses, 1u);
+    EXPECT_EQ(diagnostics.basis_misses, 1u);
+
+    // Moving the mesh changes its geometry revision: everything is released.
+    cached.resetCutVolumeEpochCacheDiagnostics();
+    auto nodes = skewedEpochCacheTetraNodes();
+    nodes[3][2] += Real{0.25};
+    mesh.setNodes(nodes);
+    assemble_and_compare(moved_again, marker, "moved mesh");
+    diagnostics = cached.cutVolumeEpochCacheDiagnostics();
+    EXPECT_EQ(diagnostics.resets, 1u);
+    EXPECT_EQ(diagnostics.rule_misses, 1u);
+    EXPECT_EQ(diagnostics.basis_misses, 1u);
+
+    // Entries left unused for a whole generation are released.
+    cached.resetCutVolumeEpochCacheDiagnostics();
+    assemble_and_compare(makeEpochCacheCutVolumeContext(other_marker, 61u), other_marker,
+                         "other marker, generation 1");
+    EXPECT_EQ(cached.cutVolumeEpochCacheDiagnostics().entries, 2u);
+    assemble_and_compare(makeEpochCacheCutVolumeContext(other_marker, 62u), other_marker,
+                         "other marker, generation 2");
+    diagnostics = cached.cutVolumeEpochCacheDiagnostics();
+    EXPECT_EQ(diagnostics.stale_releases, 1u);
+    EXPECT_EQ(diagnostics.entries, 1u);
+
+    // Explicit geometry invalidation releases everything.
+    cached.invalidateGeometryCaches();
+    diagnostics = cached.cutVolumeEpochCacheDiagnostics();
+    EXPECT_EQ(diagnostics.entries, 0u);
+    EXPECT_EQ(diagnostics.bytes, 0u);
+}
+
+TEST(StandardAssemblerCutVolumeEpochCache, StaysWithinMemoryBudget)
+{
+    constexpr int marker = 420;
+    ConfigurableSingleTetraMeshAccess mesh(skewedEpochCacheTetraNodes(),
+                                           std::array<GlobalIndex, 4>{0, 1, 2, 3});
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/2);
+    const auto n_dofs = static_cast<GlobalIndex>(space.dofs_per_element());
+    auto dof_map = createSingleCellDofMap(n_dofs);
+    const auto cut_context = makeEpochCacheCutVolumeContext(marker);
+    CutVolumeEpochProbeKernel kernel;
+
+    AssemblyOptions tiny;
+    tiny.cut_volume_epoch_cache_max_bytes = 256u;
+    StandardAssembler assembler(tiny);
+    assembler.setDofMap(dof_map);
+    StandardAssembler uncached(epochCacheDisabledOptions());
+    uncached.setDofMap(dof_map);
+
+    TestDenseSystemView actual(n_dofs);
+    TestDenseSystemView expected(n_dofs);
+    for (int pass = 0; pass < 2; ++pass) {
+        actual.zero();
+        const auto result = assembler.assembleCutVolumes(
+            mesh, cut_context, marker, geometry::CutIntegrationSide::Negative, space, space,
+            kernel, &actual, &actual, /*assemble_matrix=*/true, /*assemble_vector=*/true);
+        ASSERT_TRUE(result.success);
+    }
+    const auto diagnostics = assembler.cutVolumeEpochCacheDiagnostics();
+    EXPECT_LE(diagnostics.peak_bytes, 256u);
+    EXPECT_GT(diagnostics.over_budget_skips, 0u);
+    EXPECT_EQ(diagnostics.basis_hits, 0u);
+
+    const auto result = uncached.assembleCutVolumes(
+        mesh, cut_context, marker, geometry::CutIntegrationSide::Negative, space, space,
+        kernel, &expected, &expected, /*assemble_matrix=*/true, /*assemble_vector=*/true);
+    ASSERT_TRUE(result.success);
+    expectDenseSystemBitwiseEqual(actual, expected, "over budget");
 }
 
 TEST(StandardAssemblerCutInterfaces, MapsReferenceInterfaceMeasureToPhysicalSurface) {
