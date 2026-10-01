@@ -530,8 +530,7 @@ class FSILS_subLsType
 
     /// End a GMRES cycle once the unscaled residual, estimated from the
     /// Arnoldi residual and the unscaled/scaled ratio at the cycle start,
-    /// meets the target (verified at the next cycle start).  Always used with
-    /// a right preconditioner; opt-in otherwise.
+    /// meets the target (verified at the next cycle start).  Opt-in.
     bool estimate_unscaled_residual{false};
 
     /// Upper bound on the iterations of one GMRES call (0: none).  Used for
