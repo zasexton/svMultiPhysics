@@ -436,6 +436,7 @@ struct DistributedAggregationResult {
     std::size_t canonical_owned_pinned_dofs{0u};
     std::size_t canonical_strong_suppressed_dofs{0u};
     std::size_t canonical_halo_limited_root_choices{0u};
+    std::size_t canonical_row_coupled_slaves_beyond_halo{0u};
     std::vector<SmallCutAggregationProlongationRow> canonical_rows{};
 };
 
@@ -760,6 +761,7 @@ resolveDistributedAggregationDeclarations(
     const GlobalCandidateMap& global_candidates,
     const LocalAggregationDeclarationMap& local_candidates,
     const std::set<GlobalIndex>& assembled_candidate_dofs,
+    const std::set<GlobalIndex>& row_coupled_candidate_dofs,
     bool slave_all_cut,
     bool allow_unaggregated)
 {
@@ -1805,6 +1807,36 @@ resolveDistributedAggregationDeclarations(
     coordinateDistributedLocalFailure(system,
                                       local_final_validation_exception,
                                       "canonical_line_final_validation");
+
+    // Slaves that share a cell with an owned row but whose masters lie
+    // outside this rank's halo: the assembling ranks condense them correctly
+    // (the residual is unaffected), but the owned rows cannot store the
+    // condensed master columns, so the Jacobian loses those entries.
+    long long local_row_coupled_beyond_halo = 0;
+    for (const auto dof : row_coupled_candidate_dofs) {
+        const auto line_it = canonical_lines.find(dof);
+        if (line_it == canonical_lines.end()) {
+            continue;
+        }
+        if (!std::all_of(line_it->second.entries.begin(),
+                         line_it->second.entries.end(),
+                         [&](const ConstraintEntry& entry) {
+                             return partition.isRelevant(entry.master_dof);
+                         })) {
+            ++local_row_coupled_beyond_halo;
+        }
+    }
+    long long row_coupled_beyond_halo = local_row_coupled_beyond_halo;
+    if (initialized != 0 && world_size > 1) {
+        MPI_Allreduce(&local_row_coupled_beyond_halo,
+                      &row_coupled_beyond_halo,
+                      1,
+                      MPI_LONG_LONG,
+                      MPI_SUM,
+                      comm);
+    }
+    result.canonical_row_coupled_slaves_beyond_halo =
+        static_cast<std::size_t>(row_coupled_beyond_halo);
     return result;
 }
 
@@ -1841,6 +1873,7 @@ resolveDistributedAggregationDeclarations(
     std::string_view,
     const GlobalCandidateMap& global_candidates,
     const LocalAggregationDeclarationMap& local_candidates,
+    const std::set<GlobalIndex>&,
     const std::set<GlobalIndex>&,
     bool slave_all_cut,
     bool allow_unaggregated)
@@ -5124,12 +5157,15 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
 
     DistributedAggregationResult distributed_result;
     if (max_lines == std::numeric_limits<std::size_t>::max()) {
-        // Candidate DOFs this rank assembles with: DOFs of its owned cells
-        // (condensed here under reverse scatter), of their face neighbors
-        // (reached by facet terms), and of every local cell holding an owned
-        // DOF (whose couplings, condensed, land in owned rows and their
-        // sparsity). Such a rank needs the canonical line and all masters.
+        // Candidate DOFs this rank condenses: DOFs of its owned cells
+        // (assembled here under reverse scatter) and of their face neighbors
+        // (reached by facet terms). Such a rank needs the canonical line and
+        // all masters, or the discretization would change. Under reverse
+        // scatter, candidate DOFs of other local cells holding an owned DOF
+        // only couple to owned rows; missing masters there cost Jacobian
+        // entries, not correctness.
         std::set<GlobalIndex> assembled_candidate_dofs;
+        std::set<GlobalIndex> row_coupled_candidate_dofs;
         {
             std::set<GlobalIndex> candidate_component_dofs;
             for (const auto& [dof, candidate] : global_candidates) {
@@ -5165,20 +5201,33 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                         mark_cell(first);
                     }
                 });
+            // Owned-row assembly (any policy but reverse scatter) condenses
+            // every local cell that holds an owned row as well.
+            const bool owned_cells_only =
+                system.assemblyGhostPolicy() ==
+                assembly::GhostPolicy::ReverseScatter;
             for (GlobalIndex cell = 0; cell < n_local_cells; ++cell) {
                 const auto cell_dofs = dh.getCellDofs(cell);
-                const bool assembled =
-                    assembled_cell[static_cast<std::size_t>(cell)] != 0u ||
+                const bool row_coupled =
                     std::any_of(cell_dofs.begin(), cell_dofs.end(),
                                 [&](GlobalIndex dof) {
                                     return assembly_partition.isOwned(offset + dof);
                                 });
-                if (!assembled) {
+                const bool assembled =
+                    assembled_cell[static_cast<std::size_t>(cell)] != 0u ||
+                    (!owned_cells_only && row_coupled);
+                if (!assembled && !row_coupled) {
                     continue;
                 }
                 for (const auto dof : cell_dofs) {
-                    if (candidate_component_dofs.count(offset + dof) != 0u) {
+                    if (candidate_component_dofs.count(offset + dof) == 0u) {
+                        continue;
+                    }
+                    if (assembled) {
                         assembled_candidate_dofs.insert(offset + dof);
+                    }
+                    if (row_coupled) {
+                        row_coupled_candidate_dofs.insert(offset + dof);
                     }
                 }
             }
@@ -5190,6 +5239,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             global_candidates,
             local_aggregation_declarations,
             assembled_candidate_dofs,
+            row_coupled_candidate_dofs,
             slave_all_cut,
             allow_unaggregated);
     } else {
@@ -5518,6 +5568,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         << distributed_result.canonical_strong_suppressed_dofs
         << " canonical_halo_limited_root_choices="
         << distributed_result.canonical_halo_limited_root_choices
+        << " canonical_row_coupled_slaves_beyond_halo="
+        << distributed_result.canonical_row_coupled_slaves_beyond_halo
         << " canonical_active_feature_count="
         << canonical_active_features.size()
         << " canonical_rooted_active_feature_count="

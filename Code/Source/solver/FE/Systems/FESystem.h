@@ -2537,6 +2537,9 @@ public:
      */
     [[nodiscard]] MPI_Comm activeMpiCommunicator() const noexcept;
 #endif
+    /// Ghost policy of the configured assembler (OwnedRowsOnly before setup).
+    /// Under ReverseScatter each rank assembles only its owned cells.
+    [[nodiscard]] assembly::GhostPolicy assemblyGhostPolicy() const noexcept;
     [[nodiscard]] int temporalOrder() const noexcept;
     [[nodiscard]] bool hasExplicitTimeDependency() const noexcept;
     [[nodiscard]] bool hasTimeDependentConstraints() const noexcept;

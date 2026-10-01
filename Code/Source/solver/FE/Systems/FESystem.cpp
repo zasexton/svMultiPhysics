@@ -8056,6 +8056,12 @@ FESystem::~FESystem() = default;
 FESystem::FESystem(FESystem&&) noexcept = default;
 FESystem& FESystem::operator=(FESystem&&) noexcept = default;
 
+assembly::GhostPolicy FESystem::assemblyGhostPolicy() const noexcept
+{
+    return assembler_ ? assembler_->getOptions().ghost_policy
+                      : assembly::GhostPolicy::OwnedRowsOnly;
+}
+
 #if FE_HAS_MPI
 MPI_Comm FESystem::activeMpiCommunicator() const noexcept
 {
