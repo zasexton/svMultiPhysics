@@ -595,7 +595,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
 
       | Branch | Speed-ups |
       |---|---|
-      | `dev/perf-rebuild-path` | items 1, 3 and 4 above |
+      | `dev/perf-rebuild-path` | items 1, 3 and 5 above |
       | `dev/perf-reuse-unchanged` | items 6 and 7 |
       | `dev/perf-kernels` | item 2 and the cache-key and full-cell basis part of item 9 |
       | `dev/perf-cut-integration-reuse` | reuse of cut-cell quadrature and basis data within a frozen geometry epoch; cut cells are about 70% of a 3D Jacobian assembly |
@@ -604,6 +604,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
     - Queued until the branches above merge:
       - item 8, classification-only records for fully dry cells (3D memory);
       - multithreaded assembly in `StandardAssembler`.
+    - Not yet assigned: item 4, the KAG duplicate-sample search in `ApplicationDriver.cpp`.
   - **Open questions (for the user):**
     1. 3D gating: R/h = 32 is not affordable, so gate at R/h = 16 with the order over 8/16, or report 3D without gating.
     2. For R/h = 16 memory: implement item 8, or allow a job larger than 16 GB.
