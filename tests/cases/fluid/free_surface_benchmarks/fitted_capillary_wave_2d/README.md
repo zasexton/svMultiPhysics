@@ -72,6 +72,12 @@ option `--dt-over-capillary-limit F` (never gated) writes a run with a step of
 about `F` times the level's limit; it is used below to check whether the
 fitted discretization needs the limit.
 
+**Amplitude.** The reference is linear, while the simulation keeps the
+finite amplitude `a0 k = 0.063`, whose frequency shift is of order
+`(a0 k)^2 = 4e-3` times a coefficient below one. The diagnostic option
+`--amplitude-over-wavelength` (never gated) runs a smaller amplitude to
+separate that shift from the discretization error.
+
 ## Metrics (`verify.py`)
 
 The solver writes the reference configuration as VTK points and the current

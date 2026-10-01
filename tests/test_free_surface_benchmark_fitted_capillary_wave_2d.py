@@ -110,6 +110,12 @@ def test_study_roles_and_diagnostic_steps(tmp_path):
     d = gen.generate(64, tmp_path / "d", dt_over_capillary_limit=8.0)
     assert not d["protocol_run"] and 4.0 < d["dt_over_capillary_limit"] <= 8.0
     assert d["steps"] % 100 == 0
+    small = gen.generate(32, tmp_path / "a", amplitude_over_wavelength=0.0025)
+    assert not small["protocol_run"] and small["initial_amplitude"] == pytest.approx(0.0025)
+    points, _, faces, _ = gen.liquid_triangle_mesh(32, 0.0025)
+    top = points[faces[gen.FREE_SURFACE][0]]
+    assert np.allclose(top[:, 1], gen.MEAN_LEVEL + 0.0025 * np.cos(gen.WAVENUMBER * top[:, 0]))
+    assert np.allclose(gen.initial_pressure(top, 0.0025), 0.25 * gen.initial_pressure(top))
     with pytest.raises(ValueError):
         gen.generate(24, tmp_path / "bad")
     with pytest.raises(ValueError):
