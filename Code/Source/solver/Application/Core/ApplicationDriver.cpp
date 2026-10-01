@@ -17669,10 +17669,16 @@ std::size_t projectLevelSetCurvatureFieldsFromState(
           mesh_field_layout_revision,
           mesh_label_revision,
           mesh_coordinate_configuration_key);
-      if (fast_signature.has_value() &&
+      // The signatures hash rank-local data while the projection below can
+      // be collective (kinematic-area-gradient recovery): reuse the cache
+      // only when every rank can.
+      const bool local_fast_hit =
+          fast_signature.has_value() &&
           cache_entry->valid &&
           cache_entry->fast_valid &&
-          cache_entry->fast_signature == *fast_signature) {
+          cache_entry->fast_signature == *fast_signature;
+      if (!globalAnyBool(!local_fast_hit,
+                         activeFESystemCommunicator(system))) {
         reapply_cached_curvature_if_needed(*cache_entry);
         logLevelSetCurvatureProjectionDiagnostic(
             request,
@@ -17728,7 +17734,10 @@ std::size_t projectLevelSetCurvatureFieldsFromState(
         mesh_numbering_revision,
         mesh_coordinate_configuration_key);
     if (cache_entry != nullptr) {
-      if (cache_entry->valid && cache_entry->signature == signature) {
+      const bool local_signature_hit =
+          cache_entry->valid && cache_entry->signature == signature;
+      if (!globalAnyBool(!local_signature_hit,
+                         activeFESystemCommunicator(system))) {
         if (fast_signature.has_value()) {
           cache_entry->fast_valid = true;
           cache_entry->fast_signature = *fast_signature;
@@ -17817,8 +17826,11 @@ std::size_t projectLevelSetCurvatureFieldsFromState(
           result.source_value_revision;
       cache_entry->workspace.cut_rule_signature = cut_context_signature;
     }
-    if (!result.success) {
-      if (reuse_cached_on_projection_failure &&
+    // Projection success and cache reuse are rank-local facts; the next
+    // steps (prescribed-field update, rethrow) must be taken together.
+    if (globalAnyBool(!result.success, activeFESystemCommunicator(system))) {
+      const bool local_reuse_available =
+          reuse_cached_on_projection_failure &&
           cache_entry != nullptr &&
           cache_entry->valid &&
           cache_entry->last_result.free_surface_snapshot_revision_key ==
@@ -17826,7 +17838,9 @@ std::size_t projectLevelSetCurvatureFieldsFromState(
           cache_entry->last_result.source_value_revision ==
               result.source_value_revision &&
           cache_entry->last_result.cut_rule_signature ==
-              result.cut_rule_signature) {
+              result.cut_rule_signature;
+      if (!globalAnyBool(!local_reuse_available,
+                         activeFESystemCommunicator(system))) {
         reapply_cached_curvature_if_needed(*cache_entry);
         application::core::oopCout()
             << "[svMultiPhysics::Application] WARNING Level-set curvature projection"
