@@ -390,6 +390,19 @@ gatherAndResolveConstraints(MPI_Comm comm,
     return canonical;
 }
 
+/// A ghost copy of a constraint line is only representable on a rank that
+/// also carries every master; lines whose masters lie outside the local halo
+/// stay with the ranks that assemble with them (see
+/// SmallCutAggregationConstraint, which proves that).
+[[nodiscard]] bool mastersRelevant(const ConstraintLine& line,
+                                   const dofs::DofPartition& partition)
+{
+    return std::all_of(line.entries.begin(), line.entries.end(),
+                       [&](const auto& entry) {
+                           return partition.isRelevant(entry.master_dof);
+                       });
+}
+
 enum class LocalConstraintSelection {
     Owned,
     Relevant
@@ -409,7 +422,9 @@ AffineConstraints rebuildLocalConstraints(
         const bool keep =
             selection == LocalConstraintSelection::Owned
                 ? partition.isOwned(dof)
-                : partition.isRelevant(dof);
+                : partition.isRelevant(dof) &&
+                      (partition.isOwned(dof) ||
+                       mastersRelevant(ranked.line, partition));
         if (!keep) {
             continue;
         }
@@ -619,6 +634,10 @@ bool ParallelConstraints::validateConsistency(
         // canonical constraint.
         for (const auto& [dof, ranked] : canonical) {
             if (!partition_->isRelevant(dof)) {
+                continue;
+            }
+            if (!partition_->isOwned(dof) &&
+                !mastersRelevant(ranked.line, *partition_)) {
                 continue;
             }
 

@@ -79,10 +79,18 @@
  * root-cell ID) as its deterministic key. Algebraic master DOF numbers are
  * excluded because owner-contiguous numbering changes under repartitioning.
  * Equivalent providers of the selected physical root must agree on the
- * extension weights. The canonical line is installed on every rank where its
- * slave is relevant only after proving that the slave has exactly one owner
- * and every nonzero master is relevant there. Distributed mesh adapters must
- * expose globally unique cell IDs; missing IDs, master availability, or
+ * extension weights. A rank "assembles with" a slave when the slave lies in
+ * one of its owned cells, in a face neighbor of one, or in a local cell that
+ * holds an owned DOF; such a rank needs the canonical line and every nonzero
+ * master. The preferred root is used whenever every assembling rank carries
+ * its masters, so the choice matches the serial one; otherwise the next root
+ * that they all carry is used and counted as
+ * canonical_halo_limited_root_choices (partition dependent: widen the
+ * overlap). The line is installed where the slave is relevant and all masters
+ * are present, after proving that the slave has exactly one owner; ranks that
+ * see the slave only deeper in the halo carry no line (their ghost value
+ * follows the owner). Distributed mesh adapters must expose globally unique
+ * cell IDs; missing IDs, masters absent on an assembling rank, or
  * inconsistent component/weight data fails closed before the generic
  * owner-wins parallel merge. Increase mesh/DOF overlap in the latter case.
  * SVMP_AGGREGATION_ALLOW_UNAGGREGATED=1 restores the
