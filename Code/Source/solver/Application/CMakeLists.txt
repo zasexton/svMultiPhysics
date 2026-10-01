@@ -8,6 +8,7 @@ add_library(svapplication STATIC
   Core/ActiveDomainOutput.cpp
   Core/ApplicationDriver.cpp
   Core/FreeSurfaceEnergyLedger.cpp
+  Core/FreeSurfaceSemiImplicitReference.cpp
   Core/LevelSetCutConfiguration.cpp
   Core/LevelSetMaintenanceConfiguration.cpp
   Core/LevelSetCurvatureSamples.cpp

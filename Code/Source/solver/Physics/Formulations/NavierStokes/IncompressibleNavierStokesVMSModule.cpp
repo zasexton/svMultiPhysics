@@ -7,6 +7,7 @@
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceSemiImplicitSurfaceTension.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 
 #include "FE/Assembly/Assembler.h"
@@ -4024,6 +4025,66 @@ void validateDynamicContactWallEssentialBC(
                : "supplied_scalar_frozen";
 }
 
+// The lagged normal-increment term is qualified only where its derivation
+// holds: an exterior unfitted interface whose generated LinearCorner facets
+// carry a piecewise-constant normal, refreshed-frozen geometry inside the
+// outer fixed point, and the SurfaceStress energy (KAG is an experiment).
+// The transient outer fixed point and the level-set transport are checked
+// by the application, which owns them.
+void validateFreeSurfaceSemiImplicitSurfaceTension(
+    const FreeSurfaceBoundary& bc)
+{
+    if (bc.surface_tension_semi_implicit ==
+        FreeSurfaceSurfaceTensionSemiImplicit::None) {
+        return;
+    }
+    if (!usesSemiImplicitNormalIncrement(bc)) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: unsupported "
+            "Surface_tension_semi_implicit value");
+    }
+    const auto reject = [](std::string_view requirement) {
+        throw std::invalid_argument(
+            std::string("IncompressibleNavierStokesVMSModule: "
+                        "Surface_tension_semi_implicit=NormalIncrement "
+                        "requires ") +
+            std::string(requirement));
+    };
+    if (!isExteriorOnePhaseBoundary(bc) || !isUnfittedLevelSet(bc)) {
+        reject("an exterior one-phase UnfittedLevelSet free surface");
+    }
+    if (!usesSurfaceStress(bc) && !usesKinematicAreaGradientTraction(bc)) {
+        reject("Surface_tension_form=SurfaceStress (or the experimental "
+               "KinematicAreaGradientTraction)");
+    }
+    if (!FE::forms::bc::isConstantScalarValue(bc.surface_tension) ||
+        !(constantScalarValueOrThrow(
+              bc.surface_tension,
+              "semi-implicit free-surface surface_tension") >
+          FE::Real{0.0})) {
+        reject("a literal positive Surface_tension");
+    }
+    if (bc.active_domain == FreeSurfaceActiveDomain::None ||
+        bc.allow_full_domain_unfitted_free_surface) {
+        reject("Active_domain=LevelSetNegative or LevelSetPositive");
+    }
+    if (bc.active_domain_method !=
+            FreeSurfaceActiveDomainMethod::CutVolume ||
+        bc.active_domain_smoothing_width != FE::Real{0.0}) {
+        reject("Active_domain_method=CutVolume with zero smoothing width");
+    }
+    if (normalizedFreeSurfaceOptionToken(bc.generated_interface_geometry) !=
+        "linearcorner") {
+        reject("Generated_interface_geometry=LinearCorner, whose facet "
+               "normal is piecewise constant");
+    }
+    if (!isRefreshedFrozenGeometryTangent(bc) ||
+        !unfittedLevelSetShapeTangentsDisabled()) {
+        reject("Geometry_tangent_policy=RefreshedFrozenQuadrature without "
+               "level-set shape tangents");
+    }
+}
+
 void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                                  const IncompressibleNavierStokesVMSOptions& options,
                                  bool ale_enabled,
@@ -4119,6 +4180,7 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
         "free-surface surface_tension (variable surface tension/Marangoni traction is unsupported)");
     validateNonnegativeConstantScalar(
         bc.surface_tension, "free-surface surface_tension");
+    validateFreeSurfaceSemiImplicitSurfaceTension(bc);
     validateFiniteConstantScalar(bc.curvature, "free-surface curvature");
     validateNonnegativeConstantScalar(
         bc.cut_cell_stabilization.pressure_gradient_penalty,
@@ -6072,6 +6134,29 @@ void appendCutVolumeShapeTangentForm(
         kappa_id, *rec.space, bc.curvature_field_name);
 }
 
+// u_ref of the semi-implicit capillary term: prescribed data in the velocity
+// space, registered by registerOn and refreshed by the application.
+[[nodiscard]] FE::forms::FormExpr freeSurfaceSemiImplicitReferenceVelocity(
+    const FE::systems::FESystem& system)
+{
+    const std::string name(kFreeSurfaceSemiImplicitReferenceVelocityFieldName);
+    const auto field = system.findFieldByName(name);
+    if (field == FE::INVALID_FIELD_ID) {
+        throw std::logic_error(
+            "IncompressibleNavierStokesVMSModule: the semi-implicit "
+            "reference velocity field '" + name + "' is not registered");
+    }
+    const auto& rec = system.fieldRecord(field);
+    if (rec.source_kind != FE::systems::FieldSourceKind::PrescribedData ||
+        system.fieldParticipatesInUnknownVector(field) || !rec.space) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: the semi-implicit "
+            "reference velocity field '" + name +
+            "' must be prescribed data, not an unknown");
+    }
+    return FE::forms::FormExpr::discreteField(field, *rec.space, name);
+}
+
 [[nodiscard]] FE::forms::FormExpr unfittedLevelSetNormalSpeedFactor(
     const FreeSurfaceBoundary& bc,
     const FE::systems::FESystem& system)
@@ -6961,6 +7046,38 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
                     " diagnostic=free_surface_generated_curvature_traction");
             }
         }
+    }
+
+    if (usesSemiImplicitNormalIncrement(bc)) {
+        // Lagged normal increment: zero at every refreshed residual, so it
+        // is not part of any conservative or residual-work ledger channel;
+        // it adds only a constant velocity block to the inner Jacobian.
+        const auto semi_implicit_integrand =
+            semiImplicitNormalIncrementIntegrand(
+                gamma,
+                u,
+                freeSurfaceSemiImplicitReferenceVelocity(system),
+                v,
+                n);
+        momentum_form = momentum_form + integrateOnFreeSurface(
+            semi_implicit_integrand, bc, ale_enabled);
+        FE_LOG_INFO(
+            std::string("IncompressibleNavierStokesVMSModule: installed semi-implicit capillary term") +
+            " marker=" + std::to_string(freeSurfaceMarker(bc)) +
+            " surface_tension_semi_implicit=" +
+            freeSurfaceSurfaceTensionSemiImplicitName(
+                bc.surface_tension_semi_implicit) +
+            " surface_tension_form=" + surfaceTensionFormName(bc) +
+            " form=gamma_dt_eff_grad_gamma_du_dot_n_dot_grad_gamma_v_dot_n" +
+            " reference_velocity_field=" +
+            std::string(kFreeSurfaceSemiImplicitReferenceVelocityFieldName) +
+            " reference_refresh=every_generated_state_refresh" +
+            " fresh_residual_contribution=0" +
+            " coefficient=surface_tension_times_effective_time_step" +
+            " qualification=" +
+            (usesKinematicAreaGradientTraction(bc) ? "Experimental"
+                                                   : "Candidate") +
+            " diagnostic=free_surface_semi_implicit_normal_increment");
     }
 
     if (tangential_pressure_gradient_probe.has_value()) {
@@ -7961,6 +8078,14 @@ tangentialPolicyProvenance(
                    isInternalMaterialInterfaceVolume(boundary)
                        ? "NotApplicableInternalVolume"
                        : surfaceTensionFormName(boundary));
+        if (usesSemiImplicitNormalIncrement(boundary)) {
+            out << ",\"surface_tension_semi_implicit\":"
+                << jsonString(freeSurfaceSurfaceTensionSemiImplicitName(
+                       boundary.surface_tension_semi_implicit))
+                << ",\"surface_tension_semi_implicit_reference_velocity\":"
+                << jsonString(std::string(
+                       kFreeSurfaceSemiImplicitReferenceVelocityFieldName));
+        }
         if (isExteriorOnePhaseBoundary(boundary) &&
             usesGeneratedCurvatureTraction(boundary)) {
             out << ",\"surface_tension_form_qualification\":"
@@ -8614,6 +8739,29 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         throw std::invalid_argument(
             "IncompressibleNavierStokesVMSModule::registerOn: KinematicAreaGradientTraction requires an affine P1 Product H1 velocity space on Triangle3 or Tetra4 cells");
     }
+    std::optional<FE::systems::FieldSpec> semi_implicit_reference_spec;
+    if (std::any_of(effective_free_surfaces.begin(),
+                    effective_free_surfaces.end(),
+                    usesSemiImplicitNormalIncrement)) {
+        if (!isSupportedGeneratedBoundaryTraceSpace(*velocity_space_, dim)) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule::registerOn: Surface_tension_semi_implicit=NormalIncrement requires an affine P1 Product H1 velocity space on Triangle3 or Tetra4 cells");
+        }
+        FE::systems::FieldSpec reference_spec;
+        reference_spec.name =
+            std::string(kFreeSurfaceSemiImplicitReferenceVelocityFieldName);
+        reference_spec.space = velocity_space_;
+        reference_spec.components = dim;
+        reference_spec.source_kind =
+            FE::systems::FieldSourceKind::PrescribedData;
+        validateCompatibleField(
+            system,
+            reference_spec,
+            FE::systems::FieldSourceKind::PrescribedData,
+            /*allow_missing=*/true,
+            "IncompressibleNavierStokesVMSModule::registerOn semi-implicit reference velocity");
+        semi_implicit_reference_spec = std::move(reference_spec);
+    }
     validateGeneratedFreeSurfaceMarkerUniqueness(
         effective_free_surfaces, system);
     validateActiveDomainPressureConstraints(
@@ -8687,6 +8835,10 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                  ale_options.mesh_velocity_source ==
                      FE::systems::ALEMeshVelocitySource::CoupledDisplacement
              ? std::string_view(ale_options.mesh_displacement_field_name)
+             : std::string_view{}},
+        {"semi-implicit reference velocity",
+         semi_implicit_reference_spec.has_value()
+             ? std::string_view(semi_implicit_reference_spec->name)
              : std::string_view{}},
     });
     validateCompatibleField(
@@ -8813,6 +8965,13 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             std::move(*body_force_spec),
             options_.auto_register_body_force_field,
             "IncompressibleNavierStokesVMSModule::registerOn momentum source");
+    }
+    if (semi_implicit_reference_spec.has_value()) {
+        (void)ensureCompatiblePrescribedField(
+            system,
+            std::move(*semi_implicit_reference_spec),
+            /*auto_register=*/true,
+            "IncompressibleNavierStokesVMSModule::registerOn semi-implicit reference velocity");
     }
 
     declareFreeSurfaceDiscreteFunctionals(

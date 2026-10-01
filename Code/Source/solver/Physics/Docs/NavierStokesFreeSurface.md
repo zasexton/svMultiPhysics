@@ -47,6 +47,68 @@ surface tension; supply `Curvature` or a projected curvature field instead.
   `Lumped`. With `Lumped` the filter coefficient defaults to 0 and may be
   omitted; with `Consistent` it defaults to 1 and must be set to 0.
 
+## Semi-implicit surface tension
+
+`Surface_tension_semi_implicit` = `None` (default) | `NormalIncrement` adds
+the lagged normal-increment term of decision D13 (design note
+`Documentation/free_surface_semi_implicit_surface_tension_design.md`, §3.3):
+
+```text
+R_SI(u; v) = gamma * dt_eff * int_{Gamma_h} grad_Gamma((u - u_ref).n_h) . grad_Gamma(v.n_h),
+grad_Gamma(w.n_h) = P_h (grad w)^T n_h,   P_h = I - n_h ⊗ n_h.
+```
+
+- `n_h` is the generated-interface normal of the rule that carries `dI`;
+  it is constant on each `LinearCorner` facet.
+- `dt_eff = 1/a0` is the effective step of the time integrator:
+  `0.5333 dt` for generalized-alpha with `rho_inf = 0.5`, `dt` for backward
+  Euler. It is not a tuned parameter.
+- `u_ref` is the prescribed field
+  `ns_free_surface_semi_implicit_reference_velocity` in the velocity space.
+  The application overwrites it with the velocity unknown at every
+  generated-state refresh: the projected outer fixed-point, projected
+  endpoint and restored synchronization points, and before each physical
+  solve. The copy is a coefficient copy between two fields that share one
+  DOF map.
+
+`R_SI` is therefore zero in every freshly refreshed residual: the accepted
+state and the acceptance test of the outer fixed point are those of the
+scheme without the term, to within the outer tolerance. Only the Jacobian of
+the frozen inner solves changes. It gains a constant, symmetric,
+positive-semidefinite velocity block, which is the Laplace–Beltrami part of
+the omitted geometry Jacobian. The term enters no conservative or
+residual-work ledger channel, because it is zero at acceptance.
+
+One exception: when the outer loop cycles between two cut topologies and the
+step is accepted on a frozen epoch (`diagnostic=cut_topology_cycle`), the
+accepted inner solution still contains `R_SI` for its last inner update.
+
+The option fails closed outside the validated scope. It requires all of the
+following:
+
+- an exterior one-phase `UnfittedLevelSet` free surface with an active side;
+- `Active_domain_method=CutVolume` with zero smoothing width;
+- `Generated_interface_geometry=LinearCorner`;
+- `Geometry_tangent_policy=RefreshedFrozenQuadrature`, without level-set
+  shape tangents;
+- a literal positive `Surface_tension`;
+- `Surface_tension_form=SurfaceStress`. `KinematicAreaGradientTraction` is
+  admitted as an experiment only;
+- an affine P1 `Triangle3` or `Tetra4` velocity space.
+
+The application adds three further requirements:
+
+- a transient solve;
+- the generated-state outer fixed point;
+- a level set advected by the fluid velocity (`Velocity_source=coupled_field`)
+  or by a PDE extension of it (`Advection_velocity_extension_method` =
+  `pde_harmonic` or `pde_normal`, with either coupling). The PDE extension
+  equals the fluid velocity on every vertex of the retained interface cells.
+
+The algebraic `wall_compatible_normal` and `nearest_interface_point`
+extensions, plain prescribed or constant velocities, steady solves, and runs
+with the outer fixed point disabled are rejected.
+
 ## Fitted ALE free surfaces
 
 A fitted free surface (`Implementation=FittedALE`) is a boundary of the
