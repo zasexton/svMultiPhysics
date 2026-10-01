@@ -67,6 +67,11 @@ LEVEL_SET_VELOCITY = ("coupled_field", "wet_extension",
                       "pde_harmonic_monolithic", "pde_harmonic_prescribed",
                       "pde_normal_monolithic", "pde_normal_prescribed")
 PROTOCOL_LEVEL_SET_VELOCITY = "pde_harmonic_monolithic"
+# Accepted-step kinematic reconciliation of the transported level set
+# (Enable_kinematic_reconciliation; FE/LevelSet/LevelSetKinematicReconciliation.h):
+# each step's change of the sharp liquid area equals the interface flux of the
+# transport velocity.  Local and parameter-free; "off" reproduces earlier decks.
+KINEMATIC_RECONCILIATION = True
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +315,10 @@ def level_set_velocity_block(mode: str) -> str:
 
 
 def solver_xml(schedule: dict, steps: int, cadence: int,
-               level_set_velocity: str = PROTOCOL_LEVEL_SET_VELOCITY) -> str:
+               level_set_velocity: str = PROTOCOL_LEVEL_SET_VELOCITY,
+               kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION) -> str:
+    reconciliation = ("\n    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>"
+                      if kinematic_reconciliation else "")
     faces = "\n".join(
         f'    <Add_face name="{w}"><Face_file_path>mesh/mesh-surfaces/{w}.vtp</Face_file_path></Add_face>'
         for w in WALLS)
@@ -361,7 +369,7 @@ def solver_xml(schedule: dict, steps: int, cadence: int,
     <SUPG_tau_scale>0.5</SUPG_tau_scale>
     <SUPG_transient_scale>2.0</SUPG_transient_scale>
     <Enable_reinitialization>false</Enable_reinitialization>
-    <Enable_volume_correction>false</Enable_volume_correction>
+    <Enable_volume_correction>false</Enable_volume_correction>{reconciliation}
     <Output type="Spatial">
       <Level_set>true</Level_set>
     </Output>
@@ -422,6 +430,7 @@ def generate(level: int, output_dir: Path, *, periods: float = PERIODS,
              steps_per_period: int | None = None,
              level_set_velocity: str = PROTOCOL_LEVEL_SET_VELOCITY,
              mean_depth: float = MEAN_DEPTH, max_steps: int | None = None,
+             kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
              force: bool = False) -> dict:
     if level not in LEVELS:
         raise ValueError(f"--level must be one of {LEVELS}")
@@ -468,7 +477,8 @@ def generate(level: int, output_dir: Path, *, periods: float = PERIODS,
     for wall in WALLS:
         node_ids, parents = faces[wall]
         write_face_vtp(mesh_dir / "mesh-surfaces" / f"{wall}.vtp", points, node_ids, parents)
-    (output_dir / "solver.xml").write_text(solver_xml(schedule, steps, cadence, level_set_velocity),
+    (output_dir / "solver.xml").write_text(solver_xml(schedule, steps, cadence, level_set_velocity,
+                                                      kinematic_reconciliation),
                                            encoding="utf-8")
 
     case = {
@@ -499,6 +509,7 @@ def generate(level: int, output_dir: Path, *, periods: float = PERIODS,
         "dt": schedule["dt"],
         "steps_per_period": schedule["steps_per_period"],
         "level_set_velocity": level_set_velocity,
+        "kinematic_reconciliation": bool(kinematic_reconciliation),
         "study_roles": study_roles(level, schedule["steps_per_period"]),
         "protocol_run": (bool(study_roles(level, schedule["steps_per_period"]))
                          and level_set_velocity == PROTOCOL_LEVEL_SET_VELOCITY
@@ -538,12 +549,17 @@ def main(argv=None) -> int:
     parser.add_argument("--max-steps", type=int, default=None,
                         help="smoke runs only: stop after this many steps; verify.py rejects "
                              "such runs for acceptance")
+    parser.add_argument("--kinematic-reconciliation", choices=("on", "off"),
+                        default="on" if KINEMATIC_RECONCILIATION else "off",
+                        help="accepted-step kinematic reconciliation of the level set "
+                             "(protocol: on; off reproduces the earlier decks)")
     parser.add_argument("--force", action="store_true", help="allow a non-empty output dir")
     args = parser.parse_args(argv)
     case = generate(args.level, args.output_dir, periods=args.periods,
                     steps_per_period=args.steps_per_period,
                     level_set_velocity=args.level_set_velocity, mean_depth=args.mean_depth,
                     max_steps=args.max_steps,
+                    kinematic_reconciliation=args.kinematic_reconciliation == "on",
                     force=args.force)
     print(f"wrote {args.output_dir}")
     for key in ("level_cells_per_length", "n_vertices", "n_triangles", "mean_depth",
