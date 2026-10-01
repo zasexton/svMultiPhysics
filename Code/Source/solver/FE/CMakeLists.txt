@@ -1384,6 +1384,7 @@ set(FE_BACKENDS_HEADERS
     Backends/Eigen/EigenVector.h
     Backends/Eigen/EigenMatrix.h
     Backends/Eigen/EigenLinearSolver.h
+    Backends/Eigen/EigenRightGmres.h
 
     Backends/FSILS/FsilsFactory.h
     Backends/FSILS/FsilsVector.h
