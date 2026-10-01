@@ -1012,6 +1012,216 @@ TEST(LevelSetVolume,
 #endif
 }
 
+TEST(LevelSetVolume, FullCellSnapshotRulesAssembleLikeDirectBasisEvaluation)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    // phi = x - 1.5 on the four-triangle strip [0,2]x[0,1] leaves the two
+    // left triangles uncut: their snapshot rules are full-side rules with
+    // identical reference points, which the assembler tabulates once and
+    // shares. The assembled cut-volume mass + stiffness matrix must match
+    // direct evaluation of the P1 basis at every retained rule point.
+    auto mesh = buildFourTriangleStripMesh();
+    auto space =
+        std::make_shared<FE::spaces::H1Space>(FE::ElementType::Triangle3,
+                                              /*order=*/1);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup());
+
+    const auto& access = system.meshAccess();
+    const auto vertex_x = [&](FE::GlobalIndex vertex) {
+        return access.getNodeCoordinates(vertex);
+    };
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()),
+        FE::Real{0.0});
+    {
+        const auto* entity_map = system.fieldDofHandler(phi).getEntityDofMap();
+        ASSERT_NE(entity_map, nullptr);
+        const auto offset = static_cast<std::size_t>(system.fieldDofOffset(phi));
+        for (FE::GlobalIndex vertex = 0; vertex < entity_map->numVertices(); ++vertex) {
+            const auto dofs = entity_map->getVertexDofs(vertex);
+            ASSERT_EQ(dofs.size(), 1u);
+            solution[offset + static_cast<std::size_t>(dofs.front())] =
+                vertex_x(vertex)[0] - FE::Real{1.5};
+        }
+    }
+
+    // Affine map of each triangle: x = x0 + J xi.
+    struct CellMap {
+        std::array<FE::GlobalIndex, 3> vertices{};
+        std::array<FE::Real, 3> origin{};
+        std::array<std::array<FE::Real, 2>, 2> J{};
+    };
+    std::vector<CellMap> cells(static_cast<std::size_t>(access.numCells()));
+    for (FE::GlobalIndex cell = 0; cell < access.numCells(); ++cell) {
+        std::vector<FE::GlobalIndex> nodes;
+        access.getCellNodes(cell, nodes);
+        ASSERT_EQ(nodes.size(), 3u);
+        auto& map = cells[static_cast<std::size_t>(cell)];
+        map.vertices = {{nodes[0], nodes[1], nodes[2]}};
+        map.origin = vertex_x(nodes[0]);
+        for (std::size_t r = 0; r < 2u; ++r) {
+            for (std::size_t c = 0; c < 2u; ++c) {
+                map.J[r][c] = vertex_x(nodes[c + 1u])[r] - map.origin[r];
+            }
+        }
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions interface_options{};
+    interface_options.level_set_field_name = "phi";
+    interface_options.domain_id = "full_cell_tabulation";
+    interface_options.requested_interface_marker = 721;
+    interface_options.interface_quadrature_order = 2;
+    interface_options.volume_quadrature_order = 2;
+    interface_options.allow_corner_linearized_geometry = true;
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    auto generated = lifecycle.build(system, interface_options, solution);
+    ASSERT_TRUE(generated.success) << generated.diagnostic;
+
+    FE::interfaces::FreeSurfaceGeometrySnapshotPolicy snapshot_policy;
+    snapshot_policy.require_complete_exterior_boundary_partition = false;
+    FE::interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    scalar.value = [cells](FE::GlobalIndex cell,
+                           const std::array<FE::Real, 3>& xi,
+                           const FE::geometry::CutQuadratureProvenance&) {
+        const auto& map = cells.at(static_cast<std::size_t>(cell));
+        return map.origin[0] + map.J[0][0] * xi[0] + map.J[0][1] * xi[1] -
+               FE::Real{1.5};
+    };
+    scalar.reference_gradient = [cells](FE::GlobalIndex cell,
+                                        const std::array<FE::Real, 3>&,
+                                        const FE::geometry::CutQuadratureProvenance&) {
+        const auto& map = cells.at(static_cast<std::size_t>(cell));
+        return std::array<FE::Real, 3>{{map.J[0][0], map.J[0][1], 0.0}};
+    };
+    const auto snapshot = FE::interfaces::buildFreeSurfaceGeometrySnapshot(
+        std::move(generated.domain),
+        {},
+        {},
+        access,
+        snapshot_policy,
+        std::move(scalar),
+        "full_cell_tabulation");
+    ASSERT_TRUE(snapshot);
+
+    // At least two uncut cells share bitwise identical full-side points.
+    std::vector<const FE::geometry::CutQuadratureRule*> full_rules;
+    for (const auto* record : snapshot->retainedRules(
+             FE::interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume)) {
+        ASSERT_NE(record, nullptr);
+        if (record->reference_rule.full_cell_equivalent) {
+            full_rules.push_back(&record->reference_rule);
+        }
+    }
+    ASSERT_GE(full_rules.size(), 2u);
+    ASSERT_EQ(full_rules[0]->points.size(), full_rules[1]->points.size());
+    for (std::size_t q = 0; q < full_rules[0]->points.size(); ++q) {
+        EXPECT_EQ(full_rules[0]->points[q].point, full_rules[1]->points[q].point);
+        EXPECT_EQ(full_rules[0]->points[q].weight, full_rules[1]->points[q].weight);
+    }
+
+    FE::systems::FESystem assembly_system(mesh);
+    const auto u_field = assembly_system.addField(FE::systems::FieldSpec{
+        .name = "u",
+        .space = space,
+        .components = 1,
+    });
+    assembly_system.addOperator("mass_stiffness");
+    const auto u = FE::forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = FE::forms::FormExpr::testFunction(*space, "v");
+    const auto residual =
+        (u * v + FE::forms::inner(FE::forms::grad(u), FE::forms::grad(v)))
+            .dCutVolume(interface_options.requested_interface_marker,
+                        FE::forms::CutVolumeSide::Negative);
+    const auto installed = FE::systems::installFormulation(
+        assembly_system, "mass_stiffness", {u_field}, residual);
+    ASSERT_FALSE(installed.residual.empty());
+
+    auto cut_context = std::make_shared<FE::assembly::CutIntegrationContext>();
+    cut_context->addFreeSurfaceGeometrySnapshot(
+        snapshot, FE::geometry::CutIntegrationSide::Negative);
+    assembly_system.setCutIntegrationContext(cut_context);
+    ASSERT_NO_THROW(assembly_system.setup());
+
+    const auto n_dofs = assembly_system.dofHandler().getNumDofs();
+    std::vector<FE::Real> state_values(static_cast<std::size_t>(n_dofs), FE::Real{0.0});
+    FE::systems::SystemStateView state;
+    state.u = state_values;
+    FE::systems::AssemblyRequest request;
+    request.op = "mass_stiffness";
+    request.want_matrix = true;
+    request.want_vector = false;
+    FE::assembly::DenseSystemView assembled(n_dofs);
+    assembled.zero();
+    const auto assembly = assembly_system.assemble(request, state, &assembled, nullptr);
+    ASSERT_TRUE(assembly.success) << assembly.error_message;
+
+    // Direct evaluation: P1 values (1 - xi - eta, xi, eta) and their
+    // physical gradients J^{-T} grad_xi at every retained rule point.
+    const auto* u_map = assembly_system.fieldDofHandler(u_field).getEntityDofMap();
+    ASSERT_NE(u_map, nullptr);
+    const auto u_offset = assembly_system.fieldDofOffset(u_field);
+    std::vector<FE::Real> expected(static_cast<std::size_t>(n_dofs * n_dofs), FE::Real{0.0});
+    std::size_t evaluated_points = 0u;
+    for (const auto* record : snapshot->retainedRules(
+             FE::interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume)) {
+        const auto& rule = record->reference_rule;
+        const auto& map = cells.at(static_cast<std::size_t>(rule.provenance.parent_entity));
+        const FE::Real det = map.J[0][0] * map.J[1][1] - map.J[0][1] * map.J[1][0];
+        const std::array<std::array<FE::Real, 2>, 2> inv{{
+            {{map.J[1][1] / det, -map.J[0][1] / det}},
+            {{-map.J[1][0] / det, map.J[0][0] / det}}}};
+        const std::array<std::array<FE::Real, 2>, 3> grad_ref{{
+            {{-1.0, -1.0}}, {{1.0, 0.0}}, {{0.0, 1.0}}}};
+        std::array<std::array<FE::Real, 2>, 3> grad{};
+        for (std::size_t a = 0; a < 3u; ++a) {
+            for (std::size_t d = 0; d < 2u; ++d) {
+                grad[a][d] = inv[0][d] * grad_ref[a][0] + inv[1][d] * grad_ref[a][1];
+            }
+        }
+        std::array<FE::GlobalIndex, 3> dof{};
+        for (std::size_t a = 0; a < 3u; ++a) {
+            const auto dofs = u_map->getVertexDofs(map.vertices[a]);
+            ASSERT_EQ(dofs.size(), 1u);
+            dof[a] = u_offset + dofs.front();
+        }
+        for (const auto& qp : rule.points) {
+            const std::array<FE::Real, 3> N{{
+                FE::Real{1.0} - qp.point[0] - qp.point[1], qp.point[0], qp.point[1]}};
+            const FE::Real w = qp.weight * std::abs(det);
+            for (std::size_t a = 0; a < 3u; ++a) {
+                for (std::size_t b = 0; b < 3u; ++b) {
+                    expected[static_cast<std::size_t>(dof[a] * n_dofs + dof[b])] +=
+                        w * (N[a] * N[b] + grad[a][0] * grad[b][0] + grad[a][1] * grad[b][1]);
+                }
+            }
+            ++evaluated_points;
+        }
+    }
+    ASSERT_GT(evaluated_points, 0u);
+    FE::Real max_difference{0.0};
+    for (FE::GlobalIndex row = 0; row < n_dofs; ++row) {
+        for (FE::GlobalIndex col = 0; col < n_dofs; ++col) {
+            const FE::Real difference = std::abs(
+                assembled.getMatrixEntry(row, col) -
+                expected[static_cast<std::size_t>(row * n_dofs + col)]);
+            max_difference = std::max(max_difference, difference);
+            EXPECT_LT(difference, FE::Real{1.0e-13}) << row << "," << col;
+        }
+    }
+    RecordProperty("full_cell_snapshot_rules", static_cast<int>(full_rules.size()));
+    RecordProperty("full_cell_tabulation_max_difference",
+                   ::testing::PrintToString(max_difference));
+#endif
+}
+
 TEST(LevelSetVolume, GeneratedInterfaceGlobalShiftReusesLifecycleCacheAcrossBisection)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)

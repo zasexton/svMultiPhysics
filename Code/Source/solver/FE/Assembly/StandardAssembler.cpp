@@ -56,6 +56,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <functional>
 #include <optional>
 #include <span>
@@ -2769,10 +2770,144 @@ public:
     }
 };
 
+// Uncut cells of a free-surface snapshot are assembled through full-side
+// cut-volume rules that repeat the same reference rule in every cell of a
+// type. Such cells share one rule object for an assembly call, and the basis
+// tabulations at its points are computed once and reused. Like the per-cell
+// rule it replaces, it is treated as a transient rule, so every other step
+// of the assembly is unchanged.
+class FullSideSnapshotQuadratureRule final : public quadrature::QuadratureRule {
+public:
+    explicit FullSideSnapshotQuadratureRule(const quadrature::QuadratureRule& rule)
+        : quadrature::QuadratureRule(rule.cell_family(), rule.dimension(), rule.order())
+    {
+        set_data(rule.points(), rule.weights());
+    }
+
+    // Same family, dimension and order, and bitwise identical points and
+    // weights: every consumer sees the same rule.
+    [[nodiscard]] bool reproduces(const quadrature::QuadratureRule& rule) const noexcept
+    {
+        if (cell_family() != rule.cell_family() || dimension() != rule.dimension() ||
+            order() != rule.order() || num_points() != rule.num_points() ||
+            !same_cache_identity(rule)) {
+            return false;
+        }
+        const auto& other_weights = rule.weights();
+        return weights().empty() ||
+               std::memcmp(weights().data(), other_weights.data(),
+                           weights().size() * sizeof(Real)) == 0;
+    }
+
+    // BasisCache::compute_uncached(basis, *this, gradients, hessians),
+    // computed on first request and kept for the lifetime of this rule.
+    // Only structural bases are kept, for which BasisCache itself treats
+    // basis type, element, dimension, order, size and vector valuedness as
+    // the complete identity; the key also holds the basis object, so a
+    // tabulation is only reused for the object that produced it. Returns
+    // nullptr for other bases.
+    [[nodiscard]] const basis::BasisCacheEntry* tabulation(
+        const basis::BasisFunction& basis,
+        bool gradients,
+        bool hessians) const
+    {
+        if (!basis.cache_identity_is_structural()) {
+            return nullptr;
+        }
+        const Tabulation key{&basis,
+                             basis.basis_type(),
+                             basis.element_type(),
+                             basis.dimension(),
+                             basis.order(),
+                             basis.size(),
+                             basis.is_vector_valued(),
+                             gradients,
+                             hessians,
+                             {}};
+        for (const auto& tabulated : tabulations_) {
+            if (tabulated.sameKey(key)) {
+                return &tabulated.entry;
+            }
+        }
+        tabulations_.push_back(key);
+        tabulations_.back().entry = basis::BasisCache::instance().compute_uncached(
+            basis, *this, gradients, hessians);
+        return &tabulations_.back().entry;
+    }
+
+private:
+    struct Tabulation {
+        const basis::BasisFunction* basis_object{nullptr};
+        BasisType basis_type{};
+        ElementType element_type{};
+        int dimension{0};
+        int order{0};
+        std::size_t size{0};
+        bool vector_valued{false};
+        bool gradients{false};
+        bool hessians{false};
+        basis::BasisCacheEntry entry{};
+
+        [[nodiscard]] bool sameKey(const Tabulation& other) const noexcept
+        {
+            return basis_object == other.basis_object &&
+                   basis_type == other.basis_type &&
+                   element_type == other.element_type &&
+                   dimension == other.dimension &&
+                   order == other.order &&
+                   size == other.size &&
+                   vector_valued == other.vector_valued &&
+                   gradients == other.gradients &&
+                   hessians == other.hessians;
+        }
+    };
+
+    // Deque: entries handed out stay valid while later ones are added.
+    mutable std::deque<Tabulation> tabulations_;
+};
+
+// Full-side snapshot rules of one assembly call, at most a few per call
+// (one per cell type and reference rule).
+class FullSideSnapshotRulePool {
+public:
+    // The shared rule equal to `rule`, or `rule` itself when the pool is
+    // full of other rules.
+    [[nodiscard]] const quadrature::QuadratureRule& intern(const quadrature::QuadratureRule& rule)
+    {
+        for (const auto& shared : rules_) {
+            if (shared->reproduces(rule)) {
+                return *shared;
+            }
+        }
+        if (rules_.size() >= max_rules) {
+            return rule;
+        }
+        rules_.push_back(std::make_unique<FullSideSnapshotQuadratureRule>(rule));
+        return *rules_.back();
+    }
+
+private:
+    static constexpr std::size_t max_rules = 16u;
+    std::vector<std::unique_ptr<FullSideSnapshotQuadratureRule>> rules_;
+};
+
 [[nodiscard]] bool isTransientCutVolumeQuadratureRule(
     const quadrature::QuadratureRule& rule) noexcept
 {
-    return dynamic_cast<const CutVolumeQuadratureRule*>(&rule) != nullptr;
+    return dynamic_cast<const CutVolumeQuadratureRule*>(&rule) != nullptr ||
+           dynamic_cast<const FullSideSnapshotQuadratureRule*>(&rule) != nullptr;
+}
+
+// Reused tabulation of `basis` at a full-side snapshot rule, or nullptr for
+// any other rule.
+[[nodiscard]] const basis::BasisCacheEntry* fullSideSnapshotTabulation(
+    const quadrature::QuadratureRule& rule,
+    const basis::BasisFunction& basis,
+    bool gradients,
+    bool hessians)
+{
+    const auto* shared = dynamic_cast<const FullSideSnapshotQuadratureRule*>(&rule);
+    return shared != nullptr ? shared->tabulation(basis, gradients, hessians) : nullptr;
 }
 
 void mixCutVolumeBasisCacheHash(std::uint64_t& h, std::uint64_t value) noexcept
@@ -8347,6 +8482,10 @@ void StandardAssembler::prepareGeometry(
 
     std::optional<basis::BasisCacheEntry> local_geom_bcache;
     const basis::BasisCacheEntry* geom_bcache_ptr = cached_geom_bcache_;
+    if (!geom_bcache_ptr && transient_cut_quad_rule) {
+        geom_bcache_ptr = fullSideSnapshotTabulation(
+            quad_rule, mapping->geometryBasis(), /*gradients=*/true, /*hessians=*/false);
+    }
     if (!geom_bcache_ptr) {
         if (transient_cut_quad_rule) {
             local_geom_bcache.emplace(basis::BasisCache::instance().compute_uncached(
@@ -9196,7 +9335,11 @@ void StandardAssembler::prepareBasis(
     const basis::BasisCacheEntry* trial_bcache = nullptr;
     const auto* cut_volume_basis_cache =
         transient_cut_quad_rule ? active_cut_volume_basis_cache_entry_ : nullptr;
-    if (!test_is_vector_basis) {
+    if (!test_is_vector_basis && cut_volume_basis_cache == nullptr) {
+        test_bcache = fullSideSnapshotTabulation(
+            quad_rule, test_basis, true, need_basis_hessians);
+    }
+    if (!test_is_vector_basis && test_bcache == nullptr) {
         if (cut_volume_basis_cache != nullptr) {
             test_bcache = &cut_volume_basis_cache->test_basis;
         } else if (transient_cut_quad_rule) {
@@ -9212,7 +9355,12 @@ void StandardAssembler::prepareBasis(
             test_bcache = cached_test_bcache_;
         }
     }
-    if (&test_space != &trial_space && !trial_is_vector_basis) {
+    if (&test_space != &trial_space && !trial_is_vector_basis &&
+        !(cut_volume_basis_cache != nullptr && cut_volume_basis_cache->has_trial)) {
+        trial_bcache = fullSideSnapshotTabulation(
+            quad_rule, trial_basis, true, need_basis_hessians);
+    }
+    if (&test_space != &trial_space && !trial_is_vector_basis && trial_bcache == nullptr) {
         if (cut_volume_basis_cache != nullptr &&
             cut_volume_basis_cache->has_trial) {
             trial_bcache = &cut_volume_basis_cache->trial_basis;
@@ -10608,6 +10756,7 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
     const auto cut_geometry_cache_insertions_before = cut_volume_geometry_cache_insertions_;
     const auto cut_geometry_cache_evictions_before = cut_volume_geometry_cache_evictions_;
     std::array<std::shared_ptr<const quadrature::QuadratureRule>, 256> full_cell_rule_cache{};
+    FullSideSnapshotRulePool full_side_snapshot_rules;
     std::span<const GlobalIndex> row_dofs;
     std::span<const GlobalIndex> col_dofs;
     std::vector<Real> cut_jit_constants;
@@ -10708,6 +10857,11 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
                 }
             }
             ++cut_partial_rules;
+        }
+        if (active_rule_is_partial_cut && isFullSideVolumeRule(rule)) {
+            // Uncut cell of a free-surface snapshot: share the rule object so
+            // its basis tabulations are reused across cells.
+            active_rule = &full_side_snapshot_rules.intern(*active_rule);
         }
         FE_CHECK_NOT_NULL(active_rule, "StandardAssembler::assembleCutVolumes: active quadrature rule");
         cut_quadrature_points += active_rule->num_points();
@@ -11213,6 +11367,7 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
     const auto cut_geometry_cache_insertions_before = cut_volume_geometry_cache_insertions_;
     const auto cut_geometry_cache_evictions_before = cut_volume_geometry_cache_evictions_;
     std::array<std::shared_ptr<const quadrature::QuadratureRule>, 256> full_cell_rule_cache{};
+    FullSideSnapshotRulePool full_side_snapshot_rules;
     std::vector<Real> cut_jit_constants;
     constexpr forms::CutCellParameterSlots cut_parameter_slots{};
     const auto cut_parameter_count =
@@ -11307,6 +11462,11 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
             }
             ++cut_partial_rules;
         }
+        if (active_rule_is_partial_cut && isFullSideVolumeRule(rule)) {
+            // Uncut cell of a free-surface snapshot: share the rule object so
+            // its basis tabulations are reused across cells.
+            active_rule = &full_side_snapshot_rules.intern(*active_rule);
+        }
         FE_CHECK_NOT_NULL(active_rule, "StandardAssembler::assembleCutVolumesFused: active quadrature rule");
         cut_quadrature_points += active_rule->num_points();
         cut_rule_time += cut_now() - stage_start;
@@ -11320,7 +11480,10 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
                 storeCutVolumeGeometryCacheEntry(rule_index, mesh, cell_id, cell_type, context_);
             }
         }
-        std::string current_geometry_rule_identity = active_rule->cache_identity();
+        // Rule the context geometry was last prepared with; the owner keeps a
+        // term-specific full-cell rule alive while it is that rule.
+        const quadrature::QuadratureRule* current_geometry_rule = active_rule;
+        std::shared_ptr<const quadrature::QuadratureRule> current_geometry_rule_owner;
         cut_geometry_time += cut_now() - stage_start;
 
         bool assembled_rule = false;
@@ -11344,10 +11507,11 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
                 term_rule = term_full_cell_rule.get();
             }
             if (active_rule_is_full_side &&
-                term_rule->cache_identity() != current_geometry_rule_identity) {
+                !term_rule->same_cache_identity(*current_geometry_rule)) {
                 stage_start = cut_now();
                 prepareGeometry(context_, mesh, cell_id, *term_rule);
-                current_geometry_rule_identity = term_rule->cache_identity();
+                current_geometry_rule = term_rule;
+                current_geometry_rule_owner = term_full_cell_rule;
                 cut_geometry_time += cut_now() - stage_start;
             }
 

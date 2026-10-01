@@ -2183,6 +2183,49 @@ public:
     }
 };
 
+// Samples a non-primary scalar field on boundary faces and compares it with
+// the affine function whose P1 interpolant the field holds.
+class BoundaryFaceFieldSamplingKernel final : public AssemblyKernel {
+public:
+    explicit BoundaryFaceFieldSamplingKernel(FieldId field) : field_(field) {}
+
+    [[nodiscard]] RequiredData getRequiredData() const override {
+        return RequiredData::PhysicalPoints | RequiredData::IntegrationWeights;
+    }
+
+    [[nodiscard]] std::vector<FieldRequirement> fieldRequirements() const override {
+        return {FieldRequirement{field_, RequiredData::SolutionValues}};
+    }
+
+    void computeCell(const AssemblyContext& /*ctx*/, KernelOutput& /*output*/) override {}
+
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override { return true; }
+
+    void computeBoundaryFace(const AssemblyContext& ctx,
+                             int /*boundary_marker*/,
+                             KernelOutput& output) override
+    {
+        const auto n = ctx.numTestDofs();
+        output.local_vector.assign(static_cast<std::size_t>(n), 0.0);
+        output.has_vector = true;
+        output.has_matrix = false;
+        output.n_test_dofs = n;
+        output.n_trial_dofs = n;
+        for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+            const auto x = ctx.physicalPoint(q);
+            const Real expected = x[0] + Real{2.0} * x[1] + Real{3.0} * x[2];
+            const Real value = ctx.fieldValue(field_, q);
+            max_error = std::max(max_error, std::abs(value - expected));
+            ++samples;
+            output.local_vector[0] += ctx.integrationWeight(q) * value;
+        }
+    }
+
+    FieldId field_{INVALID_FIELD_ID};
+    Real max_error{0.0};
+    int samples{0};
+};
+
 class CutInterfaceDiagnosticsKernel : public AssemblyKernel {
 public:
     [[nodiscard]] RequiredData getRequiredData() const override
@@ -3030,6 +3073,51 @@ TEST(StandardAssemblerFaces, BoundaryFaceUsesFaceQuadratureAndNormals) {
     EXPECT_NEAR(rhs.getVectorEntry(0), 0.5, 1e-12);         // sum of integration weights
     EXPECT_NEAR(rhs.getVectorEntry(1), 0.0, 1e-12);         // max |xi.z|
     EXPECT_NEAR(rhs.getVectorEntry(2), -1.0, 1e-12);        // avg normal z component
+}
+
+TEST(StandardAssemblerFaces, BoundaryFacesSampleNonPrimaryFieldsAtMappedPoints) {
+    // Field bases on a face must be evaluated at the face-to-cell mapped
+    // points (context.quadraturePoints()), not at the canonical points of
+    // the face rule. Faces 1-3 of the reference tetrahedron expose any
+    // mix-up; the field interpolates f = x + 2y + 3z exactly.
+    constexpr FieldId kField = 403;
+    for (LocalIndex face = 0; face < 4; ++face) {
+        SingleTetraBoundaryMeshAccess mesh(face);
+        dofs::DofMap dof_map(1, 4, 4);
+        dof_map.setCellDofs(0, std::vector<GlobalIndex>{0, 1, 2, 3});
+        dof_map.setNumDofs(4);
+        dof_map.setNumLocalDofs(4);
+        dof_map.finalize();
+
+        spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+        std::array<FieldSolutionAccess, 1> field_access = {{
+            FieldSolutionAccess{
+                .field = kField,
+                .space = &space,
+                .dof_map = &dof_map,
+                .dof_offset = 4,
+            },
+        }};
+        // Primary unknowns, then the field's P1 values at the vertices
+        // (0,0,0), (1,0,0), (0,1,0), (0,0,1).
+        const std::vector<Real> solution{
+            Real{0.0}, Real{0.0}, Real{0.0}, Real{0.0},
+            Real{0.0}, Real{1.0}, Real{2.0}, Real{3.0}};
+
+        DenseVectorView rhs(4);
+        StandardAssembler assembler;
+        assembler.setDofMap(dof_map);
+        assembler.setFieldSolutionAccess(field_access);
+        assembler.setCurrentSolution(solution);
+        assembler.initialize();
+
+        BoundaryFaceFieldSamplingKernel kernel(kField);
+        const auto result = assembler.assembleBoundaryFaces(mesh, 1, space, kernel, nullptr, &rhs);
+        ASSERT_TRUE(result.success) << "face " << face;
+        EXPECT_EQ(result.boundary_faces_assembled, 1) << "face " << face;
+        EXPECT_GT(kernel.samples, 0) << "face " << face;
+        EXPECT_LT(kernel.max_error, Real{1.0e-14}) << "face " << face;
+    }
 }
 
 TEST(StandardAssemblerMovingDomain, BoundaryFacePreparesReferenceAndCurrentGeometry) {
