@@ -110,6 +110,43 @@ the fluxes or nonlinear operator that produced that candidate. Production
 validation must therefore track interface position, convergence under time-step
 refinement, and phase volume in addition to nodal bounds.
 
+### Kinematic Reconciliation
+
+Galerkin transport satisfies `phi_t + w . grad(phi) = 0` only in the
+`L2(Omega)` sense, so the sharp P1 liquid measure `V(phi) = |{phi < c}|`
+changes by more or less than the interface flux of the transport velocity.
+Where `w` varies on the mesh scale, for example at a moving contact line
+whose slip velocity peaks at the contact vertex, this is the dominant source
+of liquid-volume drift; it does not shrink with `dt` and converges slowly
+with `h`.
+
+`Enable_kinematic_reconciliation` (default off;
+`LevelSetKinematicReconciliationOptions`) applies, after every accepted step,
+the correction of `FE/LevelSet/LevelSetKinematicReconciliation.h`. With the
+transported rate `d = (phi_t - phi_p) / dt` held fixed, the endpoint solves
+the lumped interface-kinematic equations
+
+`phi_i = phi_t,i - dt r_i / gbar_i`,
+`r_i = ((M_p + M) d)_i / 2 + (f_p,i + f_i) / 2`,
+`gbar_i = (g_p,i + g_i) / 2`,
+
+with `g_i = int_Gamma N_i / |grad(phi)|` (the exact nodal derivative of `-V`),
+`f_i = int_Gamma N_i (w . grad(phi)) / |grad(phi)|` (the nodal parts of
+`int_Gamma w . n`) and `M_ij = int_Gamma N_i N_j / |grad(phi)|`, on the
+previous accepted interface and, by fixed-point iteration, on the reconciled
+endpoint. Since the row sums of `(M_p + M) / 2` are `gbar`, the trapezoidal
+change of `V` equals the trapezoidal flux `dt (F_p + F) / 2`. Each nodal
+change depends only on the interface in the node's support: there is no
+global shift, multiplier or numerical parameter, and the target is the flux
+of `w` itself rather than a volume. Nodes keep their sign class (so the cut
+topology is unchanged); a blocked node's share moves to the other nodes of its
+cells. Affine `Triangle3` and `Tetra4` cells are supported; replicated level-set
+coefficients and owned-cell sums give partition-independent results. The
+application runs it as the first stage of accepted-step maintenance
+(`GeometryReconciliation` ledger rows) and logs one
+`Level-set kinematic reconciliation` line per step with the transported and
+reconciled volume errors.
+
 ## Equation-Level Active Domains
 
 An equation-level active-domain request means that volume forms owned by that
