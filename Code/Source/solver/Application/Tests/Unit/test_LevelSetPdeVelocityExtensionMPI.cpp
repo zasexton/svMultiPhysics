@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <vector>
@@ -187,5 +188,185 @@ TEST(LevelSetPdeVelocityExtensionMPI, TwoRankResultMatchesSerialOnEveryLocalVert
     int failures = 0;
     MPI_Allreduce(&local_failures, &failures, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
     EXPECT_EQ(failures, 0) << application::core::pdeVelocityExtensionOperatorName(op);
+  }
+}
+
+namespace {
+
+struct PdeCachedRun {
+  std::vector<double> extended;
+  std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> rows;
+  bool reused{false};
+};
+
+// Known set as in extend(), plus the vertices at the given (i, j) lattice
+// points; source velocity uAt scaled by `scale`.
+PdeCachedRun extendCached(const svmp::Mesh& mesh, const svmp::MeshComm& comm,
+                          PdeVelocityExtensionOperator op, double scale,
+                          const std::vector<std::pair<long long, long long>>& extra,
+                          application::core::PdeVelocityExtensionCache* cache)
+{
+  const auto n = mesh.n_vertices();
+  const auto& X = mesh.X_ref();
+  std::vector<double> phi(n), source(2 * n);
+  std::vector<std::uint8_t> known(n, 0u);
+  for (std::size_t v = 0; v < n; ++v) {
+    const double x = X[2 * v], y = X[2 * v + 1];
+    phi[v] = phiAt(x, y);
+    const auto u = uAt(x, y);
+    source[2 * v] = scale * u[0];
+    source[2 * v + 1] = scale * u[1] + (scale - 1.0);
+    known[v] = phi[v] < 0.0 ? 1u : 0u;
+    const auto key = std::make_pair(std::llround(x * kPdeCells),
+                                    std::llround(y * kPdeCells));
+    if (std::find(extra.begin(), extra.end(), key) != extra.end()) {
+      known[v] = 1u;
+    }
+  }
+  const auto& local = mesh.local_mesh();
+  for (svmp::index_t c = 0; c < local.n_cells(); ++c) {
+    auto [cv, count] = local.cell_vertices_span(c);
+    bool neg = false, pos = false;
+    for (std::size_t i = 0; i < count; ++i) {
+      neg = neg || phi[static_cast<std::size_t>(cv[i])] < 0.0;
+      pos = pos || phi[static_cast<std::size_t>(cv[i])] >= 0.0;
+    }
+    if (neg && pos) {
+      for (std::size_t i = 0; i < count; ++i) {
+        known[static_cast<std::size_t>(cv[i])] = 1u;
+      }
+    }
+  }
+  const std::vector<WallVelocityExtensionConstraint> walls{
+      {.boundary_label = kPdeSideWall,
+       .constrained_components = {true, false, false}}};
+  PdeVelocityExtensionOptions options;
+  options.op = op;
+  PdeCachedRun out;
+  const auto report = application::core::extendVelocityByPde(
+      mesh, comm, phi, source, 2u, known, 2u,
+      std::span<const WallVelocityExtensionConstraint>(walls), options,
+      out.extended, &out.rows, cache,
+      application::core::PdeVelocityExtensionMeshRevisions{
+          .geometry = 1u, .topology = 1u, .ownership = 1u, .numbering = 1u});
+  out.reused = report.reused_factorization;
+  return out;
+}
+
+// Number of local mismatches between two runs (values and rows, bitwise).
+int bitwiseMismatches(const PdeCachedRun& a, const PdeCachedRun& b)
+{
+  int mismatches = 0;
+  if (a.extended.size() != b.extended.size() || a.rows.size() != b.rows.size()) {
+    return 1;
+  }
+  if (!a.extended.empty() &&
+      std::memcmp(a.extended.data(), b.extended.data(),
+                  a.extended.size() * sizeof(double)) != 0) {
+    ++mismatches;
+  }
+  for (std::size_t r = 0; r < a.rows.size(); ++r) {
+    const auto& ra = a.rows[r];
+    const auto& rb = b.rows[r];
+    if (ra.vertex != rb.vertex || ra.component != rb.component ||
+        ra.dependencies.size() != rb.dependencies.size()) {
+      ++mismatches;
+      continue;
+    }
+    for (std::size_t d = 0; d < ra.dependencies.size(); ++d) {
+      const auto& da = ra.dependencies[d];
+      const auto& db = rb.dependencies[d];
+      if (da.field != db.field || da.vertex != db.vertex ||
+          da.component != db.component ||
+          std::memcmp(&da.coefficient, &db.coefficient, sizeof(double)) != 0) {
+        ++mismatches;
+      }
+    }
+  }
+  return mismatches;
+}
+
+// Reuse flags over the ranks: {all reused, any reused}.
+std::pair<bool, bool> reuseOverRanks(bool reused)
+{
+  int local = reused ? 1 : 0;
+  int all = 0;
+  int any = 0;
+  MPI_Allreduce(&local, &all, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+  MPI_Allreduce(&local, &any, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+  return {all != 0, any != 0};
+}
+
+int globalSum(int value)
+{
+  int sum = 0;
+  MPI_Allreduce(&value, &sum, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+  return sum;
+}
+
+} // namespace
+
+TEST(LevelSetPdeVelocityExtensionMPI, CacheReuseDecisionIsCollective)
+{
+  int size = 1;
+  int rank = 0;
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  ASSERT_EQ(size, 2) << "This test requires exactly two ranks.";
+
+  const auto arrays = makePdeArrays();
+  auto distributed = std::make_shared<svmp::Mesh>(svmp::MeshComm(MPI_COMM_WORLD));
+  distributed->build_from_arrays_global_and_partition(
+      2, arrays.x, arrays.offsets, arrays.connectivity, arrays.shapes,
+      svmp::PartitionHint::Cells, /*ghost_layers=*/3,
+      {{"partition_method", "block"}});
+  labelSideWalls(*distributed);
+  const svmp::MeshComm comm(MPI_COMM_WORLD);
+
+  // A dry vertex present on exactly one rank: marking it known changes only
+  // that rank's contribution.
+  const std::pair<long long, long long> lone{kPdeCells / 2, kPdeCells - 1};
+  int present = 0;
+  {
+    const auto& X = distributed->X_ref();
+    for (std::size_t v = 0; v < distributed->n_vertices(); ++v) {
+      if (std::llround(X[2 * v] * kPdeCells) == lone.first &&
+          std::llround(X[2 * v + 1] * kPdeCells) == lone.second) {
+        present = 1;
+      }
+    }
+  }
+  ASSERT_EQ(globalSum(present), 1);
+
+  for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
+                        PdeVelocityExtensionOperator::LeastSquaresNormal}) {
+    SCOPED_TRACE(application::core::pdeVelocityExtensionOperatorName(op));
+    application::core::PdeVelocityExtensionCache cache;
+    const auto check = [&](double scale,
+                           const std::vector<std::pair<long long, long long>>& extra,
+                           bool expect_reuse, const char* what) {
+      SCOPED_TRACE(what);
+      const auto cached = extendCached(*distributed, comm, op, scale, extra, &cache);
+      const auto reference =
+          extendCached(*distributed, comm, op, scale, extra, nullptr);
+      const auto [all, any] = reuseOverRanks(cached.reused);
+      EXPECT_EQ(all, any) << "ranks disagree on reuse";
+      EXPECT_EQ(all, expect_reuse);
+      EXPECT_FALSE(reference.reused);
+      EXPECT_EQ(globalSum(bitwiseMismatches(cached, reference)), 0);
+    };
+
+    check(1.0, {}, false, "first call");
+    check(1.5, {}, true, "new velocity");
+    // One rank drops its entry: every rank refactors.
+    if (rank == 1) {
+      cache.clear();
+    }
+    check(0.5, {}, false, "entry dropped on rank 1");
+    check(2.0, {}, true, "reuse after the collective rebuild");
+    // The known set changes on one rank only: every rank refactors.
+    check(1.0, {lone}, false, "known set changed on one rank");
+    check(1.25, {lone}, true, "reuse of the new known set");
+    check(1.25, {}, false, "known set restored");
   }
 }
