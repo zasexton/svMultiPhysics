@@ -5494,10 +5494,10 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         }
     }
 
-    // INFO diagnostics are built only when the logger prints them; the
-    // fail-open warning below also quotes this line.
+    // Detailed diagnostics, printed (at INFO) only when FE_LOG_LEVEL=DEBUG;
+    // the fail-open warning below also quotes the first line.
     const bool log_aggregation_diagnostics =
-        Logger::instance().get_level() <= LogLevel::INFO;
+        Logger::instance().get_level() <= LogLevel::DEBUG;
     std::ostringstream oss;
     if (!log_aggregation_diagnostics && !allow_unaggregated) {
         oss.setstate(std::ios::badbit);  // the insertions below format nothing
