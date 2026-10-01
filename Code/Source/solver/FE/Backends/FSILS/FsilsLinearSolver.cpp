@@ -8,6 +8,7 @@
 #include "Backends/FSILS/FsilsLinearSolver.h"
 
 #include "Backends/FSILS/FsilsMatrix.h"
+#include "Backends/FSILS/FsilsSystemDump.h"
 #include "Backends/FSILS/FsilsVector.h"
 #include "Core/FEException.h"
 #include "Core/Logger.h"
@@ -23,6 +24,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <exception>
 #include <cstdlib>
 #include <cmath>
@@ -1264,6 +1266,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                                       GenericVector& x_in,
                                       const GenericVector& b_in)
 {
+    const auto solve_wall_start = std::chrono::steady_clock::now();
     const auto* A = dynamic_cast<const FsilsMatrix*>(&A_in);
     auto* x = dynamic_cast<FsilsVector*>(&x_in);
     const auto* b = dynamic_cast<const FsilsVector*>(&b_in);
@@ -6672,6 +6675,14 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             << " rel=" << report.relative_residual
             << " msg='" << report.message << "'";
         traceLog(oss.str());
+    }
+
+    if (fsilsSystemDumpRequested()) {
+        const double solve_seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_wall_start).count();
+        maybeDumpFsilsSystem(*A, *b, *x, dirichlet_dofs_, options_, report, solve_seconds,
+                             static_cast<int>(rank_one_updates_.size() + reduced_field_updates_.size() +
+                                              grouped_bordered_field_couplings_.size()));
     }
 
     return report;
