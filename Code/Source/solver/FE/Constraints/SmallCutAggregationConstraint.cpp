@@ -2174,11 +2174,17 @@ resolveDistributedAggregationDeclarations(
     }
     Real measure = 0.0;
     if (!rule.points.empty()) {
-        auto mapped_rule = rule;
-        mapped_rule.provenance.parent_entity =
-            static_cast<MeshIndex>(cell);
-        measure =
-            geometry::physicalCutQuadratureMeasure(mesh, mapped_rule);
+        // The measure reads the parent cell from the rule provenance; copy
+        // the rule only when that cell has to be substituted.
+        if (rule.provenance.parent_entity == static_cast<MeshIndex>(cell)) {
+            measure = geometry::physicalCutQuadratureMeasure(mesh, rule);
+        } else {
+            auto mapped_rule = rule;
+            mapped_rule.provenance.parent_entity =
+                static_cast<MeshIndex>(cell);
+            measure =
+                geometry::physicalCutQuadratureMeasure(mesh, mapped_rule);
+        }
     } else if (rule.frame == geometry::CutGeometryFrame::Current) {
         // Hand-built constraint fixtures historically provide only a
         // current-frame measure. Production generated rules carry points and
@@ -5111,13 +5117,32 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             }
         }
 
-        std::sort(
-            component_cells.begin(),
-            component_cells.end(),
-            [&](const CellKey& lhs, const CellKey& rhs) {
-                return std::tie(global_physical_cell_gids.at(lhs), lhs) <
-                       std::tie(global_physical_cell_gids.at(rhs), rhs);
-            });
+        // Order by (physical cell GID, key). Look each GID up once instead
+        // of twice per comparison; the pairs are unique, so the order is the
+        // same for any sort.
+        {
+            std::vector<std::pair<GlobalIndex, std::size_t>> component_order;
+            component_order.reserve(component_cells.size());
+            for (std::size_t i = 0; i < component_cells.size(); ++i) {
+                component_order.emplace_back(
+                    global_physical_cell_gids.at(component_cells[i]), i);
+            }
+            std::sort(
+                component_order.begin(),
+                component_order.end(),
+                [&](const auto& lhs, const auto& rhs) {
+                    return std::tie(lhs.first, component_cells[lhs.second]) <
+                           std::tie(rhs.first, component_cells[rhs.second]);
+                });
+            std::vector<CellKey> ordered_component_cells;
+            ordered_component_cells.reserve(component_cells.size());
+            for (const auto& [gid, index] : component_order) {
+                static_cast<void>(gid);
+                ordered_component_cells.push_back(
+                    std::move(component_cells[index]));
+            }
+            component_cells = std::move(ordered_component_cells);
+        }
         if (component_cells.empty()) {
             throw std::logic_error(
                 "SmallCutAggregationConstraint: active feature traversal "
