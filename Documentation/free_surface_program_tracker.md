@@ -367,6 +367,12 @@ These are proposals. Each lists a recommended option and an alternative. Record 
 - **D10, 2026-09-30: space and time convergence are judged separately.** Spatial convergence is gated with the time-step error removed (a small fixed Δt or a converged-Δt reference), and a separate Δt study is run at a fixed mesh. Refining Δt with h let opposite-sign errors cancel.
 - **D11, 2026-09-30: volume criteria gate the maximum deviation over the run**, including any reversible oscillation of the P1 area.
 - **D12, 2026-09-30: sloshing damping error ≤ 5% at the finest level** (pass/fail), matching the capillary-wave criterion.
+- **D13, 2026-10-01: implement the lagged normal-increment surface-tension term** (`Documentation/free_surface_semi_implicit_surface_tension_design.md` §3.3).
+  - Opt-in `Surface_tension_semi_implicit=NormalIncrement`, `SurfaceStress` first.
+  - Δt_eff comes from the integrator, not a tuned parameter (P1). The term vanishes in every fresh residual, so the accepted solution is unchanged within the outer tolerance.
+  - Purpose: remove Δt_B as the step-count driver for the relaxation and capillary benchmarks.
+  - Any protocol change to a fixed physical Δt with Δt refinement waits for validation and a user decision.
+  - Branch `dev/semi-implicit-surface-tension`.
 - **D6, 2026-09-29: the lightweight process is adopted (§12).**
   - Evidence for a result is:
     - the commit hash;
@@ -629,7 +635,12 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
       - multithreaded assembly in `StandardAssembler`, after the assembler branches;
       - perf C follow-ups, after `dev/perf-cut-integration-reuse`: deduplicate the per-component physical transforms of product-space velocity, and cache field evaluations in full cells (about 10% of cut-volume time);
       - constraint-build cost (about 3 s per 3D tank step at 1/h = 16), after `dev/mpi-correctness`.
-    - Need user approval, because results change within solver tolerance: fewer outer passes (a better geometry predictor, or Jacobian reuse across passes); the lagged-increment surface-tension term.
+    - Started 2026-10-01: `dev/perf-build-jit`, a build-configuration and JIT study.
+      - Variants: LTO and PGO (expected bitwise); `-march=x86-64-v3` with and without FP contraction; JIT opt level, CPU target and contraction.
+      - It also checks that JIT cache objects are keyed by CPU features, since jobs run on both SKX (AVX-512) and MLN (AVX2) nodes.
+      - Defaults that change round-off need user approval.
+    - Queued after the current merges: a fresh 2D/3D profiling pass of the post-merge step, attacking the next hotspots (results-neutral).
+    - Need user approval, because results change within solver tolerance: fewer outer passes (a better geometry predictor, or Jacobian reuse across passes). The lagged-increment term was approved as D13.
   - **Open questions (for the user):**
     1. 3D gating: R/h = 32 is not affordable, so gate at R/h = 16 with the order over 8/16, or report 3D without gating.
     2. For R/h = 16 memory: implement item 8, or allow a job larger than 16 GB.
