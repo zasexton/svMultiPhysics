@@ -1538,6 +1538,13 @@ bool shouldApplyLevelSetVolumeCorrection(
            completed_step_index % options.cadence_steps == 0;
 }
 
+bool shouldApplyLevelSetKinematicReconciliation(
+    const LevelSetKinematicReconciliationOptions& options,
+    int completed_step_index) noexcept
+{
+    return options.enabled && completed_step_index > 0;
+}
+
 systems::CoupledResidualKernels installLevelSetTransport(
     systems::FESystem& system,
     std::shared_ptr<const spaces::FunctionSpace> level_set_space,
