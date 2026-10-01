@@ -305,6 +305,75 @@ D9). `--transport wet_extension` was not run.
 A 20-step static drop (`static_drop_2d`, `R/h = 8`, no crossings) gives
 bit-identical output with the baseline build of `11aba0a2`.
 
+## Area drift: attribution and kinematic reconciliation (2026-10-01)
+
+Serial, `R/h = 16`, `SurfaceStress`, generalized-alpha, FSILS, transport
+`pde_extension`, 100 steps (`t = 0.437`) unless stated. Raw output:
+`$SCRATCH/svmp-dev-volume/runs/`.
+
+**Budget before the fix** (build `35a81fd3`, 60 deg). The change of the
+exact P1 area `A_h` over each step was split, from the saved fields, into
+the interface flux of the transport velocity, `dt (F_n + F_{n+1}) / 2` with
+`F = int_Gamma w . n`, and the rest:
+
+| Source | Contribution to `A/A(0) - 1` |
+|---|---|
+| total (maximum over the run) | 1.25e-3 (final 8.5e-4) |
+| (a) level-set transport: area change minus interface flux | +8.47e-4 (99.8%) |
+| interface flux itself, i.e. the fluid's discrete divergence on the liquid | +1.5e-6 (backward Euler: 5e-12) |
+| (b) wall maintenance or reinitialization | 0: off in the protocol; with `--reinitialization` the projection did not converge in 4 iterations and was skipped at every call |
+| (c) cut-topology epochs: excess of the 9 restart/cycle steps over their neighbours | +2.8e-6 |
+| (d) measurement | 0: the `Wet volume diagnostic` equals the exact P1 cut area of the transported `phi` to round-off |
+
+Controls (maximum drift): SUPG off 1.26e-3; backward Euler 1.07e-3; `dt/2`
+1.25e-3; 90 deg started at 90 deg (no contact-line motion) 1.7e-7; coupled
+transport 5.2e-3; 120 deg 1.5e-4. At `t <= 0.4375` the drift is 2.6e-3,
+1.2e-3 and 0.93e-3 at `R/h = 8, 16, 32` (observed order 1.1, then 0.4). A
+replay of the P1 Galerkin/SUPG/generalized-alpha step from the saved `phi`
+and `w` reproduces the per-step area error to 1%, as do its variants without
+SUPG, with lumped mass or with backward Euler.
+
+**Cause.** The Galerkin transport satisfies `phi_t + w . grad(phi) = 0` only
+in `L2(Omega)`. The nodal kinematic residual on the interface sits on the
+wall vertex next to each contact point and the vertex above it: the
+Navier-slip velocity peaks at the contact vertex, `phi` develops a gradient
+kink there, and the nodal update blends the slopes of both wall cells. At
+step 15 the contact point moved 23% faster than the fluid at the contact
+point. The error follows the contact-point position within a wall cell (its
+sign changes about every half cell) and adds liquid on balance in both the
+spreading and the receding case.
+
+**Fix.** `Enable_kinematic_reconciliation=true` (generator default; tracker
+decision pending): after every accepted step, a local, parameter-free
+correction makes the step's area change equal the interface flux of the
+transport velocity (`FE/LevelSet/LevelSetKinematicReconciliation.h`).
+
+| Run | Max drift, reconciled (`dd9e831e`) | Max drift, `35a81fd3` |
+|---|---|---|
+| 60 deg, full protocol, 2800 steps to `T = 12.25` | 6.1e-6 | 2.6e-2; from step 2324 a spurious dry spot on the wall inside the footprint (four wall crossings) |
+| 120 deg, full protocol | 6.8e-5 | 3.7e-3 |
+| 60 deg, `t <= 0.4375`, nested meshes `R/h = 8, 16, 32` | 3.3e-6, 2.8e-6, 5.6e-6 | 2.6e-3, 1.2e-3, 0.93e-3 |
+| 60 and 120 deg, coupled transport, 100 steps | 9.6e-6, 3.4e-6 | 5.2e-3 (60 deg) |
+
+The remaining drift is the interface flux itself (the fluid's discrete
+divergence on the liquid, generalized-alpha stage) plus a per-step residual
+of order 1e-8; both accumulate with the number of steps, so it no longer
+decreases with `h`. The 60 degree cap ends at 61.7/58.4 degrees (circle fit
+60.2, height-base angle 60.2), base error 0.10%, apex error 0.29%; the base
+radius history matches the run without reconciliation to within 0.3%
+(`35a81fd3` at `t = 10.0`, before its dry spot: 61.4/59.0 degrees, circle fit
+60.7). The 120 degree cap follows the run without reconciliation to within
+2 degrees in angle; at `t = 4.0` its base half-width is 0.853 against 0.864
+(that run had gained 0.35% area), and both end within 0.3% of the reference
+0.866 (0.864 and 0.868). Its drift (6.8e-5 at the end) is almost all
+interface flux: under generalized-alpha the endpoint velocity is not
+discretely divergence free on the endpoint liquid (about -4e-8 of the area
+per step near equilibrium); backward Euler gives 5e-12 per 100 steps. The
+reconciliation adds 20-45% to the time per step
+(one accepted-step maintenance transaction per step). Jobs: 46146618
+(full-protocol, refinement and regression runs), 46143892 (coupled
+transport); case directories under `runs/val`, `runs/kr5`, `runs/kr4`.
+
 ## Smoke runs before the vertex-crossing fixes (2026-09-30)
 
 All at `R/h = 16` with `SurfaceStress` and truncated with `--max-steps`. The
@@ -337,7 +406,15 @@ the `volume_drift` criterion (1e-4) will fail. Conservative transport (WP-6) is 
 
 ## Open points
 
-- The area drift of both cases (about 1e-2 over 11% of the run), above.
+- The area drift of both cases (about 1e-2 over 11% of the run), above;
+  removed by the kinematic reconciliation (section "Area drift").
+- Spurious wall spots: in the dry wall region behind a receding contact
+  line, and once inside the footprint, single wall vertices of the
+  transported `phi` settle within about 1e-3 of zero or cross it, giving
+  tiny extra wall crossings. Seen with and without the reconciliation (120
+  deg from step 952 with it and from step 1344 without; 60 deg without it
+  from step 2324), so `verify.py` rejects those full runs ("expected two wall
+  contact points").
   A first comparison with the PDE velocity extension of tracker D9
   (`--transport pde_extension`; job `46108807`, branch
   `dev/pde-velocity-extension` at `0e4ef8e7`, `R/h = 16`, `SurfaceStress`,
