@@ -2702,6 +2702,8 @@ if(FE_BUILD_TESTS)
 	                Tests/Unit/Backends/test_LinearSolverConformance.cpp
 	                Tests/Unit/Backends/test_PetscBackend.cpp
 	                Tests/Unit/Backends/test_GaugeDiagnostics.cpp
+	                Tests/Unit/Backends/test_PreconditionerReuse.cpp
+	                Tests/Unit/Backends/test_LinearSolverReplay.cpp
 	                Tests/Unit/Backends/test_main.cpp
 		            )
 		            add_executable(test_fe_backends ${FE_BACKENDS_TEST_SOURCES})
