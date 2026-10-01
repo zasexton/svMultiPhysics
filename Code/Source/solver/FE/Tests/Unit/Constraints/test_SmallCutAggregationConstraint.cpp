@@ -47,6 +47,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
@@ -3511,6 +3512,362 @@ TEST(SmallCutAggregationConstraint, PrunedSliverFallsToInactivePinPolicy)
     EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 3)));
     EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 6)));
     EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 7)));
+#endif
+}
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+namespace {
+
+// Bitwise summary of everything a refresh publishes: closed constraint
+// lines, finalized prolongation reports (whose canonical digest covers rows,
+// cells with retained volumes and patches) and the refresh reports without
+// their rank-local lineage.
+struct AggregationPublicationSummary {
+    std::vector<std::uint64_t> line_words{};
+    std::vector<std::uint64_t> prolongation_words{};
+    std::vector<std::uint64_t> report_words{};
+
+    [[nodiscard]] bool operator==(
+        const AggregationPublicationSummary&) const = default;
+};
+
+[[nodiscard]] std::uint64_t realBits(Real value)
+{
+    return std::bit_cast<std::uint64_t>(static_cast<double>(value));
+}
+
+[[nodiscard]] AggregationPublicationSummary summarizeAggregationPublication(
+    const systems::FESystem& system)
+{
+    AggregationPublicationSummary summary;
+    std::vector<std::vector<std::uint64_t>> lines;
+    system.constraints().forEach(
+        [&](const AffineConstraints::ConstraintView& line) {
+            std::vector<std::uint64_t> words{
+                static_cast<std::uint64_t>(line.slave_dof),
+                std::bit_cast<std::uint64_t>(line.inhomogeneity)};
+            for (const auto& entry : line.entries) {
+                words.push_back(static_cast<std::uint64_t>(entry.master_dof));
+                words.push_back(std::bit_cast<std::uint64_t>(entry.weight));
+            }
+            lines.push_back(std::move(words));
+        });
+    std::sort(lines.begin(), lines.end());
+    for (const auto& words : lines) {
+        summary.line_words.push_back(words.size());
+        summary.line_words.insert(
+            summary.line_words.end(), words.begin(), words.end());
+    }
+    for (const auto& prolongation :
+         system.finalizedSmallCutAggregationProlongations()) {
+        EXPECT_NE(prolongation, nullptr);
+        if (!prolongation) {
+            continue;
+        }
+        summary.prolongation_words.push_back(
+            static_cast<std::uint64_t>(prolongation->field));
+        summary.prolongation_words.push_back(
+            prolongation->canonical_content_digest);
+        summary.prolongation_words.push_back(
+            prolongation->trace_bound_eligible ? 1u : 0u);
+        for (const auto& cell : prolongation->active_cells) {
+            summary.prolongation_words.push_back(
+                static_cast<std::uint64_t>(cell.cell_gid));
+            summary.prolongation_words.push_back(
+                realBits(cell.retained_physical_volume));
+        }
+    }
+    for (const auto& report :
+         system.completedSmallCutAggregationRefreshReports()) {
+        auto& words = summary.report_words;
+        words.push_back(static_cast<std::uint64_t>(report.field));
+        words.push_back(report.canonical_feature_class_fingerprint);
+        words.push_back(report.canonical_slave_set_fingerprint);
+        words.push_back(report.maximum_observed_root_path);
+        words.push_back(realBits(
+            report.maximum_observed_reference_extrapolation));
+        words.push_back(realBits(report.maximum_observed_absolute_coefficient));
+        words.push_back(realBits(report.maximum_observed_row_l1_norm));
+        words.push_back(report.canonical_candidate_vertices);
+        words.push_back(report.canonical_rooted_candidate_vertices);
+        words.push_back(report.canonical_rootless_candidate_vertices);
+        words.push_back(report.canonical_owned_aggregate_dofs);
+        words.push_back(report.canonical_owned_pinned_dofs);
+        words.push_back(report.canonical_strong_suppressed_dofs);
+        words.push_back(report.canonical_active_feature_count);
+        words.push_back(realBits(
+            report.canonical_rootless_active_physical_volume));
+        words.push_back(report.local_lineage.successful_publication_ordinal);
+        for (const auto& feature : report.canonical_active_features) {
+            words.push_back(
+                static_cast<std::uint64_t>(feature.stable_feature_id));
+            words.push_back(feature.canonical_cell_gid_digest);
+            words.push_back(feature.canonical_cell_count);
+            words.push_back(static_cast<std::uint64_t>(feature.disposition));
+            words.push_back(
+                realBits(feature.canonical_retained_physical_volume));
+        }
+        words.push_back(report.canonical_topology_transition.has_value());
+        if (report.canonical_topology_transition.has_value()) {
+            const auto& transition = *report.canonical_topology_transition;
+            words.push_back(transition.canonical_topology_changed);
+            words.push_back(transition.canonical_aggregate_slaves_entered);
+            words.push_back(transition.canonical_aggregate_slaves_left);
+            words.push_back(transition.canonical_features_entered);
+            words.push_back(transition.canonical_features_exited);
+            words.push_back(realBits(
+                transition.canonical_rootless_active_physical_volume_delta));
+        }
+    }
+    return summary;
+}
+
+struct AggregationReuseRun {
+    std::vector<AggregationPublicationSummary> summaries{};
+    std::vector<std::string> logs{};
+};
+
+// Velocity (two components) and pressure on a four-cell strip, both with
+// small-cut aggregation, refreshed once per context in `contexts`.
+[[nodiscard]] AggregationReuseRun runAggregationReuseSequence(
+    const std::vector<std::vector<CellRuleSpec>>& contexts,
+    bool disable_reuse)
+{
+    std::optional<ScopedEnvVar> disable;
+    if (disable_reuse) {
+        disable.emplace("SVMP_DISABLE_SMALL_CUT_AGGREGATION_REUSE", "1");
+    }
+    auto mesh = buildQuadStrip(4);
+    auto scalar_space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+    auto vector_space =
+        std::make_shared<spaces::ProductSpace>(scalar_space, /*components=*/2);
+    systems::FESystem system(mesh);
+    const auto velocity = system.addField(
+        systems::FieldSpec{.name = "u", .space = vector_space, .components = 2});
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = scalar_space, .components = 1});
+    system.addOperator("equations");
+    system.addSystemConstraint(std::make_unique<SmallCutAggregationConstraint>(
+        velocity, geometry::CutIntegrationSide::Negative, kInterfaceMarker));
+    system.addSystemConstraint(std::make_unique<SmallCutAggregationConstraint>(
+        pressure, geometry::CutIntegrationSide::Negative, kInterfaceMarker));
+    system.setup();
+
+    AggregationReuseRun run;
+    for (const auto& specs : contexts) {
+        system.setCutIntegrationContext(makeCutContext(specs));
+        testing::internal::CaptureStdout();
+        testing::internal::CaptureStderr();
+        system.rebuildConstraintState();
+        auto log = testing::internal::GetCapturedStdout();
+        log += testing::internal::GetCapturedStderr();
+        run.logs.push_back(std::move(log));
+        run.summaries.push_back(summarizeAggregationPublication(system));
+    }
+    return run;
+}
+
+[[nodiscard]] std::size_t countOccurrences(const std::string& text,
+                                           const std::string& needle)
+{
+    std::size_t count = 0u;
+    for (auto position = text.find(needle); position != std::string::npos;
+         position = text.find(needle, position + needle.size())) {
+        ++count;
+    }
+    return count;
+}
+
+} // namespace
+#endif
+
+TEST(SmallCutAggregationConstraint,
+     ReusedRefreshPublishesBitwiseTheSameAsAFullRecomputation)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    const std::vector<CellRuleSpec> cut_left{
+        {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
+        {.cell = 1, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+        {.cell = 2, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+        {.cell = 3, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+    };
+    // Same cut topology, different retained volume of the cut cell.
+    auto moved_left = cut_left;
+    moved_left[0].volume_fraction = Real{0.45};
+    // Same cut topology and volumes, new retained-rule identities (generated
+    // rules embed the source value revision in their identity).
+    auto relabeled_left = moved_left;
+    for (auto& spec : relabeled_left) {
+        spec.cut_topology_revision =
+            std::uint64_t{1000} + static_cast<std::uint64_t>(spec.cell);
+    }
+    // Different cut topology: the cut moves to the right end.
+    const std::vector<CellRuleSpec> cut_right{
+        {.cell = 0, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+        {.cell = 1, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+        {.cell = 2, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+        {.cell = 3, .volume_fraction = Real{0.2}, .full_cell_equivalent = false},
+    };
+    const std::vector<std::vector<CellRuleSpec>> sequence{
+        cut_left, cut_left, moved_left, relabeled_left,
+        cut_right, cut_right, cut_left};
+
+    const auto reused = runAggregationReuseSequence(sequence, false);
+    const auto recomputed = runAggregationReuseSequence(sequence, true);
+    ASSERT_EQ(reused.summaries.size(), sequence.size());
+    ASSERT_EQ(recomputed.summaries.size(), sequence.size());
+    for (std::size_t step = 0; step < sequence.size(); ++step) {
+        EXPECT_FALSE(reused.summaries[step].line_words.empty());
+        EXPECT_EQ(reused.summaries[step], recomputed.summaries[step])
+            << "step " << step;
+        EXPECT_EQ(countOccurrences(recomputed.logs[step],
+                                   "decision=rebuilt reason=not_admissible"),
+                  2u)
+            << recomputed.logs[step];
+        // The refresh diagnostic and churn lines are emitted on reuse too.
+        EXPECT_EQ(countOccurrences(reused.logs[step],
+                                   "diagnostic=small_cut_aggregation "),
+                  2u);
+        EXPECT_EQ(countOccurrences(reused.logs[step],
+                                   "diagnostic=small_cut_aggregation_churn"),
+                  2u);
+    }
+
+    const auto expect_decisions = [&](std::size_t step,
+                                      const std::string& velocity,
+                                      const std::string& pressure) {
+        const auto& log = reused.logs[step];
+        EXPECT_NE(log.find("field='u' decision=" + velocity),
+                  std::string::npos)
+            << "step " << step << "\n" << log;
+        EXPECT_NE(log.find("field='p' decision=" + pressure),
+                  std::string::npos)
+            << "step " << step << "\n" << log;
+    };
+    expect_decisions(0, "rebuilt reason=no_previous_refresh",
+                     "rebuilt reason=no_previous_refresh");
+    // Unchanged input: the pressure constraint shares the retained measures
+    // that the velocity constraint refreshed.
+    expect_decisions(1, "reused", "reused retained_measures=shared");
+    // Volume-only change: still reused, with the new retained volumes.
+    expect_decisions(2, "reused retained_measures=recomputed",
+                     "reused retained_measures=shared");
+    // Identity-only change: reused, with the new identities.
+    expect_decisions(3, "reused retained_measures=recomputed",
+                     "reused retained_measures=shared");
+    // Topology change: both rebuild.
+    expect_decisions(4, "rebuilt reason=cut_topology_changed",
+                     "rebuilt reason=cut_topology_changed");
+    expect_decisions(5, "reused", "reused retained_measures=shared");
+    expect_decisions(6, "rebuilt reason=cut_topology_changed",
+                     "rebuilt reason=cut_topology_changed");
+    EXPECT_NE(reused.summaries[1].prolongation_words,
+              reused.summaries[2].prolongation_words);
+    EXPECT_NE(reused.summaries[2].prolongation_words,
+              reused.summaries[3].prolongation_words);
+    EXPECT_EQ(reused.summaries[1].line_words,
+              reused.summaries[3].line_words);
+#endif
+}
+
+TEST(SmallCutAggregationConstraint, ReuseFollowsChangesOfTheIncomingConstraintSet)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    // A strong pin applied before aggregation removes a candidate. Toggling
+    // it must rebuild; an unchanged pin must reuse.
+    class ToggleableVertexPin final : public ISystemConstraint {
+    public:
+        ToggleableVertexPin(FieldId field, GlobalIndex vertex, bool* active)
+            : field_(field), vertex_(vertex), active_(active)
+        {
+        }
+        void apply(const systems::FESystem& system,
+                   AffineConstraints& constraints) override
+        {
+            if (*active_) {
+                constraints.addDirichlet(
+                    vertexDof(system, field_, vertex_), Real{0.0});
+            }
+        }
+        bool updateValues(const systems::FESystem&,
+                          AffineConstraints&,
+                          double,
+                          double) override
+        {
+            return false;
+        }
+        [[nodiscard]] bool isTimeDependent() const noexcept override
+        {
+            return false;
+        }
+        [[nodiscard]] systems::SetupStorageRequirements
+        storageRequirements() const noexcept override
+        {
+            systems::SetupStorageRequirements requirements;
+            requirements.entity_dof_map = true;
+            return requirements;
+        }
+
+    private:
+        FieldId field_{INVALID_FIELD_ID};
+        GlobalIndex vertex_{-1};
+        bool* active_{nullptr};
+    };
+
+    auto mesh = buildQuadStrip(3);
+    auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    bool pin_active = true;
+    system.addSystemConstraint(
+        std::make_unique<ToggleableVertexPin>(pressure, 0, &pin_active));
+    system.addSystemConstraint(std::make_unique<SmallCutAggregationConstraint>(
+        pressure, geometry::CutIntegrationSide::Negative, kInterfaceMarker));
+    ASSERT_NO_THROW(system.setup());
+    const std::vector<CellRuleSpec> specs{
+        {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
+        {.cell = 1, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+        {.cell = 2, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+    };
+    const auto refresh = [&]() {
+        system.setCutIntegrationContext(makeCutContext(specs));
+        testing::internal::CaptureStdout();
+        testing::internal::CaptureStderr();
+        system.rebuildConstraintState();
+        auto log = testing::internal::GetCapturedStdout();
+        log += testing::internal::GetCapturedStderr();
+        return log;
+    };
+    const auto pinned_slave = vertexDof(system, pressure, 0);
+    const auto aggregated_slave = vertexDof(system, pressure, 4);
+
+    EXPECT_NE(refresh().find("decision=rebuilt reason=no_previous_refresh"),
+              std::string::npos);
+    const auto pinned = summarizeAggregationPublication(system);
+    ASSERT_TRUE(system.constraints().getConstraint(pinned_slave).has_value());
+    EXPECT_TRUE(system.constraints().getConstraint(pinned_slave)->isDirichlet());
+    EXPECT_NE(refresh().find("decision=reused"), std::string::npos);
+    EXPECT_EQ(summarizeAggregationPublication(system).line_words,
+              pinned.line_words);
+
+    pin_active = false;
+    EXPECT_NE(refresh().find("decision=rebuilt reason=inputs_changed"),
+              std::string::npos);
+    ASSERT_TRUE(system.constraints().getConstraint(pinned_slave).has_value());
+    EXPECT_FALSE(
+        system.constraints().getConstraint(pinned_slave)->isDirichlet());
+    EXPECT_TRUE(system.constraints().isConstrained(aggregated_slave));
+    const auto unpinned = summarizeAggregationPublication(system);
+    EXPECT_NE(unpinned.line_words, pinned.line_words);
+    EXPECT_NE(refresh().find("decision=reused"), std::string::npos);
+    EXPECT_EQ(summarizeAggregationPublication(system).line_words,
+              unpinned.line_words);
 #endif
 }
 

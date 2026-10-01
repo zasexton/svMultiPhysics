@@ -35,6 +35,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <span>
@@ -73,6 +74,63 @@ struct SmallCutAggregationPendingProlongation {
     std::vector<SmallCutAggregationProlongationRow> rows{};
     std::vector<SmallCutAggregationProlongationCell> active_cells{};
     std::vector<SmallCutAggregationProlongationPatch> patches{};
+};
+
+/**
+ * Rank-local key of everything apply() reads, except the retained physical
+ * volumes and retained-rule identities, which a reuse recomputes:
+ *  - `topology`: for both sides of the marker, the ordered generated volume
+ *    rules as the classification reads them (cell, retained/full/cut flags,
+ *    availability of the stable rule identity);
+ *  - `inputs`: the field and its DOF layout content, the system DOF
+ *    partition and assembly ghost policy, the mesh revision tuple, the set
+ *    of DOFs already constrained when apply() runs, the excluded markers and
+ *    vertices, the guards and the runtime options.
+ * Each word is mixed into two independent 64-bit digests.
+ */
+struct SmallCutAggregationReuseKey {
+    std::array<std::uint64_t, 2> topology{};
+    std::array<std::uint64_t, 2> inputs{};
+
+    [[nodiscard]] bool operator==(
+        const SmallCutAggregationReuseKey&) const noexcept = default;
+};
+
+// Communicator-canonical per-cell data that a reuse refreshes, aligned with
+// the recorded canonical active cells (sorted by physical cell ID).
+struct SmallCutAggregationRetainedMeasures {
+    std::vector<Real> volumes{};
+    std::vector<std::vector<std::uint64_t>> stable_rule_ids{};
+};
+
+struct SmallCutAggregationReuseInputs {
+    SmallCutAggregationReuseKey key{};
+    // Field-independent digests that identify the per-cell retained volumes
+    // and rule identities (shared by the velocity and pressure constraints
+    // of one marker): the classification sequence, and the retained active
+    // rules' identities, points, weights, cell types, cell node coordinates
+    // and physical cell IDs.
+    std::array<std::uint64_t, 2> classification{};
+    std::array<std::uint64_t, 2> geometry_digest{};
+};
+
+/**
+ * Outputs of one successful full refresh, keyed by its inputs. The lines,
+ * canonical ledgers, rows, cells and patches are pure functions of the key;
+ * retained volumes and rule identities, geometry identity, lineage, topology
+ * transition, churn and the publication ordinal are recomputed by
+ * publishReusedRefresh().
+ */
+struct SmallCutAggregationReuseRecord {
+    SmallCutAggregationReuseKey key{};
+    std::string field_name{};
+    std::vector<ConstraintLine> added_lines{};
+    // The refresh diagnostic split around its two input-dependent parts.
+    std::string diagnostic_head{};
+    std::string diagnostic_middle{};
+    SmallCutAggregationRefreshReport report{};
+    std::shared_ptr<const SmallCutAggregationPendingProlongation> pending{};
+    std::vector<GlobalIndex> canonical_slaves{};
 };
 
 } // namespace detail
@@ -2954,6 +3012,676 @@ buildCanonicalTopologyTransitionReport(
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// Reuse of an unchanged refresh.
+
+[[nodiscard]] bool aggregationReuseDisabled()
+{
+    const char* value = std::getenv("SVMP_DISABLE_SMALL_CUT_AGGREGATION_REUSE");
+    const char* dump = std::getenv("SVMP_AGGREGATION_DUMP");
+    const auto set = [](const char* v) {
+        return v != nullptr && v[0] != '\0' && v[0] != '0';
+    };
+    return set(value) || set(dump);
+}
+
+// Two independent 64-bit digests of one word sequence.
+class AggregationReuseDigest {
+public:
+    void mix(std::uint64_t word) noexcept
+    {
+        a_ ^= word;
+        a_ *= 1099511628211ull;
+        word ^= word >> 30;
+        word *= 0xbf58476d1ce4e5b9ull;
+        word ^= word >> 27;
+        word *= 0x94d049bb133111ebull;
+        word ^= word >> 31;
+        b_ = std::rotl(b_ ^ word, 27) * 0x9e3779b185ebca87ull +
+             0x632be59bd9b4e019ull;
+    }
+
+    void mixReal(double value) noexcept
+    {
+        mix(std::bit_cast<std::uint64_t>(value));
+    }
+
+    [[nodiscard]] std::array<std::uint64_t, 2> value() const noexcept
+    {
+        return {{a_, b_}};
+    }
+
+private:
+    std::uint64_t a_{14695981039346656037ull};
+    std::uint64_t b_{0x9e3779b97f4a7c15ull};
+};
+
+[[nodiscard]] std::uint64_t aggregationReuseAvalanche(
+    std::uint64_t word) noexcept
+{
+    word += 0x9e3779b97f4a7c15ull;
+    word ^= word >> 30;
+    word *= 0xbf58476d1ce4e5b9ull;
+    word ^= word >> 27;
+    word *= 0x94d049bb133111ebull;
+    word ^= word >> 31;
+    return word;
+}
+
+/**
+ * Computes the rank-local reuse key and the retained-volume digests. The
+ * classification pass mirrors the retained-rule classification of apply():
+ * it reads the same rules in the same order and applies the same validity
+ * tests, so equal digests imply equal cell classes, retained-rule identities
+ * and per-cell rule sequences. Returns nullopt when reuse is not admissible
+ * (debug knobs, missing revision tracking, or rule data that apply() would
+ * reject, so that the full path reports the failure).
+ */
+[[nodiscard]] std::optional<detail::SmallCutAggregationReuseInputs>
+computeAggregationReuseInputs(
+    const systems::FESystem& system,
+    const assembly::CutIntegrationContext& cut_context,
+    const AffineConstraints& constraints,
+    FieldId field,
+    geometry::CutIntegrationSide active_side,
+    int interface_marker,
+    std::span<const int> excluded_boundary_markers,
+    std::span<const GlobalIndex> excluded_vertices,
+    const SmallCutAggregationGuardOptions& guards,
+    const AggregationRuntimeOptions& runtime_options)
+{
+    if (aggregationReuseDisabled() || !runtime_options.flags_valid ||
+        !runtime_options.max_lines_valid ||
+        runtime_options.allow_unaggregated ||
+        runtime_options.max_lines !=
+            std::numeric_limits<std::size_t>::max()) {
+        return std::nullopt;
+    }
+    const auto& mesh = system.meshAccess();
+    if (!mesh.revisionTrackingAvailable()) {
+        return std::nullopt;
+    }
+
+    AggregationReuseDigest classification;
+    AggregationReuseDigest geometry_digest;
+    const auto& metadata = cut_context.metadata();
+    const auto& rules = cut_context.volumeRules();
+    const auto inactive_side =
+        active_side == geometry::CutIntegrationSide::Negative
+            ? geometry::CutIntegrationSide::Positive
+            : geometry::CutIntegrationSide::Negative;
+    const bool global_ids = mesh.globalEntityIdsAvailable();
+    std::vector<GlobalIndex> nodes;
+    classification.mix(static_cast<std::uint64_t>(
+        static_cast<std::uint32_t>(interface_marker)));
+    for (const auto side : {active_side, inactive_side}) {
+        const bool active = side == active_side;
+        classification.mix(active ? 0x41435456u : 0x494e4143u);
+        for (const auto index :
+             cut_context.generatedVolumeRuleIndicesForMarkerAndSide(
+                 interface_marker, side)) {
+            if (index >= rules.size() || index >= metadata.size()) {
+                classification.mix(0x534b4950u);
+                continue;
+            }
+            const auto& meta = metadata[index];
+            const auto& rule = rules[index];
+            const auto fraction = rule.volume_fraction;
+            const auto metadata_fraction = meta.volume_fraction;
+            if (!std::isfinite(fraction) || fraction < Real(0) ||
+                fraction > Real(1) || !std::isfinite(metadata_fraction) ||
+                metadata_fraction < Real(0) || metadata_fraction > Real(1)) {
+                return std::nullopt;
+            }
+            const auto fraction_scale =
+                std::max({Real(1), std::abs(fraction),
+                          std::abs(metadata_fraction)});
+            if (std::abs(fraction - metadata_fraction) >
+                Real(64) * std::numeric_limits<Real>::epsilon() *
+                    fraction_scale) {
+                return std::nullopt;
+            }
+            const auto cell = meta.cell >= 0 ? meta.cell : meta.parent_entity;
+            if (cell < 0) {
+                classification.mix(0x4e4f4345u);
+                continue;
+            }
+            const bool full = rule.full_cell_equivalent;
+            const bool partial = fraction > Real(0) && fraction < Real(1);
+            const bool retained = active && (full || partial);
+            classification.mix(static_cast<std::uint64_t>(cell));
+            classification.mix((full ? 1u : 0u) | (partial ? 2u : 0u) |
+                               (retained ? 4u : 0u) | (active ? 8u : 0u));
+            if (!retained) {
+                continue;
+            }
+            // Retained-rule identities embed the source value revision and
+            // change with every rebuild; only their availability is part of
+            // the classification. The identities themselves are refreshed on
+            // reuse together with the retained volumes.
+            classification.mix(
+                rule.provenance.cut_topology_revision == 0u ? 0u : 1u);
+
+            const auto local_cell = static_cast<GlobalIndex>(cell);
+            geometry_digest.mix(static_cast<std::uint64_t>(local_cell));
+            geometry_digest.mix(static_cast<std::uint64_t>(
+                global_ids ? mesh.getCellGlobalId(local_cell) : local_cell));
+            geometry_digest.mix(
+                static_cast<std::uint64_t>(mesh.getCellType(local_cell)));
+            mesh.getCellNodes(local_cell, nodes);
+            geometry_digest.mix(static_cast<std::uint64_t>(nodes.size()));
+            for (const auto node : nodes) {
+                const auto xyz = mesh.getNodeCoordinates(node);
+                geometry_digest.mixReal(static_cast<double>(xyz[0]));
+                geometry_digest.mixReal(static_cast<double>(xyz[1]));
+                geometry_digest.mixReal(static_cast<double>(xyz[2]));
+            }
+            geometry_digest.mix(rule.provenance.cut_topology_revision);
+            geometry_digest.mix(static_cast<std::uint64_t>(rule.kind));
+            geometry_digest.mix(static_cast<std::uint64_t>(rule.frame));
+            geometry_digest.mix(full ? 1u : 0u);
+            geometry_digest.mixReal(static_cast<double>(rule.measure));
+            geometry_digest.mix(static_cast<std::uint64_t>(rule.points.size()));
+            for (const auto& point : rule.points) {
+                for (std::size_t d = 0; d < 3u; ++d) {
+                    geometry_digest.mixReal(static_cast<double>(point.point[d]));
+                    geometry_digest.mixReal(
+                        static_cast<double>(point.parent_coordinate[d]));
+                }
+                geometry_digest.mixReal(static_cast<double>(point.weight));
+            }
+        }
+    }
+
+    AggregationReuseDigest inputs;
+    const auto& record = system.fieldRecord(field);
+    const auto& dofs = system.fieldDofHandler(field);
+    const auto* entity_map = dofs.getEntityDofMap();
+    if (!record.space || entity_map == nullptr) {
+        return std::nullopt;
+    }
+    inputs.mix(static_cast<std::uint64_t>(field));
+    inputs.mix(system.spaceRevision());
+    inputs.mix(static_cast<std::uint64_t>(system.fieldDofOffset(field)));
+    inputs.mix(static_cast<std::uint64_t>(record.components));
+    inputs.mix(static_cast<std::uint64_t>(
+        record.space->element().basis().size()));
+    inputs.mix(static_cast<std::uint64_t>(dofs.getNumDofs()));
+    const auto n_cells = dofs.getDofMap().getNumCells();
+    inputs.mix(static_cast<std::uint64_t>(n_cells));
+    for (GlobalIndex cell = 0; cell < n_cells; ++cell) {
+        const auto cell_dofs = dofs.getCellDofs(cell);
+        inputs.mix(static_cast<std::uint64_t>(cell_dofs.size()));
+        for (const auto dof : cell_dofs) {
+            inputs.mix(static_cast<std::uint64_t>(dof));
+        }
+    }
+    const auto n_vertices = entity_map->numVertices();
+    inputs.mix(static_cast<std::uint64_t>(n_vertices));
+    for (GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
+        const auto vertex_dofs = entity_map->getVertexDofs(vertex);
+        inputs.mix(static_cast<std::uint64_t>(vertex_dofs.size()));
+        for (const auto dof : vertex_dofs) {
+            inputs.mix(static_cast<std::uint64_t>(dof));
+        }
+    }
+    const auto& partition = system.dofHandler().getPartition();
+    inputs.mix(static_cast<std::uint64_t>(partition.locallyOwned().size()));
+    for (const auto dof : partition.locallyOwned()) {
+        inputs.mix(static_cast<std::uint64_t>(dof));
+    }
+    inputs.mix(static_cast<std::uint64_t>(partition.ghost().size()));
+    for (const auto dof : partition.ghost()) {
+        inputs.mix(static_cast<std::uint64_t>(dof));
+    }
+    // The assembly ghost policy selects which non-owned candidate DOFs this
+    // rank condenses. It cannot change the result when every relevant DOF is
+    // owned (one rank), and it differs between the constraint pass inside
+    // setup() and later rebuilds, so it is keyed only where ghosts exist.
+    inputs.mix(partition.ghost().size() > 0
+                   ? static_cast<std::uint64_t>(system.assemblyGhostPolicy()) +
+                         1u
+                   : 0u);
+
+    inputs.mix(mesh.geometryRevision());
+    inputs.mix(mesh.topologyRevision());
+    inputs.mix(mesh.ownershipRevision());
+    inputs.mix(mesh.numberingRevision());
+    inputs.mix(mesh.labelRevision());
+    inputs.mix(mesh.activeConfigurationEpoch());
+    inputs.mix(mesh.coordinateConfigurationKey());
+    inputs.mix(static_cast<std::uint64_t>(mesh.numCells()));
+    inputs.mix(global_ids ? 1u : 0u);
+    inputs.mix(static_cast<std::uint64_t>(mesh.parallelRank()));
+    inputs.mix(static_cast<std::uint64_t>(mesh.parallelSize()));
+
+    // apply() queries the incoming constraints only through isConstrained(),
+    // so the constrained set (order-independent) is the complete dependency.
+    std::uint64_t constrained_count = 0u;
+    std::uint64_t constrained_sum = 0u;
+    std::uint64_t constrained_xor = 0u;
+    constraints.forEach([&](const AffineConstraints::ConstraintView& line) {
+        const auto word = static_cast<std::uint64_t>(line.slave_dof);
+        ++constrained_count;
+        constrained_sum += aggregationReuseAvalanche(word);
+        constrained_xor ^= aggregationReuseAvalanche(word ^ 0x5a5a5a5aull);
+    });
+    inputs.mix(constrained_count);
+    inputs.mix(constrained_sum);
+    inputs.mix(constrained_xor);
+
+    inputs.mix(static_cast<std::uint64_t>(excluded_boundary_markers.size()));
+    for (const auto marker : excluded_boundary_markers) {
+        inputs.mix(static_cast<std::uint64_t>(static_cast<std::uint32_t>(marker)));
+    }
+    inputs.mix(static_cast<std::uint64_t>(excluded_vertices.size()));
+    for (const auto vertex : excluded_vertices) {
+        inputs.mix(static_cast<std::uint64_t>(vertex));
+    }
+    inputs.mix(static_cast<std::uint64_t>(guards.maximum_root_path_length));
+    inputs.mixReal(static_cast<double>(
+        guards.maximum_reference_extrapolation_distance));
+    inputs.mixReal(static_cast<double>(guards.maximum_absolute_coefficient));
+    inputs.mixReal(static_cast<double>(guards.maximum_row_l1_norm));
+    inputs.mix(runtime_options.slave_all_cut ? 1u : 0u);
+    inputs.mix(runtime_options.linear_extension ? 1u : 0u);
+
+    detail::SmallCutAggregationReuseInputs result;
+    result.classification = classification.value();
+    result.geometry_digest = geometry_digest.value();
+    result.key.topology = result.classification;
+    result.key.inputs = inputs.value();
+    return result;
+}
+
+// Collective reuse decision: a rank reuses only when every rank of the field
+// communicator can. Returns {reuse record, reuse shared retained measures}.
+[[nodiscard]] std::array<bool, 2> agreeOnAggregationReuse(
+    const systems::FESystem& system,
+    bool local_record_matches,
+    bool local_shared_measures_available)
+{
+    std::array<int, 2> agreed{{
+        local_record_matches ? 1 : 0,
+        local_record_matches && local_shared_measures_available ? 1 : 0}};
+#if FE_HAS_MPI
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        const auto comm = system.dofHandler().mpiComm();
+        int world_size = 1;
+        MPI_Comm_size(comm, &world_size);
+        if (world_size > 1) {
+            const auto local = agreed;
+            MPI_Allreduce(local.data(),
+                          agreed.data(),
+                          static_cast<int>(agreed.size()),
+                          MPI_INT,
+                          MPI_MIN,
+                          comm);
+        }
+    }
+#else
+    static_cast<void>(system);
+#endif
+    return {{agreed[0] != 0, agreed[1] != 0}};
+}
+
+// Canonical retained measures of the last reuse, shared by the constraints of
+// the other fields of the same marker (velocity and pressure apply the same
+// classification back to back). Keyed only by content digests, so an entry
+// can never describe another mesh or context.
+struct SharedRetainedMeasureEntry {
+    std::array<std::uint64_t, 2> classification{};
+    std::array<std::uint64_t, 2> geometry_digest{};
+    int interface_marker{-1};
+    geometry::CutIntegrationSide active_side{
+        geometry::CutIntegrationSide::Negative};
+    int rank{0};
+    int world_size{1};
+    std::vector<GlobalIndex> cell_gids{};
+    detail::SmallCutAggregationRetainedMeasures measures{};
+};
+
+std::mutex& sharedRetainedMeasureMutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::optional<SharedRetainedMeasureEntry>& sharedRetainedMeasureEntry()
+{
+    static std::optional<SharedRetainedMeasureEntry> entry;
+    return entry;
+}
+
+[[nodiscard]] std::optional<detail::SmallCutAggregationRetainedMeasures>
+lookupSharedRetainedMeasures(
+    const systems::FESystem& system,
+    const detail::SmallCutAggregationReuseInputs& inputs,
+    int interface_marker,
+    geometry::CutIntegrationSide active_side,
+    std::span<const SmallCutAggregationProlongationCell> active_cells)
+{
+    const auto& mesh = system.meshAccess();
+    std::lock_guard<std::mutex> lock(sharedRetainedMeasureMutex());
+    const auto& entry = sharedRetainedMeasureEntry();
+    if (!entry.has_value() ||
+        entry->classification != inputs.classification ||
+        entry->geometry_digest != inputs.geometry_digest ||
+        entry->interface_marker != interface_marker ||
+        entry->active_side != active_side ||
+        entry->rank != mesh.parallelRank() ||
+        entry->world_size != mesh.parallelSize() ||
+        entry->cell_gids.size() != active_cells.size()) {
+        return std::nullopt;
+    }
+    for (std::size_t i = 0u; i < active_cells.size(); ++i) {
+        if (entry->cell_gids[i] != active_cells[i].cell_gid) {
+            return std::nullopt;
+        }
+    }
+    return entry->measures;
+}
+
+void storeSharedRetainedMeasures(
+    const systems::FESystem& system,
+    const detail::SmallCutAggregationReuseInputs& inputs,
+    int interface_marker,
+    geometry::CutIntegrationSide active_side,
+    std::span<const SmallCutAggregationProlongationCell> active_cells,
+    const detail::SmallCutAggregationRetainedMeasures& measures)
+{
+    SharedRetainedMeasureEntry entry;
+    entry.classification = inputs.classification;
+    entry.geometry_digest = inputs.geometry_digest;
+    entry.interface_marker = interface_marker;
+    entry.active_side = active_side;
+    entry.rank = system.meshAccess().parallelRank();
+    entry.world_size = system.meshAccess().parallelSize();
+    entry.cell_gids.reserve(active_cells.size());
+    for (const auto& cell : active_cells) {
+        entry.cell_gids.push_back(cell.cell_gid);
+    }
+    entry.measures = measures;
+    std::lock_guard<std::mutex> lock(sharedRetainedMeasureMutex());
+    sharedRetainedMeasureEntry() = std::move(entry);
+}
+
+/**
+ * Recomputes the communicator-canonical retained physical volume and the
+ * retained-rule identities of every canonical active cell exactly as apply()
+ * does: per-cell sums over the retained active rules in rule order, sorted
+ * identities with unavailable (zero) identities first, the declaration of the
+ * recorded (lowest-rank) provider, and agreement of every provider.
+ * Collective on a distributed field communicator.
+ */
+[[nodiscard]] detail::SmallCutAggregationRetainedMeasures
+refreshRetainedActiveCellMeasures(
+    const systems::FESystem& system,
+    const assembly::CutIntegrationContext& cut_context,
+    int interface_marker,
+    geometry::CutIntegrationSide active_side,
+    std::span<const SmallCutAggregationProlongationCell> active_cells)
+{
+    const auto& mesh = system.meshAccess();
+    std::vector<std::int64_t> local_words;
+    std::exception_ptr local_measure_exception;
+    try {
+        struct LocalMeasure {
+            Real physical_volume{0.0};
+            std::set<std::uint64_t> stable_rule_ids{};
+            std::size_t missing_stable_rule_ids{0u};
+        };
+        std::unordered_map<GlobalIndex, LocalMeasure> local_measures;
+        std::vector<GlobalIndex> local_order;
+        const auto& metadata = cut_context.metadata();
+        const auto& rules = cut_context.volumeRules();
+        for (const auto index :
+             cut_context.generatedVolumeRuleIndicesForMarkerAndSide(
+                 interface_marker, active_side)) {
+            if (index >= rules.size() || index >= metadata.size()) {
+                continue;
+            }
+            const auto& meta = metadata[index];
+            const auto& rule = rules[index];
+            const auto fraction = rule.volume_fraction;
+            const auto cell = meta.cell >= 0 ? meta.cell : meta.parent_entity;
+            if (cell < 0) {
+                continue;
+            }
+            if (!rule.full_cell_equivalent &&
+                !(fraction > Real(0) && fraction < Real(1))) {
+                continue;
+            }
+            const auto local_cell = static_cast<GlobalIndex>(cell);
+            const auto physical_volume =
+                physicalRetainedVolumeRuleMeasure(mesh, local_cell, rule);
+            if (!(physical_volume > Real{0.0}) ||
+                !std::isfinite(physical_volume)) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: diagnostic="
+                    "invalid_active_feature_volume retained active-side "
+                    "rule has no positive physical measure");
+            }
+            const auto [measure, inserted] =
+                local_measures.try_emplace(local_cell);
+            if (inserted) {
+                local_order.push_back(local_cell);
+            }
+            const auto stable_rule_id = rule.provenance.cut_topology_revision;
+            if (stable_rule_id == 0u) {
+                ++measure->second.missing_stable_rule_ids;
+            } else if (!measure->second.stable_rule_ids.insert(
+                           stable_rule_id).second) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: diagnostic="
+                    "duplicate_active_feature_volume_rule retained rules "
+                    "for one cell repeat a nonzero stable identity");
+            }
+            measure->second.physical_volume += physical_volume;
+            if (!std::isfinite(measure->second.physical_volume)) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: diagnostic="
+                    "invalid_active_feature_volume per-cell physical "
+                    "measure overflow");
+            }
+        }
+        const bool global_ids = mesh.globalEntityIdsAvailable();
+        for (const auto cell : local_order) {
+            const auto gid = global_ids ? mesh.getCellGlobalId(cell) : cell;
+            if (gid < 0) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: diagnostic="
+                    "invalid_active_feature_volume physical cell ID is "
+                    "unavailable");
+            }
+            const auto& measure = local_measures.at(cell);
+            local_words.push_back(static_cast<std::int64_t>(gid));
+            local_words.push_back(std::bit_cast<std::int64_t>(
+                static_cast<double>(measure.physical_volume)));
+            local_words.push_back(static_cast<std::int64_t>(
+                measure.missing_stable_rule_ids +
+                measure.stable_rule_ids.size()));
+            for (std::size_t missing = 0u;
+                 missing < measure.missing_stable_rule_ids;
+                 ++missing) {
+                local_words.push_back(0);
+            }
+            for (const auto stable_id : measure.stable_rule_ids) {
+                local_words.push_back(std::bit_cast<std::int64_t>(stable_id));
+            }
+        }
+    } catch (...) {
+        local_measure_exception = std::current_exception();
+    }
+    coordinateDistributedLocalFailure(system,
+                                      local_measure_exception,
+                                      "reused_retained_measure_refresh");
+
+    GatheredInt64Words gathered;
+    int world_size = 1;
+#if FE_HAS_MPI
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        const auto comm = system.dofHandler().mpiComm();
+        MPI_Comm_size(comm, &world_size);
+        if (world_size > 1) {
+            gathered = allGatherInt64Words(
+                comm, std::span<const std::int64_t>(local_words));
+        }
+    }
+#endif
+    if (world_size == 1) {
+        gathered.words = local_words;
+        gathered.counts = {static_cast<int>(local_words.size())};
+        gathered.displacements = {0};
+    }
+
+    detail::SmallCutAggregationRetainedMeasures measures;
+    std::exception_ptr local_decode_exception;
+    try {
+        struct ProviderMeasure {
+            int rank{-1};
+            Real volume{0.0};
+            std::vector<std::uint64_t> stable_rule_ids{};
+        };
+        std::unordered_map<GlobalIndex, std::vector<ProviderMeasure>>
+            providers_by_gid;
+        for (int rank = 0; rank < world_size; ++rank) {
+            auto position = static_cast<std::size_t>(
+                gathered.displacements[static_cast<std::size_t>(rank)]);
+            const auto end = position + static_cast<std::size_t>(
+                gathered.counts[static_cast<std::size_t>(rank)]);
+            while (position < end) {
+                if (end - position < 3u) {
+                    throw std::runtime_error(
+                        "SmallCutAggregationConstraint: malformed "
+                        "distributed reused retained-measure payload");
+                }
+                ProviderMeasure provider;
+                provider.rank = rank;
+                const auto gid =
+                    static_cast<GlobalIndex>(gathered.words[position++]);
+                provider.volume = static_cast<Real>(
+                    std::bit_cast<double>(gathered.words[position++]));
+                const auto id_count = gathered.words[position++];
+                if (id_count < 0 ||
+                    static_cast<std::uint64_t>(id_count) >
+                        static_cast<std::uint64_t>(end - position)) {
+                    throw std::runtime_error(
+                        "SmallCutAggregationConstraint: malformed "
+                        "distributed reused retained-rule identity "
+                        "payload");
+                }
+                provider.stable_rule_ids.reserve(
+                    static_cast<std::size_t>(id_count));
+                for (std::int64_t i = 0; i < id_count; ++i) {
+                    provider.stable_rule_ids.push_back(
+                        std::bit_cast<std::uint64_t>(
+                            gathered.words[position++]));
+                }
+                providers_by_gid[gid].push_back(std::move(provider));
+            }
+        }
+        measures.volumes.reserve(active_cells.size());
+        measures.stable_rule_ids.reserve(active_cells.size());
+        for (const auto& cell : active_cells) {
+            const auto providers = providers_by_gid.find(cell.cell_gid);
+            if (providers == providers_by_gid.end()) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: diagnostic="
+                    "invalid_active_feature_volume active cell has no "
+                    "communicator-visible measure provider");
+            }
+            const auto canonical = std::find_if(
+                providers->second.begin(),
+                providers->second.end(),
+                [&](const ProviderMeasure& provider) {
+                    return provider.rank ==
+                           cell.retained_measure_provider_rank;
+                });
+            if (canonical == providers->second.end()) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: diagnostic="
+                    "invalid_active_feature_volume canonical measure "
+                    "provider is missing");
+            }
+            for (const auto& provider : providers->second) {
+                if (provider.volume != canonical->volume ||
+                    provider.stable_rule_ids != canonical->stable_rule_ids) {
+                    throw std::runtime_error(
+                        "SmallCutAggregationConstraint: diagnostic="
+                        "inconsistent_distributed_active_feature_volume "
+                        "providers disagree for the same physical cell");
+                }
+            }
+            if (!(canonical->volume > Real{0.0}) ||
+                !std::isfinite(canonical->volume) ||
+                canonical->stable_rule_ids.empty()) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: diagnostic="
+                    "invalid_active_feature_volume active cell has no "
+                    "complete physical measure declaration");
+            }
+            measures.volumes.push_back(canonical->volume);
+            measures.stable_rule_ids.push_back(canonical->stable_rule_ids);
+        }
+    } catch (...) {
+        local_decode_exception = std::current_exception();
+    }
+    coordinateDistributedLocalFailure(system,
+                                      local_decode_exception,
+                                      "reused_retained_measure_decode");
+    return measures;
+}
+
+[[nodiscard]] std::shared_ptr<const detail::SmallCutAggregationReuseRecord>
+makeAggregationReuseRecord(
+    const detail::SmallCutAggregationReuseKey& key,
+    const std::string& field_name,
+    std::vector<ConstraintLine> added_lines,
+    const std::string& diagnostic,
+    const SmallCutAggregationRefreshReport& report,
+    std::shared_ptr<const detail::SmallCutAggregationPendingProlongation>
+        pending,
+    const std::vector<GlobalIndex>& canonical_slaves)
+{
+    static constexpr std::string_view volume_key =
+        " canonical_rootless_active_physical_volume=";
+    static constexpr std::string_view middle_key =
+        " local_relevant_lines_prepared=";
+    static constexpr std::string_view pruned_key = " pruned_volume_rules=";
+    const auto volume_position = diagnostic.find(volume_key);
+    if (volume_position == std::string::npos || !pending) {
+        return nullptr;
+    }
+    const auto head_end = volume_position + volume_key.size();
+    const auto middle_position = diagnostic.find(middle_key, head_end);
+    if (middle_position == std::string::npos) {
+        return nullptr;
+    }
+    const auto pruned_position = diagnostic.find(pruned_key, middle_position);
+    if (pruned_position == std::string::npos) {
+        return nullptr;
+    }
+    auto record = std::make_shared<detail::SmallCutAggregationReuseRecord>();
+    record->key = key;
+    record->field_name = field_name;
+    record->added_lines = std::move(added_lines);
+    record->diagnostic_head = diagnostic.substr(0u, head_end);
+    record->diagnostic_middle = diagnostic.substr(
+        middle_position, pruned_position - middle_position);
+    record->report = report;
+    record->report.geometry_identity = {};
+    record->report.local_lineage = {};
+    record->report.canonical_topology_transition.reset();
+    record->pending = std::move(pending);
+    record->canonical_slaves = canonical_slaves;
+    return record;
+}
+
 } // namespace
 
 SmallCutAggregationConstraint::SmallCutAggregationConstraint(
@@ -3008,6 +3736,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         std::move(completed_refresh_report_);
     completed_refresh_report_.reset();
     pending_prolongation_.reset();
+    auto previous_reuse_record = std::move(reuse_record_);
+    reuse_record_.reset();
     const auto* cut_context = system.cutIntegrationContext();
     bool distributed_aggregation = false;
 #if FE_HAS_MPI
@@ -3391,6 +4121,89 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 std::to_string(components) + ")");
         }
     };
+
+    // Reuse of an unchanged refresh. Each rank keys every input of the steps
+    // below (computeAggregationReuseInputs); the decision is collective, so
+    // either every rank publishes its recorded refresh with recomputed
+    // retained volumes and rule identities, or every rank recomputes. A key
+    // failure only disables reuse.
+    std::optional<detail::SmallCutAggregationReuseInputs> reuse_inputs;
+    try {
+        reuse_inputs = computeAggregationReuseInputs(
+            system,
+            *cut_context,
+            constraints,
+            field_,
+            active_side_,
+            interface_marker_,
+            excluded_boundary_markers_,
+            excluded_vertices_,
+            guards_,
+            runtime_options);
+    } catch (...) {
+        reuse_inputs.reset();
+    }
+    {
+        const bool local_record_matches =
+            reuse_inputs.has_value() && previous_reuse_record != nullptr &&
+            previous_reuse_record->key == reuse_inputs->key;
+        std::optional<detail::SmallCutAggregationRetainedMeasures>
+            shared_measures;
+        if (local_record_matches) {
+            shared_measures = lookupSharedRetainedMeasures(
+                system,
+                *reuse_inputs,
+                interface_marker_,
+                active_side_,
+                previous_reuse_record->pending->active_cells);
+        }
+        const auto [reuse_record, reuse_shared_measures] =
+            agreeOnAggregationReuse(
+                system, local_record_matches, shared_measures.has_value());
+        if (reuse_record) {
+            detail::SmallCutAggregationRetainedMeasures measures;
+            if (reuse_shared_measures) {
+                measures = std::move(*shared_measures);
+            } else {
+                measures = refreshRetainedActiveCellMeasures(
+                    system,
+                    *cut_context,
+                    interface_marker_,
+                    active_side_,
+                    previous_reuse_record->pending->active_cells);
+                storeSharedRetainedMeasures(
+                    system,
+                    *reuse_inputs,
+                    interface_marker_,
+                    active_side_,
+                    previous_reuse_record->pending->active_cells,
+                    measures);
+            }
+            publishReusedRefresh(system,
+                                 constraints,
+                                 *cut_context,
+                                 std::move(previous_reuse_record),
+                                 std::move(previous_completed_refresh_report),
+                                 measures,
+                                 reuse_shared_measures);
+            return;
+        }
+        std::ostringstream decision;
+        decision << "SmallCutAggregationConstraint: diagnostic="
+                    "small_cut_aggregation_reuse field='"
+                 << rec.name << "' decision=rebuilt reason="
+                 << (!reuse_inputs.has_value()
+                         ? "not_admissible"
+                         : previous_reuse_record == nullptr
+                               ? "no_previous_refresh"
+                               : !local_record_matches
+                                     ? (previous_reuse_record->key.topology !=
+                                                reuse_inputs->key.topology
+                                            ? "cut_topology_changed"
+                                            : "inputs_changed")
+                                     : "another_rank_changed");
+        FE_LOG_INFO(decision.str());
+    }
 
     // 1. Classify cells from this marker's retained volume rules.
     std::unordered_map<GlobalIndex, CellClass> cell_class;
@@ -5251,6 +6064,9 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     std::vector<SmallCutAggregationProlongationPatch>
         canonical_prolongation_patches;
     std::optional<AffineConstraints> next_constraints;
+    std::vector<ConstraintLine> reuse_added_lines;
+    std::shared_ptr<const detail::SmallCutAggregationReuseRecord>
+        next_reuse_record;
     std::vector<GlobalIndex> next_previous_canonical_slaves;
     std::optional<SmallCutAggregationRefreshReport>
         next_completed_report;
@@ -5468,6 +6284,9 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             }
         }
         staged_constraints.addConstraintLine(line);
+        if (reuse_inputs.has_value()) {
+            reuse_added_lines.push_back(line);
+        }
         current_slaves.push_back(line.slave_dof);
         if (line.entries.empty()) {
             ++island_pinned_dofs;
@@ -5802,6 +6621,17 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 std::move(canonical_prolongation_patches);
             next_pending_prolongation = std::move(pending);
     }
+    if (reuse_inputs.has_value() && next_completed_report.has_value() &&
+        next_pending_prolongation) {
+        next_reuse_record = makeAggregationReuseRecord(
+            reuse_inputs->key,
+            rec.name,
+            std::move(reuse_added_lines),
+            oss.str(),
+            *next_completed_report,
+            next_pending_prolongation,
+            next_previous_canonical_slaves);
+    }
     } catch (...) {
         local_publication_exception = std::current_exception();
     }
@@ -5846,6 +6676,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             next_previous_canonical_slaves);
         successful_publication_ordinal_ =
             next_successful_publication_ordinal;
+        reuse_record_ = std::move(next_reuse_record);
     }
 }
 
@@ -6662,6 +7493,252 @@ void SmallCutAggregationConstraint::restoreLifecycleCheckpoint(
         std::move(restored_pending_prolongation);
     successful_publication_ordinal_ =
         checkpoint.successful_publication_ordinal;
+}
+
+void SmallCutAggregationConstraint::publishReusedRefresh(
+    const systems::FESystem& system,
+    AffineConstraints& constraints,
+    const assembly::CutIntegrationContext& cut_context,
+    std::shared_ptr<const detail::SmallCutAggregationReuseRecord> record,
+    std::optional<SmallCutAggregationRefreshReport>
+        previous_completed_refresh_report,
+    const detail::SmallCutAggregationRetainedMeasures& active_cell_measures,
+    bool active_cell_measures_shared)
+{
+    // Mirrors the publication tail of apply(): every allocation, validation,
+    // diagnostic and staged state is prepared first, one collective
+    // consensus coordinates it, and the commit below is no-throw.
+    std::optional<AffineConstraints> next_constraints;
+    std::vector<GlobalIndex> next_previous_canonical_slaves;
+    std::optional<SmallCutAggregationRefreshReport> next_completed_report;
+    std::shared_ptr<const detail::SmallCutAggregationPendingProlongation>
+        next_pending_prolongation;
+    std::uint64_t next_successful_publication_ordinal =
+        successful_publication_ordinal_;
+    std::uint64_t next_feature_class_fingerprint = 0u;
+    std::uint64_t next_slave_set_fingerprint = 0u;
+    std::uint64_t next_geometry_fingerprint = 0u;
+    std::exception_ptr local_publication_exception;
+    try {
+        const auto& active_cell_volumes = active_cell_measures.volumes;
+        if (!record || !record->pending ||
+            active_cell_volumes.size() !=
+                record->pending->active_cells.size() ||
+            active_cell_measures.stable_rule_ids.size() !=
+                record->pending->active_cells.size()) {
+            throw std::logic_error(
+                "SmallCutAggregationConstraint: reused refresh record is "
+                "incomplete");
+        }
+        next_constraints.emplace(constraints);
+        auto& staged_constraints = *next_constraints;
+        for (const auto& line : record->added_lines) {
+            staged_constraints.addConstraintLine(line);
+        }
+
+        // Retained volumes: per active cell, then per feature in ascending
+        // physical cell ID (the component order of apply()), then the
+        // rootless total in ascending feature ID.
+        auto pending = std::make_shared<
+            detail::SmallCutAggregationPendingProlongation>(*record->pending);
+        std::map<GlobalIndex, long double> feature_volumes;
+        for (std::size_t i = 0u; i < pending->active_cells.size(); ++i) {
+            auto& cell = pending->active_cells[i];
+            cell.retained_physical_volume = active_cell_volumes[i];
+            cell.retained_rule_stable_ids =
+                active_cell_measures.stable_rule_ids[i];
+            feature_volumes[cell.active_feature_id] +=
+                static_cast<long double>(active_cell_volumes[i]);
+        }
+        // As in apply(); allow_unaggregated is never reused, so it is false.
+        pending->trace_bound_eligible =
+            std::all_of(
+                pending->active_cells.begin(),
+                pending->active_cells.end(),
+                [](const auto& cell) {
+                    return !cell.retained_rule_stable_ids.empty() &&
+                        std::none_of(
+                            cell.retained_rule_stable_ids.begin(),
+                            cell.retained_rule_stable_ids.end(),
+                            [](std::uint64_t stable_id) {
+                                return stable_id == 0u;
+                            });
+                }) &&
+            std::none_of(
+                pending->rows.begin(),
+                pending->rows.end(),
+                [](const auto& row) {
+                    return row.provisional_kind ==
+                        SmallCutAggregationProvisionalRowKind::
+                            UnaggregatedFreeIdentity;
+                });
+        auto report = record->report;
+        long double rootless_physical_volume = 0.0L;
+        for (auto& feature : report.canonical_active_features) {
+            const auto volume = feature_volumes.find(feature.stable_feature_id);
+            feature.canonical_retained_physical_volume =
+                volume == feature_volumes.end()
+                    ? Real{0.0}
+                    : static_cast<Real>(volume->second);
+            if (!(feature.canonical_retained_physical_volume > Real{0.0}) ||
+                !std::isfinite(feature.canonical_retained_physical_volume)) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: diagnostic="
+                    "invalid_active_feature_volume active component has no "
+                    "finite positive retained physical volume");
+            }
+            if (feature.disposition ==
+                SmallCutAggregationActiveFeatureDisposition::Rootless) {
+                rootless_physical_volume += static_cast<long double>(
+                    feature.canonical_retained_physical_volume);
+            }
+        }
+        report.canonical_rootless_active_physical_volume =
+            static_cast<Real>(rootless_physical_volume);
+        if (!std::isfinite(report.canonical_rootless_active_physical_volume) ||
+            report.canonical_rootless_active_physical_volume < Real{0.0}) {
+            throw std::logic_error(
+                "SmallCutAggregationConstraint: active feature totals are "
+                "inconsistent");
+        }
+
+        std::ostringstream oss;
+        oss << record->diagnostic_head
+            << report.canonical_rootless_active_physical_volume
+            << record->diagnostic_middle
+            << " pruned_volume_rules="
+            << cut_context.generatedPrunedVolumeRuleCount()
+            << " pruned_volume_measure="
+            << cut_context.generatedPrunedVolumeMeasure();
+        FE_LOG_INFO(oss.str());
+
+        next_previous_canonical_slaves = record->canonical_slaves;
+        {
+            const auto& canonical_slaves = next_previous_canonical_slaves;
+            const auto& previous = previous_canonical_slaves_;
+            std::size_t entered = 0u;
+            std::size_t left = 0u;
+            std::size_t i = 0u;
+            std::size_t j = 0u;
+            while (i < canonical_slaves.size() || j < previous.size()) {
+                if (j >= previous.size() ||
+                    (i < canonical_slaves.size() &&
+                     canonical_slaves[i] < previous[j])) {
+                    ++entered;
+                    ++i;
+                } else if (i >= canonical_slaves.size() ||
+                           previous[j] < canonical_slaves[i]) {
+                    ++left;
+                    ++j;
+                } else {
+                    ++i;
+                    ++j;
+                }
+            }
+            std::ostringstream churn;
+            churn << "SmallCutAggregationConstraint: diagnostic="
+                     "small_cut_aggregation_churn"
+                  << " field='" << record->field_name << "'"
+                  << " canonical_slaves=" << canonical_slaves.size()
+                  << " slaves=" << canonical_slaves.size()
+                  << " entered=" << entered
+                  << " left=" << left;
+            FE_LOG_INFO(churn.str());
+        }
+
+        if (successful_publication_ordinal_ ==
+            std::numeric_limits<std::uint64_t>::max()) {
+            throw std::overflow_error(
+                "SmallCutAggregationConstraint: successful publication "
+                "ordinal is exhausted");
+        }
+        next_successful_publication_ordinal =
+            successful_publication_ordinal_ + 1u;
+        next_feature_class_fingerprint =
+            report.canonical_feature_class_fingerprint;
+        next_slave_set_fingerprint = report.canonical_slave_set_fingerprint;
+        auto prepared_provenance = prepareRefreshProvenance(
+            system,
+            cut_context,
+            interface_marker_,
+            next_successful_publication_ordinal,
+            staged_constraints);
+        next_geometry_fingerprint =
+            prepared_provenance.geometry_identity.canonical_fingerprint;
+        report.geometry_identity =
+            std::move(prepared_provenance.geometry_identity);
+        report.local_lineage = prepared_provenance.local_lineage;
+        report.canonical_topology_transition.reset();
+        next_completed_report.emplace(std::move(report));
+        if (previous_completed_refresh_report.has_value()) {
+            next_completed_report->canonical_topology_transition =
+                buildCanonicalTopologyTransitionReport(
+                    *previous_completed_refresh_report,
+                    *next_completed_report,
+                    previous_canonical_slaves_,
+                    next_previous_canonical_slaves);
+        }
+
+        pending->cut_context_content_revision = cut_context.contentRevision();
+        pending->has_free_surface_snapshot_revision =
+            cut_context.hasFreeSurfaceGeometrySnapshotForMarker(
+                interface_marker_);
+        pending->free_surface_snapshot_revision =
+            pending->has_free_surface_snapshot_revision
+                ? cut_context.freeSurfaceGeometrySnapshotRevisionForMarker(
+                      interface_marker_)
+                : 0u;
+        pending->has_source_value_revision =
+            cut_context.hasExpectedGeneratedSourceValueRevision(
+                interface_marker_);
+        pending->source_value_revision =
+            pending->has_source_value_revision
+                ? cut_context.expectedGeneratedSourceValueRevision(
+                      interface_marker_)
+                : 0u;
+        next_pending_prolongation = std::move(pending);
+
+        std::ostringstream decision;
+        decision << "SmallCutAggregationConstraint: diagnostic="
+                    "small_cut_aggregation_reuse field='"
+                 << record->field_name << "' decision=reused"
+                 << " retained_measures="
+                 << (active_cell_measures_shared ? "shared" : "recomputed")
+                 << " reused_lines=" << record->added_lines.size()
+                 << " canonical_active_cells="
+                 << next_pending_prolongation->active_cells.size();
+        FE_LOG_INFO(decision.str());
+    } catch (...) {
+        local_publication_exception = std::current_exception();
+    }
+
+    coordinateRefreshPublicationConsensus(
+        system,
+        local_publication_exception,
+        next_feature_class_fingerprint,
+        next_slave_set_fingerprint,
+        next_geometry_fingerprint,
+        next_successful_publication_ordinal);
+
+    constraints = std::move(*next_constraints);
+    next_completed_report->geometry_identity
+        .communicator_fingerprint_consensus_validated =
+            next_completed_report->geometry_identity.available;
+    if (next_completed_report->canonical_topology_transition.has_value()) {
+        auto& transition =
+            *next_completed_report->canonical_topology_transition;
+        transition.geometry_identity_before
+            .communicator_fingerprint_consensus_validated =
+                transition.geometry_identity_before.available;
+        transition.geometry_identity_after
+            .communicator_fingerprint_consensus_validated =
+                transition.geometry_identity_after.available;
+    }
+    pending_prolongation_ = std::move(next_pending_prolongation);
+    completed_refresh_report_ = std::move(next_completed_report);
+    previous_canonical_slaves_.swap(next_previous_canonical_slaves);
+    successful_publication_ordinal_ = next_successful_publication_ordinal;
+    reuse_record_ = std::move(record);
 }
 
 bool SmallCutAggregationConstraint::updateValues(const systems::FESystem& /*system*/,

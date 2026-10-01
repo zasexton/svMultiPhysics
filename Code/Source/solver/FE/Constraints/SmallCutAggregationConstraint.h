@@ -127,11 +127,17 @@
 
 namespace svmp {
 namespace FE {
+namespace assembly {
+class CutIntegrationContext;
+} // namespace assembly
 namespace constraints {
 
 namespace detail {
 
 struct SmallCutAggregationPendingProlongation;
+struct SmallCutAggregationReuseRecord;
+struct SmallCutAggregationReuseInputs;
+struct SmallCutAggregationRetainedMeasures;
 
 /**
  * Partition-invariant identity used to choose among aggregation roots.
@@ -675,6 +681,24 @@ private:
     captureLifecycleCheckpoint() const;
     void restoreLifecycleCheckpoint(const LifecycleCheckpoint& checkpoint);
 
+    /**
+     * Publishes a refresh whose complete input matches the previous
+     * successful refresh (see SmallCutAggregationReuseRecord): the recorded
+     * lines and canonical ledgers are reused, while retained volumes and
+     * rule identities, provenance, transition, churn and the publication
+     * sequence are recomputed exactly as a full refresh would.
+     */
+    void publishReusedRefresh(
+        const systems::FESystem& system,
+        AffineConstraints& constraints,
+        const assembly::CutIntegrationContext& cut_context,
+        std::shared_ptr<const detail::SmallCutAggregationReuseRecord> record,
+        std::optional<SmallCutAggregationRefreshReport>
+            previous_completed_refresh_report,
+        const detail::SmallCutAggregationRetainedMeasures&
+            active_cell_measures,
+        bool active_cell_measures_shared);
+
     FieldId field_{INVALID_FIELD_ID};
     geometry::CutIntegrationSide active_side_{geometry::CutIntegrationSide::Negative};
     int interface_marker_{-1};
@@ -688,6 +712,11 @@ private:
     std::shared_ptr<const detail::SmallCutAggregationPendingProlongation>
         pending_prolongation_{};
     std::uint64_t successful_publication_ordinal_{0u};
+    // Inputs and outputs of the most recent successful refresh. A pure memo:
+    // it is not part of the lifecycle checkpoint, because a reuse recomputes
+    // every lifecycle-dependent field.
+    std::shared_ptr<const detail::SmallCutAggregationReuseRecord>
+        reuse_record_{};
 };
 
 } // namespace constraints
