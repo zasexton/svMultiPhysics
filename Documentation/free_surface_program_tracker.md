@@ -632,8 +632,17 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
       | `dev/perf-reuse-unchanged` | items 6 and 7 |
       | `dev/perf-kernels` | item 2 and the cache-key and full-cell basis part of item 9. **Merged 2026-10-01 (`7cdc8842`, `371f521c`), bitwise identical on the whole reference set; FE 34/34, Physics 7/7, Application 4/4.** The finite-difference check is now opt-in (`Curvature_projection_kinematic_area_gradient_finite_difference_check`). 2D `kag_lumped` drop R/h = 8: 141.9 → 96.6 s (KAG's extra cost over `surface_stress` falls from +51% to +5%). 3D sphere proxy R/h = 8, step 0: 2,288 → 990 s; the check alone was 54% of the step. Per Jacobian: 14.0 → 12.1 s. |
       | `dev/perf-cut-integration-reuse` | reuse of cut-cell quadrature and basis data within a frozen geometry epoch; cut cells are about 70% of a 3D Jacobian assembly |
-      | `dev/perf-linear-solver` | measure the solve; evaluate the existing FSILS and Eigen preconditioners; reuse the preconditioner across Newton iterations; a parameter-free block preconditioner. New options are opt-in; any default change needs approval. |
+      | `dev/perf-linear-solver` | **Merged 2026-10-01 (13 commits, tip `4d12fa8e`); all options opt-in, defaults bitwise identical on the reference set.** New `<LS>` keys `<Right_preconditioner>` (`block-ilu0`, `simple`) and `<Preconditioner_reuse>`, plus an opt-in system dump and replay harness. Findings and results are listed below the table. |
 
+    - **Linear-solver findings** (`dev/perf-linear-solver`):
+      - On the base solver (FSILS GMRES with row/column scaling), linear solves are 11–33% of 2D Newton time and 7% in 3D. SpMV takes 55–68% of that and Gram–Schmidt 20–31%. Solves end only at restart boundaries, and 31% (2D) to 63% (3D) of the unknowns are Dirichlet identity rows.
+      - None of the existing options helps: diagonal scaling, BiCGSTAB (frequent failures), NS/BlockSchur (very slow), Eigen ILUT and SparseLU (refactorized every solve).
+      - Block ILU(0) as a right preconditioner, with break-even reuse (refresh when extra iterations reach the setup cost in iterations): 2D linear time 2.3–3.1× faster (iterations per solve about 5× fewer, for example 115 → 20), 3D 1.8×.
+      - Newton, outer and inner counts are identical on all 7 FSILS 2D cases. Fields differ by ≤ 1.3e-8 of scale, and metrics by ≤ 1.1e-9 absolute.
+      - SIMPLE: 1.6–2.2×.
+      - An in-cycle unscaled-residual stopping estimate changes Newton counts, because the Newton and linear absolute tolerances are both 1e-10, so it stays opt-in.
+      - `petsc/3.18.5` (module) looks usable through `-DFE_ENABLE_PETSC=ON`; `trilinos/12.12.1` is not.
+      - **Decision for the user:** make `Right_preconditioner=block-ilu0` with `Preconditioner_reuse=true` the FSILS default. It is so far tested on one rank (plus a two-rank unit test).
     - Started 2026-10-01 (base `904c65a5`, same bitwise gate):
 
       | Branch | Work |
