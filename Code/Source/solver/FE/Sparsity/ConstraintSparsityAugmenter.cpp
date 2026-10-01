@@ -31,6 +31,7 @@
 #include "ConstraintSparsityAugmenter.h"
 #include "Dofs/DofConstraints.h"
 #include <algorithm>
+#include <cstdint>
 #include <limits>
 #include <numeric>
 #include <unordered_set>
@@ -1002,13 +1003,46 @@ void ConstraintSparsityAugmenter::augmentEliminationFill(SparsityPattern& patter
 
     auto constrained_dofs = constraint_query_->getAllConstrainedDofs();
 
-    // Precompute master lists
-    std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> master_map;
+    // Precompute master lists. Rule 1 probes every stored column, so DOFs
+    // inside the pattern are indexed densely (an array read per nonzero
+    // instead of a hash probe); any constrained DOF outside it keeps a map
+    // entry. A repeated constrained DOF keeps its last list, as before.
+    const GlobalIndex dense_size = std::max<GlobalIndex>({n_rows, n_cols, GlobalIndex{0}});
+    std::vector<std::vector<GlobalIndex>> master_lists;
+    master_lists.reserve(constrained_dofs.size());
+    std::vector<std::int64_t> master_slot(static_cast<std::size_t>(dense_size), -1);
+    std::unordered_map<GlobalIndex, std::size_t> outside_master_slot;
     for (GlobalIndex cdof : constrained_dofs) {
-        master_map[cdof] = options_.compute_transitive_closure
+        auto masters = options_.compute_transitive_closure
             ? getTransitiveMasters(cdof)
             : constraint_query_->getMasterDofs(cdof);
+        std::int64_t existing = -1;
+        if (cdof >= 0 && cdof < dense_size) {
+            existing = master_slot[static_cast<std::size_t>(cdof)];
+        } else if (const auto it = outside_master_slot.find(cdof);
+                   it != outside_master_slot.end()) {
+            existing = static_cast<std::int64_t>(it->second);
+        }
+        if (existing >= 0) {
+            master_lists[static_cast<std::size_t>(existing)] = std::move(masters);
+            continue;
+        }
+        const auto slot = master_lists.size();
+        master_lists.push_back(std::move(masters));
+        if (cdof >= 0 && cdof < dense_size) {
+            master_slot[static_cast<std::size_t>(cdof)] = static_cast<std::int64_t>(slot);
+        } else {
+            outside_master_slot.emplace(cdof, slot);
+        }
     }
+    auto masters_of = [&](GlobalIndex dof) -> const std::vector<GlobalIndex>* {
+        if (dof >= 0 && dof < dense_size) {
+            const auto slot = master_slot[static_cast<std::size_t>(dof)];
+            return slot < 0 ? nullptr : &master_lists[static_cast<std::size_t>(slot)];
+        }
+        const auto it = outside_master_slot.find(dof);
+        return it == outside_master_slot.end() ? nullptr : &master_lists[it->second];
+    };
 
     // 1. Initial setup: Ensure diagonals and add explicit constraint couplings (u_s, u_m)
     for (GlobalIndex cdof : constrained_dofs) {
@@ -1024,7 +1058,7 @@ void ConstraintSparsityAugmenter::augmentEliminationFill(SparsityPattern& patter
         }
 
         // Add explicit couplings to masters: (u_s, u_m)
-        const auto& masters = master_map[cdof];
+        const auto& masters = *masters_of(cdof);
         for (GlobalIndex m : masters) {
             if (m >= 0 && m < n_cols) {
                 if (insertSortedUnique(row_set, m)) {
@@ -1043,17 +1077,25 @@ void ConstraintSparsityAugmenter::augmentEliminationFill(SparsityPattern& patter
 
     // 2. Rule 1: For each row i having col u_s, add (i, u_m)
     //    If symmetric_fill: also add (u_m, i)
+    std::vector<GlobalIndex> current_cols;
     for (GlobalIndex row = 0; row < n_rows; ++row) {
         auto& row_set = pattern.row_sets_[static_cast<std::size_t>(row)];
-        
+
+        // A row without constrained columns gains nothing here; skip the
+        // snapshot for it.
+        if (std::none_of(row_set.begin(), row_set.end(),
+                         [&](GlobalIndex col) { return masters_of(col) != nullptr; })) {
+            continue;
+        }
+
         // Snapshot to safely iterate while potentially modifying other rows
-        std::vector<GlobalIndex> current_cols(row_set.begin(), row_set.end());
+        current_cols.assign(row_set.begin(), row_set.end());
         
         for (GlobalIndex col : current_cols) {
             // Check if col is a constrained DOF (u_s)
-            auto it = master_map.find(col);
-            if (it != master_map.end()) {
-                const auto& masters = it->second;
+            const auto* constrained_masters = masters_of(col);
+            if (constrained_masters != nullptr) {
+                const auto& masters = *constrained_masters;
                 for (GlobalIndex m : masters) {
                     if (m >= 0 && m < n_cols) {
                         // Add (row, m) i.e. (i, u_m)
@@ -1075,16 +1117,17 @@ void ConstraintSparsityAugmenter::augmentEliminationFill(SparsityPattern& patter
 
     // 3. Rule 2: For each constrained row u_s having col j, add (u_m, j)
     //    If symmetric_fill: also add (j, u_m)
+    std::vector<GlobalIndex> slave_cols;
     for (GlobalIndex cdof : constrained_dofs) {
         if (cdof < 0 || cdof >= n_rows) continue;
         
-        auto it = master_map.find(cdof);
-        if (it == master_map.end()) continue;
-        const auto& masters = it->second;
+        const auto* constrained_masters = masters_of(cdof);
+        if (constrained_masters == nullptr) continue;
+        const auto& masters = *constrained_masters;
         
         // Snapshot of columns in the constrained row u_s
         const auto& slave_row_set = pattern.row_sets_[static_cast<std::size_t>(cdof)];
-        std::vector<GlobalIndex> slave_cols(slave_row_set.begin(), slave_row_set.end());
+        slave_cols.assign(slave_row_set.begin(), slave_row_set.end());
         
         for (GlobalIndex m : masters) {
             if (m < 0 || m >= n_rows) continue;
@@ -1284,12 +1327,27 @@ std::vector<GlobalIndex> ConstraintSparsityAugmenter::getTransitiveMasters(
         return {};
     }
 
+    // Start with direct masters
+    auto direct_masters = constraint_query_->getMasterDofs(constrained_dof);
+
+    // Closed constraint sets have only unconstrained masters. With no chain
+    // to follow, the walk below would return exactly the distinct direct
+    // masters other than the DOF itself, sorted.
+    if (std::none_of(direct_masters.begin(), direct_masters.end(),
+                     [&](GlobalIndex m) { return constraint_query_->isConstrained(m); })) {
+        direct_masters.erase(
+            std::remove(direct_masters.begin(), direct_masters.end(), constrained_dof),
+            direct_masters.end());
+        std::sort(direct_masters.begin(), direct_masters.end());
+        direct_masters.erase(std::unique(direct_masters.begin(), direct_masters.end()),
+                             direct_masters.end());
+        return direct_masters;
+    }
+
     std::vector<GlobalIndex> result;
     std::unordered_set<GlobalIndex> visited;
     std::queue<GlobalIndex> to_process;
 
-    // Start with direct masters
-    auto direct_masters = constraint_query_->getMasterDofs(constrained_dof);
     for (GlobalIndex m : direct_masters) {
         to_process.push(m);
     }
