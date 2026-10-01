@@ -8,6 +8,7 @@
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/ParallelAssembler.h"
 #include "Assembly/StandardAssembler.h"
+#include "Constraints/AffineConstraints.h"
 #include "Dofs/DofHandler.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
@@ -580,6 +581,91 @@ TEST(SerialParallelEquivalenceMPI, Quad4MatrixAndVectorMatchSerialAndGhostPolici
         compareAgainstReference(ref, reverse_scatter, tol);
         EXPECT_LT(maxAbsDiff(owned_rows.matrix, reverse_scatter.matrix), tol);
         EXPECT_LT(maxAbsDiff(owned_rows.vector, reverse_scatter.vector), tol);
+    }
+}
+
+TEST(SerialParallelEquivalenceMPI, FinalizeSetsDirichletRowsLikeSerialForBothGhostPolicies)
+{
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size < 2) {
+        GTEST_SKIP() << "Run with 2+ MPI ranks to enable this test";
+    }
+
+    constexpr int n_cells_per_axis = 8;
+    const auto cell_owners = partitionQuadCellsStripesX(n_cells_per_axis, size);
+    const auto topo = buildQuadGridTopology(n_cells_per_axis, cell_owners, rank, size);
+
+    spaces::H1Space space(ElementType::Quad4, /*order=*/1);
+    dofs::DofHandler dof_handler;
+    dofs::DofDistributionOptions dof_opts;
+    dof_opts.global_numbering = dofs::GlobalNumberingMode::GlobalIds;
+    dof_opts.ownership = dofs::OwnershipStrategy::VertexGID;
+    dof_opts.my_rank = rank;
+    dof_opts.world_size = size;
+    dof_opts.mpi_comm = comm;
+    dof_handler.distributeDofs(topo, space, dof_opts);
+    dof_handler.finalize();
+    const GlobalIndex n_dofs = dof_handler.getNumDofs();
+    ASSERT_GT(n_dofs, 0);
+
+    // Inhomogeneous Dirichlet lines on the x = 0 and x = 1 columns (vertex-GID
+    // numbering). A constrained DOF that no assembled element touches (e.g. on
+    // the dry side of a cut domain) gets its identity row only from
+    // finalize(), so finalize alone must reproduce the serial rows.
+    constraints::AffineConstraints dirichlet;
+    for (int j = 0; j <= n_cells_per_axis; ++j) {
+        const auto left = static_cast<GlobalIndex>(j * (n_cells_per_axis + 1));
+        dirichlet.addDirichlet(left, 1.5);
+        dirichlet.addDirichlet(left + n_cells_per_axis, -0.5);
+    }
+    dirichlet.close();
+
+    std::vector<Real> ref_matrix;
+    std::vector<Real> ref_vector;
+    if (rank == 0) {
+        DenseMatrixView A(n_dofs);
+        DenseVectorView b(n_dofs);
+        A.zero();
+        b.zero();
+        StandardAssembler assembler;
+        assembler.setDofHandler(dof_handler);
+        assembler.setConstraints(&dirichlet);
+        assembler.finalize(&A, &b);
+        ref_matrix.assign(A.data().begin(), A.data().end());
+        ref_vector.assign(b.data().begin(), b.data().end());
+    }
+
+    for (const auto policy : {GhostPolicy::OwnedRowsOnly, GhostPolicy::ReverseScatter}) {
+        ParallelAssembler assembler;
+        assembler.setComm(comm);
+        assembler.setDofHandler(dof_handler);
+        assembler.setConstraints(&dirichlet);
+        AssemblyOptions opts;
+        opts.ghost_policy = policy;
+        opts.deterministic = true;
+        opts.overlap_communication = false;
+        assembler.setOptions(opts);
+        assembler.initialize();
+
+        DenseMatrixView A_local(n_dofs);
+        DenseVectorView b_local(n_dofs);
+        A_local.zero();
+        b_local.zero();
+        assembler.finalize(&A_local, &b_local);
+        const auto matrix = allreduceSum(A_local.data(), comm);
+        const auto vector = allreduceSum(b_local.data(), comm);
+
+        if (rank == 0) {
+            SCOPED_TRACE(policy == GhostPolicy::ReverseScatter ? "ReverseScatter"
+                                                               : "OwnedRowsOnly");
+            EXPECT_EQ(maxAbsDiff(ref_matrix, matrix), Real(0));
+            EXPECT_EQ(maxAbsDiff(ref_vector, vector), Real(0));
+            const auto corner = static_cast<std::size_t>(n_cells_per_axis);
+            EXPECT_DOUBLE_EQ(matrix[corner * static_cast<std::size_t>(n_dofs) + corner], 1.0);
+            EXPECT_DOUBLE_EQ(vector[corner], -0.5);
+        }
     }
 }
 
