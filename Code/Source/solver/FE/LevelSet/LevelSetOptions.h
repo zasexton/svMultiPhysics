@@ -170,6 +170,22 @@ struct LevelSetVolumeCorrectionOptions {
     Real maximum_cumulative_interface_displacement_fraction{1.0};
 };
 
+/**
+ * @brief Accepted-step reconciliation of the transported P1 level set with
+ * the kinematic interface flux of its own transport velocity.
+ *
+ * A Galerkin transport step moves the discrete zero set consistently with the
+ * velocity only in an L2(Omega) sense; where the velocity varies on the mesh
+ * scale (a moving contact line) the sharp liquid measure drifts.  When enabled,
+ * every accepted step applies the local, parameter-free correction described
+ * in LevelSetKinematicReconciliation.h: the trapezoidal volume change of the
+ * step equals the trapezoidal interface flux of the transport velocity.  It is
+ * not a volume target and not a global shift.
+ */
+struct LevelSetKinematicReconciliationOptions {
+    bool enabled{false};
+};
+
 struct LevelSetInflowBoundary {
     // The transported level set is defined on the background space, so this
     // condition intentionally covers the complete physical inlet. It is not
@@ -305,6 +321,7 @@ struct LevelSetTransportOptions {
     LevelSetVolumeCorrectionOptions volume_correction{};
     LevelSetBoundaryOptions boundaries{};
     LevelSetConservativePhaseOptions conservative_phase{};
+    LevelSetKinematicReconciliationOptions kinematic_reconciliation{};
 };
 
 enum class LevelSetConservationDiagnostic {
@@ -332,6 +349,10 @@ enum class LevelSetConservationDiagnostic {
 
 [[nodiscard]] bool shouldApplyLevelSetVolumeCorrection(
     const LevelSetVolumeCorrectionOptions& options,
+    int completed_step_index) noexcept;
+
+[[nodiscard]] bool shouldApplyLevelSetKinematicReconciliation(
+    const LevelSetKinematicReconciliationOptions& options,
     int completed_step_index) noexcept;
 
 } // namespace svmp::FE::level_set
