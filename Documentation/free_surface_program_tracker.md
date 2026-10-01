@@ -616,10 +616,20 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
       | `dev/perf-cut-integration-reuse` | reuse of cut-cell quadrature and basis data within a frozen geometry epoch; cut cells are about 70% of a 3D Jacobian assembly |
       | `dev/perf-linear-solver` | measure the solve; evaluate the existing FSILS and Eigen preconditioners; reuse the preconditioner across Newton iterations; a parameter-free block preconditioner. New options are opt-in; any default change needs approval. |
 
-    - Queued until the branches above merge:
-      - item 8, classification-only records for fully dry cells (3D memory);
-      - multithreaded assembly in `StandardAssembler`.
-    - Not yet assigned: item 4, the KAG duplicate-sample search in `ApplicationDriver.cpp`.
+    - Started 2026-10-01 (base `904c65a5`, same bitwise gate):
+
+      | Branch | Work |
+      |---|---|
+      | `dev/perf-pdeext-factorization` | keep the PDE extension's dry-region factorization and monolithic rows while the known set, walls and mesh are unchanged (the extension adds 15–18% to a 2D step) |
+      | `dev/perf-functional-diagnostics` | cheaper accepted-step functional records and checks (about 13% of a 3D tank step); replace the fixed 512-ulp consistency tolerance with a rounding bound derived from the term count, which unblocks 3D capillary runs |
+      | `dev/perf-log-output` | build diagnostic-only log lines only when the log level prints them; make the wet-extension map output opt-in; hashed lookup for the KAG duplicate-sample search (item 4) |
+
+    - Queued until the current branches merge:
+      - classification-only records for fully dry cells (item 8, 3D memory), after `dev/perf-cut-integration-reuse`;
+      - multithreaded assembly in `StandardAssembler`, after the assembler branches;
+      - perf C follow-ups, after `dev/perf-cut-integration-reuse`: deduplicate the per-component physical transforms of product-space velocity, and cache field evaluations in full cells (about 10% of cut-volume time);
+      - constraint-build cost (about 3 s per 3D tank step at 1/h = 16), after `dev/mpi-correctness`.
+    - Need user approval, because results change within solver tolerance: fewer outer passes (a better geometry predictor, or Jacobian reuse across passes); the lagged-increment surface-tension term.
   - **Open questions (for the user):**
     1. 3D gating: R/h = 32 is not affordable, so gate at R/h = 16 with the order over 8/16, or report 3D without gating.
     2. For R/h = 16 memory: implement item 8, or allow a job larger than 16 GB.
