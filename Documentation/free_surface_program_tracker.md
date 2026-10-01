@@ -642,7 +642,11 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
       - SIMPLE: 1.6–2.2×.
       - An in-cycle unscaled-residual stopping estimate changes Newton counts, because the Newton and linear absolute tolerances are both 1e-10, so it stays opt-in.
       - `petsc/3.18.5` (module) looks usable through `-DFE_ENABLE_PETSC=ON`; `trilinos/12.12.1` is not.
-      - **Decision for the user:** make `Right_preconditioner=block-ilu0` with `Preconditioner_reuse=true` the FSILS default. It is so far tested on one rank (plus a two-rank unit test).
+      - **Decision pending:** making `Right_preconditioner=block-ilu0` with `Preconditioner_reuse=true` the FSILS default.
+        - The block ILU(0) is applied per rank and drops couplings to other ranks, so results depend on the partition.
+        - The user prefers speed-ups whose results do not change with the rank count (2026-10-01).
+        - A 4- and 8-rank parity and speed check is running (`/scratch/users/zsexton/free-surface-benchmarks/ilu-rank-check/`). It compares the option's rank-to-rank spread with the default's round-off spread.
+        - Defaults stay unchanged meanwhile.
     - Started 2026-10-01 (base `904c65a5`, same bitwise gate):
 
       | Branch | Work |
