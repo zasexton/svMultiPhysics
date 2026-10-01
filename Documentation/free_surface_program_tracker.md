@@ -487,7 +487,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - Cases and output: `/scratch/users/zsexton/free-surface-benchmarks/static_drop_2d/35a81fd3/La12/<form>/L<level>`, with the job list in `jobs.txt`.
   - Expected: about 5 min at R/h = 8, about 1 h at 16, and about 10–15 h at 32 (longer on SKX nodes).
   - The first submission on `02da73ea` was held and cancelled when the face-sampling fix arrived. Job `46121663` then showed the fix leaves the unfitted static drop (R/h = 8, full run), sloshing (L/h = 16, full run) and capillary wave (100 steps) bitwise identical at the same cost.
-  - **Partial results (2026-09-30; R/h = 32 still running).**
+  - **Results (2026-10-01; `surface_stress` at R/h = 32 still running, 59 of 100 outputs after 15.8 h).**
 
     | Form | R/h | dp/(γ/R) − 1 | Ca_sp (final quarter) | growth | max dA/A | wall time |
     |---|---:|---:|---:|---:|---:|---:|
@@ -497,8 +497,10 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
     | `kag_lumped` | 16 | 7.68e-5 | 3.90e-4 | 0.874 | 5.9e-6 | 2.3 h |
     | `kag_consistent` | 8 | 8.65e-4 | 5.52e-3 | 0.415 | 1.1e-4 | 21 min |
     | `kag_consistent` | 16 | **stopped at step 111** (t = 0.97) | | | | |
+    | `kag_lumped` | 32 | −1.42e-4 | 2.41e-4 | **1.264** | 7.7e-7 | 15.1 h |
+    | `kag_consistent` | 32 | **stopped at step 1112** (t = 3.40), same outer-loop failure | | | | |
 
-    - `kag_lumped` has the smallest pressure-jump error, but its spurious currents are 2–6× those of `surface_stress`, and at R/h = 8 max|u| grows (growth 1.33 > 1, failing no_velocity_growth).
+    - **`kag_lumped` fails.** The pressure-jump error is ≤ 1.4e-4, but it does not converge (observed order 0.17, with a sign change), and max|u| grows at R/h = 8 and 32 (growth 1.33 and 1.26). `Ca_sp` does decrease (1.5e-3, 3.9e-4, 2.4e-4) but stays 2–6× above `surface_stress`, and volume passes.
     - `kag_consistent` at R/h = 16: the outer geometry loop reached its 12-pass cap with the state change stalled at 6.8e-10 against a 1e-10 gate. The projected curvature had spikes up to 2.0e4 against a mean of 1.0 (RMS deviation 1.9). Without an adaptive step controller the run then aborted. This is evidence for D2: consistent-mass KAG curvature is oscillatory and its outer loop is not robust. Its R/h = 8 spurious currents are also 22× those of `surface_stress`.
 - [x] **Per-step cost must come down before the refinement study (added 2026-09-29; done 2026-09-30).**
   - Merged commits `b5837011`, `09b46072`, `889c75f2` and `67b4395a`:
