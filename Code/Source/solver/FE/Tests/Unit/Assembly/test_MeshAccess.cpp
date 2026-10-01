@@ -208,6 +208,16 @@ Mesh build_two_tetrahedra_mesh() {
     return Mesh(std::move(base), svmp::MeshComm::self());
 }
 
+// Direct evaluation of the global-id predicate, without any MeshAccess state.
+bool uncached_global_entity_ids_available(const Mesh& mesh) {
+    const auto& cells = mesh.cell_gids();
+    const auto& faces = mesh.face_gids();
+    const auto valid = [](const auto id) { return id != svmp::INVALID_GID; };
+    return cells.size() == mesh.n_cells() && faces.size() == mesh.n_faces() &&
+           std::all_of(cells.begin(), cells.end(), valid) &&
+           std::all_of(faces.begin(), faces.end(), valid);
+}
+
 } // namespace
 
 TEST(MeshAccess, TwoTrianglesBoundaryAndInteriorFaces) {
@@ -343,6 +353,93 @@ TEST(MeshAccess, RevisionQueriesFollowMeshState)
     auto cell_gids = mesh.local_mesh().cell_gids();
     mesh.local_mesh().set_cell_gids(std::move(cell_gids));
     EXPECT_EQ(access.numberingRevision(), initial_numbering + 1u);
+}
+
+TEST(MeshAccess, GlobalEntityIdsAvailableFollowsNumberingTopologyAndOwnership)
+{
+    auto mesh = build_two_triangles_mesh();
+    MeshAccess access(mesh);
+    const auto expect_answer = [&](bool expected) {
+        ASSERT_EQ(uncached_global_entity_ids_available(mesh), expected);
+        EXPECT_EQ(access.globalEntityIdsAvailable(), expected);
+        // The repeated query is served from the memoized answer.
+        EXPECT_EQ(access.globalEntityIdsAvailable(), expected);
+        EXPECT_EQ(MeshAccess(mesh).globalEntityIdsAvailable(), expected);
+        const MeshAccess copy(access);
+        EXPECT_EQ(copy.globalEntityIdsAvailable(), expected);
+    };
+    expect_answer(true);
+
+    const auto original_cells = mesh.cell_gids();
+    const auto original_faces = mesh.face_gids();
+
+    // Numbering revision: an invalid cell id, then valid ids again.
+    auto numbering = access.numberingRevision();
+    auto cells = original_cells;
+    cells[1] = svmp::INVALID_GID;
+    mesh.local_mesh().set_cell_gids(cells);
+    EXPECT_GT(access.numberingRevision(), numbering);
+    expect_answer(false);
+    mesh.local_mesh().set_cell_gids(original_cells);
+    expect_answer(true);
+
+    // Numbering revision: an invalid face id, then valid ids again.
+    numbering = access.numberingRevision();
+    auto faces = original_faces;
+    faces.back() = svmp::INVALID_GID;
+    mesh.local_mesh().set_face_gids(faces);
+    EXPECT_GT(access.numberingRevision(), numbering);
+    expect_answer(false);
+    mesh.local_mesh().set_face_gids(original_faces);
+    expect_answer(true);
+
+    // Id storage that does not cover every cell.
+    mesh.local_mesh().set_cell_gids({});
+    expect_answer(false);
+    mesh.local_mesh().set_cell_gids(original_cells);
+    expect_answer(true);
+
+    // Topology revision: rebuilding the faces renumbers them with valid ids.
+    mesh.local_mesh().set_face_gids(faces);
+    expect_answer(false);
+    const auto topology = access.topologyRevision();
+    const auto& base = mesh.local_mesh();
+    mesh.local_mesh().set_faces_from_arrays(base.face_shapes(),
+                                            base.face2vertex_offsets(),
+                                            base.face2vertex(),
+                                            base.face2cell());
+    EXPECT_GT(access.topologyRevision(), topology);
+    expect_answer(true);
+
+    // Ownership revision, with ids changed in the same epoch.
+    const auto ownership = access.ownershipRevision();
+    mesh.set_ownership(/*id=*/1, EntityKind::Volume, Ownership::Ghost, /*owner_rank=*/1);
+    EXPECT_GT(access.ownershipRevision(), ownership);
+    expect_answer(true);
+    mesh.local_mesh().set_cell_gids(cells);
+    mesh.set_ownership(/*id=*/1, EntityKind::Volume, Ownership::Owned, /*owner_rank=*/0);
+    expect_answer(false);
+    mesh.local_mesh().set_cell_gids(original_cells);
+    expect_answer(true);
+
+    // A geometry update leaves the answer unchanged.
+    auto x_cur = mesh.local_mesh().X_ref();
+    ASSERT_FALSE(x_cur.empty());
+    x_cur[0] += 0.25;
+    mesh.set_current_coords(x_cur);
+    expect_answer(true);
+
+    // Rewinding the revision counters does not resurrect a stale answer: the
+    // replaced id storage is part of the cache key.
+    const auto revisions = mesh.revision_state();
+    EXPECT_TRUE(access.globalEntityIdsAvailable());
+    mesh.local_mesh().set_cell_gids(cells);
+    mesh.event_bus().restore_revision_state(revisions);
+    ASSERT_EQ(access.numberingRevision(), revisions.numbering);
+    expect_answer(false);
+    mesh.local_mesh().set_cell_gids(original_cells);
+    mesh.event_bus().restore_revision_state(revisions);
+    expect_answer(true);
 }
 
 TEST(MeshAccess, TwoTetrahedraLocalFaceIndexAndMarkers) {

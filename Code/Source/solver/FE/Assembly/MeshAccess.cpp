@@ -345,14 +345,46 @@ std::uint64_t MeshAccess::coordinateConfigurationKey() const {
 bool MeshAccess::globalEntityIdsAvailable() const {
     const auto& cells = mesh_.cell_gids();
     const auto& faces = mesh_.face_gids();
-    return cells.size() == mesh_.n_cells() &&
-           faces.size() == mesh_.n_faces() &&
-           std::all_of(cells.begin(), cells.end(), [](const auto id) {
-               return id != svmp::INVALID_GID;
-           }) &&
-           std::all_of(faces.begin(), faces.end(), [](const auto id) {
-               return id != svmp::INVALID_GID;
-           });
+    const auto revisions = mesh_.revision_state();
+    const std::size_t n_cells = mesh_.n_cells();
+    const std::size_t n_faces = mesh_.n_faces();
+
+    auto& cache = global_entity_id_cache_;
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    if (cache.valid &&
+        cache.topology_revision == revisions.topology &&
+        cache.numbering_revision == revisions.numbering &&
+        cache.ownership_revision == revisions.ownership &&
+        cache.n_cells == n_cells && cache.n_faces == n_faces &&
+        cache.cell_ids == static_cast<const void*>(cells.data()) &&
+        cache.face_ids == static_cast<const void*>(faces.data()) &&
+        cache.cell_id_count == cells.size() &&
+        cache.face_id_count == faces.size()) {
+        return cache.available;
+    }
+
+    const bool available =
+        cells.size() == n_cells &&
+        faces.size() == n_faces &&
+        std::all_of(cells.begin(), cells.end(), [](const auto id) {
+            return id != svmp::INVALID_GID;
+        }) &&
+        std::all_of(faces.begin(), faces.end(), [](const auto id) {
+            return id != svmp::INVALID_GID;
+        });
+
+    cache.valid = true;
+    cache.available = available;
+    cache.topology_revision = revisions.topology;
+    cache.numbering_revision = revisions.numbering;
+    cache.ownership_revision = revisions.ownership;
+    cache.n_cells = n_cells;
+    cache.n_faces = n_faces;
+    cache.cell_ids = static_cast<const void*>(cells.data());
+    cache.face_ids = static_cast<const void*>(faces.data());
+    cache.cell_id_count = cells.size();
+    cache.face_id_count = faces.size();
+    return available;
 }
 
 GlobalIndex MeshAccess::getCellGlobalId(GlobalIndex cell_id) const {
