@@ -537,7 +537,18 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
     5. Rate initialization regularizes 0 empty rows in serial but thousands in parallel.
   - Consequence: M2 and M3 run serially as concurrent single-rank jobs, preferably on `-C CPU_GEN:MLN` nodes (about 2× faster than SKX).
   - Estimates: M2 La = 12 at R/h = 8/16/32 for three forms is about 24 h wall time (70 core-hours). M3 is about 3 h wall time per (form, transport) combination.
-- [ ] **MPI correctness fixes (started 2026-09-30, branch `dev/mpi-correctness`, worktree `/scratch/users/zsexton/svmp-dev-mpi/`).** Fix the five defects above. Acceptance: static drop at R/h = 16 and 32 and sloshing at L32 complete on 1, 2, 4 and 8 ranks and match serial to solver tolerance, with serial Newton iteration counts and identical empty-row counts.
+- [x] **MPI correctness fixes: done and merged 2026-10-01 (13 commits, tip `ac273512`).**
+  - Static drop at R/h = 16 and 32 and sloshing at L/h = 32 and 64 complete on 1, 2, 4 and 8 ranks and match serial to round-off. Newton iteration counts equal serial (R/h = 32: 3.87 on every rank count, previously 7.47 on 2 ranks), and the rate initialization regularizes 0 rows on every rank count.
+  - Fixes:
+    1. Collective decisions in place of rank-local early returns around collectives: the master-bearing reimposition, the TimeLoop workspace and ghost exchanges, `FESystem` constraint refresh, wet-volume diagnostics, extension-map revisions and curvature-projection cache reuse.
+    2. Ghost layers: 8 derived automatically for multi-rank aggregating decks when `<Ghost_layers>` is unset. This is a fixed geometric constant and is untested in 3D.
+    3. Aggregation roots independent of the partition: only ranks that condense a slave must see its masters.
+    4. Off-rank constraint fill exchanged into the distributed Jacobian pattern (FSILS had dropped entries), which restores quadratic Newton.
+    5. Owned Dirichlet rows get their unit diagonal in `ParallelAssembler::finalize`.
+    - No capillary-assembly bug was found.
+  - Speed-up per step on a shared node: static drop R/h = 32 1.87× / 3.08× / 3.67× on 2/4/8 ranks; sloshing L/h = 64 1.52× / 2.02× / 2.30×.
+  - Open: a few rank-local throws before collectives on error paths (NewtonSolver line search, `LevelSetVolume::build`, FSILS `dot`, PDE extension). No end-to-end multi-rank cut-case CTest yet.
+- **Run policy since 2026-10-01:** long runs with FSILS linear algebra use 4 ranks on one node (`run_case_mpi.sbatch`). Bitwise comparisons between builds stay serial, and decks with Eigen linear algebra stay serial (benchmarks README).
 - [ ] **Protocol.**
   - Static drop in a box, fluid initially at rest. The Laplace number La = ργD/μ² is swept over 12 and 120; 1,200 and above are deferred until the per-step cost is reduced.
   - Start from the sampled analytic shape. No minimizer is required (D3).
@@ -640,6 +651,13 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
       - It also checks that JIT cache objects are keyed by CPU features, since jobs run on both SKX (AVX-512) and MLN (AVX2) nodes.
       - Defaults that change round-off need user approval.
     - Queued after the current merges: a fresh 2D/3D profiling pass of the post-merge step, attacking the next hotspots (results-neutral).
+    - **Job efficiency (2026-10-01).** `seff` showed four causes of low CPU efficiency:
+      - every serial benchmark job ran at exactly 50%, because `--mem=8G` exceeds amarsden's `MaxMemPerCPU=8000` MB and Slurm added a second, idle CPU;
+      - build-and-test jobs at 11–12%, because CTest runs one entry at a time on 16 cores;
+      - packed jobs at 18–30%, because their lanes are unbalanced;
+      - agent build-then-run jobs at 21–44%, from the same two effects.
+
+      Fixes: memory requests now stay at or below 8000 MB per CPU, and long runs use 4 ranks. Started `dev/test-suite-parallel`: finer CTest registration and `ctest -j` with MPI-aware `PROCESSORS`, plus separate build and test jobs.
     - Need user approval, because results change within solver tolerance: fewer outer passes (a better geometry predictor, or Jacobian reuse across passes). The lagged-increment term was approved as D13.
   - **Open questions (for the user):**
     1. 3D gating: R/h = 32 is not affordable, so gate at R/h = 16 with the order over 8/16, or report 3D without gating.
