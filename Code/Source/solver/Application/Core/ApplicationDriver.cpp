@@ -6569,12 +6569,11 @@ std::size_t writeWetVolumeFractionOutput(
       continue;
     }
 
+    // Write the field also where this rank has no active-side rule (zero
+    // wet fraction) so every partition carries the same field set.
     const auto side = cutIntegrationSide(request.active_side);
     const auto rules =
         cut_context->generatedVolumeRulesForMarkerAndSide(*marker, side);
-    if (rules.empty()) {
-      continue;
-    }
 
     const auto field_name = wetVolumeFractionFieldName(request, i);
     const auto measure_field_name = wetVolumeMeasureFieldName(request, i);
@@ -6610,7 +6609,9 @@ std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
     const auto side = cutIntegrationSide(request.active_side);
     const auto rules =
         cut_context->generatedVolumeRulesForMarkerAndSide(*marker, side);
-    if (rules.empty()) {
+    // A fully dry partition holds no active-side rule; the diagnostics below
+    // reduce over the communicator, so skip only when no rank has one.
+    if (!globalAnyBool(!rules.empty(), comm)) {
       continue;
     }
 
@@ -18850,9 +18851,13 @@ bool updateLevelSetAdvectionVelocitiesFromState(
         throw std::runtime_error(
             "[svMultiPhysics::Application] Algebraic wet-extension refresh produced no immutable map snapshot or owned constraint rows.");
       }
+      // The snapshot revision hashes rank-local arrays; the frozen-map
+      // revision must agree across ranks (as for the PDE path above).
       const std::uint64_t installed_map_revision_key =
           pde_algebraic ? pde_map_revision_key
-                        : algebraic_map_snapshot->revision().key();
+                        : application::core::communicatorCombinedRevision(
+                              algebraic_map_snapshot->revision().key(),
+                              extension_comm);
 
       std::vector<svmp::FE::Real> projected_coefficients(
           static_cast<std::size_t>(target_dofs.getNumDofs()),
@@ -19178,12 +19183,20 @@ std::optional<std::uint64_t> currentLevelSetVelocityExtensionRevision(
     mix(static_cast<std::uint64_t>(target));
     mix(kernel->frozenMapRevision());
   }
-  const auto resolved =
-      !found_current
-          ? acceptedVelocityExtensionMapRegistryRevision(accepted_maps)
-          : (revision == 0u
-                 ? std::optional<std::uint64_t>{1u}
-                 : std::optional<std::uint64_t>{revision});
+  std::optional<std::uint64_t> resolved =
+      revision == 0u ? std::optional<std::uint64_t>{1u}
+                     : std::optional<std::uint64_t>{revision};
+  if (!found_current) {
+    // Accepted snapshot revisions hash rank-local arrays: combine them.
+    const auto registry =
+        acceptedVelocityExtensionMapRegistryRevision(accepted_maps);
+    const auto comm = activeFESystemCommunicator(system);
+    resolved = std::nullopt;
+    if (globalAnyBool(registry.has_value(), comm)) {
+      resolved = application::core::communicatorCombinedRevision(
+          registry.value_or(0u), comm);
+    }
+  }
   const auto [minimum, maximum] = globalMinMaxUint64(
       resolved.value_or(0u), activeFESystemCommunicator(system));
   if (minimum != maximum) {
