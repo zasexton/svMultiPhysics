@@ -27,13 +27,22 @@ namespace backends {
  * extra Krylov work accumulated since the last refresh reaches the work of one
  * refresh:
  *
- *     sum_j max(0, n_j - n_0)  >=  R,
+ *     sum_j max(0, n_j - n*_j)  >=  R,
  *
- * where n_0 is the iteration count of the solve that used the fresh
- * preconditioner, n_j the counts of the following solves, and R the setup cost
- * expressed in Krylov iterations: setup work divided by the work of one
- * preconditioned iteration of the fresh solve.  The backend supplies R with
- * the fresh solve (FSILS: operation counts; Eigen: measured times).
+ * where n_j are the iteration counts of the solves since the refresh, n*_j the
+ * iterations a fresh preconditioner would need for the residual reduction of
+ * solve j, and R the setup cost expressed in Krylov iterations: setup work
+ * divided by the work of one preconditioned iteration of the fresh solve.  The
+ * backend supplies R with the fresh solve (FSILS: operation counts; Eigen:
+ * measured times).  n*_j uses the convergence rate of the fresh solve,
+ * log(r/r0) per iteration, applied to the reduction of solve j; this keeps
+ * solves that stop early on the absolute tolerance (or late on a strict
+ * relative one) from being mistaken for staleness.
+ *
+ * The same budget bounds a solve that uses a reused preconditioner: once it
+ * exceeds n*_j plus the remaining allowance R - sum(excess), refreshing is
+ * cheaper than continuing, so the caller abandons it, refreshes and repeats
+ * the solve (staleIterationBudget()).
  *
  * This is the deterministic break-even (ski-rental) strategy: whatever the
  * future sequence of iteration counts, its total cost is at most twice the
@@ -98,6 +107,7 @@ public:
         fresh_iterations_ = -1;
         excess_iterations_ = 0.0;
         refresh_cost_iterations_ = 0.0;
+        log_rate_ = 0.0;
         ++refresh_count_;
     }
 
@@ -107,10 +117,13 @@ public:
      * @param used_fresh_preconditioner true for the first solve after recordRefresh().
      * @param refresh_cost_iterations for a fresh solve: the setup cost in units of
      *        one preconditioned Krylov iteration of that solve (ignored otherwise).
+     * @param residual_reduction final / initial residual norm of the solve
+     *        (0 when unknown: iteration counts are then compared directly).
      */
     void recordSolve(int iterations,
                      bool used_fresh_preconditioner,
-                     double refresh_cost_iterations = 0.0) noexcept
+                     double refresh_cost_iterations = 0.0,
+                     double residual_reduction = 0.0) noexcept
     {
         if (!valid_) {
             return;
@@ -122,10 +135,37 @@ public:
                 (std::isfinite(refresh_cost_iterations) && refresh_cost_iterations > 0.0)
                     ? refresh_cost_iterations
                     : 0.0;
+            log_rate_ = (n > 0 && informativeReduction(residual_reduction))
+                            ? std::log(residual_reduction) / static_cast<double>(n)
+                            : 0.0;
             return;
         }
-        excess_iterations_ += static_cast<double>(std::max(0, n - fresh_iterations_));
+        excess_iterations_ +=
+            std::max(0.0, static_cast<double>(n) - expectedFreshIterations(residual_reduction));
         ++reuse_count_;
+    }
+
+    /// Iterations a fresh preconditioner is expected to need for a residual
+    /// reduction: from the convergence rate of the last fresh solve when known,
+    /// else its iteration count.
+    [[nodiscard]] double expectedFreshIterations(double residual_reduction) const noexcept
+    {
+        if (log_rate_ < 0.0 && informativeReduction(residual_reduction)) {
+            return std::log(residual_reduction) / log_rate_;
+        }
+        return static_cast<double>(std::max(0, fresh_iterations_));
+    }
+
+    /// Iteration budget of a solve with the current (reused) preconditioner for
+    /// a target residual reduction; 0 when no budget applies.
+    [[nodiscard]] int staleIterationBudget(double target_reduction) const noexcept
+    {
+        if (!valid_ || fresh_iterations_ < 0) {
+            return 0;
+        }
+        const double budget = expectedFreshIterations(target_reduction) +
+                              std::max(0.0, refresh_cost_iterations_ - excess_iterations_);
+        return std::max(1, static_cast<int>(std::ceil(budget)));
     }
 
     void invalidate() noexcept
@@ -134,6 +174,7 @@ public:
         fresh_iterations_ = -1;
         excess_iterations_ = 0.0;
         refresh_cost_iterations_ = 0.0;
+        log_rate_ = 0.0;
     }
 
     [[nodiscard]] bool valid() const noexcept { return valid_; }
@@ -144,7 +185,13 @@ public:
     [[nodiscard]] std::uint64_t reuseCount() const noexcept { return reuse_count_; }
 
 private:
+    [[nodiscard]] static bool informativeReduction(double r) noexcept
+    {
+        return std::isfinite(r) && r > 0.0 && r < 1.0;
+    }
+
     bool valid_{false};
+    double log_rate_{0.0};
     int fresh_iterations_{-1};
     double excess_iterations_{0.0};
     double refresh_cost_iterations_{0.0};

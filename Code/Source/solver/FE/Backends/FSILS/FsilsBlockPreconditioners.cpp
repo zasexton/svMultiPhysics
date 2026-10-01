@@ -452,8 +452,9 @@ fe_fsi_linear_solver::FSILS_rightPreconditionerHook FsilsKrylovPreconditioner::m
                           bool& fresh) {
         return prepare(lhs, dof, Val, row_scale, col_scale, force_refresh, fresh);
     };
-    hook.finish = [this](int iterations, bool converged, bool fresh, bool retried) {
-        finish(iterations, converged, fresh, retried);
+    hook.stale_iteration_cap = [this](double target_reduction) { return staleIterationCap(target_reduction); };
+    hook.finish = [this](int iterations, double residual_reduction, bool converged, bool fresh, bool retried) {
+        finish(iterations, residual_reduction, converged, fresh, retried);
     };
     return hook;
 }
@@ -792,7 +793,16 @@ void FsilsKrylovPreconditioner::applySimple(const double* in, double* out) const
     }
 }
 
-void FsilsKrylovPreconditioner::finish(int iterations, bool converged, bool fresh, bool retried)
+int FsilsKrylovPreconditioner::staleIterationCap(double target_reduction) const noexcept
+{
+    return policy_.staleIterationBudget(target_reduction);
+}
+
+void FsilsKrylovPreconditioner::finish(int iterations,
+                                       double residual_reduction,
+                                       bool converged,
+                                       bool fresh,
+                                       bool retried)
 {
     ++stats_.solves;
     stats_.last_iterations = iterations;
@@ -816,7 +826,7 @@ void FsilsKrylovPreconditioner::finish(int iterations, bool converged, bool fres
         }
         refresh_cost_iterations = flops[1] > 0.0 ? flops[0] / flops[1] : 0.0;
     }
-    policy_.recordSolve(iterations, fresh, refresh_cost_iterations);
+    policy_.recordSolve(iterations, fresh, refresh_cost_iterations, residual_reduction);
 
     std::ostringstream oss;
     oss << "FsilsKrylovPreconditioner: diagnostic=fsils_right_preconditioner"
@@ -827,6 +837,7 @@ void FsilsKrylovPreconditioner::finish(int iterations, bool converged, bool fres
         << " retried=" << (retried ? 1 : 0)
         << " iterations=" << iterations
         << " converged=" << (converged ? 1 : 0)
+        << " residual_reduction=" << residual_reduction
         << " fresh_iterations=" << policy_.freshIterations()
         << " excess_iterations=" << policy_.excessIterations()
         << " refresh_cost_iterations=" << policy_.refreshCostIterations()

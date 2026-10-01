@@ -534,6 +534,10 @@ class FSILS_subLsType
     /// a right preconditioner; opt-in otherwise.
     bool estimate_unscaled_residual{false};
 
+    /// Upper bound on the iterations of one GMRES call (0: none).  Used for
+    /// solves with a reused right preconditioner.
+    int max_total_itr{0};
+
     /// Schur-complement preconditioner selection used by the BlockSchur path.
     SchurPreconditionerType schur_preconditioner{SchurPreconditionerType::ALGEBRAIC_SHAT};
 

@@ -39,9 +39,13 @@ public:
 /// The callee sets `fresh` to true when it built the preconditioner from this
 /// operator, and returns nullptr to run the unpreconditioned kernel.
 ///
-/// `finish` is called once per fsils_solve() with the total GMRES iterations,
-/// the convergence flag and whether the final attempt used a fresh
-/// preconditioner.
+/// `stale_iteration_cap` returns the iteration budget of a solve that uses a
+/// reused preconditioner for a target residual reduction (0: no budget); a
+/// solve exceeding it is abandoned and repeated with a fresh preconditioner.
+///
+/// `finish` is called once per fsils_solve() with the GMRES iterations and the
+/// residual reduction of the final attempt, the convergence flag, whether the
+/// final attempt used a fresh preconditioner and whether it was a repeat.
 struct FSILS_rightPreconditionerHook {
   std::function<const FSILS_rightPreconditioner*(const FSILS_lhsType& lhs,
                                                  int dof,
@@ -51,7 +55,9 @@ struct FSILS_rightPreconditionerHook {
                                                  bool force_refresh,
                                                  bool& fresh)>
       prepare{};
-  std::function<void(int iterations, bool converged, bool fresh, bool retried)> finish{};
+  std::function<int(double target_reduction)> stale_iteration_cap{};
+  std::function<void(int iterations, double residual_reduction, bool converged, bool fresh, bool retried)>
+      finish{};
 
   [[nodiscard]] bool active() const noexcept { return static_cast<bool>(prepare); }
 };

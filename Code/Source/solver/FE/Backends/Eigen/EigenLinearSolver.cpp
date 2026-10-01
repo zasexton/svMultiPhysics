@@ -661,8 +661,18 @@ SolverReport EigenLinearSolver::solveWithReuse(const EigenMatrix& A, EigenVector
     const int restart = std::max(1, std::min(max_iter, options_.krylov_dim > 0 ? options_.krylov_dim : 50));
     Eigen::VectorXd xv(b.eigen().size());
 
+    // A solve with a reused factorization gets the break-even iteration budget;
+    // beyond it a refresh is cheaper, so the solve is repeated fresh.
+    int first_budget = max_iter;
+    if (!fresh && b_norm > 0.0) {
+        const int stale_budget = st.policy.staleIterationBudget(target / b_norm);
+        if (stale_budget > 0) {
+            first_budget = std::min(max_iter, stale_budget);
+        }
+    }
     auto t0 = std::chrono::steady_clock::now();
-    auto result = eigen_detail::rightPreconditionedGmres(apply_A, apply_M, b.eigen(), xv, restart, max_iter, target);
+    auto result =
+        eigen_detail::rightPreconditionedGmres(apply_A, apply_M, b.eigen(), xv, restart, first_budget, target);
     double solve_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     bool retried = false;
     int stale_iterations = 0;
@@ -685,7 +695,9 @@ SolverReport EigenLinearSolver::solveWithReuse(const EigenMatrix& A, EigenVector
     } else {
         ++st.stats.reuses;
     }
-    st.policy.recordSolve(result.iterations, fresh, refresh_cost_iterations);
+    const double reduction =
+        result.initial_residual > 0.0 ? result.final_residual / result.initial_residual : 0.0;
+    st.policy.recordSolve(result.iterations, fresh, refresh_cost_iterations, reduction);
     ++st.stats.solves;
     st.stats.last_iterations = result.iterations;
     st.stats.last_fresh = fresh;

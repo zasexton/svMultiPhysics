@@ -59,6 +59,9 @@ void fsils_ls_create(FSILS_lsType& ls, LinearSolverType LS_type, double relTol, 
   ls.RI.estimate_unscaled_residual = false;
   ls.GM.estimate_unscaled_residual = false;
   ls.CG.estimate_unscaled_residual = false;
+  ls.RI.max_total_itr = 0;
+  ls.GM.max_total_itr = 0;
+  ls.CG.max_total_itr = 0;
   ls.right_pc_hook = FSILS_rightPreconditionerHook{};
   ls.RI.convergence_ref_norm = -1.0;
   ls.GM.convergence_ref_norm = -1.0;

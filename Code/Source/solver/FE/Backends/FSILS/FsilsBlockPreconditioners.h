@@ -141,7 +141,11 @@ public:
             bool& fresh);
 
     /// FSILS hook completion (see FSILS_rightPreconditionerHook::finish).
-    void finish(int iterations, bool converged, bool fresh, bool retried);
+    void finish(int iterations, double residual_reduction, bool converged, bool fresh, bool retried);
+
+    /// Iteration budget of a solve with the reused preconditioner (see
+    /// PreconditionerReusePolicy::staleIterationBudget); 0 when none applies.
+    [[nodiscard]] int staleIterationCap(double target_reduction) const noexcept;
 
     /// Drop the current preconditioner (next solve refreshes).
     void invalidate();

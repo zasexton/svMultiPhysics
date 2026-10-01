@@ -39,6 +39,7 @@
 #include "precond.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <chrono>
 #include <cstdlib>
@@ -288,8 +289,16 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
         std::vector<double> rhs_copy;
         if (any_stale != 0) {
           rhs_copy.assign(R.data(), R.data() + R.size());
+          // Budget of a solve with a reused preconditioner, for the reduction
+          // of the true residual required by the stopping test.
+          const double ref = ls.RI.convergence_ref_norm;
+          if (ls.right_pc_hook.stale_iteration_cap && ref > 0.0 && std::isfinite(ref)) {
+            const double target = std::max(ls.RI.absTol, ls.RI.relTol * ref) / ref;
+            ls.RI.max_total_itr = ls.right_pc_hook.stale_iteration_cap(target);
+          }
         }
         gmres::gmres_v(system, ls.RI, R, row_scaling);
+        ls.RI.max_total_itr = 0;
         bool retried = false;
         int stale_iterations = 0;
         if (!ls.RI.suc && any_stale != 0) {
@@ -300,7 +309,9 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
           retried = true;
         }
         if (ls.right_pc_hook.finish) {
-          ls.right_pc_hook.finish(ls.RI.itr, ls.RI.suc, fresh, retried);
+          const double reduction =
+              (ls.RI.iNorm > 0.0 && std::isfinite(ls.RI.iNorm)) ? ls.RI.fNorm / ls.RI.iNorm : 0.0;
+          ls.right_pc_hook.finish(ls.RI.itr, reduction, ls.RI.suc, fresh, retried);
         }
         if (retried && lhs.commu.task == 0) {
           fprintf(stderr, "[fsils_solve] right preconditioner refreshed after a failed reuse "
