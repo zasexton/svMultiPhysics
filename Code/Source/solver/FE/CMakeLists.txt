@@ -941,6 +941,7 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSetImplicitCutQuadratureBackend.h
     LevelSet/LevelSetStaticCapillaryEquilibrium.h
     LevelSet/LevelSetVolume.h
+    LevelSet/LevelSetKinematicReconciliation.h
     LevelSet/LevelSetReinitialization.h
     LevelSet/LevelSetDiagnostics.h
     LevelSet/LevelSetRestart.h
@@ -960,6 +961,7 @@ set(FE_LEVELSET_SOURCES
     LevelSet/LevelSetImplicitCutQuadratureBackend.cpp
     LevelSet/LevelSetStaticCapillaryEquilibrium.cpp
     LevelSet/LevelSetVolume.cpp
+    LevelSet/LevelSetKinematicReconciliation.cpp
     LevelSet/LevelSetReinitialization.cpp
     LevelSet/LevelSetDiagnostics.cpp
     LevelSet/LevelSetRestart.cpp
@@ -2449,6 +2451,7 @@ if(FE_BUILD_TESTS)
             Tests/Unit/LevelSet/test_LevelSetCurvatureProjection.cpp
             Tests/Unit/LevelSet/test_LevelSetHeaders.cpp
             Tests/Unit/LevelSet/test_LevelSetInterfaceLifecycle.cpp
+            Tests/Unit/LevelSet/test_LevelSetKinematicReconciliation.cpp
             Tests/Unit/LevelSet/test_LevelSetOptions.cpp
             Tests/Unit/LevelSet/test_LevelSetReinitialization.cpp
             Tests/Unit/LevelSet/test_LevelSetRestart.cpp
