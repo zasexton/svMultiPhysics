@@ -1150,6 +1150,11 @@ class LinearSolverParameters : public ParameterLists
     Parameter<std::string> ns_momentum_approximation;
     Parameter<bool> ns_use_coupled_outer_fgmres;
 
+    /// Opt-in Krylov right preconditioner (new OOP solver): none, block-ilu0, simple.
+    Parameter<std::string> right_preconditioner;
+    /// Opt-in reuse of preconditioners/factorizations across solves (new OOP solver).
+    Parameter<bool> preconditioner_reuse;
+
     //Parameter<std::string> preconditioner;
 
     Parameter<double> tolerance;

@@ -3992,6 +3992,8 @@ LinearSolverParameters::LinearSolverParameters()
   set_parameter("NS_Schur_preconditioner", std::string("algebraic-shat"), !required, ns_schur_preconditioner);
   set_parameter("NS_Momentum_approximation", std::string("ilu-k"), !required, ns_momentum_approximation);
   set_parameter("NS_Use_coupled_outer_FGMRES", false, !required, ns_use_coupled_outer_fgmres);
+  set_parameter("Right_preconditioner", std::string("none"), !required, right_preconditioner);
+  set_parameter("Preconditioner_reuse", false, !required, preconditioner_reuse);
 
   //set_parameter("Preconditioner", "", !required, preconditioner);
 

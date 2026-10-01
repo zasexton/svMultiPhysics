@@ -455,6 +455,23 @@ svmp::FE::backends::PreconditionerType toPreconditioner(const std::string& legac
   return PreconditionerType::None;
 }
 
+svmp::FE::backends::RightPreconditionerType toRightPreconditioner(const std::string& value)
+{
+  using svmp::FE::backends::RightPreconditionerType;
+  const auto v = lower_copy(value);
+  if (v.empty() || v == "none") {
+    return RightPreconditionerType::None;
+  }
+  if (v == "block-ilu0" || v == "block-ilu" || v == "bilu0" || v == "bilu") {
+    return RightPreconditionerType::BlockILU0;
+  }
+  if (v == "simple" || v == "block-simple") {
+    return RightPreconditionerType::Simple;
+  }
+  throw std::runtime_error("[svMultiPhysics::Application] Unsupported <Right_preconditioner> '" + value +
+                           "'. Supported values: none, block-ilu0, simple.");
+}
+
 svmp::FE::backends::FsilsBlockSchurSchurPreconditioner
 toFsilsBlockSchurPreconditioner(const std::string& value)
 {
@@ -920,6 +937,15 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
     } else if (total > 0) {
       opts.max_iter = static_cast<int>(total);
     }
+  }
+
+  // Opt-in Krylov right preconditioner and preconditioner reuse.  The SIMPLE
+  // splitting of the incompressible-flow system acts on the scalar Pressure
+  // field; the backend locates it by name in the block layout.
+  opts.right_preconditioner = toRightPreconditioner(eq->linear_solver.right_preconditioner.value());
+  opts.reuse_preconditioner = eq->linear_solver.preconditioner_reuse.value();
+  if (opts.right_preconditioner == svmp::FE::backends::RightPreconditionerType::Simple) {
+    opts.right_preconditioner_constraint_block = "Pressure";
   }
 
   // Explicit saddle-point block names: env vars or programmatic SolverOptions.
@@ -1826,6 +1852,12 @@ void SimulationBuilder::createSolvers()
             << " preconditioner=" << svmp::FE::backends::preconditionerToString(solver_options.preconditioner)
             << " rel_tol=" << solver_options.rel_tol << " abs_tol=" << solver_options.abs_tol
             << " max_iter=" << solver_options.max_iter;
+  if (solver_options.right_preconditioner != svmp::FE::backends::RightPreconditionerType::None ||
+      solver_options.reuse_preconditioner) {
+    oopCout() << " right_preconditioner="
+              << svmp::FE::backends::rightPreconditionerToString(solver_options.right_preconditioner)
+              << " preconditioner_reuse=" << (solver_options.reuse_preconditioner ? 1 : 0);
+  }
   if (solver_options.block_layout) {
     oopCout() << " block_layout=[";
     for (std::size_t i = 0; i < solver_options.block_layout->blocks.size(); ++i) {
