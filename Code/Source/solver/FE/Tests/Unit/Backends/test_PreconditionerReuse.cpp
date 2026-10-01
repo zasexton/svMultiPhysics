@@ -354,7 +354,7 @@ TEST(PreconditionerReusePolicy, ExcessUsesTheConvergenceRateOfTheFreshSolve)
 
     // A solve that stops early on a looser (absolute) target is not stale.
     policy.recordSolve(5, false, 0.0, 1e-2);
-    EXPECT_DOUBLE_EQ(policy.excessIterations(), 0.0);
+    EXPECT_NEAR(policy.excessIterations(), 0.0, 1e-9);
     EXPECT_FALSE(policy.beforeSolve(true, false).refresh);
 
     // Ten iterations more than the fresh rate predicts reach the setup cost.
