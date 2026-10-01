@@ -912,7 +912,11 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     std::uint64_t workspace_sparsity_revision = transient.system().sparsityPatternRevision();
     auto ensure_workspace_matches_sparsity = [&]() {
         const auto revision = transient.system().sparsityPatternRevision();
-        if (revision == workspace_sparsity_revision) {
+        // The pattern revision follows the rank-local constraint structure,
+        // while allocateWorkspace() is collective.
+        if (!candidateStageBooleanMinMax(
+                 transient.system(), revision != workspace_sparsity_revision)
+                 .second) {
             return;
         }
         newton.allocateWorkspace(transient.system(), factory, workspace);
@@ -946,7 +950,9 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     if (history.stepIndex() == 0) {
         auto& sys = transient.system();
         const auto& constraints = sys.constraints();
-        if (!constraints.empty()) {
+        // Constraint lines are rank-local; the update and the ghost exchange
+        // below are collective.
+        if (candidateStageBooleanMinMax(sys, !constraints.empty()).second) {
             sys.updateConstraints(t0, history.dt());
             updateGhostsAndDistributeHistory(constraints, history);
         }
@@ -3571,10 +3577,10 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 transient.system().updateConstraints(t, accepted_dt);
                 ensure_workspace_matches_sparsity();
                 history.updateGhosts();
-                if (!transient.system().constraints().empty()) {
-                    transient.system().constraints().updateGhostsAndDistribute(
-                        history.uPrev());
-                }
+                // updateGhostsAndDistribute() exchanges ghosts collectively
+                // before its own (rank-local) empty() check.
+                transient.system().constraints().updateGhostsAndDistribute(
+                    history.uPrev());
                 // The rejected endpoint must not remain exposed through u()
                 // after a fixed-step failure or while rejection callbacks
                 // inspect the restored attempt. Recreate the current vector
@@ -3854,14 +3860,13 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     transient.system().updateConstraints(t + dt, dt);
                     ensure_workspace_matches_sparsity();
                     history.updateGhosts();
-                    if (!transient.system().constraints().empty()) {
-                        // Do not apply endpoint-time inhomogeneities to
-                        // u_n/u_{n-1}; those vectors represent their own
-                        // accepted times.  Only the endpoint candidate is
-                        // projected here.
-                        transient.system().constraints().
-                            updateGhostsAndDistribute(history.u());
-                    }
+                    // Do not apply endpoint-time inhomogeneities to
+                    // u_n/u_{n-1}; those vectors represent their own
+                    // accepted times.  Only the endpoint candidate is
+                    // projected here.  updateGhostsAndDistribute() exchanges
+                    // ghosts collectively before its rank-local empty() check.
+                    transient.system().constraints().
+                        updateGhostsAndDistribute(history.u());
 
                     if (generalized_alpha_first_order_rate_n_saved) {
                         FE_THROW_IF(
