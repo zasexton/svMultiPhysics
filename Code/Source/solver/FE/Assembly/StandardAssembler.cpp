@@ -2910,6 +2910,64 @@ private:
     return shared != nullptr ? shared->tabulation(basis, gradients, hessians) : nullptr;
 }
 
+[[nodiscard]] bool sameRealBits(Real a, Real b) noexcept
+{
+    return std::memcmp(&a, &b, sizeof(Real)) == 0;
+}
+
+// True when `cached` holds exactly (bitwise) what CutVolumeQuadratureRule
+// builds from `rule` for this cell family and dimension.
+[[nodiscard]] bool cutVolumeQuadratureRuleMatches(
+    const quadrature::QuadratureRule& cached,
+    const geometry::CutQuadratureRule& rule,
+    CellFamily family,
+    int dimension) noexcept
+{
+    if (cached.cell_family() != family || cached.dimension() != dimension ||
+        cached.order() != rule.exact_polynomial_order ||
+        cached.num_points() != rule.points.size()) {
+        return false;
+    }
+    const auto& points = cached.points();
+    const auto& weights = cached.weights();
+    for (std::size_t i = 0; i < rule.points.size(); ++i) {
+        const auto& qp = rule.points[i];
+        if (!sameRealBits(points[i][0], qp.point[0]) ||
+            !sameRealBits(points[i][1], qp.point[1]) ||
+            !sameRealBits(points[i][2], qp.point[2]) ||
+            !sameRealBits(weights[i], qp.weight)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] std::size_t cutVolumeQuadratureRuleBytes(const quadrature::QuadratureRule& rule)
+{
+    return sizeof(CutVolumeQuadratureRule) +
+           rule.points().capacity() * sizeof(quadrature::QuadPoint) +
+           rule.weights().capacity() * sizeof(Real);
+}
+
+[[nodiscard]] std::size_t cutVolumeEpochCacheMaxBytesFromEnv() noexcept
+{
+    static const std::size_t max_bytes = [] {
+        constexpr std::size_t default_megabytes = 1024u;
+        constexpr std::size_t max_megabytes = std::size_t{1} << 30u;
+        std::size_t megabytes = default_megabytes;
+        const char* env = std::getenv("SVMP_CUT_VOLUME_EPOCH_CACHE_MAX_MB");
+        if (env != nullptr && env[0] != '\0') {
+            char* end = nullptr;
+            const auto value = std::strtoull(env, &end, 10);
+            if (end != env) {
+                megabytes = std::min<std::size_t>(static_cast<std::size_t>(value), max_megabytes);
+            }
+        }
+        return megabytes * std::size_t{1024u} * std::size_t{1024u};
+    }();
+    return max_bytes;
+}
+
 void mixCutVolumeBasisCacheHash(std::uint64_t& h, std::uint64_t value) noexcept
 {
     h ^= value + 0x9e3779b97f4a7c15ULL + (h << 6U) + (h >> 2U);
@@ -4895,6 +4953,39 @@ void StandardAssembler::resetCutVolumeBasisCacheDiagnostics() noexcept
     cut_volume_basis_cache_evictions_ = 0;
 }
 
+StandardAssembler::CutVolumeEpochCacheDiagnostics
+StandardAssembler::cutVolumeEpochCacheDiagnostics() const noexcept
+{
+    auto diagnostics = cut_volume_epoch_cache_.statistics();
+    diagnostics.max_bytes = cutVolumeEpochCacheMaxBytes();
+    return diagnostics;
+}
+
+void StandardAssembler::resetCutVolumeEpochCacheDiagnostics() noexcept
+{
+    auto& statistics = cut_volume_epoch_cache_.statistics();
+    statistics.resets = 0;
+    statistics.reset_reasons = 0;
+    statistics.epochs = 0;
+    statistics.stale_releases = 0;
+    statistics.rule_hits = 0;
+    statistics.rule_misses = 0;
+    statistics.rule_invalidations = 0;
+    statistics.basis_hits = 0;
+    statistics.basis_misses = 0;
+    statistics.tabulations_stored = 0;
+    statistics.over_budget_skips = 0;
+    statistics.peak_bytes = statistics.bytes;
+}
+
+std::size_t StandardAssembler::cutVolumeEpochCacheMaxBytes() const noexcept
+{
+    if (options_.cut_volume_epoch_cache_max_bytes.has_value()) {
+        return *options_.cut_volume_epoch_cache_max_bytes;
+    }
+    return cutVolumeEpochCacheMaxBytesFromEnv();
+}
+
 std::size_t StandardAssembler::cutVolumeBasisCacheMaxEntries() const noexcept
 {
     if (options_.cut_volume_basis_cache_max_entries.has_value()) {
@@ -5067,6 +5158,7 @@ void StandardAssembler::reset()
     coloring_dof_revisions_.clear();
     clearCutVolumeBasisCache();
     clearCutVolumeGeometryCache();
+    cut_volume_epoch_cache_.clear();
     initialized_ = false;
 }
 
@@ -5081,6 +5173,7 @@ void StandardAssembler::invalidateGeometryCaches()
     cached_geom_volume_ = 0.0;
     clearCutVolumeBasisCache();
     clearCutVolumeGeometryCache();
+    cut_volume_epoch_cache_.clear();
 }
 
 void StandardAssembler::invalidateTopologyLayoutCaches()
@@ -10435,6 +10528,280 @@ void StandardAssembler::restoreCutVolumeGeometryCacheEntry(
     cached_field_recipes_valid_ = false;
 }
 
+bool StandardAssembler::beginCutVolumeEpochCache(const IMeshAccess& mesh,
+                                                 const CutIntegrationContext& cut_context)
+{
+    // Basis addresses are memoized for one assembly call only; what the
+    // cache stores is keyed on content.
+    cut_volume_epoch_key_memo_.clear();
+    const auto max_bytes = cutVolumeEpochCacheMaxBytes();
+    detail::CutVolumeEpochKey key;
+    if (max_bytes > 0u) {
+        key.content_signature = cutVolumeBasisContextSignature(cut_context);
+        key.mesh_geometry_revision = mesh.geometryRevision();
+        key.mesh_topology_revision = mesh.topologyRevision();
+        key.mesh_ownership_revision = mesh.ownershipRevision();
+        key.mesh_numbering_revision = mesh.numberingRevision();
+        key.mesh_active_configuration_epoch = mesh.activeConfigurationEpoch();
+        key.mesh_coordinate_configuration_key = mesh.coordinateConfigurationKey();
+        key.mesh_cell_count = mesh.numCells();
+        key.mesh_dimension = mesh.dimension();
+    }
+    return cut_volume_epoch_cache_.begin(key, max_bytes);
+}
+
+detail::CutVolumeEpochRuleEntry* StandardAssembler::cutVolumeEpochRuleEntry(
+    const geometry::CutQuadratureRule& rule,
+    GlobalIndex cell_id,
+    ElementType cell_type,
+    int dimension,
+    std::unique_ptr<const quadrature::QuadratureRule>& uncached_rule)
+{
+    auto& statistics = cut_volume_epoch_cache_.statistics();
+    auto* entry = cut_volume_epoch_cache_.entry(detail::CutVolumeEpochRuleSlot{
+        cell_id, rule.provenance.marker, static_cast<std::uint8_t>(rule.side)});
+    const auto family = to_mesh_family(cell_type);
+    if (entry != nullptr && entry->rule) {
+        // Reused only for the exact rule it was built from.
+        if (entry->cell_id == cell_id && entry->cell_type == cell_type &&
+            cutVolumeQuadratureRuleMatches(*entry->rule, rule, family, dimension)) {
+            ++statistics.rule_hits;
+            return entry;
+        }
+        ++statistics.rule_invalidations;
+        cut_volume_epoch_cache_.resetEntry(*entry);
+    }
+    ++statistics.rule_misses;
+    std::unique_ptr<const quadrature::QuadratureRule> built =
+        std::make_unique<const CutVolumeQuadratureRule>(rule, family, dimension);
+    const auto bytes = cutVolumeQuadratureRuleBytes(*built);
+    if (entry == nullptr || !cut_volume_epoch_cache_.fits(bytes)) {
+        if (entry != nullptr) {
+            ++statistics.over_budget_skips;
+        }
+        uncached_rule = std::move(built);
+        return nullptr;
+    }
+    entry->rule = std::move(built);
+    entry->cell_id = cell_id;
+    entry->cell_type = cell_type;
+    ++statistics.entries;
+    cut_volume_epoch_cache_.addBytes(*entry, bytes);
+    return entry;
+}
+
+void StandardAssembler::validateCutVolumeEpochCellGeometry(
+    detail::CutVolumeEpochRuleEntry& entry,
+    const IMeshAccess& mesh,
+    GlobalIndex cell_id)
+{
+    // prepareGeometry has just loaded this cell's coordinates. The cached
+    // tabulations hold physical derivatives, so they are reused only for
+    // bitwise identical node coordinates and geometry order.
+    const int geometry_order = mesh.getCellGeometryOrder(cell_id);
+    bool same = entry.geometry_order == geometry_order &&
+                entry.cell_coords.size() == cell_coords_.size();
+    for (std::size_t i = 0; same && i < cell_coords_.size(); ++i) {
+        for (std::size_t d = 0; d < 3u; ++d) {
+            if (!sameRealBits(entry.cell_coords[i][d], cell_coords_[i][d])) {
+                same = false;
+                break;
+            }
+        }
+    }
+    if (same) {
+        return;
+    }
+    if (!entry.tabulations.empty()) {
+        ++cut_volume_epoch_cache_.statistics().rule_invalidations;
+        cut_volume_epoch_cache_.dropTabulations(entry);
+    }
+    const auto old_bytes = entry.cell_coords.capacity() * sizeof(std::array<Real, 3>);
+    entry.cell_coords.assign(cell_coords_.begin(), cell_coords_.end());
+    entry.geometry_order = geometry_order;
+    cut_volume_epoch_cache_.removeBytes(entry, old_bytes);
+    cut_volume_epoch_cache_.addBytes(
+        entry, entry.cell_coords.capacity() * sizeof(std::array<Real, 3>));
+}
+
+std::uint32_t StandardAssembler::cutVolumeEpochSpaceKey(const spaces::FunctionSpace& space,
+                                                        const elements::Element& element,
+                                                        bool trial_role,
+                                                        bool with_hessians,
+                                                        int dimension)
+{
+    const auto& basis = element.basis();
+    const auto n_dofs = static_cast<LocalIndex>(space.dofs_per_element());
+    const auto n_scalar_dofs = static_cast<LocalIndex>(element.num_dofs());
+    const bool product = (space.space_type() == spaces::SpaceType::Product);
+    for (const auto& memo : cut_volume_epoch_key_memo_) {
+        if (memo.basis == &basis && memo.n_dofs == n_dofs &&
+            memo.n_scalar_dofs == n_scalar_dofs && memo.product == product &&
+            memo.trial_role == trial_role && memo.hessians == with_hessians) {
+            return memo.key;
+        }
+    }
+    // Test and trial arrays come from separate loops in prepareBasis that may
+    // differ in the sign of zero, so the role is part of the key.
+    std::string key = basis.cache_identity();
+    key += "|space_dofs=" + std::to_string(n_dofs);
+    key += "|element_dofs=" + std::to_string(n_scalar_dofs);
+    key += product ? "|product" : "|single";
+    key += trial_role ? "|trial" : "|test";
+    key += with_hessians ? "|hessians" : "|no_hessians";
+    key += "|dim=" + std::to_string(dimension);
+    const auto id = cut_volume_epoch_cache_.internSpaceKey(key);
+    cut_volume_epoch_key_memo_.push_back(
+        CutVolumeEpochSpaceKeyMemo{&basis, n_dofs, n_scalar_dofs, product, trial_role,
+                                   with_hessians, id});
+    return id;
+}
+
+void StandardAssembler::prepareCutVolumeBasisFromEpochCache(
+    AssemblyContext& context,
+    const IMeshAccess& mesh,
+    GlobalIndex cell_id,
+    ElementType cell_type,
+    const spaces::FunctionSpace& test_space,
+    const spaces::FunctionSpace& trial_space,
+    RequiredData required_data,
+    const quadrature::QuadratureRule& quad_rule,
+    detail::CutVolumeEpochRuleEntry& entry)
+{
+    const auto& test_element = getElement(test_space, cell_id, cell_type);
+    const auto& trial_element = getElement(trial_space, cell_id, cell_type);
+    if (test_element.basis().is_vector_valued() || trial_element.basis().is_vector_valued()) {
+        prepareBasis(context, mesh, cell_id, test_space, trial_space, required_data, quad_rule);
+        return;
+    }
+
+    auto& statistics = cut_volume_epoch_cache_.statistics();
+    const bool need_basis_hessians = hasFlag(required_data, RequiredData::BasisHessians);
+    const bool same_space = (&test_space == &trial_space);
+    const int dim = mesh.dimension();
+    const auto test_key =
+        cutVolumeEpochSpaceKey(test_space, test_element, /*trial_role=*/false, need_basis_hessians, dim);
+    const auto trial_key =
+        same_space ? std::uint32_t{0}
+                   : cutVolumeEpochSpaceKey(trial_space, trial_element, /*trial_role=*/true,
+                                            need_basis_hessians, dim);
+    const auto* test_tabulation = entry.find(test_key);
+    const auto* trial_tabulation = same_space ? nullptr : entry.find(trial_key);
+    const auto n_test_dofs = static_cast<LocalIndex>(test_space.dofs_per_element());
+    const auto n_trial_dofs = static_cast<LocalIndex>(trial_space.dofs_per_element());
+
+    if (test_tabulation != nullptr && (same_space || trial_tabulation != nullptr)) {
+        ++statistics.basis_hits;
+        // Leave the assembler in the state prepareBasis leaves after a
+        // transient cut rule, and hand the context the same arrays through the
+        // same setters.
+        cached_geom_bcache_handle_ = basis::BasisCacheHandle{};
+        cached_test_bcache_handle_ = basis::BasisCacheHandle{};
+        cached_trial_bcache_handle_ = basis::BasisCacheHandle{};
+        cached_geom_bcache_ = nullptr;
+        cached_test_bcache_ = nullptr;
+        cached_trial_bcache_ = nullptr;
+        cached_field_bcache_.clear();
+        cached_field_recipes_valid_ = false;
+        cached_quad_rule_ptr_ = nullptr;
+        cached_need_hessians_ = need_basis_hessians;
+        basis_scratch_valid_ = false;
+        cached_qpt_test_valid_ = false;
+        cached_qpt_trial_valid_ = false;
+        cached_qpt_major_valid_ = false;
+
+        auto& ts = cut_volume_epoch_unpack_scratch_[0];
+        auto& rs = cut_volume_epoch_unpack_scratch_[1];
+        context.configure(cell_id, test_space, trial_space, required_data);
+        context.setCellDomainId(mesh.getCellDomainId(cell_id));
+        context.setTestBasisData(n_test_dofs,
+                                 test_tabulation->values.unpack(ts.values, ts.zero_values),
+                                 test_tabulation->ref_gradients.unpack(ts.ref_gradients,
+                                                                       ts.zero_vectors));
+        if (need_basis_hessians) {
+            context.setTestBasisHessians(
+                n_test_dofs,
+                test_tabulation->ref_hessians.unpack(ts.ref_hessians, ts.zero_matrices));
+        }
+        if (!same_space) {
+            context.setTrialBasisData(n_trial_dofs,
+                                      trial_tabulation->values.unpack(rs.values, rs.zero_values),
+                                      trial_tabulation->ref_gradients.unpack(rs.ref_gradients,
+                                                                             rs.zero_vectors));
+            if (need_basis_hessians) {
+                context.setTrialBasisHessians(
+                    n_trial_dofs,
+                    trial_tabulation->ref_hessians.unpack(rs.ref_hessians, rs.zero_matrices));
+            }
+        }
+        const auto test_phys =
+            test_tabulation->phys_gradients.unpack(ts.phys_gradients, ts.zero_vectors);
+        const auto trial_phys =
+            same_space ? test_phys
+                       : trial_tabulation->phys_gradients.unpack(rs.phys_gradients, rs.zero_vectors);
+        context.setPhysicalGradients(test_phys, trial_phys);
+        if (need_basis_hessians) {
+            const auto test_hessians =
+                test_tabulation->phys_hessians.unpack(ts.phys_hessians, ts.zero_matrices);
+            const auto trial_hessians =
+                same_space ? test_hessians
+                           : trial_tabulation->phys_hessians.unpack(rs.phys_hessians,
+                                                                    rs.zero_matrices);
+            context.setPhysicalHessians(test_hessians, trial_hessians);
+        }
+        if (hasFlag(required_data, RequiredData::EntityMeasures)) {
+            context.setEntityMeasures(cached_geom_h_, cached_geom_volume_, /*facet_area=*/0.0);
+        }
+        return;
+    }
+
+    ++statistics.basis_misses;
+    prepareBasis(context, mesh, cell_id, test_space, trial_space, required_data, quad_rule);
+
+    // Keep exactly the arrays prepareBasis passed to the context setters.
+    const auto n_qpts = quad_rule.num_points();
+    const auto store = [&](std::uint32_t key,
+                           LocalIndex n_dofs,
+                           const elements::Element& element,
+                           const std::vector<Real>& values,
+                           const std::vector<AssemblyContext::Vector3D>& ref_gradients,
+                           const std::vector<AssemblyContext::Vector3D>& phys_gradients,
+                           const std::vector<AssemblyContext::Matrix3x3>& ref_hessians,
+                           const std::vector<AssemblyContext::Matrix3x3>& phys_hessians) {
+        const auto nd = static_cast<std::size_t>(n_dofs);
+        const auto ns = static_cast<std::size_t>(element.num_dofs());
+        detail::CutVolumeEpochTabulation tabulation;
+        tabulation.space_key = key;
+        tabulation.values.pack(values, nd, n_qpts, detail::CutVolumePackedLayout::DofMajor, ns);
+        tabulation.ref_gradients.pack(ref_gradients, nd, n_qpts,
+                                      detail::CutVolumePackedLayout::DofMajor, ns);
+        tabulation.phys_gradients.pack(phys_gradients, nd, n_qpts,
+                                       detail::CutVolumePackedLayout::QptMajor, ns);
+        if (need_basis_hessians) {
+            tabulation.ref_hessians.pack(ref_hessians, nd, n_qpts,
+                                         detail::CutVolumePackedLayout::DofMajor, ns);
+            tabulation.phys_hessians.pack(phys_hessians, nd, n_qpts,
+                                          detail::CutVolumePackedLayout::DofMajor, ns);
+        }
+        if (!cut_volume_epoch_cache_.fits(tabulation.bytes())) {
+            ++statistics.over_budget_skips;
+            return;
+        }
+        cut_volume_epoch_cache_.addTabulation(entry, std::move(tabulation));
+    };
+    if (test_tabulation == nullptr) {
+        store(test_key, n_test_dofs, test_element,
+              scratch_basis_values_, scratch_ref_gradients_, scratch_phys_gradients_,
+              scratch_ref_hessians_, scratch_phys_hessians_);
+    }
+    if (!same_space && trial_tabulation == nullptr) {
+        store(trial_key, n_trial_dofs, trial_element,
+              scratch_trial_basis_values_, scratch_trial_ref_gradients_,
+              scratch_trial_phys_gradients_, scratch_trial_ref_hessians_,
+              scratch_trial_phys_hessians_);
+    }
+}
+
 void StandardAssembler::prepareContext(
     AssemblyContext& context,
     const IMeshAccess& mesh,
@@ -10600,6 +10967,45 @@ void StandardAssembler::prepareFrameExplicitGeometry(
     }
 }
 
+namespace {
+
+void logCutVolumeEpochCacheTiming(int rank,
+                                  int marker,
+                                  geometry::CutIntegrationSide side,
+                                  bool enabled,
+                                  const detail::CutVolumeEpochCacheStatistics& before,
+                                  const detail::CutVolumeEpochCacheStatistics& after)
+{
+    std::fprintf(stderr,
+        "[CUT_VOLUME_EPOCH_CACHE] rank=%d marker=%d side=%s enabled=%d resets=%zu "
+        "reset_reasons=0x%x new_epochs=%zu stale_releases=%zu "
+        "rule_hits=%zu rule_misses=%zu rule_invalidations=%zu basis_hits=%zu "
+        "basis_misses=%zu tabulations_stored=%zu over_budget_skips=%zu entries=%zu "
+        "tabulations=%zu bytes=%zu peak_bytes=%zu max_bytes=%zu\n",
+        rank,
+        marker,
+        cutVolumeTimingSideName(side),
+        enabled ? 1 : 0,
+        after.resets - before.resets,
+        static_cast<unsigned>(after.reset_reasons),
+        after.epochs - before.epochs,
+        after.stale_releases - before.stale_releases,
+        after.rule_hits - before.rule_hits,
+        after.rule_misses - before.rule_misses,
+        after.rule_invalidations - before.rule_invalidations,
+        after.basis_hits - before.basis_hits,
+        after.basis_misses - before.basis_misses,
+        after.tabulations_stored - before.tabulations_stored,
+        after.over_budget_skips - before.over_budget_skips,
+        after.entries,
+        after.tabulations,
+        after.bytes,
+        after.peak_bytes,
+        after.max_bytes);
+}
+
+} // namespace
+
 AssemblyResult StandardAssembler::assembleCutVolumes(
     const IMeshAccess& mesh,
     const CutIntegrationContext& cut_context,
@@ -10747,6 +11153,11 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
     const auto cut_basis_cache_max_entries = cutVolumeBasisCacheMaxEntries();
     const std::uint64_t cut_context_basis_signature =
         cut_basis_cache_max_entries > 0u ? cutVolumeBasisContextSignature(cut_context) : 0u;
+    // Per-epoch reuse of cut-volume rules and basis tabulations; the opt-in
+    // basis cache takes precedence when it is enabled.
+    const auto epoch_statistics_before = cut_volume_epoch_cache_.statistics();
+    const bool use_epoch_cache =
+        cut_basis_cache_max_entries == 0u && beginCutVolumeEpochCache(mesh, cut_context);
     const auto cut_basis_cache_hits_before = cut_volume_basis_cache_hits_;
     const auto cut_basis_cache_misses_before = cut_volume_basis_cache_misses_;
     const auto cut_basis_cache_insertions_before = cut_volume_basis_cache_insertions_;
@@ -10811,6 +11222,8 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
         const auto cell_type = mesh.getCellType(cell_id);
         std::shared_ptr<const quadrature::QuadratureRule> full_cell_rule;
         std::optional<CutVolumeQuadratureRule> cut_rule;
+        detail::CutVolumeEpochRuleEntry* epoch_entry = nullptr;
+        std::unique_ptr<const quadrature::QuadratureRule> uncached_epoch_rule;
         const quadrature::QuadratureRule* active_rule = nullptr;
         const CutVolumeBasisCacheEntry* cut_volume_basis_cache_entry = nullptr;
         const CutVolumeGeometryCacheEntry* cut_volume_geometry_cache_entry = nullptr;
@@ -10830,8 +11243,15 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
             active_rule = full_cell_rule.get();
             ++cut_full_rules;
         } else {
-            cut_rule.emplace(rule, to_mesh_family(cell_type), mesh.dimension());
-            active_rule = &*cut_rule;
+            if (use_epoch_cache) {
+                epoch_entry = cutVolumeEpochRuleEntry(rule, cell_id, cell_type, mesh.dimension(),
+                                                      uncached_epoch_rule);
+                active_rule = epoch_entry != nullptr ? epoch_entry->rule.get()
+                                                     : uncached_epoch_rule.get();
+            } else {
+                cut_rule.emplace(rule, to_mesh_family(cell_type), mesh.dimension());
+                active_rule = &*cut_rule;
+            }
             active_rule_is_partial_cut = true;
             cached_quad_rule_ptr_ = nullptr;
             basis_scratch_valid_ = false;
@@ -10875,6 +11295,9 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
             if (active_rule_is_partial_cut && cut_basis_cache_max_entries > 0u) {
                 storeCutVolumeGeometryCacheEntry(rule_index, mesh, cell_id, cell_type, context_);
             }
+            if (epoch_entry != nullptr) {
+                validateCutVolumeEpochCellGeometry(*epoch_entry, mesh, cell_id);
+            }
         }
         cut_geometry_time += cut_now() - stage_start;
 
@@ -10883,7 +11306,14 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
             active_cut_volume_basis_cache_entry_;
         active_cut_volume_basis_cache_entry_ = cut_volume_basis_cache_entry;
         try {
-            prepareBasis(context_, mesh, cell_id, test_space, trial_space, required_data, *active_rule);
+            if (epoch_entry != nullptr) {
+                prepareCutVolumeBasisFromEpochCache(context_, mesh, cell_id, cell_type,
+                                                    test_space, trial_space, required_data,
+                                                    *active_rule, *epoch_entry);
+            } else {
+                prepareBasis(context_, mesh, cell_id, test_space, trial_space, required_data,
+                             *active_rule);
+            }
         } catch (...) {
             active_cut_volume_basis_cache_entry_ =
                 previous_cut_volume_basis_cache_entry;
@@ -11168,6 +11598,9 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
             cut_kernel_time,
             cut_orientation_time,
             cut_insert_time);
+        logCutVolumeEpochCacheTiming(rank, interface_marker, side, use_epoch_cache,
+                                     epoch_statistics_before,
+                                     cut_volume_epoch_cache_.statistics());
     }
     return result;
 }
@@ -11358,6 +11791,11 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
     const auto cut_basis_cache_max_entries = cutVolumeBasisCacheMaxEntries();
     const std::uint64_t cut_context_basis_signature =
         cut_basis_cache_max_entries > 0u ? cutVolumeBasisContextSignature(cut_context) : 0u;
+    // Per-epoch reuse of cut-volume rules and basis tabulations; the opt-in
+    // basis cache takes precedence when it is enabled.
+    const auto epoch_statistics_before = cut_volume_epoch_cache_.statistics();
+    const bool use_epoch_cache =
+        cut_basis_cache_max_entries == 0u && beginCutVolumeEpochCache(mesh, cut_context);
     const auto cut_basis_cache_hits_before = cut_volume_basis_cache_hits_;
     const auto cut_basis_cache_misses_before = cut_volume_basis_cache_misses_;
     const auto cut_basis_cache_insertions_before = cut_volume_basis_cache_insertions_;
@@ -11426,6 +11864,8 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
         const auto cell_type = mesh.getCellType(cell_id);
         std::shared_ptr<const quadrature::QuadratureRule> full_cell_rule;
         std::optional<CutVolumeQuadratureRule> cut_rule;
+        detail::CutVolumeEpochRuleEntry* epoch_entry = nullptr;
+        std::unique_ptr<const quadrature::QuadratureRule> uncached_epoch_rule;
         const quadrature::QuadratureRule* active_rule = nullptr;
         const CutVolumeGeometryCacheEntry* cut_volume_geometry_cache_entry = nullptr;
         const bool active_rule_is_full_side =
@@ -11448,8 +11888,15 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
             active_rule = full_cell_rule.get();
             ++cut_full_rules;
         } else {
-            cut_rule.emplace(rule, to_mesh_family(cell_type), mesh.dimension());
-            active_rule = &*cut_rule;
+            if (use_epoch_cache) {
+                epoch_entry = cutVolumeEpochRuleEntry(rule, cell_id, cell_type, mesh.dimension(),
+                                                      uncached_epoch_rule);
+                active_rule = epoch_entry != nullptr ? epoch_entry->rule.get()
+                                                     : uncached_epoch_rule.get();
+            } else {
+                cut_rule.emplace(rule, to_mesh_family(cell_type), mesh.dimension());
+                active_rule = &*cut_rule;
+            }
             active_rule_is_partial_cut = true;
             cached_quad_rule_ptr_ = nullptr;
             basis_scratch_valid_ = false;
@@ -11478,6 +11925,9 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
             prepareGeometry(context_, mesh, cell_id, *active_rule);
             if (active_rule_is_partial_cut && cut_basis_cache_max_entries > 0u) {
                 storeCutVolumeGeometryCacheEntry(rule_index, mesh, cell_id, cell_type, context_);
+            }
+            if (epoch_entry != nullptr) {
+                validateCutVolumeEpochCellGeometry(*epoch_entry, mesh, cell_id);
             }
         }
         // Rule the context geometry was last prepared with; the owner keeps a
@@ -11540,8 +11990,15 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
                 active_cut_volume_basis_cache_entry_;
             active_cut_volume_basis_cache_entry_ = cut_volume_basis_cache_entry;
             try {
-                prepareBasis(context_, mesh, cell_id, *t.test_space, *t.trial_space,
-                             td.required_data, *term_rule);
+                if (epoch_entry != nullptr) {
+                    prepareCutVolumeBasisFromEpochCache(context_, mesh, cell_id, cell_type,
+                                                        *t.test_space, *t.trial_space,
+                                                        td.required_data, *term_rule,
+                                                        *epoch_entry);
+                } else {
+                    prepareBasis(context_, mesh, cell_id, *t.test_space, *t.trial_space,
+                                 td.required_data, *term_rule);
+                }
             } catch (...) {
                 active_cut_volume_basis_cache_entry_ =
                     previous_cut_volume_basis_cache_entry;
@@ -11855,6 +12312,9 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
             cut_kernel_time,
             cut_orientation_time,
             cut_insert_time);
+        logCutVolumeEpochCacheTiming(rank, interface_marker, side, use_epoch_cache,
+                                     epoch_statistics_before,
+                                     cut_volume_epoch_cache_.statistics());
     }
     return result;
 }
