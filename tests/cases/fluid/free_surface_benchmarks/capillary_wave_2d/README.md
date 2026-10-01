@@ -123,6 +123,7 @@ the level-set advection velocity differ.
 | Walls | `Dir`, value 0; `Effective_direction 1 0` (sides), `0 1` (bottom); full no-slip on the dry top | free-slip mirror planes and bottom (see Physical setup) |
 | Free surface, cut stabilization, capillary forms, level-set discretization, time integration, nonlinear and linear solves | identical to `static_drop_2d` (`SurfaceStress` / KAG keys, `RefreshedFrozenQuadrature`, `Interface_quadrature_order=2`, aggregation, pressure-gradient facet penalty 1.0, SUPG 0.5/2.0, no reinitialization or volume correction, generalized-alpha `rho_inf = 0.5`, FSILS GMRES) | production values, see `static_drop_2d/README.md` |
 | Level-set advection velocity | `--transport`, see below | decision D9 |
+| Level-set kinematic reconciliation | on (`Enable_kinematic_reconciliation=true`; `--kinematic-reconciliation off` reproduces the earlier decks): after every accepted step the transported `phi` is corrected locally so that the step's change of the sharp P1 area equals the interface flux of the transport velocity (`FE/LevelSet/LevelSetKinematicReconciliation.h`) | parameter-free and local, not a volume target or global shift; the area drift stays a measured quantity (the flux of a discretely divergence-free velocity) |
 
 **Level-set transport (decision D9).** `generate_case.py --transport`
 selects the velocity that advects `phi`:

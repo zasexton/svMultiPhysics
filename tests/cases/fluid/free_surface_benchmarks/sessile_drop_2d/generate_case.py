@@ -67,6 +67,13 @@ LINEAR_SOLVERS = ("fsils", "eigen_direct")
 # moving-interface benchmarks (tracker D9; linear_sloshing_2d README,
 # "Level-set advection velocity").
 TRANSPORTS = ("coupled", "wet_extension", "pde_extension")
+# Accepted-step kinematic reconciliation of the transported level set
+# (Enable_kinematic_reconciliation; FE/LevelSet/LevelSetKinematicReconciliation.h):
+# a local, parameter-free correction that makes each step's change of the
+# sharp liquid area equal the interface flux of the transport velocity.  It
+# removes the area drift that the moving contact line causes in the plain
+# Galerkin transport.  "off" reproduces the earlier decks.
+KINEMATIC_RECONCILIATION = True
 # Existing production reinitialization values (D18/D38 and sloshing decks),
 # used only with --reinitialization.
 REINITIALIZATION_CADENCE_STEPS = 10
@@ -326,7 +333,8 @@ def linear_solver_block(solver: str = "fsils") -> str:
 def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, cadence: int,
                reinitialization: bool = False, linear_solver: str = "fsils",
                time_integration: str = "generalized_alpha",
-               transport: str = "coupled") -> str:
+               transport: str = "coupled",
+               kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION) -> str:
     if transport == "coupled":
         transport_xml = """
     <Velocity_source>coupled_field</Velocity_source>
@@ -379,6 +387,8 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
     <Reinitialization_max_iterations>{REINITIALIZATION_MAX_ITERATIONS}</Reinitialization_max_iterations>"""
     else:
         maintenance = "\n    <Enable_reinitialization>false</Enable_reinitialization>"
+    reconciliation = ("\n    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>"
+                      if kinematic_reconciliation else "")
     # The contact wall carries a strong zero normal velocity only; its
     # tangential motion is governed by the Navier slip term of the free-surface
     # condition.  The other walls stay dry and are no-slip.
@@ -435,7 +445,7 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
     <Enable_SUPG>true</Enable_SUPG>
     <SUPG_tau_scale>0.5</SUPG_tau_scale>
     <SUPG_transient_scale>2.0</SUPG_transient_scale>{maintenance}
-    <Enable_volume_correction>false</Enable_volume_correction>{curvature_projection}
+    <Enable_volume_correction>false</Enable_volume_correction>{reconciliation}{curvature_projection}
     <Output type="Spatial">
       <Level_set>true</Level_set>
     </Output>
@@ -510,6 +520,7 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
              reinitialization: bool = False, linear_solver: str = "fsils",
              time_integration: str = "generalized_alpha",
              transport: str = "coupled",
+             kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
              max_steps: int | None = None, force: bool = False) -> dict:
     if level not in LEVELS:
         raise ValueError(f"--level must be one of {LEVELS}")
@@ -567,7 +578,7 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
         write_face_vtp(mesh_dir / "mesh-surfaces" / f"{wall}.vtp", points, node_ids, parents)
     (output_dir / "solver.xml").write_text(
         solver_xml(form, equilibrium_deg, schedule, steps, cadence, reinitialization,
-                   linear_solver, time_integration, transport),
+                   linear_solver, time_integration, transport, kinematic_reconciliation),
         encoding="utf-8")
 
     case = {
@@ -582,6 +593,7 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
         "time_integration_scheme": TIME_INTEGRATION_SCHEMES[time_integration],
         "linear_solver": linear_solver,
         "transport": transport,
+        "kinematic_reconciliation": bool(kinematic_reconciliation),
         "laplace_number": LAPLACE_NUMBER,
         "density": DENSITY,
         "surface_tension": SURFACE_TENSION,
@@ -656,6 +668,10 @@ def main(argv=None) -> int:
                         choices=tuple(TIME_INTEGRATION_SCHEMES),
                         help="time integration (protocol: generalized_alpha; backward_euler "
                              "for comparison)")
+    parser.add_argument("--kinematic-reconciliation", choices=("on", "off"),
+                        default="on" if KINEMATIC_RECONCILIATION else "off",
+                        help="accepted-step kinematic reconciliation of the level set "
+                             "(protocol: on; off reproduces the earlier decks)")
     parser.add_argument("--max-steps", type=int, default=None,
                         help="smoke runs only: stop after this many steps; the case is "
                              "marked truncated and verify.py rejects it for acceptance")
@@ -668,11 +684,12 @@ def main(argv=None) -> int:
                     linear_solver=args.linear_solver,
                     time_integration=args.time_integration,
                     transport=args.transport,
+                    kinematic_reconciliation=args.kinematic_reconciliation == "on",
                     max_steps=args.max_steps, force=args.force)
     print(f"wrote {args.output_dir}")
     for key in ("level_R_over_h", "equilibrium_angle_degrees", "initial_angle_degrees",
                 "capillary_form", "time_integration_scheme", "linear_solver", "transport",
-                "reinitialization", "viscosity", "slip_length_over_h",
+                "kinematic_reconciliation", "reinitialization", "viscosity", "slip_length_over_h",
                 "viscous_time",
                 "end_time", "dt", "dt_capillary_limit", "steps", "output_cadence",
                 "box", "n_vertices", "n_triangles", "min_abs_phi_over_h",

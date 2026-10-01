@@ -99,6 +99,10 @@ def test_generated_case_has_free_slip_walls_and_the_d10_schedule(tmp_path):
     assert float(root.find(".//Viscosity/Value").text) == pytest.approx(5e-4)
     # D9: the protocol advects phi with the PDE extension (prescribed field).
     assert case["level_set_velocity"] == gen.PROTOCOL_LEVEL_SET_VELOCITY
+    assert case["kinematic_reconciliation"] is True
+    assert root.find("Add_equation[@type='level_set']/Enable_kinematic_reconciliation").text == "true"
+    plain = gen.solver_xml(gen.time_schedule(16), 10, 1, kinematic_reconciliation=False)
+    assert "Enable_kinematic_reconciliation" not in plain
     method, coupling = gen.PROTOCOL_LEVEL_SET_VELOCITY.rsplit("_", 1)
     assert f"<Advection_velocity_extension_method>{method}<" in text
     assert f"<Advection_velocity_extension_coupling>{coupling}<" in text

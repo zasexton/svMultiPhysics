@@ -229,6 +229,10 @@ def test_transport_options(tmp_path):
     assert "<Velocity_source>prescribed_data" in pde and "Use_wet_extension" not in pde
     with pytest.raises(ValueError, match="must be one of"):
         gen.solver_xml("surface_stress", schedule, 10, 1, transport="bogus")
+    # Kinematic reconciliation of the level set is on by default.
+    assert "<Enable_kinematic_reconciliation>true<" in pde
+    plain = gen.solver_xml("surface_stress", schedule, 10, 1, kinematic_reconciliation=False)
+    assert "Enable_kinematic_reconciliation" not in plain
 
 
 def test_mesh_is_mirror_symmetric_about_the_node_line():

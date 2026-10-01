@@ -93,6 +93,11 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
         assert fluid.find(f"Add_BC[@name='{wall}']").find("Effective_direction") is None
     level_set = root.find("Add_equation[@type='level_set']")
     assert level_set.find("Enable_reinitialization").text.strip() == "false"
+    assert level_set.find("Enable_kinematic_reconciliation").text.strip() == "true"
+    assert case["kinematic_reconciliation"] is True
+    plain = gen.solver_xml("surface_stress", 60, gen.time_schedule(16, 5.0, 100), 10, 1,
+                           kinematic_reconciliation=False)
+    assert "Enable_kinematic_reconciliation" not in plain
     general = root.find("GeneralSimulationParameters")
     assert general.find("Transient_time_integration_scheme") is None
     assert float(general.find("Spectral_radius_of_infinite_time_step").text) == 0.5

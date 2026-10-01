@@ -207,3 +207,15 @@ def test_default_transport_is_the_harmonic_pde_extension(tmp_path):
                        level_set_velocity="coupled_field")
     assert "<Velocity_source>coupled_field<" in (tmp_path / "old/solver.xml").read_text()
     assert old["dt"] == case["dt"]
+
+
+def test_kinematic_reconciliation_is_on_by_default_and_can_be_disabled(tmp_path):
+    case = gen.generate(8, "surface_stress", 12.0, tmp_path / "on")
+    root = ET.parse(tmp_path / "on/solver.xml").getroot()
+    level_set = root.find("Add_equation[@type='level_set']")
+    assert case["kinematic_reconciliation"] is True
+    assert level_set.find("Enable_kinematic_reconciliation").text.strip() == "true"
+    off = gen.generate(8, "surface_stress", 12.0, tmp_path / "off", kinematic_reconciliation=False)
+    root = ET.parse(tmp_path / "off/solver.xml").getroot()
+    assert off["kinematic_reconciliation"] is False
+    assert root.find("Add_equation[@type='level_set']/Enable_kinematic_reconciliation") is None

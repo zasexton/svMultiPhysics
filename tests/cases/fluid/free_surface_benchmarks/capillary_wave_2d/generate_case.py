@@ -48,6 +48,11 @@ DT_DIVISORS = (1, 2, 4)                     # time-step study at a fixed level (
 # velocity, which D9 retires).
 TRANSPORTS = ("pde_extension", "wet_extension", "coupled")
 DEFAULT_TRANSPORT = "pde_extension"
+# Accepted-step kinematic reconciliation of the transported level set
+# (Enable_kinematic_reconciliation; FE/LevelSet/LevelSetKinematicReconciliation.h):
+# each step's change of the sharp liquid area equals the interface flux of the
+# transport velocity.  Local and parameter-free; "off" reproduces earlier decks.
+KINEMATIC_RECONCILIATION = True
 DENSITY = 1.0                               # rho
 SURFACE_TENSION = 1.0                       # gamma
 WAVELENGTH = 1.0                            # lambda (length unit)
@@ -320,8 +325,11 @@ def wall_bc(name: str) -> str:
 
 
 def solver_xml(form: str, schedule: dict, steps: int, cadence: int,
-               transport: str = DEFAULT_TRANSPORT) -> str:
+               transport: str = DEFAULT_TRANSPORT,
+               kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION) -> str:
     velocity = level_set_velocity_block(transport)
+    reconciliation = ("\n    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>"
+                      if kinematic_reconciliation else "")
     kag = form in ("kag_consistent", "kag_lumped")
     curvature_projection = ""
     if kag:
@@ -382,7 +390,7 @@ def solver_xml(form: str, schedule: dict, steps: int, cadence: int,
     <SUPG_tau_scale>0.5</SUPG_tau_scale>
     <SUPG_transient_scale>2.0</SUPG_transient_scale>
     <Enable_reinitialization>false</Enable_reinitialization>
-    <Enable_volume_correction>false</Enable_volume_correction>{curvature_projection}
+    <Enable_volume_correction>false</Enable_volume_correction>{reconciliation}{curvature_projection}
     <Output type="Spatial">
       <Level_set>true</Level_set>
     </Output>
@@ -448,6 +456,7 @@ def generate(level: int, form: str, output_dir: Path, *,
              periods: float = DEFAULT_PERIODS,
              snapshots: int = DEFAULT_SNAPSHOTS,
              dt_divisor: int = 1, transport: str = DEFAULT_TRANSPORT,
+             kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
              max_steps: int | None = None, force: bool = False) -> dict:
     if level not in LEVELS:
         raise ValueError(f"--level must be one of {LEVELS}")
@@ -490,7 +499,8 @@ def generate(level: int, form: str, output_dir: Path, *,
     for wall in WALLS:
         node_ids, parents = faces[wall]
         write_face_vtp(mesh_dir / "mesh-surfaces" / f"{wall}.vtp", points, node_ids, parents)
-    (output_dir / "solver.xml").write_text(solver_xml(form, schedule, steps, cadence, transport),
+    (output_dir / "solver.xml").write_text(solver_xml(form, schedule, steps, cadence, transport,
+                                                      kinematic_reconciliation),
                                            encoding="utf-8")
 
     case = {
@@ -499,6 +509,7 @@ def generate(level: int, form: str, output_dir: Path, *,
         "level_lambda_over_h": level,
         "capillary_form": form,
         "transport": transport,
+        "kinematic_reconciliation": bool(kinematic_reconciliation),
         "laplace_number": laplace,
         "density": DENSITY,
         "surface_tension": SURFACE_TENSION,
@@ -574,13 +585,19 @@ def main(argv=None) -> int:
                         help="smoke runs only: stop after this many steps; the case is "
                              "marked truncated and verify.py rejects it for acceptance")
     parser.add_argument("--force", action="store_true", help="allow a non-empty output dir")
+    parser.add_argument("--kinematic-reconciliation", choices=("on", "off"),
+                        default="on" if KINEMATIC_RECONCILIATION else "off",
+                        help="accepted-step kinematic reconciliation of the level set "
+                             "(protocol: on; off reproduces the earlier decks)")
     args = parser.parse_args(argv)
 
     try:
         case = generate(args.level, args.capillary_form, args.output_dir,
                         laplace=args.laplace_number, periods=args.periods,
                         snapshots=args.snapshots, dt_divisor=args.dt_divisor,
-                        transport=args.transport, max_steps=args.max_steps, force=args.force)
+                        transport=args.transport,
+                        kinematic_reconciliation=args.kinematic_reconciliation == "on",
+                        max_steps=args.max_steps, force=args.force)
     except (ValueError, FileExistsError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
