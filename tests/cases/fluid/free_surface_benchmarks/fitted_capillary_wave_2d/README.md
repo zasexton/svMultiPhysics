@@ -220,7 +220,7 @@ with the PDE extension, the same step, binary `35a81fd3`, jobs `46130411`,
 The unfitted study fails all three criteria: frequency order 0.91 (errors
 0.80%, 0.66%, 0.23%), damping 7.8% at `lambda/h = 32`, and area 1.3e-4 at
 32. Its time-step study at 32 moves `omega` by 0.2% and `beta` by 4% between
-`dt` and `dt/4`, against 4e-5 and 0.03% for the fitted path. The fitted
+`dt` and `dt/4`, against 6e-5 and 0.03% for the fitted path. The fitted
 frequency errors are 7 to 25 times smaller at every level, the damping
 errors 8 and 17 times smaller at 16 and 32 (at 64 both are below 0.25%:
 0.06% unfitted, 0.22% fitted), and the area deviation 2 to 200 times
