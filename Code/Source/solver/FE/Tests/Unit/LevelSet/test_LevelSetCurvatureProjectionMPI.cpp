@@ -488,6 +488,7 @@ TEST(LevelSetCurvatureProjectionMPI,
         level_set::LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
     options.kinematic_area_gradient_young_walls.push_back(
         {1, contact_angle});
+    options.kinematic_area_gradient_finite_difference_check = true;
     std::vector<FE::Real> distributed_curvature;
     const auto distributed_result =
         level_set::projectLevelSetMeanCurvatureToVertices(

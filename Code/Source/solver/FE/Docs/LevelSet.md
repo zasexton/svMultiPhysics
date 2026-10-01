@@ -517,6 +517,18 @@ vertex whose support holds only a sliver of the interface can carry a large
 value with a very small row sum, so judge accuracy with mass-weighted or
 trace norms.
 
+`Curvature_projection_kinematic_area_gradient_finite_difference_check=true`
+(FE option `kinematic_area_gradient_finite_difference_check`, default off)
+cross-checks every analytic interface-measure and Young-wall derivative
+against Richardson-extrapolated central differences of the strict cut
+measure and reports the largest relative disagreement
+(`kinematic_area_gradient_max_relative_fd_disagreement`). It is a
+verification aid: the curvature and derivatives are identical with and
+without it, but it costs 24 extra strict cuts per cut tetrahedron (12 per
+cut triangle), which dominates a 3D projection. When it is off the
+disagreement is not evaluated, and the projection log omits it and reports
+`kinematic_area_gradient_finite_difference_check=0`.
+
 None of these modes provides derivatives of curvature with respect to
 level-set DOFs or regenerated cut geometry. Recovered curvature is used as
 refreshed data. The `level_set_quadratic` path is suitable for production

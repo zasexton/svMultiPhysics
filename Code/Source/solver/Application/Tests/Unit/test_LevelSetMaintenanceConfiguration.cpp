@@ -1009,6 +1009,44 @@ TEST(LevelSetMaintenanceConfiguration,
 }
 
 TEST(LevelSetMaintenanceConfiguration,
+     KinematicAreaGradientFiniteDifferenceCheckIsOptIn) {
+  constexpr std::string_view kCheckKey =
+      "curvature_projection_kinematic_area_gradient_finite_difference_check";
+  const auto resolve = [](const LegacyLevelSetMaintenanceInput &input) {
+    const auto resolved =
+        application::core::resolveLegacyLevelSetMaintenanceConfiguration(
+            input, std::span<const ActiveCutVolumeRequest>{});
+    EXPECT_TRUE(resolved.has_value());
+    return resolved.value_or(nullptr);
+  };
+
+  auto input = makeKinematicAreaGradientInput();
+  const auto defaulted = resolve(input);
+  ASSERT_TRUE(defaulted);
+  EXPECT_FALSE(defaulted->curvature_projection
+                   .kinematic_area_gradient_finite_difference_check);
+  EXPECT_EQ(findObservation(defaulted->input_observations, kCheckKey,
+                            "legacy_getter"),
+            nullptr);
+
+  for (const std::string spelling :
+       {"Curvature_projection_kinematic_area_gradient_finite_difference_check",
+        "ProjectedCurvatureKinematicAreaGradientFiniteDifferenceCheck"}) {
+    auto enabled_input = makeKinematicAreaGradientInput();
+    put(enabled_input.equation_parameters, spelling, "true");
+    const auto enabled = resolve(enabled_input);
+    ASSERT_TRUE(enabled) << spelling;
+    EXPECT_TRUE(enabled->curvature_projection
+                    .kinematic_area_gradient_finite_difference_check)
+        << spelling;
+    const auto *selected = findObservation(enabled->input_observations,
+                                           kCheckKey, "legacy_getter");
+    ASSERT_NE(selected, nullptr) << spelling;
+    EXPECT_EQ(selected->selected_spelling, spelling);
+  }
+}
+
+TEST(LevelSetMaintenanceConfiguration,
      ConsistentKinematicAreaGradientMassKeepsFilterCoefficientDefault) {
   using Mass = svmp::FE::level_set::LevelSetKinematicAreaGradientMass;
   const auto fe_default =
