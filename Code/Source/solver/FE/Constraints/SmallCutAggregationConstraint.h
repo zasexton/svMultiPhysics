@@ -79,18 +79,22 @@
  * root-cell ID) as its deterministic key. Algebraic master DOF numbers are
  * excluded because owner-contiguous numbering changes under repartitioning.
  * Equivalent providers of the selected physical root must agree on the
- * extension weights. A rank "assembles with" a slave when the slave lies in
- * one of its owned cells, in a face neighbor of one, or in a local cell that
- * holds an owned DOF; such a rank needs the canonical line and every nonzero
- * master. The preferred root is used whenever every assembling rank carries
- * its masters, so the choice matches the serial one; otherwise the next root
- * that they all carry is used and counted as
- * canonical_halo_limited_root_choices (partition dependent: widen the
- * overlap). The line is installed where the slave is relevant and all masters
- * are present, after proving that the slave has exactly one owner; ranks that
- * see the slave only deeper in the halo carry no line (their ghost value
- * follows the owner). Distributed mesh adapters must expose globally unique
- * cell IDs; missing IDs, masters absent on an assembling rank, or
+ * extension weights. A rank condenses a slave when it owns the slave or the
+ * slave lies in one of its owned cells or in a face neighbor of one (with
+ * owned-row assembly also in any local cell holding an owned row); such a
+ * rank needs the canonical line and every nonzero master. The preferred root
+ * is used whenever every condensing rank carries its masters, so the choice
+ * matches the serial one; otherwise the next root that they all carry is used
+ * and counted as canonical_halo_limited_root_choices (partition dependent:
+ * widen the overlap). A slave that only shares a cell with an owned row of a
+ * rank lacking its masters is counted as
+ * canonical_row_coupled_slaves_beyond_halo: the residual is unaffected but
+ * the Jacobian loses the condensed master columns of that row. The line is
+ * installed where the slave is relevant and all masters are present, after
+ * proving that the slave has exactly one owner; ranks that see the slave only
+ * deeper in the halo carry no line (their ghost value follows the owner).
+ * Distributed mesh adapters must expose globally unique cell IDs; missing
+ * IDs, masters absent on a condensing rank, or
  * inconsistent component/weight data fails closed before the generic
  * owner-wins parallel merge. Increase mesh/DOF overlap in the latter case.
  * SVMP_AGGREGATION_ALLOW_UNAGGREGATED=1 restores the
