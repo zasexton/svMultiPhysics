@@ -4039,6 +4039,11 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     const auto n_vertices = entity_map->numVertices();
 
     const auto& mesh = system.meshAccess();
+    // globalEntityIdsAvailable() scans every cell and face ID; the mesh is
+    // fixed for the duration of this call, so query it once instead of per
+    // classified cell and per root proposal.
+    const bool mesh_global_entity_ids_available =
+        mesh.globalEntityIdsAvailable();
     const auto offset = system.fieldDofOffset(field_);
     const auto components = static_cast<std::size_t>(std::max(1, rec.components));
 
@@ -4396,7 +4401,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 "active physical measure declaration");
         }
         const auto physical_cell_gid =
-            mesh.globalEntityIdsAvailable()
+            mesh_global_entity_ids_available
                 ? mesh.getCellGlobalId(cell)
                 : cell;
         if (physical_cell_gid < 0) {
@@ -5820,7 +5825,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             AggregationDeclaration declaration{
                 .state = AggregationDeclarationState::Rooted,
                 .root_distance = root_candidate.distance,
-                .root_cell_gid = mesh.globalEntityIdsAvailable()
+                .root_cell_gid = mesh_global_entity_ids_available
                                      ? mesh.getCellGlobalId(root)
                                      : root,
                 .component_dofs = candidate.component_dofs,
