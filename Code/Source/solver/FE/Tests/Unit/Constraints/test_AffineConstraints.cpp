@@ -13,7 +13,11 @@
 #include <gtest/gtest.h>
 #include "Constraints/AffineConstraints.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -768,6 +772,221 @@ TEST(AffineConstraintsTest, MergeConstraintSetsConflict) {
     ASSERT_TRUE(c0.has_value());
     ASSERT_EQ(c0->entries.size(), 1u);
     EXPECT_EQ(c0->entries[0].master_dof, 2);
+}
+
+
+// ============================================================================
+// Closure reference comparison
+// ============================================================================
+
+namespace {
+
+// Straightforward closure kept as a reference: every line is merged (sort,
+// sum equal masters in order, drop near-zero weights), then each line is
+// expanded through its constrained masters and merged again. close() skips
+// lines without constrained masters and merges in place; it must reproduce
+// this reference bit for bit.
+void referenceMergeEntries(std::vector<ConstraintEntry>& entries)
+{
+    if (entries.size() < 2) {
+        return;
+    }
+    std::sort(entries.begin(), entries.end());
+    std::vector<ConstraintEntry> merged;
+    for (const auto& entry : entries) {
+        if (!merged.empty() && merged.back().master_dof == entry.master_dof) {
+            merged.back().weight += entry.weight;
+        } else {
+            merged.push_back(entry);
+        }
+    }
+    merged.erase(std::remove_if(merged.begin(), merged.end(),
+                                [](const ConstraintEntry& e) {
+                                    return std::abs(e.weight) < 1e-15;
+                                }),
+                 merged.end());
+    entries = std::move(merged);
+}
+
+struct ReferenceLine {
+    std::vector<ConstraintEntry> entries;
+    double inhomogeneity{0.0};
+    bool closed{false};
+};
+
+void referenceCloseLine(std::map<GlobalIndex, ReferenceLine>& lines, GlobalIndex slave)
+{
+    auto& line = lines.at(slave);
+    if (line.closed) {
+        return;
+    }
+    std::vector<ConstraintEntry> expanded;
+    double inhomogeneity = line.inhomogeneity;
+    for (const auto& entry : line.entries) {
+        const auto master = lines.find(entry.master_dof);
+        if (master != lines.end()) {
+            referenceCloseLine(lines, entry.master_dof);
+            for (const auto& master_entry : master->second.entries) {
+                expanded.push_back({master_entry.master_dof, entry.weight * master_entry.weight});
+            }
+            inhomogeneity += entry.weight * master->second.inhomogeneity;
+        } else {
+            expanded.push_back(entry);
+        }
+    }
+    line.entries = std::move(expanded);
+    line.inhomogeneity = inhomogeneity;
+    referenceMergeEntries(line.entries);
+    line.closed = true;
+}
+
+std::uint64_t bits(double value)
+{
+    std::uint64_t out = 0;
+    std::memcpy(&out, &value, sizeof(out));
+    return out;
+}
+
+struct GeneratedLine {
+    GlobalIndex slave{-1};
+    std::vector<ConstraintEntry> entries;
+    double inhomogeneity{0.0};
+};
+
+// Deterministic acyclic constraint set (masters have larger indices than
+// their slaves) mixing Dirichlet lines, terminal lines, chains through
+// constrained masters, repeated masters and exact cancellations.
+std::vector<GeneratedLine> generateConstraintLines(std::uint64_t seed)
+{
+    std::uint64_t state = seed;
+    auto next = [&state]() {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        return static_cast<std::uint32_t>(state >> 33);
+    };
+    std::vector<GeneratedLine> lines;
+    for (GlobalIndex slave = 0; slave < 400; slave += 1 + static_cast<GlobalIndex>(next() % 3)) {
+        GeneratedLine line;
+        line.slave = slave;
+        line.inhomogeneity = (next() % 4 == 0) ? static_cast<double>(next() % 17) / 7.0 : 0.0;
+        const auto n_entries = next() % 7;
+        for (std::uint32_t k = 0; k < n_entries; ++k) {
+            const GlobalIndex master = slave + 1 + static_cast<GlobalIndex>(next() % 60);
+            const double weight = (static_cast<double>(next() % 23) - 11.0) / 9.0;
+            line.entries.push_back({master, weight});
+            if (next() % 5 == 0) {
+                line.entries.push_back({master, -weight});  // cancels exactly
+            } else if (next() % 4 == 0) {
+                line.entries.push_back({master, weight / 3.0});
+            }
+        }
+        lines.push_back(std::move(line));
+    }
+    return lines;
+}
+
+void expectCloseMatchesReference(bool merge_duplicates)
+{
+    for (const std::uint64_t seed : {1ULL, 7ULL, 12345ULL}) {
+        const auto generated = generateConstraintLines(seed);
+        AffineConstraintsOptions options;
+        options.merge_duplicates = merge_duplicates;
+        AffineConstraints constraints(options);
+        std::map<GlobalIndex, ReferenceLine> reference;
+        for (const auto& line : generated) {
+            constraints.addLine(line.slave);
+            auto& ref = reference[line.slave];
+            for (const auto& entry : line.entries) {
+                constraints.addEntry(line.slave, entry.master_dof, entry.weight);
+                if (std::abs(entry.weight) >= options.zero_tolerance) {
+                    ref.entries.push_back(entry);
+                }
+            }
+            constraints.setInhomogeneity(line.slave, line.inhomogeneity);
+            ref.inhomogeneity = line.inhomogeneity;
+        }
+        if (merge_duplicates) {
+            for (auto& [slave, line] : reference) {
+                static_cast<void>(slave);
+                referenceMergeEntries(line.entries);
+            }
+        }
+        for (auto& [slave, line] : reference) {
+            static_cast<void>(line);
+            referenceCloseLine(reference, slave);
+        }
+        constraints.close();
+
+        ASSERT_EQ(constraints.numConstraints(), reference.size());
+        for (const auto& [slave, ref] : reference) {
+            const auto view = constraints.getConstraint(slave);
+            ASSERT_TRUE(view.has_value()) << "slave " << slave;
+            ASSERT_EQ(view->entries.size(), ref.entries.size()) << "slave " << slave;
+            EXPECT_EQ(bits(view->inhomogeneity), bits(ref.inhomogeneity)) << "slave " << slave;
+            for (std::size_t i = 0; i < ref.entries.size(); ++i) {
+                EXPECT_EQ(view->entries[i].master_dof, ref.entries[i].master_dof)
+                    << "slave " << slave << " entry " << i;
+                EXPECT_EQ(bits(view->entries[i].weight), bits(ref.entries[i].weight))
+                    << "slave " << slave << " entry " << i;
+            }
+        }
+    }
+}
+
+}  // namespace
+
+TEST(AffineConstraintsTest, CloseMatchesReferenceClosureBitwise) {
+    expectCloseMatchesReference(/*merge_duplicates=*/true);
+}
+
+TEST(AffineConstraintsTest, CloseWithoutMergeMatchesReferenceClosureBitwise) {
+    expectCloseMatchesReference(/*merge_duplicates=*/false);
+}
+
+TEST(AffineConstraintsTest, MergeEntriesMatchesReferenceMerge) {
+    std::uint64_t state = 99;
+    auto next = [&state]() {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        return static_cast<std::uint32_t>(state >> 33);
+    };
+    for (int trial = 0; trial < 200; ++trial) {
+        ConstraintLine line;
+        const auto n = next() % 9;
+        for (std::uint32_t k = 0; k < n; ++k) {
+            const double weight = (next() % 6 == 0) ? 0.0
+                                                    : (static_cast<double>(next() % 19) - 9.0) / 7.0;
+            line.entries.push_back({static_cast<GlobalIndex>(next() % 5), weight});
+        }
+        auto expected = line.entries;
+        referenceMergeEntries(expected);
+        line.mergeEntries();
+        ASSERT_EQ(line.entries.size(), expected.size()) << "trial " << trial;
+        for (std::size_t i = 0; i < expected.size(); ++i) {
+            EXPECT_EQ(line.entries[i].master_dof, expected[i].master_dof);
+            EXPECT_EQ(bits(line.entries[i].weight), bits(expected[i].weight));
+        }
+    }
+
+    // A single entry is kept as is, even with a zero weight.
+    ConstraintLine single;
+    single.entries.push_back({3, 0.0});
+    single.mergeEntries();
+    ASSERT_EQ(single.entries.size(), 1u);
+    EXPECT_EQ(single.entries[0].master_dof, 3);
+}
+
+TEST(AffineConstraintsTest, CloseStillDetectsCyclesBehindTerminalLines) {
+    AffineConstraints constraints;
+    // Terminal lines (masters unconstrained) around a two-line cycle.
+    constraints.addLine(0);
+    constraints.addEntry(0, 100, 1.0);
+    constraints.addLine(1);
+    constraints.addEntry(1, 2, 1.0);
+    constraints.addLine(2);
+    constraints.addEntry(2, 1, 1.0);
+    constraints.addLine(3);
+    constraints.addEntry(3, 101, 0.5);
+    constraints.addEntry(3, 102, 0.5);
+    EXPECT_THROW(constraints.close(), ConstraintCycleException);
 }
 
 }  // namespace test
