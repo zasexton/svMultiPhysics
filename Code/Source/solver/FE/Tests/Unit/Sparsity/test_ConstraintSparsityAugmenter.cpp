@@ -33,7 +33,12 @@
 #include "Dofs/DofConstraints.h"
 #include <vector>
 #include <algorithm>
+#include <cstdint>
 #include <memory>
+#include <queue>
+#include <set>
+#include <unordered_map>
+#include <unordered_set>
 
 using namespace svmp::FE;
 using namespace svmp::FE::sparsity;
@@ -517,4 +522,190 @@ TEST(ConstraintSparsityAugmenterTest, EliminationFillPropagatesCouplings) {
     
     // Propagated entry: master 2 should inherit coupling to 0
     EXPECT_TRUE(pattern.hasEntry(2, 0));
+}
+
+
+// ============================================================================
+// Elimination fill against a reference implementation
+// ============================================================================
+
+namespace {
+
+// Constraint query whose constrained-DOF list is given verbatim, so tests can
+// include repeated and out-of-pattern constrained DOFs.
+class ListedConstraintQuery final : public IConstraintQuery {
+public:
+    ListedConstraintQuery(std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> masters,
+                          std::vector<GlobalIndex> listed)
+        : masters_(std::move(masters)), listed_(std::move(listed)) {}
+
+    bool isConstrained(GlobalIndex dof) const override { return masters_.count(dof) != 0u; }
+    std::vector<GlobalIndex> getMasterDofs(GlobalIndex dof) const override {
+        const auto it = masters_.find(dof);
+        return it == masters_.end() ? std::vector<GlobalIndex>{} : it->second;
+    }
+    std::vector<GlobalIndex> getAllConstrainedDofs() const override { return listed_; }
+    std::size_t numConstraints() const override { return masters_.size(); }
+
+private:
+    std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> masters_;
+    std::vector<GlobalIndex> listed_;
+};
+
+std::vector<GlobalIndex> referenceTransitiveMasters(const IConstraintQuery& query, GlobalIndex dof)
+{
+    if (!query.isConstrained(dof)) {
+        return {};
+    }
+    std::vector<GlobalIndex> result;
+    std::unordered_set<GlobalIndex> visited{dof};
+    std::queue<GlobalIndex> to_process;
+    for (const auto m : query.getMasterDofs(dof)) {
+        to_process.push(m);
+    }
+    while (!to_process.empty()) {
+        const auto current = to_process.front();
+        to_process.pop();
+        if (!visited.insert(current).second) {
+            continue;
+        }
+        if (query.isConstrained(current)) {
+            for (const auto m : query.getMasterDofs(current)) {
+                if (visited.count(m) == 0u) {
+                    to_process.push(m);
+                }
+            }
+        } else {
+            result.push_back(current);
+        }
+    }
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
+// The elimination-fill rules applied in the same order as the augmenter, on
+// plain row sets with hash-map master lookups.
+std::vector<std::set<GlobalIndex>> referenceEliminationFill(
+    std::vector<std::set<GlobalIndex>> rows, GlobalIndex n_cols, const IConstraintQuery& query)
+{
+    const auto n_rows = static_cast<GlobalIndex>(rows.size());
+    const auto constrained = query.getAllConstrainedDofs();
+    std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> master_map;
+    for (const auto cdof : constrained) {
+        master_map[cdof] = referenceTransitiveMasters(query, cdof);
+    }
+    for (const auto cdof : constrained) {
+        if (cdof < 0 || cdof >= n_rows) continue;
+        if (cdof < n_cols) rows[cdof].insert(cdof);
+        for (const auto m : master_map[cdof]) {
+            if (m >= 0 && m < n_cols) {
+                rows[cdof].insert(m);
+                if (m < n_rows && cdof < n_cols) rows[m].insert(cdof);
+            }
+        }
+    }
+    for (GlobalIndex row = 0; row < n_rows; ++row) {
+        const std::vector<GlobalIndex> snapshot(rows[row].begin(), rows[row].end());
+        for (const auto col : snapshot) {
+            const auto it = master_map.find(col);
+            if (it == master_map.end()) continue;
+            for (const auto m : it->second) {
+                if (m >= 0 && m < n_cols) {
+                    rows[row].insert(m);
+                    if (m < n_rows && row < n_cols) rows[m].insert(row);
+                }
+            }
+        }
+    }
+    for (const auto cdof : constrained) {
+        if (cdof < 0 || cdof >= n_rows) continue;
+        const auto it = master_map.find(cdof);
+        if (it == master_map.end()) continue;
+        const std::vector<GlobalIndex> snapshot(rows[cdof].begin(), rows[cdof].end());
+        for (const auto m : it->second) {
+            if (m < 0 || m >= n_rows) continue;
+            for (const auto j : snapshot) {
+                if (j >= 0 && j < n_cols) {
+                    rows[m].insert(j);
+                    if (j < n_rows && m < n_cols) rows[j].insert(m);
+                }
+            }
+        }
+    }
+    return rows;
+}
+
+void expectFillMatchesReference(GlobalIndex n,
+                                const std::vector<std::pair<GlobalIndex, GlobalIndex>>& entries,
+                                const std::shared_ptr<IConstraintQuery>& query)
+{
+    std::vector<std::set<GlobalIndex>> rows(static_cast<std::size_t>(n));
+    SparsityPattern pattern(n, n);
+    for (const auto& [r, c] : entries) {
+        rows[static_cast<std::size_t>(r)].insert(c);
+        pattern.addEntry(r, c);
+    }
+    const auto expected = referenceEliminationFill(rows, n, *query);
+
+    ConstraintSparsityAugmenter augmenter(query);
+    augmenter.augment(pattern, AugmentationMode::EliminationFill);
+    pattern.finalize();
+    for (GlobalIndex r = 0; r < n; ++r) {
+        const auto span = pattern.getRowSpan(r);
+        const std::vector<GlobalIndex> actual(span.begin(), span.end());
+        const std::vector<GlobalIndex> wanted(expected[static_cast<std::size_t>(r)].begin(),
+                                              expected[static_cast<std::size_t>(r)].end());
+        EXPECT_EQ(actual, wanted) << "row " << r;
+    }
+}
+
+}  // namespace
+
+TEST(ConstraintSparsityAugmenterTest, EliminationFillMatchesReferenceOnGeneratedSets) {
+    for (const std::uint64_t seed : {3ULL, 41ULL, 2024ULL}) {
+        std::uint64_t state = seed;
+        auto next = [&state]() {
+            state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+            return static_cast<std::uint32_t>(state >> 33);
+        };
+        const GlobalIndex n = 120;
+        std::vector<std::pair<GlobalIndex, GlobalIndex>> entries;
+        for (GlobalIndex r = 0; r < n; ++r) {
+            for (int k = 0; k < 4; ++k) {
+                entries.emplace_back(r, static_cast<GlobalIndex>(next() % n));
+            }
+        }
+        std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> masters;
+        std::vector<GlobalIndex> listed;
+        for (GlobalIndex dof = 0; dof < n; dof += 1 + static_cast<GlobalIndex>(next() % 4)) {
+            std::vector<GlobalIndex> m;
+            const auto count = next() % 4;  // zero masters: Dirichlet
+            for (std::uint32_t k = 0; k < count; ++k) {
+                // Larger indices only, so chains stay acyclic; some masters
+                // are constrained themselves.
+                const auto master = dof + 1 + static_cast<GlobalIndex>(next() % 15);
+                if (master < n) m.push_back(master);
+            }
+            masters.emplace(dof, std::move(m));
+            listed.push_back(dof);
+        }
+        auto query = std::make_shared<ListedConstraintQuery>(std::move(masters), std::move(listed));
+        expectFillMatchesReference(n, entries, query);
+    }
+}
+
+TEST(ConstraintSparsityAugmenterTest, EliminationFillHandlesRepeatedAndOutOfPatternConstrainedDofs) {
+    // Constrained DOFs outside the pattern take the map path of the master
+    // index; repeated listings must behave like a single one.
+    const GlobalIndex n = 8;
+    std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> masters = {
+        {2, {5, 5, 6}},     // repeated master
+        {3, {3, 7}},        // lists itself and is constrained: walked path
+        {4, {2}},           // chain through a constrained master
+        {20, {1}},          // outside the pattern
+        {-1, {0}},          // negative DOF
+    };
+    std::vector<GlobalIndex> listed = {2, 3, 20, 4, 2, -1, 20};
+    auto query = std::make_shared<ListedConstraintQuery>(std::move(masters), std::move(listed));
+    expectFillMatchesReference(n, {{0, 2}, {1, 4}, {2, 0}, {3, 1}, {6, 3}, {7, 7}}, query);
 }
