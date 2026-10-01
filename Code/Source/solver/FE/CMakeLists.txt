@@ -779,6 +779,7 @@ set(FE_ASSEMBLY_HEADERS
     Assembly/ContactPairContext.h
     Assembly/CutDomainAssembler.h
     Assembly/CutIntegrationContext.h
+    Assembly/CutVolumeEpochCache.h
     Assembly/BackgroundEntityMeasures.h
     Assembly/BatchedProjection.h
     Assembly/BatchedStiffness.h

@@ -359,6 +359,10 @@ struct AssemblyOptions {
     std::optional<std::size_t> cut_volume_basis_cache_max_entries{};
         ///< Max StandardAssembler cut-volume basis cache entries. nullopt reads
         ///< SVMP_CUT_VOLUME_BASIS_CACHE_MAX_ENTRIES; 0 disables the cache.
+    std::optional<std::size_t> cut_volume_epoch_cache_max_bytes{};
+        ///< Memory budget of the StandardAssembler per-epoch cut-volume
+        ///< integration cache. nullopt reads SVMP_CUT_VOLUME_EPOCH_CACHE_MAX_MB
+        ///< (default 1024 MB); 0 disables the cache.
 
     // Scheduling / locality (decorator opt-in)
     bool schedule_elements{false};       ///< Reorder element traversal (cache/locality)

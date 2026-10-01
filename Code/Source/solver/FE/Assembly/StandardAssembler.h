@@ -67,6 +67,7 @@
 #include "GlobalSystemView.h"
 #include "AssemblyKernel.h"
 #include "AssemblyContext.h"
+#include "CutVolumeEpochCache.h"
 #include "Spaces/OrientationManager.h"
 #include "Geometry/GeometryMapping.h"
 #include "Basis/BasisCache.h"
@@ -385,6 +386,12 @@ public:
     [[nodiscard]] CutVolumeBasisCacheDiagnostics
     cutVolumeBasisCacheDiagnostics() const noexcept;
     void resetCutVolumeBasisCacheDiagnostics() noexcept;
+
+    /// Counters and footprint of the per-epoch cut-volume integration cache.
+    using CutVolumeEpochCacheDiagnostics = detail::CutVolumeEpochCacheStatistics;
+    [[nodiscard]] CutVolumeEpochCacheDiagnostics
+    cutVolumeEpochCacheDiagnostics() const noexcept;
+    void resetCutVolumeEpochCacheDiagnostics() noexcept;
     [[nodiscard]] bool supportsDofOffsets() const noexcept override { return true; }
     [[nodiscard]] bool supportsFieldRequirements() const noexcept override { return true; }
     [[nodiscard]] bool supportsMaterialState() const noexcept override { return true; }
@@ -1276,6 +1283,49 @@ private:
     void restoreCutVolumeGeometryCacheEntry(
         AssemblyContext& context,
         const CutVolumeGeometryCacheEntry& entry);
+
+    // Per-epoch cut-volume integration cache (default on; see
+    // CutVolumeEpochCache.h). Used only while the opt-in cut-volume basis
+    // cache above is disabled.
+    struct CutVolumeEpochSpaceKeyMemo {
+        const void* basis{nullptr};
+        LocalIndex n_dofs{0};
+        LocalIndex n_scalar_dofs{0};
+        bool product{false};
+        bool trial_role{false};
+        bool hessians{false};
+        std::uint32_t key{0};
+    };
+    detail::CutVolumeEpochCache cut_volume_epoch_cache_{};
+    std::vector<CutVolumeEpochSpaceKeyMemo> cut_volume_epoch_key_memo_{};
+    std::array<detail::CutVolumeEpochUnpackScratch, 2> cut_volume_epoch_unpack_scratch_{};
+
+    [[nodiscard]] std::size_t cutVolumeEpochCacheMaxBytes() const noexcept;
+    [[nodiscard]] bool beginCutVolumeEpochCache(const IMeshAccess& mesh,
+                                                const CutIntegrationContext& cut_context);
+    [[nodiscard]] detail::CutVolumeEpochRuleEntry* cutVolumeEpochRuleEntry(
+        const geometry::CutQuadratureRule& rule,
+        GlobalIndex cell_id,
+        ElementType cell_type,
+        int dimension,
+        std::unique_ptr<const quadrature::QuadratureRule>& uncached_rule);
+    void validateCutVolumeEpochCellGeometry(detail::CutVolumeEpochRuleEntry& entry,
+                                            const IMeshAccess& mesh,
+                                            GlobalIndex cell_id);
+    [[nodiscard]] std::uint32_t cutVolumeEpochSpaceKey(const spaces::FunctionSpace& space,
+                                                       const elements::Element& element,
+                                                       bool trial_role,
+                                                       bool with_hessians,
+                                                       int dimension);
+    void prepareCutVolumeBasisFromEpochCache(AssemblyContext& context,
+                                             const IMeshAccess& mesh,
+                                             GlobalIndex cell_id,
+                                             ElementType cell_type,
+                                             const spaces::FunctionSpace& test_space,
+                                             const spaces::FunctionSpace& trial_space,
+                                             RequiredData required_data,
+                                             const quadrature::QuadratureRule& quad_rule,
+                                             detail::CutVolumeEpochRuleEntry& entry);
 
     // Pre-computed coupled-block metadata to avoid virtual calls in fast path.
     // Populated once per block before the cell loop; indexed by block index.
