@@ -119,6 +119,7 @@ struct ResidualStats {
     double rel_all{0.0};
     double rel_free{0.0};
     double err_vs_recorded{0.0};
+    double criterion_ratio{0.0};  ///< ||b - A x|| / max(abs_tol, rel_tol ||b||)
 };
 
 ResidualStats residualStats(const FsilsSystemSnapshot& s, const std::vector<double>& x)
@@ -152,6 +153,8 @@ ResidualStats residualStats(const FsilsSystemSnapshot& s, const std::vector<doub
     st.rel_all = std::sqrt(r_all) / std::max(std::sqrt(b_all), 1e-300);
     st.rel_free = std::sqrt(r_free) / std::max(std::sqrt(b_free), 1e-300);
     st.err_vs_recorded = std::sqrt(e) / std::max(std::sqrt(xr), 1e-300);
+    const double target = std::max(s.abs_tol, s.rel_tol * std::sqrt(b_all));
+    st.criterion_ratio = std::sqrt(r_all) / std::max(target, 1e-300);
     return st;
 }
 
@@ -447,10 +450,10 @@ TEST(LinearSolverReplay, ReplaySnapshots)
             }
             std::printf("REPLAY config=%s file=%zu nodes=%d dof=%d iters=%d converged=%d rel_all=%.3e "
                         "rel_free=%.3e err_vs_recorded=%.3e seconds=%.4f recorded_iters=%d "
-                        "recorded_seconds=%.4f\n",
+                        "recorded_seconds=%.4f criterion_ratio=%.3e\n",
                         config.name.c_str(), fi, snap.n_nodes, snap.dof, report.iterations,
                         report.converged ? 1 : 0, st.rel_all, st.rel_free, st.err_vs_recorded, seconds,
-                        snap.iterations, snap.solve_seconds);
+                        snap.iterations, snap.solve_seconds, st.criterion_ratio);
             std::fflush(stdout);
             if (config.name == "fsils-gmres-rcs") {
                 EXPECT_EQ(report.iterations, snap.iterations) << files[fi];
