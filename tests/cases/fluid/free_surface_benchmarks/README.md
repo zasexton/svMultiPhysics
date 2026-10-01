@@ -71,6 +71,11 @@ change it once, with a one-line justification in the tracker.
 - **Launching the solver.** Start every MPI-linked binary with `mpiexec -n <N> --bind-to none` (or `srun --mpi=pmix -n <N> --exact`), never bare.
   - Submit with `sbatch --export=NONE` and set the environment in the job script.
   - Reason: this Open MPI build uses Slurm's PMI when started without a launcher. A job submitted from inside an interactive `sh_dev` session inherits that session's `srun` contact variables, so a bare process contacts the interactive `srun` and hangs. That `srun` prints `PMK_KVS_Barrier task count inconsistent` in the user's terminal.
+- **Long runs on 4 ranks.** Since the MPI correctness fixes (`ac273512`), runs with FSILS linear algebra match serial to round-off on 1, 2, 4 and 8 ranks. Long runs (static drop R/h ≥ 16, capillary wave λ/h ≥ 32, sessile drop) therefore use 4 MPI ranks on one node, for example 3.1× faster at R/h = 32.
+  - Leave `<Ghost_layers>` unset: the solver derives 8 layers for an aggregating free surface.
+  - Decks with Eigen linear algebra (for example `linear_sloshing_2d`, `tank_at_rest`) stay serial.
+  - Bitwise comparisons between solver builds stay serial, because rank counts change the round-off.
+- **Requesting resources.** amarsden allows at most 8000 MB per CPU. A request above that silently adds CPUs: a one-task job with `--mem=8G` gets 2 CPUs, half of them idle. Request at most 8000 MB × CPUs (for example `--mem=7G` serial, `--mem=8G` for 4 ranks). Check finished jobs with `seff <jobid>`.
 
 ## Planned benchmarks
 
