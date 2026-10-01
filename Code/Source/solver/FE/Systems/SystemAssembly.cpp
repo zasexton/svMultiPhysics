@@ -1067,6 +1067,10 @@ void logCutVolumeAssemblyDiagnostics(const assembly::CutIntegrationContext& cut_
                                      int marker,
                                      geometry::CutIntegrationSide side)
 {
+    // INFO only: the rule statistics below exist only for this line.
+    if (Logger::instance().get_level() > LogLevel::INFO) {
+        return;
+    }
     const auto diagnostics =
         cut_context.generatedVolumeDiagnosticsForMarkerAndSide(marker, side);
 

@@ -3812,10 +3812,38 @@ void logJacobianCheckTopMismatchEntries(const systems::FESystem& sys,
     FE_LOG_INFO(oss.str());
 }
 
+// INFO diagnostics that need reductions run when the logger of any rank of
+// the system communicator prints INFO, so that every rank enters the same
+// collectives whatever its own FE_LOG_LEVEL.
+[[nodiscard]] bool infoLogEnabledOnAnyRank(const systems::FESystem& sys)
+{
+    int enabled = Logger::instance().get_level() <= LogLevel::INFO ? 1 : 0;
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    int mpi_finalized = 0;
+    MPI_Initialized(&mpi_initialized);
+    MPI_Finalized(&mpi_finalized);
+    const auto comm = (mpi_initialized && !mpi_finalized)
+                          ? sys.activeMpiCommunicator()
+                          : MPI_COMM_NULL;
+    if (comm != MPI_COMM_NULL) {
+        int any_enabled = enabled;
+        MPI_Allreduce(&enabled, &any_enabled, 1, MPI_INT, MPI_MAX, comm);
+        enabled = any_enabled;
+    }
+#else
+    (void)sys;
+#endif
+    return enabled != 0;
+}
+
 void logVectorComponentNorms(const systems::FESystem& sys,
                              backends::GenericVector& vec,
                              std::string_view label)
 {
+    if (!infoLogEnabledOnAnyRank(sys)) {
+        return;
+    }
     const auto& fmap = sys.fieldMap();
     const auto owned_dofs =
         ownedDofsForVector(vec, sys.dofHandler().getPartition().locallyOwned());
@@ -13821,6 +13849,10 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
     };
 
     auto traceResidualComponents = [&](const char* phase) {
+        // INFO diagnostic: the norms below exist only for these lines.
+        if (!infoLogEnabledOnAnyRank(transient.system())) {
+            return;
+        }
         const auto components = computeResidualComponents();
         std::ostringstream oss;
         oss << "NewtonSolver: residual block norms"
