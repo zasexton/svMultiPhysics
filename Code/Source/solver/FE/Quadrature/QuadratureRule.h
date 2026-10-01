@@ -86,8 +86,22 @@ public:
     /// reference points but not quadrature weights.
     QuadraturePointFingerprint point_fingerprint() const noexcept { return point_fingerprint_; }
 
-    /// Stable semantic identity used by BasisCache
+    /// Human-readable semantic identity (dimension and reference points).
+    /// Formatted on every call; hot paths compare rules with
+    /// same_cache_identity() instead.
     virtual std::string cache_identity() const;
+
+    /**
+     * @brief Binary form of the cache_identity() comparison
+     *
+     * True exactly when both rules have the same dimension and bitwise
+     * identical reference points, which is what equal cache_identity()
+     * strings encode (every coordinate is printed with max_digits10, so
+     * signed zeros differ too). Weights, order and family are not part of
+     * the identity. Distinct rules are usually rejected by the cached point
+     * fingerprints without touching the points.
+     */
+    bool same_cache_identity(const QuadratureRule& other) const noexcept;
 
     /**
      * @brief Validate rule data for basic consistency
@@ -129,7 +143,6 @@ private:
     int order_;
     std::vector<QuadPoint> points_;
     std::vector<Real> weights_;
-    std::string cache_identity_;
     QuadraturePointFingerprint point_fingerprint_;
 };
 
@@ -145,7 +158,6 @@ inline void QuadratureRule::set_data(std::vector<QuadPoint> pts, std::vector<Rea
     points_ = std::move(pts);
     weights_ = std::move(wts);
     point_fingerprint_ = build_point_fingerprint();
-    cache_identity_ = build_cache_identity();
 }
 
 inline bool QuadratureRule::is_valid(Real tol) const {
@@ -165,10 +177,29 @@ inline bool QuadratureRule::is_valid(Real tol) const {
 }
 
 inline std::string QuadratureRule::cache_identity() const {
-    if (!cache_identity_.empty()) {
-        return cache_identity_;
-    }
     return build_cache_identity();
+}
+
+inline bool QuadratureRule::same_cache_identity(const QuadratureRule& other) const noexcept {
+    if (this == &other) {
+        return true;
+    }
+    if (dimension_ != other.dimension_ ||
+        points_.size() != other.points_.size() ||
+        point_fingerprint_.points_hash_a != other.point_fingerprint_.points_hash_a ||
+        point_fingerprint_.points_hash_b != other.point_fingerprint_.points_hash_b) {
+        return false;
+    }
+    for (std::size_t i = 0; i < points_.size(); ++i) {
+        for (std::size_t component = 0; component < 3u; ++component) {
+            const Real a = points_[i][component];
+            const Real b = other.points_[i][component];
+            if (std::memcmp(&a, &b, sizeof(Real)) != 0) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 inline std::string QuadratureRule::build_cache_identity() const {
