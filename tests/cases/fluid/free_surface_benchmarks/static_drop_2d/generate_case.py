@@ -53,6 +53,11 @@ LEVEL_SET_VELOCITY = ("coupled_field",
                       "pde_harmonic_monolithic", "pde_harmonic_prescribed",
                       "pde_normal_monolithic", "pde_normal_prescribed")
 DEFAULT_LEVEL_SET_VELOCITY = "pde_harmonic_monolithic"   # decision D9
+# Accepted-step kinematic reconciliation of the transported level set
+# (Enable_kinematic_reconciliation; FE/LevelSet/LevelSetKinematicReconciliation.h):
+# each step's change of the sharp liquid area equals the interface flux of the
+# transport velocity.  Local and parameter-free; "off" reproduces earlier decks.
+KINEMATIC_RECONCILIATION = True
 MIN_PHI_OVER_H_WARNING = 1.0e-6             # "vertex touch" warning threshold
 LEVEL_SET_FIELD = "phi"
 CURVATURE_FIELD = "kappa"
@@ -267,8 +272,11 @@ def level_set_velocity_block(mode: str) -> str:
 
 
 def solver_xml(form: str, schedule: dict, steps: int, cadence: int,
-               level_set_velocity: str = DEFAULT_LEVEL_SET_VELOCITY) -> str:
+               level_set_velocity: str = DEFAULT_LEVEL_SET_VELOCITY,
+               kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION) -> str:
     kag = form in ("kag_consistent", "kag_lumped")
+    reconciliation = ("\n    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>"
+                      if kinematic_reconciliation else "")
     curvature_projection = ""
     if kag:
         mass = ("\n    <Curvature_projection_kinematic_area_gradient_mass>Lumped"
@@ -331,7 +339,7 @@ def solver_xml(form: str, schedule: dict, steps: int, cadence: int,
     <SUPG_tau_scale>0.5</SUPG_tau_scale>
     <SUPG_transient_scale>2.0</SUPG_transient_scale>
     <Enable_reinitialization>false</Enable_reinitialization>
-    <Enable_volume_correction>false</Enable_volume_correction>{curvature_projection}
+    <Enable_volume_correction>false</Enable_volume_correction>{reconciliation}{curvature_projection}
     <Output type="Spatial">
       <Level_set>true</Level_set>
     </Output>
@@ -396,6 +404,7 @@ def generate(level: int, form: str, laplace: float, output_dir: Path, *,
              viscous_times: float = DEFAULT_VISCOUS_TIMES,
              snapshots: int = DEFAULT_SNAPSHOTS,
              level_set_velocity: str = DEFAULT_LEVEL_SET_VELOCITY,
+             kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
              max_steps: int | None = None, force: bool = False) -> dict:
     if level_set_velocity not in LEVEL_SET_VELOCITY:
         raise ValueError(f"--level-set-velocity must be one of {LEVEL_SET_VELOCITY}")
@@ -444,7 +453,8 @@ def generate(level: int, form: str, laplace: float, output_dir: Path, *,
         node_ids, parents = faces[wall]
         write_face_vtp(mesh_dir / "mesh-surfaces" / f"{wall}.vtp", points, node_ids, parents)
     (output_dir / "solver.xml").write_text(solver_xml(form, schedule, steps, cadence,
-                                                      level_set_velocity),
+                                                      level_set_velocity,
+                                                      kinematic_reconciliation),
                                            encoding="utf-8")
 
     case = {
@@ -478,6 +488,7 @@ def generate(level: int, form: str, laplace: float, output_dir: Path, *,
         "dt_safety_factor": DT_SAFETY,
         "dt_multiple_of_capillary_limit": schedule["dt_multiple_of_capillary_limit"],
         "level_set_velocity": level_set_velocity,
+        "kinematic_reconciliation": bool(kinematic_reconciliation),
         "dt": schedule["dt"],
         "steps_protocol": schedule["steps"],
         "steps": steps,
@@ -511,17 +522,23 @@ def main(argv=None) -> int:
                         default=DEFAULT_LEVEL_SET_VELOCITY,
                         help=f"level-set advection velocity (protocol value "
                              f"{DEFAULT_LEVEL_SET_VELOCITY})")
+    parser.add_argument("--kinematic-reconciliation", choices=("on", "off"),
+                        default="on" if KINEMATIC_RECONCILIATION else "off",
+                        help="accepted-step kinematic reconciliation of the level set "
+                             "(protocol: on; off reproduces the earlier decks)")
     parser.add_argument("--force", action="store_true", help="allow a non-empty output dir")
     args = parser.parse_args(argv)
 
     case = generate(args.level, args.capillary_form, args.laplace_number, args.output_dir,
                     viscous_times=args.viscous_times, snapshots=args.snapshots,
                     level_set_velocity=args.level_set_velocity,
+                    kinematic_reconciliation=args.kinematic_reconciliation == "on",
                     max_steps=args.max_steps, force=args.force)
     print(f"wrote {args.output_dir}")
     for key in ("level_R_over_h", "capillary_form", "laplace_number", "viscosity",
                 "viscous_time", "end_time", "dt", "dt_capillary_limit",
-                "dt_multiple_of_capillary_limit", "level_set_velocity", "steps",
+                "dt_multiple_of_capillary_limit", "level_set_velocity",
+                "kinematic_reconciliation", "steps",
                 "output_cadence", "n_vertices", "n_triangles", "min_abs_phi_over_h",
                 "wall_gap_over_h", "truncated"):
         print(f"  {key} = {case[key]}")
