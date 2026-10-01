@@ -12,6 +12,7 @@ add_executable(test_application
   Unit/test_ActiveDomainOutput.cpp
   Unit/test_EquationTranslator.cpp
   Unit/test_FreeSurfaceEnergyLedger.cpp
+  Unit/test_LevelSetCurvatureSamples.cpp
   Unit/test_LevelSetCutConfiguration.cpp
   Unit/test_LevelSetEquationTranslator.cpp
   Unit/test_LevelSetMaintenanceConfiguration.cpp
