@@ -11,9 +11,13 @@
 #include "Backends/Interfaces/LinearSolver.h"
 #include "Backends/FSILS/liner_solver/fils_struct.hpp"
 
+#include <memory>
+
 namespace svmp {
 namespace FE {
 namespace backends {
+
+class FsilsKrylovPreconditioner;
 
 class FsilsLinearSolver final : public LinearSolver {
 public:
@@ -42,6 +46,12 @@ public:
     [[nodiscard]] bool supportsNullspace() const noexcept override { return true; }
     void setNullspaceBasis(std::span<const std::vector<double>> basis) override;
 
+    /// Right preconditioner state (null until a solve requests one).
+    [[nodiscard]] const FsilsKrylovPreconditioner* krylovPreconditioner() const noexcept
+    {
+        return krylov_pc_.get();
+    }
+
 private:
     SolverOptions options_{};
     std::vector<RankOneUpdate> rank_one_updates_{};
@@ -57,6 +67,9 @@ private:
     // Solver work vector kept in FSILS internal node ordering to avoid
     // old-order remap/copy-back through overlap communication on each solve.
     mutable std::vector<Real> ri_internal_work_{};
+
+    // Optional right preconditioner for GMRES, kept across solves for reuse.
+    std::unique_ptr<FsilsKrylovPreconditioner> krylov_pc_{};
 
     // Nullspace basis for post-solve projection.
     std::vector<std::vector<double>> nullspace_basis_{};

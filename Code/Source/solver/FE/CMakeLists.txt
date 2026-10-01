@@ -1378,6 +1378,7 @@ set(FE_BACKENDS_HEADERS
     Backends/Interfaces/BlockMatrix.h
 
     Backends/Utils/BackendOptions.h
+    Backends/Utils/PreconditionerReusePolicy.h
 
     Backends/Eigen/EigenFactory.h
     Backends/Eigen/EigenVector.h
@@ -1389,6 +1390,7 @@ set(FE_BACKENDS_HEADERS
     Backends/FSILS/FsilsMatrix.h
     Backends/FSILS/FsilsLinearSolver.h
     Backends/FSILS/FsilsSystemDump.h
+    Backends/FSILS/FsilsBlockPreconditioners.h
 
     # Vendored FSILS linear solver (copy of Code/Source/liner_solver)
     Backends/FSILS/liner_solver/add_bc_mul.h
@@ -1448,6 +1450,7 @@ set(FE_BACKENDS_SOURCES
     Backends/FSILS/FsilsMatrix.cpp
     Backends/FSILS/FsilsLinearSolver.cpp
     Backends/FSILS/FsilsSystemDump.cpp
+    Backends/FSILS/FsilsBlockPreconditioners.cpp
     Backends/FSILS/FsilsLegacyStatics.cpp
 
     # Vendored FSILS linear solver (copy of Code/Source/liner_solver)

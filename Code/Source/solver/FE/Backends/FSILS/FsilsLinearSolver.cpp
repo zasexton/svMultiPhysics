@@ -6,6 +6,7 @@
  */
 
 #include "Backends/FSILS/FsilsLinearSolver.h"
+#include "Backends/FSILS/FsilsBlockPreconditioners.h"
 
 #include "Backends/FSILS/FsilsMatrix.h"
 #include "Backends/FSILS/FsilsSystemDump.h"
@@ -1222,6 +1223,27 @@ struct GmresLaunchConfig {
     return std::max(1, cap);
 }
 
+/// Scalar constraint component for the Simple right preconditioner, or -1.
+[[nodiscard]] int rightPreconditionerConstraintComponent(const SolverOptions& options, int dof) noexcept
+{
+    if (!options.block_layout.has_value()) {
+        return -1;
+    }
+    const auto& layout = *options.block_layout;
+    const BlockDescriptor* block = nullptr;
+    if (!options.right_preconditioner_constraint_block.empty()) {
+        block = layout.findBlock(options.right_preconditioner_constraint_block);
+    }
+    if (block == nullptr) {
+        block = layout.constraintFieldBlock();
+    }
+    if (block == nullptr || block->n_components != 1 || block->start_component < 0 ||
+        block->start_component >= dof) {
+        return -1;
+    }
+    return block->start_component;
+}
+
 struct ResolvedSaddlePointBlocks {
     const BlockDescriptor* primary{nullptr};
     const BlockDescriptor* constraint{nullptr};
@@ -2266,6 +2288,21 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             // coupled rank-one solves so the first pass does not stop while the
             // true FE residual is still far from the requested tolerance.
             ls.RI.exact_convergence = has_native_rank_one_updates;
+            if (options_.right_preconditioner != RightPreconditionerType::None &&
+                !has_native_rank_one_updates && dof > 1) {
+                if (!krylov_pc_) {
+                    krylov_pc_ = std::make_unique<FsilsKrylovPreconditioner>();
+                }
+                const auto kind =
+                    (options_.right_preconditioner == RightPreconditionerType::Simple)
+                        ? FsilsKrylovPreconditioner::Kind::Simple
+                        : FsilsKrylovPreconditioner::Kind::BlockIlu0;
+                krylov_pc_->configure(kind,
+                                      options_.reuse_preconditioner,
+                                      rightPreconditionerConstraintComponent(options_, dof),
+                                      ls.RI.sD);
+                ls.right_pc_hook = krylov_pc_->makeHook();
+            }
         } else {
             fe_fsi_linear_solver::fsils_ls_create(ls,
                                                   method,
