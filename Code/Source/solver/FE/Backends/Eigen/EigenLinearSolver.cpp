@@ -8,8 +8,11 @@
 #include "Backends/Eigen/EigenLinearSolver.h"
 
 #include "Backends/Eigen/EigenMatrix.h"
+#include "Backends/Eigen/EigenRightGmres.h"
 #include "Backends/Eigen/EigenVector.h"
+#include "Backends/Utils/PreconditionerReusePolicy.h"
 #include "Core/FEException.h"
+#include "Core/Logger.h"
 
 #if defined(FE_HAS_EIGEN)
 #include <iostream>
@@ -19,6 +22,7 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cmath>
 #include <iomanip>
@@ -33,9 +37,28 @@ namespace backends {
 
 #if defined(FE_HAS_EIGEN)
 
+struct EigenLinearSolver::ReuseState {
+    using ColMat = Eigen::SparseMatrix<Real, Eigen::ColMajor, EigenMatrix::StorageIndex>;
+
+    std::uint64_t signature{0};
+    Eigen::Index rows{0};
+    bool direct{false};
+    std::unique_ptr<Eigen::SparseLU<ColMat>> lu{};
+    std::unique_ptr<Eigen::IncompleteLUT<Real, EigenMatrix::StorageIndex>> ilut{};
+    PreconditionerReusePolicy policy{};
+    ReuseStats stats{};
+};
+
 EigenLinearSolver::EigenLinearSolver(const SolverOptions& options)
 {
     setOptions(options);
+}
+
+EigenLinearSolver::~EigenLinearSolver() = default;
+
+EigenLinearSolver::ReuseStats EigenLinearSolver::reuseStats() const noexcept
+{
+    return reuse_ ? reuse_->stats : ReuseStats{};
 }
 
 void EigenLinearSolver::setOptions(const SolverOptions& options)
@@ -43,7 +66,13 @@ void EigenLinearSolver::setOptions(const SolverOptions& options)
     FE_THROW_IF(options.max_iter <= 0, InvalidArgumentException, "EigenLinearSolver: max_iter must be > 0");
     FE_THROW_IF(options.rel_tol < 0.0, InvalidArgumentException, "EigenLinearSolver: rel_tol must be >= 0");
     FE_THROW_IF(options.abs_tol < 0.0, InvalidArgumentException, "EigenLinearSolver: abs_tol must be >= 0");
+    const bool reuse_mode_changed =
+        options.reuse_preconditioner != options_.reuse_preconditioner ||
+        options.method != options_.method || options.preconditioner != options_.preconditioner;
     options_ = normalizeSolverOptionsForBackend(options, BackendKind::Eigen);
+    if (reuse_mode_changed) {
+        reuse_.reset();
+    }
 }
 
 namespace {
@@ -521,7 +550,176 @@ SolverReport solve_iterative(const EigenMatrix& A,
     return report;
 }
 
+[[nodiscard]] bool usesReusablePreconditioner(const SolverOptions& options) noexcept
+{
+    if (!options.reuse_preconditioner) {
+        return false;
+    }
+    if (options.method == SolverMethod::Direct) {
+        return true;
+    }
+    const bool gmres_family = options.method == SolverMethod::GMRES ||
+                              options.method == SolverMethod::PGMRES ||
+                              options.method == SolverMethod::FGMRES ||
+                              options.method == SolverMethod::BlockSchur;
+    return gmres_family && options.preconditioner == PreconditionerType::ILU;
+}
+
+[[nodiscard]] std::uint64_t patternSignature(const EigenMatrix::SparseMat& m) noexcept
+{
+    std::uint64_t h = 1469598103934665603ULL;
+    auto mix = [&h](const void* data, std::size_t bytes) {
+        const auto* p = static_cast<const unsigned char*>(data);
+        for (std::size_t i = 0; i < bytes; ++i) {
+            h ^= static_cast<std::uint64_t>(p[i]);
+            h *= 1099511628211ULL;
+        }
+    };
+    const std::int64_t dims[3] = {static_cast<std::int64_t>(m.rows()), static_cast<std::int64_t>(m.cols()),
+                                  static_cast<std::int64_t>(m.nonZeros())};
+    mix(dims, sizeof(dims));
+    if (m.isCompressed()) {
+        mix(m.outerIndexPtr(), static_cast<std::size_t>(m.outerSize() + 1) * sizeof(EigenMatrix::StorageIndex));
+        mix(m.innerIndexPtr(), static_cast<std::size_t>(m.nonZeros()) * sizeof(EigenMatrix::StorageIndex));
+    } else {
+        for (Eigen::Index k = 0; k < m.outerSize(); ++k) {
+            for (EigenMatrix::SparseMat::InnerIterator it(m, k); it; ++it) {
+                const std::int64_t ij[2] = {static_cast<std::int64_t>(it.row()), static_cast<std::int64_t>(it.col())};
+                mix(ij, sizeof(ij));
+            }
+        }
+    }
+    return h;
+}
+
 } // namespace
+
+SolverReport EigenLinearSolver::solveWithReuse(const EigenMatrix& A, EigenVector& x, const EigenVector& b)
+{
+    if (!reuse_) {
+        reuse_ = std::make_unique<ReuseState>();
+    }
+    auto& st = *reuse_;
+    const bool direct = options_.method == SolverMethod::Direct;
+    const auto signature = patternSignature(A.eigen());
+    const bool structure_changed = signature != st.signature || A.eigen().rows() != st.rows || direct != st.direct;
+    auto decision = st.policy.beforeSolve(true, structure_changed);
+
+    auto refresh = [&]() -> double {
+        const auto t0 = std::chrono::steady_clock::now();
+        if (direct) {
+            ReuseState::ColMat Acol = A.eigen();
+            if (!st.lu || structure_changed || st.signature != signature) {
+                st.lu = std::make_unique<Eigen::SparseLU<ReuseState::ColMat>>();
+                st.lu->analyzePattern(Acol);
+            }
+            st.lu->factorize(Acol);
+            if (st.lu->info() != Eigen::Success) {
+                emit_direct_factorization_diagnostics(A, b, options_, st.lu->info(), "factorize");
+                st.lu.reset();
+                st.policy.invalidate();
+                FE_THROW(FEException, "EigenLinearSolver (direct, reuse): factorization failed");
+            }
+            st.ilut.reset();
+        } else {
+            st.ilut = std::make_unique<Eigen::IncompleteLUT<Real, EigenMatrix::StorageIndex>>();
+            st.ilut->compute(A.eigen());
+            if (st.ilut->info() != Eigen::Success) {
+                st.ilut.reset();
+                st.policy.invalidate();
+                FE_THROW(FEException, "EigenLinearSolver (ILU, reuse): factorization failed");
+            }
+            st.lu.reset();
+        }
+        st.signature = signature;
+        st.rows = A.eigen().rows();
+        st.direct = direct;
+        st.policy.recordRefresh();
+        ++st.stats.refreshes;
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    };
+
+    double setup_seconds = 0.0;
+    bool fresh = false;
+    if (decision.refresh) {
+        setup_seconds = refresh();
+        fresh = true;
+    }
+
+    const auto& mat = A.eigen();
+    auto apply_A = [&mat](const Eigen::VectorXd& in, Eigen::VectorXd& out) { out.noalias() = mat * in; };
+    auto apply_M = [&st](const Eigen::VectorXd& in, Eigen::VectorXd& out) {
+        if (st.lu) {
+            out = st.lu->solve(in);
+        } else {
+            out = st.ilut->solve(in);
+        }
+    };
+    const Real b_norm = b.eigen().norm();
+    const Real target = std::max<Real>(options_.abs_tol, options_.rel_tol * b_norm);
+    const int max_iter = std::max(1, options_.max_iter);
+    const int restart = std::max(1, std::min(max_iter, options_.krylov_dim > 0 ? options_.krylov_dim : 50));
+    Eigen::VectorXd xv(b.eigen().size());
+
+    auto t0 = std::chrono::steady_clock::now();
+    auto result = eigen_detail::rightPreconditionedGmres(apply_A, apply_M, b.eigen(), xv, restart, max_iter, target);
+    double solve_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    bool retried = false;
+    int stale_iterations = 0;
+    if (!result.converged && !fresh) {
+        decision = {true, PreconditionerReusePolicy::Reason::StaleFailure};
+        stale_iterations = result.iterations;
+        setup_seconds = refresh();
+        fresh = true;
+        retried = true;
+        ++st.stats.stale_retries;
+        t0 = std::chrono::steady_clock::now();
+        result = eigen_detail::rightPreconditionedGmres(apply_A, apply_M, b.eigen(), xv, restart, max_iter, target);
+        solve_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    }
+
+    double refresh_cost_iterations = 0.0;
+    if (fresh) {
+        const double per_iteration = solve_seconds / static_cast<double>(std::max(1, result.iterations));
+        refresh_cost_iterations = per_iteration > 0.0 ? setup_seconds / per_iteration : 0.0;
+    } else {
+        ++st.stats.reuses;
+    }
+    st.policy.recordSolve(result.iterations, fresh, refresh_cost_iterations);
+    ++st.stats.solves;
+    st.stats.last_iterations = result.iterations;
+    st.stats.last_fresh = fresh;
+
+    x.eigen() = xv;
+    SolverReport report;
+    report.initial_residual_norm = result.initial_residual;
+    report.final_residual_norm = result.final_residual;
+    report.relative_residual = result.final_residual / std::max<Real>(result.initial_residual, 1e-30);
+    report.iterations = result.iterations;
+    report.setup_time_seconds = setup_seconds;
+    report.converged = result.converged && check_convergence(report, options_);
+    report.message = direct ? "direct (reuse)" : "gmres-ilut (reuse)";
+
+    std::ostringstream oss;
+    oss << "EigenLinearSolver: diagnostic=eigen_preconditioner_reuse"
+        << " kind=" << (direct ? "sparse-lu" : "ilut")
+        << " action=" << (fresh ? "refresh" : "reuse")
+        << " reason=" << PreconditionerReusePolicy::reasonName(decision.reason)
+        << " retried=" << (retried ? 1 : 0)
+        << " stale_iterations=" << stale_iterations
+        << " iterations=" << result.iterations
+        << " converged=" << (report.converged ? 1 : 0)
+        << " relative_residual=" << report.relative_residual
+        << " fresh_iterations=" << st.policy.freshIterations()
+        << " excess_iterations=" << st.policy.excessIterations()
+        << " refresh_cost_iterations=" << st.policy.refreshCostIterations()
+        << " setup_s=" << setup_seconds
+        << " solve_s=" << solve_seconds
+        << " refreshes=" << st.stats.refreshes
+        << " reuses=" << st.stats.reuses;
+    FE_LOG_INFO(oss.str());
+    return report;
+}
 
 SolverReport EigenLinearSolver::solve(const GenericMatrix& A_in,
                                       GenericVector& x_in,
@@ -538,6 +736,10 @@ SolverReport EigenLinearSolver::solve(const GenericMatrix& A_in,
                 "EigenLinearSolver::solve: rectangular systems not implemented");
     FE_THROW_IF(A->numCols() != b->size() || x->size() != b->size(), InvalidArgumentException,
                 "EigenLinearSolver::solve: size mismatch");
+
+    if (usesReusablePreconditioner(options_)) {
+        return solveWithReuse(*A, *x, *b);
+    }
 
     switch (options_.method) {
         case SolverMethod::Direct:
