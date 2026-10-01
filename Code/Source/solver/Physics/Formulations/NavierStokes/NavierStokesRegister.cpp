@@ -748,6 +748,18 @@ struct TemporalSpatialValues {
   std::vector<svmp::FE::Real> x_interpolation_coords{};
   std::vector<std::size_t> x_interpolation_nodes{};
 
+  // Uniform bucket grid over the stored coordinates.  The nearest-node
+  // interpolant is evaluated at every quadrature point, and a scan over all
+  // stored nodes per evaluation made a 1,573-node 2D table cost about 18 s
+  // per time step; the grid returns the same neighbours (ties broken by node
+  // index, as the scan did) after visiting a few buckets.
+  static constexpr std::size_t kNearestNodes = 8;
+  std::array<double, 3> grid_lo{0.0, 0.0, 0.0};
+  std::array<double, 3> grid_h{1.0, 1.0, 1.0};
+  std::array<long long, 3> grid_n{1, 1, 1};
+  std::vector<std::size_t> grid_offsets{};
+  std::vector<std::size_t> grid_items{};
+
   [[nodiscard]] static Key quantize(const std::array<svmp::FE::Real, 3>& p, int dim_in) noexcept
   {
     constexpr double scale = 1e12;
@@ -778,8 +790,176 @@ struct TemporalSpatialValues {
     return std::abs(da - db) <= 1.0e-10 * scale;
   }
 
+  void buildNearestGrid()
+  {
+    grid_offsets.clear();
+    grid_items.clear();
+    grid_n = {1, 1, 1};
+    if (coords.empty()) {
+      return;
+    }
+    std::array<double, 3> hi{};
+    for (int k = 0; k < 3; ++k) {
+      grid_lo[static_cast<std::size_t>(k)] = std::numeric_limits<double>::infinity();
+      hi[static_cast<std::size_t>(k)] = -std::numeric_limits<double>::infinity();
+    }
+    for (const auto& c : coords) {
+      for (std::size_t k = 0; k < 3; ++k) {
+        grid_lo[k] = std::min(grid_lo[k], static_cast<double>(c[k]));
+        hi[k] = std::max(hi[k], static_cast<double>(c[k]));
+      }
+    }
+    // About two nodes per bucket on the spanned axes; an axis spans the
+    // nodes if its extent exceeds 1e-9 of the longest one, and the bucket
+    // count stays below four per node.
+    double longest = 0.0;
+    for (std::size_t k = 0; k < 3; ++k) {
+      longest = std::max(longest, hi[k] - grid_lo[k]);
+    }
+    std::array<bool, 3> spans{false, false, false};
+    double measure = 1.0;
+    int spanned = 0;
+    for (std::size_t k = 0; k < 3; ++k) {
+      const double extent = hi[k] - grid_lo[k];
+      if (extent > 1.0e-9 * longest && extent > 0.0) {
+        spans[k] = true;
+        measure *= extent;
+        ++spanned;
+      }
+    }
+    double h = longest;
+    if (spanned > 0 && coords.size() > 2) {
+      h = std::pow(2.0 * measure / static_cast<double>(coords.size()), 1.0 / spanned);
+    }
+    if (!(h > 0.0) || !std::isfinite(h)) {
+      h = 1.0;
+    }
+    std::size_t buckets = 1;
+    for (int attempt = 0; attempt < 64; ++attempt) {
+      buckets = 1;
+      for (std::size_t k = 0; k < 3; ++k) {
+        const double extent = hi[k] - grid_lo[k];
+        grid_n[k] = spans[k] ? std::max<long long>(1, static_cast<long long>(std::ceil(extent / h))) : 1;
+        grid_h[k] = spans[k] ? extent / static_cast<double>(grid_n[k]) : std::max(extent, 1.0);
+        buckets *= static_cast<std::size_t>(grid_n[k]);
+      }
+      if (buckets <= 4 * coords.size() + 1) {
+        break;
+      }
+      h *= 2.0;
+    }
+    std::vector<std::size_t> bucket_of(coords.size());
+    grid_offsets.assign(buckets + 1, 0);
+    for (std::size_t i = 0; i < coords.size(); ++i) {
+      std::array<long long, 3> b{};
+      for (std::size_t k = 0; k < 3; ++k) {
+        b[k] = bucketCoordinate(static_cast<double>(coords[i][k]), k);
+      }
+      bucket_of[i] = bucketIndex(b);
+      ++grid_offsets[bucket_of[i] + 1];
+    }
+    for (std::size_t b = 0; b < buckets; ++b) {
+      grid_offsets[b + 1] += grid_offsets[b];
+    }
+    grid_items.resize(coords.size());
+    std::vector<std::size_t> fill(grid_offsets.begin(), grid_offsets.end() - 1);
+    for (std::size_t i = 0; i < coords.size(); ++i) {
+      grid_items[fill[bucket_of[i]]++] = i;
+    }
+  }
+
+  [[nodiscard]] long long bucketCoordinate(double x, std::size_t k) const noexcept
+  {
+    const double s = (x - grid_lo[k]) / grid_h[k];
+    if (!(s > 0.0)) {
+      return 0;
+    }
+    return std::min(grid_n[k] - 1, static_cast<long long>(std::floor(s)));
+  }
+
+  [[nodiscard]] std::size_t bucketIndex(const std::array<long long, 3>& b) const noexcept
+  {
+    return static_cast<std::size_t>((b[2] * grid_n[1] + b[1]) * grid_n[0] + b[0]);
+  }
+
+  // The kNearestNodes stored nodes closest to p, ordered by (squared
+  // distance, node index): the order of the former full partial_sort.
+  [[nodiscard]] std::vector<std::pair<double, std::size_t>> nearestNodes(
+      const std::array<svmp::FE::Real, 3>& p) const
+  {
+    const std::size_t k_wanted = std::min<std::size_t>(kNearestNodes, coords.size());
+    std::vector<std::pair<double, std::size_t>> best;
+    best.reserve(k_wanted + 1);
+    if (k_wanted == 0) {
+      return best;
+    }
+    const auto consider = [&](std::size_t i) {
+      const auto& c = coords[i];
+      const double dx = static_cast<double>(p[0] - c[0]);
+      const double dy = static_cast<double>(p[1] - c[1]);
+      const double dz = static_cast<double>(p[2] - c[2]);
+      const std::pair<double, std::size_t> candidate{dx * dx + dy * dy + dz * dz, i};
+      if (best.size() == k_wanted && !(candidate < best.back())) {
+        return;
+      }
+      best.insert(std::upper_bound(best.begin(), best.end(), candidate), candidate);
+      if (best.size() > k_wanted) {
+        best.pop_back();
+      }
+    };
+    std::array<long long, 3> center{};
+    for (std::size_t k = 0; k < 3; ++k) {
+      center[k] = bucketCoordinate(static_cast<double>(p[k]), k);
+    }
+    const long long max_ring = std::max({grid_n[0], grid_n[1], grid_n[2]});
+    for (long long ring = 0; ring <= max_ring; ++ring) {
+      std::array<long long, 3> lo{};
+      std::array<long long, 3> hi{};
+      for (std::size_t k = 0; k < 3; ++k) {
+        lo[k] = std::max<long long>(0, center[k] - ring);
+        hi[k] = std::min<long long>(grid_n[k] - 1, center[k] + ring);
+      }
+      for (long long bz = lo[2]; bz <= hi[2]; ++bz) {
+        for (long long by = lo[1]; by <= hi[1]; ++by) {
+          for (long long bx = lo[0]; bx <= hi[0]; ++bx) {
+            const bool on_shell = std::llabs(bx - center[0]) == ring ||
+                                  std::llabs(by - center[1]) == ring ||
+                                  std::llabs(bz - center[2]) == ring;
+            if (!on_shell) {
+              continue;       // visited in an earlier ring
+            }
+            const auto b = bucketIndex({bx, by, bz});
+            for (std::size_t j = grid_offsets[b]; j < grid_offsets[b + 1]; ++j) {
+              consider(grid_items[j]);
+            }
+          }
+        }
+      }
+      // Every unvisited node lies outside the visited bucket box; stop once
+      // the k-th candidate is closer than that box's nearest open face.
+      double gap = std::numeric_limits<double>::infinity();
+      for (std::size_t k = 0; k < 3; ++k) {
+        if (lo[k] > 0) {
+          gap = std::min(gap, static_cast<double>(p[k]) - (grid_lo[k] + static_cast<double>(lo[k]) * grid_h[k]));
+        }
+        if (hi[k] < grid_n[k] - 1) {
+          gap = std::min(gap, (grid_lo[k] + static_cast<double>(hi[k] + 1) * grid_h[k]) - static_cast<double>(p[k]));
+        }
+      }
+      if (gap == std::numeric_limits<double>::infinity()) {
+        break;                // every bucket visited
+      }
+      gap -= 1.0e-12 * std::max({grid_h[0], grid_h[1], grid_h[2]});   // bucket rounding
+      if (best.size() == k_wanted && gap > 0.0 && best.back().first < gap * gap) {
+        break;
+      }
+    }
+    return best;
+  }
+
   void buildInterpolationMetadata()
   {
+    buildNearestGrid();
     has_x_only_interpolant = false;
     x_interpolation_coords.clear();
     x_interpolation_nodes.clear();
@@ -914,12 +1094,12 @@ struct TemporalSpatialValues {
 
     const double tt = wrapTime(static_cast<double>(time));
 
+    // First interval whose right end is at or after tt (0 if none), found
+    // by bisection: the table is evaluated at every quadrature point.
     int i0 = 0;
-    for (int i = 0; i < num_time_points - 1; ++i) {
-      if (t[static_cast<std::size_t>(i + 1)] >= tt) {
-        i0 = i;
-        break;
-      }
+    const auto right = std::lower_bound(t.begin() + 1, t.begin() + num_time_points, tt);
+    if (right != t.begin() + num_time_points) {
+      i0 = static_cast<int>(std::distance(t.begin() + 1, right));
     }
 
     const double t0 = t[static_cast<std::size_t>(i0)];
@@ -965,17 +1145,8 @@ struct TemporalSpatialValues {
       return svmp::FE::Real{0.0};
     }
 
-    std::vector<std::pair<double, std::size_t>> distances;
-    distances.reserve(coords.size());
-    for (std::size_t i = 0; i < coords.size(); ++i) {
-      const auto& c = coords[i];
-      const double dx = static_cast<double>(p[0] - c[0]);
-      const double dy = static_cast<double>(p[1] - c[1]);
-      const double dz = static_cast<double>(p[2] - c[2]);
-      distances.emplace_back(dx * dx + dy * dy + dz * dz, i);
-    }
-    const auto k = std::min<std::size_t>(8, distances.size());
-    std::partial_sort(distances.begin(), distances.begin() + static_cast<std::ptrdiff_t>(k), distances.end());
+    const auto distances = nearestNodes(p);
+    const auto k = distances.size();
 
     constexpr double exact_tol2 = 1.0e-16;
     if (distances.front().first <= exact_tol2) {
