@@ -29,27 +29,24 @@ void ConstraintLine::mergeEntries() {
     // Sort by master DOF
     std::sort(entries.begin(), entries.end());
 
-    // Merge duplicates
-    std::vector<ConstraintEntry> merged;
-    merged.reserve(entries.size());
-
-    for (const auto& entry : entries) {
-        if (!merged.empty() && merged.back().master_dof == entry.master_dof) {
-            merged.back().weight += entry.weight;
+    // Merge duplicates in place (same summation order as a separate pass)
+    std::size_t merged = 0;
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (merged > 0 && entries[merged - 1].master_dof == entries[i].master_dof) {
+            entries[merged - 1].weight += entries[i].weight;
         } else {
-            merged.push_back(entry);
+            entries[merged++] = entries[i];
         }
     }
+    entries.resize(merged);
 
     // Remove entries with near-zero weight
-    merged.erase(
-        std::remove_if(merged.begin(), merged.end(),
+    entries.erase(
+        std::remove_if(entries.begin(), entries.end(),
                        [](const ConstraintEntry& e) {
                            return std::abs(e.weight) < 1e-15;
                        }),
-        merged.end());
-
-    entries = std::move(merged);
+        entries.end());
 }
 
 // ============================================================================
@@ -334,7 +331,22 @@ void AffineConstraints::computeTransitiveClosure() {
     std::unordered_set<GlobalIndex> visiting;
     std::unordered_set<GlobalIndex> closed;
 
+    // Once duplicates are merged, a line none of whose masters is itself
+    // constrained is already closed: closeLine() would copy its entries and
+    // re-merge an already sorted, duplicate-free list. Such lines can neither
+    // close a cycle nor change, so they are skipped (their state is identical
+    // either way). Without merge_duplicates, closeLine() is the first merge
+    // and every line takes the full path.
+    const bool skip_terminal_lines = options_.merge_duplicates;
     for (auto& [slave, line] : building_lines_) {
+        if (skip_terminal_lines &&
+            std::none_of(line.entries.begin(), line.entries.end(),
+                         [this](const ConstraintEntry& entry) {
+                             return building_lines_.find(entry.master_dof) !=
+                                    building_lines_.end();
+                         })) {
+            continue;
+        }
         if (closed.find(slave) == closed.end()) {
             closeLine(slave, visiting, closed);
         }
@@ -437,6 +449,7 @@ void AffineConstraints::buildCSRStorage() {
 
     // Build index map
     slave_to_index_.clear();
+    slave_to_index_.reserve(slave_dofs_.size());
     for (std::size_t i = 0; i < slave_dofs_.size(); ++i) {
         slave_to_index_[slave_dofs_[i]] = i;
     }
@@ -459,12 +472,22 @@ void AffineConstraints::buildCSRStorage() {
     for (GlobalIndex slave : slave_dofs_) {
         const ConstraintLine& line = building_lines_.at(slave);
 
-        // Sort entries within line for determinism
-        std::vector<ConstraintEntry> sorted_entries = line.entries;
-        std::sort(sorted_entries.begin(), sorted_entries.end());
-
-        for (const auto& entry : sorted_entries) {
-            entries_.push_back(entry);
+        // Sort entries within line for determinism. Merged lines are already
+        // strictly increasing, which sorting leaves unchanged; only other
+        // lines (which may hold equal masters) need the sorted copy.
+        const bool strictly_increasing =
+            std::adjacent_find(line.entries.begin(), line.entries.end(),
+                               [](const ConstraintEntry& a, const ConstraintEntry& b) {
+                                   return !(a.master_dof < b.master_dof);
+                               }) == line.entries.end();
+        if (strictly_increasing) {
+            entries_.insert(entries_.end(), line.entries.begin(), line.entries.end());
+        } else {
+            std::vector<ConstraintEntry> sorted_entries = line.entries;
+            std::sort(sorted_entries.begin(), sorted_entries.end());
+            for (const auto& entry : sorted_entries) {
+                entries_.push_back(entry);
+            }
         }
         entry_offsets_.push_back(static_cast<GlobalIndex>(entries_.size()));
         inhomogeneities_.push_back(line.inhomogeneity);
