@@ -39,6 +39,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -80,6 +81,66 @@ struct PdeVelocityExtensionReport {
   double max_extended_speed{0.0};
   double max_relative_residual{0.0};
   double max_wall_normal_velocity{0.0};
+  // True when the call reused the cached dry-region factorization (and rows).
+  bool reused_factorization{false};
+};
+
+// Mesh revisions that, together with the exact system content, key a cached
+// dry-region factorization (see PdeVelocityExtensionCache).
+struct PdeVelocityExtensionMeshRevisions {
+  std::uint64_t geometry{0u};
+  std::uint64_t topology{0u};
+  std::uint64_t ownership{0u};
+  std::uint64_t numbering{0u};
+};
+
+// Reuse of the dry-region systems between calls of extendVelocityByPde.
+//
+// The dry-region matrix does not depend on the velocity.  For the harmonic
+// operator it depends only on the mesh geometry, the known set, the dry cells
+// and the wall masks; for the least-squares normal operator it also depends on
+// the level-set normal of every dry cell.  The cache keeps the gathered
+// system, the sparse LU factorization of every velocity component and the
+// owner-local algebraic rows.  Its key is
+//   - the mesh geometry, topology, ownership and numbering revisions, and
+//   - the exact content of each rank's contribution: local vertex IDs,
+//     vertex ownership, known set, extension domain, wall masks and the
+//     element matrices of the owned dry cells, compared bitwise (the element
+//     matrices carry the level-set normals of the least-squares operator),
+// combined over the communicator.  The ranks agree on reuse collectively: a
+// change on any rank refactors on every rank.  A reused call applies the same
+// factorization to the new right-hand sides, so its result is bitwise
+// identical to a fresh solve, and it skips the gather of the element
+// matrices.  Any failure leaves the cache empty.
+class PdeVelocityExtensionCache {
+public:
+  struct Statistics {
+    std::uint64_t hits{0u};
+    std::uint64_t misses{0u};
+    // Footprint of the cached entry (estimate) and its peak.
+    std::size_t bytes{0u};
+    std::size_t peak_bytes{0u};
+  };
+  struct Entry;
+
+  PdeVelocityExtensionCache();
+  ~PdeVelocityExtensionCache();
+  PdeVelocityExtensionCache(PdeVelocityExtensionCache&&) noexcept;
+  PdeVelocityExtensionCache& operator=(PdeVelocityExtensionCache&&) noexcept;
+  PdeVelocityExtensionCache(const PdeVelocityExtensionCache&) = delete;
+  PdeVelocityExtensionCache& operator=(const PdeVelocityExtensionCache&) =
+      delete;
+
+  // Drops the cached entry on this rank.  The next call then refactors on
+  // every rank of its communicator.
+  void clear() noexcept;
+  [[nodiscard]] bool empty() const noexcept;
+  [[nodiscard]] const Statistics& statistics() const noexcept;
+
+private:
+  friend struct PdeVelocityExtensionCacheAccess;
+  std::unique_ptr<Entry> entry_;
+  Statistics statistics_{};
 };
 
 // level_set: one value per local vertex (only its gradient is used).
@@ -96,6 +157,9 @@ struct PdeVelocityExtensionReport {
 //   wall-constrained or outside the band:  w_c = 0.
 // Together with the physical velocity these rows determine exactly the
 // extension returned in `extended`.
+// cache (optional): reuse of the dry-region factorization and rows between
+// calls, keyed on `revisions` and the exact system content.  It must be
+// either non-null on every rank of the communicator or null on every rank.
 PdeVelocityExtensionReport extendVelocityByPde(
     const svmp::Mesh& mesh,
     const svmp::MeshComm& comm,
@@ -108,7 +172,9 @@ PdeVelocityExtensionReport extendVelocityByPde(
     const PdeVelocityExtensionOptions& options,
     std::vector<double>& extended,
     std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>* rows =
-        nullptr);
+        nullptr,
+    PdeVelocityExtensionCache* cache = nullptr,
+    const PdeVelocityExtensionMeshRevisions& revisions = {});
 
 // Combines one rank-local revision key per rank (in rank order) into a key
 // that is identical on every rank of the communicator.

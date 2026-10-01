@@ -19104,6 +19104,15 @@ bool updateLevelSetAdvectionVelocitiesFromState(
               extension_comm);
           pde_algebraic = true;
         }
+        // Dry-region factorizations are reused while their content key is
+        // unchanged (one cache per target field; see
+        // PdeVelocityExtensionCache).
+        static std::map<std::string,
+                        application::core::PdeVelocityExtensionCache>
+            pde_extension_caches;
+        auto& pde_extension_cache =
+            pde_extension_caches[request.target_velocity_field_name];
+        const auto& pde_mesh_access = system.meshAccess();
         const auto pde_report = application::core::extendVelocityByPde(
             mesh,
             extension_comm,
@@ -19125,7 +19134,13 @@ bool updateLevelSetAdvectionVelocitiesFromState(
                 .enforce_wall_impermeability =
                     request.enforce_wall_impermeability},
             extended,
-            pde_algebraic ? &algebraic_rows : nullptr);
+            pde_algebraic ? &algebraic_rows : nullptr,
+            &pde_extension_cache,
+            application::core::PdeVelocityExtensionMeshRevisions{
+                .geometry = pde_mesh_access.geometryRevision(),
+                .topology = pde_mesh_access.topologyRevision(),
+                .ownership = pde_mesh_access.ownershipRevision(),
+                .numbering = pde_mesh_access.numberingRevision()});
         wall_extension_report.extended_vertices =
             pde_report.extension_vertices;
         wall_extension_report.vertices_outside_band =
@@ -19152,7 +19167,12 @@ bool updateLevelSetAdvectionVelocitiesFromState(
               << " max_known_speed=" << pde_report.max_known_speed
               << " max_extended_speed=" << pde_report.max_extended_speed
               << " max_wall_normal_velocity="
-              << pde_report.max_wall_normal_velocity << std::endl;
+              << pde_report.max_wall_normal_velocity
+              << " reused_factorization=" << pde_report.reused_factorization
+              << " cache_hits=" << pde_extension_cache.statistics().hits
+              << " cache_misses=" << pde_extension_cache.statistics().misses
+              << " cache_bytes=" << pde_extension_cache.statistics().bytes
+              << std::endl;
         }
       } else if (algebraic_extension) {
         std::uint64_t free_surface_geometry_revision = 0u;

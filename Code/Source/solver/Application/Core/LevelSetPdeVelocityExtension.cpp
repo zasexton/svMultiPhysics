@@ -17,15 +17,25 @@
 #include "FE/Sparsity/SparsityPattern.h"
 #include "Mesh/Topology/DistributedTopology.h"
 
+#if defined(FE_HAS_EIGEN)
+#include "FE/Backends/Eigen/EigenMatrix.h"
+#include "FE/Backends/Eigen/EigenVector.h"
+
+#include <Eigen/SparseLU>
+#endif
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <limits>
 #include <map>
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 
 #ifdef MESH_HAS_MPI
@@ -261,6 +271,383 @@ struct VertexRecord {
   std::array<double, 3> value{0.0, 0.0, 0.0};
 };
 
+// ---- factorization reuse -----------------------------------------------------
+
+// Bumped whenever the content of the cache key changes.
+constexpr std::uint64_t kCacheSignatureVersion = 1u;
+
+constexpr std::uint8_t kOwnedVertexBit = 1u;
+constexpr std::uint8_t kKnownVertexBit = 2u;
+constexpr std::uint8_t kDomainVertexBit = 4u;
+constexpr std::uint8_t kWallVertexBit = 8u;  // shifted by the component
+
+static_assert(std::is_trivially_copyable_v<CellRecord> &&
+                  sizeof(CellRecord) ==
+                      6u * sizeof(std::int64_t) + 16u * sizeof(double),
+              "CellRecord must be padding-free for bitwise comparison");
+
+// This rank's exact contribution to the dry-region systems and rows.
+struct LocalSignature {
+  std::vector<std::uint64_t> scalars;
+  std::vector<svmp::gid_t> vertex_gids;
+  std::vector<std::uint8_t> vertex_masks;
+  std::vector<CellRecord> cells;
+};
+
+template <typename T>
+[[nodiscard]] bool sameBytes(const std::vector<T>& a, const std::vector<T>& b)
+{
+  static_assert(std::is_trivially_copyable_v<T>);
+  return a.size() == b.size() &&
+         (a.empty() ||
+          std::memcmp(a.data(), b.data(), a.size() * sizeof(T)) == 0);
+}
+
+[[nodiscard]] bool sameContent(const LocalSignature& a, const LocalSignature& b)
+{
+  return sameBytes(a.scalars, b.scalars) &&
+         sameBytes(a.vertex_gids, b.vertex_gids) &&
+         sameBytes(a.vertex_masks, b.vertex_masks) &&
+         sameBytes(a.cells, b.cells);
+}
+
+// 64-bit content hash, word at a time.
+class ContentHasher {
+public:
+  void addWord(std::uint64_t word) noexcept
+  {
+    state_ ^= word * 0x9e3779b97f4a7c15ull;
+    state_ = (state_ << 31u) | (state_ >> 33u);
+    state_ *= 0xbf58476d1ce4e5b9ull;
+  }
+
+  void addBytes(const void* data, std::size_t size) noexcept
+  {
+    addWord(static_cast<std::uint64_t>(size));
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    std::size_t offset = 0u;
+    for (; offset + sizeof(std::uint64_t) <= size;
+         offset += sizeof(std::uint64_t)) {
+      std::uint64_t word = 0u;
+      std::memcpy(&word, bytes + offset, sizeof(word));
+      addWord(word);
+    }
+    if (offset < size) {
+      std::uint64_t word = 0u;
+      std::memcpy(&word, bytes + offset, size - offset);
+      addWord(word);
+    }
+  }
+
+  template <typename T>
+  void addVector(const std::vector<T>& values) noexcept
+  {
+    static_assert(std::is_trivially_copyable_v<T>);
+    addBytes(values.data(), values.size() * sizeof(T));
+  }
+
+  [[nodiscard]] std::uint64_t value() const noexcept
+  {
+    std::uint64_t z = state_;
+    z = (z ^ (z >> 30u)) * 0xbf58476d1ce4e5b9ull;
+    z = (z ^ (z >> 27u)) * 0x94d049bb133111ebull;
+    return z ^ (z >> 31u);
+  }
+
+private:
+  std::uint64_t state_{0x84222325cbf29ce4ull};
+};
+
+[[nodiscard]] std::uint64_t signatureHash(const LocalSignature& signature)
+{
+  ContentHasher hasher;
+  hasher.addVector(signature.scalars);
+  hasher.addVector(signature.vertex_gids);
+  hasher.addVector(signature.vertex_masks);
+  hasher.addVector(signature.cells);
+  return hasher.value();
+}
+
+// One rank's reuse vote; every field enters the collective decision.
+struct ReuseVote {
+  std::uint64_t local_hash{0u};
+  std::uint64_t cached_key{0u};
+  std::uint64_t epoch{0u};
+  std::uint64_t match{0u};
+};
+
+// Mirrors SVMP_FE_EIGEN_FACTOR_DIAGNOSTICS of the FE Eigen backend: while
+// its diagnostics are requested every solve goes through the backend.
+[[nodiscard]] bool backendFactorDiagnosticsRequested()
+{
+  const char* env = std::getenv("SVMP_FE_EIGEN_FACTOR_DIAGNOSTICS");
+  return env != nullptr && env[0] != '\0' && std::string(env) != "0";
+}
+
+#if defined(FE_HAS_EIGEN)
+constexpr bool kFactorizationReuseAvailable = true;
+
+using ColumnMajorMatrix =
+    Eigen::SparseMatrix<svmp::FE::Real, Eigen::ColMajor,
+                        svmp::FE::backends::EigenMatrix::StorageIndex>;
+
+// The Eigen::SparseLU instantiation of the FE Eigen backend's direct solve
+// (solve_direct in EigenLinearSolver.cpp), kept between calls.  The derived
+// class only reports the footprint of the stored factors.
+class DryRegionFactorization final : public Eigen::SparseLU<ColumnMajorMatrix> {
+public:
+  [[nodiscard]] std::size_t bytes() const noexcept
+  {
+    const auto vector_bytes = [](const auto& vector) {
+      using Element = typename std::decay_t<decltype(vector)>::Scalar;
+      return static_cast<std::size_t>(vector.size()) * sizeof(Element);
+    };
+    std::size_t total = sizeof(*this);
+    total += vector_bytes(m_glu.xsup) + vector_bytes(m_glu.supno) +
+             vector_bytes(m_glu.lusup) + vector_bytes(m_glu.lsub) +
+             vector_bytes(m_glu.xlusup) + vector_bytes(m_glu.xlsub) +
+             vector_bytes(m_glu.ucol) + vector_bytes(m_glu.usub) +
+             vector_bytes(m_glu.xusub) + vector_bytes(m_etree) +
+             vector_bytes(m_perm_c.indices()) +
+             vector_bytes(m_perm_r.indices());
+    total += static_cast<std::size_t>(m_mat.data().allocatedSize()) *
+                 (sizeof(svmp::FE::Real) + sizeof(StorageIndex)) +
+             static_cast<std::size_t>(m_mat.outerSize() + 1) *
+                 sizeof(StorageIndex) +
+             (m_mat.isCompressed()
+                  ? 0u
+                  : static_cast<std::size_t>(m_mat.outerSize()) *
+                        sizeof(StorageIndex));
+    return total;
+  }
+};
+
+// The factorization step of solve_direct.  Returns null if Eigen reports a
+// failure.
+[[nodiscard]] std::unique_ptr<DryRegionFactorization> factorizeDryRegion(
+    const svmp::FE::backends::GenericMatrix& matrix)
+{
+  const auto* A =
+      dynamic_cast<const svmp::FE::backends::EigenMatrix*>(&matrix);
+  if (A == nullptr) {
+    throw std::runtime_error(
+        "PDE velocity extension factorization requires an Eigen matrix");
+  }
+  auto factorization = std::make_unique<DryRegionFactorization>();
+  const ColumnMajorMatrix Acol = A->eigen();
+  factorization->analyzePattern(Acol);
+  factorization->factorize(Acol);
+  if (factorization->info() != Eigen::Success) {
+    return nullptr;
+  }
+  return factorization;
+}
+
+// The solve step of solve_direct with a stored factorization: the same
+// residual metrics and the same convergence test (check_convergence).
+// Returns false if Eigen reports a failure.
+[[nodiscard]] bool solveWithFactorization(
+    const DryRegionFactorization& factorization,
+    const svmp::FE::backends::GenericMatrix& matrix,
+    svmp::FE::backends::GenericVector& solution,
+    const svmp::FE::backends::GenericVector& rhs,
+    const svmp::FE::backends::SolverOptions& options,
+    svmp::FE::backends::SolverReport& report)
+{
+  const auto* A =
+      dynamic_cast<const svmp::FE::backends::EigenMatrix*>(&matrix);
+  auto* x = dynamic_cast<svmp::FE::backends::EigenVector*>(&solution);
+  const auto* b = dynamic_cast<const svmp::FE::backends::EigenVector*>(&rhs);
+  if (A == nullptr || x == nullptr || b == nullptr) {
+    throw std::runtime_error(
+        "PDE velocity extension factorization requires Eigen objects");
+  }
+  report = svmp::FE::backends::SolverReport{};
+  report.initial_residual_norm =
+      (b->eigen() - A->eigen() * x->eigen()).norm();
+  x->eigen() = factorization.solve(b->eigen());
+  if (factorization.info() != Eigen::Success) {
+    return false;
+  }
+  report.final_residual_norm = (b->eigen() - A->eigen() * x->eigen()).norm();
+  const svmp::FE::Real denominator =
+      std::max<svmp::FE::Real>(report.initial_residual_norm, 1e-30);
+  report.relative_residual = report.final_residual_norm / denominator;
+  report.iterations = 1;
+  const bool has_abs = options.abs_tol > 0.0;
+  const bool has_rel = options.rel_tol > 0.0;
+  report.converged =
+      (!has_abs && !has_rel) ||
+      (has_abs && report.final_residual_norm <= options.abs_tol) ||
+      (has_rel && report.relative_residual <= options.rel_tol);
+  report.message = "direct";
+  return true;
+}
+#else
+constexpr bool kFactorizationReuseAvailable = false;
+
+class DryRegionFactorization {
+public:
+  [[nodiscard]] std::size_t bytes() const noexcept { return 0u; }
+};
+
+[[nodiscard]] std::unique_ptr<DryRegionFactorization> factorizeDryRegion(
+    const svmp::FE::backends::GenericMatrix&)
+{
+  return nullptr;
+}
+
+[[nodiscard]] bool solveWithFactorization(
+    const DryRegionFactorization&,
+    const svmp::FE::backends::GenericMatrix&,
+    svmp::FE::backends::GenericVector&,
+    const svmp::FE::backends::GenericVector&,
+    const svmp::FE::backends::SolverOptions&,
+    svmp::FE::backends::SolverReport&)
+{
+  return false;
+}
+#endif
+
+[[nodiscard]] std::size_t rowsBytes(
+    const std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>&
+        rows)
+{
+  std::size_t total = rows.capacity() * sizeof(rows.front());
+  for (const auto& row : rows) {
+    total += row.dependencies.capacity() * sizeof(row.dependencies.front());
+  }
+  return total;
+}
+
+} // namespace
+
+// Cached gathered system, factorizations and rows of one key.
+struct PdeVelocityExtensionCache::Entry {
+  struct Component {
+    svmp::FE::GlobalIndex unknowns{0};
+    std::unique_ptr<svmp::FE::backends::GenericMatrix> matrix;
+    std::unique_ptr<DryRegionFactorization> factorization;
+  };
+
+  std::uint64_t key{0u};
+  std::uint64_t epoch{0u};
+  LocalSignature signature;
+  // Gathered system in canonical order (sorted cell and vertex IDs).  The
+  // vertex values are replaced on every reuse.
+  std::vector<CellRecord> cells;
+  std::vector<std::array<std::size_t, 4>> cell_vertices;
+  std::vector<VertexRecord> vertices;
+  std::unordered_map<std::int64_t, std::size_t> vertex_index;
+  // Position in the vertex-record gather -> canonical vertex index.
+  std::vector<std::size_t> gathered_to_sorted;
+  std::array<Component, 3> components{};
+  bool has_rows{false};
+  std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> rows;
+
+  [[nodiscard]] std::size_t bytes() const
+  {
+    std::size_t total = sizeof(*this);
+    total += signature.scalars.capacity() * sizeof(std::uint64_t) +
+             signature.vertex_gids.capacity() * sizeof(svmp::gid_t) +
+             signature.vertex_masks.capacity() +
+             signature.cells.capacity() * sizeof(CellRecord);
+    total += cells.capacity() * sizeof(CellRecord) +
+             cell_vertices.capacity() * sizeof(cell_vertices.front()) +
+             vertices.capacity() * sizeof(VertexRecord) +
+             gathered_to_sorted.capacity() * sizeof(std::size_t);
+    // Hash map: buckets plus one node per entry.
+    total += vertex_index.bucket_count() * sizeof(void*) +
+             vertex_index.size() *
+                 (sizeof(std::pair<const std::int64_t, std::size_t>) +
+                  2u * sizeof(void*));
+    for (const auto& component : components) {
+#if defined(FE_HAS_EIGEN)
+      if (const auto* matrix =
+              dynamic_cast<const svmp::FE::backends::EigenMatrix*>(
+                  component.matrix.get())) {
+        total += static_cast<std::size_t>(matrix->eigen().nonZeros()) *
+                     (sizeof(svmp::FE::Real) +
+                      sizeof(svmp::FE::backends::EigenMatrix::StorageIndex)) +
+                 static_cast<std::size_t>(matrix->eigen().outerSize() + 1) *
+                     sizeof(svmp::FE::backends::EigenMatrix::StorageIndex);
+      }
+#endif
+      if (component.factorization) {
+        total += component.factorization->bytes();
+      }
+    }
+    total += rowsBytes(rows);
+    return total;
+  }
+};
+
+struct PdeVelocityExtensionCacheAccess {
+  [[nodiscard]] static std::unique_ptr<PdeVelocityExtensionCache::Entry>&
+  entry(PdeVelocityExtensionCache& cache) noexcept
+  {
+    return cache.entry_;
+  }
+  [[nodiscard]] static PdeVelocityExtensionCache::Statistics& statistics(
+      PdeVelocityExtensionCache& cache) noexcept
+  {
+    return cache.statistics_;
+  }
+  static void setBytes(PdeVelocityExtensionCache& cache, std::size_t bytes)
+  {
+    cache.statistics_.bytes = bytes;
+    cache.statistics_.peak_bytes =
+        std::max(cache.statistics_.peak_bytes, bytes);
+  }
+};
+
+PdeVelocityExtensionCache::PdeVelocityExtensionCache() = default;
+PdeVelocityExtensionCache::~PdeVelocityExtensionCache() = default;
+PdeVelocityExtensionCache::PdeVelocityExtensionCache(
+    PdeVelocityExtensionCache&&) noexcept = default;
+PdeVelocityExtensionCache& PdeVelocityExtensionCache::operator=(
+    PdeVelocityExtensionCache&&) noexcept = default;
+
+void PdeVelocityExtensionCache::clear() noexcept
+{
+  entry_.reset();
+  statistics_.bytes = 0u;
+}
+
+bool PdeVelocityExtensionCache::empty() const noexcept
+{
+  return entry_ == nullptr;
+}
+
+const PdeVelocityExtensionCache::Statistics&
+PdeVelocityExtensionCache::statistics() const noexcept
+{
+  return statistics_;
+}
+
+namespace {
+
+// Clears the cache unless the call completes (fail-closed).
+class CacheFailureGuard {
+public:
+  explicit CacheFailureGuard(PdeVelocityExtensionCache* cache) noexcept
+      : cache_(cache)
+  {
+  }
+  CacheFailureGuard(const CacheFailureGuard&) = delete;
+  CacheFailureGuard& operator=(const CacheFailureGuard&) = delete;
+  ~CacheFailureGuard()
+  {
+    if (cache_ != nullptr) {
+      cache_->clear();
+    }
+  }
+  void dismiss() noexcept { cache_ = nullptr; }
+
+private:
+  PdeVelocityExtensionCache* cache_;
+};
+
 } // namespace
 
 std::string_view pdeVelocityExtensionOperatorName(
@@ -313,8 +700,11 @@ PdeVelocityExtensionReport extendVelocityByPde(
     std::span<const WallVelocityExtensionConstraint> walls,
     const PdeVelocityExtensionOptions& options,
     std::vector<double>& extended,
-    std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>* rows)
+    std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>* rows,
+    PdeVelocityExtensionCache* cache,
+    const PdeVelocityExtensionMeshRevisions& revisions)
 {
+  CacheFailureGuard cache_guard(cache);
   const auto n_vertices = mesh.n_vertices();
   const int dim = mesh.dim();
   if (dim != 2 && dim != 3) {
@@ -589,37 +979,172 @@ PdeVelocityExtensionReport extendVelocityByPde(
   }
   max_known_speed = globalMax(max_known_speed, comm);
 
-  // ---- replicated global system -------------------------------------------
-  auto cells = allGatherV(local_cells, comm);
-  auto vertices = allGatherV(local_vertices, comm);
-  std::sort(cells.begin(), cells.end(),
-            [](const CellRecord& a, const CellRecord& b) {
-              return a.cell_gid < b.cell_gid;
-            });
-  std::sort(vertices.begin(), vertices.end(),
-            [](const VertexRecord& a, const VertexRecord& b) {
-              return a.gid < b.gid;
-            });
-  std::unordered_map<std::int64_t, std::size_t> vertex_index;
-  vertex_index.reserve(vertices.size());
-  for (std::size_t i = 0; i < vertices.size(); ++i) {
-    if (!vertex_index.emplace(vertices[i].gid, i).second) {
-      throw std::runtime_error(
-          "PDE velocity extension gathered duplicate vertex records");
+  // ---- reuse of the cached systems -------------------------------------------
+  // The key is this rank's exact contribution plus the mesh revisions; every
+  // vote is gathered so that all ranks take the same decision.
+  const bool store_factorization = cache != nullptr &&
+                                   kFactorizationReuseAvailable &&
+                                   !backendFactorDiagnosticsRequested();
+  LocalSignature signature;
+  PdeVelocityExtensionCache::Entry* cached = nullptr;
+  std::uint64_t cache_key = 0u;
+  std::uint64_t cache_epoch = 0u;
+  if (cache != nullptr) {
+    auto& entry = PdeVelocityExtensionCacheAccess::entry(*cache);
+    signature.scalars = {
+        kCacheSignatureVersion,
+        static_cast<std::uint64_t>(options.op),
+        static_cast<std::uint64_t>(static_cast<std::int64_t>(
+            options.band_layers)),
+        options.enforce_wall_impermeability ? 1u : 0u,
+        static_cast<std::uint64_t>(source_components),
+        static_cast<std::uint64_t>(target_components),
+        static_cast<std::uint64_t>(dim),
+        static_cast<std::uint64_t>(n_vertices),
+        static_cast<std::uint64_t>(n_cells),
+        static_cast<std::uint64_t>(comm.size()),
+        static_cast<std::uint64_t>(comm.rank()),
+        revisions.geometry,
+        revisions.topology,
+        revisions.ownership,
+        revisions.numbering};
+    signature.vertex_gids = vertex_gids;
+    signature.vertex_masks.resize(n_vertices, 0u);
+    for (std::size_t v = 0; v < n_vertices; ++v) {
+      std::uint8_t bits = 0u;
+      bits |= ownsVertex(mesh, comm, v) ? kOwnedVertexBit : 0u;
+      bits |= known_mask[v] != 0u ? kKnownVertexBit : 0u;
+      bits |= domain[v] != 0u ? kDomainVertexBit : 0u;
+      for (std::size_t c = 0; c < 3u; ++c) {
+        bits |= wall_mask[c][v] != 0u
+                    ? static_cast<std::uint8_t>(kWallVertexBit << c)
+                    : 0u;
+      }
+      signature.vertex_masks[v] = bits;
     }
-  }
-  for (const auto& cell : cells) {
-    for (std::int64_t i = 0; i < cell.count; ++i) {
-      if (vertex_index.find(cell.vertex_gid[static_cast<std::size_t>(i)]) ==
-          vertex_index.end()) {
-        throw std::runtime_error(
-            "PDE velocity extension found a cell vertex without an owned "
-            "vertex record");
+    signature.cells = local_cells;
+
+    ReuseVote vote;
+    vote.local_hash = signatureHash(signature);
+    if (entry) {
+      vote.cached_key = entry->key;
+      vote.epoch = entry->epoch;
+      vote.match =
+          store_factorization && sameContent(entry->signature, signature) ? 1u
+                                                                          : 0u;
+    }
+    const auto votes = allGatherV(std::vector<ReuseVote>{vote}, comm);
+    // Communicator key: the local content hashes in rank order.
+    std::uint64_t key = 1469598103934665603ull;
+    for (const auto& rank_vote : votes) {
+      for (std::size_t byte = 0u; byte < sizeof(rank_vote.local_hash); ++byte) {
+        key ^= (rank_vote.local_hash >> (byte * 8u)) & 0xffu;
+        key *= 1099511628211ull;
       }
     }
+    cache_key = key == 0u ? 1u : key;
+    bool reuse_all = !votes.empty();
+    std::uint64_t max_epoch = 0u;
+    for (const auto& rank_vote : votes) {
+      reuse_all = reuse_all && rank_vote.match != 0u &&
+                  rank_vote.cached_key == cache_key &&
+                  rank_vote.epoch == votes.front().epoch;
+      max_epoch = std::max(max_epoch, rank_vote.epoch);
+    }
+    cache_epoch = max_epoch + 1u;
+    auto& statistics = PdeVelocityExtensionCacheAccess::statistics(*cache);
+    if (reuse_all && entry) {
+      cached = entry.get();
+      ++statistics.hits;
+    } else {
+      // Refactor: drop the old entry first, so that a failure leaves none.
+      cache->clear();
+      ++statistics.misses;
+    }
   }
+  const bool reuse = cached != nullptr;
+
+  // ---- replicated global system -------------------------------------------
+  std::vector<CellRecord> gathered_cells;
+  std::vector<VertexRecord> vertices;
+  std::unordered_map<std::int64_t, std::size_t> gathered_vertex_index;
+  std::vector<std::array<std::size_t, 4>> gathered_cell_vertices;
+  std::vector<std::size_t> gathered_to_sorted;
+  if (reuse) {
+    // Same structure: only the vertex values are gathered, in the order of
+    // the cached record gather.
+    std::vector<std::array<double, 3>> local_values;
+    local_values.reserve(local_vertices.size());
+    for (const auto& record : local_vertices) {
+      local_values.push_back(record.value);
+    }
+    const auto values = allGatherV(local_values, comm);
+    if (values.size() != cached->gathered_to_sorted.size()) {
+      throw std::runtime_error(
+          "PDE velocity extension cache found a changed vertex record layout");
+    }
+    vertices = cached->vertices;
+    for (std::size_t g = 0; g < values.size(); ++g) {
+      vertices[cached->gathered_to_sorted[g]].value = values[g];
+    }
+  } else {
+    auto& cells = gathered_cells;
+    auto& vertex_index = gathered_vertex_index;
+    cells = allGatherV(local_cells, comm);
+    vertices = allGatherV(local_vertices, comm);
+    std::vector<std::int64_t> gathered_gids;
+    if (store_factorization) {
+      gathered_gids.reserve(vertices.size());
+      for (const auto& vertex : vertices) {
+        gathered_gids.push_back(vertex.gid);
+      }
+    }
+    std::sort(cells.begin(), cells.end(),
+              [](const CellRecord& a, const CellRecord& b) {
+                return a.cell_gid < b.cell_gid;
+              });
+    std::sort(vertices.begin(), vertices.end(),
+              [](const VertexRecord& a, const VertexRecord& b) {
+                return a.gid < b.gid;
+              });
+    vertex_index.reserve(vertices.size());
+    for (std::size_t i = 0; i < vertices.size(); ++i) {
+      if (!vertex_index.emplace(vertices[i].gid, i).second) {
+        throw std::runtime_error(
+            "PDE velocity extension gathered duplicate vertex records");
+      }
+    }
+    for (const auto& cell : cells) {
+      for (std::int64_t i = 0; i < cell.count; ++i) {
+        if (vertex_index.find(cell.vertex_gid[static_cast<std::size_t>(i)]) ==
+            vertex_index.end()) {
+          throw std::runtime_error(
+              "PDE velocity extension found a cell vertex without an owned "
+              "vertex record");
+        }
+      }
+    }
+    gathered_cell_vertices.resize(cells.size());
+    for (std::size_t k = 0; k < cells.size(); ++k) {
+      for (std::int64_t i = 0; i < cells[k].count; ++i) {
+        const auto a = static_cast<std::size_t>(i);
+        gathered_cell_vertices[k][a] = vertex_index.at(cells[k].vertex_gid[a]);
+      }
+    }
+    gathered_to_sorted.reserve(gathered_gids.size());
+    for (const auto gid : gathered_gids) {
+      gathered_to_sorted.push_back(vertex_index.at(gid));
+    }
+  }
+  const auto& cells = reuse ? cached->cells : gathered_cells;
+  const auto& vertex_index =
+      reuse ? cached->vertex_index : gathered_vertex_index;
+  // Canonical vertex index of every cell vertex.
+  const auto& cell_vertices =
+      reuse ? cached->cell_vertices : gathered_cell_vertices;
 
   PdeVelocityExtensionReport report;
+  report.reused_factorization = reuse;
   report.extension_cells = cells.size();
   for (const auto& vertex : vertices) {
     report.known_vertices += (vertex.flags & kKnownFlag) != 0u ? 1u : 0u;
@@ -648,6 +1173,9 @@ PdeVelocityExtensionReport extendVelocityByPde(
   solver_options.method = svmp::FE::backends::SolverMethod::Direct;
   solver_options.rel_tol = 1.0e-10;
 
+  // Systems built by this call, kept by the cache.
+  std::array<PdeVelocityExtensionCache::Entry::Component, 3> built{};
+  bool built_complete = store_factorization && !reuse;
   for (std::size_t component = 0; component < copy_components; ++component) {
     std::vector<svmp::FE::GlobalIndex> unknown(vertices.size(), -1);
     svmp::FE::GlobalIndex n_unknown = 0;
@@ -667,89 +1195,137 @@ PdeVelocityExtensionReport extendVelocityByPde(
       continue;
     }
 
-    svmp::FE::sparsity::SparsityPattern pattern(n_unknown, n_unknown);
-    for (const auto& cell : cells) {
-      const auto count = static_cast<std::size_t>(cell.count);
-      for (std::size_t a = 0; a < count; ++a) {
-        const auto ia = unknown[vertex_index.at(cell.vertex_gid[a])];
-        if (ia < 0) {
-          continue;
-        }
-        for (std::size_t b = 0; b < count; ++b) {
-          const auto ib = unknown[vertex_index.at(cell.vertex_gid[b])];
-          if (ib >= 0) {
-            pattern.addEntry(ia, ib);
-          }
-        }
+    std::unique_ptr<svmp::FE::backends::GenericMatrix> assembled;
+    const DryRegionFactorization* factorization = nullptr;
+    if (reuse) {
+      const auto& stored = cached->components[component];
+      if (stored.unknowns != n_unknown || !stored.matrix ||
+          !stored.factorization) {
+        throw std::runtime_error(
+            "PDE velocity extension cache lost a component system");
       }
-    }
-    for (svmp::FE::GlobalIndex i = 0; i < n_unknown; ++i) {
-      pattern.addEntry(i, i);
-    }
-    pattern.finalize();
-
-    auto A = factory->createMatrix(pattern);
-    auto b = factory->createVector(n_unknown);
-    auto x = factory->createVector(n_unknown);
-    if (!A || !b || !x) {
-      throw std::runtime_error(
-          "PDE velocity extension could not create backend objects");
-    }
-    A->zero();
-    b->zero();
-    x->zero();
-    std::vector<double> rhs(static_cast<std::size_t>(n_unknown), 0.0);
-    {
-      auto view = A->createAssemblyView();
-      view->beginAssemblyPhase();
-      for (const auto& cell : cells) {
-        const auto count = static_cast<std::size_t>(cell.count);
-        std::array<svmp::FE::GlobalIndex, 4> dofs{};
-        std::array<std::size_t, 4> local{};
-        std::size_t n_local = 0u;
+      factorization = stored.factorization.get();
+    } else {
+      svmp::FE::sparsity::SparsityPattern pattern(n_unknown, n_unknown);
+      for (std::size_t k = 0; k < cells.size(); ++k) {
+        const auto count = static_cast<std::size_t>(cells[k].count);
         for (std::size_t a = 0; a < count; ++a) {
-          const auto i = vertex_index.at(cell.vertex_gid[a]);
-          const auto ia = unknown[i];
-          if (ia >= 0) {
-            dofs[n_local] = ia;
-            local[n_local] = a;
-            ++n_local;
-            for (std::size_t bb = 0; bb < count; ++bb) {
-              const auto j = vertex_index.at(cell.vertex_gid[bb]);
-              if (unknown[j] < 0) {
-                rhs[static_cast<std::size_t>(ia)] -=
-                    cell.matrix[a * count + bb] * solution[j * 3u + component];
-              }
+          const auto ia = unknown[cell_vertices[k][a]];
+          if (ia < 0) {
+            continue;
+          }
+          for (std::size_t b = 0; b < count; ++b) {
+            const auto ib = unknown[cell_vertices[k][b]];
+            if (ib >= 0) {
+              pattern.addEntry(ia, ib);
             }
           }
         }
-        if (n_local == 0u) {
+      }
+      for (svmp::FE::GlobalIndex i = 0; i < n_unknown; ++i) {
+        pattern.addEntry(i, i);
+      }
+      pattern.finalize();
+
+      assembled = factory->createMatrix(pattern);
+      if (!assembled) {
+        throw std::runtime_error(
+            "PDE velocity extension could not create backend objects");
+      }
+      assembled->zero();
+      {
+        auto view = assembled->createAssemblyView();
+        view->beginAssemblyPhase();
+        for (std::size_t k = 0; k < cells.size(); ++k) {
+          const auto& cell = cells[k];
+          const auto count = static_cast<std::size_t>(cell.count);
+          std::array<svmp::FE::GlobalIndex, 4> dofs{};
+          std::array<std::size_t, 4> local{};
+          std::size_t n_local = 0u;
+          for (std::size_t a = 0; a < count; ++a) {
+            const auto ia = unknown[cell_vertices[k][a]];
+            if (ia >= 0) {
+              dofs[n_local] = ia;
+              local[n_local] = a;
+              ++n_local;
+            }
+          }
+          if (n_local == 0u) {
+            continue;
+          }
+          std::array<double, 16> block{};
+          for (std::size_t p = 0; p < n_local; ++p) {
+            for (std::size_t q = 0; q < n_local; ++q) {
+              block[p * n_local + q] = cell.matrix[local[p] * count + local[q]];
+            }
+          }
+          view->addMatrixEntries(
+              std::span<const svmp::FE::GlobalIndex>(dofs.data(), n_local),
+              std::span<const double>(block.data(), n_local * n_local),
+              svmp::FE::assembly::AddMode::Add);
+        }
+        view->endAssemblyPhase();
+        view->finalizeAssembly();
+      }
+      assembled->finalizeAssembly();
+    }
+    const auto& A = reuse ? *cached->components[component].matrix : *assembled;
+
+    auto b = factory->createVector(n_unknown);
+    auto x = factory->createVector(n_unknown);
+    if (!b || !x) {
+      throw std::runtime_error(
+          "PDE velocity extension could not create backend objects");
+    }
+    b->zero();
+    x->zero();
+    // Dirichlet data of the known and wall-fixed vertices, accumulated in the
+    // canonical cell order.
+    std::vector<double> rhs(static_cast<std::size_t>(n_unknown), 0.0);
+    for (std::size_t k = 0; k < cells.size(); ++k) {
+      const auto& cell = cells[k];
+      const auto count = static_cast<std::size_t>(cell.count);
+      for (std::size_t a = 0; a < count; ++a) {
+        const auto ia = unknown[cell_vertices[k][a]];
+        if (ia < 0) {
           continue;
         }
-        std::array<double, 16> block{};
-        for (std::size_t p = 0; p < n_local; ++p) {
-          for (std::size_t q = 0; q < n_local; ++q) {
-            block[p * n_local + q] = cell.matrix[local[p] * count + local[q]];
+        for (std::size_t bb = 0; bb < count; ++bb) {
+          const auto j = cell_vertices[k][bb];
+          if (unknown[j] < 0) {
+            rhs[static_cast<std::size_t>(ia)] -=
+                cell.matrix[a * count + bb] * solution[j * 3u + component];
           }
         }
-        view->addMatrixEntries(
-            std::span<const svmp::FE::GlobalIndex>(dofs.data(), n_local),
-            std::span<const double>(block.data(), n_local * n_local),
-            svmp::FE::assembly::AddMode::Add);
       }
-      view->endAssemblyPhase();
-      view->finalizeAssembly();
     }
-    A->finalizeAssembly();
     {
       auto span = b->localSpan();
       std::copy(rhs.begin(), rhs.end(), span.begin());
     }
 
-    auto solver = factory->createLinearSolver(solver_options);
     svmp::FE::backends::SolverReport solve_report;
+    std::unique_ptr<DryRegionFactorization> new_factorization;
     try {
-      solve_report = solver->solve(*A, *x, *b);
+      bool solved = false;
+      if (factorization != nullptr) {
+        solved = solveWithFactorization(*factorization, A, *x, *b,
+                                        solver_options, solve_report);
+      } else if (store_factorization) {
+        new_factorization = factorizeDryRegion(A);
+        solved = new_factorization != nullptr &&
+                 solveWithFactorization(*new_factorization, A, *x, *b,
+                                        solver_options, solve_report);
+        if (!solved) {
+          new_factorization.reset();
+        }
+      }
+      if (!solved) {
+        // The backend's direct solve (with its failure diagnostics).
+        x->zero();
+        auto solver = factory->createLinearSolver(solver_options);
+        solve_report = solver->solve(A, *x, *b);
+      }
     } catch (const std::exception& error) {
       throw std::runtime_error(
           std::string("PDE velocity extension (") +
@@ -758,7 +1334,7 @@ PdeVelocityExtensionReport extendVelocityByPde(
           "singular for this level set and known set: " + error.what());
     }
     auto r = factory->createVector(n_unknown);
-    A->mult(*x, *r);
+    A.mult(*x, *r);
     double residual2 = 0.0;
     double rhs2 = 0.0;
     {
@@ -787,10 +1363,25 @@ PdeVelocityExtensionReport extendVelocityByPde(
         solution[i * 3u + component] = xs[static_cast<std::size_t>(unknown[i])];
       }
     }
+    if (built_complete) {
+      if (new_factorization) {
+        built[component].unknowns = n_unknown;
+        built[component].matrix = std::move(assembled);
+        built[component].factorization = std::move(new_factorization);
+      } else {
+        built_complete = false;
+      }
+    }
   }
 
   // ---- owner-local algebraic rows (monolithic coupling) ---------------------
-  if (rows != nullptr) {
+  // The rows depend only on the cached content; cached rows passed every
+  // check below when they were built.
+  const bool rows_from_cache = rows != nullptr && reuse && cached->has_rows;
+  if (rows_from_cache) {
+    *rows = cached->rows;
+  }
+  if (rows != nullptr && !rows_from_cache) {
     rows->clear();
     std::unordered_map<std::int64_t, std::size_t> local_by_gid;
     local_by_gid.reserve(n_vertices);
@@ -923,6 +1514,39 @@ PdeVelocityExtensionReport extendVelocityByPde(
         std::to_string(report.max_known_speed) + ", max_extended_speed=" +
         std::to_string(report.max_extended_speed) + ")");
   }
+
+  // ---- cache update (only after every check passed) --------------------------
+  if (cache != nullptr) {
+    auto& entry = PdeVelocityExtensionCacheAccess::entry(*cache);
+    if (reuse) {
+      if (rows != nullptr && !cached->has_rows) {
+        cached->rows = *rows;
+        cached->has_rows = true;
+      }
+    } else if (built_complete) {
+      auto fresh = std::make_unique<PdeVelocityExtensionCache::Entry>();
+      fresh->key = cache_key;
+      fresh->epoch = cache_epoch;
+      fresh->signature = std::move(signature);
+      fresh->cells = std::move(gathered_cells);
+      fresh->cell_vertices = std::move(gathered_cell_vertices);
+      fresh->vertices = std::move(vertices);
+      for (auto& vertex : fresh->vertices) {
+        vertex.value = {0.0, 0.0, 0.0};
+      }
+      fresh->vertex_index = std::move(gathered_vertex_index);
+      fresh->gathered_to_sorted = std::move(gathered_to_sorted);
+      fresh->components = std::move(built);
+      if (rows != nullptr) {
+        fresh->rows = *rows;
+        fresh->has_rows = true;
+      }
+      entry = std::move(fresh);
+    }
+    PdeVelocityExtensionCacheAccess::setBytes(*cache,
+                                              entry ? entry->bytes() : 0u);
+  }
+  cache_guard.dismiss();
   return report;
 }
 
