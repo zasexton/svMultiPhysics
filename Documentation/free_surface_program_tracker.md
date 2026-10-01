@@ -651,7 +651,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
 
       | Branch | Work |
       |---|---|
-      | `dev/perf-pdeext-factorization` | keep the PDE extension's dry-region factorization and monolithic rows while the known set, walls and mesh are unchanged (the extension adds 15–18% to a 2D step) |
+      | `dev/perf-pdeext-factorization` | keep the PDE extension's dry-region factorization and monolithic rows while the known set, walls and mesh are unchanged. **Done (`e4a08ec2`, `22c9485d`); merge held, see below.** Bitwise identical with a 99.4–99.8% hit rate; the extension's own cost falls about 89%. But the extension is only 1.6–1.9% of runtime, so the end-to-end gain is about 1–2%. The earlier "15–18% per step" figure compared whole steps with and without PDE transport, which includes the monolithic coupling's extra Newton work, not the extension solve itself. |
       | `dev/perf-functional-diagnostics` | cheaper accepted-step functional records and checks (about 13% of a 3D tank step); replace the fixed 512-ulp consistency tolerance with a rounding bound derived from the term count, which unblocks 3D capillary runs |
       | `dev/perf-log-output` | build diagnostic-only log lines only when the log level prints them; make the wet-extension map output opt-in; hashed lookup for the KAG duplicate-sample search (item 4) |
 
@@ -665,6 +665,10 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
       - It also checks that JIT cache objects are keyed by CPU features, since jobs run on both SKX (AVX-512) and MLN (AVX2) nodes.
       - Defaults that change round-off need user approval.
     - Queued after the current merges: a fresh 2D/3D profiling pass of the post-merge step, attacking the next hotspots (results-neutral).
+    - **Latent uninitialized-memory bug found (2026-10-01).** `activeCutContextMatchesRefreshCache`, the cut-context reuse decision, branches on a value from an uninitialized stack allocation in `buildFreeSurfaceGeometrySnapshot`. `validateFreeSurfaceGeometrySnapshotCurrentForMarker` reads uninitialized heap memory from `makeCutCellGeometryMapping`. Memcheck reports about 45k uninitialized reads on the tip.
+      - It depends on code generation: with the PDE-cache branch, `MinimizedCircleSphereAndSessileCapsMeetProductionCertificates` fails when the Workflows suite runs in one process, apparently through stale cut-context reuse (residual 0.108 instead of 4.5e-17).
+      - Fix in progress on `dev/fix-uninitialized-snapshot`, including a production-impact assessment.
+      - The PDE-cache merge waits for the fix.
     - **Job efficiency (2026-10-01).** `seff` showed four causes of low CPU efficiency:
       - every serial benchmark job ran at exactly 50%, because `--mem=8G` exceeds amarsden's `MaxMemPerCPU=8000` MB and Slurm added a second, idle CPU;
       - build-and-test jobs at 11–12%, because CTest runs one entry at a time on 16 cores;
