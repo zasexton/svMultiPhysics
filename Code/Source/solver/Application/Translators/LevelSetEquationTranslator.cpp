@@ -676,6 +676,8 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
       << ",\"maximum_cumulative_interface_displacement_fraction\":"
       << json_real(options.volume_correction
                        .maximum_cumulative_interface_displacement_fraction)
+      << "},\"kinematic_reconciliation\":{\"enabled\":"
+      << json_bool(options.kinematic_reconciliation.enabled)
       << "}}"
       << ",\"boundaries\":{\"inflow\":[";
   for (std::size_t i = 0; i < inflow.size(); ++i) {
@@ -1651,6 +1653,11 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
           "Volume_correction_maximum_cumulative_interface_displacement_fraction")) {
     options.volume_correction
         .maximum_cumulative_interface_displacement_fraction = *value;
+  }
+  if (const auto value = get_defined_bool(
+          params,
+          {"Enable_kinematic_reconciliation", "EnableKinematicReconciliation"})) {
+    options.kinematic_reconciliation.enabled = *value;
   }
 }
 
