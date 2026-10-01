@@ -58,6 +58,9 @@ DEFAULT_LEVEL_SET_VELOCITY = "pde_harmonic_monolithic"   # decision D9
 # each step's change of the sharp liquid area equals the interface flux of the
 # transport velocity.  Local and parameter-free; "off" reproduces earlier decks.
 KINEMATIC_RECONCILIATION = True
+# Semi-implicit capillary term (Surface_tension_semi_implicit, decision D13);
+# the protocol value is None.
+SEMI_IMPLICIT_OPTIONS = ("None", "NormalIncrement")
 MIN_PHI_OVER_H_WARNING = 1.0e-6             # "vertex touch" warning threshold
 LEVEL_SET_FIELD = "phi"
 CURVATURE_FIELD = "kappa"
@@ -80,12 +83,44 @@ def dt_multiple(laplace: float) -> float:
 
 
 def time_schedule(level: int, laplace: float, viscous_times: float,
-                  snapshots: int) -> dict:
+                  snapshots: int, *, multiple: float | None = None,
+                  fixed_dt: float | None = None) -> dict:
+    """Protocol schedule, or a time-step study.
+
+    multiple overrides the per-La multiple of dt_B (rounded down to 100
+    output intervals as in the protocol).  fixed_dt keeps the step exactly:
+    the cadence is the nearest whole number of steps per output and the run
+    ends at the first output at or after 5 viscous times, so runs with
+    different fixed steps share their output times when the steps nest.
+    """
+    if multiple is not None and fixed_dt is not None:
+        raise ValueError("give at most one of --dt-multiple and --dt")
     h = RADIUS / level
     mu = viscosity_from_laplace(laplace)
     viscous_time = DENSITY * RADIUS ** 2 / mu
     end_time = viscous_times * viscous_time
-    dt_max = dt_multiple(laplace) * DT_SAFETY * capillary_dt_limit(h)
+    m = dt_multiple(laplace) if multiple is None else multiple
+    if not (math.isfinite(m) and m > 0.0):
+        raise ValueError("--dt-multiple must be positive")
+    if fixed_dt is not None:
+        if not (math.isfinite(fixed_dt) and fixed_dt > 0.0):
+            raise ValueError("--dt must be positive")
+        cadence = max(1, round(end_time / (snapshots * fixed_dt)))
+        steps = cadence * math.ceil(end_time / (cadence * fixed_dt) - 1.0e-9)
+        return {
+            "h": h,
+            "viscosity": mu,
+            "viscous_time": viscous_time,
+            "capillary_time": math.sqrt(DENSITY * RADIUS ** 3 / SURFACE_TENSION),
+            "end_time": steps * fixed_dt,
+            "dt_capillary_limit": capillary_dt_limit(h),
+            "dt_max": fixed_dt,
+            "dt_multiple_of_capillary_limit": fixed_dt / (DT_SAFETY * capillary_dt_limit(h)),
+            "dt": fixed_dt,
+            "steps": steps,
+            "output_cadence": cadence,
+        }
+    dt_max = m * DT_SAFETY * capillary_dt_limit(h)
     cadence = max(1, math.ceil(end_time / (snapshots * dt_max)))
     steps = snapshots * cadence
     return {
@@ -96,7 +131,7 @@ def time_schedule(level: int, laplace: float, viscous_times: float,
         "end_time": end_time,
         "dt_capillary_limit": capillary_dt_limit(h),
         "dt_max": dt_max,
-        "dt_multiple_of_capillary_limit": dt_multiple(laplace),
+        "dt_multiple_of_capillary_limit": m,
         "dt": end_time / steps,
         "steps": steps,
         "output_cadence": cadence,
@@ -273,7 +308,13 @@ def level_set_velocity_block(mode: str) -> str:
 
 def solver_xml(form: str, schedule: dict, steps: int, cadence: int,
                level_set_velocity: str = DEFAULT_LEVEL_SET_VELOCITY,
-               kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION) -> str:
+               kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
+               semi_implicit: str = "None") -> str:
+    if semi_implicit not in SEMI_IMPLICIT_OPTIONS:
+        raise ValueError(f"semi_implicit must be one of {SEMI_IMPLICIT_OPTIONS}")
+    semi_implicit_bc = ("" if semi_implicit == "None" else
+                        f"\n      <Surface_tension_semi_implicit>{semi_implicit}"
+                        "</Surface_tension_semi_implicit>")
     kag = form in ("kag_consistent", "kag_lumped")
     reconciliation = ("\n    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>"
                       if kinematic_reconciliation else "")
@@ -386,7 +427,7 @@ def solver_xml(form: str, schedule: dict, steps: int, cadence: int,
       <Interface_quadrature_order>2</Interface_quadrature_order>
       <External_pressure>{EXTERNAL_PRESSURE:.17g}</External_pressure>
       <Surface_tension>{SURFACE_TENSION:.17g}</Surface_tension>
-      <Surface_tension_form>{tension_form}</Surface_tension_form>{curvature_bc}
+      <Surface_tension_form>{tension_form}</Surface_tension_form>{semi_implicit_bc}{curvature_bc}
       <Use_level_set_curvature>false</Use_level_set_curvature>
       <Enable_velocity_extension>false</Enable_velocity_extension>
       <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
@@ -405,7 +446,10 @@ def generate(level: int, form: str, laplace: float, output_dir: Path, *,
              snapshots: int = DEFAULT_SNAPSHOTS,
              level_set_velocity: str = DEFAULT_LEVEL_SET_VELOCITY,
              kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
-             max_steps: int | None = None, force: bool = False) -> dict:
+             max_steps: int | None = None, force: bool = False,
+             dt_multiple_override: float | None = None,
+             fixed_dt: float | None = None,
+             semi_implicit: str = "None") -> dict:
     if level_set_velocity not in LEVEL_SET_VELOCITY:
         raise ValueError(f"--level-set-velocity must be one of {LEVEL_SET_VELOCITY}")
     if level not in LEVELS:
@@ -419,7 +463,10 @@ def generate(level: int, form: str, laplace: float, output_dir: Path, *,
     if output_dir.exists() and any(output_dir.iterdir()) and not force:
         raise FileExistsError(f"{output_dir} is not empty (use --force)")
 
-    schedule = time_schedule(level, laplace, viscous_times, snapshots)
+    if semi_implicit not in SEMI_IMPLICIT_OPTIONS:
+        raise ValueError(f"--surface-tension-semi-implicit must be one of {SEMI_IMPLICIT_OPTIONS}")
+    schedule = time_schedule(level, laplace, viscous_times, snapshots,
+                             multiple=dt_multiple_override, fixed_dt=fixed_dt)
     steps, cadence, truncated = schedule["steps"], schedule["output_cadence"], False
     if max_steps is not None:
         if max_steps < 1:
@@ -454,7 +501,8 @@ def generate(level: int, form: str, laplace: float, output_dir: Path, *,
         write_face_vtp(mesh_dir / "mesh-surfaces" / f"{wall}.vtp", points, node_ids, parents)
     (output_dir / "solver.xml").write_text(solver_xml(form, schedule, steps, cadence,
                                                       level_set_velocity,
-                                                      kinematic_reconciliation),
+                                                      kinematic_reconciliation,
+                                                      semi_implicit),
                                            encoding="utf-8")
 
     case = {
@@ -489,6 +537,9 @@ def generate(level: int, form: str, laplace: float, output_dir: Path, *,
         "dt_multiple_of_capillary_limit": schedule["dt_multiple_of_capillary_limit"],
         "level_set_velocity": level_set_velocity,
         "kinematic_reconciliation": bool(kinematic_reconciliation),
+        "surface_tension_semi_implicit": semi_implicit,
+        "dt_rule": ("fixed" if fixed_dt is not None else
+                    "multiple_override" if dt_multiple_override is not None else "protocol"),
         "dt": schedule["dt"],
         "steps_protocol": schedule["steps"],
         "steps": steps,
@@ -526,6 +577,15 @@ def main(argv=None) -> int:
                         default="on" if KINEMATIC_RECONCILIATION else "off",
                         help="accepted-step kinematic reconciliation of the level set "
                              "(protocol: on; off reproduces the earlier decks)")
+    parser.add_argument("--dt-multiple", type=float, default=None,
+                        help="time-step study: multiple of dt_B instead of the per-La protocol "
+                             "value, rounded down to the output intervals")
+    parser.add_argument("--dt", type=float, default=None,
+                        help="time-step study: this exact step; the run ends at the first output "
+                             "at or after the protocol end time")
+    parser.add_argument("--surface-tension-semi-implicit", choices=SEMI_IMPLICIT_OPTIONS,
+                        default="None",
+                        help="Surface_tension_semi_implicit of the free surface (protocol value None)")
     parser.add_argument("--force", action="store_true", help="allow a non-empty output dir")
     args = parser.parse_args(argv)
 
@@ -533,12 +593,14 @@ def main(argv=None) -> int:
                     viscous_times=args.viscous_times, snapshots=args.snapshots,
                     level_set_velocity=args.level_set_velocity,
                     kinematic_reconciliation=args.kinematic_reconciliation == "on",
-                    max_steps=args.max_steps, force=args.force)
+                    max_steps=args.max_steps, force=args.force,
+                    dt_multiple_override=args.dt_multiple, fixed_dt=args.dt,
+                    semi_implicit=args.surface_tension_semi_implicit)
     print(f"wrote {args.output_dir}")
     for key in ("level_R_over_h", "capillary_form", "laplace_number", "viscosity",
                 "viscous_time", "end_time", "dt", "dt_capillary_limit",
                 "dt_multiple_of_capillary_limit", "level_set_velocity",
-                "kinematic_reconciliation", "steps",
+                "kinematic_reconciliation", "surface_tension_semi_implicit", "steps",
                 "output_cadence", "n_vertices", "n_triangles", "min_abs_phi_over_h",
                 "wall_gap_over_h", "truncated"):
         print(f"  {key} = {case[key]}")

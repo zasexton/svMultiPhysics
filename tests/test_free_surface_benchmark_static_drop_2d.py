@@ -219,3 +219,38 @@ def test_kinematic_reconciliation_is_on_by_default_and_can_be_disabled(tmp_path)
     root = ET.parse(tmp_path / "off/solver.xml").getroot()
     assert off["kinematic_reconciliation"] is False
     assert root.find("Add_equation[@type='level_set']/Enable_kinematic_reconciliation") is None
+
+
+def test_time_step_study_options_and_semi_implicit_term(tmp_path):
+    protocol = gen.generate(8, "surface_stress", 12.0, tmp_path / "p")
+    text = (tmp_path / "p/solver.xml").read_text()
+    assert "Surface_tension_semi_implicit" not in text
+    assert protocol["surface_tension_semi_implicit"] == "None"
+    assert protocol["dt_rule"] == "protocol"
+
+    # A multiple of dt_B is rounded down to 100 output intervals.
+    four = gen.generate(8, "surface_stress", 12.0, tmp_path / "m4", dt_multiple_override=4.0)
+    assert four["dt_multiple_of_capillary_limit"] == 4.0
+    assert four["steps"] % 100 == 0
+    assert four["dt"] <= 4.0 * gen.DT_SAFETY * gen.capillary_dt_limit(1.0 / 8) + 1e-15
+    assert math.isclose(four["end_time"], protocol["end_time"], rel_tol=1e-12)
+
+    # A fixed step is kept exactly; nested steps share their output times.
+    runs = {dt: gen.generate(8, "surface_stress", 12.0, tmp_path / f"dt{dt}", fixed_dt=dt,
+                             semi_implicit="NormalIncrement")
+            for dt in (0.04, 0.02, 0.01)}
+    for dt, case in runs.items():
+        assert case["dt"] == dt and case["dt_rule"] == "fixed"
+        assert case["steps"] % case["output_cadence"] == 0
+        assert case["end_time"] >= case["viscous_times"] * case["viscous_time"] - 1e-12
+        assert math.isclose(case["end_time"], case["steps"] * dt, rel_tol=1e-12)
+        xml = (tmp_path / f"dt{dt}/solver.xml").read_text()
+        assert "<Surface_tension_semi_implicit>NormalIncrement</Surface_tension_semi_implicit>" in xml
+    outputs = {dt: [k * c["output_cadence"] * dt for k in range(1, c["steps"] // c["output_cadence"] + 1)]
+               for dt, c in runs.items()}
+    assert np.allclose(outputs[0.04], outputs[0.02]) and np.allclose(outputs[0.02], outputs[0.01])
+    with pytest.raises(ValueError):
+        gen.generate(8, "surface_stress", 12.0, tmp_path / "both", dt_multiple_override=2.0,
+                     fixed_dt=0.02)
+    with pytest.raises(ValueError):
+        gen.generate(8, "surface_stress", 12.0, tmp_path / "bad", semi_implicit="Implicit")
