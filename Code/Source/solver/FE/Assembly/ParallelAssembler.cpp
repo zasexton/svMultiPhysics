@@ -1049,6 +1049,27 @@ void ParallelAssembler::finalize(GlobalSystemView* matrix_view, GlobalSystemView
         pending_received_vector_.clear();
     }
 
+    // Same constrained-row finalization as StandardAssembler::finalize():
+    // element condensation leaves Dirichlet rows empty, so give every owned
+    // Dirichlet row its identity diagonal and inhomogeneity. Without this the
+    // distributed operator differs from the serial one on those rows.
+    if (constraints_ != nullptr && constraints_->isClosed() &&
+        (matrix_view != nullptr || vector_view != nullptr)) {
+        constraints_->forEach([&](const constraints::AffineConstraints::ConstraintView& constraint) {
+            if (!constraint.isDirichlet() || !ghost_manager_.isOwned(constraint.slave_dof)) {
+                return;
+            }
+            if (matrix_view) {
+                matrix_view->setDiagonal(constraint.slave_dof, Real{1.0});
+            }
+            if (vector_view) {
+                std::array<GlobalIndex, 1> dof{constraint.slave_dof};
+                std::array<Real, 1> value{static_cast<Real>(constraint.inhomogeneity)};
+                vector_view->setVectorEntries(dof, value);
+            }
+        });
+    }
+
     // End assembly phases
     if (matrix_view) {
         matrix_view->endAssemblyPhase();
