@@ -26,6 +26,7 @@ import argparse
 import csv
 import json
 import math
+import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -45,14 +46,22 @@ def _pyvista():
     return pv
 
 
-def output_series(run: Path) -> list[tuple[float, Path]]:
+def output_series(run: Path, dt: float) -> list[tuple[float, Path]]:
+    """Outputs from result.pvd, or from the result_NNN files (t = NNN dt)
+    when the run stopped before writing the collection file."""
     pvd = run / "result.pvd"
-    if not pvd.is_file():
-        raise DataError(f"{run}: result.pvd is missing")
-    root = ET.parse(pvd).getroot()
-    series = sorted((float(d.get("timestep")), run / d.get("file")) for d in root.iter("DataSet"))
+    if pvd.is_file():
+        root = ET.parse(pvd).getroot()
+        series = sorted((float(d.get("timestep")), run / d.get("file")) for d in root.iter("DataSet"))
+    else:
+        series = []
+        for path in list(run.glob("result_*.vtu")) + list(run.glob("result_*.pvtu")):
+            m = re.search(r"_(\d+)\.p?vtu$", path.name)
+            if m:
+                series.append((int(m.group(1)) * dt, path))
+        series.sort()
     if not series:
-        raise DataError(f"{run}: no output listed in result.pvd")
+        raise DataError(f"{run}: no solver output (result.pvd or result_NNN.vtu)")
     return series
 
 
@@ -134,7 +143,7 @@ def load_measured_pressure(path: Path) -> tuple[np.ndarray, np.ndarray]:
 def analyse(run: Path, reference_file: Path | None = None) -> dict:
     meta = json.loads((run / "benchmark.json").read_text())
     dim = int(meta["mesh"]["dimension"])
-    series = output_series(run)
+    series = output_series(run, float(meta["time"]["dt"]))
     ref = read_state(run / "mesh/water/mesh-complete.mesh.vtu", dim, reference=True)
     index = {int(g): i for i, g in enumerate(ref["gid"])}
     wall = _pyvista().read(run / "mesh/water/mesh-surfaces/wall_left.vtp")
