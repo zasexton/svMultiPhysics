@@ -439,13 +439,22 @@ void warn_overlapping_face_files(const std::vector<std::vector<std::string>>& na
 namespace application {
 namespace translators {
 
-std::shared_ptr<svmp::Mesh> MeshTranslator::loadMesh(const MeshParameters& params)
+std::shared_ptr<svmp::Mesh> MeshTranslator::loadMesh(const MeshParameters& params,
+                                                     int minimum_ghost_layers)
 {
-  const int ghost_layers = params.ghost_layers.value();
+  int ghost_layers = params.ghost_layers.value();
   if (ghost_layers < 0) {
     throw std::invalid_argument(
         "[svMultiPhysics::Application] <Ghost_layers> inside <Add_mesh name=\"" +
         params.name.value() + "\"> must be a nonnegative integer.");
+  }
+  if (!params.ghost_layers.defined() && minimum_ghost_layers > ghost_layers) {
+    ghost_layers = minimum_ghost_layers;
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] MeshTranslator: <Ghost_layers> not set;"
+        << " using " << ghost_layers
+        << " ghost layers required by distributed small-cut aggregation"
+        << " diagnostic=derived_ghost_layers" << std::endl;
   }
   const std::string file_path = params.mesh_file_path.value();
   if (file_path.empty()) {

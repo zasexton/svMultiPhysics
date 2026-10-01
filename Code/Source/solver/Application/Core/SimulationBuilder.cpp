@@ -1315,6 +1315,28 @@ void SimulationBuilder::loadMeshes()
                                      [](const auto* p) { return p != nullptr; }));
   oopCout() << "[svMultiPhysics::Application] SimulationBuilder: meshes declared=" << declared << std::endl;
 
+  // Distributed small-cut aggregation slaves a DOF to the vertices of a root
+  // cell a few cells away, and every rank that assembles with the slave (its
+  // owned cells, their face neighbors, and cells touching its owned DOFs) must
+  // carry those masters; otherwise a less preferred root is used and the
+  // discretization depends on the partition. Ghost layers are face-adjacent:
+  // on simplices the cells touching an owned vertex reach up to three layers
+  // out and a root two cells from its slave adds three more, so request six
+  // layers when the deck leaves <Ghost_layers> unset.
+  constexpr int kAggregationGhostLayers = 6;
+  int minimum_ghost_layers = 0;
+  if (svmp::MeshComm::world().size() > 1) {
+    for (const auto& request : application::core::activeCutVolumeRequests(params_)) {
+      if (request.origin ==
+              application::core::ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary &&
+          request.volume_retention ==
+              application::core::ActiveCutVolumeRetention::ActiveAndInactive) {
+        minimum_ghost_layers = kAggregationGhostLayers;
+        break;
+      }
+    }
+  }
+
   for (const auto* mesh_params : params_.mesh_parameters) {
     if (!mesh_params) {
       continue;
@@ -1338,7 +1360,8 @@ void SimulationBuilder::loadMeshes()
     }
     oopCout() << std::endl;
 
-    auto mesh = application::translators::MeshTranslator::loadMesh(*mesh_params);
+    auto mesh = application::translators::MeshTranslator::loadMesh(
+        *mesh_params, minimum_ghost_layers);
     auto participant = MeshParticipant::fromLoadedMesh(*mesh_params, mesh);
     components_.mesh_collection.addParticipant(std::move(participant));
     components_.meshes.emplace(mesh_name, mesh);

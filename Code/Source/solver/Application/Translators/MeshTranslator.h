@@ -14,7 +14,10 @@ namespace translators {
 
 class MeshTranslator {
 public:
-  static std::shared_ptr<svmp::Mesh> loadMesh(const MeshParameters& params);
+  // `minimum_ghost_layers` applies only when the deck leaves <Ghost_layers>
+  // unset; an explicit value is always honored.
+  static std::shared_ptr<svmp::Mesh> loadMesh(const MeshParameters& params,
+                                              int minimum_ghost_layers = 0);
 
 private:
   static std::string detectFormat(const std::string& file_path);
