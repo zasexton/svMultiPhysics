@@ -331,6 +331,7 @@ if(PHYSICS_BUILD_TESTS)
         Tests/Unit/test_FittedFreeSurfaceALE.cpp
         Tests/Unit/test_SharpBoundaryOperatorMPI.cpp
         Tests/Unit/test_FreeSurfaceCutStability.cpp
+        Tests/Unit/test_FreeSurfaceSemiImplicitSurfaceTension.cpp
         Tests/Unit/test_CoreUtilities.cpp
         Tests/Unit/test_VtpMeshSupport.cpp
         Tests/Unit/Coupling/test_FSICouplingModule.cpp

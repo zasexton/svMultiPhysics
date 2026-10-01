@@ -2,6 +2,7 @@
 
 #include "Application/Core/ActiveDomainOutput.h"
 #include "Application/Core/FreeSurfaceEnergyLedger.h"
+#include "Application/Core/FreeSurfaceSemiImplicitReference.h"
 #include "Application/Core/LevelSetCutConfiguration.h"
 #include "Application/Core/LevelSetCurvatureSamples.h"
 #include "Application/Core/LevelSetMaintenanceConfiguration.h"
@@ -29365,6 +29366,14 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       activeFESystemCommunicator(*sim.fe_system));
   bindKinematicAreaGradientTractionMaintenance(
       *sim.fe_system, level_set_maintenance);
+  // The semi-implicit capillary term is defined by the transient outer
+  // fixed point; a steady solve fails closed here.
+  (void)bindFreeSurfaceSemiImplicitReference(
+      *sim.fe_system,
+      {},
+      /*transient_solve=*/false,
+      /*outer_fixed_point=*/false,
+      activeFESystemCommunicator(*sim.fe_system));
   requireCollectiveLevelSetMaintenanceRequestSchedule(
       level_set_maintenance,
       LevelSetMaintenanceScheduleStage::SteadyInitialization,
@@ -29958,6 +29967,50 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         << "[svMultiPhysics::Application] Level-set nonlinear geometry policy: "
            "legacy fixed_topology comparison mode."
         << std::endl;
+  }
+  std::vector<FreeSurfaceSemiImplicitTransport> semi_implicit_transports;
+  for (const auto& equation : sim.resolved_level_set_equations_by_input_index) {
+    if (!equation) {
+      continue;
+    }
+    FreeSurfaceSemiImplicitTransport transport;
+    transport.level_set_field_name = equation->options.level_set.field_name;
+    transport.velocity_source = equation->options.velocity.source;
+    transport.advection_velocity_field_name =
+        equation->options.velocity.field_name;
+    transport.extension_source_velocity_field_name =
+        equation->options.velocity.algebraic_extension_source_field_name;
+    for (const auto& request : level_set_advection_velocity) {
+      if (request.level_set_field_name == transport.level_set_field_name &&
+          request.target_velocity_field_name ==
+              transport.advection_velocity_field_name) {
+        transport.extension_method = request.extension_method;
+        transport.extension_source_velocity_field_name =
+            request.source_velocity_field_name;
+      }
+    }
+    semi_implicit_transports.push_back(std::move(transport));
+  }
+  const auto semi_implicit_reference = bindFreeSurfaceSemiImplicitReference(
+      *sim.fe_system,
+      semi_implicit_transports,
+      /*transient_solve=*/true,
+      use_transient_external_state_fixed_point,
+      activeFESystemCommunicator(*sim.fe_system));
+  if (semi_implicit_reference) {
+    refreshFreeSurfaceSemiImplicitReference(
+        *sim.fe_system,
+        *semi_implicit_reference,
+        stateViewForHistory(*sim.time_history));
+    oopCout()
+        << "[svMultiPhysics::Application] Semi-implicit capillary term:"
+        << " surface_tension_semi_implicit=NormalIncrement"
+        << " reference_field=" << sim.fe_system->fieldRecord(
+                                      semi_implicit_reference->reference_field)
+                                      .name
+        << " velocity_field=" << semi_implicit_reference->velocity_field_name
+        << " reference_refresh=projected_outer|endpoint|restored|before_solve"
+        << " diagnostic=free_surface_semi_implicit_reference" << std::endl;
   }
   // When generated data is refreshed at accepted iterates, reassemble the
   // residual after that refresh before deciding that Newton has converged.
@@ -30702,6 +30755,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 refreshesFrozenLevelSetExtensionAtStateSync(
                     point,
                     use_transient_external_state_fixed_point));
+        if (semi_implicit_reference) {
+          // u_ref := the projected iterate that generated this geometry, so
+          // the semi-implicit capillary term vanishes in the fresh residual.
+          refreshFreeSurfaceSemiImplicitReference(
+              *sim.fe_system, *semi_implicit_reference, state);
+        }
       };
   if (track_transient_cut_topology &&
       use_transient_external_state_fixed_point) {
@@ -30789,6 +30848,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             /*reuse_cached_on_projection_failure=*/false);
         (void)updateLevelSetAdvectionVelocities(
             sim, h, level_set_advection_velocity);
+        if (semi_implicit_reference) {
+          refreshFreeSurfaceSemiImplicitReference(
+              *sim.fe_system, *semi_implicit_reference,
+              stateViewForHistory(h));
+        }
         if (!initial_free_surface_functional_baseline_recorded) {
           if (h.stepIndex() < 0) {
             throw std::runtime_error(

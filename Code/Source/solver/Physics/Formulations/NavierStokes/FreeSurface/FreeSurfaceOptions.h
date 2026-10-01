@@ -113,6 +113,24 @@ enum class FreeSurfaceSurfaceTensionForm : std::uint8_t {
 };
 
 /**
+ * @brief Semi-implicit capillary term for the outer generated-state loop
+ *
+ * NormalIncrement adds the lagged normal-increment term
+ *     gamma*dt_eff * int_{Gamma_h} grad_Gamma((u - u_ref).n_h)
+ *                                  . grad_Gamma(v.n_h),
+ * with grad_Gamma(w.n_h) = P_h (grad w)^T n_h and dt_eff the integrator's
+ * 1/a0.  u_ref is the velocity of the iterate that generated Gamma_h; the
+ * application overwrites it at every generated-state refresh, so the term
+ * vanishes in every freshly refreshed residual and changes only the
+ * Jacobian of the frozen inner solves (design note
+ * free_surface_semi_implicit_surface_tension_design.md, section 3.3).
+ */
+enum class FreeSurfaceSurfaceTensionSemiImplicit : std::uint8_t {
+    None,
+    NormalIncrement
+};
+
+/**
  * @brief Physics-side model for the wall intersection of one free surface
  *
  * The free-surface boundary owns these declarations.  FE geometry remains
@@ -255,6 +273,12 @@ struct FreeSurfaceBoundary {
     // -gamma*cos(theta_e), not with a second cos(theta_d) force.
     FreeSurfaceSurfaceTensionForm surface_tension_form{
         FreeSurfaceSurfaceTensionForm::Automatic};
+    // Optional semi-implicit capillary term (see the enum above).  It is
+    // admitted only for unfitted LinearCorner CutVolume interfaces with a
+    // literal positive gamma and the SurfaceStress (or, experimentally,
+    // KinematicAreaGradientTraction) form; everything else fails closed.
+    FreeSurfaceSurfaceTensionSemiImplicit surface_tension_semi_implicit{
+        FreeSurfaceSurfaceTensionSemiImplicit::None};
     // Explicit opt-in for SurfaceStress on a fitted ALE boundary.  The
     // fitted form integrates gamma (I - n n) : grad(v) over the current
     // boundary with the current normal and the current-frame gradient; it

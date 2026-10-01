@@ -2908,6 +2908,24 @@ parse_free_surface_surface_tension_form(std::string_view raw,
       "GeneratedCurvatureTraction, KinematicAreaGradientTraction, or SurfaceStress.");
 }
 
+svmp::Physics::formulations::navier_stokes::FreeSurfaceSurfaceTensionSemiImplicit
+parse_free_surface_surface_tension_semi_implicit(std::string_view raw,
+                                                 std::string_view context)
+{
+  using svmp::Physics::formulations::navier_stokes::
+      FreeSurfaceSurfaceTensionSemiImplicit;
+  const auto token = normalized_token(raw);
+  if (token == "none" || token == "off" || token == "disabled") {
+    return FreeSurfaceSurfaceTensionSemiImplicit::None;
+  }
+  if (token == "normalincrement" || token == "laggednormalincrement") {
+    return FreeSurfaceSurfaceTensionSemiImplicit::NormalIncrement;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Physics] " + std::string(context) +
+      " must be None or NormalIncrement.");
+}
+
 svmp::Physics::formulations::navier_stokes::FreeSurfaceNormalKinematicPolicy
 parse_free_surface_normal_kinematic_policy(std::string_view raw, std::string_view context)
 {
@@ -4005,6 +4023,13 @@ void append_free_surface_bc(
            "Capillary_force_form", "CapillaryForceForm"})) {
     fs.surface_tension_form = parse_free_surface_surface_tension_form(
         *surface_tension_form, "Free-surface Surface_tension_form");
+  }
+  if (const auto semi_implicit = first_defined_string(
+          bc.params,
+          {"Surface_tension_semi_implicit", "SurfaceTensionSemiImplicit"})) {
+    fs.surface_tension_semi_implicit =
+        parse_free_surface_surface_tension_semi_implicit(
+            *semi_implicit, "Free-surface Surface_tension_semi_implicit");
   }
   if (const auto allow_fitted_surface_stress = first_defined_bool(
           bc.params,

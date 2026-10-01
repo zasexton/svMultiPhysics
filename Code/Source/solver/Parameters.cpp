@@ -795,6 +795,8 @@ bool is_oop_boundary_extension_parameter(const std::string& name)
     "CapillaryForceForm",
     "Allow_fitted_surface_stress",
     "AllowFittedSurfaceStress",
+    "Surface_tension_semi_implicit",
+    "SurfaceTensionSemiImplicit",
     "Active_domain",
     "ActiveDomain",
     "Free_surface_active_domain",
