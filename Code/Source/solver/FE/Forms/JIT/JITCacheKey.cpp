@@ -103,6 +103,9 @@ void mixCacheKey(std::uint64_t& h, std::uint64_t v) noexcept
     mixCacheKey(h, hashStringForCacheKey(in.cpu_name));
     mixCacheKey(h, hashStringForCacheKey(in.cpu_features));
     mixCacheKey(h, hashStringForCacheKey(in.llvm_version));
+    if (!in.codegen_options.empty()) {
+        mixCacheKey(h, hashStringForCacheKey(in.codegen_options));
+    }
 
     // Hardware profile affects codegen decisions such as term-group splitting,
     // colocation budgets, and unroll suppression.
