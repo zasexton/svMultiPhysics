@@ -7460,3 +7460,198 @@ TEST(GeneratedActiveBoundaryDomain,
     EXPECT_NEAR(partition.positive_boundary_measure, 3.0, 1.0e-14);
     EXPECT_NEAR(partition.max_partition_error, 0.0, 1.0e-14);
 }
+
+TEST(FreeSurfaceGeometrySnapshot,
+     StripRulesBindToTheirOwnSourcesAndParentVolumes)
+{
+    using Side = FE::geometry::CutIntegrationSide;
+    using Role = interfaces::FreeSurfaceGeometryRuleRole;
+    using Retention = interfaces::FreeSurfaceGeometryRetention;
+    using Branch = interfaces::LinearCornerStrictBranch;
+    constexpr int interface_marker = 155;
+    constexpr int wall_marker = 25;
+    constexpr FE::GlobalIndex cell_count = 3;
+    const QuadStripBoundaryMesh mesh(cell_count, wall_marker);
+
+    // phi = x - (1 + delta): cell 0 is wet, cell 1 keeps a wet sliver far
+    // below the retained-volume fraction, and cell 2 is dry.
+    constexpr FE::Real delta = 1.0e-9;
+    const auto phi_at_node = [&mesh](FE::GlobalIndex node) {
+        return mesh.getNodeCoordinates(node)[0] - (FE::Real{1.0} + delta);
+    };
+    const auto request = interfaceRequest(interface_marker);
+    interfaces::LevelSetInterfaceDomain domain(request);
+    std::vector<interfaces::CutInterfaceVolumeRegion> regions;
+    for (FE::GlobalIndex cell = cell_count - 1; cell >= 0; --cell) {
+        interfaces::LevelSetCellCutInput input;
+        input.parent_cell = static_cast<FE::MeshIndex>(cell);
+        input.element_type = FE::ElementType::Quad4;
+        input.node_coordinates = {
+            {{-1.0, -1.0, 0.0}},
+            {{1.0, -1.0, 0.0}},
+            {{1.0, 1.0, 0.0}},
+            {{-1.0, 1.0, 0.0}},
+        };
+        std::vector<FE::GlobalIndex> nodes;
+        mesh.getCellNodes(cell, nodes);
+        for (const auto node : nodes) {
+            input.level_set_values.push_back(phi_at_node(node));
+        }
+        auto cut = interfaces::cutLinearLevelSetCell2D(request, input);
+        ASSERT_TRUE(cut.supported);
+        for (auto& fragment : cut.fragments) {
+            domain.addFragment(std::move(fragment));
+        }
+        for (auto& region : cut.volume_regions) {
+            // Distinct observations show which region each record came from.
+            if (cell == 2) {
+                region.construction_observation = Branch::ModifiedOrUnresolved;
+            }
+            regions.push_back(std::move(region));
+        }
+    }
+    // Interleave the sides so that source order differs from rule order.
+    std::stable_sort(regions.begin(), regions.end(),
+                     [](const auto& a, const auto& b) {
+                         return static_cast<int>(a.side) > static_cast<int>(b.side);
+                     });
+    for (auto& region : regions) {
+        domain.addVolumeRegion(std::move(region));
+    }
+    ASSERT_EQ(domain.cutCells().size(), 1u);
+    const interfaces::LevelSetInterfaceDomain source = domain;
+
+    auto contact = interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+        contactRequest(interface_marker, wall_marker), domain, mesh);
+    ASSERT_EQ(contact.summary().active_fragment_count, 1u);
+    interfaces::GeneratedActiveBoundaryScalarField field;
+    field.value_at_node = phi_at_node;
+    auto negative = interfaces::buildGeneratedActiveBoundaryDomain(
+        activeRequest(interface_marker, wall_marker, Side::Negative),
+        domain, contact, mesh, field);
+    auto positive = interfaces::buildGeneratedActiveBoundaryDomain(
+        activeRequest(interface_marker, wall_marker, Side::Positive),
+        domain, contact, mesh, field);
+    ASSERT_EQ(negative.fragments().size(), 2u);
+    ASSERT_EQ(positive.fragments().size(), 2u);
+    const auto active_negative = negative;
+    const auto active_positive = positive;
+    const auto contact_source = contact;
+
+    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    scalar.value = [](FE::GlobalIndex cell,
+                      const std::array<FE::Real, 3>& point,
+                      const FE::geometry::CutQuadratureProvenance&) {
+        return static_cast<FE::Real>(cell) +
+               FE::Real{0.5} * (point[0] + FE::Real{1.0}) -
+               (FE::Real{1.0} + delta);
+    };
+    scalar.reference_gradient =
+        [](FE::GlobalIndex,
+           const std::array<FE::Real, 3>&,
+           const FE::geometry::CutQuadratureProvenance&) {
+            return std::array<FE::Real, 3>{{0.5, 0.0, 0.0}};
+        };
+    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    policy.minimum_retained_volume_fraction = FE::Real{1.0e-8};
+    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+        std::move(domain),
+        {std::move(contact)},
+        {std::move(negative), std::move(positive)},
+        mesh,
+        policy,
+        std::move(scalar),
+        "strip_rule_sources");
+    ASSERT_TRUE(snapshot);
+
+    // Reference answers from front-to-back searches of the source lists.
+    const auto first_with_id = [](const auto& sources, std::uint64_t id) {
+        const auto found = std::find_if(
+            sources.begin(), sources.end(),
+            [id](const auto& candidate) { return candidate.stable_id == id; });
+        return found == sources.end() ? nullptr : &*found;
+    };
+    const auto retained_parent = [&snapshot](Role role, FE::GlobalIndex parent) {
+        return std::any_of(
+            snapshot->rules().begin(), snapshot->rules().end(),
+            [&](const auto& record) {
+                return record.role == role &&
+                       record.retention == Retention::Retained &&
+                       record.reference_rule.provenance.parent_entity_global_id ==
+                           parent;
+            });
+    };
+    std::map<std::pair<Role, FE::MeshIndex>, Retention> boundary_retention;
+    std::size_t volume_records = 0u;
+    for (const auto& record : snapshot->rules()) {
+        const auto& provenance = record.reference_rule.provenance;
+        const auto id = provenance.cut_topology_revision;
+        switch (record.role) {
+            case Role::NegativeVolume:
+            case Role::PositiveVolume: {
+                ++volume_records;
+                const auto* region = first_with_id(source.volumeRegions(), id);
+                ASSERT_NE(region, nullptr);
+                EXPECT_EQ(provenance.parent_entity, region->parent_cell);
+                EXPECT_EQ(record.construction_observation,
+                          region->construction_observation);
+                if (provenance.parent_entity == 2) {
+                    EXPECT_EQ(record.construction_observation,
+                              Branch::ModifiedOrUnresolved);
+                }
+                break;
+            }
+            case Role::Interface: {
+                const auto* fragment = first_with_id(source.fragments(), id);
+                ASSERT_NE(fragment, nullptr);
+                EXPECT_EQ(provenance.parent_entity, fragment->parent_cell);
+                EXPECT_EQ(record.construction_observation,
+                          fragment->construction_observation);
+                EXPECT_EQ(record.source_topology_key,
+                          interfaces::freeSurfaceGeometrySourceTopologyKey(
+                              *fragment, FE::ElementType::Quad4,
+                              policy.tolerance));
+                break;
+            }
+            case Role::Contact: {
+                const auto* fragment =
+                    first_with_id(contact_source.fragments(), id);
+                ASSERT_NE(fragment, nullptr);
+                EXPECT_EQ(provenance.parent_entity, fragment->parent_cell);
+                break;
+            }
+            case Role::NegativeExteriorBoundary:
+            case Role::PositiveExteriorBoundary: {
+                const bool is_negative =
+                    record.role == Role::NegativeExteriorBoundary;
+                const auto* fragment = first_with_id(
+                    is_negative ? active_negative.fragments()
+                                : active_positive.fragments(),
+                    id);
+                ASSERT_NE(fragment, nullptr);
+                EXPECT_EQ(provenance.parent_entity, fragment->parent_cell);
+                EXPECT_EQ(record.construction_observation,
+                          fragment->construction_observation);
+                const bool expected_retained = retained_parent(
+                    is_negative ? Role::NegativeVolume : Role::PositiveVolume,
+                    provenance.parent_entity_global_id);
+                EXPECT_EQ(record.retention,
+                          expected_retained ? Retention::Retained
+                                            : Retention::PrunedSmallVolume);
+                boundary_retention.emplace(
+                    std::make_pair(record.role, provenance.parent_entity),
+                    record.retention);
+                break;
+            }
+        }
+    }
+    EXPECT_EQ(volume_records, 4u);
+    // Only the wet trace of the sliver cell loses its parent volume.
+    const std::map<std::pair<Role, FE::MeshIndex>, Retention> expected{
+        {{Role::NegativeExteriorBoundary, 0}, Retention::Retained},
+        {{Role::NegativeExteriorBoundary, 1}, Retention::PrunedSmallVolume},
+        {{Role::PositiveExteriorBoundary, 1}, Retention::Retained},
+        {{Role::PositiveExteriorBoundary, 2}, Retention::Retained},
+    };
+    EXPECT_EQ(boundary_retention, expected);
+}

@@ -14,6 +14,7 @@
 #include <set>
 #include <stdexcept>
 #include <tuple>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -2723,6 +2724,29 @@ void validateVolumePartition(
     return hash == 0u ? 1u : hash;
 }
 
+// The first source record carrying each stable id, i.e. the record that a
+// front-to-back search of the source list by stable id selects.
+template <typename Source>
+[[nodiscard]] std::unordered_map<std::uint64_t, const Source*>
+firstSourceByStableId(const std::vector<Source>& sources)
+{
+    std::unordered_map<std::uint64_t, const Source*> index;
+    index.reserve(sources.size());
+    for (const auto& source : sources) {
+        index.emplace(source.stable_id, &source);
+    }
+    return index;
+}
+
+template <typename Source>
+[[nodiscard]] const Source* findSourceByStableId(
+    const std::unordered_map<std::uint64_t, const Source*>& index,
+    std::uint64_t stable_id)
+{
+    const auto found = index.find(stable_id);
+    return found == index.end() ? nullptr : found->second;
+}
+
 } // namespace
 
 std::uint64_t freeSurfaceGeometrySourceTopologyKey(
@@ -4372,15 +4396,12 @@ buildFreeSurfaceGeometrySnapshot(
     auto volume_rules = interface_domain.volumeQuadratureRules();
     auto interface_rules = interface_domain.interfaceQuadratureRules();
     records.reserve(volume_rules.size() + interface_rules.size());
+    const auto region_by_stable_id =
+        firstSourceByStableId(interface_domain.volumeRegions());
     for (auto& rule : volume_rules) {
-        const auto region = std::find_if(
-            interface_domain.volumeRegions().begin(),
-            interface_domain.volumeRegions().end(),
-            [&rule](const CutInterfaceVolumeRegion& candidate) {
-                return candidate.stable_id ==
-                       rule.provenance.cut_topology_revision;
-            });
-        if (region == interface_domain.volumeRegions().end()) {
+        const auto* const region = findSourceByStableId(
+            region_by_stable_id, rule.provenance.cut_topology_revision);
+        if (region == nullptr) {
             throw std::invalid_argument(
                 "free-surface volume rule has no authoritative source region");
         }
@@ -4399,15 +4420,12 @@ buildFreeSurfaceGeometrySnapshot(
                 volumeSourceTopologyKey(*region),
                 region->construction_observation);
     }
+    const auto fragment_by_stable_id =
+        firstSourceByStableId(interface_domain.fragments());
     for (auto& rule : interface_rules) {
-        const auto fragment = std::find_if(
-            interface_domain.fragments().begin(),
-            interface_domain.fragments().end(),
-            [&rule](const CutInterfaceFragment& candidate) {
-                return candidate.stable_id ==
-                       rule.provenance.cut_topology_revision;
-            });
-        if (fragment == interface_domain.fragments().end()) {
+        const auto* const fragment = findSourceByStableId(
+            fragment_by_stable_id, rule.provenance.cut_topology_revision);
+        if (fragment == nullptr) {
             throw std::invalid_argument(
                 "free-surface interface rule has no authoritative source fragment");
         }
@@ -4451,17 +4469,13 @@ buildFreeSurfaceGeometrySnapshot(
         validateCompleteContactTrace(
             contact, interface_domain, mesh, ledger);
         auto rules = contact.intersectionQuadratureRules();
+        const auto contact_fragment_by_stable_id =
+            firstSourceByStableId(contact.fragments());
         for (auto& rule : rules) {
-            const auto fragment = std::find_if(
-                contact.fragments().begin(),
-                contact.fragments().end(),
-                [&rule](
-                    const GeneratedInterfaceBoundaryIntersectionFragment&
-                        candidate) {
-                    return candidate.stable_id ==
-                           rule.provenance.cut_topology_revision;
-                });
-            if (fragment == contact.fragments().end()) {
+            const auto* const fragment = findSourceByStableId(
+                contact_fragment_by_stable_id,
+                rule.provenance.cut_topology_revision);
+            if (fragment == nullptr) {
                 throw std::invalid_argument(
                     "free-surface contact rule has no authoritative source fragment");
             }
@@ -4495,6 +4509,28 @@ buildFreeSurfaceGeometrySnapshot(
         const GeneratedActiveBoundaryDomain* positive{nullptr};
     };
     std::map<int, ActivePair> active_by_boundary;
+    // (role, parent cell global id) of every retained record, extended
+    // lazily over the records appended so far.  A lookup is equivalent to
+    // searching the full record list.
+    std::set<std::pair<FreeSurfaceGeometryRuleRole, GlobalIndex>>
+        retained_parents;
+    std::size_t retained_parents_scanned = 0u;
+    const auto has_retained_record = [&records,
+                                      &retained_parents,
+                                      &retained_parents_scanned](
+                                         FreeSurfaceGeometryRuleRole role,
+                                         GlobalIndex parent_cell_global_id) {
+        for (; retained_parents_scanned < records.size();
+             ++retained_parents_scanned) {
+            const auto& record = records[retained_parents_scanned];
+            if (record.retention == FreeSurfaceGeometryRetention::Retained) {
+                retained_parents.emplace(
+                    record.role,
+                    record.reference_rule.provenance.parent_entity_global_id);
+            }
+        }
+        return retained_parents.count({role, parent_cell_global_id}) != 0u;
+    };
     for (const auto& active : active_boundary_domains) {
         requireActiveBoundaryRevision(active, revision);
         auto& pair = active_by_boundary[active.request().boundary_marker];
@@ -4508,15 +4544,13 @@ buildFreeSurfaceGeometrySnapshot(
         }
         slot = &active;
         auto rules = active.boundaryQuadratureRules();
+        const auto active_fragment_by_stable_id =
+            firstSourceByStableId(active.fragments());
         for (auto& rule : rules) {
-            const auto fragment = std::find_if(
-                active.fragments().begin(),
-                active.fragments().end(),
-                [&rule](const GeneratedActiveBoundaryFragment& candidate) {
-                    return candidate.stable_id ==
-                           rule.provenance.cut_topology_revision;
-                });
-            if (fragment == active.fragments().end()) {
+            const auto* const fragment = findSourceByStableId(
+                active_fragment_by_stable_id,
+                rule.provenance.cut_topology_revision);
+            if (fragment == nullptr) {
                 throw std::invalid_argument(
                     "free-surface active-boundary rule has no authoritative source fragment");
             }
@@ -4534,17 +4568,7 @@ buildFreeSurfaceGeometrySnapshot(
             const auto parent_cell_global_id =
                 rule.provenance.parent_entity_global_id;
             const bool has_retained_parent_volume =
-                std::any_of(
-                    records.begin(),
-                    records.end(),
-                    [&](const auto& record) {
-                        return record.role == volume_role &&
-                               record.retention ==
-                                   FreeSurfaceGeometryRetention::Retained &&
-                               record.reference_rule.provenance
-                                       .parent_entity_global_id ==
-                                   parent_cell_global_id;
-                    });
+                has_retained_record(volume_role, parent_cell_global_id);
             const auto stable_id = rule.provenance.cut_topology_revision;
             auto source_ids = sourceIdsForActiveRule(active, stable_id);
             auto moment_certificate =
