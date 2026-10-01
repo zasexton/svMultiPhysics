@@ -1461,10 +1461,12 @@ void mergeQuantityRequirements(const FEQuantityDefinition& def,
     }
 }
 
+// Non-owning: every query is used only while the referenced constraints are
+// alive and unchanged (within one sparsity build), so no copy is taken.
 class AffineConstraintsQuery final : public sparsity::IConstraintQuery {
 public:
-    explicit AffineConstraintsQuery(constraints::AffineConstraints constraints)
-        : constraints_(std::move(constraints))
+    explicit AffineConstraintsQuery(const constraints::AffineConstraints& constraints)
+        : constraints_(constraints)
     {}
 
     [[nodiscard]] bool isConstrained(GlobalIndex dof) const override
@@ -1497,7 +1499,7 @@ public:
     }
 
 private:
-    constraints::AffineConstraints constraints_;
+    const constraints::AffineConstraints& constraints_;
 };
 
 class PermutedAffineConstraintsQuery final : public sparsity::IConstraintQuery {
