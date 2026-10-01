@@ -47,6 +47,9 @@ struct KernelCacheKeyInputs {
     std::string_view data_layout{};
     std::string_view cpu_name{};
     std::string_view cpu_features{};
+    // Non-default code-generation options (JITEngine::codegenOptionsString());
+    // mixed into the key only when non-empty.
+    std::string_view codegen_options{};
     std::string_view llvm_version{};
     std::uint64_t hardware_profile_hash{0};
     const JITCompileSpecialization* specialization{nullptr};

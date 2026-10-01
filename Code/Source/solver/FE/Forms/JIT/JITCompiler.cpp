@@ -52,6 +52,57 @@ inline void hashMix(std::uint64_t& h, std::uint64_t v) noexcept
     mixCacheKey(h, v);
 }
 
+[[nodiscard]] std::string trimmedEnvironmentValue(const char* name)
+{
+    const char* raw = std::getenv(name);
+    if (raw == nullptr) {
+        return {};
+    }
+    std::string value(raw);
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+        return {};
+    }
+    const auto last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1u);
+}
+
+/// Opt-in environment overrides of the requested JIT options, for build and
+/// JIT performance studies.  Unset variables change nothing.
+///   SVMP_JIT_OPT_LEVEL=0..3     JITOptions::optimization_level
+///   SVMP_JIT_FP_CONTRACT=on     fast_math_mode Strict -> ContractOnly (every
+///                               floating-point multiply-add may fuse)
+/// SVMP_JIT_FP_CONTRACT=off and SVMP_JIT_CPU act on the code generator and are
+/// handled by JITEngine.  All of them are cache-key inputs.
+[[nodiscard]] JITOptions applyEnvironmentOverrides(JITOptions options)
+{
+    static std::atomic<bool> logged{false};
+    std::string applied;
+
+    if (const std::string level = trimmedEnvironmentValue("SVMP_JIT_OPT_LEVEL"); !level.empty()) {
+        if (level.size() == 1u && level[0] >= '0' && level[0] <= '3') {
+            const int requested = level[0] - '0';
+            if (requested != options.optimization_level) {
+                applied += " optimization_level " + std::to_string(options.optimization_level) + "->" + level;
+                options.optimization_level = requested;
+            }
+        } else if (!logged.load()) {
+            FE_LOG_WARNING("LLVM JIT: ignoring SVMP_JIT_OPT_LEVEL='" + level + "' (expected 0, 1, 2 or 3)");
+        }
+    }
+
+    if (trimmedEnvironmentValue("SVMP_JIT_FP_CONTRACT") == "on" &&
+        options.fast_math_mode == JITFastMathMode::Strict) {
+        options.fast_math_mode = JITFastMathMode::ContractOnly;
+        applied += " fast_math_mode Strict->ContractOnly";
+    }
+
+    if (!applied.empty() && !logged.exchange(true)) {
+        FE_LOG_INFO("LLVM JIT: environment overrides:" + applied);
+    }
+    return options;
+}
+
 [[nodiscard]] bool containsTestOrTrial(const FormExprNode& node) noexcept
 {
     if (node.type() == FormExprType::TestFunction || node.type() == FormExprType::TrialFunction) {
@@ -307,6 +358,7 @@ struct CompilationPlan {
                                        std::string_view data_layout,
                                        std::string_view cpu_name,
                                        std::string_view cpu_features,
+                                       std::string_view codegen_options,
                                        std::string_view llvm_version,
                                        const JITCompileSpecialization* specialization)
 {
@@ -456,6 +508,7 @@ struct CompilationPlan {
             .data_layout = data_layout,
             .cpu_name = cpu_name,
             .cpu_features = cpu_features,
+            .codegen_options = codegen_options,
             .llvm_version = llvm_version,
             .hardware_profile_hash = hardwareProfile().stableHash64(),
             .specialization = specialization,
@@ -509,8 +562,10 @@ JITCompiler::JITCompiler(JITOptions options)
 {
 }
 
-std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
+std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& requested_options)
 {
+    const JITOptions options = applyEnvironmentOverrides(requested_options);
+
     struct CompilerKey {
         int optimization_level{2};
         bool vectorize{true};
@@ -716,6 +771,7 @@ JITCompileResult JITCompiler::Impl::compileFormIR(const FormIR& ir,
     const std::string data_layout = engine->dataLayoutString();
     const std::string cpu_name = engine->cpuName();
     const std::string cpu_features = engine->cpuFeaturesString();
+    const std::string codegen_options = engine->codegenOptionsString();
     const std::string llvm_version = llvmVersionString();
 
     CompilationPlan plan;
@@ -727,6 +783,7 @@ JITCompileResult JITCompiler::Impl::compileFormIR(const FormIR& ir,
                          data_layout,
                          cpu_name,
                          cpu_features,
+                         codegen_options,
                          llvm_version,
                          specialization);
     } catch (const std::exception& e) {
@@ -1061,6 +1118,13 @@ JITCompileResult JITCompiler::Impl::compileMonolithicFormIR(
     hashMix(cache_key, hashString(cpu_name));
     hashMix(cache_key, hashString(cpu_features));
     hashMix(cache_key, hashString(llvm_version));
+    // Mixed only when non-default so that existing keys stay valid.
+    if (options.fast_math_mode != JITFastMathMode::Strict) {
+        hashMix(cache_key, static_cast<std::uint64_t>(options.fast_math_mode));
+    }
+    if (const std::string codegen_options = engine->codegenOptionsString(); !codegen_options.empty()) {
+        hashMix(cache_key, hashString(codegen_options));
+    }
 
     // Check cache
     const bool enable_cache = options.cache_kernels;
@@ -1251,6 +1315,7 @@ JITCompileResult JITCompiler::compileColocated(
     const std::string data_layout = impl_->engine->dataLayoutString();
     const std::string cpu_name = impl_->engine->cpuName();
     const std::string cpu_features = impl_->engine->cpuFeaturesString();
+    const std::string codegen_options = impl_->engine->codegenOptionsString();
     const std::string llvm_version = llvmVersionString();
 
     // Build per-kernel plans to get cache keys and term indices.
@@ -1276,7 +1341,7 @@ JITCompileResult JITCompiler::compileColocated(
         try {
             kp.plan = buildPlan(*spec.ir, {}, impl_->options,
                                 target_triple, data_layout, cpu_name,
-                                cpu_features, llvm_version,
+                                cpu_features, codegen_options, llvm_version,
                                 spec.specialization);
         } catch (const std::exception& e) {
             out.message = std::string("JITCompiler(colocated): plan failed: ") + e.what();

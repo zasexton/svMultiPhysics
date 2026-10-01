@@ -20,6 +20,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -70,6 +71,16 @@
 #define SVMP_FE_LLVM_HAS_PERF_LISTENER 1
 #else
 #define SVMP_FE_LLVM_HAS_PERF_LISTENER 0
+#endif
+
+#if __has_include(<llvm/TargetParser/X86TargetParser.h>)
+#include <llvm/TargetParser/X86TargetParser.h>
+#define SVMP_FE_LLVM_HAS_X86_TARGET_PARSER 1
+#elif __has_include(<llvm/Support/X86TargetParser.h>)
+#include <llvm/Support/X86TargetParser.h>
+#define SVMP_FE_LLVM_HAS_X86_TARGET_PARSER 1
+#else
+#define SVMP_FE_LLVM_HAS_X86_TARGET_PARSER 0
 #endif
 #endif
 
@@ -571,18 +582,34 @@ void dumpLLVMIRBestEffort(std::string_view dump_directory,
     return llvm::sys::getHostCPUName().str();
 }
 
-[[nodiscard]] std::string hostCPUFeaturesString()
+[[nodiscard]] llvm::StringMap<bool> hostCPUFeatureMap()
 {
 #if LLVM_VERSION_MAJOR >= 20
     // LLVM 20+: getHostCPUFeatures() returns StringMap<bool> directly.
-    auto feats = llvm::sys::getHostCPUFeatures();
+    return llvm::sys::getHostCPUFeatures();
 #else
     llvm::StringMap<bool> feats;
     if (!llvm::sys::getHostCPUFeatures(feats)) {
         return {};
     }
+    return feats;
 #endif
+}
 
+[[nodiscard]] std::string joinSorted(std::vector<std::string> items)
+{
+    std::sort(items.begin(), items.end());
+    std::string out;
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        if (i != 0u) out += ",";
+        out += items[i];
+    }
+    return out;
+}
+
+[[nodiscard]] std::string hostCPUFeaturesString()
+{
+    const auto feats = hostCPUFeatureMap();
     std::vector<std::string> enabled;
     enabled.reserve(feats.size());
     for (const auto& kv : feats) {
@@ -590,14 +617,133 @@ void dumpLLVMIRBestEffort(std::string_view dump_directory,
             enabled.emplace_back(kv.getKey().str());
         }
     }
-    std::sort(enabled.begin(), enabled.end());
+    return joinSorted(std::move(enabled));
+}
 
-    std::string out;
-    for (std::size_t i = 0; i < enabled.size(); ++i) {
-        if (i != 0u) out += ",";
-        out += enabled[i];
+[[nodiscard]] std::string trimmedEnvironmentValue(const char* name)
+{
+    const char* raw = std::getenv(name);
+    if (raw == nullptr) {
+        return {};
     }
-    return out;
+    std::string value(raw);
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+        return {};
+    }
+    const auto last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1u);
+}
+
+/// Code-generation target of the JIT.
+///
+/// By default the JIT generates code for the host CPU with every host feature
+/// (JITTargetMachineBuilder::detectHost()).  SVMP_JIT_CPU=x86-64, x86-64-v2,
+/// x86-64-v3 or x86-64-v4 selects a generic x86-64 micro-architecture level
+/// instead, so that one compiled object runs on every node type implementing
+/// that level (for example x86-64-v3 on both AVX2 and AVX-512 nodes).  A level
+/// using instructions the host lacks is refused with a warning and the host
+/// target is used.  The CPU name and feature list are part of every kernel
+/// cache key, so objects compiled for different targets never mix.
+struct JITTargetSelection {
+    std::string cpu_name{};
+    std::string cpu_features{};
+    bool generic_level{false};
+};
+
+[[nodiscard]] JITTargetSelection selectJITTarget(bool log)
+{
+    JITTargetSelection host{hostCPUName(), hostCPUFeaturesString(), false};
+    const std::string requested = trimmedEnvironmentValue("SVMP_JIT_CPU");
+    if (requested.empty() || requested == "host") {
+        return host;
+    }
+#if SVMP_FE_LLVM_HAS_X86_TARGET_PARSER
+    static constexpr std::string_view kLevels[] = {"x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4"};
+    const bool known_level =
+        std::find(std::begin(kLevels), std::end(kLevels), std::string_view(requested)) != std::end(kLevels);
+    if (!known_level || !llvm::Triple(llvm::sys::getProcessTriple()).isX86()) {
+        if (log) {
+            FE_LOG_WARNING("LLVM JIT: SVMP_JIT_CPU='" + requested +
+                           "' is not host, x86-64, x86-64-v2, x86-64-v3 or x86-64-v4 on an x86-64 host; "
+                           "using the host CPU");
+        }
+        return host;
+    }
+
+    llvm::SmallVector<llvm::StringRef, 64> level_features;
+    llvm::X86::getFeaturesForCPU(requested, level_features);
+    const auto host_features = hostCPUFeatureMap();
+    std::vector<std::string> features;
+    std::string missing;
+    for (const auto feature : level_features) {
+        features.emplace_back(feature.str());
+        const auto it = host_features.find(feature);
+        if (it != host_features.end() && !it->getValue()) {
+            missing += (missing.empty() ? "" : ",") + feature.str();
+        }
+    }
+    if (!missing.empty()) {
+        if (log) {
+            FE_LOG_WARNING("LLVM JIT: SVMP_JIT_CPU=" + requested + " needs CPU features the host lacks (" +
+                           missing + "); using the host CPU");
+        }
+        return host;
+    }
+    return JITTargetSelection{requested, joinSorted(std::move(features)), true};
+#else
+    if (log) {
+        FE_LOG_WARNING("LLVM JIT: SVMP_JIT_CPU is not supported with this LLVM build; using the host CPU");
+    }
+    return host;
+#endif
+}
+
+/// SVMP_JIT_FP_CONTRACT=off: lower llvm.fmuladd to a separate multiply and
+/// add (no fused multiply-add anywhere in JIT code).  Unset or "default"
+/// keeps LLVM's standard policy (fmuladd may fuse).  The "on" setting is a
+/// JITOptions::fast_math_mode override applied by JITCompiler::getOrCreate.
+[[nodiscard]] bool strictFPContractionRequested()
+{
+    return trimmedEnvironmentValue("SVMP_JIT_FP_CONTRACT") == "off";
+}
+
+[[nodiscard]] llvm::orc::JITTargetMachineBuilder makeTargetMachineBuilder(const JITTargetSelection& target,
+                                                                          int optimization_level,
+                                                                          bool strict_fp_contraction)
+{
+    auto jtmb_expected = llvm::orc::JITTargetMachineBuilder::detectHost();
+    if (!jtmb_expected) {
+        FE_THROW(FEException, "LLVM JIT: failed to detect host target machine: " +
+                                  llvmErrorToString(jtmb_expected.takeError()));
+    }
+
+    auto jtmb = std::move(*jtmb_expected);
+    if (target.generic_level) {
+        jtmb.setCPU(target.cpu_name);
+        jtmb.getFeatures() = llvm::SubtargetFeatures();
+    }
+    if (strict_fp_contraction) {
+        jtmb.getOptions().AllowFPOpFusion = llvm::FPOpFusion::Strict;
+    }
+#if LLVM_VERSION_MAJOR >= 18
+    switch (sanitizeOptLevel(optimization_level)) {
+        case 0:  jtmb.setCodeGenOptLevel(llvm::CodeGenOptLevel::None);       break;
+        case 1:  jtmb.setCodeGenOptLevel(llvm::CodeGenOptLevel::Less);       break;
+        case 2:  jtmb.setCodeGenOptLevel(llvm::CodeGenOptLevel::Default);    break;
+        case 3:
+        default: jtmb.setCodeGenOptLevel(llvm::CodeGenOptLevel::Aggressive); break;
+    }
+#else
+    switch (sanitizeOptLevel(optimization_level)) {
+        case 0:  jtmb.setCodeGenOptLevel(llvm::CodeGenOpt::None);       break;
+        case 1:  jtmb.setCodeGenOptLevel(llvm::CodeGenOpt::Less);       break;
+        case 2:  jtmb.setCodeGenOptLevel(llvm::CodeGenOpt::Default);    break;
+        case 3:
+        default: jtmb.setCodeGenOptLevel(llvm::CodeGenOpt::Aggressive); break;
+    }
+#endif
+    return jtmb;
 }
 
 void initializeLLVMOnce()
@@ -617,7 +763,9 @@ void initializeLLVMOnce()
 }
 
 void configureTransformLayer(llvm::orc::IRTransformLayer& transform_layer,
-                             const JITOptions& options)
+                             const JITOptions& options,
+                             const JITTargetSelection& target,
+                             bool strict_fp_contraction)
 {
     const int sanitized_opt_level = sanitizeOptLevel(options.optimization_level);
     if (sanitized_opt_level == 0) {
@@ -632,6 +780,12 @@ void configureTransformLayer(llvm::orc::IRTransformLayer& transform_layer,
     // cost modeling.  On mobile x86-64 (16 XMM regs), PassBuilder(nullptr)
     // avoids AVX2 frequency throttling.
     const bool use_target_aware = hardwareProfile().target_aware_pipeline;
+    // The optimization pipeline models the same target as code generation.
+    std::optional<llvm::orc::JITTargetMachineBuilder> target_machine_builder;
+    if (use_target_aware) {
+        target_machine_builder =
+            makeTargetMachineBuilder(target, sanitized_opt_level, strict_fp_contraction);
+    }
 
     llvm::orc::IRTransformLayer::TransformFunction transform =
         [llvm_opt_level,
@@ -639,7 +793,8 @@ void configureTransformLayer(llvm::orc::IRTransformLayer& transform_layer,
          enable_loop_unrolling = options.specialization.enable_loop_unroll_metadata,
          dump_optimized = options.dump_llvm_ir_optimized,
          dump_directory = options.dump_directory,
-         use_target_aware](llvm::orc::ThreadSafeModule tsm,
+         use_target_aware,
+         target_machine_builder](llvm::orc::ThreadSafeModule tsm,
                                                   llvm::orc::MaterializationResponsibility& /*responsibility*/)
             -> llvm::Expected<llvm::orc::ThreadSafeModule> {
         tsm.withModuleDo([&](llvm::Module& module) {
@@ -671,11 +826,13 @@ void configureTransformLayer(llvm::orc::IRTransformLayer& transform_layer,
             // On AVX-512 / AArch64, this enables proper register count awareness,
             // vectorization width selection, and cost-model-based SLP decisions.
             std::unique_ptr<llvm::TargetMachine> opt_tm;
-            if (use_target_aware) {
-                auto jtmb = llvm::orc::JITTargetMachineBuilder::detectHost();
-                if (jtmb) {
-                    auto tm = jtmb->createTargetMachine();
-                    if (tm) opt_tm = std::move(*tm);
+            if (use_target_aware && target_machine_builder) {
+                auto builder_copy = *target_machine_builder;
+                auto tm = builder_copy.createTargetMachine();
+                if (tm) {
+                    opt_tm = std::move(*tm);
+                } else {
+                    llvm::consumeError(tm.takeError());
                 }
             }
             llvm::TargetMachine* tm_ptr = opt_tm.get(); // nullptr if not target-aware
@@ -876,34 +1033,13 @@ void configureEventListeners(llvm::orc::RTDyldObjectLinkingLayer& object_layer)
 }
 
 [[nodiscard]] std::unique_ptr<llvm::orc::LLJIT> createLLJIT(const JITOptions& options,
+                                                           const JITTargetSelection& target,
+                                                           bool strict_fp_contraction,
                                                            std::string& out_target_triple,
                                                            std::string& out_data_layout,
                                                            llvm::ObjectCache* object_cache)
 {
-    auto jtmb_expected = llvm::orc::JITTargetMachineBuilder::detectHost();
-    if (!jtmb_expected) {
-        FE_THROW(FEException, "LLVM JIT: failed to detect host target machine: " +
-                                  llvmErrorToString(jtmb_expected.takeError()));
-    }
-
-    auto jtmb = std::move(*jtmb_expected);
-#if LLVM_VERSION_MAJOR >= 18
-    switch (sanitizeOptLevel(options.optimization_level)) {
-        case 0:  jtmb.setCodeGenOptLevel(llvm::CodeGenOptLevel::None);       break;
-        case 1:  jtmb.setCodeGenOptLevel(llvm::CodeGenOptLevel::Less);       break;
-        case 2:  jtmb.setCodeGenOptLevel(llvm::CodeGenOptLevel::Default);    break;
-        case 3:
-        default: jtmb.setCodeGenOptLevel(llvm::CodeGenOptLevel::Aggressive); break;
-    }
-#else
-    switch (sanitizeOptLevel(options.optimization_level)) {
-        case 0:  jtmb.setCodeGenOptLevel(llvm::CodeGenOpt::None);       break;
-        case 1:  jtmb.setCodeGenOptLevel(llvm::CodeGenOpt::Less);       break;
-        case 2:  jtmb.setCodeGenOptLevel(llvm::CodeGenOpt::Default);    break;
-        case 3:
-        default: jtmb.setCodeGenOptLevel(llvm::CodeGenOpt::Aggressive); break;
-    }
-#endif
+    auto jtmb = makeTargetMachineBuilder(target, options.optimization_level, strict_fp_contraction);
     out_target_triple = jtmb.getTargetTriple().str();
 
     llvm::orc::LLJITBuilder builder;
@@ -960,7 +1096,7 @@ void configureEventListeners(llvm::orc::RTDyldObjectLinkingLayer& object_layer)
     configureProcessSymbolResolution(*jit);
     registerExternalCallSymbols(*jit);
 
-    configureTransformLayer(jit->getIRTransformLayer(), options);
+    configureTransformLayer(jit->getIRTransformLayer(), options, target, strict_fp_contraction);
 
     return jit;
 }
@@ -981,6 +1117,7 @@ struct JITEngine::Impl {
     std::string data_layout{};
     std::string cpu_name{};
     std::string cpu_features{};
+    std::string codegen_options{};
 #endif
 };
 
@@ -1022,16 +1159,23 @@ std::unique_ptr<JITEngine> JITEngine::create(const JITOptions& options)
             engine->impl_->object_cache = std::move(cache);
         }
 
+        // Log target overrides once per process, not once per engine.
+        static std::atomic<bool> target_logged{false};
+        const bool log_target = !target_logged.exchange(true);
+        const JITTargetSelection target = selectJITTarget(log_target);
+        const bool strict_fp_contraction = strictFPContractionRequested();
+
         std::string triple;
         std::string data_layout;
-        auto jit = createLLJIT(options, triple, data_layout,
+        auto jit = createLLJIT(options, target, strict_fp_contraction, triple, data_layout,
                                engine->impl_->object_cache.get());
 
         engine->impl_->jit = std::move(jit);
         engine->impl_->target_triple = std::move(triple);
         engine->impl_->data_layout = std::move(data_layout);
-        engine->impl_->cpu_name = hostCPUName();
-        engine->impl_->cpu_features = hostCPUFeaturesString();
+        engine->impl_->cpu_name = target.cpu_name;
+        engine->impl_->cpu_features = target.cpu_features;
+        engine->impl_->codegen_options = strict_fp_contraction ? "fp-contract=off" : "";
 
         {
             const auto& hw = hardwareProfile();
@@ -1042,7 +1186,10 @@ std::unique_ptr<JITEngine> JITEngine::create(const JITOptions& options)
                         ", fp_regs=" + std::to_string(hw.fp_register_count) +
                         ", simd=" + std::to_string(hw.simd_width_bytes * 8) + "b" +
                         ", target_aware=" + std::string(hw.target_aware_pipeline ? "true" : "false") +
-                        ", max_fused_terms=" + std::to_string(hw.maxFusedTerms()) + ")");
+                        ", max_fused_terms=" + std::to_string(hw.maxFusedTerms()) +
+                        ", cpu=" + engine->impl_->cpu_name +
+                        (target.generic_level ? std::string(" (SVMP_JIT_CPU)") : std::string()) +
+                        (strict_fp_contraction ? std::string(", fp_contract=off") : std::string()) + ")");
         }
 
         return engine;
@@ -1249,6 +1396,17 @@ std::string JITEngine::cpuFeaturesString() const
     std::lock_guard<std::mutex> lock(mutex_);
     if (impl_ == nullptr) return {};
     return impl_->cpu_features;
+#else
+    return {};
+#endif
+}
+
+std::string JITEngine::codegenOptionsString() const
+{
+#if SVMP_FE_ENABLE_LLVM_JIT
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (impl_ == nullptr) return {};
+    return impl_->codegen_options;
 #else
     return {};
 #endif

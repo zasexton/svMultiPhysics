@@ -65,8 +65,15 @@ public:
 
     [[nodiscard]] std::string targetTriple() const;
     [[nodiscard]] std::string dataLayoutString() const;
+    /// Code-generation target: the host CPU and its features, or the generic
+    /// x86-64 level selected by SVMP_JIT_CPU.  Both are cache-key inputs.
     [[nodiscard]] std::string cpuName() const;
     [[nodiscard]] std::string cpuFeaturesString() const;
+
+    /// Non-default code-generation options that change the emitted code
+    /// (currently "fp-contract=off" for SVMP_JIT_FP_CONTRACT=off); empty by
+    /// default.  Mixed into kernel cache keys only when non-empty.
+    [[nodiscard]] std::string codegenOptionsString() const;
 
     /**
      * @brief Directory holding this engine's on-disk cached objects.
