@@ -219,6 +219,11 @@ std::vector<ReplayConfig> allConfigs()
     configs.push_back({"fsils-gmres-rcs", "fsils", [](const FsilsSystemSnapshot& s) {
                            return baseFsilsOptions(s);
                        }});
+    configs.push_back({"fsils-gmres-rcs-est", "fsils", [](const FsilsSystemSnapshot& s) {
+                           auto o = baseFsilsOptions(s);
+                           o.fsils_gmres_unscaled_residual_estimate = true;
+                           return o;
+                       }});
     auto right_pc = [](RightPreconditionerType pc, bool reuse) {
         return [pc, reuse](const FsilsSystemSnapshot& s) {
             auto o = baseFsilsOptions(s);

@@ -528,6 +528,12 @@ class FSILS_subLsType
     /// Null keeps the unpreconditioned kernel.
     const FSILS_rightPreconditioner* right_pc{nullptr};
 
+    /// End a GMRES cycle once the unscaled residual, estimated from the
+    /// Arnoldi residual and the unscaled/scaled ratio at the cycle start,
+    /// meets the target (verified at the next cycle start).  Always used with
+    /// a right preconditioner; opt-in otherwise.
+    bool estimate_unscaled_residual{false};
+
     /// Schur-complement preconditioner selection used by the BlockSchur path.
     SchurPreconditionerType schur_preconditioner{SchurPreconditionerType::ALGEBRAIC_SHAT};
 

@@ -2288,6 +2288,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             // coupled rank-one solves so the first pass does not stop while the
             // true FE residual is still far from the requested tolerance.
             ls.RI.exact_convergence = has_native_rank_one_updates;
+            ls.RI.estimate_unscaled_residual = options_.fsils_gmres_unscaled_residual_estimate;
             if (options_.right_preconditioner != RightPreconditionerType::None &&
                 !has_native_rank_one_updates && dof > 1) {
                 if (!krylov_pc_) {
