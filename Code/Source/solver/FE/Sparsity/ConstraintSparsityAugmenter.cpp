@@ -1081,10 +1081,12 @@ void ConstraintSparsityAugmenter::augmentEliminationFill(SparsityPattern& patter
     for (GlobalIndex row = 0; row < n_rows; ++row) {
         auto& row_set = pattern.row_sets_[static_cast<std::size_t>(row)];
 
-        // A row without constrained columns gains nothing here; skip the
-        // snapshot for it.
-        if (std::none_of(row_set.begin(), row_set.end(),
-                         [&](GlobalIndex col) { return masters_of(col) != nullptr; })) {
+        // A row without a column constrained to masters gains nothing here
+        // (Dirichlet columns have no masters); skip the snapshot for it.
+        if (std::none_of(row_set.begin(), row_set.end(), [&](GlobalIndex col) {
+                const auto* masters = masters_of(col);
+                return masters != nullptr && !masters->empty();
+            })) {
             continue;
         }
 
@@ -1122,7 +1124,7 @@ void ConstraintSparsityAugmenter::augmentEliminationFill(SparsityPattern& patter
         if (cdof < 0 || cdof >= n_rows) continue;
         
         const auto* constrained_masters = masters_of(cdof);
-        if (constrained_masters == nullptr) continue;
+        if (constrained_masters == nullptr || constrained_masters->empty()) continue;
         const auto& masters = *constrained_masters;
         
         // Snapshot of columns in the constrained row u_s
