@@ -32,6 +32,7 @@
 #include "Basis/NodeOrderingConventions.h"
 #include "Constraints/AffineConstraints.h"
 #include "Constraints/LevelSetActiveSideVertexDirichletConstraint.h"
+#include "Constraints/SmallCutAggregationCellIndex.h"
 #include "Constraints/SmallCutAggregationConstraint.h"
 #include "Constraints/VertexDirichletConstraint.h"
 #include "Dofs/EntityDofMap.h"
@@ -3869,6 +3870,72 @@ TEST(SmallCutAggregationConstraint, ReuseFollowsChangesOfTheIncomingConstraintSe
     EXPECT_EQ(summarizeAggregationPublication(system).line_words,
               unpinned.line_words);
 #endif
+}
+
+// ============================================================================
+// Sorted cell-key tables of one aggregation refresh
+// ============================================================================
+
+TEST(SmallCutAggregationCellIndex, LocalTableIteratesAndFindsInKeyOrder)
+{
+    detail::SmallCutAggregationLocalCellTable table;
+    table.append({7, 9, 12}, 3);
+    table.append({1, 4, 5}, 11);
+    table.append({1, 4, 6}, 0);
+    table.append({2}, 8);
+    ASSERT_TRUE(table.finalize());
+    ASSERT_EQ(table.size(), 4u);
+
+    // Ascending lexicographic key order, as a std::map<CellKey, ...>.
+    std::vector<GlobalIndex> cells;
+    detail::SmallCutAggregationCellKey previous;
+    for (const auto& [key, cell] : table) {
+        EXPECT_TRUE(previous.empty() || previous < key);
+        previous = key;
+        cells.push_back(cell);
+    }
+    EXPECT_EQ(cells, (std::vector<GlobalIndex>{11, 0, 8, 3}));
+
+    const auto hit = table.find({1, 4, 6});
+    ASSERT_NE(hit, table.end());
+    EXPECT_EQ(hit->second, 0);
+    EXPECT_EQ(table.find({1, 4}), table.end());         // prefix of a key
+    EXPECT_EQ(table.find({1, 4, 5, 6}), table.end());   // extension of a key
+    EXPECT_EQ(table.find({0}), table.end());            // before every key
+    EXPECT_EQ(table.find({9}), table.end());            // after every key
+}
+
+TEST(SmallCutAggregationCellIndex, LocalTableRejectsSharedKeys)
+{
+    detail::SmallCutAggregationLocalCellTable table;
+    table.append({3, 4}, 1);
+    table.append({1, 2}, 2);
+    table.append({3, 4}, 5);
+    EXPECT_FALSE(table.finalize());
+
+    detail::SmallCutAggregationLocalCellTable empty;
+    EXPECT_TRUE(empty.finalize());
+    EXPECT_EQ(empty.find({1}), empty.end());
+}
+
+TEST(SmallCutAggregationCellIndex, GlobalIndexMatchesKeyPositions)
+{
+    const std::vector<detail::SmallCutAggregationCellKey> keys = {
+        {1, 2, 3}, {1, 2, 4}, {1, 5}, {2, 3, 4}, {10}};
+    detail::SmallCutAggregationCellIndex index(keys);
+    ASSERT_EQ(index.size(), keys.size());
+    EXPECT_FALSE(index.empty());
+    for (std::size_t i = 0; i < keys.size(); ++i) {
+        EXPECT_EQ(index.find(keys[i]), i);
+        EXPECT_EQ(index.key(i), keys[i]);
+    }
+    EXPECT_EQ(index.find({1, 2}), detail::SmallCutAggregationCellIndex::npos);
+    EXPECT_EQ(index.find({1, 3}), detail::SmallCutAggregationCellIndex::npos);
+    EXPECT_EQ(index.find({11}), detail::SmallCutAggregationCellIndex::npos);
+
+    const detail::SmallCutAggregationCellIndex none;
+    EXPECT_TRUE(none.empty());
+    EXPECT_EQ(none.find({1}), detail::SmallCutAggregationCellIndex::npos);
 }
 
 } // namespace test

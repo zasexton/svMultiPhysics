@@ -12,6 +12,7 @@
 #include "Basis/LagrangeBasis.h"
 #include "Basis/NodeOrderingConventions.h"
 #include "Constraints/AffineConstraints.h"
+#include "Constraints/SmallCutAggregationCellIndex.h"
 #include "Core/Logger.h"
 #include "Dofs/EntityDofMap.h"
 #include "Elements/ReferenceElement.h"
@@ -203,10 +204,17 @@ struct GlobalCandidateSupport {
 
 using CellKey = std::vector<GlobalIndex>;
 
+// Root candidate of the global cut-band search: `cell` indexes the sorted
+// communicator-global classified cells (see ClassifiedCellIndex), so
+// (distance, cell) orders exactly like (distance, key).
 struct GlobalRootCandidate {
-    CellKey key{};
+    std::size_t cell{0u};
     std::size_t distance{std::numeric_limits<std::size_t>::max()};
 };
+
+// Sorted cell-key tables (see SmallCutAggregationCellIndex.h).
+using LocalCellKeyTable = detail::SmallCutAggregationLocalCellTable;
+using ClassifiedCellIndex = detail::SmallCutAggregationCellIndex;
 
 struct RootedLineValidation {
     bool valid{false};
@@ -4239,8 +4247,13 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         std::sort(key.begin(), key.end());
         return key;
     };
-    std::map<CellKey, GlobalIndex> local_cell_by_key;
-    std::vector<std::pair<CellKey, CellClass>> ordered_cell_classes;
+    LocalCellKeyTable local_cell_by_key;
+    struct OrderedCellClass {
+        const CellKey* key{nullptr};
+        GlobalIndex cell{-1};
+        CellClass klass{};
+    };
+    std::vector<OrderedCellClass> ordered_cell_classes;
     std::vector<std::int64_t> local_cell_class_words;
     std::exception_ptr local_cell_declaration_exception;
     try {
@@ -4348,31 +4361,48 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         classify(inactive_side);
     }
 
+    local_cell_by_key.reserve(static_cast<std::size_t>(
+        std::max<GlobalIndex>(GlobalIndex{0}, mesh.numCells())));
     mesh.forEachCell([&](GlobalIndex cell) {
         auto key = cell_key(cell);
         if (key.empty()) {
             return;
         }
-        const auto [it, inserted] =
-            local_cell_by_key.emplace(std::move(key), cell);
-        if (!inserted && it->second != cell) {
-            throw std::runtime_error(
-                "SmallCutAggregationConstraint: duplicate local cells have "
-                "the same global field-DOF support");
-        }
+        local_cell_by_key.append(std::move(key), cell);
     });
+    if (!local_cell_by_key.finalize()) {
+        throw std::runtime_error(
+            "SmallCutAggregationConstraint: duplicate local cells have "
+            "the same global field-DOF support");
+    }
 
-    ordered_cell_classes.reserve(cell_class.size());
+    // Classified cells in ascending key order, read from the sorted local
+    // table instead of recomputing and sorting their keys. Every classified
+    // cell with field DOFs must be found there.
+    std::size_t classified_cells_with_support = 0u;
     for (const auto& [cell, klass] : cell_class) {
-        auto key = cell_key(cell);
-        if (!key.empty()) {
-            ordered_cell_classes.emplace_back(std::move(key), klass);
+        static_cast<void>(klass);
+        if (!dh.getCellDofs(cell).empty()) {
+            ++classified_cells_with_support;
         }
     }
-    std::sort(ordered_cell_classes.begin(), ordered_cell_classes.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
+    ordered_cell_classes.reserve(classified_cells_with_support);
+    for (const auto& [key, cell] : local_cell_by_key) {
+        const auto klass = cell_class.find(cell);
+        if (klass != cell_class.end()) {
+            ordered_cell_classes.push_back(
+                OrderedCellClass{&key, cell, klass->second});
+        }
+    }
+    if (ordered_cell_classes.size() != classified_cells_with_support) {
+        throw std::runtime_error(
+            "SmallCutAggregationConstraint: classified cell has no "
+            "local cell-key resolution");
+    }
 
-    for (const auto& [key, klass] : ordered_cell_classes) {
+    for (const auto& ordered : ordered_cell_classes) {
+        const auto& key = *ordered.key;
+        const auto& klass = ordered.klass;
         const std::int64_t flags =
             (klass.full_active ? 1 : 0) | (klass.cut ? 2 : 0);
         local_cell_class_words.push_back(flags);
@@ -4381,13 +4411,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         for (const auto dof : key) {
             local_cell_class_words.push_back(static_cast<std::int64_t>(dof));
         }
-        const auto local_cell = local_cell_by_key.find(key);
-        if (local_cell == local_cell_by_key.end()) {
-            throw std::runtime_error(
-                "SmallCutAggregationConstraint: classified cell has no "
-                "local cell-key resolution");
-        }
-        const auto cell = local_cell->second;
+        const auto cell = ordered.cell;
         const auto measure = local_active_cell_measures.find(cell);
         const bool active = klass.full_active || klass.cut;
         if (active &&
@@ -4485,7 +4509,6 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         gathered_cell_classes.displacements = {0};
     }
 
-    std::map<CellKey, CellClass> global_cell_classes;
     struct ActiveCellMeasureDeclaration {
         GlobalIndex physical_cell_gid{INVALID_GLOBAL_INDEX};
         std::size_t rule_count{0u};
@@ -4493,21 +4516,26 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         std::vector<std::uint64_t> stable_rule_ids{};
         int provider_rank{-1};
     };
-    std::map<CellKey, std::vector<ActiveCellMeasureDeclaration>>
-        active_cell_measure_declarations;
-    std::map<CellKey, GlobalIndex> global_physical_cell_gids;
-    std::map<CellKey, Real> global_active_cell_physical_volumes;
-    std::map<CellKey, std::vector<std::uint64_t>>
-        global_active_cell_rule_ids;
-    std::map<CellKey, int> global_active_cell_measure_provider_ranks;
-    // A declaration is a positive classification fact even when flags==0
-    // (inactive-full). Every rank retaining the same cell must therefore
-    // report the exact same fact; OR-combining flags would silently accept,
-    // for example, inactive-full on one rank and cut on another.
-    std::map<CellKey, std::int64_t> global_cell_class_flags;
+    struct DecodedCellDeclaration {
+        CellKey key{};
+        std::int64_t flags{0};
+        ActiveCellMeasureDeclaration measure{};
+    };
+    // Communicator-global classified cells (sorted keys) and per-cell
+    // arrays indexed like them. The measure arrays hold the canonical
+    // provider's declaration for active cells only.
+    ClassifiedCellIndex classified_cells;
+    // Global index of each local_cell_by_key entry (npos when unclassified).
+    std::vector<std::size_t> local_cell_global_index;
+    std::vector<CellClass> global_cell_class_of;
+    std::vector<GlobalIndex> global_physical_cell_gid_of;
+    std::vector<Real> global_active_cell_physical_volume_of;
+    std::vector<std::vector<std::uint64_t>> global_active_cell_rule_ids_of;
+    std::vector<int> global_active_cell_measure_provider_rank_of;
     std::uint64_t local_owned_mesh_cells = 0u;
     std::exception_ptr local_class_decode_exception;
     try {
+    std::vector<DecodedCellDeclaration> decoded_cell_declarations;
     for (int rank = 0; rank < aggregation_world_size; ++rank) {
         std::size_t position = static_cast<std::size_t>(
             gathered_cell_classes.displacements[static_cast<std::size_t>(rank)]);
@@ -4599,66 +4627,91 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                     "invalid_active_feature_volume cell class and physical "
                     "measure declaration disagree");
             }
-            const auto [flags_it, inserted] =
-                global_cell_class_flags.emplace(key, flags);
-            if (!inserted && flags_it->second != flags) {
+            decoded_cell_declarations.push_back(DecodedCellDeclaration{
+                .key = std::move(key),
+                .flags = flags,
+                .measure = ActiveCellMeasureDeclaration{
+                    .physical_cell_gid = physical_cell_gid,
+                    .rule_count = static_cast<std::size_t>(rule_count_word),
+                    .physical_volume = physical_volume,
+                    .stable_rule_ids = std::move(stable_rule_ids),
+                    .provider_rank = rank,
+                }});
+        }
+    }
+    // Group the declarations of each cell; the stable sort keeps them in
+    // ascending provider rank within a cell.
+    std::stable_sort(decoded_cell_declarations.begin(),
+                     decoded_cell_declarations.end(),
+                     [](const DecodedCellDeclaration& lhs,
+                        const DecodedCellDeclaration& rhs) {
+                         return lhs.key < rhs.key;
+                     });
+    std::vector<std::pair<std::size_t, std::size_t>> declaration_groups;
+    for (std::size_t first = 0u; first < decoded_cell_declarations.size();) {
+        std::size_t last = first + 1u;
+        while (last < decoded_cell_declarations.size() &&
+               decoded_cell_declarations[last].key ==
+                   decoded_cell_declarations[first].key) {
+            ++last;
+        }
+        declaration_groups.emplace_back(first, last);
+        first = last;
+    }
+    // A declaration is a positive classification fact even when flags==0
+    // (inactive-full). Every rank retaining the same cell must therefore
+    // report the exact same fact; OR-combining flags would silently accept,
+    // for example, inactive-full on one rank and cut on another.
+    for (const auto& [first, last] : declaration_groups) {
+        for (std::size_t k = first + 1u; k < last; ++k) {
+            if (decoded_cell_declarations[k].flags !=
+                decoded_cell_declarations[first].flags) {
                 throw std::runtime_error(
                     "SmallCutAggregationConstraint: diagnostic="
                     "inconsistent_distributed_cell_classification field='" +
                     rec.name + "' communicator ranks reported different "
                     "class flags for the same cell");
             }
-            auto& global = global_cell_classes[key];
-            global.full_active = global.full_active || (flags & 1) != 0;
-            global.cut = global.cut || (flags & 2) != 0;
-            if (active) {
-                active_cell_measure_declarations[key].push_back(
-                    ActiveCellMeasureDeclaration{
-                        .physical_cell_gid = physical_cell_gid,
-                        .rule_count =
-                            static_cast<std::size_t>(rule_count_word),
-                        .physical_volume = physical_volume,
-                        .stable_rule_ids =
-                            std::move(stable_rule_ids),
-                        .provider_rank = rank,
-                    });
-            }
         }
     }
-    const auto inconsistent_cell = std::find_if(
-        global_cell_classes.begin(), global_cell_classes.end(),
-        [](const auto& entry) {
-            return entry.second.full_active && entry.second.cut;
-        });
-    if (inconsistent_cell != global_cell_classes.end()) {
-        throw std::runtime_error(
-            "SmallCutAggregationConstraint: diagnostic="
-            "inconsistent_distributed_cell_classification field='" +
-            rec.name + "' communicator ranks classified the same cell as "
-            "both full-active and cut");
+    for (const auto& [first, last] : declaration_groups) {
+        static_cast<void>(last);
+        if (decoded_cell_declarations[first].flags == 3) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: diagnostic="
+                "inconsistent_distributed_cell_classification field='" +
+                rec.name + "' communicator ranks classified the same cell as "
+                "both full-active and cut");
+        }
     }
 
-    for (const auto& [key, klass] : global_cell_classes) {
+    {
+        std::vector<CellKey> classified_keys;
+        classified_keys.reserve(declaration_groups.size());
+        for (const auto& [first, last] : declaration_groups) {
+            static_cast<void>(last);
+            classified_keys.push_back(decoded_cell_declarations[first].key);
+        }
+        classified_cells = ClassifiedCellIndex(std::move(classified_keys));
+    }
+    const auto n_classified = classified_cells.size();
+    global_cell_class_of.assign(n_classified, CellClass{});
+    global_physical_cell_gid_of.assign(n_classified, INVALID_GLOBAL_INDEX);
+    global_active_cell_physical_volume_of.assign(n_classified, Real{0.0});
+    global_active_cell_rule_ids_of.assign(n_classified, {});
+    global_active_cell_measure_provider_rank_of.assign(n_classified, -1);
+    for (std::size_t index = 0u; index < n_classified; ++index) {
+        const auto [first, last] = declaration_groups[index];
+        const auto flags = decoded_cell_declarations[first].flags;
+        auto& klass = global_cell_class_of[index];
+        klass.full_active = (flags & 1) != 0;
+        klass.cut = (flags & 2) != 0;
         if (!klass.full_active && !klass.cut) {
             continue;
         }
-        auto declarations = active_cell_measure_declarations.find(key);
-        if (declarations == active_cell_measure_declarations.end() ||
-            declarations->second.empty()) {
-            throw std::runtime_error(
-                "SmallCutAggregationConstraint: diagnostic="
-                "invalid_active_feature_volume active cell has no "
-                "communicator-visible measure provider");
-        }
-        auto& providers = declarations->second;
-        std::sort(
-            providers.begin(),
-            providers.end(),
-            [](const auto& lhs, const auto& rhs) {
-                return lhs.provider_rank < rhs.provider_rank;
-        });
-        const auto& canonical = providers.front();
-        for (const auto& provider : providers) {
+        const auto& canonical = decoded_cell_declarations[first].measure;
+        for (std::size_t k = first; k < last; ++k) {
+            const auto& provider = decoded_cell_declarations[k].measure;
             if (provider.physical_cell_gid !=
                     canonical.physical_cell_gid ||
                 provider.rule_count != canonical.rule_count ||
@@ -4672,14 +4725,31 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                     "providers disagree for the same physical cell");
             }
         }
-        global_physical_cell_gids.emplace(
-            key, canonical.physical_cell_gid);
-        global_active_cell_physical_volumes.emplace(
-            key, canonical.physical_volume);
-        global_active_cell_rule_ids.emplace(
-            key, canonical.stable_rule_ids);
-        global_active_cell_measure_provider_ranks.emplace(
-            key, canonical.provider_rank);
+        global_physical_cell_gid_of[index] = canonical.physical_cell_gid;
+        global_active_cell_physical_volume_of[index] =
+            canonical.physical_volume;
+        global_active_cell_rule_ids_of[index] = canonical.stable_rule_ids;
+        global_active_cell_measure_provider_rank_of[index] =
+            canonical.provider_rank;
+    }
+    {
+        // Both sequences are sorted by key: one merge pass.
+        local_cell_global_index.assign(local_cell_by_key.size(),
+                                       ClassifiedCellIndex::npos);
+        std::size_t global_index = 0u;
+        std::size_t local_index = 0u;
+        for (const auto& [key, cell] : local_cell_by_key) {
+            static_cast<void>(cell);
+            while (global_index < n_classified &&
+                   classified_cells.key(global_index) < key) {
+                ++global_index;
+            }
+            if (global_index < n_classified &&
+                classified_cells.key(global_index) == key) {
+                local_cell_global_index[local_index] = global_index;
+            }
+            ++local_index;
+        }
     }
 
     for (const auto& [key, cell] : local_cell_by_key) {
@@ -4693,7 +4763,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     }
     coordinateLocalPhaseFailure(local_class_decode_exception,
                                 "cell_class_decode_and_owned_count");
-    if (global_cell_classes.empty()) {
+    if (classified_cells.empty()) {
         throw std::runtime_error(
             "SmallCutAggregationConstraint: diagnostic="
             "missing_marker_cell_classification generated marker has no "
@@ -4712,7 +4782,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
 #endif
     const bool communicator_cell_classification_complete =
         communicator_owned_mesh_cells ==
-        static_cast<std::uint64_t>(global_cell_classes.size());
+        static_cast<std::uint64_t>(classified_cells.size());
     if (!communicator_cell_classification_complete &&
         runtime_options.max_lines ==
             std::numeric_limits<std::size_t>::max()) {
@@ -4721,7 +4791,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             "incomplete_distributed_aggregation_context reason="
             "global_root_traversal_requires_all_owned_cell_classification "
             "classified_cells=" +
-            std::to_string(global_cell_classes.size()) +
+            std::to_string(classified_cells.size()) +
             " communicator_owned_cells=" +
             std::to_string(communicator_owned_mesh_cells));
     }
@@ -4734,8 +4804,10 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     std::vector<std::int64_t> local_cell_visibility_words;
     std::exception_ptr local_cell_visibility_exception;
     try {
+    std::size_t visibility_local_index = 0u;
     for (const auto& [key, cell] : local_cell_by_key) {
-        if (global_cell_classes.count(key) == 0u) {
+        if (local_cell_global_index[visibility_local_index++] ==
+            ClassifiedCellIndex::npos) {
             continue;
         }
         local_cell_visibility_words.push_back(mesh.isOwnedCell(cell) ? 1 : 0);
@@ -4765,8 +4837,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             static_cast<int>(local_cell_visibility_words.size())};
         gathered_cell_visibility.displacements = {0};
     }
-    std::map<CellKey, std::size_t> global_cell_owner_counts;
-    std::map<CellKey, int> global_cell_owner_ranks;
+    std::vector<std::size_t> global_cell_owner_count_of;
+    std::vector<int> global_cell_owner_rank_of;
     const bool slave_all_cut = runtime_options.slave_all_cut;
     using FaceKey = std::vector<GlobalIndex>;
     struct OwnedCellFaces {
@@ -4778,6 +4850,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     std::vector<std::int64_t> local_face_words;
     std::exception_ptr local_owner_face_exception;
     try {
+    global_cell_owner_count_of.assign(classified_cells.size(), 0u);
+    global_cell_owner_rank_of.assign(classified_cells.size(), -1);
     for (int rank = 0; rank < aggregation_world_size; ++rank) {
         std::size_t position = static_cast<std::size_t>(
             gathered_cell_visibility
@@ -4805,22 +4879,25 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 key.push_back(static_cast<GlobalIndex>(
                     gathered_cell_visibility.words[position++]));
             }
-            global_cell_owner_counts[key] += owned ? 1u : 0u;
-            if (owned) {
-                global_cell_owner_ranks.emplace(key, rank);
+            // Only classified cells are declared; the first owner is kept.
+            const auto index = classified_cells.find(key);
+            if (index != ClassifiedCellIndex::npos) {
+                global_cell_owner_count_of[index] += owned ? 1u : 0u;
+                if (owned && global_cell_owner_rank_of[index] < 0) {
+                    global_cell_owner_rank_of[index] = rank;
+                }
             }
         }
     }
-    for (const auto& [key, klass] : global_cell_classes) {
-        static_cast<void>(klass);
-        if (global_cell_owner_counts[key] != 1u) {
+    for (std::size_t index = 0u; index < classified_cells.size(); ++index) {
+        if (global_cell_owner_count_of[index] != 1u) {
             throw std::runtime_error(
                 "SmallCutAggregationConstraint: diagnostic="
                 "incomplete_distributed_aggregation_halo reason="
                 "global_cell_owner_count:" +
-                std::to_string(global_cell_owner_counts[key]));
+                std::to_string(global_cell_owner_count_of[index]));
         }
-        if (global_cell_owner_ranks.count(key) != 1u) {
+        if (global_cell_owner_rank_of[index] < 0) {
             throw std::logic_error(
                 "SmallCutAggregationConstraint: canonical cell owner rank "
                 "was not retained");
@@ -4829,10 +4906,14 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
 
     // Copy communicator-global classifications onto every local geometry
     // holder, including ghosts whose cut rules were owner-filtered.
-    for (const auto& [key, cell] : local_cell_by_key) {
-        const auto found = global_cell_classes.find(key);
-        if (found != global_cell_classes.end()) {
-            cell_class[cell] = found->second;
+    {
+        std::size_t local_index = 0u;
+        for (const auto& [key, cell] : local_cell_by_key) {
+            static_cast<void>(key);
+            const auto index = local_cell_global_index[local_index++];
+            if (index != ClassifiedCellIndex::npos) {
+                cell_class[cell] = global_cell_class_of[index];
+            }
         }
     }
 
@@ -4845,8 +4926,10 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     // corner-DOF signature. Matching signatures therefore provide a complete,
     // communicator-verifiable graph induced by the classified cells without
     // any inter-owner halo assumption.
+    std::size_t face_local_index = 0u;
     for (const auto& [key, cell] : local_cell_by_key) {
-        if (global_cell_classes.count(key) == 0u ||
+        if (local_cell_global_index[face_local_index++] ==
+                ClassifiedCellIndex::npos ||
             !mesh.isOwnedCell(cell)) {
             continue;
         }
@@ -4947,11 +5030,14 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         gathered_faces.displacements = {0};
     }
 
-    std::map<CellKey, std::set<CellKey>> global_neighbors;
+    // Face-neighbor lists per classified cell, in ascending index (= key)
+    // order like the std::set<CellKey> values they replace.
+    std::vector<std::vector<std::size_t>> global_neighbors;
     std::exception_ptr local_face_decode_exception;
     try {
-    std::map<CellKey, std::vector<FaceKey>> global_owned_faces;
-    std::map<FaceKey, std::vector<CellKey>> cells_by_face;
+    global_neighbors.assign(classified_cells.size(), {});
+    std::vector<char> has_owned_faces(classified_cells.size(), 0);
+    std::vector<std::pair<FaceKey, std::size_t>> face_incidences;
     auto read_serialized_key = [](const GatheredInt64Words& gathered,
                                   std::size_t& position,
                                   std::size_t end,
@@ -5010,21 +5096,26 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 faces.push_back(read_serialized_key(
                     gathered_faces, position, end, "owner-face signature"));
             }
-            const auto [record_it, inserted] =
-                global_owned_faces.emplace(cell, faces);
-            if (!inserted) {
+            // Owners declare only communicator-classified cells.
+            const auto cell_index = classified_cells.find(cell);
+            if (cell_index == ClassifiedCellIndex::npos) {
+                throw std::logic_error(
+                    "SmallCutAggregationConstraint: owner-face declaration "
+                    "names an unclassified cell");
+            }
+            if (has_owned_faces[cell_index] != 0) {
                 throw std::runtime_error(
                     "SmallCutAggregationConstraint: classified cell has "
                     "multiple owner-face declarations");
             }
-            for (const auto& face : record_it->second) {
-                cells_by_face[face].push_back(record_it->first);
+            has_owned_faces[cell_index] = 1;
+            for (auto& face : faces) {
+                face_incidences.emplace_back(std::move(face), cell_index);
             }
         }
     }
-    for (const auto& [cell, klass] : global_cell_classes) {
-        static_cast<void>(klass);
-        if (global_owned_faces.count(cell) != 1u) {
+    for (std::size_t index = 0u; index < classified_cells.size(); ++index) {
+        if (has_owned_faces[index] == 0) {
             throw std::runtime_error(
                 "SmallCutAggregationConstraint: diagnostic="
                 "incomplete_distributed_aggregation_halo reason="
@@ -5032,19 +5123,39 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         }
     }
 
-    for (auto& [face, cells] : cells_by_face) {
-        static_cast<void>(face);
-        std::sort(cells.begin(), cells.end());
-        cells.erase(std::unique(cells.begin(), cells.end()), cells.end());
-        if (cells.size() > 2u) {
-            throw std::runtime_error(
-                "SmallCutAggregationConstraint: non-manifold classified "
-                "band face has more than two incident cells");
+    // Faces in ascending signature order, each with its incident cells in
+    // ascending index order.
+    std::sort(face_incidences.begin(), face_incidences.end());
+    for (std::size_t first = 0u; first < face_incidences.size();) {
+        std::size_t last = first + 1u;
+        while (last < face_incidences.size() &&
+               face_incidences[last].first == face_incidences[first].first) {
+            ++last;
         }
-        if (cells.size() == 2u) {
-            global_neighbors[cells[0]].insert(cells[1]);
-            global_neighbors[cells[1]].insert(cells[0]);
+        std::size_t distinct_cells = 0u;
+        std::array<std::size_t, 2> incident{};
+        for (std::size_t k = first; k < last; ++k) {
+            if (k > first &&
+                face_incidences[k].second == face_incidences[k - 1u].second) {
+                continue;
+            }
+            if (distinct_cells == 2u) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: non-manifold classified "
+                    "band face has more than two incident cells");
+            }
+            incident[distinct_cells++] = face_incidences[k].second;
         }
+        if (distinct_cells == 2u) {
+            global_neighbors[incident[0]].push_back(incident[1]);
+            global_neighbors[incident[1]].push_back(incident[0]);
+        }
+        first = last;
+    }
+    for (auto& neighbors : global_neighbors) {
+        std::sort(neighbors.begin(), neighbors.end());
+        neighbors.erase(std::unique(neighbors.begin(), neighbors.end()),
+                        neighbors.end());
     }
     } catch (...) {
         local_face_decode_exception = std::current_exception();
@@ -5058,7 +5169,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     // reduction.
     std::vector<SmallCutAggregationActiveFeatureReport>
         canonical_active_features;
-    std::map<CellKey, GlobalIndex> active_feature_by_cell;
+    // Canonical feature ID per classified cell (INVALID for inactive cells).
+    std::vector<GlobalIndex> active_feature_of;
     std::vector<SmallCutAggregationProlongationCell>
         canonical_active_cells;
     std::size_t canonical_rooted_active_feature_count = 0u;
@@ -5066,82 +5178,62 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     Real canonical_rootless_active_physical_volume = 0.0;
     std::exception_ptr local_feature_exception;
     try {
+    const auto n_classified = classified_cells.size();
+    const auto is_active_cell = [&](std::size_t cell) {
+        return global_cell_class_of[cell].full_active ||
+               global_cell_class_of[cell].cut;
+    };
     std::set<GlobalIndex> active_physical_cell_gids;
-    for (const auto& [cell, klass] : global_cell_classes) {
-        if (!klass.full_active && !klass.cut) {
+    for (std::size_t cell = 0u; cell < n_classified; ++cell) {
+        if (!is_active_cell(cell)) {
             continue;
         }
-        const auto gid = global_physical_cell_gids.find(cell);
-        const auto volume =
-            global_active_cell_physical_volumes.find(cell);
-        if (gid == global_physical_cell_gids.end() ||
-            volume == global_active_cell_physical_volumes.end() ||
-            gid->second < 0 ||
-            !active_physical_cell_gids.insert(gid->second).second) {
+        const auto gid = global_physical_cell_gid_of[cell];
+        if (gid < 0 || !active_physical_cell_gids.insert(gid).second) {
             throw std::runtime_error(
                 "SmallCutAggregationConstraint: diagnostic="
                 "invalid_active_feature_volume communicator active cells "
                 "have missing or duplicate physical cell IDs");
         }
     }
-    std::set<CellKey> visited_active_cells;
-    for (const auto& [seed, seed_class] : global_cell_classes) {
-        if ((!seed_class.full_active && !seed_class.cut) ||
-            visited_active_cells.count(seed) > 0u) {
+    active_feature_of.assign(n_classified, INVALID_GLOBAL_INDEX);
+    std::vector<char> visited_active_cells(n_classified, 0);
+    std::vector<std::size_t> queue;
+    std::vector<std::size_t> component_cells;
+    std::vector<std::pair<GlobalIndex, std::size_t>> component_order;
+    for (std::size_t seed = 0u; seed < n_classified; ++seed) {
+        if (!is_active_cell(seed) || visited_active_cells[seed] != 0) {
             continue;
         }
 
-        std::deque<CellKey> queue;
-        std::vector<CellKey> component_cells;
+        queue.clear();
+        component_cells.clear();
         queue.push_back(seed);
-        visited_active_cells.insert(seed);
-        while (!queue.empty()) {
-            auto cell = std::move(queue.front());
-            queue.pop_front();
+        visited_active_cells[seed] = 1;
+        for (std::size_t head = 0u; head < queue.size(); ++head) {
+            const auto cell = queue[head];
             component_cells.push_back(cell);
-            const auto neighbors = global_neighbors.find(cell);
-            if (neighbors == global_neighbors.end()) {
-                continue;
-            }
-            for (const auto& neighbor : neighbors->second) {
-                const auto neighbor_class =
-                    global_cell_classes.find(neighbor);
-                if (neighbor_class == global_cell_classes.end() ||
-                    (!neighbor_class->second.full_active &&
-                     !neighbor_class->second.cut)) {
+            for (const auto neighbor : global_neighbors[cell]) {
+                if (!is_active_cell(neighbor)) {
                     continue;
                 }
-                if (visited_active_cells.insert(neighbor).second) {
+                if (visited_active_cells[neighbor] == 0) {
+                    visited_active_cells[neighbor] = 1;
                     queue.push_back(neighbor);
                 }
             }
         }
 
-        // Order by (physical cell GID, key). Look each GID up once instead
-        // of twice per comparison; the pairs are unique, so the order is the
-        // same for any sort.
-        {
-            std::vector<std::pair<GlobalIndex, std::size_t>> component_order;
-            component_order.reserve(component_cells.size());
-            for (std::size_t i = 0; i < component_cells.size(); ++i) {
-                component_order.emplace_back(
-                    global_physical_cell_gids.at(component_cells[i]), i);
-            }
-            std::sort(
-                component_order.begin(),
-                component_order.end(),
-                [&](const auto& lhs, const auto& rhs) {
-                    return std::tie(lhs.first, component_cells[lhs.second]) <
-                           std::tie(rhs.first, component_cells[rhs.second]);
-                });
-            std::vector<CellKey> ordered_component_cells;
-            ordered_component_cells.reserve(component_cells.size());
-            for (const auto& [gid, index] : component_order) {
-                static_cast<void>(gid);
-                ordered_component_cells.push_back(
-                    std::move(component_cells[index]));
-            }
-            component_cells = std::move(ordered_component_cells);
+        // Order by (physical cell GID, key); index order is key order and
+        // the pairs are unique, so the order is the same for any sort.
+        component_order.clear();
+        for (const auto cell : component_cells) {
+            component_order.emplace_back(global_physical_cell_gid_of[cell],
+                                         cell);
+        }
+        std::sort(component_order.begin(), component_order.end());
+        for (std::size_t i = 0u; i < component_order.size(); ++i) {
+            component_cells[i] = component_order[i].second;
         }
         if (component_cells.empty()) {
             throw std::logic_error(
@@ -5151,17 +5243,14 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
 
         SmallCutAggregationActiveFeatureReport feature;
         feature.stable_feature_id =
-            global_physical_cell_gids.at(component_cells.front());
-        for (const auto& cell : component_cells) {
-            const auto [feature_it, inserted] =
-                active_feature_by_cell.emplace(
-                    cell, feature.stable_feature_id);
-            if (!inserted ||
-                feature_it->second != feature.stable_feature_id) {
+            global_physical_cell_gid_of[component_cells.front()];
+        for (const auto cell : component_cells) {
+            if (active_feature_of[cell] != INVALID_GLOBAL_INDEX) {
                 throw std::logic_error(
                     "SmallCutAggregationConstraint: active cell was assigned "
                     "to more than one canonical feature");
             }
+            active_feature_of[cell] = feature.stable_feature_id;
         }
         feature.canonical_cell_count = component_cells.size();
         feature.canonical_cell_gid_digest = 14695981039346656037ull;
@@ -5177,9 +5266,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             0x43555443454c4c53ull);
         long double physical_volume = 0.0L;
         GlobalIndex previous_gid = INVALID_GLOBAL_INDEX;
-        for (const auto& cell : component_cells) {
-            const auto physical_gid =
-                global_physical_cell_gids.at(cell);
+        for (const auto cell : component_cells) {
+            const auto physical_gid = global_physical_cell_gid_of[cell];
             if (physical_gid < 0 || physical_gid == previous_gid) {
                 throw std::runtime_error(
                     "SmallCutAggregationConstraint: diagnostic="
@@ -5190,7 +5278,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             feature.canonical_cell_gid_digest ^=
                 static_cast<std::uint64_t>(physical_gid);
             feature.canonical_cell_gid_digest *= 1099511628211ull;
-            const auto& klass = global_cell_classes.at(cell);
+            const auto& klass = global_cell_class_of[cell];
             if (klass.full_active) {
                 aggregationDigestMix(
                     feature.canonical_full_active_cell_gid_digest,
@@ -5205,7 +5293,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 klass.full_active ? 1u : 0u;
             feature.canonical_cut_cell_count += klass.cut ? 1u : 0u;
             physical_volume += static_cast<long double>(
-                global_active_cell_physical_volumes.at(cell));
+                global_active_cell_physical_volume_of[cell]);
         }
         if (feature.canonical_cell_count !=
             feature.canonical_full_active_cell_count +
@@ -5281,42 +5369,43 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             "inconsistent");
     }
 
-    canonical_active_cells.reserve(active_feature_by_cell.size());
-    for (const auto& [cell, feature_id] : active_feature_by_cell) {
-        const auto& klass = global_cell_classes.at(cell);
+    std::size_t active_cell_count = 0u;
+    for (const auto feature_id : active_feature_of) {
+        active_cell_count += feature_id != INVALID_GLOBAL_INDEX ? 1u : 0u;
+    }
+    canonical_active_cells.reserve(active_cell_count);
+    for (std::size_t cell = 0u; cell < n_classified; ++cell) {
+        const auto feature_id = active_feature_of[cell];
+        if (feature_id == INVALID_GLOBAL_INDEX) {
+            continue;
+        }
+        const auto& klass = global_cell_class_of[cell];
         if (klass.full_active == klass.cut) {
             throw std::logic_error(
                 "SmallCutAggregationConstraint: canonical active cell does "
                 "not have exactly one active class");
         }
         SmallCutAggregationProlongationCell record;
-        record.cell_gid = global_physical_cell_gids.at(cell);
-        record.owner_rank = global_cell_owner_ranks.at(cell);
+        record.cell_gid = global_physical_cell_gid_of[cell];
+        record.owner_rank = global_cell_owner_rank_of[cell];
         record.retained_measure_provider_rank =
-            global_active_cell_measure_provider_ranks.at(cell);
+            global_active_cell_measure_provider_rank_of[cell];
         record.kind =
             klass.full_active
                 ? SmallCutAggregationActiveCellKind::FullActive
                 : SmallCutAggregationActiveCellKind::Cut;
         record.active_feature_id = feature_id;
         record.retained_physical_volume =
-            global_active_cell_physical_volumes.at(cell);
+            global_active_cell_physical_volume_of[cell];
         record.retained_rule_stable_ids =
-            global_active_cell_rule_ids.at(cell);
-        record.field_dofs = cell;
-        const auto neighbors = global_neighbors.find(cell);
-        if (neighbors != global_neighbors.end()) {
-            for (const auto& neighbor : neighbors->second) {
-                const auto neighbor_class =
-                    global_cell_classes.find(neighbor);
-                if (neighbor_class == global_cell_classes.end() ||
-                    (!neighbor_class->second.full_active &&
-                     !neighbor_class->second.cut)) {
-                    continue;
-                }
-                record.active_face_neighbor_cell_gids.push_back(
-                    global_physical_cell_gids.at(neighbor));
+            global_active_cell_rule_ids_of[cell];
+        record.field_dofs = classified_cells.key(cell);
+        for (const auto neighbor : global_neighbors[cell]) {
+            if (!is_active_cell(neighbor)) {
+                continue;
             }
+            record.active_face_neighbor_cell_gids.push_back(
+                global_physical_cell_gid_of[neighbor]);
         }
         std::sort(record.active_face_neighbor_cell_gids.begin(),
                   record.active_face_neighbor_cell_gids.end());
@@ -5519,13 +5608,15 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     // interface that work grows with candidate_count * cut_band_size and can
     // dominate every geometry refresh. The index and bounded traversal below
     // retain exactly the roots that can pass the path guard.
-    std::map<GlobalIndex, std::vector<CellKey>>
+    // Seeds are classified-cell indices, ascending like the keys they name.
+    const auto n_classified = classified_cells.size();
+    std::map<GlobalIndex, std::vector<std::size_t>>
         cut_seed_cells_by_dof;
-    for (const auto& [cell, klass] : global_cell_classes) {
-        if (!klass.cut) {
+    for (std::size_t cell = 0u; cell < n_classified; ++cell) {
+        if (!global_cell_class_of[cell].cut) {
             continue;
         }
-        for (const auto dof : cell) {
+        for (const auto dof : classified_cells.key(cell)) {
             cut_seed_cells_by_dof[dof].push_back(cell);
             ++root_path_seed_index_entries;
         }
@@ -5542,36 +5633,41 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     // valid root for any candidate because it would introduce slave/master
     // cycles. This policy is cell-global, so it can be classified once.
     std::set<GlobalIndex> root_eligible_feature_ids;
-    for (const auto& [cell, klass] : global_cell_classes) {
-        if (!klass.full_active) {
+    for (std::size_t cell = 0u; cell < n_classified; ++cell) {
+        if (!global_cell_class_of[cell].full_active) {
             continue;
         }
         bool eligible = true;
         if (slave_all_cut) {
+            const auto& key = classified_cells.key(cell);
             eligible = std::none_of(
-                cell.begin(), cell.end(), [&](GlobalIndex root_dof) {
+                key.begin(), key.end(), [&](GlobalIndex root_dof) {
                     return all_candidate_component_dofs.count(root_dof) > 0u;
                 });
         }
         if (eligible) {
-            const auto feature = active_feature_by_cell.find(cell);
-            if (feature == active_feature_by_cell.end()) {
+            if (active_feature_of[cell] == INVALID_GLOBAL_INDEX) {
                 throw std::logic_error(
                     "SmallCutAggregationConstraint: full-active root cell "
                     "is missing its canonical active feature");
             }
-            root_eligible_feature_ids.insert(feature->second);
+            root_eligible_feature_ids.insert(active_feature_of[cell]);
         }
     }
 
+    // Breadth-first search per candidate; a per-candidate stamp marks the
+    // visited cells without clearing a set for every candidate.
+    std::vector<std::size_t> visit_stamp(n_classified, 0u);
+    std::size_t current_stamp = 0u;
+    std::vector<std::pair<std::size_t, std::size_t>> queue;
     for (auto& [dof, support] : global_candidates) {
-        std::deque<std::pair<CellKey, std::size_t>> queue;
-        std::set<CellKey> visited;
+        ++current_stamp;
+        queue.clear();
         const auto seed_it = cut_seed_cells_by_dof.find(dof);
         if (seed_it != cut_seed_cells_by_dof.end()) {
-            for (const auto& seed : seed_it->second) {
+            for (const auto seed : seed_it->second) {
                 queue.emplace_back(seed, 0u);
-                visited.insert(seed);
+                visit_stamp[seed] = current_stamp;
             }
         }
         if (queue.empty()) {
@@ -5583,30 +5679,25 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         }
 
         bool feature_has_eligible_root = false;
-        for (const auto& seed : seed_it->second) {
-            const auto feature = active_feature_by_cell.find(seed);
-            if (feature == active_feature_by_cell.end()) {
+        for (const auto seed : seed_it->second) {
+            if (active_feature_of[seed] == INVALID_GLOBAL_INDEX) {
                 throw std::logic_error(
                     "SmallCutAggregationConstraint: candidate cut seed is "
                     "missing its canonical active feature");
             }
             feature_has_eligible_root =
                 feature_has_eligible_root ||
-                root_eligible_feature_ids.count(feature->second) > 0u;
+                root_eligible_feature_ids.count(active_feature_of[seed]) > 0u;
         }
 
         auto& roots = global_roots_by_candidate[dof];
-        while (!queue.empty()) {
-            auto [key, distance] = std::move(queue.front());
-            queue.pop_front();
+        for (std::size_t head = 0u; head < queue.size(); ++head) {
+            const auto [cell, distance] = queue[head];
             ++root_path_search_cell_visits;
-            const auto klass_it = global_cell_classes.find(key);
-            if (klass_it == global_cell_classes.end()) {
-                continue;
-            }
-            const auto& klass = klass_it->second;
+            const auto& klass = global_cell_class_of[cell];
             bool acceptable_root = klass.full_active;
             if (acceptable_root && slave_all_cut) {
+                const auto& key = classified_cells.key(cell);
                 acceptable_root = std::none_of(
                     key.begin(), key.end(), [&](GlobalIndex root_dof) {
                         return all_candidate_component_dofs.count(root_dof) >
@@ -5614,7 +5705,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                     });
             }
             if (acceptable_root) {
-                roots.push_back(GlobalRootCandidate{key, distance});
+                roots.push_back(GlobalRootCandidate{cell, distance});
                 continue;
             }
             if (!klass.cut && !(slave_all_cut && klass.full_active)) {
@@ -5623,12 +5714,9 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             if (distance >= guards_.maximum_root_path_length) {
                 continue;
             }
-            const auto neighbors_it = global_neighbors.find(key);
-            if (neighbors_it == global_neighbors.end()) {
-                continue;
-            }
-            for (const auto& next : neighbors_it->second) {
-                if (visited.insert(next).second) {
+            for (const auto next : global_neighbors[cell]) {
+                if (visit_stamp[next] != current_stamp) {
+                    visit_stamp[next] = current_stamp;
                     queue.emplace_back(next, distance + 1u);
                 }
             }
@@ -5636,14 +5724,14 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         std::sort(roots.begin(), roots.end(),
                   [](const GlobalRootCandidate& a,
                      const GlobalRootCandidate& b) {
-                      return std::tie(a.distance, a.key) <
-                             std::tie(b.distance, b.key);
+                      return std::tie(a.distance, a.cell) <
+                             std::tie(b.distance, b.cell);
                   });
         roots.erase(std::unique(
                         roots.begin(), roots.end(),
                         [](const GlobalRootCandidate& a,
                            const GlobalRootCandidate& b) {
-                            return a.key == b.key;
+                            return a.cell == b.cell;
                         }),
                     roots.end());
         for (const auto& root : roots) {
@@ -5779,7 +5867,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             continue;
         }
         for (const auto& root_candidate : roots_it->second) {
-            const auto local_root = local_cell_by_key.find(root_candidate.key);
+            const auto local_root = local_cell_by_key.find(
+                classified_cells.key(root_candidate.cell));
             if (local_root == local_cell_by_key.end()) {
                 continue;
             }
