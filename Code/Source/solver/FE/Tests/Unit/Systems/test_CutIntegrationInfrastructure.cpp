@@ -2197,6 +2197,52 @@ TEST(CutIntegrationInfrastructure, ImportsGeneratedLevelSetInterfaceDomainByMark
 }
 
 TEST(CutIntegrationInfrastructure,
+     RegistersGeneratedLevelSetInterfaceMarkerWithoutLocalInterfaceRules)
+{
+    // A partition that lies entirely on one side of the interface (a fully
+    // wet or fully dry MPI rank) imports a domain without interface rules.
+    // The marker must still be registered with an empty rule set, so
+    // interface-term assembly on that rank contributes zero instead of
+    // rejecting the marker as missing.
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromField(/*field_id=*/4,
+                                                        /*layout_revision=*/1,
+                                                        /*value_revision=*/3);
+    request.generated_domain_id = "cut-context-interface";
+    request.interface_marker = 51;
+    request.quadrature_policy_key = 19;
+
+    LevelSetInterfaceDomain domain(request);
+    const LevelSetCellCutInput wet_cell{
+        .parent_cell = 7,
+        .element_type = ElementType::Quad4,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{1.0, 1.0, 0.0}},
+                             {{0.0, 1.0, 0.0}}},
+        .level_set_values = {-0.5, -0.25, -0.75, -1.0}};
+    appendLinearLevelSetCellCut2D(domain, wet_cell);
+    ASSERT_TRUE(domain.interfaceQuadratureRules().empty());
+
+    CutIntegrationContext context;
+    context.addGeneratedInterfaceDomain(domain);
+
+    EXPECT_GT(context.contentRevision(), 0u);
+    EXPECT_TRUE(context.hasGeneratedLevelSetInterfaceMarker(51));
+    EXPECT_TRUE(context.hasGeneratedInterfaceMarker(51));
+    ASSERT_EQ(context.generatedInterfaceMarkers().size(), 1u);
+    EXPECT_EQ(context.generatedInterfaceMarkers().front(), 51);
+    EXPECT_TRUE(context.interfaceRules().empty());
+    EXPECT_TRUE(context.interfaceRulesForMarker(51).empty());
+    EXPECT_TRUE(context.generatedInterfaceRuleIndexSpanForMarker(51).empty());
+    EXPECT_NO_THROW(context.assertAllFreeSurfaceGeometrySnapshotsCurrent());
+
+    context.clear();
+    EXPECT_FALSE(context.hasGeneratedInterfaceMarker(51));
+    EXPECT_TRUE(context.generatedInterfaceMarkers().empty());
+}
+
+TEST(CutIntegrationInfrastructure,
      ComposesDirectGeneratedVolumeRuleWithLevelSetInterfaceDomain)
 {
     constexpr int marker = 63;
