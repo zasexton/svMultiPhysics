@@ -92,3 +92,27 @@ def test_interior_node_components(tmp_path, n_proc, integral, prescription):
     if prescription == "components":
         assert np.all(result.point_data["Displacement"][order, 1] > 1e-5)
     assert np.isfinite(result.point_data["Displacement"]).all()
+
+
+@pytest.mark.parametrize("last_component", ["1", "1.5", "2"])
+@pytest.mark.parametrize("node_set_last", [False, True])
+def test_interior_node_repeated_component_mask(tmp_path, last_component, node_set_last):
+    """Validate every mask tag, regardless of the node-set reference's position."""
+    root, points, _, ids = make_interior_structural_case(tmp_path)
+    bc = root.find("Add_equation/Add_BC")
+    bc.remove(bc.find("Temporal_and_spatial_values_file_path"))
+    bc.find("Time_dependence").text = "Steady"
+    ET.SubElement(bc, "Value").text = "0.02"
+    ET.SubElement(bc, "Impose_on_state_variable_integral").text = "false"
+    ET.SubElement(bc, "Effective_direction").text = "1 0"
+    ET.SubElement(bc, "Effective_direction").text = last_component
+    if node_set_last:
+        node_set = bc.find("Node_set")
+        bc.remove(node_set)
+        bc.append(node_set)
+    ET.ElementTree(root).write(tmp_path / "solver.xml")
+    error = None if last_component == "1" else "node set.*component mask entries must be 0 or 1"
+    result = run_by_name(tmp_path, "solver.xml", 2, expected_error=error)
+    if error is None:
+        selected = [np.argmin(np.linalg.norm(result.points - points[i-1], axis=1)) for i in ids]
+        np.testing.assert_allclose(result.point_data["Velocity"][selected][:, [0, 2]], 0.02, atol=1e-10)

@@ -626,6 +626,7 @@ void BoundaryConditionParameters::set_values(tinyxml2::XMLElement *xml_elem) {
   const char *sname = require_xml_attribute(xml_elem, "name");
   name.set(std::string(sname));
 
+  const bool node_target = xml_elem->FirstChildElement("Node_set") != nullptr;
   auto item = xml_elem->FirstChildElement();
 
   while (item != nullptr) {
@@ -637,6 +638,16 @@ void BoundaryConditionParameters::set_values(tinyxml2::XMLElement *xml_elem) {
       coupling_interface.set_values(item);
     } else if (item->GetText() != nullptr) {
       auto value = item->GetText();
+      if (node_target && name == "Effective_direction") {
+        std::istringstream input(value);
+        std::string token;
+        while (input >> token) {
+          if (token != "0" && token != "1") {
+            svmp::raise<svmp::ParseException>("Node set BC '" + this->name.value() +
+                "': component mask entries must be 0 or 1.");
+          }
+        }
+      }
       try {
         set_parameter_value(name, value);
       } catch (const std::bad_function_call &exception) {
@@ -647,19 +658,6 @@ void BoundaryConditionParameters::set_values(tinyxml2::XMLElement *xml_elem) {
     }
 
     item = item->NextSiblingElement();
-  }
-
-  if (node_set.defined()) {
-    if (auto* mask = xml_elem->FirstChildElement("Effective_direction")) {
-      std::istringstream input(require_xml_text(mask, "Node component mask requires a value."));
-      std::string token;
-      while (input >> token) {
-        if (token != "0" && token != "1") {
-          svmp::raise<svmp::ParseException>("Node set '" + node_set.value() +
-              "': component mask entries must be 0 or 1.");
-        }
-      }
-    }
   }
 }
 
