@@ -98,6 +98,12 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
     plain = gen.solver_xml("surface_stress", 60, gen.time_schedule(16, 5.0, 100), 10, 1,
                            kinematic_reconciliation=False)
     assert "Enable_kinematic_reconciliation" not in plain
+    assert level_set.find("Enable_sign_definite_patch_bounds").text.strip() == "true"
+    assert case["sign_definite_patch_bounds"] is True
+    unbounded = gen.solver_xml("surface_stress", 60, gen.time_schedule(16, 5.0, 100), 10, 1,
+                               sign_definite_patch_bounds=False)
+    assert "Enable_sign_definite_patch_bounds" not in unbounded
+    assert "<Enable_kinematic_reconciliation>true" in unbounded
     general = root.find("GeneralSimulationParameters")
     assert general.find("Transient_time_integration_scheme") is None
     assert float(general.find("Spectral_radius_of_infinite_time_step").text) == 0.5

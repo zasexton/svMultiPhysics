@@ -73,6 +73,15 @@ TRANSPORTS = ("coupled", "wet_extension", "pde_extension")
 # removes the area drift that the moving contact line causes in the plain
 # Galerkin transport.  "off" reproduces the earlier decks.
 KINEMATIC_RECONCILIATION = True
+# Accepted-step one-ring bounds on sign-definite patches
+# (Enable_sign_definite_patch_bounds; FE/LevelSet/LevelSetSignDefinitePatchBounds.h):
+# a node whose whole patch lies in one phase is kept inside the range of the
+# previous values over its patch, the local maximum principle of exact
+# transport.  It never changes a cut cell, so the interface, the contact line
+# and the liquid area are untouched; it stops single wall vertices next to a
+# contact line from crossing the isovalue ("Spurious wall spots" in README.md).
+# "off" reproduces the earlier decks.
+SIGN_DEFINITE_PATCH_BOUNDS = True
 # Existing production reinitialization values (D18/D38 and sloshing decks),
 # used only with --reinitialization.
 REINITIALIZATION_CADENCE_STEPS = 10
@@ -333,7 +342,8 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
                reinitialization: bool = False, linear_solver: str = "fsils",
                time_integration: str = "generalized_alpha",
                transport: str = "pde_extension",
-               kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION) -> str:
+               kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
+               sign_definite_patch_bounds: bool = SIGN_DEFINITE_PATCH_BOUNDS) -> str:
     if transport == "coupled":
         transport_xml = """
     <Velocity_source>coupled_field</Velocity_source>
@@ -388,6 +398,9 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
         maintenance = "\n    <Enable_reinitialization>false</Enable_reinitialization>"
     reconciliation = ("\n    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>"
                       if kinematic_reconciliation else "")
+    if sign_definite_patch_bounds:
+        reconciliation += ("\n    <Enable_sign_definite_patch_bounds>true"
+                           "</Enable_sign_definite_patch_bounds>")
     # The contact wall carries a strong zero normal velocity only; its
     # tangential motion is governed by the Navier slip term of the free-surface
     # condition.  The other walls stay dry and are no-slip.
@@ -520,6 +533,7 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
              time_integration: str = "generalized_alpha",
              transport: str = "pde_extension",
              kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
+             sign_definite_patch_bounds: bool = SIGN_DEFINITE_PATCH_BOUNDS,
              max_steps: int | None = None, force: bool = False) -> dict:
     if level not in LEVELS:
         raise ValueError(f"--level must be one of {LEVELS}")
@@ -577,7 +591,8 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
         write_face_vtp(mesh_dir / "mesh-surfaces" / f"{wall}.vtp", points, node_ids, parents)
     (output_dir / "solver.xml").write_text(
         solver_xml(form, equilibrium_deg, schedule, steps, cadence, reinitialization,
-                   linear_solver, time_integration, transport, kinematic_reconciliation),
+                   linear_solver, time_integration, transport, kinematic_reconciliation,
+                   sign_definite_patch_bounds),
         encoding="utf-8")
 
     case = {
@@ -593,6 +608,7 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
         "linear_solver": linear_solver,
         "transport": transport,
         "kinematic_reconciliation": bool(kinematic_reconciliation),
+        "sign_definite_patch_bounds": bool(sign_definite_patch_bounds),
         "laplace_number": LAPLACE_NUMBER,
         "density": DENSITY,
         "surface_tension": SURFACE_TENSION,
@@ -671,6 +687,11 @@ def main(argv=None) -> int:
                         default="on" if KINEMATIC_RECONCILIATION else "off",
                         help="accepted-step kinematic reconciliation of the level set "
                              "(protocol: on; off reproduces the earlier decks)")
+    parser.add_argument("--sign-definite-patch-bounds", choices=("on", "off"),
+                        default="on" if SIGN_DEFINITE_PATCH_BOUNDS else "off",
+                        help="accepted-step one-ring bounds of the level set on nodes whose "
+                             "patch lies in one phase (protocol: on; off reproduces the "
+                             "earlier decks)")
     parser.add_argument("--max-steps", type=int, default=None,
                         help="smoke runs only: stop after this many steps; the case is "
                              "marked truncated and verify.py rejects it for acceptance")
@@ -684,11 +705,13 @@ def main(argv=None) -> int:
                     time_integration=args.time_integration,
                     transport=args.transport,
                     kinematic_reconciliation=args.kinematic_reconciliation == "on",
+                    sign_definite_patch_bounds=args.sign_definite_patch_bounds == "on",
                     max_steps=args.max_steps, force=args.force)
     print(f"wrote {args.output_dir}")
     for key in ("level_R_over_h", "equilibrium_angle_degrees", "initial_angle_degrees",
                 "capillary_form", "time_integration_scheme", "linear_solver", "transport",
-                "kinematic_reconciliation", "reinitialization", "viscosity", "slip_length_over_h",
+                "kinematic_reconciliation", "sign_definite_patch_bounds", "reinitialization",
+                "viscosity", "slip_length_over_h",
                 "viscous_time",
                 "end_time", "dt", "dt_capillary_limit", "steps", "output_cadence",
                 "box", "n_vertices", "n_triangles", "min_abs_phi_over_h",
