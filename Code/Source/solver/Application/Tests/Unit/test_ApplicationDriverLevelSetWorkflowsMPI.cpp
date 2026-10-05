@@ -7438,6 +7438,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       .enforce_wall_impermeability = false,
       .retained_side = LevelSetActiveSide::Negative,
       .snapshot = snapshot,
+      .write_artifact = true,
   };
   std::vector<AcceptedVelocityExtensionMapRecord> records{record};
   Parameters params;

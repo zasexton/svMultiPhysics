@@ -4619,6 +4619,9 @@ struct LevelSetAdvectionVelocityRequest {
   // every dry vertex unless this is set (diagnostic truncation only).
   bool extension_band_layers_explicit{false};
   bool enforce_wall_impermeability{true};
+  // Write one JSON map shard per accepted step under velocity_extension_maps/
+  // (<Write_velocity_extension_maps>, off by default; the maps are large).
+  bool write_velocity_extension_maps{false};
   std::vector<std::string> wall_face_names{};
   std::vector<WallConstraint> wall_constraints{};
   double isovalue{0.0};
@@ -4640,6 +4643,9 @@ struct AcceptedVelocityExtensionMapRecord {
   LevelSetActiveSide retained_side{LevelSetActiveSide::Negative};
   std::shared_ptr<const application::core::VelocityExtensionMapSnapshot>
       snapshot{};
+  // Publish the map as a JSON artifact; the accepted-map registry records
+  // the snapshot either way.
+  bool write_artifact{false};
 };
 
 std::vector<std::string> splitFaceNameList(std::string_view raw)
@@ -5209,6 +5215,12 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
             {"Wet_extension_enforce_wall_impermeability",
              "WetExtensionEnforceWallImpermeability"})) {
       request.enforce_wall_impermeability = *wall_compatible;
+    }
+    if (const auto write_maps = first_defined_bool_parameter(
+            eq_params,
+            {"Write_velocity_extension_maps",
+             "WriteVelocityExtensionMaps"})) {
+      request.write_velocity_extension_maps = *write_maps;
     }
     bool explicit_wall_faces = false;
     if (const auto wall_faces = first_defined_parameter(
@@ -19317,6 +19329,7 @@ bool updateLevelSetAdvectionVelocitiesFromState(
               request.enforce_wall_impermeability,
           .retained_side = request.active_side,
           .snapshot = algebraic_map_snapshot,
+          .write_artifact = request.write_velocity_extension_maps,
       });
     }
     updated = true;
@@ -19606,6 +19619,14 @@ void writeAcceptedVelocityExtensionMapArtifacts(
   artifacts.reserve(records.size());
   for (std::size_t index = 0u; index < records.size(); ++index) {
     const auto& record = records[index];
+    if (!record.write_artifact) {
+      // Map output is opt-in (Write_velocity_extension_maps); the map still
+      // enters the accepted registry below.
+      artifacts.push_back(
+          application::core::VelocityExtensionMapArtifactResult{
+              .success = true});
+      continue;
+    }
     const auto previous = accepted_maps.find(record_keys[index]);
     const auto* previous_snapshot =
         previous == accepted_maps.end() ? nullptr : previous->second.get();
@@ -19670,7 +19691,7 @@ void writeAcceptedVelocityExtensionMapArtifacts(
 
   for (std::size_t index = 0u; index < records.size(); ++index) {
     accepted_maps[record_keys[index]] = records[index].snapshot;
-    if (comm.rank() == 0) {
+    if (comm.rank() == 0 && records[index].write_artifact) {
       application::core::oopCout()
           << "[svMultiPhysics::Application] Accepted velocity-extension map artifact"
           << " diagnostic=velocity_extension_map_artifact"

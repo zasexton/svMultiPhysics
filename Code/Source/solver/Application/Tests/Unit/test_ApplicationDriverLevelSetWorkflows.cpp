@@ -17180,6 +17180,138 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
+     AcceptedVelocityExtensionMapArtifactsAreOptIn)
+{
+  const auto request_xml = [](const std::string& extra) {
+    return R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Velocity_source>prescribed_data</Velocity_source>
+    <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
+    <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
+    <Source_velocity_field_name>Velocity</Source_velocity_field_name>
+    <Wet_extension_advection_velocity_method>wall_compatible_normal</Wet_extension_advection_velocity_method>)xml" +
+           extra + R"xml(
+  </Add_equation>
+  <Add_equation type="fluid">
+    <Add_BC name="wall">
+      <Type>Dir</Type>
+      <Value>0.0</Value>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml";
+  };
+  {
+    auto params = parseWorkflowParametersXml(request_xml("").c_str());
+    const auto requests = levelSetAdvectionVelocityRequests(*params);
+    ASSERT_EQ(requests.size(), 1u);
+    EXPECT_FALSE(requests.front().write_velocity_extension_maps);
+  }
+  for (const std::string key :
+       {"Write_velocity_extension_maps", "WriteVelocityExtensionMaps"}) {
+    auto params = parseWorkflowParametersXml(
+        request_xml("<" + key + ">true</" + key + ">").c_str());
+    const auto requests = levelSetAdvectionVelocityRequests(*params);
+    ASSERT_EQ(requests.size(), 1u);
+    EXPECT_TRUE(requests.front().write_velocity_extension_maps) << key;
+  }
+
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  const auto mesh = makeWorkflowSkewedExtensionTriangleMesh();
+  std::vector<double> phi(mesh->n_vertices(), 0.0);
+  std::vector<double> source(mesh->n_vertices() * 2u, 0.0);
+  std::vector<std::uint8_t> active(mesh->n_vertices(), 0u);
+  for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
+    const auto point = workflowVertexPoint(*mesh, vertex);
+    phi[vertex] = point[0] - 0.5;
+    active[vertex] = phi[vertex] <= 0.0 ? 1u : 0u;
+    source[2u * vertex] = 0.2;
+    source[2u * vertex + 1u] = -0.1;
+  }
+  const auto revision = application::core::velocityExtensionMapRevision(
+      21u, 22u, 23u, 24u, 25u, phi, active);
+  const auto snapshot = application::core::buildVelocityExtensionMapSnapshot(
+      *mesh,
+      svmp::MeshComm::self(),
+      revision,
+      phi,
+      source,
+      2u,
+      active,
+      2u,
+      2u,
+      1,
+      false,
+      std::span<const WallVelocityExtensionConstraint>{});
+  ASSERT_TRUE(snapshot);
+
+  const auto output_root =
+      std::filesystem::temp_directory_path() /
+      ("svmp_velocity_extension_opt_in_" + std::to_string(revision.key()));
+  std::error_code cleanup_error;
+  std::filesystem::remove_all(output_root, cleanup_error);
+  ASSERT_FALSE(cleanup_error);
+  Parameters params;
+  params.general_simulation_parameters.save_results_in_folder.set(
+      output_root.string());
+  AcceptedVelocityExtensionMapRecord record{
+      .level_set_field_name = "phi",
+      .source_velocity_field_name = "Velocity",
+      .target_velocity_field_name = "LevelSetAdvectionVelocity",
+      .geometry_domain_id = "free_surface",
+      .operator_tag = "level_set",
+      .extension_method = "wall_compatible_normal",
+      .isovalue = 0.0,
+      .extension_band_layers = 1,
+      .enforce_wall_impermeability = false,
+      .retained_side = LevelSetActiveSide::Negative,
+      .snapshot = snapshot,
+  };
+  EXPECT_FALSE(record.write_artifact);
+  AcceptedVelocityExtensionMapRegistry accepted_maps;
+
+  // Default: no file, but the accepted map is still registered.
+  ASSERT_NO_THROW(writeAcceptedVelocityExtensionMapArtifacts(
+      params, {record}, 1u, 0.1, 0.1, 101u, svmp::MeshComm::self(),
+      accepted_maps));
+  EXPECT_FALSE(std::filesystem::exists(output_root));
+  ASSERT_EQ(accepted_maps.size(), 1u);
+  EXPECT_EQ(accepted_maps.begin()->second, snapshot);
+  EXPECT_EQ(acceptedVelocityExtensionMapRegistryRevision(accepted_maps),
+            acceptedVelocityExtensionMapRegistryRevision(
+                AcceptedVelocityExtensionMapRegistry{
+                    {acceptedVelocityExtensionMapKey(record), snapshot}}));
+
+  // Opted in: one JSON shard per accepted step.
+  record.write_artifact = true;
+  ASSERT_NO_THROW(writeAcceptedVelocityExtensionMapArtifacts(
+      params, {record}, 2u, 0.2, 0.1, 102u, svmp::MeshComm::self(),
+      accepted_maps));
+  EXPECT_EQ(accepted_maps.size(), 1u);
+  const auto map_directory = output_root / "velocity_extension_maps";
+  ASSERT_TRUE(std::filesystem::is_directory(map_directory));
+  std::size_t json_files = 0u;
+  for (const auto& entry :
+       std::filesystem::directory_iterator(map_directory)) {
+    if (entry.path().extension() != ".json") {
+      continue;
+    }
+    ++json_files;
+    EXPECT_NE(entry.path().filename().string().find("step_00000002"),
+              std::string::npos)
+        << entry.path();
+  }
+  EXPECT_EQ(json_files, 1u);
+  std::filesystem::remove_all(output_root, cleanup_error);
+  EXPECT_FALSE(cleanup_error);
+#endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
      NormalBandVelocityExtensionManufacturedRefinementConvergesAndProjectsWalls)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
