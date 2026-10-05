@@ -19915,6 +19915,38 @@ void writeAcceptedVelocityExtensionMapArtifacts(
   }
 }
 
+// Dry (inactive-side) full-cell snapshot records carry only their
+// classification unless a declared consumer integrates over that side's
+// volume points: two-fluid stage diagnostics, or a free-surface functional
+// whose liquid side is the inactive side.  SVMP_KEEP_DRY_CELL_POINTS=1 keeps
+// every point (debugging and memory comparisons).
+bool snapshotMayStoreInactiveFullCellsClassificationOnly(
+    const svmp::FE::systems::FESystem& system,
+    svmp::FE::geometry::CutIntegrationSide inactive_side)
+{
+  static const bool keep_points = [] {
+    const char* value = std::getenv("SVMP_KEEP_DRY_CELL_POINTS");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+  }();
+  if (keep_points ||
+      !system.twoFluidAcceptedStageDiagnosticDeclarations().empty()) {
+    return false;
+  }
+  for (const auto& declaration :
+       system.freeSurfaceDiscreteFunctionalDeclarations()) {
+    const auto& energy = declaration.active_volume_energy_parameters;
+    const auto& dissipation =
+        declaration.active_volume_dissipation_parameters;
+    if (declaration.parameters.liquid_side == inactive_side ||
+        (energy.has_value() && energy->liquid_side == inactive_side) ||
+        (dissipation.has_value() &&
+         dissipation->liquid_side == inactive_side)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 std::string cutGeometryContextMemoryDetails(
     const std::string& prefix,
     const svmp::FE::assembly::CutIntegrationContext* context)
@@ -20225,16 +20257,15 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
             ? std::optional<svmp::FE::geometry::CutIntegrationSide>{}
             : std::optional<svmp::FE::geometry::CutIntegrationSide>{
                   active_volume_side};
-    const auto domain_volume_rules = result.domain.volumeQuadratureRules();
+    // volumeQuadratureRules() yields one volume rule per active region, so
+    // count the regions instead of materializing every rule.
     const auto available_volume_rule_count =
-        [&domain_volume_rules](svmp::FE::geometry::CutIntegrationSide side) {
+        [&result](svmp::FE::geometry::CutIntegrationSide side) {
           return static_cast<std::size_t>(std::count_if(
-              domain_volume_rules.begin(),
-              domain_volume_rules.end(),
-              [side](const auto& rule) {
-                return rule.kind ==
-                           svmp::FE::geometry::CutQuadratureKind::Volume &&
-                       rule.side == side;
+              result.domain.volumeRegions().begin(),
+              result.domain.volumeRegions().end(),
+              [side](const auto& region) {
+                return region.active() && region.side == side;
               }));
         };
     const auto local_negative_available_cut_volume_rules =
@@ -20555,6 +20586,11 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
             minGeneratedCutVolumeFraction();
     snapshot_policy.minimum_achieved_quadrature_order = 0;
     snapshot_policy.require_complete_exterior_boundary_partition = true;
+    if (snapshotMayStoreInactiveFullCellsClassificationOnly(
+            *sim.fe_system, inactive_volume_side)) {
+      snapshot_policy.classification_only_full_cell_side =
+          inactive_volume_side;
+    }
     auto geometry_snapshot =
         svmp::FE::interfaces::buildFreeSurfaceGeometrySnapshot(
             result.domain,

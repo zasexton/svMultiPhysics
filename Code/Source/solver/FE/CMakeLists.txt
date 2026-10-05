@@ -2454,6 +2454,7 @@ if(FE_BUILD_TESTS)
             Tests/Unit/LevelSet/test_LevelSetConservativePhaseState.cpp
             Tests/Unit/LevelSet/test_LevelSetConservativePhaseTransport.cpp
             Tests/Unit/LevelSet/test_LevelSetDiagnostics.cpp
+            Tests/Unit/LevelSet/test_FreeSurfaceSnapshotCompactRecords.cpp
             Tests/Unit/LevelSet/test_LevelSetCurvatureProjection.cpp
             Tests/Unit/LevelSet/test_LevelSetHeaders.cpp
             Tests/Unit/LevelSet/test_LevelSetInterfaceLifecycle.cpp

@@ -353,6 +353,10 @@ evaluateLocalIncompressibleTwoFluidDiagnostics(
                 throw std::invalid_argument(
                     "incompressible two-fluid diagnostics encountered an inconsistent phase-volume rule");
             }
+            if (record.classification_only) {
+                throw std::invalid_argument(
+                    "incompressible two-fluid diagnostics require phase-volume points that the snapshot stores classification-only");
+            }
             for (std::size_t point_index = 0u;
                  point_index < record.physical_rule.points.size();
                  ++point_index) {

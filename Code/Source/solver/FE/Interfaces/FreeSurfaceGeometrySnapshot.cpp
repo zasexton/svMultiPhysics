@@ -209,6 +209,18 @@ void mixCoefficientClassificationPolicy(
            role == FreeSurfaceGeometryRuleRole::PositiveVolume;
 }
 
+// Point-integrating consumers fail closed on classification-only records
+// instead of silently skipping their volume.
+void requireMaterializedVolumePoints(
+    const FreeSurfaceGeometryRuleRecord& record, const char* consumer)
+{
+    if (record.classification_only) {
+        throw std::invalid_argument(
+            std::string(consumer) +
+            " requires volume points that this snapshot stores classification-only");
+    }
+}
+
 using OwnershipRuleIdentity = std::array<std::uint64_t, 5>;
 
 struct OwnedRuleDigest {
@@ -331,6 +343,9 @@ void mixRuleContent(std::uint64_t& hash,
 [[nodiscard]] std::uint64_t ruleContentDigest(
     const FreeSurfaceGeometryRuleRecord& record) noexcept
 {
+    if (record.classification_only) {
+        return record.classification_only_content_digest;
+    }
     std::uint64_t hash = kHashOffset;
     mixRuleContent(hash, record);
     return hash == 0u ? 1u : hash;
@@ -784,6 +799,60 @@ void completeAndValidateRuleIdentity(
     }
 }
 
+// Replace the points of an authoritative full-cell volume rule by the parent
+// reference-cell rule of order max(p, d * geometry order).  The measure check
+// is skipped (null tolerance) when a validated record is rematerialized.
+void materializeAuthoritativeFullCellPoints(
+    geometry::CutQuadratureRule& rule,
+    const assembly::IMeshAccess& mesh,
+    std::optional<Real> policy_tolerance)
+{
+    if (rule.frame != geometry::CutGeometryFrame::Reference) {
+        throw std::invalid_argument(
+            "authoritative full-cell free-surface rules require a reference-frame representation");
+    }
+    const auto parent =
+        static_cast<GlobalIndex>(rule.provenance.parent_entity);
+    if (parent < 0 || parent >= mesh.numCells()) {
+        throw std::invalid_argument(
+            "authoritative full-cell free-surface rule has an invalid parent cell");
+    }
+    const int geometry_order =
+        std::max(1, mesh.getCellGeometryOrder(parent));
+    const int materialization_order = std::max(
+        rule.exact_polynomial_order,
+        mesh.dimension() * geometry_order);
+    const auto full_rule = quadrature::QuadratureFactory::create(
+        mesh.getCellType(parent), materialization_order);
+    rule.points.clear();
+    rule.points.reserve(full_rule->num_points());
+    Real reference_measure{0.0};
+    for (std::size_t q = 0; q < full_rule->num_points(); ++q) {
+        const auto point = full_rule->point(q);
+        const Real weight = full_rule->weight(q);
+        geometry::CutQuadraturePoint cut_point;
+        cut_point.point = {{point[0], point[1], point[2]}};
+        cut_point.parent_coordinate = cut_point.point;
+        cut_point.weight = weight;
+        cut_point.reference_measure_factor = weight;
+        rule.points.push_back(cut_point);
+        reference_measure += weight;
+    }
+    if (!policy_tolerance.has_value()) {
+        return;
+    }
+    const Real tolerance =
+        Real{512.0} * std::numeric_limits<Real>::epsilon() *
+            std::max(Real{1.0}, std::abs(rule.parent_measure)) +
+        *policy_tolerance;
+    if (std::abs(reference_measure - rule.parent_measure) > tolerance ||
+        std::abs(rule.measure - rule.parent_measure) > tolerance ||
+        std::abs(rule.volume_fraction - Real{1.0}) > tolerance) {
+        throw std::invalid_argument(
+            "authoritative full-cell free-surface rule does not match its parent reference measure");
+    }
+}
+
 void addRule(std::vector<FreeSurfaceGeometryRuleRecord>& records,
              FreeSurfaceGeometryValidationLedger& ledger,
              geometry::CutQuadratureRule rule,
@@ -801,47 +870,7 @@ void addRule(std::vector<FreeSurfaceGeometryRuleRecord>& records,
 {
     if (rule.kind == geometry::CutQuadratureKind::Volume &&
         rule.full_cell_equivalent) {
-        if (rule.frame != geometry::CutGeometryFrame::Reference) {
-            throw std::invalid_argument(
-                "authoritative full-cell free-surface rules require a reference-frame representation");
-        }
-        const auto parent =
-            static_cast<GlobalIndex>(rule.provenance.parent_entity);
-        if (parent < 0 || parent >= mesh.numCells()) {
-            throw std::invalid_argument(
-                "authoritative full-cell free-surface rule has an invalid parent cell");
-        }
-        const int geometry_order =
-            std::max(1, mesh.getCellGeometryOrder(parent));
-        const int materialization_order = std::max(
-            rule.exact_polynomial_order,
-            mesh.dimension() * geometry_order);
-        const auto full_rule = quadrature::QuadratureFactory::create(
-            mesh.getCellType(parent), materialization_order);
-        rule.points.clear();
-        rule.points.reserve(full_rule->num_points());
-        Real reference_measure{0.0};
-        for (std::size_t q = 0; q < full_rule->num_points(); ++q) {
-            const auto point = full_rule->point(q);
-            const Real weight = full_rule->weight(q);
-            geometry::CutQuadraturePoint cut_point;
-            cut_point.point = {{point[0], point[1], point[2]}};
-            cut_point.parent_coordinate = cut_point.point;
-            cut_point.weight = weight;
-            cut_point.reference_measure_factor = weight;
-            rule.points.push_back(cut_point);
-            reference_measure += weight;
-        }
-        const Real tolerance =
-            Real{512.0} * std::numeric_limits<Real>::epsilon() *
-                std::max(Real{1.0}, std::abs(rule.parent_measure)) +
-            policy.tolerance;
-        if (std::abs(reference_measure - rule.parent_measure) > tolerance ||
-            std::abs(rule.measure - rule.parent_measure) > tolerance ||
-            std::abs(rule.volume_fraction - Real{1.0}) > tolerance) {
-            throw std::invalid_argument(
-                "authoritative full-cell free-surface rule does not match its parent reference measure");
-        }
+        materializeAuthoritativeFullCellPoints(rule, mesh, policy.tolerance);
     }
     completeAndValidateRuleIdentity(rule, mesh, ledger);
     FreeSurfaceGeometryRuleRecord record;
@@ -2569,6 +2598,76 @@ void validateRuleMomentCertificate(
     }
 }
 
+// Polynomial moments of the volume rules of one parent cell through their
+// common claimed order against the parent reference cell.
+void validateCellPolynomialMoments(
+    std::span<const FreeSurfaceGeometryRuleRecord* const> rules,
+    GlobalIndex local_parent,
+    int common_exact_order,
+    const assembly::IMeshAccess& mesh,
+    const FreeSurfaceGeometrySnapshotPolicy& policy,
+    FreeSurfaceGeometryValidationLedger& ledger)
+{
+    if (local_parent < 0 || local_parent >= mesh.numCells() ||
+        common_exact_order < 0) {
+        throw std::invalid_argument(
+            "free-surface volume partition has incomplete polynomial-moment provenance");
+    }
+    const int dimension = mesh.dimension();
+    const auto type = mesh.getCellType(local_parent);
+    for (int total_order = 0; total_order <= common_exact_order;
+         ++total_order) {
+        for (int px = 0; px <= total_order; ++px) {
+            const int maximum_py = dimension >= 2 ? total_order - px : 0;
+            for (int py = 0; py <= maximum_py; ++py) {
+                const int pz = dimension >= 3 ? total_order - px - py : 0;
+                if (dimension < 3 && px + py != total_order) {
+                    continue;
+                }
+                Real actual{0.0};
+                Real absolute_sum{0.0};
+                for (const auto* record : rules) {
+                    const auto& rule = record->reference_rule;
+                    for (std::size_t q = 0; q < rule.points.size(); ++q) {
+                        const auto& point =
+                            record->physical_rule.points[q].reference_point;
+                        const Real integrand =
+                            integerPower(point[0], px) *
+                            integerPower(point[1], py) *
+                            integerPower(point[2], pz);
+                        const Real contribution =
+                            rule.points[q].weight * integrand;
+                        actual += contribution;
+                        absolute_sum += std::abs(contribution);
+                    }
+                }
+                const Real expected =
+                    referenceCellMonomialMoment(type, px, py, pz);
+                const Real moment_error = std::abs(actual - expected);
+                const Real scale =
+                    std::max({Real{1.0}, std::abs(expected), absolute_sum});
+                const Real moment_tolerance =
+                    Real{4096.0} * std::numeric_limits<Real>::epsilon() *
+                        scale +
+                    policy.tolerance;
+                ++ledger.validated_polynomial_moment_count;
+                ledger.maximum_polynomial_moment_error = std::max(
+                    ledger.maximum_polynomial_moment_error, moment_error);
+                ledger.maximum_polynomial_moment_scaled_error = std::max(
+                    ledger.maximum_polynomial_moment_scaled_error,
+                    moment_error / moment_tolerance);
+                if (moment_error > moment_tolerance) {
+                    ++ledger.false_achieved_order_count;
+                    throw std::invalid_argument(
+                        "positive and negative cut rules do not reproduce a parent-cell polynomial moment through their common claimed order");
+                }
+            }
+        }
+    }
+}
+
+// Cells whose only volume rule is classification-only had their moments
+// validated before the points were released.
 void validateVolumePartition(
     const std::vector<FreeSurfaceGeometryRuleRecord>& records,
     const assembly::IMeshAccess& mesh,
@@ -2624,70 +2723,16 @@ void validateVolumePartition(
             throw std::invalid_argument(
                 "positive and negative cut volumes do not partition their parent cell");
         }
-
-        if (measures.local_parent < 0 ||
-            measures.local_parent >= mesh.numCells() ||
-            measures.common_exact_order < 0) {
-            throw std::invalid_argument(
-                "free-surface volume partition has incomplete polynomial-moment provenance");
+        if (measures.rules.size() == 1u &&
+            measures.rules.front()->classification_only) {
+            continue;
         }
-        const int dimension = mesh.dimension();
-        const auto type = mesh.getCellType(measures.local_parent);
-        for (int total_order = 0;
-             total_order <= measures.common_exact_order;
-             ++total_order) {
-            for (int px = 0; px <= total_order; ++px) {
-                const int maximum_py = dimension >= 2
-                                           ? total_order - px
-                                           : 0;
-                for (int py = 0; py <= maximum_py; ++py) {
-                    const int pz = dimension >= 3
-                                       ? total_order - px - py
-                                       : 0;
-                    if (dimension < 3 && px + py != total_order) {
-                        continue;
-                    }
-                    Real actual{0.0};
-                    Real absolute_sum{0.0};
-                    for (const auto* record : measures.rules) {
-                        const auto& rule = record->reference_rule;
-                        for (std::size_t q = 0; q < rule.points.size(); ++q) {
-                            const auto& point =
-                                record->physical_rule.points[q].reference_point;
-                            const Real integrand =
-                                integerPower(point[0], px) *
-                                integerPower(point[1], py) *
-                                integerPower(point[2], pz);
-                            const Real contribution =
-                                rule.points[q].weight * integrand;
-                            actual += contribution;
-                            absolute_sum += std::abs(contribution);
-                        }
-                    }
-                    const Real expected =
-                        referenceCellMonomialMoment(type, px, py, pz);
-                    const Real moment_error = std::abs(actual - expected);
-                    const Real scale = std::max(
-                        {Real{1.0}, std::abs(expected), absolute_sum});
-                    const Real moment_tolerance =
-                        Real{4096.0} *
-                            std::numeric_limits<Real>::epsilon() * scale +
-                        policy.tolerance;
-                    ++ledger.validated_polynomial_moment_count;
-                    ledger.maximum_polynomial_moment_error = std::max(
-                        ledger.maximum_polynomial_moment_error,
-                        moment_error);
-                    ledger.maximum_polynomial_moment_scaled_error = std::max(
-                        ledger.maximum_polynomial_moment_scaled_error,
-                        moment_error / moment_tolerance);
-                    if (moment_error > moment_tolerance) {
-                        ++ledger.false_achieved_order_count;
-                        throw std::invalid_argument(
-                            "positive and negative cut rules do not reproduce a parent-cell polynomial moment through their common claimed order");
-                    }
-                }
-            }
-        }
+        validateCellPolynomialMoments(measures.rules,
+                                      measures.local_parent,
+                                      measures.common_exact_order,
+                                      mesh,
+                                      policy,
+                                      ledger);
     }
 }
 
@@ -3040,6 +3085,8 @@ evaluateFreeSurfaceActiveVolumeEnergy(
             throw std::invalid_argument(
                 "free-surface active-volume energy encountered an inconsistent liquid-volume rule");
         }
+        requireMaterializedVolumePoints(
+            record, "free-surface active-volume energy");
         for (std::size_t point_index = 0;
              point_index < record.physical_rule.points.size();
              ++point_index) {
@@ -3169,6 +3216,8 @@ evaluateFreeSurfaceActiveVolumeDissipation(
             throw std::invalid_argument(
                 "free-surface active-volume dissipation encountered an inconsistent liquid-volume rule");
         }
+        requireMaterializedVolumePoints(
+            record, "free-surface active-volume dissipation");
         for (std::size_t point_index = 0;
              point_index < record.physical_rule.points.size();
              ++point_index) {
@@ -3407,6 +3456,8 @@ evaluateFreeSurfaceBackwardEulerKineticWork(
             throw std::invalid_argument(
                 "free-surface backward-Euler kinetic work encountered an inconsistent liquid-volume rule");
         }
+        requireMaterializedVolumePoints(
+            record, "free-surface backward-Euler kinetic work");
         for (std::size_t point_index = 0;
              point_index < record.physical_rule.points.size();
              ++point_index) {
@@ -4211,6 +4262,44 @@ FreeSurfaceDynamicContactState evaluateFreeSurfaceDynamicContactState(
     return state;
 }
 
+FreeSurfaceGeometryRuleRecord materializeFreeSurfaceGeometryRuleRecord(
+    const FreeSurfaceGeometryRuleRecord& record,
+    const assembly::IMeshAccess& mesh)
+{
+    if (!record.classification_only) {
+        return record;
+    }
+    if (!volumeRole(record.role) ||
+        record.reference_rule.kind != geometry::CutQuadratureKind::Volume ||
+        !record.reference_rule.full_cell_equivalent) {
+        throw std::invalid_argument(
+            "classification-only free-surface record is not a full-cell volume rule");
+    }
+    FreeSurfaceGeometryRuleRecord result = record;
+    result.classification_only = false;
+    result.classification_only_content_digest = 0u;
+    materializeAuthoritativeFullCellPoints(
+        result.reference_rule, mesh, std::nullopt);
+    result.physical_rule =
+        geometry::mapCutQuadratureRuleToPhysical(mesh, result.reference_rule);
+    result.physical_rule.free_surface_snapshot_revision_key =
+        record.physical_rule.free_surface_snapshot_revision_key;
+    if (result.physical_rule.physical_measure !=
+            record.physical_rule.physical_measure ||
+        ruleContentDigest(result) !=
+            record.classification_only_content_digest) {
+        throw std::invalid_argument(
+            "classification-only free-surface record does not rematerialize on this mesh");
+    }
+    return result;
+}
+
+std::uint64_t freeSurfaceGeometryRuleContentDigest(
+    const FreeSurfaceGeometryRuleRecord& record) noexcept
+{
+    return ruleContentDigest(record);
+}
+
 std::vector<const FreeSurfaceGeometryRuleRecord*>
 FreeSurfaceGeometrySnapshot::retainedRules(
     FreeSurfaceGeometryRuleRole role) const
@@ -4363,7 +4452,9 @@ buildFreeSurfaceGeometrySnapshot(
     if (!interface_domain.request().valid() || !(policy.tolerance > Real{0.0}) ||
         !(policy.minimum_retained_volume_fraction > Real{0.0}) ||
         !(policy.minimum_retained_volume_fraction < Real{1.0}) ||
-        policy.minimum_achieved_quadrature_order < 0) {
+        policy.minimum_achieved_quadrature_order < 0 ||
+        policy.classification_only_full_cell_side ==
+            geometry::CutIntegrationSide::Interface) {
         throw std::invalid_argument(
             "free-surface geometry snapshot received an invalid domain or policy");
     }
@@ -4398,6 +4489,17 @@ buildFreeSurfaceGeometrySnapshot(
     auto volume_rules = interface_domain.volumeQuadratureRules();
     auto interface_rules = interface_domain.interfaceQuadratureRules();
     records.reserve(volume_rules.size() + interface_rules.size());
+    // A full-cell rule of the classification-only side that is the only
+    // volume rule of its parent is validated (rule checks, cell moments) and
+    // digested as soon as it is materialized, and its points are released
+    // before the next rule is built.  The ledger sums keep their order.
+    std::unordered_map<MeshIndex, std::size_t> volume_rules_per_parent;
+    if (policy.classification_only_full_cell_side.has_value()) {
+        volume_rules_per_parent.reserve(volume_rules.size());
+        for (const auto& rule : volume_rules) {
+            ++volume_rules_per_parent[rule.provenance.parent_entity];
+        }
+    }
     const auto region_by_stable_id =
         firstSourceByStableId(interface_domain.volumeRegions());
     for (auto& rule : volume_rules) {
@@ -4407,6 +4509,11 @@ buildFreeSurfaceGeometrySnapshot(
             throw std::invalid_argument(
                 "free-surface volume rule has no authoritative source region");
         }
+        const bool classification_only =
+            policy.classification_only_full_cell_side.has_value() &&
+            rule.full_cell_equivalent &&
+            rule.side == *policy.classification_only_full_cell_side &&
+            volume_rules_per_parent[rule.provenance.parent_entity] == 1u;
         auto moment_certificate =
             rule.full_cell_equivalent
                 ? makeParentCellMomentCertificate(mesh, rule)
@@ -4421,6 +4528,39 @@ buildFreeSurfaceGeometrySnapshot(
                 std::move(moment_certificate),
                 volumeSourceTopologyKey(*region),
                 region->construction_observation);
+        auto& record = records.back();
+        if (!classification_only ||
+            record.retention != FreeSurfaceGeometryRetention::Retained) {
+            continue;
+        }
+        if (!record.moment_certificate.phase_sign_certified &&
+            !scalar.canEvaluateValue()) {
+            throw std::invalid_argument(
+                "free-surface snapshot volume validation requires a scalar value evaluator when source geometry does not certify the represented phase");
+        }
+        validateRule(record,
+                     interface_domain,
+                     mesh,
+                     revision,
+                     policy,
+                     scalar,
+                     ledger);
+        const FreeSurfaceGeometryRuleRecord* const cell_rules[] = {&record};
+        validateCellPolynomialMoments(
+            cell_rules,
+            static_cast<GlobalIndex>(
+                record.reference_rule.provenance.parent_entity),
+            record.reference_rule.exact_polynomial_order,
+            mesh,
+            policy,
+            ledger);
+        record.classification_only_content_digest =
+            ruleContentDigest(record);
+        std::vector<geometry::CutQuadraturePoint>().swap(
+            record.reference_rule.points);
+        std::vector<geometry::MappedCutQuadraturePoint>().swap(
+            record.physical_rule.points);
+        record.classification_only = true;
     }
     const auto fragment_by_stable_id =
         firstSourceByStableId(interface_domain.fragments());
@@ -4663,13 +4803,15 @@ buildFreeSurfaceGeometrySnapshot(
             throw std::invalid_argument(
                 "free-surface snapshot contains a duplicate retained rule identity");
         }
-        validateRule(record,
-                     interface_domain,
-                     mesh,
-                     revision,
-                     policy,
-                     scalar,
-                     ledger);
+        if (!record.classification_only) {
+            validateRule(record,
+                         interface_domain,
+                         mesh,
+                         revision,
+                         policy,
+                         scalar,
+                         ledger);
+        }
         accumulateLedger(record, ledger);
     }
     validateVolumePartition(records, mesh, policy, ledger);
