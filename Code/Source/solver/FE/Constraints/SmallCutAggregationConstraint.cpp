@@ -6099,13 +6099,52 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         std::set<GlobalIndex> assembled_candidate_dofs;
         std::set<GlobalIndex> row_coupled_candidate_dofs;
         {
-            std::set<GlobalIndex> candidate_component_dofs;
+            // Candidate component DOFs, sorted and distinct, with dense
+            // per-DOF marks over their range: one array read per cell DOF
+            // instead of a set probe, and one ordered insertion per marked
+            // candidate instead of one per incident cell.
+            std::vector<GlobalIndex> candidate_component_dofs;
             for (const auto& [dof, candidate] : global_candidates) {
                 static_cast<void>(dof);
                 candidate_component_dofs.insert(
+                    candidate_component_dofs.end(),
                     candidate.component_dofs.begin(),
                     candidate.component_dofs.end());
             }
+            std::sort(candidate_component_dofs.begin(),
+                      candidate_component_dofs.end());
+            candidate_component_dofs.erase(
+                std::unique(candidate_component_dofs.begin(),
+                            candidate_component_dofs.end()),
+                candidate_component_dofs.end());
+            const GlobalIndex candidate_dof_base =
+                candidate_component_dofs.empty()
+                    ? GlobalIndex{0}
+                    : candidate_component_dofs.front();
+            const std::size_t candidate_dof_span =
+                candidate_component_dofs.empty()
+                    ? std::size_t{0}
+                    : static_cast<std::size_t>(
+                          candidate_component_dofs.back() -
+                          candidate_dof_base) + 1u;
+            constexpr unsigned char candidate_bit = 1u;
+            constexpr unsigned char assembled_bit = 2u;
+            constexpr unsigned char row_coupled_bit = 4u;
+            std::vector<unsigned char> candidate_marks(candidate_dof_span, 0u);
+            for (const auto dof : candidate_component_dofs) {
+                candidate_marks[static_cast<std::size_t>(
+                    dof - candidate_dof_base)] = candidate_bit;
+            }
+            auto candidate_mark = [&](GlobalIndex dof) -> unsigned char* {
+                if (dof < candidate_dof_base ||
+                    static_cast<std::size_t>(dof - candidate_dof_base) >=
+                        candidate_dof_span) {
+                    return nullptr;
+                }
+                auto* mark = &candidate_marks[static_cast<std::size_t>(
+                    dof - candidate_dof_base)];
+                return (*mark & candidate_bit) != 0u ? mark : nullptr;
+            };
             const auto& assembly_partition =
                 system.dofHandler().getPartition();
             const auto n_local_cells = mesh.numCells();
@@ -6152,15 +6191,28 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                     continue;
                 }
                 for (const auto dof : cell_dofs) {
-                    if (candidate_component_dofs.count(offset + dof) == 0u) {
+                    auto* mark = candidate_mark(offset + dof);
+                    if (mark == nullptr) {
                         continue;
                     }
                     if (assembled) {
-                        assembled_candidate_dofs.insert(offset + dof);
+                        *mark |= assembled_bit;
                     }
                     if (row_coupled) {
-                        row_coupled_candidate_dofs.insert(offset + dof);
+                        *mark |= row_coupled_bit;
                     }
+                }
+            }
+            for (const auto dof : candidate_component_dofs) {
+                const auto mark = candidate_marks[static_cast<std::size_t>(
+                    dof - candidate_dof_base)];
+                if ((mark & assembled_bit) != 0u) {
+                    assembled_candidate_dofs.insert(
+                        assembled_candidate_dofs.end(), dof);
+                }
+                if ((mark & row_coupled_bit) != 0u) {
+                    row_coupled_candidate_dofs.insert(
+                        row_coupled_candidate_dofs.end(), dof);
                 }
             }
         }
