@@ -147,6 +147,38 @@ application runs it as the first stage of accepted-step maintenance
 `Level-set kinematic reconciliation` line per step with the transported and
 reconciled volume errors.
 
+### Sign-Definite Patch Bounds
+
+Exact transport is constant along characteristics, so after a step whose
+one-ring Courant number is at most one the value at a node lies in the range of
+the previous values over the node's patch. The Galerkin step lacks this local
+maximum principle: the consistent mass matrix projects the advective rate,
+which is largest at the nodes of cut cells, onto P1 with negative lobes on the
+neighbouring nodes, and at a stagnation point of a diverging transport velocity
+the central Galerkin stencil is anti-diffusive. Next to a contact line, where
+the transport velocity has a mesh-scale kink and the transported field is thin
+(the gas wedge behind a receding line, the wall row inside the footprint), a
+wall node whose whole patch lies in one phase can drift to the isovalue over a
+few hundred steps and cross it, creating a spurious wetted or dry spot on the
+wall.
+
+`Enable_sign_definite_patch_bounds` (default off;
+`LevelSetSignDefinitePatchBoundsOptions`) applies, after every accepted step,
+`FE/LevelSet/LevelSetSignDefinitePatchBounds.h`: a node is sign definite when
+every node of every cell around it is in one strict sign class at the previous
+accepted state and, the node itself excepted, at the transported endpoint; its
+value is clamped into `[min, max]` of the previous values over its patch. Every
+other node, in particular every node of a cut cell, keeps its transported
+value, so the interface, the contact line and the liquid measure do not change,
+and a node away from the interface cannot cross the isovalue. There is no
+numerical parameter. The bound holds where characteristics start inside the
+mesh, so the application rejects the option together with level-set inflow
+boundaries. Affine `Triangle3` and `Tetra4` cells are supported;
+min/max and count reductions over owned cells give partition-independent
+results. The application runs it after the kinematic reconciliation
+(`Limiting` ledger rows) and logs one `Level-set sign-definite patch bounds`
+line per step.
+
 ## Equation-Level Active Domains
 
 An equation-level active-domain request means that volume forms owned by that
