@@ -174,4 +174,38 @@ if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
       ENVIRONMENT
         "OMPI_ALLOW_RUN_AS_ROOT=1;OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1"
   )
+
+  # End-to-end rank-count check of unfitted free-surface runs: generated
+  # static-drop, capillary-wave and sessile-drop decks, a few steps of
+  # svmultiphysics on 1, 2 and 4 ranks, fields and Newton counts compared
+  # with the 1-rank run.  Exit code 77 (no numpy for the generators) is a skip.
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+  set(_free_surface_benchmarks
+    "${CMAKE_SOURCE_DIR}/../tests/cases/fluid/free_surface_benchmarks")
+  if(Python3_Interpreter_FOUND AND TARGET ${SV_MULTIPHYSICS_EXE} AND
+     EXISTS "${_free_surface_benchmarks}")
+    string(REPLACE ";" " " _free_surface_mpiexec_preflags "${MPIEXEC_PREFLAGS}")
+    add_test(
+      NAME Application_FreeSurfaceRankConsistency_MPI_4
+      COMMAND ${Python3_EXECUTABLE}
+              ${CMAKE_CURRENT_SOURCE_DIR}/Support/free_surface_rank_consistency.py
+              --solver $<TARGET_FILE:${SV_MULTIPHYSICS_EXE}>
+              --mpiexec ${MPIEXEC_EXECUTABLE}
+              "--numproc-flag=${MPIEXEC_NUMPROC_FLAG}"
+              "--mpiexec-preflags=${_free_surface_mpiexec_preflags}"
+              --benchmarks ${_free_surface_benchmarks}
+              --work-dir ${CMAKE_CURRENT_BINARY_DIR}/free_surface_rank_consistency
+              --ranks 1 2 4
+              --steps 2
+    )
+    set_tests_properties(
+      Application_FreeSurfaceRankConsistency_MPI_4
+      PROPERTIES
+        PROCESSORS 4
+        TIMEOUT 3600
+        SKIP_RETURN_CODE 77
+        ENVIRONMENT
+          "OMPI_ALLOW_RUN_AS_ROOT=1;OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1"
+    )
+  endif()
 endif()
