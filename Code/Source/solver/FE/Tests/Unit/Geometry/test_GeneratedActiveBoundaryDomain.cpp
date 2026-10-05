@@ -16,6 +16,7 @@
 #include <bit>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <functional>
@@ -7662,4 +7663,75 @@ TEST(FreeSurfaceGeometrySnapshot,
         {{Role::PositiveExteriorBoundary, 2}, Retention::Retained},
     };
     EXPECT_EQ(boundary_retention, expected);
+}
+
+TEST(CutQuadratureMapping, AffineRuleReusesTheJacobianOfEveryPoint)
+{
+    // A skewed affine tetrahedron: LinearMapping's Jacobian is the same at
+    // every reference point, so the mapped rule may compute it once. Every
+    // mapped point must equal the pointwise mapping bit for bit.
+    const SingleTetraBoundaryMesh mesh(
+        17,
+        {{{0.1, -0.2, 0.05}},
+         {{1.3, 0.1, -0.1}},
+         {{0.2, 0.9, 0.3}},
+         {{-0.1, 0.25, 1.1}}});
+    const auto mapping = FE::geometry::makeCutCellGeometryMapping(mesh, 0);
+    ASSERT_TRUE(mapping);
+    const auto same_bits = [](FE::Real a, FE::Real b) {
+        return std::bit_cast<std::uint64_t>(a) ==
+               std::bit_cast<std::uint64_t>(b);
+    };
+    const std::vector<std::array<FE::Real, 3>> reference_points = {
+        {{0.1, 0.2, 0.3}},
+        {{0.6, 0.1, 0.05}},
+        {{0.05, 0.05, 0.8}},
+        {{0.25, 0.25, 0.25}},
+    };
+    for (const auto kind : {FE::geometry::CutQuadratureKind::Volume,
+                            FE::geometry::CutQuadratureKind::Interface}) {
+        SCOPED_TRACE(static_cast<int>(kind));
+        FE::geometry::CutQuadratureRule rule;
+        rule.kind = kind;
+        rule.side = kind == FE::geometry::CutQuadratureKind::Volume
+                        ? FE::geometry::CutIntegrationSide::Negative
+                        : FE::geometry::CutIntegrationSide::Interface;
+        rule.frame = FE::geometry::CutGeometryFrame::Reference;
+        rule.provenance.parent_entity = 0;
+        rule.measure = FE::Real{0.1};
+        for (std::size_t q = 0; q < reference_points.size(); ++q) {
+            FE::geometry::CutQuadraturePoint point;
+            point.point = reference_points[q];
+            point.parent_coordinate = reference_points[q];
+            point.weight = FE::Real{0.01} * static_cast<FE::Real>(q + 1u);
+            point.normal = {{0.3, 0.4, 0.5}};
+            rule.points.push_back(point);
+        }
+        const auto mapped = FE::geometry::mapCutQuadratureRuleToPhysical(mesh, rule);
+        ASSERT_EQ(mapped.points.size(), reference_points.size());
+        for (std::size_t q = 0; q < reference_points.size(); ++q) {
+            SCOPED_TRACE(q);
+            const FE::math::Vector<FE::Real, 3> xi{reference_points[q][0],
+                                                   reference_points[q][1],
+                                                   reference_points[q][2]};
+            const auto jacobian = mapping->jacobian(xi);
+            const auto inverse = jacobian.inverse();
+            const auto physical = mapping->map_to_physical(xi);
+            const auto& out = mapped.points[q];
+            for (std::size_t i = 0; i < 3u; ++i) {
+                EXPECT_TRUE(same_bits(out.physical_point[i], physical[i]));
+                for (std::size_t j = 0; j < 3u; ++j) {
+                    EXPECT_TRUE(same_bits(out.jacobian[i][j], jacobian(i, j)));
+                    EXPECT_TRUE(same_bits(out.inverse_jacobian[i][j], inverse(i, j)));
+                }
+            }
+            EXPECT_TRUE(same_bits(out.absolute_jacobian_determinant,
+                                  std::abs(jacobian.determinant())));
+            if (kind == FE::geometry::CutQuadratureKind::Volume) {
+                EXPECT_TRUE(same_bits(out.physical_weight,
+                                      rule.points[q].weight *
+                                          std::abs(jacobian.determinant())));
+            }
+        }
+    }
 }
