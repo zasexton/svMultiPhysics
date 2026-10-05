@@ -79,3 +79,42 @@ temporary file named
 place, so concurrent writers never share a temporary file and readers only see
 complete files.  Stale temporary files left by killed processes are harmless
 and can be deleted while no job is using the cache.
+
+Kernel cache keys include the target triple, the data layout, the code
+generation CPU and its full feature list, the LLVM version, the hardware
+profile (cache sizes, SIMD width, register count) and the code-generation
+options below.  An object compiled on one node type is therefore never loaded
+on another node type: with the default host target, AVX-512 and AVX2 nodes use
+different keys, even when they share one cache directory.
+
+## Code Generation Target And Floating-Point Contraction
+
+By default the JIT compiles for the host CPU with every host feature
+(`JITTargetMachineBuilder::detectHost()`), at the optimization level requested
+by the physics (`PhysicsJITPolicy::optimization_level`, 3).  Floating-point
+semantics are strict (`JITFastMathMode::Strict`), except that LLVMGen emits
+`llvm.fmuladd` for scalar `a*b + c` patterns at optimization level 2 and
+above, and LLVM fuses those into FMA instructions on CPUs that have them.
+
+The hardware profile's SIMD width, register count and target-aware pipeline
+flag come from the instruction set the solver itself was compiled for, not
+from the run-time CPU.  A generic x86-64 build therefore runs the two-lane
+SIMD batch path and builds the IR pipeline without a target machine, even on
+AVX-512 nodes.  A build with `-march=x86-64-v3` or wider reports a 256-bit
+SIMD width and switches the SIMD batch path off (see Known limitations).
+
+Environment overrides for performance studies (unset variables change
+nothing; every override is a cache-key input):
+
+| Variable | Values | Effect |
+|----------|--------|--------|
+| `SVMP_JIT_OPT_LEVEL` | `0`..`3` | Replaces the requested optimization level (IR pipeline and code generator). Levels below 2 also stop the explicit `fmuladd` emission. |
+| `SVMP_JIT_CPU` | `host`, `x86-64`, `x86-64-v2`, `x86-64-v3`, `x86-64-v4` | Compiles for a generic x86-64 level instead of the host CPU.  A level the host cannot execute is refused with a warning. |
+| `SVMP_JIT_FP_CONTRACT` | `off`, `on` | `off`: no fused multiply-add in JIT code (`fmuladd` is split).  `on`: `JITFastMathMode::ContractOnly`, so every multiply-add may fuse. |
+| `SVMP_JIT_TARGET_AWARE` | `0`, `1` | Builds the IR pipeline with the target machine (cost-model driven loop and SLP vectorization). |
+| `SVMP_CACHE_PROFILE` | `L1d:<bytes>,L1i:<bytes>,L2:<bytes>,L3:<bytes>` | Replaces the cache sizes read from sysfs in the hardware profile. |
+
+One cache directory can serve several node types only when the keys agree:
+`SVMP_JIT_CPU=x86-64-v3` together with the same `SVMP_CACHE_PROFILE` on every
+node makes AVX2 and AVX-512 nodes share objects.  Measured effects are in
+`FE/Docs/BuildOptimization.md`.
