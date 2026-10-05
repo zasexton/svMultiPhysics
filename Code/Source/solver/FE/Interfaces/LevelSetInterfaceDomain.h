@@ -1197,6 +1197,43 @@ public:
 
     [[nodiscard]] std::vector<GeneratedInterfaceTwoSidedBinding>
     twoSidedParentCellBindings() const {
+        // Active volume regions keyed by (parent cell, marker) and, within a
+        // key, by region index: each fragment visits exactly the regions a
+        // scan over all regions would accept, in the same order.
+        struct RegionKey {
+            MeshIndex parent_cell;
+            int interface_marker;
+            std::size_t index;
+        };
+        const auto same_parent_less = [](const RegionKey& a,
+                                         const RegionKey& b) noexcept {
+            if (a.parent_cell != b.parent_cell) {
+                return a.parent_cell < b.parent_cell;
+            }
+            return a.interface_marker < b.interface_marker;
+        };
+        std::vector<RegionKey> region_keys;
+        region_keys.reserve(volume_regions_.size());
+        for (std::size_t i = 0; i < volume_regions_.size(); ++i) {
+            const auto& region = volume_regions_[i];
+            if (region.active()) {
+                region_keys.push_back(
+                    RegionKey{region.parent_cell, region.interface_marker, i});
+            }
+        }
+        std::sort(region_keys.begin(),
+                  region_keys.end(),
+                  [&same_parent_less](const RegionKey& a,
+                                      const RegionKey& b) noexcept {
+                      if (same_parent_less(a, b)) {
+                          return true;
+                      }
+                      if (same_parent_less(b, a)) {
+                          return false;
+                      }
+                      return a.index < b.index;
+                  });
+
         std::vector<GeneratedInterfaceTwoSidedBinding> bindings;
         bindings.reserve(fragments_.size());
         for (const auto& fragment : fragments_) {
@@ -1211,12 +1248,13 @@ public:
             binding.normal = fragment.normal;
             binding.minus_side = fragment.minus_side;
             binding.plus_side = fragment.plus_side;
-            for (const auto& region : volume_regions_) {
-                if (!region.active() ||
-                    region.parent_cell != fragment.parent_cell ||
-                    region.interface_marker != fragment.interface_marker) {
-                    continue;
-                }
+            const auto [first, last] = std::equal_range(
+                region_keys.begin(),
+                region_keys.end(),
+                RegionKey{fragment.parent_cell, fragment.interface_marker, 0u},
+                same_parent_less);
+            for (auto key = first; key != last; ++key) {
+                const auto& region = volume_regions_[key->index];
                 if (region.side == geometry::CutIntegrationSide::Negative) {
                     binding.negative_volume_region_stable_ids.push_back(
                         region.stable_id);

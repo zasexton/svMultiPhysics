@@ -1366,3 +1366,125 @@ TEST(LevelSetInterfaceDomain, SeparateInterfaceAndVolumeQuadratureOrders)
     EXPECT_EQ(volume_rules.front().policy.name,
               "linear-moment-fitted-level-set-volume");
 }
+
+TEST(LevelSetInterfaceDomain,
+     TwoSidedBindingsMatchRegionScanForInterleavedCellsAndMarkers)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromField(/*field_id=*/4,
+                                                        /*layout_revision=*/1,
+                                                        /*value_revision=*/3);
+    request.interface_marker = 7;
+    LevelSetInterfaceDomain domain(request);
+
+    const auto add_fragment = [&](MeshIndex cell, Real measure, int marker) {
+        CutInterfaceFragment fragment;
+        fragment.parent_cell = cell;
+        fragment.measure = measure;
+        fragment.interface_marker = marker;
+        domain.addFragment(fragment);
+    };
+    add_fragment(5, 1.0, -1);
+    add_fragment(3, 1.0, -1);
+    add_fragment(5, 0.5, -1);  // second fragment of cell 5
+    add_fragment(7, 0.0, -1);  // inactive
+    add_fragment(3, 1.0, 9);   // other marker, same cell
+
+    const auto add_region =
+        [&](MeshIndex cell, CutIntegrationSide side, Real measure, int marker) {
+            CutInterfaceVolumeRegion region;
+            region.parent_cell = cell;
+            region.side = side;
+            region.parent_measure = 1.0;
+            region.measure = measure;
+            region.volume_fraction = measure;
+            region.interface_marker = marker;
+            domain.addVolumeRegion(region);
+        };
+    add_region(5, CutIntegrationSide::Negative, 0.25, -1);
+    add_region(3, CutIntegrationSide::Positive, 0.5, -1);
+    add_region(5, CutIntegrationSide::Positive, 0.75, -1);
+    add_region(5, CutIntegrationSide::Negative, 0.1, -1);  // second negative region
+    add_region(3, CutIntegrationSide::Negative, 0.5, -1);
+    add_region(3, CutIntegrationSide::Positive, 0.4, 9);
+    add_region(5, CutIntegrationSide::Negative, 0.0, -1);  // inactive
+    add_region(9, CutIntegrationSide::Negative, 1.0, -1);  // no fragment
+    add_region(3, CutIntegrationSide::Negative, 0.6, 9);
+
+    // Reference: every active fragment scans every region.
+    std::vector<GeneratedInterfaceTwoSidedBinding> expected;
+    for (const auto& fragment : domain.fragments()) {
+        if (!fragment.active()) {
+            continue;
+        }
+        GeneratedInterfaceTwoSidedBinding binding;
+        binding.interface_marker = fragment.interface_marker;
+        binding.parent_cell = fragment.parent_cell;
+        binding.interface_stable_id = fragment.stable_id;
+        for (const auto& region : domain.volumeRegions()) {
+            if (!region.active() ||
+                region.parent_cell != fragment.parent_cell ||
+                region.interface_marker != fragment.interface_marker) {
+                continue;
+            }
+            if (region.side == CutIntegrationSide::Negative) {
+                binding.negative_volume_region_stable_ids.push_back(
+                    region.stable_id);
+            } else if (region.side == CutIntegrationSide::Positive) {
+                binding.positive_volume_region_stable_ids.push_back(
+                    region.stable_id);
+            }
+        }
+        expected.push_back(std::move(binding));
+    }
+    std::sort(expected.begin(), expected.end(),
+              [](const auto& a, const auto& b) {
+                  if (a.parent_cell != b.parent_cell) {
+                      return a.parent_cell < b.parent_cell;
+                  }
+                  if (a.interface_marker != b.interface_marker) {
+                      return a.interface_marker < b.interface_marker;
+                  }
+                  return a.interface_stable_id < b.interface_stable_id;
+              });
+
+    const auto bindings = domain.twoSidedParentCellBindings();
+    ASSERT_EQ(expected.size(), 4u);
+    ASSERT_EQ(bindings.size(), expected.size());
+    for (std::size_t i = 0; i < bindings.size(); ++i) {
+        EXPECT_EQ(bindings[i].parent_cell, expected[i].parent_cell) << i;
+        EXPECT_EQ(bindings[i].interface_marker, expected[i].interface_marker) << i;
+        EXPECT_EQ(bindings[i].interface_stable_id,
+                  expected[i].interface_stable_id) << i;
+        EXPECT_EQ(bindings[i].negative_volume_region_stable_ids,
+                  expected[i].negative_volume_region_stable_ids) << i;
+        EXPECT_EQ(bindings[i].positive_volume_region_stable_ids,
+                  expected[i].positive_volume_region_stable_ids) << i;
+    }
+
+    // Spot checks: regions keep insertion order within a cell and side, and
+    // markers do not mix.
+    const auto& regions = domain.volumeRegions();
+    for (const auto& binding : bindings) {
+        if (binding.parent_cell == 5) {
+            EXPECT_EQ(binding.interface_marker, 7);
+            EXPECT_EQ(binding.negative_volume_region_stable_ids,
+                      (std::vector<std::uint64_t>{regions[0].stable_id,
+                                                  regions[3].stable_id}));
+            EXPECT_EQ(binding.positive_volume_region_stable_ids,
+                      (std::vector<std::uint64_t>{regions[2].stable_id}));
+        } else if (binding.parent_cell == 3 && binding.interface_marker == 7) {
+            EXPECT_EQ(binding.negative_volume_region_stable_ids,
+                      (std::vector<std::uint64_t>{regions[4].stable_id}));
+            EXPECT_EQ(binding.positive_volume_region_stable_ids,
+                      (std::vector<std::uint64_t>{regions[1].stable_id}));
+        } else {
+            EXPECT_EQ(binding.parent_cell, 3);
+            EXPECT_EQ(binding.interface_marker, 9);
+            EXPECT_EQ(binding.negative_volume_region_stable_ids,
+                      (std::vector<std::uint64_t>{regions[8].stable_id}));
+            EXPECT_EQ(binding.positive_volume_region_stable_ids,
+                      (std::vector<std::uint64_t>{regions[5].stable_id}));
+        }
+    }
+}
