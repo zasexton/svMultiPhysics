@@ -88,6 +88,29 @@ using FreeSurfaceBoundary = IncompressibleNavierStokesVMSOptions::FreeSurfaceBou
 using FreeSurfaceContactLine =
     IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine;
 
+// A rank-local failure is logged, with its rank, before the collective that
+// propagates it.  Otherwise only the "another communicator rank rejected"
+// text of the other ranks reaches the log when the job is aborted from one of
+// them first.
+[[maybe_unused]] void logRankLocalCollectiveFailure(
+    std::string_view phase,
+    const std::exception_ptr& failure)
+{
+    if (failure == nullptr) {
+        return;
+    }
+    std::string reason = "unknown exception";
+    try {
+        std::rethrow_exception(failure);
+    } catch (const std::exception& error) {
+        reason = error.what();
+    } catch (...) {
+    }
+    FE_LOG_ERROR("IncompressibleNavierStokesVMSModule: "
+                 "diagnostic=rank_local_collective_failure phase='" +
+                 std::string(phase) + "' reason='" + reason + "'");
+}
+
 [[nodiscard]] bool coordinateCutContextCallbackLocalPhase(
     const FE::systems::FESystem& system,
     const std::exception_ptr& local_exception,
@@ -109,6 +132,7 @@ using FreeSurfaceContactLine =
             int communicator_size = 1;
             MPI_Comm_size(communicator, &communicator_size);
             if (communicator_size > 1) {
+                logRankLocalCollectiveFailure(phase, local_exception);
                 // 0 = failed, 1 = unavailable, 2 = available. MPI_MIN makes
                 // every rank take the same route after this local phase.
                 const int local_state =
@@ -205,6 +229,9 @@ embeddedFreeSurfaceMeasureEvidence(
         int communicator_size = 1;
         MPI_Comm_size(communicator, &communicator_size);
         if (communicator_size > 1) {
+            logRankLocalCollectiveFailure(
+                "embedded_free_surface_measure_preflight",
+                local_preflight_exception);
             const int local_ok =
                 local_preflight_exception == nullptr
                     ? 1

@@ -22859,13 +22859,60 @@ bool FESystem::operatorMatrixStateIndependent(const OperatorTag& op) const
     return it->second.matrix_state_independent;
 }
 
+namespace {
+
+// Assembly terms run collectives between rank-local work, so an exception
+// raised on one rank can leave the others waiting in, or pairing with, a
+// later unrelated collective.  Log the rank-local reason, with its rank,
+// before it propagates; multi-rank runs only, so serial logs are unchanged.
+void logRankLocalAssemblyFailure(const FESystem& system,
+                                 const OperatorTag& op,
+                                 std::string_view reason)
+{
+    static_cast<void>(system);
+    static_cast<void>(op);
+    static_cast<void>(reason);
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized == 0 || finalized != 0) {
+        return;
+    }
+    const auto communicator = system.activeMpiCommunicator();
+    if (communicator == MPI_COMM_NULL) {
+        return;
+    }
+    int size = 1;
+    MPI_Comm_size(communicator, &size);
+    if (size <= 1) {
+        return;
+    }
+    FE_LOG_ERROR("FESystem::assemble: diagnostic=rank_local_assembly_failure op='" +
+                 std::string(op) + "' reason='" + std::string(reason) + "'");
+#endif
+}
+
+} // namespace
+
 assembly::AssemblyResult FESystem::assemble(
     const AssemblyRequest& req,
     const SystemStateView& state,
     assembly::GlobalSystemView* matrix_out,
     assembly::GlobalSystemView* vector_out)
 {
-    return assembleOperator(*this, req, state, matrix_out, vector_out);
+    try {
+        return assembleOperator(*this, req, state, matrix_out, vector_out);
+    } catch (const std::exception& error) {
+        logRankLocalAssemblyFailure(*this, req.op, error.what());
+        throw;
+    } catch (...) {
+        logRankLocalAssemblyFailure(*this, req.op, "unknown exception");
+        throw;
+    }
 }
 
 assembly::AssemblyResult FESystem::assembleResidual(
