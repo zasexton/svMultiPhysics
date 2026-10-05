@@ -186,6 +186,20 @@ struct LevelSetKinematicReconciliationOptions {
     bool enabled{false};
 };
 
+/**
+ * @brief Accepted-step one-ring bounds on sign-definite patches.
+ *
+ * Disabled by default.  When enabled, every accepted step clamps each node
+ * whose whole patch lies in one phase into the range of the previous values
+ * over its patch (LevelSetSignDefinitePatchBounds.h), the local maximum
+ * principle of exact transport.  Nodes of cut cells are never changed, so the
+ * interface and the liquid measure are untouched; a node away from the
+ * interface cannot cross the isovalue.  There is no numerical parameter.
+ */
+struct LevelSetSignDefinitePatchBoundsOptions {
+    bool enabled{false};
+};
+
 struct LevelSetInflowBoundary {
     // The transported level set is defined on the background space, so this
     // condition intentionally covers the complete physical inlet. It is not
@@ -322,6 +336,7 @@ struct LevelSetTransportOptions {
     LevelSetBoundaryOptions boundaries{};
     LevelSetConservativePhaseOptions conservative_phase{};
     LevelSetKinematicReconciliationOptions kinematic_reconciliation{};
+    LevelSetSignDefinitePatchBoundsOptions sign_definite_patch_bounds{};
 };
 
 enum class LevelSetConservationDiagnostic {
@@ -353,6 +368,10 @@ enum class LevelSetConservationDiagnostic {
 
 [[nodiscard]] bool shouldApplyLevelSetKinematicReconciliation(
     const LevelSetKinematicReconciliationOptions& options,
+    int completed_step_index) noexcept;
+
+[[nodiscard]] bool shouldApplyLevelSetSignDefinitePatchBounds(
+    const LevelSetSignDefinitePatchBoundsOptions& options,
     int completed_step_index) noexcept;
 
 } // namespace svmp::FE::level_set
