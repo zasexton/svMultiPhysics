@@ -18,11 +18,17 @@ Files:
 | `tolerances.json` | acceptance criteria and their sources, fixed on 2026-09-30 before the first run; they mirror `static_drop_2d` |
 | `tests/test_free_surface_benchmark_static_sphere_3d.py` | checks of the two scripts on synthetic data |
 
-**Status (2026-09-30): the benchmark cannot run yet.** With the current
-solver, every D2 capillary form stops at the first time step (see "Smoke
-run" below): first on a solver consistency check, and, with that check out
-of the way, on the first vertex crossing. The input is read and the whole
-setup completes; neither failure comes from the case definition.
+**Status (2026-10-05): runs.** The two step-0 blockers recorded under "Smoke
+run" below (2026-09-30) are fixed. The functional consistency checks now use
+a rounding bound derived from the number of summed terms, instead of a fixed
+512 ulp: at R/h = 8 the rule-wise and point-wise volumes (418,870 points)
+differ by 1.89e-12, 4x the old bound and 0.5% of the derived one. Vertex
+crossings are accepted within a step. A `surface_stress` run at R/h = 8
+(`--max-steps 2`, PDE transport) accepted both steps with 5 outer passes and
+6-7 Newton iterations each, at about 21-23 min per step serial; the volume
+drift was -3.0e-6 after step 2. A full refinement study is not yet scheduled
+(about 500 steps at R/h = 8, plus the 3D gating and memory decisions for
+R/h = 16).
 
 ## Physical setup
 
