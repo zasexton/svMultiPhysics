@@ -16,6 +16,7 @@
 
 #include "FE/Assembly/Assembler.h"
 #include "FE/Assembly/CutIntegrationContext.h"
+#include "FE/Assembly/CutGeometryMemoryReport.h"
 #include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Basis/BasisCache.h"
 #include "FE/Basis/NodeOrderingConventions.h"
@@ -2898,6 +2899,44 @@ ProcessMemorySnapshot readProcessMemorySnapshot()
     }
   }
   return snapshot;
+}
+
+long readProcessPeakRssKb()
+{
+  std::ifstream status("/proc/self/status");
+  std::string line;
+  while (std::getline(status, line)) {
+    std::istringstream fields(line);
+    std::string key;
+    long value = -1;
+    if ((fields >> key >> value) && key == "VmHWM:") {
+      return value;
+    }
+  }
+  return -1;
+}
+
+// Opt-in (SVMP_CUT_MEMORY_REPORT=1) storage breakdown of the generated cut
+// geometry, printed at the phases of an active-cut context rebuild.
+bool cutGeometryMemoryReportEnabled()
+{
+  static const bool enabled = [] {
+    const char* value = std::getenv("SVMP_CUT_MEMORY_REPORT");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+  }();
+  return enabled;
+}
+
+void logCutGeometryMemory(const char* phase, const std::string& details = {})
+{
+  if (!cutGeometryMemoryReportEnabled()) {
+    return;
+  }
+  const auto memory = readProcessMemorySnapshot();
+  std::cout << "[svMultiPhysics::Application] Cut geometry memory"
+            << " diagnostic=cut_geometry_memory phase=" << phase
+            << " rss_kb=" << memory.rss_kb
+            << " hwm_kb=" << readProcessPeakRssKb() << details << std::endl;
 }
 
 OutputTimingStats reduceOutputTiming(double local, const svmp::MeshComm& comm)
@@ -19876,6 +19915,46 @@ void writeAcceptedVelocityExtensionMapArtifacts(
   }
 }
 
+std::string cutGeometryContextMemoryDetails(
+    const std::string& prefix,
+    const svmp::FE::assembly::CutIntegrationContext* context)
+{
+  namespace report = svmp::FE::assembly::memory_report;
+  if (context == nullptr) {
+    return " " + prefix + "_mb=0";
+  }
+  std::string details =
+      report::formatContext(prefix, report::contextStorage(*context));
+  std::size_t index = 0u;
+  for (const auto& snapshot : context->freeSurfaceGeometrySnapshots()) {
+    if (snapshot) {
+      details += report::formatSnapshot(
+          prefix + "_snapshot" + std::to_string(index),
+          report::snapshotStorage(*snapshot));
+    }
+    ++index;
+  }
+  return details;
+}
+
+std::string cutGeometryLifecycleMemoryDetails(
+    const svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle)
+{
+  namespace report = svmp::FE::assembly::memory_report;
+  const auto storage = lifecycle.storage();
+  std::ostringstream out;
+  out << " lifecycle_cells_mb=" << report::megabytes(storage.cell_cache_bytes)
+      << " lifecycle_cell_points=" << storage.cell_cache_region_points
+      << " lifecycle_domain_mb="
+      << report::megabytes(storage.domain_cache_bytes)
+      << " lifecycle_domain_points=" << storage.domain_cache_region_points
+      << " lifecycle_adjacency_mb="
+      << report::megabytes(storage.adjacency_bytes)
+      << " lifecycle_backup_mb="
+      << report::megabytes(storage.transaction_backup_bytes);
+  return out.str();
+}
+
 ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     application::core::SimulationComponents& sim,
     const Parameters& params,
@@ -19923,6 +20002,13 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
       "active_cut_source_sync_before_snapshot_build");
   report.refreshed = true;
   const auto& mesh_access = sim.fe_system->meshAccess();
+  if (cutGeometryMemoryReportEnabled()) {
+    logCutGeometryMemory(
+        "refresh_begin",
+        cutGeometryLifecycleMemoryDetails(lifecycle) +
+            cutGeometryContextMemoryDetails(
+                "installed", sim.fe_system->cutIntegrationContext()));
+  }
 
   for (const auto& request : requests) {
     const auto backend_start = Clock::now();
@@ -19958,6 +20044,15 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         reduceOutputTiming(local_backend_seconds, comm);
     auto& options = *options_storage;
     auto& result = *result_storage;
+    if (cutGeometryMemoryReportEnabled()) {
+      logCutGeometryMemory(
+          "after_lifecycle_build",
+          cutGeometryLifecycleMemoryDetails(lifecycle) +
+              svmp::FE::assembly::memory_report::formatDomain(
+                  "result_domain",
+                  svmp::FE::assembly::memory_report::domainStorage(
+                      result.domain)));
+    }
     const bool local_missing_source_topology =
         std::any_of(
             result.domain.fragments().begin(),
@@ -20573,6 +20668,14 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << geometry_ledger.retained_positive_physical_volume
         << " resident_bytes=" << geometry_snapshot->residentBytes()
         << std::endl;
+    if (cutGeometryMemoryReportEnabled()) {
+      logCutGeometryMemory(
+          "after_snapshot_build",
+          svmp::FE::assembly::memory_report::formatSnapshot(
+              "snapshot",
+              svmp::FE::assembly::memory_report::snapshotStorage(
+                  *geometry_snapshot)));
+    }
     topology_bindings.push_back(
         ActiveCutTopologySnapshotBinding{
             .request = &request,
@@ -20580,6 +20683,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         });
     context->addFreeSurfaceGeometrySnapshot(
         geometry_snapshot, retained_volume_sides);
+    logCutGeometryMemory("after_context_import");
     const auto global_boundary_intersection_fragments =
         globalSumSize(local_boundary_intersection_fragments, comm);
     const auto global_active_boundary_intersection_fragments =
@@ -21100,9 +21204,19 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
 
   report.topology_key =
       activeCutContextTopologyFingerprint(topology_bindings, comm);
+  if (cutGeometryMemoryReportEnabled()) {
+    logCutGeometryMemory(
+        "before_install",
+        cutGeometryLifecycleMemoryDetails(lifecycle) +
+            cutGeometryContextMemoryDetails("new", context.get()) +
+            cutGeometryContextMemoryDetails(
+                "installed", sim.fe_system->cutIntegrationContext()));
+  }
   report.installed_context = context;
   sim.fe_system->setCutIntegrationContext(std::move(context));
+  logCutGeometryMemory("after_install");
   sim.fe_system->rebuildConstraintState();
+  logCutGeometryMemory("after_constraint_rebuild");
   application::core::oopDiagnosticsCout()
       << "[svMultiPhysics::Application] Active pressure support constraint refresh"
       << " diagnostic=active_pressure_constraint_refresh"
@@ -31315,6 +31429,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     }
     oopCout() << "[svMultiPhysics::Application] TimeLoop: step_start step=" << h.stepIndex()
               << " time=" << h.time() << " dt=" << h.dt() << std::endl;
+    logCutGeometryMemory("step_start");
   };
   auto cut_topology_key = std::make_shared<std::optional<std::uint64_t>>();
   applyJacobianCheckGeometryProvenance(
@@ -33503,6 +33618,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     }
     oopCout() << "[svMultiPhysics::Application] TimeLoop: step_accepted step=" << h.stepIndex()
               << " time=" << h.time() << " dt=" << h.dt() << std::endl;
+    logCutGeometryMemory("step_accepted");
     const auto accepted_post_maintenance_state_revision =
         has_conservative_phase
             ? collectiveMeshBoundaryStateFingerprint(
