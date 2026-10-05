@@ -7370,7 +7370,11 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
     const auto first_key_less = [](const auto& pair, GlobalIndex key) {
         return pair.first < key;
     };
-    std::set<GlobalIndex> covered_cut_cell_gids;
+    // Supports, feature sets and the covered cut cells are gathered in
+    // vectors and made sorted and distinct, the content of the sets.
+    std::vector<GlobalIndex> covered_cut_cell_gids;
+    std::vector<GlobalIndex> support;
+    std::vector<GlobalIndex> support_active_features;
     for (auto& patch : report->patches) {
         if (patch.active_feature_ids.empty() ||
             !std::is_sorted(
@@ -7384,10 +7388,10 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
                 "SmallCutAggregationConstraint: prolongation patch has "
                 "non-canonical active-feature identities");
         }
-        std::set<GlobalIndex> support(
-            patch.support_cell_gids.begin(),
-            patch.support_cell_gids.end());
-        support.insert(patch.member_cell_gids.begin(),
+        support.assign(patch.support_cell_gids.begin(),
+                       patch.support_cell_gids.end());
+        support.insert(support.end(),
+                       patch.member_cell_gids.begin(),
                        patch.member_cell_gids.end());
         for (const auto slave : patch.slave_dofs) {
             const auto row_it = finalized_row_by_slave.find(slave);
@@ -7416,15 +7420,18 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
                 for (; master_support != active_cell_gids_by_dof.end() &&
                        master_support->first == entry.master_dof;
                      ++master_support) {
-                    support.insert(master_support->second);
+                    support.push_back(master_support->second);
                 }
             }
         }
+        std::sort(support.begin(), support.end());
+        support.erase(std::unique(support.begin(), support.end()),
+                      support.end());
         // Closed affine rows can replace a provisional root master with a
         // master supported by another active feature. Derive feature identity
         // from the complete final support instead of retaining the provisional
         // patch ledger.
-        std::set<GlobalIndex> support_active_features;
+        support_active_features.clear();
         for (const auto gid : support) {
             const auto active_cell = std::lower_bound(
                 active_feature_by_cell_gid.begin(),
@@ -7436,23 +7443,36 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
                 report->trace_bound_eligible = false;
                 continue;
             }
-            support_active_features.insert(
+            support_active_features.push_back(
                 active_cell->second);
         }
+        std::sort(support_active_features.begin(),
+                  support_active_features.end());
+        support_active_features.erase(
+            std::unique(support_active_features.begin(),
+                        support_active_features.end()),
+            support_active_features.end());
         patch.active_feature_ids.assign(
             support_active_features.begin(),
             support_active_features.end());
         patch.support_cell_gids.assign(
             support.begin(), support.end());
-        for (const auto gid : patch.member_cell_gids) {
-            covered_cut_cell_gids.insert(gid);
-        }
+        covered_cut_cell_gids.insert(covered_cut_cell_gids.end(),
+                                     patch.member_cell_gids.begin(),
+                                     patch.member_cell_gids.end());
     }
+    std::sort(covered_cut_cell_gids.begin(), covered_cut_cell_gids.end());
+    covered_cut_cell_gids.erase(
+        std::unique(covered_cut_cell_gids.begin(),
+                    covered_cut_cell_gids.end()),
+        covered_cut_cell_gids.end());
     for (const auto& cell : report->active_cells) {
         if (cell.kind != SmallCutAggregationActiveCellKind::Cut) {
             continue;
         }
-        if (covered_cut_cell_gids.count(cell.cell_gid) == 0u) {
+        if (!std::binary_search(covered_cut_cell_gids.begin(),
+                                covered_cut_cell_gids.end(),
+                                cell.cell_gid)) {
             throw std::logic_error(
                 "SmallCutAggregationConstraint: canonical cut cell has no "
                 "prolongation patch");
