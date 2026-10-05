@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <limits>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -105,6 +106,21 @@ public:
     {
         const auto it = std::lower_bound(keys_.begin(), keys_.end(), key);
         return it != keys_.end() && *it == key
+                   ? static_cast<std::size_t>(it - keys_.begin())
+                   : npos;
+    }
+
+    /// Index of a key given as a view (e.g. into a received buffer), or npos.
+    [[nodiscard]] std::size_t find(std::span<const GlobalIndex> key) const
+    {
+        const auto it = std::lower_bound(
+            keys_.begin(), keys_.end(), key,
+            [](const Key& entry, std::span<const GlobalIndex> k) {
+                return std::lexicographical_compare(entry.begin(), entry.end(),
+                                                    k.begin(), k.end());
+            });
+        return it != keys_.end() &&
+                       std::equal(it->begin(), it->end(), key.begin(), key.end())
                    ? static_cast<std::size_t>(it - keys_.begin())
                    : npos;
     }

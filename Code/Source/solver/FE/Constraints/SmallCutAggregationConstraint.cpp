@@ -4841,11 +4841,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     std::vector<int> global_cell_owner_rank_of;
     const bool slave_all_cut = runtime_options.slave_all_cut;
     using FaceKey = std::vector<GlobalIndex>;
-    struct OwnedCellFaces {
-        CellKey cell{};
-        std::vector<FaceKey> faces{};
-    };
-    std::vector<OwnedCellFaces> local_owned_cell_faces;
+    std::vector<FaceKey> cell_face_keys;
     std::vector<GlobalIndex> graph_cell_nodes;
     std::vector<std::int64_t> local_face_words;
     std::exception_ptr local_owner_face_exception;
@@ -4873,12 +4869,10 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                     "SmallCutAggregationConstraint: malformed cell-owner "
                     "payload");
             }
-            CellKey key;
-            key.reserve(static_cast<std::size_t>(key_count));
-            for (std::int64_t i = 0; i < key_count; ++i) {
-                key.push_back(static_cast<GlobalIndex>(
-                    gathered_cell_visibility.words[position++]));
-            }
+            const std::span<const GlobalIndex> key(
+                gathered_cell_visibility.words.data() + position,
+                static_cast<std::size_t>(key_count));
+            position += static_cast<std::size_t>(key_count);
             // Only classified cells are declared; the first owner is kept.
             const auto index = classified_cells.find(key);
             if (index != ClassifiedCellIndex::npos) {
@@ -4945,10 +4939,14 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         check_cell_pairable(cell);
         const auto& ref =
             elements::ReferenceElement::shared(mesh.getCellType(cell));
-        OwnedCellFaces record{.cell = key};
-        record.faces.reserve(ref.num_faces());
-        for (std::size_t face = 0; face < ref.num_faces(); ++face) {
-            FaceKey face_key;
+        // Face-key buffers are reused from cell to cell.
+        const auto n_cell_faces = static_cast<std::size_t>(ref.num_faces());
+        if (cell_face_keys.size() < n_cell_faces) {
+            cell_face_keys.resize(n_cell_faces);
+        }
+        for (std::size_t face = 0; face < n_cell_faces; ++face) {
+            auto& face_key = cell_face_keys[face];
+            face_key.clear();
             const auto& face_nodes = ref.face_nodes(face);
             face_key.reserve(face_nodes.size() * components);
             for (const auto local_node : face_nodes) {
@@ -4979,34 +4977,30 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                     "SmallCutAggregationConstraint: invalid classified-cell "
                     "face-DOF signature");
             }
-            record.faces.push_back(std::move(face_key));
         }
-        std::sort(record.faces.begin(), record.faces.end());
-        if (std::adjacent_find(record.faces.begin(), record.faces.end()) !=
-            record.faces.end()) {
+        const auto cell_faces_end =
+            cell_face_keys.begin() +
+            static_cast<std::ptrdiff_t>(n_cell_faces);
+        std::sort(cell_face_keys.begin(), cell_faces_end);
+        if (std::adjacent_find(cell_face_keys.begin(), cell_faces_end) !=
+            cell_faces_end) {
             throw std::runtime_error(
                 "SmallCutAggregationConstraint: classified cell has duplicate "
                 "face-DOF signatures");
         }
-        local_owned_cell_faces.push_back(std::move(record));
-    }
-    std::sort(local_owned_cell_faces.begin(), local_owned_cell_faces.end(),
-              [](const auto& a, const auto& b) { return a.cell < b.cell; });
 
-    // [cell_key_count, cell_key..., face_count,
-    //  {face_key_count, face_key...}...]
-    for (const auto& record : local_owned_cell_faces) {
-        local_face_words.push_back(
-            static_cast<std::int64_t>(record.cell.size()));
-        for (const auto dof : record.cell) {
+        // Cells are visited in ascending key order, the order of the
+        // declarations: [cell_key_count, cell_key..., face_count,
+        // {face_key_count, face_key...}...]
+        local_face_words.push_back(static_cast<std::int64_t>(key.size()));
+        for (const auto dof : key) {
             local_face_words.push_back(static_cast<std::int64_t>(dof));
         }
-        local_face_words.push_back(
-            static_cast<std::int64_t>(record.faces.size()));
-        for (const auto& face : record.faces) {
-            local_face_words.push_back(
-                static_cast<std::int64_t>(face.size()));
-            for (const auto dof : face) {
+        local_face_words.push_back(static_cast<std::int64_t>(n_cell_faces));
+        for (auto face = cell_face_keys.begin(); face != cell_faces_end;
+             ++face) {
+            local_face_words.push_back(static_cast<std::int64_t>(face->size()));
+            for (const auto dof : *face) {
                 local_face_words.push_back(static_cast<std::int64_t>(dof));
             }
         }
@@ -5037,11 +5031,14 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     try {
     global_neighbors.assign(classified_cells.size(), {});
     std::vector<char> has_owned_faces(classified_cells.size(), 0);
-    std::vector<std::pair<FaceKey, std::size_t>> face_incidences;
+    // Keys are read as views into the gathered words (GlobalIndex is the
+    // wire type), so no key is copied.
+    using KeyView = std::span<const GlobalIndex>;
+    std::vector<std::pair<KeyView, std::size_t>> face_incidences;
     auto read_serialized_key = [](const GatheredInt64Words& gathered,
                                   std::size_t& position,
                                   std::size_t end,
-                                  std::string_view kind) {
+                                  std::string_view kind) -> KeyView {
         if (position >= end) {
             throw std::runtime_error(
                 "SmallCutAggregationConstraint: malformed distributed " +
@@ -5055,12 +5052,9 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 "SmallCutAggregationConstraint: malformed distributed " +
                 std::string(kind) + " payload");
         }
-        std::vector<GlobalIndex> key;
-        key.reserve(static_cast<std::size_t>(count));
-        for (std::int64_t i = 0; i < count; ++i) {
-            key.push_back(
-                static_cast<GlobalIndex>(gathered.words[position++]));
-        }
+        const KeyView key(gathered.words.data() + position,
+                          static_cast<std::size_t>(count));
+        position += static_cast<std::size_t>(count);
         if (!std::is_sorted(key.begin(), key.end()) ||
             std::adjacent_find(key.begin(), key.end()) != key.end()) {
             throw std::runtime_error(
@@ -5090,7 +5084,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                     "SmallCutAggregationConstraint: malformed owner-face "
                     "record");
             }
-            std::vector<FaceKey> faces;
+            std::vector<KeyView> faces;
             faces.reserve(static_cast<std::size_t>(face_count));
             for (std::int64_t face = 0; face < face_count; ++face) {
                 faces.push_back(read_serialized_key(
@@ -5109,8 +5103,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                     "multiple owner-face declarations");
             }
             has_owned_faces[cell_index] = 1;
-            for (auto& face : faces) {
-                face_incidences.emplace_back(std::move(face), cell_index);
+            for (const auto face : faces) {
+                face_incidences.emplace_back(face, cell_index);
             }
         }
     }
@@ -5125,11 +5119,23 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
 
     // Faces in ascending signature order, each with its incident cells in
     // ascending index order.
-    std::sort(face_incidences.begin(), face_incidences.end());
+    const auto same_key = [](KeyView a, KeyView b) {
+        return std::equal(a.begin(), a.end(), b.begin(), b.end());
+    };
+    std::sort(face_incidences.begin(), face_incidences.end(),
+              [&](const auto& a, const auto& b) {
+                  if (!same_key(a.first, b.first)) {
+                      return std::lexicographical_compare(
+                          a.first.begin(), a.first.end(),
+                          b.first.begin(), b.first.end());
+                  }
+                  return a.second < b.second;
+              });
     for (std::size_t first = 0u; first < face_incidences.size();) {
         std::size_t last = first + 1u;
         while (last < face_incidences.size() &&
-               face_incidences[last].first == face_incidences[first].first) {
+               same_key(face_incidences[last].first,
+                        face_incidences[first].first)) {
             ++last;
         }
         std::size_t distinct_cells = 0u;

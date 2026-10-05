@@ -28,6 +28,8 @@
 
 #include <gtest/gtest.h>
 
+#include <span>
+
 #include "Assembly/CutIntegrationContext.h"
 #include "Basis/NodeOrderingConventions.h"
 #include "Constraints/AffineConstraints.h"
@@ -3932,6 +3934,15 @@ TEST(SmallCutAggregationCellIndex, GlobalIndexMatchesKeyPositions)
     EXPECT_EQ(index.find({1, 2}), detail::SmallCutAggregationCellIndex::npos);
     EXPECT_EQ(index.find({1, 3}), detail::SmallCutAggregationCellIndex::npos);
     EXPECT_EQ(index.find({11}), detail::SmallCutAggregationCellIndex::npos);
+
+    // Lookups by view into a received buffer agree with lookups by key.
+    const std::vector<GlobalIndex> words = {3, 1, 2, 4, 2, 1, 5, 1, 2};
+    EXPECT_EQ(index.find(std::span<const GlobalIndex>(words.data() + 1, 3)), 1u);
+    EXPECT_EQ(index.find(std::span<const GlobalIndex>(words.data() + 5, 2)), 2u);
+    EXPECT_EQ(index.find(std::span<const GlobalIndex>(words.data() + 7, 2)),
+              detail::SmallCutAggregationCellIndex::npos);  // {1, 2}: prefix only
+    EXPECT_EQ(index.find(std::span<const GlobalIndex>(words.data(), 1)),
+              detail::SmallCutAggregationCellIndex::npos);  // {3}
 
     const detail::SmallCutAggregationCellIndex none;
     EXPECT_TRUE(none.empty());
