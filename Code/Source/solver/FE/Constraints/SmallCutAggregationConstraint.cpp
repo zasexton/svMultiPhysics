@@ -7179,24 +7179,50 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
     for (const auto& row : report->rows) {
         finalized_row_by_slave.emplace(row.slave_dof, &row);
     }
-    std::map<GlobalIndex, std::vector<GlobalIndex>>
+    // Sorted (DOF, active cell GID) incidences and (cell GID, feature)
+    // pairs instead of node-based maps: the stable sort keeps each DOF's
+    // cells in ledger order, and lookups are binary searches.
+    std::vector<std::pair<GlobalIndex, GlobalIndex>>
         active_cell_gids_by_dof;
-    std::map<GlobalIndex, GlobalIndex>
+    std::vector<std::pair<GlobalIndex, GlobalIndex>>
         active_feature_by_cell_gid;
-    for (const auto& cell : report->active_cells) {
-        const bool inserted =
-            active_feature_by_cell_gid.emplace(
-                cell.cell_gid, cell.active_feature_id).second;
-        if (!inserted) {
+    {
+        std::size_t incidence_count = 0u;
+        for (const auto& cell : report->active_cells) {
+            incidence_count += cell.field_dofs.size();
+        }
+        active_cell_gids_by_dof.reserve(incidence_count);
+        active_feature_by_cell_gid.reserve(report->active_cells.size());
+        for (const auto& cell : report->active_cells) {
+            active_feature_by_cell_gid.emplace_back(
+                cell.cell_gid, cell.active_feature_id);
+            for (const auto dof : cell.field_dofs) {
+                active_cell_gids_by_dof.emplace_back(dof, cell.cell_gid);
+            }
+        }
+        const auto by_first = [](const auto& lhs, const auto& rhs) {
+            return lhs.first < rhs.first;
+        };
+        std::stable_sort(active_feature_by_cell_gid.begin(),
+                         active_feature_by_cell_gid.end(),
+                         by_first);
+        if (std::adjacent_find(
+                active_feature_by_cell_gid.begin(),
+                active_feature_by_cell_gid.end(),
+                [](const auto& lhs, const auto& rhs) {
+                    return lhs.first == rhs.first;
+                }) != active_feature_by_cell_gid.end()) {
             throw std::logic_error(
                 "SmallCutAggregationConstraint: canonical active-cell "
                 "ledger contains duplicate cell identities");
         }
-        for (const auto dof : cell.field_dofs) {
-            active_cell_gids_by_dof[dof].push_back(
-                cell.cell_gid);
-        }
+        std::stable_sort(active_cell_gids_by_dof.begin(),
+                         active_cell_gids_by_dof.end(),
+                         by_first);
     }
+    const auto first_key_less = [](const auto& pair, GlobalIndex key) {
+        return pair.first < key;
+    };
     std::set<GlobalIndex> covered_cut_cell_gids;
     for (auto& patch : report->patches) {
         if (patch.active_feature_ids.empty() ||
@@ -7230,17 +7256,21 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
                 report->trace_bound_eligible = false;
             }
             for (const auto& entry : row.final_entries) {
-                const auto master_support =
-                    active_cell_gids_by_dof.find(
-                        entry.master_dof);
-                if (master_support ==
-                    active_cell_gids_by_dof.end()) {
+                auto master_support = std::lower_bound(
+                    active_cell_gids_by_dof.begin(),
+                    active_cell_gids_by_dof.end(),
+                    entry.master_dof,
+                    first_key_less);
+                if (master_support == active_cell_gids_by_dof.end() ||
+                    master_support->first != entry.master_dof) {
                     report->trace_bound_eligible = false;
                     continue;
                 }
-                support.insert(
-                    master_support->second.begin(),
-                    master_support->second.end());
+                for (; master_support != active_cell_gids_by_dof.end() &&
+                       master_support->first == entry.master_dof;
+                     ++master_support) {
+                    support.insert(master_support->second);
+                }
             }
         }
         // Closed affine rows can replace a provisional root master with a
@@ -7249,10 +7279,13 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
         // patch ledger.
         std::set<GlobalIndex> support_active_features;
         for (const auto gid : support) {
-            const auto active_cell =
-                active_feature_by_cell_gid.find(gid);
-            if (active_cell ==
-                active_feature_by_cell_gid.end()) {
+            const auto active_cell = std::lower_bound(
+                active_feature_by_cell_gid.begin(),
+                active_feature_by_cell_gid.end(),
+                gid,
+                first_key_less);
+            if (active_cell == active_feature_by_cell_gid.end() ||
+                active_cell->first != gid) {
                 report->trace_bound_eligible = false;
                 continue;
             }
