@@ -993,11 +993,16 @@ void precond_rcs(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_int
     W1 = W1 * Wr;
     W2 = W2 * Wc;
 
+    // Continue while any rank still sees a scaling factor outside the
+    // tolerance, as the serial loop does over the whole operator.  The flag
+    // is an int: gathering it as MPI_CXX_BOOL (one byte per rank) packed the
+    // ranks' flags into the first int, so the distributed loop stopped after
+    // one sweep unless rank 0 alone asked to continue.
     if (lhs.commu.nTasks > 1) {
-      int iflag = flag;
-      std::vector<int> gflag(lhs.commu.nTasks);
-      MPI_Allgather(&iflag, 1, cm_mod::mplog, gflag.data(), 1, cm_mod::mplog, lhs.commu.comm);
-      flag = std::find(gflag.begin(), gflag.end(), 1) != gflag.end();
+      int local_continue = flag ? 1 : 0;
+      int any_continue = 0;
+      MPI_Allreduce(&local_continue, &any_continue, 1, MPI_INT, MPI_MAX, lhs.commu.comm);
+      flag = any_continue != 0;
     }
   } // while
 
