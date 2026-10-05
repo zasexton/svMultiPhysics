@@ -32398,12 +32398,14 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           const auto endpoint_solution =
               gatherFeOrderedSolution(
                   h.u(), velocity_extension_artifact_comm);
+          // Content is bound by the algebraic revision of the gathered
+          // vector.  GenericVector::valueRevision() counts rank-local
+          // modifications and differs between ranks, so it must not enter
+          // the cross-rank commit words.
           appendMaintenanceScheduleWord(
               commit_state_words,
               levelSetMaintenanceAlgebraicRevision(
                   endpoint_solution));
-          appendMaintenanceScheduleWord(
-              commit_state_words, h.u().valueRevision());
           appendMaintenanceScheduleWord(
               commit_state_words,
               static_cast<std::uint64_t>(
@@ -32419,9 +32421,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 commit_state_words,
                 levelSetMaintenanceAlgebraicRevision(
                     history_solution));
-            appendMaintenanceScheduleWord(
-                commit_state_words,
-                h.uPrevK(level).valueRevision());
             appendMaintenanceScheduleWord(
                 commit_state_words,
                 static_cast<std::uint64_t>(
@@ -33554,12 +33553,14 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         const auto current_after_maintenance =
             gatherFeOrderedSolution(
                 h.u(), velocity_extension_artifact_comm);
+        // Content is bound by the algebraic revisions of the gathered
+        // vectors.  GenericVector::valueRevision() counts rank-local
+        // modifications and differs between ranks, so it must not enter
+        // the cross-rank commit words.
         appendMaintenanceScheduleWord(
             commit_state_words,
             levelSetMaintenanceAlgebraicRevision(
                 current_after_maintenance));
-        appendMaintenanceScheduleWord(
-            commit_state_words, h.u().valueRevision());
         appendMaintenanceScheduleSigned(
             commit_state_words, h.historyDepth());
         bool local_transaction_invariants_satisfied =
@@ -33586,9 +33587,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               commit_state_words,
               levelSetMaintenanceAlgebraicRevision(
                   history_after_maintenance));
-          appendMaintenanceScheduleWord(
-              commit_state_words,
-              h.uPrevK(level).valueRevision());
           appendMaintenanceScheduleWord(
               commit_state_words,
               static_cast<std::uint64_t>(
@@ -33630,8 +33628,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               levelSetMaintenanceAlgebraicRevision(
                   u_dot_after_maintenance));
           appendMaintenanceScheduleWord(
-              commit_state_words, h.uDot().valueRevision());
-          appendMaintenanceScheduleWord(
               commit_state_words,
               static_cast<std::uint64_t>(
                   u_dot_after_maintenance.size()));
@@ -33640,7 +33636,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   current_after_maintenance.size() &&
               local_transaction_invariants_satisfied;
         } else {
-          appendMaintenanceScheduleWord(commit_state_words, 0u);
           appendMaintenanceScheduleWord(commit_state_words, 0u);
           appendMaintenanceScheduleWord(commit_state_words, 0u);
         }
@@ -33653,8 +33648,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               levelSetMaintenanceAlgebraicRevision(
                   u_ddot_after_maintenance));
           appendMaintenanceScheduleWord(
-              commit_state_words, h.uDDot().valueRevision());
-          appendMaintenanceScheduleWord(
               commit_state_words,
               static_cast<std::uint64_t>(
                   u_ddot_after_maintenance.size()));
@@ -33663,7 +33656,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   current_after_maintenance.size() &&
               local_transaction_invariants_satisfied;
         } else {
-          appendMaintenanceScheduleWord(commit_state_words, 0u);
           appendMaintenanceScheduleWord(commit_state_words, 0u);
           appendMaintenanceScheduleWord(commit_state_words, 0u);
         }
