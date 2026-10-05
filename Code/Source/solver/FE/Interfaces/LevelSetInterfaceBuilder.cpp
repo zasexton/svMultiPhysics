@@ -132,6 +132,11 @@ void observeAssessedRepeat(StrictConstructionObservation& observation,
                            Real tolerance,
                            detail::DistanceObservation distance)
 {
+    // An unresolved observation stays unresolved, and the assessment has no
+    // other effect, so it is skipped once the outcome cannot change.
+    if (observation.state == LinearCornerStrictBranch::ModifiedOrUnresolved) {
+        return;
+    }
     const auto assessment = detail::assessDistance(
         a.assessment, a.point, b.assessment, b.point, tolerance, 3u,
         originRelation(a.origin, b.origin), distance);
