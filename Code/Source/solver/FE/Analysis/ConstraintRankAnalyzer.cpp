@@ -128,6 +128,9 @@ void ConstraintRankAnalyzer::run(const ProblemAnalysisContext& context,
 
     // --- For each Nullspace claim, check if BCs anchor the mode ---
     auto nullspace_claims = report.claimsOfKind(PropertyKind::Nullspace);
+    // nullspace_claims points into report.claims: append new claims only
+    // after the loop so a reallocation cannot leave those pointers dangling.
+    std::vector<PropertyClaim> under_constraint_claims;
     for (const auto* ns_claim : nullspace_claims) {
         FieldId fid = ns_claim->field;
         if (fid == INVALID_FIELD_ID) continue;
@@ -230,7 +233,7 @@ void ConstraintRankAnalyzer::run(const ProblemAnalysisContext& context,
             claim.addEvidence("ConstraintRankAnalyzer",
                 "No anchoring BC found for field " + std::to_string(fid),
                 ns_claim->confidence);
-            report.claims.push_back(std::move(claim));
+            under_constraint_claims.push_back(std::move(claim));
         } else if (weak_only) {
             // Anchored, but only through weak enforcement (Robin/Nitsche penalty).
             // Emit an informational issue (not an UnderConstraint claim) so the
@@ -245,6 +248,9 @@ void ConstraintRankAnalyzer::run(const ProblemAnalysisContext& context,
                 " magnitude: " + ns_claim->description;
             report.issues.push_back(std::move(issue));
         }
+    }
+    for (auto& claim : under_constraint_claims) {
+        report.claims.push_back(std::move(claim));
     }
 
     emitReducedConstraintMetadataClaims(context, report);
