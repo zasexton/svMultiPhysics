@@ -48,7 +48,7 @@ def make_interior_structural_case(tmp_path):
 
 
 @pytest.mark.parametrize("integral", [False, True])
-@pytest.mark.parametrize("prescription", ["components", "history"])
+@pytest.mark.parametrize("prescription", ["components", "history", "masked_history"])
 def test_interior_node_components(tmp_path, n_proc, integral, prescription):
     root, points, _, ids = make_interior_structural_case(tmp_path)
     equation = root.find("Add_equation")
@@ -69,15 +69,19 @@ def test_interior_node_components(tmp_path, n_proc, integral, prescription):
         expected = np.array([[0.02, 0.03]] * 2)
         components = [0, 2]
     else:
-        # Distinct linear histories for every component, listed in reverse node-set order.
-        slope = 0.01
+        # Distinct linear histories, listed in reverse node-set order.
+        slope = np.array([[0.01, -0.02, 0.03], [-0.04, 0.05, -0.06]])
         bc.find("Temporal_and_spatial_values_file_path").text = "vector.dat"
         expected = np.array([[0.01, 0.02, 0.03], [0.04, 0.05, 0.06]])
+        components = [0, 2] if prescription == "masked_history" else [0, 1, 2]
+        if prescription == "masked_history":
+            ET.SubElement(bc, "Effective_direction").text = "1 0 1"
+        expected = expected[:, components]
+        slope = slope[:, components]
         (tmp_path / "vector.dat").write_text(
-            "3 2 2\n0 1\n" + "".join(
-                f"{ids[i]} " + " ".join(map(str, np.r_[expected[i], expected[i] + slope])) + "\n"
+            f"{len(components)} 2 2\n0 1\n" + "".join(
+                f"{ids[i]} " + " ".join(map(str, np.r_[expected[i], expected[i] + slope[i]])) + "\n"
                 for i in [1, 0]))
-        components = [0, 1, 2]
     ET.ElementTree(root).write(tmp_path / "solver.xml")
     result = run_by_name(tmp_path, "solver.xml", 2, n_proc)
     order = [np.argmin(np.linalg.norm(result.points - points[i-1], axis=1)) for i in ids]
@@ -89,7 +93,7 @@ def test_interior_node_components(tmp_path, n_proc, integral, prescription):
         if integral:
             np.testing.assert_allclose(sample.point_data["Velocity"][selected][:, components], slope, atol=1e-10)
     # A mask that accidentally fixes every component suppresses this response.
-    if prescription == "components":
+    if len(components) < 3:
         assert np.all(result.point_data["Displacement"][order, 1] > 1e-5)
     assert np.isfinite(result.point_data["Displacement"]).all()
 

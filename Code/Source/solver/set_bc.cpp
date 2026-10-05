@@ -17,6 +17,7 @@
 #include "svZeroD_interface.h"
 #include "ustruct.h"
 #include "utils.h"
+#include <array>
 #include <cstdio>
 #include <math.h>
 
@@ -954,7 +955,7 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
 
   int nsd = com_mod.nsd;
   int nEq = com_mod.nEq;
-  std::vector<bool> eDir(maxNSD);
+  std::array<int, maxNSD> components;
 
   for (int iEq = 0; iEq < nEq; iEq++) {
     auto& eq = com_mod.eq[iEq];
@@ -1010,18 +1011,20 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
       dmsg << ">> s: " << s;
       dmsg << ">> e: " << e;
       #endif
-      std::fill(eDir.begin(), eDir.end(), false);
       int lDof = 0;
 
       for (int i = 0; i < nsd; i++) {
         if (bc.eDrn(i) != 0) {
-          eDir[i] = true; 
-          lDof = lDof + 1;
+          components[lDof++] = i;
         }
       }
 
-      if (lDof == 0) {
+      const bool selective = lDof != 0;
+      if (!selective) {
         lDof = e - s + 1;
+        for (int i = 0; i < lDof; i++) {
+          components[i] = i;
+        }
       }
       int iFa = bc.iFa;
       int iM = bc.iM;
@@ -1042,57 +1045,17 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
       // Modifies: tmpA, tmpY
       set_bc::set_bc_dir_l(com_mod, bc, face, tmpA, tmpY, lDof);
 
-      if (std::find(eDir.begin(), eDir.end(), true) != eDir.end()) {
-        if (utils::btest(bc.bType, enum_int(BoundaryConditionType::bType_impD))) {
-
-          for (int a = 0; a < nNo; a++) {
-            int Ac = nodes(a);
-            lDof = 0;
-
-            for (int i = 0; i < nsd; i++) {
-              if (eDir[i]) {
-                Yn(s+i,Ac) = tmpA(lDof,a);
-                Dn(s+i,Ac) = tmpY(lDof,a);
-                lDof = lDof + 1;
-              }
-            }
-          }
-
-        } else {
-          for (int a = 0; a < nNo; a++) {
-            int Ac = nodes(a);
-            lDof = 0;
-            for (int i = 0; i < nsd; i++) {
-              if (eDir[i]) {
-                An(s+i,Ac) = tmpA(lDof,a);
-                Yn(s+i,Ac) = tmpY(lDof,a);
-                lDof = lDof + 1;
-              }
-            }
-          }
+      const bool integral = utils::btest(bc.bType, iBC_impD);
+      auto& prescribed_rate = integral ? Yn : An;
+      auto& prescribed_value = integral ? Dn : Yn;
+      for (int a = 0; a < nNo; a++) {
+        const int node = nodes(a);
+        for (int i = 0; i < lDof; i++) {
+          const int row = s + components[i];
+          prescribed_rate(row,node) = tmpA(i,a);
+          prescribed_value(row,node) = tmpY(i,a);
         }
-
-      // No eDir[] is true. 
-      //
-      } else {
-        if (utils::btest(bc.bType, enum_int(BoundaryConditionType::bType_impD))) {
-          for (int a = 0; a < nNo; a++) {
-            int Ac = nodes(a);
-            for (int i = 0; i < tmpA.nrows(); i++) {
-              Yn(i+s,Ac) = tmpA(i,a);
-              Dn(i+s,Ac) = tmpY(i,a);
-            }
-          }
-        } else {
-          for (int a = 0; a < nNo; a++) {
-            int Ac = nodes(a);
-            for (int i = 0; i < lDof; i++) {
-              An(i+s,Ac) = tmpA(i,a);
-              Yn(i+s,Ac) = tmpY(i,a);
-            }
-          }
-        }
-      } // if (std::find(eDir.begin(), eDir.end(), true) != eDir.end())
+      }
 
       // if FSI and velocity-pressure based structural dynamics solver is used 
       // of nonlinear structure (v-p).
@@ -1102,13 +1065,13 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
         double c1i = 1.0 / c1;
         double c2  = (eq.gam - 1.0)*com_mod.dt;
 
-        if (std::find(eDir.begin(), eDir.end(), true) != eDir.end()) {
-          if (utils::btest(bc.bType, enum_int(BoundaryConditionType::bType_impD))) {
+        if (selective) {
+          if (integral) {
 
             for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
               int Ac = com_mod.msh[iM].fa[iFa].gN(a);
               for (int i = 0; i < nsd; i++) {
-                if (eDir[i]) {
+                if (bc.eDrn(i) != 0) {
                   int j = s + i;
                   An(j,Ac) = c1i*(Yn(j,Ac) - Yo(j,Ac) + c2*Ao(j,Ac));
                   com_mod.Ad(i,Ac) = c1i*(Dn(j,Ac) - Do(j,Ac) + c2*com_mod.Ad(i,Ac));
@@ -1119,7 +1082,7 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
             for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
               int Ac = com_mod.msh[iM].fa[iFa].gN(a);
               for (int i = 0; i < nsd; i++) {
-                if (eDir[i]) {
+                if (bc.eDrn(i) != 0) {
                   int j = s + i;
                   Dn(j,Ac) = c1*Yn(j,Ac) - c2*com_mod.Ad(i,Ac) + Do(j,Ac);
                   com_mod.Ad(i,Ac) = Yn(j,Ac);
@@ -1129,7 +1092,7 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
           }
 
         } else {
-          if (utils::btest(bc.bType, enum_int(BoundaryConditionType::bType_impD))) {
+          if (integral) {
             for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
               int Ac = com_mod.msh[iM].fa[iFa].gN(a);
               for (int i = 0; i < com_mod.Ad.nrows(); i++) {
