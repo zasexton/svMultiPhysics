@@ -558,6 +558,9 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - Open: a few rank-local throws before collectives on error paths (NewtonSolver line search, `LevelSetVolume::build`, FSILS `dot`, PDE extension). No end-to-end multi-rank cut-case CTest yet.
   - Integrated check on `ac273512` (job `46205355`): serial outputs bitwise identical to the shared baseline on all 9 reference cases. FE 34/34, Physics 7/7, Application 4/4. With perf C, the Application suite now takes 1,824 s, down from 3,139 s.
 - **Run policy since 2026-10-01:** long runs with FSILS linear algebra use 4 ranks on one node (`run_case_mpi.sbatch`). Bitwise comparisons between builds stay serial, and decks with Eigen linear algebra stay serial (benchmarks README).
+- [ ] **MPI follow-up (found 2026-10-05; branch `dev/mpi-followup`):**
+  1. **Startup failure when a rank has no interface.** The capillary wave fails at step 0 on 4 and 8 ranks, and the sessile drop on 8 ranks, with "another communicator rank rejected embedded free-surface measure preflight" (`IncompressibleNavierStokesVMSModule.cpp`). Every failing run has a rank with no cut cells. Until this is fixed, the 4-rank policy does not cover those decks.
+  2. **Default serial and parallel solves differ by up to 1.2e-7** (static drop R/h = 32), while 4 and 8 ranks agree to 1e-14. Serial needs 1.25–1.6× more GMRES iterations from the first solve, so the serial and parallel paths solve different systems or use different scaling.
 - [ ] **Protocol.**
   - Static drop in a box, fluid initially at rest. The Laplace number La = ργD/μ² is swept over 12 and 120; 1,200 and above are deferred until the per-step cost is reduced.
   - Start from the sampled analytic shape. No minimizer is required (D3).
@@ -650,11 +653,11 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
       - SIMPLE: 1.6–2.2×.
       - An in-cycle unscaled-residual stopping estimate changes Newton counts, because the Newton and linear absolute tolerances are both 1e-10, so it stays opt-in.
       - `petsc/3.18.5` (module) looks usable through `-DFE_ENABLE_PETSC=ON`; `trilinos/12.12.1` is not.
-      - **Decision pending:** making `Right_preconditioner=block-ilu0` with `Preconditioner_reuse=true` the FSILS default.
-        - The block ILU(0) is applied per rank and drops couplings to other ranks, so results depend on the partition.
-        - The user prefers speed-ups whose results do not change with the rank count (2026-10-01).
-        - A 4- and 8-rank parity and speed check is running (`/scratch/users/zsexton/free-surface-benchmarks/ilu-rank-check/`). It compares the option's rank-to-rank spread with the default's round-off spread.
-        - Defaults stay unchanged meanwhile.
+      - **Rank check (2026-10-05; jobs `46633103`, `46634669`; `/scratch/users/zsexton/free-surface-benchmarks/ilu-rank-check/`):** keep block ILU(0) opt-in.
+        - With ILU, 4 and 8 ranks differ from each other by up to about 8e-10 of the pressure scale and 5e-9 of the velocity scale, which is linear-solver tolerance. With the default, 4 and 8 ranks agree to about 1e-14.
+        - ILU never changed Newton or outer counts across rank counts. In serial it changed Newton counts on the capillary wave (3–4 of 150 steps).
+        - The per-step speed-up is only 1.03–1.18× (linear solve 2.0–3.5×), and it shrinks with ranks: iterations per solve grow 7–72% at 4–8 ranks.
+        - Given the user's preference for rank-independent results, the default stays unchanged.
     - Started 2026-10-01 (base `904c65a5`, same bitwise gate):
 
       | Branch | Work |
