@@ -343,8 +343,9 @@ point. The error follows the contact-point position within a wall cell (its
 sign changes about every half cell) and adds liquid on balance in both the
 spreading and the receding case.
 
-**Fix.** `Enable_kinematic_reconciliation=true` (generator default; tracker
-decision pending): after every accepted step, a local, parameter-free
+**Fix.** `Enable_kinematic_reconciliation=true` in the level-set equation
+(opt-in; the generators do not set it yet, pending a tracker decision): after
+every accepted step, a local, parameter-free
 correction makes the step's area change equal the interface flux of the
 transport velocity (`FE/LevelSet/LevelSetKinematicReconciliation.h`).
 
@@ -407,7 +408,7 @@ the `volume_drift` criterion (1e-4) will fail. Conservative transport (WP-6) is 
 ## Open points
 
 - The area drift of both cases (about 1e-2 over 11% of the run), above;
-  removed by the kinematic reconciliation (section "Area drift").
+  removed by the opt-in kinematic reconciliation (section "Area drift").
 - Spurious wall spots: in the dry wall region behind a receding contact
   line, and once inside the footprint, single wall vertices of the
   transported `phi` settle within about 1e-3 of zero or cross it, giving
