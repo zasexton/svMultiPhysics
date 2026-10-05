@@ -168,6 +168,16 @@ struct LevelSetGeneratedInterfaceResult {
         GeometryTangentPolicy::RefreshedFrozenQuadrature};
 };
 
+/** Approximate heap bytes retained by the lifecycle caches. */
+struct LevelSetGeneratedInterfaceLifecycleStorage {
+    std::size_t cell_cache_bytes{0};
+    std::size_t cell_cache_region_points{0};
+    std::size_t domain_cache_bytes{0};
+    std::size_t domain_cache_region_points{0};
+    std::size_t adjacency_bytes{0};
+    std::size_t transaction_backup_bytes{0};
+};
+
 class LevelSetGeneratedInterfaceLifecycle {
 public:
     struct Cache;
@@ -192,6 +202,7 @@ public:
         std::span<const Real> solution);
 
     [[nodiscard]] std::uint64_t valueRevision() const noexcept { return value_revision_; }
+    [[nodiscard]] LevelSetGeneratedInterfaceLifecycleStorage storage() const;
     void restoreValueRevision(std::uint64_t value_revision) noexcept;
 
     void beginTransaction();

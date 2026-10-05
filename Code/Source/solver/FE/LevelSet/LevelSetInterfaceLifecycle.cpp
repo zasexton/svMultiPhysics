@@ -1,4 +1,5 @@
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
+#include "Assembly/CutGeometryMemoryReport.h"
 
 #include "Basis/NodeOrderingConventions.h"
 #include "Dofs/EntityDofMap.h"
@@ -2077,6 +2078,78 @@ void LevelSetGeneratedInterfaceLifecycle::rollbackTransaction()
     transaction_marker_registry_backup_.reset();
     transaction_value_revision_backup_ = 0;
     transaction_active_ = false;
+}
+
+namespace {
+
+void accumulateLifecycleCacheStorage(
+    const LevelSetGeneratedInterfaceLifecycle::Cache& cache,
+    std::size_t& cell_bytes,
+    std::size_t& cell_points,
+    std::size_t& domain_bytes,
+    std::size_t& domain_points,
+    std::size_t& adjacency_bytes)
+{
+    namespace report = assembly::memory_report;
+    cell_bytes += report::vectorBytes(cache.cells);
+    for (const auto& slot : cache.cells) {
+        cell_bytes += report::vectorBytes(slot.cell.dofs) +
+                      report::vectorBytes(slot.cell.fragments) +
+                      report::vectorBytes(slot.cell.volume_regions);
+        for (const auto& fragment : slot.cell.fragments) {
+            cell_bytes += report::fragmentHeapBytes(fragment);
+        }
+        for (const auto& region : slot.cell.volume_regions) {
+            cell_bytes += report::regionHeapBytes(region);
+            cell_points += region.quadrature_points.size();
+        }
+    }
+    for (const auto& list : cache.dof_to_cells) {
+        adjacency_bytes += report::vectorBytes(list);
+    }
+    for (const auto& list : cache.cell_neighbors) {
+        adjacency_bytes += report::vectorBytes(list);
+    }
+    adjacency_bytes += report::vectorBytes(cache.dof_to_cells) +
+                       report::vectorBytes(cache.cell_neighbors);
+    const auto domain = report::domainStorage(cache.domain.result.domain);
+    domain_bytes += domain.bytes() +
+                    report::vectorBytes(cache.domain.coefficients);
+    for (const auto& side : domain.regions.classes) {
+        for (const auto& entry : side) {
+            domain_points += entry.points;
+        }
+    }
+}
+
+} // namespace
+
+LevelSetGeneratedInterfaceLifecycleStorage
+LevelSetGeneratedInterfaceLifecycle::storage() const
+{
+    LevelSetGeneratedInterfaceLifecycleStorage result;
+    if (cache_) {
+        accumulateLifecycleCacheStorage(*cache_,
+                                        result.cell_cache_bytes,
+                                        result.cell_cache_region_points,
+                                        result.domain_cache_bytes,
+                                        result.domain_cache_region_points,
+                                        result.adjacency_bytes);
+    }
+    if (transaction_cache_backup_) {
+        std::size_t points = 0u;
+        std::size_t domain_points = 0u;
+        std::size_t domain_bytes = 0u;
+        std::size_t adjacency_bytes = 0u;
+        accumulateLifecycleCacheStorage(*transaction_cache_backup_,
+                                        result.transaction_backup_bytes,
+                                        points,
+                                        domain_bytes,
+                                        domain_points,
+                                        adjacency_bytes);
+        result.transaction_backup_bytes += domain_bytes + adjacency_bytes;
+    }
+    return result;
 }
 
 std::string levelSetImplicitCutBackendCellDiagnostic(
