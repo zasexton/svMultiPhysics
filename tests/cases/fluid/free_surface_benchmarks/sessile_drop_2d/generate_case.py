@@ -60,12 +60,11 @@ DT_SAFETY = 1.0 / math.sqrt(2.0)
 TIME_INTEGRATION_SCHEMES = {"generalized_alpha": "GeneralizedAlpha",
                             "backward_euler": "BackwardEuler"}
 LINEAR_SOLVERS = ("fsils", "eigen_direct")
-# Level-set transport velocity.  "coupled": the fluid velocity itself (the
-# current default, as static_drop_2d).  "wet_extension": the wall-compatible
-# wet extension of the D18 and capillary-rise decks.  "pde_extension": the
-# harmonic PDE velocity extension with monolithic coupling, chosen for
-# moving-interface benchmarks (tracker D9; linear_sloshing_2d README,
-# "Level-set advection velocity").
+# Level-set transport velocity.  "pde_extension" (default): the harmonic PDE
+# velocity extension with monolithic coupling, chosen for moving-interface
+# benchmarks (tracker D9; linear_sloshing_2d README, "Level-set advection
+# velocity").  "coupled": the fluid velocity itself.  "wet_extension": the
+# wall-compatible wet extension of the D18 and capillary-rise decks.
 TRANSPORTS = ("coupled", "wet_extension", "pde_extension")
 # Accepted-step kinematic reconciliation of the transported level set
 # (Enable_kinematic_reconciliation; FE/LevelSet/LevelSetKinematicReconciliation.h):
@@ -333,7 +332,7 @@ def linear_solver_block(solver: str = "fsils") -> str:
 def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, cadence: int,
                reinitialization: bool = False, linear_solver: str = "fsils",
                time_integration: str = "generalized_alpha",
-               transport: str = "coupled",
+               transport: str = "pde_extension",
                kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION) -> str:
     if transport == "coupled":
         transport_xml = """
@@ -519,7 +518,7 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
              snapshots: int = DEFAULT_SNAPSHOTS,
              reinitialization: bool = False, linear_solver: str = "fsils",
              time_integration: str = "generalized_alpha",
-             transport: str = "coupled",
+             transport: str = "pde_extension",
              kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
              max_steps: int | None = None, force: bool = False) -> dict:
     if level not in LEVELS:
@@ -661,9 +660,9 @@ def main(argv=None) -> int:
                              "rescaled).  Off in the protocol, as in static_drop_2d.")
     parser.add_argument("--linear-solver", default="fsils", choices=LINEAR_SOLVERS,
                         help="linear solver (protocol: fsils; eigen_direct for comparison)")
-    parser.add_argument("--transport", default="coupled", choices=TRANSPORTS,
-                        help="level-set transport velocity (pde_extension: the harmonic PDE "
-                             "velocity extension of tracker D9, monolithic coupling)")
+    parser.add_argument("--transport", default="pde_extension", choices=TRANSPORTS,
+                        help="level-set transport velocity (default pde_extension: the harmonic "
+                             "PDE velocity extension of tracker D9, monolithic coupling)")
     parser.add_argument("--time-integration", default="generalized_alpha",
                         choices=tuple(TIME_INTEGRATION_SCHEMES),
                         help="time integration (protocol: generalized_alpha; backward_euler "

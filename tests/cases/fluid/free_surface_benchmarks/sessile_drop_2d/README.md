@@ -92,7 +92,7 @@ free-surface decks; none was chosen for this case.
 | Cut stabilization | pressure-gradient facet penalty 1.0, `Use_cut_metadata_scale=false`, `Small_cut_aggregation=true`, no velocity extension | production defaults, as `static_drop_2d` |
 | `surface_stress` (default) | `Surface_tension_form=SurfaceStress` | D2 candidate (a) |
 | `kag_lumped`, `kag_consistent` | as in `static_drop_2d` | D2 candidates (b) and (c) |
-| Level-set transport | P1, advected by the fluid velocity (`Velocity_source=coupled_field`, `--transport coupled`), SUPG with the production constants (tau scale 0.5, transient scale 2.0); no volume correction, no discontinuity capturing, no bound limiter | as `static_drop_2d`; the area drift is a measured quantity. `--transport wet_extension` writes the wall-compatible wet extension of the D18 and capillary-rise decks; `--transport pde_extension` writes the harmonic PDE velocity extension of tracker D9 with monolithic coupling (`Advection_velocity_extension_method=pde_harmonic`, `Advection_velocity_extension_coupling=monolithic`; `linear_sloshing_2d` README, "Level-set advection velocity") |
+| Level-set transport | P1, advected by the harmonic PDE velocity extension of tracker D9 with monolithic coupling (`--transport pde_extension`, the default: `Advection_velocity_extension_method=pde_harmonic`, `Advection_velocity_extension_coupling=monolithic`), SUPG with the production constants (tau scale 0.5, transient scale 2.0); no volume correction, no discontinuity capturing, no bound limiter | decision of 2026-10-05 (tracker M4), as in `static_drop_2d`, `linear_sloshing_2d` and `capillary_wave_2d`. `--transport coupled` advects with the fluid velocity (`Velocity_source=coupled_field`), and `--transport wet_extension` writes the wall-compatible wet extension of the D18 and capillary-rise decks; both remain for comparison |
 | Level-set kinematic reconciliation | on (`Enable_kinematic_reconciliation=true`; `--kinematic-reconciliation off` reproduces the earlier decks). After every accepted step the transported `phi` is corrected locally so that the step's change of the sharp P1 area equals the interface flux of the transport velocity (`FE/LevelSet/LevelSetKinematicReconciliation.h`) | parameter-free, no global shift; it removes the contact-line area drift of the Galerkin transport, see "Area drift" below |
 | Level-set maintenance | none in the protocol. `--reinitialization` enables projection reinitialization every 10 steps with at most 4 iterations; the zero set then moves by at most `1e-10` per call, and contact cells are only rescaled | the transport of `static_drop_2d`, so that the D2 comparison uses one transport. The optional values are those of the D18/D38 and sloshing decks. In the first smoke run (below) that projection did not converge in 4 iterations and was skipped, so it would not have changed the state |
 | Time integration | generalized-alpha, `rho_inf = 0.5`, fixed step; no environment variable. `--time-integration backward_euler` for comparison runs | as `static_drop_2d`. Vertex crossings are accepted within a step with the default restart budget, see "Vertex crossings" below |
@@ -345,8 +345,8 @@ sign changes about every half cell) and adds liquid on balance in both the
 spreading and the receding case.
 
 **Fix.** `Enable_kinematic_reconciliation=true` in the level-set equation
-(opt-in; the generators do not set it yet, pending a tracker decision): after
-every accepted step, a local, parameter-free
+(opt-in in the solver; written by the benchmark generators since the decision
+of 2026-10-05): after every accepted step, a local, parameter-free
 correction makes the step's area change equal the interface flux of the
 transport velocity (`FE/LevelSet/LevelSetKinematicReconciliation.h`).
 
