@@ -76,6 +76,12 @@ set(SV_USE_TRILINOS OFF CACHE BOOL "Build with the Trilinos linear algebra packa
 set(SV_PETSC_DIR "" CACHE STRING "Path to a local install of the PETSc linear algebra package")
 set(ENABLE_COVERAGE OFF CACHE BOOL "Enable code coverage")
 set(ENABLE_ARRAY_INDEX_CHECKING OFF CACHE BOOL "Enable Array index checking")
+
+# Opt-in build optimization (see Code/CMake/SimVascularBuildOptimization.cmake).
+set(SV_ENABLE_LTO OFF CACHE BOOL "Build all targets with link-time optimization")
+set(SV_PGO "OFF" CACHE STRING "Profile-guided optimization: OFF, GENERATE or USE")
+set_property(CACHE SV_PGO PROPERTY STRINGS OFF GENERATE USE)
+set(SV_PGO_PROFILE_DIR "" CACHE PATH "PGO profile data directory (empty: <build>/pgo-profile)")
 set(SV_LOCAL_VTK_PATH "" CACHE STRING "Path to a local build of VTK.")
 set(ENABLE_UNIT_TEST OFF CACHE BOOL "Enable Unit Test by Google Test")
 
@@ -167,6 +173,9 @@ ExternalProject_Add(svMultiPhysics
     -DENABLE_COVERAGE:BOOL=${ENABLE_COVERAGE}
     -DENABLE_UNIT_TEST:BOOL=${ENABLE_UNIT_TEST}
     -DENABLE_ARRAY_INDEX_CHECKING:BOOL=${ENABLE_ARRAY_INDEX_CHECKING}
+    -DSV_ENABLE_LTO:BOOL=${SV_ENABLE_LTO}
+    -DSV_PGO:STRING=${SV_PGO}
+    -DSV_PGO_PROFILE_DIR:PATH=${SV_PGO_PROFILE_DIR}
     -DSV_LOCAL_VTK_PATH:STRING=${SV_LOCAL_VTK_PATH}
     -DUSE_SYSTEM_VTK:BOOL=${USE_SYSTEM_VTK}
     -DMESH_BUILD_TESTS:BOOL=${MESH_BUILD_TESTS}

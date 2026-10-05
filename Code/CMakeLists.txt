@@ -70,6 +70,7 @@ set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 # Include Initial Options
 include(SimVascularOptions)
 include(SimVascularDependentOptions)
+include(SimVascularBuildOptimization)
 include(SimVascularInstallSetup)
 
 #set(SV_USE_TRILINOS {SV_USE_TRILINOS} PARENT_SCOPE)
