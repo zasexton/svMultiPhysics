@@ -340,10 +340,13 @@ Once the loop converges independently of Δt, the remaining limits are:
   shape tangents, literal `gamma > 0`, affine P1 `Triangle3`/`Tetra4` velocity,
   `SurfaceStress` (KAG admitted as an experiment).
 - **Ledger.** The term enters no conservative or residual-work channel; it is
-  zero at acceptance, except on frozen-epoch steps (§9.6).
+  zero at acceptance, except on frozen-epoch steps (§9.8).
 
 Runs, logs and analysis: `/scratch/users/zsexton/svmp-dev-sist2/runs/`
-(`smoke1-46231209`, `sist2-c1-46232162/analysis`); campaign at `9632beb7`.
+(`smoke1-46231209`, `sist2-c1-46232162/analysis`, `recon-46645656`); campaign
+at `9632beb7`. The runs of §9.3 to §9.6 predate decision D14 and ran without
+kinematic reconciliation, like the M2 references; §9.7 adds one
+reconciliation-on variant per case.
 
 ### 9.2 Unit and smoke tests
 
@@ -417,7 +420,7 @@ sessile drop) from the per-step functional record:
 - **Static drop and capillary wave.** `E` decreases at every accepted step at
   every Δt and level, except one step each at Δt = 0.04 and R/h = 32
   (La = 12: +2.2e-6, relative 3.5e-7; La = 120: +4.8e-6, relative 7.6e-7). Both
-  are start-up steps accepted on a frozen epoch after a topology cycle (§9.6).
+  are start-up steps accepted on a frozen epoch after a topology cycle (§9.8).
 - **Sessile drop.** `E` increases on 69% of the steps by up to 2e-5 relative
   both with and without the term (identical histories). The run also loses
   2.9e-3 of its area, so the discrete energy balance is not closed there; this
@@ -470,14 +473,34 @@ run at the shared step (Δt = 5.5e-4, 725 steps per period, term off).
 The contact points behave identically with and without the term (risk 6 not
 observed); the term lowers the passes by 20 to 30%.
 
-### 9.7 Risks found
+### 9.7 With kinematic reconciliation (D14)
+
+One variant per case with the term and `Enable_kinematic_reconciliation=true`
+(job `46645656`, at `b716620c`):
+
+| case | Δt | volume drift (off → on) | other metrics (off → on) | passes (mean/max) | energy increases |
+|---|---|---|---|---|---|
+| static drop La = 120, R/h = 8 | 0.04 | 1.6e-4 → 2.3e-9 | Δp error 4.97e-4 → 5.13e-4, growth 0.85 → 0.78 | 3.13 / 5 | 400 steps, at most 1.1e-7 |
+| static drop La = 120, R/h = 8 | 0.02 | 1.2e-4 → 5.3e-10 | Δp error 5.10e-4 → 5.26e-4 | 3.05 / 4 | 460 steps, at most 2e-8 |
+| static drop La = 120, R/h = 16 | 0.04 | 1.8e-5 → 5.6e-8 | growth 0.999 → 0.981 | 3.81 / 5 | 434 steps, at most 4e-8 |
+| static drop La = 12, R/h = 8 | 0.04 | 1.2e-5 → 7.2e-10 | Δp error 6.74e-4 → 6.75e-4 | 3.39 / 4 | none |
+| capillary wave λ/h = 32, 50 steps/period | P/50 | 1.26e-4 → 2.0e-8 | ω error 6.5e-3 → 3.9e-3, β error 0.068 → 0.071 | 3.60 / 4 | none |
+| capillary wave λ/h = 64, 50 steps/period | P/50 | 6.7e-5 → 2.1e-6 | ω error 1.1e-3 → 1.4e-3, β error 5.9e-3 → 4.0e-3 | 4.78 / 6 | none |
+| sessile drop 60°, 4 × protocol | 4.0 Δt_B | 2.9e-3 → 7.8e-5 | θ_L, θ_R 60.20°, 56.69° → 60.64°, 58.03° | 4.21 / 6 | 38 steps |
+
+Reconciliation removes the La = 120, R/h = 8 volume failure at Δt = 0.04 and
+0.02 and the capillary-wave area failure, without changing the passes per step.
+The accepted-step area correction raises `gamma |Gamma_h|` slightly on some
+static-drop steps (relative increase at most 2e-8).
+
+### 9.8 Risks found
 
 1. **Frozen-epoch acceptance.** When the outer loop cycles between two cut
    topologies, the step is accepted on a frozen epoch without a final refresh;
    `R_SI` is then not zero at acceptance, and the geometry is not
    self-consistent. This occurred in start-up steps at large Δt (static drop
    R/h = 32 at Δt = 0.04: 4 and 6 cycle steps) and coincides with the only two
-   energy increases (§9.4).
+   energy increases without reconciliation (§9.4).
 2. **Vertex crossings** are frequent at large Δt (up to 89 restarts in 400
    capillary-wave steps at λ/h = 64) and are handled by the topology restarts;
    no run failed.
@@ -486,12 +509,14 @@ observed); the term lowers the passes by 20 to 30%.
 4. **Δt bias.** `Ca_sp` at coarse levels and the La = 120, R/h = 8 volume drift
    depend on Δt; the gated pressure jump does not.
 
-### 9.8 Recommendation (the protocol choice is the user's)
+### 9.9 Recommendation (the protocol choice is the user's)
 
 - **M2:** a fixed physical step for all R/h: Δt = 0.02 at La = 12 and
   Δt = 0.01 at La = 120, each checked against a run at twice or half the step
   (the 0.01 and 0.02 runs of §9.3 already serve). La = 120 at Δt = 0.02
-  passes every gate except the R/h = 8 volume drift. At R/h = 32 this replaces
+  passes every gate except the R/h = 8 volume drift, which reconciliation
+  (§9.7) removes; with reconciliation on, Δt = 0.02 is also adequate at
+  La = 120. At R/h = 32 this replaces
   4,000 and 24,900 steps by 618 and 3,900.
 - **M3:** 50 steps per inviscid period at every level, with a 100-step check.
   The time error at 50 steps per period is 0.16% in frequency and 0.5% in
