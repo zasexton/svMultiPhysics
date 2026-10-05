@@ -3418,8 +3418,11 @@ void mixConstraintRevisionString(std::uint64_t& h,
     mixConstraintRevisionBytes(h, value.data(), value.size());
 }
 
+// Byte hash of mesh field values. With `names` (sorted, distinct), only the
+// fields of those names enter the hash.
 [[nodiscard]] std::uint64_t meshFieldValueFingerprint(
-    const svmp::MeshBase& mesh) noexcept
+    const svmp::MeshBase& mesh,
+    const std::vector<std::string>* names = nullptr) noexcept
 {
     std::uint64_t h = kConstraintRevisionHashOffset;
     const std::array<svmp::EntityKind, 4> kinds{{
@@ -3431,9 +3434,19 @@ void mixConstraintRevisionString(std::uint64_t& h,
     try {
         for (const auto kind : kinds) {
             mixConstraintRevisionHash(h, static_cast<std::uint64_t>(kind));
-            const auto names = svmp::MeshFields::list_fields(mesh, kind);
-            mixConstraintRevisionHash(h, static_cast<std::uint64_t>(names.size()));
-            for (const auto& name : names) {
+            auto field_names = svmp::MeshFields::list_fields(mesh, kind);
+            if (names != nullptr) {
+                field_names.erase(
+                    std::remove_if(field_names.begin(), field_names.end(),
+                                   [names](const std::string& name) {
+                                       return !std::binary_search(names->begin(),
+                                                                  names->end(),
+                                                                  name);
+                                   }),
+                    field_names.end());
+            }
+            mixConstraintRevisionHash(h, static_cast<std::uint64_t>(field_names.size()));
+            for (const auto& name : field_names) {
                 mixConstraintRevisionString(h, name);
                 const auto handle =
                     svmp::MeshFields::get_field_handle(mesh, kind, name);
@@ -8100,7 +8113,17 @@ std::uint64_t FESystem::systemLayoutRevision() const noexcept
 
 constraints::ConstraintRevisionSnapshot
 FESystem::captureConstraintRevisionSnapshot(
-    bool include_mesh_field_values) const noexcept
+    const constraints::ConstraintDependencyDeclaration& deps) const noexcept
+{
+    return captureConstraintRevisionSnapshot(
+        deps.readsMeshFieldValues(),
+        deps.mesh_field_values_scoped ? &deps.mesh_field_value_names : nullptr);
+}
+
+constraints::ConstraintRevisionSnapshot
+FESystem::captureConstraintRevisionSnapshot(
+    bool include_mesh_field_values,
+    const std::vector<std::string>* mesh_field_value_names) const noexcept
 {
     constraints::ConstraintRevisionSnapshot snapshot;
     snapshot.valid = true;
@@ -8119,7 +8142,8 @@ FESystem::captureConstraintRevisionSnapshot(
         snapshot.numbering = local_mesh.numbering_revision();
         snapshot.mesh_field_layout = local_mesh.field_layout_revision();
         if (include_mesh_field_values) {
-            snapshot.mesh_field_values = meshFieldValueFingerprint(local_mesh);
+            snapshot.mesh_field_values =
+                meshFieldValueFingerprint(local_mesh, mesh_field_value_names);
         }
         snapshot.labels = local_mesh.label_revision();
         snapshot.active_configuration = local_mesh.active_configuration_epoch();
@@ -8174,9 +8198,7 @@ bool FESystem::constraintStateStaleForCurrentRevisions() const
             constraints::merge_into(deps, c->dependencyDeclaration());
         }
     }
-    const bool include_mesh_field_values =
-        deps.structural.mesh_field_values || deps.value.mesh_field_values;
-    const auto current = captureConstraintRevisionSnapshot(include_mesh_field_values);
+    const auto current = captureConstraintRevisionSnapshot(deps);
     return constraints::structural_dependency_changed(deps, constraint_revision_snapshot_, current) ||
            constraints::value_dependency_changed(deps, constraint_revision_snapshot_, current);
 }
@@ -8193,9 +8215,7 @@ FESystem::refreshConstraintStateForCurrentRevisions(double time,
     last_constraint_update_dt_ = dt;
 
     const auto deps = constraintDependencyDeclaration();
-    const bool include_mesh_field_values =
-        deps.structural.mesh_field_values || deps.value.mesh_field_values;
-    const auto current = captureConstraintRevisionSnapshot(include_mesh_field_values);
+    const auto current = captureConstraintRevisionSnapshot(deps);
     // The revision snapshot is rank-local (local mesh revisions and a byte
     // hash of the local mesh fields), while setup() and several constraint
     // value updates (e.g. small-cut aggregation) are collective. Combine the
@@ -8296,8 +8316,7 @@ FESystem::refreshConstraintStateForCurrentRevisions(double time,
         throw;
     }
     ++constraint_time_epoch_;
-    constraint_revision_snapshot_ =
-        captureConstraintRevisionSnapshot(include_mesh_field_values);
+    constraint_revision_snapshot_ = captureConstraintRevisionSnapshot(deps);
     if (republish_aggregation_prolongations) {
         publishFinalizedSmallCutAggregationProlongations();
     }
@@ -21130,9 +21149,7 @@ void FESystem::requireCurrentGeneratedBoundaryNitscheTraceCertificates(
             generated_boundary_nitsche_trace_policy_signature_);
         const auto deps = constraintDependencyDeclaration();
         const auto current_constraint_revision =
-            captureConstraintRevisionSnapshot(
-                deps.structural.mesh_field_values ||
-                deps.value.mesh_field_values);
+            captureConstraintRevisionSnapshot(deps);
         if (!sameConstraintRevisionSnapshot(
                 current_constraint_revision,
                 constraint_revision_snapshot_)) {
@@ -32882,8 +32899,7 @@ void FESystem::updateConstraints(double time, double dt)
     if (any_updated) {
         ++constraint_time_epoch_;
         const auto deps = constraintDependencyDeclaration();
-        constraint_revision_snapshot_ = captureConstraintRevisionSnapshot(
-            deps.structural.mesh_field_values || deps.value.mesh_field_values);
+        constraint_revision_snapshot_ = captureConstraintRevisionSnapshot(deps);
         buildConstraintSummary();
         invalidateAnalysisCache();
     }

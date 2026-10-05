@@ -2931,8 +2931,15 @@ private:
     void bumpDofLayoutRevision() noexcept { ++fe_layout_revisions_.dof_layout; }
     void bumpConstraintLayoutRevision() noexcept { ++fe_layout_revisions_.constraint_layout; }
     void bumpBlockLayoutRevision() noexcept { ++fe_layout_revisions_.block_layout; }
+    /// @param mesh_field_value_names when given (sorted, distinct), only these
+    ///        mesh fields enter the mesh-field-value fingerprint.
     [[nodiscard]] constraints::ConstraintRevisionSnapshot captureConstraintRevisionSnapshot(
-        bool include_mesh_field_values = false) const noexcept;
+        bool include_mesh_field_values = false,
+        const std::vector<std::string>* mesh_field_value_names = nullptr) const noexcept;
+    /// Snapshot of the revisions the given (merged) declaration depends on,
+    /// with the mesh-field-value fingerprint limited to its declared scope.
+    [[nodiscard]] constraints::ConstraintRevisionSnapshot captureConstraintRevisionSnapshot(
+        const constraints::ConstraintDependencyDeclaration& deps) const noexcept;
 
     [[nodiscard]] const FieldRecord& singleField() const;
 

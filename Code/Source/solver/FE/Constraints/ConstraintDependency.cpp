@@ -7,6 +7,8 @@
 
 #include "Constraints/ConstraintDependency.h"
 
+#include <algorithm>
+
 namespace svmp {
 namespace FE {
 namespace constraints {
@@ -64,8 +66,26 @@ void merge_into(ConstraintDependencyMask& dst, const ConstraintDependencyMask& s
 }
 
 void merge_into(ConstraintDependencyDeclaration& dst,
-                const ConstraintDependencyDeclaration& src) noexcept
+                const ConstraintDependencyDeclaration& src)
 {
+    const bool dst_reads_field_values = dst.readsMeshFieldValues();
+    if (src.readsMeshFieldValues()) {
+        if (!dst_reads_field_values) {
+            dst.mesh_field_values_scoped = src.mesh_field_values_scoped;
+            dst.mesh_field_value_names = src.mesh_field_value_names;
+        } else if (dst.mesh_field_values_scoped && src.mesh_field_values_scoped) {
+            dst.mesh_field_value_names.insert(dst.mesh_field_value_names.end(),
+                                              src.mesh_field_value_names.begin(),
+                                              src.mesh_field_value_names.end());
+        } else {
+            dst.mesh_field_values_scoped = false;
+            dst.mesh_field_value_names.clear();
+        }
+        std::sort(dst.mesh_field_value_names.begin(), dst.mesh_field_value_names.end());
+        dst.mesh_field_value_names.erase(
+            std::unique(dst.mesh_field_value_names.begin(), dst.mesh_field_value_names.end()),
+            dst.mesh_field_value_names.end());
+    }
     merge_into(dst.structural, src.structural);
     merge_into(dst.value, src.value);
     if (dst.tangent_policy == ConstraintTangentPolicy::None &&

@@ -4180,8 +4180,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     try {
         bumpConstraintLayoutRevision();
         const auto deps = constraintDependencyDeclaration();
-        constraint_revision_snapshot_ = captureConstraintRevisionSnapshot(
-            deps.structural.mesh_field_values || deps.value.mesh_field_values);
+        constraint_revision_snapshot_ = captureConstraintRevisionSnapshot(deps);
     } catch (...) {
         local_constraint_snapshot_exception =
             std::current_exception();
@@ -7171,8 +7170,7 @@ void FESystem::rebuildConstraintState()
         refreshSparsityForConstraintStructureChange();
         bumpConstraintLayoutRevision();
         const auto deps = constraintDependencyDeclaration();
-        constraint_revision_snapshot_ = captureConstraintRevisionSnapshot(
-            deps.structural.mesh_field_values || deps.value.mesh_field_values);
+        constraint_revision_snapshot_ = captureConstraintRevisionSnapshot(deps);
     } catch (...) {
         local_constraint_refresh_exception =
             std::current_exception();

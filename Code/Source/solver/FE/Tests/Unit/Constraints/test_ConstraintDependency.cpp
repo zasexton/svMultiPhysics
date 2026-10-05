@@ -7,6 +7,8 @@
 #include "Constraints/TiedInterfaceConstraint.h"
 
 #include <utility>
+#include <vector>
+#include <string>
 
 namespace svmp {
 namespace FE {
@@ -246,6 +248,68 @@ TEST(ConstraintDependencyTest, TiedInterfaceDependenciesCoverMotionRemeshRebaseA
     current = cached;
     current.fe_dof_layout += 1;
     EXPECT_TRUE(structural_dependency_changed(deps, cached, current));
+}
+
+
+TEST(ConstraintDependencyTest, MeshFieldValueScopesMergeAsUnionOrEveryField)
+{
+    ConstraintDependencyDeclaration scoped_phi;
+    scoped_phi.structural.mesh_field_values = true;
+    scoped_phi.mesh_field_values_scoped = true;
+    scoped_phi.mesh_field_value_names = {"phi"};
+
+    ConstraintDependencyDeclaration scoped_psi;
+    scoped_psi.value.mesh_field_values = true;
+    scoped_psi.mesh_field_values_scoped = true;
+    scoped_psi.mesh_field_value_names = {"psi", "phi"};
+
+    ConstraintDependencyDeclaration unscoped;
+    unscoped.structural.mesh_field_values = true;
+
+    ConstraintDependencyDeclaration no_field_values;
+    no_field_values.structural.geometry = true;
+    no_field_values.mesh_field_values_scoped = true;  // ignored: reads no values
+
+    // A declaration that reads no field values leaves the scope alone.
+    ConstraintDependencyDeclaration merged;
+    merge_into(merged, no_field_values);
+    EXPECT_FALSE(merged.readsMeshFieldValues());
+    merge_into(merged, scoped_phi);
+    merge_into(merged, no_field_values);
+    EXPECT_TRUE(merged.readsMeshFieldValues());
+    EXPECT_TRUE(merged.mesh_field_values_scoped);
+    EXPECT_EQ(merged.mesh_field_value_names, (std::vector<std::string>{"phi"}));
+
+    // Scoped declarations merge to the sorted, distinct union.
+    merge_into(merged, scoped_psi);
+    EXPECT_TRUE(merged.mesh_field_values_scoped);
+    EXPECT_EQ(merged.mesh_field_value_names,
+              (std::vector<std::string>{"phi", "psi"}));
+    EXPECT_TRUE(merged.structural.mesh_field_values);
+    EXPECT_TRUE(merged.value.mesh_field_values);
+
+    // One unscoped reader makes the merged dependency cover every field,
+    // in either merge order.
+    merge_into(merged, unscoped);
+    EXPECT_FALSE(merged.mesh_field_values_scoped);
+    EXPECT_TRUE(merged.mesh_field_value_names.empty());
+
+    ConstraintDependencyDeclaration unscoped_first;
+    merge_into(unscoped_first, unscoped);
+    merge_into(unscoped_first, scoped_phi);
+    EXPECT_FALSE(unscoped_first.mesh_field_values_scoped);
+    EXPECT_TRUE(unscoped_first.mesh_field_value_names.empty());
+}
+
+TEST(ConstraintDependencyTest, LevelSetVertexConstraintScopesValuesToItsField)
+{
+    const LevelSetActiveSideVertexDirichletConstraint constraint(
+        FieldId{0}, "phi_named", LevelSetConstraintSide::Negative, Real{0.0}, Real{0.0});
+    const auto deps = constraint.dependencyDeclaration();
+    EXPECT_TRUE(deps.structural.mesh_field_values);
+    EXPECT_TRUE(deps.structural.mesh_field_layout);
+    EXPECT_TRUE(deps.mesh_field_values_scoped);
+    EXPECT_EQ(deps.mesh_field_value_names, (std::vector<std::string>{"phi_named"}));
 }
 
 } // namespace test
