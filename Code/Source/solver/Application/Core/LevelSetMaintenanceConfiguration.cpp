@@ -773,6 +773,10 @@ resolveLegacyLevelSetMaintenanceConfiguration(
       {"Enable_kinematic_reconciliation", "EnableKinematicReconciliation"},
       "enable_kinematic_reconciliation",
       result->transport.kinematic_reconciliation.enabled);
+  apply_boolean_list(
+      {"Enable_sign_definite_patch_bounds", "EnableSignDefinitePatchBounds"},
+      "enable_sign_definite_patch_bounds",
+      result->transport.sign_definite_patch_bounds.enabled);
   append_equation_observations();
 
   apply_boolean_list({"Enable_static_capillary_equilibrium_initialization",
@@ -1059,6 +1063,7 @@ resolveLegacyLevelSetMaintenanceConfiguration(
                        result->transport.reinitialization.enabled ||
                        result->transport.volume_correction.enabled ||
                        result->transport.kinematic_reconciliation.enabled ||
+                       result->transport.sign_definite_patch_bounds.enabled ||
                        result->static_capillary_equilibrium_enabled ||
                        result->curvature_projection_enabled;
   if (!enabled) {
