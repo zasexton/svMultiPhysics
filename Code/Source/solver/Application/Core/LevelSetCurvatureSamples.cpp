@@ -272,6 +272,7 @@ collectLevelSetCurvatureCutVolumeSupplementalSamples(
     return mapping;
   };
 
+  LevelSetCurvatureSampleDuplicateFilter duplicate_filter;
   auto append_sample =
       [&](svmp::FE::MeshIndex parent_cell,
           const std::array<svmp::FE::Real, 3>& coordinate,
@@ -284,31 +285,12 @@ collectLevelSetCurvatureCutVolumeSupplementalSamples(
           "[svMultiPhysics::Application] Level-set curvature projection "
           "received a non-finite cut-volume supplemental sample.");
     }
-    constexpr svmp::FE::Real duplicate_tol2 = svmp::FE::Real{1.0e-24};
-    constexpr svmp::FE::Real duplicate_value_tol = svmp::FE::Real{1.0e-12};
-    for (const auto& existing : samples) {
-      if (existing.parent_cell != parent_cell) {
-        continue;
-      }
-      const auto dx = existing.coordinate[0] - coordinate[0];
-      const auto dy = existing.coordinate[1] - coordinate[1];
-      const auto dz = existing.coordinate[2] - coordinate[2];
-      const auto dist2 = dx * dx + dy * dy + dz * dz;
-      if (dist2 <= duplicate_tol2 &&
-          std::abs(existing.value - value) <= duplicate_value_tol) {
-        if ((existing.free_surface_snapshot_revision_key != 0u ||
-             snapshot_revision_key != 0u) &&
-            (existing.free_surface_snapshot_revision_key !=
-                 snapshot_revision_key ||
-             existing.source_value_revision != source_value_revision)) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Level-set curvature projection "
-              "found duplicate samples from different geometry snapshots.");
-        }
-        return;
-      }
-    }
-    samples.push_back(
+    // Every sample here has generated_interface_geometry == false, so the
+    // filter's per-cell bucket holds exactly the earlier samples a scan over
+    // all of them could match, in the same order: the first duplicate, and
+    // so the accepted samples, are unchanged.
+    const auto* existing = duplicate_filter.appendUnlessDuplicate(
+        samples,
         svmp::FE::level_set::LevelSetCurvatureProjectionSample{
             .parent_cell = parent_cell,
             .coordinate = coordinate,
@@ -316,6 +298,16 @@ collectLevelSetCurvatureCutVolumeSupplementalSamples(
             .free_surface_snapshot_revision_key = snapshot_revision_key,
             .source_value_revision = source_value_revision,
             .cut_topology_revision = cut_topology_revision});
+    if (existing != nullptr &&
+        (existing->free_surface_snapshot_revision_key != 0u ||
+         snapshot_revision_key != 0u) &&
+        (existing->free_surface_snapshot_revision_key !=
+             snapshot_revision_key ||
+         existing->source_value_revision != source_value_revision)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set curvature projection "
+          "found duplicate samples from different geometry snapshots.");
+    }
   };
 
   constexpr svmp::FE::Real cut_fraction_tol =
