@@ -1118,14 +1118,14 @@ void addUniquePoint(StrictConstructionObservation& observation, std::vector<Iden
     }
 }
 
-[[nodiscard]] Real tetraVolume(const std::array<Real, 3>& a,
-                               const std::array<Real, 3>& b,
-                               const std::array<Real, 3>& c,
-                               const std::array<Real, 3>& d) noexcept {
-    return std::abs(dot3(sub(b, a), cross(sub(c, a), sub(d, a)))) / Real{6.0};
-}
-
-[[nodiscard]] RegionMoments polyhedronMomentsFromFaces(StrictConstructionObservation& observation,
+// The distinct points of a set of faces, in first-occurrence order. Every
+// comparison is reported to the observation, whose only effect is to mark the
+// construction unresolved; repeating the scan for the same faces and
+// tolerance therefore returns the same points and cannot change the
+// observation, so a caller may scan once and pass the points to the moment,
+// quadrature and reference-subcell builders below.
+[[nodiscard]] std::vector<IdentifiedPoint> uniqueFacePoints(
+    StrictConstructionObservation& observation,
     const IdentifiedFaces& faces,
     Real tolerance)
 {
@@ -1135,6 +1135,20 @@ void addUniquePoint(StrictConstructionObservation& observation, std::vector<Iden
             addUniquePoint(observation, unique_points, point, tolerance);
         }
     }
+    return unique_points;
+}
+
+[[nodiscard]] Real tetraVolume(const std::array<Real, 3>& a,
+                               const std::array<Real, 3>& b,
+                               const std::array<Real, 3>& c,
+                               const std::array<Real, 3>& d) noexcept {
+    return std::abs(dot3(sub(b, a), cross(sub(c, a), sub(d, a)))) / Real{6.0};
+}
+
+[[nodiscard]] RegionMoments polyhedronMomentsFromFaces(StrictConstructionObservation& observation,
+    const IdentifiedFaces& faces,
+    const std::vector<IdentifiedPoint>& unique_points)
+{
     if (unique_points.empty()) {
         return RegionMoments{};
     }
@@ -1280,14 +1294,9 @@ void addUniquePoint(StrictConstructionObservation& observation, std::vector<Iden
 
 [[nodiscard]] std::vector<geometry::CutQuadraturePoint> polyhedronQuadratureFromFaces(StrictConstructionObservation& observation,
     const IdentifiedFaces& faces,
+    const std::vector<IdentifiedPoint>& unique_points,
     Real tolerance)
 {
-    std::vector<IdentifiedPoint> unique_points;
-    for (const auto& face : faces) {
-        for (const auto& point : face) {
-            addUniquePoint(observation, unique_points, point, tolerance);
-        }
-    }
     if (unique_points.empty()) {
         return {};
     }
@@ -1336,9 +1345,18 @@ void addUniquePoint(StrictConstructionObservation& observation, std::vector<Iden
     return points;
 }
 
+[[nodiscard]] std::vector<geometry::CutQuadraturePoint> polyhedronQuadratureFromFaces(StrictConstructionObservation& observation,
+    const IdentifiedFaces& faces,
+    Real tolerance)
+{
+    const auto unique_points = uniqueFacePoints(observation, faces, tolerance);
+    return polyhedronQuadratureFromFaces(observation, faces, unique_points, tolerance);
+}
+
 [[nodiscard]] std::vector<CutInterfaceReferenceSimplex>
 referenceTetrahedraFromFaces(StrictConstructionObservation& observation,
     const IdentifiedFaces& faces,
+    const std::vector<IdentifiedPoint>& unique_points,
     const std::vector<std::array<Real, 3>>& source_points,
     const std::vector<Real>& signed_values,
     Real coefficient_band,
@@ -1383,13 +1401,6 @@ referenceTetrahedraFromFaces(StrictConstructionObservation& observation,
         return canonicalSignedValue(value, coefficient_band);
     };
 
-    std::vector<IdentifiedPoint> unique_points;
-    for (const auto& face : faces) {
-        for (const auto& point : face) {
-            addUniquePoint(observation, unique_points, point,
-                           spatial_tolerance);
-        }
-    }
     if (unique_points.empty()) {
         return {};
     }
@@ -2425,10 +2436,16 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                              &input.level_set_values,
                              &actual_signed_values,
                              request.isovalue);
+    // Each side's distinct points are found once and shared by its moments,
+    // quadrature and reference subcells (see uniqueFacePoints).
+    const auto negative_unique_points =
+        uniqueFacePoints(observation, negative_faces, request.tolerance);
     const auto negative_moments =
-        polyhedronMomentsFromFaces(observation, negative_faces, request.tolerance);
+        polyhedronMomentsFromFaces(observation, negative_faces, negative_unique_points);
+    const auto positive_unique_points =
+        uniqueFacePoints(observation, positive_faces, request.tolerance);
     const auto positive_moments =
-        polyhedronMomentsFromFaces(observation, positive_faces, request.tolerance);
+        polyhedronMomentsFromFaces(observation, positive_faces, positive_unique_points);
     const auto side_fractions =
         publish_aligned_zero_face
             ? SideVolumeFractions{
@@ -2443,12 +2460,15 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
             : sideVolumeFractions(observation,
                   negative_moments.measure, positive_moments.measure);
     auto negative_quadrature =
-        polyhedronQuadratureFromFaces(observation, negative_faces, request.tolerance);
+        polyhedronQuadratureFromFaces(observation, negative_faces,
+                                      negative_unique_points, request.tolerance);
     auto positive_quadrature =
-        polyhedronQuadratureFromFaces(observation, positive_faces, request.tolerance);
+        polyhedronQuadratureFromFaces(observation, positive_faces,
+                                      positive_unique_points, request.tolerance);
     auto negative_reference_subcells =
         referenceTetrahedraFromFaces(observation,
             negative_faces,
+            negative_unique_points,
             input.node_coordinates,
             signed_values,
             coefficient_band,
@@ -2456,6 +2476,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
     auto positive_reference_subcells =
         referenceTetrahedraFromFaces(observation,
             positive_faces,
+            positive_unique_points,
             input.node_coordinates,
             signed_values,
             coefficient_band,
