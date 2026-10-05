@@ -367,6 +367,11 @@ These are proposals. Each lists a recommended option and an alternative. Record 
 - **D10, 2026-09-30: space and time convergence are judged separately.** Spatial convergence is gated with the time-step error removed (a small fixed Δt or a converged-Δt reference), and a separate Δt study is run at a fixed mesh. Refining Δt with h let opposite-sign errors cancel.
 - **D11, 2026-09-30: volume criteria gate the maximum deviation over the run**, including any reversible oscillation of the P1 area.
 - **D12, 2026-09-30: sloshing damping error ≤ 5% at the finest level** (pass/fail), matching the capillary-wave criterion.
+- **D14, 2026-10-05: kinematic reconciliation of the transported level set.**
+  - The benchmark generators (sessile drop, static drop, linear sloshing, capillary wave) write `Enable_kinematic_reconciliation=true`; `--kinematic-reconciliation off` reproduces the earlier decks.
+  - The solver default stays off until it has been tested on more physics.
+  - Its fixed internal constants (halfway limit 0.5, at most 8 fixed-point iterations, the sign and cut-class guards) are accepted for now under P1.
+- **D15, 2026-10-05: the sessile-drop protocol uses the PDE velocity extension** (harmonic, monolithic), as the other free-surface benchmarks do.
 - **D13, 2026-10-01: implement the lagged normal-increment surface-tension term** (`Documentation/free_surface_semi_implicit_surface_tension_design.md` §3.3).
   - Opt-in `Surface_tension_semi_implicit=NormalIncrement`, `SurfaceStress` first.
   - Δt_eff comes from the integrator, not a tuned parameter (P1). The term vanishes in every fresh residual, so the accepted solution is unchanged within the outer tolerance.
@@ -770,11 +775,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
     - **Full sessile runs** (R/h = 16, T = 12.25): maximum drift 6.1e-6 at 60° (was 2.6e-2) and 6.8e-5 at 120° (was 3.7e-3), so both pass D11. Angles and base radius are unchanged within 0.3%.
     - **Other cases:** static drop 1.0e-9, sloshing 4.6e-9, capillary wave 1.1e-11. With the option off, outputs are bit-identical. Cost +18–45% per step.
     - **Why not WP-6:** the conservative phase transport fails on this case, because contact-protected nodes block its local reconciliation.
-    - **Open questions (for the user):**
-      1. Enable it in the benchmark generators: commit `0ad768e0` on `dev/volume-conservation`, held back.
-      2. Make it a solver default.
-      3. Whether its fixed internal constants are acceptable under P1 (halfway limit 0.5, at most 8 fixed-point iterations).
-      4. Sessile transport: coupled or PDE extension. Both are below 1e-4 with it.
+    - **Decided 2026-10-05 (D14, D15):** enabled in the benchmark generators; solver default stays off; constants accepted for now; sessile transport is the PDE extension.
     - **Remaining issues:**
       - Residual drift comes from the generalized-α interface flux (about 4e-8·A per step at 120°).
       - Spurious near-zero wall vertices behind receding contact lines make `verify.py` reject the full runs (4 wall crossings), with or without the fix.
