@@ -615,7 +615,7 @@ void dist_bc(ComMod& com_mod, const CmMod& cm_mod, const cmType& cm, bcType& lBc
   #endif
 
   int task_id = cm.idcm();
-  bool is_slave = cm.slv(cm_mod);
+  const bool is_non_root = !cm.mas(cm_mod);
   cm.bcast(cm_mod, &lBc.cplBCptr);
   cm.bcast(cm_mod, &lBc.bType);
   cm.bcast(cm_mod, &lBc.clsFlgRis);
@@ -624,10 +624,10 @@ void dist_bc(ComMod& com_mod, const CmMod& cm_mod, const cmType& cm, bcType& lBc
   #ifdef debug_dist_bc
   dmsg << "nsd: " << nsd;
   dmsg << "lBc.bType: " << lBc.bType;
-  dmsg << "is_slave: " << is_slave;
+  dmsg << "is_non_root: " << is_non_root;
   #endif
 
-  if (is_slave) {
+  if (is_non_root) {
     lBc.eDrn.resize(nsd); 
     lBc.h.resize(nsd);
   }
@@ -641,7 +641,7 @@ void dist_bc(ComMod& com_mod, const CmMod& cm_mod, const cmType& cm, bcType& lBc
   if (!lBc.node_set_name.empty()) {
     int count = lBc.node_ids.size();
     cm.bcast(cm_mod, &count);
-    if (is_slave) {
+    if (is_non_root) {
       original_nodes.resize(count);
     } else {
       original_nodes = lBc.node_ids;
@@ -691,7 +691,7 @@ void dist_bc(ComMod& com_mod, const CmMod& cm_mod, const cmType& cm, bcType& lBc
   cm.bcast(cm_mod, &flag);
   
   if (flag) {
-    if (is_slave) {
+    if (is_non_root) {
       //lBc.gm = new MBType;
     }
 
@@ -703,7 +703,7 @@ void dist_bc(ComMod& com_mod, const CmMod& cm_mod, const cmType& cm, bcType& lBc
     int nTp = lBc.gm.nTP;
     int iDof = lBc.gm.dof;
 
-    if (is_slave) {
+    if (is_non_root) {
      lBc.gm.t.resize(nTp);
     }
 
@@ -716,7 +716,7 @@ void dist_bc(ComMod& com_mod, const CmMod& cm_mod, const cmType& cm, bcType& lBc
     //
     Vector<double> tmp(a);
 
-    if (!is_slave) {
+    if (!is_non_root) {
       // Copy data row-wise to tmp.
       int n = 0;
       for (int k = 0; k < lBc.gm.d.nslices(); k++) {
@@ -760,7 +760,7 @@ void dist_bc(ComMod& com_mod, const CmMod& cm_mod, const cmType& cm, bcType& lBc
   if (flag) {
     int nNo = global_nodes.size();
     Vector<double> tmp(nNo);
-    if (!is_slave) {
+    if (!is_non_root) {
       tmp = lBc.gx;
       lBc.gx.clear();
     }
