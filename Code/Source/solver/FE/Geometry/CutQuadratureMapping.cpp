@@ -303,6 +303,14 @@ Real physicalCutQuadratureMeasure(const assembly::IMeshAccess& mesh,
             const auto cell =
                 static_cast<GlobalIndex>(rule.provenance.parent_entity);
             const auto mapping = makeCutCellGeometryMapping(mesh, cell);
+            // LinearMapping::jacobian() ignores xi (it evaluates the constant
+            // gradients at a fixed interior point), so its Jacobian and the
+            // checks on it are evaluated once, at the first point; every
+            // other mapping is evaluated at each point.
+            const bool point_independent_jacobian =
+                dynamic_cast<const LinearMapping*>(mapping.get()) != nullptr;
+            bool have_determinant = false;
+            Real determinant{0.0};
             Real physical_measure{0.0};
             for (const auto& point : rule.points) {
                 if (!std::isfinite(point.weight) ||
@@ -312,17 +320,20 @@ Real physicalCutQuadratureMeasure(const assembly::IMeshAccess& mesh,
                 }
                 const Point& reference = point.point;
                 requireFinitePoint(reference, "reference point");
-                const auto xi = toVector(reference);
-                const auto jacobian = mapping->jacobian(xi);
-                const Real determinant = jacobian.determinant();
-                if (!std::isfinite(determinant) ||
-                    !(std::abs(determinant) >
-                      std::numeric_limits<Real>::min())) {
-                    throw std::invalid_argument(
-                        "retained cut quadrature maps through a singular or non-finite Jacobian");
+                if (!point_independent_jacobian || !have_determinant) {
+                    const auto jacobian = mapping->jacobian(toVector(reference));
+                    determinant = jacobian.determinant();
+                    if (!std::isfinite(determinant) ||
+                        !(std::abs(determinant) >
+                          std::numeric_limits<Real>::min())) {
+                        throw std::invalid_argument(
+                            "retained cut quadrature maps through a singular or non-finite Jacobian");
+                    }
+                    // The full mapping inverts J here; keep its singularity
+                    // check.
+                    static_cast<void>(jacobian.inverse());
+                    have_determinant = true;
                 }
-                // The full mapping inverts J here; keep its singularity check.
-                static_cast<void>(jacobian.inverse());
                 const Real physical_weight = point.weight * std::abs(determinant);
                 if (!std::isfinite(physical_weight) ||
                     !(physical_weight > Real{0.0})) {
