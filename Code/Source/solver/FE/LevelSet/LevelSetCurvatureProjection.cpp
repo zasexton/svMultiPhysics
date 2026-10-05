@@ -2997,9 +2997,11 @@ void accumulateDifferentiatedTriangleMeasure(
             return;
         }
 
+        // Only the fragment geometry enters the kinematic mass and the area
+        // gradient, so a 3D cut skips the cell's volume regions.
         const auto baseline_cut = dimension == 2
             ? interfaces::cutLinearLevelSetCell2D(cut_request, input)
-            : interfaces::cutLinearLevelSetCell3D(cut_request, input);
+            : interfaces::cutLinearLevelSetCell3DInterface(cut_request, input);
         if (!baseline_cut.supported || !baseline_cut.hasActiveFragments()) {
             failure =
                 "kinematic-area-gradient curvature recovery could not reproduce a strict simplex cut";
