@@ -126,6 +126,14 @@ struct FreeSurfaceGeometryRuleRecord {
     std::uint64_t source_topology_key{0};
     std::int64_t component_id{-1};
     FreeSurfaceGeometryMomentCertificate moment_certificate{};
+    // Classification-only storage of a validated full-cell volume rule (see
+    // FreeSurfaceGeometrySnapshotPolicy::classification_only_full_cell_side).
+    // The point lists of reference_rule and physical_rule are empty; every
+    // other field keeps its value, and classification_only_content_digest is
+    // the content digest of the materialized record.
+    // materializeFreeSurfaceGeometryRuleRecord() recomputes the points.
+    bool classification_only{false};
+    std::uint64_t classification_only_content_digest{0};
 };
 
 /** Epoch-free topology descriptor used for authoritative interface sources. */
@@ -139,6 +147,15 @@ struct FreeSurfaceGeometrySnapshotPolicy {
     Real minimum_retained_volume_fraction{1.0e-8};
     int minimum_achieved_quadrature_order{0};
     bool require_complete_exterior_boundary_partition{true};
+    // Volume side (Negative or Positive) whose full-cell rules are stored
+    // classification-only after validation, typically the dry side of a
+    // one-sided free surface.  A rule qualifies when it is the only volume
+    // rule of its parent cell.  Its points are validated and digested exactly
+    // as before and then released, so the snapshot revision is unchanged.
+    // Consumers that integrate over this side's volume points must not use
+    // such a snapshot.  Unset keeps every point.
+    std::optional<geometry::CutIntegrationSide>
+        classification_only_full_cell_side{};
 };
 
 struct FreeSurfaceGeometryScalarEvaluator {
@@ -699,6 +716,21 @@ buildFreeSurfaceGeometrySnapshot(
     FreeSurfaceGeometryScalarEvaluator scalar = {},
     std::string domain_id = {},
     FreeSurfaceGeometryOwnershipCollective ownership_collective = {});
+
+/**
+ * Recompute the reference and physical points of a classification-only
+ * record on the mesh it was built on.  The result equals the record stored
+ * before its points were released, bit for bit.  Materialized records are
+ * returned unchanged.
+ */
+[[nodiscard]] FreeSurfaceGeometryRuleRecord
+materializeFreeSurfaceGeometryRuleRecord(
+    const FreeSurfaceGeometryRuleRecord& record,
+    const assembly::IMeshAccess& mesh);
+
+/** Content digest that enters the snapshot revision key. */
+[[nodiscard]] std::uint64_t freeSurfaceGeometryRuleContentDigest(
+    const FreeSurfaceGeometryRuleRecord& record) noexcept;
 
 struct FreeSurfaceGeometrySnapshotCacheStatistics {
     std::size_t live_snapshot_count{0};
