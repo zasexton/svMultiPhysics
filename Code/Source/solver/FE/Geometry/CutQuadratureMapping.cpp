@@ -1,6 +1,7 @@
 #include "Geometry/CutQuadratureMapping.h"
 
 #include "Assembly/Assembler.h"
+#include "Geometry/LinearMapping.h"
 #include "Geometry/MappingFactory.h"
 #include "Quadrature/QuadratureFactory.h"
 
@@ -8,6 +9,7 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <typeinfo>
 
 namespace svmp::FE::geometry {
 namespace {
@@ -180,6 +182,17 @@ MappedCutQuadratureRule mapCutQuadratureRuleToPhysical(
     mapped.reference_measure = rule.measure;
     mapped.points.reserve(rule.points.size());
 
+    // LinearMapping::jacobian ignores its argument (it evaluates the constant
+    // affine Jacobian at a fixed interior point), so the Jacobian, its
+    // determinant and its inverse are computed once, at the first point, and
+    // reused bit for bit by the others.
+    const bool point_independent_jacobian =
+        typeid(*mapping) == typeid(LinearMapping);
+    bool have_jacobian = false;
+    math::Matrix<Real, 3, 3> constant_jacobian{};
+    math::Matrix<Real, 3, 3> constant_inverse{};
+    Real constant_determinant{0.0};
+
     for (const auto& point : rule.points) {
         if (!std::isfinite(point.weight) || !(point.weight > Real{0.0})) {
             throw std::invalid_argument(
@@ -190,15 +203,21 @@ MappedCutQuadratureRule mapCutQuadratureRuleToPhysical(
                                                       : point.parent_coordinate;
         requireFinitePoint(reference, "reference point");
         const auto xi = toVector(reference);
-        const auto jacobian = mapping->jacobian(xi);
-        const Real determinant = jacobian.determinant();
-        if (!std::isfinite(determinant) ||
-            !(std::abs(determinant) >
-              std::numeric_limits<Real>::min())) {
-            throw std::invalid_argument(
-                "retained cut quadrature maps through a singular or non-finite Jacobian");
+        if (!have_jacobian) {
+            constant_jacobian = mapping->jacobian(xi);
+            constant_determinant = constant_jacobian.determinant();
+            if (!std::isfinite(constant_determinant) ||
+                !(std::abs(constant_determinant) >
+                  std::numeric_limits<Real>::min())) {
+                throw std::invalid_argument(
+                    "retained cut quadrature maps through a singular or non-finite Jacobian");
+            }
+            constant_inverse = constant_jacobian.inverse();
+            have_jacobian = point_independent_jacobian;
         }
-        const auto inverse = jacobian.inverse();
+        const auto& jacobian = constant_jacobian;
+        const Real determinant = constant_determinant;
+        const auto& inverse = constant_inverse;
 
         MappedCutQuadraturePoint output;
         output.reference_point = reference;
