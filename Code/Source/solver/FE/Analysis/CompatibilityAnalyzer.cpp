@@ -195,6 +195,10 @@ void CompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
         // remove the compatibility condition.
     }
 
+    // nullspace_claims points into report.claims, so new claims are
+    // collected here and appended after the loop; appending inside it would
+    // reallocate report.claims and leave the remaining pointers dangling.
+    std::vector<PropertyClaim> compatibility_claims;
     for (const auto* ns_claim : nullspace_claims) {
         FieldId fid = ns_claim->field;
         if (fid == INVALID_FIELD_ID) continue;
@@ -276,8 +280,11 @@ void CompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
                 "Nullspace: " + ns_claim->description,
                 ns_claim->confidence);
 
-            report.claims.push_back(std::move(claim));
+            compatibility_claims.push_back(std::move(claim));
         }
+    }
+    for (auto& claim : compatibility_claims) {
+        report.claims.push_back(std::move(claim));
     }
 }
 
