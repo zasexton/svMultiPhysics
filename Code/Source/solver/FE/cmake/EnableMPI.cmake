@@ -172,22 +172,18 @@ if(FE_ENABLE_MPI)
         message(STATUS "FE: Found MPI executor: ${MPIEXEC_EXECUTABLE}")
         set(FE_MPIEXEC ${MPIEXEC_EXECUTABLE} CACHE INTERNAL "FE MPI executor")
 
-        # Define a function for adding MPI tests
+        # Define a function for adding MPI tests.  Further arguments (FILTER,
+        # ENVIRONMENT, COST, ...) are forwarded to svmp_add_gtest()
+        # (Code/CMake/SvmpTestEntries.cmake), which launches through mpiexec
+        # and declares PROCESSORS ${num_procs}.
         function(add_fe_mpi_test test_name num_procs)
             if(TARGET ${test_name})
-                add_test(
-                    NAME ${test_name}_mpi_${num_procs}
-                    COMMAND ${MPIEXEC_EXECUTABLE}
-                            -np ${num_procs}
-                            ${MPIEXEC_PREFLAGS}
-                            $<TARGET_FILE:${test_name}>
-                            ${MPIEXEC_POSTFLAGS}
-                )
-                set_tests_properties(${test_name}_mpi_${num_procs} PROPERTIES
+                svmp_add_gtest(${test_name}_mpi_${num_procs}
+                    TARGET ${test_name}
+                    MPI_RANKS ${num_procs}
                     TIMEOUT 120
-                    PROCESSORS ${num_procs}
-                    LABELS "MPI"
-                )
+                    LABELS MPI
+                    ${ARGN})
             endif()
         endfunction()
     else()

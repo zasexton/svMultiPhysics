@@ -6,6 +6,7 @@ if(NOT GTest_FOUND AND NOT TARGET GTest::gtest)
 endif()
 
 enable_testing()
+include(${CMAKE_CURRENT_LIST_DIR}/../../../../CMake/SvmpTestEntries.cmake)
 
 add_executable(test_application
   Unit/test_ApplicationDriverLevelSetWorkflows.cpp
@@ -69,7 +70,9 @@ else()
   target_link_libraries(test_application PRIVATE ${GTEST_LIBRARIES})
 endif()
 
-add_test(NAME Application_Tests COMMAND test_application)
+# COST: serial seconds of the whole entry; sets the shard count (see
+# Code/CMake/SvmpTestEntries.cmake).
+svmp_add_gtest(Application_Tests TARGET test_application COST 300)
 
 if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
   add_executable(test_application_mpi
@@ -131,48 +134,32 @@ if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
     )
   endif()
 
-  add_test(
-    NAME Application_MPI_2
-    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
-            ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_application_mpi>
-            ${MPIEXEC_POSTFLAGS}
-  )
-  set_tests_properties(Application_MPI_2 PROPERTIES
-    PROCESSORS 2
-    ENVIRONMENT
-      "OMPI_ALLOW_RUN_AS_ROOT=1;OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1"
+  set(_application_mpi_env
+    OMPI_ALLOW_RUN_AS_ROOT=1
+    OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
   )
 
-  add_test(
-    NAME Application_LevelSetMaintenanceConsensus_MPI_2
-    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
-            ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_application_mpi>
-            --gtest_filter=LevelSetMaintenanceTransactionConsensusMPI.TwoRankCommitRejectAndContentRevisionAgreement
-            ${MPIEXEC_POSTFLAGS}
-  )
-  set_tests_properties(
-    Application_LevelSetMaintenanceConsensus_MPI_2
-    PROPERTIES
-      PROCESSORS 2
-      TIMEOUT 1200
-      ENVIRONMENT
-        "OMPI_ALLOW_RUN_AS_ROOT=1;OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1"
+  svmp_add_gtest(Application_MPI_2
+    TARGET test_application_mpi
+    MPI_RANKS 2
+    COST 2840
+    ENVIRONMENT ${_application_mpi_env}
   )
 
-  add_test(
-    NAME Application_LevelSetMaintenanceConsensus_MPI_4
-    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4
-            ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_application_mpi>
-            --gtest_filter=LevelSetMaintenanceTransactionConsensusMPI.FourRankCommitRejectAndContentRevisionAgreement
-            ${MPIEXEC_POSTFLAGS}
+  svmp_add_gtest(Application_LevelSetMaintenanceConsensus_MPI_2
+    TARGET test_application_mpi
+    MPI_RANKS 2
+    FILTER "LevelSetMaintenanceTransactionConsensusMPI.TwoRankCommitRejectAndContentRevisionAgreement"
+    TIMEOUT 1200
+    ENVIRONMENT ${_application_mpi_env}
   )
-  set_tests_properties(
-    Application_LevelSetMaintenanceConsensus_MPI_4
-    PROPERTIES
-      PROCESSORS 4
-      TIMEOUT 1200
-      ENVIRONMENT
-        "OMPI_ALLOW_RUN_AS_ROOT=1;OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1"
+
+  svmp_add_gtest(Application_LevelSetMaintenanceConsensus_MPI_4
+    TARGET test_application_mpi
+    MPI_RANKS 4
+    FILTER "LevelSetMaintenanceTransactionConsensusMPI.FourRankCommitRejectAndContentRevisionAgreement"
+    TIMEOUT 1200
+    ENVIRONMENT ${_application_mpi_env}
   )
 
   # End-to-end rank-count check of unfitted free-surface runs: generated

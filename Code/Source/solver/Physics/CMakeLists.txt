@@ -279,6 +279,7 @@ endif()
 
 if(PHYSICS_BUILD_TESTS)
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/EnableGTest.cmake)
+    include(${CMAKE_CURRENT_LIST_DIR}/../../../CMake/SvmpTestEntries.cmake)
 
     set(PHYSICS_COUPLING_HEADER_TEST_SOURCES)
     foreach(_physics_coupling_header IN LISTS PHYSICS_COUPLING_HEADERS)
@@ -381,81 +382,68 @@ if(PHYSICS_BUILD_TESTS)
     )
     list(JOIN _SVMP_WP0_CONFIGURATION_TESTS ":" _SVMP_WP0_CONFIGURATION_FILTER)
 
-    add_test(
-        NAME Physics_FreeSurfaceConfiguration_WP0
-        COMMAND test_physics
-                "--gtest_filter=${_SVMP_WP0_CONFIGURATION_FILTER}"
-    )
-    set_tests_properties(
-        Physics_FreeSurfaceConfiguration_WP0 PROPERTIES
+    # COST: serial seconds of the whole entry; sets the shard count (see
+    # Code/CMake/SvmpTestEntries.cmake).
+    svmp_add_gtest(Physics_FreeSurfaceConfiguration_WP0
+        TARGET test_physics
+        FILTER "${_SVMP_WP0_CONFIGURATION_FILTER}"
+        COST 95
         TIMEOUT 300
-        PROCESSORS 1
-        LABELS "physics;free-surface;qualification;wp0"
+        LABELS physics free-surface qualification wp0
     )
 
     set(_SVMP_WP7_SERIAL_MATRIX_TEST
         "FreeSurfaceCutStability.FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations")
 
-    add_test(
-        NAME Physics_Tests
-        COMMAND test_physics
-                "--gtest_filter=-${_SVMP_WP7_SERIAL_MATRIX_TEST}"
+    svmp_add_gtest(Physics_Tests
+        TARGET test_physics
+        FILTER "-${_SVMP_WP7_SERIAL_MATRIX_TEST}"
+        COST 1110
     )
 
-    add_test(
-        NAME Physics_FreeSurfaceCutStability_Serial_Matrix
-        COMMAND test_physics
-                "--gtest_filter=${_SVMP_WP7_SERIAL_MATRIX_TEST}"
-    )
-    set_tests_properties(
-        Physics_FreeSurfaceCutStability_Serial_Matrix PROPERTIES
+    svmp_add_gtest(Physics_FreeSurfaceCutStability_Serial_Matrix
+        TARGET test_physics
+        FILTER "${_SVMP_WP7_SERIAL_MATRIX_TEST}"
+        COST 105
+        SHARDS 1
         TIMEOUT 14400
-        PROCESSORS 1
-        LABELS "physics;free-surface;qualification"
+        LABELS physics free-surface qualification
     )
 
     # Optional MPI-launched tests (requires mpiexec and building with MPI-enabled deps).
     find_program(MPIEXEC_EXECUTABLE NAMES mpiexec mpirun)
     if(MPIEXEC_EXECUTABLE)
-        add_test(
-            NAME Physics_Tests_MPI_2
-            COMMAND ${MPIEXEC_EXECUTABLE} -np 2 $<TARGET_FILE:test_physics>
-                    --gtest_filter=PoissonSquareSteadyMPI.*:PoissonModuleMPI.*:MovingDomainPhysicsMPI.*:NavierStokesLegacyBCsMPI.*
-        )
-        set_tests_properties(Physics_Tests_MPI_2 PROPERTIES
+        svmp_add_gtest(Physics_Tests_MPI_2
+            TARGET test_physics
+            MPI_RANKS 2
+            FILTER "PoissonSquareSteadyMPI.*:PoissonModuleMPI.*:MovingDomainPhysicsMPI.*:NavierStokesLegacyBCsMPI.*"
             TIMEOUT 180
-            PROCESSORS 2
-            LABELS "MPI;physics"
+            LABELS MPI physics
         )
-        add_test(
-            NAME Physics_FreeSurfaceSharpBoundary_MPI_2
-            COMMAND ${MPIEXEC_EXECUTABLE} -np 2 $<TARGET_FILE:test_physics>
-                    --gtest_filter=GeneratedActiveBoundaryDomainMPI.WetFractionSweepIsOwnershipUniqueAndPartitionIndependent:FreeSurfaceSharpBoundaryOperatorsMPI.OperatorWorkIsPartitionIndependent:FreeSurfaceSharpBoundaryOperatorsMPI.StructuredChannelWorkIsInvariantUnderActualRepartition
-        )
-        set_tests_properties(Physics_FreeSurfaceSharpBoundary_MPI_2 PROPERTIES
+        svmp_add_gtest(Physics_FreeSurfaceSharpBoundary_MPI_2
+            TARGET test_physics
+            MPI_RANKS 2
+            FILTER "GeneratedActiveBoundaryDomainMPI.WetFractionSweepIsOwnershipUniqueAndPartitionIndependent:FreeSurfaceSharpBoundaryOperatorsMPI.OperatorWorkIsPartitionIndependent:FreeSurfaceSharpBoundaryOperatorsMPI.StructuredChannelWorkIsInvariantUnderActualRepartition"
             TIMEOUT 1800
-            PROCESSORS 2
-            LABELS "MPI;physics;free-surface;sharp-boundary"
+            LABELS MPI physics free-surface sharp-boundary
         )
-        add_test(
-            NAME Physics_FreeSurfaceCutStability_MPI_2
-            COMMAND ${MPIEXEC_EXECUTABLE} -np 2 $<TARGET_FILE:test_physics>
-                    --gtest_filter=FreeSurfaceCutStabilityMPI.TwoFluidPhaseIdentityIsInvariantAcrossSideAndPartitionChanges:FreeSurfaceCutStabilityMPI.PhysicalWetBlocksAndDisconnectedIslandsAreInvariantAcrossDryMPIData:FreeSurfaceCutStabilityMPI.DistributedMovingCutRemainsStableAcrossBlockAndMetisPartitions:FreeSurfaceCutStabilityMPI.LimitedMetisHaloFailsClosedOnIncompleteAggregationSupport:FreeSurfaceCutStabilityMPI.TwoRankFractionOrientationRegimeMatrixMatchesSerial
-        )
-        set_tests_properties(Physics_FreeSurfaceCutStability_MPI_2 PROPERTIES
+        svmp_add_gtest(Physics_FreeSurfaceCutStability_MPI_2
+            TARGET test_physics
+            MPI_RANKS 2
+            FILTER "FreeSurfaceCutStabilityMPI.TwoFluidPhaseIdentityIsInvariantAcrossSideAndPartitionChanges:FreeSurfaceCutStabilityMPI.PhysicalWetBlocksAndDisconnectedIslandsAreInvariantAcrossDryMPIData:FreeSurfaceCutStabilityMPI.DistributedMovingCutRemainsStableAcrossBlockAndMetisPartitions:FreeSurfaceCutStabilityMPI.LimitedMetisHaloFailsClosedOnIncompleteAggregationSupport:FreeSurfaceCutStabilityMPI.TwoRankFractionOrientationRegimeMatrixMatchesSerial"
+            COST 290
+            SHARDS 5
             TIMEOUT 43200
-            PROCESSORS 2
-            LABELS "MPI;physics;free-surface"
+            LABELS MPI physics free-surface
         )
-        add_test(
-            NAME Physics_FreeSurfaceCutStability_MPI_4
-            COMMAND ${MPIEXEC_EXECUTABLE} -np 4 $<TARGET_FILE:test_physics>
-                    --gtest_filter=FreeSurfaceCutStabilityMPI.FourRankFixedCutIsInvariantAcrossBlockAndMetisPartitions:FreeSurfaceCutStabilityMPI.FourRankFractionOrientationRegimeMatrixMatchesSerial
-        )
-        set_tests_properties(Physics_FreeSurfaceCutStability_MPI_4 PROPERTIES
+        svmp_add_gtest(Physics_FreeSurfaceCutStability_MPI_4
+            TARGET test_physics
+            MPI_RANKS 4
+            FILTER "FreeSurfaceCutStabilityMPI.FourRankFixedCutIsInvariantAcrossBlockAndMetisPartitions:FreeSurfaceCutStabilityMPI.FourRankFractionOrientationRegimeMatrixMatchesSerial"
+            COST 265
+            SHARDS 2
             TIMEOUT 43200
-            PROCESSORS 4
-            LABELS "MPI;physics;free-surface"
+            LABELS MPI physics free-surface
         )
     else()
         message(STATUS "Physics: MPI executor not found; MPI tests will not be registered")
