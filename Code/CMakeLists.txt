@@ -138,6 +138,13 @@ endforeach()
 #-----------------------------------------------------------------------------
 
 #-----------------------------------------------------------------------------
+# Enable CTest here so that `ctest` in the top build directory runs every
+# registered suite (FE, Physics, Application, ...) in one scheduler, which
+# lets `ctest -j <N>` overlap entries from different suites.
+enable_testing()
+#-----------------------------------------------------------------------------
+
+#-----------------------------------------------------------------------------
 # Add directories
 # Modules
 add_subdirectory(Source)

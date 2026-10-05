@@ -2254,6 +2254,7 @@ endif()
 
 if(FE_BUILD_TESTS)
     find_package(Threads REQUIRED)
+    include(${CMAKE_CURRENT_LIST_DIR}/../../../CMake/SvmpTestEntries.cmake)
 
     # Math module tests
     set(FE_MATH_TEST_SOURCES
@@ -2283,7 +2284,7 @@ if(FE_BUILD_TESTS)
                 svfe
                 ${GTEST_LIBRARIES}
         )
-        add_test(NAME FE_Math_Tests COMMAND test_fe_math)
+        svmp_add_gtest(FE_Math_Tests TARGET test_fe_math)
     endif()
 
     # Core module tests
@@ -2296,13 +2297,12 @@ if(FE_BUILD_TESTS)
                 svfe
                 ${GTEST_LIBRARIES}
         )
-        add_test(NAME FE_Core_Tests COMMAND test_fe_core)
+        svmp_add_gtest(FE_Core_Tests TARGET test_fe_core)
         # FE_LOG_LEVEL is read when the logger is first used, so the
         # environment-driven logger tests run in their own process.
-        add_test(NAME FE_Core_Logger_Environment_Tests
-                 COMMAND test_fe_core --gtest_filter=LoggerEnvironment.*)
-        set_tests_properties(FE_Core_Logger_Environment_Tests PROPERTIES
-                             ENVIRONMENT "FE_LOG_LEVEL=WARNING")
+        svmp_add_gtest(FE_Core_Logger_Environment_Tests TARGET test_fe_core
+                       FILTER "LoggerEnvironment.*"
+                       ENVIRONMENT "FE_LOG_LEVEL=WARNING")
     endif()
 
     # MovingMesh module tests (physics-neutral FE implementation of Mesh motion backends)
@@ -2319,7 +2319,7 @@ if(FE_BUILD_TESTS)
                 svfe
                 ${GTEST_LIBRARIES}
         )
-        add_test(NAME FE_MovingMesh_Tests COMMAND test_fe_movingmesh)
+        svmp_add_gtest(FE_MovingMesh_Tests TARGET test_fe_movingmesh)
     endif()
 
     # Quadrature module tests
@@ -2350,7 +2350,7 @@ if(FE_BUILD_TESTS)
             svfe
             ${GTEST_LIBRARIES}
     )
-    add_test(NAME FE_Quadrature_Tests COMMAND test_fe_quadrature)
+    svmp_add_gtest(FE_Quadrature_Tests TARGET test_fe_quadrature)
 
     # Basis module tests
     set(FE_BASIS_TEST_SOURCES
@@ -2382,7 +2382,7 @@ if(FE_BUILD_TESTS)
             ${GTEST_LIBRARIES}
             Threads::Threads
     )
-    add_test(NAME FE_Basis_Tests COMMAND test_fe_basis)
+    svmp_add_gtest(FE_Basis_Tests TARGET test_fe_basis)
 
     add_executable(basis_perf_microbench
         Tests/Benchmarks/basis_perf_microbench.cpp
@@ -2440,7 +2440,7 @@ if(FE_BUILD_TESTS)
         target_include_directories(
             test_fe_geometry SYSTEM PRIVATE ${Boost_INCLUDE_DIRS})
     endif()
-    add_test(NAME FE_Geometry_Tests COMMAND test_fe_geometry)
+    svmp_add_gtest(FE_Geometry_Tests TARGET test_fe_geometry)
 
     # Level-set module tests
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/LevelSet/test_main.cpp)
@@ -2472,7 +2472,8 @@ if(FE_BUILD_TESTS)
                 svfe
                 ${GTEST_LIBRARIES}
         )
-        add_test(NAME FE_LevelSet_Tests COMMAND test_fe_levelset)
+        # COST: serial seconds of the whole executable; sets the shard count.
+        svmp_add_gtest(FE_LevelSet_Tests TARGET test_fe_levelset COST 830)
         if(FE_WITH_MESH)
             add_executable(test_fe_levelset_authoritative_binding
                 Tests/Unit/LevelSet/test_LevelSetAuthoritativeDerivativeBinding.cpp)
@@ -2486,9 +2487,9 @@ if(FE_BUILD_TESTS)
                 target_link_libraries(test_fe_levelset_authoritative_binding
                     PRIVATE svfe ${_fe_binding_gtest_libs})
             endif()
-            add_test(NAME FE_LevelSet_Authoritative_Binding_Tests
-                COMMAND test_fe_levelset_authoritative_binding
-                    --gtest_filter=LevelSetAuthoritativeDerivativeBinding.*)
+            svmp_add_gtest(FE_LevelSet_Authoritative_Binding_Tests
+                TARGET test_fe_levelset_authoritative_binding
+                FILTER "LevelSetAuthoritativeDerivativeBinding.*")
         endif()
     endif()
 
@@ -2513,7 +2514,7 @@ if(FE_BUILD_TESTS)
             svfe
             ${GTEST_LIBRARIES}
     )
-    add_test(NAME FE_Elements_Tests COMMAND test_fe_elements)
+    svmp_add_gtest(FE_Elements_Tests TARGET test_fe_elements)
 
     # Spaces module tests
     file(GLOB FE_SPACES_TEST_SOURCES Tests/Unit/Spaces/test_*.cpp)
@@ -2525,7 +2526,7 @@ if(FE_BUILD_TESTS)
                 svfe
                 ${GTEST_LIBRARIES}
         )
-        add_test(NAME FE_Spaces_Tests COMMAND test_fe_spaces)
+        svmp_add_gtest(FE_Spaces_Tests TARGET test_fe_spaces)
     endif()
 
 	# Dofs module tests
@@ -2565,7 +2566,7 @@ if(FE_BUILD_TESTS)
 		                    ${GTEST_LIBRARIES}
 		            )
 		        endif()
-		        add_test(NAME FE_Dofs_Tests COMMAND test_fe_dofs)
+		        svmp_add_gtest(FE_Dofs_Tests TARGET test_fe_dofs)
 		    endif()
 		endif()
 
@@ -2613,7 +2614,7 @@ if(FE_BUILD_TESTS)
             BUILD_RPATH ""
             INSTALL_RPATH ""
         )
-        add_test(NAME FE_Constraints_Tests COMMAND test_fe_constraints)
+        svmp_add_gtest(FE_Constraints_Tests TARGET test_fe_constraints)
     endif()
 
     # Sparsity module tests
@@ -2651,7 +2652,7 @@ if(FE_BUILD_TESTS)
                 svfe
                 ${GTEST_LIBRARIES}
         )
-        add_test(NAME FE_Sparsity_Tests COMMAND test_fe_sparsity)
+        svmp_add_gtest(FE_Sparsity_Tests TARGET test_fe_sparsity)
     endif()
 
     # Analysis module tests
@@ -2693,7 +2694,7 @@ if(FE_BUILD_TESTS)
             BUILD_RPATH ""
             INSTALL_RPATH ""
         )
-        add_test(NAME FE_Analysis_Tests COMMAND test_fe_analysis)
+        svmp_add_gtest(FE_Analysis_Tests TARGET test_fe_analysis)
     endif()
 
     if(FE_ENABLE_ASSEMBLY)
@@ -2721,7 +2722,7 @@ if(FE_BUILD_TESTS)
 		                    svfe
 		                    ${GTEST_LIBRARIES}
 	            )
-	            add_test(NAME FE_Backends_Tests COMMAND test_fe_backends)
+	            svmp_add_gtest(FE_Backends_Tests TARGET test_fe_backends)
 	        endif()
 
 	        # Trilinos-specific backends tests (separate main for Tpetra init)
@@ -2738,7 +2739,7 @@ if(FE_BUILD_TESTS)
 		                    svfe
 		                    ${GTEST_LIBRARIES}
 	            )
-	            add_test(NAME FE_Trilinos_Backends_Tests COMMAND test_fe_backends_trilinos)
+	            svmp_add_gtest(FE_Trilinos_Backends_Tests TARGET test_fe_backends_trilinos)
 	        endif()
 
         # Forms module tests (depends on Assembly)
@@ -2836,7 +2837,7 @@ if(FE_BUILD_TESTS)
 	                    svfe
 	                    ${GTEST_LIBRARIES}
             )
-            add_test(NAME FE_Forms_Tests COMMAND test_fe_forms)
+            svmp_add_gtest(FE_Forms_Tests TARGET test_fe_forms)
         endif()
 
         # PostProcessing module tests (derived output registration/evaluation)
@@ -2855,7 +2856,7 @@ if(FE_BUILD_TESTS)
                     svfe
                     ${GTEST_LIBRARIES}
             )
-            add_test(NAME FE_PostProcessing_Tests COMMAND test_fe_postprocessing)
+            svmp_add_gtest(FE_PostProcessing_Tests TARGET test_fe_postprocessing)
         endif()
 
         # Constitutive module tests (depends on Forms + Systems + Assembly)
@@ -2877,7 +2878,7 @@ if(FE_BUILD_TESTS)
 	                    svfe
 	                    ${GTEST_LIBRARIES}
             )
-            add_test(NAME FE_Constitutive_Tests COMMAND test_fe_constitutive)
+            svmp_add_gtest(FE_Constitutive_Tests TARGET test_fe_constitutive)
         endif()
 
         # Assembly module tests
@@ -2931,7 +2932,7 @@ if(FE_BUILD_TESTS)
 	                    svfe
 	                    ${GTEST_LIBRARIES}
             )
-            add_test(NAME FE_Assembly_Tests COMMAND test_fe_assembly)
+            svmp_add_gtest(FE_Assembly_Tests TARGET test_fe_assembly)
         endif()
 
         # Auxiliary module tests (auxiliary state subsystem)
@@ -2956,7 +2957,7 @@ if(FE_BUILD_TESTS)
                     svfe
                     ${GTEST_LIBRARIES}
             )
-            add_test(NAME FE_Auxiliary_Tests COMMAND test_fe_auxiliary)
+            svmp_add_gtest(FE_Auxiliary_Tests TARGET test_fe_auxiliary)
         endif()
 
         # Systems module tests (Systems depends on Assembly; tests also require Mesh)
@@ -3012,7 +3013,7 @@ if(FE_BUILD_TESTS)
 	                    svfe
 	                    ${GTEST_LIBRARIES}
             )
-            add_test(NAME FE_Systems_Tests COMMAND test_fe_systems)
+            svmp_add_gtest(FE_Systems_Tests TARGET test_fe_systems COST 60)
         endif()
 
         # Coupling module tests (physics-agnostic setup and plan metadata)
@@ -3048,7 +3049,7 @@ if(FE_BUILD_TESTS)
                 PRIVATE
                     SVMP_FE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
             )
-            add_test(NAME FE_Coupling_Tests COMMAND test_fe_coupling)
+            svmp_add_gtest(FE_Coupling_Tests TARGET test_fe_coupling)
         endif()
 
         # TimeStepping module tests (depends on Systems + Forms + Backends; no Mesh required)
@@ -3078,7 +3079,7 @@ if(FE_BUILD_TESTS)
 	                    svfe
 	                    ${GTEST_LIBRARIES}
             )
-            add_test(NAME FE_TimeStepping_Tests COMMAND test_fe_timestepping)
+            svmp_add_gtest(FE_TimeStepping_Tests TARGET test_fe_timestepping)
         endif()
     endif()
 
@@ -3202,10 +3203,8 @@ if(FE_BUILD_TESTS)
             Tests/Unit/LevelSet/test_*MPI*.cpp
         )
         if(TARGET test_fe_levelset_authoritative_binding)
-            add_fe_mpi_test(test_fe_levelset_authoritative_binding 2)
-            set_tests_properties(test_fe_levelset_authoritative_binding_mpi_2
-                PROPERTIES ENVIRONMENT
-                    "GTEST_FILTER=LevelSetAuthoritativeDerivativeBindingMPI.*")
+            add_fe_mpi_test(test_fe_levelset_authoritative_binding 2
+                ENVIRONMENT "GTEST_FILTER=LevelSetAuthoritativeDerivativeBindingMPI.*")
         endif()
         if(FE_LEVELSET_MPI_TEST_SOURCES)
             add_executable(test_fe_levelset_mpi ${FE_LEVELSET_MPI_TEST_SOURCES})
