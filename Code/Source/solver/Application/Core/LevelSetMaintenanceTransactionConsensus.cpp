@@ -8,8 +8,12 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <iostream>
 #include <limits>
 #include <optional>
+#include <sstream>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #ifdef MESH_HAS_MPI
@@ -167,9 +171,51 @@ CanonicalWords canonicalActiveTransaction(
 
 } // namespace
 
-bool collectiveLevelSetMaintenanceCanonicalWordsAgree(
+namespace {
+
+// Rank-local report of a failed agreement, written before the caller acts
+// on the collective result.  Lists the first differing word positions with
+// this rank's value and the communicator minimum and maximum, so the
+// offending canonical field can be identified.
+#ifdef MESH_HAS_MPI
+constexpr std::size_t kMaxReportedWordDifferences = 16u;
+using WordDifference = std::array<std::uint64_t, 4>;
+
+void logCanonicalWordDisagreement(
+    const svmp::MeshComm& comm,
+    std::string_view context,
+    std::uint64_t local_word_count,
+    std::uint64_t minimum_word_count,
+    std::uint64_t maximum_word_count,
+    std::span<const WordDifference> differences) noexcept
+{
+  try {
+  std::ostringstream message;
+  message << "[svMultiPhysics::Application] [R" << comm.rank()
+          << "] Level-set maintenance canonical words disagree"
+          << " diagnostic=maintenance_consensus_word_disagreement"
+          << " context='" << context << "'"
+          << " local_word_count=" << local_word_count
+          << " minimum_word_count=" << minimum_word_count
+          << " maximum_word_count=" << maximum_word_count
+          << " differing_words_shown=" << differences.size();
+  for (const auto& difference : differences) {
+    message << " [index=" << difference[0]
+            << " local=" << difference[1]
+            << " min=" << difference[2]
+            << " max=" << difference[3] << "]";
+  }
+  message << "\n";
+  std::cerr << message.str() << std::flush;
+  } catch (...) {
+  }
+}
+#endif
+
+bool canonicalWordsAgree(
     std::span<const std::uint64_t> local_words,
-    const svmp::MeshComm& comm)
+    const svmp::MeshComm& comm,
+    std::string_view context)
 {
   if (!comm.is_parallel()) {
     return true;
@@ -203,6 +249,8 @@ bool collectiveLevelSetMaintenanceCanonicalWordsAgree(
   std::array<std::uint64_t, chunk_words> minimum_words{};
   std::array<std::uint64_t, chunk_words> maximum_words{};
   bool values_agree = true;
+  std::array<WordDifference, kMaxReportedWordDifferences> differences{};
+  std::size_t difference_count = 0u;
   const auto global_word_count =
       static_cast<std::size_t>(maximum_word_count);
   for (std::size_t offset = 0u; offset < global_word_count;
@@ -233,19 +281,42 @@ bool collectiveLevelSetMaintenanceCanonicalWordsAgree(
         MPI_UINT64_T,
         MPI_MAX,
         comm.native());
-    values_agree = values_agree && std::equal(
-        minimum_words.begin(),
-        minimum_words.begin() +
-            static_cast<std::ptrdiff_t>(words_this_chunk),
-        maximum_words.begin());
+    for (std::size_t i = 0u; i < words_this_chunk; ++i) {
+      if (minimum_words[i] != maximum_words[i]) {
+        values_agree = false;
+        if (difference_count < differences.size()) {
+          differences[difference_count++] = WordDifference{
+              static_cast<std::uint64_t>(offset + i), words[i],
+              minimum_words[i], maximum_words[i]};
+        }
+      }
+    }
   }
 
-  return minimum_word_count == maximum_word_count &&
-         values_agree;
+  const bool agree =
+      minimum_word_count == maximum_word_count && values_agree;
+  if (!agree) {
+    logCanonicalWordDisagreement(
+        comm, context, local_word_count, minimum_word_count,
+        maximum_word_count,
+        std::span<const WordDifference>(
+            differences.data(), difference_count));
+  }
+  return agree;
 #else
   (void)local_words;
+  (void)context;
   return true;
 #endif
+}
+
+} // namespace
+
+bool collectiveLevelSetMaintenanceCanonicalWordsAgree(
+    std::span<const std::uint64_t> local_words,
+    const svmp::MeshComm& comm)
+{
+  return canonicalWordsAgree(local_words, comm, "canonical_words");
 }
 
 LevelSetMaintenanceTransactionDecision
@@ -265,10 +336,16 @@ collectiveLevelSetMaintenanceTransactionDecision(
 
 #ifdef MESH_HAS_MPI
   std::vector<std::uint64_t> words;
+  std::string context;
   bool local_canonical_prepared = true;
   try {
     words = canonicalActiveTransaction(
         ledger, local_commit_state_words);
+    context =
+        "transaction_decision commit_state_offset=" +
+        std::to_string(words.size() - local_commit_state_words.size()) +
+        " commit_state_words=" +
+        std::to_string(local_commit_state_words.size());
   } catch (...) {
     local_canonical_prepared = false;
   }
@@ -292,10 +369,23 @@ collectiveLevelSetMaintenanceTransactionDecision(
 
   if (global_flags[0] == 0 || global_flags[1] == 0 ||
       global_flags[2] == 0) {
+    if (local_flags[0] == 0 || local_flags[1] == 0 ||
+        local_flags[2] == 0) {
+      try {
+        std::ostringstream message;
+        message << "[svMultiPhysics::Application] [R" << comm.rank()
+                << "] Level-set maintenance transaction rejected locally"
+                << " diagnostic=maintenance_consensus_local_rejection"
+                << " transaction_active=" << local_flags[0]
+                << " invariants_satisfied=" << local_flags[1]
+                << " canonical_prepared=" << local_flags[2] << "\n";
+        std::cerr << message.str() << std::flush;
+      } catch (...) {
+      }
+    }
     return LevelSetMaintenanceTransactionDecision::Reject;
   }
-  const bool identical =
-      collectiveLevelSetMaintenanceCanonicalWordsAgree(words, comm);
+  const bool identical = canonicalWordsAgree(words, comm, context);
   return identical
       ? LevelSetMaintenanceTransactionDecision::Commit
       : LevelSetMaintenanceTransactionDecision::Reject;
