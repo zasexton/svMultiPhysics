@@ -671,10 +671,11 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
       | `dev/perf-functional-diagnostics` | **Merged 2026-10-05 (`84207885`, `d23e41e0`, `505e0cab`); bitwise identical; FE 34/34, Physics 7/7, Application 4/4.** Functional-record cost per step: 459 → 79 ms (3D tank 1/h = 16), 23.9 → 9.7 ms (2D drop R/h = 16); 60% of it was per-point allocation in the velocity evaluator, plus history regrowth every step. **Consistency checks** comparing sums of the same terms now use a derived rounding bound (γ_{n_a−1} + γ_{n_b−1})·Σ\|x\| from the term counts (`FE/Systems/FreeSurfaceFunctionalRounding.h`); checks without counts keep 512 ulp. **3D sphere R/h = 8 now runs:** step 0's mismatch is 1.89e-12, 4× the old bound and 0.5% of the derived one; 2 steps accepted at about 22 min each, vertex crossings handled. |
       | `dev/perf-log-output` | **Merged 2026-10-05, bitwise identical.** (1) Diagnostic lines are built only when `FE_LOG_LEVEL` prints them; the default output is unchanged, and at WARNING a step writes 16–26 kB instead of 94–115 kB. (2) `Write_velocity_extension_maps` (default false) makes the 1–5 MB per step wet-extension map files opt-in. (3) Hashed KAG duplicate-sample search, which was 50% of 3D projection time and is now about 0.1 s; a one-step sphere uses 28% less CPU time. A quieter default verbosity is proposed on `dev/perf-log-output-quiet-proposal` (`e2efc6cc`), pending user approval. Next 3D hotspot: `collectLevelSetCurvatureCutVolumeSupplementalSamples`, about 80% of projection time. |
 
-    - Queued until the current branches merge:
-      - classification-only records for fully dry cells (item 8, 3D memory), after `dev/perf-cut-integration-reuse`;
-      - multithreaded assembly in `StandardAssembler`, after the assembler branches;
-      - perf C follow-ups, after `dev/perf-cut-integration-reuse`: deduplicate the per-component physical transforms of product-space velocity, and cache field evaluations in full cells (about 10% of cut-volume time);
+    - Started 2026-10-05, after the merges: `dev/perf-hotspots-postmerge` and `dev/perf-dry-cell-records`.
+      - `dev/perf-hotspots-postmerge` is the post-merge profiling pass. It takes in the perf C follow-ups, the remaining 3D KAG sample collection, `twoSidedParentCellBindings`, the duplicated boundary-partition validation and the formatting costs.
+      - `dev/perf-dry-cell-records` stores classification-only records for fully dry cells, plus other lossless compaction, so that the 3D R/h = 16 case fits in memory.
+    - Queued:
+      - multithreaded assembly in `StandardAssembler`, after `dev/perf-hotspots-postmerge` merges (both edit the assembler broadly);
       - constraint-build cost (about 3 s per 3D tank step at 1/h = 16): started 2026-10-01 after the MPI merge, branch `dev/perf-constraint-build`.
     - Started 2026-10-01: `dev/perf-build-jit`, a build-configuration and JIT study.
       - Variants: LTO and PGO (expected bitwise); `-march=x86-64-v3` with and without FP contraction; JIT opt level, CPU target and contraction.
