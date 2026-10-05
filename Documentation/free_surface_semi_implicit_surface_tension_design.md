@@ -1,6 +1,6 @@
 # Semi-implicit surface tension for the unfitted level-set free surface (design note)
 
-**Status:** proposal, 2026-09-29; step-0 measurements added 2026-09-30 (§1.1). No code has been changed.
+**Status:** proposal, 2026-09-29; step-0 measurements added 2026-09-30 (§1.1). Approved as decision D13 on 2026-10-01. Implemented for `SurfaceStress` (`Surface_tension_semi_implicit=NormalIncrement`, default `None`) and validated on the static drop, capillary wave and sessile drop (§9, 2026-10-05).
 **Base:** `origin/issue-449-modern-mesh-core` at `bfb3d53c`.
 **Scope:** tracker §3.6, §5 M2 ("Time step" and the per-step cost item), §6.1. The design must respect D1–D8 and principle P1.
 *Model* marks results of the single-mode analysis in §1. *(Unverified)* marks claims not yet checked against the original source.
@@ -312,3 +312,191 @@ Once the loop converges independently of Δt, the remaining limits are:
 - adopt `Δt = 2Δt_B` (later `4Δt_B`) for M2 at La = 12;
 - after validation, use a fixed physical Δt with a Δt refinement in M2 and M3;
 - decide whether frozen-map support is in scope.
+
+## 9. Implementation and validation (2026-10-01 to 2026-10-05)
+
+### 9.1 What was implemented
+
+- **Term.** Equation (4) with `n_h` the generated-rule normal and `dt_eff = 1/a0`
+  (`FormExpr::effectiveTimeStep()`); Physics helper
+  `FreeSurface/FreeSurfaceSemiImplicitSurfaceTension.{h,cpp}`, appended in
+  `applyFreeSurfaceBoundary`. The velocity difference is formed before the
+  projection, so the integrand is exactly zero where `u` and `u_ref` carry the
+  same coefficients.
+- **`u_ref`.** Prescribed field `ns_free_surface_semi_implicit_reference_velocity`
+  in the velocity space, registered by `registerOn`. The application
+  (`Application/Core/FreeSurfaceSemiImplicitReference.{h,cpp}`) copies the
+  velocity coefficients into it at the projected outer fixed-point, projected
+  endpoint and restored synchronization points and before each physical solve
+  (three hooks in `ApplicationDriver.cpp`). The two fields share one DOF map,
+  which is checked collectively once.
+- **Transport.** The PDE extension equals the fluid velocity on all
+  interface-cell vertices, so `u_ref` is well defined for `coupled_field` and
+  both PDE couplings. The algebraic `wall_compatible_normal` and
+  `nearest_interface_point` maps, plain prescribed or constant velocities,
+  steady solves and runs without the outer fixed point fail closed.
+- **Physics scope** (fails closed otherwise): exterior unfitted interface with an
+  active side, `CutVolume`, `LinearCorner`, `RefreshedFrozenQuadrature` without
+  shape tangents, literal `gamma > 0`, affine P1 `Triangle3`/`Tetra4` velocity,
+  `SurfaceStress` (KAG admitted as an experiment).
+- **Ledger.** The term enters no conservative or residual-work channel; it is
+  zero at acceptance, except on frozen-epoch steps (§9.6).
+
+Runs, logs and analysis: `/scratch/users/zsexton/svmp-dev-sist2/runs/`
+(`smoke1-46231209`, `sist2-c1-46232162/analysis`); campaign at `9632beb7`.
+
+### 9.2 Unit and smoke tests
+
+`test_FreeSurfaceSemiImplicitSurfaceTension` (6 tests, all pass):
+
+- the velocity block for a planar interface in one `Tetra4` (horizontal and
+  tilted planes, backward Euler and generalized-alpha) equals
+  `gamma dt_eff |Gamma_K| n_c n_d (P grad N_a).(P grad N_b)` to 1e-12; it is
+  symmetric positive semidefinite of rank 2, constant and tangential fields are
+  in its kernel, nothing outside the velocity block changes, and
+  `R_on - R_off = J_SI (u - u_ref)`;
+- the full Jacobian passes a central finite-difference check;
+- with `u_ref = u` the residual is bitwise unchanged;
+- `dt_eff = dt` (backward Euler) and `8/15 dt = 0.5333 dt` (generalized-alpha,
+  `rho_inf = 0.5`);
+- with the option off nothing is registered and the configuration artifact is
+  unchanged;
+- each rejection fires before the system is modified.
+
+Solver checks (jobs `46231209`, `46232162`):
+
+- option off: VTU output and logs bitwise identical to the base binary;
+- option on: the first fresh residual of a run is bitwise identical to the run
+  without the term;
+- 1 and 2 ranks: same outer passes at every step and fields within 1.4e-11.
+- The application rejections (invalid token, outer fixed point disabled,
+  `wall_compatible_normal` transport) end the run with their messages.
+
+### 9.3 Static drop (`surface_stress`, PDE transport)
+
+Every run completed. The pressure-jump error is `dp/(gamma/R_eff) - 1`.
+Wall times are on 4 ranks at R/h = 32 and 16 and serial at R/h = 8, all on one
+loaded 24-core node; the M2 R/h = 32 reference ran serially on another node.
+
+| La | Δt | steps (any R/h) | Δp error, R/h = 8/16/32 | order | `Ca_sp`, R/h = 8/16/32 | max growth | max dA/A | passes at R/h = 32 (mean/max) | wall at R/h = 32 | verdict |
+|---:|---|---:|---|---:|---|---:|---|---|---:|---|
+| 12 | 0.04 | 309 | 6.74e-4 / 1.486e-4 / 3.270e-5 | 2.18 | 2.48e-4 / 1.30e-4 / 7.37e-5 | 0.79 | 1.2e-5 | 3.34 / 4 | 2,691 s | PASS |
+| 12 | 0.02 | 618 | 6.76e-4 / 1.486e-4 / 3.273e-5 | 2.18 | 2.49e-4 / 1.30e-4 / 7.36e-5 | 0.79 | 1.1e-5 | 3.11 / 4 | 4,792 s | PASS |
+| 12 | 0.01 | 1,236 | 6.84e-4 / 1.486e-4 / 3.273e-5 | 2.19 | 2.50e-4 / 1.31e-4 / 7.36e-5 | 0.79 | 8.3e-6 | 3.02 / 4 | 8,915 s | PASS |
+| 12 | 2Δt_B (ref.) | 500 / 1,400 / 4,000 | 6.76e-4 / 1.487e-4 / 3.274e-5 | 2.18 | 2.49e-4 / 1.32e-4 / 7.42e-5 | 0.79 | 1.1e-5 | 2.96 / 6 | 90,694 s serial | PASS |
+| 120 | 0.04 | 970 | 4.97e-4 / 1.39e-4 / 2.99e-5 | 2.03 | 1.50e-4 / 5.79e-5 / 2.59e-5 | 1.00 | 1.6e-4 (R/h = 8) | 3.16 / 5 | 8,543 s | volume fails at R/h = 8 |
+| 120 | 0.02 | 1,938 | 5.10e-4 / 1.39e-4 / 2.99e-5 | 2.05 | 1.32e-4 / 5.63e-5 / 2.57e-5 | 1.00 | 1.2e-4 (R/h = 8) | 3.07 / 4 | 15,845 s | volume fails at R/h = 8 |
+| 120 | 0.01 | 3,900 | 5.25e-4 / 1.40e-4 / 2.99e-5 | 2.07 | 1.09e-4 / 5.24e-5 / 2.56e-5 | 1.00 | 8.2e-5 | 2.82 / 4 | 28,845 s | PASS |
+| 120 | Δt_B (ref.) | 3,200 / 8,800 / 24,900 | 5.21e-4 / 1.40e-4 / – | – | 1.16e-4 / 4.30e-5 / – | 1.007 (R/h = 16) | 9.2e-5 | 3.64 / 5 (first 500 steps) | about 239,000 s projected | growth fails at R/h = 16 |
+
+- **Δt criterion.** `|Δp(0.02) - Δp(0.01)| / Δp(0.01)` is at most 5.9e-6 (La = 12)
+  and 5.2e-6 (La = 120) over all levels; the 0.1% criterion holds with three
+  orders of margin. `Ca_sp` changes by at most 1.2% between Δt at R/h = 32; at
+  R/h = 8 and 16 and La = 120 it falls by up to 27% from Δt = 0.04 to 0.01
+  (risk 5), and stays monotone in h at every Δt.
+- **Volume at La = 120, R/h = 8.** The drift grows with Δt (8.2e-5, 1.2e-4,
+  1.6e-4 at Δt = 0.01, 0.02, 0.04; 9.2e-5 at Δt_B). It is a level-set transport
+  time error at the coarsest level; R/h = 16 and 32 stay below 2e-5.
+- **Cost.** Passes per step stay at 2.8 to 3.4 on average (at most 5) for steps
+  of up to 26 Δt_B, so the wall time follows the step count. At R/h = 32,
+  measured in total outer passes (machine independent), Δt = 0.02 needs 6.2
+  times fewer than the La = 12 reference and 15 times fewer than the projected
+  La = 120 reference; Δt = 0.01 needs 3.2 and 8.2 times fewer. At the protocol
+  step itself the term lowers the passes slightly (La = 12: 3.18 against 3.60 at
+  R/h = 8, 3.01 against 3.16 at R/h = 16, maximum 4 against 6).
+- **KAG (experiment, R/h = 8, La = 12).** `kag_lumped` with the term at Δt = 0.04
+  and 0.02 reproduces the M2 KAG result at 2Δt_B (Δp error -1.8e-4, `Ca_sp`
+  1.5e-3, growth 1.32, so it still fails growth) with 5.2 and 4.4 passes per
+  step against 4.9. The term does not remove the KAG defects.
+
+### 9.4 Energy
+
+`E = (1/2) rho int |u|^2 + gamma |Gamma_h|` (plus the Young wall energy for the
+sessile drop) from the per-step functional record:
+
+- **Static drop and capillary wave.** `E` decreases at every accepted step at
+  every Δt and level, except one step each at Δt = 0.04 and R/h = 32
+  (La = 12: +2.2e-6, relative 3.5e-7; La = 120: +4.8e-6, relative 7.6e-7). Both
+  are start-up steps accepted on a frozen epoch after a topology cycle (§9.6).
+- **Sessile drop.** `E` increases on 69% of the steps by up to 2e-5 relative
+  both with and without the term (identical histories). The run also loses
+  2.9e-3 of its area, so the discrete energy balance is not closed there; this
+  is independent of the term.
+
+### 9.5 Capillary wave (λ/h = 16/32/64, PDE transport, La = 3000)
+
+Errors are against the fitted Prosperetti solution. The protocol row is the M3
+run at the shared step (Δt = 5.5e-4, 725 steps per period, term off).
+
+| steps/period | Δt/Δt_B at λ/h = 16/32/64 | a0/λ | ω error, 16/32/64 | spatial order | β error, 16/32/64 | dA/A max at 32 | passes at 64 (mean/max) | wall at 64 |
+|---:|---|---:|---|---:|---|---:|---|---:|
+| 100 | 0.9 / 2.6 / 7.2 | 0.01 | 1.78e-2 / 7.33e-3 / 2.32e-3 | 1.47 | 0.216 / 0.068 / 2.3e-3 | 1.27e-4 | 4.34 / 6 | 4,072 s |
+| 50 | 1.8 / 5.1 / 14.5 | 0.01 | 1.80e-2 / 6.47e-3 / 1.09e-3 | 2.02 | 0.216 / 0.068 / 5.9e-3 | 1.26e-4 | 4.90 / 6 | 2,283 s |
+| 25 | 3.6 / 10.2 / 29 | 0.01 | 1.38e-2 / 1.80e-3 / 3.86e-3 | 0.92 | 0.214 / 0.057 / 1.86e-2 | 1.24e-4 | 5.28 / 7 | 1,483 s |
+| 100 | as above | 0.0025 | 1.60e-2 / 5.59e-3 / 1.80e-3 | 1.58 | 0.220 / 0.072 / 7.0e-3 | 8.4e-6 | 3.19 / 5 | 2,675 s |
+| 50 | as above | 0.0025 | 1.62e-2 / 4.73e-3 / 4.96e-4 | 2.51 | 0.220 / 0.072 / 3.4e-3 | 8.3e-6 | 3.42 / 6 | 1,567 s |
+| 25 | as above | 0.0025 | 1.21e-2 / 9.9e-5 / 4.10e-3 | 0.78 | 0.218 / 0.063 / 1.01e-2 | 8.2e-6 | 3.93 / 5 | 997 s |
+| 725 (protocol, off) | 0.12 / 0.35 / 1.0 | 0.01 | 8.02e-3 / 6.59e-3 / 2.28e-3 | 0.91 | 0.264 / 0.079 / 5.8e-4 | 1.29e-4 | 4.20 / 6 | 10,442 s (other node) |
+
+- **Without the term** the run fails at the first step at 100 steps per period
+  for λ/h = 32 (2.6 Δt_B) and 64 (7.2 Δt_B); at λ/h = 16 it runs with 4.0 and
+  6.6 passes per step (100 and 50 steps per period) against 3.0 and 3.3 with
+  the term.
+- **Order in Δt.** At λ/h = 64 the frequency converges with order 2.0
+  (a0 = 0.01) and 1.8 (a0 = 0.0025), the damping with 1.8 and 1.9; at λ/h = 32
+  the frequency order is 2.4. The Richardson time error at λ/h = 64 and
+  a0 = 0.01 is -0.04%, -0.16% and -0.66% in frequency and -0.15%, -0.5% and
+  -1.8% in damping at 100, 50 and 25 steps per period. This is the
+  generalized-alpha phase error, about `(ω dt)^2/12`.
+- **Gates.** The frequency gate passes at 100 and 50 steps per period (order
+  1.5 and 2.0; 1.6 and 2.5 at a0 = 0.0025) and fails at 25, where the time
+  error at λ/h = 64 exceeds the spatial error. The damping error at λ/h = 32
+  (6 to 7%) is spatial and fails the 5% gate as in the protocol run. The
+  area gate fails at λ/h = 32 for a0 = 0.01, as in the protocol run, and
+  passes at a0 = 0.0025 (at most 1.6e-5).
+- **Amplitude.** At 50 steps per period the λ/h = 64 frequency error halves from
+  1.1e-3 to 5.0e-4 at the smaller amplitude, consistent with a finite-amplitude
+  plateau.
+
+### 9.6 Sessile drop (60°, R/h = 16, two viscous times)
+
+| step | term | passes (mean/max) | θ_L, θ_R | base, apex error | wall |
+|---|---|---|---|---|---:|
+| 2 × protocol (2.0 Δt_B) | on | 3.55 / 6 | 60.19°, 56.66° | 1.7e-3, 7.0e-3 | 774 s |
+| 2 × protocol | off | 4.46 / 8 | 60.19°, 56.66° | 1.7e-3, 7.0e-3 | 879 s |
+| 4 × protocol (4.0 Δt_B) | on | 4.06 / 6 | 60.20°, 56.69° | 1.7e-3, 7.0e-3 | 444 s |
+| 4 × protocol | off | 5.74 / 9 | 60.20°, 56.69° | 1.7e-3, 7.0e-3 | 559 s |
+
+The contact points behave identically with and without the term (risk 6 not
+observed); the term lowers the passes by 20 to 30%.
+
+### 9.7 Risks found
+
+1. **Frozen-epoch acceptance.** When the outer loop cycles between two cut
+   topologies, the step is accepted on a frozen epoch without a final refresh;
+   `R_SI` is then not zero at acceptance, and the geometry is not
+   self-consistent. This occurred in start-up steps at large Δt (static drop
+   R/h = 32 at Δt = 0.04: 4 and 6 cycle steps) and coincides with the only two
+   energy increases (§9.4).
+2. **Vertex crossings** are frequent at large Δt (up to 89 restarts in 400
+   capillary-wave steps at λ/h = 64) and are handled by the topology restarts;
+   no run failed.
+3. **Conditioning.** GMRES iterations per inner solve rise from about 52 to up
+   to 150 at the largest steps; all linear solves converged.
+4. **Δt bias.** `Ca_sp` at coarse levels and the La = 120, R/h = 8 volume drift
+   depend on Δt; the gated pressure jump does not.
+
+### 9.8 Recommendation (the protocol choice is the user's)
+
+- **M2:** a fixed physical step for all R/h: Δt = 0.02 at La = 12 and
+  Δt = 0.01 at La = 120, each checked against a run at twice or half the step
+  (the 0.01 and 0.02 runs of §9.3 already serve). La = 120 at Δt = 0.02
+  passes every gate except the R/h = 8 volume drift. At R/h = 32 this replaces
+  4,000 and 24,900 steps by 618 and 3,900.
+- **M3:** 50 steps per inviscid period at every level, with a 100-step check.
+  The time error at 50 steps per period is 0.16% in frequency and 0.5% in
+  damping at λ/h = 64.
+- **`tolerances.json` Δt criterion.** Every gate passes at both steps, and the
+  gated quantity changes by at most 0.1% under halving: the pressure jump for
+  M2, and frequency and damping (at most 0.2% and 1%) at the finest level for
+  M3. `Ca_sp` is reported for each step.

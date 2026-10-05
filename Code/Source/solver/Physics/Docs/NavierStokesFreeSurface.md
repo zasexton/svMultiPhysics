@@ -109,6 +109,13 @@ The algebraic `wall_compatible_normal` and `nearest_interface_point`
 extensions, plain prescribed or constant velocities, steady solves, and runs
 with the outer fixed point disabled are rejected.
 
+Validation (design note §9): with the option off the output is bitwise
+unchanged. The static drop at La = 12 passes its M2 gates at fixed steps up
+to 26 times the capillary limit `dt_B`, with 3 to 3.4 outer passes per step;
+at La = 120 the coarsest-level volume drift needs `dt = 0.01`. The capillary
+wave runs at 25 to 100 steps per period, where the scheme without the term
+fails at the first step on the finer meshes. Its time error is second order.
+
 ## Fitted ALE free surfaces
 
 A fitted free surface (`Implementation=FittedALE`) is a boundary of the
