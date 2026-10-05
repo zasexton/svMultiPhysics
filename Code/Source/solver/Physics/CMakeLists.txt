@@ -382,12 +382,9 @@ if(PHYSICS_BUILD_TESTS)
     )
     list(JOIN _SVMP_WP0_CONFIGURATION_TESTS ":" _SVMP_WP0_CONFIGURATION_FILTER)
 
-    # COST: serial seconds of the whole entry; sets the shard count (see
-    # Code/CMake/SvmpTestEntries.cmake).
     svmp_add_gtest(Physics_FreeSurfaceConfiguration_WP0
         TARGET test_physics
         FILTER "${_SVMP_WP0_CONFIGURATION_FILTER}"
-        COST 95
         TIMEOUT 300
         LABELS physics free-surface qualification wp0
     )
@@ -395,16 +392,18 @@ if(PHYSICS_BUILD_TESTS)
     set(_SVMP_WP7_SERIAL_MATRIX_TEST
         "FreeSurfaceCutStability.FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations")
 
+    # COST: serial seconds of the whole entry (Xeon Gold 5118); sets the
+    # shard count, see Code/CMake/SvmpTestEntries.cmake.
     svmp_add_gtest(Physics_Tests
         TARGET test_physics
         FILTER "-${_SVMP_WP7_SERIAL_MATRIX_TEST}"
-        COST 1110
+        COST 790
     )
 
     svmp_add_gtest(Physics_FreeSurfaceCutStability_Serial_Matrix
         TARGET test_physics
         FILTER "${_SVMP_WP7_SERIAL_MATRIX_TEST}"
-        COST 105
+        COST 90
         SHARDS 1
         TIMEOUT 14400
         LABELS physics free-surface qualification
@@ -431,7 +430,7 @@ if(PHYSICS_BUILD_TESTS)
             TARGET test_physics
             MPI_RANKS 2
             FILTER "FreeSurfaceCutStabilityMPI.TwoFluidPhaseIdentityIsInvariantAcrossSideAndPartitionChanges:FreeSurfaceCutStabilityMPI.PhysicalWetBlocksAndDisconnectedIslandsAreInvariantAcrossDryMPIData:FreeSurfaceCutStabilityMPI.DistributedMovingCutRemainsStableAcrossBlockAndMetisPartitions:FreeSurfaceCutStabilityMPI.LimitedMetisHaloFailsClosedOnIncompleteAggregationSupport:FreeSurfaceCutStabilityMPI.TwoRankFractionOrientationRegimeMatrixMatchesSerial"
-            COST 290
+            COST 270
             SHARDS 5
             TIMEOUT 43200
             LABELS MPI physics free-surface
@@ -440,7 +439,7 @@ if(PHYSICS_BUILD_TESTS)
             TARGET test_physics
             MPI_RANKS 4
             FILTER "FreeSurfaceCutStabilityMPI.FourRankFixedCutIsInvariantAcrossBlockAndMetisPartitions:FreeSurfaceCutStabilityMPI.FourRankFractionOrientationRegimeMatrixMatchesSerial"
-            COST 265
+            COST 270
             SHARDS 2
             TIMEOUT 43200
             LABELS MPI physics free-surface

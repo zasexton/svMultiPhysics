@@ -2472,8 +2472,9 @@ if(FE_BUILD_TESTS)
                 svfe
                 ${GTEST_LIBRARIES}
         )
-        # COST: serial seconds of the whole executable; sets the shard count.
-        svmp_add_gtest(FE_LevelSet_Tests TARGET test_fe_levelset COST 830)
+        # COST: serial seconds of the whole executable (Xeon Gold 5118); sets
+        # the shard count, see Code/CMake/SvmpTestEntries.cmake.
+        svmp_add_gtest(FE_LevelSet_Tests TARGET test_fe_levelset COST 1010)
         if(FE_WITH_MESH)
             add_executable(test_fe_levelset_authoritative_binding
                 Tests/Unit/LevelSet/test_LevelSetAuthoritativeDerivativeBinding.cpp)
@@ -3013,7 +3014,7 @@ if(FE_BUILD_TESTS)
 	                    svfe
 	                    ${GTEST_LIBRARIES}
             )
-            svmp_add_gtest(FE_Systems_Tests TARGET test_fe_systems COST 60)
+            svmp_add_gtest(FE_Systems_Tests TARGET test_fe_systems COST 62)
         endif()
 
         # Coupling module tests (physics-agnostic setup and plan metadata)

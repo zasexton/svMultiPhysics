@@ -70,9 +70,9 @@ else()
   target_link_libraries(test_application PRIVATE ${GTEST_LIBRARIES})
 endif()
 
-# COST: serial seconds of the whole entry; sets the shard count (see
-# Code/CMake/SvmpTestEntries.cmake).
-svmp_add_gtest(Application_Tests TARGET test_application COST 300)
+# COST: serial seconds of the whole entry (Xeon Gold 5118); sets the shard
+# count, see Code/CMake/SvmpTestEntries.cmake.
+svmp_add_gtest(Application_Tests TARGET test_application COST 240)
 
 if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
   add_executable(test_application_mpi
@@ -139,10 +139,14 @@ if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
     OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
   )
 
+  # One case (HydrostaticGravityWithFixedPressureGaugeMatchesAcrossTwoRankPartition)
+  # takes nearly all of the 2940 s, so a few shards suffice; the high COST
+  # makes ctest -j start these shards first.
   svmp_add_gtest(Application_MPI_2
     TARGET test_application_mpi
     MPI_RANKS 2
-    COST 2840
+    COST 2940
+    SHARDS 4
     ENVIRONMENT ${_application_mpi_env}
   )
 
