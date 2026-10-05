@@ -1533,6 +1533,47 @@ public:
                 addGeneratedInterfaceBoundaryIntersectionDomain(
                     contact);
             }
+            // The first exterior-boundary rule record of each (role,
+            // physical marker, cut-topology revision) in rule order, which is
+            // the record a scan of snapshot->rules() finds for a fragment.
+            struct ActiveBoundaryRecordKey {
+                interfaces::FreeSurfaceGeometryRuleRole role;
+                int physical_boundary_marker;
+                std::uint64_t cut_topology_revision;
+                bool operator==(const ActiveBoundaryRecordKey&) const = default;
+            };
+            struct ActiveBoundaryRecordKeyHash {
+                std::size_t operator()(
+                    const ActiveBoundaryRecordKey& key) const noexcept {
+                    std::uint64_t seed = key.cut_topology_revision;
+                    seed ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(
+                                key.physical_boundary_marker)) +
+                            0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
+                    seed ^= static_cast<std::uint64_t>(key.role) +
+                            0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
+                    return static_cast<std::size_t>(seed);
+                }
+            };
+            std::unordered_map<ActiveBoundaryRecordKey,
+                               const interfaces::FreeSurfaceGeometryRuleRecord*,
+                               ActiveBoundaryRecordKeyHash>
+                first_active_boundary_records;
+            if (!snapshot->activeBoundaryDomains().empty()) {
+                for (const auto& candidate : snapshot->rules()) {
+                    if (candidate.role == interfaces::FreeSurfaceGeometryRuleRole::
+                                              NegativeExteriorBoundary ||
+                        candidate.role == interfaces::FreeSurfaceGeometryRuleRole::
+                                              PositiveExteriorBoundary) {
+                        first_active_boundary_records.emplace(
+                            ActiveBoundaryRecordKey{
+                                candidate.role,
+                                candidate.physical_boundary_marker,
+                                candidate.reference_rule.provenance
+                                    .cut_topology_revision},
+                            &candidate);
+                    }
+                }
+            }
             for (const auto& active : snapshot->activeBoundaryDomains()) {
                 interfaces::GeneratedActiveBoundaryDomain retained_active(
                     active.request());
@@ -1547,21 +1588,16 @@ public:
                                   NegativeExteriorBoundary
                             : interfaces::FreeSurfaceGeometryRuleRole::
                                   PositiveExteriorBoundary;
-                    const auto record = std::find_if(
-                        snapshot->rules().begin(),
-                        snapshot->rules().end(),
-                        [&](const auto& candidate) {
-                            return candidate.role == role &&
-                                   candidate.physical_boundary_marker ==
-                                       active.request().boundary_marker &&
-                                   candidate.reference_rule.provenance
-                                           .cut_topology_revision ==
-                                       fragment.stable_id;
-                        });
-                    if (record == snapshot->rules().end()) {
+                    const auto found = first_active_boundary_records.find(
+                        ActiveBoundaryRecordKey{
+                            role,
+                            active.request().boundary_marker,
+                            fragment.stable_id});
+                    if (found == first_active_boundary_records.end()) {
                         throw std::invalid_argument(
                             "free-surface active-boundary fragment has no snapshot rule record");
                     }
+                    const auto* record = found->second;
                     if (side_is_imported &&
                         record->retention == interfaces::
                                                  FreeSurfaceGeometryRetention::
