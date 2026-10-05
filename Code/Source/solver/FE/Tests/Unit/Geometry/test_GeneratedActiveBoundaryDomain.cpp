@@ -1929,8 +1929,11 @@ TEST(GeneratedActiveBoundaryDomain,
         fullNegativeCell(shared_generated_marker));
     ASSERT_TRUE(
         context.hasGeneratedVolumeMarker(shared_generated_marker));
-    ASSERT_FALSE(
+    // The level-set marker is registered with an empty interface rule set.
+    ASSERT_TRUE(
         context.hasGeneratedInterfaceMarker(shared_generated_marker));
+    ASSERT_TRUE(
+        context.interfaceRulesForMarker(shared_generated_marker).empty());
     const auto revision_before_boundary_domains =
         context.contentRevision();
     const auto volume_rule_count_before_boundary_domains =
@@ -1965,8 +1968,10 @@ TEST(GeneratedActiveBoundaryDomain,
               volume_rule_count_before_boundary_domains);
     EXPECT_TRUE(
         context.hasGeneratedVolumeMarker(shared_generated_marker));
-    EXPECT_FALSE(
+    EXPECT_TRUE(
         context.hasGeneratedInterfaceMarker(shared_generated_marker));
+    EXPECT_TRUE(
+        context.interfaceRulesForMarker(shared_generated_marker).empty());
     EXPECT_FALSE(
         context.hasGeneratedActiveBoundaryMarker(
             shared_generated_marker));
@@ -1989,8 +1994,11 @@ TEST(GeneratedActiveBoundaryDomain,
             shared_generated_marker));
     ASSERT_FALSE(
         context.hasGeneratedVolumeMarker(shared_generated_marker));
-    ASSERT_FALSE(
+    // The level-set marker is registered with an empty interface rule set.
+    ASSERT_TRUE(
         context.hasGeneratedInterfaceMarker(shared_generated_marker));
+    ASSERT_TRUE(
+        context.interfaceRulesForMarker(shared_generated_marker).empty());
     const auto revision_before_boundary_domains =
         context.contentRevision();
 
