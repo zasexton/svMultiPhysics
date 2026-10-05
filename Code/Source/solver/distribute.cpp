@@ -642,10 +642,11 @@ void dist_bc(ComMod& com_mod, const CmMod& cm_mod, const cmType& cm, bcType& lBc
     int count = lBc.node_ids.size();
     cm.bcast(cm_mod, &count);
     if (is_slave) {
-      lBc.node_ids.resize(count);
+      original_nodes.resize(count);
+    } else {
+      original_nodes = lBc.node_ids;
     }
-    cm.bcast(cm_mod, lBc.node_ids);
-    original_nodes = lBc.node_ids;
+    cm.bcast(cm_mod, original_nodes);
     int local_count = 0;
     for (int a = 0; a < count; ++a) {
       if (gmtl[original_nodes[a]] != -1) {
