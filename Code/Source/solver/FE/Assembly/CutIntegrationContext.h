@@ -972,11 +972,23 @@ public:
             addGeneratedVolumeRule(marker, std::move(metadata), std::move(rule));
         }
         auto rules = domain.interfaceQuadratureRules();
-        if (!rules.empty()) {
-            auto& indices = generated_interface_rule_indices_by_marker_[marker];
-            if (indices.empty()) {
+        {
+            // Register the marker even when this rank holds no interface
+            // rules (a fully wet or fully dry partition), as the
+            // interface-boundary and active-boundary imports do.  A
+            // registered marker with no local rules is an empty local set;
+            // an unregistered one is a missing interface and makes
+            // interface-term assembly throw on that rank alone.
+            auto [stored_indices, inserted_indices] =
+                generated_interface_rule_indices_by_marker_.try_emplace(
+                    marker);
+            if (inserted_indices) {
                 generated_interface_markers_.push_back(marker);
             }
+            if (rules.empty()) {
+                markModified();
+            }
+            auto& indices = stored_indices->second;
             for (auto& rule : rules) {
                 indices.push_back(interface_rules_.size());
                 interface_rules_.push_back(std::move(rule));
