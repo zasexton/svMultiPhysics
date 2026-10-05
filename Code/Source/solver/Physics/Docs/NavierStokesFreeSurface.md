@@ -359,7 +359,9 @@ With reinitialization disabled, only the optional kinematic reconciliation
 (`Enable_kinematic_reconciliation`, `FE/Docs/LevelSet.md`) changes the
 transported level set between steps. It does not read the angle: it moves the
 discrete interface, contact cells included, so that each step's change of the
-liquid area equals the interface flux of the transport velocity.
+liquid area equals the interface flux of the transport velocity. The optional
+sign-definite patch bounds (`Enable_sign_definite_patch_bounds`) change only
+nodes away from the interface: no cut cell, contact cell or angle is touched.
 
 The former reset of `PrescribedAngle` contact cells to a unit-gradient affine
 target with the declared angle (`RepairToPrescribedAngle`) is retired as a

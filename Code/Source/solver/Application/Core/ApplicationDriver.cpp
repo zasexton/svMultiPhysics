@@ -32,6 +32,7 @@
 #include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
 #include "FE/LevelSet/LevelSetKinematicReconciliation.h"
 #include "FE/LevelSet/LevelSetReinitialization.h"
+#include "FE/LevelSet/LevelSetSignDefinitePatchBounds.h"
 #include "FE/LevelSet/LevelSetStaticCapillaryEquilibrium.h"
 #include "FE/LevelSet/LevelSetTransport.h"
 #include "FE/LevelSet/LevelSetVelocityExtensionConstraint.h"
@@ -3880,6 +3881,11 @@ std::uint64_t levelSetMaintenanceRequestActionBits(
       svmp::FE::level_set::shouldApplyLevelSetKinematicReconciliation(
           request.configuration->transport.kinematic_reconciliation,
           completed_step);
+  const bool accepted_patch_bounds_due =
+      !request.configuration->transport.conservative_phase.enabled &&
+      svmp::FE::level_set::shouldApplyLevelSetSignDefinitePatchBounds(
+          request.configuration->transport.sign_definite_patch_bounds,
+          completed_step);
   const bool artifact_due =
       request.configuration->transport.conservative_phase.enabled &&
       request.configuration->transport.conservative_phase.write_flux_artifacts &&
@@ -3895,7 +3901,8 @@ std::uint64_t levelSetMaintenanceRequestActionBits(
       request.configuration->transport.bound_preserving.enabled ||
       accepted_reinitialization_due ||
       all_request_volume_due ||
-      accepted_kinematic_due;
+      accepted_kinematic_due ||
+      accepted_patch_bounds_due;
   std::uint64_t bits = 0u;
   bits |= request.configuration->transport.conservative_phase.enabled ? (1ull << 0u) : 0u;
   bits |= request.configuration->transport.bound_preserving.enabled ? (1ull << 1u) : 0u;
@@ -3918,6 +3925,7 @@ std::uint64_t levelSetMaintenanceRequestActionBits(
               ? (1ull << 11u)
               : 0u;
   bits |= accepted_kinematic_due ? (1ull << 12u) : 0u;
+  bits |= accepted_patch_bounds_due ? (1ull << 13u) : 0u;
   return bits;
 }
 
@@ -4140,6 +4148,9 @@ canonicalLevelSetMaintenanceRequestSchedule(
     appendMaintenanceScheduleBool(
         words,
         request.configuration->transport.kinematic_reconciliation.enabled);
+    appendMaintenanceScheduleBool(
+        words,
+        request.configuration->transport.sign_definite_patch_bounds.enabled);
     appendMaintenanceScheduleActiveCutRequest(
         words, request.configuration->volume_cut_request);
 
@@ -7193,7 +7204,8 @@ void logLevelSetMaintenanceCoverageDiagnostics(
   std::set<std::string> transport_maintained_fields;
   for (const auto& request : maintenance_requests) {
     if (request.configuration->transport.reinitialization.enabled || request.configuration->transport.volume_correction.enabled ||
-        request.configuration->transport.kinematic_reconciliation.enabled) {
+        request.configuration->transport.kinematic_reconciliation.enabled ||
+        request.configuration->transport.sign_definite_patch_bounds.enabled) {
       transport_maintained_fields.insert(request.configuration->transport.level_set.field_name);
     }
     application::core::oopCout()
@@ -7207,6 +7219,8 @@ void logLevelSetMaintenanceCoverageDiagnostics(
         << (request.configuration->transport.volume_correction.enabled ? "enabled" : "disabled")
         << " kinematic_reconciliation="
         << (request.configuration->transport.kinematic_reconciliation.enabled ? "enabled" : "disabled")
+        << " sign_definite_patch_bounds="
+        << (request.configuration->transport.sign_definite_patch_bounds.enabled ? "enabled" : "disabled")
         << " curvature_projection="
         << (request.configuration->curvature_projection_enabled ? "enabled" : "disabled")
         << " curvature_field='"
@@ -15311,7 +15325,9 @@ using LevelSetMaintenanceCandidateValidator = std::function<void(
     std::span<const LevelSetVolumeCorrectionMaintenanceEvent>)>;
 
 // Accepted state from which the next transport step starts.  The kinematic
-// reconciliation of that step compares the transported endpoint with it.
+// reconciliation of that step compares the transported endpoint with it, and
+// the sign-definite patch bounds take their one-ring ranges from it.  The
+// transport velocity is captured only for the reconciliation.
 struct LevelSetKinematicBaseline {
   svmp::FE::FieldId level_set_field{svmp::FE::INVALID_FIELD_ID};
   svmp::FE::FieldId velocity_field{svmp::FE::INVALID_FIELD_ID};
@@ -15364,12 +15380,14 @@ LevelSetKinematicBaseline makeLevelSetKinematicBaseline(
     int step)
 {
   const auto& transport = request.configuration->transport;
+  const bool with_velocity = transport.kinematic_reconciliation.enabled;
   if (transport.conservative_phase.enabled ||
-      transport.velocity.source ==
-          svmp::FE::level_set::LevelSetVelocitySource::ConstantVector ||
-      transport.velocity.source ==
-          svmp::FE::level_set::LevelSetVelocitySource::
-              MaterialInterfacePhasePair) {
+      (with_velocity &&
+       (transport.velocity.source ==
+            svmp::FE::level_set::LevelSetVelocitySource::ConstantVector ||
+        transport.velocity.source ==
+            svmp::FE::level_set::LevelSetVelocitySource::
+                MaterialInterfacePhasePair))) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Level-set kinematic reconciliation "
         "for field '" + transport.level_set.field_name +
@@ -15380,9 +15398,11 @@ LevelSetKinematicBaseline makeLevelSetKinematicBaseline(
   baseline.level_set_field =
       system.findFieldByName(transport.level_set.field_name);
   baseline.velocity_field =
-      system.findFieldByName(transport.velocity.field_name);
+      with_velocity ? system.findFieldByName(transport.velocity.field_name)
+                    : svmp::FE::INVALID_FIELD_ID;
   if (baseline.level_set_field == svmp::FE::INVALID_FIELD_ID ||
-      baseline.velocity_field == svmp::FE::INVALID_FIELD_ID) {
+      (with_velocity &&
+       baseline.velocity_field == svmp::FE::INVALID_FIELD_ID)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Level-set kinematic reconciliation "
         "could not find field '" + transport.level_set.field_name +
@@ -15400,8 +15420,10 @@ LevelSetKinematicBaseline makeLevelSetKinematicBaseline(
   }
   const auto begin = fe_solution.begin() + static_cast<std::ptrdiff_t>(offset);
   baseline.level_set.assign(begin, begin + static_cast<std::ptrdiff_t>(count));
-  baseline.velocity = levelSetTransportVelocityCoefficients(
-      system, baseline.velocity_field, fe_solution);
+  if (with_velocity) {
+    baseline.velocity = levelSetTransportVelocityCoefficients(
+        system, baseline.velocity_field, fe_solution);
+  }
   baseline.step = step;
   return baseline;
 }
@@ -15471,7 +15493,11 @@ bool applyLevelSetMaintenance(
         svmp::FE::level_set::shouldApplyLevelSetKinematicReconciliation(
             request.configuration->transport.kinematic_reconciliation,
             completed_step);
-    if (!do_reinit && !do_volume && !do_kinematic) {
+    const bool do_patch_bounds =
+        svmp::FE::level_set::shouldApplyLevelSetSignDefinitePatchBounds(
+            request.configuration->transport.sign_definite_patch_bounds,
+            completed_step);
+    if (!do_reinit && !do_volume && !do_kinematic && !do_patch_bounds) {
       continue;
     }
 
@@ -15579,6 +15605,93 @@ bool applyLevelSetMaintenance(
           << " kinematic_volume_change=" << result.kinematic_volume_change
           << " transported_volume_error=" << result.transported_volume_error
           << " reconciled_volume_error=" << result.reconciled_volume_error
+          << " max_abs_correction=" << result.max_abs_correction
+          << " status='" << result.diagnostic << "'";
+      staged_commit_logs.push_back(log.str());
+    }
+
+    if (do_patch_bounds) {
+      // Restore the one-ring maximum principle of exact transport on nodes
+      // whose patch lies in one phase.  It changes no cut cell, so it does
+      // not interact with the reconciliation above, which only moves nodes
+      // of cut cells.
+      const auto baseline = std::find_if(
+          kinematic_baselines.begin(),
+          kinematic_baselines.end(),
+          [field](const auto& candidate) {
+            return candidate.level_set_field == field;
+          });
+      if (baseline == kinematic_baselines.end() ||
+          baseline->step != completed_step - 1) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Level-set sign-definite patch "
+            "bounds for field '" +
+            request.configuration->transport.level_set.field_name +
+            "' have no accepted baseline from the previous step.");
+      }
+      // Where characteristics enter through an inflow boundary the value of
+      // a boundary node comes from outside its patch.
+      for (const auto& open : request.configuration->open_boundaries) {
+        if (open.inflow) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Level-set sign-definite patch "
+              "bounds for field '" +
+              request.configuration->transport.level_set.field_name +
+              "' require impermeable or outflow boundaries; face '" +
+              open.face_name + "' is a level-set inflow boundary.");
+        }
+      }
+      const auto before_bounds = fe_solution;
+      const auto offset =
+          static_cast<std::size_t>(sim.fe_system->fieldDofOffset(field));
+      const auto count = static_cast<std::size_t>(
+          sim.fe_system->fieldDofHandler(field).getNumDofs());
+      if (offset > fe_solution.size() || count > fe_solution.size() - offset) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Level-set sign-definite patch "
+            "bounds field slice exceeds the solution vector.");
+      }
+      const std::span<const svmp::FE::Real> candidate(
+          fe_solution.data() + offset, count);
+      const auto volume_options = levelSetVolumeOptionsForMaintenance(request);
+      std::vector<svmp::FE::Real> bounded;
+      const auto result =
+          svmp::FE::level_set::boundLevelSetOnSignDefinitePatches(
+              sim.fe_system->meshAccess(),
+              sim.fe_system->fieldDofHandler(field),
+              volume_options.isovalue,
+              volume_options.tolerance,
+              baseline->level_set,
+              candidate,
+              bounded);
+      if (!result.success) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Level-set sign-definite patch "
+            "bounds failed for field '" +
+            request.configuration->transport.level_set.field_name + "': " +
+            result.diagnostic);
+      }
+      if (result.applied) {
+        std::copy(bounded.begin(), bounded.end(),
+                  fe_solution.begin() + static_cast<std::ptrdiff_t>(offset));
+        changed = true;
+        modified_level_set_fields.insert(field);
+        if (observe_stage) {
+          observe_stage(
+              application::core::LevelSetMaintenanceWorkSubstage::Limiting,
+              before_bounds,
+              fe_solution);
+        }
+      }
+      std::ostringstream log;
+      log << std::setprecision(17)
+          << "[svMultiPhysics::Application] Level-set sign-definite patch bounds"
+          << " field='" << request.configuration->transport.level_set.field_name
+          << "' step=" << completed_step
+          << " applied=" << (result.applied ? "true" : "false")
+          << " sign_definite_dofs=" << result.sign_definite_dofs
+          << " bounded_dofs=" << result.bounded_dofs
+          << " sign_changes_prevented=" << result.sign_changes_prevented
           << " max_abs_correction=" << result.max_abs_correction
           << " status='" << result.diagnostic << "'";
       staged_commit_logs.push_back(log.str());
@@ -30537,28 +30650,33 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       }
     }
   };
-  // Accepted states that the kinematic reconciliation of the next step
-  // compares against: captured before the first step and after every
-  // accepted step, once its maintenance has committed or rolled back.
+  // Accepted states that the kinematic reconciliation and the sign-definite
+  // patch bounds of the next step compare against: captured before the first
+  // step and after every accepted step, once its maintenance has committed or
+  // rolled back.
   std::vector<LevelSetKinematicBaseline> kinematic_baselines;
   const auto capture_kinematic_baselines =
       [&](svmp::FE::timestepping::TimeHistory& history) {
         kinematic_baselines.clear();
+        // Conservative-phase requests skip accepted-step maintenance, so the
+        // patch bounds need no baseline for them.
+        const auto needs_baseline = [](const auto& request) {
+          const auto& transport = request.configuration->transport;
+          return transport.kinematic_reconciliation.enabled ||
+                 (transport.sign_definite_patch_bounds.enabled &&
+                  !transport.conservative_phase.enabled);
+        };
         const bool any_enabled = std::any_of(
             level_set_maintenance.begin(),
             level_set_maintenance.end(),
-            [](const auto& request) {
-              return request.configuration->transport
-                  .kinematic_reconciliation.enabled;
-            });
+            needs_baseline);
         if (!any_enabled) {
           return;
         }
         const auto solution = gatherFeOrderedSolution(
             history.u(), activeFESystemCommunicator(*sim.fe_system));
         for (const auto& request : level_set_maintenance) {
-          if (request.configuration->transport.kinematic_reconciliation
-                  .enabled) {
+          if (needs_baseline(request)) {
             kinematic_baselines.push_back(makeLevelSetKinematicBaseline(
                 *sim.fe_system, request, solution, history.stepIndex()));
           }
@@ -32868,6 +32986,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                       shouldApplyLevelSetKinematicReconciliation(
                           request.configuration->transport
                               .kinematic_reconciliation,
+                          h.stepIndex()) ||
+                  svmp::FE::level_set::
+                      shouldApplyLevelSetSignDefinitePatchBounds(
+                          request.configuration->transport
+                              .sign_definite_patch_bounds,
                           h.stepIndex()));
         });
     const bool postaccept_maintenance_topology_tracking_required =

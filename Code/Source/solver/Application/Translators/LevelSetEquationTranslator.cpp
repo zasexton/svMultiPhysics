@@ -682,6 +682,9 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
   if (options.kinematic_reconciliation.enabled) {
     out << ",\"kinematic_reconciliation\":{\"enabled\":true}";
   }
+  if (options.sign_definite_patch_bounds.enabled) {
+    out << ",\"sign_definite_patch_bounds\":{\"enabled\":true}";
+  }
   out << '}'
       << ",\"boundaries\":{\"inflow\":[";
   for (std::size_t i = 0; i < inflow.size(); ++i) {
@@ -1662,6 +1665,11 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
           params,
           {"Enable_kinematic_reconciliation", "EnableKinematicReconciliation"})) {
     options.kinematic_reconciliation.enabled = *value;
+  }
+  if (const auto value = get_defined_bool(
+          params,
+          {"Enable_sign_definite_patch_bounds", "EnableSignDefinitePatchBounds"})) {
+    options.sign_definite_patch_bounds.enabled = *value;
   }
 }
 
