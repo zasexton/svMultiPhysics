@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -73,7 +74,18 @@ struct ConstraintDependencyDeclaration {
     ConstraintTangentPolicy tangent_policy{ConstraintTangentPolicy::None};
     std::string tangent_hook_name{};
 
+    /// When set, a mesh_field_values dependency reads only the mesh fields
+    /// named in mesh_field_value_names (of any entity kind); otherwise it
+    /// covers the values of every mesh field.
+    bool mesh_field_values_scoped{false};
+    std::vector<std::string> mesh_field_value_names{};
+
     [[nodiscard]] bool any() const noexcept { return structural.any() || value.any(); }
+
+    [[nodiscard]] bool readsMeshFieldValues() const noexcept
+    {
+        return structural.mesh_field_values || value.mesh_field_values;
+    }
 };
 
 struct ConstraintRefreshResult {
@@ -85,8 +97,12 @@ struct ConstraintRefreshResult {
 };
 
 void merge_into(ConstraintDependencyMask& dst, const ConstraintDependencyMask& src) noexcept;
+
+/// Merges masks and tangent policy. The merged mesh-field-value scope is the
+/// union of the scoped declarations that read mesh field values, or unscoped
+/// (every field) as soon as one of them is unscoped.
 void merge_into(ConstraintDependencyDeclaration& dst,
-                const ConstraintDependencyDeclaration& src) noexcept;
+                const ConstraintDependencyDeclaration& src);
 
 [[nodiscard]] bool dependency_changed(const ConstraintDependencyMask& mask,
                                       const ConstraintRevisionSnapshot& cached,

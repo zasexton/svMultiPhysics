@@ -7993,8 +7993,11 @@ ConstraintDependencyDeclaration SmallCutAggregationConstraint::dependencyDeclara
     ConstraintDependencyDeclaration out = ISystemConstraint::dependencyDeclaration();
     out.structural.fe_constraint_layout = true;
     out.structural.mesh_field_layout = true;
-    out.structural.mesh_field_values = true;
     out.structural.active_configuration = true;
+    // apply() reads no mesh field values: its geometry comes from the
+    // installed cut integration context, and installing a new context
+    // rebuilds the constraint state (setCutIntegrationContext() is followed
+    // by rebuildConstraintState()).
     return out;
 }
 

@@ -9,6 +9,7 @@
 
 #include "Assembly/AssemblyKernel.h"
 #include "Constraints/LevelSetActiveSideVertexDirichletConstraint.h"
+#include "Constraints/SystemConstraint.h"
 #include "Assembly/CutIntegrationContext.h"
 #include "Assembly/GlobalSystemView.h"
 #include "Dofs/EntityDofMap.h"
@@ -1585,6 +1586,90 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
     ASSERT_NO_THROW((void)system.assemble(request, state, &matrix, nullptr));
 
     expectRowsAreIdentity(matrix, constrained_dry_pressure_dofs);
+#endif
+}
+
+
+namespace {
+
+// Constraint that adds nothing but declares a structural dependency on the
+// values of every mesh field (no scope).
+class UnscopedFieldValueDependency final : public ISystemConstraint {
+public:
+    void apply(const systems::FESystem&, AffineConstraints&) override {}
+    bool updateValues(const systems::FESystem&, AffineConstraints&, double, double) override
+    {
+        return false;
+    }
+    [[nodiscard]] bool isTimeDependent() const noexcept override { return false; }
+    [[nodiscard]] ConstraintDependencyDeclaration dependencyDeclaration() const override
+    {
+        auto out = ISystemConstraint::dependencyDeclaration();
+        out.structural.mesh_field_values = true;
+        return out;
+    }
+    [[nodiscard]] systems::SetupStorageRequirements storageRequirements() const noexcept override
+    {
+        return {};
+    }
+};
+
+} // namespace
+
+TEST(LevelSetActiveSideVertexDirichletConstraint,
+     OnlyLevelSetFieldValuesMakeTheConstraintStateStale)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    for (const bool with_unscoped_constraint : {false, true}) {
+        SCOPED_TRACE(with_unscoped_constraint ? "with unscoped constraint"
+                                              : "level-set constraint only");
+        auto mesh = buildTwoQuadStripWithCutLeftCell();
+        // An unrelated vertex field (as written for output), attached before
+        // setup so that only its values change afterwards.
+        const auto output_handle = MeshFields::attach_field(
+            mesh->local_mesh(), EntityKind::Vertex, "output_values",
+            FieldScalarType::Float64, 1);
+        auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+
+        systems::FESystem system(mesh);
+        const auto pressure = system.addField(
+            systems::FieldSpec{.name = "p", .space = space, .components = 1});
+        system.addOperator("pressure");
+        system.addSystemConstraint(
+            std::make_unique<LevelSetActiveSideVertexDirichletConstraint>(
+                pressure, "phi", LevelSetConstraintSide::Negative, Real{0.0}, Real{0.0}));
+        if (with_unscoped_constraint) {
+            system.addSystemConstraint(std::make_unique<UnscopedFieldValueDependency>());
+        }
+        ASSERT_NO_THROW(system.setup());
+        EXPECT_FALSE(system.constraintStateStaleForCurrentRevisions());
+
+        auto* output = MeshFields::field_data_as<real_t>(mesh->local_mesh(), output_handle);
+        ASSERT_NE(output, nullptr);
+        output[0] = 42.0;
+        output[3] = -7.0;
+        EXPECT_EQ(system.constraintStateStaleForCurrentRevisions(), with_unscoped_constraint);
+        const auto refresh = system.refreshConstraintStateForCurrentRevisions(
+            /*time=*/0.0, /*dt=*/0.0, /*allow_structural_rebuild=*/true);
+        EXPECT_EQ(refresh.structural_rebuild, with_unscoped_constraint);
+        EXPECT_FALSE(system.constraintStateStaleForCurrentRevisions());
+
+        // The level-set field itself still invalidates the constraint state.
+        const auto phi_handle =
+            MeshFields::get_field_handle(mesh->local_mesh(), EntityKind::Vertex, "phi");
+        auto* phi = MeshFields::field_data_as<real_t>(mesh->local_mesh(), phi_handle);
+        ASSERT_NE(phi, nullptr);
+        phi[2] = -1.0;
+        phi[5] = -1.0;
+        EXPECT_TRUE(system.constraintStateStaleForCurrentRevisions());
+        const auto phi_refresh = system.refreshConstraintStateForCurrentRevisions(
+            /*time=*/0.0, /*dt=*/0.0, /*allow_structural_rebuild=*/true);
+        EXPECT_TRUE(phi_refresh.structural_rebuild);
+        EXPECT_FALSE(system.constraintStateStaleForCurrentRevisions());
+        EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 2)));
+    }
 #endif
 }
 

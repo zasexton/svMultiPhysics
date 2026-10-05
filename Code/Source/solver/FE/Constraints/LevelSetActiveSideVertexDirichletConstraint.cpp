@@ -773,6 +773,10 @@ LevelSetActiveSideVertexDirichletConstraint::dependencyDeclaration() const
     out.structural.mesh_field_layout = true;
     out.structural.mesh_field_values = true;
     out.structural.active_configuration = true;
+    // apply() reads the values of the level-set vertex field only; writes to
+    // other mesh fields (e.g. output fields) do not change its lines.
+    out.mesh_field_values_scoped = true;
+    out.mesh_field_value_names = {level_set_field_name_};
     return out;
 }
 
