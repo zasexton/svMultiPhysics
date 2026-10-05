@@ -597,5 +597,40 @@ collectLevelSetCurvatureHighOrderSupplementalSamples(
   return samples;
 }
 
+bool LevelSetCurvatureSampleDuplicateFilter::isDuplicate(
+    const Sample& existing,
+    const Sample& candidate) noexcept
+{
+  if (existing.parent_cell != candidate.parent_cell ||
+      existing.generated_interface_geometry !=
+          candidate.generated_interface_geometry) {
+    return false;
+  }
+  const auto dx = existing.coordinate[0] - candidate.coordinate[0];
+  const auto dy = existing.coordinate[1] - candidate.coordinate[1];
+  const auto dz = existing.coordinate[2] - candidate.coordinate[2];
+  const auto dist2 = dx * dx + dy * dy + dz * dz;
+  return dist2 <= kDuplicateDistanceSquaredTolerance &&
+         std::abs(existing.value - candidate.value) <=
+             kDuplicateValueTolerance;
+}
+
+const LevelSetCurvatureSampleDuplicateFilter::Sample*
+LevelSetCurvatureSampleDuplicateFilter::appendUnlessDuplicate(
+    std::vector<Sample>& samples,
+    const Sample& candidate)
+{
+  auto& bucket = buckets_[candidate.parent_cell]
+                         [candidate.generated_interface_geometry ? 1u : 0u];
+  for (const auto index : bucket) {
+    if (isDuplicate(samples[index], candidate)) {
+      return &samples[index];
+    }
+  }
+  bucket.push_back(samples.size());
+  samples.push_back(candidate);
+  return nullptr;
+}
+
 } // namespace core
 } // namespace application
