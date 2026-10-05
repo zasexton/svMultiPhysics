@@ -612,6 +612,9 @@ void InfSupAnalyzer::run(const ProblemAnalysisContext& context,
     // =====================================================================
 
     auto saddle_claims = report.claimsOfKind(PropertyKind::MixedSaddlePoint);
+    // saddle_claims points into report.claims: append new claims only after
+    // the loop so a reallocation cannot leave those pointers dangling.
+    std::vector<PropertyClaim> inf_sup_claims;
     for (const auto* sc : saddle_claims) {
         // Check if any pair of variables in this claim appears in covered_pairs
         bool claim_covered = false;
@@ -644,6 +647,9 @@ void InfSupAnalyzer::run(const ProblemAnalysisContext& context,
             "MixedSaddlePoint claim present but no PairingDescriptor"
             " metadata available for detailed classification",
             AnalysisConfidence::Medium);
+        inf_sup_claims.push_back(std::move(claim));
+    }
+    for (auto& claim : inf_sup_claims) {
         report.claims.push_back(std::move(claim));
     }
 
