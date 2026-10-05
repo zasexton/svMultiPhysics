@@ -372,6 +372,13 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   - The solver default stays off until it has been tested on more physics.
   - Its fixed internal constants (halfway limit 0.5, at most 8 fixed-point iterations, the sign and cut-class guards) are accepted for now under P1.
 - **D15, 2026-10-05: the sessile-drop protocol uses the PDE velocity extension** (harmonic, monolithic), as the other free-surface benchmarks do.
+- **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
+  - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
+  - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
+- **D17, 2026-10-05: benchmark runs share one JIT object cache across Skylake and Milan nodes.** They set `SVMP_JIT_CPU=x86-64-v3` and a pinned `SVMP_CACHE_PROFILE` (`run_case.sbatch`, `run_case_mpi.sbatch`).
+  - The study found this bitwise identical to the host target, and it saves 10–15 s of kernel compilation per cold run.
+  - Speed-up bitwise checks keep the default target, so they stay comparable with the shared baseline.
+- **D18, 2026-10-05: no round-off-changing JIT options.** JIT floating-point contraction and optimization level 1 stay off, matching the preference for exact, reproducible results.
 - **D13, 2026-10-01: implement the lagged normal-increment surface-tension term** (`Documentation/free_surface_semi_implicit_surface_tension_design.md` §3.3).
   - Opt-in `Surface_tension_semi_implicit=NormalIncrement`, `SurfaceStress` first.
   - Δt_eff comes from the integrator, not a tuned parameter (P1). The term vanishes in every fresh residual, so the accepted solution is unchanged within the outer tolerance.
@@ -684,7 +691,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
       - **JIT settings:** none worth changing. Opt-in overrides are `SVMP_JIT_CPU`, `SVMP_JIT_FP_CONTRACT` and `SVMP_JIT_OPT_LEVEL`.
       - **JIT cache:** keyed by CPU name and features, so there is no SKX/MLN mix-up. With `SVMP_JIT_CPU=x86-64-v3` plus a common `SVMP_CACHE_PROFILE`, one cache serves both node types and stays bitwise identical.
       - Documentation: `Code/Source/solver/FE/Docs/BuildOptimization.md`.
-      - **Decisions for the user:** adopt LTO+PGO for production binaries (needs a training workflow and profile refreshes); shared JIT cache settings for mixed node pools; JIT contraction or opt level 1 (round-off changes, rank-independent).
+      - **Decided 2026-10-05 (D16–D18):** LTO+PGO once the speed-up branches settle; a shared JIT cache for benchmark runs; no round-off-changing JIT options.
     - Queued after the current merges: a fresh 2D/3D profiling pass of the post-merge step, attacking the next hotspots (results-neutral).
     - **Integrated check of the 2026-10-05 merges** (volume conservation, functional diagnostics, perf B, perf D, perf 8; tip `a4fb2de2`, jobs `46647477`/`46647480`/`46647482`): serial outputs bitwise identical on all 9 reference cases; FE 34/34, Physics 7/7, Application 4/4.
     - **Latent uninitialized-memory bug found (2026-10-01).** `activeCutContextMatchesRefreshCache`, the cut-context reuse decision, branches on a value from an uninitialized stack allocation in `buildFreeSurfaceGeometrySnapshot`. `validateFreeSurfaceGeometrySnapshotCurrentForMarker` reads uninitialized heap memory from `makeCutCellGeometryMapping`. Memcheck reports about 45k uninitialized reads on the tip.

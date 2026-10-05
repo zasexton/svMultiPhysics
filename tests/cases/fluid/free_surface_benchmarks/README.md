@@ -75,6 +75,7 @@ change it once, with a one-line justification in the tracker.
   - Leave `<Ghost_layers>` unset: the solver derives 8 layers for an aggregating free surface.
   - Decks with Eigen linear algebra (for example `linear_sloshing_2d`, `tank_at_rest`) stay serial.
   - Bitwise comparisons between solver builds stay serial, because rank counts change the round-off.
+- **JIT object cache.** Benchmark run scripts set `SVMP_JIT_CPU=x86-64-v3` and `SVMP_CACHE_PROFILE=L1d:32768,L1i:32768,L2:1048576,L3:16777216`, so one kernel cache serves both the Skylake and the Milan nodes of the partition. Outputs are bitwise identical to the default host target, and cold runs skip 10–15 s of kernel compilation (tracker D17; `Code/Source/solver/FE/Docs/BuildOptimization.md`). Bitwise comparisons between solver builds use the default target.
 - **Requesting resources.** amarsden allows at most 8000 MB per CPU. A request above that silently adds CPUs: a one-task job with `--mem=8G` gets 2 CPUs, half of them idle. Request at most 8000 MB × CPUs (for example `--mem=7G` serial, `--mem=8G` for 4 ranks). Check finished jobs with `seff <jobid>`.
 
 ## Planned benchmarks
