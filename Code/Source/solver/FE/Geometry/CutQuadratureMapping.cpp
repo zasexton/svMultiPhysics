@@ -291,6 +291,54 @@ MappedCutQuadratureRule mapCutQuadratureRuleToPhysical(
 Real physicalCutQuadratureMeasure(const assembly::IMeshAccess& mesh,
                                   const CutQuadratureRule& rule)
 {
+    // A reference-frame rule of full dimension needs only its volume
+    // weights. This applies the checks and the weight w |det J| of
+    // mapCutQuadratureRuleToPhysical() point by point, in the same order,
+    // without mapping points and normals or storing the mapped rule.
+    if (rule.frame == CutGeometryFrame::Reference &&
+        rule.provenance.parent_entity >= 0 && !rule.points.empty()) {
+        const int parent_dimension = mesh.dimension();
+        if (resolvedGeometricDimension(rule, parent_dimension) ==
+            parent_dimension) {
+            const auto cell =
+                static_cast<GlobalIndex>(rule.provenance.parent_entity);
+            const auto mapping = makeCutCellGeometryMapping(mesh, cell);
+            Real physical_measure{0.0};
+            for (const auto& point : rule.points) {
+                if (!std::isfinite(point.weight) ||
+                    !(point.weight > Real{0.0})) {
+                    throw std::invalid_argument(
+                        "retained cut quadrature has a non-positive or non-finite weight");
+                }
+                const Point& reference = point.point;
+                requireFinitePoint(reference, "reference point");
+                const auto xi = toVector(reference);
+                const auto jacobian = mapping->jacobian(xi);
+                const Real determinant = jacobian.determinant();
+                if (!std::isfinite(determinant) ||
+                    !(std::abs(determinant) >
+                      std::numeric_limits<Real>::min())) {
+                    throw std::invalid_argument(
+                        "retained cut quadrature maps through a singular or non-finite Jacobian");
+                }
+                // The full mapping inverts J here; keep its singularity check.
+                static_cast<void>(jacobian.inverse());
+                const Real physical_weight = point.weight * std::abs(determinant);
+                if (!std::isfinite(physical_weight) ||
+                    !(physical_weight > Real{0.0})) {
+                    throw std::invalid_argument(
+                        "retained cut quadrature has a non-positive mapped weight");
+                }
+                physical_measure += physical_weight;
+            }
+            if (!std::isfinite(physical_measure) ||
+                !(physical_measure > Real{0.0})) {
+                throw std::invalid_argument(
+                    "retained cut quadrature has an invalid physical measure");
+            }
+            return physical_measure;
+        }
+    }
     return mapCutQuadratureRuleToPhysical(mesh, rule).physical_measure;
 }
 
