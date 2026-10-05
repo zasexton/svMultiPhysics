@@ -763,6 +763,22 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
     2. Whether to re-anchor the backward-Euler energy history after a topology change, since it is diagnostic only.
     3. Whether to remove `SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS`.
   - **Area drift (not addressed here):** the liquid area grows by 0.7–1.0% over 300 steps with coupled transport, about 100× the 1e-4 limit. With `--transport pde_extension` (harmonic, monolithic) the maximum drift falls to 2.45e-3 at 60° and 1.6e-3 at 120°, with similar angles, but that is still over the limit. The sessile protocol default is still coupled.
+  - **Area drift fixed by kinematic reconciliation (merged 2026-10-05, `39804989`..`8cda8493`; opt-in `Enable_kinematic_reconciliation`, default off).**
+    - **Attribution** (60°, 100 steps): 99.8% of the drift comes from transport. The Galerkin + SUPG residual satisfies the kinematic condition only in L2, and at a moving contact line the contact point runs ahead by O(h·Δt) per step, which does not converge away. Wall maintenance contributes 0 (it never ran), topology epochs 2.8e-6, measurement 0.
+    - **Fix:** after each accepted step, a per-node correction on cut-cell vertices only makes the step's area change equal its trapezoidal kinematic interface flux. Guards: sign class kept, halfway limit, cut topology preserved.
+    - No tunable parameter, no global shift, no volume target. Rank-independent reductions (2-rank tests pass).
+    - **Full sessile runs** (R/h = 16, T = 12.25): maximum drift 6.1e-6 at 60° (was 2.6e-2) and 6.8e-5 at 120° (was 3.7e-3), so both pass D11. Angles and base radius are unchanged within 0.3%.
+    - **Other cases:** static drop 1.0e-9, sloshing 4.6e-9, capillary wave 1.1e-11. With the option off, outputs are bit-identical. Cost +18–45% per step.
+    - **Why not WP-6:** the conservative phase transport fails on this case, because contact-protected nodes block its local reconciliation.
+    - **Open questions (for the user):**
+      1. Enable it in the benchmark generators: commit `0ad768e0` on `dev/volume-conservation`, held back.
+      2. Make it a solver default.
+      3. Whether its fixed internal constants are acceptable under P1 (halfway limit 0.5, at most 8 fixed-point iterations).
+      4. Sessile transport: coupled or PDE extension. Both are below 1e-4 with it.
+    - **Remaining issues:**
+      - Residual drift comes from the generalized-α interface flux (about 4e-8·A per step at 120°).
+      - Spurious near-zero wall vertices behind receding contact lines make `verify.py` reject the full runs (4 wall crossings), with or without the fix.
+      - A pre-existing 2-rank `collective_consensus_rejection` with any post-accept maintenance option is handed to `dev/mpi-followup`.
 - [x] **Configuration details for the D4 runs (all in place after `6ab328c8`):**
   - Young term;
   - Navier slip on the wetted wall;
