@@ -677,10 +677,14 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
     - Queued:
       - multithreaded assembly in `StandardAssembler`, after `dev/perf-hotspots-postmerge` merges (both edit the assembler broadly);
       - constraint-build cost (about 3 s per 3D tank step at 1/h = 16): started 2026-10-01 after the MPI merge, branch `dev/perf-constraint-build`.
-    - Started 2026-10-01: `dev/perf-build-jit`, a build-configuration and JIT study.
-      - Variants: LTO and PGO (expected bitwise); `-march=x86-64-v3` with and without FP contraction; JIT opt level, CPU target and contraction.
-      - It also checks that JIT cache objects are keyed by CPU features, since jobs run on both SKX (AVX-512) and MLN (AVX2) nodes.
-      - Defaults that change round-off need user approval.
+    - **Build/JIT study: merged 2026-10-05 (`88a02419`, `f81bf270`, `0fea3646`). Everything is opt-in, and default builds and JIT cache keys are unchanged.**
+      - **LTO+PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=GENERATE|USE`): bitwise identical; 8.5–11% faster on the 2D reference set (assembly −18%, cut volumes −19%), 3–4% on held-out cases, 1.6% on a sphere step (74% of it is geometry work that barely changes).
+      - **Gains nothing:** LTO alone.
+      - **Slower, and not bitwise:** `-march=x86-64-v3`, which also loses up to 4e-9 of field scale.
+      - **JIT settings:** none worth changing. Opt-in overrides are `SVMP_JIT_CPU`, `SVMP_JIT_FP_CONTRACT` and `SVMP_JIT_OPT_LEVEL`.
+      - **JIT cache:** keyed by CPU name and features, so there is no SKX/MLN mix-up. With `SVMP_JIT_CPU=x86-64-v3` plus a common `SVMP_CACHE_PROFILE`, one cache serves both node types and stays bitwise identical.
+      - Documentation: `Code/Source/solver/FE/Docs/BuildOptimization.md`.
+      - **Decisions for the user:** adopt LTO+PGO for production binaries (needs a training workflow and profile refreshes); shared JIT cache settings for mixed node pools; JIT contraction or opt level 1 (round-off changes, rank-independent).
     - Queued after the current merges: a fresh 2D/3D profiling pass of the post-merge step, attacking the next hotspots (results-neutral).
     - **Integrated check of the 2026-10-05 merges** (volume conservation, functional diagnostics, perf B, perf D, perf 8; tip `a4fb2de2`, jobs `46647477`/`46647480`/`46647482`): serial outputs bitwise identical on all 9 reference cases; FE 34/34, Physics 7/7, Application 4/4.
     - **Latent uninitialized-memory bug found (2026-10-01).** `activeCutContextMatchesRefreshCache`, the cut-context reuse decision, branches on a value from an uninitialized stack allocation in `buildFreeSurfaceGeometrySnapshot`. `validateFreeSurfaceGeometrySnapshotCurrentForMarker` reads uninitialized heap memory from `makeCutCellGeometryMapping`. Memcheck reports about 45k uninitialized reads on the tip.
