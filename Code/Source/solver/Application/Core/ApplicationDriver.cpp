@@ -18150,16 +18150,23 @@ std::size_t projectLevelSetCurvatureFieldsFromState(
                      supplemental_samples,
                      options,
                      curvature));
-    if (snapshot_identity.free_surface_snapshot_revision_key != 0u) {
-      if (result.free_surface_snapshot_revision_key == 0u ||
-          result.free_surface_snapshot_revision_key !=
-              snapshot_identity.free_surface_snapshot_revision_key ||
-          result.source_value_revision !=
-              snapshot_identity.source_value_revision) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Curvature projection samples do "
-            "not carry the authoritative geometry snapshot revision.");
-      }
+    // The rank-local projections take their revision from this rank's own
+    // samples, and a rank whose partition holds no interface has none, so
+    // only ranks with samples can contradict the snapshot.  Decide the
+    // rejection collectively so that every rank throws together.
+    const bool local_snapshot_revision_mismatch =
+        snapshot_identity.free_surface_snapshot_revision_key != 0u &&
+        result.supplemental_samples > 0u &&
+        (result.free_surface_snapshot_revision_key == 0u ||
+         result.free_surface_snapshot_revision_key !=
+             snapshot_identity.free_surface_snapshot_revision_key ||
+         result.source_value_revision !=
+             snapshot_identity.source_value_revision);
+    if (globalAnyBool(local_snapshot_revision_mismatch,
+                      activeFESystemCommunicator(system))) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Curvature projection samples do "
+          "not carry the authoritative geometry snapshot revision.");
     }
     result.cut_rule_signature = cut_context_signature;
     if (cache_entry != nullptr) {
