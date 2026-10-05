@@ -681,6 +681,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
       - It also checks that JIT cache objects are keyed by CPU features, since jobs run on both SKX (AVX-512) and MLN (AVX2) nodes.
       - Defaults that change round-off need user approval.
     - Queued after the current merges: a fresh 2D/3D profiling pass of the post-merge step, attacking the next hotspots (results-neutral).
+    - **Integrated check of the 2026-10-05 merges** (volume conservation, functional diagnostics, perf B, perf D, perf 8; tip `a4fb2de2`, jobs `46647477`/`46647480`/`46647482`): serial outputs bitwise identical on all 9 reference cases; FE 34/34, Physics 7/7, Application 4/4.
     - **Latent uninitialized-memory bug found (2026-10-01).** `activeCutContextMatchesRefreshCache`, the cut-context reuse decision, branches on a value from an uninitialized stack allocation in `buildFreeSurfaceGeometrySnapshot`. `validateFreeSurfaceGeometrySnapshotCurrentForMarker` reads uninitialized heap memory from `makeCutCellGeometryMapping`. Memcheck reports about 45k uninitialized reads on the tip.
       - It depends on code generation: with the PDE-cache branch, `MinimizedCircleSphereAndSessileCapsMeetProductionCertificates` fails when the Workflows suite runs in one process, apparently through stale cut-context reuse (residual 0.108 instead of 4.5e-17).
       - Fix in progress on `dev/fix-uninitialized-snapshot`, including a production-impact assessment.
