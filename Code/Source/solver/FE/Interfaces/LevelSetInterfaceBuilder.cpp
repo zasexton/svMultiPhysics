@@ -2127,8 +2127,14 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
     return result;
 }
 
-LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& request,
-                                              const LevelSetCellCutInput& input)
+namespace {
+
+// with_volume_regions == false stops a cut cell after its interface fragment:
+// no side faces, moments, volume fractions, quadrature or reference subcells
+// are built (see cutLinearLevelSetCell3DInterface).
+LevelSetCellCutResult cutLinearLevelSetCell3DImpl(const CutInterfaceDomainRequest& request,
+                                                  const LevelSetCellCutInput& input,
+                                                  bool with_volume_regions)
 {
     LevelSetCellCutResult result;
     StrictConstructionObservation observation;
@@ -2416,79 +2422,87 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
     }
     fragment.normal = normal;
     fragment.measure = measure;
-    const auto negative_faces =
-        tetrahedronSideFaces(observation, input.node_coordinates,
-                             signed_values,
-                             cut_points,
-                             geometry::CutIntegrationSide::Negative,
-                             coefficient_band,
-                             request.tolerance,
-                             &input.level_set_values,
-                             &actual_signed_values,
-                             request.isovalue);
-    const auto positive_faces =
-        tetrahedronSideFaces(observation, input.node_coordinates,
-                             signed_values,
-                             cut_points,
-                             geometry::CutIntegrationSide::Positive,
-                             coefficient_band,
-                             request.tolerance,
-                             &input.level_set_values,
-                             &actual_signed_values,
-                             request.isovalue);
-    // Each side's distinct points are found once and shared by its moments,
-    // quadrature and reference subcells (see uniqueFacePoints).
-    const auto negative_unique_points =
-        uniqueFacePoints(observation, negative_faces, request.tolerance);
-    const auto negative_moments =
-        polyhedronMomentsFromFaces(observation, negative_faces, negative_unique_points);
-    const auto positive_unique_points =
-        uniqueFacePoints(observation, positive_faces, request.tolerance);
-    const auto positive_moments =
-        polyhedronMomentsFromFaces(observation, positive_faces, positive_unique_points);
-    const auto side_fractions =
-        publish_aligned_zero_face
-            ? SideVolumeFractions{
-                  aligned_parent_side ==
-                          geometry::CutIntegrationSide::Negative
-                      ? Real{1.0}
-                      : Real{0.0},
-                  aligned_parent_side ==
-                          geometry::CutIntegrationSide::Positive
-                      ? Real{1.0}
-                      : Real{0.0}}
-            : sideVolumeFractions(observation,
-                  negative_moments.measure, positive_moments.measure);
-    auto negative_quadrature =
-        polyhedronQuadratureFromFaces(observation, negative_faces,
-                                      negative_unique_points, request.tolerance);
-    auto positive_quadrature =
-        polyhedronQuadratureFromFaces(observation, positive_faces,
-                                      positive_unique_points, request.tolerance);
-    auto negative_reference_subcells =
-        referenceTetrahedraFromFaces(observation,
-            negative_faces,
-            negative_unique_points,
-            input.node_coordinates,
-            signed_values,
-            coefficient_band,
-            request.tolerance);
-    auto positive_reference_subcells =
-        referenceTetrahedraFromFaces(observation,
-            positive_faces,
-            positive_unique_points,
-            input.node_coordinates,
-            signed_values,
-            coefficient_band,
-            request.tolerance);
-    fragment.negative_volume_fraction = side_fractions.negative;
-    fragment.positive_volume_fraction = side_fractions.positive;
-    normalizeQuadratureWeightsToMeasure(observation,
-        negative_quadrature,
-        parent_measure * fragment.negative_volume_fraction);
-    normalizeQuadratureWeightsToMeasure(observation,
-        positive_quadrature,
-        parent_measure * fragment.positive_volume_fraction);
+    RegionMoments negative_moments;
+    RegionMoments positive_moments;
+    std::vector<geometry::CutQuadraturePoint> negative_quadrature;
+    std::vector<geometry::CutQuadraturePoint> positive_quadrature;
+    std::vector<CutInterfaceReferenceSimplex> negative_reference_subcells;
+    std::vector<CutInterfaceReferenceSimplex> positive_reference_subcells;
+    if (with_volume_regions) {
+        const auto negative_faces =
+            tetrahedronSideFaces(observation, input.node_coordinates,
+                                 signed_values,
+                                 cut_points,
+                                 geometry::CutIntegrationSide::Negative,
+                                 coefficient_band,
+                                 request.tolerance,
+                                 &input.level_set_values,
+                                 &actual_signed_values,
+                                 request.isovalue);
+        const auto positive_faces =
+            tetrahedronSideFaces(observation, input.node_coordinates,
+                                 signed_values,
+                                 cut_points,
+                                 geometry::CutIntegrationSide::Positive,
+                                 coefficient_band,
+                                 request.tolerance,
+                                 &input.level_set_values,
+                                 &actual_signed_values,
+                                 request.isovalue);
+        // Each side's distinct points are found once and shared by its
+        // moments, quadrature and reference subcells (see uniqueFacePoints).
+        const auto negative_unique_points =
+            uniqueFacePoints(observation, negative_faces, request.tolerance);
+        negative_moments =
+            polyhedronMomentsFromFaces(observation, negative_faces, negative_unique_points);
+        const auto positive_unique_points =
+            uniqueFacePoints(observation, positive_faces, request.tolerance);
+        positive_moments =
+            polyhedronMomentsFromFaces(observation, positive_faces, positive_unique_points);
+        const auto side_fractions =
+            publish_aligned_zero_face
+                ? SideVolumeFractions{
+                      aligned_parent_side ==
+                              geometry::CutIntegrationSide::Negative
+                          ? Real{1.0}
+                          : Real{0.0},
+                      aligned_parent_side ==
+                              geometry::CutIntegrationSide::Positive
+                          ? Real{1.0}
+                          : Real{0.0}}
+                : sideVolumeFractions(observation,
+                      negative_moments.measure, positive_moments.measure);
+        negative_quadrature =
+            polyhedronQuadratureFromFaces(observation, negative_faces,
+                                          negative_unique_points, request.tolerance);
+        positive_quadrature =
+            polyhedronQuadratureFromFaces(observation, positive_faces,
+                                          positive_unique_points, request.tolerance);
+        negative_reference_subcells =
+            referenceTetrahedraFromFaces(observation,
+                negative_faces,
+                negative_unique_points,
+                input.node_coordinates,
+                signed_values,
+                coefficient_band,
+                request.tolerance);
+        positive_reference_subcells =
+            referenceTetrahedraFromFaces(observation,
+                positive_faces,
+                positive_unique_points,
+                input.node_coordinates,
+                signed_values,
+                coefficient_band,
+                request.tolerance);
+        fragment.negative_volume_fraction = side_fractions.negative;
+        fragment.positive_volume_fraction = side_fractions.positive;
+        normalizeQuadratureWeightsToMeasure(observation,
+            negative_quadrature,
+            parent_measure * fragment.negative_volume_fraction);
+        normalizeQuadratureWeightsToMeasure(observation,
+            positive_quadrature,
+            parent_measure * fragment.positive_volume_fraction);
+    }
     fragment.min_level_set_value = *std::min_element(signed_values.begin(), signed_values.end());
     fragment.max_level_set_value = *std::max_element(signed_values.begin(), signed_values.end());
     fragment.topology_id = "cell-" + std::to_string(input.parent_cell) + "-polygon-0";
@@ -2514,49 +2528,65 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                                     .weight = measure}};
 
     result.degeneracy = fragment.degeneracy;
-    appendSideVolumeRegion(observation,
-        result,
-        makeVolumeRegion(observation, request,
-                         input,
-                         geometry::CutIntegrationSide::Negative,
-                         parent_measure,
-                         fragment.negative_volume_fraction,
-                         negative_moments.measure > Real{0.0}
-                             ? negative_moments.centroid
-                             : parent_centroid,
-                         normal,
-                         signed_values,
-                         0u,
-                         "cut-negative-volume",
-                         negative_quadrature,
-                         publish_aligned_zero_face &&
-                             aligned_parent_side ==
-                                 geometry::CutIntegrationSide::Negative,
-                         -1,
-                         std::move(negative_reference_subcells)));
-    appendSideVolumeRegion(observation,
-        result,
-        makeVolumeRegion(observation, request,
-                         input,
-                         geometry::CutIntegrationSide::Positive,
-                         parent_measure,
-                         fragment.positive_volume_fraction,
-                         positive_moments.measure > Real{0.0}
-                             ? positive_moments.centroid
-                             : parent_centroid,
-                         normal,
-                         signed_values,
-                         1u,
-                         "cut-positive-volume",
-                         positive_quadrature,
-                         publish_aligned_zero_face &&
-                             aligned_parent_side ==
-                                 geometry::CutIntegrationSide::Positive,
-                         -1,
-                         std::move(positive_reference_subcells)));
+    if (with_volume_regions) {
+        appendSideVolumeRegion(observation,
+            result,
+            makeVolumeRegion(observation, request,
+                             input,
+                             geometry::CutIntegrationSide::Negative,
+                             parent_measure,
+                             fragment.negative_volume_fraction,
+                             negative_moments.measure > Real{0.0}
+                                 ? negative_moments.centroid
+                                 : parent_centroid,
+                             normal,
+                             signed_values,
+                             0u,
+                             "cut-negative-volume",
+                             negative_quadrature,
+                             publish_aligned_zero_face &&
+                                 aligned_parent_side ==
+                                     geometry::CutIntegrationSide::Negative,
+                             -1,
+                             std::move(negative_reference_subcells)));
+        appendSideVolumeRegion(observation,
+            result,
+            makeVolumeRegion(observation, request,
+                             input,
+                             geometry::CutIntegrationSide::Positive,
+                             parent_measure,
+                             fragment.positive_volume_fraction,
+                             positive_moments.measure > Real{0.0}
+                                 ? positive_moments.centroid
+                                 : parent_centroid,
+                             normal,
+                             signed_values,
+                             1u,
+                             "cut-positive-volume",
+                             positive_quadrature,
+                             publish_aligned_zero_face &&
+                                 aligned_parent_side ==
+                                     geometry::CutIntegrationSide::Positive,
+                             -1,
+                             std::move(positive_reference_subcells)));
+    }
     result.fragments.push_back(std::move(fragment));
     observation.stamp(result);
     return result;
+}
+
+} // namespace
+
+LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& request,
+                                              const LevelSetCellCutInput& input)
+{
+    return cutLinearLevelSetCell3DImpl(request, input, /*with_volume_regions=*/true);
+}
+
+LevelSetCellCutResult cutLinearLevelSetCell3DInterface(const CutInterfaceDomainRequest& request,
+                                                       const LevelSetCellCutInput& input)
+{
+    return cutLinearLevelSetCell3DImpl(request, input, /*with_volume_regions=*/false);
 }
 
 void appendLinearLevelSetCellCut2D(LevelSetInterfaceDomain& domain,

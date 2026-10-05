@@ -5,8 +5,10 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -1676,4 +1678,142 @@ TEST(LevelSetInterfaceBuilder, SerialGeneratedInterfaceFragmentCounts)
     EXPECT_EQ(summary.active_fragment_count, 2u);
     EXPECT_EQ(summary.quadrature_point_count, 2u);
     EXPECT_NEAR(summary.measure, 0.28125 + std::sqrt(0.125), 1.0e-14);
+}
+
+namespace {
+
+bool sameBits(Real a, Real b)
+{
+    return std::bit_cast<std::uint64_t>(a) == std::bit_cast<std::uint64_t>(b);
+}
+
+bool samePointBits(const std::array<Real, 3>& a, const std::array<Real, 3>& b)
+{
+    return sameBits(a[0], b[0]) && sameBits(a[1], b[1]) && sameBits(a[2], b[2]);
+}
+
+void expect_same_fragment(const CutInterfaceFragment& full,
+                          const CutInterfaceFragment& interface_only)
+{
+    EXPECT_EQ(interface_only.interface_marker, full.interface_marker);
+    EXPECT_EQ(interface_only.parent_cell, full.parent_cell);
+    EXPECT_EQ(interface_only.local_fragment_index, full.local_fragment_index);
+    EXPECT_EQ(interface_only.stable_id, full.stable_id);
+    EXPECT_EQ(interface_only.kind, full.kind);
+    EXPECT_EQ(interface_only.degeneracy, full.degeneracy);
+    EXPECT_EQ(interface_only.minus_side, full.minus_side);
+    EXPECT_EQ(interface_only.plus_side, full.plus_side);
+    EXPECT_TRUE(samePointBits(interface_only.normal, full.normal));
+    EXPECT_TRUE(sameBits(interface_only.measure, full.measure));
+    EXPECT_TRUE(sameBits(interface_only.min_level_set_value,
+                         full.min_level_set_value));
+    EXPECT_TRUE(sameBits(interface_only.max_level_set_value,
+                         full.max_level_set_value));
+    EXPECT_EQ(interface_only.topology_id, full.topology_id);
+    EXPECT_EQ(interface_only.parent_corner_topology_key,
+              full.parent_corner_topology_key);
+    EXPECT_EQ(interface_only.active(), full.active());
+    ASSERT_EQ(interface_only.vertices.size(), full.vertices.size());
+    for (std::size_t i = 0; i < full.vertices.size(); ++i) {
+        EXPECT_TRUE(samePointBits(interface_only.vertices[i].point,
+                                  full.vertices[i].point)) << i;
+        EXPECT_TRUE(samePointBits(interface_only.vertices[i].parent_coordinate,
+                                  full.vertices[i].parent_coordinate)) << i;
+        EXPECT_TRUE(sameBits(interface_only.vertices[i].level_set_value,
+                             full.vertices[i].level_set_value)) << i;
+        EXPECT_EQ(interface_only.vertices[i].stable_id,
+                  full.vertices[i].stable_id) << i;
+    }
+    ASSERT_EQ(interface_only.quadrature_points.size(),
+              full.quadrature_points.size());
+    for (std::size_t i = 0; i < full.quadrature_points.size(); ++i) {
+        const auto& a = interface_only.quadrature_points[i];
+        const auto& b = full.quadrature_points[i];
+        EXPECT_TRUE(samePointBits(a.point, b.point)) << i;
+        EXPECT_TRUE(samePointBits(a.parent_coordinate, b.parent_coordinate)) << i;
+        EXPECT_TRUE(samePointBits(a.normal, b.normal)) << i;
+        EXPECT_TRUE(sameBits(a.weight, b.weight)) << i;
+    }
+}
+
+} // namespace
+
+TEST(LevelSetCellCut3DInterface, MatchesFullCutFragmentsWithoutVolumeRegions)
+{
+    const std::vector<std::array<Real, 3>> unit_tet = {
+        {{0.0, 0.0, 0.0}}, {{1.0, 0.0, 0.0}}, {{0.0, 1.0, 0.0}}, {{0.0, 0.0, 1.0}}};
+    const std::vector<std::array<Real, 3>> skewed_tet = {
+        {{0.1, -0.2, 0.05}}, {{1.3, 0.1, -0.1}}, {{0.2, 0.9, 0.3}}, {{-0.1, 0.25, 1.1}}};
+
+    auto field_request = make_request(/*marker=*/57);
+    // The request of the kinematic area-gradient recovery.
+    CutInterfaceDomainRequest current_request;
+    current_request.source =
+        LevelSetInterfaceSource::fromEvaluator("kinematic-area-gradient-local-measure");
+    current_request.interface_marker = 1;
+    current_request.isovalue = 0.0;
+    current_request.tolerance = 64.0 * std::numeric_limits<Real>::epsilon();
+    current_request.quadrature_order = 1;
+    current_request.frame = geometry::CutGeometryFrame::Current;
+    current_request.implicit_geometry_mode = "LinearCorner";
+    current_request.implicit_quadrature_backend = "LinearCorner";
+
+    struct Case {
+        const char* name;
+        std::vector<std::array<Real, 3>> nodes;
+        std::vector<Real> values;
+        bool cut;
+    };
+    const std::vector<Case> cases = {
+        {"triangle cut", unit_tet, {-0.25, 0.75, 0.75, 0.75}, true},
+        {"quadrilateral cut", unit_tet, {-0.5, -0.25, 0.5, 0.75}, true},
+        {"skewed quadrilateral cut", skewed_tet, {0.3, -0.7, 0.45, -0.2}, true},
+        {"skewed triangle cut", skewed_tet, {0.6, 0.2, 0.35, -0.9}, true},
+        {"full negative", unit_tet, {-0.5, -0.25, -0.5, -0.75}, false},
+        {"full positive", skewed_tet, {0.5, 0.25, 0.5, 0.75}, false},
+        {"vertex touch", unit_tet, {0.0, 0.5, 0.25, 0.75}, false},
+    };
+    for (const auto* request : {&field_request, &current_request}) {
+        for (const auto& c : cases) {
+            SCOPED_TRACE(::testing::Message()
+                         << c.name << " frame="
+                         << static_cast<int>(request->frame));
+            const LevelSetCellCutInput input{
+                .parent_cell = 3,
+                .element_type = ElementType::Tetra4,
+                .node_coordinates = c.nodes,
+                .level_set_values = c.values};
+            const auto full = cutLinearLevelSetCell3D(*request, input);
+            const auto interface_only =
+                cutLinearLevelSetCell3DInterface(*request, input);
+            EXPECT_EQ(interface_only.supported, full.supported);
+            EXPECT_EQ(interface_only.degeneracy, full.degeneracy);
+            EXPECT_EQ(interface_only.diagnostic, full.diagnostic);
+            EXPECT_EQ(interface_only.hasActiveFragments(), full.hasActiveFragments());
+            ASSERT_EQ(interface_only.fragments.size(), full.fragments.size());
+            for (std::size_t i = 0; i < full.fragments.size(); ++i) {
+                expect_same_fragment(full.fragments[i], interface_only.fragments[i]);
+            }
+            if (c.cut) {
+                ASSERT_EQ(full.fragments.size(), 1u);
+                EXPECT_EQ(full.volume_regions.size(), 2u);
+                EXPECT_TRUE(interface_only.volume_regions.empty());
+                EXPECT_EQ(interface_only.fragments.front().negative_volume_fraction, 0.0);
+                EXPECT_EQ(interface_only.fragments.front().positive_volume_fraction, 0.0);
+            } else {
+                EXPECT_EQ(interface_only.construction_observation,
+                          full.construction_observation);
+                ASSERT_EQ(interface_only.volume_regions.size(),
+                          full.volume_regions.size());
+                for (std::size_t i = 0; i < full.volume_regions.size(); ++i) {
+                    EXPECT_EQ(interface_only.volume_regions[i].side,
+                              full.volume_regions[i].side);
+                    EXPECT_TRUE(sameBits(interface_only.volume_regions[i].measure,
+                                         full.volume_regions[i].measure));
+                    EXPECT_EQ(interface_only.volume_regions[i].quadrature_points.size(),
+                              full.volume_regions[i].quadrature_points.size());
+                }
+            }
+        }
+    }
 }

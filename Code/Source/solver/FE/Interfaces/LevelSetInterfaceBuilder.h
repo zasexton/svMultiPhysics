@@ -103,6 +103,20 @@ private:
     const CutInterfaceDomainRequest& request,
     const LevelSetCellCutInput& input);
 
+/**
+ * The interface fragment of cutLinearLevelSetCell3D without the cut cell's
+ * volume regions, for callers that use only the fragment geometry.
+ *
+ * For a cut cell, the fragment's vertices, measure, normal, degeneracy, ids,
+ * topology data and quadrature are those of cutLinearLevelSetCell3D, but no
+ * volume regions are built, the fragment's side volume fractions stay zero,
+ * and construction_observation covers only the interface construction.  A
+ * cell that is not cut gives the same result as cutLinearLevelSetCell3D.
+ */
+[[nodiscard]] LevelSetCellCutResult cutLinearLevelSetCell3DInterface(
+    const CutInterfaceDomainRequest& request,
+    const LevelSetCellCutInput& input);
+
 void appendLinearLevelSetCellCut2D(LevelSetInterfaceDomain& domain,
                                    const LevelSetCellCutInput& input);
 
