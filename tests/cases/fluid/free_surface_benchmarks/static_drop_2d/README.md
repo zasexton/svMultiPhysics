@@ -235,6 +235,23 @@ The solver log is about 0.17 MB per step, so compress it. VTU snapshots are
 check use `--max-steps 5`; `verify.py` refuses such runs unless
 `--allow-truncated` is given.
 
+**Time-step studies.** `generate_case.py` has three options for studies
+outside the protocol step; the default solver input is unchanged:
+
+- `--dt-multiple m` uses `m dt_B` instead of the per-La multiple, rounded down
+  to the 100 output intervals as in the protocol.
+- `--dt <step>` keeps this exact step. The output cadence is the nearest whole
+  number of steps per output, and the run ends at the first output at or after
+  5 viscous times, so nested steps (0.04, 0.02, 0.01 at La = 12) share their
+  output times.
+- `--surface-tension-semi-implicit NormalIncrement` adds the lagged
+  normal-increment term (decision D13, `Physics/Docs/NavierStokesFreeSurface.md`).
+  Its validation and step study are in
+  `Documentation/free_surface_semi_implicit_surface_tension_design.md`, §9.
+
+`case.json` records `dt_rule` (`protocol`, `multiple_override` or `fixed`) and
+`surface_tension_semi_implicit`.
+
 ## Expected cost per level
 
 Measured on 2026-09-30 (Slurm job `46089180`, source `b4b376a0`, after the
