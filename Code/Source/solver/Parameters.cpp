@@ -306,6 +306,8 @@ bool is_oop_equation_extension_parameter(const std::string& name)
     "WetExtensionWallFaces",
     "Advection_velocity_extension_wall_faces",
     "AdvectionVelocityExtensionWallFaces",
+    "Write_velocity_extension_maps",
+    "WriteVelocityExtensionMaps",
     "Transport_form",
     "TransportForm",
     "Advection_form",
