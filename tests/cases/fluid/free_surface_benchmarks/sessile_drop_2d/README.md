@@ -94,6 +94,7 @@ free-surface decks; none was chosen for this case.
 | `kag_lumped`, `kag_consistent` | as in `static_drop_2d` | D2 candidates (b) and (c) |
 | Level-set transport | P1, advected by the harmonic PDE velocity extension of tracker D9 with monolithic coupling (`--transport pde_extension`, the default: `Advection_velocity_extension_method=pde_harmonic`, `Advection_velocity_extension_coupling=monolithic`), SUPG with the production constants (tau scale 0.5, transient scale 2.0); no volume correction, no discontinuity capturing, no bound limiter | decision of 2026-10-05 (tracker M4), as in `static_drop_2d`, `linear_sloshing_2d` and `capillary_wave_2d`. `--transport coupled` advects with the fluid velocity (`Velocity_source=coupled_field`), and `--transport wet_extension` writes the wall-compatible wet extension of the D18 and capillary-rise decks; both remain for comparison |
 | Level-set kinematic reconciliation | on (`Enable_kinematic_reconciliation=true`; `--kinematic-reconciliation off` reproduces the earlier decks). After every accepted step the transported `phi` is corrected locally so that the step's change of the sharp P1 area equals the interface flux of the transport velocity (`FE/LevelSet/LevelSetKinematicReconciliation.h`) | parameter-free, no global shift; it removes the contact-line area drift of the Galerkin transport, see "Area drift" below |
+| Level-set sign-definite patch bounds | on (`Enable_sign_definite_patch_bounds=true`; `--sign-definite-patch-bounds off` reproduces the earlier decks). After every accepted step, a node whose whole patch lies in one phase is kept inside the range of the previous values over its patch (`FE/LevelSet/LevelSetSignDefinitePatchBounds.h`) | parameter-free local maximum principle of exact transport; it never changes a cut cell, so the interface, the contact line and the area are untouched. It stops single wall vertices next to a contact line from crossing the isovalue, see "Spurious wall spots" below |
 | Level-set maintenance | none in the protocol. `--reinitialization` enables projection reinitialization every 10 steps with at most 4 iterations; the zero set then moves by at most `1e-10` per call, and contact cells are only rescaled | the transport of `static_drop_2d`, so that the D2 comparison uses one transport. The optional values are those of the D18/D38 and sloshing decks. In the first smoke run (below) that projection did not converge in 4 iterations and was skipped, so it would not have changed the state |
 | Time integration | generalized-alpha, `rho_inf = 0.5`, fixed step; no environment variable. `--time-integration backward_euler` for comparison runs | as `static_drop_2d`. Vertex crossings are accepted within a step with the default restart budget, see "Vertex crossings" below |
 | Nonlinear solve | relative tolerance 1e-4 per equation, at most 8 Newton iterations (fluid) and 4 (level set) | as `static_drop_2d` |
@@ -376,6 +377,56 @@ reconciliation adds 20-45% to the time per step
 (full-protocol, refinement and regression runs), 46143892 (coupled
 transport); case directories under `runs/val`, `runs/kr5`, `runs/kr4`.
 
+## Spurious wall spots: mechanism and sign-definite patch bounds (2026-10-05)
+
+Without the patch bounds, single wall vertices settle next to the isovalue
+or cross it, giving extra wall crossings that `verify.py` rejects: the
+120 degree full protocol from step 952 with the reconciliation and from step
+1344 without it (a dry vertex two cells behind the receding right contact
+line becomes wet), and the 60 degree protocol without the reconciliation
+from step 2324 (a wet vertex two cells inside the footprint becomes dry).
+Raw output: `$SCRATCH/svmp-dev-wallspots/runs/`, analysis scripts in
+`$SCRATCH/svmp-dev-wallspots/analysis/`.
+
+**Mechanism.** At the 120 degree vertex `x = 1.0` the transported `phi` falls
+from `1.08 h` (step 504) to `0.02 h` (step 924) while its wall neighbour on
+the contact-line side rises from `0.77 h` to `2.27 h`. The vertex is a dry
+extension vertex whose whole patch is dry. Next to it the wall rows carry a
+growing grid-scale oscillation (within about three cells of each contact
+line; the root-mean-square second difference of the wall row grows from
+`0.11 h` to `1.0 h` over the run), the gas side of the wall row is flattened
+to about 0.5 to 0.6 of the signed distance, and the PDE extension velocity
+has a diverging stagnation point at the vertex (zero normal velocity on the
+dry wall vertex against `0.053` at the interface-cell vertex above it;
+divergence 0.9 to 1.5 in the two adjacent wall cells). Once across, the
+vertex is a wet "known" vertex of a liquid sliver that the fluid does not
+resolve, its velocity is zero, and it stays negative to the end.
+
+| Test (restart from the saved step-840 state, or offline replay) | Result |
+|---|---|
+| solver, reconciliation on / off / extension wall impermeability off | crossing after about 95 / 75 / 60 steps |
+| solver, SUPG off | identical to SUPG on to four digits (`tau` is about `dt/4` at Courant number 0.004) |
+| offline replay of the P1 Galerkin/SUPG/generalized-alpha step from the saved `phi` and `w`, no reconciliation | reproduces the decline and the crossing (between steps 952 and 1008; the run crossed at 948); on the 60 degree run without reconciliation it follows the solver to `5e-4 h` over 170 steps |
+| replay decomposition, steps 504 to 1008 | consistent-mass coupling to the neighbours `-0.44 h`, own Galerkin advection at the stagnation point `-0.67 h` |
+| replay variants | lumped mass slows the decline but does not stop it; adding `div(w) phi / 2` (skew-symmetric form) makes it faster; the patch bounds stop it |
+
+The reconciliation never moves the vertex (it only moves nodes of cut cells
+and keeps sign classes); it changes the contact-line history and so the
+onset step. Wall maintenance does not run in the protocol. The cause is
+therefore the transport itself: the P1 Galerkin step has no local maximum
+principle, and next to a contact line, where the transport velocity has a
+mesh-scale kink and a diverging stagnation point on the wall and the field
+is only about `h` thick, a vertex whose whole patch lies in one phase is
+driven across the isovalue.
+
+**Fix.** The exact transport keeps the value of a node inside the range of
+the previous values over its patch (one-ring Courant number at most one, no
+inflow). `Enable_sign_definite_patch_bounds` restores that bound on the
+nodes whose patch lies in one phase at the previous state and, apart from
+the node, at the transported endpoint. Nodes of cut cells never change:
+the contact line, the angle and the area are not touched (no second angle
+mechanism, D4; no effect on the area, D11), and there is no parameter (P1).
+
 ## Smoke runs before the vertex-crossing fixes (2026-09-30)
 
 All at `R/h = 16` with `SurfaceStress` and truncated with `--max-steps`. The
@@ -412,11 +463,11 @@ the `volume_drift` criterion (1e-4) will fail. Conservative transport (WP-6) is 
   removed by the opt-in kinematic reconciliation (section "Area drift").
 - Spurious wall spots: in the dry wall region behind a receding contact
   line, and once inside the footprint, single wall vertices of the
-  transported `phi` settle within about 1e-3 of zero or cross it, giving
-  tiny extra wall crossings. Seen with and without the reconciliation (120
-  deg from step 952 with it and from step 1344 without; 60 deg without it
-  from step 2324), so `verify.py` rejects those full runs ("expected two wall
-  contact points").
+  transported `phi` settled within about 1e-3 of zero or crossed it, giving
+  tiny extra wall crossings (120 deg from step 952 with the reconciliation
+  and from step 1344 without; 60 deg without it from step 2324), so
+  `verify.py` rejected those full runs. Removed by the sign-definite patch
+  bounds, see "Spurious wall spots" above.
   A first comparison with the PDE velocity extension of tracker D9
   (`--transport pde_extension`; job `46108807`, branch
   `dev/pde-velocity-extension` at `0e4ef8e7`, `R/h = 16`, `SurfaceStress`,
