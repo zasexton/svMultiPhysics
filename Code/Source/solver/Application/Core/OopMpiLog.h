@@ -1,5 +1,6 @@
 #pragma once
 
+#include "FE/Core/Logger.h"
 #include "Mesh/Core/MeshComm.h"
 
 #include <algorithm>
@@ -54,6 +55,14 @@ inline std::ostream& null_stream()
   return os;
 }
 
+// A stream without a buffer is in the bad state: every insertion returns at
+// its sentry, before any formatting.
+inline std::ostream& disabled_stream()
+{
+  static std::ostream os(nullptr);
+  return os;
+}
+
 } // namespace detail
 
 inline bool oopTraceEnabled()
@@ -77,6 +86,31 @@ inline bool oopShouldLog()
 inline std::ostream& oopCout()
 {
   return oopShouldLog() ? std::cout : detail::null_stream();
+}
+
+/**
+ * Whether this rank prints Application diagnostic lines of @p level: it logs
+ * (oopShouldLog()) and the FE logger level admits @p level.  The logger level
+ * comes from FE_LOG_LEVEL (default INFO), so FE_LOG_LEVEL=WARNING or higher
+ * suppresses INFO diagnostics together with the FE INFO lines.  The answer is
+ * rank-local: never use it to skip a collective operation.
+ */
+inline bool oopDiagnosticsEnabled(
+    svmp::FE::LogLevel level = svmp::FE::LogLevel::INFO)
+{
+  return oopShouldLog() && svmp::FE::Logger::instance().get_level() <= level;
+}
+
+/**
+ * Stream for Application diagnostic lines of @p level: std::cout when
+ * oopDiagnosticsEnabled(level), otherwise a stream on which insertions do no
+ * formatting.  Insertion arguments are still evaluated, so callers gate
+ * values computed only for the line with oopDiagnosticsEnabled().
+ */
+inline std::ostream& oopDiagnosticsCout(
+    svmp::FE::LogLevel level = svmp::FE::LogLevel::INFO)
+{
+  return oopDiagnosticsEnabled(level) ? std::cout : detail::disabled_stream();
 }
 
 } // namespace core

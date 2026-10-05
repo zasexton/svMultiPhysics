@@ -17652,6 +17652,9 @@ void logLevelSetCurvatureProjectionDiagnostic(
     std::size_t cut_signature_cache_hits = 0u,
     std::size_t cut_signature_cache_misses = 0u)
 {
+  if (!application::core::oopDiagnosticsEnabled()) {
+    return;
+  }
   const auto curvature_options = effectiveCurvatureProjectionOptions(request);
   auto& out = application::core::oopCout();
   out
@@ -20054,7 +20057,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
       const auto global_marker_measure =
           static_cast<svmp::FE::Real>(globalSumDouble(
               static_cast<double>(intersection_summary.measure), comm));
-      application::core::oopCout()
+      application::core::oopDiagnosticsCout()
           << "[svMultiPhysics::Application] Generated interface-boundary "
              "intersection"
           << " diagnostic=generated_interface_boundary_intersection_marker"
@@ -20192,7 +20195,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
                 result.domain,
                 intersection_domain,
                 mesh_access);
-        application::core::oopCout()
+        application::core::oopDiagnosticsCout()
             << "[svMultiPhysics::Application] Generated sharp active boundary"
             << " diagnostic=generated_active_boundary_partition"
             << " interface_marker=" << result.interface_marker
@@ -20314,10 +20317,13 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     } else {
       sim.free_surface_geometry_snapshot_cache->insert(geometry_snapshot);
     }
+    // The cache statistics feed only the diagnostic line below.
     const auto geometry_cache_statistics =
-        sim.free_surface_geometry_snapshot_cache->statistics();
+        application::core::oopDiagnosticsEnabled()
+            ? sim.free_surface_geometry_snapshot_cache->statistics()
+            : svmp::FE::interfaces::FreeSurfaceGeometrySnapshotCacheStatistics{};
     const auto& geometry_ledger = geometry_snapshot->ledger();
-    application::core::oopCout()
+    application::core::oopDiagnosticsCout()
         << "[svMultiPhysics::Application] Authoritative free-surface geometry"
         << " diagnostic=free_surface_geometry_snapshot"
         << " domain_id='" << request.domain_id << "'"
@@ -20682,7 +20688,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         svmp::FE::level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature;
     const bool high_order_refreshed_frozen_tangent =
         high_order_geometry && refreshed_frozen_tangent;
-    application::core::oopCout()
+    application::core::oopDiagnosticsCout()
         << "[svMultiPhysics::Application] Active-domain cut context"
         << " diagnostic=cut_context_rebuild"
         << " provenance=" << (provenance != nullptr ? provenance : "unknown")
@@ -20932,7 +20938,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
   report.installed_context = context;
   sim.fe_system->setCutIntegrationContext(std::move(context));
   sim.fe_system->rebuildConstraintState();
-  application::core::oopCout()
+  application::core::oopDiagnosticsCout()
       << "[svMultiPhysics::Application] Active pressure support constraint refresh"
       << " diagnostic=active_pressure_constraint_refresh"
       << " provenance=" << (provenance != nullptr ? provenance : "unknown")
@@ -21204,7 +21210,7 @@ void logActiveCutContextRefreshSkipped(
     const char* solution_source,
     const char* skip_reason)
 {
-  application::core::oopCout()
+  application::core::oopDiagnosticsCout()
       << "[svMultiPhysics::Application] Cut-context refresh skipped"
       << " diagnostic=cut_context_refresh_skip"
       << " provenance=" << (provenance != nullptr ? provenance : "unknown")

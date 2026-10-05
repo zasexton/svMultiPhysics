@@ -6313,7 +6313,14 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         }
     }
 
+    // INFO diagnostics are built only when the logger prints them; the
+    // fail-open warning below also quotes this line.
+    const bool log_aggregation_diagnostics =
+        Logger::instance().get_level() <= LogLevel::INFO;
     std::ostringstream oss;
+    if (!log_aggregation_diagnostics && !allow_unaggregated) {
+        oss.setstate(std::ios::badbit);  // the insertions below format nothing
+    }
     oss << "SmallCutAggregationConstraint: diagnostic=small_cut_aggregation"
         << " field='" << rec.name << "'"
         << " marker=" << interface_marker_
@@ -6408,11 +6415,13 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         << " excluded_dirichlet_vertices=" << excluded_vertices.size()
         << " pruned_volume_rules=" << cut_context->generatedPrunedVolumeRuleCount()
         << " pruned_volume_measure=" << cut_context->generatedPrunedVolumeMeasure();
-    FE_LOG_INFO(oss.str());
+    if (log_aggregation_diagnostics) {
+        FE_LOG_INFO(oss.str());
+    }
 
     next_previous_canonical_slaves =
         distributed_result.canonical_slaves;
-    {
+    if (log_aggregation_diagnostics) {
         // Churn is computed from the replicated canonical slave set, not the
         // overlap-dependent locally relevant set. State belongs to this
         // constraint instance, whose lifetime is tied to the FESystem; this
