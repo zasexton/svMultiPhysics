@@ -52,6 +52,36 @@ std::shared_ptr<svmp::Mesh> buildSingleQuadMesh()
   return svmp::create_mesh(std::move(base));
 }
 
+std::shared_ptr<svmp::Mesh> buildTwoQuadStripMesh()
+{
+  auto base = std::make_shared<svmp::MeshBase>();
+
+  const std::vector<svmp::real_t> x_ref = {
+      0.0, 0.0,
+      1.0, 0.0,
+      2.0, 0.0,
+      0.0, 1.0,
+      1.0, 1.0,
+      2.0, 1.0,
+  };
+  const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 4, 8};
+  const std::vector<svmp::index_t> cell2vertex = {0, 1, 4, 3,
+                                                  1, 2, 5, 4};
+
+  svmp::CellShape shape{};
+  shape.family = svmp::CellFamily::Quad;
+  shape.num_corners = 4;
+  shape.order = 1;
+  base->build_from_arrays(
+      /*spatial_dim=*/2,
+      x_ref,
+      cell2vertex_offsets,
+      cell2vertex,
+      {shape, shape});
+  base->finalize();
+  return svmp::create_mesh(std::move(base));
+}
+
 std::shared_ptr<svmp::Mesh> buildWarpedBiquadraticQuadMesh()
 {
   auto base = std::make_shared<svmp::MeshBase>();
@@ -293,6 +323,154 @@ TEST(LevelSetCurvatureSamples,
           svmp::FE::geometry::CutIntegrationSide::Positive,
           /*evaluated_state_source_revision=*/0u);
   EXPECT_TRUE(positive_samples.empty());
+}
+
+TEST(LevelSetCurvatureSamples,
+     CutVolumeSamplesKeepFirstDuplicatePerCellInRuleOrder)
+{
+  auto mesh = buildTwoQuadStripMesh();
+  auto space =
+      std::make_shared<svmp::FE::spaces::H1Space>(svmp::FE::ElementType::Quad4,
+                                                  /*order=*/1);
+
+  svmp::FE::systems::FESystem system(mesh);
+  const auto phi = system.addField(
+      svmp::FE::systems::FieldSpec{
+          .name = "phi",
+          .space = space,
+          .components = 1,
+          .source_kind =
+              svmp::FE::systems::FieldSourceKind::PrescribedData});
+  ASSERT_NO_THROW(system.setup());
+  const auto n_dofs =
+      static_cast<std::size_t>(system.fieldDofHandler(phi).getNumDofs());
+  ASSERT_EQ(n_dofs, 6u);
+  std::vector<svmp::FE::Real> prescribed_coefficients(n_dofs);
+  for (std::size_t i = 0; i < n_dofs; ++i) {
+    prescribed_coefficients[i] =
+        svmp::FE::Real{0.5} + svmp::FE::Real{0.25} * static_cast<svmp::FE::Real>(i);
+  }
+  system.setPrescribedFieldCoefficients(phi, prescribed_coefficients);
+
+  constexpr int marker = 43;
+  constexpr auto side = svmp::FE::geometry::CutIntegrationSide::Negative;
+  auto cut_context =
+      std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
+  const auto add_rule =
+      [&](svmp::FE::MeshIndex cell,
+          const std::vector<std::array<svmp::FE::Real, 3>>& points) {
+        svmp::FE::geometry::CutQuadratureRule rule;
+        rule.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
+        rule.side = side;
+        rule.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+        rule.provenance.parent_entity = cell;
+        rule.provenance.marker = marker;
+        rule.measure = svmp::FE::Real{0.5};
+        rule.parent_measure = svmp::FE::Real{1.0};
+        rule.volume_fraction = svmp::FE::Real{0.5};
+        rule.full_cell_equivalent = false;
+        for (const auto& point : points) {
+          svmp::FE::geometry::CutQuadraturePoint qp;
+          qp.point = point;
+          qp.parent_coordinate = point;
+          qp.weight = svmp::FE::Real{0.125};
+          rule.points.push_back(qp);
+        }
+        svmp::FE::assembly::CutCellAssemblyMetadata metadata;
+        metadata.parent_entity = cell;
+        metadata.side = side;
+        metadata.volume_fraction = rule.volume_fraction;
+        cut_context->addGeneratedVolumeRule(marker, metadata, rule);
+      };
+  using P = std::array<svmp::FE::Real, 3>;
+  const P a{{0.25, 0.25, 0.0}};
+  const P b{{0.5, -0.25, 0.0}};
+  const P edge_right{{1.0, 0.0, 0.0}};
+  const P edge_left{{-1.0, 0.0, 0.0}};
+  // Cell 0, first rule: three distinct points.
+  add_rule(0, {a, b, edge_right});
+  // Cell 0, second rule: an exact repeat, a repeat within the coordinate
+  // tolerance, a new point, and a point just outside the tolerance.
+  add_rule(0, {b,
+               P{{0.25 + 1.0e-13, 0.25, 0.0}},
+               P{{-0.5, 0.5, 0.0}},
+               P{{0.25 + 1.0e-9, 0.25, 0.0}}});
+  // Cell 1: the physical point shared with cell 0's right edge is a distinct
+  // sample (other parent cell); its exact repeat in cell 1 is not.
+  add_rule(1, {edge_left, edge_left});
+  system.setCutIntegrationContext(cut_context);
+
+  const svmp::FE::systems::SystemStateView state;
+  const auto samples =
+      application::core::collectLevelSetCurvatureCutVolumeSupplementalSamples(
+          system,
+          state,
+          phi,
+          marker,
+          side,
+          /*evaluated_state_source_revision=*/0u);
+
+  // Reference: the scan over all earlier samples, in rule and point order.
+  const svmp::FE::assembly::MeshAccess access(*mesh);
+  std::vector<svmp::FE::level_set::LevelSetCurvatureProjectionSample> expected;
+  for (const auto* rule :
+       cut_context->generatedVolumeRulesForMarkerAndSide(marker, side)) {
+    const auto cell = rule->provenance.parent_entity;
+    const auto cell_dofs = system.fieldDofHandler(phi).getCellDofs(cell);
+    std::vector<svmp::FE::Real> coefficients;
+    for (const auto dof : cell_dofs) {
+      coefficients.push_back(
+          prescribed_coefficients[static_cast<std::size_t>(dof)]);
+    }
+    for (const auto& point : rule->points) {
+      const auto physical =
+          application::core::mapLevelSetCurvatureReferenceSampleToPhysical(
+              access, cell, point.parent_coordinate);
+      ASSERT_TRUE(physical.has_value());
+      svmp::FE::spaces::FunctionSpace::Value xi{};
+      xi[0] = point.parent_coordinate[0];
+      xi[1] = point.parent_coordinate[1];
+      xi[2] = point.parent_coordinate[2];
+      const auto value = space->evaluate_scalar(xi, coefficients);
+      bool duplicate = false;
+      for (const auto& existing : expected) {
+        if (existing.parent_cell != cell) {
+          continue;
+        }
+        const auto dx = existing.coordinate[0] - (*physical)[0];
+        const auto dy = existing.coordinate[1] - (*physical)[1];
+        const auto dz = existing.coordinate[2] - (*physical)[2];
+        if (dx * dx + dy * dy + dz * dz <= svmp::FE::Real{1.0e-24} &&
+            std::abs(existing.value - value) <= svmp::FE::Real{1.0e-12}) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (!duplicate) {
+        expected.push_back(
+            svmp::FE::level_set::LevelSetCurvatureProjectionSample{
+                .parent_cell = cell,
+                .coordinate = *physical,
+                .value = value});
+      }
+    }
+  }
+
+  ASSERT_EQ(expected.size(), 6u);
+  ASSERT_EQ(samples.size(), expected.size());
+  for (std::size_t i = 0; i < samples.size(); ++i) {
+    EXPECT_EQ(samples[i].parent_cell, expected[i].parent_cell) << i;
+    EXPECT_EQ(samples[i].coordinate, expected[i].coordinate) << i;
+    EXPECT_EQ(samples[i].value, expected[i].value) << i;
+    EXPECT_FALSE(samples[i].generated_interface_geometry) << i;
+  }
+  // The shared edge point appears once per parent cell.
+  EXPECT_EQ(std::count_if(samples.begin(), samples.end(),
+                          [&](const auto& sample) {
+                            return sample.coordinate ==
+                                   expected[2].coordinate;
+                          }),
+            2);
 }
 
 TEST(LevelSetCurvatureSamples,
