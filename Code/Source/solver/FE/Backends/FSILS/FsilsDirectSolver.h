@@ -27,7 +27,7 @@ class FsilsVector;
 /// on every rank; timings, sizes and memory are measured on the root rank.
 struct FsilsDirectSolveStats {
     std::uint64_t solves{0};
-    std::uint64_t orderings{0};         ///< fill-reducing orderings (node pattern changes)
+    std::uint64_t orderings{0};         ///< fill-reducing orderings (stored-structure changes)
     std::uint64_t analyses{0};          ///< symbolic analyses (stored structure changes)
     std::uint64_t factorizations{0};    ///< numeric factorizations
     std::uint64_t refinement_steps{0};  ///< iterative-refinement corrections
@@ -62,13 +62,13 @@ struct FsilsDirectSolveStats {
  * by a unit diagonal, which is the operator the FSILS Krylov path solves
  * through its zero preconditioner weights on Dirichlet faces.
  *
- * Reuse: the fill-reducing ordering (approximate minimum degree on the node
- * graph) is kept while the node pattern is unchanged.  The stored structure
- * holds the diagonal and every entry that has been nonzero since the node
- * pattern or the Dirichlet set last changed (exact zeros of the node blocks
- * are not stored until they become nonzero); its symbolic analysis is kept
- * until that structure changes.  The numeric factorization (threshold
- * partial pivoting with diagonal preference) runs for every solve.
+ * Reuse: the stored structure holds the diagonal and every entry that has
+ * been nonzero since the node pattern or the Dirichlet set last changed
+ * (exact zeros of the node blocks are not stored until they become nonzero).
+ * Its fill-reducing ordering (approximate minimum degree on A + A^T of the
+ * stored structure) and symbolic analysis are kept until that structure
+ * changes.  The numeric factorization (threshold partial pivoting with
+ * diagonal preference) runs for every solve.
  */
 class FsilsGatheredDirectSolver {
 public:

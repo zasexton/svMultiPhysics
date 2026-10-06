@@ -130,8 +130,8 @@ struct FsilsGatheredDirectSolver::Impl {
     // Global node pattern (rows by global node, columns sorted).
     std::vector<std::int64_t> g_row_ptr{};
     std::vector<int> g_cols{};
-    // Fill-reducing symmetric ordering of the node pattern (scalar old -> new).
-    bool ordering_valid{false};
+    bool pattern_valid{false};
+    // Fill-reducing symmetric ordering of the stored structure (scalar old -> new).
     std::vector<int> inv{};
     // Dirichlet scalar DOFs (backend numbering), sorted unique, and flags.
     std::vector<std::int64_t> dirichlet{};
@@ -164,39 +164,68 @@ struct FsilsGatheredDirectSolver::Impl {
     }
 
 #if defined(FE_HAS_EIGEN)
-    /// Approximate minimum degree on the node graph, expanded to scalar
-    /// unknowns so that the components of a node stay consecutive.  Depends on
-    /// the node pattern only, so it is kept while that pattern is unchanged.
+    /// Approximate minimum degree on the stored structure (A + A^T, scalar
+    /// unknowns).  Recomputed with every new stored structure.
     void computeOrdering()
     {
-        const int n = gnNo * dof;
-        std::vector<Eigen::Triplet<int, int>> triplets;
-        triplets.reserve(g_cols.size());
+        const int d = dof;
+        const std::size_t d2 = static_cast<std::size_t>(d) * static_cast<std::size_t>(d);
+        const int n = gnNo * d;
+        std::vector<int> col_count(static_cast<std::size_t>(n) + 1u, 0);
         for (int i = 0; i < gnNo; ++i) {
             for (auto p = g_row_ptr[static_cast<std::size_t>(i)]; p < g_row_ptr[static_cast<std::size_t>(i) + 1u];
                  ++p) {
-                triplets.emplace_back(i, g_cols[static_cast<std::size_t>(p)], 1);
+                const int j = g_cols[static_cast<std::size_t>(p)];
+                const char* kp = keep.data() + static_cast<std::size_t>(p) * d2;
+                for (int r = 0; r < d; ++r) {
+                    for (int c = 0; c < d; ++c) {
+                        if (kp[r * d + c]) {
+                            ++col_count[static_cast<std::size_t>(j * d + c) + 1u];
+                        }
+                    }
+                }
             }
         }
-        Eigen::SparseMatrix<int, Eigen::ColMajor, int> graph(gnNo, gnNo);
-        graph.setFromTriplets(triplets.begin(), triplets.end());
-        graph.makeCompressed();
-        Eigen::PermutationMatrix<Eigen::Dynamic, Eigen::Dynamic, int> node_order;
+        for (int k = 0; k < n; ++k) {
+            col_count[static_cast<std::size_t>(k) + 1u] += col_count[static_cast<std::size_t>(k)];
+        }
+        Eigen::SparseMatrix<double, Eigen::ColMajor, int> pattern(n, n);
+        pattern.resizeNonZeros(static_cast<Eigen::Index>(col_count[static_cast<std::size_t>(n)]));
+        std::vector<int> next(col_count.begin(), col_count.end() - 1);
+        int* outer = pattern.outerIndexPtr();
+        int* inner = pattern.innerIndexPtr();
+        double* values = pattern.valuePtr();
+        for (int k = 0; k <= n; ++k) {
+            outer[k] = col_count[static_cast<std::size_t>(k)];
+        }
+        for (int i = 0; i < gnNo; ++i) {
+            for (auto p = g_row_ptr[static_cast<std::size_t>(i)]; p < g_row_ptr[static_cast<std::size_t>(i) + 1u];
+                 ++p) {
+                const int j = g_cols[static_cast<std::size_t>(p)];
+                const char* kp = keep.data() + static_cast<std::size_t>(p) * d2;
+                for (int r = 0; r < d; ++r) {
+                    for (int c = 0; c < d; ++c) {
+                        if (kp[r * d + c]) {
+                            const int pos = next[static_cast<std::size_t>(j * d + c)]++;
+                            inner[pos] = i * d + r;  // rows ascend within a column (row nodes ascend)
+                            values[pos] = 1.0;
+                        }
+                    }
+                }
+            }
+        }
+        Eigen::PermutationMatrix<Eigen::Dynamic, Eigen::Dynamic, int> order;
         Eigen::AMDOrdering<int> amd;
-        amd(graph, node_order);
+        amd(pattern, order);
         // Eigen's AMDOrdering returns the elimination order: indices()(new) = old.
-        FE_THROW_IF(node_order.size() != gnNo, FEException, "FsilsGatheredDirectSolver: AMD ordering size mismatch");
+        FE_THROW_IF(order.size() != n, FEException, "FsilsGatheredDirectSolver: AMD ordering size mismatch");
         inv.assign(static_cast<std::size_t>(n), -1);
-        for (int new_node = 0; new_node < gnNo; ++new_node) {
-            const int old_node = node_order.indices()(new_node);
-            FE_THROW_IF(old_node < 0 || old_node >= gnNo, FEException,
-                        "FsilsGatheredDirectSolver: invalid AMD ordering");
-            for (int c = 0; c < dof; ++c) {
-                inv[static_cast<std::size_t>(old_node) * static_cast<std::size_t>(dof) + static_cast<std::size_t>(c)] =
-                    new_node * dof + c;
-            }
+        for (int new_index = 0; new_index < n; ++new_index) {
+            const int old_index = order.indices()(new_index);
+            FE_THROW_IF(old_index < 0 || old_index >= n || inv[static_cast<std::size_t>(old_index)] >= 0,
+                        FEException, "FsilsGatheredDirectSolver: invalid AMD ordering");
+            inv[static_cast<std::size_t>(old_index)] = new_index;
         }
-        ordering_valid = true;
     }
 
     /// Build the CSC structure (permuted numbering) and the slot map from the
@@ -343,13 +372,13 @@ struct FsilsGatheredDirectSolver::Impl {
 
         std::string reason;
         auto addReason = [&](const char* r) { reason += reason.empty() ? r : (std::string("+") + r); };
-        if (!ordering_valid || dof != d || gnNo != gn || g_row_ptr != row_ptr || g_cols != cols) {
-            addReason(ordering_valid ? "pattern" : "first");
+        if (!pattern_valid || dof != d || gnNo != gn || g_row_ptr != row_ptr || g_cols != cols) {
+            addReason(pattern_valid ? "pattern" : "first");
             dof = d;
             gnNo = gn;
             g_row_ptr = std::move(row_ptr);
             g_cols = std::move(cols);
-            ordering_valid = false;
+            pattern_valid = true;
             structure_valid = false;
             keep.clear();
         }
@@ -408,11 +437,9 @@ struct FsilsGatheredDirectSolver::Impl {
             }
         }
 
-        if (!ordering_valid) {
+        if (!structure_valid) {
             computeOrdering();
             decision.ordered = 1;
-        }
-        if (!structure_valid) {
             buildStructure();
             lu.reset();
         }
@@ -785,7 +812,7 @@ SolverReport FsilsGatheredDirectSolver::solve(const FsilsMatrix& A,
             decision = RootDecision{};
             decision.status = 3;
             root_error = e.what();
-            st.ordering_valid = false;
+            st.pattern_valid = false;
             st.structure_valid = false;
             st.keep.clear();
             st.lu.reset();
