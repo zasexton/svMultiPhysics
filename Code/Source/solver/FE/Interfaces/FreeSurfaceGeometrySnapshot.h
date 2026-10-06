@@ -128,9 +128,10 @@ struct FreeSurfaceGeometryRuleRecord {
     FreeSurfaceGeometryMomentCertificate moment_certificate{};
     // Classification-only storage of a validated full-cell volume rule (see
     // FreeSurfaceGeometrySnapshotPolicy::classification_only_full_cell_side).
-    // The point lists of reference_rule and physical_rule are empty; every
-    // other field keeps its value, and classification_only_content_digest is
-    // the content digest of the materialized record.
+    // The point lists of reference_rule and physical_rule and the parent-cell
+    // moments of moment_certificate are empty; every other field keeps its
+    // value, and classification_only_content_digest is the content digest of
+    // the materialized record.
     // materializeFreeSurfaceGeometryRuleRecord() recomputes the points.
     bool classification_only{false};
     std::uint64_t classification_only_content_digest{0};
