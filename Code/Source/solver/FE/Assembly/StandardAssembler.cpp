@@ -3000,7 +3000,9 @@ void mixCutVolumeBasisCacheHash(std::uint64_t& h, Real value) noexcept
         mixCutVolumeBasisCacheHash(h, static_cast<std::uint64_t>(rule.side));
         mixCutVolumeBasisCacheHash(
             h, static_cast<std::uint64_t>(rule.geometric_dimension + 1));
-        mixCutVolumeBasisCacheHash(h, static_cast<std::uint64_t>(rule.points.size()));
+        mixCutVolumeBasisCacheHash(
+            h,
+            static_cast<std::uint64_t>(geometry::cutQuadratureRulePointCount(rule)));
         mixCutVolumeBasisCacheHash(h, rule.measure);
         mixCutVolumeBasisCacheHash(h, rule.parent_measure);
         mixCutVolumeBasisCacheHash(h, rule.volume_fraction);

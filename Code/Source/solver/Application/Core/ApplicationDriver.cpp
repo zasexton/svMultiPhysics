@@ -5573,7 +5573,11 @@ void dumpActiveCutVolumeRulesForProbe(const svmp::FE::systems::FESystem& system,
   oss << std::setprecision(17);
   oss << "CUT_RULE_DUMP step=" << step << " n_rules=" << rules.size() << "\n";
   for (std::size_t i = 0; i < rules.size() && i < metadata.size(); ++i) {
-    const auto& rule = rules[i];
+    std::optional<svmp::FE::geometry::CutQuadratureRule> materialized;
+    if (context->volumeRuleIsClassificationOnly(i)) {
+      materialized.emplace(context->materializedVolumeRule(i));
+    }
+    const auto& rule = materialized ? *materialized : rules[i];
     if (rule.kind != svmp::FE::geometry::CutQuadratureKind::Volume) {
       continue;
     }
@@ -6758,7 +6762,7 @@ std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
       }
     }
     const auto local_measure_summary =
-        application::core::collectCutVolumeMeasures(mesh, rules);
+        application::core::collectCutVolumeMeasures(mesh, rules, cut_context);
     if (local_measure_summary.revisioned_rule_count != 0u &&
         (local_measure_summary.free_surface_snapshot_revision_key !=
              diagnostic.free_surface_snapshot_revision_key ||
@@ -17093,7 +17097,10 @@ void mixCurvatureProjectionCutRuleSignature(
 {
   mixCurvatureSignature(seed, static_cast<std::uint64_t>(rule.kind));
   mixCurvatureSignature(seed, static_cast<std::uint64_t>(rule.side));
-  mixCurvatureSignature(seed, static_cast<std::uint64_t>(rule.points.size()));
+  mixCurvatureSignature(
+      seed,
+      static_cast<std::uint64_t>(
+          svmp::FE::geometry::cutQuadratureRulePointCount(rule)));
   mixCurvatureSignature(seed, rule.exact_for_constants ? 1u : 0u);
   mixCurvatureSignature(seed,
                         static_cast<std::uint64_t>(
@@ -20717,8 +20724,18 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
             .request = &request,
             .snapshot = geometry_snapshot.get(),
         });
+    // The context keeps only the classification of the dry full-cell rules
+    // too when no cut-volume kernel integrates over the dry side.
+    const auto classification_only_context_side =
+        snapshot_policy.classification_only_full_cell_side.has_value() &&
+                sim.fe_system->cutVolumeKernelCount(
+                    result.interface_marker, inactive_volume_side) == 0u
+            ? snapshot_policy.classification_only_full_cell_side
+            : std::optional<svmp::FE::geometry::CutIntegrationSide>{};
     context->addFreeSurfaceGeometrySnapshot(
-        geometry_snapshot, retained_volume_sides);
+        geometry_snapshot,
+        retained_volume_sides,
+        classification_only_context_side);
     logCutGeometryMemory("after_context_import");
     const auto global_boundary_intersection_fragments =
         globalSumSize(local_boundary_intersection_fragments, comm);
@@ -20736,13 +20753,15 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
             mesh_access,
             context->generatedVolumeRulesForMarkerAndSide(
                 result.interface_marker,
-                active_volume_side));
+                active_volume_side),
+            context.get());
     const auto inactive_measure_summary =
         application::core::collectCutVolumeMeasures(
             mesh_access,
             context->generatedVolumeRulesForMarkerAndSide(
                 result.interface_marker,
-                inactive_volume_side));
+                inactive_volume_side),
+            context.get());
     const auto global_active_physical_volume =
         static_cast<svmp::FE::Real>(globalSumDouble(
             static_cast<double>(active_measure_summary.physical_measure),

@@ -195,6 +195,8 @@ inline void accumulateCutKernelOutput(KernelOutput& dst, const KernelOutput& src
                 continue;
             }
 
+            CutIntegrationContext::requireMaterializedVolumeRule(
+                volume_rules[i]);
             CutRuleAssemblyRequest request;
             request.path = options.path;
             request.domain = CutDomainKind::Volume;

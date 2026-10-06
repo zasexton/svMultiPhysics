@@ -16,6 +16,7 @@
 #include "Core/Types.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -138,7 +139,22 @@ struct CutQuadratureRule {
     CutGeometryFrame frame{CutGeometryFrame::Reference};
     bool curved_geometry{false};
     bool full_cell_equivalent{false};
+    /**
+     * Number of points released by an owner that keeps only this rule's
+     * classification (see CutIntegrationContext classification-only volume
+     * rules).  Zero for every rule that holds its points.  Integrating
+     * consumers must not receive a rule with released points; the owner
+     * rematerializes them exactly on request.
+     */
+    std::uint32_t released_point_count{0};
 };
+
+/** Points of the rule, including any released by a classification-only owner. */
+[[nodiscard]] inline std::size_t cutQuadratureRulePointCount(
+    const CutQuadratureRule& rule) noexcept
+{
+    return rule.points.size() + rule.released_point_count;
+}
 
 using CutGeometryJacobian = std::array<std::array<Real, 3>, 3>;
 

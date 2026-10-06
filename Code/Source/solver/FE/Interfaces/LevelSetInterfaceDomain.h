@@ -551,6 +551,14 @@ struct CutInterfaceVolumeRegion {
         rule.provenance_id = request.source.identifier();
         rule.frame = request.frame;
         rule.full_cell_equivalent = full_cell_equivalent;
+        rule.points = cutQuadratureRulePoints(request);
+        return rule;
+    }
+
+    /** The points of toCutQuadratureRule(request), and nothing else. */
+    [[nodiscard]] std::vector<geometry::CutQuadraturePoint>
+    cutQuadratureRulePoints(const CutInterfaceDomainRequest& request) const {
+        std::vector<geometry::CutQuadraturePoint> points;
         if (quadrature_points.empty()) {
             geometry::CutQuadraturePoint qp;
             qp.point = centroid;
@@ -558,9 +566,9 @@ struct CutInterfaceVolumeRegion {
             qp.weight = measure;
             qp.parent_coordinate = centroid;
             qp.reference_measure_factor = measure;
-            rule.points.push_back(qp);
+            points.push_back(qp);
         } else {
-            rule.points.reserve(quadrature_points.size());
+            points.reserve(quadrature_points.size());
             for (auto point : quadrature_points) {
                 point.normal = normal;
                 if (request.frame == geometry::CutGeometryFrame::Reference) {
@@ -569,10 +577,10 @@ struct CutInterfaceVolumeRegion {
                 if (point.reference_measure_factor <= Real{0.0}) {
                     point.reference_measure_factor = point.weight;
                 }
-                rule.points.push_back(point);
+                points.push_back(point);
             }
         }
-        return rule;
+        return points;
     }
 };
 
