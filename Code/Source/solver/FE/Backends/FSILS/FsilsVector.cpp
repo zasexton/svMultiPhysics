@@ -500,6 +500,19 @@ public:
         return vec_;
     }
 
+    // The handle is an address that a later layout may reuse; the stamp
+    // tells resolved-entry caches that such a layout is a different one.
+    [[nodiscard]] std::uint64_t vectorLayoutRevision() const noexcept override
+    {
+        if (vec_ == nullptr) {
+            return 0u;
+        }
+        if (const auto* shared = vec_->shared()) {
+            return shared->layout_stamp;
+        }
+        return 0u;
+    }
+
     [[nodiscard]] assembly::InsertionCapabilities insertionCapabilities() const noexcept override
     {
         return assembly::InsertionCapabilities{
