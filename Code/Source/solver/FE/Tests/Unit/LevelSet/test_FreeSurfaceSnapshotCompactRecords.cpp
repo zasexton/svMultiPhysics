@@ -526,6 +526,8 @@ TEST(FreeSurfaceSnapshotCompactRecords,
                       materialized),
                   interfaces::freeSurfaceGeometryRuleContentDigest(a));
     }
+    // The record array is reserved exactly.
+    EXPECT_EQ(compact->rules().capacity(), compact->rules().size());
     EXPECT_GT(dry_full_count, 0u);
     EXPECT_GT(wet_full_count, 0u);
     EXPECT_GT(cut_volume_count, 0u);
@@ -848,6 +850,11 @@ TEST(FreeSurfaceSnapshotCompactRecords,
     }
     ASSERT_TRUE(first_released.has_value());
     EXPECT_EQ(compact->classificationOnlyVolumeRuleCount(), released);
+    // The per-rule arrays are reserved for the imported rules only.
+    EXPECT_LE(compact->volumeRules().capacity() - compact->volumeRules().size(),
+              compact->generatedPrunedVolumeRuleCount());
+    EXPECT_LE(compact->metadata().capacity() - compact->metadata().size(),
+              compact->generatedPrunedVolumeRuleCount());
     for (const auto side : {geometry::CutIntegrationSide::Negative,
                             geometry::CutIntegrationSide::Positive}) {
         const auto a = full.generatedVolumeDiagnosticsForMarkerAndSide(

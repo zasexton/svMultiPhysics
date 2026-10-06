@@ -978,6 +978,21 @@ public:
             }
         }
         auto volume_rules = domain.volumeQuadratureRules();
+        // Exact capacity for the imported rules: no growth slack in the
+        // per-rule arrays.
+        const auto imported_volume_rule_count = static_cast<std::size_t>(
+            std::count_if(volume_rules.begin(),
+                          volume_rules.end(),
+                          [&](const geometry::CutQuadratureRule& rule) {
+                              return !volume_side_filter.has_value() ||
+                                     rule.side == *volume_side_filter;
+                          }));
+        metadata_.reserve(metadata_.size() + imported_volume_rule_count);
+        volume_rules_.reserve(volume_rules_.size() +
+                              imported_volume_rule_count);
+        if (bindings_.size() == volume_rules_.size()) {
+            bindings_.reserve(bindings_.size() + imported_volume_rule_count);
+        }
         for (auto& rule : volume_rules) {
             if (volume_side_filter.has_value() &&
                 rule.side != *volume_side_filter) {
@@ -1588,6 +1603,19 @@ public:
             for (const auto& active : snapshot->activeBoundaryDomains()) {
                 bind_marker(active.marker());
             }
+            // Interface, contact and exterior-boundary rules all land in
+            // interface_rules_; reserve them together (at most one rule per
+            // fragment).
+            std::size_t interface_rule_capacity =
+                interface_rules_.size() +
+                snapshot->interfaceDomain().fragments().size();
+            for (const auto& contact : snapshot->contactDomains()) {
+                interface_rule_capacity += contact.fragments().size();
+            }
+            for (const auto& active : snapshot->activeBoundaryDomains()) {
+                interface_rule_capacity += active.fragments().size();
+            }
+            interface_rules_.reserve(interface_rule_capacity);
             addGeneratedInterfaceDomain(
                 snapshot->interfaceDomain(),
                 volume_side_filter,

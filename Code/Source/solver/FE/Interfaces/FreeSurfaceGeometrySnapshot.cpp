@@ -4490,7 +4490,17 @@ buildFreeSurfaceGeometrySnapshot(
     requireCompleteAuthoritativeCutFamilies(interface_domain);
     auto volume_rules = interface_domain.volumeQuadratureRules();
     auto interface_rules = interface_domain.interfaceQuadratureRules();
-    records.reserve(volume_rules.size() + interface_rules.size());
+    // Reserve every record up front (contact and exterior-boundary domains
+    // yield at most one rule per fragment), so the record array carries no
+    // growth slack.
+    std::size_t record_capacity = volume_rules.size() + interface_rules.size();
+    for (const auto& contact : contact_domains) {
+        record_capacity += contact.fragments().size();
+    }
+    for (const auto& active : active_boundary_domains) {
+        record_capacity += active.fragments().size();
+    }
+    records.reserve(record_capacity);
     // A full-cell rule of the classification-only side that is the only
     // volume rule of its parent is validated (rule checks, cell moments) and
     // digested as soon as it is materialized, and its points are released
