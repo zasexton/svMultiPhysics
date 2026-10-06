@@ -4737,6 +4737,9 @@ std::array<bool, 3> strongZeroVelocityComponentMask(
 
 struct ActiveCutContextRefreshReport {
   bool refreshed{false};
+  // Set by a cached refresh that kept the installed context because its
+  // content signature proves that it was generated from the same input.
+  bool reused_installed_context{false};
   std::uint64_t topology_key{0};
   std::uint64_t request_policy_key{0};
   std::uint64_t value_revision{0};
@@ -21601,6 +21604,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolutionCach
         cache.evaluated_state_source_revisions;
     skipped_report.topology_key =
         cache.topology_key.value_or(0u);
+    skipped_report.reused_installed_context = true;
     logActiveCutContextRefreshSkipped(
         *signature,
         provenance,
@@ -21711,6 +21715,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCachedFromVector
         cache.evaluated_state_source_revisions;
     skipped_report.topology_key =
         cache.topology_key.value_or(0u);
+    skipped_report.reused_installed_context = true;
     const char* skip_reason =
         vector_signature->solution_signature_kind ==
                 ActiveCutContextRefreshSignature::SolutionSignatureKind::
@@ -21754,6 +21759,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCachedFromVector
         cache.evaluated_state_source_revisions;
     skipped_report.topology_key =
         cache.topology_key.value_or(0u);
+    skipped_report.reused_installed_context = true;
     if (vector_signature.has_value()) {
       cache.last_vector_signature = *vector_signature;
     }
@@ -33042,12 +33048,20 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         postaccept_maintenance_final_topology_key;
     ActiveCutContextRefreshReport cut_report{};
     if (postaccept_maintenance_topology_tracking_required) {
-      // Rebuild from the already accepted physical endpoint before any
-      // maintenance functional is evaluated or any geometry checkpoint is
-      // captured.  The work ledger, geometry transaction backup, and topology
-      // baseline must all describe this same authoritative endpoint.
-      cut_refresh_cache->last_signature.reset();
-      cut_refresh_cache->last_vector_signature.reset();
+      // Establish the geometry of the already accepted physical endpoint
+      // before any maintenance functional is evaluated or any geometry
+      // checkpoint is captured.  The work ledger, geometry transaction backup,
+      // and topology baseline must all describe this same authoritative
+      // endpoint.  A cached refresh keeps the installed context only when its
+      // content signature (level-set bytes, level-set DOF layout, mesh
+      // revisions, request policy) and its snapshot source revisions prove
+      // that it was generated from this endpoint; otherwise it rebuilds.
+      // SVMP_DISABLE_POSTACCEPT_CUT_REUSE=1 restores the unconditional
+      // rebuild.
+      if (parseBoolEnv("SVMP_DISABLE_POSTACCEPT_CUT_REUSE", false)) {
+        cut_refresh_cache->last_signature.reset();
+        cut_refresh_cache->last_vector_signature.reset();
+      }
       const auto accepted_endpoint_report =
           refreshActiveCutIntegrationContextCached(
               sim,
@@ -33057,7 +33071,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               *cut_refresh_cache,
               "accepted_endpoint_before_postaccept_maintenance");
       const bool local_baseline_complete =
-          accepted_endpoint_report.refreshed &&
+          (accepted_endpoint_report.refreshed ||
+           accepted_endpoint_report.reused_installed_context) &&
           accepted_endpoint_report.request_policy_key ==
               expected_cut_request_policy_key &&
           accepted_endpoint_report.topology_key != 0u &&
@@ -33669,8 +33684,29 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               std::span<const LevelSetVolumeCorrectionMaintenanceEvent>
                   staged_volume_corrections) {
             ensure_maintenance_geometry_transaction();
-            cut_report = maintenance_geometry_transaction->refresh(
-                params, candidate, /*force_rebuild=*/true);
+            // The final candidate usually equals the after-candidate of the
+            // last maintenance stage, whose refresh already generated its
+            // geometry.  The cached refresh keeps that context only when its
+            // content signature and snapshot source revisions prove it, so
+            // the topology key below is the one a rebuild would produce.
+            // SVMP_DISABLE_POSTACCEPT_CUT_REUSE=1 restores the forced rebuild.
+            auto validator_report = maintenance_geometry_transaction->refresh(
+                params,
+                candidate,
+                /*force_rebuild=*/parseBoolEnv(
+                    "SVMP_DISABLE_POSTACCEPT_CUT_REUSE", false));
+            const bool keep_generating_report =
+                validator_report.reused_installed_context &&
+                cut_report.refreshed &&
+                cut_report.topology_key == validator_report.topology_key &&
+                cut_report.evaluated_state_source_revisions ==
+                    validator_report.evaluated_state_source_revisions;
+            if (!keep_generating_report) {
+              // Otherwise cut_report keeps the full report of the refresh
+              // that generated the installed context, for the accepted-step
+              // log below.
+              cut_report = std::move(validator_report);
+            }
             if (postaccept_maintenance_topology_tracking_required &&
                 cut_report.request_policy_key ==
                     expected_cut_request_policy_key &&
