@@ -379,10 +379,13 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   - **Sessile drop:** contact-line behaviour is unchanged at 2–4× the protocol step.
   - **Energy:** does not increase, except for two start-up steps accepted on a frozen epoch after a topology cycle (relative 3.5e-7 and 7.6e-7).
   - **Risks:** frozen-epoch acceptance leaves the term non-zero; GMRES iterations rise to about 150 at the largest steps.
-  - **Pending user decision (recommended):**
-    - M2 at a fixed physical Δt: La = 12 at Δt = 0.02; La = 120 at Δt = 0.01, or 0.02 with reconciliation.
-    - M3 at 50 steps per period with a 100-step check.
-    - A `tolerances.json` Δt criterion: every gate passes at both Δt, and the gated quantity changes by ≤ 0.1% when the step is halved (M3: frequency ≤ 0.2%, damping ≤ 1%).
+- **D19, 2026-10-05: new time-step protocols built on D13.** The lagged-increment term is on by default in the M2 and M3 generators.
+  - M2: one fixed physical Δt for all levels, Δt = 0.02 at La = 12 and 0.01 at La = 120.
+  - M3: 50 steps per inviscid period at every level.
+  - Each protocol is checked against a Δt/2 run.
+  - Criterion in `tolerances.json`: every gate passes in both studies, and the gated quantity changes by at most 0.1% when the step is halved (M2: pressure jump at the finest level; M3: frequency ≤ 0.2%, damping ≤ 1% at the finest level).
+  - The old protocols stay reproducible through generator options.
+  - Implementation and the new protocol runs: `dev/benchmark-protocol-dt`.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
