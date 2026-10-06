@@ -4311,4 +4311,42 @@ TEST(FsilsBackend, ResolvedVectorEntriesIrregularInsertMatchesDirectInsert)
     }
 }
 
+TEST(FsilsBackend, LayoutRevisionsNeverRepeatAcrossLayouts)
+{
+    // Assembly caches resolved insertion slots under (layout handle, layout
+    // revision).  The handle is the FsilsShared address, which a later layout
+    // may reuse after the first one is destroyed, so the revisions of
+    // distinct layouts must never coincide.
+    FsilsFactory factory(/*dof_per_node=*/1);
+
+    std::uint64_t first_matrix_revision = 0u;
+    std::uint64_t first_vector_revision = 0u;
+    {
+        sparsity::SparsityPattern diagonal(4, 4);
+        for (GlobalIndex i = 0; i < 4; ++i) {
+            diagonal.addEntry(i, i);
+        }
+        diagonal.finalize();
+        auto matrix = factory.createMatrix(diagonal);
+        auto vector = factory.createVector(4);
+        auto* fsils_vector = dynamic_cast<FsilsVector*>(vector.get());
+        ASSERT_NE(fsils_vector, nullptr);
+        ASSERT_NE(fsils_vector->shared(), nullptr);
+        first_matrix_revision = matrix->createAssemblyView()->matrixLayoutRevision();
+        first_vector_revision = vector->createAssemblyView()->vectorLayoutRevision();
+        EXPECT_NE(first_matrix_revision, 0u);
+        EXPECT_EQ(first_vector_revision, fsils_vector->shared()->layout_stamp);
+        EXPECT_NE(first_vector_revision, 0u);
+    }
+
+    auto matrix = factory.createMatrix(make_dense_pattern(4));
+    auto vector = factory.createVector(4);
+    const auto second_matrix_revision =
+        matrix->createAssemblyView()->matrixLayoutRevision();
+    const auto second_vector_revision =
+        vector->createAssemblyView()->vectorLayoutRevision();
+    EXPECT_GT(second_matrix_revision, first_matrix_revision);
+    EXPECT_NE(second_vector_revision, first_vector_revision);
+}
+
 } // namespace svmp::FE::backends
