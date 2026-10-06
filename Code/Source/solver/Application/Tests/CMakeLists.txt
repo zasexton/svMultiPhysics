@@ -175,7 +175,11 @@ if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
     "${CMAKE_SOURCE_DIR}/../tests/cases/fluid/free_surface_benchmarks")
   if(Python3_Interpreter_FOUND AND TARGET ${SV_MULTIPHYSICS_EXE} AND
      EXISTS "${_free_surface_benchmarks}")
-    string(REPLACE ";" " " _free_surface_mpiexec_preflags "${MPIEXEC_PREFLAGS}")
+    # SVMP_TEST_MPIEXEC_PREFLAGS (--bind-to none) keeps these ranks off the
+    # cores of MPI entries that ctest -j runs at the same time.
+    string(REPLACE ";" " " _free_surface_mpiexec_preflags
+           "${SVMP_TEST_MPIEXEC_PREFLAGS} ${MPIEXEC_PREFLAGS}")
+    string(STRIP "${_free_surface_mpiexec_preflags}" _free_surface_mpiexec_preflags)
     add_test(
       NAME Application_FreeSurfaceRankConsistency_MPI_4
       COMMAND ${Python3_EXECUTABLE}
@@ -195,6 +199,7 @@ if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
         PROCESSORS 4
         TIMEOUT 3600
         SKIP_RETURN_CODE 77
+        LABELS MPI
         ENVIRONMENT
           "OMPI_ALLOW_RUN_AS_ROOT=1;OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1"
     )
