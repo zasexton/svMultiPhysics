@@ -4521,7 +4521,7 @@ void alignLeafCutNormalsWithEvaluator(
             normal = {{-normal[0], -normal[1], -normal[2]}};
         }
         region.normal = normal;
-        for (auto& qp : region.quadrature_points) {
+        for (auto& qp : region.quadrature_points.mutate()) {
             qp.normal = region.normal;
         }
     }
@@ -4787,7 +4787,7 @@ void appendFullRectangleRegion(
                 rectangleVolumeQuadraturePoints(
                     rect, request.resolvedVolumeQuadratureOrder());
             region.reference_subcells = rectangleReferenceSubcells(rect);
-            for (auto& point : region.quadrature_points) {
+            for (auto& point : region.quadrature_points.mutate()) {
                 point.normal = region.normal;
             }
         }
@@ -4844,7 +4844,7 @@ void appendFullBoxRegion(
                 boxVolumeQuadraturePoints(
                     box, request.resolvedVolumeQuadratureOrder());
             region.reference_subcells = boxReferenceSubcells(box);
-            for (auto& point : region.quadrature_points) {
+            for (auto& point : region.quadrature_points.mutate()) {
                 point.normal = region.normal;
             }
         }
@@ -4900,7 +4900,7 @@ void appendFullTriangleRegion(
                     tri.a, tri.b, tri.c, request.resolvedVolumeQuadratureOrder());
             region.reference_subcells = {
                 referenceTriangle(tri.a, tri.b, tri.c)};
-            for (auto& point : region.quadrature_points) {
+            for (auto& point : region.quadrature_points.mutate()) {
                 point.normal = region.normal;
             }
         }
@@ -4958,7 +4958,7 @@ void appendFullTetrahedronRegion(
                     tet, request.resolvedVolumeQuadratureOrder());
             region.reference_subcells = {
                 referenceTetrahedron(tet.a, tet.b, tet.c, tet.d)};
-            for (auto& point : region.quadrature_points) {
+            for (auto& point : region.quadrature_points.mutate()) {
                 point.normal = region.normal;
             }
         }
@@ -5131,7 +5131,7 @@ void appendLinearizedRectangleCut(
             region.quadrature_points = rectangleVolumeQuadraturePoints(
                 rect, request.resolvedVolumeQuadratureOrder());
             region.reference_subcells = rectangleReferenceSubcells(rect);
-            for (auto& point : region.quadrature_points) {
+            for (auto& point : region.quadrature_points.mutate()) {
                 point.normal = region.normal;
             }
         }
@@ -5199,7 +5199,7 @@ void appendLinearizedTriangleCut(
                 request.resolvedVolumeQuadratureOrder());
             region.reference_subcells = {
                 referenceTriangle(tri.a, tri.b, tri.c)};
-            for (auto& point : region.quadrature_points) {
+            for (auto& point : region.quadrature_points.mutate()) {
                 point.normal = region.normal;
             }
         }
@@ -5282,7 +5282,7 @@ void appendLinearizedTetrahedronCutResult(
                 tet, request.resolvedVolumeQuadratureOrder());
             region.reference_subcells = {
                 referenceTetrahedron(tet.a, tet.b, tet.c, tet.d)};
-            for (auto& point : region.quadrature_points) {
+            for (auto& point : region.quadrature_points.mutate()) {
                 point.normal = region.normal;
             }
         }
@@ -6623,7 +6623,7 @@ void recordRecursiveBackendDiagnostics(
         region.measure *= scale;
         region.volume_fraction =
             std::clamp(region.measure / parent_measure, Real{0.0}, Real{1.0});
-        for (auto& point : region.quadrature_points) {
+        for (auto& point : region.quadrature_points.mutate()) {
             point.weight *= scale;
             point.reference_measure_factor *= scale;
         }
