@@ -1154,6 +1154,9 @@ class LinearSolverParameters : public ParameterLists
     Parameter<std::string> right_preconditioner;
     /// Opt-in reuse of preconditioners/factorizations across solves (new OOP solver).
     Parameter<bool> preconditioner_reuse;
+    /// Opt-in inexact Newton forcing of the linear tolerance (new OOP solver):
+    /// none, eisenstat_walker.
+    Parameter<std::string> inexact_newton_forcing;
 
     //Parameter<std::string> preconditioner;
 

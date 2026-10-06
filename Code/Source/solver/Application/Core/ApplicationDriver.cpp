@@ -3552,6 +3552,27 @@ void applyMonolithicEquationNewtonControls(
     }
   }
 
+  // Opt-in inexact Newton forcing (<LS><Inexact_Newton_forcing>), read from
+  // the equations that control the monolithic solve.
+  using ForcingMode = svmp::FE::timestepping::NewtonOptions::LinearForcingOptions::Mode;
+  for (const auto* equation : equations) {
+    const auto& forcing = equation->linear_solver.inexact_newton_forcing;
+    if (!forcing.defined()) {
+      continue;
+    }
+    const auto value = normalized_token(forcing.value());
+    if (value.empty() || value == "none" || value == "fixed" || value == "off") {
+      continue;
+    }
+    if (value == "eisenstatwalker" || value == "ew") {
+      options.linear_forcing.mode = ForcingMode::EisenstatWalker;
+      continue;
+    }
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Unsupported <Inexact_Newton_forcing> '" +
+        forcing.value() + "'. Supported values: none, eisenstat_walker.");
+  }
+
   if (maximum_iterations.has_value()) {
     options.max_iterations = *maximum_iterations;
   }
