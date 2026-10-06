@@ -14,7 +14,7 @@ Files:
 |---|---|
 | `generate_case.py` | writes `solver.xml`, the mesh with the initial fields, the wall faces and `case.json` for one level |
 | `verify.py` | reads the solver output of one or more levels, computes the metrics, applies `tolerances.json` |
-| `tolerances.json` | acceptance criteria and their sources, fixed on 2026-09-29 before the first run; time step revised on 2026-09-30 (see "Time step") |
+| `tolerances.json` | acceptance criteria and their sources, fixed on 2026-09-29 before the first run; time step revised on 2026-09-30 and on 2026-10-05 (D13, see "Time step") |
 | `tests/test_free_surface_benchmark_static_drop_2d.py` | checks of the two scripts on synthetic data |
 
 ## Physical setup
@@ -105,17 +105,30 @@ The factor `1/sqrt(2)` relative to the tracker's form of the limit is
 derived from this one-sided density sum; it is not tuned. Viscosity relaxes
 the limit (Galusinski and Vigneaux 2008).
 
-The protocol step is `m dt_B`, with `dt_B` the limit above, `m = 2` at
-`La = 12` and `m = 1` at `La = 120`.  The step-0 measurement (tracker,
-2026-09-30, jobs `46075447` and `46076505`) found that the outer geometry loop
-accepts `2 dt_B` at `La = 12` and only `dt_B` at `La = 120` with its default
-12-pass cap.  `generate_case.py` then rounds `dt` down so that the run is
-exactly 100 equal output intervals.
+**Protocol step (decision D13, 2026-10-05).** The lagged normal-increment
+capillary term (`Surface_tension_semi_implicit = NormalIncrement`,
+`Physics/Docs/NavierStokesFreeSurface.md`) removes this limit, so every level
+uses one fixed physical step: `dt = 0.02` at `La = 12` (618 steps) and
+`dt = 0.01` at `La = 120` (3,900 steps), at any `R/h`. The term is on by
+default. The output cadence is the nearest whole number of steps per 1/100 of
+the run, which ends at the first output at or after 5 viscous times.
+Validation: `Documentation/free_surface_semi_implicit_surface_tension_design.md`,
+§9.3 and §9.9. Other Laplace numbers have no fixed step yet and keep the
+earlier rule below (`dt_rule = protocol_capillary_limit` in `case.json`).
 
-The step is kept per level (it scales as `h^(3/2)`) rather than fixed across
-levels as decision D10 asks of the transient benchmarks: every gated metric
-is taken on the relaxed steady state after 5 viscous times, where the time
-derivative vanishes, so the time-step error does not enter the metrics.
+**Half-step check.** Each refinement study is also run at `dt/2`
+(`--dt-divisor 2`: twice the steps and the cadence, the same output times).
+Every gate must pass at both steps, and the pressure jump at the finest level
+may change by at most 0.1% (`time_step_criterion` in `tolerances.json`;
+measured: at most 6e-6). `Ca_sp` is reported at each step.
+
+**Earlier protocol (until 2026-10-05).** The step was `m dt_B`, with `dt_B` the
+limit above, `m = 2` at `La = 12` and `m = 1` at `La = 120` (step-0
+measurement, tracker, 2026-09-30, jobs `46075447` and `46076505`), rounded down
+to 100 equal output intervals, with the term off. It scales as `h^(3/2)`:
+500/1,400/4,000 steps at `La = 12` and 3,200/8,800/24,900 at `La = 120` for
+`R/h = 8/16/32`. Reproduce it with
+`--dt-multiple <m> --surface-tension-semi-implicit None`.
 
 **Run length.** `T = 5 t_mu`, the lower end of the 5 to 10 viscous times of
 D3. There are 100 VTU snapshots, one every `T/100`.
@@ -149,7 +162,10 @@ status 2 on a `--max-steps` smoke run, unless `--allow-truncated` is given.
 
 ## Tolerances and their sources
 
-Each criterion applies to each (capillary form, La) refinement study.
+Each criterion applies to each (capillary form, La, dt divisor) refinement
+study, so it must pass at `dt` and at `dt/2`. The time-step criterion (D13)
+is printed as a separate gated line, or as not evaluated when only one
+divisor is given.
 
 | Criterion | Limit | Where | Source |
 |---|---|---|---|
@@ -157,6 +173,7 @@ Each criterion applies to each (capillary form, La) refinement study.
 | `parasitic_capillary_number` | strictly decreasing with refinement; absolute values reported, no absolute limit | decreasing over all levels present (at least 8/16/32) | Decision of 2026-09-29, tracker M2; see below |
 | `no_velocity_growth` | growth ratio at most 1 | every level | D1 working criterion, tracker M2 |
 | `volume_drift` | at most 1e-4 | every level | D1 working criterion, tracker M2 |
+| `time_step` | pressure jump changes by at most 0.001 between `dt` and `dt/2`; `Ca_sp` reported at each step | finest common level of the two studies | D13, 2026-10-05 |
 
 ### The July 2026 SurfaceStress level
 
@@ -225,9 +242,10 @@ for form in surface_stress kag_lumped kag_consistent; do for L in 8 16 32; do
   python3 $B/generate_case.py --level $L --capillary-form $form --laplace-number 12 --output-dir $d
   sbatch --export=NONE --time=<see table> --job-name=drop_${form}_L$L \
          --output=$d/slurm-%j.out $JOB $d $SVMP <timeout_s>
+  # half-step check: the same with --dt-divisor 2 into $OUT/La12/$form/L${L}_dt2
 done; done
-# after the jobs end:
-python3 $B/verify.py $OUT/La12/surface_stress/L{8,16,32} --json $OUT/La12_surface_stress.json
+# after the jobs end (both steps in one call; verify.py groups by dt divisor):
+python3 $B/verify.py $OUT/La12/surface_stress/L{8,16,32}{,_dt2} --json $OUT/La12_surface_stress.json
 ```
 
 The solver log is about 0.17 MB per step, so compress it. VTU snapshots are
@@ -235,26 +253,38 @@ The solver log is about 0.17 MB per step, so compress it. VTU snapshots are
 check use `--max-steps 5`; `verify.py` refuses such runs unless
 `--allow-truncated` is given.
 
-**Time-step studies.** `generate_case.py` has three options for studies
-outside the protocol step; the default solver input is unchanged:
+**Time-step options.** `generate_case.py` sets the step as follows:
 
-- `--dt-multiple m` uses `m dt_B` instead of the per-La multiple, rounded down
-  to the 100 output intervals as in the protocol.
-- `--dt <step>` keeps this exact step. The output cadence is the nearest whole
-  number of steps per output, and the run ends at the first output at or after
-  5 viscous times, so nested steps (0.04, 0.02, 0.01 at La = 12) share their
-  output times.
-- `--surface-tension-semi-implicit NormalIncrement` adds the lagged
-  normal-increment term (decision D13, `Physics/Docs/NavierStokesFreeSurface.md`).
-  Its validation and step study are in
-  `Documentation/free_surface_semi_implicit_surface_tension_design.md`, §9.
+- default: the D13 step of the Laplace number (see "Time step").
+- `--dt-divisor 2` divides the step by 2 with unchanged output times.
+- `--dt-multiple m` uses `m dt_B`, rounded down to the 100 output intervals
+  (the earlier rule).
+- `--dt <step>` keeps this exact step, as the protocol step is kept; nested
+  steps (0.04, 0.02, 0.01 at La = 12) share their output times.
+- `--surface-tension-semi-implicit None` removes the D13 term.
 
-`case.json` records `dt_rule` (`protocol`, `multiple_override` or `fixed`) and
+`case.json` records `dt_rule` (`protocol_fixed`, `protocol_capillary_limit`,
+`multiple_override` or `fixed`), `dt_base`, `dt_divisor` and
 `surface_tension_semi_implicit`.
 
 ## Expected cost per level
 
-Measured on 2026-09-30 (Slurm job `46089180`, source `b4b376a0`, after the
+**D13 protocol** (design note §9.3, 2026-10-03; `surface_stress`, PDE
+transport, term on, 4 MPI ranks at `R/h = 16` and 32, serial at 8, on one
+loaded 24-core node). Outer passes stay at about 3 per step (at most 5), so
+the time follows the step count:
+
+| La | dt | steps (any R/h) | time at R/h = 32 |
+|---:|---:|---:|---:|
+| 12 | 0.02 (protocol) | 618 | 4,800 s |
+| 12 | 0.01 (half step) | 1,236 | 8,900 s |
+| 120 | 0.01 (protocol) | 3,900 | 28,800 s |
+| 120 | 0.005 (half step) | 7,800 | about 58,000 s (estimate) |
+
+At `R/h = 32` this is 6 times fewer outer passes than the earlier protocol at
+`La = 12` and 8 times fewer than the projected run at `La = 120`.
+
+**Earlier protocol**, measured on 2026-09-30 (Slurm job `46089180`, source `b4b376a0`, after the
 solver speed-ups of `67b4395a`): `surface_stress`, La = 12, `2 dt_B`, serial,
 8 runs sharing one node.
 

@@ -17,9 +17,11 @@
     ],
     "viscous_times": 5,
     "snapshots": 100,
-    "time_step": "dt <= m * dt_B, dt_B = sqrt(rho*h^3/(4*pi*gamma)) = (1/sqrt(2)) * sqrt(rho*h^3/(2*pi*gamma)), rounded down so that the run is 100 equal output intervals; m = 2 at La = 12 and m = 1 at La = 120. Changed on 2026-09-30 from m = 1 at every La: the step-0 measurement (tracker, jobs 46075447 and 46076505) found that the outer geometry loop accepts 2 dt_B at La = 12 and only dt_B at La = 120 with its default 12-pass cap. The gated metrics are relaxed steady-state values, so the time step does not enter them (decision D10; README.md).",
+    "time_step": "Decision D13 (2026-10-05): the lagged normal-increment capillary term is on (Surface_tension_semi_implicit = NormalIncrement) and every level uses one fixed physical step: dt = 0.02 at La = 12 and dt = 0.01 at La = 120 (618 and 3900 steps at any R/h). The output cadence is the nearest whole number of steps per 1/100 of the run, which ends at the first output at or after 5 viscous times. Other Laplace numbers keep the earlier capillary-limit rule (time_step_before_D13). Each study is run at dt and at dt/2 (generate_case.py --dt-divisor 1 and 2); see time_step_criterion.",
+    "time_step_before_D13": "Until 2026-10-05, with the term off: dt <= m * dt_B, dt_B = sqrt(rho*h^3/(4*pi*gamma)) = (1/sqrt(2)) * sqrt(rho*h^3/(2*pi*gamma)), rounded down so that the run is 100 equal output intervals; m = 2 at La = 12 and m = 1 at La = 120. Changed on 2026-09-30 from m = 1 at every La: the step-0 measurement (tracker, jobs 46075447 and 46076505) found that the outer geometry loop accepts 2 dt_B at La = 12 and only dt_B at La = 120 with its default 12-pass cap. The gated metrics are relaxed steady-state values, so the time step does not enter them (decision D10; README.md). Reproduced by generate_case.py --dt-multiple <m> --surface-tension-semi-implicit None.",
+    "surface_tension_semi_implicit": "NormalIncrement (decision D13, 2026-10-05; None before)",
     "level_set_velocity": "Level-set advection velocity (decision D9): see README.md for the value in use and its validation.",
-    "note": "Criteria apply separately to each (capillary form, Laplace number) refinement study. See README.md for the definitions and the cost of each level."
+    "note": "Criteria apply separately to each (capillary form, Laplace number, dt divisor) refinement study, and must pass at dt and at dt/2. See README.md for the definitions and the cost of each level."
   },
   "criteria": [
     {
@@ -93,5 +95,25 @@
       "at_level": "each",
       "source": "Decision D1 working criterion (tracker section 5, M2: volume drift <= 1e-4)"
     }
-  ]
+  ],
+  "time_step_criterion": {
+    "id": "time_step",
+    "decided_on": "2026-10-05",
+    "source": "Decision D13 (design note Documentation/free_surface_semi_implicit_surface_tension_design.md, section 9.9): every gate passes at both steps, and the gated pressure jump changes by at most 0.1% when the step is halved. Measured in section 9.3: at most 5.9e-6 (La = 12) and 5.2e-6 (La = 120).",
+    "quantity": "pressure_jump",
+    "definition": "|dp(dt) - dp(dt/2)| / |dp(dt/2)|, dp = p_in - p_ext as in pressure_jump, between the dt divisor 1 and 2 studies of one (capillary form, Laplace number) at their finest common level.",
+    "limit": 0.001,
+    "at_level": "finest common level of the dt and dt/2 studies",
+    "dt_divisors": [
+      1,
+      2
+    ],
+    "refined_step_levels": "all",
+    "gates_at_each_step": "every criterion applies to the dt and to the dt/2 study; refined_step_levels = all means the dt/2 study must contain every level the criteria need",
+    "reported": [
+      "parasitic_capillary_number_final"
+    ],
+    "reported_note": "Ca_sp is reported for each step and level (it depends on dt at coarse levels; design note section 9.8, risk 4).",
+    "when_one_divisor_only": "reported as not evaluated; does not fail"
+  }
 }
