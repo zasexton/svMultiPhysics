@@ -404,7 +404,7 @@ resolve, its velocity is zero, and it stays negative to the end.
 
 | Test (restart from the saved step-840 state, or offline replay) | Result |
 |---|---|
-| solver, reconciliation on / off / extension wall impermeability off | crossing after about 95 / 75 / 60 steps |
+| solver, reconciliation on / off / extension wall impermeability off | crossing after 89 / 75 / 47 steps |
 | solver, SUPG off | identical to SUPG on to four digits (`tau` is about `dt/4` at Courant number 0.004) |
 | offline replay of the P1 Galerkin/SUPG/generalized-alpha step from the saved `phi` and `w`, no reconciliation | reproduces the decline and the crossing (between steps 952 and 1008; the run crossed at 948); on the 60 degree run without reconciliation it follows the solver to `5e-4 h` over 170 steps |
 | replay decomposition, steps 504 to 1008 | consistent-mass coupling to the neighbours `-0.44 h`, own Galerkin advection at the stagnation point `-0.67 h` |
@@ -426,6 +426,40 @@ nodes whose patch lies in one phase at the previous state and, apart from
 the node, at the transported endpoint. Nodes of cut cells never change:
 the contact line, the angle and the area are not touched (no second angle
 mechanism, D4; no effect on the area, D11), and there is no parameter (P1).
+
+**Validation** (`R/h = 16`, `SurfaceStress`, generator defaults with the
+patch bounds; build of the branch at `056fa2aa` plus the three patch-bound
+commits; job 46685007). The restart runs start from the saved states of the
+runs without the bounds:
+
+| Run | Wall crossings without the bounds | With the bounds |
+|---|---|---|
+| 120 deg, from step 840, reconciliation on | 4 from step 840 + 89 | 2 throughout; the vertex stays at `0.338 h` |
+| 120 deg, from step 840, reconciliation off | 4 from step 840 + 75 | 2 throughout |
+| 60 deg, from step 2128, reconciliation off | 4 from step 2128 + 187 | 2 throughout; the vertex stays at `-0.741 h` |
+| 60 deg, from step 2128, reconciliation on | 2 throughout | 2 throughout |
+
+Full protocol, 2800 steps to `T = 12.25` (`verify.py` at a single level
+reports the angle, base and apex criteria as failed only because they are
+gated at `R/h = 32`; before the bounds the 120 degree run stopped with
+"expected two wall contact points, found 4"):
+
+| `theta_e` | wall crossings | left, right angle (deg) | angle error | base error | apex error | max area drift | growth ratio |
+|---:|---|---|---:|---:|---:|---:|---:|
+| 60 | 2 at all 101 outputs | 61.745, 58.435 | 1.745 | 1.02e-3 | 2.85e-3 | 8.7e-6 | 0.744 |
+| 120 | 2 at all 101 outputs | 120.112, 120.660 | 0.660 | 5.16e-3 | 1.47e-3 | 1.5e-5 | 0.513 |
+
+The errors are against the reference cap with the initial area. The 60
+degree histories match the reconciled run without the bounds (which had no
+spot) to 0.02 degrees in angle, `1e-5` in base and `2.4e-5` in apex height.
+The 120 degree histories match the reconciled run without the bounds to
+1.6 degrees, `3e-3` and `3.4e-4` before its spot (`t < 4.16`). The bounds act
+on at most 8 nodes per step with corrections of at most `1.9e-4` (`h/330`);
+no node had to be stopped from crossing, because the bound holds each drifting
+node from its first excursion on. The patch bounds add no measurable time (353 s against 365 s for the 200-step 120 degree restart case with the option off, in the same job).
+With the option off the solver output is bitwise identical to the solver
+without it (120 degree restart case, `capillary_wave_2d` `lambda/h = 16`,
+`linear_sloshing_2d` `L/h = 16`).
 
 ## Smoke runs before the vertex-crossing fixes (2026-09-30)
 
