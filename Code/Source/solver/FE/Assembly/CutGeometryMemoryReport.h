@@ -196,6 +196,19 @@ inline void addRegion(VolumeStorage& storage,
             sizeof(interfaces::CutInterfaceVolumeRegion) +
         (domain.fragments().capacity() - domain.fragments().size()) *
             sizeof(interfaces::CutInterfaceFragment);
+    // Domain copies share their arrays: split the bytes between them.
+    const auto share_count = domain.volumeRegionShareCount();
+    if (share_count > 1) {
+        const auto divisor = static_cast<std::size_t>(share_count);
+        for (auto& side : storage.regions.classes) {
+            for (auto& entry : side) {
+                entry.bytes /= divisor;
+            }
+        }
+        storage.fragments.bytes /= divisor;
+        storage.sensitivity_bytes /= divisor;
+        storage.container_slack_bytes /= divisor;
+    }
     return storage;
 }
 
