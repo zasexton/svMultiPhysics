@@ -385,7 +385,16 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   - Each protocol is checked against a Δt/2 run.
   - Criterion in `tolerances.json`: every gate passes in both studies, and the gated quantity changes by at most 0.1% when the step is halved (M2: pressure jump at the finest level; M3: frequency ≤ 0.2%, damping ≤ 1% at the finest level).
   - The old protocols stay reproducible through generator options.
-  - Implementation and the new protocol runs: `dev/benchmark-protocol-dt`.
+  - **Implemented 2026-10-05 (`c5798e96`, `0fbe786c`; benchmark Python tests 114/114):**
+    - New generator defaults, with the old protocols reproducible bitwise:
+      - M2: `--dt-multiple 2|1 --surface-tension-semi-implicit None`;
+      - M3: `--dt-rule capillary-limit --surface-tension-semi-implicit None`.
+    - `verify.py` gates the Δt criterion between the Δt and Δt/2 groups at the finest common level, and prints "not evaluated" when only one Δt is given. M2 requires every level at Δt/2; M3 requires only λ/h = 64.
+    - `fitted_capillary_wave_2d` is pinned to the capillary-limit rule, so it is unchanged.
+    - **New protocol runs:** binary `aa811c43`, PDE transport plus kinematic reconciliation, `surface_stress`, outputs in `/scratch/users/zsexton/free-surface-benchmarks/protocol-2026-10-05/`:
+      - job `46704017`: M2 La = 12, R/h = 8/16/32 at Δt and Δt/2, 4 ranks each;
+      - job `46704018`: M2 La = 120, same layout;
+      - job `46704019`: M3 λ/h = 16/32/64 at 50 steps per period plus λ/h = 64 at 100, serial.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
