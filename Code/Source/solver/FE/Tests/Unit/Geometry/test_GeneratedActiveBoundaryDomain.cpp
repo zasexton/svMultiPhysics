@@ -6415,8 +6415,9 @@ TEST(FreeSurfaceGeometrySnapshot,
             region.side == FE::geometry::CutIntegrationSide::Negative
                 ? FE::Real{-0.25}
                 : FE::Real{0.25};
-        region.quadrature_points.front().point[0] = shifted_x;
-        region.quadrature_points.front().parent_coordinate[0] = shifted_x;
+        auto& shifted_points = region.quadrature_points.mutate();
+        shifted_points.front().point[0] = shifted_x;
+        shifted_points.front().parent_coordinate[0] = shifted_x;
         defect.addVolumeRegion(std::move(region));
     }
     EXPECT_THROW(
@@ -6502,10 +6503,11 @@ TEST(FreeSurfaceGeometrySnapshot,
             ASSERT_NEAR(region.quadrature_points[0].weight,
                         region.quadrature_points[1].weight,
                         1.0e-15);
-            region.quadrature_points[0].point[1] += 0.05;
-            region.quadrature_points[0].parent_coordinate[1] += 0.05;
-            region.quadrature_points[1].point[1] -= 0.05;
-            region.quadrature_points[1].parent_coordinate[1] -= 0.05;
+            auto& moved_points = region.quadrature_points.mutate();
+            moved_points[0].point[1] += 0.05;
+            moved_points[0].parent_coordinate[1] += 0.05;
+            moved_points[1].point[1] -= 0.05;
+            moved_points[1].parent_coordinate[1] -= 0.05;
             changed = true;
         }
         mutated.addVolumeRegion(std::move(region));

@@ -13,6 +13,7 @@
 #include "Assembly/CutIntegrationContext.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
+#include "Interfaces/CopyOnWriteVector.h"
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "LevelSet/LevelSetCellEvaluator.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
@@ -636,6 +637,77 @@ TEST(FreeSurfaceSnapshotCompactRecords, PolicyValidation)
                                      NegativeVolume &&
                       record.reference_rule.full_cell_equivalent);
     }
+}
+
+TEST(FreeSurfaceSnapshotCompactRecords, CopyOnWriteVectorSharesUntilModified)
+{
+    using Points = interfaces::CopyOnWriteVector<geometry::CutQuadraturePoint>;
+    std::vector<geometry::CutQuadraturePoint> source(3u);
+    for (std::size_t i = 0; i < source.size(); ++i) {
+        source[i].point = {{0.1 * static_cast<FE::Real>(i), 0.2, 0.3}};
+        source[i].weight = FE::Real{0.25} + static_cast<FE::Real>(i);
+    }
+    Points a = source;
+    Points b = a;
+    EXPECT_EQ(a.shareCount(), 2);
+    EXPECT_EQ(a.data(), b.data());
+    ASSERT_EQ(b.size(), source.size());
+    for (std::size_t i = 0; i < source.size(); ++i) {
+        EXPECT_TRUE(sameBits(b[i].point, source[i].point));
+        EXPECT_TRUE(sameBits(b[i].weight, source[i].weight));
+    }
+    b.mutate()[1].weight = FE::Real{7.0};
+    EXPECT_NE(a.data(), b.data());
+    EXPECT_EQ(a.shareCount(), 1);
+    EXPECT_TRUE(sameBits(a[1].weight, source[1].weight));
+    EXPECT_TRUE(sameBits(b[1].weight, FE::Real{7.0}));
+    const std::vector<geometry::CutQuadraturePoint>& view = a;
+    EXPECT_EQ(view.size(), source.size());
+    Points empty;
+    EXPECT_TRUE(empty.empty());
+    EXPECT_EQ(empty.begin(), empty.end());
+    empty.push_back(source[0]);
+    EXPECT_EQ(empty.size(), 1u);
+    empty.clear();
+    EXPECT_EQ(empty.shareCount(), 0);
+}
+
+TEST(FreeSurfaceSnapshotCompactRecords,
+     GeneratedDomainCopiesShareRegionPointsAndYieldIdenticalRules)
+{
+    const SphereSnapshotFixture fixture;
+    ASSERT_TRUE(fixture.generated.success) << fixture.generated.diagnostic;
+    const auto& domain = fixture.generated.domain;
+    const auto snapshot =
+        fixture.snapshot(geometry::CutIntegrationSide::Positive);
+    const auto& snapshot_regions = snapshot->interfaceDomain().volumeRegions();
+    ASSERT_EQ(snapshot_regions.size(), domain.volumeRegions().size());
+
+    // A region whose points own independent storage.
+    const auto deep_copy = [](interfaces::CutInterfaceVolumeRegion region) {
+        region.quadrature_points = std::vector<geometry::CutQuadraturePoint>(
+            region.quadrature_points.values());
+        return region;
+    };
+    std::size_t shared = 0u;
+    for (std::size_t i = 0; i < snapshot_regions.size(); ++i) {
+        const auto& region = domain.volumeRegions()[i];
+        const auto& copy = snapshot_regions[i];
+        if (!region.quadrature_points.empty()) {
+            EXPECT_EQ(region.quadrature_points.data(),
+                      copy.quadrature_points.data());
+            shared += region.quadrature_points.shareCount() > 1 ? 1u : 0u;
+        }
+        if (!region.active()) {
+            continue;
+        }
+        const auto independent = deep_copy(region);
+        EXPECT_NE(independent.quadrature_points.data(),
+                  region.quadrature_points.data());
+        expectSameRules(region.toCutQuadratureRule(domain.request()),
+                        independent.toCutQuadratureRule(domain.request()));
+    }
+    EXPECT_GT(shared, 0u);
 }
 
 #endif
