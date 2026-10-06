@@ -10,6 +10,15 @@ PrescribedAngle contact line, Navier slip on the wetted wall, and a strong
 normal-only zero velocity on the wall.  Level-set wall maintenance, when
 enabled, only rescales contact cells.
 
+Time step: the protocol rule is the capillary limit of each level, rounded
+down to 100 equal output intervals (--dt-rule capillary-limit).  --dt-rule
+fixed shares one physical step by all levels, the capillary-limit step of the
+coarsest level R/h = 16 (2800 steps over 5 viscous times), and is meant for
+use with the lagged normal-increment capillary term
+(--surface-tension-semi-implicit NormalIncrement, decision D13).
+--dt-divisor 2 and 4 refine either step exactly with unchanged output times,
+for the time-step check (time_step_criterion in tolerances.json).
+
 The case is written for the new OOP solver: solver.xml, an affine Triangle3
 background mesh with the initial fields, the four wall face files, and
 case.json with every parameter that verify.py needs.  See README.md.
@@ -52,6 +61,24 @@ DEFAULT_SNAPSHOTS = 100                     # VTU outputs per run
 # one-sided density sum of a free surface (rho_liquid + rho_void = rho):
 #   dt <= sqrt(rho h^3 / (4 pi gamma)) = SAFETY * sqrt(rho h^3 / (2 pi gamma)).
 DT_SAFETY = 1.0 / math.sqrt(2.0)
+# Time-step rule.  "capillary-limit" (protocol): DT_SAFETY times the limit
+# above at each level, rounded down so that the run is `snapshots` equal output
+# intervals (2800 / 7900 / 22300 steps at R/h = 16 / 32 / 64).  "fixed": the
+# same rule evaluated at the coarsest level, R/h = 16, and shared by every
+# level: one physical step, dt = T/2800 = 4.374e-3 for the protocol run, which
+# is 1, 2.83 and 8 times the capillary-limit step of R/h = 16, 32 and 64.  It
+# needs the lagged normal-increment capillary term (decision D13; design note
+# Documentation/free_surface_semi_implicit_surface_tension_design.md).
+DT_RULES = ("capillary-limit", "fixed")
+DEFAULT_DT_RULE = "capillary-limit"
+# Time-step check: the step of either rule divided by 1, 2 or 4, with the
+# output times unchanged (time_step_criterion in tolerances.json).
+DT_DIVISORS = (1, 2, 4)
+# Semi-implicit capillary term (Surface_tension_semi_implicit, decision D13):
+# the lagged normal increment gamma dt_eff int (P grad(u - u_ref)) : (P grad v),
+# zero in every fresh residual.  The protocol value is None.
+SEMI_IMPLICIT_OPTIONS = ("None", "NormalIncrement")
+DEFAULT_SEMI_IMPLICIT = "None"
 # Time integration and linear solver: generalized-alpha (rho_inf = 0.5) and
 # FSILS GMRES, as in static_drop_2d.  The moving contact line and interface
 # cross mesh vertices all the time; the solver accepts a cut-topology change
@@ -130,14 +157,42 @@ def capillary_dt_limit(h: float) -> float:
     return math.sqrt(DENSITY * h ** 3 / (2.0 * math.pi * SURFACE_TENSION))
 
 
-def time_schedule(level: int, viscous_times: float, snapshots: int) -> dict:
+TIME_STEP_RULES = {
+    "capillary-limit": "capillary limit of each level, rounded down to the output intervals",
+    "fixed": "one physical step shared by all levels: the capillary-limit step of the coarsest "
+             "level (R/h = 16), rounded down to the output intervals",
+}
+
+
+def time_schedule(level: int, viscous_times: float, snapshots: int, *,
+                  dt_rule: str = DEFAULT_DT_RULE, dt_multiple: float = 1.0,
+                  dt_divisor: int = 1) -> dict:
+    """Time step and output cadence of one level.
+
+    The base step is dt_multiple * DT_SAFETY * sqrt(rho h_r^3 / (2 pi gamma)),
+    rounded down so that the run is `snapshots` equal output intervals, with
+    h_r = h for "capillary-limit" and h_r = R/16 (the coarsest level) for
+    "fixed".  dt_divisor refines it exactly to dt/d (d times the steps and the
+    cadence), so the output times are unchanged.  dt_multiple = 1 and
+    dt_divisor = 1 give the protocol schedule of each rule; at R/h = 16 the two
+    rules give the same step.
+    """
+    if dt_rule not in DT_RULES:
+        raise ValueError(f"--dt-rule must be one of {DT_RULES}")
+    if dt_divisor not in DT_DIVISORS:
+        raise ValueError(f"--dt-divisor must be one of {DT_DIVISORS}")
+    if not (math.isfinite(dt_multiple) and dt_multiple > 0.0):
+        raise ValueError("--dt-multiple must be positive and finite")
     h = RADIUS / level
     mu = viscosity_from_laplace(LAPLACE_NUMBER)
     viscous_time = DENSITY * RADIUS ** 2 / mu
     end_time = viscous_times * viscous_time
-    dt_max = DT_SAFETY * capillary_dt_limit(h)
+    h_rule = h if dt_rule == "capillary-limit" else RADIUS / min(LEVELS)
+    dt_max = dt_multiple * DT_SAFETY * capillary_dt_limit(h_rule)
     cadence = max(1, math.ceil(end_time / (snapshots * dt_max)))
     steps = snapshots * cadence
+    dt_base = end_time / steps
+    dt = dt_base / dt_divisor
     return {
         "h": h,
         "viscosity": mu,
@@ -146,10 +201,15 @@ def time_schedule(level: int, viscous_times: float, snapshots: int) -> dict:
         "visco_capillary_time": mu * RADIUS / SURFACE_TENSION,
         "end_time": end_time,
         "dt_capillary_limit": capillary_dt_limit(h),
+        "dt_rule": dt_rule,
+        "dt_multiple": dt_multiple,
         "dt_max": dt_max,
-        "dt": end_time / steps,
-        "steps": steps,
-        "output_cadence": cadence,
+        "dt_base": dt_base,
+        "dt_divisor": dt_divisor,
+        "dt": dt,
+        "dt_over_capillary_limit": dt / (DT_SAFETY * capillary_dt_limit(h)),
+        "steps": steps * dt_divisor,
+        "output_cadence": cadence * dt_divisor,
     }
 
 
@@ -343,7 +403,17 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
                time_integration: str = "generalized_alpha",
                transport: str = "pde_extension",
                kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
-               sign_definite_patch_bounds: bool = SIGN_DEFINITE_PATCH_BOUNDS) -> str:
+               sign_definite_patch_bounds: bool = SIGN_DEFINITE_PATCH_BOUNDS,
+               semi_implicit: str = DEFAULT_SEMI_IMPLICIT) -> str:
+    if semi_implicit not in SEMI_IMPLICIT_OPTIONS:
+        raise ValueError(f"semi_implicit must be one of {SEMI_IMPLICIT_OPTIONS}")
+    if semi_implicit != "None" and transport == "wet_extension":
+        # The solver fails closed: the term needs a transport velocity equal to
+        # the fluid velocity on the interface (design note, section 9.1).
+        raise ValueError("Surface_tension_semi_implicit needs --transport pde_extension or coupled")
+    semi_implicit_bc = ("" if semi_implicit == "None" else
+                        f"\n      <Surface_tension_semi_implicit>{semi_implicit}"
+                        "</Surface_tension_semi_implicit>")
     if transport == "coupled":
         transport_xml = """
     <Velocity_source>coupled_field</Velocity_source>
@@ -505,7 +575,7 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
       <Interface_quadrature_order>2</Interface_quadrature_order>
       <External_pressure>{EXTERNAL_PRESSURE:.17g}</External_pressure>
       <Surface_tension>{SURFACE_TENSION:.17g}</Surface_tension>
-      <Surface_tension_form>{tension_form}</Surface_tension_form>{curvature_bc}
+      <Surface_tension_form>{tension_form}</Surface_tension_form>{semi_implicit_bc}{curvature_bc}
       <Use_level_set_curvature>false</Use_level_set_curvature>
       <Contact_line_model>PrescribedAngle</Contact_line_model>
       <Contact_line_wall_face>{CONTACT_WALL}</Contact_line_wall_face>
@@ -534,7 +604,9 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
              transport: str = "pde_extension",
              kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
              sign_definite_patch_bounds: bool = SIGN_DEFINITE_PATCH_BOUNDS,
-             max_steps: int | None = None, force: bool = False) -> dict:
+             max_steps: int | None = None, force: bool = False,
+             dt_rule: str = DEFAULT_DT_RULE, dt_multiple: float = 1.0, dt_divisor: int = 1,
+             semi_implicit: str = DEFAULT_SEMI_IMPLICIT) -> dict:
     if level not in LEVELS:
         raise ValueError(f"--level must be one of {LEVELS}")
     if equilibrium_deg not in EQUILIBRIUM_ANGLES_DEG:
@@ -547,10 +619,16 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
         raise ValueError("--initial-angle must lie in [10, 170] degrees")
     if not (viscous_times > 0.0 and snapshots >= 4):
         raise ValueError("need viscous_times > 0 and at least 4 snapshots")
+    if semi_implicit not in SEMI_IMPLICIT_OPTIONS:
+        raise ValueError(f"--surface-tension-semi-implicit must be one of {SEMI_IMPLICIT_OPTIONS}")
+    if semi_implicit != "None" and transport == "wet_extension":
+        raise ValueError("--surface-tension-semi-implicit needs --transport pde_extension or "
+                         "coupled (the solver rejects the wet extension with the term)")
     if output_dir.exists() and any(output_dir.iterdir()) and not force:
         raise FileExistsError(f"{output_dir} is not empty (use --force)")
 
-    schedule = time_schedule(level, viscous_times, snapshots)
+    schedule = time_schedule(level, viscous_times, snapshots, dt_rule=dt_rule,
+                             dt_multiple=dt_multiple, dt_divisor=dt_divisor)
     steps, cadence, truncated = schedule["steps"], schedule["output_cadence"], False
     if max_steps is not None:
         if max_steps < 1:
@@ -592,7 +670,7 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
     (output_dir / "solver.xml").write_text(
         solver_xml(form, equilibrium_deg, schedule, steps, cadence, reinitialization,
                    linear_solver, time_integration, transport, kinematic_reconciliation,
-                   sign_definite_patch_bounds),
+                   sign_definite_patch_bounds, semi_implicit),
         encoding="utf-8")
 
     case = {
@@ -609,6 +687,7 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
         "transport": transport,
         "kinematic_reconciliation": bool(kinematic_reconciliation),
         "sign_definite_patch_bounds": bool(sign_definite_patch_bounds),
+        "surface_tension_semi_implicit": semi_implicit,
         "laplace_number": LAPLACE_NUMBER,
         "density": DENSITY,
         "surface_tension": SURFACE_TENSION,
@@ -639,6 +718,12 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
         "end_time_protocol": schedule["end_time"],
         "dt_capillary_limit": schedule["dt_capillary_limit"],
         "dt_safety_factor": DT_SAFETY,
+        "dt_rule": dt_rule,
+        "time_step_rule": TIME_STEP_RULES[dt_rule],
+        "dt_multiple": float(dt_multiple),
+        "dt_base": schedule["dt_base"],
+        "dt_divisor": dt_divisor,
+        "dt_over_capillary_limit": schedule["dt_over_capillary_limit"],
         "dt": schedule["dt"],
         "steps_protocol": schedule["steps"],
         "steps": steps,
@@ -692,6 +777,21 @@ def main(argv=None) -> int:
                         help="accepted-step one-ring bounds of the level set on nodes whose "
                              "patch lies in one phase (protocol: on; off reproduces the "
                              "earlier decks)")
+    parser.add_argument("--dt-rule", choices=DT_RULES, default=DEFAULT_DT_RULE,
+                        help="time-step rule: capillary-limit (protocol; the limit of each level) "
+                             "or fixed (one step for all levels, the capillary-limit step of "
+                             "R/h = 16; use with --surface-tension-semi-implicit NormalIncrement)")
+    parser.add_argument("--dt-multiple", type=float, default=1.0,
+                        help="multiple of the capillary limit of the rule, rounded down to the "
+                             "output intervals (protocol value 1; larger-step studies only)")
+    parser.add_argument("--dt-divisor", type=int, choices=DT_DIVISORS, default=1,
+                        help="divide the step by this factor with unchanged output times "
+                             "(time-step check: 2, and 4 at R/h = 16)")
+    parser.add_argument("--surface-tension-semi-implicit", choices=SEMI_IMPLICIT_OPTIONS,
+                        default=DEFAULT_SEMI_IMPLICIT,
+                        help="Surface_tension_semi_implicit of the free surface (protocol value "
+                             f"{DEFAULT_SEMI_IMPLICIT}; NormalIncrement is the lagged "
+                             "normal-increment term of decision D13)")
     parser.add_argument("--max-steps", type=int, default=None,
                         help="smoke runs only: stop after this many steps; the case is "
                              "marked truncated and verify.py rejects it for acceptance")
@@ -706,14 +806,17 @@ def main(argv=None) -> int:
                     transport=args.transport,
                     kinematic_reconciliation=args.kinematic_reconciliation == "on",
                     sign_definite_patch_bounds=args.sign_definite_patch_bounds == "on",
-                    max_steps=args.max_steps, force=args.force)
+                    max_steps=args.max_steps, force=args.force, dt_rule=args.dt_rule,
+                    dt_multiple=args.dt_multiple, dt_divisor=args.dt_divisor,
+                    semi_implicit=args.surface_tension_semi_implicit)
     print(f"wrote {args.output_dir}")
     for key in ("level_R_over_h", "equilibrium_angle_degrees", "initial_angle_degrees",
                 "capillary_form", "time_integration_scheme", "linear_solver", "transport",
                 "kinematic_reconciliation", "sign_definite_patch_bounds", "reinitialization",
-                "viscosity", "slip_length_over_h",
+                "surface_tension_semi_implicit", "viscosity", "slip_length_over_h",
                 "viscous_time",
-                "end_time", "dt", "dt_capillary_limit", "steps", "output_cadence",
+                "end_time", "dt_rule", "dt", "dt_divisor", "dt_capillary_limit",
+                "dt_over_capillary_limit", "steps", "output_cadence",
                 "box", "n_vertices", "n_triangles", "min_abs_phi_over_h",
                 "initial_contact_vertex_gap_over_h", "dry_gap_over_h", "truncated"):
         print(f"  {key} = {case[key]}")

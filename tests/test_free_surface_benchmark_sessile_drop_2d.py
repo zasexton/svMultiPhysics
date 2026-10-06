@@ -161,15 +161,21 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
 
 
 def write_synthetic_run(run, level, angle_offset=0.0, theta_e=60, growth=False,
-                        area_shift=0.0, drop_last=False, max_steps=None):
+                        area_shift=0.0, drop_last=False, max_steps=None, dt_rule="fixed",
+                        dt_divisor=1, mid_angle_offset=0.0,
+                        semi_implicit="NormalIncrement"):
     """Emulate solver output: a relaxed cap with a known angle and a decaying velocity.
 
     The initial level set in the mesh file is replaced by the same cap, so the
     liquid area is conserved exactly unless area_shift moves the last output.
+    mid_angle_offset changes the cap angle at the middle output only.
     """
-    case = gen.generate(level, theta_e, "surface_stress", run, snapshots=8, max_steps=max_steps)
+    case = gen.generate(level, theta_e, "surface_stress", run, snapshots=8, max_steps=max_steps,
+                        dt_rule=dt_rule, dt_divisor=dt_divisor, semi_implicit=semi_implicit)
     points, tris, phi = sampled_cap(case, level, theta_e + angle_offset,
                                     case["equilibrium_cap_nominal"]["area"])
+    _, _, phi_mid = sampled_cap(case, level, theta_e + angle_offset + mid_angle_offset,
+                                case["equilibrium_cap_nominal"]["area"])
     n = len(phi)
     zeros = np.zeros((n, 3))
     gen.write_vtu(run / "mesh/mesh-complete.mesh.vtu", points, tris,
@@ -185,7 +191,7 @@ def write_synthetic_run(run, level, angle_offset=0.0, theta_e=60, growth=False,
         t = k * case["output_cadence"] * case["dt"]
         amp = 1e-3 * (math.exp(t / case["viscous_time"]) if growth
                       else math.exp(-t / case["viscous_time"]))
-        values = phi + (area_shift if k == outputs else 0.0)
+        values = (phi_mid if k == outputs // 2 else phi) + (area_shift if k == outputs else 0.0)
         name = f"result_{k * case['output_cadence']:03d}.vtu"
         gen.write_vtu(run / name, points, tris,
                       {"phi": ("Float64", values), "Velocity": ("Float64", amp * swirl),
@@ -201,23 +207,29 @@ def write_synthetic_run(run, level, angle_offset=0.0, theta_e=60, growth=False,
 def study(tmp_path):
     pytest.importorskip("pyvista")
 
-    def make(overrides=None, levels=(16, 32, 64)):
+    def make(overrides=None, levels=(16, 32, 64), dt_divisor=1, tag="", **common):
         overrides = overrides or {}
         runs = []
         for level in levels:
-            opts = {"angle_offset": 1.2 * 16 / level}
+            opts = {"angle_offset": 1.2 * 16 / level, **common}
             opts.update(overrides.get(level, {}))
-            write_synthetic_run(tmp_path / f"L{level}", level, **opts)
-            runs.append(str(tmp_path / f"L{level}"))
+            run = tmp_path / f"L{level}_dt{dt_divisor}{tag}"
+            write_synthetic_run(run, level, dt_divisor=dt_divisor, **opts)
+            runs.append(str(run))
         return runs
     return make
 
 
-def test_synthetic_refinement_study_passes(study, tmp_path):
+def test_synthetic_refinement_study_passes(study, tmp_path, capsys):
     out = tmp_path / "report.json"
     assert ver.main([*study(), "--json", str(out)]) == 0
-    group = json.loads(out.read_text())["groups"][0]
+    # A single time step: the time-step criterion is reported, not failed.
+    assert "[NOT EVALUATED] time_step" in capsys.readouterr().out
+    report = json.loads(out.read_text())
+    assert report["time_step_criterion"][0]["evaluated"] is False
+    group = report["groups"][0]
     assert group["passed"] and group["equilibrium_angle_degrees"] == 60.0
+    assert group["dt_divisor"] == 1 and group["dt_rule"] == "fixed"
     run16, run32 = group["runs"][0], group["runs"][1]
     assert run16["contact_angle_error_degrees"] == pytest.approx(1.2, abs=0.2)
     assert run32["contact_angle_error_degrees"] == pytest.approx(0.6, abs=0.05)
@@ -265,7 +277,7 @@ def test_missing_incomplete_and_truncated_data_fail_clearly(study, tmp_path, cap
     assert ver.main([str(empty)]) == 2
     assert "no solver output" in capsys.readouterr().err
     smoke = tmp_path / "smoke"
-    write_synthetic_run(smoke, 16, max_steps=5)
+    write_synthetic_run(smoke, 16, max_steps=5, dt_rule="capillary-limit", semi_implicit="None")
     assert ver.main([str(smoke)]) == 2
     assert "truncated smoke runs" in capsys.readouterr().err
     assert ver.main([str(smoke), "--allow-truncated"]) == 1   # one level only
@@ -278,3 +290,139 @@ def test_a_drop_off_the_wall_is_rejected(tmp_path):
     snap = {"points": points[:, :2], "tris": tris, "phi": floating}
     with pytest.raises(ver.DataError, match="two wall contact points"):
         ver.drop_geometry(snap, case, 1.0)
+
+
+def test_time_step_rules_and_semi_implicit_term(tmp_path):
+    # Default: the capillary-limit rule of each level, without the term.
+    protocol = gen.generate(32, 120, "surface_stress", tmp_path / "p")
+    assert protocol["dt_rule"] == "capillary-limit" and protocol["dt_divisor"] == 1
+    assert protocol["surface_tension_semi_implicit"] == "None"
+    assert "Surface_tension_semi_implicit" not in (tmp_path / "p/solver.xml").read_text()
+    # Fixed rule: one step for every level, the capillary-limit step of R/h = 16.
+    coarse = gen.time_schedule(16, 5.0, 100)
+    assert coarse["steps"] == 2800 and coarse["output_cadence"] == 28
+    for level in gen.LEVELS:
+        fixed = gen.time_schedule(level, 5.0, 100, dt_rule="fixed")
+        assert fixed["dt"] == coarse["dt"] and fixed["steps"] == 2800
+        assert fixed["output_cadence"] == 28
+    assert gen.time_schedule(64, 5.0, 100, dt_rule="fixed")["dt_over_capillary_limit"] == \
+        pytest.approx(8.0, rel=0.01)
+    assert coarse["dt"] == pytest.approx(4.374e-3, rel=1e-4)
+    # The term goes into the free-surface block.
+    case = gen.generate(32, 120, "surface_stress", tmp_path / "f", dt_rule="fixed",
+                        semi_implicit="NormalIncrement")
+    root = ET.parse(tmp_path / "f/solver.xml").getroot()
+    free_surface = root.find("Add_equation[@type='fluid']/Add_BC[@name='free_surface']")
+    assert free_surface.findtext("Surface_tension_semi_implicit") == "NormalIncrement"
+    assert (tmp_path / "f/solver.xml").read_text().count("Surface_tension_semi_implicit>") == 2
+    assert case["surface_tension_semi_implicit"] == "NormalIncrement"
+    assert case["dt_rule"] == "fixed" and case["steps"] == 2800
+    assert float(root.findtext("GeneralSimulationParameters/Time_step_size")) == coarse["dt"]
+    # Divisors refine the step exactly and keep the output times.
+    for divisor in (2, 4):
+        half = gen.generate(32, 120, "surface_stress", tmp_path / f"d{divisor}", dt_rule="fixed",
+                            dt_divisor=divisor, semi_implicit="NormalIncrement")
+        assert half["dt"] == case["dt"] / divisor and half["dt_base"] == case["dt"]
+        assert half["steps"] == divisor * 2800 and half["output_cadence"] == divisor * 28
+        assert half["output_cadence"] * half["dt"] == case["output_cadence"] * case["dt"]
+        assert half["end_time"] == pytest.approx(case["end_time"], rel=1e-14)
+    # A multiple of the limit, rounded down to the outputs; m = 2 halved is the m = 1 deck.
+    double = gen.generate(32, 120, "surface_stress", tmp_path / "m2", dt_rule="fixed",
+                          dt_multiple=2.0, semi_implicit="NormalIncrement")
+    assert double["steps"] == 1400 and double["dt"] == 2.0 * case["dt"]
+    gen.generate(32, 120, "surface_stress", tmp_path / "m2d2", dt_rule="fixed", dt_multiple=2.0,
+                 dt_divisor=2, semi_implicit="NormalIncrement")
+    assert (tmp_path / "m2d2/solver.xml").read_bytes() == (tmp_path / "f/solver.xml").read_bytes()
+    with pytest.raises(ValueError):
+        gen.generate(16, 60, "surface_stress", tmp_path / "bad1", dt_divisor=3)
+    with pytest.raises(ValueError):
+        gen.generate(16, 60, "surface_stress", tmp_path / "bad2", dt_rule="per-period")
+    with pytest.raises(ValueError):
+        gen.generate(16, 60, "surface_stress", tmp_path / "bad3", semi_implicit="Implicit")
+    with pytest.raises(ValueError):                     # the solver rejects this combination
+        gen.generate(16, 60, "surface_stress", tmp_path / "bad4", transport="wet_extension",
+                     semi_implicit="NormalIncrement")
+    with pytest.raises(ValueError):
+        gen.generate(16, 60, "surface_stress", tmp_path / "bad5", dt_multiple=0.0)
+
+
+def test_capillary_limit_protocol_is_reproducible(tmp_path):
+    """--dt-rule capillary-limit --surface-tension-semi-implicit None: the decks before the options."""
+    steps = {}
+    for level in gen.LEVELS:
+        out = tmp_path / f"cl{level}"
+        assert gen.main(["--level", str(level), "--contact-angle", "60", "--output-dir", str(out),
+                         "--dt-rule", "capillary-limit",
+                         "--surface-tension-semi-implicit", "None"]) == 0
+        case = json.loads((out / "case.json").read_text())
+        text = (out / "solver.xml").read_text()
+        assert "Surface_tension_semi_implicit" not in text
+        assert case["dt"] <= gen.DT_SAFETY * gen.capillary_dt_limit(1.0 / level) * (1 + 1e-12)
+        assert case["steps"] == 100 * case["output_cadence"]
+        assert case["dt"] == case["end_time"] / case["steps"]
+        steps[level] = case["steps"]
+        default = tmp_path / f"default{level}"
+        gen.generate(level, 60, "surface_stress", default)
+        assert (default / "solver.xml").read_bytes() == text.encode()
+    assert steps == {16: 2800, 32: 7900, 64: 22300}           # tracker M4
+    # At R/h = 16 the fixed rule without the term writes the same deck.
+    gen.generate(16, 60, "surface_stress", tmp_path / "fixed16", dt_rule="fixed")
+    assert (tmp_path / "fixed16/solver.xml").read_bytes() == \
+        (tmp_path / "cl16/solver.xml").read_bytes()
+
+
+def test_time_step_criterion_passes_at_dt_and_dt_over_2(study, tmp_path, capsys):
+    runs = study()
+    half = study(dt_divisor=2, levels=(16, 32))         # the dt/2 study needs R/h = 16 and 32
+    quarter = study(dt_divisor=4, levels=(16,))         # extra check, R/h = 16 only
+    out = tmp_path / "dt.json"
+    assert ver.main([*runs, *half, *quarter, "--json", str(out)]) == 0
+    text = capsys.readouterr().out
+    assert "dt divisor 1" in text and "dt divisor 2" in text and "dt divisor 4" in text
+    assert "[PASS] time_step: R/h=32 (finest common level)" in text
+    assert "R/h=16, dt/2 vs dt/4 (reported)" in text
+    assert "monotonicity not evaluated at this step" in text
+    report = json.loads(out.read_text())
+    assert [g["dt_divisor"] for g in report["groups"]] == [1, 2, 4]
+    assert [g["passed"] for g in report["groups"]] == [True, True, True]
+    crit = report["time_step_criterion"][0]
+    assert crit["evaluated"] and crit["passed"] and crit["level"] == 32
+    assert all(q["value"] == 0.0 for q in crit["quantities"])
+    assert crit["changes"]["matched_outputs"] == 8 and crit["changes"]["unmeasured_outputs"] == 0
+    # The dt study needs every level, R/h = 64 included.
+    coarse = study(levels=(16, 32), tag="no64")
+    assert ver.main([*coarse, *half]) == 1
+    text = capsys.readouterr().out
+    assert "monotonicity needs R/h=[64]" in text and "[PASS] time_step" in text
+
+
+def test_time_step_criterion_fails_on_the_end_state_and_on_the_history(study, capsys):
+    runs = study()
+    moved = study({32: {"angle_offset": 0.6 + 0.3}}, dt_divisor=2, levels=(16, 32), tag="end")
+    assert ver.main([*runs, *moved]) == 1
+    text = capsys.readouterr().out
+    assert "[FAIL] time_step" in text and "contact_angle_change_final 0.3" in text
+    assert "[FAIL] contact_angle" not in text           # both studies pass their gates
+    history = study({32: {"mid_angle_offset": 1.0}}, dt_divisor=2, levels=(16, 32), tag="mid")
+    assert ver.main([*runs, *history]) == 1
+    text = capsys.readouterr().out
+    assert "[FAIL] time_step" in text and "contact_angle_change_history 1" in text
+    assert "contact_angle_change_final 0 <= 0.1" in text
+    # Each rule and multiple is its own study: the capillary-limit runs do not pair with these.
+    old = study(levels=(16, 32), tag="old", dt_rule="capillary-limit", semi_implicit="None")
+    assert ver.main([*runs, *old]) == 1                 # old study misses R/h = 64
+    text = capsys.readouterr().out
+    assert "dt rule capillary-limit, dt divisor 1" in text and "dt per level" in text
+    assert text.count("[NOT EVALUATED] time_step") == 2
+
+
+def test_every_gate_applies_at_dt_over_2(study, capsys):
+    runs = study()
+    drifting = study({16: {"area_shift": 2e-3}}, dt_divisor=2, levels=(16, 32), tag="drift")
+    assert ver.main([*runs, *drifting]) == 1
+    assert "[FAIL] volume_drift" in capsys.readouterr().out
+    partial = study(dt_divisor=2, levels=(16,), tag="p")    # the dt/2 study needs R/h = 32
+    assert ver.main([*runs, *partial]) == 1
+    text = capsys.readouterr().out
+    assert "missing run at R/h=32" in text
+    assert "[PASS] time_step: R/h=16 (finest common level)" in text

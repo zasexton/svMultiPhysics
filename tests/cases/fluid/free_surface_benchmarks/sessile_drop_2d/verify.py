@@ -7,9 +7,12 @@ Usage:
 Each RUN_DIR is a case written by generate_case.py (it holds case.json and
 mesh/mesh-complete.mesh.vtu) in which the solver has run, leaving
 result.pvd and result_NNN.vtu (serial) or result_NNN.pvtu (MPI).  Runs are
-grouped by (capillary form, equilibrium angle); the criteria are applied to
-each group across its resolution levels.  Metric definitions are in
-README.md.
+grouped by (capillary form, equilibrium angle, time-step rule, dt multiple, dt
+divisor); the criteria are applied to each group across its resolution
+levels.  The time-step criterion compares the divisor-1 and divisor-2 groups
+of each (capillary form, angle, rule, multiple) at their finest common level,
+on the end state and on the histories over the outputs; with only one divisor
+it is reported as not evaluated.  Metric definitions are in README.md.
 
 Exit status: 0 if every criterion passes, 1 if any criterion fails, 2 if
 input data are missing or invalid.
@@ -344,7 +347,7 @@ def analyse_run(run: Path) -> dict:
     reference = equilibrium_cap(area0, math.radians(theta_e))
     nominal = case["equilibrium_cap_nominal"]
 
-    times, speeds, areas, bases, left, right = [], [], [], [], [], []
+    times, speeds, areas, bases, apexes, left, right = [], [], [], [], [], [], []
     for t, path in series:
         snap = read_snapshot(path, case)
         area, _ = liquid_area_centroid(snap["points"], snap["tris"], snap["phi"])
@@ -354,14 +357,16 @@ def analyse_run(run: Path) -> dict:
         try:
             g = drop_geometry(snap, case, reference["radius"])
             bases.append(g["base_half_width"])
+            apexes.append(g["apex_height"])
             left.append(g["contact_angle_left"])
             right.append(g["contact_angle_right"])
         except DataError:
             bases.append(math.nan)
+            apexes.append(math.nan)
             left.append(math.nan)
             right.append(math.nan)
     times, speeds, areas = map(np.asarray, (times, speeds, areas))
-    bases, left, right = map(np.asarray, (bases, left, right))
+    bases, apexes, left, right = map(np.asarray, (bases, apexes, left, right))
 
     final = drop_geometry(snap, case, reference["radius"])
     # Decision D10: the end state is a static equilibrium whose discrete form
@@ -383,6 +388,13 @@ def analyse_run(run: Path) -> dict:
         "capillary_form": case["capillary_form"],
         "equilibrium_angle_degrees": theta_e,
         "initial_angle_degrees": case["initial_angle_degrees"],
+        # Cases written before the time-step options used the capillary-limit rule.
+        "dt": case["dt"],
+        "steps": case["steps"],
+        "dt_rule": case.get("dt_rule", "capillary-limit"),
+        "dt_multiple": float(case.get("dt_multiple", 1.0)),
+        "dt_divisor": int(case.get("dt_divisor", 1)),
+        "surface_tension_semi_implicit": case.get("surface_tension_semi_implicit", "None"),
         "truncated": bool(case.get("truncated", False)),
         "end_time": float(t_end),
         "viscous_times_simulated": float(t_end / case["viscous_time"]),
@@ -424,6 +436,7 @@ def analyse_run(run: Path) -> dict:
         "max_speed_growth_ratio": float(speeds[-1] / np.max(speeds[third])),
         "history": {"time": times.tolist(), "max_speed": speeds.tolist(),
                     "liquid_area": areas.tolist(), "base_half_width": bases.tolist(),
+                    "apex_height": apexes.tolist(),
                     "contact_angle_left": left.tolist(),
                     "contact_angle_right": right.tolist()},
     }
@@ -432,8 +445,17 @@ def analyse_run(run: Path) -> dict:
 # ---------------------------------------------------------------------------
 # Criteria
 # ---------------------------------------------------------------------------
-def evaluate_group(runs: list[dict], tolerances: dict) -> list[dict]:
+def evaluate_group(runs: list[dict], tolerances: dict,
+                   required_levels: set | None = None) -> list[dict]:
+    """Apply the criteria to one refinement study.
+
+    required_levels (default: every protocol level) are the levels this study
+    must contain; a criterion at a level outside it that has no run is
+    reported as not run, without failing.
+    """
     by_level = {r["level"]: r for r in runs}
+    if required_levels is None:
+        required_levels = set(tolerances["levels"]["R_over_h"])
     results = []
     for crit in tolerances["criteria"]:
         q, limit = crit["quantity"], crit.get("limit")
@@ -442,8 +464,11 @@ def evaluate_group(runs: list[dict], tolerances: dict) -> list[dict]:
         levels = sorted(by_level) if at == "each" else [at]
         for level in levels:
             if level not in by_level:
-                ok = False
-                messages.append(f"missing run at R/h={level}")
+                if level in required_levels:
+                    ok = False
+                    messages.append(f"missing run at R/h={level}")
+                else:
+                    messages.append(f"R/h={level}: not run at this step (not required)")
                 continue
             value = by_level[level][q]
             if limit is None:
@@ -455,7 +480,9 @@ def evaluate_group(runs: list[dict], tolerances: dict) -> list[dict]:
         if crit.get("monotone") == "strictly_decreasing":
             need = crit["monotone_levels"]
             missing = [lv for lv in need if lv not in by_level]
-            if missing:
+            if missing and not set(missing) <= required_levels:
+                messages.append(f"monotonicity not evaluated at this step (needs R/h={need})")
+            elif missing:
                 ok = False
                 messages.append(f"monotonicity needs R/h={missing}")
             else:
@@ -471,6 +498,167 @@ def evaluate_group(runs: list[dict], tolerances: dict) -> list[dict]:
         results.append({"id": crit["id"], "quantity": q, "passed": bool(ok),
                         "details": messages})
     return results
+
+
+def required_levels_at(divisor: int, tolerances: dict) -> set:
+    """Levels a study at this dt divisor must contain.
+
+    Divisor 1: every protocol level.  Divisor 2: refined_step_levels of the
+    time-step criterion.  Other divisors are extra checks: no level is
+    required, and the criteria apply at the levels that were run.
+    """
+    levels = set(tolerances["levels"]["R_over_h"])
+    if divisor == 1:
+        return levels
+    crit = tolerances.get("time_step_criterion", {})
+    if divisor not in crit.get("dt_divisors", [1, 2]):
+        return set()
+    rule = crit.get("refined_step_levels", "all")
+    return levels if rule == "all" else set(rule)
+
+
+def _matched_outputs(a: dict, b: dict) -> tuple[np.ndarray, np.ndarray]:
+    """Indices of the outputs of runs a and b at the same time (half the smaller step)."""
+    ta, tb = np.asarray(a["history"]["time"]), np.asarray(b["history"]["time"])
+    tol = 0.5 * min(a["dt"], b["dt"])
+    ia, ib = [], []
+    for i, t in enumerate(ta):
+        j = int(np.argmin(np.abs(tb - t)))
+        if abs(tb[j] - t) <= tol:
+            ia.append(i)
+            ib.append(j)
+    return np.asarray(ia, dtype=int), np.asarray(ib, dtype=int)
+
+
+def time_step_changes(a: dict, b: dict) -> dict:
+    """Changes between the runs a (step dt) and b (step dt/2) of one level.
+
+    End state: the largest change of the two contact angles (degrees), and the
+    relative changes of the base half-width and the apex height.  Histories:
+    the largest change of either contact angle and of the base half-width
+    (relative to the reference base half-width) over the outputs at the same
+    times.  Outputs at which either run has no measurable geometry (other than
+    two wall contact points) are counted.
+    """
+    ia, ib = _matched_outputs(a, b)
+    ha, hb = a["history"], b["history"]
+
+    def series(h, key, idx):
+        return np.asarray(h[key], dtype=float)[idx]
+
+    d_left = np.abs(series(ha, "contact_angle_left", ia) - series(hb, "contact_angle_left", ib))
+    d_right = np.abs(series(ha, "contact_angle_right", ia) - series(hb, "contact_angle_right", ib))
+    d_base = (np.abs(series(ha, "base_half_width", ia) - series(hb, "base_half_width", ib))
+              / b["reference_base_half_width"])
+    d_angle = np.fmax(d_left, d_right)
+    unmeasured = ~(np.isfinite(d_left) & np.isfinite(d_right) & np.isfinite(d_base))
+    times = series(ha, "time", ia)
+
+    def worst(values):
+        if not np.any(np.isfinite(values)):
+            return math.nan, math.nan
+        k = int(np.nanargmax(values))
+        return float(values[k]), float(times[k])
+
+    angle_hist, angle_t = worst(d_angle)
+    base_hist, base_t = worst(d_base)
+    return {
+        "contact_angle_change_final": float(max(
+            abs(a["contact_angle_left"] - b["contact_angle_left"]),
+            abs(a["contact_angle_right"] - b["contact_angle_right"]))),
+        "base_radius_change_final": abs(a["base_half_width"] - b["base_half_width"])
+                                    / b["base_half_width"],
+        "apex_height_change_final": abs(a["apex_height"] - b["apex_height"]) / b["apex_height"],
+        "contact_angle_change_history": angle_hist,
+        "contact_angle_change_history_time": angle_t,
+        "base_radius_change_history": base_hist,
+        "base_radius_change_history_time": base_t,
+        "matched_outputs": int(len(ia)),
+        "outputs": [int(a["outputs"]), int(b["outputs"])],
+        "unmeasured_outputs": int(np.count_nonzero(unmeasured)),
+        "first_unmeasured_time": float(times[unmeasured][0]) if np.any(unmeasured) else None,
+    }
+
+
+def _format_changes(c: dict) -> str:
+    return (f"angle {c['contact_angle_change_final']:.3g} deg, base {c['base_radius_change_final']:.3g}, "
+            f"apex {c['apex_height_change_final']:.3g}; history: angle "
+            f"{c['contact_angle_change_history']:.3g} deg (t={c['contact_angle_change_history_time']:.4g}), "
+            f"base {c['base_radius_change_history']:.3g} (t={c['base_radius_change_history_time']:.4g})")
+
+
+def evaluate_time_step(groups: dict, tolerances: dict) -> list[dict]:
+    """Time-step criterion for every (capillary form, angle, dt rule, dt multiple).
+
+    Compares the divisor-1 and divisor-2 studies at their finest common level
+    against the limits in tolerances.json (end state and histories).  With
+    only one divisor, or no common level, the criterion is not evaluated and
+    does not fail.  The changes at the other common levels, and between the
+    divisor-2 and divisor-4 studies, are reported.
+    """
+    crit = tolerances.get("time_step_criterion")
+    if crit is None:
+        return []
+    out = []
+    studies = sorted({key[:4] for key in groups})
+    for study in studies:
+        form, theta_e, rule, multiple = study
+        coarse, fine = groups.get(study + (1,)), groups.get(study + (2,))
+        entry = {"id": crit["id"], "capillary_form": form, "equilibrium_angle_degrees": theta_e,
+                 "dt_rule": rule, "dt_multiple": multiple, "evaluated": False, "passed": True,
+                 "level": None, "details": []}
+        common = (sorted({r["level"] for r in coarse} & {r["level"] for r in fine})
+                  if coarse and fine else [])
+        if not common:
+            present = sorted({k[4] for k in groups if k[:4] == study})
+            entry["details"].append("not evaluated: needs runs at dt divisors 1 and 2 at a "
+                                    f"common level (divisors present: {present})")
+            out.append(entry)
+            continue
+        level = common[-1]
+        a = next(r for r in coarse if r["level"] == level)
+        b = next(r for r in fine if r["level"] == level)
+        changes = time_step_changes(a, b)
+        passed, verdicts = True, []
+        for q in crit["quantities"]:
+            value = changes[q["id"]]
+            ok = math.isfinite(value) and value <= q["limit"]
+            passed &= ok
+            verdicts.append({"id": q["id"], "value": value, "limit": q["limit"], "passed": bool(ok)})
+        if changes["matched_outputs"] != max(changes["outputs"]):
+            passed = False
+            entry["details"].append(f"output times differ: {changes['matched_outputs']} matched of "
+                                    f"{changes['outputs']}")
+        if changes["unmeasured_outputs"]:
+            passed = False
+            entry["details"].append(f"{changes['unmeasured_outputs']} outputs without a measurable "
+                                    f"geometry (first t={changes['first_unmeasured_time']:.4g})")
+        entry.update(evaluated=True, passed=bool(passed), level=level, dt=[a["dt"], b["dt"]],
+                     changes=changes, quantities=verdicts)
+        entry["details"].insert(0, (
+            f"R/h={level} (finest common level), dt={a['dt']:.4g} vs {b['dt']:.4g}: " + ", ".join(
+                f"{v['id']} {v['value']:.3g} {'<=' if v['passed'] else '>'} {v['limit']:g}"
+                for v in verdicts)
+            + f"; largest history changes at t={changes['contact_angle_change_history_time']:.4g} "
+              f"(angle) and t={changes['base_radius_change_history_time']:.4g} (base)"))
+        reported = []
+        for lv in common[:-1]:
+            ra = next(r for r in coarse if r["level"] == lv)
+            rb = next(r for r in fine if r["level"] == lv)
+            c = time_step_changes(ra, rb)
+            reported.append({"level": lv, "divisors": [1, 2], **c})
+            entry["details"].append(f"R/h={lv}, dt vs dt/2 (reported): {_format_changes(c)}")
+        quarter = groups.get(study + (4,))
+        if fine and quarter:
+            for lv in sorted({r["level"] for r in fine} & {r["level"] for r in quarter}):
+                rb = next(r for r in fine if r["level"] == lv)
+                rc = next(r for r in quarter if r["level"] == lv)
+                c = time_step_changes(rb, rc)
+                reported.append({"level": lv, "divisors": [2, 4], **c})
+                entry["details"].append(f"R/h={lv}, dt/2 vs dt/4 (reported): {_format_changes(c)}")
+        entry["reported"] = reported
+        out.append(entry)
+    return out
 
 
 def main(argv=None) -> int:
@@ -497,19 +685,31 @@ def main(argv=None) -> int:
 
     groups: dict[tuple, list] = {}
     for a in analysed:
-        groups.setdefault((a["capillary_form"], a["equilibrium_angle_degrees"]), []).append(a)
+        groups.setdefault((a["capillary_form"], a["equilibrium_angle_degrees"], a["dt_rule"],
+                           a["dt_multiple"], a["dt_divisor"]), []).append(a)
     levels = set(tolerances["levels"]["R_over_h"])
     report, all_pass = [], True
-    for (form, theta_e), runs in sorted(groups.items()):
+    for (form, theta_e, rule, multiple, divisor), runs in sorted(groups.items()):
         seen = [r["level"] for r in runs]
+        name = (f"{form}, theta_e={theta_e:g}, dt rule {rule}, multiple {multiple:g}, "
+                f"divisor {divisor}")
         if len(seen) != len(set(seen)) or not set(seen) <= levels:
-            print(f"ERROR: group {form}, theta_e={theta_e:g}: duplicate or unknown levels {seen}",
+            print(f"ERROR: group {name}: duplicate or unknown levels {seen}", file=sys.stderr)
+            return 2
+        steps = sorted({r["dt"] for r in runs})
+        if rule == "fixed" and steps[-1] > steps[0] * (1.0 + 1e-12):
+            print(f"ERROR: group {name}: the fixed rule needs one step, found {steps}",
                   file=sys.stderr)
             return 2
         runs.sort(key=lambda r: r["level"])
-        verdicts = evaluate_group(runs, tolerances)
+        verdicts = evaluate_group(runs, tolerances, required_levels_at(divisor, tolerances))
         all_pass &= all(v["passed"] for v in verdicts)
-        print(f"\n== {form}, theta_e = {theta_e:g} deg (initial {runs[0]['initial_angle_degrees']:g})"
+        dt_text = (f"dt = {steps[0]:.6g}" if steps[-1] <= steps[0] * (1.0 + 1e-12)
+                   else "dt per level " + "/".join(f"{r['dt']:.4g}" for r in runs))
+        semi = "/".join(sorted({r["surface_tension_semi_implicit"] for r in runs}))
+        print(f"\n== {form}, theta_e = {theta_e:g} deg (initial {runs[0]['initial_angle_degrees']:g}), "
+              f"dt rule {rule}" + (f" x{multiple:g}" if multiple != 1.0 else "")
+              + f", dt divisor {divisor}, {dt_text}, semi-implicit {semi}"
               + ("  [TRUNCATED SMOKE RUNS]" if any(r["truncated"] for r in runs) else ""))
         print(f"{'R/h':>4} {'t/t_mu':>7} {'theta_L':>8} {'theta_R':>8} {'err':>6} {'b err':>9}"
               f" {'H err':>9} {'dA/A max':>9} {'growth':>7} {'Ca_final':>9}")
@@ -523,11 +723,22 @@ def main(argv=None) -> int:
         for v in verdicts:
             print(f"  [{'PASS' if v['passed'] else 'FAIL'}] {v['id']}: " + "; ".join(v["details"]))
         report.append({"capillary_form": form, "equilibrium_angle_degrees": theta_e,
+                       "dt_rule": rule, "dt_multiple": multiple, "dt_divisor": divisor,
                        "runs": runs, "criteria": verdicts,
                        "passed": all(v["passed"] for v in verdicts)})
+
+    time_step = evaluate_time_step(groups, tolerances)
+    for t in time_step:
+        all_pass &= t["passed"]
+        tag = ("PASS" if t["passed"] else "FAIL") if t["evaluated"] else "NOT EVALUATED"
+        print(f"\n-- time-step criterion {t['capillary_form']}, theta_e = "
+              f"{t['equilibrium_angle_degrees']:g} deg, dt rule {t['dt_rule']}"
+              + (f" x{t['dt_multiple']:g}" if t["dt_multiple"] != 1.0 else ""))
+        print(f"  [{tag}] {t['id']}: " + "; ".join(t["details"]))
     if args.json:
         args.json.write_text(json.dumps({"benchmark": tolerances["benchmark"],
-                                         "groups": report, "passed": bool(all_pass)},
+                                         "groups": report, "time_step_criterion": time_step,
+                                         "passed": bool(all_pass)},
                                         indent=2) + "\n")
     print("\nOVERALL:", "PASS" if all_pass else "FAIL")
     return 0 if all_pass else 1
