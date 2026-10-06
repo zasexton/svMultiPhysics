@@ -411,11 +411,13 @@ struct SphereSnapshotFixture {
     }
 
     [[nodiscard]] std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot>
-    snapshot(std::optional<geometry::CutIntegrationSide> compact_side) const
+    snapshot(std::optional<geometry::CutIntegrationSide> compact_side,
+             bool both_sides = false) const
     {
         interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
         policy.require_complete_exterior_boundary_partition = false;
         policy.classification_only_full_cell_side = compact_side;
+        policy.classification_only_full_cells_on_both_sides = both_sides;
         return interfaces::buildFreeSurfaceGeometrySnapshot(
             generated.domain,
             {},
@@ -652,6 +654,96 @@ TEST(FreeSurfaceSnapshotCompactRecords, ConsumersGetIdenticalAnswers)
     for (std::size_t i = 0; i < context_full.interfaceRules().size(); ++i) {
         expectSameRules(context_full.interfaceRules()[i],
                         context_compact.interfaceRules()[i]);
+    }
+}
+
+TEST(FreeSurfaceSnapshotCompactRecords,
+     BothSidesCompactRecordsRematerializeForPointIntegrals)
+{
+    const SphereSnapshotFixture fixture;
+    ASSERT_TRUE(fixture.generated.success) << fixture.generated.diagnostic;
+    const auto full = fixture.snapshot(std::nullopt);
+    const auto compact = fixture.snapshot(
+        geometry::CutIntegrationSide::Positive, /*both_sides=*/true);
+    const auto* mesh = &fixture.system.meshAccess();
+    EXPECT_EQ(full->revision().snapshot_revision_key,
+              compact->revision().snapshot_revision_key);
+    EXPECT_EQ(std::memcmp(&full->ledger(),
+                          &compact->ledger(),
+                          sizeof(interfaces::FreeSurfaceGeometryValidationLedger)),
+              0);
+    ASSERT_EQ(full->rules().size(), compact->rules().size());
+    std::size_t wet_compact = 0u;
+    for (std::size_t i = 0; i < full->rules().size(); ++i) {
+        const auto& a = full->rules()[i];
+        const auto& b = compact->rules()[i];
+        expectSameClassification(a, b);
+        const bool full_volume =
+            (a.role == interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume ||
+             a.role == interfaces::FreeSurfaceGeometryRuleRole::PositiveVolume) &&
+            a.reference_rule.full_cell_equivalent;
+        EXPECT_EQ(b.classification_only, full_volume);
+        if (b.classification_only &&
+            b.role == interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume) {
+            ++wet_compact;
+            const auto materialized =
+                interfaces::materializeFreeSurfaceGeometryRuleRecord(b, *mesh);
+            expectSamePoints(a, materialized);
+        }
+    }
+    EXPECT_GT(wet_compact, 0u);
+
+    // Point integrals over the wet side rematerialize exactly.
+    const auto velocity = testVelocity(FE::Real{0.4});
+    const auto previous = testVelocity(FE::Real{0.25});
+    interfaces::FreeSurfaceActiveVolumeEnergyParameters energy;
+    energy.liquid_side = geometry::CutIntegrationSide::Negative;
+    energy.density = FE::Real{1.2};
+    energy.gravitational_acceleration = {{0.0, 0.0, -9.81}};
+    interfaces::FreeSurfaceActiveVolumeDissipationParameters dissipation;
+    dissipation.liquid_side = geometry::CutIntegrationSide::Negative;
+    dissipation.dynamic_viscosity = FE::Real{0.3};
+    for (const auto side : {geometry::CutIntegrationSide::Negative,
+                            geometry::CutIntegrationSide::Positive}) {
+        energy.liquid_side = side;
+        dissipation.liquid_side = side;
+        const auto e_full = interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
+            *full, energy, velocity);
+        const auto e_compact =
+            interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
+                *compact, energy, velocity, mesh);
+        EXPECT_EQ(e_full.owned_quadrature_point_count,
+                  e_compact.owned_quadrature_point_count);
+        EXPECT_TRUE(sameBits(e_full.owned_liquid_volume,
+                             e_compact.owned_liquid_volume));
+        EXPECT_TRUE(sameBits(e_full.kinetic_energy, e_compact.kinetic_energy));
+        EXPECT_TRUE(sameBits(e_full.gravitational_energy,
+                             e_compact.gravitational_energy));
+        EXPECT_TRUE(sameBits(e_full.gravitational_potential_power,
+                             e_compact.gravitational_potential_power));
+        const auto d_full =
+            interfaces::evaluateFreeSurfaceActiveVolumeDissipation(
+                *full, dissipation, velocity);
+        const auto d_compact =
+            interfaces::evaluateFreeSurfaceActiveVolumeDissipation(
+                *compact, dissipation, velocity, mesh);
+        EXPECT_TRUE(sameBits(d_full.bulk_viscous_dissipation_rate,
+                             d_compact.bulk_viscous_dissipation_rate));
+        const auto w_full =
+            interfaces::evaluateFreeSurfaceBackwardEulerKineticWork(
+                *full, side, FE::Real{1.2}, 3u, 4u, previous, velocity);
+        const auto w_compact =
+            interfaces::evaluateFreeSurfaceBackwardEulerKineticWork(
+                *compact, side, FE::Real{1.2}, 3u, 4u, previous, velocity,
+                mesh);
+        EXPECT_TRUE(sameBits(w_full.step_integrated_inertia_work,
+                             w_compact.step_integrated_inertia_work));
+        EXPECT_TRUE(sameBits(w_full.identity_residual,
+                             w_compact.identity_residual));
+        // Without the mesh the evaluators fail closed.
+        EXPECT_THROW((void)interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
+                         *compact, energy, velocity),
+                     std::invalid_argument);
     }
 }
 

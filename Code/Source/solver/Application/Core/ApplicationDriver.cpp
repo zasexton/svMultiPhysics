@@ -10511,7 +10511,7 @@ void attachAcceptedFreeSurfaceActiveVolumeEnergies(
           "Accepted active-volume energy");
       local_energy =
           svmp::FE::interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
-              **found, parameters, velocity);
+              **found, parameters, velocity, &sim.fe_system->meshAccess());
     } catch (...) {
       local_failure = std::current_exception();
     }
@@ -10628,7 +10628,8 @@ void attachAcceptedFreeSurfaceActiveVolumeDissipation(
               evaluateFreeSurfaceActiveVolumeDissipation(
                   **found,
                   *declaration.active_volume_dissipation_parameters,
-                  velocity);
+                  velocity,
+                  &sim.fe_system->meshAccess());
     } catch (...) {
       local_failure = std::current_exception();
     }
@@ -10936,7 +10937,8 @@ void attachAcceptedFreeSurfaceBackwardEulerKineticWork(
                   previous_velocity_revision,
                   endpoint_velocity_revision,
                   previous_velocity,
-                  endpoint_velocity);
+                  endpoint_velocity,
+                  &sim.fe_system->meshAccess());
     } catch (...) {
       local_failure = std::current_exception();
     }
@@ -19922,36 +19924,22 @@ void writeAcceptedVelocityExtensionMapArtifacts(
   }
 }
 
-// Dry (inactive-side) full-cell snapshot records carry only their
-// classification unless a declared consumer integrates over that side's
-// volume points: two-fluid stage diagnostics, or a free-surface functional
-// whose liquid side is the inactive side.  SVMP_KEEP_DRY_CELL_POINTS=1 keeps
-// every point (debugging and memory comparisons).
-bool snapshotMayStoreInactiveFullCellsClassificationOnly(
-    const svmp::FE::systems::FESystem& system,
-    svmp::FE::geometry::CutIntegrationSide inactive_side)
+// Full-cell snapshot records carry only their classification unless a
+// consumer integrates over their volume points without the mesh: the
+// two-fluid stage diagnostics.  The active-volume energy, dissipation and
+// kinetic-work evaluators rematerialize them from the mesh.  The dry
+// (inactive) side is always eligible; in 3D, where full cells dominate the
+// snapshot, both sides are.  SVMP_KEEP_DRY_CELL_POINTS=1 keeps every point
+// (debugging and memory comparisons).
+bool snapshotMayStoreFullCellsClassificationOnly(
+    const svmp::FE::systems::FESystem& system)
 {
   static const bool keep_points = [] {
     const char* value = std::getenv("SVMP_KEEP_DRY_CELL_POINTS");
     return value != nullptr && value[0] != '\0' && value[0] != '0';
   }();
-  if (keep_points ||
-      !system.twoFluidAcceptedStageDiagnosticDeclarations().empty()) {
-    return false;
-  }
-  for (const auto& declaration :
-       system.freeSurfaceDiscreteFunctionalDeclarations()) {
-    const auto& energy = declaration.active_volume_energy_parameters;
-    const auto& dissipation =
-        declaration.active_volume_dissipation_parameters;
-    if (declaration.parameters.liquid_side == inactive_side ||
-        (energy.has_value() && energy->liquid_side == inactive_side) ||
-        (dissipation.has_value() &&
-         dissipation->liquid_side == inactive_side)) {
-      return false;
-    }
-  }
-  return true;
+  return !keep_points &&
+         system.twoFluidAcceptedStageDiagnosticDeclarations().empty();
 }
 
 std::string cutGeometryContextMemoryDetails(
@@ -20593,10 +20581,11 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
             minGeneratedCutVolumeFraction();
     snapshot_policy.minimum_achieved_quadrature_order = 0;
     snapshot_policy.require_complete_exterior_boundary_partition = true;
-    if (snapshotMayStoreInactiveFullCellsClassificationOnly(
-            *sim.fe_system, inactive_volume_side)) {
+    if (snapshotMayStoreFullCellsClassificationOnly(*sim.fe_system)) {
       snapshot_policy.classification_only_full_cell_side =
           inactive_volume_side;
+      snapshot_policy.classification_only_full_cells_on_both_sides =
+          mesh_access.dimension() == 3;
     }
     auto geometry_snapshot =
         svmp::FE::interfaces::buildFreeSurfaceGeometrySnapshot(
