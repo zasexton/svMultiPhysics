@@ -15,10 +15,12 @@
     "amplitude_over_wavelength": 0.01,
     "periods": 4,
     "snapshots": 100,
-    "time_step": "One time step shared by all levels (decision D10): the largest dt within the one-sided capillary limit of the finest level, sqrt(rho*h^3/(4*pi*gamma)) with h = lambda/64 (= (1/sqrt(2)) * sqrt(rho*h^3/(2*pi*gamma))), that divides the run into 100 equal output intervals: dt = 5.50e-4, 2900 steps. The spatial study at 16/32/64 therefore carries no level-dependent time error.",
+    "time_step": "Decision D13 (2026-10-05): the lagged normal-increment capillary term is on (Surface_tension_semi_implicit = NormalIncrement) and every level uses 50 steps per inviscid period 2*pi/omega0: dt = 7.98e-3, 200 steps, one step shared by all levels (dt = 1.8/5.1/14.5 times the one-sided capillary limit at lambda/h = 16/32/64). Outputs every 2 steps (100 outputs). The check at 100 steps per period is generate_case.py --dt-divisor 2; see time_step_criterion.",
+    "time_step_before_D13": "Until 2026-10-05, with the term off: One time step shared by all levels (decision D10): the largest dt within the one-sided capillary limit of the finest level, sqrt(rho*h^3/(4*pi*gamma)) with h = lambda/64 (= (1/sqrt(2)) * sqrt(rho*h^3/(2*pi*gamma))), that divides the run into 100 equal output intervals: dt = 5.50e-4, 2900 steps. The spatial study at 16/32/64 therefore carries no level-dependent time error. Reproduced by generate_case.py --dt-rule capillary-limit --surface-tension-semi-implicit None.",
+    "surface_tension_semi_implicit": "NormalIncrement (decision D13, 2026-10-05; None before)",
     "reference": "Prosperetti initial-value solution for a free surface (Phys. Fluids 19, 195 (1976); Phys. Fluids 24, 1217 (1981), one-fluid limit), fitted with the same damped-cosine model on the same output times as the simulation",
-    "note": "Criteria apply separately to each (capillary form, transport, Laplace number) spatial study at the shared protocol time step (dt divisor 1). See README.md for the definitions and the cost of each level.",
-    "time_step_study": "Separate, at lambda/h = 32: dt, dt/2, dt/4 (generate_case.py --dt-divisor 1, 2, 4); reported only (D10)",
+    "note": "Criteria apply separately to each (capillary form, transport, Laplace number, dt divisor) spatial study at one shared time step; the divisor-1 study needs every level, the divisor-2 study the levels in time_step_criterion.refined_step_levels. See README.md for the definitions and the cost of each level.",
+    "time_step_study": "Gated since 2026-10-05 (D13, time_step_criterion): dt/2 (100 steps per period) at lambda/h = 64. Every level run at two or more divisors (1, 2, 4) is also reported.",
     "transport": "Level-set advection with the PDE velocity extension of decision D9 once it is in the solver (generate_case.py --transport pde_extension); until then wet_extension (wall_compatible_normal), the D9 comparison baseline. Criteria apply per (capillary form, transport) study."
   },
   "criteria": [
@@ -63,5 +65,33 @@
       "at_level": "each",
       "source": "Decision D1 working criterion (tracker section 5: volume drift <= 1e-4, as for M1 and M2, applied to M3), gated on the maximum deviation over the run (decision D11). A(0) includes the whole liquid layer (depth ~ lambda); mean_level_drift_over_amplitude reports the same drift relative to a0."
     }
-  ]
+  ],
+  "time_step_criterion": {
+    "id": "time_step",
+    "decided_on": "2026-10-05",
+    "source": "Decision D13 (design note Documentation/free_surface_semi_implicit_surface_tension_design.md, section 9.9): every gate passes at both steps, and the fitted frequency and damping change by at most 0.2% and 1% when the step is halved, at the finest level. Measured in section 9.5 (Richardson time error at lambda/h = 64, 50 steps per period): -0.16% in frequency, -0.5% in damping.",
+    "definition": "|q(dt) - q(dt/2)| / |q(dt/2)| for the frequency omega and the damping rate beta of the damped-cosine fit to the simulated a_h(t), between the dt divisor 1 and 2 runs of one (capillary form, transport, Laplace number) at their finest common level.",
+    "quantities": [
+      {
+        "id": "frequency",
+        "fit_parameter": "omega",
+        "limit": 0.002
+      },
+      {
+        "id": "damping",
+        "fit_parameter": "beta",
+        "limit": 0.01
+      }
+    ],
+    "at_level": "finest common level of the dt and dt/2 runs (protocol: lambda/h = 64)",
+    "dt_divisors": [
+      1,
+      2
+    ],
+    "refined_step_levels": [
+      64
+    ],
+    "gates_at_each_step": "every criterion applies to the dt study (all levels) and to the dt/2 study at the levels in refined_step_levels; criteria at levels not run at dt/2 are reported as not run",
+    "when_one_divisor_only": "reported as not evaluated; does not fail"
+  }
 }

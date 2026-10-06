@@ -40,7 +40,7 @@ def test_physical_case_and_schedule_are_those_of_capillary_wave_2d():
             ours = gen.time_schedule(level, divisor)
             theirs = unfitted.time_schedule(level, unfitted.DEFAULT_LAPLACE_NUMBER,
                                             unfitted.DEFAULT_PERIODS, unfitted.DEFAULT_SNAPSHOTS,
-                                            divisor)
+                                            divisor, dt_rule="capillary-limit")
             assert ours["dt"] == theirs["dt"] and ours["steps"] == theirs["steps"]
     # The shared step is within the one-sided capillary limit of the finest level.
     fine = gen.time_schedule(64)

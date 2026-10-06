@@ -8,9 +8,12 @@ walls, which are the mirror planes of the standing cosine mode.  The
 amplitude history is compared with Prosperetti's initial-value solution
 (prosperetti_reference.py) by verify.py.
 
-Every level uses the same time step, the capillary limit of the finest level
-(decision D10), so the refinement study measures the spatial error alone;
---dt-divisor 2 and 4 give the separate time-step study at one level.
+Time step (decision D13, 2026-10-05): the lagged normal-increment capillary
+term (Surface_tension_semi_implicit = NormalIncrement) is on, and every level
+uses 50 steps per inviscid period, one step shared by all levels;
+--dt-divisor 2 gives the 100-steps-per-period check.  The earlier protocol, one
+shared step at the capillary limit of the finest level (decision D10), is
+reproduced by --dt-rule capillary-limit --surface-tension-semi-implicit None.
 --transport selects the level-set advection velocity (decision D9).
 
 The case is written for the new OOP solver: solver.xml, an affine Triangle3
@@ -39,7 +42,18 @@ import prosperetti_reference as reference  # noqa: E402
 # ---------------------------------------------------------------------------
 LEVELS = (16, 32, 64)                       # wavelength / h
 CAPILLARY_FORMS = ("surface_stress", "kag_consistent", "kag_lumped")
-DT_DIVISORS = (1, 2, 4)                     # time-step study at a fixed level (D10)
+DT_DIVISORS = (1, 2, 4)                     # time-step study (D10, D13)
+# Time-step rule.  "steps-per-period" (protocol since 2026-10-05, D13): the
+# inviscid period 2 pi / omega0 in STEPS_PER_PERIOD steps at every level.
+# "capillary-limit" (earlier protocol, D10): the largest step within the
+# capillary limit of the finest level that divides the run into the outputs.
+DT_RULES = ("steps-per-period", "capillary-limit")
+DEFAULT_DT_RULE = "steps-per-period"
+STEPS_PER_PERIOD = 50
+# Semi-implicit capillary term (Surface_tension_semi_implicit, decision D13);
+# NormalIncrement since 2026-10-05, None before.
+SEMI_IMPLICIT_OPTIONS = ("None", "NormalIncrement")
+DEFAULT_SEMI_IMPLICIT = "NormalIncrement"
 # Level-set advection velocity (decision D9).  "pde_extension" (default) is
 # the harmonic PDE velocity extension with monolithic coupling, as in
 # linear_sloshing_2d, static_drop_2d and sessile_drop_2d.  "wet_extension" is
@@ -119,22 +133,39 @@ def physical_parameters(laplace: float) -> dict:
 
 
 def time_schedule(level: int, laplace: float, periods: float, snapshots: int,
-                  dt_divisor: int = 1) -> dict:
-    """Time step shared by all levels (D10), refined by dt_divisor.
+                  dt_divisor: int = 1, dt_rule: str = DEFAULT_DT_RULE) -> dict:
+    """Time step shared by all levels, refined by dt_divisor.
 
-    Protocol step: the largest dt within the capillary limit of the finest
-    level, DT_SAFETY * sqrt(rho h_min^3 / (2 pi gamma)), that divides the run
-    into `snapshots` equal output intervals.  It is below the limit of every
-    coarser level.  A divisor d refines it exactly to dt/d (d times the
-    cadence).
+    "steps-per-period" (D13): dt = T0 / STEPS_PER_PERIOD with T0 = 2 pi/omega0;
+    the run of `periods` periods must be a whole number of such steps, and the
+    output cadence is the largest divisor of the step count that still gives
+    at least `snapshots` outputs.  "capillary-limit" (D10): the largest dt
+    within the capillary limit of the finest level, DT_SAFETY *
+    sqrt(rho h_min^3 / (2 pi gamma)), that divides the run into `snapshots`
+    equal output intervals.  Either step is the same at every level.  A
+    divisor d refines it exactly to dt/d (d times the cadence), so the output
+    times are unchanged.
     """
+    if dt_rule not in DT_RULES:
+        raise ValueError(f"--dt-rule must be one of {DT_RULES}")
     h = WAVELENGTH / level
     h_min = WAVELENGTH / max(LEVELS)
     phys = physical_parameters(laplace)
     end_time = periods * phys["inviscid_period"]
     dt_max = DT_SAFETY * capillary_dt_limit(h_min)
-    cadence = max(1, math.ceil(end_time / (snapshots * dt_max))) * dt_divisor
-    steps = snapshots * cadence
+    if dt_rule == "steps-per-period":
+        base_steps = round(periods * STEPS_PER_PERIOD)
+        if base_steps < 1 or not math.isclose(base_steps, periods * STEPS_PER_PERIOD,
+                                              abs_tol=1e-9):
+            raise ValueError(f"--periods times {STEPS_PER_PERIOD} steps per period must be a "
+                             "whole number of steps")
+        base_cadence = max([c for c in range(1, base_steps + 1)
+                            if base_steps % c == 0 and base_steps // c >= min(snapshots, base_steps)])
+        cadence = base_cadence * dt_divisor
+        steps = base_steps * dt_divisor
+    else:
+        cadence = max(1, math.ceil(end_time / (snapshots * dt_max))) * dt_divisor
+        steps = snapshots * cadence
     return {
         "h": h,
         "end_time": end_time,
@@ -142,6 +173,8 @@ def time_schedule(level: int, laplace: float, periods: float, snapshots: int,
         "dt_capillary_limit_finest_level": capillary_dt_limit(h_min),
         "dt_max": dt_max,
         "dt": end_time / steps,
+        "dt_over_capillary_limit": end_time / steps / (DT_SAFETY * capillary_dt_limit(h)),
+        "steps_per_period": steps / periods,
         "steps": steps,
         "output_cadence": cadence,
         **phys,
@@ -326,7 +359,13 @@ def wall_bc(name: str) -> str:
 
 def solver_xml(form: str, schedule: dict, steps: int, cadence: int,
                transport: str = DEFAULT_TRANSPORT,
-               kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION) -> str:
+               kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
+               semi_implicit: str = DEFAULT_SEMI_IMPLICIT) -> str:
+    if semi_implicit not in SEMI_IMPLICIT_OPTIONS:
+        raise ValueError(f"semi_implicit must be one of {SEMI_IMPLICIT_OPTIONS}")
+    semi_implicit_bc = ("" if semi_implicit == "None" else
+                        f"\n      <Surface_tension_semi_implicit>{semi_implicit}"
+                        "</Surface_tension_semi_implicit>")
     velocity = level_set_velocity_block(transport)
     reconciliation = ("\n    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>"
                       if kinematic_reconciliation else "")
@@ -437,7 +476,7 @@ def solver_xml(form: str, schedule: dict, steps: int, cadence: int,
       <Interface_quadrature_order>2</Interface_quadrature_order>
       <External_pressure>{EXTERNAL_PRESSURE:.17g}</External_pressure>
       <Surface_tension>{SURFACE_TENSION:.17g}</Surface_tension>
-      <Surface_tension_form>{tension_form}</Surface_tension_form>{curvature_bc}
+      <Surface_tension_form>{tension_form}</Surface_tension_form>{semi_implicit_bc}{curvature_bc}
       <Use_level_set_curvature>false</Use_level_set_curvature>
       <Enable_velocity_extension>false</Enable_velocity_extension>
       <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
@@ -457,7 +496,9 @@ def generate(level: int, form: str, output_dir: Path, *,
              snapshots: int = DEFAULT_SNAPSHOTS,
              dt_divisor: int = 1, transport: str = DEFAULT_TRANSPORT,
              kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
-             max_steps: int | None = None, force: bool = False) -> dict:
+             max_steps: int | None = None, force: bool = False,
+             dt_rule: str = DEFAULT_DT_RULE,
+             semi_implicit: str = DEFAULT_SEMI_IMPLICIT) -> dict:
     if level not in LEVELS:
         raise ValueError(f"--level must be one of {LEVELS}")
     if form not in CAPILLARY_FORMS:
@@ -465,6 +506,10 @@ def generate(level: int, form: str, output_dir: Path, *,
     if dt_divisor not in DT_DIVISORS:
         raise ValueError(f"--dt-divisor must be one of {DT_DIVISORS}")
     level_set_velocity_block(transport)                 # validates the transport choice
+    if dt_rule not in DT_RULES:
+        raise ValueError(f"--dt-rule must be one of {DT_RULES}")
+    if semi_implicit not in SEMI_IMPLICIT_OPTIONS:
+        raise ValueError(f"--surface-tension-semi-implicit must be one of {SEMI_IMPLICIT_OPTIONS}")
     if not (math.isfinite(laplace) and laplace > 0.0):
         raise ValueError("--laplace-number must be positive and finite")
     if not (periods > 0.0 and snapshots >= 4):
@@ -472,7 +517,7 @@ def generate(level: int, form: str, output_dir: Path, *,
     if output_dir.exists() and any(output_dir.iterdir()) and not force:
         raise FileExistsError(f"{output_dir} is not empty (use --force)")
 
-    schedule = time_schedule(level, laplace, periods, snapshots, dt_divisor)
+    schedule = time_schedule(level, laplace, periods, snapshots, dt_divisor, dt_rule)
     steps, cadence, truncated = schedule["steps"], schedule["output_cadence"], False
     if max_steps is not None:
         if max_steps < 1:
@@ -500,7 +545,7 @@ def generate(level: int, form: str, output_dir: Path, *,
         node_ids, parents = faces[wall]
         write_face_vtp(mesh_dir / "mesh-surfaces" / f"{wall}.vtp", points, node_ids, parents)
     (output_dir / "solver.xml").write_text(solver_xml(form, schedule, steps, cadence, transport,
-                                                      kinematic_reconciliation),
+                                                      kinematic_reconciliation, semi_implicit),
                                            encoding="utf-8")
 
     case = {
@@ -510,6 +555,7 @@ def generate(level: int, form: str, output_dir: Path, *,
         "capillary_form": form,
         "transport": transport,
         "kinematic_reconciliation": bool(kinematic_reconciliation),
+        "surface_tension_semi_implicit": semi_implicit,
         "laplace_number": laplace,
         "density": DENSITY,
         "surface_tension": SURFACE_TENSION,
@@ -547,8 +593,13 @@ def generate(level: int, form: str, output_dir: Path, *,
         "dt_capillary_limit": schedule["dt_capillary_limit"],
         "dt_capillary_limit_finest_level": schedule["dt_capillary_limit_finest_level"],
         "dt_safety_factor": DT_SAFETY,
-        "time_step_rule": "shared by all levels: capillary limit of the finest level (D10)",
+        "dt_rule": dt_rule,
+        "time_step_rule": ("shared by all levels: 50 steps per inviscid period (D13)"
+                           if dt_rule == "steps-per-period" else
+                           "shared by all levels: capillary limit of the finest level (D10)"),
         "dt_divisor": dt_divisor,
+        "steps_per_period": schedule["steps_per_period"],
+        "dt_over_capillary_limit": schedule["dt_over_capillary_limit"],
         "dt": schedule["dt"],
         "steps_protocol": schedule["steps"],
         "steps": steps,
@@ -579,8 +630,16 @@ def main(argv=None) -> int:
     parser.add_argument("--snapshots", type=int, default=DEFAULT_SNAPSHOTS,
                         help="number of VTU outputs over the run (protocol value 100)")
     parser.add_argument("--dt-divisor", type=int, default=1, choices=DT_DIVISORS,
-                        help="divide the shared protocol time step by this factor "
-                             "(time-step study at one level, D10; protocol value 1)")
+                        help="divide the shared time step by this factor with unchanged output "
+                             "times (2: the 100-steps-per-period check of D13)")
+    parser.add_argument("--dt-rule", default=DEFAULT_DT_RULE, choices=DT_RULES,
+                        help=f"time-step rule (protocol: steps-per-period, {STEPS_PER_PERIOD} "
+                             "steps per inviscid period, D13; capillary-limit with "
+                             "--surface-tension-semi-implicit None reproduces the earlier protocol)")
+    parser.add_argument("--surface-tension-semi-implicit", choices=SEMI_IMPLICIT_OPTIONS,
+                        default=DEFAULT_SEMI_IMPLICIT,
+                        help="Surface_tension_semi_implicit of the free surface (protocol value "
+                             f"{DEFAULT_SEMI_IMPLICIT}, D13; None reproduces the earlier decks)")
     parser.add_argument("--max-steps", type=int, default=None,
                         help="smoke runs only: stop after this many steps; the case is "
                              "marked truncated and verify.py rejects it for acceptance")
@@ -597,14 +656,16 @@ def main(argv=None) -> int:
                         snapshots=args.snapshots, dt_divisor=args.dt_divisor,
                         transport=args.transport,
                         kinematic_reconciliation=args.kinematic_reconciliation == "on",
-                        max_steps=args.max_steps, force=args.force)
+                        max_steps=args.max_steps, force=args.force, dt_rule=args.dt_rule,
+                        semi_implicit=args.surface_tension_semi_implicit)
     except (ValueError, FileExistsError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     print(f"wrote {args.output_dir}")
     for key in ("level_lambda_over_h", "capillary_form", "transport", "laplace_number", "viscosity",
                 "epsilon", "omega0", "normal_mode_omega", "normal_mode_damping_rate",
-                "end_time", "dt", "dt_capillary_limit", "dt_divisor", "steps",
+                "end_time", "dt_rule", "dt", "dt_capillary_limit", "dt_over_capillary_limit",
+                "dt_divisor", "steps_per_period", "surface_tension_semi_implicit", "steps",
                 "output_cadence", "n_vertices", "n_triangles", "min_abs_phi_over_h",
                 "top_gap_over_h", "boundary_layer_thickness_over_h", "truncated"):
         print(f"  {key} = {case[key]}")
