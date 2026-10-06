@@ -4002,6 +4002,7 @@ LinearSolverParameters::LinearSolverParameters()
   set_parameter("NS_Use_coupled_outer_FGMRES", false, !required, ns_use_coupled_outer_fgmres);
   set_parameter("Right_preconditioner", std::string("none"), !required, right_preconditioner);
   set_parameter("Preconditioner_reuse", false, !required, preconditioner_reuse);
+  set_parameter("Inexact_Newton_forcing", std::string("none"), !required, inexact_newton_forcing);
 
   //set_parameter("Preconditioner", "", !required, preconditioner);
 
