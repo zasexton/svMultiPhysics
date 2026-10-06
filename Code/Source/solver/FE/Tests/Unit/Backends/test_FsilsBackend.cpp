@@ -15,8 +15,10 @@
 #include "Core/FEException.h"
 #include "Sparsity/SparsityPattern.h"
 
+#include "Backends/FSILS/FsilsDirectSolver.h"
 #include "Backends/FSILS/FsilsFactory.h"
 #include "Backends/FSILS/FsilsLinearSolver.h"
+#include "FsilsDirectSolveTestUtils.h"
 #include "Backends/FSILS/liner_solver/bcast.h"
 #include "Backends/FSILS/liner_solver/block_schur_strategy_selector.h"
 #include "Backends/FSILS/liner_solver/dot.h"
@@ -4347,6 +4349,153 @@ TEST(FsilsBackend, LayoutRevisionsNeverRepeatAcrossLayouts)
         vector->createAssemblyView()->vectorLayoutRevision();
     EXPECT_GT(second_matrix_revision, first_matrix_revision);
     EXPECT_NE(second_vector_revision, first_vector_revision);
+}
+
+namespace {
+
+SolverOptions directOptions()
+{
+    SolverOptions o;
+    o.method = SolverMethod::Direct;
+    o.rel_tol = 1e-8;
+    o.abs_tol = 1e-10;
+    return o;
+}
+
+/// Max |x - x_exact| over the operator's DOFs.
+Real maxErrorAgainstExact(const direct_test::ChainOptions& o, GenericVector& x)
+{
+    auto view = x.createGhostedReadView();
+    Real err = 0.0;
+    for (GlobalIndex dof = 0; dof < o.n_nodes * direct_test::kChainDof; ++dof) {
+        err = std::max(err, std::abs(view->getVectorEntry(dof) - direct_test::exactValue(o, dof)));
+    }
+    return err;
+}
+
+} // namespace
+
+TEST(FsilsDirectSolve, SerialSolveEnforcesDirichletAndKeepsAnalysisWhileStructureIsUnchanged)
+{
+    using namespace direct_test;
+    FsilsFactory factory(kChainDof);
+    FsilsLinearSolver solver(directOptions());
+
+    ChainOptions o;
+    o.n_nodes = 17;
+    o.dirichlet = {0, 5 * kChainDof + 2, 16 * kChainDof + 0, 16 * kChainDof + 1, 16 * kChainDof + 2};
+    solver.setDirichletDofs(o.dirichlet);
+
+    auto sys = buildSerialChain(factory, o);
+    auto rep = solver.solve(*sys.A, *sys.x, *sys.b);
+    EXPECT_TRUE(rep.converged) << rep.message;
+    EXPECT_FALSE(rep.numerical_breakdown);
+    EXPECT_GE(rep.iterations, 1);
+    EXPECT_LT(maxErrorAgainstExact(o, *sys.x), 1e-12);
+    ASSERT_NE(solver.directSolver(), nullptr);
+    EXPECT_EQ(solver.directSolver()->stats().analyses, 1u);
+    EXPECT_EQ(solver.directSolver()->stats().factorizations, 1u);
+
+    // New values on the same structure: numeric factorization only.
+    o.scale = 1.7;
+    sys = buildSerialChain(factory, o);
+    rep = solver.solve(*sys.A, *sys.x, *sys.b);
+    EXPECT_TRUE(rep.converged) << rep.message;
+    EXPECT_LT(maxErrorAgainstExact(o, *sys.x), 1e-12);
+    EXPECT_EQ(solver.directSolver()->stats().analyses, 1u);
+    EXPECT_EQ(solver.directSolver()->stats().factorizations, 2u);
+
+    // A component pair that was exactly zero becomes nonzero: new analysis.
+    o.couple_10 = true;
+    sys = buildSerialChain(factory, o);
+    rep = solver.solve(*sys.A, *sys.x, *sys.b);
+    EXPECT_TRUE(rep.converged) << rep.message;
+    EXPECT_LT(maxErrorAgainstExact(o, *sys.x), 1e-12);
+    EXPECT_EQ(solver.directSolver()->stats().analyses, 2u);
+
+    // A changed Dirichlet set changes the factored structure: new analysis.
+    o.dirichlet.push_back(9 * kChainDof + 1);
+    solver.setDirichletDofs(o.dirichlet);
+    sys = buildSerialChain(factory, o);
+    rep = solver.solve(*sys.A, *sys.x, *sys.b);
+    EXPECT_TRUE(rep.converged) << rep.message;
+    EXPECT_LT(maxErrorAgainstExact(o, *sys.x), 1e-12);
+    EXPECT_EQ(solver.directSolver()->stats().analyses, 3u);
+    EXPECT_EQ(solver.directSolver()->stats().factorizations, 4u);
+    EXPECT_EQ(solver.directSolver()->stats().failures, 0u);
+}
+
+TEST(FsilsDirectSolve, SerialSolveMatchesFsilsGmresWithDirichletFaces)
+{
+    using namespace direct_test;
+    FsilsFactory factory(kChainDof);
+    ChainOptions o;
+    o.n_nodes = 23;
+    o.couple_10 = true;
+    o.dirichlet = {1, 7 * kChainDof + 0, 7 * kChainDof + 1, 12 * kChainDof + 2};
+
+    SolverOptions gmres;
+    gmres.method = SolverMethod::GMRES;
+    gmres.preconditioner = PreconditionerType::RowColumnScaling;
+    gmres.fsils_use_rcs = true;
+    gmres.rel_tol = 1e-12;
+    gmres.abs_tol = 1e-14;
+    gmres.max_iter = 500;
+    gmres.krylov_dim = 100;
+    FsilsLinearSolver krylov(gmres);
+    krylov.setDirichletDofs(o.dirichlet);
+    auto sys_k = buildSerialChain(factory, o);
+    const auto rep_k = krylov.solve(*sys_k.A, *sys_k.x, *sys_k.b);
+    EXPECT_TRUE(rep_k.converged) << rep_k.message;
+
+    FsilsLinearSolver direct(directOptions());
+    direct.setDirichletDofs(o.dirichlet);
+    auto sys_d = buildSerialChain(factory, o);
+    const auto rep_d = direct.solve(*sys_d.A, *sys_d.x, *sys_d.b);
+    EXPECT_TRUE(rep_d.converged) << rep_d.message;
+
+    EXPECT_LT(maxErrorAgainstExact(o, *sys_k.x), 1e-8);
+    EXPECT_LT(maxErrorAgainstExact(o, *sys_d.x), 1e-12);
+}
+
+TEST(FsilsDirectSolve, SerialSingularOperatorReportsBreakdownWithZeroCorrection)
+{
+    using namespace direct_test;
+    FsilsFactory factory(kChainDof);
+    FsilsLinearSolver solver(directOptions());
+    ChainOptions o;
+    o.n_nodes = 11;
+    o.zero_row = 4 * kChainDof + 1;
+    auto sys = buildSerialChain(factory, o);
+    const auto rep = solver.solve(*sys.A, *sys.x, *sys.b);
+    EXPECT_FALSE(rep.converged);
+    EXPECT_TRUE(rep.numerical_breakdown);
+    for (const auto v : sys.x->localSpan()) {
+        EXPECT_EQ(v, 0.0);
+    }
+    EXPECT_EQ(solver.directSolver()->stats().failures, 1u);
+
+    // The solver recovers on the next nonsingular operator.
+    o.zero_row = -1;
+    sys = buildSerialChain(factory, o);
+    const auto rep2 = solver.solve(*sys.A, *sys.x, *sys.b);
+    EXPECT_TRUE(rep2.converged) << rep2.message;
+    EXPECT_LT(maxErrorAgainstExact(o, *sys.x), 1e-12);
+}
+
+TEST(FsilsDirectSolve, SerialSolveRefusesLowRankOperatorUpdates)
+{
+    using namespace direct_test;
+    FsilsFactory factory(kChainDof);
+    FsilsLinearSolver solver(directOptions());
+    ChainOptions o;
+    o.n_nodes = 8;
+    auto sys = buildSerialChain(factory, o);
+    RankOneUpdate update;
+    update.sigma = 1.0;
+    update.v = {{0, 1.0}, {3, -1.0}};
+    solver.setRankOneUpdates(std::span<const RankOneUpdate>(&update, 1));
+    EXPECT_THROW((void)solver.solve(*sys.A, *sys.x, *sys.b), NotImplementedException);
 }
 
 } // namespace svmp::FE::backends

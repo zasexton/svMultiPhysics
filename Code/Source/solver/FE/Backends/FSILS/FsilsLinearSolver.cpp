@@ -7,6 +7,7 @@
 
 #include "Backends/FSILS/FsilsLinearSolver.h"
 #include "Backends/FSILS/FsilsBlockPreconditioners.h"
+#include "Backends/FSILS/FsilsDirectSolver.h"
 
 #include "Backends/FSILS/FsilsMatrix.h"
 #include "Backends/FSILS/FsilsSystemDump.h"
@@ -1298,6 +1299,10 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 "FsilsLinearSolver::solve: rectangular systems not implemented");
     FE_THROW_IF(b->size() != A->numRows() || x->size() != b->size(), InvalidArgumentException,
                 "FsilsLinearSolver::solve: size mismatch");
+
+    if (options_.method == SolverMethod::Direct) {
+        return solveDirect(*A, *x, *b, solve_wall_start);
+    }
 
     auto& lhs = *static_cast<fe_fsi_linear_solver::FSILS_lhsType*>(const_cast<void*>(A->fsilsLhsPtr()));
     const int dof = A->fsilsDof();
@@ -6723,6 +6728,72 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                                               grouped_bordered_field_couplings_.size()));
     }
 
+    return report;
+}
+
+SolverReport FsilsLinearSolver::solveDirect(const FsilsMatrix& A,
+                                            FsilsVector& x,
+                                            const FsilsVector& b,
+                                            std::chrono::steady_clock::time_point solve_wall_start)
+{
+    auto& lhs = *static_cast<fe_fsi_linear_solver::FSILS_lhsType*>(const_cast<void*>(A.fsilsLhsPtr()));
+    auto& commu = lhs.commu;
+
+    // Low-rank operator terms are applied matrix-free by the Krylov path and
+    // are not part of the assembled matrix; the direct path refuses them on
+    // every rank (the update lists are ownership-partitioned).
+    int local_updates = (!rank_one_updates_.empty() || !reduced_field_updates_.empty() ||
+                         !grouped_bordered_field_couplings_.empty())
+                            ? 1
+                            : 0;
+    int any_updates = local_updates;
+    if (commu.nTasks > 1) {
+        fe_fsi_linear_solver::fsils_allreduce(&local_updates, &any_updates, 1, MPI_INT, MPI_LOR, commu);
+    }
+    FE_THROW_IF(any_updates != 0, NotImplementedException,
+                "FsilsLinearSolver: the direct solve does not support rank-one, reduced or bordered "
+                "operator updates (use an iterative LS type)");
+
+    if (!direct_solver_) {
+        direct_solver_ = std::make_unique<FsilsGatheredDirectSolver>();
+    }
+    SolverReport report = direct_solver_->solve(A, x, b, dirichlet_dofs_, options_);
+
+    // Post-solve nullspace projection, as on the Krylov path.
+    if (!nullspace_basis_.empty()) {
+        auto x_span = x.localSpan();
+        const auto n = x_span.size();
+        for (const auto& z : nullspace_basis_) {
+            if (z.size() != n) {
+                continue;
+            }
+            double local_dot = 0.0;
+            for (std::size_t i = 0; i < n; ++i) {
+                local_dot += z[i] * static_cast<double>(x_span[i]);
+            }
+            double global_dot = local_dot;
+            if (commu.nTasks > 1) {
+                fe_fsi_linear_solver::fsils_allreduce_sum(&local_dot, &global_dot, 1, MPI_DOUBLE, commu);
+            }
+            for (std::size_t i = 0; i < n; ++i) {
+                x_span[i] -= static_cast<Real>(global_dot * z[i]);
+            }
+        }
+    }
+
+    if (oopTraceEnabled()) {
+        std::ostringstream oss;
+        oss << "FsilsLinearSolver::solveDirect: converged=" << (report.converged ? 1 : 0)
+            << " iters=" << report.iterations << " r0=" << report.initial_residual_norm
+            << " rn=" << report.final_residual_norm << " rel=" << report.relative_residual
+            << " msg='" << report.message << "'";
+        traceLog(oss.str());
+    }
+    if (fsilsSystemDumpRequested()) {
+        const double solve_seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_wall_start).count();
+        maybeDumpFsilsSystem(A, b, x, dirichlet_dofs_, options_, report, solve_seconds, 0);
+    }
     return report;
 }
 
