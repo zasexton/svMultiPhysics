@@ -106,6 +106,19 @@ limit `sqrt(rho h^3 / (2 pi gamma))` with the fixed factor `1/sqrt(2)` that
 follows from the one-sided density sum. `generate_case.py` rounds `dt` down
 so that the run is exactly 100 equal output intervals.
 
+Time-step options (2026-10-06), for the fixed-step protocol under validation:
+
+| Option | Effect |
+|---|---|
+| `--dt-rule capillary-limit` (default) | the limit of each level, as above: 2,800 / 7,900 / 22,300 steps at `R/h = 16 / 32 / 64` |
+| `--dt-rule fixed` | one physical step for every level, the capillary-limit step of the coarsest level `R/h = 16`: `dt = T/2800 = 4.374e-3`, outputs every 28 steps; 1, 2.83 and 8 times the capillary-limit step of `R/h = 16, 32, 64`. At `R/h = 16` the deck equals the capillary-limit deck |
+| `--surface-tension-semi-implicit NormalIncrement` | the lagged normal-increment capillary term of decision D13 in the free-surface block (default `None`). It needs `--transport pde_extension` or `coupled` |
+| `--dt-divisor 2`, `4` | the step of either rule divided exactly, with the steps and the output cadence multiplied, so the output times are unchanged |
+| `--dt-multiple m` | `m` times the capillary limit of the rule, rounded down to the output intervals (larger-step studies; `m = 2` halved by `--dt-divisor 2` gives the `m = 1` deck) |
+
+`case.json` records `dt_rule`, `dt_multiple`, `dt_base`, `dt_divisor`,
+`dt_over_capillary_limit` and `surface_tension_semi_implicit`.
+
 **Vertex crossings.** A moving contact line or interface crosses mesh
 vertices all the time, and every crossing changes the cut topology during a
 step. The solver treats that as a normal event (branch `dev/vertex-crossing`):
@@ -190,7 +203,9 @@ more than half a step away from `T`. It also exits with status 2 on a `--max-ste
 
 ## Tolerances and their sources
 
-Each criterion applies to each (capillary form, `theta_e`) refinement study.
+Each criterion applies to each (capillary form, `theta_e`, dt rule, dt
+multiple, dt divisor) refinement study. Cases written before the time-step
+options count as the capillary-limit rule with divisor 1.
 
 | Criterion | Limit | Where | Source |
 |---|---|---|---|
@@ -199,6 +214,29 @@ Each criterion applies to each (capillary form, `theta_e`) refinement study.
 | `apex_height` | at most 0.02 | `R/h = 32` | tracker M4 working criterion, as above |
 | `volume_drift` | at most 1e-4 | every level | D1 working criterion |
 | `no_velocity_growth` | growth ratio at most 1 | every level | D1 working criterion |
+| `time_step` | between `dt` and `dt/2`: end-state angles change by at most 0.1 degree, base half-width and apex height by at most 0.1%; over the outputs, the angles by at most 0.5 degree and the base half-width by at most 0.1% of `b_ref`; every output measurable in both runs | finest common level of the `dt` and `dt/2` studies | pre-registered 2026-10-06 from the D13 sessile runs (below) |
+
+**Time-step criterion** (`time_step_criterion` in `tolerances.json`, written
+before any fixed-step run was analysed). `verify.py` applies every criterion
+above to the `dt` study (all levels) and to the `dt/2` study
+(`R/h = 16` and 32; the monotone decrease over 16/32/64 is not evaluated at
+`dt/2` without `R/h = 64`), and compares the divisor-1 and divisor-2 studies
+of each (capillary form, `theta_e`, rule, multiple) at their finest common
+level. It reports the changes at the other common levels and between `dt/2`
+and `dt/4`. With one divisor the criterion is reported as not evaluated. The
+numbers come from the D13 sessile runs (design note
+`Documentation/free_surface_semi_implicit_surface_tension_design.md`
+section 9.6; 60 degrees, `R/h = 16`, two viscous times, 20 outputs): halving
+the step from 4 to 2 times the `R/h = 16` capillary-limit step changed the
+final angles by 0.005 and 0.037 degrees, the base by 2e-7 and the apex by
+6.9e-5, and over the history the angles by at most 0.15 and 0.37 degrees (one
+output next to a vertex crossing) and the base by at most 2.2e-4 of `b_ref`.
+The end-state limits are 1/20 of the M4 gates. The end state is an
+equilibrium that hides time error, so the histories are gated too: the
+contact-line position (base) is smooth in time, while the circle-fit angle
+jumps by a few tenths of a degree when the interface crosses a vertex one
+step earlier or later, whatever the step; 0.5 degrees is 1/4 of the angle
+gate.
 
 The area criterion gates the maximum drift over the whole run, not its final
 value (decision D11); `liquid_area_relative_drift_max` is that maximum.

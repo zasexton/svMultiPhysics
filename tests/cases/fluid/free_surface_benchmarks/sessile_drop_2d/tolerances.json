@@ -26,8 +26,9 @@
     "viscous_times": 5,
     "snapshots": 100,
     "time_step": "dt <= sqrt(rho*h^3/(4*pi*gamma)) = (1/sqrt(2)) * sqrt(rho*h^3/(2*pi*gamma)), rounded down so that the run is 100 equal output intervals",
+    "time_step_options": "generate_case.py --dt-rule fixed shares one physical step by every level: the capillary-limit step of the coarsest level, R/h = 16, dt = T/2800 = 4.374e-3 (2800 steps and outputs every 28 steps at every level; 1, 2.83 and 8 times the capillary-limit step of R/h = 16, 32 and 64). It is used with the lagged normal-increment capillary term of decision D13 (--surface-tension-semi-implicit NormalIncrement). --dt-divisor 2 and 4 refine either rule exactly with unchanged output times; --dt-multiple scales the capillary limit before rounding (larger-step studies). The fixed-step protocol was proposed on 2026-10-06 and is validated with time_step_criterion before it can become the protocol.",
     "reference": "circular cap on y = 0 with the Young angle and the area A(0) of the sampled initial level set: R_ref = sqrt(A(0)/(theta_e - sin(theta_e) cos(theta_e))), base half-width R_ref sin(theta_e), apex height R_ref (1 - cos(theta_e))",
-    "note": "Criteria apply separately to each (capillary form, equilibrium angle) refinement study. See README.md for the definitions and the cost of each level."
+    "note": "Criteria apply separately to each (capillary form, equilibrium angle, dt rule, dt multiple, dt divisor) refinement study; the divisor-1 study needs every level, the divisor-2 study the levels in time_step_criterion.refined_step_levels. See README.md for the definitions and the cost of each level."
   },
   "criteria": [
     {
@@ -76,5 +77,56 @@
       "at_level": "each",
       "source": "Decision D1 working criterion (tracker section 5: no growth of max|u| in time)"
     }
-  ]
+  ],
+  "time_step_criterion": {
+    "id": "time_step",
+    "decided_on": "2026-10-06",
+    "pre_registered": "written and committed before any run of the fixed-step protocol was analysed",
+    "applies_to": "every (capillary form, equilibrium angle, dt rule, dt multiple) with runs at dt divisors 1 and 2. Written for the fixed-step protocol under validation (--dt-rule fixed --surface-tension-semi-implicit NormalIncrement), which may become the protocol only if this criterion passes at 60 and 120 degrees.",
+    "source": "User proposal of 2026-10-06 (every M4 gate at dt and dt/2; end-state angle change at most 0.1 degree, base radius and apex height at most 0.1%; a history criterion over the outputs), with the numbers set from the D13 sessile runs, design note Documentation/free_surface_semi_implicit_surface_tension_design.md section 9.6 (job 46232162).",
+    "definition": "Between the dt divisor 1 and 2 studies of one (capillary form, equilibrium angle, dt rule, dt multiple), at their finest common level. End state: the quantities of contact_angle, base_radius and apex_height at the end of the run. History: the same measurements (contact angles from the local circle fit, base half-width from the wall zero crossings) at every output; both runs write their outputs at the same times (100 in the protocol).",
+    "quantities": [
+      {
+        "id": "contact_angle_change_final",
+        "limit": 0.1,
+        "unit": "degrees",
+        "definition": "max over the two contact points of |theta(dt) - theta(dt/2)| at the end of the run"
+      },
+      {
+        "id": "base_radius_change_final",
+        "limit": 0.001,
+        "definition": "|b(dt) - b(dt/2)| / b(dt/2) at the end of the run"
+      },
+      {
+        "id": "apex_height_change_final",
+        "limit": 0.001,
+        "definition": "|H(dt) - H(dt/2)| / H(dt/2) at the end of the run"
+      },
+      {
+        "id": "contact_angle_change_history",
+        "limit": 0.5,
+        "unit": "degrees",
+        "definition": "max over the outputs t_k and the two contact points of |theta(dt, t_k) - theta(dt/2, t_k)|"
+      },
+      {
+        "id": "base_radius_change_history",
+        "limit": 0.001,
+        "definition": "max over the outputs t_k of |b(dt, t_k) - b(dt/2, t_k)| / b_ref, b_ref the reference base half-width"
+      }
+    ],
+    "every_output_measurable": "the output times of the two runs must match, and both runs must have exactly two wall contact points at every output; otherwise the criterion fails",
+    "at_level": "finest common level of the dt and dt/2 studies (validation: R/h = 32)",
+    "dt_divisors": [
+      1,
+      2
+    ],
+    "refined_step_levels": [
+      16,
+      32
+    ],
+    "gates_at_each_step": "every criterion in criteria applies to the dt study (all levels) and to the dt/2 study at the levels in refined_step_levels; at dt/2 the monotone decrease of the angle error over 16/32/64 is not evaluated unless R/h = 64 was run. Other divisors (dt/4) are extra checks: their criteria apply at the levels run, and their changes against dt/2 are reported",
+    "justification": "D13 data (60 degrees, R/h = 16, two viscous times, term on, 20 shared outputs; no kinematic reconciliation or patch bounds): halving the step from 4 to 2 times the R/h = 16 capillary-limit step (1.75e-2 to 8.75e-3, i.e. 4 dt and 2 dt of the fixed rule) changed the final angles by 0.005 and 0.037 degrees, the base half-width by 2e-7 and the apex height by 6.9e-5 (relative). Over the history the angle changed by at most 0.15 degrees (left) and 0.37 degrees (right, at one output next to a vertex crossing; 0.03 to 0.04 degrees late in the run), and the base half-width by at most 2.2e-4 of b_ref. End-state limits: 0.1 degree and 0.1% are 1/20 of the M4 gates (2 degrees, 2%), so the time error cannot move a gated quantity materially, and 2.7 times the largest D13 end-state change at a step four times the candidate. The end state is an equilibrium that hides time error, so the histories are gated too. The base half-width (the contact-line position) is smooth in time; its limit, 0.1% of b_ref, is 4.5 times the D13 value. The angle comes from a local circle fit whose points jump when the interface crosses a vertex, so at a fixed output a crossing one step earlier or later moves it by up to about 0.4 degrees at R/h = 16 whatever the step (D13: 0.37); its limit, 0.5 degrees, is 1/4 of the angle gate and 1.35 times that floor. The 120 degree receding case, R/h = 32 and the first output at T/100 = 0.12 (D13: 0.245) are first measured in the validation.",
+    "reported": "the same changes at the other common levels, and between the dt/2 and dt/4 studies",
+    "when_one_divisor_only": "reported as not evaluated; does not fail"
+  }
 }
