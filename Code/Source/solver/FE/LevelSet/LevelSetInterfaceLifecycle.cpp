@@ -2353,12 +2353,19 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
         cache_->dof_to_cells =
             buildGeneratedInterfaceDofCellAdjacency(
                 mesh, field_dofs, n_field_dofs);
+        // Built on first use: only an affected-cell neighborhood of at
+        // least one layer reads it.
+        cache_->cell_neighbors.clear();
+        cache_->domain = Cache::DomainSlot{};
+        cache_->context = cache_context;
+    }
+    if (options.affected_cell_neighborhood_layers > 0 &&
+        cache_->cell_neighbors.size() !=
+            static_cast<std::size_t>(mesh.numCells())) {
         cache_->cell_neighbors =
             buildGeneratedInterfaceCellNeighbors(
                 cache_->dof_to_cells,
                 static_cast<std::size_t>(mesh.numCells()));
-        cache_->domain = Cache::DomainSlot{};
-        cache_->context = cache_context;
     }
     if (cache_->domain.valid &&
         coefficientSnapshotMatches(cache_->domain.coefficients, coefficients)) {
