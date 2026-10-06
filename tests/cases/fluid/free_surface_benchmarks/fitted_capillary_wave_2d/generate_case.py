@@ -86,7 +86,10 @@ def time_schedule(level: int, dt_divisor: int = 1,
     capillary limit sqrt(rho h^3/(4 pi gamma)) that divides the run into the
     protocol number of output intervals.
     """
-    schedule = CW.time_schedule(level, LAPLACE_NUMBER, PERIODS, SNAPSHOTS, dt_divisor)
+    # The D10 rule of capillary_wave_2d (its protocol moved to steps per period
+    # with the unfitted D13 term on 2026-10-05; this benchmark keeps D10).
+    schedule = CW.time_schedule(level, LAPLACE_NUMBER, PERIODS, SNAPSHOTS, dt_divisor,
+                                dt_rule="capillary-limit")
     limit = CW.DT_SAFETY * CW.capillary_dt_limit(schedule["h"])     # one-sided limit of this level
     schedule["dt_capillary_limit_one_sided"] = limit
     if dt_over_capillary_limit is not None:

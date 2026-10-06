@@ -9,11 +9,11 @@ the three capillary routes compared in decision D2: `SurfaceStress`, KAG
 with a lumped trace mass, and KAG with the consistent trace mass (the two KAG
 forms are generated but have not been run).
 
-The protocol follows decisions D9 to D11 of 2026-09-30: `phi` is advected
-with the harmonic PDE velocity extension (`--transport`, below); the
-spatial study uses one time step for all levels, with a separate time-step
-study at one mesh; and the area criterion gates the maximum deviation over
-the whole run.
+The protocol follows decisions D9 to D11 of 2026-09-30 and D13 of
+2026-10-05: `phi` is advected with the harmonic PDE velocity extension
+(`--transport`, below); the lagged normal-increment capillary term is on and
+every level uses 50 steps per inviscid period, checked at 100; and the area
+criterion gates the maximum deviation over the whole run.
 
 Files:
 
@@ -138,22 +138,31 @@ The side walls hold `u_x = 0` strongly at every wall vertex, so none of the
 three moves `phi` through a wall. Criteria are applied separately to each
 (capillary form, transport) study.
 
-**Time step (decision D10).** The capillary limit is, as in
-`static_drop_2d`, the one-sided `dt <= sqrt(rho h^3 / (4 pi gamma))`: the
-tracker form `sqrt(rho h^3/(2 pi gamma))` times the fixed factor `1/sqrt(2)`
-derived from the free-surface density sum. All three levels use the limit
-of the finest level, `lambda/h = 64`, rounded down so that the run is
-exactly 100 equal output intervals: `dt = 5.50e-4`, 2900 steps, `omega dt =
-0.0086`. It lies below the limit of every coarser level (by factors 8 and
-2.8 at 16 and 32), and the spatial study carries no level-dependent time
-error, so opposite-sign space and time errors cannot cancel. The expected
-generalized-alpha phase error at `omega dt = 0.0086` is of order
-`(omega dt)^2/12 = 6e-6`.
+**Time step (decision D13, 2026-10-05).** The lagged normal-increment
+capillary term (`Surface_tension_semi_implicit = NormalIncrement` in the
+free-surface block, `Physics/Docs/NavierStokesFreeSurface.md`) removes the
+capillary limit and is on by default (`--surface-tension-semi-implicit`).
+Every level uses 50 steps per inviscid period `2 pi/omega0`: `dt = 7.98e-3`,
+200 steps, outputs every 2 steps (`--dt-rule steps-per-period`). The step is
+shared by all levels, as D10 requires, and is 1.8, 5.1 and 14.5 times the
+one-sided capillary limit at `lambda/h = 16`, 32 and 64. The time error at 50
+steps per period is about 0.16% in frequency and 0.5% in damping at
+`lambda/h = 64`, the generalized-alpha phase error `(omega dt)^2/12`
+(`Documentation/free_surface_semi_implicit_surface_tension_design.md`, §9.5
+and §9.9).
 
-The separate time-step study runs `lambda/h = 32` with `--dt-divisor 1, 2, 4`
-(`dt`, `dt/2`, `dt/4`, exactly nested). `verify.py` reports it next to the
-spatial study, with the change of the fitted frequency and damping relative
-to the smallest step, and does not gate it.
+**Half-step check.** `--dt-divisor 2` gives 100 steps per period with the same
+output times; the protocol runs it at `lambda/h = 64`. Every gate must also
+pass for the `dt/2` run, and between `dt` and `dt/2` at the finest common
+level the fitted frequency may change by at most 0.2% and the damping by at
+most 1% (`time_step_criterion` in `tolerances.json`). Other levels run at two
+or more divisors (1, 2, 4) are reported in the time-step study.
+
+**Earlier protocol (D10, until 2026-10-05).** All levels used the one-sided
+capillary limit `dt <= sqrt(rho h^3 / (4 pi gamma))` of the finest level,
+rounded down to 100 equal output intervals: `dt = 5.50e-4`, 2900 steps
+(725 per period), with the term off. Reproduce it with
+`--dt-rule capillary-limit --surface-tension-semi-implicit None`.
 
 **Run length.** 4 inviscid periods (`t omega0 = 8 pi = 25`, Popinet's
 horizon), with 100 VTU snapshots, 25 per period.
@@ -189,15 +198,19 @@ cells, non-finite values, a run that stopped before its end time) and on a
 
 ## Tolerances and their sources
 
-Each criterion applies to each (capillary form, transport, `La`) spatial
-study at the shared protocol time step; `verify.py` refuses a study whose
-levels use different time steps (D10).
+Each criterion applies to each (capillary form, transport, `La`, dt divisor)
+spatial study; `verify.py` refuses a study whose levels use different time
+steps (D10). The divisor-1 study needs every level; the divisor-2 study only
+`lambda/h = 64` (criteria at levels it does not contain are reported as not
+run). The time-step criterion (D13) is printed as a separate gated line, or
+as not evaluated when only one divisor is given.
 
 | Criterion | Limit | Where | Source |
 |---|---|---|---|
 | `frequency` | at most 0.02, observed order at least 1 | 0.02 at `lambda/h = 32`; order over 16/32/64 | D1 working criterion, tracker M3 |
 | `damping` | at most 0.05, observed order at least 1 | 0.05 at `lambda/h = 32` and at the finest level 64; order over 16/32/64 | D1 working criterion, tracker M3; the finest-level check as in D12 |
 | `volume_drift` | at most 1e-4 | every level, maximum over the run | D1 working criterion (the volume limit of tracker M1 and M2, applied to M3), gated as in D11 |
+| `time_step` | frequency change at most 0.002, damping change at most 0.01 between `dt` and `dt/2` | finest common level (64) | D13, 2026-10-05 |
 
 "Convergence over 16/32/64" is an observed order of at least 1 on the
 spatial study at the shared time step (D10, confirmed 2026-09-30): the rate
@@ -244,9 +257,8 @@ python3 $B/verify.py $OUT/$TRANSPORT/surface_stress/L{16,32,64} \
     --json $OUT/$TRANSPORT/surface_stress.json
 ```
 
-For the time-step study (D10) add `--dt-divisor 2` and `--dt-divisor 4` runs
-at `lambda/h = 32` and pass them to `verify.py` together with the spatial
-study; the `--dt-divisor 1` run at 32 is shared. `verify.py` reads
+For the half-step check (D13) add a `--dt-divisor 2` run at `lambda/h = 64`
+and pass it to `verify.py` together with the spatial study. `verify.py` reads
 `solver_run.log.gz` for the per-step areas (D11), so keep the log beside the
 output. For a quick schema check use `--max-steps 10`; `verify.py` refuses
 such runs unless `--allow-truncated` is given.
@@ -294,8 +306,14 @@ the two the cost grows as (vertices)^0.94; `lambda/h = 64` is extrapolated
 with exponent 0.94 to 1. The solver writes about 0.3 MB of log per step, so
 compress the log (`gzip -1`) for protocol runs.
 
-With the shared time step (D10) every level takes 2900 steps; the time-step
-study adds 5800 and 11600 steps at `lambda/h = 32`.
+**D13 protocol.** Every level takes 200 steps (400 for the `dt/2` run).
+Measured at `lambda/h = 64` (design note §9.5, 2026-10-03, term on, about 4.9
+outer passes per step): 2,283 s at 50 steps per period and 4,072 s at 100,
+against 10,442 s for the earlier 2900-step protocol. The coarser levels cost
+less. The table below is for the earlier protocol.
+
+**Earlier protocol (D10).** Every level takes 2900 steps; its time-step
+study added 5800 and 11600 steps at `lambda/h = 32`.
 
 | Run | vertices | steps | s/step (baseline) | time, baseline | time, tip (about 3x faster, estimate) |
 |---|---:|---:|---:|---|---|

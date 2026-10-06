@@ -194,13 +194,22 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     assert bcs["wall_bottom"].findtext("Effective_direction") == "0 1"
     assert bcs["wall_top"].find("Effective_direction") is None
     assert float(fluid.findtext("Viscosity/Value")) == pytest.approx(1.0 / math.sqrt(3000.0))
-    # D10: one time step for all levels, within the capillary limit of the finest.
-    h_min = 1.0 / max(gen.LEVELS)
-    assert case["dt"] <= math.sqrt(h_min ** 3 / (4.0 * math.pi)) * (1 + 1e-12)
+    # D13: 50 steps per inviscid period at every level, with the lagged
+    # normal-increment term in the free-surface block.
+    assert case["dt_rule"] == "steps-per-period" and case["dt_divisor"] == 1
+    assert case["dt"] == pytest.approx(2.0 * math.pi / OMEGA0 / 50.0, rel=1e-14)
     assert case["steps"] * case["dt"] == pytest.approx(4.0 * 2.0 * math.pi / OMEGA0)
-    assert case["steps"] == 100 * case["output_cadence"] == 2900
+    assert case["steps"] == 100 * case["output_cadence"] == 200
+    assert case["steps_per_period"] == pytest.approx(50.0)
     for level in gen.LEVELS:
         assert gen.time_schedule(level, 3000.0, 4.0, 100)["dt"] == case["dt"]
+    free_surface = fluid.find("Add_BC[@name='free_surface']")
+    assert free_surface.findtext("Surface_tension_semi_implicit") == "NormalIncrement"
+    assert case["surface_tension_semi_implicit"] == "NormalIncrement"
+    half = gen.generate(64, "surface_stress", tmp_path / "half", dt_divisor=2)
+    assert half["steps"] == 400 and half["output_cadence"] == 4
+    assert half["steps_per_period"] == pytest.approx(100.0)
+    assert half["end_time"] == pytest.approx(case["end_time"], rel=1e-14)
     assert case["min_abs_phi_over_h"] > 0.02 and case["top_gap_over_h"] > 2.0
     assert case["epsilon"] == pytest.approx(0.0458, abs=1e-4)
     for wall in gen.WALLS:
@@ -332,15 +341,71 @@ def test_volume_drift_fails(study, capsys):
     assert "[FAIL] volume_drift" in out and "[PASS] frequency" in out
 
 
-def test_time_step_runs_are_reported_but_not_gated(study, tmp_path, capsys):
-    runs = study()
-    extra = tmp_path / "L32_dt2"
-    case = write_synthetic_run(extra, 32, omega_error=0.003, beta_error=0.01, dt_divisor=2)
+def test_old_protocol_is_reproducible(tmp_path):
+    """--dt-rule capillary-limit --surface-tension-semi-implicit None gives the decks before D13."""
+    out = tmp_path / "old"
+    assert gen.main(["--level", "16", "--output-dir", str(out), "--dt-rule", "capillary-limit",
+                     "--surface-tension-semi-implicit", "None"]) == 0
+    case = json.loads((out / "case.json").read_text())
+    assert "Surface_tension_semi_implicit" not in (out / "solver.xml").read_text()
+    assert case["dt_rule"] == "capillary-limit" and case["surface_tension_semi_implicit"] == "None"
+    # D10: one step for all levels, within the capillary limit of the finest.
+    h_min = 1.0 / max(gen.LEVELS)
+    assert case["dt"] <= math.sqrt(h_min ** 3 / (4.0 * math.pi)) * (1 + 1e-12)
+    assert case["steps"] == 100 * case["output_cadence"] == 2900
+    for level in gen.LEVELS:
+        assert gen.time_schedule(level, 3000.0, 4.0, 100, dt_rule="capillary-limit")["dt"] == case["dt"]
+    with pytest.raises(ValueError, match="dt-rule"):
+        gen.generate(16, "surface_stress", tmp_path / "bad", dt_rule="cfl")
+    with pytest.raises(ValueError, match="semi-implicit"):
+        gen.generate(16, "surface_stress", tmp_path / "bad2", semi_implicit="Implicit")
+
+
+def test_time_step_criterion_passes_at_the_finest_level(study, tmp_path, capsys):
+    runs = study()                                      # lambda/h = 64: omega 0.15%, beta 0.5% error
+    fine = tmp_path / "L64_dt2"
+    case = write_synthetic_run(fine, 64, omega_error=0.0005, beta_error=0.0, dt_divisor=2)
     assert case["dt_divisor"] == 2
-    assert ver.main([*runs, str(extra)]) == 0
+    coarse32 = tmp_path / "L32_dt2"
+    write_synthetic_run(coarse32, 32, omega_error=0.003, beta_error=0.01, dt_divisor=2)
+    out_json = tmp_path / "dt.json"
+    assert ver.main([*runs, str(fine), str(coarse32), "--json", str(out_json)]) == 0
     out = capsys.readouterr().out
+    assert "dt divisor 2, dt = 0.00398942 (100 steps per period)" in out
+    # Other levels stay reported in the time-step study.
     assert "time-step study surface_stress, transport pde_extension, La = 3000, lambda/h = 32" in out
     assert "dt/2: omega err 3.000e-03, beta err 1.000e-02" in out
+    assert "[PASS] time_step: lambda/h=64 (finest common level)" in out
+    crit = json.loads(out_json.read_text())["time_step_criterion"][0]
+    assert crit["evaluated"] and crit["passed"] and crit["level"] == 64
+    assert crit["changes"]["frequency"] == pytest.approx(0.001 / 1.0005, rel=1e-5)
+    assert crit["changes"]["damping"] == pytest.approx(0.005, rel=1e-5)
+
+
+def test_time_step_criterion_fails_and_dt2_study_is_gated(study, tmp_path, capsys):
+    runs = study()
+    fine = tmp_path / "L64_dt2"
+    write_synthetic_run(fine, 64, omega_error=0.0045, beta_error=0.02, dt_divisor=2)
+    assert ver.main([*runs, str(fine)]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] time_step" in out and "frequency change 2.987e-03 > 0.002" in out
+    assert "damping change 1.471e-02 > 0.01" in out
+    # The dt/2 study needs lambda/h = 64 only: the other levels are reported as not run.
+    assert "lambda/h=32: not run at this step (not required)" in out
+    assert "order not evaluated at this step" in out
+    other = tmp_path / "L32_dt2"
+    write_synthetic_run(other, 32, dt_divisor=2)
+    assert ver.main([*runs, str(other)]) == 1           # dt/2 study without lambda/h = 64
+    out = capsys.readouterr().out
+    assert "missing run at lambda/h=64" in out
+
+
+def test_time_step_criterion_not_evaluated_with_one_divisor(study, tmp_path, capsys):
+    runs = study()
+    assert ver.main(runs) == 0
+    assert "[NOT EVALUATED] time_step" in capsys.readouterr().out
+    extra = tmp_path / "L64_dt2"
+    write_synthetic_run(extra, 64, dt_divisor=2)
     assert ver.main([str(extra)]) == 1                  # no protocol-time-step run at all
     assert "criteria cannot be applied" in capsys.readouterr().out
 
