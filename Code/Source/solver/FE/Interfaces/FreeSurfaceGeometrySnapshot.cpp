@@ -209,16 +209,29 @@ void mixCoefficientClassificationPolicy(
            role == FreeSurfaceGeometryRuleRole::PositiveVolume;
 }
 
-// Point-integrating consumers fail closed on classification-only records
-// instead of silently skipping their volume.
-void requireMaterializedVolumePoints(
-    const FreeSurfaceGeometryRuleRecord& record, const char* consumer)
+FreeSurfaceGeometryRuleRecord materializeClassificationOnlyRecord(
+    const FreeSurfaceGeometryRuleRecord& record,
+    const assembly::IMeshAccess& mesh);
+
+// The record a point-integrating consumer integrates: classification-only
+// records are rematerialized exactly from the mesh, and without a mesh the
+// consumer fails closed instead of silently skipping their volume.
+[[nodiscard]] const FreeSurfaceGeometryRuleRecord& integrationRecord(
+    const FreeSurfaceGeometryRuleRecord& record,
+    const assembly::IMeshAccess* mesh,
+    std::optional<FreeSurfaceGeometryRuleRecord>& rematerialized,
+    const char* consumer)
 {
-    if (record.classification_only) {
+    if (!record.classification_only) {
+        return record;
+    }
+    if (mesh == nullptr) {
         throw std::invalid_argument(
             std::string(consumer) +
             " requires volume points that this snapshot stores classification-only");
     }
+    rematerialized.emplace(materializeClassificationOnlyRecord(record, *mesh));
+    return *rematerialized;
 }
 
 using OwnershipRuleIdentity = std::array<std::uint64_t, 5>;
@@ -3027,7 +3040,8 @@ FreeSurfaceActiveVolumeEnergyState
 evaluateFreeSurfaceActiveVolumeEnergy(
     const FreeSurfaceGeometrySnapshot& snapshot,
     const FreeSurfaceActiveVolumeEnergyParameters& parameters,
-    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity)
+    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity,
+    const assembly::IMeshAccess* mesh)
 {
     if (!snapshot.revision().complete()) {
         throw std::invalid_argument(
@@ -3067,13 +3081,16 @@ evaluateFreeSurfaceActiveVolumeEnergy(
     state.gravitational_reference_point =
         parameters.gravitational_reference_point;
 
-    for (const auto& record : snapshot.rules()) {
-        if (!record.locally_owned ||
-            record.retention !=
+    for (const auto& stored_record : snapshot.rules()) {
+        if (!stored_record.locally_owned ||
+            stored_record.retention !=
                 FreeSurfaceGeometryRetention::Retained ||
-            record.role != volume_role) {
+            stored_record.role != volume_role) {
             continue;
         }
+        std::optional<FreeSurfaceGeometryRuleRecord> rematerialized;
+        const auto& record = integrationRecord(
+            stored_record, mesh, rematerialized, "free-surface active-volume energy");
         if (record.reference_rule.kind !=
                 geometry::CutQuadratureKind::Volume ||
             record.physical_rule.kind !=
@@ -3085,8 +3102,6 @@ evaluateFreeSurfaceActiveVolumeEnergy(
             throw std::invalid_argument(
                 "free-surface active-volume energy encountered an inconsistent liquid-volume rule");
         }
-        requireMaterializedVolumePoints(
-            record, "free-surface active-volume energy");
         for (std::size_t point_index = 0;
              point_index < record.physical_rule.points.size();
              ++point_index) {
@@ -3164,7 +3179,8 @@ FreeSurfaceActiveVolumeDissipationState
 evaluateFreeSurfaceActiveVolumeDissipation(
     const FreeSurfaceGeometrySnapshot& snapshot,
     const FreeSurfaceActiveVolumeDissipationParameters& parameters,
-    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity)
+    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity,
+    const assembly::IMeshAccess* mesh)
 {
     if (!snapshot.revision().complete()) {
         throw std::invalid_argument(
@@ -3198,13 +3214,16 @@ evaluateFreeSurfaceActiveVolumeDissipation(
     state.liquid_side = parameters.liquid_side;
     state.dynamic_viscosity = parameters.dynamic_viscosity;
 
-    for (const auto& record : snapshot.rules()) {
-        if (!record.locally_owned ||
-            record.retention !=
+    for (const auto& stored_record : snapshot.rules()) {
+        if (!stored_record.locally_owned ||
+            stored_record.retention !=
                 FreeSurfaceGeometryRetention::Retained ||
-            record.role != volume_role) {
+            stored_record.role != volume_role) {
             continue;
         }
+        std::optional<FreeSurfaceGeometryRuleRecord> rematerialized;
+        const auto& record = integrationRecord(
+            stored_record, mesh, rematerialized, "free-surface active-volume dissipation");
         if (record.reference_rule.kind !=
                 geometry::CutQuadratureKind::Volume ||
             record.physical_rule.kind !=
@@ -3216,8 +3235,6 @@ evaluateFreeSurfaceActiveVolumeDissipation(
             throw std::invalid_argument(
                 "free-surface active-volume dissipation encountered an inconsistent liquid-volume rule");
         }
-        requireMaterializedVolumePoints(
-            record, "free-surface active-volume dissipation");
         for (std::size_t point_index = 0;
              point_index < record.physical_rule.points.size();
              ++point_index) {
@@ -3401,7 +3418,8 @@ evaluateFreeSurfaceBackwardEulerKineticWork(
     std::uint64_t previous_velocity_revision,
     std::uint64_t endpoint_velocity_revision,
     const FreeSurfaceDiscreteFunctionalVectorEvaluator& previous_velocity,
-    const FreeSurfaceDiscreteFunctionalVectorEvaluator& endpoint_velocity)
+    const FreeSurfaceDiscreteFunctionalVectorEvaluator& endpoint_velocity,
+    const assembly::IMeshAccess* mesh)
 {
     if (!endpoint_snapshot.revision().complete()) {
         throw std::invalid_argument(
@@ -3439,12 +3457,15 @@ evaluateFreeSurfaceBackwardEulerKineticWork(
     state.liquid_side = liquid_side;
     state.density = density;
 
-    for (const auto& record : endpoint_snapshot.rules()) {
-        if (!record.locally_owned ||
-            record.retention != FreeSurfaceGeometryRetention::Retained ||
-            record.role != volume_role) {
+    for (const auto& stored_record : endpoint_snapshot.rules()) {
+        if (!stored_record.locally_owned ||
+            stored_record.retention != FreeSurfaceGeometryRetention::Retained ||
+            stored_record.role != volume_role) {
             continue;
         }
+        std::optional<FreeSurfaceGeometryRuleRecord> rematerialized;
+        const auto& record = integrationRecord(
+            stored_record, mesh, rematerialized, "free-surface backward-Euler kinetic work");
         if (record.reference_rule.kind !=
                 geometry::CutQuadratureKind::Volume ||
             record.physical_rule.kind !=
@@ -3456,8 +3477,6 @@ evaluateFreeSurfaceBackwardEulerKineticWork(
             throw std::invalid_argument(
                 "free-surface backward-Euler kinetic work encountered an inconsistent liquid-volume rule");
         }
-        requireMaterializedVolumePoints(
-            record, "free-surface backward-Euler kinetic work");
         for (std::size_t point_index = 0;
              point_index < record.physical_rule.points.size();
              ++point_index) {
@@ -4266,6 +4285,15 @@ FreeSurfaceGeometryRuleRecord materializeFreeSurfaceGeometryRuleRecord(
     const FreeSurfaceGeometryRuleRecord& record,
     const assembly::IMeshAccess& mesh)
 {
+    return materializeClassificationOnlyRecord(record, mesh);
+}
+
+namespace {
+
+FreeSurfaceGeometryRuleRecord materializeClassificationOnlyRecord(
+    const FreeSurfaceGeometryRuleRecord& record,
+    const assembly::IMeshAccess& mesh)
+{
     if (!record.classification_only) {
         return record;
     }
@@ -4295,6 +4323,8 @@ FreeSurfaceGeometryRuleRecord materializeFreeSurfaceGeometryRuleRecord(
     }
     return result;
 }
+
+} // namespace
 
 std::uint64_t freeSurfaceGeometryRuleContentDigest(
     const FreeSurfaceGeometryRuleRecord& record) noexcept
@@ -4505,8 +4535,14 @@ buildFreeSurfaceGeometrySnapshot(
     // volume rule of its parent is validated (rule checks, cell moments) and
     // digested as soon as it is materialized, and its points are released
     // before the next rule is built.  The ledger sums keep their order.
+    const auto classification_only_side =
+        [&policy](geometry::CutIntegrationSide side) {
+            return policy.classification_only_full_cells_on_both_sides ||
+                   policy.classification_only_full_cell_side == side;
+        };
     std::unordered_map<MeshIndex, std::size_t> volume_rules_per_parent;
-    if (policy.classification_only_full_cell_side.has_value()) {
+    if (policy.classification_only_full_cell_side.has_value() ||
+        policy.classification_only_full_cells_on_both_sides) {
         volume_rules_per_parent.reserve(volume_rules.size());
         for (const auto& rule : volume_rules) {
             ++volume_rules_per_parent[rule.provenance.parent_entity];
@@ -4522,9 +4558,7 @@ buildFreeSurfaceGeometrySnapshot(
                 "free-surface volume rule has no authoritative source region");
         }
         const bool classification_only =
-            policy.classification_only_full_cell_side.has_value() &&
-            rule.full_cell_equivalent &&
-            rule.side == *policy.classification_only_full_cell_side &&
+            rule.full_cell_equivalent && classification_only_side(rule.side) &&
             volume_rules_per_parent[rule.provenance.parent_entity] == 1u;
         auto moment_certificate =
             rule.full_cell_equivalent
