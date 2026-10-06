@@ -163,6 +163,13 @@ TEST(FsilsDirectSolveMPI, MatchesFsilsGmresWithDirichletFaces)
     o.n_nodes = 26;
     o.couple_10 = true;
     o.dirichlet = {1, 7 * kChainDof + 0, 7 * kChainDof + 1, 12 * kChainDof + 2};
+    // The FSILS Krylov reference needs a Dirichlet DOF in the overlap set of
+    // every rank: a rank whose Dirichlet face is empty skips the neighbour
+    // exchange of fsils_reduce_shared_face_values_owned_row() while its
+    // neighbours enter it.
+    for (GlobalIndex node = 2; node < o.n_nodes; node += 3) {
+        o.dirichlet.push_back(node * kChainDof + 1);
+    }
 
     SolverOptions gmres;
     gmres.method = SolverMethod::GMRES;
