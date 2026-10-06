@@ -45,6 +45,20 @@ template <typename T>
     return allocationBytes(values.capacity() * sizeof(T));
 }
 
+// A shared element array is split evenly between the copies sharing it, so
+// the copies of one domain add up to a single array.
+template <typename T>
+[[nodiscard]] std::size_t vectorBytes(
+    const interfaces::CopyOnWriteVector<T>& values) noexcept
+{
+    const auto share_count = values.shareCount();
+    if (share_count <= 0) {
+        return 0u;
+    }
+    return allocationBytes(values.capacity() * sizeof(T)) /
+           static_cast<std::size_t>(share_count);
+}
+
 [[nodiscard]] inline std::size_t stringBytes(const std::string& value) noexcept
 {
     return value.capacity() > 15u ? allocationBytes(value.capacity() + 1u) : 0u;

@@ -14,6 +14,7 @@
  */
 
 #include "Core/Types.h"
+#include "Interfaces/CopyOnWriteVector.h"
 #include "Geometry/CutQuadrature.h"
 
 #include <algorithm>
@@ -452,7 +453,9 @@ struct CutInterfaceVolumeRegion {
     bool full_cell_equivalent{false};
     int achieved_quadrature_order{-1};
     std::vector<CutInterfaceReferenceSimplex> reference_subcells{};
-    std::vector<geometry::CutQuadraturePoint> quadrature_points{};
+    // Shared by every copy of the region (lifecycle caches, returned domains,
+    // snapshots) until one copy is modified through mutate().
+    CopyOnWriteVector<geometry::CutQuadraturePoint> quadrature_points{};
 
     [[nodiscard]] bool active() const noexcept {
         return interface_marker >= 0 &&
