@@ -372,6 +372,17 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   - The solver default stays off until it has been tested on more physics.
   - Its fixed internal constants (halfway limit 0.5, at most 8 fixed-point iterations, the sign and cut-class guards) are accepted for now under P1.
 - **D15, 2026-10-05: the sessile-drop protocol uses the PDE velocity extension** (harmonic, monolithic), as the other free-surface benchmarks do.
+- **D13 result (2026-10-05; merged `b7d55fad`..`aa811c43`; opt-in `Surface_tension_semi_implicit=NormalIncrement`, default off and bitwise identical; FE 34/34, Physics 7/7, Application 4/4).** Validation is in the design note §9.
+  - **M2 static drop:** La = 12 passes every gate at Δt = 0.04, 0.02 and 0.01. At R/h = 32 the pressure-jump error is 3.27e-5 (order 2.18), the same as the 2·Δt_B reference, with 618 instead of 4,000 steps at Δt = 0.02, about 6× fewer outer passes.
+  - **First La = 120 pass**, at Δt = 0.01 (3,900 steps instead of 24,900), or at 0.02 with kinematic reconciliation, which removes the R/h = 8 volume failure.
+  - **Capillary wave:** runs at 25–100 steps per period. Without the term it fails at step 0 for λ/h ≥ 32 at 100 steps per period. Observed time order is about 2 in frequency and 1.8–1.9 in damping. The damping gate at λ/h = 32 still fails (6–7%, a spatial error).
+  - **Sessile drop:** contact-line behaviour is unchanged at 2–4× the protocol step.
+  - **Energy:** does not increase, except for two start-up steps accepted on a frozen epoch after a topology cycle (relative 3.5e-7 and 7.6e-7).
+  - **Risks:** frozen-epoch acceptance leaves the term non-zero; GMRES iterations rise to about 150 at the largest steps.
+  - **Pending user decision (recommended):**
+    - M2 at a fixed physical Δt: La = 12 at Δt = 0.02; La = 120 at Δt = 0.01, or 0.02 with reconciliation.
+    - M3 at 50 steps per period with a 100-step check.
+    - A `tolerances.json` Δt criterion: every gate passes at both Δt, and the gated quantity changes by ≤ 0.1% when the step is halved (M3: frequency ≤ 0.2%, damping ≤ 1%).
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
