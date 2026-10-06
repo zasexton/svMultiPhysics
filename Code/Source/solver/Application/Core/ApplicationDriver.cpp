@@ -21243,7 +21243,10 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
   if (cutGeometryMemoryReportEnabled()) {
     logCutGeometryMemory(
         "before_install",
-        cutGeometryLifecycleMemoryDetails(lifecycle) +
+        std::string(" fe_context_transaction_active=") +
+            (sim.fe_system->cutIntegrationContextTransactionActive() ? "1"
+                                                                    : "0") +
+            cutGeometryLifecycleMemoryDetails(lifecycle) +
             cutGeometryContextMemoryDetails("new", context.get()) +
             cutGeometryContextMemoryDetails(
                 "installed", sim.fe_system->cutIntegrationContext()));
