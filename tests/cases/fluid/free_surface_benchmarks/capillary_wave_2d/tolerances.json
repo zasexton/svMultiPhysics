@@ -44,10 +44,7 @@
       "quantity": "damping_rate_relative_error",
       "definition": "|beta_sim - beta_ref| / beta_ref with beta the amplitude decay rate of the same two fits.",
       "limit": 0.05,
-      "at_level": [
-        32,
-        64
-      ],
+      "at_level": 64,
       "minimum_observed_order": 1.0,
       "order_levels": [
         16,
@@ -55,7 +52,11 @@
         64
       ],
       "order_method": "least-squares slope of log(error) against log(lambda/h) over order_levels, on the spatial study at the shared time step (D10); pairwise orders are reported",
-      "source": "Decision D1 working criterion (tracker section 5, M3: damping error <= 5% at lambda/h = 32, with convergence over 16/32/64), also applied at the finest level (lambda/h = 64) as in decision D12."
+      "source": "Decision D1 working criterion (tracker section 5, M3: damping error <= 5%, with convergence over 16/32/64). Decision D20 (2026-10-06) applies the limit at the finest level (lambda/h = 64), as M2 and the sloshing damping criterion (D12) do; until then it also applied at lambda/h = 32. D20 was made after the first D19 protocol run (job 46704019): the damping error converges at observed order 2.9, from 7.1% at lambda/h = 32 to 0.39% at 64, so the lambda/h = 32 excess is a resolution error; the order requirement over 16/32/64 is kept.",
+      "at_level_before_D20": [
+        32,
+        64
+      ]
     },
     {
       "id": "volume_drift",

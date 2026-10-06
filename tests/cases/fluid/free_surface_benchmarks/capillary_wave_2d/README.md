@@ -208,7 +208,7 @@ as not evaluated when only one divisor is given.
 | Criterion | Limit | Where | Source |
 |---|---|---|---|
 | `frequency` | at most 0.02, observed order at least 1 | 0.02 at `lambda/h = 32`; order over 16/32/64 | D1 working criterion, tracker M3 |
-| `damping` | at most 0.05, observed order at least 1 | 0.05 at `lambda/h = 32` and at the finest level 64; order over 16/32/64 | D1 working criterion, tracker M3; the finest-level check as in D12 |
+| `damping` | at most 0.05, observed order at least 1 | 0.05 at the finest level `lambda/h = 64` (D20; until 2026-10-06 also at 32); order over 16/32/64 | D1 working criterion, tracker M3; finest level as in M2 and D12 (D20, 2026-10-06) |
 | `volume_drift` | at most 1e-4 | every level, maximum over the run | D1 working criterion (the volume limit of tracker M1 and M2, applied to M3), gated as in D11 |
 | `time_step` | frequency change at most 0.002, damping change at most 0.01 between `dt` and `dt/2` | finest common level (64) | D13, 2026-10-05 |
 

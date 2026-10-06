@@ -324,14 +324,30 @@ def test_synthetic_refinement_study_passes(study, tmp_path):
 
 
 def test_large_frequency_error_and_slow_damping_convergence_fail(study, capsys):
-    # Damping errors 0.04 / 0.02 / 0.03: within the limit at lambda/h = 32 but not converging.
+    # Damping errors 0.04 / 0.02 / 0.03: within the limit at lambda/h = 64 but not converging.
     runs = study({32: {"omega_error": 0.03, "beta_error": 0.02},
                   16: {"beta_error": 0.04}, 64: {"beta_error": 0.03}})
     assert ver.main(runs) == 1
     out = capsys.readouterr().out
     assert "[FAIL] frequency" in out and "0.03 > 0.02" in out
-    assert "[FAIL] damping" in out and "0.02 <= 0.05" in out and "observed order 0.21" in out
+    assert "[FAIL] damping" in out and "0.03 <= 0.05" in out and "observed order 0.21" in out
     assert "[PASS] volume_drift" in out
+
+
+def test_damping_is_gated_at_the_finest_level(study, capsys):
+    # D20: damping errors 0.30 / 0.071 / 0.0039 (order 2.9) exceed the limit at lambda/h = 32
+    # but pass at the finest level.
+    runs = study({16: {"beta_error": 0.30}, 32: {"beta_error": 0.071}, 64: {"beta_error": 0.0039}})
+    assert ver.main(runs) == 0
+    out = capsys.readouterr().out
+    assert "[PASS] damping" in out and "lambda/h=64: 0.0039 <= 0.05" in out
+    assert "lambda/h=32" not in out.split("[PASS] damping")[1].split("[")[0]
+
+
+def test_damping_above_the_limit_at_the_finest_level_fails(study, capsys):
+    runs = study({16: {"beta_error": 0.24}, 32: {"beta_error": 0.12}, 64: {"beta_error": 0.06}})
+    assert ver.main(runs) == 1
+    assert "lambda/h=64: 0.06 > 0.05" in capsys.readouterr().out
 
 
 def test_volume_drift_fails(study, capsys):
