@@ -1569,6 +1569,13 @@ class GeneralSimulationParameters : public ParameterLists
     Parameter<int> starting_time_step;
     Parameter<int> number_of_time_steps;
 
+    // Opt-in stage predictor of first-order generalized-alpha (new OOP
+    // solver; TimeLoopOptions::generalized_alpha_predictor): "ConstantRate"
+    // (default) or "RateExtrapolation". The fields list (comma- or
+    // space-separated names) restricts the extrapolation; empty means every
+    // field. The predictor changes only the initial iterate of each step.
+    Parameter<std::string> generalized_alpha_predictor;
+    Parameter<std::string> generalized_alpha_predictor_fields;
     Parameter<std::string> name_prefix_of_saved_vtk_files;
     Parameter<std::string> restart_file_name; 
     Parameter<std::string> searched_file_name_to_trigger_stop; 

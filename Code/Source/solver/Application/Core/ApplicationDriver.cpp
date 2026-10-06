@@ -30569,6 +30569,60 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   opts.newton.external_state_fixed_point.max_discontinuity_restarts =
       cut_topology_restart_limit;
   applyGeneratedStateOuterRelaxationEnvOptions(opts.newton);
+  // Opt-in stage predictor of first-order generalized-alpha (see
+  // TimeLoopOptions::generalized_alpha_predictor); default ConstantRate. The
+  // predictor changes the initial iterate only, so results change within
+  // the nonlinear tolerances. XML keys Generalized_alpha_predictor
+  // (ConstantRate | RateExtrapolation) and Generalized_alpha_predictor_fields
+  // (field names; empty = all fields). When the predictor key is absent, the
+  // environment variables SVMP_GENERALIZED_ALPHA_PREDICTOR and
+  // SVMP_GENERALIZED_ALPHA_PREDICTOR_FIELDS are honored (comparison runs).
+  {
+    const auto& general = params.general_simulation_parameters;
+    std::string predictor_name = general.generalized_alpha_predictor.value();
+    std::string field_list = general.generalized_alpha_predictor_fields.value();
+    const char* predictor_source = "xml";
+    if (!general.generalized_alpha_predictor.defined()) {
+      predictor_source = "default";
+      if (const char* predictor =
+              std::getenv("SVMP_GENERALIZED_ALPHA_PREDICTOR");
+          predictor != nullptr && predictor[0] != '\0') {
+        predictor_name = predictor;
+        predictor_source = "environment";
+        if (const char* fields =
+                std::getenv("SVMP_GENERALIZED_ALPHA_PREDICTOR_FIELDS");
+            fields != nullptr) {
+          field_list = fields;
+        }
+      }
+    }
+    if (predictor_name == "RateExtrapolation") {
+      opts.generalized_alpha_predictor = svmp::FE::timestepping::
+          TimeLoopOptions::GeneralizedAlphaPredictor::LinearRateExtrapolation;
+      std::replace(field_list.begin(), field_list.end(), ',', ' ');
+      std::stringstream field_stream(field_list);
+      std::string field_name;
+      while (field_stream >> field_name) {
+        const auto field = sim.fe_system->findFieldByName(field_name);
+        if (field == svmp::FE::INVALID_FIELD_ID) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Generalized_alpha_predictor_fields "
+              "names an unknown field '" + field_name + "'.");
+        }
+        opts.generalized_alpha_predictor_fields.push_back(field);
+      }
+      oopCout() << "[svMultiPhysics::Application] Generalized-alpha stage "
+                   "predictor: RateExtrapolation fields="
+                << (opts.generalized_alpha_predictor_fields.empty()
+                        ? std::string("all")
+                        : field_list)
+                << " (" << predictor_source << ")" << std::endl;
+    } else if (predictor_name != "ConstantRate") {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Generalized_alpha_predictor must be "
+          "ConstantRate or RateExtrapolation, got '" + predictor_name + "'.");
+    }
+  }
   const bool refresh_generated_geometry_within_solve =
       has_transient_generated_state &&
       !use_transient_external_state_fixed_point &&

@@ -144,6 +144,26 @@ struct TimeLoopOptions {
     // history fallback directly.
     bool initialize_first_order_rate_from_pde{true};
 
+    // Stage predictor of first-order generalized-alpha, the initial iterate of
+    // the stage solve. ConstantRate (default) uses u_n + alpha_f dt udot_n,
+    // i.e. it assumes udot_{n+1} = udot_n. LinearRateExtrapolation
+    // extrapolates the endpoint rate from the start-of-step rates of the
+    // current and the last accepted step, udot_{n+1} ~ udot_n +
+    // (dt/dt_{n-1}) (udot_n - udot_{n-1}), and uses the stage value
+    // u_n + alpha_f dt ((1-gamma) udot_n + gamma udot_{n+1}) on the DOFs of
+    // generalized_alpha_predictor_fields (all fields when empty); the other
+    // DOFs, and every step without an accepted predecessor, keep the
+    // constant-rate value. Only the initial iterate changes, so the solution
+    // agrees within the nonlinear tolerances. Each value is a DOF-local
+    // expression, independent of the partition.
+    enum class GeneralizedAlphaPredictor {
+        ConstantRate,
+        LinearRateExtrapolation
+    };
+    GeneralizedAlphaPredictor generalized_alpha_predictor{
+        GeneralizedAlphaPredictor::ConstantRate};
+    std::vector<FieldId> generalized_alpha_predictor_fields{};
+
     // Newmark-β family parameters (structural dynamics).
     // - For systems with temporalOrder()==2, TimeLoop uses a displacement-only Newmark-β update
     //   and requires `TimeHistory` to store velocity/acceleration (`uDot`, `uDDot`).
