@@ -128,7 +128,9 @@ private:
     GlobalIndex global_rows_{0};
     GlobalIndex global_cols_{0};
     GlobalIndex nnz_{0};
-    std::uint64_t layout_revision_{1};
+    // Process-unique (nextFsilsLayoutStamp) so that a new matrix whose layout
+    // reuses a destroyed layout's address never repeats a cached revision.
+    std::uint64_t layout_revision_{nextFsilsLayoutStamp()};
 
 #if defined(FE_HAS_MPI) && FE_HAS_MPI
     MPI_Comm comm_{MPI_COMM_WORLD};
