@@ -444,6 +444,7 @@ public:
         stabilization_hooks_.clear();
         bindings_.clear();
         sensitivity_metadata_.clear();
+        classification_only_volume_rule_sources_.clear();
         generated_pruned_volume_rule_count_ = 0u;
         generated_pruned_volume_measure_ = Real{0.0};
         markModified();
@@ -717,11 +718,21 @@ public:
         }
     }
 
+    /**
+     * Import a generated level-set domain.  When
+     * classification_only_full_cell_side is set, the imported full-cell
+     * volume rules of that side keep their classification but release their
+     * points (see volumeRuleIsClassificationOnly()); the domain must then
+     * outlive this context and its copies, which a context guarantees for
+     * the domain of an imported free-surface snapshot.
+     */
     void addGeneratedInterfaceDomain(
         const interfaces::LevelSetInterfaceDomain& domain,
         std::optional<geometry::CutIntegrationSide> volume_side_filter =
             std::nullopt,
-        std::string_view publication_domain_id = {}) {
+        std::string_view publication_domain_id = {},
+        std::optional<geometry::CutIntegrationSide>
+            classification_only_full_cell_side = std::nullopt) {
         const int marker = domain.marker();
         if (marker < 0) {
             return;
@@ -775,6 +786,8 @@ public:
         const auto old_binding_size = bindings_.size();
         const auto old_sensitivity_metadata_size =
             sensitivity_metadata_.size();
+        const auto old_classification_only_volume_rule_count =
+            classification_only_volume_rule_sources_.size();
         const auto old_generated_volume_marker_size =
             generated_volume_markers_.size();
         const auto old_generated_interface_marker_size =
@@ -947,12 +960,36 @@ public:
                 addSensitivityMetadata(make_sensitivity_metadata(record));
             }
         }
+        if (classification_only_full_cell_side ==
+            geometry::CutIntegrationSide::Interface) {
+            throw std::invalid_argument(
+                "classification-only cut-volume side requires Negative or Positive side");
+        }
+        std::unordered_map<std::uint64_t,
+                           const interfaces::CutInterfaceVolumeRegion*>
+            classification_only_region_by_stable_id;
+        if (classification_only_full_cell_side.has_value()) {
+            for (const auto& region : domain.volumeRegions()) {
+                if (region.full_cell_equivalent &&
+                    region.side == *classification_only_full_cell_side) {
+                    classification_only_region_by_stable_id.emplace(
+                        region.stable_id, &region);
+                }
+            }
+        }
         auto volume_rules = domain.volumeQuadratureRules();
         for (auto& rule : volume_rules) {
             if (volume_side_filter.has_value() &&
                 rule.side != *volume_side_filter) {
                 continue;
             }
+            const bool classification_only =
+                classification_only_full_cell_side.has_value() &&
+                rule.full_cell_equivalent &&
+                rule.side == *classification_only_full_cell_side;
+            const auto source_stable_id =
+                rule.provenance.cut_topology_revision;
+            const auto stored_rule_index = volume_rules_.size();
             CutCellAssemblyMetadata metadata;
             metadata.cell = rule.provenance.parent_entity;
             metadata.parent_entity = rule.provenance.parent_entity;
@@ -970,6 +1007,19 @@ public:
             metadata.free_surface_snapshot_revision_key =
                 rule.provenance.free_surface_snapshot_revision_key;
             addGeneratedVolumeRule(marker, std::move(metadata), std::move(rule));
+            if (classification_only &&
+                volume_rules_.size() == stored_rule_index + 1u) {
+                const auto source =
+                    classification_only_region_by_stable_id.find(
+                        source_stable_id);
+                if (source ==
+                    classification_only_region_by_stable_id.end()) {
+                    throw std::invalid_argument(
+                        "classification-only cut-volume rule has no source region");
+                }
+                releaseVolumeRulePoints(
+                    stored_rule_index, *source->second, domain.request());
+            }
         }
         auto rules = domain.interfaceQuadratureRules();
         {
@@ -1031,6 +1081,8 @@ public:
             bindings_.resize(old_binding_size);
             sensitivity_metadata_.resize(
                 old_sensitivity_metadata_size);
+            classification_only_volume_rule_sources_.resize(
+                old_classification_only_volume_rule_count);
             generated_volume_markers_.resize(
                 old_generated_volume_marker_size);
             generated_interface_markers_.resize(
@@ -1344,10 +1396,19 @@ public:
         }
     }
 
+    /**
+     * Import an authoritative snapshot.  classification_only_full_cell_side
+     * releases the points of that side's imported full-cell volume rules
+     * (see addGeneratedInterfaceDomain()); the snapshot keeps their source
+     * regions alive for exact rematerialization.  Only a side that no
+     * integrating consumer (cut-volume kernel) reads may be selected.
+     */
     void addFreeSurfaceGeometrySnapshot(
         std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot> snapshot,
         std::optional<geometry::CutIntegrationSide> volume_side_filter =
-            std::nullopt) {
+            std::nullopt,
+        std::optional<geometry::CutIntegrationSide>
+            classification_only_full_cell_side = std::nullopt) {
         if (!snapshot || !snapshot->revision().complete()) {
             throw std::invalid_argument(
                 "cut integration requires a complete free-surface geometry snapshot");
@@ -1403,6 +1464,8 @@ public:
         const auto first_binding = bindings_.size();
         const auto first_sensitivity_metadata =
             sensitivity_metadata_.size();
+        const auto first_classification_only_volume_rule =
+            classification_only_volume_rule_sources_.size();
         const auto first_generated_volume_marker =
             generated_volume_markers_.size();
         const auto first_generated_interface_marker =
@@ -1528,7 +1591,8 @@ public:
             addGeneratedInterfaceDomain(
                 snapshot->interfaceDomain(),
                 volume_side_filter,
-                snapshot->revision().domain_id);
+                snapshot->revision().domain_id,
+                classification_only_full_cell_side);
             for (const auto& contact : snapshot->contactDomains()) {
                 addGeneratedInterfaceBoundaryIntersectionDomain(
                     contact);
@@ -1647,6 +1711,8 @@ public:
             bindings_.resize(first_binding);
             sensitivity_metadata_.resize(
                 first_sensitivity_metadata);
+            classification_only_volume_rule_sources_.resize(
+                first_classification_only_volume_rule);
             generated_volume_markers_.resize(
                 first_generated_volume_marker);
             generated_interface_markers_.resize(
@@ -2227,6 +2293,77 @@ public:
         return volume_rules_;
     }
 
+    /**
+     * Whether a stored volume rule keeps only its classification: every
+     * field except its points, which an integrating consumer must obtain
+     * from materializedVolumeRule().  Such rules exist only for a side
+     * selected at snapshot import.
+     */
+    [[nodiscard]] bool volumeRuleIsClassificationOnly(
+        std::size_t index) const noexcept {
+        return index < volume_rules_.size() &&
+               volume_rules_[index].released_point_count != 0u;
+    }
+
+    [[nodiscard]] std::size_t classificationOnlyVolumeRuleCount() const noexcept {
+        return classification_only_volume_rule_sources_.size();
+    }
+
+    /**
+     * The stored volume rule with its points, bitwise equal to the rule
+     * before its points were released.
+     */
+    [[nodiscard]] geometry::CutQuadratureRule materializedVolumeRule(
+        std::size_t index) const {
+        auto rule = volume_rules_.at(index);
+        if (rule.released_point_count == 0u) {
+            return rule;
+        }
+        const auto source = std::lower_bound(
+            classification_only_volume_rule_sources_.begin(),
+            classification_only_volume_rule_sources_.end(),
+            index,
+            [](const ClassificationOnlyVolumeRuleSource& entry,
+               std::size_t value) { return entry.rule_index < value; });
+        if (source == classification_only_volume_rule_sources_.end() ||
+            source->rule_index != index || source->region == nullptr ||
+            source->request == nullptr) {
+            throw std::logic_error(
+                "classification-only cut-volume rule has no source region");
+        }
+        rule.points = source->region->cutQuadratureRulePoints(*source->request);
+        if (rule.points.size() != rule.released_point_count) {
+            throw std::logic_error(
+                "classification-only cut-volume rule does not rematerialize");
+        }
+        rule.released_point_count = 0u;
+        return rule;
+    }
+
+    /** Integrating consumers fail closed on classification-only rules. */
+    static void requireMaterializedVolumeRule(
+        const geometry::CutQuadratureRule& rule) {
+        if (rule.released_point_count != 0u) {
+            throw std::logic_error(
+                "classification-only cut-volume rule reached an integrating consumer");
+        }
+    }
+
+    /** materializedVolumeRule() for a rule stored in volumeRules(). */
+    [[nodiscard]] geometry::CutQuadratureRule materializedVolumeRule(
+        const geometry::CutQuadratureRule& rule) const {
+        if (rule.released_point_count == 0u) {
+            return rule;
+        }
+        if (volume_rules_.empty() || &rule < volume_rules_.data() ||
+            &rule >= volume_rules_.data() + volume_rules_.size()) {
+            throw std::logic_error(
+                "classification-only cut-volume rule is not stored in this context");
+        }
+        return materializedVolumeRule(
+            static_cast<std::size_t>(&rule - volume_rules_.data()));
+    }
+
     [[nodiscard]] const std::vector<geometry::CutQuadratureRule>& interfaceRules() const noexcept {
         return interface_rules_;
     }
@@ -2652,6 +2789,7 @@ public:
             }
 
             const auto& rule = volume_rules_[i];
+            requireMaterializedVolumeRule(rule);
             record_fixed_geometry_diagnostic(
                 evaluation.fixed_geometry_diagnostics,
                 rule,
@@ -3361,6 +3499,35 @@ private:
 
     using VolumeRuleSideIndex = std::array<VolumeRuleSideBucket, 2>;
 
+    // Keep the classification of a just-imported full-cell volume rule and
+    // release its points; the source region rematerializes them.
+    void releaseVolumeRulePoints(
+        std::size_t index,
+        const interfaces::CutInterfaceVolumeRegion& region,
+        const interfaces::CutInterfaceDomainRequest& request) {
+        auto& rule = volume_rules_.at(index);
+        if (!rule.full_cell_equivalent || rule.points.empty() ||
+            rule.released_point_count != 0u ||
+            region.stable_id != rule.provenance.cut_topology_revision ||
+            region.quadraturePointCount() != rule.points.size() ||
+            (!classification_only_volume_rule_sources_.empty() &&
+             classification_only_volume_rule_sources_.back().rule_index >=
+                 index)) {
+            throw std::invalid_argument(
+                "cut-volume rule cannot be stored classification-only");
+        }
+        classification_only_volume_rule_sources_.push_back(
+            ClassificationOnlyVolumeRuleSource{
+                .rule_index = index,
+                .region = &region,
+                .request = &request,
+            });
+        rule.released_point_count =
+            static_cast<std::uint32_t>(rule.points.size());
+        // The importing call marks the context modified.
+        std::vector<geometry::CutQuadraturePoint>().swap(rule.points);
+    }
+
     void markModified() noexcept {
         ++content_revision_;
         if (content_revision_ == 0u) {
@@ -3464,6 +3631,16 @@ private:
     std::vector<CutStabilizationHook> stabilization_hooks_{};
     std::vector<CutIntegrationBinding> bindings_{};
     std::vector<CutGeometrySensitivityMetadata> sensitivity_metadata_{};
+    // Source regions of classification-only volume rules, ordered by rule
+    // index.  The regions belong to the domain of an imported snapshot,
+    // which free_surface_geometry_snapshots_ keeps alive in every copy.
+    struct ClassificationOnlyVolumeRuleSource {
+        std::size_t rule_index{0u};
+        const interfaces::CutInterfaceVolumeRegion* region{nullptr};
+        const interfaces::CutInterfaceDomainRequest* request{nullptr};
+    };
+    std::vector<ClassificationOnlyVolumeRuleSource>
+        classification_only_volume_rule_sources_{};
     std::size_t generated_pruned_volume_rule_count_{0u};
     Real generated_pruned_volume_measure_{0.0};
     std::uint64_t content_revision_{0u};

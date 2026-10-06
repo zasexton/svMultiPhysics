@@ -13,6 +13,7 @@
 #include "Assembly/CutIntegrationContext.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
+#include "Geometry/CutQuadratureMapping.h"
 #include "Interfaces/CopyOnWriteVector.h"
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "LevelSet/LevelSetCellEvaluator.h"
@@ -292,19 +293,52 @@ void expectSamePoints(const interfaces::FreeSurfaceGeometryRuleRecord& a,
     }
 }
 
-void expectSameRules(const geometry::CutQuadratureRule& a,
-                     const geometry::CutQuadratureRule& b)
+// Every scalar field except released_point_count.
+void expectSameRuleClassification(const geometry::CutQuadratureRule& a,
+                                  const geometry::CutQuadratureRule& b)
 {
     EXPECT_EQ(a.kind, b.kind);
     EXPECT_EQ(a.side, b.side);
+    EXPECT_EQ(a.geometric_dimension, b.geometric_dimension);
     EXPECT_TRUE(sameBits(a.measure, b.measure));
-    EXPECT_EQ(a.full_cell_equivalent, b.full_cell_equivalent);
+    EXPECT_TRUE(sameBits(a.parent_measure, b.parent_measure));
+    EXPECT_TRUE(sameBits(a.volume_fraction, b.volume_fraction));
+    EXPECT_EQ(a.exact_for_constants, b.exact_for_constants);
+    EXPECT_EQ(a.exact_polynomial_order, b.exact_polynomial_order);
+    EXPECT_EQ(a.policy.kind, b.policy.kind);
+    EXPECT_EQ(a.policy.polynomial_order, b.policy.polynomial_order);
+    EXPECT_EQ(a.policy.moment_fitted, b.policy.moment_fitted);
+    EXPECT_TRUE(sameBits(a.policy.tolerance, b.policy.tolerance));
+    EXPECT_EQ(a.policy.name, b.policy.name);
     expectSameProvenance(a.provenance, b.provenance);
+    EXPECT_EQ(a.provenance_id, b.provenance_id);
+    EXPECT_EQ(a.frame, b.frame);
+    EXPECT_EQ(a.curved_geometry, b.curved_geometry);
+    EXPECT_EQ(a.full_cell_equivalent, b.full_cell_equivalent);
+    EXPECT_EQ(geometry::cutQuadratureRulePointCount(a),
+              geometry::cutQuadratureRulePointCount(b));
+}
+
+// Every field, points bitwise.
+void expectSameRules(const geometry::CutQuadratureRule& a,
+                     const geometry::CutQuadratureRule& b)
+{
+    expectSameRuleClassification(a, b);
+    EXPECT_EQ(a.released_point_count, b.released_point_count);
     ASSERT_EQ(a.points.size(), b.points.size());
     for (std::size_t q = 0; q < a.points.size(); ++q) {
-        EXPECT_TRUE(sameBits(a.points[q].point, b.points[q].point));
-        EXPECT_TRUE(sameBits(a.points[q].normal, b.points[q].normal));
-        EXPECT_TRUE(sameBits(a.points[q].weight, b.points[q].weight));
+        const auto& x = a.points[q];
+        const auto& y = b.points[q];
+        EXPECT_TRUE(sameBits(x.point, y.point));
+        EXPECT_TRUE(sameBits(x.normal, y.normal));
+        EXPECT_TRUE(sameBits(x.boundary_normal, y.boundary_normal));
+        EXPECT_TRUE(sameBits(x.tangent, y.tangent));
+        EXPECT_TRUE(sameBits(x.weight, y.weight));
+        EXPECT_TRUE(sameBits(x.parent_coordinate, y.parent_coordinate));
+        EXPECT_TRUE(sameBits(x.reference_measure_factor,
+                             y.reference_measure_factor));
+        EXPECT_TRUE(sameBits(x.level_set_residual, y.level_set_residual));
+        EXPECT_TRUE(sameBits(x.gradient_norm, y.gradient_norm));
     }
 }
 
@@ -712,6 +746,102 @@ TEST(FreeSurfaceSnapshotCompactRecords,
                         independent.toCutQuadratureRule(domain.request()));
     }
     EXPECT_GT(shared, 0u);
+}
+
+TEST(FreeSurfaceSnapshotCompactRecords,
+     ContextKeepsDryFullCellRulesClassificationOnly)
+{
+    const SphereSnapshotFixture fixture;
+    ASSERT_TRUE(fixture.generated.success) << fixture.generated.diagnostic;
+    const auto snapshot =
+        fixture.snapshot(geometry::CutIntegrationSide::Positive);
+    const auto& mesh = fixture.system.meshAccess();
+
+    FE::assembly::CutIntegrationContext full;
+    full.addFreeSurfaceGeometrySnapshot(snapshot);
+    auto compact = std::make_unique<FE::assembly::CutIntegrationContext>();
+    compact->addFreeSurfaceGeometrySnapshot(
+        snapshot, std::nullopt, geometry::CutIntegrationSide::Positive);
+    // No extra modification events: the import is the same content change.
+    EXPECT_EQ(full.contentRevision(), compact->contentRevision());
+    EXPECT_EQ(full.classificationOnlyVolumeRuleCount(), 0u);
+
+    ASSERT_EQ(full.volumeRules().size(), compact->volumeRules().size());
+    ASSERT_EQ(full.metadata().size(), compact->metadata().size());
+    ASSERT_EQ(full.bindings().size(), compact->bindings().size());
+    std::size_t released = 0u;
+    std::optional<std::size_t> first_released;
+    for (std::size_t i = 0; i < full.volumeRules().size(); ++i) {
+        const auto& a = full.volumeRules()[i];
+        const auto& b = compact->volumeRules()[i];
+        expectSameRuleClassification(a, b);
+        EXPECT_EQ(full.metadata()[i].parent_entity,
+                  compact->metadata()[i].parent_entity);
+        EXPECT_TRUE(sameBits(full.metadata()[i].volume_fraction,
+                             compact->metadata()[i].volume_fraction));
+        EXPECT_TRUE(sameBits(full.metadata()[i].embedded_normal,
+                             compact->metadata()[i].embedded_normal));
+        EXPECT_EQ(full.bindings()[i].cut_revision_key,
+                  compact->bindings()[i].cut_revision_key);
+        const bool dry_full =
+            a.side == geometry::CutIntegrationSide::Positive &&
+            a.full_cell_equivalent;
+        EXPECT_EQ(compact->volumeRuleIsClassificationOnly(i), dry_full);
+        if (!dry_full) {
+            expectSameRules(a, b);
+            continue;
+        }
+        ++released;
+        if (!first_released) {
+            first_released = i;
+        }
+        EXPECT_TRUE(b.points.empty());
+        EXPECT_EQ(b.points.capacity(), 0u);
+        EXPECT_EQ(b.released_point_count, a.points.size());
+        const auto materialized = compact->materializedVolumeRule(i);
+        expectSameRules(a, materialized);
+        expectSameRules(a, compact->materializedVolumeRule(b));
+        EXPECT_TRUE(sameBits(
+            geometry::physicalCutQuadratureMeasure(mesh, a),
+            geometry::physicalCutQuadratureMeasure(mesh, materialized)));
+    }
+    ASSERT_TRUE(first_released.has_value());
+    EXPECT_EQ(compact->classificationOnlyVolumeRuleCount(), released);
+    for (const auto side : {geometry::CutIntegrationSide::Negative,
+                            geometry::CutIntegrationSide::Positive}) {
+        const auto a = full.generatedVolumeDiagnosticsForMarkerAndSide(
+            snapshot->interfaceDomain().marker(), side);
+        const auto b = compact->generatedVolumeDiagnosticsForMarkerAndSide(
+            snapshot->interfaceDomain().marker(), side);
+        EXPECT_EQ(a.rule_count, b.rule_count);
+        EXPECT_EQ(a.quadrature_points, b.quadrature_points);
+        EXPECT_TRUE(sameBits(a.active_volume, b.active_volume));
+    }
+
+    // Integrating consumers fail closed; the full context still integrates.
+    const auto one = [](const FE::assembly::CutScalarOperatorPoint&) {
+        return FE::Real{1.0};
+    };
+    EXPECT_NO_THROW((void)full.evaluateScalarCutOperator(
+        FE::assembly::CutIntegrationAssemblyPath::Standard, one, one));
+    EXPECT_THROW((void)compact->evaluateScalarCutOperator(
+                     FE::assembly::CutIntegrationAssemblyPath::Standard,
+                     one,
+                     one),
+                 std::logic_error);
+
+    // A copy keeps the snapshot, and with it the source regions, alive.
+    const FE::assembly::CutIntegrationContext copy = *compact;
+    compact.reset();
+    for (std::size_t i = 0; i < full.volumeRules().size(); ++i) {
+        if (copy.volumeRuleIsClassificationOnly(i)) {
+            expectSameRules(full.volumeRules()[i],
+                            copy.materializedVolumeRule(i));
+        }
+    }
+    // A released rule that is not stored in the context has no source.
+    const auto foreign = copy.volumeRules()[*first_released];
+    EXPECT_THROW((void)copy.materializedVolumeRule(foreign), std::logic_error);
 }
 
 #endif
