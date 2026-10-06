@@ -1,6 +1,7 @@
 #include "Application/Core/ActiveDomainOutput.h"
 
 #include "FE/Assembly/Assembler.h"
+#include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Assembly/MeshAccess.h"
 #include "FE/Geometry/CutQuadratureMapping.h"
 
@@ -147,7 +148,8 @@ std::vector<double> collectWetVolumeFractions(
 
 CutVolumeMeasureSummary collectCutVolumeMeasures(
     const svmp::FE::assembly::IMeshAccess& mesh,
-    const std::vector<const svmp::FE::geometry::CutQuadratureRule*>& rules)
+    const std::vector<const svmp::FE::geometry::CutQuadratureRule*>& rules,
+    const svmp::FE::assembly::CutIntegrationContext* context)
 {
   CutVolumeMeasureSummary summary;
   bool found_revisioned_rule = false;
@@ -205,8 +207,19 @@ CutVolumeMeasureSummary collectCutVolumeMeasures(
     ++summary.rule_count;
     summary.reference_measure += rule->measure;
     try {
-      summary.physical_measure +=
-          svmp::FE::geometry::physicalCutQuadratureMeasure(mesh, *rule);
+      if (rule->released_point_count != 0u) {
+        if (context == nullptr) {
+          throw std::invalid_argument(
+              "[svMultiPhysics::Application] Cut-volume measure of a "
+              "classification-only rule requires its integration context.");
+        }
+        summary.physical_measure +=
+            svmp::FE::geometry::physicalCutQuadratureMeasure(
+                mesh, context->materializedVolumeRule(*rule));
+      } else {
+        summary.physical_measure +=
+            svmp::FE::geometry::physicalCutQuadratureMeasure(mesh, *rule);
+      }
       ++summary.physical_rule_count;
     } catch (...) {
       if (found_revisioned_rule) {

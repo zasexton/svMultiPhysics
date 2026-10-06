@@ -12,6 +12,7 @@
 namespace svmp {
 namespace FE {
 namespace assembly {
+class CutIntegrationContext;
 class IMeshAccess;
 }
 }
@@ -45,9 +46,12 @@ struct WetVolumeMeasureSelection {
   std::string frame{"physical"};
 };
 
+// Rules stored classification-only in a cut integration context are
+// measured through that context's exact rematerialization.
 CutVolumeMeasureSummary collectCutVolumeMeasures(
     const svmp::FE::assembly::IMeshAccess& mesh,
-    const std::vector<const svmp::FE::geometry::CutQuadratureRule*>& rules);
+    const std::vector<const svmp::FE::geometry::CutQuadratureRule*>& rules,
+    const svmp::FE::assembly::CutIntegrationContext* context = nullptr);
 
 WetVolumeMeasureSelection selectWetVolumeForDrift(
     const CutVolumeMeasureSummary& summary);
