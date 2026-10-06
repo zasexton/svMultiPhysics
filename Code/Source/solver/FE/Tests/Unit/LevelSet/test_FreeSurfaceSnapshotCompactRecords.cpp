@@ -188,7 +188,8 @@ void expectSameProvenance(const geometry::CutQuadratureProvenance& a,
               b.free_surface_snapshot_revision_key);
 }
 
-// Every field except the point lists and the classification-only marker.
+// Every field except the point lists, the moments and the
+// classification-only marker.
 void expectSameClassification(const interfaces::FreeSurfaceGeometryRuleRecord& a,
                               const interfaces::FreeSurfaceGeometryRuleRecord& b)
 {
@@ -208,14 +209,6 @@ void expectSameClassification(const interfaces::FreeSurfaceGeometryRuleRecord& a
     EXPECT_EQ(a.moment_certificate.source, b.moment_certificate.source);
     EXPECT_EQ(a.moment_certificate.phase_sign_certified,
               b.moment_certificate.phase_sign_certified);
-    ASSERT_EQ(a.moment_certificate.moments.size(),
-              b.moment_certificate.moments.size());
-    for (std::size_t i = 0; i < a.moment_certificate.moments.size(); ++i) {
-        EXPECT_EQ(a.moment_certificate.moments[i].exponents,
-                  b.moment_certificate.moments[i].exponents);
-        EXPECT_TRUE(sameBits(a.moment_certificate.moments[i].value,
-                             b.moment_certificate.moments[i].value));
-    }
 
     const auto& ar = a.reference_rule;
     const auto& br = b.reference_rule;
@@ -254,9 +247,18 @@ void expectSameClassification(const interfaces::FreeSurfaceGeometryRuleRecord& a
     EXPECT_TRUE(sameBits(ap.physical_measure, bp.physical_measure));
 }
 
+// The content a classification-only record releases: points and moments.
 void expectSamePoints(const interfaces::FreeSurfaceGeometryRuleRecord& a,
                       const interfaces::FreeSurfaceGeometryRuleRecord& b)
 {
+    ASSERT_EQ(a.moment_certificate.moments.size(),
+              b.moment_certificate.moments.size());
+    for (std::size_t i = 0; i < a.moment_certificate.moments.size(); ++i) {
+        EXPECT_EQ(a.moment_certificate.moments[i].exponents,
+                  b.moment_certificate.moments[i].exponents);
+        EXPECT_TRUE(sameBits(a.moment_certificate.moments[i].value,
+                             b.moment_certificate.moments[i].value));
+    }
     ASSERT_EQ(a.reference_rule.points.size(), b.reference_rule.points.size());
     for (std::size_t q = 0; q < a.reference_rule.points.size(); ++q) {
         const auto& x = a.reference_rule.points[q];
@@ -477,6 +479,8 @@ TEST(FreeSurfaceSnapshotCompactRecords,
         EXPECT_TRUE(b.physical_rule.points.empty());
         EXPECT_EQ(b.reference_rule.points.capacity(), 0u);
         EXPECT_EQ(b.physical_rule.points.capacity(), 0u);
+        EXPECT_EQ(b.moment_certificate.moments.capacity(), 0u);
+        EXPECT_FALSE(a.moment_certificate.moments.empty());
         // Exact recomputation of the released points.
         const auto materialized =
             interfaces::materializeFreeSurfaceGeometryRuleRecord(

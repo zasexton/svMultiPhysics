@@ -4280,6 +4280,8 @@ FreeSurfaceGeometryRuleRecord materializeFreeSurfaceGeometryRuleRecord(
     result.classification_only_content_digest = 0u;
     materializeAuthoritativeFullCellPoints(
         result.reference_rule, mesh, std::nullopt);
+    result.moment_certificate.moments =
+        makeParentCellMomentCertificate(mesh, result.reference_rule).moments;
     result.physical_rule =
         geometry::mapCutQuadratureRuleToPhysical(mesh, result.reference_rule);
     result.physical_rule.free_surface_snapshot_revision_key =
@@ -4560,6 +4562,10 @@ buildFreeSurfaceGeometrySnapshot(
             record.reference_rule.points);
         std::vector<geometry::MappedCutQuadraturePoint>().swap(
             record.physical_rule.points);
+        // The parent-cell certificate depends only on the cell type and the
+        // claimed order; its scalar fields stay.
+        std::vector<FreeSurfaceGeometryMonomialMoment>().swap(
+            record.moment_certificate.moments);
         record.classification_only = true;
     }
     const auto fragment_by_stable_id =
