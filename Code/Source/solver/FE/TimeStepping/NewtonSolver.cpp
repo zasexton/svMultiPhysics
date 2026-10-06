@@ -36,6 +36,7 @@
 #include <functional>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <cmath>
 #include <cstdint>
 #include <cctype>
@@ -12461,12 +12462,96 @@ NewtonReport NewtonSolver::solveStep(
     // scaledExternalStateOuterGate). Every other acceptance condition is
     // unchanged.
     const NewtonOptions unscaled_inner_options = inner_options;
+    std::optional<NewtonOptions> scaled_inner_options;
     std::optional<NewtonSolver> scaled_inner_solver;
     ExternalStateOuterGate outer_gate;
     bool outer_gate_derived = false;
     NewtonSolver inner_solver(
         std::move(inner_options),
         /*defer_pressure_representability_distance_gate=*/true);
+
+    // A refresh whose fresh residual is predicted to pass the gate (the
+    // zero-update certificate pass) runs an inner solver that assembles the
+    // residual first and the Jacobian only if the tolerance check fails
+    // (NewtonOptions::initial_residual_first). The prediction extrapolates
+    // the contraction of the two preceding fresh residuals of the attempt
+    // epoch: ||R_k|| ~ ||R_{k-1}||^2 / ||R_{k-2}||. It uses global norms, so
+    // every rank takes the same branch, and it only selects the assembly
+    // order: the iterates and the acceptance decision are unchanged.
+    const bool residual_first_on_predicted_certificate =
+        options_.external_state_fixed_point
+            .residual_first_on_predicted_certificate &&
+        !envBoolEnabled("SVMP_DISABLE_PREDICTED_CERTIFICATE_RESIDUAL_FIRST");
+    std::optional<NewtonSolver> residual_first_inner_solver;
+    std::optional<NewtonSolver> residual_first_scaled_inner_solver;
+    auto residualFirstInnerSolver = [&]() -> const NewtonSolver& {
+        if (scaled_inner_solver) {
+            if (!residual_first_scaled_inner_solver) {
+                NewtonOptions options = *scaled_inner_options;
+                options.initial_residual_first = true;
+                residual_first_scaled_inner_solver.emplace(NewtonSolver(
+                    std::move(options),
+                    /*defer_pressure_representability_distance_gate=*/true));
+            }
+            return *residual_first_scaled_inner_solver;
+        }
+        if (!residual_first_inner_solver) {
+            NewtonOptions options = unscaled_inner_options;
+            options.initial_residual_first = true;
+            residual_first_inner_solver.emplace(NewtonSolver(
+                std::move(options),
+                /*defer_pressure_representability_distance_gate=*/true));
+        }
+        return *residual_first_inner_solver;
+    };
+    struct FreshResidualSample {
+        double combined{0.0};
+        std::vector<double> fields{};
+    };
+    std::vector<FreshResidualSample> fresh_residual_samples;
+    int residual_first_refreshes = 0;
+    int residual_first_certificates = 0;
+    auto certificatePredicted = [&]() {
+        if (!outer_gate_derived || fresh_residual_samples.size() < 2u) {
+            return false;
+        }
+        const auto& older =
+            fresh_residual_samples[fresh_residual_samples.size() - 2u];
+        const auto& newer = fresh_residual_samples.back();
+        const auto predicted_within = [](double previous,
+                                         double latest,
+                                         double gate) {
+            if (!std::isfinite(previous) || !std::isfinite(latest) ||
+                !std::isfinite(gate) || latest < 0.0 || gate < 0.0) {
+                return false;
+            }
+            if (latest == 0.0) {
+                return true;
+            }
+            if (!(previous > 0.0)) {
+                return false;
+            }
+            const double predicted = latest * (latest / previous);
+            return std::isfinite(predicted) && predicted <= gate;
+        };
+        if (!predicted_within(older.combined,
+                              newer.combined,
+                              outer_gate.residual_tolerance)) {
+            return false;
+        }
+        if (older.fields.size() != newer.fields.size() ||
+            newer.fields.size() != outer_gate.field_tolerances.size()) {
+            return false;
+        }
+        for (std::size_t i = 0; i < newer.fields.size(); ++i) {
+            if (!predicted_within(older.fields[i],
+                                  newer.fields[i],
+                                  outer_gate.field_tolerances[i])) {
+                return false;
+            }
+        }
+        return true;
+    };
 
     NewtonReport aggregate{};
     backends::SolverReport last_nontrivial_linear{};
@@ -12716,6 +12801,9 @@ NewtonReport NewtonSolver::solveStep(
                             OuterFixedPointState);
                     ++external_state_discontinuity_restarts;
                     discontinuity_restart_consumed = true;
+                    // Fresh residuals of the previous epoch do not predict
+                    // the contraction on the new one.
+                    fresh_residual_samples.clear();
                     if (options_
                             .acknowledge_external_state_discontinuity) {
                         options_.acknowledge_external_state_discontinuity(
@@ -12762,8 +12850,14 @@ NewtonReport NewtonSolver::solveStep(
                 "NewtonSolver: external-state refresh opened a mesh-coordinate transaction");
 
             previous_outer_iterate->copyFrom(history.u());
+            const bool residual_first_refresh =
+                residual_first_on_predicted_certificate &&
+                !finish_on_frozen_epoch && certificatePredicted();
             const NewtonSolver& active_inner_solver =
-                scaled_inner_solver ? *scaled_inner_solver : inner_solver;
+                residual_first_refresh
+                    ? residualFirstInnerSolver()
+                    : (scaled_inner_solver ? *scaled_inner_solver
+                                           : inner_solver);
             auto inner_report = active_inner_solver.solveStepFrozenExternalState(
                 transient,
                 linear,
@@ -12771,6 +12865,22 @@ NewtonReport NewtonSolver::solveStep(
                 history,
                 workspace,
                 residual_addition);
+            if (residual_first_refresh) {
+                ++residual_first_refreshes;
+                if (inner_report.converged && inner_report.iterations == 0) {
+                    ++residual_first_certificates;
+                }
+            }
+            if (inner_report.component_residual_convergence) {
+                // Component (auxiliary-block) convergence uses a different
+                // gate; do not predict certificates from combined norms.
+                fresh_residual_samples.clear();
+            } else {
+                fresh_residual_samples.push_back(FreshResidualSample{
+                    .combined = inner_report.residual_norm0,
+                    .fields = inner_report.field_criterion_residual_norm0,
+                });
+            }
             if (!outer_gate_derived) {
                 outer_gate_derived = true;
                 outer_gate = scaledExternalStateOuterGate(
@@ -12794,6 +12904,7 @@ NewtonReport NewtonSolver::solveStep(
                         scaled_options.field_residual_criteria[i]
                             .abs_tolerance = outer_gate.field_tolerances[i];
                     }
+                    scaled_inner_options = scaled_options;
                     scaled_inner_solver.emplace(NewtonSolver(
                         std::move(scaled_options),
                         /*defer_pressure_representability_distance_gate=*/
@@ -12856,6 +12967,10 @@ NewtonReport NewtonSolver::solveStep(
             aggregate.iterations = inner_iterations_total;
             aggregate.accepted_line_search_refresh_skips =
                 accepted_line_search_refresh_skips_total;
+            aggregate.outer_residual_first_refreshes =
+                residual_first_refreshes;
+            aggregate.outer_residual_first_certificates =
+                residual_first_certificates;
             aggregate.outer_gate_scaled = outer_gate.scaled;
             aggregate.outer_gate_reference_residual =
                 outer_gate.reference_residual;
@@ -13013,7 +13128,11 @@ NewtonReport NewtonSolver::solveStep(
                         << (outer == 0 ? options_.abs_tolerance
                                        : outer_gate.residual_tolerance)
                         << " scaled_gate="
-                        << ((outer > 0 && outer_gate.scaled) ? 1 : 0);
+                        << ((outer > 0 && outer_gate.scaled) ? 1 : 0)
+                        << " residual_first_refreshes="
+                        << residual_first_refreshes
+                        << " residual_first_certificates="
+                        << residual_first_certificates;
                     FE_LOG_INFO(oss.str());
                 }
                 aggregate.converged = true;
@@ -16559,8 +16678,20 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
         bool jacobian_ready = have_jacobian && !need_jacobian;
         const bool initial_residual_only_certificate =
             options_.initial_residual_only_certificate && it == 0;
+        // Entry state expected to satisfy the tolerances (see
+        // NewtonOptions::initial_residual_first): assemble the residual
+        // alone and the Jacobian below only if the tolerance check fails.
+        const bool initial_residual_first =
+            options_.initial_residual_first &&
+            it == 0 &&
+            !have_residual &&
+            need_jacobian &&
+            options_.assemble_both_when_possible &&
+            same_op &&
+            !has_monolithic_auxiliary_unknowns;
         const bool residual_first_convergence_check =
             initial_residual_only_certificate ||
+            initial_residual_first ||
             (!options_.use_line_search &&
              it > 0 &&
              need_jacobian &&
@@ -16586,9 +16717,69 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                     state,
                     initial_residual_only_certificate
                         ? "initial_residual_only_certificate"
+                        : initial_residual_first
+                        ? "initial_residual_first"
                         : residual_first_convergence_check
                         ? "post_update_convergence_check"
                         : nullptr);
+                if (initial_residual_first &&
+                    envBoolEnabled("SVMP_RESIDUAL_FIRST_SELF_CHECK")) {
+                    // Diagnostic: the combined assembly must reproduce the
+                    // residual bit for bit. Its residual and Jacobian are
+                    // kept, so the iterates are those of the combined path.
+                    FE_CHECK_NOT_NULL(
+                        workspace.factory,
+                        "NewtonSolver: residual-first self-check factory");
+                    auto residual_first_copy =
+                        workspace.factory->createVector(r.size());
+                    FE_CHECK_NOT_NULL(
+                        residual_first_copy.get(),
+                        "NewtonSolver: residual-first self-check copy");
+                    residual_first_copy->copyFrom(r);
+                    const double residual_first_norm = current_residual_norm;
+                    current_residual_norm = assembleJacobianAndResidual(state);
+                    ptc_gamma_applied = 0.0;
+                    jacobian_ready = true;
+                    have_jacobian = true;
+                    last_jacobian_it = it;
+                    const auto combined = r.localSpan();
+                    const auto separate = residual_first_copy->localSpan();
+                    std::size_t mismatches =
+                        combined.size() == separate.size()
+                            ? 0u
+                            : std::max(combined.size(), separate.size());
+                    double max_abs_difference = 0.0;
+                    if (mismatches == 0u) {
+                        for (std::size_t i = 0; i < combined.size(); ++i) {
+                            if (std::memcmp(&combined[i], &separate[i],
+                                            sizeof(Real)) != 0) {
+                                ++mismatches;
+                                max_abs_difference = std::max(
+                                    max_abs_difference,
+                                    std::abs(static_cast<double>(
+                                        combined[i] - separate[i])));
+                            }
+                        }
+                    }
+                    const bool any_mismatch =
+                        anyRank(mismatches > 0u) ||
+                        std::memcmp(&residual_first_norm,
+                                    &current_residual_norm,
+                                    sizeof(double)) != 0;
+                    if (activeSystemRank(sys) == 0) {
+                        std::ostringstream oss;
+                        oss << std::setprecision(17)
+                            << "NewtonSolver: residual-first self-check"
+                            << " diagnostic=residual_first_self_check"
+                            << " identical=" << (any_mismatch ? 0 : 1)
+                            << " rank0_mismatched_entries=" << mismatches
+                            << " rank0_max_abs_difference="
+                            << max_abs_difference
+                            << " residual_first_norm=" << residual_first_norm
+                            << " combined_norm=" << current_residual_norm;
+                        FE_LOG_INFO(oss.str());
+                    }
+                }
                 // A residual synchronization can install a different affine
                 // constraint set.  Recompute the within-iteration Jacobian
                 // decision instead of using the value cached before that

@@ -204,6 +204,15 @@ struct NewtonOptions {
         // The outer iteration limit bounds the work in either case.
         int max_discontinuity_restarts{0};
         DynamicRelaxationOptions dynamic_relaxation{};
+        // Refreshes whose fresh residual the contraction of the two
+        // preceding fresh residuals of the attempt predicts to pass the gate
+        // (the zero-update certificate pass) assemble the residual first and
+        // the Jacobian only if it is needed (NewtonOptions::
+        // initial_residual_first). The iterates and the acceptance decision
+        // are unchanged; only the Jacobian assembly of a certificate pass is
+        // saved. The environment variable
+        // SVMP_DISABLE_PREDICTED_CERTIFICATE_RESIDUAL_FIRST=1 turns it off.
+        bool residual_first_on_predicted_certificate{true};
     };
 
     ExternalStateFixedPointOptions external_state_fixed_point{};
@@ -265,6 +274,19 @@ struct NewtonOptions {
      * reports nonconvergence when the entry residual tolerances are not met.
      */
     bool initial_residual_only_certificate{false};
+
+    /**
+     * Assemble the residual alone in the first iteration and the Jacobian
+     * only when that residual does not satisfy the tolerances, instead of one
+     * combined assembly. Both assemblies produce the same residual and
+     * Jacobian as the combined one, so the iterates are unchanged; when the
+     * entry state already satisfies the tolerances the Jacobian assembly is
+     * saved. Ignored unless the residual and Jacobian operators are the same,
+     * combined assembly is allowed, and there are no monolithic auxiliary
+     * unknowns. With SVMP_RESIDUAL_FIRST_SELF_CHECK=1 the combined assembly
+     * is also performed and its residual compared bit for bit (diagnostic).
+     */
+    bool initial_residual_first{false};
 
     // Modified Newton: reuse the Jacobian for multiple nonlinear iterations.
     // `1` => full Newton (assemble every iteration).
@@ -433,6 +455,11 @@ struct NewtonReport {
     // Accepted line-search steps whose trial residual was reused because
     // the accepted reprojection left the constraints and state unchanged.
     int accepted_line_search_refresh_skips{0};
+    // External-state fixed point refreshes that assembled the residual first
+    // because a certificate pass was predicted, and how many of those were
+    // certificate passes (no Newton update, Jacobian never assembled).
+    int outer_residual_first_refreshes{0};
+    int outer_residual_first_certificates{0};
     // External-state fixed point acceptance gate of this step (see
     // scaledExternalStateOuterGate). NaN/empty when no gate was derived.
     bool outer_gate_scaled{false};
