@@ -395,6 +395,12 @@ These are proposals. Each lists a recommended option and an alternative. Record 
       - job `46704017`: M2 La = 12, R/h = 8/16/32 at Δt and Δt/2, 4 ranks each;
       - job `46704018`: M2 La = 120, same layout;
       - job `46704019`: M3 λ/h = 16/32/64 at 50 steps per period plus λ/h = 64 at 100, serial.
+    - **M3 result (job `46704019`, all 4 runs in about 40 min):**
+      - frequency passes: 1.58e-2 / 3.94e-3 / 1.39e-3, order 1.75;
+      - volume passes: ≤ 2.1e-6 with reconciliation;
+      - the Δt criterion passes at λ/h = 64: frequency changes 9.8e-4 and damping 2.7e-3 when the step is halved;
+      - **damping fails only at λ/h = 32** (7.1% > 5%). It converges at order 2.9 to 0.39% at λ/h = 64, so it is a spatial error at λ/h = 32.
+    - **M2 rerun:** the first M2 jobs (`46704017`, `46704018`) failed at step 1 with the 4-rank maintenance consensus bug, because the binary `aa811c43` predates the MPI follow-up. They were resubmitted on `3bc60e4e` as jobs `46787442` (La = 12) and `46787451` (La = 120).
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
