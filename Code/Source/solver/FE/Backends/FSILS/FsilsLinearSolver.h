@@ -11,6 +11,7 @@
 #include "Backends/Interfaces/LinearSolver.h"
 #include "Backends/FSILS/liner_solver/fils_struct.hpp"
 
+#include <chrono>
 #include <memory>
 
 namespace svmp {
@@ -18,6 +19,9 @@ namespace FE {
 namespace backends {
 
 class FsilsKrylovPreconditioner;
+class FsilsGatheredDirectSolver;
+class FsilsMatrix;
+class FsilsVector;
 
 class FsilsLinearSolver final : public LinearSolver {
 public:
@@ -52,6 +56,12 @@ public:
         return krylov_pc_.get();
     }
 
+    /// Gathered sparse direct solver (null until a SolverMethod::Direct solve).
+    [[nodiscard]] const FsilsGatheredDirectSolver* directSolver() const noexcept
+    {
+        return direct_solver_.get();
+    }
+
 private:
     SolverOptions options_{};
     std::vector<RankOneUpdate> rank_one_updates_{};
@@ -70,6 +80,10 @@ private:
 
     // Optional right preconditioner for GMRES, kept across solves for reuse.
     std::unique_ptr<FsilsKrylovPreconditioner> krylov_pc_{};
+
+    // Gathered sparse LU for SolverMethod::Direct; keeps its symbolic analysis
+    // across solves while the factored structure is unchanged.
+    std::unique_ptr<FsilsGatheredDirectSolver> direct_solver_{};
 
     // Nullspace basis for post-solve projection.
     std::vector<std::vector<double>> nullspace_basis_{};
@@ -94,6 +108,11 @@ private:
     mutable std::vector<CachedFace> cached_faces_;
 
     void invalidateReusableBlockSchurState() const;
+
+    [[nodiscard]] SolverReport solveDirect(const FsilsMatrix& A,
+                                           FsilsVector& x,
+                                           const FsilsVector& b,
+                                           std::chrono::steady_clock::time_point solve_wall_start);
 };
 
 } // namespace backends

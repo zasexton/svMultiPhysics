@@ -1398,6 +1398,7 @@ set(FE_BACKENDS_HEADERS
     Backends/FSILS/FsilsLinearSolver.h
     Backends/FSILS/FsilsSystemDump.h
     Backends/FSILS/FsilsBlockPreconditioners.h
+    Backends/FSILS/FsilsDirectSolver.h
 
     # Vendored FSILS linear solver (copy of Code/Source/liner_solver)
     Backends/FSILS/liner_solver/add_bc_mul.h
@@ -1458,6 +1459,7 @@ set(FE_BACKENDS_SOURCES
     Backends/FSILS/FsilsLinearSolver.cpp
     Backends/FSILS/FsilsSystemDump.cpp
     Backends/FSILS/FsilsBlockPreconditioners.cpp
+    Backends/FSILS/FsilsDirectSolver.cpp
     Backends/FSILS/FsilsLegacyStatics.cpp
 
     # Vendored FSILS linear solver (copy of Code/Source/liner_solver)
