@@ -1089,16 +1089,21 @@ public:
     }
 
     [[nodiscard]] const std::vector<CutInterfaceFragment>& fragments() const noexcept {
-        return fragments_;
+        return fragments_.values();
     }
 
     [[nodiscard]] const std::vector<CutInterfaceVolumeRegion>& volumeRegions() const noexcept {
-        return volume_regions_;
+        return volume_regions_.values();
     }
 
     [[nodiscard]] const std::vector<GeneratedInterfaceSensitivityRecord>&
     sensitivityRecords() const noexcept {
-        return sensitivity_records_;
+        return sensitivity_records_.values();
+    }
+
+    /** Number of domain copies sharing the volume-region array (memory reports). */
+    [[nodiscard]] long volumeRegionShareCount() const noexcept {
+        return volume_regions_.shareCount();
     }
 
     [[nodiscard]] std::vector<MeshIndex> cutCells() const {
@@ -1326,9 +1331,11 @@ public:
 
 private:
     CutInterfaceDomainRequest request_{};
-    std::vector<CutInterfaceFragment> fragments_{};
-    std::vector<CutInterfaceVolumeRegion> volume_regions_{};
-    std::vector<GeneratedInterfaceSensitivityRecord> sensitivity_records_{};
+    // Copies of a domain (lifecycle caches, returned results, snapshots)
+    // share these arrays until one copy adds or clears entries.
+    CopyOnWriteVector<CutInterfaceFragment> fragments_{};
+    CopyOnWriteVector<CutInterfaceVolumeRegion> volume_regions_{};
+    CopyOnWriteVector<GeneratedInterfaceSensitivityRecord> sensitivity_records_{};
 };
 
 } // namespace interfaces

@@ -745,7 +745,48 @@ TEST(FreeSurfaceSnapshotCompactRecords,
         expectSameRules(region.toCutQuadratureRule(domain.request()),
                         independent.toCutQuadratureRule(domain.request()));
     }
-    EXPECT_GT(shared, 0u);
+    // Either the domain copies share one region array, or their regions
+    // share point arrays.
+    EXPECT_TRUE(shared > 0u || domain.volumeRegionShareCount() > 1);
+}
+
+TEST(FreeSurfaceSnapshotCompactRecords, DomainCopiesShareTheirArraysUntilModified)
+{
+    const SphereSnapshotFixture fixture;
+    ASSERT_TRUE(fixture.generated.success) << fixture.generated.diagnostic;
+    const auto& domain = fixture.generated.domain;
+    ASSERT_FALSE(domain.volumeRegions().empty());
+    ASSERT_FALSE(domain.fragments().empty());
+
+    auto copy = domain;
+    EXPECT_EQ(copy.volumeRegions().data(), domain.volumeRegions().data());
+    EXPECT_EQ(copy.fragments().data(), domain.fragments().data());
+    EXPECT_GE(domain.volumeRegionShareCount(), 2);
+
+    // Adding to the copy gives it its own arrays; the original is unchanged.
+    const auto original_regions = domain.volumeRegions().size();
+    auto region = domain.volumeRegions().front();
+    region.stable_id = 0u;
+    region.local_region_index = FE::INVALID_LOCAL_INDEX;
+    copy.addVolumeRegion(region);
+    EXPECT_NE(copy.volumeRegions().data(), domain.volumeRegions().data());
+    EXPECT_EQ(domain.volumeRegions().size(), original_regions);
+    EXPECT_EQ(copy.volumeRegions().size(), original_regions + 1u);
+    for (std::size_t i = 0; i < original_regions; ++i) {
+        EXPECT_EQ(copy.volumeRegions()[i].stable_id,
+                  domain.volumeRegions()[i].stable_id);
+        EXPECT_EQ(copy.volumeRegions()[i].quadrature_points.data(),
+                  domain.volumeRegions()[i].quadrature_points.data());
+    }
+    copy.clearFragments();
+    EXPECT_TRUE(copy.fragments().empty());
+    EXPECT_FALSE(domain.fragments().empty());
+
+    // A snapshot built from the domain shares its arrays as well.
+    const auto snapshot =
+        fixture.snapshot(geometry::CutIntegrationSide::Positive);
+    EXPECT_EQ(snapshot->interfaceDomain().volumeRegions().data(),
+              domain.volumeRegions().data());
 }
 
 TEST(FreeSurfaceSnapshotCompactRecords,
