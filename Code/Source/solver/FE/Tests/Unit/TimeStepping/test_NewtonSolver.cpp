@@ -11369,3 +11369,98 @@ TEST(NewtonSolver, CoupledSolveAcceptsOriginalLinearTarget)
     EXPECT_TRUE(rep.linear.converged);
     EXPECT_NE(rep.linear.message.find("accepted original coupled target"), std::string::npos);
 }
+
+namespace {
+
+/// Reports an iterative method to the Newton solver, records the relative
+/// tolerance of every correction solve and delegates the solve to the inner
+/// (direct) solver.
+class RecordingForcingSolver final : public svmp::FE::backends::LinearSolver {
+public:
+    explicit RecordingForcingSolver(svmp::FE::backends::LinearSolver& inner)
+        : inner_(inner), options_(inner.getOptions())
+    {
+        options_.method = svmp::FE::backends::SolverMethod::GMRES;
+        options_.rel_tol = 1e-8;
+    }
+
+    [[nodiscard]] svmp::FE::backends::BackendKind backendKind() const noexcept override
+    {
+        return inner_.backendKind();
+    }
+
+    void setOptions(const svmp::FE::backends::SolverOptions& options) override { options_ = options; }
+
+    [[nodiscard]] const svmp::FE::backends::SolverOptions& getOptions() const noexcept override
+    {
+        return options_;
+    }
+
+    [[nodiscard]] svmp::FE::backends::SolverReport solve(const svmp::FE::backends::GenericMatrix& A,
+                                                          svmp::FE::backends::GenericVector& x,
+                                                          const svmp::FE::backends::GenericVector& b) override
+    {
+        rel_tols.push_back(static_cast<double>(options_.rel_tol));
+        return inner_.solve(A, x, b);
+    }
+
+    std::vector<double> rel_tols{};
+
+private:
+    svmp::FE::backends::LinearSolver& inner_;
+    svmp::FE::backends::SolverOptions options_{};
+};
+
+} // namespace
+
+TEST(NewtonSolver, EisenstatWalkerForcingRelaxesOnlyIterativeCorrectionSolves)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto run = [](svmp::FE::timestepping::NewtonOptions::LinearForcingOptions::Mode mode) {
+        auto problem = makeScalarProblem(
+            [](const svmp::FE::forms::FormExpr& u, const svmp::FE::forms::FormExpr& v) {
+                return (svmp::FE::forms::dt(u) * v + u * u * u * v).dx();
+            },
+            /*dt=*/0.2,
+            /*u0=*/{1.0});
+        svmp::FE::timestepping::NewtonOptions nopt;
+        nopt.residual_op = "op";
+        nopt.jacobian_op = "op";
+        nopt.max_iterations = 20;
+        nopt.abs_tolerance = 1e-12;
+        nopt.rel_tolerance = 1e-10;
+        nopt.use_line_search = false;
+        nopt.linear_forcing.mode = mode;
+
+        svmp::FE::timestepping::NewtonSolver newton(nopt);
+        svmp::FE::timestepping::NewtonWorkspace ws;
+        newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+        problem.history.repack(*problem.factory);
+        RecordingForcingSolver solver(*problem.linear);
+        const auto rep = newton.solveStep(*problem.transient,
+                                          solver,
+                                          problem.history.time() + problem.history.dt(),
+                                          problem.history,
+                                          ws);
+        EXPECT_TRUE(rep.converged);
+        return solver.rel_tols;
+    };
+
+    using Mode = svmp::FE::timestepping::NewtonOptions::LinearForcingOptions::Mode;
+    const auto fixed = run(Mode::Fixed);
+    ASSERT_FALSE(fixed.empty());
+    for (const double tol : fixed) {
+        EXPECT_DOUBLE_EQ(tol, 1e-8);
+    }
+
+    const auto forced = run(Mode::EisenstatWalker);
+    ASSERT_FALSE(forced.empty());
+    const svmp::FE::timestepping::NewtonOptions::LinearForcingOptions defaults{};
+    EXPECT_DOUBLE_EQ(forced.front(), defaults.eta_max);
+    for (const double tol : forced) {
+        EXPECT_GE(tol, 1e-8);
+        EXPECT_LE(tol, defaults.eta_max);
+    }
+}

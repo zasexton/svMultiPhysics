@@ -214,6 +214,32 @@ struct NewtonOptions {
     // finite and globally nonzero. Keep this off by default.
     bool accept_inexact_linear_solutions{false};
 
+    /**
+     * @brief Inexact Newton forcing of the linear relative tolerance (opt-in).
+     *
+     * `Fixed` keeps the linear solver's configured relative tolerance.
+     * `EisenstatWalker` sets the relative tolerance of the Newton correction
+     * solve of iteration k to eta_k (Eisenstat and Walker 1996, choice 2,
+     * with the safeguards of Kelley 1995, eq. 6.20):
+     *   eta_0 = eta_max,
+     *   eta_k = gamma (||F_k|| / ||F_{k-1}||)^alpha, raised to
+     *           gamma eta_{k-1}^alpha when that exceeds 0.1,
+     *   eta_k = min(eta_max, max(eta_k, target_fraction * gate / ||F_k||)),
+     * floored by the configured linear relative tolerance.  `gate` is the
+     * smallest absolute residual threshold of the active convergence
+     * criteria.  The residual norms are global, so eta_k is the same on
+     * every rank.  Iterative linear methods only; a direct solve ignores it.
+     */
+    struct LinearForcingOptions {
+        enum class Mode : std::uint8_t { Fixed, EisenstatWalker };
+        Mode mode{Mode::Fixed};
+        double eta_max{0.1};
+        double gamma{0.9};
+        double alpha{2.0};
+        double target_fraction{0.5};
+    };
+    LinearForcingOptions linear_forcing{};
+
     int max_iterations{25};
     int min_iterations{0};
     double abs_tolerance{1e-10};
