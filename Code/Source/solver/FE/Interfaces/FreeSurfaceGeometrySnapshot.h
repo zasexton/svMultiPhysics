@@ -153,10 +153,15 @@ struct FreeSurfaceGeometrySnapshotPolicy {
     // one-sided free surface.  A rule qualifies when it is the only volume
     // rule of its parent cell.  Its points are validated and digested exactly
     // as before and then released, so the snapshot revision is unchanged.
-    // Consumers that integrate over this side's volume points must not use
-    // such a snapshot.  Unset keeps every point.
+    // Consumers that integrate over this side's volume points rematerialize
+    // them (materializeFreeSurfaceGeometryRuleRecord()) or fail closed.
+    // Unset keeps every point.
     std::optional<geometry::CutIntegrationSide>
         classification_only_full_cell_side{};
+    // Store the full-cell rules of both sides classification-only.  The
+    // active-volume energy, dissipation and backward-Euler kinetic-work
+    // evaluators then rematerialize them from the mesh they are given.
+    bool classification_only_full_cells_on_both_sides{false};
 };
 
 struct FreeSurfaceGeometryScalarEvaluator {
@@ -521,7 +526,8 @@ struct FreeSurfaceActiveVolumeEnergyState {
 evaluateFreeSurfaceActiveVolumeEnergy(
     const FreeSurfaceGeometrySnapshot& snapshot,
     const FreeSurfaceActiveVolumeEnergyParameters& parameters,
-    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity);
+    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity,
+    const assembly::IMeshAccess* mesh = nullptr);
 
 struct FreeSurfaceActiveVolumeDissipationParameters {
     geometry::CutIntegrationSide liquid_side{
@@ -554,7 +560,8 @@ struct FreeSurfaceActiveVolumeDissipationState {
 evaluateFreeSurfaceActiveVolumeDissipation(
     const FreeSurfaceGeometrySnapshot& snapshot,
     const FreeSurfaceActiveVolumeDissipationParameters& parameters,
-    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity);
+    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity,
+    const assembly::IMeshAccess* mesh = nullptr);
 
 struct FreeSurfaceExternalPressurePowerParameters {
     geometry::CutIntegrationSide liquid_side{
@@ -629,7 +636,8 @@ evaluateFreeSurfaceBackwardEulerKineticWork(
     std::uint64_t previous_velocity_revision,
     std::uint64_t endpoint_velocity_revision,
     const FreeSurfaceDiscreteFunctionalVectorEvaluator& previous_velocity,
-    const FreeSurfaceDiscreteFunctionalVectorEvaluator& endpoint_velocity);
+    const FreeSurfaceDiscreteFunctionalVectorEvaluator& endpoint_velocity,
+    const assembly::IMeshAccess* mesh = nullptr);
 
 /** Recompute non-additive mean and motion fields after rank reduction. */
 void finalizeFreeSurfaceDynamicContactState(
