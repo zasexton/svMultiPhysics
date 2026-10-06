@@ -1991,7 +1991,7 @@ bool FsilsMatrix::adoptCompatibleReinitialization(FsilsMatrix&& replacement)
     global_rows_ = replacement.global_rows_;
     global_cols_ = replacement.global_cols_;
     nnz_ = replacement.nnz_;
-    ++layout_revision_;
+    layout_revision_ = nextFsilsLayoutStamp();
     resetDroppedEntryCount();
     resetOffOwnerWriteCount();
     return true;

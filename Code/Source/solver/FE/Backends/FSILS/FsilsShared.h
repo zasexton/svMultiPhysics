@@ -14,6 +14,8 @@
 #include "Backends/FSILS/liner_solver/fils_struct.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <vector>
@@ -21,6 +23,21 @@
 namespace svmp {
 namespace FE {
 namespace backends {
+
+/**
+ * @brief Process-unique stamp for FSILS layouts and matrix layout revisions.
+ *
+ * Assembly caches resolved insertion slots under a layout handle (the address
+ * of the FsilsShared object) and a revision.  A destroyed layout's address can
+ * be reused by a new layout with a different structure, so revisions must
+ * never repeat across objects; a per-object counter starting at the same value
+ * would let a cache keyed on a recycled address accept stale slots.
+ */
+[[nodiscard]] inline std::uint64_t nextFsilsLayoutStamp() noexcept
+{
+    static std::atomic<std::uint64_t> stamp{0};
+    return stamp.fetch_add(1u, std::memory_order_relaxed) + 1u;
+}
 
 /**
  * @brief Shared FSILS layout/communication metadata for a matrix/vector pair.
@@ -35,6 +52,8 @@ namespace backends {
  * needed.
  */
 struct FsilsShared final {
+    /// Process-unique identity of this layout (see nextFsilsLayoutStamp()).
+    std::uint64_t layout_stamp{nextFsilsLayoutStamp()};
     GlobalIndex global_dofs{0}; ///< Global DOF count (= dof * gnNo)
     int dof{1};                 ///< DOFs per node (block size)
     int gnNo{0};                ///< Global node count
