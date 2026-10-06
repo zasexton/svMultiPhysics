@@ -974,6 +974,59 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     FE_CHECK_NOT_NULL(scratch_vec2.get(), "TimeLoop scratch_vec2");
     FE_CHECK_NOT_NULL(generalized_alpha_rate_n.get(),
                       "TimeLoop generalized-alpha rate_n scratch");
+    // Linear rate-extrapolation stage predictor of first-order
+    // generalized-alpha (TimeLoopOptions::generalized_alpha_predictor): the
+    // start-of-step rate of the last accepted step, that step's dt, and a
+    // mask (1 on extrapolated DOFs, in the local layout of the history
+    // vectors).
+    const bool rate_extrapolation_predictor =
+        options_.generalized_alpha_predictor ==
+        TimeLoopOptions::GeneralizedAlphaPredictor::LinearRateExtrapolation;
+    std::unique_ptr<backends::GenericVector> predictor_previous_rate{};
+    std::unique_ptr<backends::GenericVector> predictor_mask{};
+    double predictor_previous_dt = 0.0;
+    bool predictor_previous_rate_valid = false;
+    if (rate_extrapolation_predictor) {
+        predictor_previous_rate = factory.createVector(n_dofs);
+        predictor_mask = factory.createVector(n_dofs);
+        FE_CHECK_NOT_NULL(predictor_previous_rate.get(),
+                          "TimeLoop rate-extrapolation predictor rate");
+        FE_CHECK_NOT_NULL(predictor_mask.get(),
+                          "TimeLoop rate-extrapolation predictor mask");
+        predictor_mask->zero();
+        const auto& predictor_fields =
+            options_.generalized_alpha_predictor_fields;
+        if (predictor_fields.empty()) {
+            for (auto& value : predictor_mask->localSpan()) {
+                value = Real{1.0};
+            }
+        } else {
+            const auto& sys = transient.system();
+            const auto& fmap = sys.fieldMap();
+            auto mask_view = predictor_mask->createAssemblyView();
+            FE_CHECK_NOT_NULL(mask_view.get(),
+                              "TimeLoop rate-extrapolation predictor mask view");
+            mask_view->beginAssemblyPhase();
+            for (const auto field : predictor_fields) {
+                FE_THROW_IF(field == INVALID_FIELD_ID,
+                            InvalidArgumentException,
+                            "TimeLoop: invalid generalized-alpha predictor field");
+                const auto field_index =
+                    fmap.getFieldIndex(sys.fieldRecord(field).name);
+                FE_THROW_IF(field_index < 0, InvalidArgumentException,
+                            "TimeLoop: generalized-alpha predictor field is not "
+                            "in the system field map");
+                const auto range = fmap.getFieldDofRange(
+                    static_cast<std::size_t>(field_index));
+                for (GlobalIndex dof = range.first; dof < range.second; ++dof) {
+                    mask_view->addVectorEntry(dof, Real{1.0},
+                                              assembly::AddMode::Insert);
+                }
+            }
+            mask_view->finalizeAssembly();
+            predictor_mask->updateGhosts();
+        }
+    }
     if (callbacks.on_candidate_stage) {
         FE_CHECK_NOT_NULL(candidate_stage_state.get(),
                           "TimeLoop candidate-stage state scratch");
@@ -2863,6 +2916,31 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                             for (std::size_t i = 0; i < cur.size(); ++i) {
                                 cur[i] += alpha_dt * v[i];
                             }
+                            if (rate_extrapolation_predictor &&
+                                predictor_previous_rate_valid &&
+                                predictor_previous_dt > 0.0 &&
+                                std::isfinite(predictor_previous_dt)) {
+                                // udot_{n+1} ~ udot_n + (dt/dt_{n-1})
+                                // (udot_n - udot_{n-1}) in the stage value
+                                // u_n + alpha_f dt ((1-gamma) udot_n +
+                                // gamma udot_{n+1}).
+                                const auto v_prev =
+                                    predictor_previous_rate->localSpan();
+                                const auto mask = predictor_mask->localSpan();
+                                FE_CHECK_ARG(
+                                    v_prev.size() == cur.size() &&
+                                        mask.size() == cur.size(),
+                                    "TimeLoop: generalized-alpha rate-extrapolation predictor size mismatch");
+                                const Real c = static_cast<Real>(
+                                    ga1_params->alpha_f * dt *
+                                    ga1_params->gamma *
+                                    (dt / predictor_previous_dt));
+                                for (std::size_t i = 0; i < cur.size(); ++i) {
+                                    if (mask[i] != Real{0.0}) {
+                                        cur[i] += c * (v[i] - v_prev[i]);
+                                    }
+                                }
+                            }
                             constraints.updateGhostsAndDistribute(history.u());
                         }
 
@@ -4188,6 +4266,18 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     systems::GeometricNonlinearityUpdatePoint::AcceptedTimeStep);
                 transient.system().commitTimeStep();
                 history.acceptStep(dt);
+                if (rate_extrapolation_predictor) {
+                    // The start-of-step rate of the accepted step and its dt
+                    // feed the next step's rate extrapolation. A step that
+                    // did not record it leaves no valid history.
+                    predictor_previous_rate_valid =
+                        generalized_alpha_first_order_rate_n_saved;
+                    if (predictor_previous_rate_valid) {
+                        copyVector(*predictor_previous_rate,
+                                   *generalized_alpha_rate_n);
+                        predictor_previous_dt = dt;
+                    }
+                }
                 if (temporal_order == 2 && options_.scheme == SchemeKind::VSVO_BDF && history.hasSecondOrderState()) {
                     (void)utils::initializeSecondOrderStateFromDisplacementHistory(
                         history,

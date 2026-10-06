@@ -3206,6 +3206,87 @@ TEST(TimeLoopCallbacks, GeneralizedAlphaRetryMatchesDirectAttemptAndRestoresMiss
     }
 }
 
+TEST(TimeLoopConvergence,
+     GeneralizedAlphaRateExtrapolationPredictorKeepsTheSolution)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using svmp::FE::timestepping::TimeLoopOptions;
+    // The predictor changes only the initial iterate of each stage solve.
+    // Newton solves the linear reaction equation exactly, so the solution is
+    // unchanged up to the nonlinear tolerance, while the entry residual of
+    // the stage solves (after the first step, which has no rate history)
+    // is smaller than with the constant-rate predictor.
+    const auto run = [](bool extrapolate, bool restrict_to_field,
+                        std::vector<double>& entry_residuals) {
+        return runReactionProblem(
+            svmp::FE::timestepping::SchemeKind::GeneralizedAlpha,
+            /*dt=*/0.05,
+            /*t_end=*/1.0,
+            /*lambda=*/1.0,
+            /*history_depth=*/2,
+            /*controller=*/{},
+            /*generalized_alpha_rho_inf=*/0.5,
+            /*dg_degree=*/1,
+            /*cg_degree=*/2,
+            svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+            /*collocation_max_outer_iterations=*/4,
+            /*collocation_outer_tolerance=*/0.0,
+            /*exact_initial_history=*/false,
+            /*theta=*/0.5,
+            /*newton_max_iterations=*/8,
+            /*newton_abs_tolerance=*/1e-12,
+            /*newton_rel_tolerance=*/0.0,
+            [&entry_residuals](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+                               svmp::FE::timestepping::TimeHistory&) {
+                callbacks.on_nonlinear_done =
+                    [&entry_residuals](const svmp::FE::timestepping::TimeHistory&,
+                                       const svmp::FE::timestepping::NewtonReport& nr) {
+                        entry_residuals.push_back(nr.residual_norm0);
+                    };
+            },
+            /*inspect_expected_exception=*/{},
+            [extrapolate, restrict_to_field](TimeLoopOptions& opts,
+                                             svmp::FE::FieldId u_field) {
+                if (extrapolate) {
+                    opts.generalized_alpha_predictor =
+                        TimeLoopOptions::GeneralizedAlphaPredictor::
+                            LinearRateExtrapolation;
+                    if (restrict_to_field) {
+                        opts.generalized_alpha_predictor_fields = {u_field};
+                    }
+                }
+            });
+    };
+    std::vector<double> constant_residuals;
+    const auto constant_rate = run(false, false, constant_residuals);
+    ASSERT_FALSE(constant_rate.empty());
+    for (const bool restrict_to_field : {false, true}) {
+        std::vector<double> extrapolated_residuals;
+        const auto extrapolated =
+            run(true, restrict_to_field, extrapolated_residuals);
+        ASSERT_EQ(extrapolated.size(), constant_rate.size());
+        for (std::size_t i = 0; i < constant_rate.size(); ++i) {
+            EXPECT_NEAR(extrapolated[i], constant_rate[i], 1e-10)
+                << "DOF " << i << " restrict=" << restrict_to_field;
+        }
+        ASSERT_EQ(extrapolated_residuals.size(), constant_residuals.size());
+        ASSERT_GE(constant_residuals.size(), 4u);
+        // The first step has no accepted predecessor and keeps the
+        // constant-rate value.
+        EXPECT_EQ(extrapolated_residuals.front(), constant_residuals.front());
+        double constant_sum = 0.0;
+        double extrapolated_sum = 0.0;
+        for (std::size_t s = 2; s < constant_residuals.size(); ++s) {
+            constant_sum += constant_residuals[s];
+            extrapolated_sum += extrapolated_residuals[s];
+        }
+        EXPECT_LT(extrapolated_sum, constant_sum)
+            << "restrict=" << restrict_to_field;
+    }
+}
+
 TEST(TimeLoopCallbacks,
      GeneralizedAlphaCandidateCallbackExceptionRestoresGeneratedAndRateState)
 {
