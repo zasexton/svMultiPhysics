@@ -16466,6 +16466,73 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
 
     double prev_residual_norm = -1.0;
     bool tangent_analysis_report_logged = false;
+
+    // Inexact Newton forcing (NewtonOptions::linear_forcing).  The state is
+    // the residual norm and forcing term of the previous correction solve.
+    double forcing_previous_norm = -1.0;
+    double forcing_previous_eta = -1.0;
+    // Smallest ratio threshold / residual over the active convergence
+    // criteria: the relative reduction that the next update must achieve.
+    auto convergenceGateRatio = [&]() -> double {
+        auto threshold = [](double abs_tolerance, double rel_tolerance, double norm0) {
+            double t = abs_tolerance > 0.0 ? abs_tolerance : 0.0;
+            if (rel_tolerance > 0.0 && norm0 > 0.0 && std::isfinite(norm0)) {
+                t = std::max(t, rel_tolerance * norm0);
+            }
+            return t;
+        };
+        double ratio = std::numeric_limits<double>::infinity();
+        auto consider = [&](double gate, double norm) {
+            if (gate > 0.0 && norm > 0.0 && std::isfinite(norm)) {
+                ratio = std::min(ratio, gate / norm);
+            }
+        };
+        if (!componentResidualConvergenceActive()) {
+            consider(threshold(options_.abs_tolerance, options_.rel_tolerance, report.residual_norm0),
+                     current_residual_norm);
+        } else {
+            consider(threshold(options_.abs_tolerance, options_.rel_tolerance,
+                               initial_residual_components.field),
+                     current_residual_components.field);
+            consider(threshold(options_.abs_tolerance, options_.rel_tolerance,
+                               initial_residual_components.auxiliary),
+                     current_residual_components.auxiliary);
+        }
+        for (const auto& state : field_residual_states) {
+            const double norm0 = state.relative_reference_available ? state.initial_norm : 0.0;
+            consider(threshold(state.criterion.abs_tolerance, state.criterion.rel_tolerance, norm0),
+                     state.current_norm);
+        }
+        return ratio;
+    };
+    // Eisenstat-Walker choice 2 with Kelley's safeguards; returns the
+    // relative tolerance for the correction solve at the current residual.
+    auto linearForcingTerm = [&](double base_rel_tol) -> double {
+        const auto& f = options_.linear_forcing;
+        const double norm = current_residual_norm;
+        double eta = f.eta_max;
+        if (forcing_previous_norm > 0.0 && std::isfinite(forcing_previous_norm) &&
+            std::isfinite(norm) && norm >= 0.0) {
+            eta = f.gamma * std::pow(norm / forcing_previous_norm, f.alpha);
+            const double carried = f.gamma * std::pow(forcing_previous_eta, f.alpha);
+            if (carried > 0.1) {
+                eta = std::max(eta, carried);
+            }
+        }
+        const double gate_ratio = convergenceGateRatio();
+        if (std::isfinite(gate_ratio)) {
+            eta = std::max(eta, f.target_fraction * gate_ratio);
+        }
+        eta = std::min(eta, f.eta_max);
+        if (!std::isfinite(eta)) {
+            eta = f.eta_max;
+        }
+        eta = std::max(eta, static_cast<double>(base_rel_tol));
+        forcing_previous_norm = norm;
+        forcing_previous_eta = eta;
+        return eta;
+    };
+
     for (int it = 0; it < max_it; ++it) {
         current_newton_iteration = it;
         ntp0 = NTP();
@@ -18213,6 +18280,27 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                         logVectorTopEntries(
                             transient.system(), residual_base, "constraint-only probe Jx", 8u);
                     }
+                }
+            }
+            if (options_.linear_forcing.mode ==
+                    NewtonOptions::LinearForcingOptions::Mode::EisenstatWalker &&
+                !needs_strict_coupled_solve_options &&
+                !needs_validated_native_rank_one_options &&
+                ptc_retries == 0 &&
+                base_linear_options.method != backends::SolverMethod::Direct) {
+                auto forced = linear.getOptions();
+                const double eta = linearForcingTerm(forced.rel_tol);
+                if (eta > static_cast<double>(forced.rel_tol)) {
+                    forced.rel_tol = static_cast<Real>(eta);
+                    linear.setOptions(forced);
+                }
+                if (mpiRank() == 0) {
+                    std::ostringstream oss;
+                    oss << "NewtonSolver: linear forcing diagnostic=newton_linear_forcing"
+                        << " it=" << it << " eta=" << eta
+                        << " residual=" << current_residual_norm
+                        << " gate_ratio=" << convergenceGateRatio();
+                    FE_LOG_INFO(oss.str());
                 }
             }
             ntp0 = NTP();
