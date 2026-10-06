@@ -596,6 +596,11 @@ struct NewtonWorkspace {
     const backends::BackendFactory* factory{nullptr};
     /// Snapshot of FESystem::sparsityPatternRevision() at last (re)allocation.
     std::uint64_t sparsity_revision{0};
+    /// Most recent ratio ||R_k|| / ||R_{k-1}|| of consecutive fresh residuals
+    /// of the external-state fixed point at refresh index k (within an attempt
+    /// epoch), observed in earlier steps. Used only to predict certificate
+    /// passes, which selects the assembly order and never the iterates.
+    std::vector<double> outer_fresh_residual_ratios{};
 
     [[nodiscard]] bool isAllocated() const noexcept
     {

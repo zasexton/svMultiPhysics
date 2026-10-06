@@ -3376,7 +3376,8 @@ ContractingRefreshRun runContractingRefreshProblem(
     double c,
     double abs_tolerance,
     double rel_tolerance,
-    std::optional<std::pair<double, double>> field_tolerances = std::nullopt)
+    std::optional<std::pair<double, double>> field_tolerances = std::nullopt,
+    bool residual_first_on_predicted_certificate = true)
 {
     double generated_measure = 1.0 + c * u0;
     auto problem = makeRefreshedGeometryRootProblem(
@@ -3401,6 +3402,8 @@ ContractingRefreshRun runContractingRefreshProblem(
     }
     options.external_state_fixed_point.enabled = true;
     options.external_state_fixed_point.max_iterations = 60;
+    options.external_state_fixed_point.residual_first_on_predicted_certificate =
+        residual_first_on_predicted_certificate;
     options.synchronize_state =
         [&](const svmp::FE::systems::SystemStateView& state, SyncPoint point) {
             const auto u = static_cast<double>(state.u.front());
@@ -3491,6 +3494,44 @@ TEST(NewtonSolverExternalStateFixedPoint,
               absolute.report.outer_iterations);
     EXPECT_EQ(relative.u, absolute.u);
     EXPECT_LE(relative.report.residual_norm, 1e-3);
+}
+
+TEST(NewtonSolverExternalStateFixedPoint,
+     PredictedCertificateResidualFirstKeepsEveryRefresh)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    constexpr double c = 0.2;
+    // The certificate prediction only selects the assembly order of a
+    // refresh, so the refresh sequence, the iterates and the accepted state
+    // must be identical with and without it.
+    const auto combined = runContractingRefreshProblem(
+        2.0, c, 1e-13, 1e-4, std::nullopt, /*residual_first=*/false);
+    const auto residual_first = runContractingRefreshProblem(
+        2.0, c, 1e-13, 1e-4, std::nullopt, /*residual_first=*/true);
+    ASSERT_TRUE(combined.report.converged);
+    ASSERT_TRUE(residual_first.report.converged);
+    EXPECT_EQ(combined.report.outer_residual_first_refreshes, 0);
+    EXPECT_GE(residual_first.report.outer_residual_first_refreshes, 1);
+    EXPECT_GE(residual_first.report.outer_residual_first_certificates, 1);
+    EXPECT_LE(residual_first.report.outer_residual_first_certificates,
+              residual_first.report.outer_residual_first_refreshes);
+    EXPECT_EQ(residual_first.report.outer_iterations,
+              combined.report.outer_iterations);
+    EXPECT_EQ(residual_first.report.inner_iterations_total,
+              combined.report.inner_iterations_total);
+    EXPECT_EQ(residual_first.report.residual_norm,
+              combined.report.residual_norm);
+    EXPECT_EQ(residual_first.u, combined.u);
+    ASSERT_EQ(residual_first.refreshed_states.size(),
+              combined.refreshed_states.size());
+    for (std::size_t i = 0; i < combined.refreshed_states.size(); ++i) {
+        EXPECT_EQ(residual_first.refreshed_states[i],
+                  combined.refreshed_states[i])
+            << "refresh=" << i;
+    }
 }
 
 TEST(NewtonSolverExternalStateFixedPoint,

@@ -12475,9 +12475,11 @@ NewtonReport NewtonSolver::solveStep(
     // residual first and the Jacobian only if the tolerance check fails
     // (NewtonOptions::initial_residual_first). The prediction extrapolates
     // the contraction of the two preceding fresh residuals of the attempt
-    // epoch: ||R_k|| ~ ||R_{k-1}||^2 / ||R_{k-2}||. It uses global norms, so
-    // every rank takes the same branch, and it only selects the assembly
-    // order: the iterates and the acceptance decision are unchanged.
+    // epoch, ||R_k|| ~ ||R_{k-1}||^2 / ||R_{k-2}||, and for the second
+    // refresh (k = 2) the ratio observed at that index in earlier steps. It
+    // uses global norms, so every rank takes the same branch, and it only
+    // selects the assembly order: the iterates and the acceptance decision
+    // are unchanged.
     const bool residual_first_on_predicted_certificate =
         options_.external_state_fixed_point
             .residual_first_on_predicted_certificate &&
@@ -12515,24 +12517,41 @@ NewtonReport NewtonSolver::solveStep(
         if (!outer_gate_derived || fresh_residual_samples.size() < 2u) {
             return false;
         }
-        const auto& older =
-            fresh_residual_samples[fresh_residual_samples.size() - 2u];
+        // Refresh index (within the attempt epoch) whose fresh residual is
+        // predicted from the latest one: ||R_k|| ~ ratio * ||R_{k-1}||.
+        const std::size_t index = fresh_residual_samples.size();
         const auto& newer = fresh_residual_samples.back();
-        const auto predicted_within = [](double previous,
-                                         double latest,
-                                         double gate) {
-            if (!std::isfinite(previous) || !std::isfinite(latest) ||
-                !std::isfinite(gate) || latest < 0.0 || gate < 0.0) {
+        const auto& older = fresh_residual_samples[index - 2u];
+        // R_0 is the time-step residual of the predictor, so R_1/R_0 is not a
+        // geometry contraction; the second refresh uses the ratio observed at
+        // the same index in earlier steps instead.
+        double stored_ratio = std::numeric_limits<double>::quiet_NaN();
+        if (index == 2u) {
+            if (workspace.outer_fresh_residual_ratios.size() <= index) {
+                return false;
+            }
+            stored_ratio = workspace.outer_fresh_residual_ratios[index];
+        }
+        const auto predicted_within = [&](double previous,
+                                          double latest,
+                                          double gate) {
+            if (!std::isfinite(latest) || !std::isfinite(gate) ||
+                latest < 0.0 || gate < 0.0) {
                 return false;
             }
             if (latest == 0.0) {
                 return true;
             }
-            if (!(previous > 0.0)) {
-                return false;
+            double ratio = stored_ratio;
+            if (index != 2u) {
+                if (!std::isfinite(previous) || !(previous > 0.0)) {
+                    return false;
+                }
+                ratio = latest / previous;
             }
-            const double predicted = latest * (latest / previous);
-            return std::isfinite(predicted) && predicted <= gate;
+            const double predicted = latest * ratio;
+            return std::isfinite(predicted) && predicted >= 0.0 &&
+                   predicted <= gate;
         };
         if (!predicted_within(older.combined,
                               newer.combined,
@@ -12551,6 +12570,23 @@ NewtonReport NewtonSolver::solveStep(
             }
         }
         return true;
+    };
+    auto recordFreshResidualRatio = [&]() {
+        const std::size_t index = fresh_residual_samples.size() - 1u;
+        if (index < 2u) {
+            return;
+        }
+        const double previous = fresh_residual_samples[index - 1u].combined;
+        const double latest = fresh_residual_samples[index].combined;
+        if (!std::isfinite(previous) || !(previous > 0.0) ||
+            !std::isfinite(latest) || latest < 0.0) {
+            return;
+        }
+        auto& ratios = workspace.outer_fresh_residual_ratios;
+        if (ratios.size() <= index) {
+            ratios.resize(index + 1u, std::numeric_limits<double>::quiet_NaN());
+        }
+        ratios[index] = latest / previous;
     };
 
     NewtonReport aggregate{};
@@ -12880,6 +12916,7 @@ NewtonReport NewtonSolver::solveStep(
                     .combined = inner_report.residual_norm0,
                     .fields = inner_report.field_criterion_residual_norm0,
                 });
+                recordFreshResidualRatio();
             }
             if (!outer_gate_derived) {
                 outer_gate_derived = true;
