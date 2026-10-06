@@ -584,9 +584,18 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - Open: a few rank-local throws before collectives on error paths (NewtonSolver line search, `LevelSetVolume::build`, FSILS `dot`, PDE extension). No end-to-end multi-rank cut-case CTest yet.
   - Integrated check on `ac273512` (job `46205355`): serial outputs bitwise identical to the shared baseline on all 9 reference cases. FE 34/34, Physics 7/7, Application 4/4. With perf C, the Application suite now takes 1,824 s, down from 3,139 s.
 - **Run policy since 2026-10-01:** long runs with FSILS linear algebra use 4 ranks on one node (`run_case_mpi.sbatch`). Bitwise comparisons between builds stay serial, and decks with Eigen linear algebra stay serial (benchmarks README).
-- [ ] **MPI follow-up (found 2026-10-05; branch `dev/mpi-followup`):**
+- [x] **MPI follow-up (found and fixed 2026-10-05; branch `dev/mpi-followup`, merged locally as `017e397f`..`fd4a03c4`):**
   1. **Startup failure when a rank has no interface.** The capillary wave fails at step 0 on 4 and 8 ranks, and the sessile drop on 8 ranks, with "another communicator rank rejected embedded free-surface measure preflight" (`IncompressibleNavierStokesVMSModule.cpp`). Every failing run has a rank with no cut cells. Until this is fixed, the 4-rank policy does not cover those decks.
   2. **Default serial and parallel solves differ by up to 1.2e-7** (static drop R/h = 32), while 4 and 8 ranks agree to 1e-14. Serial needs 1.25–1.6× more GMRES iterations from the first solve, so the serial and parallel paths solve different systems or use different scaling.
+  - **Fixes:**
+    1. The interface marker is registered with an empty rule list on ranks without interface rules (`CutIntegrationContext::addGeneratedInterfaceDomain`). Before, those ranks threw in `assemble_on_marker` and desynchronized a collective. Rank-local failures are now logged before the collective that propagates them. Curvature projection also checks snapshot revisions only on ranks that have samples.
+    2. FSILS row/column scaling gathered an int "continue" flag as `MPI_CXX_BOOL` (one byte per rank) into an int array, so parallel runs did 1 scaling sweep where serial did 2. The flag is now reduced as an int with `MPI_MAX`. The assembled systems were already identical.
+    3. The maintenance consensus words included rank-local vector modification counters (`valueRevision()`). They are dropped; the content-binding algebraic revisions stay.
+  - **Result:** serial vs 4 and 8 ranks agree to about 1e-13 with identical Newton, outer and GMRES counts, for the static drop R/h = 16 and 32, the sessile drop and the capillary wave. The capillary wave and sessile drop run on 4 and 8 ranks, and every maintenance transaction commits on 1/2/4/8 ranks.
+  - Serial outputs are bitwise identical to the baseline. New end-to-end MPI test `Application_FreeSurfaceRankConsistency_MPI_4`.
+  - **Open:**
+    - fully dry ranks with small-cut aggregation turned off (the wet-volume diagnostic marker lookup);
+    - `verify.py` `shape_rms_radial_deviation` reads partitioned output about 0.6% differently.
 - [ ] **Protocol.**
   - Static drop in a box, fluid initially at rest. The Laplace number La = ργD/μ² is swept over 12 and 120; 1,200 and above are deferred until the per-step cost is reduced.
   - Start from the sampled analytic shape. No minimizer is required (D3).
