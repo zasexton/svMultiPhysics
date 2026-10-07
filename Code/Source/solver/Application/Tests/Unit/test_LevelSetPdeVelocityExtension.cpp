@@ -858,7 +858,7 @@ TEST(LevelSetPdeVelocityExtensionCache, KeepsRecentEntriesUpToItsCapacity)
   EXPECT_EQ(cache.capacity(true), 2u);
 
   struct Step {
-    const Setup* setup;
+    const decltype(a)* setup;
     bool hit;
     std::size_t entries;
     const char* what;
