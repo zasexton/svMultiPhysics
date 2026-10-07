@@ -1554,6 +1554,9 @@ class GeneralSimulationParameters : public ParameterLists
     Parameter<double> time_step_size;
 
     Parameter<int> adaptive_time_loop_max_retries;
+    // Threads per rank for element/face/cut-volume assembly (new solver);
+    // 1 (default) assembles serially. Results do not depend on the value.
+    Parameter<int> assembly_threads;
     Parameter<int> adaptive_time_loop_max_steps_multiplier;
     // Cut-topology epoch changes allowed within one nonlinear attempt; -1
     // (default) means "as many as there are outer fixed-point refreshes".
