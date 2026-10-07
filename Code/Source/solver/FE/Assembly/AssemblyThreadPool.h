@@ -28,11 +28,10 @@
  *    kernels open internally stay serial on assembly threads.
  *
  * The pool uses standard mutexes and condition variables (transparent to
- * ThreadSanitizer). Before a thread blocks it polls for a short time
- * (spinWait, SVMP_ASSEMBLY_SPIN_US): an idle core drops its clock, and the
- * gaps between the short loops of a 2D assembly are often shorter than the
- * time the core needs to clock up again. Polling changes only timing.
- * The pool is independent of OMP_NUM_THREADS.
+ * ThreadSanitizer). Optionally a thread polls for a while before it blocks
+ * (spinWait, SVMP_ASSEMBLY_SPIN_US, off by default); this saves context
+ * switches but did not shorten the measured loops. Polling changes only
+ * timing. The pool is independent of OMP_NUM_THREADS.
  */
 
 #include <atomic>
@@ -80,7 +79,7 @@ public:
     [[nodiscard]] bool reserveWorkers(int n_workers) noexcept;
 
     /// Polling time before a thread of the threaded assembly blocks:
-    /// SVMP_ASSEMBLY_SPIN_US microseconds (default 2000; 0 disables).
+    /// SVMP_ASSEMBLY_SPIN_US microseconds (default 0: block at once).
     [[nodiscard]] static std::chrono::nanoseconds spinBudget() noexcept;
 
     /// Polls ready() (a cheap, thread-safe check) for up to spinBudget();

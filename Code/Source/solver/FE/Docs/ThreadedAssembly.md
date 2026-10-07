@@ -188,13 +188,13 @@ A rank with `N` assembly threads runs `N` compute threads and its main
 thread, which inserts in order during the threaded loops and otherwise does
 the serial work.
 
-Before a thread of the threaded assembly blocks (waiting for the next loop,
-for a free record buffer or for the next block to insert) it polls for up to
-`SVMP_ASSEMBLY_SPIN_US` microseconds (default 2000, 0 disables).  An idle
-core drops its clock, and in 2D the loops are short (a few milliseconds per
-call), so threads that sleep between them ran at about half the clock of the
-busy main thread (hardware counters: the same instructions and cycles as
-the serial run, but a lower frequency).  Polling only changes timing.
+`SVMP_ASSEMBLY_SPIN_US=N` makes a thread poll for up to `N` microseconds
+before it blocks (waiting for the next loop, a free record buffer or the
+next block to insert); the default is 0.  Polling only changes timing.  It
+was added to test whether the threads of the short 2D loops run slowly
+because their cores idle between loops: with 2 ms of polling the context
+switches dropped fourfold but the loops were not faster (sessile drop, 4
+threads: 18.1 s against 18.4 s), and 50 ms of polling made the run slower.
 
 ## MPI ranks and threads
 
@@ -316,11 +316,14 @@ and `+0.0` count as different), on the code of this note:
 | Runs | Compared with | Result |
 |---|---|---|
 | Nine-case reference set, thread variable unset and 1, 2, 4, 8 threads (45 runs) | reference set of the default build | identical |
-| 3D sphere proxy (2 steps), default and 2, 4, 8 threads | reference set | identical |
+| 3D sphere proxy (2 steps), default and 2, 4, 8 threads | unmodified build (itself identical to the reference set) | identical |
 | 3D tank (L16), default and 2, 4, 8 threads | unmodified build | identical |
 | 2 ranks x 2 and 4 threads (sessile drop L16, sphere proxy); 4 ranks x 2 threads (sessile drop L16, sphere proxy, capillary wave L16) | the same ranks with 1 thread | identical |
-| 2 and 4 ranks, 1 thread (same cases) | unmodified build, same ranks | identical |
+| 1 thread on 2 ranks (sessile drop L16, sphere proxy) and 4 ranks (sessile drop L16, capillary wave L16) | unmodified build, same ranks | identical |
 | Deck key `Assembly_threads` = 4 (two cases), and with the variable overriding it | reference set | identical |
+| 8 threads with polling disabled (the default; the runs above polled for 2 ms) | reference set | identical |
+| Final default: nine-case reference set with 4 threads | reference set | identical |
+| `OMP_NUM_THREADS=2`: 4 threads requested (serial fallback) | the same without threads | identical |
 
 Unit tests (`FE/Tests/Unit/Assembly/test_ThreadedAssembly.cpp`) compare
 threaded and serial assembly of the same system bitwise for 2 to 8 threads:

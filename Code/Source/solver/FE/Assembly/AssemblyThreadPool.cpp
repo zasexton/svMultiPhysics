@@ -122,7 +122,7 @@ void AssemblyThreadPool::ensureWorkersLocked(int n_workers)
 std::chrono::nanoseconds AssemblyThreadPool::spinBudget() noexcept
 {
     static const std::chrono::nanoseconds budget = []() {
-        long long us = 2000;
+        long long us = 0;
         if (const char* value = std::getenv("SVMP_ASSEMBLY_SPIN_US")) {
             char* end = nullptr;
             const long long parsed = std::strtoll(value, &end, 10);
