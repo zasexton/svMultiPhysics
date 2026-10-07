@@ -574,12 +574,15 @@ public:
                        want_matrix_, want_vector_);
         output.clear();
 
+        // Per-thread scratch: threaded assembly calls one kernel object from
+        // several threads (FE/Docs/ThreadedAssembly.md).
+        thread_local assembly::KernelOutput scratch;
         for (const auto& term : terms_) {
-            scratch_.reserve(ctx.numTestDofs(), ctx.numTrialDofs(),
-                             term.want_matrix, term.want_vector);
-            scratch_.clear();
-            term.kernel->computeCell(ctx, scratch_);
-            accumulateOutput(ctx, output, term);
+            scratch.reserve(ctx.numTestDofs(), ctx.numTrialDofs(),
+                            term.want_matrix, term.want_vector);
+            scratch.clear();
+            term.kernel->computeCell(ctx, scratch);
+            accumulateOutput(ctx, output, term, scratch);
         }
     }
 
@@ -627,25 +630,26 @@ private:
         }
     }
 
-    void accumulateOutput(const assembly::AssemblyContext& ctx,
-                          assembly::KernelOutput& output,
-                          const Term& term)
+    static void accumulateOutput(const assembly::AssemblyContext& ctx,
+                                 assembly::KernelOutput& output,
+                                 const Term& term,
+                                 const assembly::KernelOutput& term_output)
     {
-        if (term.want_matrix && scratch_.has_matrix) {
-            FE_THROW_IF(scratch_.local_matrix.size() != output_matrix_size(ctx),
+        if (term.want_matrix && term_output.has_matrix) {
+            FE_THROW_IF(term_output.local_matrix.size() != output_matrix_size(ctx),
                         InvalidStateException,
                         "CompositeCutVolumeCellKernel: matrix block size mismatch");
-            for (std::size_t i = 0; i < scratch_.local_matrix.size(); ++i) {
-                output.local_matrix[i] += scratch_.local_matrix[i];
+            for (std::size_t i = 0; i < term_output.local_matrix.size(); ++i) {
+                output.local_matrix[i] += term_output.local_matrix[i];
             }
         }
-        if (term.want_vector && scratch_.has_vector) {
-            FE_THROW_IF(scratch_.local_vector.size() !=
+        if (term.want_vector && term_output.has_vector) {
+            FE_THROW_IF(term_output.local_vector.size() !=
                             static_cast<std::size_t>(ctx.numTestDofs()),
                         InvalidStateException,
                         "CompositeCutVolumeCellKernel: vector block size mismatch");
-            for (std::size_t i = 0; i < scratch_.local_vector.size(); ++i) {
-                output.local_vector[i] += scratch_.local_vector[i];
+            for (std::size_t i = 0; i < term_output.local_vector.size(); ++i) {
+                output.local_vector[i] += term_output.local_vector[i];
             }
         }
     }
@@ -664,7 +668,6 @@ private:
     bool has_explicit_time_dependency_{false};
     bool want_matrix_{false};
     bool want_vector_{false};
-    mutable assembly::KernelOutput scratch_{};
 };
 
 class ParticipantFilteredMeshAccess final : public assembly::IMeshAccess {

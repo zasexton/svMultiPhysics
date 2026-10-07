@@ -796,6 +796,9 @@ set(FE_ASSEMBLY_HEADERS
     Assembly/JIT/FieldSolutions.h
     Assembly/TimeIntegrationContext.h
     Assembly/StandardAssembler.h
+    Assembly/AssemblyThreadPool.h
+    Assembly/ConcurrentCompute.h
+    Assembly/DeferredInsertBuffer.h
     Assembly/ParallelAssembler.h
     Assembly/GhostContributionManager.h
     # Phase 2: HIGH priority
@@ -829,6 +832,7 @@ set(FE_ASSEMBLY_SOURCES
     Assembly/BatchedProjection.cpp
     Assembly/BatchedStiffness.cpp
     Assembly/StandardAssembler.cpp
+    Assembly/AssemblyThreadPool.cpp
     Constraints/SmallCutAggregationConstraint.cpp
     Analysis/GeneratedBoundaryAggregateTraceCertificate.cpp
     Assembly/AssemblerFactory.cpp
@@ -1843,6 +1847,10 @@ endif()
 #------------------------------------------------------------------------------
 # OpenMP (optional, enables threaded assembly kernels and BLAS-1 in FSILS)
 #------------------------------------------------------------------------------
+
+# std::thread team of the threaded assembly (Assembly/AssemblyThreadPool.cpp).
+find_package(Threads REQUIRED)
+target_link_libraries(svfe PUBLIC Threads::Threads)
 
 find_package(OpenMP QUIET COMPONENTS CXX)
 if(OpenMP_CXX_FOUND)
@@ -2944,6 +2952,20 @@ if(FE_BUILD_TESTS)
 	                    ${GTEST_LIBRARIES}
             )
             svmp_add_gtest(FE_Assembly_Tests TARGET test_fe_assembly)
+
+            # Threaded assembly: bitwise equality with the serial loops
+            # (FE/Docs/ThreadedAssembly.md). A separate executable keeps it
+            # quick to build alone, for example under ThreadSanitizer.
+            add_executable(test_fe_threaded_assembly
+                Tests/Unit/Assembly/test_ThreadedAssembly.cpp
+                Tests/Unit/Assembly/test_main.cpp)
+            _svmp_fe_target_enable_warnings(test_fe_threaded_assembly)
+            target_link_libraries(test_fe_threaded_assembly
+                PRIVATE
+                    svfe
+                    ${GTEST_LIBRARIES}
+            )
+            svmp_add_gtest(FE_ThreadedAssembly_Tests TARGET test_fe_threaded_assembly)
         endif()
 
         # Auxiliary module tests (auxiliary state subsystem)
