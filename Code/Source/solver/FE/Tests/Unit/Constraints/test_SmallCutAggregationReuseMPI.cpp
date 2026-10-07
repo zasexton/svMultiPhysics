@@ -17,6 +17,7 @@
 #include "Assembly/Assembler.h"
 #include "Assembly/CutIntegrationContext.h"
 #include "Constraints/SmallCutAggregationConstraint.h"
+#include "Core/Logger.h"
 #include "Dofs/DofHandler.h"
 #include "Geometry/CutQuadrature.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
@@ -244,6 +245,25 @@ private:
     std::optional<std::string> prior_;
 };
 
+// The detailed aggregation diagnostics print only when the logger admits
+// DEBUG (FE_LOG_LEVEL=DEBUG); tests that read them raise the level.
+class ScopedLogLevel {
+public:
+    explicit ScopedLogLevel(LogLevel level)
+        : prior_(Logger::instance().get_level())
+    {
+        Logger::instance().set_level(level);
+    }
+
+    ~ScopedLogLevel() { Logger::instance().set_level(prior_); }
+
+    ScopedLogLevel(const ScopedLogLevel&) = delete;
+    ScopedLogLevel& operator=(const ScopedLogLevel&) = delete;
+
+private:
+    LogLevel prior_;
+};
+
 struct ReuseRebuildOutcome {
     bool all_succeeded{false};
     std::string log{};
@@ -258,6 +278,7 @@ ReuseRebuildOutcome rebuildCollectively(systems::FESystem& system)
 {
     ReuseRebuildOutcome outcome;
     int local_threw = 0;
+    const ScopedLogLevel detailed_diagnostics(LogLevel::DEBUG);
     testing::internal::CaptureStdout();
     testing::internal::CaptureStderr();
     try {

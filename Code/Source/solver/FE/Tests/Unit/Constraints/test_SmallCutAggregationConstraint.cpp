@@ -37,6 +37,7 @@
 #include "Constraints/SmallCutAggregationCellIndex.h"
 #include "Constraints/SmallCutAggregationConstraint.h"
 #include "Constraints/VertexDirichletConstraint.h"
+#include "Core/Logger.h"
 #include "Dofs/EntityDofMap.h"
 #include "Elements/ReferenceElement.h"
 #include "Geometry/CutQuadrature.h"
@@ -69,6 +70,25 @@ namespace test {
 namespace {
 
 constexpr int kInterfaceMarker = 7;
+
+// The detailed aggregation diagnostics print only when the logger admits
+// DEBUG (FE_LOG_LEVEL=DEBUG); tests that read them raise the level.
+class ScopedLogLevel {
+public:
+    explicit ScopedLogLevel(LogLevel level)
+        : prior_(Logger::instance().get_level())
+    {
+        Logger::instance().set_level(level);
+    }
+
+    ~ScopedLogLevel() { Logger::instance().set_level(prior_); }
+
+    ScopedLogLevel(const ScopedLogLevel&) = delete;
+    ScopedLogLevel& operator=(const ScopedLogLevel&) = delete;
+
+private:
+    LogLevel prior_;
+};
 
 class ScopedEnvVar {
 public:
@@ -1127,6 +1147,7 @@ TEST(SmallCutAggregationConstraint, SlavesOnlyUnsupportedCutVerticesWithExtrapol
         {.cell = 1, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
     }));
 
+    const ScopedLogLevel detailed_diagnostics(LogLevel::DEBUG);
     testing::internal::CaptureStdout();
     testing::internal::CaptureStderr();
     ASSERT_NO_THROW(system.rebuildConstraintState());
@@ -1796,6 +1817,7 @@ TEST(SmallCutAggregationConstraint,
         {.cell = 6, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
     }));
 
+    const ScopedLogLevel detailed_diagnostics(LogLevel::DEBUG);
     testing::internal::CaptureStdout();
     testing::internal::CaptureStderr();
     ASSERT_NO_THROW(system.rebuildConstraintState());
@@ -1911,6 +1933,7 @@ TEST(SmallCutAggregationConstraint,
          .full_cell_equivalent = true},
     }));
 
+    const ScopedLogLevel detailed_diagnostics(LogLevel::DEBUG);
     testing::internal::CaptureStdout();
     testing::internal::CaptureStderr();
     ASSERT_NO_THROW(system.rebuildConstraintState());
@@ -2093,6 +2116,7 @@ TEST(SmallCutAggregationConstraint, NoRootIslandCandidatesArePinnedHomogeneously
                 geometry::CutIntegrationSide::Positive);
     system.setCutIntegrationContext(std::move(context));
 
+    const ScopedLogLevel detailed_diagnostics(LogLevel::DEBUG);
     testing::internal::CaptureStdout();
     testing::internal::CaptureStderr();
     ASSERT_NO_THROW(system.rebuildConstraintState());
@@ -2882,6 +2906,7 @@ TEST(SmallCutAggregationConstraint, AllowUnaggregatedEnvRestoresFailOpenBehavior
                 geometry::CutIntegrationSide::Positive);
     system.setCutIntegrationContext(std::move(context));
 
+    const ScopedLogLevel detailed_diagnostics(LogLevel::DEBUG);
     testing::internal::CaptureStdout();
     testing::internal::CaptureStderr();
     ASSERT_NO_THROW(system.rebuildConstraintState());
@@ -2949,6 +2974,7 @@ TEST(SmallCutAggregationConstraint, WallMarkerVerticesAreNeverSlaved)
         {.cell = 1, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
     }));
 
+    const ScopedLogLevel detailed_diagnostics(LogLevel::DEBUG);
     testing::internal::CaptureStdout();
     testing::internal::CaptureStderr();
     ASSERT_NO_THROW(system.rebuildConstraintState());
@@ -3480,6 +3506,7 @@ TEST(SmallCutAggregationConstraint, PrunedSliverFallsToInactivePinPolicy)
         geometry::CutIntegrationSide::Positive);
     system.setCutIntegrationContext(std::move(context));
 
+    const ScopedLogLevel detailed_diagnostics(LogLevel::DEBUG);
     testing::internal::CaptureStdout();
     testing::internal::CaptureStderr();
     ASSERT_NO_THROW(system.rebuildConstraintState());
@@ -3660,6 +3687,7 @@ struct AggregationReuseRun {
     AggregationReuseRun run;
     for (const auto& specs : contexts) {
         system.setCutIntegrationContext(makeCutContext(specs));
+        const ScopedLogLevel detailed_diagnostics(LogLevel::DEBUG);
         testing::internal::CaptureStdout();
         testing::internal::CaptureStderr();
         system.rebuildConstraintState();
@@ -3840,6 +3868,7 @@ TEST(SmallCutAggregationConstraint, ReuseFollowsChangesOfTheIncomingConstraintSe
     };
     const auto refresh = [&]() {
         system.setCutIntegrationContext(makeCutContext(specs));
+        const ScopedLogLevel detailed_diagnostics(LogLevel::DEBUG);
         testing::internal::CaptureStdout();
         testing::internal::CaptureStderr();
         system.rebuildConstraintState();

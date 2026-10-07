@@ -20357,7 +20357,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
       const auto global_marker_measure =
           static_cast<svmp::FE::Real>(globalSumDouble(
               static_cast<double>(intersection_summary.measure), comm));
-      application::core::oopDiagnosticsCout()
+      application::core::oopDiagnosticsCout(svmp::FE::LogLevel::DEBUG)
           << "[svMultiPhysics::Application] Generated interface-boundary "
              "intersection"
           << " diagnostic=generated_interface_boundary_intersection_marker"
@@ -20495,7 +20495,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
                 result.domain,
                 intersection_domain,
                 mesh_access);
-        application::core::oopDiagnosticsCout()
+        application::core::oopDiagnosticsCout(svmp::FE::LogLevel::DEBUG)
             << "[svMultiPhysics::Application] Generated sharp active boundary"
             << " diagnostic=generated_active_boundary_partition"
             << " interface_marker=" << result.interface_marker
@@ -20625,11 +20625,11 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     }
     // The cache statistics feed only the diagnostic line below.
     const auto geometry_cache_statistics =
-        application::core::oopDiagnosticsEnabled()
+        application::core::oopDiagnosticsEnabled(svmp::FE::LogLevel::DEBUG)
             ? sim.free_surface_geometry_snapshot_cache->statistics()
             : svmp::FE::interfaces::FreeSurfaceGeometrySnapshotCacheStatistics{};
     const auto& geometry_ledger = geometry_snapshot->ledger();
-    application::core::oopDiagnosticsCout()
+    application::core::oopDiagnosticsCout(svmp::FE::LogLevel::DEBUG)
         << "[svMultiPhysics::Application] Authoritative free-surface geometry"
         << " diagnostic=free_surface_geometry_snapshot"
         << " domain_id='" << request.domain_id << "'"

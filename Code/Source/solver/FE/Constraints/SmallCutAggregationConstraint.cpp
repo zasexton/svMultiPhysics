@@ -6490,12 +6490,15 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         }
     }
 
-    // INFO diagnostics are built only when the logger prints them; the
-    // fail-open warning below also quotes this line.
+    // Detailed diagnostics, printed (at INFO) only when FE_LOG_LEVEL=DEBUG.
+    // The fail-open warning below also quotes the first line, and the reuse
+    // record keeps parts of it for later reused refreshes, so it is built
+    // whenever either needs it.
     const bool log_aggregation_diagnostics =
-        Logger::instance().get_level() <= LogLevel::INFO;
+        Logger::instance().get_level() <= LogLevel::DEBUG;
     std::ostringstream oss;
-    if (!log_aggregation_diagnostics && !allow_unaggregated) {
+    if (!log_aggregation_diagnostics && !allow_unaggregated &&
+        !reuse_inputs.has_value()) {
         oss.setstate(std::ios::badbit);  // the insertions below format nothing
     }
     oss << "SmallCutAggregationConstraint: diagnostic=small_cut_aggregation"
@@ -7899,18 +7902,24 @@ void SmallCutAggregationConstraint::publishReusedRefresh(
                 "inconsistent");
         }
 
-        std::ostringstream oss;
-        oss << record->diagnostic_head
-            << report.canonical_rootless_active_physical_volume
-            << record->diagnostic_middle
-            << " pruned_volume_rules="
-            << cut_context.generatedPrunedVolumeRuleCount()
-            << " pruned_volume_measure="
-            << cut_context.generatedPrunedVolumeMeasure();
-        FE_LOG_INFO(oss.str());
+        // Detailed diagnostics, printed (at INFO) only when
+        // FE_LOG_LEVEL=DEBUG, as in apply().
+        const bool log_aggregation_diagnostics =
+            Logger::instance().get_level() <= LogLevel::DEBUG;
+        if (log_aggregation_diagnostics) {
+            std::ostringstream oss;
+            oss << record->diagnostic_head
+                << report.canonical_rootless_active_physical_volume
+                << record->diagnostic_middle
+                << " pruned_volume_rules="
+                << cut_context.generatedPrunedVolumeRuleCount()
+                << " pruned_volume_measure="
+                << cut_context.generatedPrunedVolumeMeasure();
+            FE_LOG_INFO(oss.str());
+        }
 
         next_previous_canonical_slaves = record->canonical_slaves;
-        {
+        if (log_aggregation_diagnostics) {
             const auto& canonical_slaves = next_previous_canonical_slaves;
             const auto& previous = previous_canonical_slaves_;
             std::size_t entered = 0u;
