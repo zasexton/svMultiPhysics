@@ -411,6 +411,9 @@ def test_d4_profile_is_the_default_wetting_deck(tmp_path: Path):
     assert free_surface.findtext("Use_cut_metadata_scale") == "false"
     assert free_surface.find("Allow_corner_linearized_cut_geometry") is None
     assert free_surface.find("Contact_line_mobility") is None
+    assert float(free_surface.findtext(
+        "Small_cut_aggregation_maximum_reference_extrapolation_distance")) == 6.0
+    assert free_surface.findtext("Small_cut_aggregation_maximum_root_path_length") == "12"
     assert fluid.find("LS").attrib["type"] == "Direct"
     assert fluid.find("LS/Linear_algebra").attrib["type"] == "fsils"
     assert level_set.find("LS").attrib["type"] == "GMRES"

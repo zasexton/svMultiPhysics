@@ -24,7 +24,9 @@ Two deck profiles are written (``write_case(..., profile=...)``):
   predictor the first steps cannot absorb.
   The coupled system is solved with the gathered sparse direct solve
   (opt-in, decision D23): FSILS GMRES needs 1e3-1e4 iterations per Newton
-  update at 20 cells and stalls above its tolerance at 40 cells.
+  update at 20 cells and stalls above its tolerance at 40 cells.  The
+  small-cut aggregation guards are widened for the wetting wedge at the wall
+  (AGGREGATION_MAXIMUM_REFERENCE_EXTRAPOLATION).
 * ``"legacy"``: the 2026-08-30 deck (PrescribedContactAngle, wet-extension
   transport, projection reinitialization every step, discontinuity capturing,
   corner-linearized cut geometry, tolerances 1e-6), reproduced byte for byte;
@@ -84,6 +86,17 @@ CONTACT_SPEED_SAFETY = 1.5
 # 4-5 passes per step at 10 and 20 half-gap cells (cap 12); at 1.2 (10 cells,
 # m = 4) 6-8, and at 2.5 (m = 2) the first step reaches the cap.
 CAPILLARY_STEP_FRACTION = 0.7
+# Small-cut aggregation guards of the d4 deck (defaults 4 and 8; the deck
+# options need solver commit 31bab975 or later).  The wetting wedge between
+# the meniscus and the wall holds aggregation candidates whose nearest full
+# cell lies several cells below.  At 10 cells, t = 0.306 s, a wall cell
+# below the wedge turned non-full (a vertex at phi = -3e-6 m), its next full
+# root was 4.2-5.0 reference lengths away, and the default guard left two
+# candidates without a root (the run stopped; 20 cells stopped the same way at
+# 0.095 s).  With 6 and 12 the 10-cell residual history is bitwise unchanged up
+# to that step, and the step passes.
+AGGREGATION_MAXIMUM_REFERENCE_EXTRAPOLATION = 6.0
+AGGREGATION_MAXIMUM_ROOT_PATH_LENGTH = 12
 # History sampling: one output per millisecond, the step of the comparison
 # grid, over its whole support [0, 0.69 s].
 OUTPUT_INTERVAL_S = 0.001
@@ -591,6 +604,8 @@ def _d4_solver_xml(steps: int,
     <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
     <Use_cut_metadata_scale>false</Use_cut_metadata_scale>
     <Small_cut_aggregation>true</Small_cut_aggregation>
+    <Small_cut_aggregation_maximum_reference_extrapolation_distance>{AGGREGATION_MAXIMUM_REFERENCE_EXTRAPOLATION:.17g}</Small_cut_aggregation_maximum_reference_extrapolation_distance>
+    <Small_cut_aggregation_maximum_root_path_length>{AGGREGATION_MAXIMUM_ROOT_PATH_LENGTH}</Small_cut_aggregation_maximum_root_path_length>
   </Add_BC>
 </Add_equation>
 
@@ -773,6 +788,10 @@ def write_case(case_dir: Path,
             "nonlinear_tolerance": 1.0e-4,
             "level_set_bottom_boundary": "none (D21 bounds reject level-set inflow faces)",
             "fluid_linear_solver": "gathered sparse direct (FSILS Direct, opt-in D23)",
+            "aggregation_guards": {
+                "maximum_reference_extrapolation_distance": AGGREGATION_MAXIMUM_REFERENCE_EXTRAPOLATION,
+                "maximum_root_path_length": AGGREGATION_MAXIMUM_ROOT_PATH_LENGTH,
+                "minimum_solver_commit": "31bab975"},
             "initial_rate": "zero (PDE rate solve disabled by the required environment)",
         }
         benchmark["required_environment"] = dict(REQUIRED_ENVIRONMENT)
