@@ -9,6 +9,7 @@
 #include "Assembly/ConcurrentCompute.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <utility>
 
 #ifdef _OPENMP
@@ -111,11 +112,27 @@ void AssemblyThreadPool::ensureWorkersLocked(int n_workers)
         // The worker starts from the generation current at creation, so a run()
         // that creates it and then publishes a new generation is not missed.
         const int index = static_cast<int>(threads_.size());
-        const std::uint64_t start_generation = generation_;
+        const std::uint64_t start_generation = generation_.load();
         threads_.emplace_back([this, index, start_generation]() {
             workerLoop(index, start_generation);
         });
     }
+}
+
+std::chrono::nanoseconds AssemblyThreadPool::spinBudget() noexcept
+{
+    static const std::chrono::nanoseconds budget = []() {
+        long long us = 0;
+        if (const char* value = std::getenv("SVMP_ASSEMBLY_SPIN_US")) {
+            char* end = nullptr;
+            const long long parsed = std::strtoll(value, &end, 10);
+            if (end != value && parsed >= 0) {
+                us = parsed;
+            }
+        }
+        return std::chrono::nanoseconds(us * 1000);
+    }();
+    return budget;
 }
 
 void AssemblyThreadPool::workerLoop(int worker_index, std::uint64_t start_generation)
@@ -127,11 +144,20 @@ void AssemblyThreadPool::workerLoop(int worker_index, std::uint64_t start_genera
     std::uint64_t seen_generation = start_generation;
     std::unique_lock<std::mutex> lock(mutex_);
     for (;;) {
-        start_cv_.wait(lock, [&]() { return stop_ || generation_ != seen_generation; });
-        if (stop_) {
+        if (!stop_.load() && generation_.load() == seen_generation) {
+            // Poll briefly before sleeping (see spinWait).
+            lock.unlock();
+            (void)spinWait([&]() {
+                return stop_.load(std::memory_order_acquire) ||
+                       generation_.load(std::memory_order_acquire) != seen_generation;
+            });
+            lock.lock();
+        }
+        start_cv_.wait(lock, [&]() { return stop_.load() || generation_.load() != seen_generation; });
+        if (stop_.load()) {
             return;
         }
-        seen_generation = generation_;
+        seen_generation = generation_.load();
         const int participant = worker_index + 1;
         if (participant >= active_participants_) {
             continue;
@@ -171,7 +197,7 @@ void AssemblyThreadPool::run(int n_participants, const std::function<void(int)>&
         active_participants_ = n_participants;
         remaining_ = n_participants - 1;
         errors_.assign(static_cast<std::size_t>(n_participants), nullptr);
-        ++generation_;
+        generation_.fetch_add(1u);
     }
     start_cv_.notify_all();
 
