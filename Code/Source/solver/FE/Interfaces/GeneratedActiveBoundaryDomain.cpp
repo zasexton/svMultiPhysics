@@ -9,6 +9,7 @@
 #include <limits>
 #include <locale>
 #include <map>
+#include <span>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -565,27 +566,70 @@ void removeDuplicatePolygonVertices(std::vector<Point>& points,
 // order.  Built once per active-boundary construction so that the per-face
 // lookups visit only the records of the face's parent cell, in the same order
 // as a scan of the full source lists.
+// Source indices grouped by parent cell, each group in increasing source
+// order: a compressed row per local cell (counting sort), so building the
+// index costs two passes over the sources and no per-cell allocation.
+class CellIndexLists {
+public:
+    template <typename Sources>
+    explicit CellIndexLists(const Sources& sources)
+    {
+        MeshIndex max_cell = static_cast<MeshIndex>(-1);
+        for (const auto& source : sources) {
+            max_cell = std::max(max_cell, source.parent_cell);
+        }
+        if (max_cell < static_cast<MeshIndex>(0)) {
+            return;
+        }
+        offsets_.assign(static_cast<std::size_t>(max_cell) + 2u, 0u);
+        for (const auto& source : sources) {
+            if (source.parent_cell >= static_cast<MeshIndex>(0)) {
+                ++offsets_[static_cast<std::size_t>(source.parent_cell) + 1u];
+            }
+        }
+        for (std::size_t cell = 1; cell < offsets_.size(); ++cell) {
+            offsets_[cell] += offsets_[cell - 1u];
+        }
+        entries_.resize(offsets_.back());
+        auto cursor = offsets_;
+        for (std::size_t i = 0; i < sources.size(); ++i) {
+            const auto cell = sources[i].parent_cell;
+            if (cell >= static_cast<MeshIndex>(0)) {
+                entries_[cursor[static_cast<std::size_t>(cell)]++] = i;
+            }
+        }
+    }
+
+    [[nodiscard]] std::span<const std::size_t> of(MeshIndex cell) const noexcept
+    {
+        if (cell < static_cast<MeshIndex>(0) ||
+            static_cast<std::size_t>(cell) + 1u >= offsets_.size()) {
+            return {};
+        }
+        const auto begin = offsets_[static_cast<std::size_t>(cell)];
+        const auto end = offsets_[static_cast<std::size_t>(cell) + 1u];
+        return std::span<const std::size_t>(entries_.data() + begin,
+                                            end - begin);
+    }
+
+private:
+    std::vector<std::size_t> offsets_{};
+    std::vector<std::size_t> entries_{};
+};
+
 struct CellSourceIndex {
-    using IndexList = std::vector<std::size_t>;
     using ContactList =
         std::vector<const GeneratedInterfaceBoundaryIntersectionFragment*>;
 
-    std::unordered_map<MeshIndex, IndexList> fragments;
-    std::unordered_map<MeshIndex, IndexList> regions;
+    CellIndexLists fragments;
+    CellIndexLists regions;
     std::map<std::pair<MeshIndex, MeshIndex>, ContactList> contacts;
 
     CellSourceIndex(
         const LevelSetInterfaceDomain& domain,
         const GeneratedInterfaceBoundaryIntersectionDomain& contact_domain)
+        : fragments(domain.fragments()), regions(domain.volumeRegions())
     {
-        const auto& source_fragments = domain.fragments();
-        for (std::size_t i = 0; i < source_fragments.size(); ++i) {
-            fragments[source_fragments[i].parent_cell].push_back(i);
-        }
-        const auto& source_regions = domain.volumeRegions();
-        for (std::size_t i = 0; i < source_regions.size(); ++i) {
-            regions[source_regions[i].parent_cell].push_back(i);
-        }
         for (const auto& fragment : contact_domain.fragments()) {
             if (fragment.active()) {
                 contacts[{fragment.parent_cell, fragment.parent_face}]
@@ -594,13 +638,11 @@ struct CellSourceIndex {
         }
     }
 
-    [[nodiscard]] static const IndexList& of(
-        const std::unordered_map<MeshIndex, IndexList>& lists,
-        MeshIndex cell)
+    [[nodiscard]] static std::span<const std::size_t> of(
+        const CellIndexLists& lists,
+        MeshIndex cell) noexcept
     {
-        static const IndexList empty{};
-        const auto found = lists.find(cell);
-        return found == lists.end() ? empty : found->second;
+        return lists.of(cell);
     }
 };
 
@@ -645,7 +687,7 @@ contactFragmentsForFace(
     const CellSourceIndex& index,
     MeshIndex cell) noexcept
 {
-    const auto& candidates = CellSourceIndex::of(index.fragments, cell);
+    const auto candidates = CellSourceIndex::of(index.fragments, cell);
     return std::any_of(
         candidates.begin(),
         candidates.end(),
