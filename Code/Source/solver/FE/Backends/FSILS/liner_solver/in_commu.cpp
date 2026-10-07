@@ -388,15 +388,16 @@ void fsils_reduce_shared_face_values_owned_row(const FSILS_lhsType& lhs,
     const Vector<int>& face_nodes,
     Array<double>& face_values)
 {
-  if (lhs.commu.nTasks <= 1 || dof <= 0 || face_nodes.size() <= 0 || face_values.size() <= 0) {
+  // The halo exchanges below are point-to-point with every neighbour rank, so
+  // every rank of the communicator takes part, including ranks whose part of
+  // the face is empty (they contribute zeros). Only communicator-wide
+  // conditions may return early: the callers pass the same dof on every rank.
+  if (lhs.commu.nTasks <= 1 || dof <= 0) {
     return;
   }
 
-  const int face_node_count = std::min(face_nodes.size(), face_values.ncols());
-  const int face_dof = std::min(dof, face_values.nrows());
-  if (face_node_count <= 0 || face_dof <= 0) {
-    return;
-  }
+  const int face_node_count = std::max(0, std::min(face_nodes.size(), face_values.ncols()));
+  const int face_dof = std::max(0, std::min(dof, face_values.nrows()));
 
   Array<double> contributions(dof, lhs.nNo);
   contributions = 0.0;
@@ -429,15 +430,14 @@ void fsils_apply_shared_dirichlet_face_mask(const FSILS_lhsType& lhs,
     const Vector<int>& face_nodes,
     Array<double>& face_values)
 {
-  if (lhs.commu.nTasks <= 1 || dof <= 0 || face_nodes.size() <= 0 || face_values.size() <= 0) {
+  // Collective over the halo neighbours, like the reduction it calls: a rank
+  // with an empty part of the face still takes part.
+  if (lhs.commu.nTasks <= 1 || dof <= 0) {
     return;
   }
 
-  const int face_node_count = std::min(face_nodes.size(), face_values.ncols());
-  const int face_dof = std::min(dof, face_values.nrows());
-  if (face_node_count <= 0 || face_dof <= 0) {
-    return;
-  }
+  const int face_node_count = std::max(0, std::min(face_nodes.size(), face_values.ncols()));
+  const int face_dof = std::max(0, std::min(dof, face_values.nrows()));
 
   Array<double> counts(dof, face_node_count);
   counts = 0.0;
