@@ -1,4 +1,5 @@
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
+#include "Core/DeterministicParallel.h"
 #include "Assembly/CutGeometryMemoryReport.h"
 
 #include "Basis/NodeOrderingConventions.h"
@@ -11,6 +12,8 @@
 #include <array>
 #include <cstring>
 #include <cstddef>
+#include <exception>
+#include <span>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -909,9 +912,11 @@ void populateLinearCornerDifferentiatedSensitivityRecords(
     return strictly_negative || strictly_positive;
 }
 
+// The regions a full LinearCorner cell adds to the domain, in order.
 [[nodiscard]] std::optional<GeneratedInterfaceCellDiagnostics>
-appendLinearFullCellFastPath(
-    interfaces::LevelSetInterfaceDomain& domain,
+computeLinearFullCellFastPath(
+    const interfaces::CutInterfaceDomainRequest& request,
+    std::vector<interfaces::CutInterfaceVolumeRegion>& regions_out,
     const assembly::IMeshAccess& mesh,
     ElementType type,
     const interfaces::LevelSetCellCutInput& input,
@@ -921,7 +926,6 @@ appendLinearFullCellFastPath(
     std::size_t corner_count,
     ImplicitCutQuadratureBackend selected_backend)
 {
-    const auto& request = domain.request();
     if (!linearFullCellFastPathApplies(
             evaluator, cell_id, input, request.isovalue,
             request.resolvedCoefficientClassificationBand())) {
@@ -962,7 +966,7 @@ appendLinearFullCellFastPath(
                       request.resolvedVolumeQuadratureOrder());
         achieved_volume_quadrature_order =
             std::min(achieved_volume_quadrature_order, region_order);
-        domain.addVolumeRegion(std::move(region));
+        regions_out.push_back(std::move(region));
     }
 
     return GeneratedInterfaceCellDiagnostics{
@@ -1152,8 +1156,20 @@ detectUnqualifiedSameSignHighOrderComponentForCell(
            std::to_string(cell_id);
 }
 
-[[nodiscard]] GeneratedInterfaceCellDiagnostics appendGeneratedInterfaceCell(
-    interfaces::LevelSetInterfaceDomain& domain,
+// One cell's generated geometry: its diagnostics and the fragments and
+// regions it adds to the domain, in order.  Computing it reads only the
+// request, the mesh, the level-set values and the cell evaluator, so cells
+// can be computed concurrently (each thread with its own evaluator, which
+// caches the last cell's coefficients) and appended in cell order.
+struct GeneratedInterfaceCellOutput {
+    GeneratedInterfaceCellDiagnostics diagnostics{};
+    std::vector<interfaces::CutInterfaceFragment> fragments{};
+    std::vector<interfaces::CutInterfaceVolumeRegion> volume_regions{};
+};
+
+[[nodiscard]] GeneratedInterfaceCellDiagnostics computeGeneratedInterfaceCell(
+    const interfaces::CutInterfaceDomainRequest& request,
+    GeneratedInterfaceCellOutput& output,
     const assembly::IMeshAccess& mesh,
     const dofs::EntityDofMap& entity_map,
     const dofs::DofHandler& level_set_dofs,
@@ -1198,7 +1214,7 @@ detectUnqualifiedSameSignHighOrderComponentForCell(
     ImplicitCutQuadratureBackendCellInput backend_input{};
     backend_input.linearized_input = input;
     backend_input.evaluator = &evaluator;
-    backend_input.isovalue = domain.request().isovalue;
+    backend_input.isovalue = request.isovalue;
     backend_input.reference_min =
         minReferenceCoordinate(input.node_coordinates);
     backend_input.reference_max =
@@ -1208,7 +1224,8 @@ detectUnqualifiedSameSignHighOrderComponentForCell(
             type, level_set_dofs, evaluator, cell_id, count);
 
     if (auto full_cell_fast_path =
-            appendLinearFullCellFastPath(domain,
+            computeLinearFullCellFastPath(request,
+                                         output.volume_regions,
                                          mesh,
                                          type,
                                          input,
@@ -1221,10 +1238,10 @@ detectUnqualifiedSameSignHighOrderComponentForCell(
     }
 
     auto backend_result =
-        backend.cut(mesh.dimension(), domain.request(), backend_input);
+        backend.cut(mesh.dimension(), request, backend_input);
     const auto validation =
         validateImplicitCutQuadratureBackendCellResult(
-            domain.request(), backend_input, backend_result);
+            request, backend_input, backend_result);
     if (!validation.ok) {
         throw std::invalid_argument(
             backendCellDiagnostic(
@@ -1235,16 +1252,16 @@ detectUnqualifiedSameSignHighOrderComponentForCell(
             ImplicitCutQuadratureDiagnosticStatus::Unsupported &&
         backend.kind() != ImplicitCutQuadratureBackend::LinearCorner &&
         backend.kind() != ImplicitCutQuadratureBackend::MomentFit &&
-        requestAllowsLinearCornerFallback(domain.request()) &&
+        requestAllowsLinearCornerFallback(request) &&
         linearCornerSupportsCell(mesh.dimension(), type)) {
         const auto& fallback_backend =
             implicitCutQuadratureBackendDriver(
                 ImplicitCutQuadratureBackend::LinearCorner);
         auto fallback_result =
-            fallback_backend.cut(mesh.dimension(), domain.request(), backend_input);
+            fallback_backend.cut(mesh.dimension(), request, backend_input);
         const auto fallback_validation =
             validateImplicitCutQuadratureBackendCellResult(
-                domain.request(), backend_input, fallback_result);
+                request, backend_input, fallback_result);
         if (!fallback_validation.ok) {
             throw std::invalid_argument(
                 backendCellDiagnostic(
@@ -1280,7 +1297,7 @@ detectUnqualifiedSameSignHighOrderComponentForCell(
                 backend, cell_id, type, backend_result.cut.diagnostic));
     }
     if (backend_result.fallback_used &&
-        domain.request().implicit_fallback_policy ==
+        request.implicit_fallback_policy ==
             implicitCutFallbackPolicyName(ImplicitCutFallbackPolicy::Fail)) {
         throw std::invalid_argument(
             backendCellDiagnostic(
@@ -1292,18 +1309,18 @@ detectUnqualifiedSameSignHighOrderComponentForCell(
     }
     const auto interface_fragment_count = backend_result.cut.fragments.size();
     std::string same_sign_high_order_component_diagnostic;
-    if (domain.request().implicit_geometry_mode ==
+    if (request.implicit_geometry_mode ==
             generatedInterfaceGeometryModeName(
                 GeneratedInterfaceGeometryMode::HighOrderImplicit) &&
-        domain.request().required_implicit_cut_backend_qualification ==
+        request.required_implicit_cut_backend_qualification ==
             "ProductionQualified") {
         if (const auto diagnostic =
                 detectUnqualifiedSameSignHighOrderComponentForCell(
                     mesh,
                     level_set_dofs,
                     evaluator,
-                    domain.request().isovalue,
-                    domain.request().resolvedCoefficientClassificationBand(),
+                    request.isovalue,
+                    request.resolvedCoefficientClassificationBand(),
                     coefficients,
                     cell_id,
                     interface_fragment_count)) {
@@ -1317,7 +1334,7 @@ detectUnqualifiedSameSignHighOrderComponentForCell(
         backend_result.cut,
         backend_result.fallback_used);
     const auto parent_corner_topology_key =
-        interfaces::levelSetParentCornerTopologyKey(domain.request(), input);
+        interfaces::levelSetParentCornerTopologyKey(request, input);
     for (auto& fragment : backend_result.cut.fragments) {
         fragment.parent_cell_global_id = mesh.globalEntityIdsAvailable()
                                              ? mesh.getCellGlobalId(cell_id)
@@ -1325,7 +1342,7 @@ detectUnqualifiedSameSignHighOrderComponentForCell(
         fragment.owner_rank = mesh.getCellOwnerRank(cell_id);
         fragment.parent_corner_topology_key = parent_corner_topology_key;
         fragment.stable_id = 0u;
-        domain.addFragment(std::move(fragment));
+        output.fragments.push_back(std::move(fragment));
     }
     for (auto& region : backend_result.cut.volume_regions) {
         region.parent_cell_global_id = mesh.globalEntityIdsAvailable()
@@ -1334,7 +1351,7 @@ detectUnqualifiedSameSignHighOrderComponentForCell(
         region.owner_rank = mesh.getCellOwnerRank(cell_id);
         region.parent_corner_topology_key = parent_corner_topology_key;
         region.stable_id = 0u;
-        domain.addVolumeRegion(std::move(region));
+        output.volume_regions.push_back(std::move(region));
     }
 
     return GeneratedInterfaceCellDiagnostics{
@@ -1361,6 +1378,43 @@ detectUnqualifiedSameSignHighOrderComponentForCell(
             same_sign_high_order_component_diagnostic};
 }
 
+
+// Appends a computed cell to the domain, as the cell computation used to.
+[[nodiscard]] GeneratedInterfaceCellDiagnostics appendGeneratedInterfaceCellOutput(
+    interfaces::LevelSetInterfaceDomain& domain,
+    GeneratedInterfaceCellOutput&& output)
+{
+    for (auto& fragment : output.fragments) {
+        domain.addFragment(std::move(fragment));
+    }
+    for (auto& region : output.volume_regions) {
+        domain.addVolumeRegion(std::move(region));
+    }
+    return std::move(output.diagnostics);
+}
+
+[[nodiscard]] GeneratedInterfaceCellDiagnostics appendGeneratedInterfaceCell(
+    interfaces::LevelSetInterfaceDomain& domain,
+    const assembly::IMeshAccess& mesh,
+    const dofs::EntityDofMap& entity_map,
+    const dofs::DofHandler& level_set_dofs,
+    const ImplicitCutQuadratureBackendDriver& backend,
+    const LevelSetCellEvaluator& evaluator,
+    std::span<const Real> coefficients,
+    GlobalIndex cell_id)
+{
+    GeneratedInterfaceCellOutput output;
+    output.diagnostics = computeGeneratedInterfaceCell(domain.request(),
+                                                       output,
+                                                       mesh,
+                                                       entity_map,
+                                                       level_set_dofs,
+                                                       backend,
+                                                       evaluator,
+                                                       coefficients,
+                                                       cell_id);
+    return appendGeneratedInterfaceCellOutput(domain, std::move(output));
+}
 } // namespace
 
 struct LevelSetGeneratedInterfaceLifecycle::Cache {
@@ -2034,6 +2088,310 @@ retargetCachedGeneratedInterfaceDomainExcludingCells(
     return domain;
 }
 
+
+// ---------------------------------------------------------------------------
+// Concurrent per-cell computation
+// ---------------------------------------------------------------------------
+
+// One cell of a build computed ahead of the ordered append: the outcome of
+// the cache checks the serial loop makes for it and, for a cell that is
+// (re)computed, its output.  An exception is kept and raised where the
+// serial loop would have raised it.
+struct PrecomputedGeneratedCell {
+    bool coefficients_unchanged{false};
+    bool signature_computed{false};
+    GeneratedInterfaceCellSignature signature{};
+    std::exception_ptr signature_error{};
+    bool output_computed{false};
+    GeneratedInterfaceCellOutput output{};
+    std::exception_ptr error{};
+};
+
+// Threads for the per-cell computation of one build.  LinearCorner geometry
+// with the LinearCorner backend reads only corner values, reference
+// geometry and the mesh; the high-order backends evaluate the field through
+// the function space and stay serial.
+[[nodiscard]] int generatedCellThreads(
+    const systems::FESystem& system,
+    const LevelSetGeneratedInterfaceOptions& options) noexcept
+{
+    if (options.geometry_mode != GeneratedInterfaceGeometryMode::LinearCorner ||
+        options.implicit_cut_quadrature_backend !=
+            ImplicitCutQuadratureBackend::LinearCorner) {
+        return 1;
+    }
+    return geometryThreadCount(system.assemblyThreadCount());
+}
+
+[[nodiscard]] bool sameBits(Real a, Real b) noexcept
+{
+    return std::memcmp(&a, &b, sizeof(Real)) == 0;
+}
+
+template <std::size_t N>
+[[nodiscard]] bool sameBits(const std::array<Real, N>& a,
+                            const std::array<Real, N>& b) noexcept
+{
+    return std::memcmp(a.data(), b.data(), N * sizeof(Real)) == 0;
+}
+
+// The comparisons name every field; these sizes make a new field fail to
+// compile until it is compared too.
+static_assert(sizeof(interfaces::CutInterfaceVertex) == 64u);
+static_assert(sizeof(interfaces::CutInterfaceQuadraturePoint) == 104u);
+static_assert(sizeof(interfaces::CutInterfaceReferenceSimplex) == 152u);
+static_assert(sizeof(geometry::CutQuadraturePoint) == 152u);
+static_assert(sizeof(interfaces::CutInterfaceFragment) == 400u);
+static_assert(sizeof(interfaces::CutInterfaceVolumeRegion) == 288u);
+static_assert(sizeof(GeneratedInterfaceCellDiagnostics) == 144u);
+
+[[nodiscard]] bool sameVertex(const interfaces::CutInterfaceVertex& a,
+                              const interfaces::CutInterfaceVertex& b) noexcept
+{
+    return sameBits(a.point, b.point) &&
+           sameBits(a.parent_coordinate, b.parent_coordinate) &&
+           sameBits(a.level_set_value, b.level_set_value) &&
+           a.stable_id == b.stable_id;
+}
+
+[[nodiscard]] bool sameInterfacePoint(
+    const interfaces::CutInterfaceQuadraturePoint& a,
+    const interfaces::CutInterfaceQuadraturePoint& b) noexcept
+{
+    return sameBits(a.point, b.point) &&
+           sameBits(a.parent_coordinate, b.parent_coordinate) &&
+           sameBits(a.normal, b.normal) && sameBits(a.weight, b.weight) &&
+           sameBits(a.reference_measure_factor, b.reference_measure_factor) &&
+           sameBits(a.level_set_residual, b.level_set_residual) &&
+           sameBits(a.gradient_norm, b.gradient_norm);
+}
+
+[[nodiscard]] bool sameCutPoint(const geometry::CutQuadraturePoint& a,
+                                const geometry::CutQuadraturePoint& b) noexcept
+{
+    return sameBits(a.point, b.point) && sameBits(a.normal, b.normal) &&
+           sameBits(a.boundary_normal, b.boundary_normal) &&
+           sameBits(a.tangent, b.tangent) && sameBits(a.weight, b.weight) &&
+           sameBits(a.parent_coordinate, b.parent_coordinate) &&
+           sameBits(a.reference_measure_factor, b.reference_measure_factor) &&
+           sameBits(a.level_set_residual, b.level_set_residual) &&
+           sameBits(a.gradient_norm, b.gradient_norm);
+}
+
+[[nodiscard]] bool sameSimplex(
+    const interfaces::CutInterfaceReferenceSimplex& a,
+    const interfaces::CutInterfaceReferenceSimplex& b) noexcept
+{
+    if (a.vertex_count != b.vertex_count ||
+        a.has_represented_signed_values != b.has_represented_signed_values ||
+        !sameBits(a.represented_signed_values, b.represented_signed_values) ||
+        !sameBits(a.measure_scale, b.measure_scale)) {
+        return false;
+    }
+    for (std::size_t i = 0; i < a.vertices.size(); ++i) {
+        if (!sameBits(a.vertices[i], b.vertices[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <typename T, typename Same>
+[[nodiscard]] bool sameRange(const T& a, const T& b, Same same)
+{
+    if (a.size() != b.size()) {
+        return false;
+    }
+    auto ia = a.begin();
+    auto ib = b.begin();
+    for (; ia != a.end(); ++ia, ++ib) {
+        if (!same(*ia, *ib)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool sameFragment(const interfaces::CutInterfaceFragment& a,
+                                const interfaces::CutInterfaceFragment& b)
+{
+    return a.construction_observation == b.construction_observation &&
+           a.interface_marker == b.interface_marker &&
+           a.parent_cell == b.parent_cell &&
+           a.parent_cell_global_id == b.parent_cell_global_id &&
+           a.owner_rank == b.owner_rank &&
+           a.local_fragment_index == b.local_fragment_index &&
+           a.stable_id == b.stable_id && a.kind == b.kind &&
+           a.degeneracy == b.degeneracy && a.minus_side == b.minus_side &&
+           a.plus_side == b.plus_side && sameBits(a.normal, b.normal) &&
+           sameBits(a.measure, b.measure) &&
+           sameBits(a.curvature_estimate, b.curvature_estimate) &&
+           sameBits(a.negative_volume_fraction, b.negative_volume_fraction) &&
+           sameBits(a.positive_volume_fraction, b.positive_volume_fraction) &&
+           sameBits(a.min_level_set_value, b.min_level_set_value) &&
+           sameBits(a.max_level_set_value, b.max_level_set_value) &&
+           a.topology_id == b.topology_id &&
+           a.parent_corner_topology_key == b.parent_corner_topology_key &&
+           a.implicit_quadrature_backend == b.implicit_quadrature_backend &&
+           a.implicit_fallback_status == b.implicit_fallback_status &&
+           a.branch_id == b.branch_id &&
+           a.conditioning_diagnostic == b.conditioning_diagnostic &&
+           a.root_finder_iterations == b.root_finder_iterations &&
+           sameBits(a.max_root_residual, b.max_root_residual) &&
+           sameBits(a.min_gradient_norm, b.min_gradient_norm) &&
+           a.root_polished == b.root_polished &&
+           sameRange(a.vertices, b.vertices, sameVertex) &&
+           sameRange(a.quadrature_points, b.quadrature_points,
+                     sameInterfacePoint) &&
+           a.moment_certificate_order == b.moment_certificate_order &&
+           sameRange(a.moment_certificate_points, b.moment_certificate_points,
+                     sameInterfacePoint);
+}
+
+[[nodiscard]] bool sameRegion(const interfaces::CutInterfaceVolumeRegion& a,
+                              const interfaces::CutInterfaceVolumeRegion& b)
+{
+    return a.construction_observation == b.construction_observation &&
+           a.interface_marker == b.interface_marker &&
+           a.parent_cell == b.parent_cell &&
+           a.parent_cell_global_id == b.parent_cell_global_id &&
+           a.owner_rank == b.owner_rank &&
+           a.local_region_index == b.local_region_index &&
+           a.stable_id == b.stable_id && a.side == b.side &&
+           sameBits(a.centroid, b.centroid) && sameBits(a.normal, b.normal) &&
+           sameBits(a.parent_measure, b.parent_measure) &&
+           sameBits(a.measure, b.measure) &&
+           sameBits(a.volume_fraction, b.volume_fraction) &&
+           sameBits(a.min_level_set_value, b.min_level_set_value) &&
+           sameBits(a.max_level_set_value, b.max_level_set_value) &&
+           a.topology_id == b.topology_id &&
+           a.parent_corner_topology_key == b.parent_corner_topology_key &&
+           a.implicit_quadrature_backend == b.implicit_quadrature_backend &&
+           a.implicit_fallback_status == b.implicit_fallback_status &&
+           a.full_cell_equivalent == b.full_cell_equivalent &&
+           a.achieved_quadrature_order == b.achieved_quadrature_order &&
+           sameRange(a.reference_subcells, b.reference_subcells, sameSimplex) &&
+           sameRange(a.quadrature_points, b.quadrature_points, sameCutPoint);
+}
+
+// Everything but the measured backend time.
+[[nodiscard]] bool sameDiagnostics(const GeneratedInterfaceCellDiagnostics& a,
+                                   const GeneratedInterfaceCellDiagnostics& b)
+{
+    return a.node_count == b.node_count && a.corner_count == b.corner_count &&
+           a.corner_linearized == b.corner_linearized &&
+           a.selected_backend == b.selected_backend &&
+           a.achieved_interface_quadrature_order ==
+               b.achieved_interface_quadrature_order &&
+           a.achieved_volume_quadrature_order ==
+               b.achieved_volume_quadrature_order &&
+           a.fallback_used == b.fallback_used &&
+           a.volume_quadrature_point_count == b.volume_quadrature_point_count &&
+           a.interface_quadrature_point_count ==
+               b.interface_quadrature_point_count &&
+           a.linear_full_cell_fast_path == b.linear_full_cell_fast_path &&
+           a.backend_diagnostic == b.backend_diagnostic &&
+           a.interface_fragment_count == b.interface_fragment_count &&
+           a.same_sign_high_order_component_diagnostic ==
+               b.same_sign_high_order_component_diagnostic;
+}
+
+[[nodiscard]] bool sameCellOutput(const GeneratedInterfaceCellOutput& a,
+                                  const GeneratedInterfaceCellOutput& b)
+{
+    return sameDiagnostics(a.diagnostics, b.diagnostics) &&
+           sameRange(a.fragments, b.fragments, sameFragment) &&
+           sameRange(a.volume_regions, b.volume_regions, sameRegion);
+}
+
+// Computes the given cells concurrently into their slots (participant p
+// uses evaluators[p]).  With the self-check, every computed cell is
+// computed again on the calling thread and must be identical bit for bit.
+[[nodiscard]] std::size_t computeGeneratedCellsConcurrently(
+    std::span<const GlobalIndex> cells,
+    std::span<PrecomputedGeneratedCell> slots,
+    std::span<const unsigned char> compute,
+    int threads,
+    const interfaces::CutInterfaceDomainRequest& request,
+    const assembly::IMeshAccess& mesh,
+    const dofs::EntityDofMap& entity_map,
+    const dofs::DofHandler& field_dofs,
+    const ImplicitCutQuadratureBackendDriver& backend,
+    const LevelSetCellEvaluator& evaluator,
+    std::span<const Real> coefficients)
+{
+    std::vector<LevelSetCellEvaluator> evaluators(
+        static_cast<std::size_t>(std::max(threads, 1)), evaluator);
+    deterministicParallelFor(
+        cells.size(),
+        threads,
+        [&](std::size_t k, int participant) {
+            if (compute[k] == 0u) {
+                return;
+            }
+            auto& slot = slots[k];
+            try {
+                slot.output.diagnostics = computeGeneratedInterfaceCell(
+                    request,
+                    slot.output,
+                    mesh,
+                    entity_map,
+                    field_dofs,
+                    backend,
+                    evaluators[static_cast<std::size_t>(participant)],
+                    coefficients,
+                    cells[k]);
+                slot.output_computed = true;
+            } catch (...) {
+                slot.output = GeneratedInterfaceCellOutput{};
+                slot.error = std::current_exception();
+            }
+        },
+        /*block_size=*/8u,
+        /*min_parallel_items=*/32u);
+    if (threads <= 1 || !geometryThreadsSelfCheckEnabled()) {
+        return 0u;
+    }
+    std::size_t checked = 0u;
+    for (std::size_t k = 0; k < cells.size(); ++k) {
+        if (compute[k] == 0u || !slots[k].output_computed) {
+            continue;
+        }
+        ++checked;
+        GeneratedInterfaceCellOutput serial;
+        serial.diagnostics = computeGeneratedInterfaceCell(request,
+                                                           serial,
+                                                           mesh,
+                                                           entity_map,
+                                                           field_dofs,
+                                                           backend,
+                                                           evaluator,
+                                                           coefficients,
+                                                           cells[k]);
+        if (!sameCellOutput(serial, slots[k].output)) {
+            throw std::logic_error(
+                "generated level-set interface geometry-thread self-check: cell " +
+                std::to_string(cells[k]) + " differs from its serial computation");
+        }
+    }
+    return checked;
+}
+
+// The serial loop's append of a precomputed cell.
+[[nodiscard]] GeneratedInterfaceCellDiagnostics appendPrecomputedGeneratedCell(
+    interfaces::LevelSetInterfaceDomain& domain,
+    PrecomputedGeneratedCell& slot)
+{
+    if (slot.error) {
+        std::rethrow_exception(slot.error);
+    }
+    if (!slot.output_computed) {
+        throw std::logic_error(
+            "generated level-set interface cell was not precomputed");
+    }
+    return appendGeneratedInterfaceCellOutput(domain, std::move(slot.output));
+}
+
 } // namespace
 
 LevelSetGeneratedInterfaceLifecycle::LevelSetGeneratedInterfaceLifecycle(
@@ -2364,6 +2722,10 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
     interfaces::LevelSetInterfaceDomain domain(request);
     const auto coefficients = solution.subspan(offset, n_field_dofs);
     const auto evaluator = makeLevelSetCellEvaluator(system, field, solution);
+    // Threads for the per-cell computation (FE/Core/DeterministicParallel.h):
+    // results do not depend on their number.
+    const int cell_threads = generatedCellThreads(system, options);
+    std::size_t thread_self_checked_cells = 0u;
     if (!cache_) {
         cache_ = std::make_unique<Cache>();
     }
@@ -2612,7 +2974,41 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
                 accumulate_diagnostics(diagnostics, /*include_elapsed=*/false);
             }
 
+            // With geometry threads the refreshed cells are computed
+            // concurrently first and appended below in refresh order.
+            std::vector<PrecomputedGeneratedCell> refresh_slots;
+            if (cell_threads > 1) {
+                std::vector<GlobalIndex> refresh_cell_ids;
+                std::vector<unsigned char> compute;
+                refresh_cell_ids.reserve(changed_cells->refresh_cells.size());
+                compute.reserve(changed_cells->refresh_cells.size());
+                for (const auto& changed_cell : changed_cells->refresh_cells) {
+                    refresh_cell_ids.push_back(changed_cell.cell_id);
+                    // An out-of-range id is rejected by the loop below.
+                    compute.push_back(
+                        changed_cell.cell_id >= 0 &&
+                                static_cast<std::size_t>(changed_cell.cell_id) <
+                                    cache_->cells.size()
+                            ? 1u
+                            : 0u);
+                }
+                refresh_slots.resize(refresh_cell_ids.size());
+                thread_self_checked_cells = computeGeneratedCellsConcurrently(
+                                                  refresh_cell_ids,
+                                                  refresh_slots,
+                                                  compute,
+                                                  cell_threads,
+                                                  request,
+                                                  mesh,
+                                                  *entity_map,
+                                                  field_dofs,
+                                                  backend,
+                                                  evaluator,
+                                                  coefficients);
+            }
+            std::size_t refresh_index = 0u;
             for (const auto& changed_cell : changed_cells->refresh_cells) {
+                const auto slot_index = refresh_index++;
                 const auto cell_id = changed_cell.cell_id;
                 if (cell_id < 0 ||
                     static_cast<std::size_t>(cell_id) >= cache_->cells.size()) {
@@ -2625,15 +3021,18 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
                 const auto fragment_begin = domain.fragments().size();
                 const auto volume_begin = domain.volumeRegions().size();
                 auto diagnostics =
-                    appendGeneratedInterfaceCell(
-                        domain,
-                        mesh,
-                        *entity_map,
-                        field_dofs,
-                        backend,
-                        evaluator,
-                        coefficients,
-                        cell_id);
+                    refresh_slots.empty()
+                        ? appendGeneratedInterfaceCell(
+                              domain,
+                              mesh,
+                              *entity_map,
+                              field_dofs,
+                              backend,
+                              evaluator,
+                              coefficients,
+                              cell_id)
+                        : appendPrecomputedGeneratedCell(
+                              domain, refresh_slots[slot_index]);
 
                 Cache::Cell cell_cache_entry;
                 cell_cache_entry.signature = changed_cell.signature.value;
@@ -2684,7 +3083,86 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
             static_cast<std::size_t>(mesh.numCells());
         linear_full_cell_fast_path_count = 0u;
         domain = interfaces::LevelSetInterfaceDomain(request);
+        const auto coefficients_unchanged_for =
+            [&](const Cache::CellSlot& cached_slot) {
+                return cached_slot.valid && cache_->domain.valid &&
+                       cachedCellCoefficientSnapshotMatches(
+                           std::span<const GlobalIndex>(
+                               cached_slot.cell.dofs.data(),
+                               cached_slot.cell.dofs.size()),
+                           cache_->domain.coefficients,
+                           coefficients);
+            };
+        // With geometry threads every cell's cache checks (which read only
+        // its own slot, unchanged until the loop below reaches the cell) and
+        // the computation of the cells to rebuild run concurrently first.
+        std::vector<PrecomputedGeneratedCell> cell_slots;
+        if (cell_threads > 1) {
+            std::vector<GlobalIndex> cell_ids;
+            cell_ids.reserve(static_cast<std::size_t>(mesh.numCells()));
+            mesh.forEachCell(
+                [&cell_ids](GlobalIndex cell_id) { cell_ids.push_back(cell_id); });
+            cell_slots.resize(cell_ids.size());
+            std::vector<unsigned char> compute(cell_ids.size(), 0u);
+            std::vector<LevelSetCellEvaluator> evaluators(
+                static_cast<std::size_t>(cell_threads), evaluator);
+            deterministicParallelFor(
+                cell_ids.size(),
+                cell_threads,
+                [&](std::size_t k, int participant) {
+                    const auto cell_id = cell_ids[k];
+                    if (cell_id < 0 ||
+                        static_cast<std::size_t>(cell_id) >=
+                            cache_->cells.size()) {
+                        return;  // rejected by the loop below
+                    }
+                    auto& slot = cell_slots[k];
+                    const auto& cached_slot =
+                        cache_->cells[static_cast<std::size_t>(cell_id)];
+                    slot.coefficients_unchanged =
+                        coefficients_unchanged_for(cached_slot);
+                    if (slot.coefficients_unchanged) {
+                        return;
+                    }
+                    try {
+                        slot.signature = generatedInterfaceCellSignature(
+                            mesh,
+                            field_dofs,
+                            evaluators[static_cast<std::size_t>(participant)],
+                            coefficients,
+                            request.isovalue,
+                            request.resolvedCoefficientClassificationBand(),
+                            cell_id);
+                        slot.signature_computed = true;
+                    } catch (...) {
+                        slot.signature_error = std::current_exception();
+                        return;
+                    }
+                    compute[k] = !(cached_slot.valid &&
+                                   cached_slot.cell.signature ==
+                                       slot.signature.value)
+                                     ? 1u
+                                     : 0u;
+                },
+                /*block_size=*/256u,
+                /*min_parallel_items=*/1024u);
+            thread_self_checked_cells = computeGeneratedCellsConcurrently(
+                                              cell_ids,
+                                              cell_slots,
+                                              compute,
+                                              cell_threads,
+                                              request,
+                                              mesh,
+                                              *entity_map,
+                                              field_dofs,
+                                              backend,
+                                              evaluator,
+                                              coefficients);
+        }
+        std::size_t cell_slot_index = 0u;
         mesh.forEachCell([&](GlobalIndex cell_id) {
+        PrecomputedGeneratedCell* const precomputed =
+            cell_slots.empty() ? nullptr : &cell_slots[cell_slot_index++];
         if (cell_id < 0 ||
             static_cast<std::size_t>(cell_id) >= cache_->cells.size()) {
             throw std::invalid_argument(
@@ -2693,13 +3171,8 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
         GeneratedInterfaceCellDiagnostics diagnostics;
         auto& cached_slot = cache_->cells[static_cast<std::size_t>(cell_id)];
         const bool cached_cell_coefficients_unchanged =
-            cached_slot.valid &&
-            cache_->domain.valid &&
-            cachedCellCoefficientSnapshotMatches(
-                std::span<const GlobalIndex>(cached_slot.cell.dofs.data(),
-                                             cached_slot.cell.dofs.size()),
-                cache_->domain.coefficients,
-                coefficients);
+            precomputed != nullptr ? precomputed->coefficients_unchanged
+                                   : coefficients_unchanged_for(cached_slot);
         if (cached_cell_coefficients_unchanged) {
             diagnostics = cached_slot.cell.diagnostics;
             diagnostics.backend_elapsed_seconds = 0.0;
@@ -2708,14 +3181,20 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
             ++cell_cache_hits;
             ++cell_cache_unchanged_dof_hits;
         } else {
+            if (precomputed != nullptr && precomputed->signature_error) {
+                std::rethrow_exception(precomputed->signature_error);
+            }
             const auto cell_signature =
-                generatedInterfaceCellSignature(mesh,
-                                                field_dofs,
-                                                evaluator,
-                                                coefficients,
-                                                request.isovalue,
-                                                request.resolvedCoefficientClassificationBand(),
-                                                cell_id);
+                precomputed != nullptr && precomputed->signature_computed
+                    ? precomputed->signature
+                    : generatedInterfaceCellSignature(
+                          mesh,
+                          field_dofs,
+                          evaluator,
+                          coefficients,
+                          request.isovalue,
+                          request.resolvedCoefficientClassificationBand(),
+                          cell_id);
             if (cached_slot.valid &&
                 cached_slot.cell.signature == cell_signature.value) {
                 diagnostics = cached_slot.cell.diagnostics;
@@ -2727,15 +3206,17 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
                 const auto fragment_begin = domain.fragments().size();
                 const auto volume_begin = domain.volumeRegions().size();
                 diagnostics =
-                    appendGeneratedInterfaceCell(
-                        domain,
-                        mesh,
-                        *entity_map,
-                        field_dofs,
-                        backend,
-                        evaluator,
-                        coefficients,
-                        cell_id);
+                    precomputed != nullptr
+                        ? appendPrecomputedGeneratedCell(domain, *precomputed)
+                        : appendGeneratedInterfaceCell(
+                              domain,
+                              mesh,
+                              *entity_map,
+                              field_dofs,
+                              backend,
+                              evaluator,
+                              coefficients,
+                              cell_id);
 
                 Cache::Cell cell_cache_entry;
                 cell_cache_entry.signature = cell_signature.value;
@@ -2812,6 +3293,7 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
         affected_cell_neighborhood_count;
     result.linear_full_cell_fast_path_count =
         linear_full_cell_fast_path_count;
+    result.thread_self_checked_cell_count = thread_self_checked_cells;
     populateOwnedGeneratedInterfaceMetrics(result, mesh, cache_->cells);
     result.success =
         result.summary.active_fragment_count > 0u ||
