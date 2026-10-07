@@ -446,6 +446,14 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   - R/h = 32 60°: rollback failure at step 172 (4 ranks);
   - R/h = 32 120°: outer cap at step 5096 (t = 7.9) after 7.75 h (4 ranks);
   - R/h = 64 60° and 120°: aggregation owner disagreement (8 ranks; 60° at setup, 120° after step 459).
+- **D25, 2026-10-07: protocol for the 3D static sphere (M2, 3D part).** The user approved starting it and a larger memory budget, and left the four open 3D questions to the coordinator's recommendation:
+  1. **Gating level R/h = 16**, with the observed order over R/h = 8/16. R/h = 32 is not affordable. Gated at R/h = 16: pressure-jump error ≤ 1% with order ≥ 1; parasitic capillary number decreasing from 8 to 16; no velocity growth; volume drift ≤ 1e-4.
+  2. **Memory:** the dry-cell compaction is merged (R/h = 16 peaks at about 19 GB serially, against an estimated 49 GB before). Jobs may use up to a full node (at most 8000 MB per CPU).
+  3. **Box:** keep the 3R cube that the benchmark and its tests were built for.
+  4. **Wet-extension map output:** already opt-in (Perf 8); transport is the PDE extension.
+  - **Time step:** the D19 static-drop protocol, with the lagged normal-increment term on and Δt = 0.02 at La = 12 for both levels. The Δt/2 check runs at R/h = 8 only. In 2D halving the step changed the pressure jump by 1e-10 (La = 12), and a Δt/2 run at R/h = 16 would cost days.
+  - **Form:** `SurfaceStress` only, since both KAG forms fail M2 in 2D.
+  - **Binary:** `svmultiphysics-39c88f74-ltopgo`, with multi-rank runs (FSILS).
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
