@@ -48,6 +48,7 @@
 #include <span>
 #include <optional>
 #include <memory>
+#include <functional>
 
 #if FE_HAS_MPI
 #include <mpi.h>
@@ -185,6 +186,26 @@ public:
     }
 
     /**
+     * @brief Owner rank of each ghost DOF of the partition
+     *
+     * With an owner function the canonical constraint lines are resolved by
+     * routing every line to its slave's owner and the owner's resolution
+     * back to the ranks on which the slave is a ghost, instead of
+     * all-gathering every line on every rank.  The resolution is identical:
+     * lines exist only for locally relevant slaves, the owner folds them in
+     * ascending source rank as the all-gather did, and every consumer keeps
+     * only locally relevant lines.  Without an owner function, or when a
+     * precondition fails on any rank (a line for a non-relevant slave, an
+     * invalid ghost owner), the all-gather is used.
+     * SVMP_PARALLEL_CONSTRAINTS_ALLGATHER=1 forces the all-gather;
+     * SVMP_PARALLEL_CONSTRAINTS_CHECK=1 computes both and throws unless they
+     * agree bit for bit on every locally relevant slave.
+     */
+    void setDofOwnerFunction(std::function<int(GlobalIndex)> owner_of) {
+        dof_owner_ = std::move(owner_of);
+    }
+
+    /**
      * @brief Get current options
      */
     [[nodiscard]] const ParallelConstraintOptions& getOptions() const noexcept {
@@ -313,6 +334,7 @@ private:
     MPI_Comm comm_{MPI_COMM_NULL};
 #endif
     const dofs::DofPartition* partition_{nullptr};
+    std::function<int(GlobalIndex)> dof_owner_{};
     ParallelConstraintOptions options_;
     ParallelConstraintStats last_stats_;
 

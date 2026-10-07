@@ -18,6 +18,7 @@
 
 #include <mpi.h>
 
+#include <cstring>
 #include <exception>
 #include <string>
 #include <utility>
@@ -323,6 +324,135 @@ TEST(ParallelConstraintsMPITest,
     EXPECT_FALSE(valid);
     EXPECT_EQ(minimum_valid, 0);
     EXPECT_EQ(maximum_valid, 0);
+}
+
+namespace {
+
+// Rank r owns DOFs [4r, 4r+4) and holds as ghosts the last two DOFs of
+// rank r-1 and the first two of rank r+1.  Lines: a two-master line and an
+// inhomogeneous Dirichlet line on owned DOFs; a line on the next rank's
+// first DOF that only this (ghost-holding) rank declares; and a Dirichlet
+// value on the previous rank's last DOF that conflicts with its owner's.
+struct RoutedFixture {
+    dofs::DofPartition partition;
+    AffineConstraints constraints;
+};
+
+RoutedFixture makeRoutedFixture(int my_rank, int n_ranks)
+{
+    const GlobalIndex begin = static_cast<GlobalIndex>(4 * my_rank);
+    std::vector<GlobalIndex> ghosts;
+    if (my_rank > 0) {
+        ghosts.push_back(begin - 2);
+        ghosts.push_back(begin - 1);
+    }
+    if (my_rank + 1 < n_ranks) {
+        ghosts.push_back(begin + 4);
+        ghosts.push_back(begin + 5);
+    }
+    RoutedFixture fixture{dofs::DofPartition(begin, begin + 4, ghosts), AffineConstraints{}};
+    fixture.partition.setGlobalSize(static_cast<GlobalIndex>(4 * n_ranks));
+    auto& c = fixture.constraints;
+    c.addLine(begin + 1);
+    c.addEntry(begin + 1, begin, 0.5);
+    c.addEntry(begin + 1, begin + 2, 0.5);
+    c.addDirichlet(begin + 3, static_cast<double>(my_rank) + 0.25);
+    if (my_rank + 1 < n_ranks) {
+        c.addLine(begin + 4);
+        c.addEntry(begin + 4, begin + 3, 2.0);
+        c.addEntry(begin + 4, begin + 5, -1.0 / 3.0);
+    }
+    if (my_rank > 0) {
+        c.addDirichlet(begin - 1, 100.0 + my_rank);
+    }
+    return fixture;
+}
+
+bool sameLineBits(const AffineConstraints& a, const AffineConstraints& b, GlobalIndex dof)
+{
+    const auto la = a.getConstraint(dof);
+    const auto lb = b.getConstraint(dof);
+    if (la.has_value() != lb.has_value()) {
+        return false;
+    }
+    if (!la.has_value()) {
+        return true;
+    }
+    if (std::memcmp(&la->inhomogeneity, &lb->inhomogeneity, sizeof(double)) != 0 ||
+        la->entries.size() != lb->entries.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < la->entries.size(); ++i) {
+        if (la->entries[i].master_dof != lb->entries[i].master_dof ||
+            std::memcmp(&la->entries[i].weight, &lb->entries[i].weight, sizeof(double)) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+TEST(ParallelConstraintsMPITest, OwnerRoutedResolutionMatchesAllGather)
+{
+    int my_rank = 0;
+    int n_ranks = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &n_ranks);
+    if (n_ranks < 2) {
+        GTEST_SKIP() << "Requires at least 2 MPI ranks";
+    }
+
+    for (const auto strategy : {ParallelConstraintOptions::ConflictResolution::OwnerWins,
+                                ParallelConstraintOptions::ConflictResolution::SmallestRank}) {
+        SCOPED_TRACE(static_cast<int>(strategy));
+        auto gathered = makeRoutedFixture(my_rank, n_ranks);
+        auto routed = makeRoutedFixture(my_rank, n_ranks);
+        ParallelConstraintOptions opts;
+        opts.conflict_resolution = strategy;
+
+        ParallelConstraints all_gather(MPI_COMM_WORLD, gathered.partition);
+        all_gather.setOptions(opts);
+        ParallelConstraints owner_routed(MPI_COMM_WORLD, routed.partition);
+        owner_routed.setOptions(opts);
+        owner_routed.setDofOwnerFunction(
+            [](GlobalIndex dof) { return static_cast<int>(dof / 4); });
+
+        (void)all_gather.synchronize(gathered.constraints);
+        (void)owner_routed.synchronize(routed.constraints);
+
+        for (const auto dof : routed.partition.locallyRelevant()) {
+            EXPECT_TRUE(sameLineBits(gathered.constraints, routed.constraints, dof))
+                << "dof=" << dof;
+        }
+        EXPECT_EQ(gathered.constraints.getConstrainedDofs().size(),
+                  routed.constraints.getConstrainedDofs().size());
+        EXPECT_TRUE(owner_routed.validateConsistency(routed.constraints));
+        EXPECT_TRUE(all_gather.validateConsistency(gathered.constraints));
+
+        // The ghost-holder-only line on the next rank's first DOF is
+        // installed on its owner.
+        const auto first = routed.constraints.getConstraint(static_cast<GlobalIndex>(4 * my_rank));
+        EXPECT_EQ(first.has_value(), my_rank > 0);
+    }
+
+    // An owner function that disagrees with the partition falls back to the
+    // all-gather on every rank instead of failing.
+    auto gathered = makeRoutedFixture(my_rank, n_ranks);
+    auto routed = makeRoutedFixture(my_rank, n_ranks);
+    ParallelConstraints all_gather(MPI_COMM_WORLD, gathered.partition);
+    ParallelConstraints wrong_owner(MPI_COMM_WORLD, routed.partition);
+    wrong_owner.setDofOwnerFunction([n_ranks](GlobalIndex dof) {
+        return static_cast<int>((dof / 4 + 1) % n_ranks);
+    });
+    (void)all_gather.synchronize(gathered.constraints);
+    const auto outcome = invokeCollectively(MPI_COMM_WORLD, [&] {
+        (void)wrong_owner.synchronize(routed.constraints);
+    });
+    EXPECT_EQ(outcome.maximum_threw, 0) << outcome.local_message;
+    for (const auto dof : routed.partition.locallyRelevant()) {
+        EXPECT_TRUE(sameLineBits(gathered.constraints, routed.constraints, dof)) << "dof=" << dof;
+    }
 }
 
 } // namespace test

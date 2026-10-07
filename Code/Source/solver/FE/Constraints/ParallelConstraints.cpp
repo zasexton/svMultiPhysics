@@ -8,8 +8,11 @@
 #include "ParallelConstraints.h"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
+#include <cstdlib>
 #include <exception>
+#include <functional>
 #include <limits>
 #include <numeric>
 #include <string>
@@ -390,6 +393,402 @@ gatherAndResolveConstraints(MPI_Comm comm,
     return canonical;
 }
 
+bool envFlagEnabled(const char* name)
+{
+    const char* value = std::getenv(name);
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+void appendLineWords(std::vector<std::int64_t>& words,
+                     const ConstraintLine& line,
+                     int source_rank,
+                     bool claims_ownership)
+{
+    words.push_back(static_cast<std::int64_t>(line.slave_dof));
+    words.push_back(static_cast<std::int64_t>(source_rank));
+    words.push_back(claims_ownership ? 1 : 0);
+    words.push_back(std::bit_cast<std::int64_t>(static_cast<double>(line.inhomogeneity)));
+    words.push_back(static_cast<std::int64_t>(line.entries.size()));
+    for (const auto& entry : line.entries) {
+        words.push_back(static_cast<std::int64_t>(entry.master_dof));
+        words.push_back(std::bit_cast<std::int64_t>(static_cast<double>(entry.weight)));
+    }
+}
+
+RankedConstraintLine readLineWords(const std::vector<std::int64_t>& words,
+                                   std::size_t& position,
+                                   std::size_t end)
+{
+    if (end - position < 5u) {
+        CONSTRAINT_THROW("ParallelConstraints: malformed routed constraint line header");
+    }
+    RankedConstraintLine ranked;
+    ranked.line.slave_dof = static_cast<GlobalIndex>(words[position++]);
+    ranked.source_rank = static_cast<int>(words[position++]);
+    ranked.source_claims_ownership = words[position++] != 0;
+    ranked.line.inhomogeneity = std::bit_cast<double>(words[position++]);
+    const auto n_entries = words[position++];
+    if (n_entries < 0 ||
+        static_cast<std::uint64_t>(n_entries) * 2u >
+            static_cast<std::uint64_t>(end - position)) {
+        CONSTRAINT_THROW("ParallelConstraints: malformed routed constraint line entries");
+    }
+    ranked.line.entries.reserve(static_cast<std::size_t>(n_entries));
+    for (std::int64_t e = 0; e < n_entries; ++e) {
+        const auto master = static_cast<GlobalIndex>(words[position++]);
+        const double weight = std::bit_cast<double>(words[position++]);
+        ranked.line.entries.push_back({master, weight});
+    }
+    // As unpackConstraintsForRank: lines are merged on both ends of the wire.
+    ranked.line.mergeEntries();
+    return ranked;
+}
+
+// Sparse all-to-all of int64 words: counts by MPI_Alltoall, payload by
+// MPI_Alltoallv.  Returns the received words and per-source displacements.
+void alltoallWords(MPI_Comm comm,
+                   int world_size,
+                   const std::vector<std::vector<std::int64_t>>& send,
+                   std::vector<std::int64_t>& recv,
+                   std::vector<int>& recv_counts,
+                   std::vector<int>& recv_displs)
+{
+    std::vector<int> send_counts(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> send_displs(static_cast<std::size_t>(world_size), 0);
+    std::size_t total_send = 0;
+    for (int r = 0; r < world_size; ++r) {
+        const auto n = send[static_cast<std::size_t>(r)].size();
+        if (n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+            total_send > static_cast<std::size_t>(std::numeric_limits<int>::max()) - n) {
+            CONSTRAINT_THROW("ParallelConstraints: routed constraint payload exceeds the MPI count range");
+        }
+        send_displs[static_cast<std::size_t>(r)] = static_cast<int>(total_send);
+        send_counts[static_cast<std::size_t>(r)] = static_cast<int>(n);
+        total_send += n;
+    }
+    std::vector<std::int64_t> send_buffer;
+    send_buffer.reserve(total_send);
+    for (int r = 0; r < world_size; ++r) {
+        const auto& part = send[static_cast<std::size_t>(r)];
+        send_buffer.insert(send_buffer.end(), part.begin(), part.end());
+    }
+    recv_counts.assign(static_cast<std::size_t>(world_size), 0);
+    MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, comm);
+    recv_displs.assign(static_cast<std::size_t>(world_size), 0);
+    std::size_t total_recv = 0;
+    for (int r = 0; r < world_size; ++r) {
+        const auto n = static_cast<std::size_t>(recv_counts[static_cast<std::size_t>(r)]);
+        if (total_recv > static_cast<std::size_t>(std::numeric_limits<int>::max()) - n) {
+            CONSTRAINT_THROW("ParallelConstraints: routed constraint payload exceeds the MPI displacement range");
+        }
+        recv_displs[static_cast<std::size_t>(r)] = static_cast<int>(total_recv);
+        total_recv += n;
+    }
+    recv.assign(total_recv, 0);
+    MPI_Alltoallv(send_buffer.data(), send_counts.data(), send_displs.data(), MPI_INT64_T,
+                  recv.data(), recv_counts.data(), recv_displs.data(), MPI_INT64_T, comm);
+}
+
+// Owner-routed resolution of the canonical constraint lines (see
+// ParallelConstraints::setDofOwnerFunction).  Returns the canonical lines of
+// every locally relevant constrained slave (owned and ghost), or nullopt on
+// every rank when a precondition fails on any rank.  Collective.
+std::optional<CanonicalConstraintMap>
+resolveConstraintsByOwner(MPI_Comm comm,
+                          int world_size,
+                          int my_rank,
+                          const dofs::DofPartition& partition,
+                          const std::function<int(GlobalIndex)>& owner_of,
+                          const ParallelConstraintOptions& options,
+                          const AffineConstraints& local_constraints,
+                          ParallelConstraintStats& stats)
+{
+    // Preconditions: every local line has a locally relevant slave, and
+    // every ghost DOF has a valid remote owner.
+    int local_ok = 1;
+    std::vector<std::vector<std::int64_t>> requests(static_cast<std::size_t>(world_size));
+    std::vector<std::vector<std::int64_t>> routed_lines(static_cast<std::size_t>(world_size));
+    // Own lines for owned slaves, folded at position my_rank.
+    std::vector<RankedConstraintLine> own_owned_lines;
+    std::exception_ptr local_exception;
+    try {
+        for (const GlobalIndex dof : partition.ghost()) {
+            const int owner = owner_of ? owner_of(dof) : -1;
+            if (owner < 0 || owner >= world_size || owner == my_rank) {
+                local_ok = 0;
+                break;
+            }
+            requests[static_cast<std::size_t>(owner)].push_back(static_cast<std::int64_t>(dof));
+        }
+        if (local_ok != 0) {
+            for (const GlobalIndex dof : local_constraints.getConstrainedDofs()) {
+                const auto view = local_constraints.getConstraint(dof);
+                if (!view) {
+                    continue;
+                }
+                if (!partition.isRelevant(dof)) {
+                    local_ok = 0;
+                    break;
+                }
+                ConstraintLine line = toConstraintLine(*view);
+                if (partition.isOwned(dof)) {
+                    // The all-gather merges a line when packing and again
+                    // when unpacking; do the same for the owner's own line.
+                    line.mergeEntries();
+                    own_owned_lines.push_back({std::move(line), my_rank, true});
+                    continue;
+                }
+                const int owner = owner_of(dof);
+                if (owner < 0 || owner >= world_size || owner == my_rank) {
+                    local_ok = 0;
+                    break;
+                }
+                appendLineWords(routed_lines[static_cast<std::size_t>(owner)], line, my_rank, false);
+            }
+        }
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+    coordinateDistributedPhaseFailure(comm, local_exception, "routed_precondition");
+    int all_ok = 0;
+    MPI_Allreduce(&local_ok, &all_ok, 1, MPI_INT, MPI_MIN, comm);
+    if (all_ok == 0) {
+        return std::nullopt;
+    }
+
+    // Phase A: ghost-DOF requests and lines go to the owners.
+    std::vector<std::int64_t> recv_a;
+    std::vector<int> counts_a;
+    std::vector<int> displs_a;
+    std::exception_ptr phase_a_exception;
+    std::vector<std::vector<std::int64_t>> send_a(static_cast<std::size_t>(world_size));
+    try {
+        for (int r = 0; r < world_size; ++r) {
+            auto& out = send_a[static_cast<std::size_t>(r)];
+            const auto& req = requests[static_cast<std::size_t>(r)];
+            const auto& lines = routed_lines[static_cast<std::size_t>(r)];
+            if (req.empty() && lines.empty()) {
+                continue;
+            }
+            out.reserve(1u + req.size() + lines.size());
+            out.push_back(static_cast<std::int64_t>(req.size()));
+            out.insert(out.end(), req.begin(), req.end());
+            out.insert(out.end(), lines.begin(), lines.end());
+        }
+    } catch (...) {
+        phase_a_exception = std::current_exception();
+    }
+    coordinateDistributedPhaseFailure(comm, phase_a_exception, "routed_send_lines");
+    alltoallWords(comm, world_size, send_a, recv_a, counts_a, displs_a);
+
+    // Owner fold in ascending source rank, the order of the all-gather fold.
+    // A request or line that reaches a rank not owning its DOF means the
+    // owner function disagrees with the partition: fall back collectively.
+    CanonicalConstraintMap canonical;
+    std::vector<std::vector<GlobalIndex>> requested_by(static_cast<std::size_t>(world_size));
+    int local_route_ok = 1;
+    std::exception_ptr fold_exception;
+    try {
+        std::unordered_map<GlobalIndex, std::vector<RankedConstraintLine>> lines_by_slave;
+        lines_by_slave.reserve(own_owned_lines.size());
+        for (auto& ranked : own_owned_lines) {
+            const auto slave = ranked.line.slave_dof;
+            lines_by_slave[slave].push_back(std::move(ranked));
+        }
+        for (int r = 0; r < world_size; ++r) {
+            std::size_t position = static_cast<std::size_t>(displs_a[static_cast<std::size_t>(r)]);
+            const std::size_t end = position + static_cast<std::size_t>(counts_a[static_cast<std::size_t>(r)]);
+            if (position == end) {
+                continue;
+            }
+            const auto n_requests = recv_a[position++];
+            if (n_requests < 0 ||
+                static_cast<std::uint64_t>(n_requests) > static_cast<std::uint64_t>(end - position)) {
+                CONSTRAINT_THROW("ParallelConstraints: malformed routed ghost request");
+            }
+            auto& req = requested_by[static_cast<std::size_t>(r)];
+            req.reserve(static_cast<std::size_t>(n_requests));
+            for (std::int64_t i = 0; i < n_requests; ++i) {
+                const auto dof = static_cast<GlobalIndex>(recv_a[position++]);
+                if (!partition.isOwned(dof)) {
+                    local_route_ok = 0;
+                }
+                req.push_back(dof);
+            }
+            while (position < end) {
+                auto ranked = readLineWords(recv_a, position, end);
+                if (ranked.source_rank != r) {
+                    CONSTRAINT_THROW_DOF("ParallelConstraints: routed constraint line has a wrong source rank",
+                                         ranked.line.slave_dof);
+                }
+                if (!partition.isOwned(ranked.line.slave_dof)) {
+                    local_route_ok = 0;
+                }
+                const auto slave = ranked.line.slave_dof;
+                lines_by_slave[slave].push_back(std::move(ranked));
+            }
+        }
+        canonical.reserve(lines_by_slave.size());
+        for (auto& [slave, lines] : lines_by_slave) {
+            std::stable_sort(lines.begin(), lines.end(),
+                             [](const RankedConstraintLine& a, const RankedConstraintLine& b) {
+                                 return a.source_rank < b.source_rank;
+                             });
+            RankedConstraintLine current = std::move(lines.front());
+            for (std::size_t k = 1; k < lines.size(); ++k) {
+                bool had_real_conflict = false;
+                current = chooseWinner(current,
+                                       lines[k],
+                                       options.conflict_resolution,
+                                       options.tolerance,
+                                       had_real_conflict);
+                if (had_real_conflict &&
+                    options.conflict_resolution !=
+                        ParallelConstraintOptions::ConflictResolution::Error) {
+                    ++stats.n_conflicts_resolved;
+                }
+            }
+            canonical.emplace(slave, std::move(current));
+        }
+    } catch (...) {
+        fold_exception = std::current_exception();
+    }
+    coordinateDistributedPhaseFailure(comm, fold_exception, "routed_owner_fold");
+    int all_route_ok = 0;
+    MPI_Allreduce(&local_route_ok, &all_route_ok, 1, MPI_INT, MPI_MIN, comm);
+    if (all_route_ok == 0) {
+        return std::nullopt;
+    }
+
+    // Phase B: owners return the canonical lines of the requested ghosts.
+    std::vector<std::vector<std::int64_t>> send_b(static_cast<std::size_t>(world_size));
+    std::exception_ptr phase_b_exception;
+    try {
+        for (int r = 0; r < world_size; ++r) {
+            for (const auto dof : requested_by[static_cast<std::size_t>(r)]) {
+                const auto it = canonical.find(dof);
+                if (it == canonical.end()) {
+                    continue;
+                }
+                appendLineWords(send_b[static_cast<std::size_t>(r)],
+                                it->second.line,
+                                it->second.source_rank,
+                                it->second.source_claims_ownership);
+            }
+        }
+    } catch (...) {
+        phase_b_exception = std::current_exception();
+    }
+    coordinateDistributedPhaseFailure(comm, phase_b_exception, "routed_reply_lines");
+    std::vector<std::int64_t> recv_b;
+    std::vector<int> counts_b;
+    std::vector<int> displs_b;
+    alltoallWords(comm, world_size, send_b, recv_b, counts_b, displs_b);
+
+    std::exception_ptr decode_exception;
+    try {
+        for (int r = 0; r < world_size; ++r) {
+            std::size_t position = static_cast<std::size_t>(displs_b[static_cast<std::size_t>(r)]);
+            const std::size_t end = position + static_cast<std::size_t>(counts_b[static_cast<std::size_t>(r)]);
+            while (position < end) {
+                auto ranked = readLineWords(recv_b, position, end);
+                const auto slave = ranked.line.slave_dof;
+                if (!partition.isGhost(slave) ||
+                    !canonical.emplace(slave, std::move(ranked)).second) {
+                    CONSTRAINT_THROW_DOF("ParallelConstraints: unexpected routed canonical line", slave);
+                }
+            }
+        }
+        stats.n_messages_sent += static_cast<GlobalIndex>(
+            std::count_if(send_a.begin(), send_a.end(), [](const auto& v) { return !v.empty(); }) +
+            std::count_if(send_b.begin(), send_b.end(), [](const auto& v) { return !v.empty(); }));
+        stats.n_messages_received += static_cast<GlobalIndex>(
+            std::count_if(counts_a.begin(), counts_a.end(), [](int n) { return n > 0; }) +
+            std::count_if(counts_b.begin(), counts_b.end(), [](int n) { return n > 0; }));
+    } catch (...) {
+        decode_exception = std::current_exception();
+    }
+    coordinateDistributedPhaseFailure(comm, decode_exception, "routed_decode");
+    return canonical;
+}
+
+bool sameRankedLineBits(const RankedConstraintLine& a, const RankedConstraintLine& b)
+{
+    if (a.source_rank != b.source_rank ||
+        a.source_claims_ownership != b.source_claims_ownership ||
+        a.line.slave_dof != b.line.slave_dof ||
+        std::bit_cast<std::uint64_t>(static_cast<double>(a.line.inhomogeneity)) !=
+            std::bit_cast<std::uint64_t>(static_cast<double>(b.line.inhomogeneity)) ||
+        a.line.entries.size() != b.line.entries.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < a.line.entries.size(); ++i) {
+        if (a.line.entries[i].master_dof != b.line.entries[i].master_dof ||
+            std::bit_cast<std::uint64_t>(static_cast<double>(a.line.entries[i].weight)) !=
+                std::bit_cast<std::uint64_t>(static_cast<double>(b.line.entries[i].weight))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Canonical lines for the locally relevant slaves: owner-routed when an
+// owner function is available (see setDofOwnerFunction), otherwise the
+// all-gather.  Collective.
+CanonicalConstraintMap
+resolveCanonicalConstraints(MPI_Comm comm,
+                            int world_size,
+                            int my_rank,
+                            const dofs::DofPartition& partition,
+                            const std::function<int(GlobalIndex)>& owner_of,
+                            const ParallelConstraintOptions& options,
+                            const AffineConstraints& local_constraints,
+                            ParallelConstraintStats& stats)
+{
+    static const bool force_allgather = envFlagEnabled("SVMP_PARALLEL_CONSTRAINTS_ALLGATHER");
+    static const bool check = envFlagEnabled("SVMP_PARALLEL_CONSTRAINTS_CHECK");
+    if (!owner_of || force_allgather) {
+        return gatherAndResolveConstraints(comm, world_size, partition, options,
+                                           local_constraints, stats);
+    }
+    auto routed = resolveConstraintsByOwner(comm, world_size, my_rank, partition, owner_of,
+                                            options, local_constraints, stats);
+    if (!routed) {
+        return gatherAndResolveConstraints(comm, world_size, partition, options,
+                                           local_constraints, stats);
+    }
+    if (check) {
+        ParallelConstraintStats reference_stats;
+        const auto reference = gatherAndResolveConstraints(comm, world_size, partition, options,
+                                                           local_constraints, reference_stats);
+        std::exception_ptr local_exception;
+        try {
+            std::size_t relevant_reference = 0;
+            for (const auto& [dof, ranked] : reference) {
+                if (!partition.isRelevant(dof)) {
+                    continue;
+                }
+                ++relevant_reference;
+                const auto it = routed->find(dof);
+                if (it == routed->end() || !sameRankedLineBits(it->second, ranked)) {
+                    CONSTRAINT_THROW_DOF(
+                        "ParallelConstraints: owner-routed canonical line differs from the all-gather",
+                        dof);
+                }
+            }
+            if (relevant_reference != routed->size()) {
+                CONSTRAINT_THROW(
+                    "ParallelConstraints: owner-routed canonical lines cover a different slave set "
+                    "than the all-gather");
+            }
+        } catch (...) {
+            local_exception = std::current_exception();
+        }
+        coordinateDistributedPhaseFailure(comm, local_exception, "routed_self_check");
+    }
+    return std::move(*routed);
+}
+
 /// A ghost copy of a constraint line is only representable on a rank that
 /// also carries every master; lines whose masters lie outside the local halo
 /// stay with the ranks that assemble with them (see
@@ -490,7 +889,7 @@ ParallelConstraintStats ParallelConstraints::makeConsistent(
 
     requireDistributedPartition(comm_, partition_);
 
-    auto canonical = gatherAndResolveConstraints(comm_, world_size_, *partition_, options_, constraints, stats);
+    auto canonical = resolveCanonicalConstraints(comm_, world_size_, my_rank_, *partition_, dof_owner_, options_, constraints, stats);
 
     std::optional<AffineConstraints> updated;
     std::exception_ptr local_rebuild_exception;
@@ -528,7 +927,7 @@ ParallelConstraintStats ParallelConstraints::importGhostConstraints(
 #if FE_HAS_MPI
     requireDistributedPartition(comm_, partition_);
 
-    auto canonical = gatherAndResolveConstraints(comm_, world_size_, *partition_, options_, constraints, stats);
+    auto canonical = resolveCanonicalConstraints(comm_, world_size_, my_rank_, *partition_, dof_owner_, options_, constraints, stats);
 
     std::optional<AffineConstraints> updated;
     std::exception_ptr local_rebuild_exception;
@@ -563,7 +962,7 @@ ParallelConstraintStats ParallelConstraints::synchronize(AffineConstraints& cons
 #if FE_HAS_MPI
     requireDistributedPartition(comm_, partition_);
 
-    auto canonical = gatherAndResolveConstraints(comm_, world_size_, *partition_, options_, constraints, stats);
+    auto canonical = resolveCanonicalConstraints(comm_, world_size_, my_rank_, *partition_, dof_owner_, options_, constraints, stats);
 
     std::optional<AffineConstraints> updated;
     std::exception_ptr local_rebuild_exception;
@@ -625,7 +1024,7 @@ bool ParallelConstraints::validateConsistency(
     requireDistributedPartition(comm_, partition_);
 
     ParallelConstraintStats stats;
-    auto canonical = gatherAndResolveConstraints(comm_, world_size_, *partition_, options_, constraints, stats);
+    auto canonical = resolveCanonicalConstraints(comm_, world_size_, my_rank_, *partition_, dof_owner_, options_, constraints, stats);
 
     bool local_valid = true;
     std::exception_ptr local_validation_exception;
