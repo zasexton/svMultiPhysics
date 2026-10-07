@@ -16524,7 +16524,10 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             configured_fields_satisfied =
                 configured_fields_satisfied && satisfied;
 
-            if (activeSystemRank(sys) == 0) {
+            // Detailed per-iteration line, printed (at INFO) only when
+            // FE_LOG_LEVEL=DEBUG.
+            if (activeSystemRank(sys) == 0 &&
+                Logger::instance().get_level() <= LogLevel::DEBUG) {
                 const bool rel_ok = criterion.rel_tolerance > 0.0 &&
                                     (state.initial_norm > 0.0 &&
                                              std::isfinite(state.initial_norm)

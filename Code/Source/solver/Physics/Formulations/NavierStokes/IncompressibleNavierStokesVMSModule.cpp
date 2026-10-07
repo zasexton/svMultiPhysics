@@ -3250,6 +3250,11 @@ void validateUnfittedContactWallNormal(
         }
     }
 
+    // Detailed per-refresh line, printed (at INFO) only when
+    // FE_LOG_LEVEL=DEBUG.
+    if (FE::Logger::instance().get_level() > FE::LogLevel::DEBUG) {
+        return;
+    }
     FE_LOG_INFO(
         std::string("IncompressibleNavierStokesVMSModule: validated generated contact-line wall normal") +
         " wall_boundary_marker=" +
@@ -5189,6 +5194,13 @@ void logUnfittedContactLineMeasure(
     if (marker_available) {
         cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
             system.meshAccess());
+    }
+    // The statistics below feed only the detailed line, which prints (at
+    // INFO) only when FE_LOG_LEVEL=DEBUG.
+    if (FE::Logger::instance().get_level() > FE::LogLevel::DEBUG) {
+        return;
+    }
+    if (marker_available) {
         const auto rules = cut_context->interfaceRulesForMarker(contact_marker);
         rule_count = rules.size();
         for (const auto* rule : rules) {

@@ -21666,7 +21666,7 @@ void logActiveCutContextRefreshMiss(
     const char* solution_source,
     const char* reason)
 {
-  application::core::oopDiagnosticsCout()
+  application::core::oopDiagnosticsCout(svmp::FE::LogLevel::DEBUG)
       << "[svMultiPhysics::Application] Cut-context refresh miss"
       << " diagnostic=cut_context_refresh_miss"
       << " provenance=" << (provenance != nullptr ? provenance : "unknown")
