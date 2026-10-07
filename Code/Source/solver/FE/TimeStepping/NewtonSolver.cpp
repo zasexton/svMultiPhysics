@@ -13208,7 +13208,28 @@ NewtonReport NewtonSolver::solveStep(
                 return aggregate;
             }
 
-            if (dynamic_relaxation.enabled) {
+            if (dynamic_relaxation.enabled &&
+                outer < dynamic_relaxation.start_iteration) {
+                // Deferred relaxation: keep this update unchanged and only
+                // record it, so that the first relaxed update can estimate
+                // its factor from two raw updates (this one taken with
+                // factor 1).
+                if (std::isfinite(state_change_norm)) {
+                    previous_raw_outer_update->copyFrom(
+                        *workspace.residual_scratch);
+                    previous_raw_outer_update_norm = state_change_norm;
+                    previous_relaxation_constraint_semantics =
+                        current_constraint_semantics;
+                    have_previous_raw_outer_update = true;
+                } else {
+                    have_previous_raw_outer_update = false;
+                    previous_raw_outer_update_norm =
+                        std::numeric_limits<double>::quiet_NaN();
+                }
+                outer_relaxation_factor = 1.0;
+                relaxation_reason = "deferred_until_start_iteration";
+                aggregate.outer_dynamic_relaxation_factor = 1.0;
+            } else if (dynamic_relaxation.enabled) {
                 FE_THROW_IF(
                     !std::isfinite(state_change_norm),
                     systems::InvalidStateException,

@@ -189,6 +189,12 @@ struct NewtonOptions {
             double minimum_factor{0.05};
             double maximum_factor{25.0};
             double denominator_relative_tolerance{1.0e-12};
+            // Index (0-based) of the first outer refresh whose update is
+            // relaxed. The updates of earlier refreshes are taken unchanged;
+            // their raw updates only seed the first estimate, so a step that
+            // converges before this refresh is bitwise identical to an
+            // unrelaxed one. Zero relaxes every update.
+            int start_iteration{0};
         };
 
         bool enabled{false};

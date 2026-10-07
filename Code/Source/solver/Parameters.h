@@ -1558,6 +1558,12 @@ class GeneralSimulationParameters : public ParameterLists
     // Cut-topology epoch changes allowed within one nonlinear attempt; -1
     // (default) means "as many as there are outer fixed-point refreshes".
     Parameter<int> max_cut_topology_restarts_per_step;
+    // Outer geometry fixed point of the new OOP solver: maximum number of
+    // refreshes per step, and the 1-based refresh whose update is the first
+    // one relaxed by the safeguarded delta-squared (Aitken) estimate (0: no
+    // relaxation; 1: every update). Built-in defaults apply when absent.
+    Parameter<int> outer_fixed_point_max_passes;
+    Parameter<int> outer_fixed_point_relaxation_start_pass;
     Parameter<int> adaptive_time_loop_target_newton_iterations;
     Parameter<int> newton_max_iterations;
     Parameter<int> newton_line_search_max_iterations;

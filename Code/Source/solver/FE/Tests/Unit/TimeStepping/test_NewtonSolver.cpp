@@ -3377,7 +3377,8 @@ ContractingRefreshRun runContractingRefreshProblem(
     double abs_tolerance,
     double rel_tolerance,
     std::optional<std::pair<double, double>> field_tolerances = std::nullopt,
-    bool residual_first_on_predicted_certificate = true)
+    bool residual_first_on_predicted_certificate = true,
+    int relaxation_start = -1)
 {
     double generated_measure = 1.0 + c * u0;
     auto problem = makeRefreshedGeometryRootProblem(
@@ -3404,6 +3405,11 @@ ContractingRefreshRun runContractingRefreshProblem(
     options.external_state_fixed_point.max_iterations = 60;
     options.external_state_fixed_point.residual_first_on_predicted_certificate =
         residual_first_on_predicted_certificate;
+    if (relaxation_start >= 0) {
+        options.external_state_fixed_point.dynamic_relaxation.enabled = true;
+        options.external_state_fixed_point.dynamic_relaxation.start_iteration =
+            relaxation_start;
+    }
     options.synchronize_state =
         [&](const svmp::FE::systems::SystemStateView& state, SyncPoint point) {
             const auto u = static_cast<double>(state.u.front());
@@ -3532,6 +3538,59 @@ TEST(NewtonSolverExternalStateFixedPoint,
                   combined.refreshed_states[i])
             << "refresh=" << i;
     }
+}
+
+TEST(NewtonSolverExternalStateFixedPoint,
+     DeferredRelaxationLeavesEarlierRefreshesBitwise)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    // The generated coefficient m = 1 + c*u makes the refresh map
+    // u -> 1/(1 + c*u) contract with the negative factor -c/(1 + c*u*)^2
+    // (about -0.64 for c = 5), like the oscillating sliver cut of the
+    // sessile drop.
+    constexpr double c = 5.0;
+    const auto plain = runContractingRefreshProblem(
+        2.0, c, 1e-8, 0.0, std::nullopt, true, /*relaxation_start=*/-1);
+    ASSERT_TRUE(plain.report.converged);
+    ASSERT_GT(plain.report.outer_iterations, 12);
+
+    // Relaxation deferred beyond the last refresh: every refresh, every
+    // iterate and the accepted state are those of the plain loop.
+    const auto deferred = runContractingRefreshProblem(
+        2.0, c, 1e-8, 0.0, std::nullopt, true,
+        /*relaxation_start=*/plain.report.outer_iterations + 1);
+    ASSERT_TRUE(deferred.report.converged);
+    EXPECT_EQ(deferred.report.outer_iterations,
+              plain.report.outer_iterations);
+    EXPECT_EQ(deferred.report.outer_dynamic_relaxation_updates, 0);
+    EXPECT_EQ(deferred.u, plain.u);
+    ASSERT_EQ(deferred.refreshed_states.size(),
+              plain.refreshed_states.size());
+    for (std::size_t i = 0; i < plain.refreshed_states.size(); ++i) {
+        EXPECT_EQ(deferred.refreshed_states[i], plain.refreshed_states[i])
+            << "refresh=" << i;
+    }
+
+    // Relaxation from the fourth update: the first four refreshes are
+    // unchanged, and the relaxed loop converges in far fewer refreshes to
+    // the same fixed point.
+    const auto relaxed = runContractingRefreshProblem(
+        2.0, c, 1e-8, 0.0, std::nullopt, true, /*relaxation_start=*/3);
+    ASSERT_TRUE(relaxed.report.converged);
+    EXPECT_GE(relaxed.report.outer_dynamic_relaxation_updates, 1);
+    EXPECT_LT(relaxed.report.outer_iterations,
+              plain.report.outer_iterations / 2);
+    ASSERT_GE(relaxed.refreshed_states.size(), 4u);
+    for (std::size_t i = 0; i < 4u; ++i) {
+        EXPECT_EQ(relaxed.refreshed_states[i], plain.refreshed_states[i])
+            << "refresh=" << i;
+    }
+    const double u_star = (-1.0 + std::sqrt(1.0 + 4.0 * c)) / (2.0 * c);
+    EXPECT_NEAR(relaxed.u, u_star, 1e-7);
+    EXPECT_NEAR(plain.u, u_star, 1e-7);
 }
 
 TEST(NewtonSolverExternalStateFixedPoint,
