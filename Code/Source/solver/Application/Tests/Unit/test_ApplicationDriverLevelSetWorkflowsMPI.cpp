@@ -5051,18 +5051,60 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                  maximum_phi_update_across_cases);
 }
 
-TEST(ApplicationDriverLevelSetWorkflowsMPI,
-     HydrostaticGravityWithFixedPressureGaugeMatchesAcrossTwoRankPartition)
+namespace {
+
+// One case of the two-rank hydrostatic fixed-gauge matrix: the partition and
+// numbering variant of the partitioned mesh and DOF layout, and the physical
+// case (active side, cut offset, gravity direction) of the serial twin
+// StaticCapillaryInitializationBalancesHydrostaticGravityWithFixedPressureGauge.
+struct HydrostaticFixedGaugeMpiCase {
+  int spatial_dimension = 2;
+  int normal_axis = 0;
+  bool reverse_vertex_numbering = false;
+  bool alternate_cell_order = false;
+  bool highest_rank_dof_ownership = false;
+  bool dense_global_dof_numbering = false;
+  bool positive_side = false;
+  svmp::FE::Real normal_offset = 0.0;
+  svmp::FE::Real gravity_direction = 0.0;
+};
+
+struct HydrostaticFixedGaugeMpiSummary {
+  std::size_t case_count = 0u;
+  std::size_t two_dimensional_case_count = 0u;
+  std::size_t three_dimensional_case_count = 0u;
+  std::size_t owner_contiguous_nonidentity_case_count = 0u;
+  std::size_t three_dimensional_owner_contiguous_nonidentity_case_count = 0u;
+  std::size_t three_dimensional_shared_vertex_case_count = 0u;
+  svmp::FE::Real maximum_pressure_residual = 0.0;
+  svmp::FE::Real maximum_pressure_relative_distance = 0.0;
+  svmp::FE::Real maximum_exact_field_production_residual = 0.0;
+  svmp::FE::Real maximum_production_residual = 0.0;
+  svmp::FE::Real maximum_initializer_pressure_representative_distance = 0.0;
+  svmp::FE::Real maximum_exact_initializer_pressure_update = 0.0;
+  svmp::FE::Real maximum_gravitational_energy_error = 0.0;
+  svmp::FE::Real maximum_volume_error = 0.0;
+  svmp::FE::Real maximum_surface_energy_error = 0.0;
+  svmp::FE::Real maximum_phi_update = 0.0;
+};
+
+constexpr std::array<svmp::FE::Real, 3> kHydrostaticNormalOffsets{
+    svmp::FE::Real{0.35},
+    svmp::FE::Real{0.5},
+    svmp::FE::Real{0.65},
+};
+
+// Runs one two-rank hydrostatic fixed-gauge case and folds its counts and
+// errors into `summary`. A fatal failure returns early; callers stop the
+// matrix on ::testing::Test::HasFatalFailure().
+void runHydrostaticFixedGaugeMpiCase(
+    const HydrostaticFixedGaugeMpiCase& hydrostatic_case,
+    HydrostaticFixedGaugeMpiSummary& summary)
 {
   int rank = 0;
   int size = 1;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
-  if (size != 2) {
-    GTEST_SKIP()
-        << "This hydrostatic fixed-gauge fixture requires two ranks.";
-  }
-
   constexpr int interface_marker = 725;
   constexpr int first_wall_marker = 7251;
   constexpr int second_wall_marker = 7252;
@@ -5076,38 +5118,1175 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       svmp::FE::Real{3.141592653589793238462643383279502884};
   constexpr svmp::FE::Real contact_angle =
       pi / svmp::FE::Real{2.0};
+  const int spatial_dimension = hydrostatic_case.spatial_dimension;
+  const int normal_axis = hydrostatic_case.normal_axis;
+  const bool reverse_vertex_numbering =
+      hydrostatic_case.reverse_vertex_numbering;
+  const bool column_major_cells = hydrostatic_case.alternate_cell_order;
+  const bool highest_rank_dof_ownership =
+      hydrostatic_case.highest_rank_dof_ownership;
+  const bool dense_global_dof_numbering =
+      hydrostatic_case.dense_global_dof_numbering;
+  std::array<int, 2> tangent_axes{};
+  std::size_t tangent_axis_count = 0u;
+  for (int axis = 0; axis < spatial_dimension; ++axis) {
+    if (axis != normal_axis) {
+      tangent_axes[tangent_axis_count++] = axis;
+    }
+  }
+  ASSERT_EQ(tangent_axis_count,
+            static_cast<std::size_t>(spatial_dimension - 1));
+  const int tangent_axis = tangent_axes.front();
+  const bool positive_side = hydrostatic_case.positive_side;
+  const auto gauge_normal_coordinate =
+      positive_side ? svmp::FE::Real{1.0} : svmp::FE::Real{0.0};
+  const auto normal_offset = hydrostatic_case.normal_offset;
+  const svmp::FE::Real gravity_direction = hydrostatic_case.gravity_direction;
+  const auto gravity = gravity_direction * gravity_magnitude;
+  const auto external_pressure =
+      density * gravity *
+      (normal_offset - gauge_normal_coordinate);
+  SCOPED_TRACE(::testing::Message()
+               << "rank=" << rank
+               << " spatial_dimension=" << spatial_dimension
+               << " cell_order="
+               << (column_major_cells ? "column-major"
+                                      : "row-major")
+               << " vertex_numbering="
+               << (reverse_vertex_numbering ? "reversed"
+                                            : "forward")
+               << " dof_ownership="
+               << (highest_rank_dof_ownership ? "highest-rank"
+                                              : "lowest-rank")
+               << " fe_global_numbering="
+               << (dense_global_dof_numbering ? "dense-global-ids"
+                                              : "owner-contiguous")
+               << " normal_axis=" << normal_axis
+               << " active_side="
+               << (positive_side ? "positive" : "negative")
+               << " normal_offset=" << normal_offset
+               << " gravity=" << gravity
+               << " external_pressure=" << external_pressure);
+  ++summary.case_count;
+  if (spatial_dimension == 2) {
+    ++summary.two_dimensional_case_count;
+  } else {
+    ++summary.three_dimensional_case_count;
+  }
+
+  auto mesh = spatial_dimension == 2
+                  ? makePartitionedHydrostaticPressureMesh(
+                        normal_axis,
+                        column_major_cells,
+                        reverse_vertex_numbering)
+                  : makePartitionedHydrostaticPressureMesh3D(
+                        normal_axis,
+                        column_major_cells,
+                        reverse_vertex_numbering);
+  ASSERT_GT(mesh->n_ghost_vertices(), 0u);
+  auto& local_mesh = mesh->local_mesh();
+  unsigned long long local_owned_cell_count = 0u;
+  for (std::size_t cell = 0u;
+       cell < mesh->n_cells();
+       ++cell) {
+    const auto local_cell = static_cast<svmp::index_t>(cell);
+    if (mesh->owner_rank_cell(local_cell) != rank) {
+      continue;
+    }
+    ++local_owned_cell_count;
+  }
+  std::array<unsigned long long, 2> owned_cell_counts{};
+  ASSERT_EQ(MPI_Allgather(&local_owned_cell_count,
+                          1,
+                          MPI_UNSIGNED_LONG_LONG,
+                          owned_cell_counts.data(),
+                          1,
+                          MPI_UNSIGNED_LONG_LONG,
+                          MPI_COMM_WORLD),
+            MPI_SUCCESS);
+  const auto expected_owned_cell_count =
+      spatial_dimension == 2 ? 16u : 48u;
+  EXPECT_EQ(owned_cell_counts[0], expected_owned_cell_count);
+  EXPECT_EQ(owned_cell_counts[1], expected_owned_cell_count);
+
+  if (spatial_dimension == 2) {
+    std::array<int, 2> local_probe_counts{};
+    std::array<int, 2> local_probe_owner_plus_one{};
+    for (std::size_t cell = 0u;
+         cell < mesh->n_cells();
+         ++cell) {
+      const auto local_cell = static_cast<svmp::index_t>(cell);
+      if (mesh->owner_rank_cell(local_cell) != rank) {
+        continue;
+      }
+      const auto center = local_mesh.cell_center(local_cell);
+      const auto logical_tangent_coordinate =
+          normal_axis == 0
+              ? svmp::FE::Real{3.0} - center[tangent_axis]
+              : center[tangent_axis];
+      const bool lower_right =
+          logical_tangent_coordinate > svmp::FE::Real{2.25} &&
+          center[normal_axis] < svmp::FE::Real{0.2};
+      const bool upper_left =
+          logical_tangent_coordinate < svmp::FE::Real{0.81} &&
+          center[normal_axis] > svmp::FE::Real{0.7};
+      if (lower_right) {
+        ++local_probe_counts[0];
+        local_probe_owner_plus_one[0] = rank + 1;
+      }
+      if (upper_left) {
+        ++local_probe_counts[1];
+        local_probe_owner_plus_one[1] = rank + 1;
+      }
+    }
+    std::array<int, 2> global_probe_counts{};
+    std::array<int, 2> global_probe_owner_plus_one{};
+    ASSERT_EQ(
+        MPI_Allreduce(local_probe_counts.data(),
+                      global_probe_counts.data(),
+                      static_cast<int>(local_probe_counts.size()),
+                      MPI_INT,
+                      MPI_SUM,
+                      MPI_COMM_WORLD),
+        MPI_SUCCESS);
+    ASSERT_EQ(
+        MPI_Allreduce(
+            local_probe_owner_plus_one.data(),
+            global_probe_owner_plus_one.data(),
+            static_cast<int>(local_probe_owner_plus_one.size()),
+            MPI_INT,
+            MPI_MAX,
+            MPI_COMM_WORLD),
+        MPI_SUCCESS);
+    EXPECT_EQ(global_probe_counts,
+              (std::array<int, 2>{2, 2}));
+    EXPECT_EQ(
+        global_probe_owner_plus_one,
+        (column_major_cells ? std::array<int, 2>{2, 1}
+                            : std::array<int, 2>{1, 2}));
+  }
+
+  struct ContactWall {
+    int marker = -1;
+    int axis = 0;
+    svmp::FE::Real coordinate = 0.0;
+    svmp::FE::Real outward_normal = 0.0;
+  };
+  const std::array<int, 4> wall_markers{{
+      first_wall_marker,
+      second_wall_marker,
+      third_wall_marker,
+      fourth_wall_marker,
+  }};
+  std::vector<ContactWall> contact_walls;
+  contact_walls.reserve(2u * tangent_axis_count);
+  for (std::size_t tangent = 0u;
+       tangent < tangent_axis_count;
+       ++tangent) {
+    const auto axis = tangent_axes[tangent];
+    const auto maximum_coordinate =
+        spatial_dimension == 2 || axis == (normal_axis + 1) % 3
+            ? svmp::FE::Real{3.0}
+            : svmp::FE::Real{2.0};
+    contact_walls.push_back(ContactWall{
+        .marker = wall_markers[2u * tangent],
+        .axis = axis,
+        .coordinate = 0.0,
+        .outward_normal = -1.0,
+    });
+    contact_walls.push_back(ContactWall{
+        .marker = wall_markers[2u * tangent + 1u],
+        .axis = axis,
+        .coordinate = maximum_coordinate,
+        .outward_normal = 1.0,
+    });
+  }
+  ASSERT_EQ(contact_walls.size(),
+            static_cast<std::size_t>(
+                2 * (spatial_dimension - 1)));
+
+  std::array<int, 6> local_marker_present{};
+  constexpr svmp::FE::Real coordinate_tolerance = 1.0e-12;
+  const auto physical_boundary_faces =
+      svmp::DistributedTopology::global_boundary_faces(
+          *mesh, /*owned_only=*/false);
+  for (const auto face : physical_boundary_faces) {
+    const auto vertices = local_mesh.face_vertices(face);
+    ASSERT_EQ(vertices.size(),
+              static_cast<std::size_t>(spatial_dimension));
+    std::array<bool, 4> on_contact_wall{{true, true, true, true}};
+    bool on_lower_anchor = true;
+    bool on_upper_anchor = true;
+    for (const auto vertex : vertices) {
+      const auto point = local_mesh.get_vertex_coords(vertex);
+      for (std::size_t wall = 0u;
+           wall < contact_walls.size();
+           ++wall) {
+        on_contact_wall[wall] =
+            on_contact_wall[wall] &&
+            std::abs(point[contact_walls[wall].axis] -
+                     contact_walls[wall].coordinate) <=
+                coordinate_tolerance;
+      }
+      on_lower_anchor =
+          on_lower_anchor &&
+          std::abs(point[normal_axis]) <= coordinate_tolerance;
+      on_upper_anchor =
+          on_upper_anchor &&
+          std::abs(point[normal_axis] - svmp::FE::Real{1.0}) <=
+              coordinate_tolerance;
+    }
+    bool classified = false;
+    for (std::size_t wall = 0u;
+         wall < contact_walls.size();
+         ++wall) {
+      if (on_contact_wall[wall]) {
+        mesh->set_boundary_label(face, contact_walls[wall].marker);
+        local_marker_present[wall] = 1;
+        classified = true;
+        break;
+      }
+    }
+    if (classified) {
+      continue;
+    }
+    if (on_lower_anchor) {
+      mesh->set_boundary_label(face, lower_anchor_marker);
+      local_marker_present[4] = 1;
+    } else if (on_upper_anchor) {
+      mesh->set_boundary_label(face, upper_anchor_marker);
+      local_marker_present[5] = 1;
+    } else {
+      FAIL() << "Distributed hydrostatic fixture found an "
+                "unclassified physical boundary face.";
+    }
+  }
+  std::array<int, 6> global_marker_present{};
+  ASSERT_EQ(
+      MPI_Allreduce(local_marker_present.data(),
+                    global_marker_present.data(),
+                    static_cast<int>(local_marker_present.size()),
+                    MPI_INT,
+                    MPI_MAX,
+                    MPI_COMM_WORLD),
+      MPI_SUCCESS);
+  for (std::size_t wall = 0u;
+       wall < contact_walls.size();
+       ++wall) {
+    EXPECT_EQ(global_marker_present[wall], 1);
+  }
+  EXPECT_EQ(global_marker_present[4], 1);
+  EXPECT_EQ(global_marker_present[5], 1);
+
+  std::array<unsigned long long, 6> local_marker_face_counts{};
+  const auto owned_physical_boundary_faces =
+      svmp::DistributedTopology::global_boundary_faces(
+          *mesh, /*owned_only=*/true);
+  for (const auto face : owned_physical_boundary_faces) {
+    const auto marker = mesh->boundary_label(face);
+    for (std::size_t wall = 0u;
+         wall < contact_walls.size();
+         ++wall) {
+      if (marker == contact_walls[wall].marker) {
+        ++local_marker_face_counts[wall];
+      }
+    }
+    if (marker == lower_anchor_marker) {
+      ++local_marker_face_counts[4];
+    } else if (marker == upper_anchor_marker) {
+      ++local_marker_face_counts[5];
+    }
+  }
+  std::array<unsigned long long, 6> global_marker_face_counts{};
+  ASSERT_EQ(
+      MPI_Allreduce(local_marker_face_counts.data(),
+                    global_marker_face_counts.data(),
+                    static_cast<int>(
+                        local_marker_face_counts.size()),
+                    MPI_UNSIGNED_LONG_LONG,
+                    MPI_SUM,
+                    MPI_COMM_WORLD),
+      MPI_SUCCESS);
+  const auto expected_contact_wall_face_count =
+      spatial_dimension == 2 ? 4u : 16u;
+  const auto expected_anchor_face_count =
+      spatial_dimension == 2 ? 4u : 8u;
+  for (std::size_t wall = 0u;
+       wall < contact_walls.size();
+       ++wall) {
+    EXPECT_EQ(global_marker_face_counts[wall],
+              expected_contact_wall_face_count);
+  }
+  EXPECT_EQ(global_marker_face_counts[4],
+            expected_anchor_face_count);
+  EXPECT_EQ(global_marker_face_counts[5],
+            expected_anchor_face_count);
+
+  const auto& vertex_gids = local_mesh.vertex_gids();
+  ASSERT_EQ(vertex_gids.size(), mesh->n_vertices());
+  auto local_max_vertex_gid = svmp::gid_t{-1};
+  for (const auto gid : vertex_gids) {
+    local_max_vertex_gid = std::max(local_max_vertex_gid, gid);
+  }
+  svmp::gid_t global_max_vertex_gid = svmp::gid_t{-1};
+  ASSERT_EQ(MPI_Allreduce(&local_max_vertex_gid,
+                          &global_max_vertex_gid,
+                          1,
+                          MPI_INT64_T,
+                          MPI_MAX,
+                          MPI_COMM_WORLD),
+            MPI_SUCCESS);
+  ASSERT_GE(global_max_vertex_gid, svmp::gid_t{0});
+  const auto global_vertex_count =
+      static_cast<std::size_t>(global_max_vertex_gid + 1);
+  std::vector<int> local_owned_cell_vertex_adjacency(
+      global_vertex_count, 0);
+  for (std::size_t cell = 0u; cell < mesh->n_cells(); ++cell) {
+    const auto local_cell = static_cast<svmp::index_t>(cell);
+    if (mesh->owner_rank_cell(local_cell) != rank) {
+      continue;
+    }
+    for (const auto vertex : local_mesh.cell_vertices(local_cell)) {
+      ASSERT_GE(vertex, svmp::index_t{0});
+      ASSERT_LT(static_cast<std::size_t>(vertex),
+                vertex_gids.size());
+      const auto gid =
+          vertex_gids[static_cast<std::size_t>(vertex)];
+      ASSERT_GE(gid, svmp::gid_t{0});
+      ASSERT_LT(static_cast<std::size_t>(gid),
+                global_vertex_count);
+      local_owned_cell_vertex_adjacency[
+          static_cast<std::size_t>(gid)] = 1;
+    }
+  }
+  std::vector<int> global_owned_cell_vertex_adjacency(
+      global_vertex_count, 0);
+  ASSERT_LE(global_vertex_count,
+            static_cast<std::size_t>(
+                std::numeric_limits<int>::max()));
+  ASSERT_EQ(MPI_Allreduce(
+                local_owned_cell_vertex_adjacency.data(),
+                global_owned_cell_vertex_adjacency.data(),
+                static_cast<int>(global_vertex_count),
+                MPI_INT,
+                MPI_SUM,
+                MPI_COMM_WORLD),
+            MPI_SUCCESS);
+  auto shared_vertex_gid = svmp::gid_t{-1};
+  for (std::size_t gid = 0u;
+       gid < global_owned_cell_vertex_adjacency.size();
+       ++gid) {
+    if (global_owned_cell_vertex_adjacency[gid] == size) {
+      shared_vertex_gid = static_cast<svmp::gid_t>(gid);
+      break;
+    }
+  }
+  ASSERT_GE(shared_vertex_gid, svmp::gid_t{0});
+  auto local_gauge_gid = std::numeric_limits<svmp::gid_t>::max();
+  for (std::size_t vertex = 0u;
+       vertex < mesh->n_vertices();
+       ++vertex) {
+    const auto point = local_mesh.get_vertex_coords(
+        static_cast<svmp::index_t>(vertex));
+    if (std::abs(point[normal_axis] - gauge_normal_coordinate) <=
+        coordinate_tolerance) {
+      local_gauge_gid =
+          std::min(local_gauge_gid, vertex_gids[vertex]);
+    }
+  }
+  svmp::gid_t gauge_gid =
+      std::numeric_limits<svmp::gid_t>::max();
+  ASSERT_EQ(MPI_Allreduce(&local_gauge_gid,
+                          &gauge_gid,
+                          1,
+                          MPI_INT64_T,
+                          MPI_MIN,
+                          MPI_COMM_WORLD),
+            MPI_SUCCESS);
+  ASSERT_NE(gauge_gid, std::numeric_limits<svmp::gid_t>::max());
+  ASSERT_GE(gauge_gid, svmp::gid_t{0});
+  const auto upper_gauge_layer_first_gid =
+      spatial_dimension == 2 ? 20 : 36;
+  const auto expected_gauge_gid = static_cast<svmp::gid_t>(
+      reverse_vertex_numbering
+          ? (positive_side ? 0 : upper_gauge_layer_first_gid)
+          : (positive_side ? upper_gauge_layer_first_gid : 0));
+  EXPECT_EQ(gauge_gid, expected_gauge_gid);
+
+  const auto mesh_field = svmp::MeshFields::attach_field(
+      local_mesh,
+      svmp::EntityKind::Vertex,
+      "phi_physical_hydrostatic_fixed_gauge_mpi",
+      svmp::FieldScalarType::Float64,
+      1);
+  auto* mesh_phi =
+      svmp::MeshFields::field_data_as<svmp::real_t>(
+          local_mesh, mesh_field);
+  ASSERT_NE(mesh_phi, nullptr);
+  const auto& coordinates = mesh->X_ref();
+  ASSERT_EQ(coordinates.size(),
+            static_cast<std::size_t>(spatial_dimension) *
+                mesh->n_vertices());
+  for (std::size_t vertex = 0u;
+       vertex < mesh->n_vertices();
+       ++vertex) {
+    mesh_phi[vertex] =
+        coordinates[static_cast<std::size_t>(spatial_dimension) *
+                        vertex +
+                    static_cast<std::size_t>(normal_axis)] -
+        normal_offset;
+  }
+
+  const auto element_type =
+      spatial_dimension == 2
+          ? svmp::FE::ElementType::Triangle3
+          : svmp::FE::ElementType::Tetra4;
+  auto scalar_space =
+      svmp::FE::spaces::SpaceFactory::create_h1(
+          element_type,
+          /*order=*/1);
+  auto velocity_space =
+      svmp::FE::spaces::SpaceFactory::create_vector_h1(
+          element_type,
+          /*order=*/1,
+          /*components=*/spatial_dimension);
+  auto system =
+      std::make_unique<svmp::FE::systems::FESystem>(mesh);
+  const auto phi = system->addField(
+      svmp::FE::systems::FieldSpec{
+          .name = "phi_physical_hydrostatic_fixed_gauge_mpi",
+          .space = scalar_space,
+          .components = 1});
+
+  channel_ns::IncompressibleNavierStokesVMSOptions options;
+  options.velocity_field_name =
+      "u_physical_hydrostatic_fixed_gauge_mpi";
+  options.pressure_field_name =
+      "p_physical_hydrostatic_fixed_gauge_mpi";
+  options.density = density;
+  options.viscosity = 0.01;
+  options.body_force[normal_axis] = gravity;
+  options.enable_convection = false;
+  options.enable_vms = false;
+  options.jit_policy.enable = false;
+  options.velocity_dirichlet.push_back(
+      channel_ns::IncompressibleNavierStokesVMSOptions::
+          VelocityDirichletBC{
+              .boundary_marker =
+                  positive_side ? upper_anchor_marker
+                                : lower_anchor_marker,
+              .value = {0.0, 0.0, 0.0},
+          });
+  for (const auto& wall : contact_walls) {
+    options.velocity_dirichlet.push_back(
+        channel_ns::IncompressibleNavierStokesVMSOptions::
+            VelocityDirichletBC{
+                .boundary_marker = wall.marker,
+                .value = {0.0, 0.0, 0.0},
+                .active_components = {wall.axis == 0,
+                                      wall.axis == 1,
+                                      wall.axis == 2},
+            });
+  }
+  options.node_pressure_constraints.id_type =
+      channel_ns::IncompressibleNavierStokesVMSOptions::
+          NodePressureConstraintIdType::GlobalVertexGid;
+  options.node_pressure_constraints.values.push_back(
+      channel_ns::IncompressibleNavierStokesVMSOptions::
+          NodePressureConstraint{
+              .node_id =
+                  static_cast<svmp::FE::GlobalIndex>(gauge_gid),
+              .pressure = 0.0,
+          });
+
+  using ContactLine =
+      channel_ns::IncompressibleNavierStokesVMSOptions::
+          FreeSurfaceContactLine;
+  auto free_surface =
+      channel_ns::IncompressibleNavierStokesVMSOptions::
+          FreeSurfaceBoundary{
+              .implementation =
+                  channel_ns::FreeSurfaceImplementation::
+                      UnfittedLevelSet,
+              .interface_marker = interface_marker,
+              .level_set_field_name =
+                  "phi_physical_hydrostatic_fixed_gauge_mpi",
+              .generated_interface_domain_id =
+                  "physical_hydrostatic_fixed_gauge_mpi",
+              .generated_interface_geometry = "LinearCorner",
+              .active_domain =
+                  positive_side
+                      ? channel_ns::FreeSurfaceActiveDomain::
+                            LevelSetPositive
+                      : channel_ns::FreeSurfaceActiveDomain::
+                            LevelSetNegative,
+              .active_domain_method =
+                  channel_ns::FreeSurfaceActiveDomainMethod::
+                      CutVolume,
+              .external_pressure = external_pressure,
+              .surface_tension = 1.0,
+              .surface_tension_form =
+                  channel_ns::FreeSurfaceSurfaceTensionForm::
+                      SurfaceStress,
+              .curvature = 0.0,
+              .use_level_set_curvature = false,
+              .small_cut_aggregation = false,
+  };
+  for (const auto& wall : contact_walls) {
+    free_surface.contact_lines.push_back(
+        ContactLine{
+            .configuration = ContactLine::DynamicRenE{
+                .wall_boundary_marker = wall.marker,
+                .contact_line_marker = -1,
+                .equilibrium_contact_angle_radians = contact_angle,
+                .wall_normal = {
+                    wall.axis == 0 ? wall.outward_normal : 0.0,
+                    wall.axis == 1 ? wall.outward_normal : 0.0,
+                    wall.axis == 2 ? wall.outward_normal : 0.0},
+                .mobility = 1.0,
+                .slip_length = 1.0,
+            }});
+  }
+  options.free_surface.push_back(std::move(free_surface));
+
+  channel_ns::IncompressibleNavierStokesVMSModule module(
+      velocity_space, scalar_space, std::move(options));
+  module.registerOn(*system);
+  const auto velocity = system->findFieldByName(
+      "u_physical_hydrostatic_fixed_gauge_mpi");
+  const auto pressure = system->findFieldByName(
+      "p_physical_hydrostatic_fixed_gauge_mpi");
+  ASSERT_NE(velocity, svmp::FE::INVALID_FIELD_ID);
+  ASSERT_NE(pressure, svmp::FE::INVALID_FIELD_ID);
+
+  svmp::FE::systems::SetupOptions setup_options;
+  setup_options.assembler_name = "StandardAssembler";
+  setup_options.assembly_options.ghost_policy =
+      svmp::FE::assembly::GhostPolicy::ReverseScatter;
+  setup_options.assembly_options.deterministic = true;
+  setup_options.assembly_options.overlap_communication = false;
+  setup_options.dof_options.global_numbering =
+      dense_global_dof_numbering
+          ? svmp::FE::dofs::GlobalNumberingMode::DenseGlobalIds
+          : svmp::FE::dofs::GlobalNumberingMode::OwnerContiguous;
+  setup_options.dof_options.ownership =
+      highest_rank_dof_ownership
+          ? svmp::FE::dofs::OwnershipStrategy::HighestRank
+          : svmp::FE::dofs::OwnershipStrategy::LowestRank;
+  setup_options.dof_options.my_rank = rank;
+  setup_options.dof_options.world_size = size;
+  setup_options.dof_options.mpi_comm = MPI_COMM_WORLD;
+  setup_options.use_backend_row_ownership_for_assembly = true;
+  setup_options.retain_serial_sparsity = false;
+  ASSERT_NO_THROW(system->setup(setup_options));
+  ASSERT_TRUE(system->dofPermutation());
+
+  const auto solution_size = static_cast<std::size_t>(
+      system->dofHandler().getNumDofs());
+  ASSERT_LE(solution_size,
+            static_cast<std::size_t>(
+                std::numeric_limits<int>::max()));
+  std::vector<svmp::FE::Real> local_current(solution_size, 0.0);
+  std::vector<svmp::FE::Real> local_exact(solution_size, 0.0);
+  std::vector<svmp::FE::Real> current(solution_size, 0.0);
+  std::vector<svmp::FE::Real> exact_solution(solution_size, 0.0);
+  const auto& phi_dofs = system->fieldDofHandler(phi);
+  const auto* phi_entity_map = phi_dofs.getEntityDofMap();
+  ASSERT_NE(phi_entity_map, nullptr);
+  const auto& pressure_dofs = system->fieldDofHandler(pressure);
+  const auto* pressure_entity_map =
+      pressure_dofs.getEntityDofMap();
+  ASSERT_NE(pressure_entity_map, nullptr);
+  const auto phi_offset = system->fieldDofOffset(phi);
+  const auto pressure_offset = system->fieldDofOffset(pressure);
+  ASSERT_GE(phi_offset, 0);
+  ASSERT_GE(pressure_offset, 0);
+  std::size_t shared_ownership_probe_vertex_count = 0u;
+  unsigned long long local_pressure_numbering_mismatch_count = 0u;
+  for (std::size_t vertex = 0u;
+       vertex < mesh->n_vertices();
+       ++vertex) {
+    const auto normal_coordinate =
+        static_cast<svmp::FE::Real>(
+            coordinates[static_cast<std::size_t>(spatial_dimension) *
+                            vertex +
+                        static_cast<std::size_t>(normal_axis)]);
+    const auto signed_coordinate =
+        normal_coordinate - normal_offset;
+    const auto phi_vertex_dofs =
+        phi_entity_map->getVertexDofs(
+            static_cast<svmp::FE::GlobalIndex>(vertex));
+    ASSERT_EQ(phi_vertex_dofs.size(), 1u);
+    const auto phi_dof = phi_vertex_dofs.front();
+    ASSERT_GE(phi_dof, 0);
+    if (phi_dofs.getDofMap().isOwnedDof(phi_dof)) {
+      const auto index =
+          static_cast<std::size_t>(phi_offset + phi_dof);
+      ASSERT_LT(index, solution_size);
+      local_current[index] = signed_coordinate;
+      local_exact[index] = signed_coordinate;
+    }
+
+    const auto pressure_vertex_dofs =
+        pressure_entity_map->getVertexDofs(
+            static_cast<svmp::FE::GlobalIndex>(vertex));
+    ASSERT_EQ(pressure_vertex_dofs.size(), 1u);
+    const auto pressure_dof = pressure_vertex_dofs.front();
+    ASSERT_GE(pressure_dof, 0);
+    const auto pressure_vertex_gid = static_cast<svmp::FE::GlobalIndex>(
+        vertex_gids[vertex]);
+    if (dense_global_dof_numbering) {
+      EXPECT_EQ(pressure_dof, pressure_vertex_gid);
+    }
+    if (pressure_dofs.getDofMap().isOwnedDof(pressure_dof) &&
+        pressure_dof != pressure_vertex_gid) {
+      ++local_pressure_numbering_mismatch_count;
+    }
+    bool is_ownership_probe_vertex =
+        pressure_vertex_gid == shared_vertex_gid;
+    if (spatial_dimension == 2) {
+      const auto logical_tangent_coordinate =
+          normal_axis == 0
+              ? svmp::FE::Real{3.0} -
+                    static_cast<svmp::FE::Real>(
+                        coordinates[
+                            static_cast<std::size_t>(
+                                spatial_dimension) *
+                                vertex +
+                            static_cast<std::size_t>(tangent_axis)])
+              : static_cast<svmp::FE::Real>(
+                    coordinates[
+                        static_cast<std::size_t>(spatial_dimension) *
+                            vertex +
+                        static_cast<std::size_t>(tangent_axis)]);
+      is_ownership_probe_vertex =
+          std::abs(normal_coordinate - svmp::FE::Real{0.4}) <=
+              coordinate_tolerance &&
+          std::abs(logical_tangent_coordinate -
+                   svmp::FE::Real{1.55}) <= coordinate_tolerance;
+    }
+    if (is_ownership_probe_vertex) {
+      ++shared_ownership_probe_vertex_count;
+      EXPECT_EQ(
+          pressure_dofs.getDofMap().getDofOwner(pressure_dof),
+          highest_rank_dof_ownership ? 1 : 0);
+    }
+    if (pressure_dofs.getDofMap().isOwnedDof(pressure_dof)) {
+      const auto index =
+          static_cast<std::size_t>(pressure_offset + pressure_dof);
+      ASSERT_LT(index, solution_size);
+      local_exact[index] =
+          density * gravity *
+          (normal_coordinate - gauge_normal_coordinate);
+    }
+  }
+  EXPECT_EQ(shared_ownership_probe_vertex_count, 1u);
+  if (spatial_dimension == 3) {
+    ++summary.three_dimensional_shared_vertex_case_count;
+  }
+  unsigned long long pressure_numbering_mismatch_count = 0u;
+  ASSERT_EQ(MPI_Allreduce(
+                &local_pressure_numbering_mismatch_count,
+                &pressure_numbering_mismatch_count,
+                1,
+                MPI_UNSIGNED_LONG_LONG,
+                MPI_SUM,
+                MPI_COMM_WORLD),
+            MPI_SUCCESS);
+  if (dense_global_dof_numbering) {
+    EXPECT_EQ(pressure_numbering_mismatch_count, 0u);
+  } else if (pressure_numbering_mismatch_count > 0u) {
+    ++summary.owner_contiguous_nonidentity_case_count;
+    if (spatial_dimension == 3) {
+      ++summary.three_dimensional_owner_contiguous_nonidentity_case_count;
+    }
+  }
+  ASSERT_EQ(MPI_Allreduce(local_current.data(),
+                          current.data(),
+                          static_cast<int>(solution_size),
+                          MPI_DOUBLE,
+                          MPI_SUM,
+                          MPI_COMM_WORLD),
+            MPI_SUCCESS);
+  ASSERT_EQ(MPI_Allreduce(local_exact.data(),
+                          exact_solution.data(),
+                          static_cast<int>(solution_size),
+                          MPI_DOUBLE,
+                          MPI_SUM,
+                          MPI_COMM_WORLD),
+            MPI_SUCCESS);
+  system->updateConstraints(/*time=*/0.0, /*dt=*/0.1);
+  system->constraints().distribute(current);
+  system->constraints().distribute(exact_solution);
+  std::fill(local_current.begin(), local_current.end(), 0.0);
+  std::fill(local_exact.begin(), local_exact.end(), 0.0);
+  for (const auto field : {phi, velocity, pressure}) {
+    const auto field_offset = system->fieldDofOffset(field);
+    const auto& field_dofs = system->fieldDofHandler(field);
+    ASSERT_GE(field_offset, 0);
+    ASSERT_GE(field_dofs.getNumDofs(), 0);
+    for (svmp::FE::GlobalIndex dof = 0;
+         dof < field_dofs.getNumDofs();
+         ++dof) {
+      if (!field_dofs.getDofMap().isOwnedDof(dof)) {
+        continue;
+      }
+      const auto index =
+          static_cast<std::size_t>(field_offset + dof);
+      ASSERT_LT(index, solution_size);
+      local_current[index] = current[index];
+      local_exact[index] = exact_solution[index];
+    }
+  }
+  std::vector<svmp::FE::Real> constrained_current(
+      solution_size, 0.0);
+  std::vector<svmp::FE::Real> constrained_exact(
+      solution_size, 0.0);
+  ASSERT_EQ(MPI_Allreduce(local_current.data(),
+                          constrained_current.data(),
+                          static_cast<int>(solution_size),
+                          MPI_DOUBLE,
+                          MPI_SUM,
+                          MPI_COMM_WORLD),
+            MPI_SUCCESS);
+  ASSERT_EQ(MPI_Allreduce(local_exact.data(),
+                          constrained_exact.data(),
+                          static_cast<int>(solution_size),
+                          MPI_DOUBLE,
+                          MPI_SUM,
+                          MPI_COMM_WORLD),
+            MPI_SUCCESS);
+  current = std::move(constrained_current);
+  exact_solution = std::move(constrained_exact);
+
+  application::core::SimulationComponents sim;
+  sim.primary_mesh = mesh;
+  sim.fe_system = std::move(system);
+  sim.backend =
+      std::make_unique<svmp::FE::backends::FsilsFactory>(
+          /*dofs_per_node=*/spatial_dimension + 2,
+          sim.fe_system->dofPermutation(),
+          MPI_COMM_WORLD);
+  ASSERT_NE(sim.backend, nullptr);
+  const auto* distributed_equations =
+      sim.fe_system->distributedSparsityIfAvailable("equations");
+  ASSERT_NE(distributed_equations, nullptr);
+  auto backend_layout_matrix =
+      sim.backend->createMatrix(*distributed_equations);
+  ASSERT_NE(backend_layout_matrix, nullptr);
+  svmp::FE::backends::SolverOptions linear_options;
+  linear_options.method =
+      svmp::FE::backends::SolverMethod::GMRES;
+  linear_options.preconditioner =
+      svmp::FE::backends::PreconditionerType::Diagonal;
+  linear_options.rel_tol = 1.0e-12;
+  linear_options.abs_tol = 1.0e-13;
+  linear_options.max_iter = 500;
+  sim.linear_solver =
+      sim.backend->createLinearSolver(linear_options);
+  ASSERT_NE(sim.linear_solver, nullptr);
+
+  auto allocated_history =
+      svmp::FE::timestepping::TimeHistory::allocate(
+          *sim.backend,
+          sim.fe_system->dofHandler().getNumDofs(),
+          /*history_depth=*/2,
+          /*allocate_second_order_state=*/true);
+  sim.time_history =
+      std::make_unique<svmp::FE::timestepping::TimeHistory>(
+          std::move(allocated_history));
+  sim.time_history->setTime(0.0);
+  sim.time_history->setDt(0.1);
+  sim.time_history->setPrevDt(0.1);
+  scatterFeOrderedSolution(sim.time_history->u(), current);
+  scatterFeOrderedSolution(sim.time_history->uPrev(), current);
+  scatterFeOrderedSolution(sim.time_history->uPrev2(), current);
+  sim.time_history->uDot().zero();
+  sim.time_history->uDDot().zero();
+  sim.time_history->updateGhosts();
+  const auto owned_rows =
+      sim.time_history->u().ownedGlobalRows();
+  ASSERT_FALSE(owned_rows.empty());
+  EXPECT_LT(owned_rows.size(), solution_size);
+  const auto local_owned_row_count =
+      static_cast<unsigned long long>(owned_rows.size());
+  unsigned long long global_owned_row_count = 0u;
+  ASSERT_EQ(MPI_Allreduce(&local_owned_row_count,
+                          &global_owned_row_count,
+                          1,
+                          MPI_UNSIGNED_LONG_LONG,
+                          MPI_SUM,
+                          MPI_COMM_WORLD),
+            MPI_SUCCESS);
+  EXPECT_EQ(global_owned_row_count,
+            static_cast<unsigned long long>(solution_size));
+
+  std::ostringstream contact_wall_markers_xml;
+  std::ostringstream contact_wall_normals_xml;
+  for (std::size_t wall_index = 0u;
+       wall_index < contact_walls.size();
+       ++wall_index) {
+    if (wall_index > 0u) {
+      contact_wall_markers_xml << ';';
+      contact_wall_normals_xml << "; ";
+    }
+    const auto& wall = contact_walls[wall_index];
+    contact_wall_markers_xml << wall.marker;
+    for (int component = 0; component < 3; ++component) {
+      if (component > 0) {
+        contact_wall_normals_xml << ' ';
+      }
+      contact_wall_normals_xml
+          << (component == wall.axis ? wall.outward_normal : 0.0);
+    }
+  }
+  std::ostringstream parameter_xml;
+  parameter_xml << std::setprecision(17) << R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi_physical_hydrostatic_fixed_gauge_mpi</Level_set_field_name>
+    <Enable_static_capillary_equilibrium_initialization>true</Enable_static_capillary_equilibrium_initialization>
+    <Static_capillary_volume_tolerance>1.0e-11</Static_capillary_volume_tolerance>
+    <Static_capillary_projected_gradient_tolerance>2.0e-6</Static_capillary_projected_gradient_tolerance>
+    <Static_capillary_pressure_representability_max_residual_norm>2.0e-10</Static_capillary_pressure_representability_max_residual_norm>
+    <Static_capillary_pressure_representability_max_relative_distance>2.0e-10</Static_capillary_pressure_representability_max_relative_distance>
+    <Static_capillary_physical_equilibrium_max_residual_norm>2.0e-10</Static_capillary_physical_equilibrium_max_residual_norm>
+    <Static_capillary_constant_pressure_kkt_max_residual_norm>2.0e-10</Static_capillary_constant_pressure_kkt_max_residual_norm>
+    <Static_capillary_constant_pressure_kkt_max_relative_distance>2.0e-10</Static_capillary_constant_pressure_kkt_max_relative_distance>
+  </Add_equation>
+  <Add_equation type="fluid">
+    <Add_BC name="physical_hydrostatic_fixed_gauge_mpi">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi_physical_hydrostatic_fixed_gauge_mpi</Level_set_field_name>
+      <Generated_interface_domain_id>physical_hydrostatic_fixed_gauge_mpi</Generated_interface_domain_id>
+      <Interface_marker>725</Interface_marker>
+      <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
+      <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
+      <Active_domain>)xml"
+                << (positive_side ? "LevelSetPositive"
+                                  : "LevelSetNegative")
+                << R"xml(</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+      <Small_cut_aggregation>false</Small_cut_aggregation>
+      <External_pressure>)xml"
+                << external_pressure
+                << R"xml(</External_pressure>
+      <Surface_tension>1.0</Surface_tension>
+      <Surface_tension_form>SurfaceStress</Surface_tension_form>
+      <Contact_line_model>DynamicContactAngle</Contact_line_model>
+      <Contact_angle_degrees>90.0</Contact_angle_degrees>
+      <Contact_line_wall_markers>)xml"
+                << contact_wall_markers_xml.str()
+                << R"xml(</Contact_line_wall_markers>
+      <Contact_line_wall_normals>)xml"
+                << contact_wall_normals_xml.str()
+                << R"xml(</Contact_line_wall_normals>
+      <Contact_line_mobility>1.0</Contact_line_mobility>
+      <Wall_slip_model>Navier</Wall_slip_model>
+      <Wall_slip_length>1.0</Wall_slip_length>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml";
+  const auto parameter_text = parameter_xml.str();
+  auto params =
+      parseMpiWorkflowParametersXml(parameter_text.c_str());
+  auto requests = legacyMaintenanceRequestsForTest(*params);
+  ASSERT_EQ(requests.size(), 1u);
+  ASSERT_TRUE(
+      requests.front().configuration->static_capillary_equilibrium_enabled);
+
+  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle
+      lifecycle;
+  ActiveCutContextRefreshCache refresh_cache;
+  const auto initial_report =
+      refreshActiveCutIntegrationContextCached(
+          sim,
+          *params,
+          sim.time_history->u(),
+          lifecycle,
+          refresh_cache,
+          "application-driver-mpi-hydrostatic-fixed-gauge-initial");
+  ASSERT_TRUE(initial_report.refreshed);
+  ASSERT_NE(initial_report.topology_key, 0u);
+  auto initial_functionals =
+      evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+  ASSERT_EQ(initial_functionals.size(), 1u);
+  attachAcceptedFreeSurfaceActiveVolumeEnergies(
+      sim, current, initial_functionals);
+  ASSERT_TRUE(
+      initial_functionals.front().active_volume_energy.has_value());
+  const auto tangent_measure =
+      spatial_dimension == 2 ? svmp::FE::Real{3.0}
+                             : svmp::FE::Real{6.0};
+  const auto expected_volume =
+      tangent_measure *
+      (positive_side
+           ? svmp::FE::Real{1.0} - normal_offset
+           : normal_offset);
+  const auto active_first_moment =
+      svmp::FE::Real{0.5} * tangent_measure *
+      (positive_side
+           ? svmp::FE::Real{1.0} -
+                 normal_offset * normal_offset
+           : normal_offset * normal_offset);
+  const auto expected_gravitational_energy =
+      -density * gravity * active_first_moment;
+  EXPECT_NEAR(
+      initial_functionals.front().state.owned_liquid_volume,
+      expected_volume,
+      1.0e-13);
+  EXPECT_NEAR(
+      initial_functionals.front().state.liquid_gas_surface_energy,
+      tangent_measure,
+      1.0e-13);
+  EXPECT_NEAR(initial_functionals.front().state.young_wall_energy,
+              svmp::FE::Real{0.0},
+              1.0e-13);
+  EXPECT_NEAR(
+      initial_functionals.front()
+          .active_volume_energy->gravitational_energy,
+      expected_gravitational_energy,
+      2.0e-13);
+
+  const auto pressure_offset_index =
+      static_cast<std::size_t>(pressure_offset);
+  const auto pressure_count = static_cast<std::size_t>(
+      sim.fe_system->fieldDofHandler(pressure).getNumDofs());
+  const std::vector<svmp::FE::Real>
+      expected_pressure_coefficients(
+          exact_solution.begin() +
+              static_cast<std::ptrdiff_t>(pressure_offset_index),
+          exact_solution.begin() +
+              static_cast<std::ptrdiff_t>(pressure_offset_index +
+                                          pressure_count));
+  const auto exact_pressure_certificate =
+      evaluateStaticCapillaryPressureCertificate(
+          sim,
+          exact_solution,
+          effectiveStaticCapillaryEquilibriumOptions(requests.front()),
+          /*initialize_compatible_pressure=*/false);
+  const auto& exact_certificate =
+      exact_pressure_certificate.report;
+  ASSERT_TRUE(
+      exact_certificate.pressure_representability_diagnostic_sampled);
+  EXPECT_LE(exact_certificate.residual_norm, 2.0e-12);
+
+  const auto exact_initialized_pressure_certificate =
+      evaluateStaticCapillaryPressureCertificate(
+          sim,
+          exact_solution,
+          effectiveStaticCapillaryEquilibriumOptions(requests.front()),
+          /*initialize_compatible_pressure=*/true);
+  const auto& exact_initialized_report =
+      exact_initialized_pressure_certificate.report;
+  ASSERT_TRUE(
+      exact_initialized_report
+          .static_compatible_pressure_initializer_applied);
+  ASSERT_TRUE(
+      exact_initialized_report
+          .static_compatible_pressure_initializer_passed);
+  EXPECT_LE(exact_initialized_report.residual_norm, 2.0e-12);
+  ASSERT_EQ(
+      exact_initialized_pressure_certificate.certified_solution.size(),
+      exact_solution.size());
+  svmp::FE::Real exact_initializer_pressure_update = 0.0;
+  for (std::size_t i = 0u; i < pressure_count; ++i) {
+    exact_initializer_pressure_update =
+        std::max(
+            exact_initializer_pressure_update,
+            std::abs(
+                exact_initialized_pressure_certificate
+                    .certified_solution[pressure_offset_index + i] -
+                exact_solution[pressure_offset_index + i]));
+  }
+  EXPECT_LE(exact_initializer_pressure_update, 2.0e-12);
+
+  bool initialized = false;
+  ASSERT_NO_THROW(
+      initialized = initializeDiscreteStaticCapillaryEquilibrium(
+          sim,
+          *params,
+          requests,
+          lifecycle,
+          refresh_cache));
+  ASSERT_TRUE(initialized);
+  ASSERT_TRUE(
+      requests.front().runtime.static_capillary_equilibrium_initialized);
+
+  const auto communicator =
+      activeFESystemCommunicator(*sim.fe_system);
+  const auto certified_solution =
+      capturePostacceptMaintenanceVectorCollectively(
+          sim.time_history->u(), communicator);
+  const auto pressure_certificate =
+      evaluateStaticCapillaryPressureCertificate(
+          sim,
+          certified_solution,
+          effectiveStaticCapillaryEquilibriumOptions(requests.front()),
+          /*initialize_compatible_pressure=*/false);
+  const auto& certificate = pressure_certificate.report;
+  ASSERT_TRUE(
+      certificate.pressure_representability_diagnostic_sampled);
+  ASSERT_TRUE(certificate.pressure_representability_available)
+      << certificate.pressure_representability_reason;
+  EXPECT_TRUE(certificate.pressure_representability_converged);
+  EXPECT_FALSE(certificate.pressure_representability_breakdown);
+  EXPECT_LE(certificate.pressure_representability_residual_norm,
+            2.0e-10);
+  EXPECT_LE(certificate.pressure_representability_relative_distance,
+            2.0e-10);
+  EXPECT_LE(certificate.residual_norm, 2.0e-10);
+  EXPECT_FALSE(
+      certificate.constant_pressure_constraints_preserve_constants);
+  EXPECT_FALSE(certificate.constant_pressure_kkt_available);
+
+  svmp::FE::Real initializer_pressure_representative_distance =
+      0.0;
+  for (std::size_t i = 0u;
+       i < expected_pressure_coefficients.size();
+       ++i) {
+    initializer_pressure_representative_distance =
+        std::max(
+            initializer_pressure_representative_distance,
+            std::abs(certified_solution[
+                         pressure_offset_index + i] -
+                     expected_pressure_coefficients[i]));
+  }
+  EXPECT_TRUE(std::isfinite(
+      initializer_pressure_representative_distance));
+
+  const auto phi_offset_index =
+      static_cast<std::size_t>(phi_offset);
+  const auto phi_count = static_cast<std::size_t>(
+      sim.fe_system->fieldDofHandler(phi).getNumDofs());
+  svmp::FE::Real phi_update = 0.0;
+  for (std::size_t i = 0u; i < phi_count; ++i) {
+    phi_update =
+        std::max(phi_update,
+                 std::abs(certified_solution[
+                              phi_offset_index + i] -
+                          current[phi_offset_index + i]));
+  }
+  EXPECT_LE(phi_update, 2.0e-7);
+
+  auto final_functionals =
+      evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+  ASSERT_EQ(final_functionals.size(), 1u);
+  attachAcceptedFreeSurfaceActiveVolumeEnergies(
+      sim, certified_solution, final_functionals);
+  ASSERT_TRUE(
+      final_functionals.front().active_volume_energy.has_value());
+  const auto gravitational_energy_error = std::abs(
+      final_functionals.front()
+          .active_volume_energy->gravitational_energy -
+      expected_gravitational_energy);
+  const auto volume_error = std::abs(
+      final_functionals.front().state.owned_liquid_volume -
+      expected_volume);
+  const auto surface_energy_error = std::abs(
+      final_functionals.front().state.liquid_gas_surface_energy -
+      tangent_measure);
+  EXPECT_LE(gravitational_energy_error, 2.0e-10);
+  EXPECT_LE(volume_error, 1.0e-11);
+  EXPECT_LE(surface_energy_error, 2.0e-10);
+  EXPECT_NEAR(final_functionals.front().state.young_wall_energy,
+              svmp::FE::Real{0.0},
+              1.0e-13);
+
+  for (const auto scalar : {
+           static_cast<double>(exact_certificate.residual_norm),
+           static_cast<double>(
+               exact_initializer_pressure_update),
+           static_cast<double>(
+               certificate.pressure_representability_residual_norm),
+           static_cast<double>(
+               certificate
+                   .pressure_representability_relative_distance),
+           static_cast<double>(certificate.residual_norm),
+           static_cast<double>(
+               initializer_pressure_representative_distance),
+           static_cast<double>(gravitational_energy_error),
+           static_cast<double>(volume_error),
+           static_cast<double>(surface_energy_error),
+           static_cast<double>(phi_update)}) {
+    EXPECT_EQ(globalMinDouble(scalar, communicator),
+              globalMaxDouble(scalar, communicator));
+  }
+  const auto final_revision =
+      collectiveLevelSetMaintenanceAlgebraicRevision(
+          certified_solution, communicator);
+  const auto [minimum_revision, maximum_revision] =
+      globalMinMaxUint64(final_revision, communicator);
+  EXPECT_EQ(minimum_revision, maximum_revision);
+
+  summary.maximum_pressure_residual =
+      std::max(summary.maximum_pressure_residual,
+               static_cast<svmp::FE::Real>(
+                   certificate
+                       .pressure_representability_residual_norm));
+  summary.maximum_pressure_relative_distance =
+      std::max(summary.maximum_pressure_relative_distance,
+               static_cast<svmp::FE::Real>(
+                   certificate
+                       .pressure_representability_relative_distance));
+  summary.maximum_exact_field_production_residual =
+      std::max(summary.maximum_exact_field_production_residual,
+               static_cast<svmp::FE::Real>(
+                   exact_certificate.residual_norm));
+  summary.maximum_production_residual =
+      std::max(summary.maximum_production_residual,
+               static_cast<svmp::FE::Real>(
+                   certificate.residual_norm));
+  summary.maximum_initializer_pressure_representative_distance =
+      std::max(
+          summary.maximum_initializer_pressure_representative_distance,
+          initializer_pressure_representative_distance);
+  summary.maximum_exact_initializer_pressure_update =
+      std::max(summary.maximum_exact_initializer_pressure_update,
+               exact_initializer_pressure_update);
+  summary.maximum_gravitational_energy_error =
+      std::max(summary.maximum_gravitational_energy_error,
+               gravitational_energy_error);
+  summary.maximum_volume_error =
+      std::max(summary.maximum_volume_error, volume_error);
+  summary.maximum_surface_energy_error =
+      std::max(summary.maximum_surface_energy_error,
+               surface_energy_error);
+  summary.maximum_phi_update =
+      std::max(summary.maximum_phi_update, phi_update);
+}
+
+} // namespace
+
+TEST(ApplicationDriverLevelSetWorkflowsMPI,
+     HydrostaticGravityWithFixedPressureGaugeMatchesAcrossTwoRankPartition)
+{
+  // Exhaustive matrix: every partition, vertex numbering, DOF ownership and
+  // FE global numbering variant of every serial-twin case (960 cases, about
+  // 45 minutes). Kept for the frozen WP-4 qualification registries, which
+  // gate its properties; the default CTest entry excludes it and runs the
+  // covering matrices below instead (see Tests/CMakeLists.txt).
+  int size = 1;
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  if (size != 2) {
+    GTEST_SKIP()
+        << "This hydrostatic fixed-gauge fixture requires two ranks.";
+  }
+
   MpiWorkflowScopedEnvVar conservative_balance_diagnostic(
       "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
       std::string("1"));
 
-  constexpr std::array<svmp::FE::Real, 3> normal_offsets{
-      svmp::FE::Real{0.35},
-      svmp::FE::Real{0.5},
-      svmp::FE::Real{0.65},
-  };
+  const auto& normal_offsets = kHydrostaticNormalOffsets;
   constexpr std::size_t partition_layout_count = 2u;
   constexpr std::size_t vertex_numbering_count = 2u;
   constexpr std::size_t normal_axis_count = 2u;
   constexpr std::size_t three_dimensional_normal_axis_count = 3u;
   constexpr std::size_t dof_ownership_strategy_count = 2u;
   constexpr std::size_t fe_global_numbering_mode_count = 2u;
-  std::size_t case_count = 0u;
-  std::size_t two_dimensional_case_count = 0u;
-  std::size_t three_dimensional_case_count = 0u;
-  std::size_t owner_contiguous_nonidentity_case_count = 0u;
-  std::size_t
-      three_dimensional_owner_contiguous_nonidentity_case_count = 0u;
-  std::size_t three_dimensional_shared_vertex_case_count = 0u;
-  svmp::FE::Real maximum_pressure_residual = 0.0;
-  svmp::FE::Real maximum_pressure_relative_distance = 0.0;
-  svmp::FE::Real maximum_exact_field_production_residual = 0.0;
-  svmp::FE::Real maximum_production_residual = 0.0;
-  svmp::FE::Real maximum_initializer_pressure_representative_distance = 0.0;
-  svmp::FE::Real maximum_exact_initializer_pressure_update = 0.0;
-  svmp::FE::Real maximum_gravitational_energy_error = 0.0;
-  svmp::FE::Real maximum_volume_error = 0.0;
-  svmp::FE::Real maximum_surface_energy_error = 0.0;
-  svmp::FE::Real maximum_phi_update = 0.0;
+  HydrostaticFixedGaugeMpiSummary summary;
 
   struct HydrostaticMeshVariant {
     int spatial_dimension = 2;
@@ -5180,1160 +6359,44 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   }
 
   for (const auto& mesh_variant : mesh_variants) {
-    const int spatial_dimension = mesh_variant.spatial_dimension;
-    const int normal_axis = mesh_variant.normal_axis;
-    const bool reverse_vertex_numbering =
-        mesh_variant.reverse_vertex_numbering;
-    const bool column_major_cells = mesh_variant.alternate_cell_order;
-    const bool highest_rank_dof_ownership =
-        mesh_variant.highest_rank_dof_ownership;
-    const bool dense_global_dof_numbering =
-        mesh_variant.dense_global_dof_numbering;
-    std::array<int, 2> tangent_axes{};
-    std::size_t tangent_axis_count = 0u;
-    for (int axis = 0; axis < spatial_dimension; ++axis) {
-      if (axis != normal_axis) {
-        tangent_axes[tangent_axis_count++] = axis;
-      }
-    }
-    ASSERT_EQ(tangent_axis_count,
-              static_cast<std::size_t>(spatial_dimension - 1));
-    const int tangent_axis = tangent_axes.front();
     for (const bool positive_side : {false, true}) {
-      const auto gauge_normal_coordinate =
-          positive_side ? svmp::FE::Real{1.0} : svmp::FE::Real{0.0};
       for (const auto normal_offset : normal_offsets) {
         for (const svmp::FE::Real gravity_direction :
              {svmp::FE::Real{-1.0}, svmp::FE::Real{1.0}}) {
-          const auto gravity = gravity_direction * gravity_magnitude;
-          const auto external_pressure =
-              density * gravity *
-              (normal_offset - gauge_normal_coordinate);
-          SCOPED_TRACE(::testing::Message()
-                       << "rank=" << rank
-                       << " spatial_dimension=" << spatial_dimension
-                       << " cell_order="
-                       << (column_major_cells ? "column-major"
-                                              : "row-major")
-                       << " vertex_numbering="
-                       << (reverse_vertex_numbering ? "reversed"
-                                                    : "forward")
-                       << " dof_ownership="
-                       << (highest_rank_dof_ownership ? "highest-rank"
-                                                      : "lowest-rank")
-                       << " fe_global_numbering="
-                       << (dense_global_dof_numbering ? "dense-global-ids"
-                                                      : "owner-contiguous")
-                       << " normal_axis=" << normal_axis
-                       << " active_side="
-                       << (positive_side ? "positive" : "negative")
-                       << " normal_offset=" << normal_offset
-                       << " gravity=" << gravity
-                       << " external_pressure=" << external_pressure);
-          ++case_count;
-          if (spatial_dimension == 2) {
-            ++two_dimensional_case_count;
-          } else {
-            ++three_dimensional_case_count;
+          runHydrostaticFixedGaugeMpiCase(
+              HydrostaticFixedGaugeMpiCase{
+                  .spatial_dimension = mesh_variant.spatial_dimension,
+                  .normal_axis = mesh_variant.normal_axis,
+                  .reverse_vertex_numbering =
+                      mesh_variant.reverse_vertex_numbering,
+                  .alternate_cell_order = mesh_variant.alternate_cell_order,
+                  .highest_rank_dof_ownership =
+                      mesh_variant.highest_rank_dof_ownership,
+                  .dense_global_dof_numbering =
+                      mesh_variant.dense_global_dof_numbering,
+                  .positive_side = positive_side,
+                  .normal_offset = normal_offset,
+                  .gravity_direction = gravity_direction,
+              },
+              summary);
+          if (::testing::Test::HasFatalFailure()) {
+            return;
           }
-
-          auto mesh = spatial_dimension == 2
-                          ? makePartitionedHydrostaticPressureMesh(
-                                normal_axis,
-                                column_major_cells,
-                                reverse_vertex_numbering)
-                          : makePartitionedHydrostaticPressureMesh3D(
-                                normal_axis,
-                                column_major_cells,
-                                reverse_vertex_numbering);
-          ASSERT_GT(mesh->n_ghost_vertices(), 0u);
-          auto& local_mesh = mesh->local_mesh();
-          unsigned long long local_owned_cell_count = 0u;
-          for (std::size_t cell = 0u;
-               cell < mesh->n_cells();
-               ++cell) {
-            const auto local_cell = static_cast<svmp::index_t>(cell);
-            if (mesh->owner_rank_cell(local_cell) != rank) {
-              continue;
-            }
-            ++local_owned_cell_count;
-          }
-          std::array<unsigned long long, 2> owned_cell_counts{};
-          ASSERT_EQ(MPI_Allgather(&local_owned_cell_count,
-                                  1,
-                                  MPI_UNSIGNED_LONG_LONG,
-                                  owned_cell_counts.data(),
-                                  1,
-                                  MPI_UNSIGNED_LONG_LONG,
-                                  MPI_COMM_WORLD),
-                    MPI_SUCCESS);
-          const auto expected_owned_cell_count =
-              spatial_dimension == 2 ? 16u : 48u;
-          EXPECT_EQ(owned_cell_counts[0], expected_owned_cell_count);
-          EXPECT_EQ(owned_cell_counts[1], expected_owned_cell_count);
-
-          if (spatial_dimension == 2) {
-            std::array<int, 2> local_probe_counts{};
-            std::array<int, 2> local_probe_owner_plus_one{};
-            for (std::size_t cell = 0u;
-                 cell < mesh->n_cells();
-                 ++cell) {
-              const auto local_cell = static_cast<svmp::index_t>(cell);
-              if (mesh->owner_rank_cell(local_cell) != rank) {
-                continue;
-              }
-              const auto center = local_mesh.cell_center(local_cell);
-              const auto logical_tangent_coordinate =
-                  normal_axis == 0
-                      ? svmp::FE::Real{3.0} - center[tangent_axis]
-                      : center[tangent_axis];
-              const bool lower_right =
-                  logical_tangent_coordinate > svmp::FE::Real{2.25} &&
-                  center[normal_axis] < svmp::FE::Real{0.2};
-              const bool upper_left =
-                  logical_tangent_coordinate < svmp::FE::Real{0.81} &&
-                  center[normal_axis] > svmp::FE::Real{0.7};
-              if (lower_right) {
-                ++local_probe_counts[0];
-                local_probe_owner_plus_one[0] = rank + 1;
-              }
-              if (upper_left) {
-                ++local_probe_counts[1];
-                local_probe_owner_plus_one[1] = rank + 1;
-              }
-            }
-            std::array<int, 2> global_probe_counts{};
-            std::array<int, 2> global_probe_owner_plus_one{};
-            ASSERT_EQ(
-                MPI_Allreduce(local_probe_counts.data(),
-                              global_probe_counts.data(),
-                              static_cast<int>(local_probe_counts.size()),
-                              MPI_INT,
-                              MPI_SUM,
-                              MPI_COMM_WORLD),
-                MPI_SUCCESS);
-            ASSERT_EQ(
-                MPI_Allreduce(
-                    local_probe_owner_plus_one.data(),
-                    global_probe_owner_plus_one.data(),
-                    static_cast<int>(local_probe_owner_plus_one.size()),
-                    MPI_INT,
-                    MPI_MAX,
-                    MPI_COMM_WORLD),
-                MPI_SUCCESS);
-            EXPECT_EQ(global_probe_counts,
-                      (std::array<int, 2>{2, 2}));
-            EXPECT_EQ(
-                global_probe_owner_plus_one,
-                (column_major_cells ? std::array<int, 2>{2, 1}
-                                    : std::array<int, 2>{1, 2}));
-          }
-
-          struct ContactWall {
-            int marker = -1;
-            int axis = 0;
-            svmp::FE::Real coordinate = 0.0;
-            svmp::FE::Real outward_normal = 0.0;
-          };
-          const std::array<int, 4> wall_markers{{
-              first_wall_marker,
-              second_wall_marker,
-              third_wall_marker,
-              fourth_wall_marker,
-          }};
-          std::vector<ContactWall> contact_walls;
-          contact_walls.reserve(2u * tangent_axis_count);
-          for (std::size_t tangent = 0u;
-               tangent < tangent_axis_count;
-               ++tangent) {
-            const auto axis = tangent_axes[tangent];
-            const auto maximum_coordinate =
-                spatial_dimension == 2 || axis == (normal_axis + 1) % 3
-                    ? svmp::FE::Real{3.0}
-                    : svmp::FE::Real{2.0};
-            contact_walls.push_back(ContactWall{
-                .marker = wall_markers[2u * tangent],
-                .axis = axis,
-                .coordinate = 0.0,
-                .outward_normal = -1.0,
-            });
-            contact_walls.push_back(ContactWall{
-                .marker = wall_markers[2u * tangent + 1u],
-                .axis = axis,
-                .coordinate = maximum_coordinate,
-                .outward_normal = 1.0,
-            });
-          }
-          ASSERT_EQ(contact_walls.size(),
-                    static_cast<std::size_t>(
-                        2 * (spatial_dimension - 1)));
-
-          std::array<int, 6> local_marker_present{};
-          constexpr svmp::FE::Real coordinate_tolerance = 1.0e-12;
-          const auto physical_boundary_faces =
-              svmp::DistributedTopology::global_boundary_faces(
-                  *mesh, /*owned_only=*/false);
-          for (const auto face : physical_boundary_faces) {
-            const auto vertices = local_mesh.face_vertices(face);
-            ASSERT_EQ(vertices.size(),
-                      static_cast<std::size_t>(spatial_dimension));
-            std::array<bool, 4> on_contact_wall{{true, true, true, true}};
-            bool on_lower_anchor = true;
-            bool on_upper_anchor = true;
-            for (const auto vertex : vertices) {
-              const auto point = local_mesh.get_vertex_coords(vertex);
-              for (std::size_t wall = 0u;
-                   wall < contact_walls.size();
-                   ++wall) {
-                on_contact_wall[wall] =
-                    on_contact_wall[wall] &&
-                    std::abs(point[contact_walls[wall].axis] -
-                             contact_walls[wall].coordinate) <=
-                        coordinate_tolerance;
-              }
-              on_lower_anchor =
-                  on_lower_anchor &&
-                  std::abs(point[normal_axis]) <= coordinate_tolerance;
-              on_upper_anchor =
-                  on_upper_anchor &&
-                  std::abs(point[normal_axis] - svmp::FE::Real{1.0}) <=
-                      coordinate_tolerance;
-            }
-            bool classified = false;
-            for (std::size_t wall = 0u;
-                 wall < contact_walls.size();
-                 ++wall) {
-              if (on_contact_wall[wall]) {
-                mesh->set_boundary_label(face, contact_walls[wall].marker);
-                local_marker_present[wall] = 1;
-                classified = true;
-                break;
-              }
-            }
-            if (classified) {
-              continue;
-            }
-            if (on_lower_anchor) {
-              mesh->set_boundary_label(face, lower_anchor_marker);
-              local_marker_present[4] = 1;
-            } else if (on_upper_anchor) {
-              mesh->set_boundary_label(face, upper_anchor_marker);
-              local_marker_present[5] = 1;
-            } else {
-              FAIL() << "Distributed hydrostatic fixture found an "
-                        "unclassified physical boundary face.";
-            }
-          }
-          std::array<int, 6> global_marker_present{};
-          ASSERT_EQ(
-              MPI_Allreduce(local_marker_present.data(),
-                            global_marker_present.data(),
-                            static_cast<int>(local_marker_present.size()),
-                            MPI_INT,
-                            MPI_MAX,
-                            MPI_COMM_WORLD),
-              MPI_SUCCESS);
-          for (std::size_t wall = 0u;
-               wall < contact_walls.size();
-               ++wall) {
-            EXPECT_EQ(global_marker_present[wall], 1);
-          }
-          EXPECT_EQ(global_marker_present[4], 1);
-          EXPECT_EQ(global_marker_present[5], 1);
-
-          std::array<unsigned long long, 6> local_marker_face_counts{};
-          const auto owned_physical_boundary_faces =
-              svmp::DistributedTopology::global_boundary_faces(
-                  *mesh, /*owned_only=*/true);
-          for (const auto face : owned_physical_boundary_faces) {
-            const auto marker = mesh->boundary_label(face);
-            for (std::size_t wall = 0u;
-                 wall < contact_walls.size();
-                 ++wall) {
-              if (marker == contact_walls[wall].marker) {
-                ++local_marker_face_counts[wall];
-              }
-            }
-            if (marker == lower_anchor_marker) {
-              ++local_marker_face_counts[4];
-            } else if (marker == upper_anchor_marker) {
-              ++local_marker_face_counts[5];
-            }
-          }
-          std::array<unsigned long long, 6> global_marker_face_counts{};
-          ASSERT_EQ(
-              MPI_Allreduce(local_marker_face_counts.data(),
-                            global_marker_face_counts.data(),
-                            static_cast<int>(
-                                local_marker_face_counts.size()),
-                            MPI_UNSIGNED_LONG_LONG,
-                            MPI_SUM,
-                            MPI_COMM_WORLD),
-              MPI_SUCCESS);
-          const auto expected_contact_wall_face_count =
-              spatial_dimension == 2 ? 4u : 16u;
-          const auto expected_anchor_face_count =
-              spatial_dimension == 2 ? 4u : 8u;
-          for (std::size_t wall = 0u;
-               wall < contact_walls.size();
-               ++wall) {
-            EXPECT_EQ(global_marker_face_counts[wall],
-                      expected_contact_wall_face_count);
-          }
-          EXPECT_EQ(global_marker_face_counts[4],
-                    expected_anchor_face_count);
-          EXPECT_EQ(global_marker_face_counts[5],
-                    expected_anchor_face_count);
-
-          const auto& vertex_gids = local_mesh.vertex_gids();
-          ASSERT_EQ(vertex_gids.size(), mesh->n_vertices());
-          auto local_max_vertex_gid = svmp::gid_t{-1};
-          for (const auto gid : vertex_gids) {
-            local_max_vertex_gid = std::max(local_max_vertex_gid, gid);
-          }
-          svmp::gid_t global_max_vertex_gid = svmp::gid_t{-1};
-          ASSERT_EQ(MPI_Allreduce(&local_max_vertex_gid,
-                                  &global_max_vertex_gid,
-                                  1,
-                                  MPI_INT64_T,
-                                  MPI_MAX,
-                                  MPI_COMM_WORLD),
-                    MPI_SUCCESS);
-          ASSERT_GE(global_max_vertex_gid, svmp::gid_t{0});
-          const auto global_vertex_count =
-              static_cast<std::size_t>(global_max_vertex_gid + 1);
-          std::vector<int> local_owned_cell_vertex_adjacency(
-              global_vertex_count, 0);
-          for (std::size_t cell = 0u; cell < mesh->n_cells(); ++cell) {
-            const auto local_cell = static_cast<svmp::index_t>(cell);
-            if (mesh->owner_rank_cell(local_cell) != rank) {
-              continue;
-            }
-            for (const auto vertex : local_mesh.cell_vertices(local_cell)) {
-              ASSERT_GE(vertex, svmp::index_t{0});
-              ASSERT_LT(static_cast<std::size_t>(vertex),
-                        vertex_gids.size());
-              const auto gid =
-                  vertex_gids[static_cast<std::size_t>(vertex)];
-              ASSERT_GE(gid, svmp::gid_t{0});
-              ASSERT_LT(static_cast<std::size_t>(gid),
-                        global_vertex_count);
-              local_owned_cell_vertex_adjacency[
-                  static_cast<std::size_t>(gid)] = 1;
-            }
-          }
-          std::vector<int> global_owned_cell_vertex_adjacency(
-              global_vertex_count, 0);
-          ASSERT_LE(global_vertex_count,
-                    static_cast<std::size_t>(
-                        std::numeric_limits<int>::max()));
-          ASSERT_EQ(MPI_Allreduce(
-                        local_owned_cell_vertex_adjacency.data(),
-                        global_owned_cell_vertex_adjacency.data(),
-                        static_cast<int>(global_vertex_count),
-                        MPI_INT,
-                        MPI_SUM,
-                        MPI_COMM_WORLD),
-                    MPI_SUCCESS);
-          auto shared_vertex_gid = svmp::gid_t{-1};
-          for (std::size_t gid = 0u;
-               gid < global_owned_cell_vertex_adjacency.size();
-               ++gid) {
-            if (global_owned_cell_vertex_adjacency[gid] == size) {
-              shared_vertex_gid = static_cast<svmp::gid_t>(gid);
-              break;
-            }
-          }
-          ASSERT_GE(shared_vertex_gid, svmp::gid_t{0});
-          auto local_gauge_gid = std::numeric_limits<svmp::gid_t>::max();
-          for (std::size_t vertex = 0u;
-               vertex < mesh->n_vertices();
-               ++vertex) {
-            const auto point = local_mesh.get_vertex_coords(
-                static_cast<svmp::index_t>(vertex));
-            if (std::abs(point[normal_axis] - gauge_normal_coordinate) <=
-                coordinate_tolerance) {
-              local_gauge_gid =
-                  std::min(local_gauge_gid, vertex_gids[vertex]);
-            }
-          }
-          svmp::gid_t gauge_gid =
-              std::numeric_limits<svmp::gid_t>::max();
-          ASSERT_EQ(MPI_Allreduce(&local_gauge_gid,
-                                  &gauge_gid,
-                                  1,
-                                  MPI_INT64_T,
-                                  MPI_MIN,
-                                  MPI_COMM_WORLD),
-                    MPI_SUCCESS);
-          ASSERT_NE(gauge_gid, std::numeric_limits<svmp::gid_t>::max());
-          ASSERT_GE(gauge_gid, svmp::gid_t{0});
-          const auto upper_gauge_layer_first_gid =
-              spatial_dimension == 2 ? 20 : 36;
-          const auto expected_gauge_gid = static_cast<svmp::gid_t>(
-              reverse_vertex_numbering
-                  ? (positive_side ? 0 : upper_gauge_layer_first_gid)
-                  : (positive_side ? upper_gauge_layer_first_gid : 0));
-          EXPECT_EQ(gauge_gid, expected_gauge_gid);
-
-          const auto mesh_field = svmp::MeshFields::attach_field(
-              local_mesh,
-              svmp::EntityKind::Vertex,
-              "phi_physical_hydrostatic_fixed_gauge_mpi",
-              svmp::FieldScalarType::Float64,
-              1);
-          auto* mesh_phi =
-              svmp::MeshFields::field_data_as<svmp::real_t>(
-                  local_mesh, mesh_field);
-          ASSERT_NE(mesh_phi, nullptr);
-          const auto& coordinates = mesh->X_ref();
-          ASSERT_EQ(coordinates.size(),
-                    static_cast<std::size_t>(spatial_dimension) *
-                        mesh->n_vertices());
-          for (std::size_t vertex = 0u;
-               vertex < mesh->n_vertices();
-               ++vertex) {
-            mesh_phi[vertex] =
-                coordinates[static_cast<std::size_t>(spatial_dimension) *
-                                vertex +
-                            static_cast<std::size_t>(normal_axis)] -
-                normal_offset;
-          }
-
-          const auto element_type =
-              spatial_dimension == 2
-                  ? svmp::FE::ElementType::Triangle3
-                  : svmp::FE::ElementType::Tetra4;
-          auto scalar_space =
-              svmp::FE::spaces::SpaceFactory::create_h1(
-                  element_type,
-                  /*order=*/1);
-          auto velocity_space =
-              svmp::FE::spaces::SpaceFactory::create_vector_h1(
-                  element_type,
-                  /*order=*/1,
-                  /*components=*/spatial_dimension);
-          auto system =
-              std::make_unique<svmp::FE::systems::FESystem>(mesh);
-          const auto phi = system->addField(
-              svmp::FE::systems::FieldSpec{
-                  .name = "phi_physical_hydrostatic_fixed_gauge_mpi",
-                  .space = scalar_space,
-                  .components = 1});
-
-          channel_ns::IncompressibleNavierStokesVMSOptions options;
-          options.velocity_field_name =
-              "u_physical_hydrostatic_fixed_gauge_mpi";
-          options.pressure_field_name =
-              "p_physical_hydrostatic_fixed_gauge_mpi";
-          options.density = density;
-          options.viscosity = 0.01;
-          options.body_force[normal_axis] = gravity;
-          options.enable_convection = false;
-          options.enable_vms = false;
-          options.jit_policy.enable = false;
-          options.velocity_dirichlet.push_back(
-              channel_ns::IncompressibleNavierStokesVMSOptions::
-                  VelocityDirichletBC{
-                      .boundary_marker =
-                          positive_side ? upper_anchor_marker
-                                        : lower_anchor_marker,
-                      .value = {0.0, 0.0, 0.0},
-                  });
-          for (const auto& wall : contact_walls) {
-            options.velocity_dirichlet.push_back(
-                channel_ns::IncompressibleNavierStokesVMSOptions::
-                    VelocityDirichletBC{
-                        .boundary_marker = wall.marker,
-                        .value = {0.0, 0.0, 0.0},
-                        .active_components = {wall.axis == 0,
-                                              wall.axis == 1,
-                                              wall.axis == 2},
-                    });
-          }
-          options.node_pressure_constraints.id_type =
-              channel_ns::IncompressibleNavierStokesVMSOptions::
-                  NodePressureConstraintIdType::GlobalVertexGid;
-          options.node_pressure_constraints.values.push_back(
-              channel_ns::IncompressibleNavierStokesVMSOptions::
-                  NodePressureConstraint{
-                      .node_id =
-                          static_cast<svmp::FE::GlobalIndex>(gauge_gid),
-                      .pressure = 0.0,
-                  });
-
-          using ContactLine =
-              channel_ns::IncompressibleNavierStokesVMSOptions::
-                  FreeSurfaceContactLine;
-          auto free_surface =
-              channel_ns::IncompressibleNavierStokesVMSOptions::
-                  FreeSurfaceBoundary{
-                      .implementation =
-                          channel_ns::FreeSurfaceImplementation::
-                              UnfittedLevelSet,
-                      .interface_marker = interface_marker,
-                      .level_set_field_name =
-                          "phi_physical_hydrostatic_fixed_gauge_mpi",
-                      .generated_interface_domain_id =
-                          "physical_hydrostatic_fixed_gauge_mpi",
-                      .generated_interface_geometry = "LinearCorner",
-                      .active_domain =
-                          positive_side
-                              ? channel_ns::FreeSurfaceActiveDomain::
-                                    LevelSetPositive
-                              : channel_ns::FreeSurfaceActiveDomain::
-                                    LevelSetNegative,
-                      .active_domain_method =
-                          channel_ns::FreeSurfaceActiveDomainMethod::
-                              CutVolume,
-                      .external_pressure = external_pressure,
-                      .surface_tension = 1.0,
-                      .surface_tension_form =
-                          channel_ns::FreeSurfaceSurfaceTensionForm::
-                              SurfaceStress,
-                      .curvature = 0.0,
-                      .use_level_set_curvature = false,
-                      .small_cut_aggregation = false,
-          };
-          for (const auto& wall : contact_walls) {
-            free_surface.contact_lines.push_back(
-                ContactLine{
-                    .configuration = ContactLine::DynamicRenE{
-                        .wall_boundary_marker = wall.marker,
-                        .contact_line_marker = -1,
-                        .equilibrium_contact_angle_radians = contact_angle,
-                        .wall_normal = {
-                            wall.axis == 0 ? wall.outward_normal : 0.0,
-                            wall.axis == 1 ? wall.outward_normal : 0.0,
-                            wall.axis == 2 ? wall.outward_normal : 0.0},
-                        .mobility = 1.0,
-                        .slip_length = 1.0,
-                    }});
-          }
-          options.free_surface.push_back(std::move(free_surface));
-
-          channel_ns::IncompressibleNavierStokesVMSModule module(
-              velocity_space, scalar_space, std::move(options));
-          module.registerOn(*system);
-          const auto velocity = system->findFieldByName(
-              "u_physical_hydrostatic_fixed_gauge_mpi");
-          const auto pressure = system->findFieldByName(
-              "p_physical_hydrostatic_fixed_gauge_mpi");
-          ASSERT_NE(velocity, svmp::FE::INVALID_FIELD_ID);
-          ASSERT_NE(pressure, svmp::FE::INVALID_FIELD_ID);
-
-          svmp::FE::systems::SetupOptions setup_options;
-          setup_options.assembler_name = "StandardAssembler";
-          setup_options.assembly_options.ghost_policy =
-              svmp::FE::assembly::GhostPolicy::ReverseScatter;
-          setup_options.assembly_options.deterministic = true;
-          setup_options.assembly_options.overlap_communication = false;
-          setup_options.dof_options.global_numbering =
-              dense_global_dof_numbering
-                  ? svmp::FE::dofs::GlobalNumberingMode::DenseGlobalIds
-                  : svmp::FE::dofs::GlobalNumberingMode::OwnerContiguous;
-          setup_options.dof_options.ownership =
-              highest_rank_dof_ownership
-                  ? svmp::FE::dofs::OwnershipStrategy::HighestRank
-                  : svmp::FE::dofs::OwnershipStrategy::LowestRank;
-          setup_options.dof_options.my_rank = rank;
-          setup_options.dof_options.world_size = size;
-          setup_options.dof_options.mpi_comm = MPI_COMM_WORLD;
-          setup_options.use_backend_row_ownership_for_assembly = true;
-          setup_options.retain_serial_sparsity = false;
-          ASSERT_NO_THROW(system->setup(setup_options));
-          ASSERT_TRUE(system->dofPermutation());
-
-          const auto solution_size = static_cast<std::size_t>(
-              system->dofHandler().getNumDofs());
-          ASSERT_LE(solution_size,
-                    static_cast<std::size_t>(
-                        std::numeric_limits<int>::max()));
-          std::vector<svmp::FE::Real> local_current(solution_size, 0.0);
-          std::vector<svmp::FE::Real> local_exact(solution_size, 0.0);
-          std::vector<svmp::FE::Real> current(solution_size, 0.0);
-          std::vector<svmp::FE::Real> exact_solution(solution_size, 0.0);
-          const auto& phi_dofs = system->fieldDofHandler(phi);
-          const auto* phi_entity_map = phi_dofs.getEntityDofMap();
-          ASSERT_NE(phi_entity_map, nullptr);
-          const auto& pressure_dofs = system->fieldDofHandler(pressure);
-          const auto* pressure_entity_map =
-              pressure_dofs.getEntityDofMap();
-          ASSERT_NE(pressure_entity_map, nullptr);
-          const auto phi_offset = system->fieldDofOffset(phi);
-          const auto pressure_offset = system->fieldDofOffset(pressure);
-          ASSERT_GE(phi_offset, 0);
-          ASSERT_GE(pressure_offset, 0);
-          std::size_t shared_ownership_probe_vertex_count = 0u;
-          unsigned long long local_pressure_numbering_mismatch_count = 0u;
-          for (std::size_t vertex = 0u;
-               vertex < mesh->n_vertices();
-               ++vertex) {
-            const auto normal_coordinate =
-                static_cast<svmp::FE::Real>(
-                    coordinates[static_cast<std::size_t>(spatial_dimension) *
-                                    vertex +
-                                static_cast<std::size_t>(normal_axis)]);
-            const auto signed_coordinate =
-                normal_coordinate - normal_offset;
-            const auto phi_vertex_dofs =
-                phi_entity_map->getVertexDofs(
-                    static_cast<svmp::FE::GlobalIndex>(vertex));
-            ASSERT_EQ(phi_vertex_dofs.size(), 1u);
-            const auto phi_dof = phi_vertex_dofs.front();
-            ASSERT_GE(phi_dof, 0);
-            if (phi_dofs.getDofMap().isOwnedDof(phi_dof)) {
-              const auto index =
-                  static_cast<std::size_t>(phi_offset + phi_dof);
-              ASSERT_LT(index, solution_size);
-              local_current[index] = signed_coordinate;
-              local_exact[index] = signed_coordinate;
-            }
-
-            const auto pressure_vertex_dofs =
-                pressure_entity_map->getVertexDofs(
-                    static_cast<svmp::FE::GlobalIndex>(vertex));
-            ASSERT_EQ(pressure_vertex_dofs.size(), 1u);
-            const auto pressure_dof = pressure_vertex_dofs.front();
-            ASSERT_GE(pressure_dof, 0);
-            const auto pressure_vertex_gid = static_cast<svmp::FE::GlobalIndex>(
-                vertex_gids[vertex]);
-            if (dense_global_dof_numbering) {
-              EXPECT_EQ(pressure_dof, pressure_vertex_gid);
-            }
-            if (pressure_dofs.getDofMap().isOwnedDof(pressure_dof) &&
-                pressure_dof != pressure_vertex_gid) {
-              ++local_pressure_numbering_mismatch_count;
-            }
-            bool is_ownership_probe_vertex =
-                pressure_vertex_gid == shared_vertex_gid;
-            if (spatial_dimension == 2) {
-              const auto logical_tangent_coordinate =
-                  normal_axis == 0
-                      ? svmp::FE::Real{3.0} -
-                            static_cast<svmp::FE::Real>(
-                                coordinates[
-                                    static_cast<std::size_t>(
-                                        spatial_dimension) *
-                                        vertex +
-                                    static_cast<std::size_t>(tangent_axis)])
-                      : static_cast<svmp::FE::Real>(
-                            coordinates[
-                                static_cast<std::size_t>(spatial_dimension) *
-                                    vertex +
-                                static_cast<std::size_t>(tangent_axis)]);
-              is_ownership_probe_vertex =
-                  std::abs(normal_coordinate - svmp::FE::Real{0.4}) <=
-                      coordinate_tolerance &&
-                  std::abs(logical_tangent_coordinate -
-                           svmp::FE::Real{1.55}) <= coordinate_tolerance;
-            }
-            if (is_ownership_probe_vertex) {
-              ++shared_ownership_probe_vertex_count;
-              EXPECT_EQ(
-                  pressure_dofs.getDofMap().getDofOwner(pressure_dof),
-                  highest_rank_dof_ownership ? 1 : 0);
-            }
-            if (pressure_dofs.getDofMap().isOwnedDof(pressure_dof)) {
-              const auto index =
-                  static_cast<std::size_t>(pressure_offset + pressure_dof);
-              ASSERT_LT(index, solution_size);
-              local_exact[index] =
-                  density * gravity *
-                  (normal_coordinate - gauge_normal_coordinate);
-            }
-          }
-          EXPECT_EQ(shared_ownership_probe_vertex_count, 1u);
-          if (spatial_dimension == 3) {
-            ++three_dimensional_shared_vertex_case_count;
-          }
-          unsigned long long pressure_numbering_mismatch_count = 0u;
-          ASSERT_EQ(MPI_Allreduce(
-                        &local_pressure_numbering_mismatch_count,
-                        &pressure_numbering_mismatch_count,
-                        1,
-                        MPI_UNSIGNED_LONG_LONG,
-                        MPI_SUM,
-                        MPI_COMM_WORLD),
-                    MPI_SUCCESS);
-          if (dense_global_dof_numbering) {
-            EXPECT_EQ(pressure_numbering_mismatch_count, 0u);
-          } else if (pressure_numbering_mismatch_count > 0u) {
-            ++owner_contiguous_nonidentity_case_count;
-            if (spatial_dimension == 3) {
-              ++three_dimensional_owner_contiguous_nonidentity_case_count;
-            }
-          }
-          ASSERT_EQ(MPI_Allreduce(local_current.data(),
-                                  current.data(),
-                                  static_cast<int>(solution_size),
-                                  MPI_DOUBLE,
-                                  MPI_SUM,
-                                  MPI_COMM_WORLD),
-                    MPI_SUCCESS);
-          ASSERT_EQ(MPI_Allreduce(local_exact.data(),
-                                  exact_solution.data(),
-                                  static_cast<int>(solution_size),
-                                  MPI_DOUBLE,
-                                  MPI_SUM,
-                                  MPI_COMM_WORLD),
-                    MPI_SUCCESS);
-          system->updateConstraints(/*time=*/0.0, /*dt=*/0.1);
-          system->constraints().distribute(current);
-          system->constraints().distribute(exact_solution);
-          std::fill(local_current.begin(), local_current.end(), 0.0);
-          std::fill(local_exact.begin(), local_exact.end(), 0.0);
-          for (const auto field : {phi, velocity, pressure}) {
-            const auto field_offset = system->fieldDofOffset(field);
-            const auto& field_dofs = system->fieldDofHandler(field);
-            ASSERT_GE(field_offset, 0);
-            ASSERT_GE(field_dofs.getNumDofs(), 0);
-            for (svmp::FE::GlobalIndex dof = 0;
-                 dof < field_dofs.getNumDofs();
-                 ++dof) {
-              if (!field_dofs.getDofMap().isOwnedDof(dof)) {
-                continue;
-              }
-              const auto index =
-                  static_cast<std::size_t>(field_offset + dof);
-              ASSERT_LT(index, solution_size);
-              local_current[index] = current[index];
-              local_exact[index] = exact_solution[index];
-            }
-          }
-          std::vector<svmp::FE::Real> constrained_current(
-              solution_size, 0.0);
-          std::vector<svmp::FE::Real> constrained_exact(
-              solution_size, 0.0);
-          ASSERT_EQ(MPI_Allreduce(local_current.data(),
-                                  constrained_current.data(),
-                                  static_cast<int>(solution_size),
-                                  MPI_DOUBLE,
-                                  MPI_SUM,
-                                  MPI_COMM_WORLD),
-                    MPI_SUCCESS);
-          ASSERT_EQ(MPI_Allreduce(local_exact.data(),
-                                  constrained_exact.data(),
-                                  static_cast<int>(solution_size),
-                                  MPI_DOUBLE,
-                                  MPI_SUM,
-                                  MPI_COMM_WORLD),
-                    MPI_SUCCESS);
-          current = std::move(constrained_current);
-          exact_solution = std::move(constrained_exact);
-
-          application::core::SimulationComponents sim;
-          sim.primary_mesh = mesh;
-          sim.fe_system = std::move(system);
-          sim.backend =
-              std::make_unique<svmp::FE::backends::FsilsFactory>(
-                  /*dofs_per_node=*/spatial_dimension + 2,
-                  sim.fe_system->dofPermutation(),
-                  MPI_COMM_WORLD);
-          ASSERT_NE(sim.backend, nullptr);
-          const auto* distributed_equations =
-              sim.fe_system->distributedSparsityIfAvailable("equations");
-          ASSERT_NE(distributed_equations, nullptr);
-          auto backend_layout_matrix =
-              sim.backend->createMatrix(*distributed_equations);
-          ASSERT_NE(backend_layout_matrix, nullptr);
-          svmp::FE::backends::SolverOptions linear_options;
-          linear_options.method =
-              svmp::FE::backends::SolverMethod::GMRES;
-          linear_options.preconditioner =
-              svmp::FE::backends::PreconditionerType::Diagonal;
-          linear_options.rel_tol = 1.0e-12;
-          linear_options.abs_tol = 1.0e-13;
-          linear_options.max_iter = 500;
-          sim.linear_solver =
-              sim.backend->createLinearSolver(linear_options);
-          ASSERT_NE(sim.linear_solver, nullptr);
-
-          auto allocated_history =
-              svmp::FE::timestepping::TimeHistory::allocate(
-                  *sim.backend,
-                  sim.fe_system->dofHandler().getNumDofs(),
-                  /*history_depth=*/2,
-                  /*allocate_second_order_state=*/true);
-          sim.time_history =
-              std::make_unique<svmp::FE::timestepping::TimeHistory>(
-                  std::move(allocated_history));
-          sim.time_history->setTime(0.0);
-          sim.time_history->setDt(0.1);
-          sim.time_history->setPrevDt(0.1);
-          scatterFeOrderedSolution(sim.time_history->u(), current);
-          scatterFeOrderedSolution(sim.time_history->uPrev(), current);
-          scatterFeOrderedSolution(sim.time_history->uPrev2(), current);
-          sim.time_history->uDot().zero();
-          sim.time_history->uDDot().zero();
-          sim.time_history->updateGhosts();
-          const auto owned_rows =
-              sim.time_history->u().ownedGlobalRows();
-          ASSERT_FALSE(owned_rows.empty());
-          EXPECT_LT(owned_rows.size(), solution_size);
-          const auto local_owned_row_count =
-              static_cast<unsigned long long>(owned_rows.size());
-          unsigned long long global_owned_row_count = 0u;
-          ASSERT_EQ(MPI_Allreduce(&local_owned_row_count,
-                                  &global_owned_row_count,
-                                  1,
-                                  MPI_UNSIGNED_LONG_LONG,
-                                  MPI_SUM,
-                                  MPI_COMM_WORLD),
-                    MPI_SUCCESS);
-          EXPECT_EQ(global_owned_row_count,
-                    static_cast<unsigned long long>(solution_size));
-
-          std::ostringstream contact_wall_markers_xml;
-          std::ostringstream contact_wall_normals_xml;
-          for (std::size_t wall_index = 0u;
-               wall_index < contact_walls.size();
-               ++wall_index) {
-            if (wall_index > 0u) {
-              contact_wall_markers_xml << ';';
-              contact_wall_normals_xml << "; ";
-            }
-            const auto& wall = contact_walls[wall_index];
-            contact_wall_markers_xml << wall.marker;
-            for (int component = 0; component < 3; ++component) {
-              if (component > 0) {
-                contact_wall_normals_xml << ' ';
-              }
-              contact_wall_normals_xml
-                  << (component == wall.axis ? wall.outward_normal : 0.0);
-            }
-          }
-          std::ostringstream parameter_xml;
-          parameter_xml << std::setprecision(17) << R"xml(
-<svMultiPhysicsFile>
-  <Add_equation type="level_set">
-    <Level_set_field_name>phi_physical_hydrostatic_fixed_gauge_mpi</Level_set_field_name>
-    <Enable_static_capillary_equilibrium_initialization>true</Enable_static_capillary_equilibrium_initialization>
-    <Static_capillary_volume_tolerance>1.0e-11</Static_capillary_volume_tolerance>
-    <Static_capillary_projected_gradient_tolerance>2.0e-6</Static_capillary_projected_gradient_tolerance>
-    <Static_capillary_pressure_representability_max_residual_norm>2.0e-10</Static_capillary_pressure_representability_max_residual_norm>
-    <Static_capillary_pressure_representability_max_relative_distance>2.0e-10</Static_capillary_pressure_representability_max_relative_distance>
-    <Static_capillary_physical_equilibrium_max_residual_norm>2.0e-10</Static_capillary_physical_equilibrium_max_residual_norm>
-    <Static_capillary_constant_pressure_kkt_max_residual_norm>2.0e-10</Static_capillary_constant_pressure_kkt_max_residual_norm>
-    <Static_capillary_constant_pressure_kkt_max_relative_distance>2.0e-10</Static_capillary_constant_pressure_kkt_max_relative_distance>
-  </Add_equation>
-  <Add_equation type="fluid">
-    <Add_BC name="physical_hydrostatic_fixed_gauge_mpi">
-      <Type>Free_surface</Type>
-      <Implementation>UnfittedLevelSet</Implementation>
-      <Level_set_field_name>phi_physical_hydrostatic_fixed_gauge_mpi</Level_set_field_name>
-      <Generated_interface_domain_id>physical_hydrostatic_fixed_gauge_mpi</Generated_interface_domain_id>
-      <Interface_marker>725</Interface_marker>
-      <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
-      <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
-      <Active_domain>)xml"
-                        << (positive_side ? "LevelSetPositive"
-                                          : "LevelSetNegative")
-                        << R"xml(</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
-      <Small_cut_aggregation>false</Small_cut_aggregation>
-      <External_pressure>)xml"
-                        << external_pressure
-                        << R"xml(</External_pressure>
-      <Surface_tension>1.0</Surface_tension>
-      <Surface_tension_form>SurfaceStress</Surface_tension_form>
-      <Contact_line_model>DynamicContactAngle</Contact_line_model>
-      <Contact_angle_degrees>90.0</Contact_angle_degrees>
-      <Contact_line_wall_markers>)xml"
-                        << contact_wall_markers_xml.str()
-                        << R"xml(</Contact_line_wall_markers>
-      <Contact_line_wall_normals>)xml"
-                        << contact_wall_normals_xml.str()
-                        << R"xml(</Contact_line_wall_normals>
-      <Contact_line_mobility>1.0</Contact_line_mobility>
-      <Wall_slip_model>Navier</Wall_slip_model>
-      <Wall_slip_length>1.0</Wall_slip_length>
-    </Add_BC>
-  </Add_equation>
-</svMultiPhysicsFile>
-)xml";
-          const auto parameter_text = parameter_xml.str();
-          auto params =
-              parseMpiWorkflowParametersXml(parameter_text.c_str());
-          auto requests = legacyMaintenanceRequestsForTest(*params);
-          ASSERT_EQ(requests.size(), 1u);
-          ASSERT_TRUE(
-              requests.front().configuration->static_capillary_equilibrium_enabled);
-
-          svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle
-              lifecycle;
-          ActiveCutContextRefreshCache refresh_cache;
-          const auto initial_report =
-              refreshActiveCutIntegrationContextCached(
-                  sim,
-                  *params,
-                  sim.time_history->u(),
-                  lifecycle,
-                  refresh_cache,
-                  "application-driver-mpi-hydrostatic-fixed-gauge-initial");
-          ASSERT_TRUE(initial_report.refreshed);
-          ASSERT_NE(initial_report.topology_key, 0u);
-          auto initial_functionals =
-              evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
-          ASSERT_EQ(initial_functionals.size(), 1u);
-          attachAcceptedFreeSurfaceActiveVolumeEnergies(
-              sim, current, initial_functionals);
-          ASSERT_TRUE(
-              initial_functionals.front().active_volume_energy.has_value());
-          const auto tangent_measure =
-              spatial_dimension == 2 ? svmp::FE::Real{3.0}
-                                     : svmp::FE::Real{6.0};
-          const auto expected_volume =
-              tangent_measure *
-              (positive_side
-                   ? svmp::FE::Real{1.0} - normal_offset
-                   : normal_offset);
-          const auto active_first_moment =
-              svmp::FE::Real{0.5} * tangent_measure *
-              (positive_side
-                   ? svmp::FE::Real{1.0} -
-                         normal_offset * normal_offset
-                   : normal_offset * normal_offset);
-          const auto expected_gravitational_energy =
-              -density * gravity * active_first_moment;
-          EXPECT_NEAR(
-              initial_functionals.front().state.owned_liquid_volume,
-              expected_volume,
-              1.0e-13);
-          EXPECT_NEAR(
-              initial_functionals.front().state.liquid_gas_surface_energy,
-              tangent_measure,
-              1.0e-13);
-          EXPECT_NEAR(initial_functionals.front().state.young_wall_energy,
-                      svmp::FE::Real{0.0},
-                      1.0e-13);
-          EXPECT_NEAR(
-              initial_functionals.front()
-                  .active_volume_energy->gravitational_energy,
-              expected_gravitational_energy,
-              2.0e-13);
-
-          const auto pressure_offset_index =
-              static_cast<std::size_t>(pressure_offset);
-          const auto pressure_count = static_cast<std::size_t>(
-              sim.fe_system->fieldDofHandler(pressure).getNumDofs());
-          const std::vector<svmp::FE::Real>
-              expected_pressure_coefficients(
-                  exact_solution.begin() +
-                      static_cast<std::ptrdiff_t>(pressure_offset_index),
-                  exact_solution.begin() +
-                      static_cast<std::ptrdiff_t>(pressure_offset_index +
-                                                  pressure_count));
-          const auto exact_pressure_certificate =
-              evaluateStaticCapillaryPressureCertificate(
-                  sim,
-                  exact_solution,
-                  effectiveStaticCapillaryEquilibriumOptions(requests.front()),
-                  /*initialize_compatible_pressure=*/false);
-          const auto& exact_certificate =
-              exact_pressure_certificate.report;
-          ASSERT_TRUE(
-              exact_certificate.pressure_representability_diagnostic_sampled);
-          EXPECT_LE(exact_certificate.residual_norm, 2.0e-12);
-
-          const auto exact_initialized_pressure_certificate =
-              evaluateStaticCapillaryPressureCertificate(
-                  sim,
-                  exact_solution,
-                  effectiveStaticCapillaryEquilibriumOptions(requests.front()),
-                  /*initialize_compatible_pressure=*/true);
-          const auto& exact_initialized_report =
-              exact_initialized_pressure_certificate.report;
-          ASSERT_TRUE(
-              exact_initialized_report
-                  .static_compatible_pressure_initializer_applied);
-          ASSERT_TRUE(
-              exact_initialized_report
-                  .static_compatible_pressure_initializer_passed);
-          EXPECT_LE(exact_initialized_report.residual_norm, 2.0e-12);
-          ASSERT_EQ(
-              exact_initialized_pressure_certificate.certified_solution.size(),
-              exact_solution.size());
-          svmp::FE::Real exact_initializer_pressure_update = 0.0;
-          for (std::size_t i = 0u; i < pressure_count; ++i) {
-            exact_initializer_pressure_update =
-                std::max(
-                    exact_initializer_pressure_update,
-                    std::abs(
-                        exact_initialized_pressure_certificate
-                            .certified_solution[pressure_offset_index + i] -
-                        exact_solution[pressure_offset_index + i]));
-          }
-          EXPECT_LE(exact_initializer_pressure_update, 2.0e-12);
-
-          bool initialized = false;
-          ASSERT_NO_THROW(
-              initialized = initializeDiscreteStaticCapillaryEquilibrium(
-                  sim,
-                  *params,
-                  requests,
-                  lifecycle,
-                  refresh_cache));
-          ASSERT_TRUE(initialized);
-          ASSERT_TRUE(
-              requests.front().runtime.static_capillary_equilibrium_initialized);
-
-          const auto communicator =
-              activeFESystemCommunicator(*sim.fe_system);
-          const auto certified_solution =
-              capturePostacceptMaintenanceVectorCollectively(
-                  sim.time_history->u(), communicator);
-          const auto pressure_certificate =
-              evaluateStaticCapillaryPressureCertificate(
-                  sim,
-                  certified_solution,
-                  effectiveStaticCapillaryEquilibriumOptions(requests.front()),
-                  /*initialize_compatible_pressure=*/false);
-          const auto& certificate = pressure_certificate.report;
-          ASSERT_TRUE(
-              certificate.pressure_representability_diagnostic_sampled);
-          ASSERT_TRUE(certificate.pressure_representability_available)
-              << certificate.pressure_representability_reason;
-          EXPECT_TRUE(certificate.pressure_representability_converged);
-          EXPECT_FALSE(certificate.pressure_representability_breakdown);
-          EXPECT_LE(certificate.pressure_representability_residual_norm,
-                    2.0e-10);
-          EXPECT_LE(certificate.pressure_representability_relative_distance,
-                    2.0e-10);
-          EXPECT_LE(certificate.residual_norm, 2.0e-10);
-          EXPECT_FALSE(
-              certificate.constant_pressure_constraints_preserve_constants);
-          EXPECT_FALSE(certificate.constant_pressure_kkt_available);
-
-          svmp::FE::Real initializer_pressure_representative_distance =
-              0.0;
-          for (std::size_t i = 0u;
-               i < expected_pressure_coefficients.size();
-               ++i) {
-            initializer_pressure_representative_distance =
-                std::max(
-                    initializer_pressure_representative_distance,
-                    std::abs(certified_solution[
-                                 pressure_offset_index + i] -
-                             expected_pressure_coefficients[i]));
-          }
-          EXPECT_TRUE(std::isfinite(
-              initializer_pressure_representative_distance));
-
-          const auto phi_offset_index =
-              static_cast<std::size_t>(phi_offset);
-          const auto phi_count = static_cast<std::size_t>(
-              sim.fe_system->fieldDofHandler(phi).getNumDofs());
-          svmp::FE::Real phi_update = 0.0;
-          for (std::size_t i = 0u; i < phi_count; ++i) {
-            phi_update =
-                std::max(phi_update,
-                         std::abs(certified_solution[
-                                      phi_offset_index + i] -
-                                  current[phi_offset_index + i]));
-          }
-          EXPECT_LE(phi_update, 2.0e-7);
-
-          auto final_functionals =
-              evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
-          ASSERT_EQ(final_functionals.size(), 1u);
-          attachAcceptedFreeSurfaceActiveVolumeEnergies(
-              sim, certified_solution, final_functionals);
-          ASSERT_TRUE(
-              final_functionals.front().active_volume_energy.has_value());
-          const auto gravitational_energy_error = std::abs(
-              final_functionals.front()
-                  .active_volume_energy->gravitational_energy -
-              expected_gravitational_energy);
-          const auto volume_error = std::abs(
-              final_functionals.front().state.owned_liquid_volume -
-              expected_volume);
-          const auto surface_energy_error = std::abs(
-              final_functionals.front().state.liquid_gas_surface_energy -
-              tangent_measure);
-          EXPECT_LE(gravitational_energy_error, 2.0e-10);
-          EXPECT_LE(volume_error, 1.0e-11);
-          EXPECT_LE(surface_energy_error, 2.0e-10);
-          EXPECT_NEAR(final_functionals.front().state.young_wall_energy,
-                      svmp::FE::Real{0.0},
-                      1.0e-13);
-
-          for (const auto scalar : {
-                   static_cast<double>(exact_certificate.residual_norm),
-                   static_cast<double>(
-                       exact_initializer_pressure_update),
-                   static_cast<double>(
-                       certificate.pressure_representability_residual_norm),
-                   static_cast<double>(
-                       certificate
-                           .pressure_representability_relative_distance),
-                   static_cast<double>(certificate.residual_norm),
-                   static_cast<double>(
-                       initializer_pressure_representative_distance),
-                   static_cast<double>(gravitational_energy_error),
-                   static_cast<double>(volume_error),
-                   static_cast<double>(surface_energy_error),
-                   static_cast<double>(phi_update)}) {
-            EXPECT_EQ(globalMinDouble(scalar, communicator),
-                      globalMaxDouble(scalar, communicator));
-          }
-          const auto final_revision =
-              collectiveLevelSetMaintenanceAlgebraicRevision(
-                  certified_solution, communicator);
-          const auto [minimum_revision, maximum_revision] =
-              globalMinMaxUint64(final_revision, communicator);
-          EXPECT_EQ(minimum_revision, maximum_revision);
-
-          maximum_pressure_residual =
-              std::max(maximum_pressure_residual,
-                       static_cast<svmp::FE::Real>(
-                           certificate
-                               .pressure_representability_residual_norm));
-          maximum_pressure_relative_distance =
-              std::max(maximum_pressure_relative_distance,
-                       static_cast<svmp::FE::Real>(
-                           certificate
-                               .pressure_representability_relative_distance));
-          maximum_exact_field_production_residual =
-              std::max(maximum_exact_field_production_residual,
-                       static_cast<svmp::FE::Real>(
-                           exact_certificate.residual_norm));
-          maximum_production_residual =
-              std::max(maximum_production_residual,
-                       static_cast<svmp::FE::Real>(
-                           certificate.residual_norm));
-          maximum_initializer_pressure_representative_distance =
-              std::max(
-                  maximum_initializer_pressure_representative_distance,
-                  initializer_pressure_representative_distance);
-          maximum_exact_initializer_pressure_update =
-              std::max(maximum_exact_initializer_pressure_update,
-                       exact_initializer_pressure_update);
-          maximum_gravitational_energy_error =
-              std::max(maximum_gravitational_energy_error,
-                       gravitational_energy_error);
-          maximum_volume_error =
-              std::max(maximum_volume_error, volume_error);
-          maximum_surface_energy_error =
-              std::max(maximum_surface_energy_error,
-                       surface_energy_error);
-          maximum_phi_update =
-              std::max(maximum_phi_update, phi_update);
         }
       }
     }
   }
 
-  EXPECT_EQ(two_dimensional_case_count, 384u);
-  EXPECT_EQ(three_dimensional_case_count, 576u);
-  EXPECT_EQ(case_count, 960u);
-  EXPECT_EQ(owner_contiguous_nonidentity_case_count,
-            case_count / fe_global_numbering_mode_count);
-  EXPECT_EQ(three_dimensional_owner_contiguous_nonidentity_case_count,
-            three_dimensional_case_count /
+  EXPECT_EQ(summary.two_dimensional_case_count, 384u);
+  EXPECT_EQ(summary.three_dimensional_case_count, 576u);
+  EXPECT_EQ(summary.case_count, 960u);
+  EXPECT_EQ(summary.owner_contiguous_nonidentity_case_count,
+            summary.case_count / fe_global_numbering_mode_count);
+  EXPECT_EQ(summary.three_dimensional_owner_contiguous_nonidentity_case_count,
+            summary.three_dimensional_case_count /
                 fe_global_numbering_mode_count);
-  EXPECT_EQ(three_dimensional_shared_vertex_case_count,
-            three_dimensional_case_count);
+  EXPECT_EQ(summary.three_dimensional_shared_vertex_case_count,
+            summary.three_dimensional_case_count);
   RecordProperty("wp4_hydrostatic_mpi_rank_count", size);
   RecordProperty("wp4_hydrostatic_mpi_partition_layout_count",
                  partition_layout_count);
@@ -6345,7 +6408,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                  fe_global_numbering_mode_count);
   RecordProperty(
       "wp4_hydrostatic_mpi_owner_contiguous_nonidentity_case_count",
-      owner_contiguous_nonidentity_case_count);
+      summary.owner_contiguous_nonidentity_case_count);
   RecordProperty(
       "wp4_hydrostatic_mpi_three_dimensional_partition_layout_count",
       partition_layout_count);
@@ -6361,10 +6424,10 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   RecordProperty(
       "wp4_hydrostatic_mpi_three_dimensional_owner_contiguous_nonidentity_"
       "case_count",
-      three_dimensional_owner_contiguous_nonidentity_case_count);
+      summary.three_dimensional_owner_contiguous_nonidentity_case_count);
   RecordProperty(
       "wp4_hydrostatic_mpi_three_dimensional_shared_vertex_case_count",
-      three_dimensional_shared_vertex_case_count);
+      summary.three_dimensional_shared_vertex_case_count);
   RecordProperty("wp4_hydrostatic_mpi_spatial_dimension", 3);
   RecordProperty("wp4_hydrostatic_mpi_spatial_dimension_count", 2);
   RecordProperty("wp4_hydrostatic_mpi_coordinate_direction_count", 3);
@@ -6375,36 +6438,314 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                  normal_offsets.size());
   RecordProperty("wp4_hydrostatic_mpi_gravity_direction_count", 2);
   RecordProperty("wp4_hydrostatic_mpi_two_dimensional_case_count",
-                 two_dimensional_case_count);
+                 summary.two_dimensional_case_count);
   RecordProperty("wp4_hydrostatic_mpi_three_dimensional_case_count",
-                 three_dimensional_case_count);
+                 summary.three_dimensional_case_count);
   RecordProperty("wp4_hydrostatic_mpi_fixed_zero_pressure_gauge_case_count",
-                 case_count);
-  RecordProperty("wp4_hydrostatic_mpi_matrix_case_count", case_count);
+                 summary.case_count);
+  RecordProperty("wp4_hydrostatic_mpi_matrix_case_count", summary.case_count);
   RecordProperty(
       "wp4_hydrostatic_mpi_pressure_representability_residual_norm",
-      maximum_pressure_residual);
+      summary.maximum_pressure_residual);
   RecordProperty("wp4_hydrostatic_mpi_pressure_relative_distance",
-                 maximum_pressure_relative_distance);
+                 summary.maximum_pressure_relative_distance);
   RecordProperty(
       "wp4_hydrostatic_mpi_exact_field_production_residual_norm",
-      maximum_exact_field_production_residual);
+      summary.maximum_exact_field_production_residual);
   RecordProperty("wp4_hydrostatic_mpi_production_residual_norm",
-                 maximum_production_residual);
+                 summary.maximum_production_residual);
   RecordProperty(
       "wp4_hydrostatic_mpi_initializer_pressure_representative_distance",
-      maximum_initializer_pressure_representative_distance);
+      summary.maximum_initializer_pressure_representative_distance);
   RecordProperty(
       "wp4_hydrostatic_mpi_exact_initializer_pressure_update",
-      maximum_exact_initializer_pressure_update);
+      summary.maximum_exact_initializer_pressure_update);
   RecordProperty("wp4_hydrostatic_mpi_gravitational_energy_error",
-                 maximum_gravitational_energy_error);
+                 summary.maximum_gravitational_energy_error);
   RecordProperty("wp4_hydrostatic_mpi_volume_error",
-                 maximum_volume_error);
+                 summary.maximum_volume_error);
   RecordProperty("wp4_hydrostatic_mpi_surface_energy_error",
-                 maximum_surface_energy_error);
+                 summary.maximum_surface_energy_error);
   RecordProperty("wp4_hydrostatic_mpi_maximum_phi_update",
-                 maximum_phi_update);
+                 summary.maximum_phi_update);
+}
+
+namespace {
+
+// Covering design of the two-rank hydrostatic fixed-gauge matrix, the default
+// CTest workload. Every physical case of the serial twin
+// StaticCapillaryInitializationBalancesHydrostaticGravityWithFixedPressureGauge
+// (normal axis, active side, cut offset, gravity direction: 24 cases in 2D, 36
+// in 3D) runs once, in the serial twin's order, with one partition and
+// numbering variant given by the bit mask of the case:
+//   1: alternate cell order (the other block partition layout),
+//   2: reversed global vertex numbering,
+//   4: highest-rank DOF ownership,
+//   8: dense global DOF ids.
+// Within each dimension the masks give
+//   - all 16 variant combinations;
+//   - for each normal axis, every (cell order, active side, cut offset)
+//     combination, so each partition layout meets every interface position,
+//     including an interface inside one rank's block and a rank whose block is
+//     entirely inactive;
+//   - every (cell order, vertex numbering, DOF ownership, active side)
+//     combination, which puts the pressure gauge vertex on either rank with
+//     either owner;
+//   - every value of each numbering and ownership flag together with every
+//     normal axis, active side, cut offset and gravity direction.
+// verifyHydrostaticCoveringDesign() checks these properties. The exhaustive
+// product of all 16 variants with every case (960 cases) remains available as
+// HydrostaticGravityWithFixedPressureGaugeMatchesAcrossTwoRankPartition.
+constexpr std::array<std::uint8_t, 24> kHydrostaticCoveringVariants2D{{
+    15, 2, 0, 11, 7, 12, 11, 6, 8, 13, 12, 1,
+    9, 4, 6, 5, 10, 1, 5, 8, 14, 3, 10, 7,
+}};
+constexpr std::array<std::uint8_t, 36> kHydrostaticCoveringVariants3D{{
+    14, 3, 11, 14, 0, 9, 7, 2, 12, 13, 1, 0,
+    5, 10, 12, 13, 10, 7, 4, 13, 6, 1, 0, 11,
+    12, 3, 13, 8, 12, 15, 9, 2, 0, 15, 5, 14,
+}};
+
+[[nodiscard]] std::vector<HydrostaticFixedGaugeMpiCase>
+hydrostaticCoveringCases(int spatial_dimension)
+{
+  const std::uint8_t* masks = spatial_dimension == 2
+                                  ? kHydrostaticCoveringVariants2D.data()
+                                  : kHydrostaticCoveringVariants3D.data();
+  std::vector<HydrostaticFixedGaugeMpiCase> cases;
+  cases.reserve(static_cast<std::size_t>(12 * spatial_dimension));
+  std::size_t index = 0u;
+  for (int normal_axis = 0; normal_axis < spatial_dimension; ++normal_axis) {
+    for (const bool positive_side : {false, true}) {
+      for (const auto normal_offset : kHydrostaticNormalOffsets) {
+        for (const svmp::FE::Real gravity_direction :
+             {svmp::FE::Real{-1.0}, svmp::FE::Real{1.0}}) {
+          const auto mask = masks[index++];
+          cases.push_back(HydrostaticFixedGaugeMpiCase{
+              .spatial_dimension = spatial_dimension,
+              .normal_axis = normal_axis,
+              .reverse_vertex_numbering = (mask & 2u) != 0u,
+              .alternate_cell_order = (mask & 1u) != 0u,
+              .highest_rank_dof_ownership = (mask & 4u) != 0u,
+              .dense_global_dof_numbering = (mask & 8u) != 0u,
+              .positive_side = positive_side,
+              .normal_offset = normal_offset,
+              .gravity_direction = gravity_direction,
+          });
+        }
+      }
+    }
+  }
+  return cases;
+}
+
+void verifyHydrostaticCoveringDesign(
+    const std::vector<HydrostaticFixedGaugeMpiCase>& cases,
+    int spatial_dimension)
+{
+  ASSERT_EQ(cases.size(), static_cast<std::size_t>(12 * spatial_dimension));
+  const auto offset_index = [](const HydrostaticFixedGaugeMpiCase& c) {
+    for (std::size_t i = 0u; i < kHydrostaticNormalOffsets.size(); ++i) {
+      if (c.normal_offset == kHydrostaticNormalOffsets[i]) {
+        return static_cast<int>(i);
+      }
+    }
+    return -1;
+  };
+  const auto layout = [](const HydrostaticFixedGaugeMpiCase& c) {
+    return static_cast<int>(c.alternate_cell_order);
+  };
+  const auto numbering = [](const HydrostaticFixedGaugeMpiCase& c) {
+    return static_cast<int>(c.reverse_vertex_numbering);
+  };
+  const auto ownership = [](const HydrostaticFixedGaugeMpiCase& c) {
+    return static_cast<int>(c.highest_rank_dof_ownership);
+  };
+  const auto global_ids = [](const HydrostaticFixedGaugeMpiCase& c) {
+    return static_cast<int>(c.dense_global_dof_numbering);
+  };
+  const auto side = [](const HydrostaticFixedGaugeMpiCase& c) {
+    return static_cast<int>(c.positive_side);
+  };
+  const auto gravity = [](const HydrostaticFixedGaugeMpiCase& c) {
+    return static_cast<int>(c.gravity_direction > svmp::FE::Real{0.0});
+  };
+  const auto axis = [](const HydrostaticFixedGaugeMpiCase& c) {
+    return c.normal_axis;
+  };
+  const auto expect_all = [&](const std::string& name,
+                              const auto& key_of,
+                              std::size_t expected) {
+    std::set<std::vector<int>> seen;
+    for (const auto& c : cases) {
+      seen.insert(key_of(c));
+    }
+    EXPECT_EQ(seen.size(), expected)
+        << "spatial_dimension=" << spatial_dimension << " coverage of "
+        << name;
+  };
+  const auto axes = static_cast<std::size_t>(spatial_dimension);
+  expect_all("all variant combinations",
+             [&](const auto& c) {
+               return std::vector<int>{
+                   layout(c), numbering(c), ownership(c), global_ids(c)};
+             },
+             16u);
+  expect_all("normal axis x cell order x active side x cut offset",
+             [&](const auto& c) {
+               return std::vector<int>{
+                   axis(c), layout(c), side(c), offset_index(c)};
+             },
+             axes * 12u);
+  expect_all("cell order x vertex numbering x DOF ownership x active side",
+             [&](const auto& c) {
+               return std::vector<int>{
+                   layout(c), numbering(c), ownership(c), side(c)};
+             },
+             16u);
+  using CaseKey = int (*)(const HydrostaticFixedGaugeMpiCase&);
+  const std::array<std::pair<const char*, CaseKey>, 3> flags{{
+      {"vertex numbering", +numbering},
+      {"DOF ownership", +ownership},
+      {"global DOF ids", +global_ids},
+  }};
+  const std::array<std::tuple<const char*, CaseKey, std::size_t>, 4>
+      physical{{
+          {"normal axis", +axis, axes},
+          {"active side", +side, 2u},
+          {"cut offset", +offset_index, kHydrostaticNormalOffsets.size()},
+          {"gravity direction", +gravity, 2u},
+      }};
+  for (const auto& [flag_name, flag] : flags) {
+    for (const auto& [physical_name, value, count] : physical) {
+      expect_all(std::string(flag_name) + " x " + physical_name,
+                 [&](const auto& c) {
+                   return std::vector<int>{flag(c), value(c)};
+                 },
+                 2u * count);
+    }
+  }
+}
+
+// Runs the covering cases of one dimension (one normal axis when
+// `normal_axis` >= 0) and records their properties under `prefix`.
+void runHydrostaticCoveringMatrix(int spatial_dimension,
+                                  int normal_axis,
+                                  const std::string& prefix)
+{
+  int size = 1;
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  if (size != 2) {
+    GTEST_SKIP()
+        << "This hydrostatic fixed-gauge fixture requires two ranks.";
+  }
+  MpiWorkflowScopedEnvVar conservative_balance_diagnostic(
+      "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
+      std::string("1"));
+
+  const auto cases = hydrostaticCoveringCases(spatial_dimension);
+  verifyHydrostaticCoveringDesign(cases, spatial_dimension);
+  if (::testing::Test::HasFatalFailure()) {
+    return;
+  }
+
+  HydrostaticFixedGaugeMpiSummary summary;
+  std::size_t owner_contiguous_case_count = 0u;
+  for (const auto& hydrostatic_case : cases) {
+    if (normal_axis >= 0 && hydrostatic_case.normal_axis != normal_axis) {
+      continue;
+    }
+    if (!hydrostatic_case.dense_global_dof_numbering) {
+      ++owner_contiguous_case_count;
+    }
+    runHydrostaticFixedGaugeMpiCase(hydrostatic_case, summary);
+    if (::testing::Test::HasFatalFailure()) {
+      return;
+    }
+  }
+
+  const auto expected_case_count =
+      normal_axis >= 0 ? std::size_t{12u}
+                       : static_cast<std::size_t>(12 * spatial_dimension);
+  EXPECT_EQ(summary.case_count, expected_case_count);
+  EXPECT_EQ(spatial_dimension == 2 ? summary.two_dimensional_case_count
+                                   : summary.three_dimensional_case_count,
+            expected_case_count);
+  // Owner-contiguous numbering differs from the global vertex ids in every
+  // case, as in the exhaustive matrix.
+  EXPECT_EQ(summary.owner_contiguous_nonidentity_case_count,
+            owner_contiguous_case_count);
+  if (spatial_dimension == 3) {
+    EXPECT_EQ(
+        summary.three_dimensional_owner_contiguous_nonidentity_case_count,
+        owner_contiguous_case_count);
+    EXPECT_EQ(summary.three_dimensional_shared_vertex_case_count,
+              expected_case_count);
+  }
+
+  using ::testing::Test;
+  Test::RecordProperty(prefix + "rank_count", size);
+  Test::RecordProperty(prefix + "spatial_dimension", spatial_dimension);
+  Test::RecordProperty(prefix + "normal_axis", normal_axis);
+  Test::RecordProperty(prefix + "case_count", summary.case_count);
+  Test::RecordProperty(prefix + "owner_contiguous_nonidentity_case_count",
+                       summary.owner_contiguous_nonidentity_case_count);
+  Test::RecordProperty(prefix + "pressure_representability_residual_norm",
+                       summary.maximum_pressure_residual);
+  Test::RecordProperty(prefix + "pressure_relative_distance",
+                       summary.maximum_pressure_relative_distance);
+  Test::RecordProperty(prefix + "exact_field_production_residual_norm",
+                       summary.maximum_exact_field_production_residual);
+  Test::RecordProperty(prefix + "production_residual_norm",
+                       summary.maximum_production_residual);
+  Test::RecordProperty(
+      prefix + "initializer_pressure_representative_distance",
+      summary.maximum_initializer_pressure_representative_distance);
+  Test::RecordProperty(prefix + "exact_initializer_pressure_update",
+                       summary.maximum_exact_initializer_pressure_update);
+  Test::RecordProperty(prefix + "gravitational_energy_error",
+                       summary.maximum_gravitational_energy_error);
+  Test::RecordProperty(prefix + "volume_error", summary.maximum_volume_error);
+  Test::RecordProperty(prefix + "surface_energy_error",
+                       summary.maximum_surface_energy_error);
+  Test::RecordProperty(prefix + "maximum_phi_update",
+                       summary.maximum_phi_update);
+}
+
+} // namespace
+
+// The covering matrix is split by dimension and normal axis so that CTest
+// shards run the 3D cases (about 4.5 s each on two ranks) side by side.
+TEST(ApplicationDriverLevelSetWorkflowsMPI,
+     HydrostaticFixedGaugeCoveringMatrixMatchesAcrossTwoRankPartition2D)
+{
+  runHydrostaticCoveringMatrix(
+      /*spatial_dimension=*/2, /*normal_axis=*/-1,
+      "wp4_hydrostatic_mpi_covering_2d_");
+}
+
+TEST(ApplicationDriverLevelSetWorkflowsMPI,
+     HydrostaticFixedGaugeCoveringMatrixMatchesAcrossTwoRankPartition3DAxis0)
+{
+  runHydrostaticCoveringMatrix(
+      /*spatial_dimension=*/3, /*normal_axis=*/0,
+      "wp4_hydrostatic_mpi_covering_3d_axis0_");
+}
+
+TEST(ApplicationDriverLevelSetWorkflowsMPI,
+     HydrostaticFixedGaugeCoveringMatrixMatchesAcrossTwoRankPartition3DAxis1)
+{
+  runHydrostaticCoveringMatrix(
+      /*spatial_dimension=*/3, /*normal_axis=*/1,
+      "wp4_hydrostatic_mpi_covering_3d_axis1_");
+}
+
+TEST(ApplicationDriverLevelSetWorkflowsMPI,
+     HydrostaticFixedGaugeCoveringMatrixMatchesAcrossTwoRankPartition3DAxis2)
+{
+  runHydrostaticCoveringMatrix(
+      /*spatial_dimension=*/3, /*normal_axis=*/2,
+      "wp4_hydrostatic_mpi_covering_3d_axis2_");
 }
 
 TEST(ApplicationDriverLevelSetWorkflowsMPI,
