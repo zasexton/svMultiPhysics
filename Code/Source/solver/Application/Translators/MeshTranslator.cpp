@@ -14,10 +14,12 @@
 #include <cstdint>
 #include <cmath>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -440,7 +442,8 @@ namespace application {
 namespace translators {
 
 std::shared_ptr<svmp::Mesh> MeshTranslator::loadMesh(const MeshParameters& params,
-                                                     int minimum_ghost_layers)
+                                                     int minimum_ghost_layers,
+                                                     const MeshPartitionWeights& partition_weights)
 {
   int ghost_layers = params.ghost_layers.value();
   if (ghost_layers < 0) {
@@ -478,6 +481,25 @@ std::shared_ptr<svmp::Mesh> MeshTranslator::loadMesh(const MeshParameters& param
   io_opts.kv["codim1_topology"] = "none";
   io_opts.kv["edge_topology"] = "false";
   io_opts.kv["ghost_layers"] = std::to_string(ghost_layers);
+  if (!partition_weights.vertex_field.empty()) {
+    const auto real_text = [](double value) {
+      std::ostringstream os;
+      os << std::setprecision(17) << value;
+      return os.str();
+    };
+    io_opts.kv["partition_weight_vertex_field"] = partition_weights.vertex_field;
+    io_opts.kv["partition_weight_isovalue"] = real_text(partition_weights.isovalue);
+    io_opts.kv["partition_weight_negative"] = real_text(partition_weights.negative);
+    io_opts.kv["partition_weight_positive"] = real_text(partition_weights.positive);
+    io_opts.kv["partition_weight_cut"] = real_text(partition_weights.cut);
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] MeshTranslator: startup partition weights from vertex field '"
+        << partition_weights.vertex_field << "' isovalue=" << partition_weights.isovalue
+        << " negative=" << partition_weights.negative << " positive=" << partition_weights.positive
+        << " cut=" << partition_weights.cut
+        << " (ParMETIS balances cell count and weighted work) diagnostic=partition_weighting"
+        << std::endl;
+  }
 
   application::core::oopCout()
       << "[svMultiPhysics::Application] MeshTranslator: initial mesh storage codim1=none edge=false"

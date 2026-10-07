@@ -1353,17 +1353,62 @@ void SimulationBuilder::loadMeshes()
   // eight layers when the deck leaves <Ghost_layers> unset.
   constexpr int kAggregationGhostLayers = 8;
   int minimum_ghost_layers = 0;
+  std::optional<application::core::ActiveCutVolumeRequest> free_surface_request;
   if (svmp::MeshComm::world().size() > 1) {
     for (const auto& request : application::core::activeCutVolumeRequests(params_)) {
       if (request.origin ==
-              application::core::ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary &&
-          request.volume_retention ==
-              application::core::ActiveCutVolumeRetention::ActiveAndInactive) {
-        minimum_ghost_layers = kAggregationGhostLayers;
-        break;
+          application::core::ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary) {
+        if (!free_surface_request) {
+          free_surface_request = request;
+        }
+        if (request.volume_retention ==
+            application::core::ActiveCutVolumeRetention::ActiveAndInactive) {
+          minimum_ghost_layers = kAggregationGhostLayers;
+        }
       }
     }
   }
+
+  // Opt-in <Partition_weighting>free_surface</Partition_weighting>: weight
+  // the startup partition by the sign of the free surface's initial level
+  // set (active, inactive and cut cells).  Active and cut cells carry the
+  // flow terms and the cut quadrature, so a cell-count partition leaves the
+  // ranks that hold the liquid and the interface with most of the work.
+  const auto partition_weights_for =
+      [&](const MeshParameters& mesh_params) -> application::translators::MeshPartitionWeights {
+    application::translators::MeshPartitionWeights weights;
+    std::string mode = mesh_params.partition_weighting.value();
+    std::transform(mode.begin(), mode.end(), mode.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (mode.empty() || mode == "none") {
+      return weights;
+    }
+    if (mode != "free_surface") {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] <Partition_weighting> inside <Add_mesh name=\"" +
+          mesh_params.name.value() + "\"> must be 'none' or 'free_surface', got '" +
+          mesh_params.partition_weighting.value() + "'.");
+    }
+    if (svmp::MeshComm::world().size() <= 1) {
+      return weights;
+    }
+    if (!free_surface_request) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] <Partition_weighting>free_surface</Partition_weighting> "
+          "requires an unfitted level-set free-surface boundary condition.");
+    }
+    const double active = mesh_params.partition_weight_active.value();
+    const double inactive = mesh_params.partition_weight_inactive.value();
+    const double cut = mesh_params.partition_weight_cut.value();
+    weights.vertex_field = free_surface_request->level_set_field_name;
+    weights.isovalue = free_surface_request->isovalue;
+    const bool negative_active =
+        free_surface_request->active_side == application::core::LevelSetActiveSide::Negative;
+    weights.negative = negative_active ? active : inactive;
+    weights.positive = negative_active ? inactive : active;
+    weights.cut = cut;
+    return weights;
+  };
 
   for (const auto* mesh_params : params_.mesh_parameters) {
     if (!mesh_params) {
@@ -1389,7 +1434,7 @@ void SimulationBuilder::loadMeshes()
     oopCout() << std::endl;
 
     auto mesh = application::translators::MeshTranslator::loadMesh(
-        *mesh_params, minimum_ghost_layers);
+        *mesh_params, minimum_ghost_layers, partition_weights_for(*mesh_params));
     auto participant = MeshParticipant::fromLoadedMesh(*mesh_params, mesh);
     components_.mesh_collection.addParticipant(std::move(participant));
     components_.meshes.emplace(mesh_name, mesh);

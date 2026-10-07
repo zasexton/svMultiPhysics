@@ -3520,6 +3520,10 @@ MeshParameters::MeshParameters()
   set_parameter("Domain", 0,  !required, domain_id);
   set_parameter("Domain_file_path", "", !required, domain_file_path);
   set_parameter("Ghost_layers", 0, !required, ghost_layers);
+  set_parameter("Partition_weighting", "none", !required, partition_weighting);
+  set_parameter("Partition_weight_active", 3.0, !required, partition_weight_active);
+  set_parameter("Partition_weight_inactive", 1.0, !required, partition_weight_inactive);
+  set_parameter("Partition_weight_cut", 4.0, !required, partition_weight_cut);
 
   //set_parameter("Fiber_direction", {}, !required, fiber_direction);
   set_parameter("Fiber_direction_file_path", {}, !required, fiber_direction_file_paths);
