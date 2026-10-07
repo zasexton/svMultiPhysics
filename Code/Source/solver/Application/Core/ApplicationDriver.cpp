@@ -30356,8 +30356,32 @@ void ApplicationDriver::runWithParameters(const Parameters& params)
   const auto comm = svmp::MeshComm::world();
 
   // Auto-configure OpenMP threads: hardware_cores / MPI_ranks_per_node.
-  // Respects OMP_NUM_THREADS if the user has set it explicitly.
-  configureOpenMPThreads(comm);
+  // Respects OMP_NUM_THREADS if the user has set it explicitly. With threaded
+  // assembly requested (<Assembly_threads> or SVMP_ASSEMBLY_THREADS above one)
+  // OpenMP stays at one thread instead: OpenMP threads change the FSILS
+  // reduction order and select the coloured cell assembly, so results would
+  // depend on the core count (FE/Docs/ThreadedAssembly.md).
+  int assembly_threads = 1;
+  {
+    const auto& deck = params.general_simulation_parameters.assembly_threads;
+    if (deck.defined() && deck.value() >= 1) {
+      assembly_threads = deck.value();
+    }
+    if (const char* env = std::getenv("SVMP_ASSEMBLY_THREADS"); env != nullptr && *env != '\0') {
+      char* end = nullptr;
+      const long value = std::strtol(env, &end, 10);
+      if (end != env && *end == '\0' && value >= 1 && value <= 4096) {
+        assembly_threads = static_cast<int>(value);
+      }
+    }
+  }
+  if (assembly_threads > 1 && std::getenv("OMP_NUM_THREADS") == nullptr) {
+#ifdef _OPENMP
+    omp_set_num_threads(1);
+#endif
+  } else {
+    configureOpenMPThreads(comm);
+  }
 
   {
     int omp_threads = 1;

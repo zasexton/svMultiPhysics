@@ -1165,6 +1165,30 @@ bool inputRequestsCoupledDisplacementALE(const Parameters& params)
   return false;
 }
 
+// Assembly threads per rank: <Assembly_threads> in GeneralSimulationParameters,
+// overridden by SVMP_ASSEMBLY_THREADS. Values below one are ignored.
+int requestedAssemblyThreads(const Parameters& params, std::string& source)
+{
+  int threads = 1;
+  source = "default";
+  const auto& deck = params.general_simulation_parameters.assembly_threads;
+  if (deck.defined() && deck.value() >= 1) {
+    threads = deck.value();
+    source = "Assembly_threads";
+  }
+  if (const char* env = std::getenv("SVMP_ASSEMBLY_THREADS"); env != nullptr && *env != '\0') {
+    char* end = nullptr;
+    const long value = std::strtol(env, &end, 10);
+    if (end != env && *end == '\0' && value >= 1 && value <= 4096) {
+      threads = static_cast<int>(value);
+      source = "SVMP_ASSEMBLY_THREADS";
+    } else {
+      source += " (ignored invalid SVMP_ASSEMBLY_THREADS)";
+    }
+  }
+  return threads;
+}
+
 } // namespace
 
 namespace application {
@@ -1661,6 +1685,17 @@ void SimulationBuilder::setupSystem()
     }
     oopCout() << "[svMultiPhysics::Application] SVMP_DOF_NUMBERING=" << env
               << " -> numbering override applied" << std::endl;
+  }
+
+  // Opt-in threaded assembly (FE/Docs/ThreadedAssembly.md); results do not
+  // depend on the thread count.
+  {
+    std::string source;
+    setup_opts.assembly_options.num_threads = requestedAssemblyThreads(params_, source);
+    if (setup_opts.assembly_options.num_threads > 1 || source != "default") {
+      oopCout() << "[svMultiPhysics::Application] Assembly threads per rank="
+                << setup_opts.assembly_options.num_threads << " (" << source << ")" << std::endl;
+    }
   }
 
   components_.fe_system->setup(setup_opts);
