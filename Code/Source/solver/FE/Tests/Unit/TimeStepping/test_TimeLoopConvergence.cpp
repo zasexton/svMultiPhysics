@@ -45,6 +45,7 @@
 #include <numeric>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -3042,6 +3043,188 @@ TEST(TimeLoopCallbacks,
     EXPECT_EQ(outer_state_callbacks, 2);
     EXPECT_EQ(discontinuity_checks, 2);
     EXPECT_EQ(rejected_callbacks, 1);
+    EXPECT_EQ(accepted_callbacks, 0);
+}
+
+// A failure determined by the entry state of the outer fixed point (here the
+// state of the first attempt) recurs when the rollback synchronizes that
+// state again. It is a step failure, not a rollback failure: the TimeLoop
+// restores the accepted state and the adaptive controller retries with a
+// smaller step, and the report carries the failure. Before the fix the report
+// only said "external-state fixed-point failure was followed by a rollback
+// failure".
+TEST(TimeLoopCallbacks,
+     ExternalStateEntrySynchronizationFailureRetriesWithSmallerStep)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using svmp::FE::timestepping::StepRejectReason;
+    using StateSyncPoint = svmp::FE::timestepping::NewtonOptions::
+        StateSynchronizationPoint;
+
+    auto controller =
+        std::make_shared<RecordingAcceptanceGateController>();
+    bool failing_attempt = true;
+    int restored_outer_callbacks = 0;
+    int rejected_callbacks = 0;
+
+    const auto final_values = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::BackwardEuler,
+        /*dt=*/0.1,
+        /*t_end=*/0.1,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        controller,
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory&) {
+            callbacks.on_step_rejected =
+                [&](const svmp::FE::timestepping::TimeHistory& history,
+                    StepRejectReason reason,
+                    const svmp::FE::timestepping::NewtonReport& report) {
+                    ++rejected_callbacks;
+                    failing_attempt = false;
+                    EXPECT_EQ(reason,
+                              StepRejectReason::NonlinearSolveFailed);
+                    EXPECT_FALSE(report.converged);
+                    EXPECT_NE(report.failure_message.find(
+                                  "entry geometry rejected"),
+                              std::string::npos)
+                        << report.failure_message;
+                    EXPECT_EQ(report.failure_message.find(
+                                  "rollback failure"),
+                              std::string::npos)
+                        << report.failure_message;
+                    EXPECT_EQ(history.stepIndex(), 0);
+                };
+        },
+        /*inspect_expected_exception=*/{},
+        [&](svmp::FE::timestepping::TimeLoopOptions& options,
+            svmp::FE::FieldId) {
+            options.newton.external_state_fixed_point.enabled = true;
+            options.newton.external_state_fixed_point.max_iterations = 4;
+            options.newton.synchronize_state =
+                [&](const svmp::FE::systems::SystemStateView&,
+                    StateSyncPoint point) {
+                    if (point ==
+                        StateSyncPoint::RestoredOuterFixedPointState) {
+                        ++restored_outer_callbacks;
+                    }
+                    if (failing_attempt &&
+                        (point == StateSyncPoint::OuterFixedPointState ||
+                         point ==
+                             StateSyncPoint::RestoredOuterFixedPointState)) {
+                        throw std::runtime_error("entry geometry rejected");
+                    }
+                };
+        });
+
+    ASSERT_EQ(final_values.size(), 4u);
+    EXPECT_FALSE(failing_attempt);
+    EXPECT_EQ(rejected_callbacks, 1);
+    ASSERT_EQ(controller->rejected.size(), 1u);
+    EXPECT_EQ(controller->rejected.front().second,
+              StepRejectReason::NonlinearSolveFailed);
+    EXPECT_EQ(controller->accepted.size(), 2u);
+    EXPECT_EQ(restored_outer_callbacks, 1);
+}
+
+// The same failure with a fixed step: the run stops with the failure and the
+// accepted state. Before the fix it stopped with "external-state fixed-point
+// failure was followed by a rollback failure" and without the failure.
+TEST(TimeLoopCallbacks,
+     FixedStepExternalStateEntrySynchronizationFailureIsReportedAfterRestore)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using StateSyncPoint = svmp::FE::timestepping::NewtonOptions::
+        StateSynchronizationPoint;
+
+    int outer_state_callbacks = 0;
+    int restored_outer_callbacks = 0;
+    int accepted_callbacks = 0;
+    bool saw_exception = false;
+
+    const auto final_values = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::BackwardEuler,
+        /*dt=*/0.1,
+        /*t_end=*/0.1,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory&) {
+            callbacks.on_step_accepted =
+                [&](svmp::FE::timestepping::TimeHistory&) {
+                    ++accepted_callbacks;
+                };
+        },
+        [&](const svmp::FE::timestepping::TimeHistory& history,
+            const svmp::FE::FEException& error) {
+            saw_exception = true;
+            const std::string message = error.what();
+            EXPECT_NE(message.find("entry geometry rejected"),
+                      std::string::npos)
+                << message;
+            EXPECT_EQ(message.find("rollback failure"), std::string::npos)
+                << message;
+            EXPECT_EQ(history.stepIndex(), 0);
+            EXPECT_NEAR(history.time(), 0.0, 1e-15);
+            ASSERT_EQ(history.uSpan().size(),
+                      history.uPrevSpan().size());
+            EXPECT_TRUE(std::equal(
+                history.uSpan().begin(),
+                history.uSpan().end(),
+                history.uPrevSpan().begin()));
+        },
+        [&](svmp::FE::timestepping::TimeLoopOptions& options,
+            svmp::FE::FieldId) {
+            options.newton.external_state_fixed_point.enabled = true;
+            options.newton.external_state_fixed_point.max_iterations = 4;
+            options.newton.synchronize_state =
+                [&](const svmp::FE::systems::SystemStateView&,
+                    StateSyncPoint point) {
+                    if (point == StateSyncPoint::OuterFixedPointState) {
+                        ++outer_state_callbacks;
+                        throw std::runtime_error("entry geometry rejected");
+                    }
+                    if (point ==
+                        StateSyncPoint::RestoredOuterFixedPointState) {
+                        ++restored_outer_callbacks;
+                        throw std::runtime_error("entry geometry rejected");
+                    }
+                };
+        });
+
+    EXPECT_TRUE(final_values.empty());
+    EXPECT_TRUE(saw_exception);
+    EXPECT_EQ(outer_state_callbacks, 1);
+    EXPECT_EQ(restored_outer_callbacks, 1);
     EXPECT_EQ(accepted_callbacks, 0);
 }
 
