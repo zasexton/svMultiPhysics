@@ -3419,37 +3419,76 @@ private:
     [[nodiscard]] static std::unordered_map<MeshIndex, Real>
     buildCutCellStabilizationScales(
         const std::vector<CutCellAssemblyMetadata>& metadata) {
+        return buildCutCellStabilizationScales(
+            metadata.size(),
+            [&metadata](std::size_t i) -> const CutCellAssemblyMetadata* {
+                return &metadata[i];
+            });
+    }
+
+    // entry(i) is the i-th metadata entry (or null to skip it).
+    template <typename Entry>
+    [[nodiscard]] static std::unordered_map<MeshIndex, Real>
+    buildCutCellStabilizationScales(std::size_t count, Entry&& entry_at) {
         // Generated cut backends emit many subdivision-leaf rules per cut
         // cell, so a single entry's volume fraction says nothing about the
         // cell's cut support. Aggregate fractions per (parent, side) first;
         // the stabilization scale reflects the smallest per-side aggregate
         // support of the cell, never an individual subdivision leaf.
+        // The per-parent sums are kept in a dense array (indexed by the
+        // nonnegative parent) and accumulate in entry order.
         constexpr Real fraction_floor = Real{1.0e-12};
         constexpr Real full_fraction_tol = Real{1.0e-12};
-        std::unordered_map<MeshIndex, std::array<Real, 2>> side_fractions;
-        for (const auto& entry : metadata) {
-            const MeshIndex parent =
-                entry.parent_entity >= static_cast<MeshIndex>(0)
-                    ? entry.parent_entity
-                    : entry.cell;
-            if (parent < static_cast<MeshIndex>(0) ||
-                entry.side == geometry::CutIntegrationSide::Interface ||
-                !std::isfinite(entry.volume_fraction) ||
-                entry.volume_fraction <= Real{0.0}) {
+        const auto parent_of = [](const CutCellAssemblyMetadata& entry) {
+            return entry.parent_entity >= static_cast<MeshIndex>(0)
+                       ? entry.parent_entity
+                       : entry.cell;
+        };
+        const auto counted = [](const CutCellAssemblyMetadata& entry,
+                                MeshIndex parent) {
+            return parent >= static_cast<MeshIndex>(0) &&
+                   entry.side != geometry::CutIntegrationSide::Interface &&
+                   std::isfinite(entry.volume_fraction) &&
+                   entry.volume_fraction > Real{0.0};
+        };
+        MeshIndex max_parent = static_cast<MeshIndex>(-1);
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto* entry = entry_at(i);
+            if (entry == nullptr) {
+                continue;
+            }
+            const auto parent = parent_of(*entry);
+            if (counted(*entry, parent)) {
+                max_parent = std::max(max_parent, parent);
+            }
+        }
+        std::vector<std::array<Real, 2>> side_fractions(
+            static_cast<std::size_t>(max_parent + 1),
+            std::array<Real, 2>{Real{0.0}, Real{0.0}});
+        std::vector<unsigned char> has_fractions(side_fractions.size(), 0u);
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto* entry = entry_at(i);
+            if (entry == nullptr) {
+                continue;
+            }
+            const auto parent = parent_of(*entry);
+            if (!counted(*entry, parent)) {
                 continue;
             }
             const std::size_t side_index =
-                entry.side == geometry::CutIntegrationSide::Negative ? 0u : 1u;
-            auto [it, inserted] = side_fractions.emplace(
-                parent, std::array<Real, 2>{Real{0.0}, Real{0.0}});
-            it->second[side_index] += entry.volume_fraction;
+                entry->side == geometry::CutIntegrationSide::Negative ? 0u : 1u;
+            const auto cell = static_cast<std::size_t>(parent);
+            has_fractions[cell] = 1u;
+            side_fractions[cell][side_index] += entry->volume_fraction;
         }
 
         std::unordered_map<MeshIndex, Real> scales;
-        scales.reserve(side_fractions.size());
-        for (const auto& [parent, fractions] : side_fractions) {
+        for (std::size_t cell = 0; cell < side_fractions.size(); ++cell) {
+            if (has_fractions[cell] == 0u) {
+                continue;
+            }
             Real min_side_fraction = std::numeric_limits<Real>::infinity();
-            for (const Real fraction : fractions) {
+            for (const Real fraction : side_fractions[cell]) {
                 if (fraction > Real{0.0}) {
                     min_side_fraction = std::min(
                         min_side_fraction, std::min(fraction, Real{1.0}));
@@ -3460,7 +3499,7 @@ private:
                 continue;
             }
             scales.emplace(
-                parent,
+                static_cast<MeshIndex>(cell),
                 std::min(maxCutCellStabilizationScale(),
                          Real{1.0} /
                              std::max(min_side_fraction, fraction_floor)));
@@ -3478,13 +3517,9 @@ private:
         return it == scales.end() ? Real{0.0} : it->second;
     }
 
-    static void bindFacetStabilizationScales(
+    static void applyFacetStabilizationScales(
         CutFacetSetHandle& handle,
-        const std::vector<CutCellAssemblyMetadata>& metadata) {
-        if (handle.facet_metadata.empty()) {
-            return;
-        }
-        const auto scales = buildCutCellStabilizationScales(metadata);
+        const std::unordered_map<MeshIndex, Real>& scales) {
         for (auto& facet : handle.facet_metadata) {
             if (std::isfinite(facet.stabilization_scale) &&
                 facet.stabilization_scale > Real{0.0}) {
@@ -3502,18 +3537,26 @@ private:
 
     static void bindFacetStabilizationScales(
         CutFacetSetHandle& handle,
-        const std::vector<const CutCellAssemblyMetadata*>& metadata) {
-        if (metadata.empty()) {
+        const std::vector<CutCellAssemblyMetadata>& metadata) {
+        if (handle.facet_metadata.empty()) {
             return;
         }
-        std::vector<CutCellAssemblyMetadata> compact_metadata;
-        compact_metadata.reserve(metadata.size());
-        for (const auto* entry : metadata) {
-            if (entry != nullptr) {
-                compact_metadata.push_back(*entry);
-            }
+        applyFacetStabilizationScales(
+            handle, buildCutCellStabilizationScales(metadata));
+    }
+
+    static void bindFacetStabilizationScales(
+        CutFacetSetHandle& handle,
+        const std::vector<const CutCellAssemblyMetadata*>& metadata) {
+        if (metadata.empty() || handle.facet_metadata.empty()) {
+            return;
         }
-        bindFacetStabilizationScales(handle, compact_metadata);
+        // The non-null entries in order, without copying them.
+        applyFacetStabilizationScales(
+            handle,
+            buildCutCellStabilizationScales(
+                metadata.size(),
+                [&metadata](std::size_t i) { return metadata[i]; }));
     }
 
     void validateGeneratedVolumeLevelSetComposition(
