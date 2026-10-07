@@ -1,0 +1,97 @@
+{
+  "benchmark": "oscillating_drop_2d",
+  "milestone": "M3",
+  "fixed_on": "2026-10-07, before the first protocol run (the smoke run checks the deck and the cost only)",
+  "levels": {
+    "R_over_h": [
+      8,
+      16,
+      32
+    ]
+  },
+  "protocol": {
+    "mode": 2,
+    "laplace_number": 800,
+    "laplace_number_definition": "La = rho*gamma*D/mu^2 with D = 2R, as static_drop_2d: mu = 0.05 for rho = gamma = R = 1. Oh = mu/sqrt(rho*gamma*R) = 0.05; eps = nu/(omega0 R^2) = 0.0204. Exact normal mode: omega = 2.42587 (omega0 - 0.96%), beta = 0.177334 (2 n (n-1) nu/R^2 - 11.3%); beta/omega = 0.073, so 4 periods damp the mode to 0.16 of its initial amplitude (chosen to match the capillary-wave protocol, where 4 periods leave 0.13). Vorticity layer sqrt(2 nu/omega0) = 0.20 R = 1.6/3.2/6.5 h at R/h = 8/16/32.",
+    "amplitude_over_radius": 0.01,
+    "amplitude_note": "r = R0 (1 + eps cos(2 theta)), R0 = R/sqrt(1 + eps^2/2), eps = 0.01. Finite-amplitude frequency shift from the fully nonlinear inviscid drop (finite_amplitude.py): omega/omega0 - 1 = -0.770 eps^2 = -7.7e-5 at eps = 0.01, 260 times below the frequency limit and 26 times below the time-step limit. The mesh-induced cos(2 theta) moment of the relaxed static drop (M2 runs, R/h = 8) is 5e-6 R, 0.05% of a0.",
+    "periods": 4,
+    "snapshots": 100,
+    "time_step": "As D13/D19 for the capillary wave: the lagged normal-increment capillary term is on (Surface_tension_semi_implicit = NormalIncrement) and every level uses one step, a fixed number of steps per inviscid period 2*pi/omega0. Here 100 steps per period (not 50): dt = 2.565e-2, 400 steps, outputs every 4 steps (100 outputs); dt = 2.1/5.8/16.5 times the one-sided capillary limit at R/h = 8/16/32. Reason, fixed before any protocol run: the mode-2 wavelength pi R is resolved by 25/50/100 cells at R/h = 8/16/32, finer than the capillary wave's lambda/h = 16/32/64, so the spatial frequency error at the finest level is expected to fall below the 50-steps-per-period time error (-0.13% in frequency, -0.36% in damping, measured on the capillary wave, job 46704019 and verify_D20.json). A shared time error of that size would cap the observed spatial order over 8/16/32 (D10 asks for the spatial study with the time error removed); at 100 steps per period it is about four times smaller (-0.03%, -0.09%). The check at 200 steps per period is generate_case.py --dt-divisor 2.",
+    "surface_tension_semi_implicit": "NormalIncrement (D13)",
+    "capillary_form": "surface_stress (SurfaceStress, D2 candidate a); the KAG forms are generated but not part of this protocol",
+    "transport": "pde_extension: harmonic PDE velocity extension with monolithic coupling (D9, D15)",
+    "kinematic_reconciliation": "on (D14)",
+    "sign_definite_patch_bounds": "off, the solver default (D21 enables them for the sessile drop only; this case has no contact line)",
+    "reference": "Exact linear viscous initial-value solution of the released 2D drop (drop_reference.py: residue sum of the Laplace transform; normal mode checked against the inviscid, weak-viscosity, Stokes and planar limits and against an independent Chebyshev collocation), evaluated at R_eff = sqrt(A_h(0)/pi), the equilibrium radius of the sampled drop, and fitted with the same damped-cosine model on the same output times as the simulation",
+    "note": "Criteria apply separately to each (capillary form, transport, Laplace number, dt divisor) spatial study at one shared time step; the divisor-1 study needs every level, the divisor-2 study the levels in time_step_criterion.refined_step_levels. Runs: 4 MPI ranks at R/h = 16 and 32, serial at R/h = 8."
+  },
+  "criteria": [
+    {
+      "id": "frequency",
+      "quantity": "frequency_relative_error",
+      "definition": "|omega_sim - omega_ref| / omega_ref. omega_sim is the angular frequency of the least-squares fit exp(-beta t)(c1 cos(omega t) + c2 sin(omega t)) to the mode-2 amplitude a_h(t) = Re M_2 / (pi R_A^3) over all outputs including t = 0, with M_2 the second harmonic moment of the P1 liquid region about its centroid and R_A = sqrt(A/pi); omega_ref is the same fit to the exact linear history at R_eff sampled at the same times.",
+      "limit": 0.02,
+      "at_level": 32,
+      "minimum_observed_order": 1.0,
+      "order_levels": [
+        8,
+        16,
+        32
+      ],
+      "order_method": "least-squares slope of log(error) against log(R/h) over order_levels, on the spatial study at the shared time step (D10); pairwise orders are reported",
+      "source": "Decision D1 working criterion (tracker section 5, M3: frequency error <= 2% with convergence), applied at R/h = 32 with an observed order of at least 1 over 8/16/32, as for the capillary wave."
+    },
+    {
+      "id": "damping",
+      "quantity": "damping_rate_relative_error",
+      "definition": "|beta_sim - beta_ref| / beta_ref with beta the amplitude decay rate of the same two fits.",
+      "limit": 0.05,
+      "at_level": 32,
+      "minimum_observed_order": 1.0,
+      "order_levels": [
+        8,
+        16,
+        32
+      ],
+      "order_method": "least-squares slope of log(error) against log(R/h) over order_levels, on the spatial study at the shared time step (D10); pairwise orders are reported",
+      "source": "Decision D1 working criterion (tracker section 5, M3: damping error <= 5% with convergence), at the finest level R/h = 32 as decision D20 does for the capillary wave (and M2 and D12), with an observed order of at least 1 over 8/16/32."
+    },
+    {
+      "id": "volume_drift",
+      "quantity": "liquid_area_relative_drift_max",
+      "definition": "max over the whole run of |A(t) - A(0)| / A(0) (decision D11): over all VTU outputs and, when solver_run.log[.gz] is present, over the per-step 'Wet volume diagnostic' areas of every accepted step. A is the exact area of {phi_h < 0}; A(0) that of the sampled initial level set in mesh/mesh-complete.mesh.vtu",
+      "limit": 0.0001,
+      "at_level": "each",
+      "source": "Decision D1 working criterion (tracker section 5: volume drift <= 1e-4, as for M1, M2 and the capillary wave), gated on the maximum deviation over the run (decision D11)."
+    }
+  ],
+  "time_step_criterion": {
+    "id": "time_step",
+    "decided_on": "2026-10-07",
+    "source": "Decision D19 (M3): every gate passes in both studies, and the fitted frequency and damping change by at most 0.2% and 1% when the step is halved, at the finest level.",
+    "definition": "|q(dt) - q(dt/2)| / |q(dt/2)| for the frequency omega and the damping rate beta of the damped-cosine fit to the simulated a_h(t), between the dt divisor 1 and 2 runs of one (capillary form, transport, Laplace number) at their finest common level.",
+    "quantities": [
+      {
+        "id": "frequency",
+        "fit_parameter": "omega",
+        "limit": 0.002
+      },
+      {
+        "id": "damping",
+        "fit_parameter": "beta",
+        "limit": 0.01
+      }
+    ],
+    "at_level": "finest common level of the dt and dt/2 runs (protocol: R/h = 32)",
+    "dt_divisors": [
+      1,
+      2
+    ],
+    "refined_step_levels": [
+      32
+    ],
+    "gates_at_each_step": "every criterion applies to the dt study (all levels) and to the dt/2 study at the levels in refined_step_levels; criteria at levels not run at dt/2 are reported as not run",
+    "when_one_divisor_only": "reported as not evaluated; does not fail"
+  }
+}
