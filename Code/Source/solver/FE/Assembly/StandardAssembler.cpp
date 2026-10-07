@@ -4590,6 +4590,7 @@ void StandardAssembler::prepareThreadWorkers(int n)
         w.mesh_motion_field_access_ = mesh_motion_field_access_;
         w.field_solution_access_ = field_solution_access_;
 
+        w.worker_flat_check_valid_ = false;
         // Field recipes hold pointers into the owner's field access plans.
         if (w.worker_field_plans_revision_ != field_access_plans_revision_) {
             w.cached_field_recipes_valid_ = false;
@@ -4756,18 +4757,23 @@ std::size_t StandardAssembler::runThreadedRange(
 
     constexpr std::size_t none = std::numeric_limits<std::size_t>::max();
     // Shared state of the compute threads and the inserting (calling) thread.
+    // Fields are written under the mutex; the atomic ones are also polled
+    // without it before a thread blocks (AssemblyThreadPool::spinWait).
     struct Pipeline {
         std::mutex mutex{};
         std::condition_variable block_ready{};
         std::condition_variable slot_free{};
-        std::vector<std::size_t> ready{};      // per slot: block index + 1 once computed
-        std::vector<AssemblyResult> counters{}; // per slot: counters of its block
-        std::size_t inserted{0};               // blocks inserted so far
-        std::size_t first_failed{none};        // earliest block whose computation stopped
+        std::unique_ptr<std::atomic<std::size_t>[]> ready{}; // per slot: block index + 1 once computed
+        std::vector<AssemblyResult> counters{};      // per slot: counters of its block
+        std::atomic<std::size_t> inserted{0};        // blocks inserted so far
+        std::atomic<std::size_t> first_failed{none}; // earliest block whose computation stopped
         std::string stop_reason{};
-        bool stop{false};
+        std::atomic<bool> stop{false};
     } pipe;
-    pipe.ready.assign(ring_size, 0u);
+    pipe.ready = std::make_unique<std::atomic<std::size_t>[]>(ring_size);
+    for (std::size_t slot = 0; slot < ring_size; ++slot) {
+        pipe.ready[slot].store(0u);
+    }
     pipe.counters.assign(ring_size, AssemblyResult{});
 
     const bool timing = assemblyThreadTimingEnabled();
@@ -4793,12 +4799,15 @@ std::size_t StandardAssembler::runThreadedRange(
         if (participant == 0) {
             try {
                 for (std::size_t b = 0; b < n_blocks; ++b) {
+                    const auto block_done = [&]() {
+                        return pipe.ready[b % ring_size].load(std::memory_order_acquire) == b + 1u ||
+                               b >= pipe.first_failed.load(std::memory_order_acquire);
+                    };
+                    (void)AssemblyThreadPool::spinWait(block_done);
                     {
                         std::unique_lock<std::mutex> lock(pipe.mutex);
-                        pipe.block_ready.wait(lock, [&]() {
-                            return pipe.ready[b % ring_size] == b + 1u || b >= pipe.first_failed;
-                        });
-                        if (b >= pipe.first_failed) {
+                        pipe.block_ready.wait(lock, block_done);
+                        if (b >= pipe.first_failed.load()) {
                             break;
                         }
                     }
@@ -4816,7 +4825,7 @@ std::size_t StandardAssembler::runThreadedRange(
                         result.interface_faces_assembled += c.interface_faces_assembled;
                         result.matrix_entries_inserted += c.matrix_entries_inserted;
                         result.vector_entries_inserted += c.vector_entries_inserted;
-                        pipe.inserted = b + 1u;
+                        pipe.inserted.store(b + 1u, std::memory_order_release);
                     }
                     pipe.slot_free.notify_all();
                 }
@@ -4825,7 +4834,7 @@ std::size_t StandardAssembler::runThreadedRange(
             }
             {
                 std::lock_guard<std::mutex> lock(pipe.mutex);
-                pipe.stop = true;
+                pipe.stop.store(true, std::memory_order_release);
             }
             pipe.slot_free.notify_all();
             return;
@@ -4835,12 +4844,15 @@ std::size_t StandardAssembler::runThreadedRange(
         const auto thread = static_cast<std::size_t>(participant - 1);
         auto& worker = *thread_workers_[thread];
         for (std::size_t b = thread; b < n_blocks; b += threads) {
+            const auto slot_free = [&]() {
+                return pipe.stop.load(std::memory_order_acquire) ||
+                       b < pipe.inserted.load(std::memory_order_acquire) + ring_size;
+            };
+            (void)AssemblyThreadPool::spinWait(slot_free);
             {
                 std::unique_lock<std::mutex> lock(pipe.mutex);
-                pipe.slot_free.wait(lock, [&]() {
-                    return pipe.stop || b < pipe.inserted + ring_size;
-                });
-                if (pipe.stop || b >= pipe.first_failed) {
+                pipe.slot_free.wait(lock, slot_free);
+                if (pipe.stop.load() || b >= pipe.first_failed.load()) {
                     return;
                 }
             }
@@ -4878,13 +4890,13 @@ std::size_t StandardAssembler::runThreadedRange(
             {
                 std::lock_guard<std::mutex> lock(pipe.mutex);
                 if (failed) {
-                    if (b < pipe.first_failed) {
-                        pipe.first_failed = b;
+                    if (b < pipe.first_failed.load()) {
+                        pipe.first_failed.store(b, std::memory_order_release);
                         pipe.stop_reason.swap(failure);
                     }
                 } else {
                     pipe.counters[b % ring_size] = block_result;
-                    pipe.ready[b % ring_size] = b + 1u;
+                    pipe.ready[b % ring_size].store(b + 1u, std::memory_order_release);
                 }
             }
             pipe.block_ready.notify_all();
@@ -4900,8 +4912,9 @@ std::size_t StandardAssembler::runThreadedRange(
 
     // Blocks before the earliest stopped block are all inserted: a thread
     // computes its blocks in increasing order and only stops at a failure.
+    const std::size_t first_failed = pipe.first_failed.load();
     const std::size_t done_items =
-        pipe.first_failed == none ? n_items : begin + pipe.first_failed * block_size;
+        first_failed == none ? n_items : begin + first_failed * block_size;
 
     if (timing) {
         const double total = std::chrono::duration<double>(clock::now() - t0).count();
@@ -4910,8 +4923,8 @@ std::size_t StandardAssembler::runThreadedRange(
                      "compute=%9.6f insert=%9.6f serial_from=%zu%s%s\n",
                      loop_name, n_items, begin, n_threads, n_blocks, ring_size,
                      total, insert_seconds, done_items,
-                     pipe.first_failed == none ? "" : " stop=",
-                     pipe.first_failed == none ? "" :
+                     first_failed == none ? "" : " stop=",
+                     first_failed == none ? "" :
                          (pipe.stop_reason.empty() ? "exception" : pipe.stop_reason.c_str()));
     }
     return done_items;
@@ -7184,7 +7197,8 @@ struct StandardAssembler::InteriorFaceLoop {
 };
 
 // Per-thread mutable state of one assembleInteriorFaces call.
-struct StandardAssembler::InteriorFaceThreadState {
+// Cache-line aligned: the states of different threads are adjacent in a vector.
+struct alignas(64) StandardAssembler::InteriorFaceThreadState {
     AssemblyContext context_plus{};
     KernelOutput output_minus{};
     KernelOutput output_plus{};
@@ -9355,6 +9369,31 @@ void StandardAssembler::ensureColoring(const IMeshAccess& mesh,
     coloring_dof_revisions_ = std::move(dof_revisions);
 }
 
+bool StandardAssembler::flatCoordsRevisionsCurrent(const FlatCellCoords& flat,
+                                                   const IMeshAccess& mesh)
+{
+    const auto check = [&]() {
+        return flat.geometry_revision == mesh.geometryRevision() &&
+               flat.topology_revision == mesh.topologyRevision() &&
+               flat.ownership_revision == mesh.ownershipRevision() &&
+               flat.numbering_revision == mesh.numberingRevision() &&
+               flat.active_configuration_epoch == mesh.activeConfigurationEpoch() &&
+               flat.coordinate_configuration_key == mesh.coordinateConfigurationKey();
+    };
+    if (table_owner_ == nullptr) {
+        return check();
+    }
+    // Worker: the mesh and the owner's table do not change while the threads
+    // run, and every revision query takes a mesh-wide lock, so the check is
+    // done once per threaded call (reset by prepareThreadWorkers).
+    if (!worker_flat_check_valid_ || worker_flat_check_mesh_ != &mesh) {
+        worker_flat_check_result_ = check();
+        worker_flat_check_mesh_ = &mesh;
+        worker_flat_check_valid_ = true;
+    }
+    return worker_flat_check_result_;
+}
+
 void StandardAssembler::prepareGeometry(
     AssemblyContext& context,
     const IMeshAccess& mesh,
@@ -9380,13 +9419,7 @@ void StandardAssembler::prepareGeometry(
         flat.cell_count == mesh.numCells() &&
         flat.nodes_per_cell > 0 &&
         flat.uniform_cell_type == cell_type &&
-        (!flat.revision_tracking_available ||
-         (flat.geometry_revision == mesh.geometryRevision() &&
-          flat.topology_revision == mesh.topologyRevision() &&
-          flat.ownership_revision == mesh.ownershipRevision() &&
-          flat.numbering_revision == mesh.numberingRevision() &&
-          flat.active_configuration_epoch == mesh.activeConfigurationEpoch() &&
-          flat.coordinate_configuration_key == mesh.coordinateConfigurationKey()));
+        (!flat.revision_tracking_available || flatCoordsRevisionsCurrent(flat, mesh));
     if (flat_coords_current &&
         cell_id >= 0 &&
         static_cast<std::size_t>(cell_id) < flat.coords.size() /
@@ -12557,7 +12590,8 @@ struct StandardAssembler::CutVolumeFusedLoop {
 };
 
 // Per-thread mutable state of one assembleCutVolumesFused call.
-struct StandardAssembler::CutVolumeFusedThreadState {
+// Cache-line aligned: the states of different threads are adjacent in a vector.
+struct alignas(64) StandardAssembler::CutVolumeFusedThreadState {
     struct TermScratch {
         std::span<const GlobalIndex> row_dofs{};
         std::span<const GlobalIndex> col_dofs{};
@@ -13528,7 +13562,8 @@ struct StandardAssembler::CutInterfaceLoop {
 };
 
 // Per-thread mutable state of one assembleCutInterfaces call.
-struct StandardAssembler::CutInterfaceThreadState {
+// Cache-line aligned: the states of different threads are adjacent in a vector.
+struct alignas(64) StandardAssembler::CutInterfaceThreadState {
     AssemblyContext context_plus{};
     KernelOutput output_plus{};
     KernelOutput coupling_mp{};
@@ -14213,7 +14248,8 @@ struct StandardAssembler::MonolithicBatchLoop {
 };
 
 // Per-thread mutable state of one batched monolithic cell loop.
-struct StandardAssembler::MonolithicBatchThreadState {
+// Cache-line aligned: the states of different threads are adjacent in a vector.
+struct alignas(64) StandardAssembler::MonolithicBatchThreadState {
     struct BatchBlockWorkspace {
         AssemblyContext ctx;
         std::span<const GlobalIndex> row_dofs{};
@@ -15176,7 +15212,8 @@ struct StandardAssembler::MonolithicVectorLoop {
 };
 
 // Per-thread mutable state of one residual-only monolithic cell loop.
-struct StandardAssembler::MonolithicVectorThreadState {
+// Cache-line aligned: the states of different threads are adjacent in a vector.
+struct alignas(64) StandardAssembler::MonolithicVectorThreadState {
     AssemblyContext fallback_ctx{};
     KernelOutput fallback_output{};
     std::deque<CellCoefficientCacheEntry> fallback_coefficient_cache{};

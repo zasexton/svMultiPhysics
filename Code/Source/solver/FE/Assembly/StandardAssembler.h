@@ -1024,6 +1024,11 @@ private:
     /// Owner's field_access_plans_revision_ the worker's recipes refer to
     /// (worker only).
     std::uint64_t worker_field_plans_revision_{~std::uint64_t{0}};
+    /// Worker only: memo of the owner's flat-coordinate table revision check
+    /// for the current threaded call (see flatCoordsRevisionsCurrent).
+    bool worker_flat_check_valid_{false};
+    bool worker_flat_check_result_{false};
+    const IMeshAccess* worker_flat_check_mesh_{nullptr};
 
     /**
      * @brief Get element from function space for a cell
@@ -1704,6 +1709,10 @@ private:
         std::uint64_t coordinate_configuration_key{0};
     };
     FlatCellCoords flat_cell_coords_;
+    /// Whether a flat-coordinate table's mesh revisions are current (on a
+    /// worker: checked once per threaded call).
+    [[nodiscard]] bool flatCoordsRevisionsCurrent(const FlatCellCoords& flat,
+                                                  const IMeshAccess& mesh);
 
     /// Build flat coordinate array from mesh. Called once per topology.
     void ensureFlatCellCoords(const IMeshAccess& mesh);

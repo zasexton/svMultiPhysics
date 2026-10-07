@@ -188,6 +188,14 @@ A rank with `N` assembly threads runs `N` compute threads and its main
 thread, which inserts in order during the threaded loops and otherwise does
 the serial work.
 
+`SVMP_ASSEMBLY_SPIN_US=N` makes a thread poll for up to `N` microseconds
+before it blocks (waiting for the next loop, a free record buffer or the
+next block to insert); the default is 0.  Polling only changes timing.  It
+was added to test whether the threads of the short 2D loops run slowly
+because their cores idle between loops: with 2 ms of polling the context
+switches dropped fourfold but the loops were not faster (sessile drop, 4
+threads: 18.1 s against 18.4 s), and 50 ms of polling made the run slower.
+
 ## MPI ranks and threads
 
 Ranks and threads combine: each rank assembles its own cells with `N`
@@ -247,13 +255,81 @@ the error at whose block the pass ended.  Summing
 `serial_from - begin` over the passes gives the number of items computed
 by the threads.
 
+## Performance
+
+Measured on one node (Intel Xeon Gold 5118, 12 CPUs of a shared 24-core
+node, one run at a time, OpenMP at one thread), with the JIT object cache
+warm.  "Loops" is the summed time of the threaded-capable loops
+(`SVMP_ASSEMBLY_THREAD_TIMING=1`, mean over ranks for MPI runs); the rest of
+the wall time is outside these loops and runs on one core per rank.
+
+| Case | Threads | Loops (s) | Speed-up | Efficiency | Wall (s) | Wall speed-up |
+|---|---|---|---|---|---|---|
+| 3D tank L16 (8 steps) | 1 | 24.3 | 1 | 1 | 40.5 | 1 |
+| | 2 | 13.5 | 1.80 | 0.90 | 29.5 | 1.37 |
+| | 4 | 7.2 | 3.39 | 0.85 | 23.3 | 1.74 |
+| | 8 | 4.6 | 5.28 | 0.66 | 21.6 | 1.87 |
+| 3D sphere proxy (2 steps) | 1 | 141.2 | 1 | 1 | 299.5 | 1 |
+| | 2 | 73.6 | 1.92 | 0.96 | 243.0 | 1.23 |
+| | 4 | 41.0 | 3.44 | 0.86 | 199.4 | 1.50 |
+| | 8 | 27.8 | 5.08 | 0.64 | 188.9 | 1.58 |
+| 2D sessile drop R/h = 32 (40 steps) | 1 | 31.9 | 1 | 1 | 151.8 | 1 |
+| | 2 | 30.4 | 1.05 | 0.52 | 152.4 | 1.00 |
+| | 4 | 20.1 | 1.59 | 0.40 | 136.6 | 1.11 |
+| | 8 | 14.9 | 2.13 | 0.27 | 133.2 | 1.14 |
+| 2D capillary wave lambda/h = 64 (40 steps) | 1 | 78.1 | 1 | 1 | 335.8 | 1 |
+| | 2 | 60.3 | 1.30 | 0.65 | 327.3 | 1.03 |
+| | 4 | 40.2 | 1.94 | 0.49 | 290.6 | 1.16 |
+| | 8 | 27.2 | 2.87 | 0.36 | 287.8 | 1.17 |
+
+Sphere proxy, ranks x threads (wall s): 1x1 299.5; 2x1 215.8, 2x4 170.9;
+4x1 182.2, 4x2 149.4; 8x1 119.3; 1x8 188.9.  At equal core counts ranks
+are faster, since they also divide the work outside assembly; threads add
+speed on top of a rank count (2 ranks: -21 %, 4 ranks: -18 %).
+
+What remains serial (Amdahl):
+
+- Outside the loops: 40 % of the one-thread wall time of the tank, 53 % of
+  the sphere proxy, about 78 % of the 2D cases.  In a profile of the 2D
+  sessile run with 4 threads, the main thread spends 36 % of its time in the
+  linear solver, 20 % in free-surface geometry and cut rebuilds, 7 % in
+  constraints and 6 % in vertex field evaluation and output.  Upper bounds
+  of the wall speed-up from assembly threads alone are therefore about 2.5
+  (tank), 1.9 (sphere) and 1.3 (2D).
+- Ordered insertion: one thread replays all insertions.  It overlaps with
+  the computation, but at 8 threads the batched cell loop of the sphere is
+  insertion-bound (5.1 s of insertion in a 5.5 s loop), and insertion is
+  17.5 s of the sphere's 27.8 s.  Most of it is the per-entry constrained
+  insertion into FSILS (hash lookups per matrix entry).
+- First assemblies: compiles of new kernel shapes run serially (deferred to
+  the calling thread); the threads resume after each.
+- 2D elements are cheap (a few microseconds per cell), and the threads
+  spend about twice the serial CPU time per item; the cause is still open
+  (mesh revision queries take a mesh-wide lock and are now checked once per
+  call on the threads; allocation is about 10 % of the threads' time).
+
 ## Verification
 
-- Bitwise comparison of full runs for 1, 2, 4 and 8 threads against the
-  default build: the nine-case reference set, the 3D sphere proxy and the 3D
-  tank, serial and on 2 and 4 ranks.
-- Unit tests in `FE/Tests/Unit/Assembly/test_ThreadedAssembly.cpp` compare
-  threaded and serial assembly of the same system bitwise.
-- ThreadSanitizer build of the assembly unit tests.
+Every array of every output file was compared byte for byte (so `-0.0`
+and `+0.0` count as different), on the code of this note:
 
-Results and timings are recorded in `Documentation/free_surface_program_tracker.md`.
+| Runs | Compared with | Result |
+|---|---|---|
+| Nine-case reference set, thread variable unset and 1, 2, 4, 8 threads (45 runs) | reference set of the default build | identical |
+| 3D sphere proxy (2 steps), default and 2, 4, 8 threads | unmodified build (itself identical to the reference set) | identical |
+| 3D tank (L16), default and 2, 4, 8 threads | unmodified build | identical |
+| 2 ranks x 2 and 4 threads (sessile drop L16, sphere proxy); 4 ranks x 2 threads (sessile drop L16, sphere proxy, capillary wave L16) | the same ranks with 1 thread | identical |
+| 1 thread on 2 ranks (sessile drop L16, sphere proxy) and 4 ranks (sessile drop L16, capillary wave L16) | unmodified build, same ranks | identical |
+| Deck key `Assembly_threads` = 4 (two cases), and with the variable overriding it | reference set | identical |
+| 8 threads with polling disabled (the default; the runs above polled for 2 ms) | reference set | identical |
+| Final default: nine-case reference set with 4 threads | reference set | identical |
+| `OMP_NUM_THREADS=2`: 4 threads requested (serial fallback) | the same without threads | identical |
+
+Unit tests (`FE/Tests/Unit/Assembly/test_ThreadedAssembly.cpp`) compare
+threaded and serial assembly of the same system bitwise for 2 to 8 threads:
+fused cut volumes, interior faces, the monolithic cell loops (matrix and
+vector, vector only), constrained insertion, repeated calls, deferred lazy
+work in an early and a late block, kernel errors, and a JIT-compiled kernel
+whose compiles are deferred.  A further test checks that reversing the item
+order changes the bits, so the comparisons can detect ordering errors.  The
+unit tests also run under ThreadSanitizer.
