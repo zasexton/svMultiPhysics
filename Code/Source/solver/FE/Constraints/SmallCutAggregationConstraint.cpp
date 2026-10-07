@@ -75,6 +75,18 @@ struct SmallCutAggregationPendingProlongation {
     std::vector<SmallCutAggregationProlongationRow> rows{};
     std::vector<SmallCutAggregationProlongationCell> active_cells{};
     std::vector<SmallCutAggregationProlongationPatch> patches{};
+
+    // Sorted (DOF, active cell GID) incidences and (cell GID, feature) pairs
+    // of `active_cells`, built by the first finalizeProlongationReport() of
+    // a refresh.  They depend only on the cell GIDs, field DOFs and feature
+    // IDs, which a reuse copies unchanged (it refreshes volumes and rule
+    // identities only), so reused pendings share the index.
+    struct ActiveCellIndex {
+        std::size_t cell_count{0u};
+        std::vector<std::pair<GlobalIndex, GlobalIndex>> cell_gids_by_dof{};
+        std::vector<std::pair<GlobalIndex, GlobalIndex>> feature_by_cell_gid{};
+    };
+    mutable std::shared_ptr<const ActiveCellIndex> active_cell_index{};
 };
 
 /**
@@ -3439,9 +3451,48 @@ refreshRetainedActiveCellMeasures(
     std::span<const SmallCutAggregationProlongationCell> active_cells)
 {
     const auto& mesh = system.meshAccess();
+    int my_rank = 0;
+#if FE_HAS_MPI
+    {
+        int initialized = 0;
+        MPI_Initialized(&initialized);
+        if (initialized != 0) {
+            MPI_Comm_rank(system.dofHandler().mpiComm(), &my_rank);
+        }
+    }
+#endif
+    // Only the recorded canonical provider of an active cell sends its
+    // measure; every other rank that retains the cell compares its own
+    // measure with the provider's exactly after the gather.  The canonical
+    // measure, and every disagreement check, is the same as when every
+    // retaining rank sent its measure.
+    const auto provider_of = [&](GlobalIndex gid) -> int {
+        const auto it = std::lower_bound(
+            active_cells.begin(), active_cells.end(), gid,
+            [](const SmallCutAggregationProlongationCell& cell, GlobalIndex key) {
+                return cell.cell_gid < key;
+            });
+        if (it == active_cells.end() || it->cell_gid != gid) {
+            return -1;
+        }
+        return it->retained_measure_provider_rank;
+    };
+    struct RetainedCellMeasure {
+        Real volume{0.0};
+        std::vector<std::uint64_t> stable_rule_ids{};
+    };
+    std::vector<std::pair<GlobalIndex, RetainedCellMeasure>> local_non_provider;
     std::vector<std::int64_t> local_words;
     std::exception_ptr local_measure_exception;
     try {
+        if (!std::is_sorted(active_cells.begin(), active_cells.end(),
+                            [](const auto& lhs, const auto& rhs) {
+                                return lhs.cell_gid < rhs.cell_gid;
+                            })) {
+            throw std::logic_error(
+                "SmallCutAggregationConstraint: reused active-cell ledger is "
+                "not sorted by physical cell ID");
+        }
         struct LocalMeasure {
             Real physical_volume{0.0};
             std::set<std::uint64_t> stable_rule_ids{};
@@ -3511,6 +3562,20 @@ refreshRetainedActiveCellMeasures(
                     "unavailable");
             }
             const auto& measure = local_measures.at(cell);
+            const int provider = provider_of(gid);
+            if (provider != my_rank) {
+                if (provider >= 0) {
+                    RetainedCellMeasure own;
+                    own.volume = measure.physical_volume;
+                    own.stable_rule_ids.assign(
+                        measure.missing_stable_rule_ids, std::uint64_t{0});
+                    own.stable_rule_ids.insert(own.stable_rule_ids.end(),
+                                               measure.stable_rule_ids.begin(),
+                                               measure.stable_rule_ids.end());
+                    local_non_provider.emplace_back(gid, std::move(own));
+                }
+                continue;
+            }
             local_words.push_back(static_cast<std::int64_t>(gid));
             local_words.push_back(std::bit_cast<std::int64_t>(
                 static_cast<double>(measure.physical_volume)));
@@ -3628,7 +3693,8 @@ refreshRetainedActiveCellMeasures(
                     throw std::runtime_error(
                         "SmallCutAggregationConstraint: diagnostic="
                         "inconsistent_distributed_active_feature_volume "
-                        "providers disagree for the same physical cell");
+                        "providers disagree for the same physical cell "
+                        "cell_gid=" + std::to_string(cell.cell_gid));
                 }
             }
             if (!(canonical->volume > Real{0.0}) ||
@@ -3641,6 +3707,27 @@ refreshRetainedActiveCellMeasures(
             }
             measures.volumes.push_back(canonical->volume);
             measures.stable_rule_ids.push_back(canonical->stable_rule_ids);
+        }
+        // Exact comparison of this rank's own measures of cells provided by
+        // another rank (the cross-check every retaining rank used to make on
+        // the gathered declarations).
+        for (const auto& [gid, own] : local_non_provider) {
+            const auto providers = providers_by_gid.find(gid);
+            if (providers == providers_by_gid.end()) {
+                continue;  // reported above for the active cell
+            }
+            for (const auto& provider : providers->second) {
+                if (provider.volume != own.volume ||
+                    provider.stable_rule_ids != own.stable_rule_ids) {
+                    throw std::runtime_error(
+                        "SmallCutAggregationConstraint: diagnostic="
+                        "inconsistent_distributed_active_feature_volume "
+                        "providers disagree for the same physical cell "
+                        "cell_gid=" + std::to_string(gid) +
+                        " retaining_rank=" + std::to_string(my_rank) +
+                        " provider_rank=" + std::to_string(provider.rank));
+                }
+            }
         }
     } catch (...) {
         local_decode_exception = std::current_exception();
@@ -7393,11 +7480,15 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
     }
     // Sorted (DOF, active cell GID) incidences and (cell GID, feature)
     // pairs instead of node-based maps: the stable sort keeps each DOF's
-    // cells in ledger order, and lookups are binary searches.
-    std::vector<std::pair<GlobalIndex, GlobalIndex>>
-        active_cell_gids_by_dof;
-    std::vector<std::pair<GlobalIndex, GlobalIndex>>
-        active_feature_by_cell_gid;
+    // cells in ledger order, and lookups are binary searches.  Built once
+    // per refresh and shared by its reuses (see ActiveCellIndex).
+    if (!pending.active_cell_index ||
+        pending.active_cell_index->cell_count != report->active_cells.size()) {
+    auto built_index = std::make_shared<
+        detail::SmallCutAggregationPendingProlongation::ActiveCellIndex>();
+    built_index->cell_count = report->active_cells.size();
+    auto& active_cell_gids_by_dof = built_index->cell_gids_by_dof;
+    auto& active_feature_by_cell_gid = built_index->feature_by_cell_gid;
     {
         std::size_t incidence_count = 0u;
         for (const auto& cell : report->active_cells) {
@@ -7432,6 +7523,12 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
                          active_cell_gids_by_dof.end(),
                          by_first);
     }
+    pending.active_cell_index = std::move(built_index);
+    }
+    const auto& active_cell_gids_by_dof =
+        pending.active_cell_index->cell_gids_by_dof;
+    const auto& active_feature_by_cell_gid =
+        pending.active_cell_index->feature_by_cell_gid;
     const auto first_key_less = [](const auto& pair, GlobalIndex key) {
         return pair.first < key;
     };
