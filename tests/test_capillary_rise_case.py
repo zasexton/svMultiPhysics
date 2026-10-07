@@ -536,6 +536,8 @@ def test_candidate_uncertainty_follows_the_declared_rule():
     # Second-order levels: errors 4e, e, e/4 -> observed order 2, F = 1.25.
     result = history.numerical_uncertainty([level(0.16), level(0.04), level(0.01)], protocol)
     assert result["method"] == "three_level"
+    # The candidate grid is the comparison runner's grid, point for point.
+    assert list(result["grid"]) == [0.0 + index * 0.001 for index in range(691)]
     assert math.isclose(result["observed_order"], 2.0, rel_tol=1.0e-9)
     np.testing.assert_allclose(result["numerical_uncertainty_mm"],
                                1.25 * 0.03 * (1.0 + times) / 3.0, rtol=1.0e-9)

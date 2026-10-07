@@ -161,8 +161,10 @@ def numerical_uncertainty(levels: list[list[dict[str, float]]],
                           protocol: dict[str, Any]) -> dict[str, Any]:
     """Apply the frozen candidate-uncertainty rule to coarse-to-fine levels."""
     grid_spec = protocol["comparison_grid"]
-    grid = np.round(np.arange(int(grid_spec["point_count"])) * float(grid_spec["step_s"])
-                    + float(grid_spec["start_s"]), 12)
+    # Exactly the comparison runner's grid (start + index * step, unrounded),
+    # so that the candidate covers its last point.
+    grid = np.asarray([float(grid_spec["start_s"]) + index * float(grid_spec["step_s"])
+                       for index in range(int(grid_spec["point_count"]))])
     heights = [_on_grid(rows, grid) for rows in levels]
     rule = protocol["uncertainty_rule"]
     ratio = float(rule["refinement_ratio"])
