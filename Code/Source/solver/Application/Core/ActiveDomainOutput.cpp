@@ -214,8 +214,7 @@ CutVolumeMeasureSummary collectCutVolumeMeasures(
               "classification-only rule requires its integration context.");
         }
         summary.physical_measure +=
-            svmp::FE::geometry::physicalCutQuadratureMeasure(
-                mesh, context->materializedVolumeRule(*rule));
+            context->physicalVolumeRuleMeasure(mesh, *rule);
       } else {
         summary.physical_measure +=
             svmp::FE::geometry::physicalCutQuadratureMeasure(mesh, *rule);

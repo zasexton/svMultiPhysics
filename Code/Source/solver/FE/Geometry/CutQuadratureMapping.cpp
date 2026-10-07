@@ -291,12 +291,23 @@ MappedCutQuadratureRule mapCutQuadratureRuleToPhysical(
 Real physicalCutQuadratureMeasure(const assembly::IMeshAccess& mesh,
                                   const CutQuadratureRule& rule)
 {
+    return physicalCutQuadratureMeasure(
+        mesh,
+        rule,
+        std::span<const CutQuadraturePoint>(rule.points.data(),
+                                            rule.points.size()));
+}
+
+Real physicalCutQuadratureMeasure(const assembly::IMeshAccess& mesh,
+                                  const CutQuadratureRule& rule,
+                                  std::span<const CutQuadraturePoint> points)
+{
     // A reference-frame rule of full dimension needs only its volume
     // weights. This applies the checks and the weight w |det J| of
     // mapCutQuadratureRuleToPhysical() point by point, in the same order,
     // without mapping points and normals or storing the mapped rule.
     if (rule.frame == CutGeometryFrame::Reference &&
-        rule.provenance.parent_entity >= 0 && !rule.points.empty()) {
+        rule.provenance.parent_entity >= 0 && !points.empty()) {
         const int parent_dimension = mesh.dimension();
         if (resolvedGeometricDimension(rule, parent_dimension) ==
             parent_dimension) {
@@ -312,7 +323,7 @@ Real physicalCutQuadratureMeasure(const assembly::IMeshAccess& mesh,
             bool have_determinant = false;
             Real determinant{0.0};
             Real physical_measure{0.0};
-            for (const auto& point : rule.points) {
+            for (const auto& point : points) {
                 if (!std::isfinite(point.weight) ||
                     !(point.weight > Real{0.0})) {
                     throw std::invalid_argument(
@@ -350,7 +361,14 @@ Real physicalCutQuadratureMeasure(const assembly::IMeshAccess& mesh,
             return physical_measure;
         }
     }
-    return mapCutQuadratureRuleToPhysical(mesh, rule).physical_measure;
+    if (points.data() == rule.points.data() &&
+        points.size() == rule.points.size()) {
+        return mapCutQuadratureRuleToPhysical(mesh, rule).physical_measure;
+    }
+    auto with_points = rule;
+    with_points.points.assign(points.begin(), points.end());
+    with_points.released_point_count = 0u;
+    return mapCutQuadratureRuleToPhysical(mesh, with_points).physical_measure;
 }
 
 } // namespace svmp::FE::geometry

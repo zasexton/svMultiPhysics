@@ -18,6 +18,7 @@
 
 #include <array>
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace svmp::FE {
@@ -77,6 +78,16 @@ struct MappedCutQuadratureRule {
 [[nodiscard]] Real physicalCutQuadratureMeasure(
     const assembly::IMeshAccess& mesh,
     const CutQuadratureRule& rule);
+
+/**
+ * physicalCutQuadratureMeasure() of `rule` with its points replaced by
+ * `points` (the measure reads every other field from `rule`).  Used for
+ * classification-only rules, whose points are kept by their source region.
+ */
+[[nodiscard]] Real physicalCutQuadratureMeasure(
+    const assembly::IMeshAccess& mesh,
+    const CutQuadratureRule& rule,
+    std::span<const CutQuadraturePoint> points);
 
 } // namespace geometry
 } // namespace svmp::FE
