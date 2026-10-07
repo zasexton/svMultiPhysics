@@ -387,8 +387,16 @@ Reported, not gated:
   diagnostic=off_rank_constraint_fill_outside_halo` with 2 to 20 rejected
   columns ("increase <Ghost_layers>") at the same physical times in both
   runs (`t` = 0.92 to 1.03 and 1.54 to 1.64); every step still converged.
-  A serial run of the `R/h = 32` `dt` deck (job `46914683`) checks that the
-  result does not depend on it.
+  A serial run of the same `R/h = 32` `dt` deck (job `46914683`, stopped
+  after step 72, past both windows; `serial_vs_4ranks_L32_dt1.txt`) agrees
+  with the 4-rank run to round-off (`phi` 8e-15, velocity 1e-14, amplitude
+  2e-14 `a0`) up to step 36. Across the first window the difference jumps to
+  3e-11 in `phi`, 6.5e-9 in velocity and 5e-11 `a0` in the amplitude, within
+  the nonlinear tolerance, as expected if the rejected columns only make the
+  Newton matrix inexact; it then decays (velocity 1.6e-11 at step 72). The
+  effect on the gated metrics is negligible (amplitude changes of 5e-11 `a0`
+  against errors of 1e-4 to 1e-3), but the 4-rank runs are not bitwise
+  equal to serial there.
 
 ## Cost
 
