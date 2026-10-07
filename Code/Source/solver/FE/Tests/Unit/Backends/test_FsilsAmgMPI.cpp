@@ -338,7 +338,10 @@ TEST(FsilsAmgMPI, AggregatesAndSolutionDoNotDependOnThePartition)
         without += amg_rows.roots[i] == 0 ? 1u : 0u;
     }
     EXPECT_EQ(differing, 0u);
-    EXPECT_EQ(without, 0u);
+    // Only the corner point, whose unknowns are all Dirichlet, has no
+    // couplings and therefore no aggregate (the smoother solves it).
+    EXPECT_EQ(without, 1u);
+    EXPECT_EQ(amg_rows.roots[physical(0, 0)], 0);
 
     // Same iterations and round-off-level agreement between the two splits.
     EXPECT_EQ(amg_rows.iterations, amg_cols.iterations);
