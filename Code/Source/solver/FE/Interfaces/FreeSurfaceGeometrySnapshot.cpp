@@ -12,6 +12,8 @@
 #include <map>
 #include <numbers>
 #include <set>
+#include <span>
+#include <string_view>
 #include <stdexcept>
 #include <tuple>
 #include <unordered_map>
@@ -19,6 +21,42 @@
 #include <utility>
 
 namespace svmp::FE::interfaces {
+
+namespace snapshot_reuse_detail {
+
+// Content-only contribution of the validation of one full-cell volume
+// record: everything a rule validation adds to the ledger except the
+// represented-phase disagreement statistics, which depend on the level set.
+struct FullCellValidationContribution {
+    std::size_t represented_phase_point_count{0};
+    std::size_t certified_rule_count{0};
+    std::size_t parent_cell_moment_certificate_count{0};
+    std::size_t centroid_moment_certificate_count{0};
+    std::size_t piecewise_affine_moment_certificate_count{0};
+    std::size_t backend_reference_moment_certificate_count{0};
+    std::size_t stored_generated_moment_certificate_count{0};
+    std::size_t validated_rule_polynomial_moment_count{0};
+    std::size_t validated_polynomial_moment_count{0};
+    Real maximum_constant_moment_error{0.0};
+    Real maximum_polynomial_moment_error{0.0};
+    Real maximum_polynomial_moment_scaled_error{0.0};
+};
+
+// What the snapshot reuse cache keeps for one record of the previous build.
+struct FullCellRecordReplay {
+    // The record is a full-cell volume record whose validation touched only
+    // content-only ledger fields and the represented-phase statistics.
+    bool reusable{false};
+    // identity_free_digest_state is the digest state after the
+    // identity-free content of the record.
+    bool has_identity_free_digest_state{false};
+    std::size_t point_count{0};
+    std::uint64_t identity_free_digest_state{0};
+    FullCellValidationContribution contribution{};
+};
+
+} // namespace snapshot_reuse_detail
+
 namespace {
 
 constexpr std::uint64_t kHashOffset = 1469598103934665603ull;
@@ -254,8 +292,14 @@ struct OwnedRuleDigest {
             provenance.parent_boundary_entity_global_id)}};
 }
 
-void mixRuleContent(std::uint64_t& hash,
-                    const FreeSurfaceGeometryRuleRecord& record) noexcept
+// The content digest is the identity-free content (everything below except
+// the source identities, which embed the source value revision) followed by
+// those identities.  The state after the identity-free part therefore
+// depends only on content and can be kept across builds by the snapshot
+// reuse cache.
+void mixRuleContentWithoutIdentities(
+    std::uint64_t& hash,
+    const FreeSurfaceGeometryRuleRecord& record) noexcept
 {
     mix(hash, static_cast<std::uint64_t>(record.construction_observation));
     mix(hash, static_cast<std::uint64_t>(record.role));
@@ -264,8 +308,6 @@ void mixRuleContent(std::uint64_t& hash,
                   record.physical_boundary_marker + 1));
     mix(hash, record.topology_id);
     mix(hash, record.source_topology_key);
-    mix(hash, static_cast<std::uint64_t>(record.component_id));
-    mix(hash, record.reference_rule.provenance.cut_topology_revision);
     mix(hash, static_cast<std::uint64_t>(
                   record.reference_rule.provenance.marker));
     mix(hash, static_cast<std::uint64_t>(
@@ -334,9 +376,6 @@ void mixRuleContent(std::uint64_t& hash,
         mix(hash, point.reference_weight);
         mix(hash, point.physical_weight);
     }
-    for (const auto id : record.source_fragment_stable_ids) {
-        mix(hash, id);
-    }
     mix(hash, static_cast<std::uint64_t>(
                   record.moment_certificate.polynomial_order + 1));
     mix(hash, static_cast<std::uint64_t>(
@@ -353,23 +392,60 @@ void mixRuleContent(std::uint64_t& hash,
     }
 }
 
+void mixRuleIdentities(std::uint64_t& hash,
+                       const FreeSurfaceGeometryRuleRecord& record) noexcept
+{
+    mix(hash, static_cast<std::uint64_t>(record.component_id));
+    mix(hash, record.reference_rule.provenance.cut_topology_revision);
+    for (const auto id : record.source_fragment_stable_ids) {
+        mix(hash, id);
+    }
+}
+
+// Digest state after the identity-free content of a materialized record.
+[[nodiscard]] std::uint64_t ruleContentWithoutIdentitiesState(
+    const FreeSurfaceGeometryRuleRecord& record) noexcept
+{
+    std::uint64_t hash = kHashOffset;
+    mixRuleContentWithoutIdentities(hash, record);
+    return hash;
+}
+
+[[nodiscard]] std::uint64_t finishRuleContentDigest(
+    std::uint64_t identity_free_state,
+    const FreeSurfaceGeometryRuleRecord& record) noexcept
+{
+    std::uint64_t hash = identity_free_state;
+    mixRuleIdentities(hash, record);
+    return hash == 0u ? 1u : hash;
+}
+
 [[nodiscard]] std::uint64_t ruleContentDigest(
     const FreeSurfaceGeometryRuleRecord& record) noexcept
 {
     if (record.classification_only) {
         return record.classification_only_content_digest;
     }
-    std::uint64_t hash = kHashOffset;
-    mixRuleContent(hash, record);
-    return hash == 0u ? 1u : hash;
+    return finishRuleContentDigest(
+        ruleContentWithoutIdentitiesState(record), record);
 }
 
+// record_digests, when given, holds ruleContentDigest() of every record.
 [[nodiscard]] std::vector<OwnedRuleDigest> validateUniqueRuleOwnership(
     const std::vector<FreeSurfaceGeometryRuleRecord>& records,
     const assembly::IMeshAccess& mesh,
     const FreeSurfaceGeometryOwnershipCollective& collective,
-    FreeSurfaceGeometryValidationLedger& ledger)
+    FreeSurfaceGeometryValidationLedger& ledger,
+    std::span<const std::uint64_t> record_digests = {})
 {
+    if (!record_digests.empty() && record_digests.size() != records.size()) {
+        throw std::logic_error(
+            "free-surface snapshot ownership validation received a malformed digest table");
+    }
+    const auto digest_of = [&records, record_digests](std::size_t index) {
+        return record_digests.empty() ? ruleContentDigest(records[index])
+                                      : record_digests[index];
+    };
     constexpr std::size_t identity_width =
         std::tuple_size_v<OwnershipRuleIdentity>;
     constexpr std::size_t width = identity_width + 1u;
@@ -384,7 +460,8 @@ void mixRuleContent(std::uint64_t& hash,
 
     std::vector<std::uint64_t> local_owned_values;
     local_owned_values.reserve(ledger.owned_rule_count * width);
-    for (const auto& record : records) {
+    for (std::size_t index = 0; index < records.size(); ++index) {
+        const auto& record = records[index];
         if (!record.locally_owned) {
             continue;
         }
@@ -392,7 +469,7 @@ void mixRuleContent(std::uint64_t& hash,
         local_owned_values.insert(local_owned_values.end(),
                                   identity.begin(),
                                   identity.end());
-        local_owned_values.push_back(ruleContentDigest(record));
+        local_owned_values.push_back(digest_of(index));
     }
 
     std::vector<std::uint64_t> global_owned_values = local_owned_values;
@@ -425,7 +502,8 @@ void mixRuleContent(std::uint64_t& hash,
                 "free-surface snapshot found a rule owned by more than one rank");
         }
     }
-    for (const auto& record : records) {
+    for (std::size_t index = 0; index < records.size(); ++index) {
+        const auto& record = records[index];
         const auto found = globally_owned_by_identity.find(
             ownershipRuleIdentity(record));
         if (found == globally_owned_by_identity.end()) {
@@ -433,7 +511,7 @@ void mixRuleContent(std::uint64_t& hash,
             throw std::invalid_argument(
                 "free-surface snapshot found a local rule without one global owner");
         }
-        if (found->second != ruleContentDigest(record)) {
+        if (found->second != digest_of(index)) {
             ++ledger.invalid_global_identity_count;
             throw std::invalid_argument(
                 "free-surface snapshot found local rule content that differs "
@@ -452,7 +530,7 @@ void mixRuleContent(std::uint64_t& hash,
                         .parent_boundary_entity_global_id) +
                 " owner_digest=" + std::to_string(found->second) +
                 " local_digest=" +
-                std::to_string(ruleContentDigest(record)));
+                std::to_string(digest_of(index)));
         }
     }
     ledger.global_owned_rule_count = globally_owned_by_identity.size();
@@ -2287,9 +2365,30 @@ void requireCompleteAuthoritativeCutFamilies(
         std::size_t negative_region_count{0u};
         std::size_t positive_region_count{0u};
         std::size_t fragment_count{0u};
+        bool present{false};
     };
 
-    std::map<MeshIndex, ParentVolumeState> volume_state_by_parent;
+    // Active sources have a nonnegative parent cell: one state per local
+    // cell, visited below in increasing cell order like an ordered map.
+    MeshIndex max_parent = static_cast<MeshIndex>(-1);
+    for (const auto& fragment : interface_domain.fragments()) {
+        if (fragment.active()) {
+            max_parent = std::max(max_parent, fragment.parent_cell);
+        }
+    }
+    for (const auto& region : interface_domain.volumeRegions()) {
+        if (region.active()) {
+            max_parent = std::max(max_parent, region.parent_cell);
+        }
+    }
+    std::vector<ParentVolumeState> volume_state_by_parent(
+        static_cast<std::size_t>(max_parent + 1));
+    const auto state_of = [&volume_state_by_parent](MeshIndex parent)
+        -> ParentVolumeState& {
+        auto& state = volume_state_by_parent[static_cast<std::size_t>(parent)];
+        state.present = true;
+        return state;
+    };
     for (const auto& fragment : interface_domain.fragments()) {
         if (!fragment.active()) {
             continue;
@@ -2298,7 +2397,7 @@ void requireCompleteAuthoritativeCutFamilies(
             throw std::invalid_argument(
                 "active authoritative free-surface fragment has the wrong interface marker");
         }
-        auto& state = volume_state_by_parent[fragment.parent_cell];
+        auto& state = state_of(fragment.parent_cell);
         ++state.fragment_count;
         const Real tolerance = interface_domain.request().tolerance;
         const Real coefficient_band =
@@ -2331,7 +2430,7 @@ void requireCompleteAuthoritativeCutFamilies(
             throw std::invalid_argument(
                 "active authoritative free-surface volume region has the wrong interface marker");
         }
-        auto& state = volume_state_by_parent[region.parent_cell];
+        auto& state = state_of(region.parent_cell);
         const Real measure_tolerance = std::max(
             interface_domain.request().tolerance,
             interface_domain.request().tolerance * region.parent_measure);
@@ -2359,12 +2458,14 @@ void requireCompleteAuthoritativeCutFamilies(
     const std::set<MeshIndex> cut_cell_set(cut_cells.begin(),
                                           cut_cells.end());
     for (const auto parent : cut_cells) {
-        const auto found = volume_state_by_parent.find(parent);
-        if (found == volume_state_by_parent.end()) {
+        if (parent < static_cast<MeshIndex>(0) ||
+            static_cast<std::size_t>(parent) >= volume_state_by_parent.size() ||
+            !volume_state_by_parent[static_cast<std::size_t>(parent)].present) {
             throw std::invalid_argument(
                 "authoritative free-surface cut cell is missing an active negative or positive source volume region");
         }
-        const auto& state = found->second;
+        const auto& state =
+            volume_state_by_parent[static_cast<std::size_t>(parent)];
         const bool has_complete_two_phase_family =
             state.has_negative && state.has_positive;
         const auto aligned_parent_side = interface_domain.request()
@@ -2414,8 +2515,11 @@ void requireCompleteAuthoritativeCutFamilies(
         }
     }
 
-    for (const auto& [parent, state] : volume_state_by_parent) {
-        if (state.has_negative && state.has_positive &&
+    for (std::size_t index = 0; index < volume_state_by_parent.size();
+         ++index) {
+        const auto& state = volume_state_by_parent[index];
+        const auto parent = static_cast<MeshIndex>(index);
+        if (state.present && state.has_negative && state.has_positive &&
             cut_cell_set.find(parent) == cut_cell_set.end()) {
             throw std::invalid_argument(
                 "authoritative two-phase free-surface volume family is missing its active interface source fragment");
@@ -2805,6 +2909,823 @@ template <typename Source>
 {
     const auto found = index.find(stable_id);
     return found == index.end() ? nullptr : found->second;
+}
+
+
+// ---------------------------------------------------------------------------
+// Bitwise comparison of snapshot content
+// ---------------------------------------------------------------------------
+
+[[nodiscard]] bool sameRealBits(Real a, Real b) noexcept
+{
+    return std::memcmp(&a, &b, sizeof(Real)) == 0;
+}
+
+template <std::size_t N>
+[[nodiscard]] bool sameRealBits(const std::array<Real, N>& a,
+                                const std::array<Real, N>& b) noexcept
+{
+    return std::memcmp(a.data(), b.data(), N * sizeof(Real)) == 0;
+}
+
+[[nodiscard]] bool sameRealBits(const geometry::CutGeometryJacobian& a,
+                                const geometry::CutGeometryJacobian& b) noexcept
+{
+    return sameRealBits(a[0], b[0]) && sameRealBits(a[1], b[1]) &&
+           sameRealBits(a[2], b[2]);
+}
+
+// The comparisons below name every field.  These size checks make a new
+// field fail to compile until the comparisons (and the reuse key built on
+// them) take it into account.
+static_assert(sizeof(geometry::CutQuadraturePoint) == 152u);
+static_assert(sizeof(geometry::CutQuadratureProvenance) == 384u);
+static_assert(sizeof(geometry::CutQuadratureConstructionPolicy) == 56u);
+static_assert(sizeof(geometry::CutQuadratureRule) == 544u);
+static_assert(sizeof(geometry::MappedCutQuadraturePoint) == 288u);
+static_assert(sizeof(geometry::MappedCutQuadratureRule) == 88u);
+static_assert(sizeof(FreeSurfaceGeometryMomentCertificate) == 40u);
+static_assert(sizeof(FreeSurfaceGeometryRuleRecord) == 776u);
+static_assert(sizeof(FreeSurfaceGeometryValidationLedger) == 440u);
+static_assert(sizeof(FreeSurfaceGeometrySnapshotPolicy) == 24u);
+
+[[nodiscard]] bool samePointBits(const geometry::CutQuadraturePoint& a,
+                                 const geometry::CutQuadraturePoint& b) noexcept
+{
+    return sameRealBits(a.point, b.point) &&
+           sameRealBits(a.normal, b.normal) &&
+           sameRealBits(a.boundary_normal, b.boundary_normal) &&
+           sameRealBits(a.tangent, b.tangent) &&
+           sameRealBits(a.weight, b.weight) &&
+           sameRealBits(a.parent_coordinate, b.parent_coordinate) &&
+           sameRealBits(a.reference_measure_factor,
+                        b.reference_measure_factor) &&
+           sameRealBits(a.level_set_residual, b.level_set_residual) &&
+           sameRealBits(a.gradient_norm, b.gradient_norm);
+}
+
+[[nodiscard]] bool sameMappedPointBits(
+    const geometry::MappedCutQuadraturePoint& a,
+    const geometry::MappedCutQuadraturePoint& b) noexcept
+{
+    return sameRealBits(a.reference_point, b.reference_point) &&
+           sameRealBits(a.physical_point, b.physical_point) &&
+           sameRealBits(a.jacobian, b.jacobian) &&
+           sameRealBits(a.inverse_jacobian, b.inverse_jacobian) &&
+           sameRealBits(a.absolute_jacobian_determinant,
+                        b.absolute_jacobian_determinant) &&
+           sameRealBits(a.reference_weight, b.reference_weight) &&
+           sameRealBits(a.physical_weight, b.physical_weight) &&
+           sameRealBits(a.normal, b.normal) &&
+           sameRealBits(a.boundary_normal, b.boundary_normal) &&
+           sameRealBits(a.tangent, b.tangent);
+}
+
+// Every provenance field except the four that a source value revision
+// re-stamps: the cut-topology revision and source stable id (both the
+// region's stable id), the source value revision and the snapshot key.
+[[nodiscard]] bool sameProvenanceExceptRevisionStamps(
+    const geometry::CutQuadratureProvenance& a,
+    const geometry::CutQuadratureProvenance& b) noexcept
+{
+    return a.embedded_geometry_id == b.embedded_geometry_id &&
+           a.cut_topology_id == b.cut_topology_id &&
+           a.parent_entity == b.parent_entity &&
+           a.parent_boundary_entity == b.parent_boundary_entity &&
+           a.parent_entity_global_id == b.parent_entity_global_id &&
+           a.parent_boundary_entity_global_id ==
+               b.parent_boundary_entity_global_id &&
+           a.owner_rank == b.owner_rank && a.marker == b.marker &&
+           a.predicate_policy_key == b.predicate_policy_key &&
+           a.coefficient_classification_policy ==
+               b.coefficient_classification_policy &&
+           sameRealBits(a.coefficient_classification_band,
+                        b.coefficient_classification_band) &&
+           a.construction == b.construction && a.frame == b.frame &&
+           a.implicit_geometry_mode == b.implicit_geometry_mode &&
+           a.implicit_quadrature_backend == b.implicit_quadrature_backend &&
+           a.selected_implicit_quadrature_backend ==
+               b.selected_implicit_quadrature_backend &&
+           a.implicit_fallback_policy == b.implicit_fallback_policy &&
+           a.implicit_fallback_status == b.implicit_fallback_status &&
+           a.geometry_tangent_policy == b.geometry_tangent_policy &&
+           sameRealBits(a.implicit_cut_root_tolerance,
+                        b.implicit_cut_root_tolerance) &&
+           sameRealBits(a.implicit_cut_root_coordinate_tolerance,
+                        b.implicit_cut_root_coordinate_tolerance) &&
+           a.implicit_cut_root_max_iterations ==
+               b.implicit_cut_root_max_iterations &&
+           a.requested_quadrature_order == b.requested_quadrature_order &&
+           a.achieved_quadrature_order == b.achieved_quadrature_order;
+}
+
+[[nodiscard]] bool sameProvenanceBits(
+    const geometry::CutQuadratureProvenance& a,
+    const geometry::CutQuadratureProvenance& b) noexcept
+{
+    return sameProvenanceExceptRevisionStamps(a, b) &&
+           a.cut_topology_revision == b.cut_topology_revision &&
+           a.source_stable_id == b.source_stable_id &&
+           a.source_value_revision == b.source_value_revision &&
+           a.free_surface_snapshot_revision_key ==
+               b.free_surface_snapshot_revision_key;
+}
+
+// Every rule field except the points and the revision stamps of its
+// provenance.
+[[nodiscard]] bool sameRuleExceptPointsAndRevisionStamps(
+    const geometry::CutQuadratureRule& a,
+    const geometry::CutQuadratureRule& b) noexcept
+{
+    return a.kind == b.kind && a.side == b.side &&
+           a.geometric_dimension == b.geometric_dimension &&
+           sameRealBits(a.measure, b.measure) &&
+           sameRealBits(a.parent_measure, b.parent_measure) &&
+           sameRealBits(a.volume_fraction, b.volume_fraction) &&
+           a.exact_for_constants == b.exact_for_constants &&
+           a.exact_polynomial_order == b.exact_polynomial_order &&
+           a.policy.kind == b.policy.kind &&
+           a.policy.polynomial_order == b.policy.polynomial_order &&
+           a.policy.moment_fitted == b.policy.moment_fitted &&
+           sameRealBits(a.policy.tolerance, b.policy.tolerance) &&
+           a.policy.name == b.policy.name &&
+           sameProvenanceExceptRevisionStamps(a.provenance, b.provenance) &&
+           a.provenance_id == b.provenance_id && a.frame == b.frame &&
+           a.curved_geometry == b.curved_geometry &&
+           a.full_cell_equivalent == b.full_cell_equivalent &&
+           a.released_point_count == b.released_point_count;
+}
+
+[[nodiscard]] std::string firstRecordDifference(
+    const FreeSurfaceGeometryRuleRecord& a,
+    const FreeSurfaceGeometryRuleRecord& b)
+{
+    if (a.construction_observation != b.construction_observation) {
+        return "construction_observation";
+    }
+    if (a.role != b.role || a.retention != b.retention ||
+        a.physical_boundary_marker != b.physical_boundary_marker ||
+        a.locally_owned != b.locally_owned) {
+        return "role/retention/boundary marker/ownership";
+    }
+    if (a.source_fragment_stable_ids != b.source_fragment_stable_ids ||
+        a.topology_id != b.topology_id ||
+        a.source_topology_key != b.source_topology_key ||
+        a.component_id != b.component_id) {
+        return "source identities/topology";
+    }
+    if (a.classification_only != b.classification_only ||
+        a.classification_only_content_digest !=
+            b.classification_only_content_digest) {
+        return "classification-only state";
+    }
+    const auto& am = a.moment_certificate;
+    const auto& bm = b.moment_certificate;
+    if (am.polynomial_order != bm.polynomial_order ||
+        am.ambient_dimension != bm.ambient_dimension ||
+        am.source != bm.source ||
+        am.phase_sign_certified != bm.phase_sign_certified ||
+        am.moments.size() != bm.moments.size()) {
+        return "moment certificate header";
+    }
+    for (std::size_t i = 0; i < am.moments.size(); ++i) {
+        if (am.moments[i].exponents != bm.moments[i].exponents ||
+            !sameRealBits(am.moments[i].value, bm.moments[i].value)) {
+            return "moment certificate moment " + std::to_string(i);
+        }
+    }
+    const auto& ar = a.reference_rule;
+    const auto& br = b.reference_rule;
+    if (!sameRuleExceptPointsAndRevisionStamps(ar, br) ||
+        !sameProvenanceBits(ar.provenance, br.provenance)) {
+        return "reference rule fields";
+    }
+    if (ar.points.size() != br.points.size()) {
+        return "reference point count";
+    }
+    for (std::size_t q = 0; q < ar.points.size(); ++q) {
+        if (!samePointBits(ar.points[q], br.points[q])) {
+            return "reference point " + std::to_string(q);
+        }
+    }
+    const auto& ap = a.physical_rule;
+    const auto& bp = b.physical_rule;
+    if (ap.kind != bp.kind || ap.side != bp.side ||
+        ap.geometric_dimension != bp.geometric_dimension ||
+        ap.parent_entity != bp.parent_entity || ap.marker != bp.marker ||
+        ap.source_stable_id != bp.source_stable_id ||
+        ap.cut_topology_revision != bp.cut_topology_revision ||
+        ap.source_value_revision != bp.source_value_revision ||
+        ap.free_surface_snapshot_revision_key !=
+            bp.free_surface_snapshot_revision_key ||
+        !sameRealBits(ap.reference_measure, bp.reference_measure) ||
+        !sameRealBits(ap.physical_measure, bp.physical_measure)) {
+        return "physical rule fields";
+    }
+    if (ap.points.size() != bp.points.size()) {
+        return "physical point count";
+    }
+    for (std::size_t q = 0; q < ap.points.size(); ++q) {
+        if (!sameMappedPointBits(ap.points[q], bp.points[q])) {
+            return "physical point " + std::to_string(q);
+        }
+    }
+    return {};
+}
+
+// Visits every ledger field: counts as std::size_t&, the rest as Real&.
+template <typename Ledger, typename CountVisitor, typename RealVisitor>
+void forEachLedgerField(Ledger& ledger,
+                        CountVisitor&& count,
+                        RealVisitor&& real)
+{
+    count("rule_count", ledger.rule_count);
+    count("retained_rule_count", ledger.retained_rule_count);
+    count("pruned_rule_count", ledger.pruned_rule_count);
+    count("quadrature_point_count", ledger.quadrature_point_count);
+    count("owned_rule_count", ledger.owned_rule_count);
+    count("global_owned_rule_count", ledger.global_owned_rule_count);
+    count("contact_fragment_count", ledger.contact_fragment_count);
+    count("referenced_surface_fragment_count",
+          ledger.referenced_surface_fragment_count);
+    count("orphan_contact_fragment_count",
+          ledger.orphan_contact_fragment_count);
+    count("missing_contact_fragment_count",
+          ledger.missing_contact_fragment_count);
+    count("stale_revision_count", ledger.stale_revision_count);
+    count("invalid_phase_point_count", ledger.invalid_phase_point_count);
+    count("represented_phase_point_count",
+          ledger.represented_phase_point_count);
+    count("represented_phase_disagreement_count",
+          ledger.represented_phase_disagreement_count);
+    count("outside_parent_point_count", ledger.outside_parent_point_count);
+    count("invalid_weight_count", ledger.invalid_weight_count);
+    count("false_achieved_order_count", ledger.false_achieved_order_count);
+    count("certified_rule_count", ledger.certified_rule_count);
+    count("parent_cell_moment_certificate_count",
+          ledger.parent_cell_moment_certificate_count);
+    count("centroid_moment_certificate_count",
+          ledger.centroid_moment_certificate_count);
+    count("piecewise_affine_moment_certificate_count",
+          ledger.piecewise_affine_moment_certificate_count);
+    count("backend_reference_moment_certificate_count",
+          ledger.backend_reference_moment_certificate_count);
+    count("stored_generated_moment_certificate_count",
+          ledger.stored_generated_moment_certificate_count);
+    count("validated_rule_polynomial_moment_count",
+          ledger.validated_rule_polynomial_moment_count);
+    count("validated_polynomial_moment_count",
+          ledger.validated_polynomial_moment_count);
+    count("invalid_global_identity_count",
+          ledger.invalid_global_identity_count);
+    count("duplicate_rule_identity_count",
+          ledger.duplicate_rule_identity_count);
+    real("unpruned_negative_reference_volume",
+         ledger.unpruned_negative_reference_volume);
+    real("unpruned_positive_reference_volume",
+         ledger.unpruned_positive_reference_volume);
+    real("unpruned_negative_physical_volume",
+         ledger.unpruned_negative_physical_volume);
+    real("unpruned_positive_physical_volume",
+         ledger.unpruned_positive_physical_volume);
+    real("owned_unpruned_negative_reference_volume",
+         ledger.owned_unpruned_negative_reference_volume);
+    real("owned_unpruned_positive_reference_volume",
+         ledger.owned_unpruned_positive_reference_volume);
+    real("owned_unpruned_negative_physical_volume",
+         ledger.owned_unpruned_negative_physical_volume);
+    real("owned_unpruned_positive_physical_volume",
+         ledger.owned_unpruned_positive_physical_volume);
+    real("retained_negative_reference_volume",
+         ledger.retained_negative_reference_volume);
+    real("retained_positive_reference_volume",
+         ledger.retained_positive_reference_volume);
+    real("retained_negative_physical_volume",
+         ledger.retained_negative_physical_volume);
+    real("retained_positive_physical_volume",
+         ledger.retained_positive_physical_volume);
+    real("owned_retained_negative_reference_volume",
+         ledger.owned_retained_negative_reference_volume);
+    real("owned_retained_positive_reference_volume",
+         ledger.owned_retained_positive_reference_volume);
+    real("owned_retained_negative_physical_volume",
+         ledger.owned_retained_negative_physical_volume);
+    real("owned_retained_positive_physical_volume",
+         ledger.owned_retained_positive_physical_volume);
+    real("interface_reference_measure", ledger.interface_reference_measure);
+    real("interface_physical_measure", ledger.interface_physical_measure);
+    real("contact_reference_measure", ledger.contact_reference_measure);
+    real("contact_physical_measure", ledger.contact_physical_measure);
+    real("maximum_root_residual", ledger.maximum_root_residual);
+    real("maximum_normal_angular_error",
+         ledger.maximum_normal_angular_error);
+    real("maximum_represented_phase_disagreement",
+         ledger.maximum_represented_phase_disagreement);
+    real("maximum_constant_moment_error",
+         ledger.maximum_constant_moment_error);
+    real("maximum_polynomial_moment_error",
+         ledger.maximum_polynomial_moment_error);
+    real("maximum_polynomial_moment_scaled_error",
+         ledger.maximum_polynomial_moment_scaled_error);
+    real("maximum_volume_partition_error",
+         ledger.maximum_volume_partition_error);
+    real("maximum_boundary_partition_error",
+         ledger.maximum_boundary_partition_error);
+}
+
+[[nodiscard]] std::string firstLedgerDifference(
+    const FreeSurfaceGeometryValidationLedger& a,
+    const FreeSurfaceGeometryValidationLedger& b)
+{
+    // Pair the fields of both ledgers through their addresses' offsets.
+    std::vector<std::pair<const char*, std::size_t>> counts;
+    std::vector<std::pair<const char*, Real>> reals;
+    forEachLedgerField(
+        a,
+        [&counts](const char* name, std::size_t value) {
+            counts.emplace_back(name, value);
+        },
+        [&reals](const char* name, Real value) {
+            reals.emplace_back(name, value);
+        });
+    std::size_t count_index = 0;
+    std::size_t real_index = 0;
+    std::string difference;
+    forEachLedgerField(
+        b,
+        [&](const char* name, std::size_t value) {
+            if (difference.empty() && counts[count_index].second != value) {
+                difference = name;
+            }
+            ++count_index;
+        },
+        [&](const char* name, Real value) {
+            if (difference.empty() &&
+                !sameRealBits(reals[real_index].second, value)) {
+                difference = name;
+            }
+            ++real_index;
+        });
+    return difference;
+}
+
+// Fields a single rule validation (validateRule, validateRuleMomentCertificate
+// and validateCellPolynomialMoments) may change.
+[[nodiscard]] bool isRuleValidationCount(std::string_view name) noexcept
+{
+    return name == "stale_revision_count" ||
+           name == "invalid_phase_point_count" ||
+           name == "represented_phase_point_count" ||
+           name == "represented_phase_disagreement_count" ||
+           name == "outside_parent_point_count" ||
+           name == "invalid_weight_count" ||
+           name == "false_achieved_order_count" ||
+           name == "certified_rule_count" ||
+           name == "parent_cell_moment_certificate_count" ||
+           name == "centroid_moment_certificate_count" ||
+           name == "piecewise_affine_moment_certificate_count" ||
+           name == "backend_reference_moment_certificate_count" ||
+           name == "stored_generated_moment_certificate_count" ||
+           name == "validated_rule_polynomial_moment_count" ||
+           name == "validated_polynomial_moment_count";
+}
+
+[[nodiscard]] bool isRuleValidationMaximum(std::string_view name) noexcept
+{
+    return name == "maximum_root_residual" ||
+           name == "maximum_normal_angular_error" ||
+           name == "maximum_represented_phase_disagreement" ||
+           name == "maximum_constant_moment_error" ||
+           name == "maximum_polynomial_moment_error" ||
+           name == "maximum_polynomial_moment_scaled_error";
+}
+
+using snapshot_reuse_detail::FullCellValidationContribution;
+using snapshot_reuse_detail::FullCellRecordReplay;
+
+// Merges a scratch ledger (zero-initialized, then filled by the validation
+// of one rule) into the build ledger.  Counts add and maxima combine with
+// std::max; the maxima are nonnegative magnitudes that start at zero, so the
+// result is bitwise the one validating directly into the build ledger.  A
+// scratch field outside the rule-validation set is a programming error.
+void mergeRuleValidationLedger(FreeSurfaceGeometryValidationLedger& into,
+                               const FreeSurfaceGeometryValidationLedger& from)
+{
+    std::vector<std::size_t> counts;
+    std::vector<Real> reals;
+    forEachLedgerField(
+        from,
+        [&counts](const char* name, std::size_t value) {
+            if (!isRuleValidationCount(name) && value != 0u) {
+                throw std::logic_error(
+                    std::string("free-surface rule validation changed an unexpected ledger count: ") +
+                    name);
+            }
+            counts.push_back(value);
+        },
+        [&reals](const char* name, Real value) {
+            if (!isRuleValidationMaximum(name) &&
+                !sameRealBits(value, Real{0.0})) {
+                throw std::logic_error(
+                    std::string("free-surface rule validation changed an unexpected ledger value: ") +
+                    name);
+            }
+            reals.push_back(value);
+        });
+    std::size_t count_index = 0;
+    std::size_t real_index = 0;
+    forEachLedgerField(
+        into,
+        [&](const char* name, std::size_t& value) {
+            if (isRuleValidationCount(name)) {
+                value += counts[count_index];
+            }
+            ++count_index;
+        },
+        [&](const char* name, Real& value) {
+            if (isRuleValidationMaximum(name)) {
+                value = std::max(value, reals[real_index]);
+            }
+            ++real_index;
+        });
+}
+
+[[nodiscard]] FullCellValidationContribution fullCellValidationContribution(
+    const FreeSurfaceGeometryValidationLedger& scratch) noexcept
+{
+    FullCellValidationContribution contribution;
+    contribution.represented_phase_point_count =
+        scratch.represented_phase_point_count;
+    contribution.certified_rule_count = scratch.certified_rule_count;
+    contribution.parent_cell_moment_certificate_count =
+        scratch.parent_cell_moment_certificate_count;
+    contribution.centroid_moment_certificate_count =
+        scratch.centroid_moment_certificate_count;
+    contribution.piecewise_affine_moment_certificate_count =
+        scratch.piecewise_affine_moment_certificate_count;
+    contribution.backend_reference_moment_certificate_count =
+        scratch.backend_reference_moment_certificate_count;
+    contribution.stored_generated_moment_certificate_count =
+        scratch.stored_generated_moment_certificate_count;
+    contribution.validated_rule_polynomial_moment_count =
+        scratch.validated_rule_polynomial_moment_count;
+    contribution.validated_polynomial_moment_count =
+        scratch.validated_polynomial_moment_count;
+    contribution.maximum_constant_moment_error =
+        scratch.maximum_constant_moment_error;
+    contribution.maximum_polynomial_moment_error =
+        scratch.maximum_polynomial_moment_error;
+    contribution.maximum_polynomial_moment_scaled_error =
+        scratch.maximum_polynomial_moment_scaled_error;
+    return contribution;
+}
+
+// A scratch ledger of a passed full-cell validation holds content-only
+// fields and the represented-phase disagreement statistics.  The record is
+// a reuse template only when nothing else was touched.
+[[nodiscard]] bool onlyContentAndPhaseFieldsChanged(
+    const FreeSurfaceGeometryValidationLedger& scratch)
+{
+    FreeSurfaceGeometryValidationLedger expected{};
+    const auto contribution = fullCellValidationContribution(scratch);
+    expected.represented_phase_point_count =
+        contribution.represented_phase_point_count;
+    expected.certified_rule_count = contribution.certified_rule_count;
+    expected.parent_cell_moment_certificate_count =
+        contribution.parent_cell_moment_certificate_count;
+    expected.centroid_moment_certificate_count =
+        contribution.centroid_moment_certificate_count;
+    expected.piecewise_affine_moment_certificate_count =
+        contribution.piecewise_affine_moment_certificate_count;
+    expected.backend_reference_moment_certificate_count =
+        contribution.backend_reference_moment_certificate_count;
+    expected.stored_generated_moment_certificate_count =
+        contribution.stored_generated_moment_certificate_count;
+    expected.validated_rule_polynomial_moment_count =
+        contribution.validated_rule_polynomial_moment_count;
+    expected.validated_polynomial_moment_count =
+        contribution.validated_polynomial_moment_count;
+    expected.maximum_constant_moment_error =
+        contribution.maximum_constant_moment_error;
+    expected.maximum_polynomial_moment_error =
+        contribution.maximum_polynomial_moment_error;
+    expected.maximum_polynomial_moment_scaled_error =
+        contribution.maximum_polynomial_moment_scaled_error;
+    expected.represented_phase_disagreement_count =
+        scratch.represented_phase_disagreement_count;
+    expected.maximum_represented_phase_disagreement =
+        scratch.maximum_represented_phase_disagreement;
+    return firstLedgerDifference(expected, scratch).empty();
+}
+
+void replayFullCellValidationContribution(
+    FreeSurfaceGeometryValidationLedger& ledger,
+    const FullCellValidationContribution& contribution) noexcept
+{
+    ledger.represented_phase_point_count +=
+        contribution.represented_phase_point_count;
+    ledger.certified_rule_count += contribution.certified_rule_count;
+    ledger.parent_cell_moment_certificate_count +=
+        contribution.parent_cell_moment_certificate_count;
+    ledger.centroid_moment_certificate_count +=
+        contribution.centroid_moment_certificate_count;
+    ledger.piecewise_affine_moment_certificate_count +=
+        contribution.piecewise_affine_moment_certificate_count;
+    ledger.backend_reference_moment_certificate_count +=
+        contribution.backend_reference_moment_certificate_count;
+    ledger.stored_generated_moment_certificate_count +=
+        contribution.stored_generated_moment_certificate_count;
+    ledger.validated_rule_polynomial_moment_count +=
+        contribution.validated_rule_polynomial_moment_count;
+    ledger.validated_polynomial_moment_count +=
+        contribution.validated_polynomial_moment_count;
+    ledger.maximum_constant_moment_error =
+        std::max(ledger.maximum_constant_moment_error,
+                 contribution.maximum_constant_moment_error);
+    ledger.maximum_polynomial_moment_error =
+        std::max(ledger.maximum_polynomial_moment_error,
+                 contribution.maximum_polynomial_moment_error);
+    ledger.maximum_polynomial_moment_scaled_error =
+        std::max(ledger.maximum_polynomial_moment_scaled_error,
+                 contribution.maximum_polynomial_moment_scaled_error);
+}
+
+// The level-set dependent part of validateRule() for a volume record whose
+// content checks are known to pass, in the same point order: the
+// represented phase of every point.  reference_points[q] is
+// physical_rule.points[q].reference_point of the materialized record.
+void validateVolumeRecordPhase(
+    const FreeSurfaceGeometryRuleRecord& record,
+    std::span<const std::array<Real, 3>> reference_points,
+    const FreeSurfaceGeometryRevision& revision,
+    const FreeSurfaceGeometrySnapshotPolicy& policy,
+    const FreeSurfaceGeometryScalarEvaluator& scalar,
+    FreeSurfaceGeometryValidationLedger& ledger)
+{
+    if (!scalar.canEvaluateValue()) {
+        return;
+    }
+    const auto& rule = record.reference_rule;
+    const auto parent = static_cast<GlobalIndex>(rule.provenance.parent_entity);
+    const Real scaled_tolerance = Real{128.0} * policy.tolerance;
+    for (std::size_t q = 0; q < reference_points.size(); ++q) {
+        const auto& reference_point = reference_points[q];
+        const Real level_set =
+            scalar.value(parent, reference_point, rule.provenance) -
+            revision.isovalue;
+        if (!std::isfinite(level_set)) {
+            throw std::invalid_argument(
+                "free-surface snapshot scalar evaluator returned a non-finite value");
+        }
+        if ((negativeRole(record.role) && level_set > scaled_tolerance) ||
+            (positiveRole(record.role) && level_set < -scaled_tolerance)) {
+            if (volumeRole(record.role) &&
+                record.moment_certificate.phase_sign_certified) {
+                ++ledger.represented_phase_disagreement_count;
+                ledger.maximum_represented_phase_disagreement =
+                    std::max(ledger.maximum_represented_phase_disagreement,
+                             std::abs(level_set));
+            } else {
+                ++ledger.invalid_phase_point_count;
+                throw std::invalid_argument(
+                    "retained free-surface point has the wrong declared phase sign"
+                    "; role=" +
+                    std::to_string(static_cast<int>(record.role)) +
+                    "; topology_id=" + record.topology_id +
+                    "; point_index=" + std::to_string(q) +
+                    "; xi=(" + std::to_string(reference_point[0]) + "," +
+                    std::to_string(reference_point[1]) + "," +
+                    std::to_string(reference_point[2]) + ")" +
+                    "; level_set=" + std::to_string(level_set) +
+                    "; tolerance=" + std::to_string(scaled_tolerance));
+            }
+        }
+    }
+}
+
+// Reference points of the parent-cell rule materializeAuthoritativeFullCellPoints()
+// builds, which are the mapped reference points of a full-cell record.
+class FullCellReferencePoints {
+public:
+    [[nodiscard]] std::span<const std::array<Real, 3>> get(
+        const assembly::IMeshAccess& mesh,
+        const geometry::CutQuadratureRule& rule)
+    {
+        const auto parent =
+            static_cast<GlobalIndex>(rule.provenance.parent_entity);
+        const auto type = mesh.getCellType(parent);
+        const int geometry_order =
+            std::max(1, mesh.getCellGeometryOrder(parent));
+        const int order = std::max(rule.exact_polynomial_order,
+                                   mesh.dimension() * geometry_order);
+        for (const auto& entry : entries_) {
+            if (entry.type == type && entry.order == order) {
+                return entry.points;
+            }
+        }
+        const auto quadrature = quadrature::QuadratureFactory::create(type, order);
+        Entry entry{type, order, {}};
+        entry.points.reserve(quadrature->num_points());
+        for (std::size_t q = 0; q < quadrature->num_points(); ++q) {
+            const auto point = quadrature->point(q);
+            entry.points.push_back({{point[0], point[1], point[2]}});
+        }
+        entries_.push_back(std::move(entry));
+        return entries_.back().points;
+    }
+
+private:
+    struct Entry {
+        ElementType type{};
+        int order{0};
+        std::vector<std::array<Real, 3>> points{};
+    };
+    std::vector<Entry> entries_{};
+};
+
+} // namespace
+
+struct FreeSurfaceGeometrySnapshotReuseCache::State {
+    bool valid{false};
+    // Context of the previous build.  A record is reused only under the same
+    // mesh (object, revisions, communicator) and the same policy.
+    const assembly::IMeshAccess* mesh{nullptr};
+    int rank{0};
+    int size{0};
+    int dimension{0};
+    GlobalIndex cell_count{0};
+    FreeSurfaceGeometryLocalMeshRevision mesh_revision{};
+    FreeSurfaceGeometrySnapshotPolicy policy{};
+    // The previous snapshot, whose records are the reuse templates.  The
+    // cache does not keep it alive: once every owner (typically the
+    // installed integration context) has released it, nothing is reused.
+    std::weak_ptr<const FreeSurfaceGeometrySnapshot> snapshot{};
+    // Parallel to snapshot->rules().
+    std::vector<snapshot_reuse_detail::FullCellRecordReplay> replay{};
+    // Local cell -> 1 + index of the cell's first volume record (0: none).
+    std::vector<std::uint32_t> first_volume_record_by_cell{};
+};
+
+FreeSurfaceGeometrySnapshotReuseCache::FreeSurfaceGeometrySnapshotReuseCache()
+    : state_(std::make_unique<State>())
+{
+}
+
+FreeSurfaceGeometrySnapshotReuseCache::~FreeSurfaceGeometrySnapshotReuseCache() =
+    default;
+
+FreeSurfaceGeometrySnapshotReuseCache::FreeSurfaceGeometrySnapshotReuseCache(
+    FreeSurfaceGeometrySnapshotReuseCache&&) noexcept = default;
+
+FreeSurfaceGeometrySnapshotReuseCache&
+FreeSurfaceGeometrySnapshotReuseCache::operator=(
+    FreeSurfaceGeometrySnapshotReuseCache&&) noexcept = default;
+
+void FreeSurfaceGeometrySnapshotReuseCache::clear() noexcept
+{
+    if (!state_) {
+        state_ = std::make_unique<State>();
+    }
+    *state_ = State{};
+    last_build_ = Statistics{};
+}
+
+bool FreeSurfaceGeometrySnapshotReuseCache::empty() const noexcept
+{
+    return !state_ || !state_->valid;
+}
+
+namespace {
+
+[[nodiscard]] bool samePolicyBits(const FreeSurfaceGeometrySnapshotPolicy& a,
+                                  const FreeSurfaceGeometrySnapshotPolicy& b) noexcept
+{
+    return sameRealBits(a.tolerance, b.tolerance) &&
+           sameRealBits(a.minimum_retained_volume_fraction,
+                        b.minimum_retained_volume_fraction) &&
+           a.minimum_achieved_quadrature_order ==
+               b.minimum_achieved_quadrature_order &&
+           a.require_complete_exterior_boundary_partition ==
+               b.require_complete_exterior_boundary_partition &&
+           a.classification_only_full_cell_side ==
+               b.classification_only_full_cell_side &&
+           a.classification_only_full_cells_on_both_sides ==
+               b.classification_only_full_cells_on_both_sides;
+}
+
+[[nodiscard]] bool reuseContextMatches(
+    const FreeSurfaceGeometrySnapshotReuseCache::State& state,
+    const FreeSurfaceGeometrySnapshot* templates,
+    const assembly::IMeshAccess& mesh,
+    const FreeSurfaceGeometrySnapshotPolicy& policy)
+{
+    return state.valid && templates != nullptr &&
+           mesh.revisionTrackingAvailable() && state.mesh == &mesh &&
+           state.rank == mesh.parallelRank() &&
+           state.size == mesh.parallelSize() &&
+           state.dimension == mesh.dimension() &&
+           state.cell_count == mesh.numCells() &&
+           state.mesh_revision ==
+               FreeSurfaceGeometryLocalMeshRevision{
+                   .mesh_geometry_revision = mesh.geometryRevision(),
+                   .mesh_topology_revision = mesh.topologyRevision(),
+                   .ownership_revision = mesh.ownershipRevision(),
+                   .numbering_revision = mesh.numberingRevision(),
+               } &&
+           samePolicyBits(state.policy, policy) &&
+           state.replay.size() == templates->rules().size() &&
+           state.first_volume_record_by_cell.size() ==
+               static_cast<std::size_t>(mesh.numCells());
+}
+
+[[nodiscard]] bool isFullCellVolumeRecord(
+    const FreeSurfaceGeometryRuleRecord& record) noexcept
+{
+    return volumeRole(record.role) &&
+           record.reference_rule.kind == geometry::CutQuadratureKind::Volume &&
+           record.reference_rule.full_cell_equivalent;
+}
+
+// The previous build's record of the full-cell volume rule `rule` (whose
+// identity addRule() has completed), when every input of addRule() and of
+// the content-only validation is the same, otherwise null.
+[[nodiscard]] std::size_t findReusableFullCellRecord(
+    const FreeSurfaceGeometrySnapshotReuseCache::State& state,
+    const std::vector<FreeSurfaceGeometryRuleRecord>& templates,
+    const geometry::CutQuadratureRule& rule,
+    const CutInterfaceVolumeRegion& region,
+    bool classification_only)
+{
+    constexpr auto none = std::numeric_limits<std::size_t>::max();
+    const auto cell = rule.provenance.parent_entity;
+    if (cell < 0 ||
+        static_cast<std::size_t>(cell) >=
+            state.first_volume_record_by_cell.size()) {
+        return none;
+    }
+    const auto first = state.first_volume_record_by_cell[
+        static_cast<std::size_t>(cell)];
+    if (first == 0u) {
+        return none;
+    }
+    const auto source_topology_key = volumeSourceTopologyKey(region);
+    for (std::size_t index = first - 1u; index < templates.size(); ++index) {
+        const auto& candidate = templates[index];
+        if (!volumeRole(candidate.role) ||
+            candidate.reference_rule.provenance.parent_entity != cell) {
+            break;
+        }
+        if (state.replay[index].reusable &&
+            isFullCellVolumeRecord(candidate) &&
+            candidate.classification_only == classification_only &&
+            candidate.retention == FreeSurfaceGeometryRetention::Retained &&
+            candidate.construction_observation ==
+                region.construction_observation &&
+            candidate.source_topology_key == source_topology_key &&
+            sameRuleExceptPointsAndRevisionStamps(rule,
+                                                  candidate.reference_rule)) {
+            return index;
+        }
+    }
+    return none;
+}
+
+// Gives a copied full-cell record the revision-dependent identities that
+// addRule() derives from `rule`.
+void restampReusedFullCellRecord(FreeSurfaceGeometryRuleRecord& record,
+                                 const geometry::CutQuadratureRule& rule)
+{
+    auto& provenance = record.reference_rule.provenance;
+    provenance.cut_topology_revision = rule.provenance.cut_topology_revision;
+    provenance.source_stable_id = rule.provenance.source_stable_id;
+    provenance.source_value_revision = rule.provenance.source_value_revision;
+    provenance.free_surface_snapshot_revision_key =
+        rule.provenance.free_surface_snapshot_revision_key;
+    auto& physical = record.physical_rule;
+    physical.source_stable_id = provenance.source_stable_id;
+    physical.cut_topology_revision = provenance.cut_topology_revision;
+    physical.source_value_revision = provenance.source_value_revision;
+    physical.free_surface_snapshot_revision_key =
+        provenance.free_surface_snapshot_revision_key;
+    record.source_fragment_stable_ids.clear();
+    if (provenance.source_stable_id != 0u) {
+        record.source_fragment_stable_ids.push_back(
+            provenance.source_stable_id);
+    }
+    record.component_id = stableComponentId(
+        record.source_fragment_stable_ids, provenance.cut_topology_revision);
+}
+
+// interface_domain.volumeQuadratureRules() without the points of
+// full-cell-equivalent rules, which addRule() replaces by the parent-cell
+// rule before reading them.
+[[nodiscard]] std::vector<geometry::CutQuadratureRule> snapshotVolumeRules(
+    const LevelSetInterfaceDomain& domain)
+{
+    return domain.volumeQuadratureRules(
+        [](const CutInterfaceVolumeRegion& region) noexcept {
+            return region.full_cell_equivalent;
+        });
 }
 
 } // namespace
@@ -4481,6 +5402,29 @@ buildFreeSurfaceGeometrySnapshot(
     std::string domain_id,
     FreeSurfaceGeometryOwnershipCollective ownership_collective)
 {
+    return buildFreeSurfaceGeometrySnapshot(std::move(interface_domain),
+                                            std::move(contact_domains),
+                                            std::move(active_boundary_domains),
+                                            mesh,
+                                            std::move(policy),
+                                            std::move(scalar),
+                                            std::move(domain_id),
+                                            std::move(ownership_collective),
+                                            nullptr);
+}
+
+std::shared_ptr<const FreeSurfaceGeometrySnapshot>
+buildFreeSurfaceGeometrySnapshot(
+    LevelSetInterfaceDomain interface_domain,
+    std::vector<GeneratedInterfaceBoundaryIntersectionDomain> contact_domains,
+    std::vector<GeneratedActiveBoundaryDomain> active_boundary_domains,
+    const assembly::IMeshAccess& mesh,
+    FreeSurfaceGeometrySnapshotPolicy policy,
+    FreeSurfaceGeometryScalarEvaluator scalar,
+    std::string domain_id,
+    FreeSurfaceGeometryOwnershipCollective ownership_collective,
+    FreeSurfaceGeometrySnapshotReuseCache* reuse_cache)
+{
     if (!interface_domain.request().valid() || !(policy.tolerance > Real{0.0}) ||
         !(policy.minimum_retained_volume_fraction > Real{0.0}) ||
         !(policy.minimum_retained_volume_fraction < Real{1.0}) ||
@@ -4518,7 +5462,27 @@ buildFreeSurfaceGeometrySnapshot(
 
     requireUniqueAuthoritativeSourceIds(interface_domain);
     requireCompleteAuthoritativeCutFamilies(interface_domain);
-    auto volume_rules = interface_domain.volumeQuadratureRules();
+    // With a reuse cache, the records of full-cell volume rules whose inputs
+    // match the previous build are copied (see
+    // FreeSurfaceGeometrySnapshotReuseCache); record_replay keeps what the
+    // next build needs to reuse this build's records, and record_reused marks
+    // the copied ones.  Without a cache this function runs unchanged.
+    const bool reuse = reuse_cache != nullptr;
+    const auto reuse_templates =
+        reuse ? reuse_cache->state().snapshot.lock()
+              : std::shared_ptr<const FreeSurfaceGeometrySnapshot>{};
+    const bool reuse_context_matches =
+        reuse && reuseContextMatches(reuse_cache->state(),
+                                     reuse_templates.get(),
+                                     mesh,
+                                     policy);
+    FreeSurfaceGeometrySnapshotReuseCache::Statistics reuse_statistics;
+    reuse_statistics.context_matched = reuse_context_matches;
+    std::vector<snapshot_reuse_detail::FullCellRecordReplay> record_replay;
+    std::vector<unsigned char> record_reused;
+    FullCellReferencePoints full_cell_reference_points;
+    auto volume_rules = reuse ? snapshotVolumeRules(interface_domain)
+                              : interface_domain.volumeQuadratureRules();
     auto interface_rules = interface_domain.interfaceQuadratureRules();
     // Reserve every record up front (contact and exterior-boundary domains
     // yield at most one rule per fragment), so the record array carries no
@@ -4531,6 +5495,10 @@ buildFreeSurfaceGeometrySnapshot(
         record_capacity += active.fragments().size();
     }
     records.reserve(record_capacity);
+    if (reuse) {
+        record_replay.reserve(record_capacity);
+        record_reused.reserve(record_capacity);
+    }
     // A full-cell rule of the classification-only side that is the only
     // volume rule of its parent is validated (rule checks, cell moments) and
     // digested as soon as it is materialized, and its points are released
@@ -4560,6 +5528,60 @@ buildFreeSurfaceGeometrySnapshot(
         const bool classification_only =
             rule.full_cell_equivalent && classification_only_side(rule.side) &&
             volume_rules_per_parent[rule.provenance.parent_entity] == 1u;
+        const bool full_cell_volume_rule =
+            rule.kind == geometry::CutQuadratureKind::Volume &&
+            rule.full_cell_equivalent;
+        if (reuse_context_matches && full_cell_volume_rule) {
+            // addRule() completes the identity before it reads it; the
+            // previous records carry completed identities.
+            completeAndValidateRuleIdentity(rule, mesh, ledger);
+            const auto template_index = findReusableFullCellRecord(
+                reuse_cache->state(),
+                reuse_templates->rules(),
+                rule,
+                *region,
+                classification_only);
+            if (template_index != std::numeric_limits<std::size_t>::max()) {
+                const auto& replay =
+                    reuse_cache->state().replay[template_index];
+                records.push_back(reuse_templates->rules()[template_index]);
+                auto& record = records.back();
+                restampReusedFullCellRecord(record, rule);
+                // addRule()'s ledger counts.
+                ++ledger.rule_count;
+                ledger.quadrature_point_count += replay.point_count;
+                if (record.locally_owned) {
+                    ++ledger.owned_rule_count;
+                }
+                ++ledger.retained_rule_count;
+                record_replay.push_back(replay);
+                record_reused.push_back(1u);
+                ++reuse_statistics.full_cell_records_reused;
+                if (!classification_only) {
+                    // Validated in the record loop below.
+                    continue;
+                }
+                if (!record.moment_certificate.phase_sign_certified &&
+                    !scalar.canEvaluateValue()) {
+                    throw std::invalid_argument(
+                        "free-surface snapshot volume validation requires a scalar value evaluator when source geometry does not certify the represented phase");
+                }
+                replayFullCellValidationContribution(ledger,
+                                                     replay.contribution);
+                validateVolumeRecordPhase(
+                    record,
+                    full_cell_reference_points.get(mesh,
+                                                   record.reference_rule),
+                    revision,
+                    policy,
+                    scalar,
+                    ledger);
+                record.classification_only_content_digest =
+                    finishRuleContentDigest(
+                        replay.identity_free_digest_state, record);
+                continue;
+            }
+        }
         auto moment_certificate =
             rule.full_cell_equivalent
                 ? makeParentCellMomentCertificate(mesh, rule)
@@ -4575,6 +5597,17 @@ buildFreeSurfaceGeometrySnapshot(
                 volumeSourceTopologyKey(*region),
                 region->construction_observation);
         auto& record = records.back();
+        if (reuse) {
+            record_replay.emplace_back();
+            record_reused.push_back(0u);
+            if (full_cell_volume_rule) {
+                ++reuse_statistics.full_cell_records_built;
+                record_replay.back().point_count =
+                    record.reference_rule.points.size();
+            } else {
+                ++reuse_statistics.other_records_built;
+            }
+        }
         if (!classification_only ||
             record.retention != FreeSurfaceGeometryRetention::Retained) {
             continue;
@@ -4584,24 +5617,55 @@ buildFreeSurfaceGeometrySnapshot(
             throw std::invalid_argument(
                 "free-surface snapshot volume validation requires a scalar value evaluator when source geometry does not certify the represented phase");
         }
-        validateRule(record,
-                     interface_domain,
-                     mesh,
-                     revision,
-                     policy,
-                     scalar,
-                     ledger);
         const FreeSurfaceGeometryRuleRecord* const cell_rules[] = {&record};
-        validateCellPolynomialMoments(
-            cell_rules,
-            static_cast<GlobalIndex>(
-                record.reference_rule.provenance.parent_entity),
-            record.reference_rule.exact_polynomial_order,
-            mesh,
-            policy,
-            ledger);
-        record.classification_only_content_digest =
-            ruleContentDigest(record);
+        if (reuse && full_cell_volume_rule) {
+            // Validate into a scratch ledger to record the content-only
+            // contribution for the next build, then merge it.
+            FreeSurfaceGeometryValidationLedger scratch{};
+            validateRule(record,
+                         interface_domain,
+                         mesh,
+                         revision,
+                         policy,
+                         scalar,
+                         scratch);
+            validateCellPolynomialMoments(
+                cell_rules,
+                static_cast<GlobalIndex>(
+                    record.reference_rule.provenance.parent_entity),
+                record.reference_rule.exact_polynomial_order,
+                mesh,
+                policy,
+                scratch);
+            mergeRuleValidationLedger(ledger, scratch);
+            auto& replay = record_replay.back();
+            replay.reusable = onlyContentAndPhaseFieldsChanged(scratch);
+            replay.contribution = fullCellValidationContribution(scratch);
+            replay.identity_free_digest_state =
+                ruleContentWithoutIdentitiesState(record);
+            replay.has_identity_free_digest_state = true;
+            record.classification_only_content_digest =
+                finishRuleContentDigest(replay.identity_free_digest_state,
+                                        record);
+        } else {
+            validateRule(record,
+                         interface_domain,
+                         mesh,
+                         revision,
+                         policy,
+                         scalar,
+                         ledger);
+            validateCellPolynomialMoments(
+                cell_rules,
+                static_cast<GlobalIndex>(
+                    record.reference_rule.provenance.parent_entity),
+                record.reference_rule.exact_polynomial_order,
+                mesh,
+                policy,
+                ledger);
+            record.classification_only_content_digest =
+                ruleContentDigest(record);
+        }
         std::vector<geometry::CutQuadraturePoint>().swap(
             record.reference_rule.points);
         std::vector<geometry::MappedCutQuadraturePoint>().swap(
@@ -4834,13 +5898,23 @@ buildFreeSurfaceGeometrySnapshot(
             "free-surface snapshot interface/contact validation requires a represented scalar value and gradient evaluator");
     }
 
+    if (reuse) {
+        // Interface, contact and exterior-boundary records are always built.
+        reuse_statistics.other_records_built +=
+            records.size() - record_replay.size();
+        record_replay.resize(records.size());
+        record_reused.resize(records.size(), 0u);
+    }
     std::set<std::tuple<FreeSurfaceGeometryRuleRole,
                         int,
                         GlobalIndex,
                         GlobalIndex,
                         std::uint64_t>>
         unique_rules;
-    for (auto& record : records) {
+    std::vector<std::array<Real, 3>> reused_reference_points;
+    for (std::size_t record_index = 0; record_index < records.size();
+         ++record_index) {
+        auto& record = records[record_index];
         const auto identity = std::make_tuple(
             record.role,
             record.reference_rule.provenance.marker,
@@ -4854,19 +5928,68 @@ buildFreeSurfaceGeometrySnapshot(
                 "free-surface snapshot contains a duplicate retained rule identity");
         }
         if (!record.classification_only) {
-            validateRule(record,
-                         interface_domain,
-                         mesh,
-                         revision,
-                         policy,
-                         scalar,
-                         ledger);
+            if (reuse && record_reused[record_index] != 0u) {
+                // A copied record passed every content check when it was
+                // built; replay their ledger contribution and evaluate the
+                // level-set dependent checks.
+                replayFullCellValidationContribution(
+                    ledger, record_replay[record_index].contribution);
+                reused_reference_points.clear();
+                for (const auto& point : record.physical_rule.points) {
+                    reused_reference_points.push_back(point.reference_point);
+                }
+                validateVolumeRecordPhase(record,
+                                          reused_reference_points,
+                                          revision,
+                                          policy,
+                                          scalar,
+                                          ledger);
+            } else if (reuse && isFullCellVolumeRecord(record)) {
+                FreeSurfaceGeometryValidationLedger scratch{};
+                validateRule(record,
+                             interface_domain,
+                             mesh,
+                             revision,
+                             policy,
+                             scalar,
+                             scratch);
+                mergeRuleValidationLedger(ledger, scratch);
+                auto& replay = record_replay[record_index];
+                replay.reusable = onlyContentAndPhaseFieldsChanged(scratch);
+                replay.contribution = fullCellValidationContribution(scratch);
+                replay.identity_free_digest_state =
+                    ruleContentWithoutIdentitiesState(record);
+                replay.has_identity_free_digest_state = true;
+            } else {
+                validateRule(record,
+                             interface_domain,
+                             mesh,
+                             revision,
+                             policy,
+                             scalar,
+                             ledger);
+            }
         }
         accumulateLedger(record, ledger);
     }
     validateVolumePartition(records, mesh, policy, ledger);
+    std::vector<std::uint64_t> record_digests;
+    if (reuse) {
+        record_digests.reserve(records.size());
+        for (std::size_t record_index = 0; record_index < records.size();
+             ++record_index) {
+            const auto& record = records[record_index];
+            const auto& replay = record_replay[record_index];
+            record_digests.push_back(
+                !record.classification_only &&
+                        replay.has_identity_free_digest_state
+                    ? finishRuleContentDigest(
+                          replay.identity_free_digest_state, record)
+                    : ruleContentDigest(record));
+        }
+    }
     const auto globally_owned_rule_digests = validateUniqueRuleOwnership(
-        records, mesh, ownership_collective, ledger);
+        records, mesh, ownership_collective, ledger, record_digests);
     canonicalizeDistributedRevision(
         revision, policy, ownership_collective);
     revision.snapshot_revision_key =
@@ -4882,7 +6005,29 @@ buildFreeSurfaceGeometrySnapshot(
         record.physical_rule.free_surface_snapshot_revision_key =
             revision.snapshot_revision_key;
     }
-    return std::shared_ptr<const FreeSurfaceGeometrySnapshot>(
+    std::vector<std::uint32_t> first_volume_record_by_cell;
+    if (reuse) {
+        first_volume_record_by_cell.assign(
+            static_cast<std::size_t>(std::max<GlobalIndex>(mesh.numCells(), 0)),
+            0u);
+        for (std::size_t record_index = 0; record_index < records.size();
+             ++record_index) {
+            const auto& record = records[record_index];
+            const auto cell = record.reference_rule.provenance.parent_entity;
+            if (!volumeRole(record.role) || cell < 0 ||
+                static_cast<std::size_t>(cell) >=
+                    first_volume_record_by_cell.size() ||
+                record_index >= std::numeric_limits<std::uint32_t>::max()) {
+                continue;
+            }
+            auto& first =
+                first_volume_record_by_cell[static_cast<std::size_t>(cell)];
+            if (first == 0u) {
+                first = static_cast<std::uint32_t>(record_index + 1u);
+            }
+        }
+    }
+    auto snapshot = std::shared_ptr<const FreeSurfaceGeometrySnapshot>(
         new FreeSurfaceGeometrySnapshot(
             std::move(revision),
             local_mesh_revision,
@@ -4892,6 +6037,78 @@ buildFreeSurfaceGeometrySnapshot(
             std::move(active_boundary_domains),
             std::move(records),
             ledger));
+    if (reuse) {
+        auto& state = reuse_cache->state();
+        state.valid = true;
+        state.mesh = &mesh;
+        state.rank = mesh.parallelRank();
+        state.size = mesh.parallelSize();
+        state.dimension = mesh.dimension();
+        state.cell_count = mesh.numCells();
+        state.mesh_revision = local_mesh_revision;
+        state.policy = snapshot->policy();
+        state.snapshot = snapshot;
+        state.replay = std::move(record_replay);
+        state.first_volume_record_by_cell =
+            std::move(first_volume_record_by_cell);
+        reuse_cache->setLastBuild(reuse_statistics);
+    }
+    return snapshot;
+}
+
+std::string compareFreeSurfaceGeometrySnapshots(
+    const FreeSurfaceGeometrySnapshot& a,
+    const FreeSurfaceGeometrySnapshot& b)
+{
+    const auto& ar = a.revision();
+    const auto& br = b.revision();
+    if (ar.source_id != br.source_id || ar.domain_id != br.domain_id ||
+        ar.interface_marker != br.interface_marker ||
+        !sameRealBits(ar.isovalue, br.isovalue) ||
+        ar.source_layout_revision != br.source_layout_revision ||
+        ar.source_value_revision != br.source_value_revision ||
+        ar.mesh_geometry_revision != br.mesh_geometry_revision ||
+        ar.mesh_topology_revision != br.mesh_topology_revision ||
+        ar.ownership_revision != br.ownership_revision ||
+        ar.numbering_revision != br.numbering_revision ||
+        ar.quadrature_policy_key != br.quadrature_policy_key ||
+        ar.coefficient_classification_policy !=
+            br.coefficient_classification_policy ||
+        !sameRealBits(ar.coefficient_classification_band,
+                      br.coefficient_classification_band)) {
+        return "revision";
+    }
+    if (ar.snapshot_revision_key != br.snapshot_revision_key) {
+        return "snapshot revision key " +
+               std::to_string(ar.snapshot_revision_key) + " vs " +
+               std::to_string(br.snapshot_revision_key);
+    }
+    if (!(a.localMeshRevision() == b.localMeshRevision())) {
+        return "local mesh revision";
+    }
+    if (!samePolicyBits(a.policy(), b.policy())) {
+        return "policy";
+    }
+    if (const auto difference = firstLedgerDifference(a.ledger(), b.ledger());
+        !difference.empty()) {
+        return "ledger field " + difference;
+    }
+    if (a.rules().size() != b.rules().size()) {
+        return "rule count " + std::to_string(a.rules().size()) + " vs " +
+               std::to_string(b.rules().size());
+    }
+    for (std::size_t index = 0; index < a.rules().size(); ++index) {
+        if (const auto difference =
+                firstRecordDifference(a.rules()[index], b.rules()[index]);
+            !difference.empty()) {
+            return "rule " + std::to_string(index) + " (parent cell " +
+                   std::to_string(a.rules()[index]
+                                      .reference_rule.provenance
+                                      .parent_entity) +
+                   "): " + difference;
+        }
+    }
+    return {};
 }
 
 std::shared_ptr<const FreeSurfaceGeometrySnapshot>
@@ -4903,7 +6120,7 @@ FreeSurfaceGeometrySnapshotCache::find(std::uint64_t revision_key)
         ++statistics_.miss_count;
         return {};
     }
-    auto snapshot = found->second.lock();
+    auto snapshot = found->second.snapshot.lock();
     if (!snapshot) {
         snapshots_.erase(found);
         ++statistics_.expired_eviction_count;
@@ -4922,14 +6139,16 @@ void FreeSurfaceGeometrySnapshotCache::insert(
             "free-surface snapshot cache requires a complete immutable snapshot");
     }
     evictExpired();
-    snapshots_[snapshot->revision().snapshot_revision_key] = snapshot;
+    const auto resident_bytes = snapshot->residentBytes();
+    snapshots_[snapshot->revision().snapshot_revision_key] =
+        Entry{.snapshot = snapshot, .resident_bytes = resident_bytes};
     (void)statistics();
 }
 
 void FreeSurfaceGeometrySnapshotCache::evictExpired()
 {
     for (auto iterator = snapshots_.begin(); iterator != snapshots_.end();) {
-        if (iterator->second.expired()) {
+        if (iterator->second.snapshot.expired()) {
             iterator = snapshots_.erase(iterator);
             ++statistics_.expired_eviction_count;
         } else {
@@ -4944,11 +6163,11 @@ FreeSurfaceGeometrySnapshotCache::statistics()
     evictExpired();
     statistics_.live_snapshot_count = 0u;
     statistics_.live_resident_bytes = 0u;
-    for (const auto& [key, weak] : snapshots_) {
+    for (const auto& [key, entry] : snapshots_) {
         (void)key;
-        if (const auto snapshot = weak.lock()) {
+        if (!entry.snapshot.expired()) {
             ++statistics_.live_snapshot_count;
-            statistics_.live_resident_bytes += snapshot->residentBytes();
+            statistics_.live_resident_bytes += entry.resident_bytes;
         }
     }
     statistics_.peak_live_snapshot_count = std::max(

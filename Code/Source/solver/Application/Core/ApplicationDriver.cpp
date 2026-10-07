@@ -19956,6 +19956,26 @@ bool snapshotMayStoreFullCellsClassificationOnly(
          system.twoFluidAcceptedStageDiagnosticDeclarations().empty();
 }
 
+// Incremental cut-geometry rebuilds reuse, from one rebuild to the next,
+// the work for cells whose inputs did not change (bitwise identical results).
+// SVMP_DISABLE_INCREMENTAL_REBUILD=1 rebuilds everything;
+// SVMP_INCREMENTAL_REBUILD_SELF_CHECK=1 also rebuilds everything from scratch
+// and fails unless the incremental result is identical bit for bit.
+bool incrementalRebuildEnabled()
+{
+  static const bool enabled =
+      !parseBoolEnv("SVMP_DISABLE_INCREMENTAL_REBUILD", false);
+  return enabled;
+}
+
+bool incrementalRebuildSelfCheckEnabled()
+{
+  static const bool enabled =
+      incrementalRebuildEnabled() &&
+      parseBoolEnv("SVMP_INCREMENTAL_REBUILD_SELF_CHECK", false);
+  return enabled;
+}
+
 std::string cutGeometryContextMemoryDetails(
     const std::string& prefix,
     const svmp::FE::assembly::CutIntegrationContext* context)
@@ -20558,11 +20578,13 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
                 "Authoritative free-surface geometry rule has an unsupported represented implicit backend '" +
                 provenance.selected_implicit_quadrature_backend + "'.");
           }
-          const auto evaluation = linear_corner
-              ? snapshot_cell_evaluator->evaluateLinearCorner(
+          // evaluateLinearCornerValue() is evaluateLinearCorner().value
+          // bit for bit, without the gradient.
+          return linear_corner
+              ? snapshot_cell_evaluator->evaluateLinearCornerValue(
                     cell, parent_coordinate)
-              : snapshot_cell_evaluator->evaluate(cell, parent_coordinate);
-          return evaluation.value;
+              : snapshot_cell_evaluator->evaluate(cell, parent_coordinate)
+                    .value;
         };
     snapshot_scalar_evaluator.reference_gradient =
         [snapshot_cell_evaluator](
@@ -20601,6 +20623,34 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
       snapshot_policy.classification_only_full_cells_on_both_sides =
           mesh_access.dimension() == 3;
     }
+    svmp::FE::interfaces::FreeSurfaceGeometrySnapshotReuseCache*
+        snapshot_reuse_cache = nullptr;
+    if (incrementalRebuildEnabled()) {
+      auto& slot =
+          sim.free_surface_geometry_snapshot_reuse_caches[request.domain_id];
+      if (!slot) {
+        slot = std::make_unique<
+            svmp::FE::interfaces::FreeSurfaceGeometrySnapshotReuseCache>();
+      }
+      snapshot_reuse_cache = slot.get();
+    }
+    std::shared_ptr<const svmp::FE::interfaces::FreeSurfaceGeometrySnapshot>
+        reference_geometry_snapshot;
+    if (incrementalRebuildSelfCheckEnabled()) {
+      // Every rank takes this branch (the setting is read from the
+      // environment), so the reference build's collectives stay matched.
+      reference_geometry_snapshot =
+          svmp::FE::interfaces::buildFreeSurfaceGeometrySnapshot(
+              result.domain,
+              snapshot_contact_domains,
+              snapshot_active_boundary_domains,
+              mesh_access,
+              snapshot_policy,
+              snapshot_scalar_evaluator,
+              request.domain_id,
+              snapshotOwnershipCollective(comm),
+              nullptr);
+    }
     auto geometry_snapshot =
         svmp::FE::interfaces::buildFreeSurfaceGeometrySnapshot(
             result.domain,
@@ -20610,7 +20660,34 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
             snapshot_policy,
             std::move(snapshot_scalar_evaluator),
             request.domain_id,
-            snapshotOwnershipCollective(comm));
+            snapshotOwnershipCollective(comm),
+            snapshot_reuse_cache);
+    if (reference_geometry_snapshot) {
+      const auto difference =
+          svmp::FE::interfaces::compareFreeSurfaceGeometrySnapshots(
+              *geometry_snapshot, *reference_geometry_snapshot);
+      if (globalAnyBool(!difference.empty(), comm)) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Incremental rebuild self-check: "
+            "the reused free-surface geometry snapshot differs from a full "
+            "rebuild (domain_id='" +
+            request.domain_id + "' rank=" + std::to_string(comm.rank()) +
+            "): " + (difference.empty() ? "differs on another rank"
+                                        : difference));
+      }
+      application::core::oopCout()
+          << "[svMultiPhysics::Application] Incremental rebuild self-check"
+          << " diagnostic=incremental_rebuild_self_check stage=snapshot"
+          << " domain_id='" << request.domain_id << "'"
+          << " identical=1"
+          << " reused_full_cell_records="
+          << globalSumSize(snapshot_reuse_cache->lastBuild()
+                               .full_cell_records_reused,
+                           comm)
+          << " rules=" << globalSumSize(geometry_snapshot->rules().size(), comm)
+          << std::endl;
+      reference_geometry_snapshot.reset();
+    }
     if (!sim.free_surface_geometry_snapshot_cache) {
       sim.free_surface_geometry_snapshot_cache = std::make_unique<
           svmp::FE::interfaces::FreeSurfaceGeometrySnapshotCache>();
@@ -20713,6 +20790,19 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << " positive_physical_volume="
         << geometry_ledger.retained_positive_physical_volume
         << " resident_bytes=" << geometry_snapshot->residentBytes()
+        << " reuse_context_matched="
+        << (snapshot_reuse_cache != nullptr &&
+                    snapshot_reuse_cache->lastBuild().context_matched
+                ? 1
+                : 0)
+        << " reused_full_cell_records="
+        << (snapshot_reuse_cache != nullptr
+                ? snapshot_reuse_cache->lastBuild().full_cell_records_reused
+                : 0u)
+        << " built_full_cell_records="
+        << (snapshot_reuse_cache != nullptr
+                ? snapshot_reuse_cache->lastBuild().full_cell_records_built
+                : 0u)
         << std::endl;
     if (cutGeometryMemoryReportEnabled()) {
       logCutGeometryMemory(
