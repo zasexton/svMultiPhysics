@@ -29,6 +29,10 @@
 #include "Constraints/AffineConstraints.h"
 #include "Dofs/DofMap.h"
 #include "Elements/ReferenceElement.h"
+#include "Forms/FormCompiler.h"
+#include "Forms/FormExpr.h"
+#include "Forms/FormKernels.h"
+#include "Forms/JIT/JITKernelWrapper.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
 
@@ -334,8 +338,8 @@ CutIntegrationContext makeCutContext(const StructuredTetMesh& mesh, int marker)
 // runs on an assembly thread (as a JIT compile would).
 class ProbeKernel final : public AssemblyKernel {
 public:
-    explicit ProbeKernel(Real weight, GlobalIndex defer_cell = -1)
-        : weight_(weight), defer_cell_(defer_cell)
+    explicit ProbeKernel(Real weight, GlobalIndex defer_cell = -1, GlobalIndex throw_cell = -1)
+        : weight_(weight), defer_cell_(defer_cell), throw_cell_(throw_cell)
     {
     }
 
@@ -344,6 +348,9 @@ public:
         if (defer_cell_ >= 0 && ctx.cellId() == defer_cell_) {
             deferral_checks_.fetch_add(1, std::memory_order_relaxed);
             requireSerial("unit-test deferred cell");
+        }
+        if (throw_cell_ >= 0 && ctx.cellId() == throw_cell_) {
+            throw std::runtime_error("unit-test kernel error");
         }
         const auto n_test = ctx.numTestDofs();
         const auto n_trial = ctx.numTrialDofs();
@@ -390,6 +397,7 @@ public:
 private:
     Real weight_;
     GlobalIndex defer_cell_;
+    GlobalIndex throw_cell_;
     std::atomic<int> deferral_checks_{0};
 };
 
@@ -702,6 +710,49 @@ TEST(ThreadedAssembly, DeferredLazyWorkContinuesSeriallyWithSameBits)
     expectBitwiseEqual(second, ref_first, "deferred warm");
 }
 
+TEST(ThreadedAssembly, KernelErrorIsRaisedByTheSerialContinuation)
+{
+    // An error on a thread stops the threaded part; the serial loop then
+    // meets the same error at the same cell and raises it.
+    FusedSetup s;
+    ProbeKernel uu(Real{1.0}), up(Real{0.7}), pp(Real{1.3});
+    ProbeKernel pu_throwing(Real{-0.4}, /*defer_cell=*/-1, /*throw_cell=*/s.mesh.numCells() / 2);
+    for (int threads : {1, 4}) {
+        StandardAssembler assembler(threadOptions(threads));
+        assembler.setDofMap(s.u_map);
+        assembler.setCurrentSolution(s.solution);
+        DenseSystemView system(s.n_total);
+        auto terms = makeFusedTerms(s, {&uu, &up, &pu_throwing, &pp}, system);
+        EXPECT_THROW((void)assembler.assembleCutVolumesFused(
+                         s.mesh, s.cut_context, FusedSetup::marker,
+                         geometry::CutIntegrationSide::Negative, terms),
+                     std::runtime_error)
+            << "threads=" << threads;
+    }
+}
+
+TEST(ThreadedAssembly, RepeatedAssembliesStayBitwiseEqual)
+{
+    // Many calls on one assembler: worker caches warm up and the insertion
+    // ring wraps around many times.
+    FusedSetup s;
+    ProbeKernel uu(Real{1.0}), up(Real{0.7}), pu(Real{-0.4}), pp(Real{1.3});
+    const std::array<ProbeKernel*, 4> kernels{&uu, &up, &pu, &pp};
+    DenseSystemView reference(s.n_total), unused(s.n_total);
+    assembleFused(s, 1, kernels, reference, unused);
+    StandardAssembler assembler(threadOptions(3));
+    assembler.setDofMap(s.u_map);
+    assembler.setCurrentSolution(s.solution);
+    for (int repeat = 0; repeat < 6; ++repeat) {
+        DenseSystemView system(s.n_total);
+        auto terms = makeFusedTerms(s, kernels, system);
+        auto result = assembler.assembleCutVolumesFused(
+            s.mesh, s.cut_context, FusedSetup::marker, geometry::CutIntegrationSide::Negative, terms);
+        ASSERT_TRUE(result.success);
+        expectBitwiseEqual(system, reference, "repeat " + std::to_string(repeat));
+    }
+}
+
 TEST(ThreadedAssembly, ConstrainedInsertionBitwiseEqual)
 {
     FusedSetup s;
@@ -754,6 +805,56 @@ TEST(ThreadedAssembly, InteriorFacesBitwiseEqualForAnyThreadCount)
         expectBitwiseEqual(system, reference, "interior faces threads=" + std::to_string(threads));
     }
 }
+
+#if defined(SVMP_FE_ENABLE_LLVM_JIT) && SVMP_FE_ENABLE_LLVM_JIT
+TEST(ThreadedAssembly, JITKernelDefersCompilesAndMatchesSerialBitwise)
+{
+    // A JIT-compiled form kernel shared by the threads: the first threaded
+    // call meets the compile on a thread, defers it and continues serially
+    // (compiles happen in the serial order); later calls run threaded.
+    FusedSetup s;
+    const auto make_kernel = [&]() {
+        forms::SymbolicOptions sym_opts;
+        sym_opts.jit.enable = true;
+        forms::FormCompiler compiler(sym_opts);
+        const auto u = forms::FormExpr::trialFunction(s.pressure, "u");
+        const auto v = forms::FormExpr::testFunction(s.pressure, "v");
+        const auto form = (u * v + forms::inner(forms::grad(u), forms::grad(v))).dx();
+        auto fallback = std::make_shared<forms::FormKernel>(compiler.compileBilinear(form));
+        forms::JITOptions jit_opts;
+        jit_opts.enable = true;
+        return std::make_unique<forms::jit::JITKernelWrapper>(fallback, jit_opts);
+    };
+    const auto assemble = [&](int threads, forms::jit::JITKernelWrapper& kernel,
+                              DenseSystemView& system) {
+        StandardAssembler assembler(threadOptions(threads));
+        assembler.setDofMap(s.p_map);
+        auto result = assembler.assembleCutVolumes(
+            s.mesh, s.cut_context, FusedSetup::marker, geometry::CutIntegrationSide::Negative,
+            s.pressure, s.pressure, kernel, &system, nullptr, true, false);
+        ASSERT_TRUE(result.success);
+    };
+    const auto n = s.p_map.getNumDofs();
+    auto serial_kernel = make_kernel();
+    DenseSystemView reference(n);
+    assemble(1, *serial_kernel, reference);
+
+    auto threaded_kernel = make_kernel();
+    DenseSystemView first(n), second(n);
+    assemble(4, *threaded_kernel, first);
+    assemble(4, *threaded_kernel, second);
+    const auto rm = reference.matrixData();
+    for (auto* system : {&first, &second}) {
+        const auto m = system->matrixData();
+        ASSERT_EQ(m.size(), rm.size());
+        std::size_t differences = 0;
+        for (std::size_t i = 0; i < m.size(); ++i) {
+            differences += std::memcmp(&m[i], &rm[i], sizeof(Real)) != 0 ? 1u : 0u;
+        }
+        EXPECT_EQ(differences, 0u);
+    }
+}
+#endif
 
 } // namespace test
 } // namespace assembly
