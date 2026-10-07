@@ -19,6 +19,7 @@
 #include "Forms/FormExpr.h"
 #include "Forms/JIT/JITSpecialization.h"
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -273,12 +274,27 @@ private:
 	    [[nodiscard]] bool canUseJIT() const noexcept;
 	    void markRuntimeFailureOnce(std::string_view where, std::string_view msg) noexcept;
         void traceMarkedInteriorFaceFallbackOnce(int marker) noexcept;
-	    [[nodiscard]] std::shared_ptr<const CompiledDispatch> getSpecializedDispatch(
+	    // Specialized dispatch for the context's shape, or nullptr for the
+	    // generic one.  The returned dispatch is owned by specialized_dispatch_
+	    // and stays valid until markDirty().  Repeated lookups of a shape are
+	    // answered from a thread-local memo without locking (see
+	    // dispatch_epoch_).
+	    [[nodiscard]] const CompiledDispatch* getSpecializedDispatch(
 	        KernelRole role,
 	        const FormIR& ir,
 	        IntegralDomain domain,
 	        const assembly::AssemblyContext& ctx_minus,
 	        const assembly::AssemblyContext* ctx_plus);
+	    [[nodiscard]] std::shared_ptr<const CompiledDispatch> lookupSpecializedDispatch(
+	        KernelRole role,
+	        const FormIR& ir,
+	        IntegralDomain domain,
+	        const assembly::AssemblyContext& ctx_minus,
+	        const assembly::AssemblyContext* ctx_plus);
+	    void bumpDispatchEpoch() noexcept
+	    {
+	        dispatch_epoch_.fetch_add(1u, std::memory_order_acq_rel);
+	    }
     [[nodiscard]] SpecializationKey makeSpecializationKey(
         KernelRole role,
         const JITCompileSpecialization& specialization,
@@ -300,6 +316,17 @@ private:
     JITOptions options_{};
 
     mutable std::mutex jit_mutex_{};
+    // Lock-free fast paths for kernel calls from several assembly threads.
+    // compile_settled_: maybeCompile() has nothing to do for the current
+    // revision (set under jit_mutex_, cleared by markDirty()).
+    // dispatch_epoch_: incremented, under jit_mutex_, by every change of the
+    // state getSpecializedDispatch() depends on (revisions, compiler,
+    // specialized and attempted variants, primed shapes); a memo entry is
+    // used only while the epoch it was recorded with is current.
+    // instance_id_: process-unique key of this wrapper in the memo.
+    std::atomic<bool> compile_settled_{false};
+    std::atomic<std::uint64_t> dispatch_epoch_{0};
+    std::uint64_t instance_id_{0};
     std::uint64_t revision_{0};
     std::uint64_t compiled_revision_{static_cast<std::uint64_t>(-1)};
     std::uint64_t attempted_revision_{static_cast<std::uint64_t>(-1)};

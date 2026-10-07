@@ -20,6 +20,8 @@
 #include "Forms/JIT/JITCompiler.h"
 #include "Forms/JIT/JITValidation.h"
 
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdlib>
 #include <cctype>
@@ -65,6 +67,45 @@ struct RequestedKernelOutputs {
     requested.matrix = can_matrix && want_matrix;
     requested.vector = can_vector && want_vector;
     return requested;
+}
+
+[[nodiscard]] std::uint64_t nextWrapperInstanceId() noexcept
+{
+    static std::atomic<std::uint64_t> counter{0};
+    return counter.fetch_add(1u, std::memory_order_relaxed) + 1u;
+}
+
+// Increments a wrapper's dispatch epoch when leaving a scope that changed
+// state read by getSpecializedDispatch(); declared after the lock guard, so
+// the increment happens while jit_mutex_ is still held.
+struct DispatchEpochBump {
+    std::atomic<std::uint64_t>& epoch;
+    ~DispatchEpochBump() { epoch.fetch_add(1u, std::memory_order_acq_rel); }
+};
+
+// Thread-local memo of getSpecializedDispatch() results: (wrapper instance,
+// dispatch epoch, role/domain and context sizes) -> dispatch (or nullptr).
+// Direct mapped; a collision only costs a locked lookup.
+using DispatchMemoShape = std::array<std::uint32_t, 7>;
+
+struct DispatchMemoEntry {
+    std::uint64_t instance{0};
+    std::uint64_t epoch{0};
+    DispatchMemoShape shape{};
+    const void* dispatch{nullptr};
+};
+
+[[nodiscard]] DispatchMemoEntry& dispatchMemoSlot(std::uint64_t instance,
+                                                  const DispatchMemoShape& shape) noexcept
+{
+    constexpr std::size_t kSlots = 512;
+    thread_local std::array<DispatchMemoEntry, kSlots> memo{};
+    std::uint64_t h = instance * 0x9E3779B97F4A7C15ull;
+    for (const auto v : shape) {
+        h ^= static_cast<std::uint64_t>(v) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+    }
+    h ^= h >> 29;
+    return memo[static_cast<std::size_t>(h % kSlots)];
 }
 
 [[nodiscard]] bool traceSpecializationEnabled() noexcept
@@ -500,6 +541,7 @@ JITKernelWrapper::JITKernelWrapper(std::shared_ptr<assembly::AssemblyKernel> fal
     if (const auto env_enable = parseOptionalBoolEnv("SVMP_JIT_BASIS_BAKING")) {
         options_.basis_baking.enable = *env_enable;
     }
+    instance_id_ = nextWrapperInstanceId();
 }
 
 assembly::RequiredData JITKernelWrapper::getRequiredData() const
@@ -1036,12 +1078,12 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                     KernelRole::Bilinear, k->bilinearIR(), IntegralDomain::Cell, *first_ctx, nullptr);
                 const auto& compiled_bi = disp_bi ? *disp_bi : compiled_bilinear_;
 
-                std::shared_ptr<const CompiledDispatch> disp_lin;
+                const CompiledDispatch* disp_lin = nullptr;
                 const CompiledDispatch* compiled_lin_ptr = nullptr;
                 if (has_compiled_linear_ && k->linearIR().has_value()) {
                     disp_lin = getSpecializedDispatch(
                         KernelRole::Linear, *k->linearIR(), IntegralDomain::Cell, *first_ctx, nullptr);
-                    compiled_lin_ptr = disp_lin ? disp_lin.get() : &compiled_linear_;
+                    compiled_lin_ptr = disp_lin ? disp_lin : &compiled_linear_;
                 }
 
                 // Pre-reserve all outputs.
@@ -1267,7 +1309,7 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                     const bool has_updates = !updates.empty();
 
                     // Resolve specializations once for the whole batch.
-                    std::shared_ptr<const CompiledDispatch> disp_tan;
+                    const CompiledDispatch* disp_tan = nullptr;
                     const CompiledDispatch* compiled_tan_ptr = &compiled_tangent_;
                     if (want_matrix) {
                         // Note: for NonlinearFormKernel, we don't have the tangent IR for specialization
@@ -1276,16 +1318,16 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                         if (k_sym) {
                             disp_tan = getSpecializedDispatch(
                                 KernelRole::Tangent, k_sym->tangentIR(), IntegralDomain::Cell, *first_ctx, nullptr);
-                            if (disp_tan) compiled_tan_ptr = disp_tan.get();
+                            if (disp_tan) compiled_tan_ptr = disp_tan;
                         }
                     }
 
-                    std::shared_ptr<const CompiledDispatch> disp_res;
+                    const CompiledDispatch* disp_res = nullptr;
                     const CompiledDispatch* compiled_res_ptr = &compiled_residual_;
                     if (want_vector) {
                         disp_res = getSpecializedDispatch(
                             KernelRole::Residual, residual_ir, IntegralDomain::Cell, *first_ctx, nullptr);
-                        if (disp_res) compiled_res_ptr = disp_res.get();
+                        if (disp_res) compiled_res_ptr = disp_res;
                     }
 
                     // Pre-reserve all outputs.
@@ -2719,6 +2761,8 @@ void JITKernelWrapper::markDirty(std::string_view reason) noexcept
 {
     std::uint64_t revision = 0;
     std::lock_guard<std::mutex> lock(jit_mutex_);
+    const DispatchEpochBump bump_epoch{dispatch_epoch_};
+    compile_settled_.store(false, std::memory_order_release);
     ++revision_;
     revision = revision_;
     compiled_revision_ = static_cast<std::uint64_t>(-1);
@@ -2877,6 +2921,7 @@ void JITKernelWrapper::setExternalCellAddress(std::uintptr_t addr)
     }
 
     std::lock_guard<std::mutex> lock(jit_mutex_);
+    const DispatchEpochBump bump_epoch{dispatch_epoch_};
 
     // Replace an existing dispatch when one was already compiled, otherwise
     // publish a minimal role-appropriate dispatch. This path must not call
@@ -2996,6 +3041,7 @@ void JITKernelWrapper::rememberPrimedAffine(KernelRole role,
 {
     const auto shape_key = makeSpecializationShapeKey(role, specialization);
     std::lock_guard<std::mutex> lock(jit_mutex_);
+    const DispatchEpochBump bump_epoch{dispatch_epoch_};
     if (ambiguous_affine_shapes_.find(shape_key) != ambiguous_affine_shapes_.end()) {
         return;
     }
@@ -3034,6 +3080,7 @@ void JITKernelWrapper::rememberPrimedBasisBake(KernelRole role,
 
     const auto shape_key = makeSpecializationShapeKey(role, specialization);
     std::lock_guard<std::mutex> lock(jit_mutex_);
+    const DispatchEpochBump bump_epoch{dispatch_epoch_};
     if (ambiguous_basis_bake_shapes_.find(shape_key) != ambiguous_basis_bake_shapes_.end()) {
         return;
     }
@@ -3196,6 +3243,7 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::comp
         // compiles it). See Assembly/ConcurrentCompute.h.
         assembly::requireSerial("JIT specialization compile");
         attempted_specializations_.insert(key);
+        bumpDispatchEpoch();
     }
 
     ValidationOptions vopt;
@@ -3293,6 +3341,7 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::comp
             return nullptr;
         }
         specialized_dispatch_[key] = disp;
+        bumpDispatchEpoch();
         if (traceSpecializationEnabled() && traced_specialization_compiles_.insert(key).second) {
             std::ostringstream oss;
             oss << "event=compile trigger=" << trigger
@@ -3310,7 +3359,53 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::comp
     return disp;
 }
 
-std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::getSpecializedDispatch(
+const JITKernelWrapper::CompiledDispatch* JITKernelWrapper::getSpecializedDispatch(
+    KernelRole role,
+    const FormIR& ir,
+    IntegralDomain domain,
+    const assembly::AssemblyContext& ctx_minus,
+    const assembly::AssemblyContext* ctx_plus)
+{
+    if (!options_.enable || !options_.specialization.enable || !compiler_) {
+        return nullptr;
+    }
+    const bool face_domain = (domain == IntegralDomain::InteriorFace || domain == IntegralDomain::InterfaceFace);
+    if (traceSpecializationEnabled() || (face_domain && ctx_plus == nullptr)) {
+        // Traced lookups log per call; keep them on the locked path.
+        return lookupSpecializedDispatch(role, ir, domain, ctx_minus, ctx_plus).get();
+    }
+
+    // The lookup result depends only on the role, the domain, the context
+    // sizes and the wrapper state covered by dispatch_epoch_ (the IR is fixed
+    // per role, as in the specialization key).  The memo returns the same
+    // dispatch object the locked lookup would return.
+    const DispatchMemoShape shape{
+        (static_cast<std::uint32_t>(role) << 8u) | static_cast<std::uint32_t>(domain),
+        static_cast<std::uint32_t>(ctx_minus.numQuadraturePoints()),
+        static_cast<std::uint32_t>(ctx_minus.numTestDofs()),
+        static_cast<std::uint32_t>(ctx_minus.numTrialDofs()),
+        face_domain ? static_cast<std::uint32_t>(ctx_plus->numQuadraturePoints()) : 0u,
+        face_domain ? static_cast<std::uint32_t>(ctx_plus->numTestDofs()) : 0u,
+        face_domain ? static_cast<std::uint32_t>(ctx_plus->numTrialDofs()) : 0u};
+    auto& entry = dispatchMemoSlot(instance_id_, shape);
+    const auto epoch = dispatch_epoch_.load(std::memory_order_acquire);
+    if (entry.instance == instance_id_ && entry.epoch == epoch && entry.shape == shape) {
+        return static_cast<const CompiledDispatch*>(entry.dispatch);
+    }
+
+    const auto dispatch = lookupSpecializedDispatch(role, ir, domain, ctx_minus, ctx_plus);
+    // Record only if no state changed during the lookup (a compile, for
+    // example); the dispatch stays owned by specialized_dispatch_.
+    if (dispatch_epoch_.load(std::memory_order_acquire) == epoch) {
+        entry.instance = instance_id_;
+        entry.epoch = epoch;
+        entry.shape = shape;
+        entry.dispatch = dispatch.get();
+    }
+    return dispatch.get();
+}
+
+std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::lookupSpecializedDispatch(
     KernelRole role,
     const FormIR& ir,
     IntegralDomain domain,
@@ -3458,17 +3553,25 @@ void JITKernelWrapper::maybeCompile()
     if (!options_.enable) {
         return;
     }
+    // Nothing to do for the current revision: return without locking, so
+    // that kernel calls from several assembly threads do not serialize here.
+    if (compile_settled_.load(std::memory_order_acquire)) {
+        return;
+    }
 
     std::lock_guard<std::mutex> lock(jit_mutex_);
 
     if (compiled_revision_ == revision_) {
+        compile_settled_.store(true, std::memory_order_release);
         return;
     }
     if (attempted_revision_ == revision_) {
+        compile_settled_.store(true, std::memory_order_release);
         return;
     }
     // Compiles run in the serial order only (see Assembly/ConcurrentCompute.h).
     assembly::requireSerial("JIT kernel compile");
+    const DispatchEpochBump bump_epoch{dispatch_epoch_};
     attempted_revision_ = revision_;
 
     // We currently only JIT-accelerate kernels that are backed by FE/Forms IR.
