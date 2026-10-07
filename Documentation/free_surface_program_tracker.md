@@ -401,6 +401,14 @@ These are proposals. Each lists a recommended option and an alternative. Record 
       - the Δt criterion passes at λ/h = 64: frequency changes 9.8e-4 and damping 2.7e-3 when the step is halved;
       - **damping fails only at λ/h = 32** (7.1% > 5%). It converges at order 2.9 to 0.39% at λ/h = 64, so it is a spatial error at λ/h = 32.
     - **M2 rerun:** the first M2 jobs (`46704017`, `46704018`) failed at step 1 with the 4-rank maintenance consensus bug, because the binary `aa811c43` predates the MPI follow-up. They were resubmitted on `3bc60e4e` as jobs `46787442` (La = 12) and `46787451` (La = 120).
+    - **M2 result under D19 (2026-10-06, binary `3bc60e4e`, 4 ranks per run, verified with `verify.py`): both Laplace numbers PASS every gate at Δt and Δt/2.**
+
+      | La | Δt | pressure-jump error at R/h = 32 (order) | max volume drift | Δt criterion (pressure-jump change) |
+      |---:|---:|---:|---:|---:|
+      | 12 | 0.02 / 0.01 | 3.29e-5 (2.18) / 3.29e-5 (2.19) | 2.1e-9 | 1.2e-10 ≤ 1e-3 |
+      | 120 | 0.01 / 0.005 | 3.00e-5 (2.08) / 3.01e-5 (2.10) | 8.1e-10 | 5.4e-8 ≤ 1e-3 |
+
+      Velocity-growth ratios stay ≤ 0.99 and the parasitic capillary number decreases with R/h at both La. Wall time on 4 ranks: R/h = 32 took 2.7 h (La = 120, Δt) and 5.0 h (Δt/2). The 2D part of M2 is complete; the 3D static drop remains.
 - **D20, 2026-10-06: the M3 damping gate applies at the finest level, λ/h = 64** (≤ 5%; it also applied at λ/h = 32 until now). This matches M2, which gates at its finest level, and the sloshing damping criterion (D12). The observed-order requirement over 16/32/64 stays.
   - The change was made after the first D19 protocol run (job `46704019`) had been seen. The damping error converges at observed order 2.9, from 7.1% at λ/h = 32 to 0.39% at 64, so the λ/h = 32 excess is a resolution error, not a method error. This is the one adjustment allowed for this tolerance (§5).
   - `capillary_wave_2d/tolerances.json` (`at_level` 64, the earlier value kept as `at_level_before_D20`), README table and two new synthetic tests.
@@ -418,6 +426,11 @@ These are proposals. Each lists a recommended option and an alternative. Record 
     2. Fewer and cheaper outer geometry passes per step: bitwise identical where possible, otherwise opt-in and rank-independent.
     3. A rank-independent sparse direct solve option, then inexact Newton forcing terms, both opt-in.
   - Already queued: constraint build, post-merge hot spots, dry-cell records, LTO + PGO (D16), multithreaded assembly. Development checks use R/h = 16 runs and restarts from saved states; R/h = 64 is reserved for acceptance.
+- **D23, 2026-10-06 (taken under the user's auto-approval window, 17:34–21:34): linear-solver and predictor options stay opt-in; the benchmark protocols are unchanged.**
+  - The gathered sparse direct solve (`<LS type="Direct">` with FSILS) is opt-in. It is recommended for 2D development runs on 1–4 ranks when GMRES needs hundreds of iterations per Newton iteration (capillary wave λ/h = 64: −27% serial, −17% on 4 ranks; static drop R/h = 32 early transient: −40%). It is neutral for full M2 runs on 4 ranks and at 8 ranks, and not viable in 3D (sphere L8: 11× slower per solve, 7.2 GB on rank 0). Across rank counts it agrees to 1e-12, the same size as GMRES's own spread (7e-13). M2 La = 12 and M3 pass with it. The protocols keep GMRES so that gated results stay comparable with earlier runs.
+  - Eisenstat–Walker forcing (`<Inexact_Newton_forcing>`) stays off. It raised Newton iterations by 70–90% and slowed every case, because most passes need only one Newton iteration.
+  - The generalized-α rate-extrapolation predictor (`Generalized_alpha_predictor=RateExtrapolation`, fields `phi`) stays opt-in. It is 20–24% faster per step and gives the same results on 1, 2 and 4 ranks to 1e-14. It is as far from a 100× tighter-gate reference as the default is, and it moves the M2/M3/M4 gate metrics by at most 1.5e-6 relative. Making it the default would change every result within the nonlinear tolerance, so that waits for an explicit user decision.
+  - Measured before the merge: commits that are bitwise identical on the default path cut a further 10–14% per step on top of 119818c3 (check-only passes assemble only the residual, redundant cut-context rebuilds removed).
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
