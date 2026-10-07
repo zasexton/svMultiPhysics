@@ -8,10 +8,14 @@ Each RUN_DIR is a case written by generate_case.py (it holds case.json and
 mesh/mesh-complete.mesh.vtu) in which the solver has run, leaving
 result.pvd and result_NNN.vtu (serial) or result_NNN.pvtu (MPI), and
 optionally the solver log (solver_run.log or solver_run.log.gz).  Runs are
-grouped by (capillary form, transport, Laplace number); the criteria are
-applied to each group across its resolution levels.  Runs made with a
-non-protocol time step (generate_case.py --dt-multiple) are reported but not
-gated.  Metric definitions are in README.md.
+grouped by (capillary form, transport, Laplace number, dt divisor); the
+criteria are applied to each group across its resolution levels.  The
+time-step criterion (decisions D19 and D25) compares the divisor-1 and
+divisor-2 groups of each (capillary form, transport, Laplace number) at their
+finest common level; with only one divisor it is reported as not evaluated.
+Runs made with a non-protocol time step (generate_case.py --dt-multiple or
+--dt, and cases written before D25) are reported but not gated.  Metric
+definitions are in README.md.
 
 Exit status: 0 if every criterion passes, 1 if any criterion fails, 2 if
 input data are missing or invalid.
@@ -39,6 +43,9 @@ LOG_NAMES = ("solver_run.log", "solver_run.log.gz")
 LOG_VOLUME_AGREEMENT = 1.0e-8
 WET_VOLUME_LINE = re.compile(r"Wet volume diagnostic step=(\d+) time=(\S+) .*? wet_volume=(\S+)")
 LOCAL_EDGES = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
+# dt_rule values of generate_case.py that are protocol time steps (D25); a case
+# without dt_rule was written before D25 and is reported as diagnostic.
+PROTOCOL_DT_RULES = ("protocol_fixed", "protocol_capillary_limit")
 
 
 class DataError(RuntimeError):
@@ -312,8 +319,13 @@ def analyse_run(run: Path) -> dict:
         "capillary_form": case["capillary_form"],
         "transport": case.get("transport", "unknown"),
         "laplace_number": case["laplace_number"],
+        "dt": case["dt"],
+        "dt_divisor": case.get("dt_divisor", 1),
+        "dt_rule": case.get("dt_rule", "before_D25"),
         "dt_multiple_of_dt_B": case.get("dt_multiple_of_dt_B"),
-        "protocol_time_step": bool(case.get("dt_multiple_is_protocol", True)),
+        "protocol_time_step": case.get("dt_rule") in PROTOCOL_DT_RULES,
+        "surface_tension_semi_implicit": case.get("surface_tension_semi_implicit", "None"),
+        "kinematic_reconciliation": bool(case.get("kinematic_reconciliation", False)),
         "truncated": bool(case.get("truncated", False)),
         "end_time": float(t_end),
         "viscous_times_simulated": float(t_end / case["viscous_time"]),
@@ -351,8 +363,17 @@ def analyse_run(run: Path) -> dict:
 # ---------------------------------------------------------------------------
 # Criteria
 # ---------------------------------------------------------------------------
-def evaluate_group(runs: list[dict], tolerances: dict) -> list[dict]:
+def evaluate_group(runs: list[dict], tolerances: dict,
+                   required_levels: set | None = None) -> list[dict]:
+    """Apply the criteria to one refinement study.
+
+    required_levels (default: every protocol level) are the levels this study
+    must contain; a criterion at a level outside it that has no run is
+    reported as not run, without failing.
+    """
     by_level = {r["level"]: r for r in runs}
+    if required_levels is None:
+        required_levels = set(tolerances["levels"]["R_over_h"])
     results = []
     for crit in tolerances["criteria"]:
         q, limit = crit["quantity"], crit.get("limit")
@@ -361,8 +382,11 @@ def evaluate_group(runs: list[dict], tolerances: dict) -> list[dict]:
         levels = sorted(by_level) if at == "each" else [at]
         for level in levels:
             if level not in by_level:
-                ok = False
-                messages.append(f"missing run at R/h={level}")
+                if level in required_levels:
+                    ok = False
+                    messages.append(f"missing run at R/h={level}")
+                else:
+                    messages.append(f"R/h={level}: not run at this step (not required)")
                 continue
             value = by_level[level][q]
             if limit is None:
@@ -374,7 +398,9 @@ def evaluate_group(runs: list[dict], tolerances: dict) -> list[dict]:
         if "minimum_observed_order" in crit:
             need = crit["order_levels"]
             missing = [lv for lv in need if lv not in by_level]
-            if missing:
+            if missing and not set(missing) <= required_levels:
+                messages.append(f"order not evaluated at this step (needs R/h={need})")
+            elif missing:
                 ok = False
                 messages.append(f"order needs R/h={missing}")
             else:
@@ -393,7 +419,9 @@ def evaluate_group(runs: list[dict], tolerances: dict) -> list[dict]:
         if crit.get("monotone") == "strictly_decreasing":
             need = crit["monotone_levels"]
             missing = [lv for lv in need if lv not in by_level]
-            if missing:
+            if missing and not set(missing) <= required_levels:
+                messages.append(f"monotonicity not evaluated at this step (needs R/h={need})")
+            elif missing:
                 ok = False
                 messages.append(f"monotonicity needs R/h={missing}")
             else:
@@ -407,6 +435,68 @@ def evaluate_group(runs: list[dict], tolerances: dict) -> list[dict]:
         results.append({"id": crit["id"], "quantity": q, "passed": bool(ok),
                         "details": messages})
     return results
+
+
+def required_levels_at(divisor: int, tolerances: dict) -> set:
+    """Levels a study at this dt divisor must contain (all of them at divisor 1)."""
+    levels = set(tolerances["levels"]["R_over_h"])
+    if divisor == 1:
+        return levels
+    rule = tolerances.get("time_step_criterion", {}).get("refined_step_levels", "all")
+    return levels if rule == "all" else set(rule)
+
+
+def evaluate_time_step(groups: dict, tolerances: dict) -> list[dict]:
+    """Time-step criterion (D19/D25) for every (capillary form, transport, Laplace number).
+
+    Compares the divisor-1 and divisor-2 studies at their finest common level:
+    |Q(dt) - Q(dt/2)| / |Q(dt/2)| <= limit for the quantity in tolerances.json.
+    With only one divisor, or no common level, the criterion is not evaluated
+    and does not fail.  The parasitic capillary number of each step is reported.
+    """
+    crit = tolerances.get("time_step_criterion")
+    if crit is None:
+        return []
+    out = []
+    for form, transport, laplace in sorted({(f, t, la) for f, t, la, _ in groups}):
+        coarse = groups.get((form, transport, laplace, 1))
+        fine = groups.get((form, transport, laplace, 2))
+        entry = {"id": crit["id"], "capillary_form": form, "transport": transport,
+                 "laplace_number": laplace, "quantity": crit["quantity"], "limit": crit["limit"],
+                 "evaluated": False, "passed": True, "level": None, "details": []}
+        common = (sorted({r["level"] for r in coarse} & {r["level"] for r in fine})
+                  if coarse and fine else [])
+        if not common:
+            present = sorted({d for f, t, la, d in groups if (f, t, la) == (form, transport, laplace)})
+            entry["details"].append("not evaluated: needs runs at dt divisors 1 and 2 at a "
+                                    f"common level (divisors present: {present})")
+            out.append(entry)
+            continue
+        level = common[-1]
+        a = next(r for r in coarse if r["level"] == level)
+        b = next(r for r in fine if r["level"] == level)
+        q = crit["quantity"]
+        change = abs(a[q] - b[q]) / abs(b[q])
+        passed = change <= crit["limit"]
+        entry.update(evaluated=True, passed=bool(passed), level=level, change=change,
+                     values={"dt": a[q], "dt/2": b[q]}, dt=[a["dt"], b["dt"]])
+        entry["details"].append(
+            f"R/h={level} (finest common level): {q} {a[q]:.6g} at dt={a['dt']:.4g}, "
+            f"{b[q]:.6g} at dt={b['dt']:.4g}; change {change:.3e} "
+            f"{'<=' if passed else '>'} {crit['limit']:g}")
+        reported = {}
+        for name in crit.get("reported", []):
+            rows = []
+            for lv in common:
+                ra = next(r for r in coarse if r["level"] == lv)
+                rb = next(r for r in fine if r["level"] == lv)
+                rows.append(f"R/h={lv}: {ra[name]:.3e} / {rb[name]:.3e}")
+                reported.setdefault(name, []).append({"level": lv, "dt": ra[name],
+                                                      "dt/2": rb[name]})
+            entry["details"].append(f"{name} (dt / dt/2, reported): " + ", ".join(rows))
+        entry["reported"] = reported
+        out.append(entry)
+    return out
 
 
 def print_table(runs: list[dict]) -> None:
@@ -448,43 +538,58 @@ def main(argv=None) -> int:
     protocol = [a for a in analysed if a["protocol_time_step"]]
     groups: dict[tuple, list] = {}
     for a in protocol:
-        groups.setdefault((a["capillary_form"], a["transport"], a["laplace_number"]), []).append(a)
+        groups.setdefault((a["capillary_form"], a["transport"], a["laplace_number"],
+                           a["dt_divisor"]), []).append(a)
     levels = set(tolerances["levels"]["R_over_h"])
     report, all_pass = [], True
-    for (form, transport, laplace), runs in sorted(groups.items()):
+    for (form, transport, laplace, divisor), runs in sorted(groups.items()):
         seen = [r["level"] for r in runs]
         if len(seen) != len(set(seen)) or not set(seen) <= levels:
-            print(f"ERROR: group {form}, {transport}, La={laplace:g}: duplicate or unknown "
-                  f"levels {seen}", file=sys.stderr)
+            print(f"ERROR: group {form}, {transport}, La={laplace:g}, dt divisor {divisor}: "
+                  f"duplicate or unknown levels {seen}", file=sys.stderr)
             return 2
         runs.sort(key=lambda r: r["level"])
-        verdicts = evaluate_group(runs, tolerances)
+        verdicts = evaluate_group(runs, tolerances, required_levels_at(divisor, tolerances))
         all_pass &= all(v["passed"] for v in verdicts)
-        print(f"\n== {form}, transport {transport}, La = {laplace:g}" +
+        steps = sorted({r["dt"] for r in runs})
+        dt_text = (f"dt = {steps[0]:.6g}" if steps[-1] <= steps[0] * (1.0 + 1e-12)
+                   else "dt per level " + "/".join(f"{r['dt']:.4g}" for r in runs))
+        semi = "/".join(sorted({r["surface_tension_semi_implicit"] for r in runs}))
+        print(f"\n== {form}, transport {transport}, La = {laplace:g}, dt divisor {divisor}, "
+              f"{dt_text}, semi-implicit {semi}" +
               ("  [TRUNCATED SMOKE RUNS]" if any(r["truncated"] for r in runs) else ""))
         print_table(runs)
         for v in verdicts:
             print(f"  [{'PASS' if v['passed'] else 'FAIL'}] {v['id']}: " + "; ".join(v["details"]))
         report.append({"capillary_form": form, "transport": transport, "laplace_number": laplace,
-                       "runs": runs, "criteria": verdicts,
+                       "dt_divisor": divisor, "runs": runs, "criteria": verdicts,
                        "passed": all(v["passed"] for v in verdicts)})
+    time_step = evaluate_time_step(groups, tolerances)
+    for t in time_step:
+        all_pass &= t["passed"]
+        tag = ("PASS" if t["passed"] else "FAIL") if t["evaluated"] else "NOT EVALUATED"
+        print(f"\n-- time-step criterion {t['capillary_form']}, transport {t['transport']}, "
+              f"La = {t['laplace_number']:g} (D25)")
+        print(f"  [{tag}] {t['id']}: " + "; ".join(t["details"]))
     if diagnostic:
         print("\n== diagnostic runs (non-protocol time step; reported, not gated)")
         for r in sorted(diagnostic, key=lambda r: (r["capillary_form"], r["transport"],
-                                                   r["laplace_number"], r["level"])):
+                                                   r["laplace_number"], r["level"], r["dt"])):
             print(f"  {r['capillary_form']}, {r['transport']}, La = {r['laplace_number']:g}, "
-                  f"dt = {r['dt_multiple_of_dt_B']:g} dt_B")
+                  f"dt = {r['dt']:.4g} = {r['dt_multiple_of_dt_B']:.3g} dt_B ({r['dt_rule']})")
             print_table([r])
     if not protocol:
         print("\nOVERALL: no protocol runs, nothing gated", file=sys.stderr)
         if args.json:
             args.json.write_text(json.dumps({"benchmark": tolerances["benchmark"], "groups": [],
+                                             "time_step_criterion": [],
                                              "diagnostic_runs": diagnostic, "passed": False},
                                             indent=2) + "\n")
         return 2
     if args.json:
         args.json.write_text(json.dumps({"benchmark": tolerances["benchmark"],
-                                         "groups": report, "diagnostic_runs": diagnostic,
+                                         "groups": report, "time_step_criterion": time_step,
+                                         "diagnostic_runs": diagnostic,
                                          "passed": bool(all_pass)}, indent=2) + "\n")
     print("\nOVERALL:", "PASS" if all_pass else "FAIL")
     return 0 if all_pass else 1

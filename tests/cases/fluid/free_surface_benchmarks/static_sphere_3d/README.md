@@ -6,8 +6,9 @@ parasitic currents of the unfitted level-set free surface on the physically
 relaxed state (decisions D1 and D3 in
 `Documentation/free_surface_program_tracker.md`), for the capillary routes
 compared in decision D2 (milestone M2): `SurfaceStress`, KAG with a lumped
-trace mass, and KAG with the consistent trace mass. The tracker schedules the
-3D sphere at R/h = 8, 16, 32 after the 2D selection (M2, "Selection").
+trace mass, and KAG with the consistent trace mass. The protocol is decision
+D25 (2026-10-07): `SurfaceStress` at R/h = 8 and 16, gated at R/h = 16, with
+the D19 time step of `static_drop_2d`.
 
 Files:
 
@@ -15,7 +16,7 @@ Files:
 |---|---|
 | `generate_case.py` | writes `solver.xml`, the Tetra4 mesh with the initial fields, the six wall faces and `case.json` for one level |
 | `verify.py` | reads the solver output of one or more levels, computes the metrics, applies `tolerances.json` |
-| `tolerances.json` | acceptance criteria and their sources, fixed on 2026-09-30 before the first run; they mirror `static_drop_2d` |
+| `tolerances.json` | acceptance criteria and their sources, fixed on 2026-09-30 before the first run; they mirror `static_drop_2d`. Revised on 2026-10-07 by D25 (gating level, time step, time-step criterion), before any D25 run |
 | `tests/test_free_surface_benchmark_static_sphere_3d.py` | checks of the two scripts on synthetic data |
 
 **Status (2026-10-05): runs.** The two step-0 blockers recorded under "Smoke
@@ -26,9 +27,21 @@ differ by 1.89e-12, 4x the old bound and 0.5% of the derived one. Vertex
 crossings are accepted within a step. A `surface_stress` run at R/h = 8
 (`--max-steps 2`, PDE transport) accepted both steps with 5 outer passes and
 6-7 Newton iterations each, at about 21-23 min per step serial; the volume
-drift was -3.0e-6 after step 2. A full refinement study is not yet scheduled
-(about 500 steps at R/h = 8, plus the 3D gating and memory decisions for
-R/h = 16).
+drift was -3.0e-6 after step 2.
+
+**Protocol (decision D25, 2026-10-07).** The tracker's open 3D questions were
+settled before the first refinement study:
+
+- levels R/h = 8 and 16, gated at R/h = 16 with the observed order over 8/16
+  (R/h = 32 is not run);
+- the existing 3R cube and its Kuhn mesh;
+- the D19 static-drop time step: the lagged normal-increment term on and
+  `dt = 0.02` at `La = 12` for both levels, with a `dt/2` check at R/h = 8;
+- `SurfaceStress` only, PDE-extension transport, kinematic reconciliation on
+  (D14), sign-definite patch bounds off;
+- multi-rank runs with FSILS, up to a full node per run.
+
+`generate_case.py` writes this protocol by default.
 
 ## Physical setup
 
@@ -79,7 +92,9 @@ README for the sources); none was chosen for this case.
 | Free surface | `UnfittedLevelSet`, `Active_domain=LevelSetNegative`, `CutVolume`, `LinearCorner`, `Geometry_tangent_policy=RefreshedFrozenQuadrature`, `Interface_quadrature_order=2`, `Use_level_set_curvature=false` | as `static_drop_2d`; order 2 is required by KAG and used for all forms |
 | Cut stabilization | pressure-gradient facet penalty 1.0, `Use_cut_metadata_scale=false`, `Small_cut_aggregation=true`, no velocity extension | production defaults (tracker section 6.1) |
 | Capillary forms | `surface_stress`, `kag_lumped`, `kag_consistent`: same keys as `static_drop_2d` | D2 candidates (a), (b), (c) |
-| Level-set transport | `--transport`, see below; P1 SUPG (tau scale 0.5, transient scale 2.0), no reinitialization, no volume correction | D9; the volume drift is a measured quantity, so it is not corrected |
+| Level-set transport | `--transport`, see below; P1 SUPG (tau scale 0.5, transient scale 2.0), no reinitialization, no volume correction, no sign-definite patch bounds | D9; the volume drift is a measured quantity, so it is not corrected |
+| Level-set kinematic reconciliation | on (`Enable_kinematic_reconciliation=true`; `--kinematic-reconciliation off` reproduces the earlier decks): after every accepted step the transported `phi` is corrected locally so that the step's change of the sharp P1 volume equals the interface flux of the transport velocity (`FE/LevelSet/LevelSetKinematicReconciliation.h`) | D14, as `static_drop_2d`; parameter-free and local, not a volume target or global shift |
+| Semi-implicit capillary term | `Surface_tension_semi_implicit=NormalIncrement` in the free-surface block (`--surface-tension-semi-implicit None` removes it) | D13; protocol value since D25, as in `static_drop_2d` under D19 |
 | Time integration | generalized-alpha, `rho_inf = 0.5` | all free-surface decks |
 | Nonlinear solve | relative tolerance 1e-4 per equation, at most 8 Newton iterations; level-set absolute gate 1e-10 | production decks |
 | Linear solve | FSILS GMRES with the RCS preconditioner, 100 iterations, Krylov dimension 50, tolerances 1e-8 / 1e-10 | as `static_drop_2d` |
@@ -102,28 +117,54 @@ the map output must become opt-in before any 3D run with that transport. Its
 compute cost is small (2.4% of a tank step). Criteria apply
 separately to each (capillary form, transport, `La`) study.
 
-**Time step.** As in 2D, the capillary limit of Brackbill, Kothe and Zemach
-with the one-sided density sum of a free surface is
+**Time step (decision D25, 2026-10-07).** The protocol is the D19 step of
+`static_drop_2d`: the lagged normal-increment capillary term
+(`Surface_tension_semi_implicit = NormalIncrement`,
+`Physics/Docs/NavierStokesFreeSurface.md`) removes the capillary limit, so
+every level uses one fixed physical step, `dt = 0.02` at `La = 12` (618 steps
+at any `R/h`). The output cadence is the nearest whole number of steps per
+1/100 of the run (6 steps), which ends at the first output at or after 5
+viscous times (`t = 12.36`, the same end time as `static_drop_2d`). For
+`La = 120` the generator writes the 2D step `dt = 0.01`; that study is not
+part of D25. Other Laplace numbers keep the earlier rule below
+(`dt_rule = protocol_capillary_limit` in `case.json`). Validation of the
+term and of the 2D step: `Documentation/free_surface_semi_implicit_surface_tension_design.md`,
+section 9, and tracker D19.
+
+**Half-step check.** The R/h = 8 study is also run at `dt/2`
+(`--dt-divisor 2`: 1,236 steps, cadence 12, the same output times). Every
+gate that the `dt/2` study can evaluate (velocity growth and volume drift at
+R/h = 8) must pass, and the pressure jump at R/h = 8 may change by at most
+0.1% (`time_step_criterion` in `tolerances.json`). In 2D halving the step
+changed the pressure jump by 1.2e-10 at `La = 12`, and a `dt/2` run at
+R/h = 16 would cost days, so it is not made.
+
+**Earlier rule (until D25).** The capillary limit of Brackbill, Kothe and
+Zemach with the one-sided density sum of a free surface is
 
 ```text
 dt_B = sqrt(rho h^3 / (4 pi gamma)) = (1/sqrt(2)) * sqrt(rho h^3 / (2 pi gamma)).
 ```
 
-The time step is `m dt_B` with `m = 2` at `La = 12` and `m = 1` at
-`La = 120` (and any other `La`), rounded down so that the run is exactly 100
-equal output intervals. The values of `m` come from the 2D step-0
-measurement (tracker M2, jobs 46075447 and 46076505): with the default
-12-pass cap, the outer geometry loop accepted steps up to `2 dt_B` at
-`La = 12` and up to `dt_B` at `La = 120`. **In 3D they are assumed, not
-measured.** Check them once, as in 2D, by running the first steps at
-`--dt-multiple 1, 2, 4` and comparing the outer passes per step;
-`verify.py` reports such runs but does not gate them. The gated metrics are
-relaxed steady-state values, so the time step does not enter them (decision
-D10); no separate time-step study is needed for the acceptance criteria.
+The step was `m dt_B` with `m = 2` at `La = 12` and `m = 1` at `La = 120`
+(and any other `La`), rounded down so that the run is exactly 100 equal output
+intervals, with the term and the reconciliation off. The values of `m` came
+from the 2D step-0 measurement (tracker M2, jobs 46075447 and 46076505) and
+were assumed, not measured, in 3D. This gave 500, 1,400 and 4,000 steps at
+`La = 12` for `R/h` = 8, 16, 32. Reproduce those decks (bitwise) with
+`--dt-multiple <m> --surface-tension-semi-implicit None --kinematic-reconciliation off`.
+
+**Time-step options.** `--dt-divisor 2` halves the protocol step with
+unchanged output times. `--dt-multiple m` (a multiple of `dt_B`) and `--dt
+<step>` (an exact step; nested steps share their output times) are diagnostic:
+`verify.py` reports such runs but does not gate them, and the same holds for
+cases written before D25 (no `dt_rule` in `case.json`). `case.json` records
+`dt_rule`, `dt_base`, `dt_divisor`, `surface_tension_semi_implicit` and
+`kinematic_reconciliation`.
 
 **Run length.** `T = 5 t_mu`, the lower end of the 5 to 10 viscous times of
-D3, with 100 VTU snapshots. At `La = 12` this is 500, 1,400 and 4,000 steps
-at `R/h` = 8, 16, 32.
+D3, with 100 VTU snapshots (103 under the fixed step, as in 2D). At `La = 12`
+this is 618 steps at every `R/h` (1,236 at `dt/2`).
 
 ## Metrics (`verify.py`)
 
@@ -151,50 +192,55 @@ of `log(error)` against `log(R/h)`; pairwise orders are printed as well.
 `case.json`, no output, missing arrays, non-tetrahedral cells, non-finite
 values, or a run that stopped before `T`. It also exits with status 2 on a
 `--max-steps` smoke run unless `--allow-truncated` is given, and when only
-diagnostic (`--dt-multiple`) runs are supplied.
+diagnostic (`--dt-multiple`, `--dt` or pre-D25) runs are supplied.
 
 ## Tolerances and their sources
 
-The criteria are those of `static_drop_2d`, applied to each (capillary form,
-transport, La) refinement study:
+The criteria are those of `static_drop_2d`, with the gating level and the
+order levels set by D25 (2026-10-07, before any D25 run). They apply to each
+(capillary form, transport, La, dt divisor) refinement study:
 
 | Criterion | Limit | Where | Source |
 |---|---|---|---|
-| `pressure_jump` | at most 0.01, observed order at least 1 | 0.01 at `R/h = 32`; order over 8/16/32 | D1 working criterion, tracker M2 |
-| `parasitic_capillary_number` | strictly decreasing with refinement; absolute values reported, no absolute limit | all levels present (at least 8/16/32) | decision of 2026-09-29, tracker M2 |
+| `pressure_jump` | at most 0.01, observed order at least 1 | 0.01 at `R/h = 16`; order over 8/16 | D25 (before: 0.01 at `R/h = 32`, order over 8/16/32; D1 working criterion, tracker M2) |
+| `parasitic_capillary_number` | decreasing from `R/h = 8` to 16; absolute values reported, no absolute limit | all levels present (at least 8/16) | D25; decision of 2026-09-29, tracker M2 |
 | `no_velocity_growth` | growth ratio at most 1 | every level | D1 working criterion, tracker M2 |
 | `volume_drift` | at most 1e-4 as the maximum deviation over the run | every level | D1 working criterion, tracker M2; D11 |
+| `time_step` | pressure jump changes by at most 0.001 between `dt` and `dt/2`; `Ca_sp` reported at each step | finest common level of the two studies; the `dt/2` study is run at `R/h = 8` only | D25, the D19 criterion of `static_drop_2d` |
 
-The pressure-jump and parasitic-current criteria need the `R/h = 32` run. If
-that level stays unaffordable (next section), they cannot be evaluated as
-written; a 3D-specific criterion (for example the error at `R/h = 16` and the
-order over 8/16) would need a decision recorded in the tracker.
+The `dt/2` study contains only `R/h = 8`, so the criteria that need
+`R/h = 16` (the pressure-jump limit, the order and the `Ca_sp` decrease) are
+printed as not evaluated for it, and the growth and volume criteria are gated
+at `R/h = 8`. The time-step criterion is printed as a separate gated line, or
+as not evaluated when only one divisor is given.
 
 ## How to run the refinement study
 
 Use the Python stack from the benchmark README (numpy; pyvista for
 `verify.py`), put cases and output under `$SCRATCH`, launch the solver
 through `mpiexec` and submit with `--export=NONE` (benchmark README,
-"Launching the solver"):
+"Launching the solver"). The D25 study is three runs:
 
 ```bash
 B=tests/cases/fluid/free_surface_benchmarks/static_sphere_3d
-OUT=$SCRATCH/free-surface-benchmarks/static_sphere_3d/$(git rev-parse --short HEAD)
-TRANSPORT=pde_extension        # protocol transport (D9)
-for form in surface_stress kag_lumped kag_consistent; do for L in 8 16 32; do
-  d=$OUT/La12/$TRANSPORT/$form/L$L
-  python3 $B/generate_case.py --level $L --capillary-form $form --laplace-number 12 \
-      --transport $TRANSPORT --output-dir $d
-  sbatch --export=NONE --time=<see below> --mem=<see below> --job-name=sphere_${form}_L$L \
-         --output=$d/slurm-%j.out run_case.sbatch $d $SVMP <timeout_s>
-done; done
-python3 $B/verify.py $OUT/La12/$TRANSPORT/surface_stress/L{8,16,32} --json $OUT/surface_stress.json
+OUT=$SCRATCH/free-surface-benchmarks/static_sphere_3d/d25
+for L in 8 16; do
+  python3 $B/generate_case.py --level $L --capillary-form surface_stress --laplace-number 12 \
+      --output-dir $OUT/L$L
+done
+python3 $B/generate_case.py --level 8 --capillary-form surface_stress --laplace-number 12 \
+    --dt-divisor 2 --output-dir $OUT/L8_dt2
+# one job per case on one node (ranks, memory and time: "Expected cost per level")
+sbatch --export=NONE --ntasks=<ranks> --mem=<at most 8000 MB per rank> --time=<limit> \
+       --job-name=sphere_L16 --output=$OUT/L16/slurm-%j.out run_case_mpi.sbatch $OUT/L16 $SVMP <timeout_s>
+# after the jobs end (both steps in one call; verify.py groups by dt divisor):
+python3 $B/verify.py $OUT/L8 $OUT/L16 $OUT/L8_dt2 --json $OUT/verify.json
 ```
 
-`run_case.sbatch` is the static-drop job script (it runs
-`timeout -k 30 <s> mpiexec -n 1 --bind-to none $SVMP solver.xml` and
-compresses the log). For a schema check use `--max-steps 4`; `verify.py`
-refuses such runs unless `--allow-truncated` is given.
+`run_case_mpi.sbatch` is the static-drop MPI job script (it runs
+`timeout -k 30 <s> mpiexec -n <ranks> --bind-to core $SVMP solver.xml` with
+FSILS and compresses the log). For a schema check use `--max-steps 4`;
+`verify.py` refuses such runs unless `--allow-truncated` is given.
 
 ## Smoke run (2026-09-30)
 
@@ -238,7 +284,16 @@ a second run used `--transport coupled`.
 
 ## Expected cost per level
 
-Measured on 2026-09-30 with the same binary (SKX nodes, serial; profiling
+**Before the D25 runs (2026-10-07).** After the merged speed-ups and the
+dry-cell compaction, a `SurfaceStress` step of the sphere proxy at R/h = 8
+takes about 90 to 120 s serially (about 9% less with the LTO + PGO build),
+with a peak RSS of about 2.9 GB. R/h = 16 peaks at about 19 GB serially; with
+an older binary its setup took about 22 min and step 0 about 108 min
+serially. With 618 steps per run, R/h = 8 is about 15 to 20 h serially, so
+R/h = 16 runs on many ranks of one node. The D25 scaling probe and the
+measured run costs are recorded below once made.
+
+**Earlier measurement**, 2026-09-30, with the same binary (SKX nodes, serial; profiling
 data under `$SCRATCH/free-surface-benchmarks/profiling-3d/`). Because of the
 check above, the sphere's time steps were measured with a profiling proxy
 (`GeneratedCurvatureTraction` fed with the lumped KAG curvature), which runs
