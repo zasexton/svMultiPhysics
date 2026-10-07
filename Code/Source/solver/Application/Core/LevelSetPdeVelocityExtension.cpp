@@ -21,15 +21,20 @@
 #include "FE/Backends/Eigen/EigenMatrix.h"
 #include "FE/Backends/Eigen/EigenVector.h"
 
+#include <Eigen/OrderingMethods>
+#include <Eigen/SparseCholesky>
 #include <Eigen/SparseLU>
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -311,6 +316,55 @@ template <typename T>
          sameBytes(a.cells, b.cells);
 }
 
+[[nodiscard]] bool sameDoubleBits(double a, double b) noexcept
+{
+  return std::memcmp(&a, &b, sizeof(double)) == 0;
+}
+
+// Rows compared field by field, coefficients bit for bit.
+[[nodiscard]] bool sameVelocityExtensionRows(
+    const std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>& a,
+    const std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>& b)
+{
+  if (a.size() != b.size()) {
+    return false;
+  }
+  for (std::size_t r = 0; r < a.size(); ++r) {
+    const auto& ra = a[r];
+    const auto& rb = b[r];
+    if (ra.vertex != rb.vertex || ra.component != rb.component ||
+        ra.dependencies.size() != rb.dependencies.size()) {
+      return false;
+    }
+    for (std::size_t d = 0; d < ra.dependencies.size(); ++d) {
+      const auto& da = ra.dependencies[d];
+      const auto& db = rb.dependencies[d];
+      if (da.field != db.field || da.vertex != db.vertex ||
+          da.component != db.component ||
+          !sameDoubleBits(da.coefficient, db.coefficient)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+// Every computed report field (not the cache and self-check bookkeeping).
+[[nodiscard]] bool sameReportContent(const PdeVelocityExtensionReport& a,
+                                     const PdeVelocityExtensionReport& b)
+{
+  return a.known_vertices == b.known_vertices &&
+         a.extension_vertices == b.extension_vertices &&
+         a.outside_vertices == b.outside_vertices &&
+         a.extension_cells == b.extension_cells && a.unknowns == b.unknowns &&
+         a.wall_fixed == b.wall_fixed &&
+         sameDoubleBits(a.max_known_speed, b.max_known_speed) &&
+         sameDoubleBits(a.max_extended_speed, b.max_extended_speed) &&
+         sameDoubleBits(a.max_relative_residual, b.max_relative_residual) &&
+         sameDoubleBits(a.max_wall_normal_velocity,
+                        b.max_wall_normal_velocity);
+}
+
 // 64-bit content hash, word at a time.
 class ContentHasher {
 public:
@@ -368,12 +422,96 @@ private:
   return hasher.value();
 }
 
-// One rank's reuse vote; every field enters the collective decision.
+// One rank's reuse vote; every field enters the collective decision.  Slot i
+// describes the rank's i-th most recently used cache entry.
 struct ReuseVote {
+  static constexpr std::size_t kSlots = 8u;
   std::uint64_t local_hash{0u};
-  std::uint64_t cached_key{0u};
-  std::uint64_t epoch{0u};
-  std::uint64_t match{0u};
+  std::uint64_t entry_count{0u};
+  std::array<std::uint64_t, kSlots> keys{};
+  std::array<std::uint64_t, kSlots> epochs{};
+  std::array<std::uint64_t, kSlots> match{};
+};
+
+[[nodiscard]] bool environmentFlag(const char* name) noexcept
+{
+  const char* text = std::getenv(name);
+  return text != nullptr && text[0] != '\0' && std::string(text) != "0";
+}
+
+// Components are solved on one rank each when a factorization cache is used
+// on at least as many ranks as there are components (3 components: rank c
+// solves component c).  SVMP_PDE_EXTENSION_REPLICATED_SOLVES=1 keeps the
+// solve of every component on every rank.
+[[nodiscard]] bool distributedComponentSolves(bool store_factorization,
+                                              const svmp::MeshComm& comm)
+{
+  return store_factorization && comm.is_parallel() && comm.size() >= 3 &&
+         !environmentFlag("SVMP_PDE_EXTENSION_REPLICATED_SOLVES");
+}
+
+[[nodiscard]] int componentSolveRank(std::size_t component) noexcept
+{
+  return static_cast<int>(component);
+}
+
+[[nodiscard]] double secondsSince(
+    std::chrono::steady_clock::time_point start) noexcept
+{
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+      .count();
+}
+
+// Test hook: SVMP_PDE_EXTENSION_FAIL_COMPONENT=c makes the solve of
+// component c throw (exercises the failure reporting of distributed solves).
+[[nodiscard]] bool injectedComponentFailure(std::size_t component)
+{
+  const char* text = std::getenv("SVMP_PDE_EXTENSION_FAIL_COMPONENT");
+  return text != nullptr && text[0] != '\0' &&
+         std::string(text) == std::to_string(component);
+}
+
+// SVMP_PDE_EXTENSION_DUMP: rank 0 writes the canonical solution of the first
+// calls of the process (see the header).
+void dumpCanonicalSolution(const std::vector<VertexRecord>& vertices,
+                           const std::vector<double>& solution,
+                           const svmp::MeshComm& comm)
+{
+  const char* prefix = std::getenv("SVMP_PDE_EXTENSION_DUMP");
+  if (prefix == nullptr || prefix[0] == '\0') {
+    return;
+  }
+  static std::atomic<std::uint64_t> calls{0u};
+  const auto call = calls.fetch_add(1u);
+  std::uint64_t limit = 2u;
+  if (const char* text = std::getenv("SVMP_PDE_EXTENSION_DUMP_CALLS");
+      text != nullptr && text[0] != '\0') {
+    limit = std::strtoull(text, nullptr, 10);
+  }
+  if (call >= limit || comm.rank() != 0) {
+    return;
+  }
+  std::ofstream out(std::string(prefix) + "." + std::to_string(call) + ".bin",
+                    std::ios::binary);
+  const std::uint64_t n = vertices.size();
+  out.write(reinterpret_cast<const char*>(&n), sizeof(n));
+  for (std::size_t i = 0; i < vertices.size(); ++i) {
+    const std::int64_t gid = vertices[i].gid;
+    out.write(reinterpret_cast<const char*>(&gid), sizeof(gid));
+    out.write(reinterpret_cast<const char*>(&solution[i * 3u]),
+              3u * sizeof(double));
+  }
+}
+
+// The outcome of one component solve, as broadcast by its rank.
+struct ComponentSolveHeader {
+  std::int32_t failed{0};
+  std::int32_t converged{0};
+  std::int32_t has_factorization{0};
+  std::int32_t reserved{0};
+  double relative_residual{0.0};
+  std::uint64_t message_bytes{0u};
+  std::uint64_t solution_size{0u};
 };
 
 // Mirrors SVMP_FE_EIGEN_FACTOR_DIAGNOSTICS of the FE Eigen backend: while
@@ -391,12 +529,30 @@ using ColumnMajorMatrix =
     Eigen::SparseMatrix<svmp::FE::Real, Eigen::ColMajor,
                         svmp::FE::backends::EigenMatrix::StorageIndex>;
 
-// The Eigen::SparseLU instantiation of the FE Eigen backend's direct solve
-// (solve_direct in EigenLinearSolver.cpp), kept between calls.  The derived
-// class only reports the footprint of the stored factors.
-class DryRegionFactorization final : public Eigen::SparseLU<ColumnMajorMatrix> {
+// A dry-region factorization kept between calls.
+class DryRegionFactorization {
 public:
-  [[nodiscard]] std::size_t bytes() const noexcept
+  virtual ~DryRegionFactorization() = default;
+  // x = A^{-1} b with the stored factors; false if Eigen reports a failure.
+  [[nodiscard]] virtual bool solveInto(const Eigen::VectorXd& b,
+                                       Eigen::VectorXd& x) const = 0;
+  // Footprint of the stored factors.
+  [[nodiscard]] virtual std::size_t bytes() const noexcept = 0;
+};
+
+// The Eigen::SparseLU instantiation of the FE Eigen backend's direct solve
+// (solve_direct in EigenLinearSolver.cpp).
+class DryRegionLu final : public DryRegionFactorization,
+                          public Eigen::SparseLU<ColumnMajorMatrix> {
+public:
+  [[nodiscard]] bool solveInto(const Eigen::VectorXd& b,
+                               Eigen::VectorXd& x) const override
+  {
+    x = this->solve(b);
+    return this->info() == Eigen::Success;
+  }
+
+  [[nodiscard]] std::size_t bytes() const noexcept override
   {
     const auto vector_bytes = [](const auto& vector) {
       using Element = typename std::decay_t<decltype(vector)>::Scalar;
@@ -422,10 +578,44 @@ public:
   }
 };
 
-// The factorization step of solve_direct.  Returns null if Eigen reports a
-// failure.
+// Opt-in LDLT^T factorization with AMD ordering of the symmetric operator
+// (lower triangle).
+class DryRegionLdlt final
+    : public DryRegionFactorization,
+      public Eigen::SimplicialLDLT<
+          ColumnMajorMatrix, Eigen::Lower,
+          Eigen::AMDOrdering<
+              svmp::FE::backends::EigenMatrix::StorageIndex>> {
+public:
+  [[nodiscard]] bool solveInto(const Eigen::VectorXd& b,
+                               Eigen::VectorXd& x) const override
+  {
+    x = this->solve(b);
+    return this->info() == Eigen::Success;
+  }
+
+  [[nodiscard]] std::size_t bytes() const noexcept override
+  {
+    std::size_t total = sizeof(*this);
+    total += static_cast<std::size_t>(m_matrix.data().allocatedSize()) *
+                 (sizeof(svmp::FE::Real) + sizeof(StorageIndex)) +
+             static_cast<std::size_t>(m_matrix.outerSize() + 1) *
+                 sizeof(StorageIndex);
+    total += static_cast<std::size_t>(m_diag.size()) * sizeof(svmp::FE::Real);
+    total += static_cast<std::size_t>(m_P.indices().size() +
+                                      m_Pinv.indices().size()) *
+             sizeof(StorageIndex);
+    total += static_cast<std::size_t>(m_parent.size() + m_nonZerosPerCol.size()) *
+             sizeof(StorageIndex);
+    return total;
+  }
+};
+
+// The factorization step of solve_direct (or the opt-in LDLT).  Returns null
+// if Eigen reports a failure.
 [[nodiscard]] std::unique_ptr<DryRegionFactorization> factorizeDryRegion(
-    const svmp::FE::backends::GenericMatrix& matrix)
+    const svmp::FE::backends::GenericMatrix& matrix,
+    PdeVelocityExtensionFactorization kind)
 {
   const auto* A =
       dynamic_cast<const svmp::FE::backends::EigenMatrix*>(&matrix);
@@ -433,8 +623,17 @@ public:
     throw std::runtime_error(
         "PDE velocity extension factorization requires an Eigen matrix");
   }
-  auto factorization = std::make_unique<DryRegionFactorization>();
   const ColumnMajorMatrix Acol = A->eigen();
+  if (kind == PdeVelocityExtensionFactorization::LdltAmd) {
+    auto factorization = std::make_unique<DryRegionLdlt>();
+    factorization->analyzePattern(Acol);
+    factorization->factorize(Acol);
+    if (factorization->info() != Eigen::Success) {
+      return nullptr;
+    }
+    return factorization;
+  }
+  auto factorization = std::make_unique<DryRegionLu>();
   factorization->analyzePattern(Acol);
   factorization->factorize(Acol);
   if (factorization->info() != Eigen::Success) {
@@ -465,8 +664,7 @@ public:
   report = svmp::FE::backends::SolverReport{};
   report.initial_residual_norm =
       (b->eigen() - A->eigen() * x->eigen()).norm();
-  x->eigen() = factorization.solve(b->eigen());
-  if (factorization.info() != Eigen::Success) {
+  if (!factorization.solveInto(b->eigen(), x->eigen())) {
     return false;
   }
   report.final_residual_norm = (b->eigen() - A->eigen() * x->eigen()).norm();
@@ -492,7 +690,8 @@ public:
 };
 
 [[nodiscard]] std::unique_ptr<DryRegionFactorization> factorizeDryRegion(
-    const svmp::FE::backends::GenericMatrix&)
+    const svmp::FE::backends::GenericMatrix&,
+    PdeVelocityExtensionFactorization)
 {
   return nullptr;
 }
@@ -526,12 +725,16 @@ public:
 struct PdeVelocityExtensionCache::Entry {
   struct Component {
     svmp::FE::GlobalIndex unknowns{0};
+    // Rank that holds the matrix and factorization and solves the component;
+    // -1: every rank does.
+    int owner{-1};
     std::unique_ptr<svmp::FE::backends::GenericMatrix> matrix;
     std::unique_ptr<DryRegionFactorization> factorization;
   };
 
   std::uint64_t key{0u};
   std::uint64_t epoch{0u};
+  bool distributed_solves{false};
   LocalSignature signature;
   // Gathered system in canonical order (sorted cell and vertex IDs).  The
   // vertex values are replaced on every reuse.
@@ -583,10 +786,11 @@ struct PdeVelocityExtensionCache::Entry {
 };
 
 struct PdeVelocityExtensionCacheAccess {
-  [[nodiscard]] static std::unique_ptr<PdeVelocityExtensionCache::Entry>&
-  entry(PdeVelocityExtensionCache& cache) noexcept
+  [[nodiscard]] static std::vector<
+      std::unique_ptr<PdeVelocityExtensionCache::Entry>>&
+  entries(PdeVelocityExtensionCache& cache) noexcept
   {
-    return cache.entry_;
+    return cache.entries_;
   }
   [[nodiscard]] static PdeVelocityExtensionCache::Statistics& statistics(
       PdeVelocityExtensionCache& cache) noexcept
@@ -601,7 +805,35 @@ struct PdeVelocityExtensionCacheAccess {
   }
 };
 
-PdeVelocityExtensionCache::PdeVelocityExtensionCache() = default;
+namespace {
+
+[[nodiscard]] std::size_t cacheCapacityFromEnvironment() noexcept
+{
+  const char* text = std::getenv("SVMP_PDE_EXTENSION_CACHE_ENTRIES");
+  if (text == nullptr || text[0] == '\0') {
+    return 0u;
+  }
+  char* end = nullptr;
+  const long value = std::strtol(text, &end, 10);
+  if (end == text || *end != '\0' || value < 1) {
+    return 0u;
+  }
+  return std::min<std::size_t>(static_cast<std::size_t>(value),
+                               PdeVelocityExtensionCache::kMaxEntries);
+}
+
+} // namespace
+
+PdeVelocityExtensionCache::PdeVelocityExtensionCache()
+    : capacity_(cacheCapacityFromEnvironment())
+{
+}
+
+PdeVelocityExtensionCache::PdeVelocityExtensionCache(std::size_t capacity)
+    : capacity_(std::clamp<std::size_t>(capacity, 1u, kMaxEntries))
+{
+}
+
 PdeVelocityExtensionCache::~PdeVelocityExtensionCache() = default;
 PdeVelocityExtensionCache::PdeVelocityExtensionCache(
     PdeVelocityExtensionCache&&) noexcept = default;
@@ -610,13 +842,27 @@ PdeVelocityExtensionCache& PdeVelocityExtensionCache::operator=(
 
 void PdeVelocityExtensionCache::clear() noexcept
 {
-  entry_.reset();
+  entries_.clear();
   statistics_.bytes = 0u;
 }
 
 bool PdeVelocityExtensionCache::empty() const noexcept
 {
-  return entry_ == nullptr;
+  return entries_.empty();
+}
+
+std::size_t PdeVelocityExtensionCache::size() const noexcept
+{
+  return entries_.size();
+}
+
+std::size_t PdeVelocityExtensionCache::capacity(
+    bool distributed_solves) const noexcept
+{
+  if (capacity_ != 0u) {
+    return capacity_;
+  }
+  return distributed_solves ? kDefaultDistributedEntries : kDefaultEntries;
 }
 
 const PdeVelocityExtensionCache::Statistics&
@@ -675,6 +921,32 @@ pdeVelocityExtensionOperatorFromToken(std::string_view token)
   return std::nullopt;
 }
 
+std::string_view pdeVelocityExtensionFactorizationName(
+    PdeVelocityExtensionFactorization factorization) noexcept
+{
+  switch (factorization) {
+  case PdeVelocityExtensionFactorization::LuColamd:
+    return "lu_colamd";
+  case PdeVelocityExtensionFactorization::LdltAmd:
+    return "ldlt_amd";
+  }
+  return "unknown";
+}
+
+std::optional<PdeVelocityExtensionFactorization>
+pdeVelocityExtensionFactorizationFromToken(std::string_view token)
+{
+  const auto normalized = normalizedMethodToken(token);
+  if (normalized == "lu" || normalized == "lucolamd" ||
+      normalized == "default") {
+    return PdeVelocityExtensionFactorization::LuColamd;
+  }
+  if (normalized == "ldlt" || normalized == "ldltamd") {
+    return PdeVelocityExtensionFactorization::LdltAmd;
+  }
+  return std::nullopt;
+}
+
 std::uint64_t communicatorCombinedRevision(std::uint64_t local_key,
                                           const svmp::MeshComm& comm)
 {
@@ -705,6 +977,7 @@ PdeVelocityExtensionReport extendVelocityByPde(
     const PdeVelocityExtensionMeshRevisions& revisions)
 {
   CacheFailureGuard cache_guard(cache);
+  const auto call_start = std::chrono::steady_clock::now();
   const auto n_vertices = mesh.n_vertices();
   const int dim = mesh.dim();
   if (dim != 2 && dim != 3) {
@@ -990,10 +1263,11 @@ PdeVelocityExtensionReport extendVelocityByPde(
   std::uint64_t cache_key = 0u;
   std::uint64_t cache_epoch = 0u;
   if (cache != nullptr) {
-    auto& entry = PdeVelocityExtensionCacheAccess::entry(*cache);
+    auto& entries = PdeVelocityExtensionCacheAccess::entries(*cache);
     signature.scalars = {
         kCacheSignatureVersion,
         static_cast<std::uint64_t>(options.op),
+        static_cast<std::uint64_t>(options.factorization),
         static_cast<std::uint64_t>(static_cast<std::int64_t>(
             options.band_layers)),
         options.enforce_wall_impermeability ? 1u : 0u,
@@ -1024,14 +1298,18 @@ PdeVelocityExtensionReport extendVelocityByPde(
     }
     signature.cells = local_cells;
 
+    static_assert(ReuseVote::kSlots >= PdeVelocityExtensionCache::kMaxEntries);
     ReuseVote vote;
     vote.local_hash = signatureHash(signature);
-    if (entry) {
-      vote.cached_key = entry->key;
-      vote.epoch = entry->epoch;
-      vote.match =
-          store_factorization && sameContent(entry->signature, signature) ? 1u
-                                                                          : 0u;
+    vote.entry_count = std::min<std::size_t>(entries.size(), ReuseVote::kSlots);
+    for (std::size_t slot = 0; slot < vote.entry_count; ++slot) {
+      const auto& candidate = *entries[slot];
+      vote.keys[slot] = candidate.key;
+      vote.epochs[slot] = candidate.epoch;
+      vote.match[slot] =
+          store_factorization && sameContent(candidate.signature, signature)
+              ? 1u
+              : 0u;
     }
     const auto votes = allGatherV(std::vector<ReuseVote>{vote}, comm);
     // Communicator key: the local content hashes in rank order.
@@ -1043,22 +1321,56 @@ PdeVelocityExtensionReport extendVelocityByPde(
       }
     }
     cache_key = key == 0u ? 1u : key;
-    bool reuse_all = !votes.empty();
     std::uint64_t max_epoch = 0u;
     for (const auto& rank_vote : votes) {
-      reuse_all = reuse_all && rank_vote.match != 0u &&
-                  rank_vote.cached_key == cache_key &&
-                  rank_vote.epoch == votes.front().epoch;
-      max_epoch = std::max(max_epoch, rank_vote.epoch);
+      for (std::size_t slot = 0; slot < rank_vote.entry_count; ++slot) {
+        max_epoch = std::max(max_epoch, rank_vote.epochs[slot]);
+      }
     }
     cache_epoch = max_epoch + 1u;
+    // The most recently used entry (in rank 0's order) that every rank holds
+    // and whose content matches this call's on every rank.
+    std::uint64_t reuse_epoch = 0u;
+    if (!votes.empty()) {
+      const auto& first = votes.front();
+      for (std::size_t slot = 0; slot < first.entry_count && reuse_epoch == 0u;
+           ++slot) {
+        const auto candidate = first.epochs[slot];
+        bool everywhere = candidate != 0u;
+        for (const auto& rank_vote : votes) {
+          bool matched = false;
+          for (std::size_t other = 0; other < rank_vote.entry_count; ++other) {
+            if (rank_vote.epochs[other] == candidate) {
+              matched = rank_vote.match[other] != 0u &&
+                        rank_vote.keys[other] == cache_key;
+              break;
+            }
+          }
+          everywhere = everywhere && matched;
+        }
+        if (everywhere) {
+          reuse_epoch = candidate;
+        }
+      }
+    }
     auto& statistics = PdeVelocityExtensionCacheAccess::statistics(*cache);
-    if (reuse_all && entry) {
-      cached = entry.get();
+    const auto reused_entry =
+        std::find_if(entries.begin(), entries.end(), [&](const auto& item) {
+          return reuse_epoch != 0u && item->epoch == reuse_epoch;
+        });
+    if (reused_entry != entries.end()) {
+      // Most recently used first.
+      std::rotate(entries.begin(), reused_entry, reused_entry + 1);
+      cached = entries.front().get();
       ++statistics.hits;
     } else {
-      // Refactor: drop the old entry first, so that a failure leaves none.
-      cache->clear();
+      // Refactor.  Evict the least recently used entries first so that the
+      // entry built below keeps the footprint within the capacity.
+      const auto capacity = cache->capacity(
+          distributedComponentSolves(store_factorization, comm));
+      while (!entries.empty() && entries.size() >= capacity) {
+        entries.pop_back();
+      }
       ++statistics.misses;
     }
   }
@@ -1176,8 +1488,14 @@ PdeVelocityExtensionReport extendVelocityByPde(
   // Systems built by this call, kept by the cache.
   std::array<PdeVelocityExtensionCache::Entry::Component, 3> built{};
   bool built_complete = store_factorization && !reuse;
+
+  // Unknown numbering of every component (dry vertices that are not
+  // wall-fixed, in canonical vertex order).
+  std::array<std::vector<svmp::FE::GlobalIndex>, 3> unknowns_by_component;
+  std::array<svmp::FE::GlobalIndex, 3> n_unknowns{0, 0, 0};
   for (std::size_t component = 0; component < copy_components; ++component) {
-    std::vector<svmp::FE::GlobalIndex> unknown(vertices.size(), -1);
+    auto& unknown = unknowns_by_component[component];
+    unknown.assign(vertices.size(), -1);
     svmp::FE::GlobalIndex n_unknown = 0;
     for (std::size_t i = 0; i < vertices.size(); ++i) {
       if ((vertices[i].flags & kExtensionFlag) == 0u) {
@@ -1191,10 +1509,28 @@ PdeVelocityExtensionReport extendVelocityByPde(
       unknown[i] = n_unknown++;
     }
     report.unknowns[component] = static_cast<std::size_t>(n_unknown);
-    if (n_unknown == 0) {
-      continue;
-    }
+    n_unknowns[component] = n_unknown;
+  }
 
+  // The solve of one component: its matrix (assembled or cached), the
+  // Dirichlet right-hand side, the factorization (new or cached) and the
+  // residual.  Components are independent; a component reads only the known
+  // and wall-fixed values of `solution`.
+  struct ComponentSolve {
+    std::vector<double> x;
+    double relative_residual{0.0};
+    bool converged{false};
+    PdeVelocityExtensionCache::Entry::Component stored{};
+  };
+  const auto solve_component = [&](std::size_t component) -> ComponentSolve {
+    const auto& unknown = unknowns_by_component[component];
+    const auto n_unknown = n_unknowns[component];
+    if (injectedComponentFailure(component)) {
+      throw std::runtime_error(
+          "PDE velocity extension: injected failure of component " +
+          std::to_string(component) + " (SVMP_PDE_EXTENSION_FAIL_COMPONENT)");
+    }
+    ComponentSolve out;
     std::unique_ptr<svmp::FE::backends::GenericMatrix> assembled;
     const DryRegionFactorization* factorization = nullptr;
     if (reuse) {
@@ -1311,8 +1647,10 @@ PdeVelocityExtensionReport extendVelocityByPde(
       if (factorization != nullptr) {
         solved = solveWithFactorization(*factorization, A, *x, *b,
                                         solver_options, solve_report);
-      } else if (store_factorization) {
-        new_factorization = factorizeDryRegion(A);
+      } else if (store_factorization ||
+                 options.factorization !=
+                     PdeVelocityExtensionFactorization::LuColamd) {
+        new_factorization = factorizeDryRegion(A, options.factorization);
         solved = new_factorization != nullptr &&
                  solveWithFactorization(*new_factorization, A, *x, *b,
                                         solver_options, solve_report);
@@ -1345,11 +1683,28 @@ PdeVelocityExtensionReport extendVelocityByPde(
         rhs2 += rhs[i] * rhs[i];
       }
     }
-    const double relative_residual =
+    out.relative_residual =
         rhs2 > 0.0 ? std::sqrt(residual2 / rhs2) : std::sqrt(residual2);
+    out.converged = solve_report.converged;
+    const auto xs = x->localSpan();
+    out.x.assign(xs.begin(), xs.end());
+    if (store_factorization && new_factorization) {
+      out.stored.unknowns = n_unknown;
+      out.stored.matrix = std::move(assembled);
+      out.stored.factorization = std::move(new_factorization);
+    }
+    return out;
+  };
+
+  // Checks one component's result and gathers it, in component order.
+  const auto accept_component = [&](std::size_t component,
+                                    ComponentSolve& result,
+                                    bool has_factorization,
+                                    int owner) {
+    const double relative_residual = result.relative_residual;
     report.max_relative_residual =
         std::max(report.max_relative_residual, relative_residual);
-    if (!solve_report.converged || !std::isfinite(relative_residual) ||
+    if (!result.converged || !std::isfinite(relative_residual) ||
         relative_residual > 1.0e-8) {
       throw std::runtime_error(
           std::string("PDE velocity extension (") +
@@ -1357,22 +1712,141 @@ PdeVelocityExtensionReport extendVelocityByPde(
           ") failed its dry-region solve (relative residual " +
           std::to_string(relative_residual) + ")");
     }
-    const auto xs = x->localSpan();
+    const auto& unknown = unknowns_by_component[component];
+    if (result.x.size() != static_cast<std::size_t>(n_unknowns[component])) {
+      throw std::runtime_error(
+          "PDE velocity extension received a component solution of the wrong "
+          "size");
+    }
     for (std::size_t i = 0; i < vertices.size(); ++i) {
       if (unknown[i] >= 0) {
-        solution[i * 3u + component] = xs[static_cast<std::size_t>(unknown[i])];
+        solution[i * 3u + component] =
+            result.x[static_cast<std::size_t>(unknown[i])];
       }
     }
     if (built_complete) {
-      if (new_factorization) {
-        built[component].unknowns = n_unknown;
-        built[component].matrix = std::move(assembled);
-        built[component].factorization = std::move(new_factorization);
+      if (has_factorization) {
+        built[component] = std::move(result.stored);
+        built[component].unknowns = n_unknowns[component];
+        built[component].owner = owner;
       } else {
         built_complete = false;
       }
     }
+  };
+
+  const bool distributed_solves =
+      reuse ? cached->distributed_solves
+            : distributedComponentSolves(store_factorization, comm);
+  report.distributed_solves = distributed_solves;
+  if (!distributed_solves) {
+    for (std::size_t component = 0; component < copy_components; ++component) {
+      if (n_unknowns[component] == 0) {
+        continue;
+      }
+      const auto solve_start = std::chrono::steady_clock::now();
+      auto result = solve_component(component);
+      report.component_solve_seconds += secondsSince(solve_start);
+      const bool has_factorization = result.stored.factorization != nullptr;
+      accept_component(component, result, has_factorization, -1);
+    }
+  } else {
+    // Each component is factorized and solved by one rank; every rank first
+    // solves its own components, then the results are broadcast, so the
+    // components run concurrently.  A failure is broadcast too and raised on
+    // every rank in component order.
+    std::array<int, 3> owner{-1, -1, -1};
+    for (std::size_t component = 0; component < copy_components; ++component) {
+      owner[component] = reuse ? cached->components[component].owner
+                               : componentSolveRank(component);
+      if (n_unknowns[component] > 0 &&
+          (owner[component] < 0 || owner[component] >= comm.size())) {
+        throw std::runtime_error(
+            "PDE velocity extension found an invalid component solve rank");
+      }
+    }
+    std::array<ComponentSolve, 3> results{};
+    std::array<ComponentSolveHeader, 3> headers{};
+    std::array<std::string, 3> messages{};
+    for (std::size_t component = 0; component < copy_components; ++component) {
+      if (n_unknowns[component] == 0 || owner[component] != comm.rank()) {
+        continue;
+      }
+      auto& header = headers[component];
+      const auto solve_start = std::chrono::steady_clock::now();
+      try {
+        results[component] = solve_component(component);
+        header.converged = results[component].converged ? 1 : 0;
+        header.has_factorization =
+            results[component].stored.factorization != nullptr ? 1 : 0;
+        header.relative_residual = results[component].relative_residual;
+        header.solution_size = results[component].x.size();
+      } catch (const std::exception& error) {
+        header.failed = 1;
+        messages[component] = error.what();
+      } catch (...) {
+        header.failed = 1;
+        messages[component] =
+            "PDE velocity extension: unknown failure of a component solve";
+      }
+      report.component_solve_seconds += secondsSince(solve_start);
+      header.message_bytes = messages[component].size();
+    }
+#ifdef MESH_HAS_MPI
+    for (std::size_t component = 0; component < copy_components; ++component) {
+      if (n_unknowns[component] == 0) {
+        continue;
+      }
+      const int root = owner[component];
+      auto& header = headers[component];
+      MPI_Bcast(&header, static_cast<int>(sizeof(header)), MPI_BYTE, root,
+                comm.native());
+      if (header.message_bytes >
+              static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
+          header.solution_size >
+              static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error(
+            "PDE velocity extension component result exceeds the MPI int range");
+      }
+      if (comm.rank() != root) {
+        messages[component].assign(
+            static_cast<std::size_t>(header.message_bytes), '\0');
+        results[component].x.assign(
+            static_cast<std::size_t>(header.solution_size), 0.0);
+        results[component].converged = header.converged != 0;
+        results[component].relative_residual = header.relative_residual;
+      }
+      if (header.message_bytes > 0u) {
+        MPI_Bcast(messages[component].data(),
+                  static_cast<int>(header.message_bytes), MPI_CHAR, root,
+                  comm.native());
+      }
+      if (header.solution_size > 0u) {
+        MPI_Bcast(results[component].x.data(),
+                  static_cast<int>(header.solution_size), MPI_DOUBLE, root,
+                  comm.native());
+      }
+    }
+#endif
+    for (std::size_t component = 0; component < copy_components; ++component) {
+      if (n_unknowns[component] == 0) {
+        continue;
+      }
+      if (headers[component].failed != 0) {
+        throw std::runtime_error(messages[component]);
+      }
+      accept_component(component, results[component],
+                       headers[component].has_factorization != 0,
+                       owner[component]);
+    }
   }
+
+  {
+    ContentHasher hasher;
+    hasher.addVector(solution);
+    report.solution_hash = hasher.value();
+  }
+  dumpCanonicalSolution(vertices, solution, comm);
 
   // ---- owner-local algebraic rows (monolithic coupling) ---------------------
   // The rows depend only on the cached content; cached rows passed every
@@ -1517,7 +1991,7 @@ PdeVelocityExtensionReport extendVelocityByPde(
 
   // ---- cache update (only after every check passed) --------------------------
   if (cache != nullptr) {
-    auto& entry = PdeVelocityExtensionCacheAccess::entry(*cache);
+    auto& entries = PdeVelocityExtensionCacheAccess::entries(*cache);
     if (reuse) {
       if (rows != nullptr && !cached->has_rows) {
         cached->rows = *rows;
@@ -1527,6 +2001,7 @@ PdeVelocityExtensionReport extendVelocityByPde(
       auto fresh = std::make_unique<PdeVelocityExtensionCache::Entry>();
       fresh->key = cache_key;
       fresh->epoch = cache_epoch;
+      fresh->distributed_solves = distributed_solves;
       fresh->signature = std::move(signature);
       fresh->cells = std::move(gathered_cells);
       fresh->cell_vertices = std::move(gathered_cell_vertices);
@@ -1541,10 +2016,51 @@ PdeVelocityExtensionReport extendVelocityByPde(
         fresh->rows = *rows;
         fresh->has_rows = true;
       }
-      entry = std::move(fresh);
+      entries.insert(entries.begin(), std::move(fresh));
+      while (entries.size() > cache->capacity(distributed_solves)) {
+        entries.pop_back();
+      }
     }
-    PdeVelocityExtensionCacheAccess::setBytes(*cache,
-                                              entry ? entry->bytes() : 0u);
+    std::size_t bytes = 0u;
+    for (const auto& item : entries) {
+      bytes += item->bytes();
+    }
+    PdeVelocityExtensionCacheAccess::setBytes(*cache, bytes);
+    report.cache_entries = entries.size();
+  }
+
+  report.elapsed_seconds = secondsSince(call_start);
+
+  // ---- self-check: the uncached replicated solve, bit for bit -----------------
+  if (cache != nullptr && environmentFlag("SVMP_PDE_EXTENSION_SELF_CHECK")) {
+    std::vector<double> reference_extended;
+    std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>
+        reference_rows;
+    const auto reference = extendVelocityByPde(
+        mesh, comm, level_set, source, source_components, known,
+        target_components, walls, options, reference_extended,
+        rows != nullptr ? &reference_rows : nullptr, nullptr, revisions);
+    std::size_t mismatches = 0u;
+    if (!sameBytes(extended, reference_extended)) {
+      ++mismatches;
+    }
+    if (rows != nullptr && !sameVelocityExtensionRows(*rows, reference_rows)) {
+      ++mismatches;
+    }
+    if (!sameReportContent(report, reference)) {
+      ++mismatches;
+    }
+    if (globalSum(mismatches, comm) != 0u) {
+      throw std::runtime_error(
+          "PDE velocity extension self-check (SVMP_PDE_EXTENSION_SELF_CHECK): "
+          "the cached or distributed result differs from the uncached "
+          "replicated solve (reused_factorization=" +
+          std::to_string(report.reused_factorization ? 1 : 0) +
+          " distributed_solves=" +
+          std::to_string(report.distributed_solves ? 1 : 0) +
+          " local_mismatches=" + std::to_string(mismatches) + ")");
+    }
+    report.self_checked = true;
   }
   cache_guard.dismiss();
   return report;
