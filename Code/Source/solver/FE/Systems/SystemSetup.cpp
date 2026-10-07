@@ -4135,6 +4135,10 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     std::optional<constraints::ParallelConstraints> parallel;
     if (mpi_initialized_constraints) {
         parallel.emplace(dof_handler_.mpiComm(), dof_handler_.getPartition());
+        // Route constraint lines through the slave owners instead of
+        // all-gathering every line (identical canonical lines).
+        parallel->setDofOwnerFunction(
+            [this](GlobalIndex dof) { return dof_handler_.getDofMap().getDofOwner(dof); });
     } else {
         parallel.emplace(dof_handler_.getPartition());
     }
@@ -7124,6 +7128,10 @@ void FESystem::rebuildConstraintState()
     std::optional<constraints::ParallelConstraints> parallel;
     if (mpi_initialized_constraints) {
         parallel.emplace(dof_handler_.mpiComm(), dof_handler_.getPartition());
+        // Route constraint lines through the slave owners instead of
+        // all-gathering every line (identical canonical lines).
+        parallel->setDofOwnerFunction(
+            [this](GlobalIndex dof) { return dof_handler_.getDofMap().getDofOwner(dof); });
     } else {
         parallel.emplace(dof_handler_.getPartition());
     }
