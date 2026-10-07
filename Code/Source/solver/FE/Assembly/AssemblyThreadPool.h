@@ -27,10 +27,15 @@
  *  - every worker sets its OpenMP thread count to one, so OpenMP regions that
  *    kernels open internally stay serial on assembly threads.
  *
- * The pool uses only standard mutexes and condition variables, which keeps it
- * transparent to ThreadSanitizer. It is independent of OMP_NUM_THREADS.
+ * The pool uses standard mutexes and condition variables (transparent to
+ * ThreadSanitizer). Optionally a thread polls for a while before it blocks
+ * (spinWait, SVMP_ASSEMBLY_SPIN_US, off by default); this saves context
+ * switches but did not shorten the measured loops. Polling changes only
+ * timing. The pool is independent of OMP_NUM_THREADS.
  */
 
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <exception>
@@ -73,7 +78,44 @@ public:
     /// a thread could not be created (the caller should then run serially).
     [[nodiscard]] bool reserveWorkers(int n_workers) noexcept;
 
+    /// Polling time before a thread of the threaded assembly blocks:
+    /// SVMP_ASSEMBLY_SPIN_US microseconds (default 0: block at once).
+    [[nodiscard]] static std::chrono::nanoseconds spinBudget() noexcept;
+
+    /// Polls ready() (a cheap, thread-safe check) for up to spinBudget();
+    /// returns its last value. The caller then blocks if it is still false.
+    template <class Ready>
+    static bool spinWait(Ready&& ready)
+    {
+        if (ready()) {
+            return true;
+        }
+        const auto budget = spinBudget();
+        if (budget.count() <= 0) {
+            return false;
+        }
+        const auto start = std::chrono::steady_clock::now();
+        for (unsigned i = 1;; ++i) {
+            cpuRelax();
+            if (ready()) {
+                return true;
+            }
+            if ((i & 63u) == 0u && std::chrono::steady_clock::now() - start >= budget) {
+                return ready();
+            }
+        }
+    }
+
 private:
+    static void cpuRelax() noexcept
+    {
+#if defined(__x86_64__) || defined(__i386__)
+        __builtin_ia32_pause();
+#else
+        std::this_thread::yield();
+#endif
+    }
+
     void ensureWorkersLocked(int n_workers);
     void workerLoop(int worker_index, std::uint64_t start_generation);
 
@@ -81,12 +123,13 @@ private:
     std::condition_variable start_cv_{};
     std::condition_variable done_cv_{};
     std::vector<std::thread> threads_{};
-    std::uint64_t generation_{0};
+    // Written under mutex_; atomic so that waiting workers can poll it.
+    std::atomic<std::uint64_t> generation_{0};
     int active_participants_{0};
     int remaining_{0};
     const std::function<void(int)>* task_{nullptr};
     std::vector<std::exception_ptr> errors_{};
-    bool stop_{false};
+    std::atomic<bool> stop_{false};
 
     /// Serializes run() calls issued concurrently by different caller threads.
     std::mutex run_mutex_{};
