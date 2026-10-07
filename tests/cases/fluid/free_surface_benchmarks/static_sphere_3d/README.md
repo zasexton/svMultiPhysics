@@ -39,7 +39,8 @@ settled before the first refinement study:
   `dt = 0.02` at `La = 12` for both levels, with a `dt/2` check at R/h = 8;
 - `SurfaceStress` only, PDE-extension transport, kinematic reconciliation on
   (D14), sign-definite patch bounds off;
-- multi-rank runs with FSILS, up to a full node per run.
+- multi-rank runs with FSILS, up to a full node per run, with an explicit
+  `<Ghost_layers>` of 12 (see the input table).
 
 `generate_case.py` writes this protocol by default.
 
@@ -98,6 +99,7 @@ README for the sources); none was chosen for this case.
 | Time integration | generalized-alpha, `rho_inf = 0.5` | all free-surface decks |
 | Nonlinear solve | relative tolerance 1e-4 per equation, at most 8 Newton iterations; level-set absolute gate 1e-10 | production decks |
 | Linear solve | FSILS GMRES with the RCS preconditioner, 100 iterations, Krylov dimension 50, tolerances 1e-8 / 1e-10 | as `static_drop_2d` |
+| Mesh overlap | `<Ghost_layers>12</Ghost_layers>` in `<Add_mesh>` (`--ghost-layers N`; `derived` leaves it unset, and the solver then derives 8) | multi-rank runs only. With the derived 8 layers every constraint rebuild on 4 to 24 ranks reports `off_rank_constraint_fill_outside_halo` and `canonical_row_coupled_slaves_beyond_halo` (an inexact Jacobian); 12 is the provisional value of the MPI-scaling work (2026-10-07). Multi-rank logs must show none of these diagnostics nor `canonical_halo_limited_root_choices` > 0. |
 
 **Level-set transport (decision D9).** `generate_case.py --transport`
 offers the same choices as `capillary_wave_2d`:
@@ -148,19 +150,20 @@ dt_B = sqrt(rho h^3 / (4 pi gamma)) = (1/sqrt(2)) * sqrt(rho h^3 / (2 pi gamma))
 
 The step was `m dt_B` with `m = 2` at `La = 12` and `m = 1` at `La = 120`
 (and any other `La`), rounded down so that the run is exactly 100 equal output
-intervals, with the term and the reconciliation off. The values of `m` came
+intervals, with the term and the reconciliation off and `<Ghost_layers>`
+unset. The values of `m` came
 from the 2D step-0 measurement (tracker M2, jobs 46075447 and 46076505) and
 were assumed, not measured, in 3D. This gave 500, 1,400 and 4,000 steps at
 `La = 12` for `R/h` = 8, 16, 32. Reproduce those decks (bitwise) with
-`--dt-multiple <m> --surface-tension-semi-implicit None --kinematic-reconciliation off`.
+`--dt-multiple <m> --surface-tension-semi-implicit None --kinematic-reconciliation off --ghost-layers derived`.
 
 **Time-step options.** `--dt-divisor 2` halves the protocol step with
 unchanged output times. `--dt-multiple m` (a multiple of `dt_B`) and `--dt
 <step>` (an exact step; nested steps share their output times) are diagnostic:
 `verify.py` reports such runs but does not gate them, and the same holds for
 cases written before D25 (no `dt_rule` in `case.json`). `case.json` records
-`dt_rule`, `dt_base`, `dt_divisor`, `surface_tension_semi_implicit` and
-`kinematic_reconciliation`.
+`dt_rule`, `dt_base`, `dt_divisor`, `surface_tension_semi_implicit`,
+`kinematic_reconciliation` and `ghost_layers`.
 
 **Run length.** `T = 5 t_mu`, the lower end of the 5 to 10 viscous times of
 D3, with 100 VTU snapshots (103 under the fixed step, as in 2D). At `La = 12`
@@ -315,8 +318,18 @@ are wall time from one step start to the next, so they include output.
   (about 220 s on 8 ranks, 250 s on 16, 284 s on 24). At R/h = 8 the same
   refresh takes 0.5 to 17 s, and these events stop after the start-up
   transient (6, 4, 1, 0 in steps 0 to 3).
-- So 16 ranks are no faster than 8 at R/h = 16. The protocol runs use 8
-  ranks per case, as three lanes on one 24-core node.
+- So 16 ranks are no faster than 8 at R/h = 16.
+- Every multi-rank run of the probe used the derived 8 ghost layers and
+  reported `off_rank_constraint_fill_outside_halo` (4 to 24 ranks) and
+  `canonical_row_coupled_slaves_beyond_halo` = 4 to 69 (8 to 24 ranks) at
+  each constraint rebuild; `canonical_halo_limited_root_choices` stayed 0.
+  The serial run reported none. The first protocol job (46916384, 8 ranks per
+  case) was therefore cancelled; on it the R/h = 8 `dt/2` case had stopped at
+  step 35 at the 12-pass outer cap, with the active pressure constraints
+  alternating between two sets (12,568 and 12,564) from pass to pass.
+- The protocol runs use `<Ghost_layers>` = 12: R/h = 16 on 8 ranks, and both
+  R/h = 8 runs serially (on the 24-cell-wide R/h = 8 mesh, 12 layers put
+  almost the whole mesh on every rank, so ranks gain little there).
 
 **Earlier measurement**, 2026-09-30, with the same binary (SKX nodes, serial; profiling
 data under `$SCRATCH/free-surface-benchmarks/profiling-3d/`). Because of the

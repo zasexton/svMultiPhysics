@@ -16,9 +16,10 @@ NormalIncrement) is on, and every level uses one fixed physical step, 0.02 at
 La = 12 (0.01 at La = 120, as in 2D).  Other Laplace numbers keep the earlier
 capillary-limit rule (a multiple of dt_B).  --dt-divisor 2 halves the step for
 the time-step check.  Kinematic reconciliation of the level set is on (D14).
-The earlier decks are reproduced by --dt-multiple <m>
---surface-tension-semi-implicit None --kinematic-reconciliation off (m = 2 at
-La = 12, m = 1 at La = 120).
+The deck sets <Ghost_layers> = 12 for the multi-rank runs (the derived 8 layers
+are too shallow in 3D; see GHOST_LAYERS).  The earlier decks are reproduced by
+--dt-multiple <m> --surface-tension-semi-implicit None --kinematic-reconciliation
+off --ghost-layers derived (m = 2 at La = 12, m = 1 at La = 120).
 
 The case is written for the new OOP solver: solver.xml, an affine Tetra4
 background mesh with the initial fields, the six wall face files, and
@@ -95,6 +96,14 @@ KINEMATIC_RECONCILIATION = True
 # the protocol value is NormalIncrement since D25 (None before).
 SEMI_IMPLICIT_OPTIONS = ("None", "NormalIncrement")
 DEFAULT_SEMI_IMPLICIT = "NormalIncrement"
+# Mesh overlap of multi-rank runs (<Ghost_layers> in <Add_mesh>).  Unset, the
+# solver derives 8 layers for an aggregating free surface, which is too shallow
+# on the 3D Kuhn mesh: on 4 to 24 ranks every constraint rebuild then reports
+# off_rank_constraint_fill_outside_halo and canonical_row_coupled_slaves_beyond_halo
+# (an inexact Jacobian; 2026-10-07, D25 scaling probe and MPI-scaling work).
+# 12 is the provisional value of that work; serial runs do not use it.
+# "derived" leaves the key unset (the earlier decks).
+GHOST_LAYERS: int | str = 12
 MIN_PHI_OVER_H_WARNING = 1.0e-6             # "vertex touch" warning threshold
 LEVEL_SET_FIELD = "phi"
 CURVATURE_FIELD = "kappa"
@@ -401,12 +410,29 @@ def level_set_velocity_block(transport: str) -> str:
     raise ValueError(f"--transport must be one of {TRANSPORTS}")
 
 
+def ghost_layers_value(value) -> int | str:
+    """Validated --ghost-layers: a nonnegative integer, or "derived" (key left unset)."""
+    if isinstance(value, str) and value == "derived":
+        return value
+    try:
+        layers = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("--ghost-layers must be a nonnegative integer or 'derived'") from None
+    if layers < 0 or str(layers) != str(value).strip():
+        raise ValueError("--ghost-layers must be a nonnegative integer or 'derived'")
+    return layers
+
+
 def solver_xml(form: str, schedule: dict, steps: int, cadence: int,
                transport: str = DEFAULT_TRANSPORT,
                kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
-               semi_implicit: str = DEFAULT_SEMI_IMPLICIT) -> str:
+               semi_implicit: str = DEFAULT_SEMI_IMPLICIT,
+               ghost_layers: int | str = GHOST_LAYERS) -> str:
     if semi_implicit not in SEMI_IMPLICIT_OPTIONS:
         raise ValueError(f"semi_implicit must be one of {SEMI_IMPLICIT_OPTIONS}")
+    ghost_layers = ghost_layers_value(ghost_layers)
+    ghost = ("" if ghost_layers == "derived" else
+             f"\n    <Ghost_layers>{ghost_layers}</Ghost_layers>")
     semi_implicit_bc = ("" if semi_implicit == "None" else
                         f"\n      <Surface_tension_semi_implicit>{semi_implicit}"
                         "</Surface_tension_semi_implicit>")
@@ -458,7 +484,7 @@ def solver_xml(form: str, schedule: dict, steps: int, cadence: int,
   </GeneralSimulationParameters>
 
   <Add_mesh name="box">
-    <Mesh_file_path>mesh/mesh-complete.mesh.vtu</Mesh_file_path>
+    <Mesh_file_path>mesh/mesh-complete.mesh.vtu</Mesh_file_path>{ghost}
 {faces}
   </Add_mesh>
 
@@ -550,7 +576,8 @@ def generate(level: int, form: str, laplace: float, output_dir: Path, *,
              fixed_dt: float | None = None,
              kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
              semi_implicit: str = DEFAULT_SEMI_IMPLICIT,
-             dt_divisor: int = 1) -> dict:
+             dt_divisor: int = 1,
+             ghost_layers: int | str = GHOST_LAYERS) -> dict:
     if level not in LEVELS:
         raise ValueError(f"--level must be one of {LEVELS}")
     if form not in CAPILLARY_FORMS:
@@ -564,6 +591,7 @@ def generate(level: int, form: str, laplace: float, output_dir: Path, *,
         raise ValueError("--dt-multiple must be positive")
     if semi_implicit not in SEMI_IMPLICIT_OPTIONS:
         raise ValueError(f"--surface-tension-semi-implicit must be one of {SEMI_IMPLICIT_OPTIONS}")
+    ghost_layers = ghost_layers_value(ghost_layers)
     if output_dir.exists() and any(output_dir.iterdir()) and not force:
         raise FileExistsError(f"{output_dir} is not empty (use --force)")
 
@@ -602,7 +630,8 @@ def generate(level: int, form: str, laplace: float, output_dir: Path, *,
         triangles, parents = faces[wall]
         write_face_vtp(mesh_dir / "mesh-surfaces" / f"{wall}.vtp", points, triangles, parents)
     (output_dir / "solver.xml").write_text(solver_xml(form, schedule, steps, cadence, transport,
-                                                      kinematic_reconciliation, semi_implicit),
+                                                      kinematic_reconciliation, semi_implicit,
+                                                      ghost_layers),
                                            encoding="utf-8")
 
     case = {
@@ -639,6 +668,7 @@ def generate(level: int, form: str, laplace: float, output_dir: Path, *,
         "dt_multiple_of_dt_B": schedule["dt_multiple_of_dt_B"],
         "kinematic_reconciliation": bool(kinematic_reconciliation),
         "surface_tension_semi_implicit": semi_implicit,
+        "ghost_layers": ghost_layers,
         "dt_rule": dt_rule(laplace, dt_multiple_override, fixed_dt),
         "time_step_rule": TIME_STEP_RULES[dt_rule(laplace, dt_multiple_override, fixed_dt)],
         "dt_base": schedule["dt_base"],
@@ -695,6 +725,9 @@ def main(argv=None) -> int:
     parser.add_argument("--max-steps", type=int, default=None,
                         help="smoke runs only: stop after this many steps; the case is "
                              "marked truncated and verify.py rejects it for acceptance")
+    parser.add_argument("--ghost-layers", default=GHOST_LAYERS,
+                        help=f"<Ghost_layers> of the mesh for multi-rank runs (default {GHOST_LAYERS}); "
+                             "'derived' leaves it unset, so the solver derives 8 (earlier decks)")
     parser.add_argument("--force", action="store_true", help="allow a non-empty output dir")
     args = parser.parse_args(argv)
 
@@ -704,12 +737,12 @@ def main(argv=None) -> int:
                     max_steps=args.max_steps, force=args.force, fixed_dt=args.dt,
                     kinematic_reconciliation=args.kinematic_reconciliation == "on",
                     semi_implicit=args.surface_tension_semi_implicit,
-                    dt_divisor=args.dt_divisor)
+                    dt_divisor=args.dt_divisor, ghost_layers=args.ghost_layers)
     print(f"wrote {args.output_dir}")
     for key in ("level_R_over_h", "capillary_form", "transport", "laplace_number", "viscosity",
                 "viscous_time", "end_time", "dt_rule", "dt", "dt_divisor", "dt_B",
                 "dt_multiple_of_dt_B", "kinematic_reconciliation",
-                "surface_tension_semi_implicit", "steps",
+                "surface_tension_semi_implicit", "ghost_layers", "steps",
                 "output_cadence", "n_vertices", "n_tetrahedra", "min_abs_phi_over_h",
                 "wall_gap_over_h", "truncated"):
         print(f"  {key} = {case[key]}")
