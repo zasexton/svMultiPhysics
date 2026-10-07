@@ -689,6 +689,205 @@ TEST(FsilsBackendMPI, SharedFaceReductionUsesOwnedRowHalo)
     EXPECT_NEAR(dirichlet_mask(1, 0), 0.0, 1e-12);
 }
 
+// A rank whose part of a shared face is empty must still take part in the
+// neighbour exchanges of the face reduction and of the Dirichlet mask; before
+// the fix it returned early and its neighbour waited for it forever.
+TEST(FsilsBackendMPI, SharedFaceReductionIncludesRanksWithAnEmptyFacePart)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr int dof = 2;
+    constexpr GlobalIndex n_nodes = 2;
+    constexpr GlobalIndex n_global = n_nodes * dof;
+
+    using svmp::FE::sparsity::DistributedSparsityPattern;
+    using svmp::FE::sparsity::IndexRange;
+
+    // rank0 owns node 0 and keeps node 1 as a ghost; rank1 owns node 1.
+    const IndexRange owned = (rank == 0) ? IndexRange{0, 2} : IndexRange{2, 4};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+    if (rank == 0) {
+        pattern.addEntry(0, 0);
+        pattern.addEntry(0, 2);
+        pattern.addEntry(1, 1);
+        pattern.addEntry(1, 3);
+    } else {
+        pattern.addEntry(2, 2);
+        pattern.addEntry(3, 3);
+    }
+    pattern.ensureDiagonal();
+    pattern.finalize();
+    if (rank == 0) {
+        std::vector<GlobalIndex> ghost_rows{2, 3};
+        std::vector<GlobalIndex> ghost_row_ptr{0, 2, 4};
+        std::vector<GlobalIndex> ghost_cols{0, 2, 1, 3};
+        pattern.setGhostRows(std::move(ghost_rows), std::move(ghost_row_ptr), std::move(ghost_cols));
+    }
+
+    FsilsFactory factory(/*dof_per_node=*/dof);
+    auto A = factory.createMatrix(pattern);
+    const auto* fsils = dynamic_cast<const FsilsMatrix*>(A.get());
+    ASSERT_NE(fsils, nullptr);
+    const auto shared_ptr = fsils->shared();
+    ASSERT_NE(shared_ptr, nullptr);
+    const auto& shared = *shared_ptr;
+    ASSERT_TRUE(shared.lhs.owned_row_operator);
+    ASSERT_FALSE(shared.lhs.owned_halo_neighbor_ranks.empty());
+
+    // The face is {node 0, node 1}; rank 0 holds both, rank 1 holds none.
+    const int face_node_count = (rank == 0) ? 2 : 0;
+    Vector<int> face_nodes(face_node_count);
+    Array<double> face_values(dof, face_node_count);
+    Array<double> dirichlet_mask(dof, face_node_count);
+    if (rank == 0) {
+        for (int a = 0; a < 2; ++a) {
+            face_nodes(a) = shared.globalNodeToInternal(a);
+            ASSERT_GE(face_nodes(a), 0);
+            ASSERT_LT(face_nodes(a), shared.lhs.nNo);
+        }
+        face_values(0, 0) = 3.0;
+        face_values(1, 0) = -1.0;
+        face_values(0, 1) = 4.5;
+        face_values(1, 1) = 2.25;
+        dirichlet_mask(0, 0) = 1.0;
+        dirichlet_mask(1, 0) = 0.0;
+        dirichlet_mask(0, 1) = 0.0;
+        dirichlet_mask(1, 1) = 1.0;
+    }
+
+    fe_fsi_linear_solver::fsils_reduce_shared_face_values_owned_row(
+        shared.lhs, dof, face_nodes, face_values);
+    fe_fsi_linear_solver::fsils_reduce_shared_face_values_owned_row(
+        shared.lhs, dof, face_nodes, dirichlet_mask);
+    fe_fsi_linear_solver::fsils_apply_shared_dirichlet_face_mask(
+        shared.lhs, dof, face_nodes, dirichlet_mask);
+
+    // Rank 1 contributes nothing, so rank 0 keeps its own values.
+    if (rank == 0) {
+        EXPECT_NEAR(face_values(0, 0), 3.0, 1e-12);
+        EXPECT_NEAR(face_values(1, 0), -1.0, 1e-12);
+        EXPECT_NEAR(face_values(0, 1), 4.5, 1e-12);
+        EXPECT_NEAR(face_values(1, 1), 2.25, 1e-12);
+        EXPECT_NEAR(dirichlet_mask(0, 0), 1.0, 1e-12);
+        EXPECT_NEAR(dirichlet_mask(1, 0), 0.0, 1e-12);
+        EXPECT_NEAR(dirichlet_mask(0, 1), 0.0, 1e-12);
+        EXPECT_NEAR(dirichlet_mask(1, 1), 1.0, 1e-12);
+    }
+}
+
+// FSILS GMRES with Dirichlet DOFs on ranks 0 and 2 of a 3-rank chain and none
+// on rank 1: the shared Dirichlet face is reduced over all ranks, so rank 1,
+// whose part of the face is empty, must take part in the neighbour exchange.
+TEST(FsilsBackendMPI, GmresWithDirichletFaceEmptyOnOneRank)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 3) {
+        GTEST_SKIP() << "This test requires exactly 3 MPI ranks";
+    }
+
+    // Chain 0-1-2-3 (dof = 1); rank 0 owns node 0, rank 1 node 1 and rank 2
+    // nodes 2 and 3. Element (r, r + 1) lives on rank r, so ranks 0 and 1
+    // keep the next node as a ghost row; this overlap is the halo over which
+    // the face reduction exchanges. The values form a diagonal system on the
+    // owned rows, A = diag(1, 2, 2, 1) and b = [0, 2, 2, 0], with Dirichlet
+    // rows 0 (rank 0) and 3 (rank 2), so x = [0, 1, 1, 0].
+    constexpr GlobalIndex n_global = 4;
+
+    using svmp::FE::sparsity::DistributedSparsityPattern;
+    using svmp::FE::sparsity::IndexRange;
+
+    const IndexRange owned = (rank == 0) ? IndexRange{0, 1}
+                             : (rank == 1) ? IndexRange{1, 2}
+                                           : IndexRange{2, 4};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+    if (rank == 0) {
+        pattern.addEntry(0, 0);
+        pattern.addEntry(0, 1);
+    } else if (rank == 1) {
+        pattern.addEntry(1, 1);
+        pattern.addEntry(1, 2);
+    } else {
+        pattern.addEntry(2, 2);
+        pattern.addEntry(2, 3);
+        pattern.addEntry(3, 2);
+        pattern.addEntry(3, 3);
+    }
+    pattern.ensureDiagonal();
+    pattern.finalize();
+    if (rank < 2) {
+        const GlobalIndex row = rank + 1;
+        std::vector<GlobalIndex> ghost_rows{row};
+        std::vector<GlobalIndex> ghost_row_ptr{0, 2};
+        std::vector<GlobalIndex> ghost_cols{row - 1, row};
+        pattern.setGhostRows(std::move(ghost_rows), std::move(ghost_row_ptr), std::move(ghost_cols));
+    }
+
+    FsilsFactory factory(/*dof_per_node=*/1);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(n_global);
+    auto x = factory.createVector(n_global);
+
+    const double diagonal[4] = {1.0, 2.0, 2.0, 1.0};
+    const double rhs[4] = {0.0, 2.0, 2.0, 0.0};
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+    for (GlobalIndex dof = owned.first; dof < owned.last; ++dof) {
+        viewA->addMatrixEntry(dof, dof, diagonal[static_cast<std::size_t>(dof)],
+                              assembly::AddMode::Add);
+    }
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    auto viewb = b->createAssemblyView();
+    viewb->beginAssemblyPhase();
+    for (GlobalIndex dof = owned.first; dof < owned.last; ++dof) {
+        const GlobalIndex dofs[1] = {dof};
+        const Real be[1] = {rhs[static_cast<std::size_t>(dof)]};
+        viewb->addVectorEntries(dofs, be, assembly::AddMode::Add);
+    }
+    viewb->finalizeAssembly();
+
+    SolverOptions opts;
+    opts.method = SolverMethod::GMRES;
+    opts.preconditioner = PreconditionerType::RowColumnScaling;
+    opts.fsils_use_rcs = true;
+    opts.rel_tol = 1e-12;
+    opts.abs_tol = 1e-14;
+    opts.max_iter = 200;
+
+    auto solver = factory.createLinearSolver(opts);
+    std::vector<GlobalIndex> dirichlet;
+    if (rank == 0) {
+        dirichlet.push_back(0);
+    } else if (rank == 2) {
+        dirichlet.push_back(3);
+    }
+    solver->setDirichletDofs(dirichlet);
+    const auto rep = solver->solve(*A, *x, *b);
+    EXPECT_TRUE(rep.converged) << rep.message;
+
+    x->updateGhosts();
+    auto read_view = x->createGhostedReadView();
+    const double expected[4] = {0.0, 1.0, 1.0, 0.0};
+    for (GlobalIndex dof = owned.first; dof < owned.last; ++dof) {
+        EXPECT_NEAR(read_view->getVectorEntry(dof),
+                    expected[static_cast<std::size_t>(dof)],
+                    1e-10)
+            << "rank=" << rank << " dof=" << dof;
+    }
+}
+
 TEST(FsilsBackendMPI, FactoryCreateVectorUsesCachedDistributedOverlapLayout)
 {
     int rank = 0;

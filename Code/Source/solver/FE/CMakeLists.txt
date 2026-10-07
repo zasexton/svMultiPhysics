@@ -3245,6 +3245,10 @@ if(FE_BUILD_TESTS)
 	                    target_link_libraries(test_fe_backends_mpi PRIVATE svfe ${_fe_backends_mpi_gtest_libs})
 	                endif()
 	                add_fe_mpi_test(test_fe_backends_mpi 2)
+	                # A shared FSILS Dirichlet face that is empty on the middle
+	                # rank of three (collective face reduction).
+	                add_fe_mpi_test(test_fe_backends_mpi 3
+	                    FILTER "FsilsBackendMPI.GmresWithDirichletFaceEmptyOnOneRank")
 	            endif()
 	        endif()
 	    endif()
