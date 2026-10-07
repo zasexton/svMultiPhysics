@@ -470,6 +470,18 @@ struct CutInterfaceVolumeRegion {
 
     [[nodiscard]] geometry::CutQuadratureRule toCutQuadratureRule(
         const CutInterfaceDomainRequest& request) const {
+        auto rule = toCutQuadratureRuleWithoutPoints(request);
+        rule.points = cutQuadratureRulePoints(request);
+        return rule;
+    }
+
+    /**
+     * toCutQuadratureRule(request) with an empty point list.  Consumers that
+     * replace the points of a full-cell-equivalent rule by the parent-cell
+     * rule use it to skip copying the region's points.
+     */
+    [[nodiscard]] geometry::CutQuadratureRule toCutQuadratureRuleWithoutPoints(
+        const CutInterfaceDomainRequest& request) const {
         if (side == geometry::CutIntegrationSide::Interface) {
             throw std::invalid_argument("level-set volume region requires Negative or Positive side");
         }
@@ -551,7 +563,6 @@ struct CutInterfaceVolumeRegion {
         rule.provenance_id = request.source.identifier();
         rule.frame = request.frame;
         rule.full_cell_equivalent = full_cell_equivalent;
-        rule.points = cutQuadratureRulePoints(request);
         return rule;
     }
 
@@ -1200,11 +1211,82 @@ public:
     }
 
     [[nodiscard]] std::vector<geometry::CutQuadratureRule> volumeQuadratureRules() const {
+        return volumeQuadratureRules(
+            [](const CutInterfaceVolumeRegion&) noexcept { return false; });
+    }
+
+    /**
+     * volumeQuadratureRules(), except that the rule of every region for
+     * which skip_points(region) is true has an empty point list
+     * (toCutQuadratureRuleWithoutPoints()).
+     *
+     * The active regions are ordered by the key cutQuadratureRuleDeterministicLess
+     * reads from their rules (parent cell, side, marker, topology id, stable
+     * id; a volume rule has no boundary parent) and only then materialized,
+     * so no rule is moved while sorting.  When two regions have equal keys,
+     * the rules are materialized in region order and sorted as rules, as
+     * before, so the result is the same in every case.
+     */
+    template <typename SkipPoints>
+    [[nodiscard]] std::vector<geometry::CutQuadratureRule> volumeQuadratureRules(
+        SkipPoints&& skip_points) const {
+        const auto& regions = volume_regions_.values();
+        const auto materialize = [&](const CutInterfaceVolumeRegion& region) {
+            return skip_points(region)
+                       ? region.toCutQuadratureRuleWithoutPoints(request_)
+                       : region.toCutQuadratureRule(request_);
+        };
+        std::vector<std::size_t> order;
+        order.reserve(regions.size());
+        for (std::size_t i = 0; i < regions.size(); ++i) {
+            if (regions[i].active()) {
+                order.push_back(i);
+            }
+        }
+        const auto region_less = [&regions](std::size_t ia,
+                                            std::size_t ib) noexcept {
+            const auto& a = regions[ia];
+            const auto& b = regions[ib];
+            const auto a_parent =
+                a.parent_cell_global_id != INVALID_GLOBAL_INDEX
+                    ? a.parent_cell_global_id
+                    : static_cast<GlobalIndex>(a.parent_cell);
+            const auto b_parent =
+                b.parent_cell_global_id != INVALID_GLOBAL_INDEX
+                    ? b.parent_cell_global_id
+                    : static_cast<GlobalIndex>(b.parent_cell);
+            if (a_parent != b_parent) {
+                return a_parent < b_parent;
+            }
+            if (a.side != b.side) {
+                return a.side < b.side;
+            }
+            if (a.interface_marker != b.interface_marker) {
+                return a.interface_marker < b.interface_marker;
+            }
+            if (a.topology_id != b.topology_id) {
+                return a.topology_id < b.topology_id;
+            }
+            return a.stable_id < b.stable_id;
+        };
+        std::sort(order.begin(), order.end(), region_less);
+        const bool distinct_keys =
+            std::adjacent_find(order.begin(),
+                               order.end(),
+                               [&region_less](std::size_t a, std::size_t b) {
+                                   return !region_less(a, b);
+                               }) == order.end();
         std::vector<geometry::CutQuadratureRule> rules;
-        rules.reserve(volume_regions_.size());
-        for (const auto& region : volume_regions_) {
+        rules.reserve(order.size());
+        if (distinct_keys) {
+            for (const auto index : order) {
+                rules.push_back(materialize(regions[index]));
+            }
+            return rules;
+        }
+        for (const auto& region : regions) {
             if (region.active()) {
-                rules.push_back(region.toCutQuadratureRule(request_));
+                rules.push_back(materialize(region));
             }
         }
         std::sort(rules.begin(), rules.end(), cutQuadratureRuleDeterministicLess);

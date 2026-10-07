@@ -198,6 +198,26 @@ struct GeneratedInterfaceCellDiagnostics {
 void validateGeneratedInterfaceRuleProvenance(
     const interfaces::LevelSetInterfaceDomain& domain)
 {
+    // validateRuleProvenance() reads only provenance fields.  Check every
+    // volume rule without materializing its points or sorting; when every
+    // rule passes nothing is thrown either way, and otherwise the sorted
+    // check below reports the same first failure as before.
+    bool volume_rules_valid = true;
+    try {
+        for (const auto& region : domain.volumeRegions()) {
+            if (region.active() &&
+                !validateRuleProvenance(
+                     region.toCutQuadratureRuleWithoutPoints(
+                         domain.request()))
+                     .empty()) {
+                volume_rules_valid = false;
+                break;
+            }
+        }
+    } catch (...) {
+        // Let the original order of checks raise it.
+        volume_rules_valid = false;
+    }
     const auto interface_rules = domain.interfaceQuadratureRules();
     for (const auto& rule : interface_rules) {
         const auto diagnostic = validateRuleProvenance(rule);
@@ -208,6 +228,9 @@ void validateGeneratedInterfaceRuleProvenance(
         }
     }
 
+    if (volume_rules_valid) {
+        return;
+    }
     const auto volume_rules = domain.volumeQuadratureRules();
     for (const auto& rule : volume_rules) {
         const auto diagnostic = validateRuleProvenance(rule);
