@@ -64,6 +64,15 @@ public:
         GlobalIndex cell_id,
         const std::array<Real, 3>& parent_coordinate) const;
 
+    /**
+     * evaluateLinearCorner(cell_id, parent_coordinate).value, bit for bit
+     * (the same basis values summed in the same order), without the
+     * gradient and without allocating.
+     */
+    [[nodiscard]] Real evaluateLinearCornerValue(
+        GlobalIndex cell_id,
+        const std::array<Real, 3>& parent_coordinate) const;
+
 private:
     [[nodiscard]] const std::vector<Real>& cachedCellCoefficients(
         GlobalIndex cell_id) const;
@@ -74,6 +83,7 @@ private:
     mutable bool cached_cell_valid_{false};
     mutable GlobalIndex cached_cell_id_{static_cast<GlobalIndex>(-1)};
     mutable std::vector<Real> cached_cell_coefficients_{};
+    mutable std::vector<Real> linear_corner_values_{};
     std::shared_ptr<const basis::LagrangeBasis> linear_corner_basis_{};
 };
 

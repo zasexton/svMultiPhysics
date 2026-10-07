@@ -215,6 +215,40 @@ LevelSetCellEvaluation LevelSetCellEvaluator::evaluateLinearCorner(
     }
 }
 
+Real LevelSetCellEvaluator::evaluateLinearCornerValue(
+    GlobalIndex cell_id,
+    const std::array<Real, 3>& parent_coordinate) const
+{
+    try {
+        if (!linear_corner_basis_) {
+            throw std::invalid_argument(
+                "the field element has no supported LinearCorner topology");
+        }
+        const auto& coefficients = cachedCellCoefficients(cell_id);
+        const auto corner_count = linear_corner_basis_->size();
+        if (coefficients.size() < corner_count) {
+            throw std::invalid_argument(
+                "the cell has fewer coefficients than corner vertices");
+        }
+        const auto point = toSpacePoint(parent_coordinate);
+        linear_corner_basis_->evaluate_values(point, linear_corner_values_);
+        if (linear_corner_values_.size() != corner_count) {
+            throw std::invalid_argument(
+                "the LinearCorner basis returned an inconsistent size");
+        }
+        // The accumulation of evaluateLinearCorner().value.
+        Real value{0.0};
+        for (std::size_t i = 0; i < corner_count; ++i) {
+            value += coefficients[i] * linear_corner_values_[i];
+        }
+        return value;
+    } catch (const std::exception& ex) {
+        throw std::invalid_argument(
+            "level-set LinearCorner evaluator could not evaluate cell " +
+            std::to_string(cell_id) + ": " + ex.what());
+    }
+}
+
 LevelSetCellEvaluator makeLevelSetCellEvaluator(
     const systems::FESystem& system,
     FieldId field,
