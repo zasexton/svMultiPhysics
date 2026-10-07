@@ -43,6 +43,7 @@
 #include "Types.h"
 #include "FEConfig.h"
 #include <exception>
+#include <stdexcept>
 #include <string>
 #include <sstream>
 #include <vector>
@@ -472,6 +473,24 @@ private:
     static std::string build_message(const std::string& msg, Real det) {
         return msg + " (Jacobian determinant: " + std::to_string(det) + ")";
     }
+};
+
+/**
+ * @brief The ghost (overlap) layers of the mesh partition do not cover a
+ * distributed stencil, e.g. a small-cut aggregation line whose masters are
+ * missing on a rank that assembles with its slave.
+ *
+ * Throwers decide this collectively from communicator-global data, so every
+ * rank of the communicator throws it together.  It is a property of the
+ * partition and the ghost depth: rolling back or retrying with a smaller
+ * step does not cure it, so callers stop the run with the diagnostic.
+ * Derived from std::runtime_error (not FEException) so that code catching
+ * std::runtime_error or std::exception sees it unchanged.
+ */
+class InsufficientGhostHaloError : public std::runtime_error {
+public:
+    explicit InsufficientGhostHaloError(const std::string& message)
+        : std::runtime_error(message) {}
 };
 
 // ============================================================================
