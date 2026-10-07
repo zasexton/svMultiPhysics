@@ -1347,11 +1347,21 @@ void SimulationBuilder::loadMeshes()
   // preferred root is used and the discretization depends on the partition;
   // every rank owning a row that couples to the slave must carry them too,
   // otherwise its Jacobian rows lose the condensed master columns. Ghost
-  // layers are face-adjacent: on simplices the cells touching an owned vertex
+  // layers are face-adjacent: on triangles the cells touching an owned vertex
   // reach three layers out, the cut cells around a slave three more, and the
   // preferred roots lie at most two cells beyond those in practice, so request
-  // eight layers when the deck leaves <Ghost_layers> unset.
-  constexpr int kAggregationGhostLayers = 8;
+  // eight layers when a 2D deck leaves <Ghost_layers> unset.  A tetrahedral
+  // vertex star spans about five face layers, so 3D decks request 5 + 5 + 2 =
+  // 12: with 8 layers the 3D static sphere (R/h = 8) dropped up to 952
+  // constraint-fill columns per rebuild on 16 ranks, lost condensed master
+  // columns in up to 36 rows and took partition-dependent roots; with 12 none
+  // of these occurred at 16 ranks, in about the same time.
+  constexpr int kAggregationGhostLayers2D = 8;
+  constexpr int kAggregationGhostLayers3D = 12;
+  const int kAggregationGhostLayers =
+      params_.general_simulation_parameters.number_of_spatial_dimensions.value() >= 3
+          ? kAggregationGhostLayers3D
+          : kAggregationGhostLayers2D;
   int minimum_ghost_layers = 0;
   std::optional<application::core::ActiveCutVolumeRequest> free_surface_request;
   if (svmp::MeshComm::world().size() > 1) {
