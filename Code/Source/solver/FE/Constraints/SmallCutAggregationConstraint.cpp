@@ -4207,21 +4207,25 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                                  reuse_shared_measures);
             return;
         }
-        std::ostringstream decision;
-        decision << "SmallCutAggregationConstraint: diagnostic="
-                    "small_cut_aggregation_reuse field='"
-                 << rec.name << "' decision=rebuilt reason="
-                 << (!reuse_inputs.has_value()
-                         ? "not_admissible"
-                         : previous_reuse_record == nullptr
-                               ? "no_previous_refresh"
-                               : !local_record_matches
-                                     ? (previous_reuse_record->key.topology !=
-                                                reuse_inputs->key.topology
-                                            ? "cut_topology_changed"
-                                            : "inputs_changed")
-                                     : "another_rank_changed");
-        FE_LOG_INFO(decision.str());
+        // Detailed diagnostic, printed (at INFO) only when FE_LOG_LEVEL=DEBUG.
+        if (Logger::instance().get_level() <= LogLevel::DEBUG) {
+            std::ostringstream decision;
+            decision << "SmallCutAggregationConstraint: diagnostic="
+                        "small_cut_aggregation_reuse field='"
+                     << rec.name << "' decision=rebuilt reason="
+                     << (!reuse_inputs.has_value()
+                             ? "not_admissible"
+                             : previous_reuse_record == nullptr
+                                   ? "no_previous_refresh"
+                                   : !local_record_matches
+                                         ? (previous_reuse_record->key
+                                                        .topology !=
+                                                    reuse_inputs->key.topology
+                                                ? "cut_topology_changed"
+                                                : "inputs_changed")
+                                         : "another_rank_changed");
+            FE_LOG_INFO(decision.str());
+        }
     }
 
     // 1. Classify cells from this marker's retained volume rules.
@@ -8004,16 +8008,18 @@ void SmallCutAggregationConstraint::publishReusedRefresh(
                 : 0u;
         next_pending_prolongation = std::move(pending);
 
-        std::ostringstream decision;
-        decision << "SmallCutAggregationConstraint: diagnostic="
-                    "small_cut_aggregation_reuse field='"
-                 << record->field_name << "' decision=reused"
-                 << " retained_measures="
-                 << (active_cell_measures_shared ? "shared" : "recomputed")
-                 << " reused_lines=" << record->added_lines.size()
-                 << " canonical_active_cells="
-                 << next_pending_prolongation->active_cells.size();
-        FE_LOG_INFO(decision.str());
+        if (log_aggregation_diagnostics) {
+            std::ostringstream decision;
+            decision << "SmallCutAggregationConstraint: diagnostic="
+                        "small_cut_aggregation_reuse field='"
+                     << record->field_name << "' decision=reused"
+                     << " retained_measures="
+                     << (active_cell_measures_shared ? "shared" : "recomputed")
+                     << " reused_lines=" << record->added_lines.size()
+                     << " canonical_active_cells="
+                     << next_pending_prolongation->active_cells.size();
+            FE_LOG_INFO(decision.str());
+        }
     } catch (...) {
         local_publication_exception = std::current_exception();
     }
