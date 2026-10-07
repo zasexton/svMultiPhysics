@@ -11289,6 +11289,25 @@ void applyAuxiliaryDelta(systems::FESystem& system,
     mgr->syncGhosts();
 }
 
+// Message of a captured exception for failure reports that combine two
+// exceptions (an attempt failure and the failure of its rollback).
+[[nodiscard]] std::string capturedExceptionMessage(
+    const std::exception_ptr& failure)
+{
+    if (!failure) {
+        return "none";
+    }
+    try {
+        std::rethrow_exception(failure);
+    } catch (const FEException& error) {
+        return error.message();
+    } catch (const std::exception& error) {
+        return error.what();
+    } catch (...) {
+        return "non-standard exception";
+    }
+}
+
 } // namespace
 
 ExternalStateOuterGate scaledExternalStateOuterGate(
@@ -12385,10 +12404,12 @@ NewtonReport NewtonSolver::solveStep(
     int outer_relaxation_resets = 0;
 
     bool entry_state_restored = false;
-    auto restoreEntryState = [&]() {
-        if (entry_state_restored) {
-            return;
-        }
+    bool entry_algebraic_state_restored = false;
+    // Restores the algebraic entry state (solution, history, rates, auxiliary
+    // and bordered state); restoreEntryState() then regenerates the generated
+    // state for it.
+    auto restoreEntryAlgebraicState = [&]() {
+        entry_algebraic_state_restored = false;
         system.rollbackGeometricNonlinearityTrial(/*force=*/true);
         FE_THROW_IF(
             system.meshCoordinateTransactionActive(),
@@ -12415,6 +12436,13 @@ NewtonReport NewtonSolver::solveStep(
         // inner-solve state and suppress the initializer on a later retry.
         workspace.static_compatible_pressure_initialized =
             static_compatible_pressure_initialized_at_entry;
+        entry_algebraic_state_restored = true;
+    };
+    auto restoreEntryState = [&]() {
+        if (entry_state_restored) {
+            return;
+        }
+        restoreEntryAlgebraicState();
         system.updateConstraints(solve_time, history.dt());
         synchronizeOuterState(
             NewtonOptions::StateSynchronizationPoint::
@@ -13335,8 +13363,29 @@ NewtonReport NewtonSolver::solveStep(
         try {
             restoreEntryState();
         } catch (...) {
+            const auto rollback_failure = std::current_exception();
+            if (!canonical_entry_defined && entry_algebraic_state_restored) {
+                // The failure occurred while the generated state of the entry
+                // state itself was synchronized, before a canonical entry
+                // existed, and synchronizing the restored (same) entry state
+                // failed again: the failure is determined by that state, not
+                // by the rollback. The algebraic entry state is restored; the
+                // generated state is restored by the caller
+                // (TimeLoop::restoreAcceptedGeneratedState runs for every
+                // FEException from the nonlinear solve), which then retries
+                // with a smaller step or stops with this message.
+                std::throw_with_nested(systems::InvalidStateException(
+                    "NewtonSolver: external-state fixed point could not synchronize the generated state of its entry state: " +
+                    capturedExceptionMessage(original_failure) +
+                    " (synchronizing the restored entry state failed again: " +
+                    capturedExceptionMessage(rollback_failure) + ")"));
+            }
             std::throw_with_nested(systems::InvalidStateException(
-                "NewtonSolver: external-state fixed-point failure was followed by a rollback failure"));
+                "NewtonSolver: external-state fixed-point failure was followed by a rollback failure"
+                " (fixed-point failure: " +
+                capturedExceptionMessage(original_failure) +
+                "; rollback failure: " +
+                capturedExceptionMessage(rollback_failure) + ")"));
         }
         std::rethrow_exception(original_failure);
     }
