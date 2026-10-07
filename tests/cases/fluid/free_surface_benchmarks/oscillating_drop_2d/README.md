@@ -326,11 +326,77 @@ generator at `7e0e6867`, `--max-steps` 10/10/6 at `R/h` = 8/16/32 (serial,
 - Time per step after start-up: 0.95 s (`R/h = 8`, serial), 1.75 s
   (`R/h = 16`, 4 ranks) and 12 s (`R/h = 32`, 4 ranks).
 
-## Expected cost
+## Protocol results (2026-10-07)
 
-From the smoke run: 400 steps take about 6.5 min, 12 min and 80 min at
-`R/h` = 8, 16, 32 (serial, 4, 4 ranks), and the `dt/2` runs (800 steps) at
-most twice that. The protocol job packs the six runs into four lanes on one
-node (13 CPUs: `R/h = 32` at `dt/2`; `R/h = 32` at `dt`; `R/h = 16` at `dt`
-then `dt/2`; `R/h = 8` at `dt` then `dt/2`). Memory is small (2.6 GB peak for
-the whole smoke job).
+Slurm job `46903541` (node `sh02-07n62`, Intel Xeon Gold 5118, 13 CPUs in four
+lanes), binary `svmultiphysics-4cbf2643-ltopgo` (LTO + PGO build of the D26
+fix), cases generated at `231448a3` with the criteria of `7e0e6867`;
+`surface_stress`, PDE transport, kinematic reconciliation, lagged
+normal-increment term, `La = 800`, `eps = 0.01`. All six runs completed
+every step with no rejected step and no non-converged step. Case
+directories, logs, `verify_protocol.{txt,json}` (the gated verdict) and
+`verify_all_reported.{txt,json}` (with the `dt/2` runs at every level) are in
+`$SCRATCH/free-surface-benchmarks/oscillating_drop_2d/protocol-231448a3/`.
+
+**Verdict (`verify.py L8_dt1 L16_dt1 L32_dt1 L32_dt2`): PASS on every
+criterion.**
+
+| Criterion | Result | Limit |
+|---|---|---|
+| `frequency` | 1.37e-4 at `R/h = 32`; observed order 2.15 (pairwise 1.93, 2.37) | 0.02; order 1 |
+| `damping` | 9.09e-4 at `R/h = 32`; observed order 2.40 (pairwise 2.56, 2.24) | 0.05; order 1 |
+| `volume_drift` | at most 3.2e-6 (every level, every logged step) | 1e-4 |
+| all gates at `dt/2`, `R/h = 32` | frequency 1.47e-4, damping 1.75e-3, area 8.4e-7 | as above |
+| `time_step` (`R/h = 32`) | frequency change 2.84e-4, damping change 8.4e-4 | 0.002, 0.01 |
+
+Per run (errors signed, simulation minus reference, relative to the fitted
+exact history at `R_eff`; the reference fit at `R/h = 32` is
+`omega = 2.42536`, `beta = 0.176642`):
+
+| R/h | dt | omega | omega error | beta | beta error | RMS `a_h/a_h(0) - a/a0` | max `dA/A` | steps | wall (ranks) | outer passes, mean (max) | Newton per step | GMRES per Newton |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---|---|---:|---:|
+| 8 | `dt` | 2.43588 | +2.70e-3 | 0.18151 | +2.53e-2 | 1.03e-2 | 1.5e-6 | 400 | 425 s (1) | 3.71 (5) | 3.46 | 59 |
+| 16 | `dt` | 2.42796 | +7.08e-4 | 0.17749 | +4.29e-3 | 2.15e-3 | 2.6e-6 | 400 | 694 s (4) | 4.38 (6) | 4.07 | 105 |
+| 32 | `dt` | 2.42503 | -1.37e-4 | 0.17680 | +9.09e-4 | 5.41e-4 | 3.2e-6 | 400 | 3,746 s (4) | 4.92 (6) | 5.12 | 340 |
+| 8 | `dt/2` | 2.43558 | +2.58e-3 | 0.18252 | +3.11e-2 | 1.05e-2 | 1.2e-6 | 800 | 565 s (1) | 3.20 (4) | 2.57 | 56 |
+| 16 | `dt/2` | 2.42822 | +8.13e-4 | 0.17775 | +5.79e-3 | 2.57e-3 | 7.8e-7 | 800 | 1,004 s (4) | 3.76 (5) | 3.11 | 100 |
+| 32 | `dt/2` | 2.42572 | +1.47e-4 | 0.17695 | +1.75e-3 | 5.27e-4 | 8.4e-7 | 800 | 5,241 s (4) | 4.56 (7) | 4.43 | 217 |
+
+Reported, not gated:
+
+- The `dt/2` study alone also passes every criterion with orders 2.07
+  (frequency) and 2.08 (damping) (`verify_all_reported.txt`).
+- Time errors from the two steps (`(4/3)(e(dt) - e(dt/2))`, assuming
+  second order in `dt`): frequency +1.6e-4, -1.4e-4, -3.8e-4 and damping
+  -7.7e-3, -2.0e-3, -1.1e-3 at `R/h` = 8, 16, 32. With them removed the
+  spatial errors are 2.5e-3, 8.5e-4, 2.4e-4 in frequency (orders 1.6, 1.8)
+  and 3.3e-2, 6.3e-3, 2.0e-3 in damping (orders 2.4, 1.6). The frequency
+  error at `R/h = 32` is thus at the level of the time error even at 100
+  steps per period, which changes its sign at `dt`; the gated order 2.15
+  is helped by that sign change, the time-corrected order (about 1.7) is
+  still above 1.
+- Against the reference at the nominal `R = 1` instead of `R_eff`: frequency
+  4.5e-3, 1.2e-3, 1.9e-5 and damping 2.8e-2, 4.9e-3, 1.1e-3 at `dt`.
+- The `sin(2 theta)` component stays at the static mesh-induced level
+  (1.2e-2, 3.8e-3, 6.2e-4 `a0` at most); the centroid drifts by at most
+  2.0e-4, 6.3e-5, 5.1e-5 R; the fit residuals are 1.5e-5 to 2.0e-5 R (0.2%
+  of `a0`).
+- Warnings: the geometric `ActiveFluid/WetVolumeFraction disagreement`
+  diagnostic (57, 10 and 73 steps at `R/h` = 8, 16, 32). On 4 ranks at
+  `R/h = 32` only, `FESystem: constraint sparsity refresh
+  diagnostic=off_rank_constraint_fill_outside_halo` with 2 to 20 rejected
+  columns ("increase <Ghost_layers>") at the same physical times in both
+  runs (`t` = 0.92 to 1.03 and 1.54 to 1.64); every step still converged.
+  A serial run of the `R/h = 32` `dt` deck (job `46914683`) checks that the
+  result does not depend on it.
+
+## Cost
+
+Measured in job `46903541` (Xeon Gold 5118, 4 ranks at `R/h` = 16 and 32,
+serial at 8; table above): 7, 12 and 62 min at `dt` and 9, 17 and 87 min at
+`dt/2` for `R/h` = 8, 16, 32. The whole protocol (four lanes, 13 CPUs) took
+1 h 28 min; peak memory of the job was 4.4 GB. GMRES iterations per Newton
+iteration grow with the level (59, 105, 340 at `dt`) and fall with the step
+(217 at `dt/2`, `R/h = 32`), so `R/h = 32` dominates the cost. The log is
+0.16, 0.35 and 0.38 MB per step at `R/h` = 8, 16, 32 before compression
+(`gzip -1` reduces it about sixfold).
