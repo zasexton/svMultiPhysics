@@ -185,6 +185,16 @@ if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
     ENVIRONMENT ${_application_mpi_env}
   )
 
+  # Distributed component solves of the PDE velocity extension (component c
+  # on rank c) need at least three ranks.
+  svmp_add_gtest(Application_PdeVelocityExtension_MPI_4
+    TARGET test_application_mpi
+    MPI_RANKS 4
+    FILTER "LevelSetPdeVelocityExtensionMPI.FourRank*"
+    TIMEOUT 600
+    ENVIRONMENT ${_application_mpi_env}
+  )
+
   # End-to-end rank-count check of unfitted free-surface runs: generated
   # static-drop, capillary-wave and sessile-drop decks, a few steps of
   # svmultiphysics on 1, 2 and 4 ranks, fields and Newton counts compared

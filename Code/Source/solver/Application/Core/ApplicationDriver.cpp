@@ -18661,6 +18661,28 @@ bool usesTraceSeedVelocityExtension(std::string_view method)
              .has_value();
 }
 
+// SVMP_PDE_EXTENSION_FACTORIZATION selects the dry-region factorization of
+// the PDE velocity extension: lu_colamd (default) or the opt-in ldlt_amd.
+application::core::PdeVelocityExtensionFactorization
+pdeVelocityExtensionFactorizationSetting()
+{
+  static const auto setting = [] {
+    const char* text = std::getenv("SVMP_PDE_EXTENSION_FACTORIZATION");
+    if (text == nullptr || text[0] == '\0') {
+      return application::core::PdeVelocityExtensionFactorization::LuColamd;
+    }
+    const auto parsed =
+        application::core::pdeVelocityExtensionFactorizationFromToken(text);
+    if (!parsed.has_value()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] SVMP_PDE_EXTENSION_FACTORIZATION='" +
+          std::string(text) + "' is not one of lu_colamd, ldlt_amd.");
+    }
+    return *parsed;
+  }();
+  return setting;
+}
+
 bool updateLevelSetAdvectionVelocitiesFromState(
     application::core::SimulationComponents& sim,
     const svmp::FE::systems::SystemStateView& state,
@@ -19219,7 +19241,8 @@ bool updateLevelSetAdvectionVelocitiesFromState(
                                    ? request.extension_band_layers
                                    : 0,
                 .enforce_wall_impermeability =
-                    request.enforce_wall_impermeability},
+                    request.enforce_wall_impermeability,
+                .factorization = pdeVelocityExtensionFactorizationSetting()},
             extended,
             pde_algebraic ? &algebraic_rows : nullptr,
             &pde_extension_cache,
@@ -19256,10 +19279,31 @@ bool updateLevelSetAdvectionVelocitiesFromState(
               << " max_wall_normal_velocity="
               << pde_report.max_wall_normal_velocity
               << " reused_factorization=" << pde_report.reused_factorization
+              << " distributed_solves=" << pde_report.distributed_solves
+              << " factorization="
+              << application::core::pdeVelocityExtensionFactorizationName(
+                     pdeVelocityExtensionFactorizationSetting())
+              << " cache_entries=" << pde_report.cache_entries
+              << " cache_capacity="
+              << pde_extension_cache.capacity(pde_report.distributed_solves)
               << " cache_hits=" << pde_extension_cache.statistics().hits
               << " cache_misses=" << pde_extension_cache.statistics().misses
               << " cache_bytes=" << pde_extension_cache.statistics().bytes
+              << " cache_peak_bytes="
+              << pde_extension_cache.statistics().peak_bytes
+              << " solution_hash=" << pde_report.solution_hash
+              << " elapsed_s=" << pde_report.elapsed_seconds
+              << " component_solve_s=" << pde_report.component_solve_seconds
               << std::endl;
+        }
+        if (pde_report.self_checked) {
+          application::core::oopCout()
+              << "[svMultiPhysics::Application] PDE velocity extension "
+                 "self-check diagnostic=pde_extension_self_check"
+              << " reused_factorization=" << pde_report.reused_factorization
+              << " distributed_solves=" << pde_report.distributed_solves
+              << " cache_entries=" << pde_report.cache_entries
+              << " mismatches=0" << std::endl;
         }
       } else if (algebraic_extension) {
         std::uint64_t free_surface_geometry_revision = 0u;

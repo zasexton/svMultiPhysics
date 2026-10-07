@@ -14,11 +14,13 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <numbers>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -779,4 +781,246 @@ TEST(LevelSetPdeVelocityExtensionCache, AFailedCallLeavesTheCacheEmpty)
   EXPECT_THROW((void)runCached(*mesh, good, op, tangential, &cache),
                std::runtime_error);
   EXPECT_TRUE(cache.empty());
+}
+
+namespace {
+
+// Sets an environment variable for the lifetime of the object.
+class ScopedEnvironment {
+public:
+  ScopedEnvironment(const char* name, const char* value) : name_(name)
+  {
+    if (const char* previous = std::getenv(name); previous != nullptr) {
+      previous_ = std::string(previous);
+    }
+    ::setenv(name, value, 1);
+  }
+  ~ScopedEnvironment()
+  {
+    if (previous_.has_value()) {
+      ::setenv(name_, previous_->c_str(), 1);
+    } else {
+      ::unsetenv(name_);
+    }
+  }
+  ScopedEnvironment(const ScopedEnvironment&) = delete;
+  ScopedEnvironment& operator=(const ScopedEnvironment&) = delete;
+
+private:
+  const char* name_;
+  std::optional<std::string> previous_;
+};
+
+// Known set of the wavy interface plus the interior vertices with
+// x in (x0, x1) and y > 0.7 (a dry patch that becomes known).
+Setup patchedSetup(const svmp::Mesh& mesh, double x0, double x1)
+{
+  auto s = makeSetup(mesh, wavyPhi, firstVelocity);
+  for (std::size_t v = 0; v < mesh.n_vertices(); ++v) {
+    const auto p = vertexPoint(mesh, v);
+    if (p[0] > x0 && p[0] < x1 && p[1] > 0.7 && p[1] < 0.95) {
+      s.known[v] = 1u;
+    }
+  }
+  return s;
+}
+
+CachedRun runWithFactorization(
+    const svmp::Mesh& mesh, const Setup& s, PdeVelocityExtensionOperator op,
+    const std::vector<WallVelocityExtensionConstraint>& walls,
+    PdeVelocityExtensionCache* cache,
+    application::core::PdeVelocityExtensionFactorization factorization)
+{
+  CachedRun out;
+  PdeVelocityExtensionOptions options;
+  options.op = op;
+  options.enforce_wall_impermeability = !walls.empty();
+  options.factorization = factorization;
+  out.report = extendVelocityByPde(
+      mesh, svmp::MeshComm::self(), s.phi, s.source, 2u, s.known, 2u,
+      std::span<const WallVelocityExtensionConstraint>(walls), options,
+      out.extended, &out.rows, cache, {});
+  return out;
+}
+
+} // namespace
+
+TEST(LevelSetPdeVelocityExtensionCache, KeepsRecentEntriesUpToItsCapacity)
+{
+  const auto mesh = makeSquareTriangleMesh(10);
+  const auto a = patchedSetup(*mesh, 0.05, 0.3);
+  const auto b = patchedSetup(*mesh, 0.35, 0.6);
+  const auto c = patchedSetup(*mesh, 0.65, 0.95);
+  const auto& walls = cacheTestWalls();
+  const auto op = PdeVelocityExtensionOperator::Harmonic;
+  PdeVelocityExtensionCache cache(2u);
+  EXPECT_EQ(cache.capacity(false), 2u);
+  EXPECT_EQ(cache.capacity(true), 2u);
+
+  struct Step {
+    const decltype(a)* setup;
+    bool hit;
+    std::size_t entries;
+    const char* what;
+  };
+  // Most recently used first: A, B -> [B A]; A -> [A B]; B -> [B A];
+  // C evicts A -> [C B]; A evicts B -> [A C]; C -> [C A]; B evicts A.
+  const std::vector<Step> steps{
+      {&a, false, 1u, "A"},       {&b, false, 2u, "B"},
+      {&a, true, 2u, "A again"},  {&b, true, 2u, "B again"},
+      {&c, false, 2u, "C"},       {&a, false, 2u, "A evicted"},
+      {&c, true, 2u, "C kept"},   {&b, false, 2u, "B evicted"}};
+  std::uint64_t hits = 0u;
+  for (const auto& step : steps) {
+    SCOPED_TRACE(step.what);
+    const auto cached = runCached(*mesh, *step.setup, op, walls, &cache);
+    EXPECT_EQ(cached.report.reused_factorization, step.hit);
+    EXPECT_FALSE(cached.report.distributed_solves);
+    EXPECT_EQ(cached.report.cache_entries, step.entries);
+    EXPECT_EQ(cache.size(), step.entries);
+    expectBitwiseEqual(cached, runCached(*mesh, *step.setup, op, walls, nullptr));
+    hits += step.hit ? 1u : 0u;
+  }
+  EXPECT_EQ(cache.statistics().hits, hits);
+  EXPECT_EQ(cache.statistics().misses, steps.size() - hits);
+  EXPECT_GE(cache.statistics().peak_bytes, cache.statistics().bytes);
+
+  // Capacity 1 keeps only the last entry.
+  PdeVelocityExtensionCache single(1u);
+  EXPECT_FALSE(runCached(*mesh, a, op, walls, &single).report.reused_factorization);
+  EXPECT_FALSE(runCached(*mesh, b, op, walls, &single).report.reused_factorization);
+  EXPECT_FALSE(runCached(*mesh, a, op, walls, &single).report.reused_factorization);
+  EXPECT_TRUE(runCached(*mesh, a, op, walls, &single).report.reused_factorization);
+  EXPECT_EQ(single.size(), 1u);
+
+  // The capacity is clamped to [1, kMaxEntries]; the environment sets the
+  // default, which otherwise depends on distributed solves.
+  EXPECT_EQ(PdeVelocityExtensionCache(0u).capacity(false), 1u);
+  EXPECT_EQ(PdeVelocityExtensionCache(100u).capacity(true),
+            PdeVelocityExtensionCache::kMaxEntries);
+  {
+    ScopedEnvironment entries("SVMP_PDE_EXTENSION_CACHE_ENTRIES", "5");
+    EXPECT_EQ(PdeVelocityExtensionCache().capacity(false), 5u);
+    EXPECT_EQ(PdeVelocityExtensionCache().capacity(true), 5u);
+  }
+  {
+    ScopedEnvironment entries("SVMP_PDE_EXTENSION_CACHE_ENTRIES", "bogus");
+    EXPECT_EQ(PdeVelocityExtensionCache().capacity(false),
+              PdeVelocityExtensionCache::kDefaultEntries);
+    EXPECT_EQ(PdeVelocityExtensionCache().capacity(true),
+              PdeVelocityExtensionCache::kDefaultDistributedEntries);
+  }
+}
+
+TEST(LevelSetPdeVelocityExtensionCache, AFailureDropsEveryEntry)
+{
+  const auto mesh = makeSquareTriangleMesh(8);
+  const auto a = patchedSetup(*mesh, 0.05, 0.3);
+  const auto b = patchedSetup(*mesh, 0.35, 0.6);
+  const auto& walls = cacheTestWalls();
+  const auto op = PdeVelocityExtensionOperator::Harmonic;
+  PdeVelocityExtensionCache cache(3u);
+  (void)runCached(*mesh, a, op, walls, &cache);
+  (void)runCached(*mesh, b, op, walls, &cache);
+  ASSERT_EQ(cache.size(), 2u);
+  const std::vector<WallVelocityExtensionConstraint> tangential{
+      {.boundary_label = kSideWall, .constrained_components = {false, true, false}}};
+  EXPECT_THROW((void)runCached(*mesh, a, op, tangential, &cache),
+               std::runtime_error);
+  EXPECT_TRUE(cache.empty());
+  EXPECT_EQ(cache.statistics().bytes, 0u);
+}
+
+TEST(LevelSetPdeVelocityExtensionCache, SelfCheckComparesWithTheUncachedSolve)
+{
+  const auto mesh = makeSquareTriangleMesh(10);
+  const auto first = makeSetup(*mesh, wavyPhi, firstVelocity);
+  const auto second = makeSetup(*mesh, wavyPhi, secondVelocity);
+  const auto& walls = cacheTestWalls();
+  const auto op = PdeVelocityExtensionOperator::Harmonic;
+  PdeVelocityExtensionCache cache(2u);
+  {
+    const auto off = runCached(*mesh, first, op, walls, &cache);
+    EXPECT_FALSE(off.report.self_checked);
+  }
+  ScopedEnvironment self_check("SVMP_PDE_EXTENSION_SELF_CHECK", "1");
+  const auto hit = runCached(*mesh, second, op, walls, &cache);
+  EXPECT_TRUE(hit.report.reused_factorization);
+  EXPECT_TRUE(hit.report.self_checked);
+  const auto uncached = runCached(*mesh, second, op, walls, nullptr);
+  EXPECT_FALSE(uncached.report.self_checked);
+  expectBitwiseEqual(hit, uncached);
+}
+
+TEST(LevelSetPdeVelocityExtension, ParsesFactorizationTokens)
+{
+  using application::core::PdeVelocityExtensionFactorization;
+  using application::core::pdeVelocityExtensionFactorizationFromToken;
+  using application::core::pdeVelocityExtensionFactorizationName;
+  EXPECT_EQ(pdeVelocityExtensionFactorizationFromToken("lu_colamd"),
+            PdeVelocityExtensionFactorization::LuColamd);
+  EXPECT_EQ(pdeVelocityExtensionFactorizationFromToken("Default"),
+            PdeVelocityExtensionFactorization::LuColamd);
+  EXPECT_EQ(pdeVelocityExtensionFactorizationFromToken("LDLT-AMD"),
+            PdeVelocityExtensionFactorization::LdltAmd);
+  EXPECT_EQ(pdeVelocityExtensionFactorizationFromToken("ldlt"),
+            PdeVelocityExtensionFactorization::LdltAmd);
+  EXPECT_FALSE(pdeVelocityExtensionFactorizationFromToken("cholmod").has_value());
+  EXPECT_EQ(pdeVelocityExtensionFactorizationName(
+                PdeVelocityExtensionFactorization::LdltAmd),
+            "ldlt_amd");
+}
+
+TEST(LevelSetPdeVelocityExtension, LdltFactorizationAgreesWithLuToRoundOff)
+{
+  using application::core::PdeVelocityExtensionFactorization;
+  const auto mesh = makeSquareTriangleMesh(16, 0.03);
+  const auto first = makeSetup(*mesh, wavyPhi, firstVelocity);
+  const auto second = makeSetup(*mesh, wavyPhi, secondVelocity);
+  const auto& walls = cacheTestWalls();
+  for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
+                        PdeVelocityExtensionOperator::LeastSquaresNormal}) {
+    SCOPED_TRACE(std::string(
+        application::core::pdeVelocityExtensionOperatorName(op)));
+    PdeVelocityExtensionCache cache(2u);
+    const auto lu = runWithFactorization(*mesh, first, op, walls, nullptr,
+                                         PdeVelocityExtensionFactorization::LuColamd);
+    const auto ldlt = runWithFactorization(
+        *mesh, first, op, walls, &cache, PdeVelocityExtensionFactorization::LdltAmd);
+    const auto ldlt_uncached = runWithFactorization(
+        *mesh, first, op, walls, nullptr, PdeVelocityExtensionFactorization::LdltAmd);
+    expectBitwiseEqual(ldlt, ldlt_uncached);
+    const bool harmonic = op == PdeVelocityExtensionOperator::Harmonic;
+    EXPECT_LT(ldlt.report.max_relative_residual, harmonic ? 1e-12 : 1e-10);
+    ASSERT_EQ(lu.extended.size(), ldlt.extended.size());
+    double scale = 0.0;
+    double difference = 0.0;
+    for (std::size_t i = 0; i < lu.extended.size(); ++i) {
+      scale = std::max(scale, std::abs(lu.extended[i]));
+      difference = std::max(difference, std::abs(lu.extended[i] - ldlt.extended[i]));
+    }
+    EXPECT_LE(difference, (harmonic ? 1e-12 : 1e-8) * std::max(scale, 1.0));
+    // The rows do not depend on the factorization.
+    ASSERT_EQ(lu.rows.size(), ldlt.rows.size());
+    for (std::size_t r = 0; r < lu.rows.size(); ++r) {
+      ASSERT_EQ(lu.rows[r].dependencies.size(), ldlt.rows[r].dependencies.size());
+      for (std::size_t d = 0; d < lu.rows[r].dependencies.size(); ++d) {
+        EXPECT_TRUE(sameBits(lu.rows[r].dependencies[d].coefficient,
+                             ldlt.rows[r].dependencies[d].coefficient));
+      }
+    }
+    // Reuse of the LDLT entry; an LU call does not reuse it.
+    const auto ldlt_hit = runWithFactorization(
+        *mesh, second, op, walls, &cache, PdeVelocityExtensionFactorization::LdltAmd);
+    EXPECT_TRUE(ldlt_hit.report.reused_factorization);
+    expectBitwiseEqual(ldlt_hit,
+                       runWithFactorization(*mesh, second, op, walls, nullptr,
+                                            PdeVelocityExtensionFactorization::LdltAmd));
+    const auto lu_cached = runWithFactorization(
+        *mesh, second, op, walls, &cache, PdeVelocityExtensionFactorization::LuColamd);
+    EXPECT_FALSE(lu_cached.report.reused_factorization);
+    expectBitwiseEqual(lu_cached,
+                       runWithFactorization(*mesh, second, op, walls, nullptr,
+                                            PdeVelocityExtensionFactorization::LuColamd));
+  }
 }

@@ -20,7 +20,10 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <optional>
+#include <string>
 #include <map>
 #include <memory>
 #include <vector>
@@ -197,6 +200,8 @@ struct PdeCachedRun {
   std::vector<double> extended;
   std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> rows;
   bool reused{false};
+  bool distributed{false};
+  bool self_checked{false};
 };
 
 // Known set as in extend(), plus the vertices at the given (i, j) lattice
@@ -250,6 +255,8 @@ PdeCachedRun extendCached(const svmp::Mesh& mesh, const svmp::MeshComm& comm,
       application::core::PdeVelocityExtensionMeshRevisions{
           .geometry = 1u, .topology = 1u, .ownership = 1u, .numbering = 1u});
   out.reused = report.reused_factorization;
+  out.distributed = report.distributed_solves;
+  out.self_checked = report.self_checked;
   return out;
 }
 
@@ -368,5 +375,170 @@ TEST(LevelSetPdeVelocityExtensionMPI, CacheReuseDecisionIsCollective)
     check(1.0, {lone}, false, "known set changed on one rank");
     check(1.25, {lone}, true, "reuse of the new known set");
     check(1.25, {}, false, "known set restored");
+  }
+}
+
+namespace {
+
+class ScopedEnvironment {
+public:
+  ScopedEnvironment(const char* name, const char* value) : name_(name)
+  {
+    if (const char* previous = std::getenv(name); previous != nullptr) {
+      previous_ = std::string(previous);
+    }
+    ::setenv(name, value, 1);
+  }
+  ~ScopedEnvironment()
+  {
+    if (previous_.has_value()) {
+      ::setenv(name_, previous_->c_str(), 1);
+    } else {
+      ::unsetenv(name_);
+    }
+  }
+  ScopedEnvironment(const ScopedEnvironment&) = delete;
+  ScopedEnvironment& operator=(const ScopedEnvironment&) = delete;
+
+private:
+  const char* name_;
+  std::optional<std::string> previous_;
+};
+
+std::pair<bool, bool> flagOverRanks(bool flag) { return reuseOverRanks(flag); }
+
+} // namespace
+
+// Four ranks: rank c factorizes and solves component c and broadcasts the
+// solution; the result must equal the replicated uncached solve bit for bit,
+// with several cache entries and collective reuse decisions.
+TEST(LevelSetPdeVelocityExtensionMPI, FourRankDistributedSolvesMatchTheReplicatedSolve)
+{
+  int size = 1;
+  int rank = 0;
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  if (size != 4) {
+    GTEST_SKIP() << "This test requires exactly four ranks.";
+  }
+
+  const auto arrays = makePdeArrays();
+  auto distributed = std::make_shared<svmp::Mesh>(svmp::MeshComm(MPI_COMM_WORLD));
+  distributed->build_from_arrays_global_and_partition(
+      2, arrays.x, arrays.offsets, arrays.connectivity, arrays.shapes,
+      svmp::PartitionHint::Cells, /*ghost_layers=*/3,
+      {{"partition_method", "block"}});
+  labelSideWalls(*distributed);
+  const svmp::MeshComm comm(MPI_COMM_WORLD);
+
+  // A dry vertex owned by exactly one rank's local mesh (see the two-rank
+  // test): marking it known changes one rank's contribution only.
+  std::vector<std::pair<long long, long long>> lone_candidates;
+  for (long long i = 1; i < kPdeCells; ++i) {
+    lone_candidates.emplace_back(i, kPdeCells - 1);
+  }
+  std::pair<long long, long long> lone{-1, -1};
+  for (const auto& candidate : lone_candidates) {
+    int present = 0;
+    const auto& X = distributed->X_ref();
+    for (std::size_t v = 0; v < distributed->n_vertices(); ++v) {
+      if (std::llround(X[2 * v] * kPdeCells) == candidate.first &&
+          std::llround(X[2 * v + 1] * kPdeCells) == candidate.second) {
+        present = 1;
+      }
+    }
+    if (globalSum(present) == 1) {
+      lone = candidate;
+      break;
+    }
+  }
+  const std::pair<long long, long long> other{kPdeCells / 2, kPdeCells - 2};
+
+  for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
+                        PdeVelocityExtensionOperator::LeastSquaresNormal}) {
+    SCOPED_TRACE(application::core::pdeVelocityExtensionOperatorName(op));
+    application::core::PdeVelocityExtensionCache cache(3u);
+    const auto check = [&](double scale,
+                           const std::vector<std::pair<long long, long long>>& extra,
+                           bool expect_reuse, const char* what) {
+      SCOPED_TRACE(what);
+      const auto cached = extendCached(*distributed, comm, op, scale, extra, &cache);
+      const auto reference =
+          extendCached(*distributed, comm, op, scale, extra, nullptr);
+      const auto [all, any] = reuseOverRanks(cached.reused);
+      EXPECT_EQ(all, any) << "ranks disagree on reuse";
+      EXPECT_EQ(all, expect_reuse);
+      const auto [all_distributed, any_distributed] =
+          flagOverRanks(cached.distributed);
+      EXPECT_TRUE(all_distributed);
+      EXPECT_TRUE(any_distributed);
+      EXPECT_FALSE(reference.distributed);
+      EXPECT_EQ(globalSum(bitwiseMismatches(cached, reference)), 0);
+    };
+
+    check(1.0, {}, false, "first call");
+    check(1.5, {}, true, "new velocity");
+    check(1.0, {other}, false, "second known set");
+    check(0.75, {}, true, "first known set kept");
+    check(1.25, {other}, true, "second known set kept");
+    if (lone.first >= 0) {
+      // Entries, most recently used first: [B A] -> C: [C B A] -> A: [A C B]
+      // -> B: [B A C] -> D evicts C: [D B A] -> C again is rebuilt.
+      check(1.0, {lone}, false, "known set changed on one rank");
+      check(1.0, {}, true, "first known set still kept");
+      check(2.0, {other}, true, "second known set still kept");
+      check(1.0, {other, lone}, false, "fourth known set evicts the oldest");
+      check(1.5, {lone}, false, "evicted known set is rebuilt");
+    }
+    // One rank drops its entries: the next call refactors on every rank.
+    if (rank == 2) {
+      cache.clear();
+    }
+    check(0.5, {}, false, "entries dropped on rank 2");
+    check(2.0, {}, true, "reuse after the collective rebuild");
+
+    {
+      ScopedEnvironment self_check("SVMP_PDE_EXTENSION_SELF_CHECK", "1");
+      const auto checked = extendCached(*distributed, comm, op, 1.75, {}, &cache);
+      const auto [all_checked, any_checked] = flagOverRanks(checked.self_checked);
+      EXPECT_TRUE(all_checked);
+      EXPECT_TRUE(any_checked);
+    }
+    {
+      ScopedEnvironment replicated("SVMP_PDE_EXTENSION_REPLICATED_SOLVES", "1");
+      application::core::PdeVelocityExtensionCache replicated_cache(2u);
+      const auto miss =
+          extendCached(*distributed, comm, op, 1.0, {}, &replicated_cache);
+      const auto hit =
+          extendCached(*distributed, comm, op, 1.5, {}, &replicated_cache);
+      const auto [any_miss_distributed, unused] = flagOverRanks(miss.distributed);
+      (void)unused;
+      EXPECT_FALSE(any_miss_distributed);
+      EXPECT_EQ(reuseOverRanks(hit.reused).first, true);
+      EXPECT_EQ(globalSum(bitwiseMismatches(
+                    miss, extendCached(*distributed, comm, op, 1.0, {}, nullptr))),
+                0);
+      EXPECT_EQ(globalSum(bitwiseMismatches(
+                    hit, extendCached(*distributed, comm, op, 1.5, {}, nullptr))),
+                0);
+    }
+    // A failure on the rank that solves component 1 is raised on every rank,
+    // and every rank drops its entries.
+    {
+      ScopedEnvironment failure("SVMP_PDE_EXTENSION_FAIL_COMPONENT", "1");
+      int threw = 0;
+      std::string message;
+      try {
+        (void)extendCached(*distributed, comm, op, 3.0, {other}, &cache);
+      } catch (const std::runtime_error& error) {
+        threw = 1;
+        message = error.what();
+      }
+      EXPECT_EQ(globalSum(threw), size);
+      EXPECT_NE(message.find("injected failure of component 1"), std::string::npos)
+          << message;
+      EXPECT_TRUE(cache.empty());
+    }
+    check(1.0, {}, false, "after the failure");
   }
 }
