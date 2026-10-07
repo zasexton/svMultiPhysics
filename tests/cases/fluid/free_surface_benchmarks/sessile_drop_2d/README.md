@@ -126,9 +126,18 @@ step. The solver treats that as a normal event (branch `dev/vertex-crossing`):
 - Inside a step, each outer fixed-point pass regenerates the cut geometry.
   When the topology differs from the one the inner Newton solve used, the
   solve restarts on the new topology. The number of such restarts per step
-  is bounded by the outer iteration limit (12) by default;
+  is bounded by the outer pass limit by default;
   `GeneralSimulationParameters/Max_cut_topology_restarts_per_step` overrides
   it (0 restores the old stop-and-reject behaviour).
+- The outer pass limit is 30 (`GeneralSimulationParameters/
+  Outer_fixed_point_max_passes`; 12 before decision D28, 2026-10-07). From
+  pass 12 on, the outer updates are Aitken-relaxed
+  (`Outer_fixed_point_relaxation_start_pass`, 0 = off, 1 = every update), so
+  a step accepted within 12 passes is bitwise identical to the earlier
+  default. The relaxation removes the alternating contact-line mode (an
+  oscillating sliver cut cell) that made `R/h >= 32` steps stall at the old
+  12-pass limit; the results below that mention the 12-pass limit predate
+  D28.
 - A topology change found in the initial canonicalization of an attempt (the
   generalized-alpha stage predictor `u_n + alpha_f dt uDot_n`, or the
   backward-Euler start `u_n`) is adopted instead of rejecting the attempt.

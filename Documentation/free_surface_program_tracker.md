@@ -465,6 +465,21 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   - Seen at R/h = 32 (120° current protocol at t = 7.9; 60° at larger steps) and R/h = 64 (60° at t = 0.39). Steps hit the 12-pass cap while still contracting slowly: about 0.41 per pass, or about 0.8 with an oscillating sliver cut cell.
   - The existing opt-in Aitken relaxation took 7 passes on one such step, where a cap of 20 needed 13.
   - The outer-pass agent is evaluating a higher cap, relaxation, the predictor and a sliver fix. The sessile resolution study waits for it.
+- **D28, 2026-10-07 (user's auto-approval window): outer-loop stagnation fixed with a higher pass limit and deferred Aitken relaxation; the default changes, bitwise on every step accepted within 12 passes.**
+  - **Diagnosis:** the slow mode alternates sign (contraction λ ≈ −0.43 at R/h = 32 60°; −0.74 to −1.08 at R/h = 32 120°, where plain iteration slowly diverges). The driver is a sliver cut cell at the contact line whose active fraction alternates between passes (about 2e-5 to 4e-4).
+  - **Change:** `Outer_fixed_point_max_passes` defaults to 30 (was 12) and `Outer_fixed_point_relaxation_start_pass` to 12 (0 = off, 1 = every update). The cut-topology restart limit follows the pass limit.
+  - **Effect on earlier results:** steps that converge within 12 passes never reach a relaxed update, so every run that completed before is bitwise identical. Only steps that previously failed, or that adaptive runs previously retried with a smaller step, now converge at their own step.
+  - **Evidence (4 ranks):**
+    - every reproducible stall completes: R/h = 32 60° at 2dt, 200 steps, at most 13 passes; R/h = 32 120° restart, 150 steps, at most 19; R/h = 64 60° dt/2 restart, 60 steps;
+    - 1, 2 and 4 ranks agree to 2.4e-13;
+    - the result differs from plain 30-pass iteration by 4e-7 (velocity), against a tolerance-level spread of 1–5e-5;
+    - reference set bitwise identical, CTest 88/88, `test_fe_timestepping` 284/284.
+  - **Rejected:**
+    - a higher cap alone: R/h = 32 120° still fails at 30 passes;
+    - the predictor: R/h = 32 120° still fails;
+    - a sliver prune threshold, which would change the discretization;
+    - relaxing every update stays opt-in: it is faster (up to 37%) but moves the R/h = 32 120° result 10–50× more.
+  - **Caveat:** in the late R/h = 32 120° regime, tolerance-level perturbations grow (phi differences of about 1.5e-3, and local velocity up to 10%). The M4 angle results there must be read with that sensitivity in mind.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
