@@ -1150,8 +1150,17 @@ class LinearSolverParameters : public ParameterLists
     Parameter<std::string> ns_momentum_approximation;
     Parameter<bool> ns_use_coupled_outer_fgmres;
 
-    /// Opt-in Krylov right preconditioner (new OOP solver): none, block-ilu0, simple.
+    /// Opt-in Krylov right preconditioner (new OOP solver): none, block-ilu0, simple, amg.
     Parameter<std::string> right_preconditioner;
+    /// Right_preconditioner=amg settings (new OOP solver): Chebyshev degree,
+    /// coarsest global node count, level limit, prolongator (smoothed or
+    /// plain) and power iterations for the smoother bound (0: inf-norm bound).
+    Parameter<int> amg_smoother_degree;
+    Parameter<int> amg_coarse_nodes;
+    Parameter<int> amg_max_levels;
+    Parameter<std::string> amg_prolongator;
+    Parameter<int> amg_lambda_iterations;
+    Parameter<double> amg_strength_threshold;
     /// Opt-in reuse of preconditioners/factorizations across solves (new OOP solver).
     Parameter<bool> preconditioner_reuse;
     /// Opt-in inexact Newton forcing of the linear tolerance (new OOP solver):

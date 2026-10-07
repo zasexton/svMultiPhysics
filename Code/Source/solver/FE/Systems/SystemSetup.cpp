@@ -1603,6 +1603,9 @@ struct NodalInterleavedDofMap {
     std::vector<unsigned char> node_is_relevant{};
     std::vector<unsigned char> node_is_ghost{};
     std::vector<int> node_owner_rank{};
+    // Partition-independent key per backend node (DofPermutation::node_key);
+    // empty when a node has no vertex coordinates.
+    std::vector<std::uint64_t> node_key{};
 
     [[nodiscard]] bool isGhostNode(int node) const noexcept
     {
@@ -2304,6 +2307,38 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
         }
         if (comp_offset != dof_per_node) {
             return fail("comp_offset != dof_per_node");
+        }
+    }
+
+    // Partition-independent node keys from the vertex coordinates, for
+    // preconditioners whose construction must not depend on the partition.
+    {
+        std::vector<std::uint64_t> local_keys(static_cast<std::size_t>(n_nodes), 0u);
+        int missing = 0;
+        for (const auto& rec : owned_recs) {
+            const auto it = fe_node_to_backend.find(rec.node);
+            const GlobalIndex fe0 = field_map.componentToGlobal(0, 0, rec.node);
+            bool found = false;
+            if (it != fe_node_to_backend.end() && emap != nullptr && fe0 >= 0) {
+                if (const auto ent = emap->getDofEntity(fe0); ent && ent->kind == dofs::EntityKind::Vertex) {
+                    const auto p = mesh.getNodeCoordinates(ent->id);
+                    std::uint64_t key = backends::nodeKeyFromCoordinates(
+                        static_cast<double>(p[0]), static_cast<double>(p[1]), static_cast<double>(p[2]));
+                    if (key == 0u) {
+                        key = 1u;
+                    }
+                    local_keys[static_cast<std::size_t>(it->second)] = key;
+                    found = true;
+                }
+            }
+            missing = missing || !found;
+        }
+        int any_missing = missing;
+        MPI_Allreduce(&missing, &any_missing, 1, MPI_INT, MPI_MAX, dof_options.mpi_comm);
+        if (any_missing == 0) {
+            map.node_key.assign(static_cast<std::size_t>(n_nodes), 0u);
+            MPI_Allreduce(local_keys.data(), map.node_key.data(), static_cast<int>(n_nodes), MPI_UINT64_T, MPI_MAX,
+                          dof_options.mpi_comm);
         }
     }
 
@@ -5354,6 +5389,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         }
         perm->forward = std::move(map.fe_to_fs);
         perm->inverse = std::move(map.fs_to_fe);
+        perm->node_key = std::move(map.node_key);
         dof_permutation_ = std::move(perm);
     } else {
         dof_permutation_.reset();

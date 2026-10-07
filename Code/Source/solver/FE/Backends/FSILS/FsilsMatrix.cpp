@@ -265,6 +265,7 @@ enum class LocalRowOwnership : std::uint8_t {
         normalized->forward = perm->forward;
         normalized->inverse = std::move(inverse_from_forward);
         normalized->owner_rank = perm->owner_rank;
+        normalized->node_key = perm->node_key;
         return normalized;
     }
 
@@ -295,6 +296,7 @@ enum class LocalRowOwnership : std::uint8_t {
     normalized->forward = perm->forward;
     normalized->inverse = std::move(inverse_from_forward);
     normalized->owner_rank = perm->owner_rank;
+    normalized->node_key = perm->node_key;
     return normalized;
 }
 

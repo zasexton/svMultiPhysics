@@ -4028,6 +4028,12 @@ LinearSolverParameters::LinearSolverParameters()
   set_parameter("NS_Momentum_approximation", std::string("ilu-k"), !required, ns_momentum_approximation);
   set_parameter("NS_Use_coupled_outer_FGMRES", false, !required, ns_use_coupled_outer_fgmres);
   set_parameter("Right_preconditioner", std::string("none"), !required, right_preconditioner);
+  set_parameter("AMG_smoother_degree", 3, !required, amg_smoother_degree);
+  set_parameter("AMG_coarse_nodes", 600, !required, amg_coarse_nodes);
+  set_parameter("AMG_max_levels", 10, !required, amg_max_levels);
+  set_parameter("AMG_prolongator", std::string("plain"), !required, amg_prolongator);
+  set_parameter("AMG_lambda_iterations", 0, !required, amg_lambda_iterations);
+  set_parameter("AMG_strength_threshold", 0.0, !required, amg_strength_threshold);
   set_parameter("Preconditioner_reuse", false, !required, preconditioner_reuse);
   set_parameter("Inexact_Newton_forcing", std::string("none"), !required, inexact_newton_forcing);
 

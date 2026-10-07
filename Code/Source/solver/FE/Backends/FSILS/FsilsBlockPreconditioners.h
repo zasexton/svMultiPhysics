@@ -8,6 +8,7 @@
 #ifndef SVMP_FE_BACKENDS_FSILS_BLOCK_PRECONDITIONERS_H
 #define SVMP_FE_BACKENDS_FSILS_BLOCK_PRECONDITIONERS_H
 
+#include "Backends/FSILS/FsilsAmg.h"
 #include "Backends/FSILS/liner_solver/right_precond.h"
 #include "Backends/Utils/BackendOptions.h"
 #include "Backends/Utils/PreconditionerReusePolicy.h"
@@ -96,6 +97,10 @@ int invertDenseBlock(int d, const double* block, double* inverse);
  *    with K~ the block ILU(0) of K, D_K the nodal diagonal blocks of K,
  *    S = C - D D_K^{-1} G restricted to the operator graph and S~ its ILU(0).
  *    No relaxation or other coefficients.
+ *  - Amg: aggregation multigrid V-cycle on the nodal blocks of the scaled
+ *    operator (FsilsAmgHierarchy).  Its aggregates come from node keys that do
+ *    not depend on the partition (setNodeKeys) and it keeps every coupling
+ *    between ranks, so results differ across rank counts only by round-off.
  *
  * Reuse follows PreconditionerReusePolicy.  A reused preconditioner is
  * combined with the current diagonal scalings, so that for the current scaled
@@ -106,7 +111,7 @@ int invertDenseBlock(int d, const double* block, double* inverse);
  */
 class FsilsKrylovPreconditioner {
 public:
-    enum class Kind : std::uint8_t { BlockIlu0, Simple };
+    enum class Kind : std::uint8_t { BlockIlu0, Simple, Amg };
 
     struct Stats {
         std::uint64_t solves{0};
@@ -150,6 +155,16 @@ public:
     /// Drop the current preconditioner (next solve refreshes).
     void invalidate();
 
+    /// Settings of the Amg kind; a change invalidates the current preconditioner.
+    void setAmgOptions(const FsilsAmgOptions& options);
+
+    /// Partition-independent keys of the owned nodes (FSILS internal order)
+    /// for the Amg kind; empty to use the backend node ids.
+    void setNodeKeys(std::vector<std::uint64_t> owned_keys);
+
+    /// The Amg hierarchy, or nullptr for the other kinds (exposed for tests and logs).
+    [[nodiscard]] const FsilsAmgHierarchy* amgHierarchy() const noexcept { return amg_.get(); }
+
     [[nodiscard]] Kind kind() const noexcept { return kind_; }
     [[nodiscard]] bool reuseEnabled() const noexcept { return reuse_; }
     [[nodiscard]] const Stats& stats() const noexcept { return stats_; }
@@ -177,6 +192,7 @@ private:
     void apply(const Array<double>& in, Array<double>& out) const;
     void applyBlockIlu0(const double* in, double* out) const;
     void applySimple(const double* in, double* out) const;
+    void refreshAmg(const fe_fsi_linear_solver::FSILS_lhsType& lhs, int dof, const double* val);
 
     Kind kind_{Kind::BlockIlu0};
     bool reuse_{false};
@@ -195,6 +211,9 @@ private:
     std::vector<double> d_blocks_{};       // Simple: D (1 x m) per entry
     std::vector<double> g_blocks_{};       // Simple: G (m x 1) per entry
     std::vector<double> dk_inv_{};         // Simple: inverse nodal K diagonal blocks (m x m)
+    std::unique_ptr<FsilsAmgHierarchy> amg_{};  // Amg
+    FsilsAmgOptions amg_options_{};
+    std::vector<std::uint64_t> node_keys_{};
     double setup_flops_{0.0};
     double apply_flops_{0.0};
 

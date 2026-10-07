@@ -1409,6 +1409,7 @@ set(FE_BACKENDS_HEADERS
     Backends/FSILS/FsilsMatrix.h
     Backends/FSILS/FsilsLinearSolver.h
     Backends/FSILS/FsilsSystemDump.h
+    Backends/FSILS/FsilsAmg.h
     Backends/FSILS/FsilsBlockPreconditioners.h
     Backends/FSILS/FsilsDirectSolver.h
 
@@ -1470,6 +1471,7 @@ set(FE_BACKENDS_SOURCES
     Backends/FSILS/FsilsMatrix.cpp
     Backends/FSILS/FsilsLinearSolver.cpp
     Backends/FSILS/FsilsSystemDump.cpp
+    Backends/FSILS/FsilsAmg.cpp
     Backends/FSILS/FsilsBlockPreconditioners.cpp
     Backends/FSILS/FsilsDirectSolver.cpp
     Backends/FSILS/FsilsLegacyStatics.cpp
@@ -3280,6 +3282,18 @@ if(FE_BUILD_TESTS)
 	                # rank of three (collective face reduction).
 	                add_fe_mpi_test(test_fe_backends_mpi 3
 	                    FILTER "FsilsBackendMPI.GmresWithDirichletFaceEmptyOnOneRank")
+	                # Partition independence of the aggregation multigrid on
+	                # one, three and four ranks (two ranks run with the rest).
+	                if(MPIEXEC_EXECUTABLE)
+	                    foreach(_fe_amg_np 1 3 4)
+	                        svmp_add_gtest(test_fe_backends_amg_mpi_${_fe_amg_np}
+	                            TARGET test_fe_backends_mpi
+	                            MPI_RANKS ${_fe_amg_np}
+	                            TIMEOUT 120
+	                            LABELS MPI
+	                            FILTER "FsilsAmgMPI.*")
+	                    endforeach()
+	                endif()
 	            endif()
 	        endif()
 	    endif()

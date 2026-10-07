@@ -468,8 +468,11 @@ svmp::FE::backends::RightPreconditionerType toRightPreconditioner(const std::str
   if (v == "simple" || v == "block-simple") {
     return RightPreconditionerType::Simple;
   }
+  if (v == "amg" || v == "sa-amg" || v == "aggregation-amg") {
+    return RightPreconditionerType::Amg;
+  }
   throw std::runtime_error("[svMultiPhysics::Application] Unsupported <Right_preconditioner> '" + value +
-                           "'. Supported values: none, block-ilu0, simple.");
+                           "'. Supported values: none, block-ilu0, simple, amg.");
 }
 
 svmp::FE::backends::FsilsBlockSchurSchurPreconditioner
@@ -946,6 +949,22 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
   opts.reuse_preconditioner = eq->linear_solver.preconditioner_reuse.value();
   if (opts.right_preconditioner == svmp::FE::backends::RightPreconditionerType::Simple) {
     opts.right_preconditioner_constraint_block = "Pressure";
+  }
+  opts.amg_smoother_degree = eq->linear_solver.amg_smoother_degree.value();
+  opts.amg_coarse_nodes = eq->linear_solver.amg_coarse_nodes.value();
+  opts.amg_max_levels = eq->linear_solver.amg_max_levels.value();
+  opts.amg_lambda_iterations = eq->linear_solver.amg_lambda_iterations.value();
+  opts.amg_strength_threshold = eq->linear_solver.amg_strength_threshold.value();
+  {
+    const auto prolongator = lower_copy(eq->linear_solver.amg_prolongator.value());
+    if (prolongator == "smoothed" || prolongator == "sa") {
+      opts.amg_smooth_prolongator = true;
+    } else if (prolongator == "plain" || prolongator == "unsmoothed" || prolongator == "tentative") {
+      opts.amg_smooth_prolongator = false;
+    } else {
+      throw std::runtime_error("[svMultiPhysics::Application] Unsupported <AMG_prolongator> '" +
+                               eq->linear_solver.amg_prolongator.value() + "'. Supported values: smoothed, plain.");
+    }
   }
 
   // Explicit saddle-point block names: env vars or programmatic SolverOptions.
@@ -1955,6 +1974,14 @@ void SimulationBuilder::createSolvers()
     oopCout() << " right_preconditioner="
               << svmp::FE::backends::rightPreconditionerToString(solver_options.right_preconditioner)
               << " preconditioner_reuse=" << (solver_options.reuse_preconditioner ? 1 : 0);
+    if (solver_options.right_preconditioner == svmp::FE::backends::RightPreconditionerType::Amg) {
+      oopCout() << " amg_smoother_degree=" << solver_options.amg_smoother_degree
+                << " amg_coarse_nodes=" << solver_options.amg_coarse_nodes
+                << " amg_max_levels=" << solver_options.amg_max_levels
+                << " amg_prolongator=" << (solver_options.amg_smooth_prolongator ? "smoothed" : "plain")
+                << " amg_lambda_iterations=" << solver_options.amg_lambda_iterations
+                << " amg_strength_threshold=" << solver_options.amg_strength_threshold;
+    }
   }
   if (solver_options.block_layout) {
     oopCout() << " block_layout=[";

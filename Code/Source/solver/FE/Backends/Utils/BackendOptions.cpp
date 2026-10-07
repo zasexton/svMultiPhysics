@@ -49,6 +49,7 @@ std::string_view rightPreconditionerToString(RightPreconditionerType pc) noexcep
         case RightPreconditionerType::None: return "none";
         case RightPreconditionerType::BlockILU0: return "block-ilu0";
         case RightPreconditionerType::Simple: return "simple";
+        case RightPreconditionerType::Amg: return "amg";
         default: return "unknown";
     }
 }

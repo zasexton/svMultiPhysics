@@ -76,7 +76,8 @@ enum class FsilsBlockSchurMomentumApproximation : std::uint8_t {
 enum class RightPreconditionerType : std::uint8_t {
     None,
     BlockILU0,   ///< Block ILU(0) of the scaled operator (nodal blocks).
-    Simple       ///< SIMPLE splitting for a scalar constraint field.
+    Simple,      ///< SIMPLE splitting for a scalar constraint field.
+    Amg          ///< Aggregation multigrid V-cycle with partition-independent aggregates.
 };
 
 struct FieldSplitOptions {
@@ -649,6 +650,16 @@ struct SolverOptions {
     /// RightPreconditionerType::Simple (e.g. "Pressure").  When empty the
     /// constraint block of the saddle-point annotation is used.
     std::string right_preconditioner_constraint_block{};
+
+    /// RightPreconditionerType::Amg settings (FSILS GMRES).  Aggregates come
+    /// from node keys that do not depend on the partition, so results differ
+    /// across rank counts only by round-off.
+    int amg_smoother_degree{3};          ///< Chebyshev degree of pre- and post-smoothing.
+    long long amg_coarse_nodes{600};     ///< Coarsen until at most this many global nodes.
+    int amg_max_levels{10};              ///< Levels including the finest.
+    bool amg_smooth_prolongator{false};  ///< Smoothed (true) or plain (false) aggregation.
+    int amg_lambda_iterations{0};        ///< Power iterations for lambda_max (0: inf-norm bound).
+    double amg_strength_threshold{0.0};  ///< Block strength threshold of the aggregation graph.
 
     /// Reuse a preconditioner or factorization across solves (Newton iterations,
     /// outer passes, time steps) and refresh it by the break-even rule of

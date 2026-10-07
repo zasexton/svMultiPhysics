@@ -2345,11 +2345,46 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
                 const auto kind =
                     (options_.right_preconditioner == RightPreconditionerType::Simple)
                         ? FsilsKrylovPreconditioner::Kind::Simple
+                    : (options_.right_preconditioner == RightPreconditionerType::Amg)
+                        ? FsilsKrylovPreconditioner::Kind::Amg
                         : FsilsKrylovPreconditioner::Kind::BlockIlu0;
                 krylov_pc_->configure(kind,
                                       options_.reuse_preconditioner,
                                       rightPreconditionerConstraintComponent(options_, dof),
                                       ls.RI.sD);
+                if (kind == FsilsKrylovPreconditioner::Kind::Amg) {
+                    FsilsAmgOptions amg;
+                    amg.max_levels = std::max(1, options_.amg_max_levels);
+                    amg.coarse_nodes = std::max<long long>(1, options_.amg_coarse_nodes);
+                    amg.smoother_degree = std::max(1, options_.amg_smoother_degree);
+                    amg.smooth_prolongator = options_.amg_smooth_prolongator;
+                    amg.lambda_iterations = std::max(0, options_.amg_lambda_iterations);
+                    amg.strength_threshold = std::max(0.0, options_.amg_strength_threshold);
+                    krylov_pc_->setAmgOptions(amg);
+                    // Partition-independent keys of the owned nodes (internal
+                    // order equals the local order of the owned-row operator).
+                    std::vector<std::uint64_t> owned_keys;
+                    const auto* perm = shared_layout->dof_permutation.get();
+                    if (perm != nullptr && !perm->node_key.empty()) {
+                        const int owned = static_cast<int>(lhs.mynNo);
+                        owned_keys.resize(static_cast<std::size_t>(owned), 0u);
+                        bool complete = true;
+                        for (int old = 0; old < owned; ++old) {
+                            const int g = shared_layout->oldToGlobalNode(old);
+                            if (g < 0 || static_cast<std::size_t>(g) >= perm->node_key.size() ||
+                                perm->node_key[static_cast<std::size_t>(g)] == 0u) {
+                                complete = false;
+                                break;
+                            }
+                            owned_keys[static_cast<std::size_t>(lhs.map(old))] =
+                                perm->node_key[static_cast<std::size_t>(g)];
+                        }
+                        if (!complete) {
+                            owned_keys.clear();
+                        }
+                    }
+                    krylov_pc_->setNodeKeys(std::move(owned_keys));
+                }
                 ls.right_pc_hook = krylov_pc_->makeHook();
             }
         } else {

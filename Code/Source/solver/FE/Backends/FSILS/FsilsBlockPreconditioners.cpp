@@ -415,6 +415,7 @@ std::string FsilsKrylovPreconditioner::kindName(Kind kind)
     switch (kind) {
         case Kind::BlockIlu0: return "block-ilu0";
         case Kind::Simple: return "simple";
+        case Kind::Amg: return "amg";
     }
     return "unknown";
 }
@@ -431,6 +432,67 @@ void FsilsKrylovPreconditioner::configure(Kind kind, bool reuse, int constraint_
     if (changed) {
         invalidate();
     }
+}
+
+void FsilsKrylovPreconditioner::setAmgOptions(const FsilsAmgOptions& options)
+{
+    const bool changed = options.max_levels != amg_options_.max_levels ||
+                         options.coarse_nodes != amg_options_.coarse_nodes ||
+                         options.smoother_degree != amg_options_.smoother_degree ||
+                         options.smoother_ratio != amg_options_.smoother_ratio ||
+                         options.smooth_prolongator != amg_options_.smooth_prolongator ||
+                         options.prolongator_omega != amg_options_.prolongator_omega ||
+                         options.lambda_iterations != amg_options_.lambda_iterations ||
+                         options.strength_threshold != amg_options_.strength_threshold;
+    amg_options_ = options;
+    if (changed) {
+        invalidate();
+    }
+}
+
+void FsilsKrylovPreconditioner::setNodeKeys(std::vector<std::uint64_t> owned_keys)
+{
+    if (owned_keys != node_keys_) {
+        node_keys_ = std::move(owned_keys);
+        invalidate();
+    }
+}
+
+void FsilsKrylovPreconditioner::refreshAmg(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                           int dof,
+                                           const double* val)
+{
+    if (!amg_) {
+        amg_ = std::make_unique<FsilsAmgHierarchy>();
+    }
+    const bool have_keys = node_keys_.size() >= static_cast<std::size_t>(lhs.mynNo);
+    const std::span<const std::uint64_t> keys =
+        have_keys ? std::span<const std::uint64_t>(node_keys_) : std::span<const std::uint64_t>{};
+    // A reused hierarchy must own its finest-level values.
+    amg_->build(lhs, dof, val, keys, amg_options_, /*copy_values=*/reuse_);
+    factor_ = BlockIlu0Factorization{};
+    schur_factor_ = BlockIlu0Factorization{};
+    d_blocks_.clear();
+    g_blocks_.clear();
+    dk_inv_.clear();
+    // Operation counts for the reuse policy, from global block counts (the
+    // policy sums the per-rank values).
+    double block_entries = 0.0;
+    double finest_entries = 0.0;
+    const auto& levels = amg_->stats().levels;
+    for (std::size_t l = 0; l < levels.size(); ++l) {
+        const double e = static_cast<double>(levels[l].blocks) * static_cast<double>(levels[l].block_size) *
+                         static_cast<double>(levels[l].block_size);
+        block_entries += e;
+        if (l == 0) {
+            finest_entries = e;
+        }
+    }
+    const double tasks = static_cast<double>(std::max(n_tasks_, 1));
+    const double degree = static_cast<double>(std::max(amg_options_.smoother_degree, 1));
+    setup_flops_ = (8.0 * static_cast<double>(dof) * block_entries + 2.0 * finest_entries) / tasks;
+    apply_flops_ = 2.0 * (2.0 * degree + 2.0) * block_entries / tasks;
+    stats_.regularized_pivots = amg_->stats().regularized_pivots;
 }
 
 void FsilsKrylovPreconditioner::invalidate()
@@ -529,7 +591,9 @@ void FsilsKrylovPreconditioner::refresh(const fe_fsi_linear_solver::FSILS_lhsTyp
         effective = Kind::BlockIlu0;
     }
 
-    if (effective == Kind::BlockIlu0) {
+    if (effective == Kind::Amg) {
+        refreshAmg(lhs, dof, val);
+    } else if (effective == Kind::BlockIlu0) {
         std::vector<double> blocks(nnz * dd);
         for (std::size_t p = 0; p < nnz; ++p) {
             const double* srcb = val + static_cast<std::size_t>(graph_.src[p]) * dd;
@@ -690,7 +754,9 @@ void FsilsKrylovPreconditioner::apply(const Array<double>& in, Array<double>& ou
             work_a_[i] = src[i] * ratio_in_[i];
         }
     }
-    if (!d_blocks_.empty()) {
+    if (kind_ == Kind::Amg && amg_ && !amg_->empty()) {
+        amg_->apply(work_a_.data(), dst);
+    } else if (!d_blocks_.empty()) {
         applySimple(work_a_.data(), dst);
     } else {
         applyBlockIlu0(work_a_.data(), dst);
@@ -830,7 +896,8 @@ void FsilsKrylovPreconditioner::finish(int iterations,
 
     std::ostringstream oss;
     oss << "FsilsKrylovPreconditioner: diagnostic=fsils_right_preconditioner"
-        << " kind=" << kindName(d_blocks_.empty() ? Kind::BlockIlu0 : Kind::Simple)
+        << " kind=" << kindName(kind_ == Kind::Amg ? Kind::Amg
+                                : (d_blocks_.empty() ? Kind::BlockIlu0 : Kind::Simple))
         << " reuse=" << (reuse_ ? 1 : 0)
         << " action=" << (fresh ? "refresh" : "reuse")
         << " reason=" << PreconditionerReusePolicy::reasonName(stats_.last_reason)
@@ -847,6 +914,9 @@ void FsilsKrylovPreconditioner::finish(int iterations,
         << " regularized_pivots=" << stats_.regularized_pivots
         << " refreshes=" << stats_.refreshes
         << " reuses=" << stats_.reuses;
+    if (kind_ == Kind::Amg && amg_ && fresh) {
+        oss << " amg " << amg_->summary();
+    }
     FE_LOG_INFO(oss.str());
 }
 
