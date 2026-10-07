@@ -8500,6 +8500,34 @@ DistributedMesh DistributedMesh::load_parallel(const MeshIOOptions& opts, MPI_Co
             }
         }
         dmesh.rebalance(PartitionHint::ParMetis, rebalance_options);
+        if (!weight_field.empty()) {
+            // One summary line: per-rank cell count and weighted load after
+            // the migration (min / mean / max over ranks).
+            std::uint64_t local_stats[2] = {0u, 0u};
+            if (dmesh.local_mesh_ &&
+                dmesh.local_mesh_->has_field(EntityKind::Volume, weight_field)) {
+                const auto handle = dmesh.local_mesh_->field_handle(EntityKind::Volume, weight_field);
+                const auto* weights = dmesh.local_mesh_->field_data_as<std::int32_t>(handle);
+                local_stats[0] = static_cast<std::uint64_t>(dmesh.local_mesh_->n_cells());
+                for (std::size_t c = 0; c < dmesh.local_mesh_->n_cells(); ++c) {
+                    local_stats[1] += static_cast<std::uint64_t>(std::max<std::int32_t>(1, weights[c]));
+                }
+            }
+            std::uint64_t min_stats[2] = {0u, 0u};
+            std::uint64_t max_stats[2] = {0u, 0u};
+            std::uint64_t sum_stats[2] = {0u, 0u};
+            MPI_Allreduce(local_stats, min_stats, 2, MPI_UINT64_T, MPI_MIN, comm);
+            MPI_Allreduce(local_stats, max_stats, 2, MPI_UINT64_T, MPI_MAX, comm);
+            MPI_Allreduce(local_stats, sum_stats, 2, MPI_UINT64_T, MPI_SUM, comm);
+            if (rank == 0) {
+                const double ranks = static_cast<double>(std::max(size, 1));
+                std::cout << "[svMultiPhysics::Mesh] weighted startup partition: cells min/mean/max "
+                          << min_stats[0] << "/" << static_cast<double>(sum_stats[0]) / ranks << "/"
+                          << max_stats[0] << " weighted load (x10) min/mean/max " << min_stats[1] << "/"
+                          << static_cast<double>(sum_stats[1]) / ranks << "/" << max_stats[1]
+                          << " diagnostic=weighted_startup_partition" << std::endl;
+            }
+        }
         if (!weight_field.empty() && dmesh.local_mesh_ &&
             dmesh.local_mesh_->has_field(EntityKind::Volume, weight_field)) {
             dmesh.local_mesh_->remove_field(
