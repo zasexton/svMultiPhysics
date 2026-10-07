@@ -3222,9 +3222,23 @@ void applyGeneratedStateOuterRelaxationEnvOptions(
 {
   auto& relaxation =
       opts.external_state_fixed_point.dynamic_relaxation;
-  relaxation.enabled = parseBoolEnv(
-      "SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION",
-      relaxation.enabled);
+  if (std::getenv("SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION") !=
+      nullptr) {
+    // An explicit switch keeps its original meaning: relax every update
+    // (on) or none (off).
+    relaxation.enabled = parseBoolEnv(
+        "SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION",
+        relaxation.enabled);
+    relaxation.start_iteration = 0;
+  }
+  if (std::getenv("SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION_START_PASS") !=
+      nullptr) {
+    // 1-based pass whose update is the first relaxed one; 0 disables.
+    const int start_pass = parseIntEnv(
+        "SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION_START_PASS", 0);
+    relaxation.enabled = start_pass > 0;
+    relaxation.start_iteration = std::max(0, start_pass - 1);
+  }
   relaxation.initial_factor = parseDoubleEnv(
       "SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION_INITIAL_FACTOR",
       relaxation.initial_factor);
@@ -30697,9 +30711,34 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       parseBoolEnv("SVMP_GENERATED_STATE_OUTER_FIXED_POINT", true);
   opts.newton.external_state_fixed_point.enabled =
       use_transient_external_state_fixed_point;
+  // Outer fixed-point budget and relaxation. Default: at most
+  // kOuterFixedPointDefaultMaxPasses refreshes; the first
+  // kOuterFixedPointPlainPasses are plain and the updates from then on use
+  // the safeguarded delta-squared (Aitken) relaxation. A step that converges
+  // within the plain passes is bitwise identical to the plain loop with that
+  // cap; only steps that would have hit it continue, relaxed. XML keys
+  // Outer_fixed_point_max_passes and Outer_fixed_point_relaxation_start_pass
+  // (1-based pass whose update is the first relaxed one; 0 disables, 1
+  // relaxes every update) take precedence over the environment variables
+  // SVMP_GENERATED_STATE_OUTER_MAX_ITERATIONS,
+  // SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION and
+  // SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION_START_PASS.
+  constexpr int kOuterFixedPointPlainPasses = 12;
+  constexpr int kOuterFixedPointDefaultMaxPasses = 30;
   opts.newton.external_state_fixed_point.max_iterations = std::max(
       1,
-      parseIntEnv("SVMP_GENERATED_STATE_OUTER_MAX_ITERATIONS", 12));
+      parseIntEnv("SVMP_GENERATED_STATE_OUTER_MAX_ITERATIONS",
+                  kOuterFixedPointDefaultMaxPasses));
+  opts.newton.external_state_fixed_point.dynamic_relaxation.enabled = true;
+  opts.newton.external_state_fixed_point.dynamic_relaxation.start_iteration =
+      kOuterFixedPointPlainPasses - 1;
+  {
+    const auto& general = params.general_simulation_parameters;
+    if (general.outer_fixed_point_max_passes.defined()) {
+      opts.newton.external_state_fixed_point.max_iterations =
+          std::max(1, general.outer_fixed_point_max_passes.value());
+    }
+  }
   // A cut-topology change during a step is a normal event for a moving
   // interface: each outer fixed-point refresh may regenerate a new topology,
   // and the solve continues on it.  The number of such epoch changes is
@@ -30730,6 +30769,16 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   opts.newton.external_state_fixed_point.max_discontinuity_restarts =
       cut_topology_restart_limit;
   applyGeneratedStateOuterRelaxationEnvOptions(opts.newton);
+  {
+    const auto& start_parameter = params.general_simulation_parameters
+                                      .outer_fixed_point_relaxation_start_pass;
+    if (start_parameter.defined()) {
+      auto& relaxation =
+          opts.newton.external_state_fixed_point.dynamic_relaxation;
+      relaxation.enabled = start_parameter.value() > 0;
+      relaxation.start_iteration = std::max(0, start_parameter.value() - 1);
+    }
+  }
   // Opt-in stage predictor of first-order generalized-alpha (see
   // TimeLoopOptions::generalized_alpha_predictor); default ConstantRate. The
   // predictor changes the initial iterate only, so results change within
@@ -30803,6 +30852,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         << (opts.newton.external_state_fixed_point.dynamic_relaxation.enabled
                 ? "enabled"
                 : "disabled")
+        << ", dynamic_relaxation_start_pass="
+        << (opts.newton.external_state_fixed_point.dynamic_relaxation.enabled
+                ? opts.newton.external_state_fixed_point.dynamic_relaxation
+                          .start_iteration +
+                      1
+                : 0)
         << std::endl;
   } else if (has_frozen_algebraic_level_set_extension) {
     oopCout()

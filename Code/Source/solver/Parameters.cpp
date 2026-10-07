@@ -3262,6 +3262,11 @@ GeneralSimulationParameters::GeneralSimulationParameters()
   // -1: bounded only by the outer fixed-point iteration limit (every outer
   // refresh may start a new cut-topology epoch).  0 restores stop-and-reject.
   set_parameter("Max_cut_topology_restarts_per_step", -1, !required, max_cut_topology_restarts_per_step, {-1,int_inf});
+  // Outer fixed point (new OOP solver): refresh budget per step and the first
+  // refresh whose update is relaxed (0: none, 1: every update). Built-in
+  // defaults (30 and 12) apply when the keys are absent.
+  set_parameter("Outer_fixed_point_max_passes", 30, !required, outer_fixed_point_max_passes, {1,int_inf});
+  set_parameter("Outer_fixed_point_relaxation_start_pass", 12, !required, outer_fixed_point_relaxation_start_pass, {0,int_inf});
   set_parameter("Newton_line_search_fail_on_no_reduction", false, !required, newton_line_search_fail_on_no_reduction);
   set_parameter("Newton_line_search_max_iterations", 10, !required, newton_line_search_max_iterations, {1,int_inf});
   set_parameter("Newton_absolute_tolerance", 1.0e-10, !required, newton_absolute_tolerance);
