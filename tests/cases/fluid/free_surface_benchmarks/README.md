@@ -87,3 +87,4 @@ change it once, with a one-line justification in the tracker.
 | `static_drop_2d` | M2 | Laplace pressure and spurious currents. Capillary-route comparison (D2). |
 | `capillary_wave_2d` | M3 | Frequency and damping against Prosperetti |
 | `sessile_drop_2d` | M4 | Relaxation to the Young angle with Navier slip (D4) |
+| `ren_e_2d` | M4 | Ren–E moving contact line (DynamicRenE), advancing and receding: law consistency on 3 meshes (l_s/h = 2, 4, 8) and 3 time steps |

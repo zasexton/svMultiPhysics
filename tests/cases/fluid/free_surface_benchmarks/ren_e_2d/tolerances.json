@@ -1,0 +1,14 @@
+{
+  "benchmark": "ren_e_2d",
+  "status": "pre-registered 2026-10-07, before the protocol runs (README.md, 'Criteria')",
+  "window_start_fraction": 0.1,
+  "finest_rms_relative_error": 0.10,
+  "finest_rms_relative_error_note": "RMS over the measurement window and both contact points of |V_measured - V_RenE(theta_d)| / |V_RenE(theta_d)|, for the wall fluid speed and for the geometric contact-line speed, at R/h = 32 and dt0/4, for the advancing and the receding case.",
+  "mesh_convergence": "At dt0/4 both RMS errors decrease strictly from R/h = 8 to 16 to 32 (l_s/h = 2, 4, 8 with the physical slip length fixed).",
+  "max_displacement_change_halving_dt": 0.02,
+  "max_displacement_change_halving_dt_note": "At R/h = 32, the mean outward contact-line displacement at t = 0.25 changes by at most 2% between dt0/2 and dt0/4.",
+  "signs": "Every window sample of every run: the wall fluid speed and the geometric speed have the sign of the Ren-E prediction (advancing positive).",
+  "max_area_drift": 1.0e-4,
+  "max_area_drift_note": "Maximum relative change of the exact P1 liquid area over the run, every run (decision D11).",
+  "completion": "Every run reaches its end time; an outer fixed-point cap failure is recorded and retried once with SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION=1 for diagnosis only (the retry is not a protocol result)."
+}
