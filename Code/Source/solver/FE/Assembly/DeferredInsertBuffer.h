@@ -70,9 +70,10 @@ struct DeferredInsertOp {
  * @brief Insertions recorded by one thread for one block of items, in order.
  *
  * Storage is kept between uses (clear() keeps capacity), so steady-state
- * recording does not allocate.
+ * recording does not allocate.  Aligned to a cache line: adjacent buffers of
+ * the ring are written by different threads at the same time.
  */
-class DeferredInsertBuffer {
+class alignas(64) DeferredInsertBuffer {
 public:
     void clear() noexcept
     {
