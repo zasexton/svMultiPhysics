@@ -61,3 +61,30 @@ this constitutive check): 10% is a fifth of the pilot's loose gate and the size 
 error at which a law speed is still quantitatively useful; 2% mirrors the D19
 time-step criteria of the static drop and capillary wave in relative terms.  The
 convergence requirement is the D1 working criterion (error decreasing with h).
+
+## Result (2026-10-07, protocol job 46900681, binary 4cbf2643-ltopgo, commit 73c095a9)
+
+**FAIL on finest accuracy only.**  All 18 runs complete with no outer-cap failure.
+The signs are correct and the area drift is at most 4e-7.  The errors decrease
+strictly with h, and the time-step change is below 1%.  The RMS law error at
+dt0/4 on R/h = 8, 16, 32 is:
+
+* advancing: 0.307, 0.242, 0.171
+* receding: 0.584, 0.434, 0.346
+
+The verify angle is the solver's own operator angle (`dynamic_contact_operator_angle`).
+The wall fluid speed agrees with the geometric contact speed to 1-2%.  The measured
+speed stays below the law, by a factor of 0.43 / 0.58 / 0.66 for receding at all
+times, and by 0.66-0.75 early for advancing.
+
+A diagnosis-only sensitivity at R/h = 16, dt0 (job 46906511) changed one parameter
+at a time:
+
+* M/10: the speed ratio rises to 1.03 (advancing) and 0.88 (receding).
+* mu/10: the ratio becomes 1.05-1.17 (advancing) and 0.80 (receding).
+* l_s x4: little change.
+
+The deficit is therefore set by mu*M.  The weak point force balance shares the
+uncompensated Young force between the line friction 1/M and the viscous and slip
+stress in the contact element, and this share decays only slowly with h.  The
+criteria above are unchanged.
