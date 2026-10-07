@@ -967,9 +967,29 @@ private:
      * needed lazy one-time work, DeferredSerialWork, or threw). The caller
      * runs the remaining items with its serial loop, which gives the serial
      * insertion sequence and reproduces any error at the same item.
+     *
+     * With serial (the caller's serial loop body for one item), a stopped
+     * block is run serially here (its lazy work then happens in the serial
+     * order, an error is raised at its item) and the threads resume after
+     * it; the return value is then the item from which the caller must
+     * continue serially after repeated stops (n_items when all are done).
      */
     std::size_t runThreadedItems(
         const char* loop_name,
+        std::size_t n_items,
+        int n_threads,
+        std::size_t block_size,
+        const std::function<void(StandardAssembler& worker,
+                                 int thread,
+                                 std::size_t item,
+                                 InsertSink& sink,
+                                 AssemblyResult& result)>& compute,
+        AssemblyResult& result,
+        const std::function<void(std::size_t item)>& serial = {});
+    /// One threaded pass of runThreadedItems over items [begin, n_items).
+    std::size_t runThreadedRange(
+        const char* loop_name,
+        std::size_t begin,
         std::size_t n_items,
         int n_threads,
         std::size_t block_size,
@@ -999,9 +1019,11 @@ private:
     bool concurrent_insertion_{false};
     /// Record buffers of the threaded loops (a ring of blocks, reused).
     std::vector<detail::DeferredInsertBuffer> deferred_insert_buffers_{};
-    /// Field access list the worker last saw (worker only).
-    const void* worker_field_plans_data_{nullptr};
-    std::size_t worker_field_plans_size_{0};
+    /// Incremented whenever field_access_plans_ is cleared or rebuilt.
+    std::uint64_t field_access_plans_revision_{0};
+    /// Owner's field_access_plans_revision_ the worker's recipes refer to
+    /// (worker only).
+    std::uint64_t worker_field_plans_revision_{~std::uint64_t{0}};
 
     /**
      * @brief Get element from function space for a cell
