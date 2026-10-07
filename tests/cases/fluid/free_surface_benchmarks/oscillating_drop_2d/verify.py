@@ -185,7 +185,10 @@ def solver_log_summary(run: Path) -> dict | None:
                 if m:
                     newton += int(m.group(1))
                     linear += int(m.group(2))
-    rows = [v for k, v in steps.items() if k >= 1]
+    # "nonlinear_done step=k" closes the solve of the step that starts at
+    # step index k (k = 0 is the first time step); a retried step keeps its
+    # last solve.
+    rows = list(steps.values())
     if not rows:
         return None
     summary = {"steps_logged": len(rows),

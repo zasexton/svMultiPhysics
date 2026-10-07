@@ -500,8 +500,8 @@ def test_area_criterion_and_log_statistics_use_the_solver_log(study, tmp_path, c
     assert ver.main([*runs, "--json", str(out_json)]) == 1
     out = capsys.readouterr().out
     assert "[FAIL] volume_drift" in out
-    # Steps 1-3 (step 0 is the initial state); GMRES counts every Newton solve.
-    assert "3 steps, outer passes 3.67 (max 4), Newton 2.67/step, GMRES 101/Newton" in out
+    # "nonlinear_done step=k" is the solve of time step k + 1 (k = 0 included).
+    assert "4 steps, outer passes 3.50 (max 4), Newton 2.50/step, GMRES 101/Newton" in out
     r = json.loads(out_json.read_text())["groups"][0]["runs"][1]
     assert r["liquid_area_logged_steps"] == 4
     assert r["liquid_area_relative_drift_max"] == pytest.approx(2e-4, rel=1e-9)
