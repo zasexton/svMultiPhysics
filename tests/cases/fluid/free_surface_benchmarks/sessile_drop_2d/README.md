@@ -499,6 +499,83 @@ With the option off the solver output is bitwise identical to the solver
 without it (120 degree restart case, `capillary_wave_2d` `lambda/h = 16`,
 `linear_sloshing_2d` `L/h = 16`).
 
+## Fixed-step validation (2026-10-06): not adopted
+
+The candidate protocol was `--dt-rule fixed --surface-tension-semi-implicit
+NormalIncrement`: one step, `dt = 4.374e-3`, at every level (1, 2.83 and 8
+times the capillary-limit step of `R/h = 16, 32, 64`). It was checked against
+`time_step_criterion`, written before any run was analysed. All runs used
+`SurfaceStress`, the generator defaults and binary `4e604d10`, with 4 ranks
+per case (8 for `R/h = 64` at 120 degrees) in jobs 46797281, 46807360 and
+46813527. Raw output:
+`$SCRATCH/free-surface-benchmarks/sessile-dt-protocol/validation-4e604d10/`.
+The default stays the capillary-limit rule.
+
+`R/h = 16`, end state (errors against the reference cap with the initial
+area; the capillary-limit protocol step is `dt` itself):
+
+| `theta_e` | step | left, right angle (deg) | angle error | base error | apex error | outer passes (mean) | GMRES per solve |
+|---:|---|---|---:|---:|---:|---:|---:|
+| 60 | `2 dt` | 61.931, 58.311 | 1.931 | 8.6e-4 | 3.0e-3 | 4.00 | 83 |
+| 60 | `dt` | 61.745, 58.435 | 1.745 | 1.0e-3 | 2.9e-3 | 3.42 | 75 |
+| 60 | `dt/2` | 61.167, 58.555 | 1.445 | 1.5e-3 | 2.7e-3 | 3.07 | 59 |
+| 60 | `dt/4` | 60.644, 58.844 | 1.156 | 2.0e-3 | 2.7e-3 | 3.00 | 55 |
+| 120 | `2 dt` | 120.022, 120.643 | 0.643 | 5.0e-3 | 1.4e-3 | 3.90 | 109 |
+| 120 | `dt` | 120.112, 120.650 | 0.650 | 5.1e-3 | 1.5e-3 | 3.67 | 88 |
+| 120 | `dt/2` | 120.379, 120.505 | 0.505 | 5.5e-3 | 1.6e-3 | 3.13 | 82 |
+| 120 | `dt/4` | 121.837, 120.170 | 1.837 | 6.6e-3 | 1.5e-3 | 2.99 | 82 |
+
+Time-step criterion at `R/h = 16` (the only level with complete pairs):
+
+| `theta_e` | pair | final angle change | final base, apex change | history angle change | history base change |
+|---:|---|---:|---|---:|---:|
+| 60 | `2 dt`, `dt` | 0.186 | 1.6e-4, 1.3e-4 | 0.438 | 5.4e-4 |
+| 60 | `dt`, `dt/2` | 0.578 | 4.7e-4, 1.8e-4 | 0.717 | 9.5e-4 |
+| 60 | `dt/2`, `dt/4` | 0.523 | 5.1e-4, 8.7e-6 | 0.541 | 7.7e-4 |
+| 120 | `2 dt`, `dt` | 0.090 | 1.3e-4, 4.5e-5 | 1.10 | 1.33e-3 |
+| 120 | `dt`, `dt/2` | 0.267 | 3.4e-4, 1.1e-4 | 1.24 | 1.40e-3 |
+| 120 | `dt/2`, `dt/4` | 1.46 | 1.08e-3, 6.9e-5 | 1.53 | 1.39e-3 |
+
+- **The angle does not converge in `dt` at `R/h = 16`.** Halving the step moves
+  the final angles by 0.1 to 1.5 degrees with no trend toward zero, for steps
+  down to a quarter of the capillary-limit step. Base and apex agree within
+  0.1 to 0.2%. At `T` the contact lines are still creeping (`mu max abs(u) /
+  gamma` is 4e-3 to 9e-3), and the local angle of a slowly creeping, partly
+  pinned contact line depends on when it crosses each wall vertex. Every
+  tested step fails the angle limits of the criterion, the capillary-limit
+  protocol step included. The `dt/2` run at 60 degrees also fails
+  `no_velocity_growth` (1.044).
+- **The lagged term does not change the result at the protocol step.** At
+  `R/h = 16`, `dt` with the term differs from the capillary-limit run without
+  it by at most 0.01 degree at the end and 0.12 degree over the history. It
+  lowers the mean outer passes from 4.05 to 3.42 (60 degrees) and 3.67
+  (120 degrees).
+- **`R/h = 32`: no complete pair.** At 120 degrees every step fails the
+  12-pass outer limit on an unchanged cut topology: `2 dt` at `t = 5.88`,
+  `dt` at 11.56, and `dt/2` and `dt/4` both at 9.33. The capillary-limit run
+  without the term (1 times the limit) fails the same way at `t = 7.90`, so
+  this failure does not come from the step. Before failing, the `dt/2` run's
+  left contact line accelerates (`max abs(u)` 0.05 to 0.9). At 60 degrees `dt`
+  and `dt/4` stop at `t = 0.27` with the 4-rank small-cut aggregation error
+  "relevant finalized row disagrees with its canonical owner". The
+  capillary-limit run fails at the same time with "external-state
+  fixed-point failure was followed by a rollback failure", and `2 dt` fails
+  the outer limit at `t = 1.43`. Only `dt/2` completes (angle error 1.245
+  degrees, base 1.04%, apex 1.25%, area drift 3.6e-5).
+- **`R/h = 64`: 60 degrees.** `dt` and `2 dt` fail the outer limit at the same
+  time, `t = 0.39` (passes 7, 8, 9, 10, then 12). `dt/2` gets past that time
+  with 10 passes and then fails the limit at `t = 0.57`.
+- **`R/h = 64`: 120 degrees.** `dt/2` on 8 ranks stops at `t = 0.25` with the
+  rollback failure above.
+- **Cost.** GMRES iterations per solve grow with the step at the fine levels.
+  They are 160 / 190 / 280 at `R/h = 32` (120 degrees, `dt/4` / `dt/2` /
+  `dt`). At `R/h = 64` they are 1,120 (`dt/2`) and 1,650 (`dt`), against 360
+  for the capillary-limit run. At `R/h = 64` a step costs 2 to 3 times a
+  capillary-limit step, so 8 times fewer steps would save at most a factor of
+  about 3.
+
+The options stay available for time-step studies.
+
 ## Smoke runs before the vertex-crossing fixes (2026-09-30)
 
 All at `R/h = 16` with `SurfaceStress` and truncated with `--max-steps`. The
