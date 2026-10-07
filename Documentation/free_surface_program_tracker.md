@@ -454,6 +454,17 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   - **Time step:** the D19 static-drop protocol, with the lagged normal-increment term on and Δt = 0.02 at La = 12 for both levels. The Δt/2 check runs at R/h = 8 only. In 2D halving the step changed the pressure jump by 1e-10 (La = 12), and a Δt/2 run at R/h = 16 would cost days.
   - **Form:** `SurfaceStress` only, since both KAG forms fail M2 in 2D.
   - **Binary:** `svmultiphysics-39c88f74-ltopgo`, with multi-rank runs (FSILS).
+- **D26, 2026-10-07 (user's auto-approval window): the sessile and MPI robustness fixes are accepted** (branch `dev/fix-sessile-mpi-robustness`).
+  - **A, aggregation owner disagreement on 4 and 8 ranks.** The finalized-row check exempts a rank that sees a slave only deep in the halo. It recognized such a rank by a closed master being absent, but closure removes an absent Dirichlet wall master, so ranks that correctly carry no line were rejected.
+    - The exemption now also covers a non-owning rank that lacks a master of the unclosed line. That is the same rule the installation and `ParallelConstraints::validateConsistency` use. Ranks that hold a line, own the slave, or see all masters are still compared, and every rank that assembles with the slave must still see every master.
+  - **B, "rollback failure".** It was A raised in the entry synchronization of the outer fixed point. The rollback re-synchronized the same state and failed again. The failure is now reported as a step failure with both messages, and the TimeLoop restores the accepted state and retries with a smaller step or stops with the cause.
+  - **C, FSILS GMRES deadlock.** Shared Dirichlet-face reductions returned early on ranks with an empty face part. Those ranks now take part with zeros.
+  - Each fix has a regression test that fails before the fix.
+  - **Evidence:** sessile R/h = 64 on 8 ranks ran 300 steps (60°, failed at setup before) and 650 steps (120°, failed at step 459). R/h = 32 60° on 4 ranks ran 400 steps (failed at 172). The capillary wave λ/h = 64 on 8 ranks completed all 200 steps (failed at 86). Reference set bitwise identical, 2- and 4-rank parity bitwise identical, CTest 88/88.
+- **D27, 2026-10-07: failure D, outer-loop stagnation, is open.**
+  - Seen at R/h = 32 (120° current protocol at t = 7.9; 60° at larger steps) and R/h = 64 (60° at t = 0.39). Steps hit the 12-pass cap while still contracting slowly: about 0.41 per pass, or about 0.8 with an oscillating sliver cut cell.
+  - The existing opt-in Aitken relaxation took 7 passes on one such step, where a cap of 20 needed 13.
+  - The outer-pass agent is evaluating a higher cap, relaxation, the predictor and a sliver fix. The sessile resolution study waits for it.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
