@@ -4506,7 +4506,24 @@ int StandardAssembler::threadedAssemblyThreadCount() const noexcept
     if (table_owner_ != nullptr || AssemblyThreadPool::insideParallelRegion()) {
         return 1;
     }
-    return std::max(1, options_.num_threads);
+    const int requested = std::max(1, options_.num_threads);
+#ifdef _OPENMP
+    // With OpenMP threads the serial loops split cell batches across them
+    // (and may use the coloured cell path), while assembly threads run one
+    // OpenMP thread each: the results would then depend on the assembly
+    // thread count. Assembly threads are used with one OpenMP thread only.
+    if (requested > 1 && omp_get_max_threads() > 1) {
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true)) {
+            std::fprintf(stderr,
+                         "[ASSEMBLY_THREADS] %d assembly threads requested, but OpenMP uses %d "
+                         "threads; assembly runs serially (set OMP_NUM_THREADS=1)\n",
+                         requested, omp_get_max_threads());
+        }
+        return 1;
+    }
+#endif
+    return requested;
 }
 
 bool StandardAssembler::hasConstraintDistributorForInsert() const noexcept
@@ -4574,12 +4591,10 @@ void StandardAssembler::prepareThreadWorkers(int n)
         w.field_solution_access_ = field_solution_access_;
 
         // Field recipes hold pointers into the owner's field access plans.
-        if (w.worker_field_plans_data_ != static_cast<const void*>(field_access_plans_.data()) ||
-            w.worker_field_plans_size_ != field_access_plans_.size()) {
+        if (w.worker_field_plans_revision_ != field_access_plans_revision_) {
             w.cached_field_recipes_valid_ = false;
             w.cached_field_recipes_.clear();
-            w.worker_field_plans_data_ = field_access_plans_.data();
-            w.worker_field_plans_size_ = field_access_plans_.size();
+            w.worker_field_plans_revision_ = field_access_plans_revision_;
         }
         if (!w.initialized_) {
             w.initialize();
@@ -4592,12 +4607,23 @@ void StandardAssembler::ensureThreadedGatherTables(const IMeshAccess& mesh)
     // The serial loops build the resolved gather tables of the history views
     // lazily on first use; workers cannot, so build them before the threads.
     ensureResolvedVectorTables(mesh);
+    // Keys of the current DOF tables, copied first: building a gather table
+    // may add a DOF table (the vector would reallocate under the loop), and
+    // a table of an outdated layout is left to the serial path.
+    std::vector<std::pair<const dofs::DofMap*, GlobalIndex>> keys;
+    keys.reserve(cell_dof_tables_.size());
+    for (const auto& table : cell_dof_tables_) {
+        if (table.dof_map != nullptr &&
+            table.dof_layout_revision == dofLayoutRevision(table.dof_map)) {
+            keys.emplace_back(table.dof_map, table.dof_offset);
+        }
+    }
     for (const auto* view : previous_solution_views_) {
         if (view == nullptr || view == current_solution_view_) {
             continue;
         }
-        for (const auto& table : cell_dof_tables_) {
-            ensureResolvedVectorTable(mesh, table.dof_map, table.dof_offset, view);
+        for (const auto& [dof_map, dof_offset] : keys) {
+            ensureResolvedVectorTable(mesh, dof_map, dof_offset, view);
         }
     }
 }
@@ -4660,14 +4686,66 @@ std::size_t StandardAssembler::runThreadedItems(
                              std::size_t item,
                              InsertSink& sink,
                              AssemblyResult& result)>& compute,
-    AssemblyResult& result)
+    AssemblyResult& result,
+    const std::function<void(std::size_t item)>& serial)
 {
     if (n_items == 0u || n_threads <= 1) {
         return 0u;
     }
     block_size = std::max<std::size_t>(1u, block_size);
+    prepareThreadWorkers(n_threads);
+    if (!AssemblyThreadPool::global().reserveWorkers(n_threads)) {
+        return 0u; // no threads available: the caller runs the loop serially
+    }
+
+    // A stop is usually lazy one-time work (a JIT compile of a new kernel
+    // shape, typically in the first assemblies of a run). The stopped block
+    // runs serially, then the threads resume. After a few passes that stop
+    // at their first block, or when the serial block changed the field
+    // access plans the workers' state refers to, the caller finishes
+    // serially.
+    constexpr int kMaxPasses = 32;
+    constexpr int kMaxFutilePasses = 3;
+    std::size_t begin = 0u;
+    int futile = 0;
+    for (int pass = 1;; ++pass) {
+        const std::size_t done =
+            runThreadedRange(loop_name, begin, n_items, n_threads, block_size, compute, result);
+        if (done >= n_items || !serial) {
+            return done;
+        }
+        futile = (done == begin) ? futile + 1 : 0;
+        const auto plans_revision = field_access_plans_revision_;
+        const std::size_t serial_end = std::min(n_items, done + block_size);
+        for (std::size_t item = done; item < serial_end; ++item) {
+            serial(item);
+        }
+        begin = serial_end;
+        if (begin >= n_items || futile >= kMaxFutilePasses || pass >= kMaxPasses ||
+            field_access_plans_revision_ != plans_revision) {
+            return begin;
+        }
+    }
+}
+
+std::size_t StandardAssembler::runThreadedRange(
+    const char* loop_name,
+    std::size_t begin,
+    std::size_t n_items,
+    int n_threads,
+    std::size_t block_size,
+    const std::function<void(StandardAssembler& worker,
+                             int thread,
+                             std::size_t item,
+                             InsertSink& sink,
+                             AssemblyResult& result)>& compute,
+    AssemblyResult& result)
+{
+    if (begin >= n_items) {
+        return n_items;
+    }
     const auto threads = static_cast<std::size_t>(n_threads);
-    const std::size_t n_blocks = (n_items + block_size - 1u) / block_size;
+    const std::size_t n_blocks = (n_items - begin + block_size - 1u) / block_size;
     // Ring of record buffers: block b uses slot b % ring_size, so at most
     // ring_size blocks are computed ahead of the insertion.
     const std::size_t ring_size =
@@ -4675,7 +4753,6 @@ std::size_t StandardAssembler::runThreadedItems(
     if (deferred_insert_buffers_.size() < ring_size) {
         deferred_insert_buffers_.resize(ring_size);
     }
-    prepareThreadWorkers(n_threads);
 
     constexpr std::size_t none = std::numeric_limits<std::size_t>::max();
     // Shared state of the compute threads and the inserting (calling) thread.
@@ -4771,29 +4848,39 @@ std::size_t StandardAssembler::runThreadedItems(
             AssemblyResult block_result;
             buffer.clear();
             InsertSink sink(buffer);
-            const std::size_t item_end = std::min(n_items, (b + 1u) * block_size);
+            const std::size_t item_end = std::min(n_items, begin + (b + 1u) * block_size);
             std::string failure;
             bool failed = false;
+            // Building the message must not throw past the handlers: the
+            // block has to be marked (computed or failed) in every case, or
+            // the inserting thread would wait for it forever.
+            const auto describe = [&failure](const char* prefix, const char* what) noexcept {
+                try {
+                    failure = std::string(prefix) + what;
+                } catch (...) {
+                    failure.clear();
+                }
+            };
             try {
-                for (std::size_t item = b * block_size; item < item_end; ++item) {
+                for (std::size_t item = begin + b * block_size; item < item_end; ++item) {
                     compute(worker, static_cast<int>(thread), item, sink, block_result);
                 }
             } catch (const DeferredSerialWork& e) {
                 failed = true;
-                failure = e.what();
+                describe("", e.what());
             } catch (const std::exception& e) {
                 failed = true;
-                failure = std::string("exception: ") + e.what();
+                describe("exception: ", e.what());
             } catch (...) {
                 failed = true;
-                failure = "exception";
+                describe("", "exception");
             }
             {
                 std::lock_guard<std::mutex> lock(pipe.mutex);
                 if (failed) {
                     if (b < pipe.first_failed) {
                         pipe.first_failed = b;
-                        pipe.stop_reason = failure;
+                        pipe.stop_reason.swap(failure);
                     }
                 } else {
                     pipe.counters[b % ring_size] = block_result;
@@ -4814,17 +4901,18 @@ std::size_t StandardAssembler::runThreadedItems(
     // Blocks before the earliest stopped block are all inserted: a thread
     // computes its blocks in increasing order and only stops at a failure.
     const std::size_t done_items =
-        pipe.first_failed == none ? n_items : pipe.first_failed * block_size;
+        pipe.first_failed == none ? n_items : begin + pipe.first_failed * block_size;
 
     if (timing) {
         const double total = std::chrono::duration<double>(clock::now() - t0).count();
         std::fprintf(stderr,
-                     "[ASSEMBLY_THREADS] loop=%s items=%zu threads=%d blocks=%zu ring=%zu "
+                     "[ASSEMBLY_THREADS] loop=%s items=%zu begin=%zu threads=%d blocks=%zu ring=%zu "
                      "compute=%9.6f insert=%9.6f serial_from=%zu%s%s\n",
-                     loop_name, n_items, n_threads, n_blocks, ring_size,
+                     loop_name, n_items, begin, n_threads, n_blocks, ring_size,
                      total, insert_seconds, done_items,
-                     pipe.stop_reason.empty() ? "" : " stop=",
-                     pipe.stop_reason.c_str());
+                     pipe.first_failed == none ? "" : " stop=",
+                     pipe.first_failed == none ? "" :
+                         (pipe.stop_reason.empty() ? "exception" : pipe.stop_reason.c_str()));
     }
     return done_items;
 }
@@ -4898,6 +4986,7 @@ void StandardAssembler::setDofMap(const dofs::DofMap& dof_map)
     cell_resolved_matrix_tables_.clear();
     clearFusedResolvedScratch();
     field_access_plans_.clear();
+    ++field_access_plans_revision_;
     cell_constrained_flags_valid_ = false;
     coloring_valid_ = false;
 }
@@ -4944,6 +5033,7 @@ void StandardAssembler::setDofHandler(const dofs::DofHandler& dof_handler)
     cell_resolved_matrix_tables_.clear();
     clearFusedResolvedScratch();
     field_access_plans_.clear();
+    ++field_access_plans_revision_;
     cell_constrained_flags_valid_ = false;
     coloring_valid_ = false;
 }
@@ -5030,6 +5120,7 @@ void StandardAssembler::setFieldSolutionAccess(std::span<const FieldSolutionAcce
         // invalidated).  DOF tables and resolved tables are keyed by DofMap
         // pointers and remain valid.
         field_access_plans_.clear();
+        ++field_access_plans_revision_;
     }
 }
 
@@ -5622,6 +5713,7 @@ void StandardAssembler::reset()
     cell_resolved_vector_tables_.clear();
     cell_resolved_matrix_tables_.clear();
     field_access_plans_.clear();
+    ++field_access_plans_revision_;
     cell_constrained_flags_valid_ = false;
     cell_constrained_flags_constraint_revision_ = 0;
     cell_constrained_flags_dof_revisions_.clear();
@@ -5700,6 +5792,7 @@ void StandardAssembler::ensureCellDofTables(const IMeshAccess& mesh)
         cell_resolved_matrix_tables_.clear();
         clearFusedResolvedScratch();
         field_access_plans_.clear();
+        ++field_access_plans_revision_;
         cell_constrained_flags_valid_ = false;
         coloring_valid_ = false;
     }
@@ -5736,6 +5829,8 @@ const StandardAssembler::CellDofTable& StandardAssembler::getCellDofTable(
         }
     }
 
+    FE_THROW_IF(concurrent_insertion_, FEException,
+                "StandardAssembler::getCellDofTable: table built during threaded insertion");
     const bool stale_table_for_key =
         std::any_of(cell_dof_tables_.begin(), cell_dof_tables_.end(),
                     [&](const CellDofTable& table) {
@@ -5749,17 +5844,17 @@ const StandardAssembler::CellDofTable& StandardAssembler::getCellDofTable(
         cell_resolved_matrix_tables_.clear();
         clearFusedResolvedScratch();
         field_access_plans_.clear();
+        ++field_access_plans_revision_;
         cell_constrained_flags_valid_ = false;
         coloring_valid_ = false;
     }
 
-    FE_THROW_IF(concurrent_insertion_, FEException,
-                "StandardAssembler::getCellDofTable: table built during threaded insertion");
     // NOTE: Do NOT clear cell_resolved_*_tables_ here.  Resolved tables are
     // keyed by (layout_handle, dof_map_ptr, offset) and remain valid when new
     // DOF tables are added.  Clearing forces expensive rebuilds.
     // field_access_plans_ may reference CellDofTable pointers; clear if needed.
     field_access_plans_.clear();
+    ++field_access_plans_revision_;
     auto& table = cell_dof_tables_.emplace_back();
     table.dof_map = dof_map;
     table.dof_offset = dof_offset;
@@ -6152,6 +6247,7 @@ void StandardAssembler::ensureFieldAccessPlans(const IMeshAccess& mesh)
     }
 
     field_access_plans_.clear();
+    ++field_access_plans_revision_;
     field_access_plans_.reserve(field_solution_access_.size());
     for (const auto& access : field_solution_access_) {
         FE_CHECK_NOT_NULL(access.space, "StandardAssembler::ensureFieldAccessPlans: field space");
@@ -7320,16 +7416,29 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
     // Threaded compute with ordered insertion (FE/Docs/ThreadedAssembly.md).
     std::size_t serial_begin = 0u;
     const int n_threads = threadedAssemblyThreadCount();
-    if (n_threads > 1 && faces.size() >= kThreadedAssemblyMinItems && !need_material_state) {
-        for (auto& face_item : faces) {
-            if (facet_set_handle != nullptr &&
-                !facet_set_handle->containsFacet(static_cast<MeshIndex>(face_item.face_id))) {
-                continue;
+    bool threaded = n_threads > 1 && faces.size() >= kThreadedAssemblyMinItems && !need_material_state;
+    if (threaded) {
+        // The serial loop looks the indices up only for faces that pass its
+        // filters; a lookup that fails here (a face the loop would skip)
+        // makes this call serial, so errors are raised as without threads.
+        try {
+            for (auto& face_item : faces) {
+                if (facet_set_handle != nullptr &&
+                    !facet_set_handle->containsFacet(static_cast<MeshIndex>(face_item.face_id))) {
+                    continue;
+                }
+                face_item.local_face_minus = mesh.getLocalFaceIndex(face_item.face_id, face_item.cell_minus);
+                face_item.local_face_plus = mesh.getLocalFaceIndex(face_item.face_id, face_item.cell_plus);
+                face_item.local_faces_known = true;
             }
-            face_item.local_face_minus = mesh.getLocalFaceIndex(face_item.face_id, face_item.cell_minus);
-            face_item.local_face_plus = mesh.getLocalFaceIndex(face_item.face_id, face_item.cell_plus);
-            face_item.local_faces_known = true;
+        } catch (...) {
+            threaded = false;
+            for (auto& face_item : faces) {
+                face_item.local_faces_known = false;
+            }
         }
+    }
+    if (threaded) {
         ensureThreadedGatherTables(mesh);
         prepareThreadWorkers(n_threads);
         thread_states.resize(static_cast<std::size_t>(n_threads));
@@ -7339,6 +7448,7 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             thread_states[static_cast<std::size_t>(t)].context_plus.reserve(
                 plus_context_dofs, 27, mesh.dimension());
         }
+        InsertSink owner_sink(*this);
         serial_begin = runThreadedItems(
             "interior_faces", faces.size(), n_threads, kThreadedAssemblyBlockSize,
             [&](StandardAssembler& worker, int thread, std::size_t item, InsertSink& sink,
@@ -7346,7 +7456,10 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
                 worker.assembleInteriorFaceItem(
                     loop, thread_states[static_cast<std::size_t>(thread)], item, sink, item_result);
             },
-            result);
+            result,
+            [&](std::size_t item) {
+                assembleInteriorFaceItem(loop, serial_state, item, owner_sink, result);
+            });
     }
     if (serial_begin < faces.size()) {
         InsertSink sink(*this);
@@ -9256,33 +9369,36 @@ void StandardAssembler::prepareGeometry(
 
     // Get cell node coordinates — use flat table when available (Tier 2/3),
     // bypassing virtual dispatch through IMeshAccess::getCellCoordinates.
+    // A worker of the threaded loops reads its owner's table (built by the
+    // owner, read-only while the threads run).
+    const auto& flat = tableOwner().flat_cell_coords_;
     const bool flat_coords_current =
-        flat_cell_coords_.valid &&
-        flat_cell_coords_.mesh == &mesh &&
-        flat_cell_coords_.dense_cell_ids &&
+        flat.valid &&
+        flat.mesh == &mesh &&
+        flat.dense_cell_ids &&
         mesh.cellIdsAreDense() &&
-        flat_cell_coords_.cell_count == mesh.numCells() &&
-        flat_cell_coords_.nodes_per_cell > 0 &&
-        flat_cell_coords_.uniform_cell_type == cell_type &&
-        (!flat_cell_coords_.revision_tracking_available ||
-         (flat_cell_coords_.geometry_revision == mesh.geometryRevision() &&
-          flat_cell_coords_.topology_revision == mesh.topologyRevision() &&
-          flat_cell_coords_.ownership_revision == mesh.ownershipRevision() &&
-          flat_cell_coords_.numbering_revision == mesh.numberingRevision() &&
-          flat_cell_coords_.active_configuration_epoch == mesh.activeConfigurationEpoch() &&
-          flat_cell_coords_.coordinate_configuration_key == mesh.coordinateConfigurationKey()));
+        flat.cell_count == mesh.numCells() &&
+        flat.nodes_per_cell > 0 &&
+        flat.uniform_cell_type == cell_type &&
+        (!flat.revision_tracking_available ||
+         (flat.geometry_revision == mesh.geometryRevision() &&
+          flat.topology_revision == mesh.topologyRevision() &&
+          flat.ownership_revision == mesh.ownershipRevision() &&
+          flat.numbering_revision == mesh.numberingRevision() &&
+          flat.active_configuration_epoch == mesh.activeConfigurationEpoch() &&
+          flat.coordinate_configuration_key == mesh.coordinateConfigurationKey()));
     if (flat_coords_current &&
         cell_id >= 0 &&
-        static_cast<std::size_t>(cell_id) < flat_cell_coords_.coords.size() /
-            (static_cast<std::size_t>(flat_cell_coords_.nodes_per_cell) * 3u)) {
-        const auto npc = static_cast<std::size_t>(flat_cell_coords_.nodes_per_cell);
+        static_cast<std::size_t>(cell_id) < flat.coords.size() /
+            (static_cast<std::size_t>(flat.nodes_per_cell) * 3u)) {
+        const auto npc = static_cast<std::size_t>(flat.nodes_per_cell);
         const auto base = static_cast<std::size_t>(cell_id) * npc * 3u;
         cell_coords_.resize(npc);
         scratch_node_coords_.resize(npc);
         for (std::size_t i = 0; i < npc; ++i) {
-            const auto x = flat_cell_coords_.coords[base + i * 3u + 0u];
-            const auto y = flat_cell_coords_.coords[base + i * 3u + 1u];
-            const auto z = flat_cell_coords_.coords[base + i * 3u + 2u];
+            const auto x = flat.coords[base + i * 3u + 0u];
+            const auto y = flat.coords[base + i * 3u + 1u];
+            const auto z = flat.coords[base + i * 3u + 2u];
             cell_coords_[i] = {x, y, z};
             scratch_node_coords_[i] = math::Vector<Real, 3>{x, y, z};
         }
@@ -12792,6 +12908,7 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
             worker.context_.reserve(max_dofs, reserve_qpts, mesh.dimension());
             thread_states[static_cast<std::size_t>(t)].reset(loop, jit_constants_, worker_epoch);
         }
+        InsertSink owner_sink(*this);
         serial_begin = runThreadedItems(
             "cut_volumes_fused", iteration_count, n_threads, kThreadedAssemblyBlockSize,
             [&](StandardAssembler& worker, int thread, std::size_t item, InsertSink& sink,
@@ -12799,7 +12916,10 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
                 worker.assembleCutVolumeFusedRule(
                     loop, thread_states[static_cast<std::size_t>(thread)], item, sink, item_result);
             },
-            result);
+            result,
+            [&](std::size_t ordinal) {
+                assembleCutVolumeFusedRule(loop, serial_state, ordinal, owner_sink, result);
+            });
     }
     if (serial_begin < iteration_count) {
         InsertSink sink(*this);
@@ -13594,7 +13714,27 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
     // Threaded compute with ordered insertion (FE/Docs/ThreadedAssembly.md).
     std::size_t serial_begin = 0u;
     const int n_threads = threadedAssemblyThreadCount();
-    if (n_threads > 1 && selected_rules.size() >= kThreadedAssemblyMinItems && !need_material_state) {
+    bool threaded = n_threads > 1 && selected_rules.size() >= kThreadedAssemblyMinItems && !need_material_state;
+    if (threaded && hasFlag(required_data, RequiredData::EntityMeasures)) {
+        // Parent-face measures look up local face indices, a table the mesh
+        // builds on first use: do one lookup before the threads start. If
+        // it fails, the loop runs serially and raises the error at its item.
+        for (const auto* rule_ptr : selected_rules) {
+            if (rule_ptr == nullptr || rule_ptr->provenance.parent_boundary_entity < 0 ||
+                rule_ptr->provenance.parent_entity < 0) {
+                continue;
+            }
+            try {
+                (void)mesh.getLocalFaceIndex(
+                    static_cast<GlobalIndex>(rule_ptr->provenance.parent_boundary_entity),
+                    static_cast<GlobalIndex>(rule_ptr->provenance.parent_entity));
+            } catch (...) {
+                threaded = false;
+            }
+            break;
+        }
+    }
+    if (threaded) {
         ensureThreadedGatherTables(mesh);
         prepareThreadedInsertTables(mesh, row_dof_map_, row_dof_offset_, col_dof_map_, col_dof_offset_,
                                     assemble_matrix ? insert_matrix_view : nullptr,
@@ -13609,6 +13749,7 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
                     plus_context_dofs, plus_context_qpts, mesh.dimension());
             }
         }
+        InsertSink owner_sink(*this);
         serial_begin = runThreadedItems(
             "cut_interfaces", selected_rules.size(), n_threads, kThreadedAssemblyBlockSize,
             [&](StandardAssembler& worker, int thread, std::size_t item, InsertSink& sink,
@@ -13616,7 +13757,10 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
                 worker.assembleCutInterfaceItem(
                     loop, thread_states[static_cast<std::size_t>(thread)], item, sink, item_result);
             },
-            result);
+            result,
+            [&](std::size_t item) {
+                assembleCutInterfaceItem(loop, serial_state, item, owner_sink, result);
+            });
     }
     if (serial_begin < selected_rules.size()) {
         InsertSink sink(*this);
@@ -15913,7 +16057,11 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             vector_loop, vector_thread_states[static_cast<std::size_t>(thread)],
                             item + 1u, sink, item_result);
                     },
-                    result);
+                    result,
+                    [&](std::size_t item) {
+                        assembleMonolithicVectorCell(vector_loop, vector_serial_state, item + 1u,
+                                                     vector_sink, result);
+                    });
             }
             for (std::size_t item = vector_begin; item < cell_ids.size(); ++item) {
                 assembleMonolithicVectorCell(vector_loop, vector_serial_state, item, vector_sink, result);
@@ -16292,6 +16440,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                                          mesh.dimension(), use_coupled_scalar_cache);
                     thread_states[static_cast<std::size_t>(t)].init(loop, mesh.dimension());
                 }
+                InsertSink owner_sink(*this);
                 serial_begin = runThreadedItems(
                     "cells_monolithic_batch", batches.size(), n_threads,
                     kThreadedAssemblyMonolithicBatchesPerBlock,
@@ -16301,7 +16450,10 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             loop, thread_states[static_cast<std::size_t>(thread)], item, sink,
                             item_result);
                     },
-                    result);
+                    result,
+                    [&](std::size_t item) {
+                        assembleMonolithicCellBatch(loop, serial_state, item, owner_sink, result);
+                    });
             }
             if (serial_begin < batches.size()) {
                 InsertSink sink(*this);

@@ -94,6 +94,17 @@ int AssemblyThreadPool::workerCount() const
     return static_cast<int>(threads_.size());
 }
 
+bool AssemblyThreadPool::reserveWorkers(int n_workers) noexcept
+{
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensureWorkersLocked(n_workers);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 void AssemblyThreadPool::ensureWorkersLocked(int n_workers)
 {
     while (static_cast<int>(threads_.size()) < n_workers) {

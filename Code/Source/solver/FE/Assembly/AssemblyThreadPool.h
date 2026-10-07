@@ -69,6 +69,10 @@ public:
     /// Number of worker threads currently alive (excluding callers).
     [[nodiscard]] int workerCount() const;
 
+    /// Starts worker threads until there are at least `n_workers`; false if
+    /// a thread could not be created (the caller should then run serially).
+    [[nodiscard]] bool reserveWorkers(int n_workers) noexcept;
+
 private:
     void ensureWorkersLocked(int n_workers);
     void workerLoop(int worker_index, std::uint64_t start_generation);
