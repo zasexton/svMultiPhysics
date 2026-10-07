@@ -14,7 +14,14 @@ Two deck profiles are written (``write_case(..., profile=...)``):
   harmonic PDE velocity extension for the level-set transport (D15), the
   accepted-step kinematic reconciliation (D14) and the sign-definite patch
   bounds (D21), no reinitialization, and the generalized-alpha / FSILS GMRES
-  solver with the benchmark tolerances (1e-4).
+  solver with the benchmark tolerances (1e-4).  The bottom face carries no
+  level-set inflow condition: the D21 bounds reject level-set inflow faces
+  (the bottom stays deep in the liquid; its nodes keep a negative value
+  within their one-ring bounds).  The run starts from rest with a zero
+  initial rate (REQUIRED_ENVIRONMENT, recorded in benchmark.json): the
+  PDE-consistent rate solve holds the closed-inlet preload pressure fixed,
+  so at the opened inlet it returns a non-solenoidal impulsive rate whose
+  predictor the first steps cannot absorb.
 * ``"legacy"``: the 2026-08-30 deck (PrescribedContactAngle, wet-extension
   transport, projection reinitialization every step, discontinuity capturing,
   corner-linearized cut geometry, tolerances 1e-6), reproduced byte for byte;
@@ -51,6 +58,8 @@ SLIP_LENGTH_M = 0.001
 # Deck profiles (module docstring).  "legacy" reproduces the 2026-08-30 decks.
 PROFILES = ("d4", "legacy")
 DEFAULT_PROFILE = "d4"
+# Process environment a d4 run needs (module docstring); run scripts export it.
+REQUIRED_ENVIRONMENT = {"SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT": "0"}
 INTERFACE_DOMAIN_ID = "capillary_rise_surface"
 COMPARISON_CONTRACT = (
     Path(__file__).resolve().parents[1]
@@ -65,6 +74,13 @@ PROTOCOL_LEVELS = (10, 20, 40)
 # meniscus reshapes, so the step is sized for CONTACT_SPEED_SAFETY times it.
 REFERENCE_MAXIMUM_APEX_SPEED_M_PER_S = 0.115
 CONTACT_SPEED_SAFETY = 1.5
+# The outer fixed point regenerates the capillary geometry between passes, so
+# within a step capillarity is coupled explicitly; its passes contract only
+# for steps below the explicit capillary bound sqrt(rho dx^3 / (2 pi gamma))
+# (Brackbill, Kothe and Zemach 1992).  At 0.7 of the bound the d4 deck needs
+# 4-5 passes per step at 10 and 20 half-gap cells (cap 12); at 1.2 (10 cells,
+# m = 4) 6-8, and at 2.5 (m = 2) the first step reaches the cap.
+CAPILLARY_STEP_FRACTION = 0.7
 # History sampling: one output per millisecond, the step of the comparison
 # grid, over its whole support [0, 0.69 s].
 OUTPUT_INTERVAL_S = 0.001
@@ -494,11 +510,6 @@ def _d4_solver_xml(steps: int,
     <Tolerance>1.0e-8</Tolerance>
     <Absolute_tolerance>1.0e-10</Absolute_tolerance>
   </LS>
-  <Add_BC name="wall_bottom">
-    <Type>LevelSetInflow</Type>
-    <Value>-0.01</Value>
-    <Penalty_scale>2.0</Penalty_scale>
-  </Add_BC>
   <Add_BC name="wall_top">
     <Type>LevelSetOutflow</Type>
   </Add_BC>
@@ -602,10 +613,11 @@ def protocol_schedule(half_gap_cells: int,
     """Time step of one comparison level.
 
     The step is the output interval (1 ms) divided by the smallest integer m
-    for which CONTACT_SPEED_SAFETY times the largest reference apex speed
+    for which (a) CONTACT_SPEED_SAFETY times the largest reference apex speed
     moves the contact point at most the frozen limit of the level (cells per
-    step).  Outputs fall on the 1 ms comparison grid; the run covers
-    [0, 0.69 s].
+    step), and (b) the step is at most CAPILLARY_STEP_FRACTION times the
+    explicit capillary bound of the level.  Outputs fall on the 1 ms
+    comparison grid; the run covers [0, 0.69 s].
     """
     if (not isinstance(half_gap_cells, int) or isinstance(half_gap_cells, bool)
             or half_gap_cells < 2):
@@ -617,9 +629,14 @@ def protocol_schedule(half_gap_cells: int,
         raise ValueError("contact-motion limit must be positive and finite")
     dx = HALF_GAP_M / float(half_gap_cells)
     design_speed = CONTACT_SPEED_SAFETY * REFERENCE_MAXIMUM_APEX_SPEED_M_PER_S
-    substeps = max(1, math.ceil(
+    motion_substeps = max(1, math.ceil(
         OUTPUT_INTERVAL_S * design_speed / (motion_limit_cells_per_step * dx)
         - 1.0e-12))
+    capillary_bound = capillary_step_bound_s(half_gap_cells)
+    capillary_substeps = max(1, math.ceil(
+        OUTPUT_INTERVAL_S / (CAPILLARY_STEP_FRACTION * capillary_bound)
+        - 1.0e-12))
+    substeps = max(motion_substeps, capillary_substeps)
     outputs = int(round(PROTOCOL_END_TIME_S / OUTPUT_INTERVAL_S))
     dt = OUTPUT_INTERVAL_S / substeps
     return {
@@ -628,12 +645,24 @@ def protocol_schedule(half_gap_cells: int,
         "maximum_contact_motion_cells_per_step": motion_limit_cells_per_step,
         "design_contact_speed_m_per_s": design_speed,
         "design_contact_motion_cells_per_step": design_speed * dt / dx,
+        "capillary_step_bound_s": capillary_bound,
+        "capillary_step_fraction": dt / capillary_bound,
+        "limiting_constraint": (
+            "capillary" if capillary_substeps > motion_substeps
+            else "contact_motion"),
         "time_step_size_s": dt,
         "output_cadence_steps": substeps,
         "output_interval_s": OUTPUT_INTERVAL_S,
         "number_of_time_steps": outputs * substeps,
         "end_time_s": outputs * substeps * dt,
     }
+
+
+def capillary_step_bound_s(half_gap_cells: int) -> float:
+    """Explicit capillary time-step bound sqrt(rho dx^3 / (2 pi gamma))."""
+    dx = HALF_GAP_M / float(half_gap_cells)
+    return math.sqrt(LIQUID_DENSITY_KG_PER_M3 * dx ** 3 /
+                     (2.0 * math.pi * SURFACE_TENSION_N_PER_M))
 
 
 def frozen_contact_motion_limits() -> dict[int, float]:
@@ -739,7 +768,10 @@ def write_case(case_dir: Path,
             "reinitialization": False,
             "time_integration": "GeneralizedAlpha",
             "nonlinear_tolerance": 1.0e-4,
+            "level_set_bottom_boundary": "none (D21 bounds reject level-set inflow faces)",
+            "initial_rate": "zero (PDE rate solve disabled by the required environment)",
         }
+        benchmark["required_environment"] = dict(REQUIRED_ENVIRONMENT)
     (case_dir / "benchmark.json").write_text(
         json.dumps(benchmark, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

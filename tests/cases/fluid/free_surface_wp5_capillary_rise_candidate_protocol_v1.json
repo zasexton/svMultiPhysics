@@ -6,13 +6,35 @@
   "comparison_contract": "tests/cases/fluid/free_surface_wp5_capillary_rise_comparison_v1.json",
   "generator": "tests/cases/fluid/open_vessel_free_surface/capillary_rise_2d.py (profile d4)",
   "levels": [
-    {"half_gap_cells": 10, "slip_length_to_mesh_ratio": 2.0, "maximum_contact_motion_cells_per_step": 0.2},
-    {"half_gap_cells": 20, "slip_length_to_mesh_ratio": 4.0, "maximum_contact_motion_cells_per_step": 0.1},
-    {"half_gap_cells": 40, "slip_length_to_mesh_ratio": 8.0, "maximum_contact_motion_cells_per_step": 0.05}
+    {
+      "half_gap_cells": 10,
+      "slip_length_to_mesh_ratio": 2.0,
+      "maximum_contact_motion_cells_per_step": 0.2,
+      "steps_per_output": 8,
+      "time_step_s": 0.000125
+    },
+    {
+      "half_gap_cells": 20,
+      "slip_length_to_mesh_ratio": 4.0,
+      "maximum_contact_motion_cells_per_step": 0.1,
+      "steps_per_output": 20,
+      "time_step_s": 5e-05
+    },
+    {
+      "half_gap_cells": 40,
+      "slip_length_to_mesh_ratio": 8.0,
+      "maximum_contact_motion_cells_per_step": 0.05,
+      "steps_per_output": 57,
+      "time_step_s": 1.7543859649122806e-05
+    }
   ],
-  "time_step_rule": "dt = 1 ms / m, m the smallest integer with 1.5 * 0.115 m/s * dt <= limit * dx (capillary_rise_2d.protocol_schedule); space and time are refined together, so the three levels are the three spatial and the three temporal levels of the contract.",
+  "time_step_rule": "dt = 1 ms / m, m the smallest integer with (a) 1.5 * 0.115 m/s * dt <= limit * dx and (b) dt <= 0.7 * sqrt(rho dx^3 / (2 pi gamma)) (capillary_rise_2d.protocol_schedule); (b) binds at every level. Space and time are refined together, so the three levels are the three spatial and the three temporal levels of the contract.",
   "candidate_history": "the finest completed level, sampled every 1 ms and linearly interpolated onto the comparison grid",
-  "comparison_grid": {"start_s": 0.0, "step_s": 0.001, "point_count": 691},
+  "comparison_grid": {
+    "start_s": 0.0,
+    "step_s": 0.001,
+    "point_count": 691
+  },
   "uncertainty_rule": {
     "description": "Pointwise GCI-type estimate u(t) = F |h_fine(t) - h_medium(t)| / (r^p - 1). With three levels, p is the observed order from the RMS level differences, log(||h_medium - h_coarse|| / ||h_fine - h_medium||) / log(r), clipped to [0.5, 2], with F = 1.25; if the differences do not decrease, p = 1 and F = 3. With two levels only, p = 1 and F = 3 (the comparison is then reported as two-level and does not qualify).",
     "refinement_ratio": 2.0,
@@ -20,8 +42,24 @@
     "two_level_safety_factor": 3.0,
     "fallback_safety_factor": 3.0,
     "fallback_order": 1.0,
-    "order_clip": [0.5, 2.0]
+    "order_clip": [
+      0.5,
+      2.0
+    ]
   },
   "contact_motion_check": "The measured wall-contact motion per step (between 1 ms outputs) must stay below the level limit at every output; a violation is reported and disqualifies that level as a temporal level.",
-  "failure_policy": "A run stopped by the outer fixed-point cap is recorded (case, step, passes) and retried once with SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION=1 for diagnosis only; the diagnostic run is not a candidate."
+  "failure_policy": "A run stopped by the outer fixed-point cap is recorded (case, step, passes) and retried once with SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION=1 for diagnosis only; the diagnostic run is not a candidate.",
+  "run_environment": {
+    "SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT": "0",
+    "reason": "start from rest with a zero initial rate; the PDE rate solve holds the closed-inlet preload pressure fixed and returns a non-solenoidal impulsive rate at the opened inlet"
+  },
+  "revisions": [
+    {
+      "revision": 2,
+      "date": "2026-10-07",
+      "before_candidate_execution": true,
+      "change": "time-step rule gains the capillary bound (b); the run environment is declared",
+      "evidence": "diagnosis jobs 46898188, 46901883, 46907273, 46910758: with m = 2 (10 cells) the outer fixed point reaches its 12-pass cap at step 0; 4-5 passes per step at m = 8 (10 cells) and m = 20 (20 cells); the PDE rate initialization makes the first steps fail at m <= 6 (10 cells) and m <= 14 (20 cells)."
+    }
+  ]
 }

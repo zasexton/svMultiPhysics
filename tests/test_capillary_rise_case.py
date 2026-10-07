@@ -388,8 +388,11 @@ def test_d4_profile_is_the_default_wetting_deck(tmp_path: Path):
     assert level_set.findtext("Enable_reinitialization") == "false"
     assert level_set.find("Enable_discontinuity_capturing") is None
     assert level_set.findtext("Enable_volume_correction") == "false"
-    assert boundary_by_name(level_set, "wall_bottom").findtext("Type") == "LevelSetInflow"
+    # D21 bounds reject level-set inflow faces: the bottom has no level-set BC.
+    assert [bc.attrib["name"] for bc in level_set.findall("Add_BC")] == ["wall_top"]
     assert boundary_by_name(level_set, "wall_top").findtext("Type") == "LevelSetOutflow"
+    assert benchmark["required_environment"] == {
+        "SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT": "0"}
 
     fluid = equation_by_type(root, "fluid")
     assert fluid.findtext("Tolerance") == "1.0e-4"
@@ -423,21 +426,27 @@ def test_protocol_schedule_meets_the_frozen_contact_motion_limits():
     module = load_module()
     limits = module.frozen_contact_motion_limits()
     assert limits == {10: 0.2, 20: 0.1, 40: 0.05}
-    expected_substeps = {10: 2, 20: 7, 40: 28}
+    # The capillary bound (0.7 of sqrt(rho dx^3 / (2 pi gamma))) is the binding
+    # constraint at every level: 2.03e-4, 7.18e-5, 2.54e-5 s.
+    expected_substeps = {10: 8, 20: 20, 40: 57}
     for cells, limit in limits.items():
         schedule = module.protocol_schedule(cells)
         assert schedule["output_cadence_steps"] == expected_substeps[cells]
+        assert schedule["limiting_constraint"] == "capillary"
         assert math.isclose(
             schedule["time_step_size_s"] * schedule["output_cadence_steps"], 1.0e-3)
         assert schedule["number_of_time_steps"] == 690 * expected_substeps[cells]
         assert math.isclose(schedule["end_time_s"], 0.69)
         assert schedule["design_contact_motion_cells_per_step"] <= limit
-        # One substep fewer would exceed the limit at the design speed.
-        coarser = 1.0e-3 / (schedule["output_cadence_steps"] - 1) if (
-            schedule["output_cadence_steps"] > 1) else None
-        if coarser is not None:
-            assert (schedule["design_contact_speed_m_per_s"] * coarser /
-                    schedule["dx_m"]) > limit
+        assert schedule["capillary_step_fraction"] <= module.CAPILLARY_STEP_FRACTION
+        # One substep fewer would exceed the capillary fraction.
+        coarser = 1.0e-3 / (schedule["output_cadence_steps"] - 1)
+        assert coarser / schedule["capillary_step_bound_s"] > module.CAPILLARY_STEP_FRACTION
+    assert math.isclose(module.capillary_step_bound_s(10), 2.0330e-4, rel_tol=1.0e-4)
+    # Without the capillary bound the motion limit alone gives 2, 7, 28 substeps.
+    motion_only = {cells: math.ceil(1.0e-3 * 1.5 * 0.115 / (limit * 0.005 / cells) - 1.0e-12)
+                   for cells, limit in limits.items()}
+    assert motion_only == {10: 2, 20: 7, 40: 28}
 
 
 def test_command_line_writes_a_truncated_d4_level(tmp_path: Path):
@@ -449,11 +458,11 @@ def test_command_line_writes_a_truncated_d4_level(tmp_path: Path):
     assert benchmark["deck_profile"] == "d4"
     assert benchmark["truncated"] is True
     assert benchmark["number_of_time_steps"] == 6
-    assert benchmark["protocol_schedule"]["output_cadence_steps"] == 2
+    assert benchmark["protocol_schedule"]["output_cadence_steps"] == 8
     root = ET.parse(out / "solver.xml").getroot()
     general = root.find("GeneralSimulationParameters")
     assert general.findtext("Number_of_time_steps") == "6"
-    assert float(general.findtext("Time_step_size")) == 5.0e-4
+    assert float(general.findtext("Time_step_size")) == 1.25e-4
 
 
 HISTORY_PATH = (
