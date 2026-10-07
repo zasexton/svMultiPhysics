@@ -33,6 +33,7 @@
 #include <deque>
 #include <exception>
 #include <functional>
+#include <iomanip>
 #include <limits>
 #include <map>
 #include <memory>
@@ -423,6 +424,17 @@ struct AggregationRuntimeOptions {
     }
     valid = false;
     return false;
+}
+
+// Diagnostic only: SVMP_AGGREGATION_TRACE_PROPOSALS=1 logs every root
+// proposal and its outcome.  It changes no constraint.
+[[nodiscard]] bool aggregationProposalTraceEnabled() noexcept
+{
+    static const bool enabled = [] {
+        const char* value = std::getenv("SVMP_AGGREGATION_TRACE_PROPOSALS");
+        return value != nullptr && std::string_view(value) == "1";
+    }();
+    return enabled;
 }
 
 [[nodiscard]] AggregationRuntimeOptions readAggregationRuntimeOptions()
@@ -907,6 +919,15 @@ resolveDistributedAggregationDeclarations(
             // A bad root proposal is not a communicator failure if another
             // root/provider can furnish a valid extension for the candidate.
             if (!valid) {
+                if (aggregationProposalTraceEnabled()) {
+                    FE_LOG_INFO(
+                        "SmallCutAggregationConstraint: diagnostic="
+                        "aggregation_proposal_trace stage=normalization "
+                        "candidate_dof=" + std::to_string(dof) +
+                        " root_cell_gid=" +
+                        std::to_string(normalized.root_cell_gid) +
+                        " outcome=dropped");
+                }
                 continue;
             }
             normalized_local_declarations.push_back(std::move(normalized));
@@ -1413,7 +1434,10 @@ resolveDistributedAggregationDeclarations(
                 ++failure_count;
                 if (failure_count <= 4u) {
                     failures << " dof=" << dof
-                             << " reason=no_valid_root_proposal;";
+                             << " reason=no_valid_root_proposal xyz=("
+                             << support.coordinates[0] << ","
+                             << support.coordinates[1] << ","
+                             << support.coordinates[2] << ");";
                 }
                 continue;
             }
@@ -5970,6 +5994,30 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 continue;
             }
             const auto root = local_root->second;
+            Vector<Real, 3> traced_xi{};
+            Real traced_extrapolation =
+                std::numeric_limits<Real>::quiet_NaN();
+            auto trace_proposal = [&](const char* outcome) {
+                if (!aggregationProposalTraceEnabled()) {
+                    return;
+                }
+                std::ostringstream trace;
+                trace << std::setprecision(17)
+                      << "SmallCutAggregationConstraint: diagnostic="
+                         "aggregation_proposal_trace stage=construction"
+                      << " field='" << rec.name << "'"
+                      << " candidate_dof=" << declaration_dof
+                      << " xyz=(" << candidate.coordinates[0] << ","
+                      << candidate.coordinates[1] << ","
+                      << candidate.coordinates[2] << ")"
+                      << " root_cell=" << root
+                      << " root_distance=" << root_candidate.distance
+                      << " xi=(" << traced_xi[0] << "," << traced_xi[1]
+                      << "," << traced_xi[2] << ")"
+                      << " extrapolation=" << traced_extrapolation
+                      << " outcome=" << outcome;
+                FE_LOG_INFO(trace.str());
+            };
             mesh.getCellNodes(root, root_check_nodes);
             check_cell_pairable(root);
             const auto n_declared_root_nodes = std::min(
@@ -6000,11 +6048,15 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 !invertMapping(*mapping, candidate.coordinates,
                                mesh.dimension(), xi)) {
                 ++inversion_failed;
+                traced_xi = xi;
+                trace_proposal("inversion_failed");
                 continue;
             }
             const Real reference_extrapolation =
                 normalizedReferenceExtrapolationDistance(
                     mesh.getCellType(root), xi);
+            traced_xi = xi;
+            traced_extrapolation = reference_extrapolation;
             maximum_attempted_reference_extrapolation = std::max(
                 maximum_attempted_reference_extrapolation,
                 reference_extrapolation);
@@ -6017,6 +6069,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                                 guards_
                                     .maximum_reference_extrapolation_distance)) {
                 ++extrapolation_guard_rejections;
+                trace_proposal("extrapolation_guard");
                 continue;
             }
             maximum_observed_reference_extrapolation = std::max(
@@ -6030,6 +6083,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 (!field_mesh_to_basis.empty() &&
                  field_mesh_to_basis.size() < n_root_field_nodes)) {
                 ++inversion_failed;
+                trace_proposal("basis_size");
                 continue;
             }
 
@@ -6096,8 +6150,10 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             if (!proposal_valid ||
                 declaration.lines.size() != candidate.component_dofs.size()) {
                 ++empty_lines;
+                trace_proposal(proposal_valid ? "line_count" : "line_invalid");
                 continue;
             }
+            trace_proposal("emitted");
             local_aggregation_declarations[declaration_dof].push_back(
                 std::move(declaration));
             candidate_emitted = true;
