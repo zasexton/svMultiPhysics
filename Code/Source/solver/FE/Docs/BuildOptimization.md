@@ -8,11 +8,13 @@ sphere proxy), serial runs, on Intel Skylake (Xeon Gold 5118) nodes.
 
 ## Production Build
 
-The production build is CMake `Release` with GCC 12.4.0 for the compiler's
+The default build is CMake `Release` with GCC 12.4.0 for the compiler's
 generic x86-64 target: `-O3 -DNDEBUG`, no `-march`, no link-time optimization
-(LTO), no profile-guided optimization (PGO).  Some FE translation units add
-`-ftree-vectorize -funroll-loops` (FSILS, assembly, basis), and
-`Interfaces/detail/ProducerArithmeticAssessment.cpp` is pinned to
+(LTO), no profile-guided optimization (PGO).  Binaries for benchmark and
+production runs add LTO and PGO on top of it (decision D16, see
+[Production LTO + PGO Binaries](#production-lto--pgo-binaries)).  Some FE
+translation units add `-ftree-vectorize -funroll-loops` (FSILS, assembly,
+basis), and `Interfaces/detail/ProducerArithmeticAssessment.cpp` is pinned to
 `-ffp-contract=off -fno-lto -msse2`.  GCC's default `-ffp-contract=fast` has
 no effect for the generic target, which has no FMA instructions.  LLVM 17 is
 linked statically; its own code generation speed is not affected by these
@@ -35,11 +37,12 @@ The existing `FE_ENABLE_IPO` option enables LTO for the FE library only.
 ## Recommended Configuration
 
 `SV_ENABLE_LTO=ON` with `SV_PGO=USE`, generic instruction set, default JIT
-settings.  Outputs are bitwise identical to the production build, with the
-same accepted steps, outer passes, Newton and linear iterations, and the
-reference cases run 8.5-11% faster (3-4% on cases outside the training set).
+settings.  Outputs are bitwise identical to the default build, with the
+same accepted steps, outer passes, Newton and linear iterations.  In the study
+below the reference cases ran 8.5-11% faster (3-4% on cases outside the
+training set); at `39c88f74` a step takes 6-18% less time (next section).
 
-Recipe (configure arguments as in the production build, from `Code/`):
+Recipe (configure arguments as in the default build, from `Code/`):
 
 ```bash
 # 1. Instrumented build.
@@ -58,28 +61,117 @@ cmake --build build-opt -j 12 --target svmultiphysics
 ```
 
 The study trained on the eight 2D reference cases, `tank3d_L8` and the first
-step of the sphere proxy.  The instrumented solver is 3.5 to 4 times slower
-(the sphere step took 82 minutes), so the 2D cases and `tank3d_L8` alone (about
-10 minutes, three runs at a time) are a reasonable training set.  A stale
+step of the sphere proxy.  The instrumented solver is 3 to 5 times slower
+(the sphere step took 82 minutes then, 14 minutes at `39c88f74`).  A stale
 profile never changes results: functions whose source changed lose their
 profile and are optimized as without PGO (GCC prints a coverage-mismatch
-warning), so the gain decays as the code moves on.  Regenerate the profile
-after larger changes to the hot paths.
+warning), so the gain decays as the code moves on.  The production training
+set and the refresh policy are in the next section.
 
 LTO alone is bitwise identical but gives no measurable speed-up; it shrinks the
 solver by 10% and its build is not slower.  With LTO, every test executable is
 also linked with LTO, which makes test builds slower.
 
+## Production LTO + PGO Binaries
+
+Benchmark and production binaries use `SV_ENABLE_LTO=ON` and `SV_PGO=USE` with
+a profile trained on the same commit (decision D16), first at `39c88f74`.  On
+Sherlock one job runs the whole recipe:
+
+```bash
+sbatch --export=NONE /scratch/users/zsexton/svmp-integration-67b4395a/jobs/build_ltopgo.sbatch <commit> \
+       [stages=generate,train,use] [src=<clean worktree>] [work=<dir>] [profile=<commit>|<dir>]
+```
+
+It builds the instrumented solver (`SV_PGO=GENERATE`, solver target only),
+runs the training set, stores the profile, builds every target with LTO and
+the profile (so CTest can run), and installs `svmultiphysics-<commit>-ltopgo`.
+For `39c88f74` it took 1 h 42 min with 16 CPUs on a Skylake node: 7 min
+instrumented build, 69 min training, 25 min optimized build with tests.
+
+Training set: decks written by the generators of the same commit, truncated
+with `--max-steps`, plus the 3D sphere proxy of the reference set; 12 runs on
+13 CPUs at the same time, default JIT settings.
+
+| Case | Generator arguments | Steps | Ranks |
+|------|---------------------|-------|-------|
+| static drop, `SurfaceStress`, R/h = 16 | `static_drop_2d --level 16 --capillary-form surface_stress --laplace-number 12` | 200 | 1 and 4 |
+| static drop, KAG lumped and consistent, R/h = 8 | `static_drop_2d --level 8 --capillary-form kag_lumped` (`kag_consistent`) `--laplace-number 12` | 50 each | 1 |
+| capillary wave, λ/h = 32 | `capillary_wave_2d --level 32` | 100 | 1 and 4 |
+| sessile drop, R/h = 16, 60° | `sessile_drop_2d --level 16 --contact-angle 60` | 300 | 1 and 4 |
+| sessile drop, R/h = 16, 120° | `sessile_drop_2d --level 16 --contact-angle 120` | 300 | 1 |
+| linear sloshing, L/h = 32 | `linear_sloshing_2d --level 32` | 128 | 1 |
+| 3D tank at rest, 1/h = 8 | `tank_at_rest --dim 3 --level 8` | 40 | 1 |
+| 3D static-sphere proxy, R/h = 8 | reference deck `sphere_proxy_L8_kagl` | 1 | 1 |
+
+The protocol decks cover PDE transport, kinematic reconciliation, the
+sign-definite patch bounds of the sessile drop and FSILS; the FSILS decks also
+run on 4 ranks for the distributed paths.  Sloshing and the tank use the Eigen
+direct solver and run serially.
+
+Profile policy:
+
+- Profiles are kept in group storage, `/home/groups/amarsden/zsexton/svmp-pgo/<commit>/`:
+  the `.gcda` files (559 files, 14 MB for `39c88f74`) and a `README.md` with the
+  commit, toolchain, training runs and date.  Not on scratch, which is purged,
+  and never in the repository.
+- One profile per trained commit.  Delete a profile once binaries no longer
+  need it; group storage is nearly full.  The script never overwrites an
+  existing profile.
+- Retrain after changes to the hot paths (assembly, cut-volume integration,
+  geometry and cut-context rebuilds, curvature, level-set maintenance, the
+  linear solve) and after toolchain changes.  For a commit that does not touch
+  them, `stages=use profile=<trained commit>` reuses the older profile.  A stale
+  profile never changes results; the build log counts the functions that lost
+  their profile (`coverage_mismatch_warnings` in `logs/ltopgo-summary.txt`).
+- Before production use: the nine serial reference cases bitwise against the
+  shared baseline, CTest, and 2- and 4-rank runs bitwise against the default
+  binary of the same commit, all with default JIT settings.  Some Application
+  tests look for `tests/cases/...` above the build directory, so a build
+  directory outside the integration layout needs a `tests` link next to it
+  (the script creates it).
+
+Checks for `39c88f74`: the nine reference cases are bitwise identical to the
+baseline job `46134332`; sessile drop R/h = 16 (60 steps) and capillary wave
+λ/h = 32 (50 steps) are bitwise identical to the default binary on 2 and 4
+ranks; CTest passes 87 of 87 entries (FE 51, Physics 25, Application 11).
+
+Speed of the `39c88f74` LTO + PGO binary against the default binary of the
+same commit, in one job on one Skylake node (job `46866398`).  Both binaries
+ran each case at the same time on separate bound cores and swapped cores on
+every repetition.  Seconds per step are taken from the rank-0 log time stamps
+from the end of step 1 to the end of the run, so the first step, which
+includes JIT compilation, is excluded; the time-loop totals give the same
+ratios within 1%.  Speed-up is the mean default time over the mean LTO + PGO
+time; single repetitions vary by up to 3% around it.
+
+| Case | Ranks | Steps | Repetitions | Default s/step | LTO + PGO s/step | Speed-up |
+|------|-------|-------|-------------|----------------|------------------|----------|
+| sessile drop, R/h = 16, 60° | 1 | 200 | 4 | 0.922 | 0.783 | 1.18 |
+| sessile drop, R/h = 16, 60° | 4 | 200 | 4 | 0.594 | 0.531 | 1.12 |
+| capillary wave, λ/h = 32 | 1 | 100 | 4 | 1.002 | 0.822 | 1.22 |
+| capillary wave, λ/h = 64 | 1 | 40 | 4 | 7.86 | 6.59 | 1.19 |
+| static drop, `SurfaceStress`, R/h = 32 (first 40 steps) | 1 | 40 | 2 | 24.1 | 21.2 | 1.14 |
+| 3D tank at rest, 1/h = 8 | 1 | 50 | 2 | 0.465 | 0.437 | 1.06 |
+| 3D sphere proxy, R/h = 8 (second step) | 1 | 2 | 4 | 134.6 | 122.4 | 1.10 |
+
+The capillary wave at λ/h = 64 and the static drop at R/h = 32 are resolutions
+the training did not run.  Over both of its steps the sphere proxy takes 143.3
+against 129.7 s per step (1.10); in the study the sphere step gained 1.6%,
+when 74% of it was geometry work outside Newton.  The outputs of both binaries
+are bitwise identical in all of these runs.
+
 ## Measured Effect
 
-Fourteen variants ran each case at the same time on one node (so all saw the
-same load), first with an empty JIT object cache (cold) and then reusing it
-(warm).  Wall times are sums over the nine reference cases; speed-up is base
-time over variant time.  Build times are for the solver target with 12 jobs.
+In the study (2026-10-05, before the speed-up merges), fourteen variants ran
+each case at the same time on one node (so all saw the same load), first with
+an empty JIT object cache (cold) and then reusing it (warm).  Wall times are
+sums over the nine reference cases; speed-up is base time over variant time.
+Build times are for the solver target with 12 jobs.
 
 | Variant | Flags | Cold s | Warm s | Speed-up cold / warm | Held-out cold / warm | Bitwise | Build s | Size MB |
 |---------|-------|--------|--------|----------------------|----------------------|---------|---------|---------|
-| base | production | 752.1 | 649.5 | 1 / 1 | 1 / 1 | yes (= reference job) | 422 | 101.6 |
+| base | default (`Release`) | 752.1 | 649.5 | 1 / 1 | 1 / 1 | yes (= reference job) | 422 | 101.6 |
 | lto | `SV_ENABLE_LTO=ON` | 752.8 | 647.4 | 0.999 / 1.003 | 0.983 / 1.003 | yes | 346 | 91.6 |
 | pgo | `SV_PGO=USE` | 702.4 | 601.0 | 1.071 / 1.081 | 1.010 / 1.024 | yes | 466 | 109.1 |
 | ltopgo | LTO + PGO | 692.8 | 586.3 | 1.085 / 1.108 | 1.027 / 1.044 | yes | 365 | 98.9 |
