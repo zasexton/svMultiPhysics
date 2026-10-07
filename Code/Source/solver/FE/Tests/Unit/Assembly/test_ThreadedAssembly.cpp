@@ -33,6 +33,7 @@
 #include "Forms/FormExpr.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
+#include "Forms/MonolithicCellKernel.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
 
@@ -46,12 +47,32 @@
 #include <stdexcept>
 #include <vector>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace svmp {
 namespace FE {
 namespace assembly {
 namespace test {
 
 namespace {
+
+// Assembly threads are used only with one OpenMP thread (with more, the
+// serial loops would split cell batches across OpenMP threads), so the tests
+// run with one OpenMP thread whatever OMP_NUM_THREADS says.
+class SingleOpenMPThreadEnvironment final : public ::testing::Environment {
+public:
+    void SetUp() override
+    {
+#ifdef _OPENMP
+        omp_set_num_threads(1);
+#endif
+    }
+};
+
+[[maybe_unused]] ::testing::Environment* const kSingleOpenMPThread =
+    ::testing::AddGlobalTestEnvironment(new SingleOpenMPThreadEnvironment);
 
 // Structured tetrahedral mesh of the unit cube: n^3 cubes, six tetrahedra per
 // cube (Freudenthal split along the main diagonal, conforming), with
@@ -349,6 +370,9 @@ public:
             deferral_checks_.fetch_add(1, std::memory_order_relaxed);
             requireSerial("unit-test deferred cell");
         }
+        if (defer_cell_ >= 0 && concurrentComputeActive() && ctx.cellId() > defer_cell_ + 128) {
+            threaded_after_deferral_.fetch_add(1, std::memory_order_relaxed);
+        }
         if (throw_cell_ >= 0 && ctx.cellId() == throw_cell_) {
             throw std::runtime_error("unit-test kernel error");
         }
@@ -393,12 +417,15 @@ public:
     }
 
     [[nodiscard]] int deferralChecks() const { return deferral_checks_.load(); }
+    /// Cells well after defer_cell computed on an assembly thread.
+    [[nodiscard]] int threadedAfterDeferral() const { return threaded_after_deferral_.load(); }
 
 private:
     Real weight_;
     GlobalIndex defer_cell_;
     GlobalIndex throw_cell_;
     std::atomic<int> deferral_checks_{0};
+    std::atomic<int> threaded_after_deferral_{0};
 };
 
 // Interior-face kernel coupling both sides (all four blocks and both vectors).
@@ -710,6 +737,25 @@ TEST(ThreadedAssembly, DeferredLazyWorkContinuesSeriallyWithSameBits)
     expectBitwiseEqual(second, ref_first, "deferred warm");
 }
 
+TEST(ThreadedAssembly, ThreadsResumeAfterADeferredBlock)
+{
+    // Lazy work on an early cell: its block runs serially, then the threads
+    // resume, so cells well after it are computed on threads again.
+    FusedSetup s;
+    ProbeKernel uu(Real{1.0}), up(Real{0.7}), pp(Real{1.3});
+    const GlobalIndex defer_cell = 40;
+    ProbeKernel pu_deferring(Real{-0.4}, defer_cell);
+    ProbeKernel pu(Real{-0.4});
+    DenseSystemView ref_first(s.n_total), ref_second(s.n_total);
+    assembleFused(s, 1, {&uu, &up, &pu, &pp}, ref_first, ref_second);
+    DenseSystemView first(s.n_total), second(s.n_total);
+    assembleFused(s, 4, {&uu, &up, &pu_deferring, &pp}, first, second);
+    EXPECT_GT(pu_deferring.deferralChecks(), 0);
+    EXPECT_GT(pu_deferring.threadedAfterDeferral(), 0);
+    expectBitwiseEqual(first, ref_first, "resumed cold");
+    expectBitwiseEqual(second, ref_first, "resumed warm");
+}
+
 TEST(ThreadedAssembly, KernelErrorIsRaisedByTheSerialContinuation)
 {
     // An error on a thread stops the threaded part; the serial loop then
@@ -803,6 +849,97 @@ TEST(ThreadedAssembly, InteriorFacesBitwiseEqualForAnyThreadCount)
         DenseSystemView system(n);
         assemble(threads, system);
         expectBitwiseEqual(system, reference, "interior faces threads=" + std::to_string(threads));
+    }
+}
+
+TEST(ThreadedAssembly, MonolithicCellLoopsBitwiseEqualForAnyThreadCount)
+{
+    // Two scalar P1 fields coupled by a monolithic cell kernel of three
+    // blocks: the batched path (matrix and vector) and the residual-only path
+    // of assembleCellsFused. Constraints keep the per-block insertion, which
+    // is the path the threads take.
+    StructuredTetMesh mesh(5);
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    auto field_map = makeVertexDofMap(mesh, 1);
+    const auto n = field_map.getNumDofs();
+    const auto solution = makeSolution(2 * n);
+    constraints::AffineConstraints constraints;
+    for (GlobalIndex d = 0; d < 6; ++d) {
+        constraints.addDirichlet(d, Real{0.2});
+        constraints.addDirichlet(n + d, Real{-0.1});
+    }
+    constraints.close();
+
+    auto k00 = std::make_shared<ProbeKernel>(Real{1.0});
+    auto k11 = std::make_shared<ProbeKernel>(Real{0.6});
+    auto k01 = std::make_shared<ProbeKernel>(Real{-0.3});
+    const auto block = [&](std::shared_ptr<AssemblyKernel> kernel, int test_field, int trial_field) {
+        return forms::MonolithicCellKernel::BlockSpec{
+            .test_field = static_cast<FieldId>(test_field),
+            .trial_field = static_cast<FieldId>(trial_field),
+            .want_matrix = true,
+            .want_vector = true,
+            .fallback_kernel = std::move(kernel),
+            .test_space = &space,
+            .trial_space = &space,
+            .row_dof_map = &field_map,
+            .col_dof_map = &field_map,
+            .row_dof_offset = test_field == 0 ? GlobalIndex{0} : n,
+            .col_dof_offset = trial_field == 0 ? GlobalIndex{0} : n,
+        };
+    };
+    const auto assemble = [&](int threads, bool want_matrix, DenseSystemView& system) {
+        std::vector<forms::MonolithicCellKernel::BlockSpec> blocks;
+        blocks.push_back(block(k00, 0, 0));
+        blocks.push_back(block(k11, 1, 1));
+        blocks.push_back(block(k01, 0, 1));
+        forms::MonolithicCellKernel kernel(
+            std::move(blocks), std::shared_ptr<forms::jit::JITCompiler>{}, forms::JITOptions{});
+        kernel.setResolved();
+        StandardAssembler assembler(threadOptions(threads));
+        assembler.setDofMap(field_map);
+        assembler.setConstraints(&constraints);
+        assembler.setCurrentSolution(solution);
+        // The first call warms the worker caches; the second one is compared.
+        DenseSystemView warm_up(system.numRows());
+        for (auto* target : {&warm_up, &system}) {
+            const FusedCellTerm term{
+                .test_space = &space,
+                .trial_space = &space,
+                .kernel = &kernel,
+                .row_dof_map = &field_map,
+                .col_dof_map = &field_map,
+                .row_dof_offset = 0,
+                .col_dof_offset = 0,
+                .matrix_view = want_matrix ? target : nullptr,
+                .vector_view = target,
+                .assemble_matrix = want_matrix,
+                .assemble_vector = true,
+            };
+            auto result = assembler.assembleCellsFused(mesh, std::span<const FusedCellTerm>(&term, 1));
+            ASSERT_TRUE(result.success);
+        }
+    };
+    for (bool want_matrix : {true, false}) {
+        DenseSystemView reference(2 * n);
+        assemble(1, want_matrix, reference);
+        for (int threads : {2, 3, 8}) {
+            DenseSystemView system(2 * n);
+            assemble(threads, want_matrix, system);
+            const auto label = std::string(want_matrix ? "matrix+vector" : "vector only") +
+                               " threads=" + std::to_string(threads);
+            if (want_matrix) {
+                expectBitwiseEqual(system, reference, label);
+            } else {
+                const auto v = system.vectorData();
+                const auto rv = reference.vectorData();
+                std::size_t differences = 0;
+                for (std::size_t i = 0; i < v.size(); ++i) {
+                    differences += std::memcmp(&v[i], &rv[i], sizeof(Real)) != 0 ? 1u : 0u;
+                }
+                EXPECT_EQ(differences, 0u) << label;
+            }
+        }
     }
 }
 
