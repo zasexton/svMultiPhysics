@@ -22,6 +22,9 @@ Two deck profiles are written (``write_case(..., profile=...)``):
   PDE-consistent rate solve holds the closed-inlet preload pressure fixed,
   so at the opened inlet it returns a non-solenoidal impulsive rate whose
   predictor the first steps cannot absorb.
+  The coupled system is solved with the gathered sparse direct solve
+  (opt-in, decision D23): FSILS GMRES needs 1e3-1e4 iterations per Newton
+  update at 20 cells and stalls above its tolerance at 40 cells.
 * ``"legacy"``: the 2026-08-30 deck (PrescribedContactAngle, wet-extension
   transport, projection reinitialization every step, discontinuity capturing,
   corner-linearized cut geometry, tolerances 1e-6), reproduced byte for byte;
@@ -537,7 +540,7 @@ def _d4_solver_xml(steps: int,
   <Output type="Volume_integral">
     <Volume>true</Volume>
   </Output>
-  <LS type="GMRES">
+  <LS type="Direct">
     <Linear_algebra type="fsils">
       <Preconditioner>rcs</Preconditioner>
     </Linear_algebra>
@@ -769,6 +772,7 @@ def write_case(case_dir: Path,
             "time_integration": "GeneralizedAlpha",
             "nonlinear_tolerance": 1.0e-4,
             "level_set_bottom_boundary": "none (D21 bounds reject level-set inflow faces)",
+            "fluid_linear_solver": "gathered sparse direct (FSILS Direct, opt-in D23)",
             "initial_rate": "zero (PDE rate solve disabled by the required environment)",
         }
         benchmark["required_environment"] = dict(REQUIRED_ENVIRONMENT)
