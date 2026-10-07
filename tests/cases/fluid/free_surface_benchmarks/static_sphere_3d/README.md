@@ -290,8 +290,33 @@ takes about 90 to 120 s serially (about 9% less with the LTO + PGO build),
 with a peak RSS of about 2.9 GB. R/h = 16 peaks at about 19 GB serially; with
 an older binary its setup took about 22 min and step 0 about 108 min
 serially. With 618 steps per run, R/h = 8 is about 15 to 20 h serially, so
-R/h = 16 runs on many ranks of one node. The D25 scaling probe and the
-measured run costs are recorded below once made.
+R/h = 16 runs on many ranks of one node.
+
+**D25 scaling probe (2026-10-07).** Binary `4cbf2643` (LTO + PGO), default
+deck, `--max-steps 4` at R/h = 8 and 2 at R/h = 16, one rank per core of an
+SKX node (Xeon Gold 5118; Slurm jobs 46898074 and 46898075). Seconds per step
+are wall time from one step start to the next, so they include output.
+
+| R/h | ranks | setup | s per step (steps 0, 1, 2, 3) | outer passes | Newton iterations | GMRES iterations per step | peak RSS per rank (max / sum) |
+|---:|---:|---:|---|---|---|---|---|
+| 8 | 1 | 23 s | 306, 195, 156, 120 | 6, 5, 4, 4 | 9, 6, 4, 4 | 1026, 652, 455, 455 | 3.7 / 3.7 GB |
+| 8 | 4 | 19 s | 141, 128, 99, 78 | 6, 5, 4, 4 | 12, 10, 8, 8 | 1309, 1033, 787, 788 | 1.8 / 6.7 GB |
+| 8 | 8 | 17 s | 107, 91, 75, 56 | 6, 5, 4, 4 | 14, 11, 10, 9 | 1493, 1144, 976, 897 | 1.3 / 9.9 GB |
+| 16 | 8 | 94 s | 1345, 1545 | 7, 8 | 14, 15 | 2589, 2619 | 9.0 / 70 GB |
+| 16 | 16 | 78 s | 1539, 1500 | 8, 6 | 15, 11 | 2810, 1965 | 8.5 / 120 GB |
+| 16 | 24 | 65 s | stopped in step 0 by a solver error (small-cut aggregation halo, then rollback failure) | | | | about 167 GB in total |
+
+- The outer passes do not depend on the rank count, but the Newton
+  iterations per step roughly double in parallel (the first Newton update
+  of a pass leaves a larger residual).
+- At R/h = 16 most of a step goes into a constraint refresh and rebuild after
+  every change of the cut topology: about 200 to 280 s each, three or four
+  times per step in steps 0 and 1. It does not get faster with more ranks
+  (about 220 s on 8 ranks, 250 s on 16, 284 s on 24). At R/h = 8 the same
+  refresh takes 0.5 to 17 s, and these events stop after the start-up
+  transient (6, 4, 1, 0 in steps 0 to 3).
+- So 16 ranks are no faster than 8 at R/h = 16. The protocol runs use 8
+  ranks per case, as three lanes on one 24-core node.
 
 **Earlier measurement**, 2026-09-30, with the same binary (SKX nodes, serial; profiling
 data under `$SCRATCH/free-surface-benchmarks/profiling-3d/`). Because of the
