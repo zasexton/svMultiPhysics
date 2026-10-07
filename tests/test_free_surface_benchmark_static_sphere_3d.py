@@ -395,6 +395,23 @@ def test_protocol_deck_has_the_d25_settings(tmp_path):
         gen.generate(8, "surface_stress", 12.0, tmp_path / "bad", semi_implicit="Implicit")
 
 
+def test_ghost_layers_are_explicit_in_the_protocol_deck(tmp_path):
+    # D25 multi-rank runs: 12 layers in <Add_mesh>; "derived" leaves the key unset.
+    case = gen.generate(8, "surface_stress", 12.0, tmp_path / "p")
+    root = ET.parse(tmp_path / "p/solver.xml").getroot()
+    assert root.find("Add_mesh/Ghost_layers").text == "12" == str(gen.GHOST_LAYERS)
+    assert case["ghost_layers"] == 12
+    derived = gen.generate(8, "surface_stress", 12.0, tmp_path / "d", ghost_layers="derived")
+    assert "Ghost_layers" not in (tmp_path / "d/solver.xml").read_text()
+    assert derived["ghost_layers"] == "derived"
+    assert gen.main(["--level", "8", "--capillary-form", "surface_stress", "--laplace-number", "12",
+                     "--output-dir", str(tmp_path / "g16"), "--ghost-layers", "16"]) == 0
+    assert ET.parse(tmp_path / "g16/solver.xml").getroot().find("Add_mesh/Ghost_layers").text == "16"
+    for bad in ("-1", "1.5", "deep"):
+        with pytest.raises(ValueError):
+            gen.generate(8, "surface_stress", 12.0, tmp_path / f"bad{bad}", ghost_layers=bad)
+
+
 def test_half_step_and_diagnostic_step_options(tmp_path):
     protocol = gen.generate(16, "surface_stress", 12.0, tmp_path / "p")
     half = gen.generate(8, "surface_stress", 12.0, tmp_path / "half", dt_divisor=2)
@@ -427,14 +444,15 @@ DECK_SHA256_BEFORE_D25 = {
 
 
 def test_decks_before_d25_are_reproducible_bitwise(tmp_path):
-    """--dt-multiple <m> --surface-tension-semi-implicit None --kinematic-reconciliation off."""
+    """--dt-multiple <m> --surface-tension-semi-implicit None --kinematic-reconciliation off
+    --ghost-layers derived."""
     for (form, laplace, multiple), digest in DECK_SHA256_BEFORE_D25.items():
         out = tmp_path / f"old_{form}_{laplace:g}"
         assert gen.main(["--level", "8", "--capillary-form", form,
                          "--laplace-number", f"{laplace:g}", "--output-dir", str(out),
                          "--dt-multiple", f"{multiple:g}",
                          "--surface-tension-semi-implicit", "None",
-                         "--kinematic-reconciliation", "off"]) == 0
+                         "--kinematic-reconciliation", "off", "--ghost-layers", "derived"]) == 0
         assert hashlib.sha256((out / "solver.xml").read_bytes()).hexdigest() == digest
         case = json.loads((out / "case.json").read_text())
         assert case["dt_rule"] == "multiple_override" and case["dt_multiple_of_dt_B"] == multiple
