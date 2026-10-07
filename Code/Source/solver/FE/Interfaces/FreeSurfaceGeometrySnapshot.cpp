@@ -1,5 +1,7 @@
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 
+#include "Core/DeterministicParallel.h"
+
 #include "Assembly/Assembler.h"
 #include "Elements/ReferenceElement.h"
 #include "Quadrature/QuadratureFactory.h"
@@ -8,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <map>
 #include <numbers>
@@ -3350,6 +3353,42 @@ void mergeRuleValidationLedger(FreeSurfaceGeometryValidationLedger& into,
         });
 }
 
+// Merges a scratch ledger that collected the counts of building rules
+// (addRule()) and validating them into the build ledger: every count adds,
+// the rule-validation maxima combine with std::max, and no other value may
+// have been touched.  The result is bitwise the one accumulating directly.
+void mergeScratchLedger(FreeSurfaceGeometryValidationLedger& into,
+                        const FreeSurfaceGeometryValidationLedger& from)
+{
+    std::vector<std::size_t> counts;
+    std::vector<Real> reals;
+    forEachLedgerField(
+        from,
+        [&counts](const char*, std::size_t value) { counts.push_back(value); },
+        [&reals](const char* name, Real value) {
+            if (!isRuleValidationMaximum(name) &&
+                !sameRealBits(value, Real{0.0})) {
+                throw std::logic_error(
+                    std::string("free-surface rule construction changed an unexpected ledger value: ") +
+                    name);
+            }
+            reals.push_back(value);
+        });
+    std::size_t count_index = 0;
+    std::size_t real_index = 0;
+    forEachLedgerField(
+        into,
+        [&](const char*, std::size_t& value) {
+            value += counts[count_index++];
+        },
+        [&](const char* name, Real& value) {
+            if (isRuleValidationMaximum(name)) {
+                value = std::max(value, reals[real_index]);
+            }
+            ++real_index;
+        });
+}
+
 [[nodiscard]] FullCellValidationContribution fullCellValidationContribution(
     const FreeSurfaceGeometryValidationLedger& scratch) noexcept
 {
@@ -5410,7 +5449,8 @@ buildFreeSurfaceGeometrySnapshot(
                                             std::move(scalar),
                                             std::move(domain_id),
                                             std::move(ownership_collective),
-                                            nullptr);
+                                            nullptr,
+                                            1);
 }
 
 std::shared_ptr<const FreeSurfaceGeometrySnapshot>
@@ -5423,7 +5463,8 @@ buildFreeSurfaceGeometrySnapshot(
     FreeSurfaceGeometryScalarEvaluator scalar,
     std::string domain_id,
     FreeSurfaceGeometryOwnershipCollective ownership_collective,
-    FreeSurfaceGeometrySnapshotReuseCache* reuse_cache)
+    FreeSurfaceGeometrySnapshotReuseCache* reuse_cache,
+    int threads)
 {
     if (!interface_domain.request().valid() || !(policy.tolerance > Real{0.0}) ||
         !(policy.minimum_retained_volume_fraction > Real{0.0}) ||
@@ -5518,7 +5559,56 @@ buildFreeSurfaceGeometrySnapshot(
     }
     const auto region_by_stable_id =
         firstSourceByStableId(interface_domain.volumeRegions());
-    for (auto& rule : volume_rules) {
+    // Rules are computed concurrently in chunks (see
+    // FE/Core/DeterministicParallel.h) and appended to the record list in
+    // rule order.  A participant other than the caller evaluates the level
+    // set through its own copy of the scalar evaluator; without a way to
+    // copy it the build is serial.
+    const int rule_threads =
+        threads > 1 && (!scalar.canEvaluateValue() ||
+                        static_cast<bool>(scalar.make_concurrent_copy))
+            ? threads
+            : 1;
+    std::vector<FreeSurfaceGeometryScalarEvaluator> participant_scalars;
+    participant_scalars.reserve(static_cast<std::size_t>(rule_threads));
+    participant_scalars.push_back(scalar);
+    for (int participant = 1; participant < rule_threads; ++participant) {
+        participant_scalars.push_back(scalar.canEvaluateValue()
+                                          ? scalar.make_concurrent_copy()
+                                          : scalar);
+    }
+    std::vector<FullCellReferencePoints> participant_reference_points(
+        static_cast<std::size_t>(rule_threads));
+    std::vector<unsigned char> rule_classification_only(volume_rules.size(),
+                                                        0u);
+    for (std::size_t index = 0; index < volume_rules.size(); ++index) {
+        const auto& rule = volume_rules[index];
+        rule_classification_only[index] =
+            rule.full_cell_equivalent && classification_only_side(rule.side) &&
+                    volume_rules_per_parent[rule.provenance.parent_entity] ==
+                        1u
+                ? 1u
+                : 0u;
+    }
+    // What one rule adds: its record (built or copied), the ledger counts of
+    // building and validating it, and what the next build may reuse.
+    struct VolumeRuleOutcome {
+        std::exception_ptr error{};
+        bool reused{false};
+        bool full_cell{false};
+        std::vector<FreeSurfaceGeometryRuleRecord> record{};
+        FreeSurfaceGeometryValidationLedger counts{};
+        snapshot_reuse_detail::FullCellRecordReplay replay{};
+    };
+    const auto build_volume_rule = [&](std::size_t rule_index,
+                                       VolumeRuleOutcome& outcome,
+                                       int participant) {
+        auto& rule = volume_rules[rule_index];
+        auto& counts = outcome.counts;
+        const auto& participant_scalar =
+            participant_scalars[static_cast<std::size_t>(participant)];
+        auto& reference_points = participant_reference_points[
+            static_cast<std::size_t>(participant)];
         const auto* const region = findSourceByStableId(
             region_by_stable_id, rule.provenance.cut_topology_revision);
         if (region == nullptr) {
@@ -5526,15 +5616,15 @@ buildFreeSurfaceGeometrySnapshot(
                 "free-surface volume rule has no authoritative source region");
         }
         const bool classification_only =
-            rule.full_cell_equivalent && classification_only_side(rule.side) &&
-            volume_rules_per_parent[rule.provenance.parent_entity] == 1u;
+            rule_classification_only[rule_index] != 0u;
         const bool full_cell_volume_rule =
             rule.kind == geometry::CutQuadratureKind::Volume &&
             rule.full_cell_equivalent;
+        outcome.full_cell = full_cell_volume_rule;
         if (reuse_context_matches && full_cell_volume_rule) {
             // addRule() completes the identity before it reads it; the
             // previous records carry completed identities.
-            completeAndValidateRuleIdentity(rule, mesh, ledger);
+            completeAndValidateRuleIdentity(rule, mesh, counts);
             const auto template_index = findReusableFullCellRecord(
                 reuse_cache->state(),
                 reuse_templates->rules(),
@@ -5544,42 +5634,41 @@ buildFreeSurfaceGeometrySnapshot(
             if (template_index != std::numeric_limits<std::size_t>::max()) {
                 const auto& replay =
                     reuse_cache->state().replay[template_index];
-                records.push_back(reuse_templates->rules()[template_index]);
-                auto& record = records.back();
+                outcome.record.push_back(
+                    reuse_templates->rules()[template_index]);
+                auto& record = outcome.record.back();
                 restampReusedFullCellRecord(record, rule);
                 // addRule()'s ledger counts.
-                ++ledger.rule_count;
-                ledger.quadrature_point_count += replay.point_count;
+                ++counts.rule_count;
+                counts.quadrature_point_count += replay.point_count;
                 if (record.locally_owned) {
-                    ++ledger.owned_rule_count;
+                    ++counts.owned_rule_count;
                 }
-                ++ledger.retained_rule_count;
-                record_replay.push_back(replay);
-                record_reused.push_back(1u);
-                ++reuse_statistics.full_cell_records_reused;
+                ++counts.retained_rule_count;
+                outcome.replay = replay;
+                outcome.reused = true;
                 if (!classification_only) {
                     // Validated in the record loop below.
-                    continue;
+                    return;
                 }
                 if (!record.moment_certificate.phase_sign_certified &&
-                    !scalar.canEvaluateValue()) {
+                    !participant_scalar.canEvaluateValue()) {
                     throw std::invalid_argument(
                         "free-surface snapshot volume validation requires a scalar value evaluator when source geometry does not certify the represented phase");
                 }
-                replayFullCellValidationContribution(ledger,
+                replayFullCellValidationContribution(counts,
                                                      replay.contribution);
                 validateVolumeRecordPhase(
                     record,
-                    full_cell_reference_points.get(mesh,
-                                                   record.reference_rule),
+                    reference_points.get(mesh, record.reference_rule),
                     revision,
                     policy,
-                    scalar,
-                    ledger);
+                    participant_scalar,
+                    counts);
                 record.classification_only_content_digest =
                     finishRuleContentDigest(
                         replay.identity_free_digest_state, record);
-                continue;
+                return;
             }
         }
         auto moment_certificate =
@@ -5587,8 +5676,8 @@ buildFreeSurfaceGeometrySnapshot(
                 ? makeParentCellMomentCertificate(mesh, rule)
                 : makeVolumeRegionMomentCertificate(
                       *region, rule, mesh.dimension(), policy.tolerance);
-        addRule(records,
-                ledger,
+        addRule(outcome.record,
+                counts,
                 std::move(rule),
                 FreeSurfaceGeometryRuleRole::Interface,
                 mesh,
@@ -5596,24 +5685,16 @@ buildFreeSurfaceGeometrySnapshot(
                 std::move(moment_certificate),
                 volumeSourceTopologyKey(*region),
                 region->construction_observation);
-        auto& record = records.back();
-        if (reuse) {
-            record_replay.emplace_back();
-            record_reused.push_back(0u);
-            if (full_cell_volume_rule) {
-                ++reuse_statistics.full_cell_records_built;
-                record_replay.back().point_count =
-                    record.reference_rule.points.size();
-            } else {
-                ++reuse_statistics.other_records_built;
-            }
+        auto& record = outcome.record.back();
+        if (reuse && full_cell_volume_rule) {
+            outcome.replay.point_count = record.reference_rule.points.size();
         }
         if (!classification_only ||
             record.retention != FreeSurfaceGeometryRetention::Retained) {
-            continue;
+            return;
         }
         if (!record.moment_certificate.phase_sign_certified &&
-            !scalar.canEvaluateValue()) {
+            !participant_scalar.canEvaluateValue()) {
             throw std::invalid_argument(
                 "free-surface snapshot volume validation requires a scalar value evaluator when source geometry does not certify the represented phase");
         }
@@ -5627,7 +5708,7 @@ buildFreeSurfaceGeometrySnapshot(
                          mesh,
                          revision,
                          policy,
-                         scalar,
+                         participant_scalar,
                          scratch);
             validateCellPolynomialMoments(
                 cell_rules,
@@ -5637,8 +5718,8 @@ buildFreeSurfaceGeometrySnapshot(
                 mesh,
                 policy,
                 scratch);
-            mergeRuleValidationLedger(ledger, scratch);
-            auto& replay = record_replay.back();
+            mergeRuleValidationLedger(counts, scratch);
+            auto& replay = outcome.replay;
             replay.reusable = onlyContentAndPhaseFieldsChanged(scratch);
             replay.contribution = fullCellValidationContribution(scratch);
             replay.identity_free_digest_state =
@@ -5653,8 +5734,8 @@ buildFreeSurfaceGeometrySnapshot(
                          mesh,
                          revision,
                          policy,
-                         scalar,
-                         ledger);
+                         participant_scalar,
+                         counts);
             validateCellPolynomialMoments(
                 cell_rules,
                 static_cast<GlobalIndex>(
@@ -5662,7 +5743,7 @@ buildFreeSurfaceGeometrySnapshot(
                 record.reference_rule.exact_polynomial_order,
                 mesh,
                 policy,
-                ledger);
+                counts);
             record.classification_only_content_digest =
                 ruleContentDigest(record);
         }
@@ -5675,30 +5756,104 @@ buildFreeSurfaceGeometrySnapshot(
         std::vector<FreeSurfaceGeometryMonomialMoment>().swap(
             record.moment_certificate.moments);
         record.classification_only = true;
+    };
+    constexpr std::size_t rule_chunk = 4096u;
+    std::vector<VolumeRuleOutcome> volume_outcomes;
+    for (std::size_t chunk_begin = 0; chunk_begin < volume_rules.size();
+         chunk_begin += rule_chunk) {
+        const auto chunk_size =
+            std::min(rule_chunk, volume_rules.size() - chunk_begin);
+        volume_outcomes.clear();
+        volume_outcomes.resize(chunk_size);
+        deterministicParallelFor(
+            chunk_size,
+            rule_threads,
+            [&](std::size_t k, int participant) {
+                try {
+                    build_volume_rule(
+                        chunk_begin + k, volume_outcomes[k], participant);
+                } catch (...) {
+                    volume_outcomes[k].error = std::current_exception();
+                }
+            },
+            /*block_size=*/32u,
+            /*min_parallel_items=*/256u);
+        for (auto& outcome : volume_outcomes) {
+            if (outcome.error) {
+                std::rethrow_exception(outcome.error);
+            }
+            records.push_back(std::move(outcome.record.front()));
+            mergeScratchLedger(ledger, outcome.counts);
+            if (!reuse) {
+                continue;
+            }
+            record_replay.push_back(std::move(outcome.replay));
+            record_reused.push_back(outcome.reused ? 1u : 0u);
+            if (outcome.reused) {
+                ++reuse_statistics.full_cell_records_reused;
+            } else if (outcome.full_cell) {
+                ++reuse_statistics.full_cell_records_built;
+            } else {
+                ++reuse_statistics.other_records_built;
+            }
+        }
     }
     const auto fragment_by_stable_id =
         firstSourceByStableId(interface_domain.fragments());
-    for (auto& rule : interface_rules) {
-        const auto* const fragment = findSourceByStableId(
-            fragment_by_stable_id, rule.provenance.cut_topology_revision);
-        if (fragment == nullptr) {
-            throw std::invalid_argument(
-                "free-surface interface rule has no authoritative source fragment");
+    struct InterfaceRuleOutcome {
+        std::exception_ptr error{};
+        std::vector<FreeSurfaceGeometryRuleRecord> record{};
+        FreeSurfaceGeometryValidationLedger counts{};
+    };
+    std::vector<InterfaceRuleOutcome> interface_outcomes;
+    for (std::size_t chunk_begin = 0; chunk_begin < interface_rules.size();
+         chunk_begin += rule_chunk) {
+        const auto chunk_size =
+            std::min(rule_chunk, interface_rules.size() - chunk_begin);
+        interface_outcomes.clear();
+        interface_outcomes.resize(chunk_size);
+        deterministicParallelFor(
+            chunk_size,
+            rule_threads,
+            [&](std::size_t k, int) {
+                auto& outcome = interface_outcomes[k];
+                try {
+                    auto& rule = interface_rules[chunk_begin + k];
+                    const auto* const fragment = findSourceByStableId(
+                        fragment_by_stable_id,
+                        rule.provenance.cut_topology_revision);
+                    if (fragment == nullptr) {
+                        throw std::invalid_argument(
+                            "free-surface interface rule has no authoritative source fragment");
+                    }
+                    auto moment_certificate =
+                        makeInterfaceFragmentMomentCertificate(
+                            *fragment, rule, mesh.dimension());
+                    addRule(outcome.record,
+                            outcome.counts,
+                            std::move(rule),
+                            FreeSurfaceGeometryRuleRole::Interface,
+                            mesh,
+                            policy,
+                            std::move(moment_certificate),
+                            interfaceSourceTopologyKey(
+                                *fragment,
+                                mesh.getCellType(fragment->parent_cell),
+                                policy.tolerance),
+                            fragment->construction_observation);
+                } catch (...) {
+                    outcome.error = std::current_exception();
+                }
+            },
+            /*block_size=*/8u,
+            /*min_parallel_items=*/64u);
+        for (auto& outcome : interface_outcomes) {
+            if (outcome.error) {
+                std::rethrow_exception(outcome.error);
+            }
+            records.push_back(std::move(outcome.record.front()));
+            mergeScratchLedger(ledger, outcome.counts);
         }
-        auto moment_certificate = makeInterfaceFragmentMomentCertificate(
-            *fragment, rule, mesh.dimension());
-        addRule(records,
-                ledger,
-                std::move(rule),
-                FreeSurfaceGeometryRuleRole::Interface,
-                mesh,
-                policy,
-                std::move(moment_certificate),
-                interfaceSourceTopologyKey(
-                    *fragment,
-                    mesh.getCellType(fragment->parent_cell),
-                    policy.tolerance),
-                fragment->construction_observation);
     }
 
     std::map<int, const GeneratedInterfaceBoundaryIntersectionDomain*>
@@ -5905,13 +6060,86 @@ buildFreeSurfaceGeometrySnapshot(
         record_replay.resize(records.size());
         record_reused.resize(records.size(), 0u);
     }
+    // The rule checks run concurrently, each participant counting into its
+    // own scratch ledger (counts and maxima merge exactly); a failing record
+    // keeps its exception, which the ordered loop below raises at the record
+    // where the serial loop would have raised it.
+    std::vector<std::exception_ptr> validation_errors(records.size());
+    std::vector<FreeSurfaceGeometryValidationLedger> participant_ledgers(
+        static_cast<std::size_t>(rule_threads));
+    std::vector<std::vector<std::array<Real, 3>>> participant_points(
+        static_cast<std::size_t>(rule_threads));
+    deterministicParallelFor(
+        records.size(),
+        rule_threads,
+        [&](std::size_t record_index, int participant) {
+            auto& record = records[record_index];
+            if (record.classification_only) {
+                return;
+            }
+            auto& participant_ledger =
+                participant_ledgers[static_cast<std::size_t>(participant)];
+            const auto& participant_scalar =
+                participant_scalars[static_cast<std::size_t>(participant)];
+            try {
+                if (reuse && record_reused[record_index] != 0u) {
+                    // A copied record passed every content check when it
+                    // was built; replay their ledger contribution and
+                    // evaluate the level-set dependent checks.
+                    replayFullCellValidationContribution(
+                        participant_ledger,
+                        record_replay[record_index].contribution);
+                    auto& reused_reference_points = participant_points[
+                        static_cast<std::size_t>(participant)];
+                    reused_reference_points.clear();
+                    for (const auto& point : record.physical_rule.points) {
+                        reused_reference_points.push_back(
+                            point.reference_point);
+                    }
+                    validateVolumeRecordPhase(record,
+                                              reused_reference_points,
+                                              revision,
+                                              policy,
+                                              participant_scalar,
+                                              participant_ledger);
+                } else if (reuse && isFullCellVolumeRecord(record)) {
+                    FreeSurfaceGeometryValidationLedger scratch{};
+                    validateRule(record,
+                                 interface_domain,
+                                 mesh,
+                                 revision,
+                                 policy,
+                                 participant_scalar,
+                                 scratch);
+                    mergeRuleValidationLedger(participant_ledger, scratch);
+                    auto& replay = record_replay[record_index];
+                    replay.reusable = onlyContentAndPhaseFieldsChanged(scratch);
+                    replay.contribution =
+                        fullCellValidationContribution(scratch);
+                    replay.identity_free_digest_state =
+                        ruleContentWithoutIdentitiesState(record);
+                    replay.has_identity_free_digest_state = true;
+                } else {
+                    validateRule(record,
+                                 interface_domain,
+                                 mesh,
+                                 revision,
+                                 policy,
+                                 participant_scalar,
+                                 participant_ledger);
+                }
+            } catch (...) {
+                validation_errors[record_index] = std::current_exception();
+            }
+        },
+        /*block_size=*/64u,
+        /*min_parallel_items=*/256u);
     std::set<std::tuple<FreeSurfaceGeometryRuleRole,
                         int,
                         GlobalIndex,
                         GlobalIndex,
                         std::uint64_t>>
         unique_rules;
-    std::vector<std::array<Real, 3>> reused_reference_points;
     for (std::size_t record_index = 0; record_index < records.size();
          ++record_index) {
         auto& record = records[record_index];
@@ -5927,67 +6155,34 @@ buildFreeSurfaceGeometrySnapshot(
             throw std::invalid_argument(
                 "free-surface snapshot contains a duplicate retained rule identity");
         }
-        if (!record.classification_only) {
-            if (reuse && record_reused[record_index] != 0u) {
-                // A copied record passed every content check when it was
-                // built; replay their ledger contribution and evaluate the
-                // level-set dependent checks.
-                replayFullCellValidationContribution(
-                    ledger, record_replay[record_index].contribution);
-                reused_reference_points.clear();
-                for (const auto& point : record.physical_rule.points) {
-                    reused_reference_points.push_back(point.reference_point);
-                }
-                validateVolumeRecordPhase(record,
-                                          reused_reference_points,
-                                          revision,
-                                          policy,
-                                          scalar,
-                                          ledger);
-            } else if (reuse && isFullCellVolumeRecord(record)) {
-                FreeSurfaceGeometryValidationLedger scratch{};
-                validateRule(record,
-                             interface_domain,
-                             mesh,
-                             revision,
-                             policy,
-                             scalar,
-                             scratch);
-                mergeRuleValidationLedger(ledger, scratch);
-                auto& replay = record_replay[record_index];
-                replay.reusable = onlyContentAndPhaseFieldsChanged(scratch);
-                replay.contribution = fullCellValidationContribution(scratch);
-                replay.identity_free_digest_state =
-                    ruleContentWithoutIdentitiesState(record);
-                replay.has_identity_free_digest_state = true;
-            } else {
-                validateRule(record,
-                             interface_domain,
-                             mesh,
-                             revision,
-                             policy,
-                             scalar,
-                             ledger);
-            }
+        if (validation_errors[record_index]) {
+            std::rethrow_exception(validation_errors[record_index]);
         }
         accumulateLedger(record, ledger);
     }
-    validateVolumePartition(records, mesh, policy, ledger);
-    std::vector<std::uint64_t> record_digests;
-    if (reuse) {
-        record_digests.reserve(records.size());
-        for (std::size_t record_index = 0; record_index < records.size();
-             ++record_index) {
-            const auto& record = records[record_index];
-            const auto& replay = record_replay[record_index];
-            record_digests.push_back(
-                !record.classification_only &&
-                        replay.has_identity_free_digest_state
-                    ? finishRuleContentDigest(
-                          replay.identity_free_digest_state, record)
-                    : ruleContentDigest(record));
-        }
+    for (const auto& participant_ledger : participant_ledgers) {
+        mergeScratchLedger(ledger, participant_ledger);
     }
+    validateVolumePartition(records, mesh, policy, ledger);
+    // Content digests of every record, computed concurrently.
+    std::vector<std::uint64_t> record_digests(records.size(), 0u);
+    deterministicParallelFor(
+        records.size(),
+        rule_threads,
+        [&](std::size_t record_index, int) {
+            const auto& record = records[record_index];
+            record_digests[record_index] =
+                reuse && !record.classification_only &&
+                        record_replay[record_index]
+                            .has_identity_free_digest_state
+                    ? finishRuleContentDigest(
+                          record_replay[record_index]
+                              .identity_free_digest_state,
+                          record)
+                    : ruleContentDigest(record);
+        },
+        /*block_size=*/256u,
+        /*min_parallel_items=*/1024u);
     const auto globally_owned_rule_digests = validateUniqueRuleOwnership(
         records, mesh, ownership_collective, ledger, record_digests);
     canonicalizeDistributedRevision(

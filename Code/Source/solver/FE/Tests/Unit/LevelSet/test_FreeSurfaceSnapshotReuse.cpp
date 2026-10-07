@@ -12,6 +12,7 @@
 // motion, including motions that change the cut topology.
 
 #include "Assembly/CutIntegrationContext.h"
+#include "Core/DeterministicParallel.h"
 #include "Dofs/DofHandler.h"
 #include "Geometry/CutQuadratureMapping.h"
 #include "Dofs/EntityDofMap.h"
@@ -30,6 +31,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -224,8 +226,12 @@ struct ReuseFixture {
     // One generated-interface rebuild, snapshotted with and without the
     // reuse cache.
     Pair build(interfaces::FreeSurfaceGeometrySnapshotReuseCache& cache,
-               const interfaces::FreeSurfaceGeometrySnapshotPolicy& policy)
+               const interfaces::FreeSurfaceGeometrySnapshotPolicy& policy,
+               level_set::LevelSetGeneratedInterfaceLifecycle* other_lifecycle =
+                   nullptr)
     {
+        auto& active_lifecycle =
+            other_lifecycle != nullptr ? *other_lifecycle : lifecycle;
         level_set::LevelSetGeneratedInterfaceOptions options{};
         options.level_set_field_name = "phi";
         options.domain_id = "snapshot_reuse";
@@ -233,30 +239,41 @@ struct ReuseFixture {
         options.quadrature_order = 1;
         options.interface_quadrature_order = 2;
         options.volume_quadrature_order = 2;
-        const auto generated = lifecycle.build(system, options, solution);
+        const auto generated =
+            active_lifecycle.build(system, options, solution);
         EXPECT_TRUE(generated.success) << generated.diagnostic;
         auto evaluator = std::make_shared<level_set::LevelSetCellEvaluator>(
             level_set::makeLevelSetCellEvaluator(system, phi, solution));
-        interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
-        scalar.value = [evaluator](FE::GlobalIndex cell,
-                                   const Point& xi,
-                                   const geometry::CutQuadratureProvenance&) {
-            return evaluator->evaluateLinearCorner(cell, xi).value;
-        };
-        scalar.reference_gradient =
-            [evaluator](FE::GlobalIndex cell,
-                        const Point& xi,
-                        const geometry::CutQuadratureProvenance&) {
-                return evaluator->evaluateLinearCorner(cell, xi)
-                    .reference_gradient;
+        const auto make_scalar =
+            [](std::shared_ptr<level_set::LevelSetCellEvaluator> cell) {
+                interfaces::FreeSurfaceGeometryScalarEvaluator result;
+                result.value = [cell](FE::GlobalIndex id,
+                                      const Point& xi,
+                                      const geometry::CutQuadratureProvenance&) {
+                    return cell->evaluateLinearCorner(id, xi).value;
+                };
+                result.reference_gradient =
+                    [cell](FE::GlobalIndex id,
+                           const Point& xi,
+                           const geometry::CutQuadratureProvenance&) {
+                        return cell->evaluateLinearCorner(id, xi)
+                            .reference_gradient;
+                    };
+                return result;
             };
+        auto scalar = make_scalar(evaluator);
+        scalar.make_concurrent_copy = [evaluator, make_scalar]() {
+            return make_scalar(
+                std::make_shared<level_set::LevelSetCellEvaluator>(*evaluator));
+        };
         Pair pair;
+        // The reference: no cache, one thread.
         pair.full = interfaces::buildFreeSurfaceGeometrySnapshot(
             generated.domain, {}, {}, system.meshAccess(), policy, scalar,
-            "snapshot_reuse", {}, nullptr);
+            "snapshot_reuse", {}, nullptr, 1);
         pair.reused = interfaces::buildFreeSurfaceGeometrySnapshot(
             generated.domain, {}, {}, system.meshAccess(), policy, scalar,
-            "snapshot_reuse", {}, &cache);
+            "snapshot_reuse", {}, &cache, FE::geometryThreadCount());
         return pair;
     }
 };
@@ -532,6 +549,156 @@ TEST(FreeSurfaceSnapshotReuse, ClassificationOnlyContextRuleMeasuresMatchMateria
         }
         EXPECT_GT(released, 0u) << "dimension " << dimension;
         EXPECT_EQ(context.classificationOnlyVolumeRuleCount(), released);
+    }
+}
+
+// Sets SVMP_ASSEMBLY_THREADS for the lifetime of the object.
+class ScopedGeometryThreads {
+public:
+    explicit ScopedGeometryThreads(int threads)
+    {
+        if (const char* old = std::getenv("SVMP_ASSEMBLY_THREADS")) {
+            previous_ = old;
+            had_previous_ = true;
+        }
+        ::setenv("SVMP_ASSEMBLY_THREADS", std::to_string(threads).c_str(), 1);
+    }
+    ~ScopedGeometryThreads()
+    {
+        if (had_previous_) {
+            ::setenv("SVMP_ASSEMBLY_THREADS", previous_.c_str(), 1);
+        } else {
+            ::unsetenv("SVMP_ASSEMBLY_THREADS");
+        }
+    }
+    ScopedGeometryThreads(const ScopedGeometryThreads&) = delete;
+    ScopedGeometryThreads& operator=(const ScopedGeometryThreads&) = delete;
+
+private:
+    std::string previous_{};
+    bool had_previous_{false};
+};
+
+[[nodiscard]] bool sameRealArray(const Point& a, const Point& b) noexcept
+{
+    return std::memcmp(a.data(), b.data(), sizeof(Point)) == 0;
+}
+
+void expectSameDomains(const interfaces::LevelSetInterfaceDomain& a,
+                       const interfaces::LevelSetInterfaceDomain& b,
+                       const std::string& label)
+{
+    ASSERT_EQ(a.fragments().size(), b.fragments().size()) << label;
+    for (std::size_t i = 0; i < a.fragments().size(); ++i) {
+        const auto& x = a.fragments()[i];
+        const auto& y = b.fragments()[i];
+        EXPECT_EQ(x.parent_cell, y.parent_cell) << label;
+        EXPECT_EQ(x.local_fragment_index, y.local_fragment_index) << label;
+        EXPECT_EQ(x.topology_id, y.topology_id) << label;
+        EXPECT_EQ(x.construction_observation, y.construction_observation)
+            << label;
+        EXPECT_TRUE(sameRealArray(x.normal, y.normal)) << label;
+        EXPECT_EQ(std::memcmp(&x.measure, &y.measure, sizeof(FE::Real)), 0)
+            << label;
+        ASSERT_EQ(x.vertices.size(), y.vertices.size()) << label;
+        for (std::size_t v = 0; v < x.vertices.size(); ++v) {
+            EXPECT_TRUE(sameRealArray(x.vertices[v].point, y.vertices[v].point))
+                << label;
+        }
+        ASSERT_EQ(x.quadrature_points.size(), y.quadrature_points.size())
+            << label;
+        for (std::size_t q = 0; q < x.quadrature_points.size(); ++q) {
+            EXPECT_TRUE(sameRealArray(x.quadrature_points[q].point,
+                                      y.quadrature_points[q].point))
+                << label;
+            EXPECT_EQ(std::memcmp(&x.quadrature_points[q].weight,
+                                  &y.quadrature_points[q].weight,
+                                  sizeof(FE::Real)),
+                      0)
+                << label;
+        }
+    }
+    ASSERT_EQ(a.volumeRegions().size(), b.volumeRegions().size()) << label;
+    for (std::size_t i = 0; i < a.volumeRegions().size(); ++i) {
+        const auto& x = a.volumeRegions()[i];
+        const auto& y = b.volumeRegions()[i];
+        EXPECT_EQ(x.parent_cell, y.parent_cell) << label;
+        EXPECT_EQ(x.local_region_index, y.local_region_index) << label;
+        EXPECT_EQ(x.side, y.side) << label;
+        EXPECT_EQ(x.topology_id, y.topology_id) << label;
+        EXPECT_EQ(x.full_cell_equivalent, y.full_cell_equivalent) << label;
+        EXPECT_EQ(std::memcmp(&x.measure, &y.measure, sizeof(FE::Real)), 0)
+            << label;
+        ASSERT_EQ(x.quadrature_points.size(), y.quadrature_points.size())
+            << label;
+        for (std::size_t q = 0; q < x.quadrature_points.size(); ++q) {
+            EXPECT_TRUE(sameRealArray(x.quadrature_points[q].point,
+                                      y.quadrature_points[q].point))
+                << label;
+            EXPECT_EQ(std::memcmp(&x.quadrature_points[q].weight,
+                                  &y.quadrature_points[q].weight,
+                                  sizeof(FE::Real)),
+                      0)
+                << label;
+        }
+    }
+}
+
+// The generated geometry, and the snapshots built from it, do not depend on
+// the number of geometry threads, for full builds (first build, every cell)
+// and incremental refreshes (only cut cells).
+TEST(FreeSurfaceSnapshotReuse, GeneratedGeometryIsIndependentOfTheThreadCount)
+{
+    for (const int dimension : {2, 3}) {
+        for (const int threads : {2, 3, 8}) {
+            // One mesh and system; two lifecycles, one per thread count.
+            ReuseFixture fixture(dimension);
+            level_set::LevelSetGeneratedInterfaceLifecycle threaded_lifecycle;
+            interfaces::FreeSurfaceGeometrySnapshotReuseCache serial_cache;
+            interfaces::FreeSurfaceGeometrySnapshotReuseCache threaded_cache;
+            interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+            policy.require_complete_exterior_boundary_partition = false;
+            policy.classification_only_full_cell_side =
+                geometry::CutIntegrationSide::Positive;
+            const std::vector<std::pair<Point, FE::Real>> motion{
+                {{{0.531, 0.487, 0.462}}, FE::Real{0.29}},
+                {{{0.5312, 0.4871, 0.4619}}, FE::Real{0.29}},
+                {{{0.5600, 0.4500, 0.5000}}, FE::Real{0.31}},
+            };
+            ReuseFixture::Pair serial_previous;
+            ReuseFixture::Pair threaded_previous;
+            for (std::size_t step = 0; step < motion.size(); ++step) {
+                const std::string label =
+                    std::to_string(dimension) + "D threads " +
+                    std::to_string(threads) + " step " + std::to_string(step);
+                fixture.setLevelSet(motion[step].first, motion[step].second);
+                ReuseFixture::Pair a;
+                ReuseFixture::Pair b;
+                {
+                    ScopedGeometryThreads one(1);
+                    a = fixture.build(serial_cache, policy);
+                }
+                {
+                    ScopedGeometryThreads many(threads);
+                    b = fixture.build(threaded_cache, policy,
+                                      &threaded_lifecycle);
+                }
+                expectSameDomains(a.full->interfaceDomain(),
+                                  b.full->interfaceDomain(),
+                                  label);
+                EXPECT_EQ(interfaces::compareFreeSurfaceGeometrySnapshots(
+                              *a.full, *b.full),
+                          "")
+                    << label;
+                // Threaded snapshot builds with reuse.
+                EXPECT_EQ(interfaces::compareFreeSurfaceGeometrySnapshots(
+                              *b.reused, *a.full),
+                          "")
+                    << label;
+                serial_previous = std::move(a);
+                threaded_previous = std::move(b);
+            }
+        }
     }
 }
 
