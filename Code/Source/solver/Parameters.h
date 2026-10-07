@@ -1616,6 +1616,7 @@ class FaceParameters : public ParameterLists
 /// <Add_mesh name="lumen" >
 ///   <Mesh_file_path> mesh/lumen/mesh-complete.mesh.vtu  </Mesh_file_path>
 ///   <Ghost_layers> 0 </Ghost_layers>
+///   <Partition_weighting> none </Partition_weighting>
 ///
 ///   <Add_face name="lumen_inlet">
 ///       <Face_file_path> mesh/lumen/mesh-surfaces/lumen_inlet.vtp </Face_file_path>
@@ -1661,6 +1662,16 @@ class MeshParameters : public ParameterLists
     Parameter<int> domain_id;
     Parameter<std::string> domain_file_path;
     Parameter<int> ghost_layers;
+
+    // Opt-in startup partition weighting for multi-rank runs:
+    // "none" (default, cell-count balance) or "free_surface", which weights
+    // cells by the sign of the free surface's initial level set in the mesh
+    // file (active, inactive and cut cells) and balances both the cell count
+    // and the weighted work.  Changes the partition, hence round-off.
+    Parameter<std::string> partition_weighting;
+    Parameter<double> partition_weight_active;
+    Parameter<double> partition_weight_inactive;
+    Parameter<double> partition_weight_cut;
 
     VectorParameter<std::string> fiber_direction_file_paths;
     //Parameter<std::string> fiber_direction_file_path;
