@@ -7,6 +7,8 @@
 
 #include "Forms/JIT/JITKernelWrapper.h"
 
+#include "Assembly/ConcurrentCompute.h"
+
 #include "Assembly/JIT/KernelArgs.h"
 #include "Core/FEException.h"
 #include "Core/Logger.h"
@@ -820,10 +822,20 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
     }
 
     fallback_->computeCell(ctx, output);
+    } catch (const assembly::DeferredSerialWork&) {
+        throw;
     } catch (const std::exception& e) {
+        if (assembly::concurrentComputeActive()) {
+            // Threaded assembly: let the serial loop meet the failure, so the
+            // switch to the interpreter happens in the serial order.
+            throw assembly::DeferredSerialWork(std::string("JIT runtime failure in computeCell: ") + e.what());
+        }
         markRuntimeFailureOnce("computeCell", e.what());
         fallback_->computeCell(ctx, output);
     } catch (...) {
+        if (assembly::concurrentComputeActive()) {
+            throw assembly::DeferredSerialWork("JIT runtime failure in computeCell");
+        }
         markRuntimeFailureOnce("computeCell", "unknown exception");
         fallback_->computeCell(ctx, output);
     }
@@ -1488,9 +1500,19 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
             }
         }
 
+    } catch (const assembly::DeferredSerialWork&) {
+        throw;
     } catch (const std::exception& e) {
+        if (assembly::concurrentComputeActive()) {
+            // Threaded assembly: let the serial loop meet the failure, so the
+            // switch to the interpreter happens in the serial order.
+            throw assembly::DeferredSerialWork(std::string("JIT runtime failure in computeCellBatch: ") + e.what());
+        }
         markRuntimeFailureOnce("computeCellBatch", e.what());
     } catch (...) {
+        if (assembly::concurrentComputeActive()) {
+            throw assembly::DeferredSerialWork("JIT runtime failure in computeCellBatch");
+        }
         markRuntimeFailureOnce("computeCellBatch", "unknown exception");
     }
 
@@ -1752,10 +1774,20 @@ void JITKernelWrapper::computeBoundaryFace(const assembly::AssemblyContext& ctx,
     }
 
     fallback_->computeBoundaryFace(ctx, boundary_marker, output);
+    } catch (const assembly::DeferredSerialWork&) {
+        throw;
     } catch (const std::exception& e) {
+        if (assembly::concurrentComputeActive()) {
+            // Threaded assembly: let the serial loop meet the failure, so the
+            // switch to the interpreter happens in the serial order.
+            throw assembly::DeferredSerialWork(std::string("JIT runtime failure in computeBoundaryFace: ") + e.what());
+        }
         markRuntimeFailureOnce("computeBoundaryFace", e.what());
         fallback_->computeBoundaryFace(ctx, boundary_marker, output);
     } catch (...) {
+        if (assembly::concurrentComputeActive()) {
+            throw assembly::DeferredSerialWork("JIT runtime failure in computeBoundaryFace");
+        }
         markRuntimeFailureOnce("computeBoundaryFace", "unknown exception");
         fallback_->computeBoundaryFace(ctx, boundary_marker, output);
     }
@@ -1999,12 +2031,22 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
     fallback_->computeInteriorFace(ctx_minus, ctx_plus,
                                    output_minus, output_plus,
                                    coupling_minus_plus, coupling_plus_minus);
+    } catch (const assembly::DeferredSerialWork&) {
+        throw;
     } catch (const std::exception& e) {
+        if (assembly::concurrentComputeActive()) {
+            // Threaded assembly: let the serial loop meet the failure, so the
+            // switch to the interpreter happens in the serial order.
+            throw assembly::DeferredSerialWork(std::string("JIT runtime failure in computeInteriorFace: ") + e.what());
+        }
         markRuntimeFailureOnce("computeInteriorFace", e.what());
         fallback_->computeInteriorFace(ctx_minus, ctx_plus,
                                        output_minus, output_plus,
                                        coupling_minus_plus, coupling_plus_minus);
     } catch (...) {
+        if (assembly::concurrentComputeActive()) {
+            throw assembly::DeferredSerialWork("JIT runtime failure in computeInteriorFace");
+        }
         markRuntimeFailureOnce("computeInteriorFace", "unknown exception");
         fallback_->computeInteriorFace(ctx_minus, ctx_plus,
                                        output_minus, output_plus,
@@ -2208,12 +2250,22 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
     fallback_->computeInterfaceFace(ctx_minus, ctx_plus, interface_marker,
                                     output_minus, output_plus,
                                     coupling_minus_plus, coupling_plus_minus);
+    } catch (const assembly::DeferredSerialWork&) {
+        throw;
     } catch (const std::exception& e) {
+        if (assembly::concurrentComputeActive()) {
+            // Threaded assembly: let the serial loop meet the failure, so the
+            // switch to the interpreter happens in the serial order.
+            throw assembly::DeferredSerialWork(std::string("JIT runtime failure in computeInterfaceFace: ") + e.what());
+        }
         markRuntimeFailureOnce("computeInterfaceFace", e.what());
         fallback_->computeInterfaceFace(ctx_minus, ctx_plus, interface_marker,
                                         output_minus, output_plus,
                                         coupling_minus_plus, coupling_plus_minus);
     } catch (...) {
+        if (assembly::concurrentComputeActive()) {
+            throw assembly::DeferredSerialWork("JIT runtime failure in computeInterfaceFace");
+        }
         markRuntimeFailureOnce("computeInterfaceFace", "unknown exception");
         fallback_->computeInterfaceFace(ctx_minus, ctx_plus, interface_marker,
                                         output_minus, output_plus,
@@ -3138,6 +3190,11 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::comp
             return nullptr;
         }
 
+        // Specialized compiles run in the serial order only: on an assembly
+        // thread a missing variant defers the item to the serial loop instead
+        // of compiling it (or using the generic kernel while another thread
+        // compiles it). See Assembly/ConcurrentCompute.h.
+        assembly::requireSerial("JIT specialization compile");
         attempted_specializations_.insert(key);
     }
 
@@ -3410,6 +3467,8 @@ void JITKernelWrapper::maybeCompile()
     if (attempted_revision_ == revision_) {
         return;
     }
+    // Compiles run in the serial order only (see Assembly/ConcurrentCompute.h).
+    assembly::requireSerial("JIT kernel compile");
     attempted_revision_ = revision_;
 
     // We currently only JIT-accelerate kernels that are backed by FE/Forms IR.
