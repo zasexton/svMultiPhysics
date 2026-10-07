@@ -480,6 +480,17 @@ These are proposals. Each lists a recommended option and an alternative. Record 
     - a sliver prune threshold, which would change the discretization;
     - relaxing every update stays opt-in: it is faster (up to 37%) but moves the R/h = 32 120° result 10–50× more.
   - **Caveat:** in the late R/h = 32 120° regime, tolerance-level perturbations grow (phi differences of about 1.5e-3, and local velocity up to 10%). The M4 angle results there must be read with that sensitivity in mind.
+- **D29, 2026-10-07 (user's auto-approval window; the M4 protocol question became blocking): the sessile resolution study runs to 10 viscous times.**
+  - Settings: 200 outputs, the same cadence as before; the capillary-limit Δt is unchanged; binary `688a625a` (D28) with LTO + PGO.
+  - An R/h = 16 Δt/2 pair at the longer run measures whether the contact angle settles once the contact lines have stopped creeping (D24: at 5 viscous times it moved 0.1–1.5° per halving).
+  - If it still moves by more than about 0.5°, an angle tolerance that allows for the Δt and vertex-crossing scatter goes to the user.
+  - The generator default (5 viscous times) changes only after the results.
+  - Jobs `46899877` (R/h = 16 and 32, plus the R/h = 16 Δt/2 pair) and `46899878` (R/h = 64, 8 ranks each).
+- **D30, 2026-10-07 (user): a second round of FE-infrastructure speed-ups (physics-agnostic), in three agents.**
+  1. MPI scaling: per-rank phase profiles at 1–16 ranks; ghost depth computed instead of fixed at 8; batched collectives; no replicated serial work; cut-weighted partitioning only if it changes round-off alone. This includes the CTest case that is about 13× slower on 2 ranks than serially and sets the 25–45 min test cycle.
+  2. Incremental cut, snapshot and constraint regeneration, and an assembler and sparsity pattern kept across passes and steps; bitwise. Then threads for per-cell geometry rebuilds, bitwise for any thread count.
+  3. Quieter default logging: the held proposal `e2efc6cc` plus other unparsed per-pass lines, moved to DEBUG; the solution is unchanged. Then an opt-in scalable preconditioner whose results do not depend on the partition: a field split from the generic block layout with partition-independent inner solves.
+  - Measured starting point (s/step at 1/2/4/8 ranks): static drop R/h = 32 14.9 / 8.7 / 5.6 / 3.3 (57% at 8); sessile R/h = 32 2.38 / 1.49 / – / 0.86 (35%); capillary wave λ/h = 64 61% at 4 ranks.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
