@@ -11,7 +11,9 @@
 #include "Constraints/AffineConstraints.h"
 #include "Constraints/ConstraintDistributor.h"
 #include "Sparsity/SparsityPattern.h"
+#include "Assembly/AssemblyThreadPool.h"
 #include "Assembly/BackgroundEntityMeasures.h"
+#include "Assembly/ConcurrentCompute.h"
 #include "Assembly/CutIntegrationContext.h"
 #include "Spaces/FunctionSpace.h"
 #include "Elements/Element.h"
@@ -57,6 +59,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <exception>
 #include <functional>
 #include <optional>
 #include <span>
@@ -4355,6 +4358,370 @@ StandardAssembler::StandardAssembler(StandardAssembler&& other) noexcept = defau
 
 StandardAssembler& StandardAssembler::operator=(StandardAssembler&& other) noexcept = default;
 
+// ============================================================================
+// Threaded assembly infrastructure (FE/Docs/ThreadedAssembly.md)
+// ============================================================================
+
+namespace {
+
+[[nodiscard]] bool assemblyThreadTimingEnabled() noexcept
+{
+    static const bool enabled = envFlagEnabled("SVMP_ASSEMBLY_THREAD_TIMING");
+    return enabled;
+}
+
+/// Loops with fewer items run serially.
+constexpr std::size_t kThreadedAssemblyMinItems = 64u;
+/// Items per block; blocks are assigned round-robin to threads.
+constexpr std::size_t kThreadedAssemblyBlockSize = 32u;
+/// Blocks per thread in one wave (bounds the recorded outputs).
+constexpr std::size_t kThreadedAssemblyWaveBlocksPerThread = 16u;
+
+/// Per-item cut-volume diagnostics and the topology policy log or edit local
+/// outputs in item order; with any of them active the loop stays serial.
+[[nodiscard]] bool cutVolumeOrderedDiagnosticsEnabled() noexcept
+{
+    return cutVolumeLocalMatrixProvenanceDiagnosticEnabled() ||
+           cutVolumeLocalMatrixColumnSupportDiagnosticEnabled() ||
+           cutVolumeLocalMatrixColumnGeometryDiagnosticEnabled() ||
+           cutVolumeLocalMatrixQuadratureGeometryDiagnosticEnabled() ||
+           cutVolumeLocalMatrixGradientBalanceDiagnosticEnabled() ||
+           cutVolumeDirectPspgLocalSchurDiagnosticEnabled() ||
+           cutVolumeDirectPspgLocalEdgeBalanceDiagnosticEnabled() ||
+           cutVolumeDirectPspgSupportCouplingProvenanceDiagnosticEnabled() ||
+           cutVolumeDirectPspgTopologyPolicy() != CutVolumeDirectPspgTopologyPolicy::Off;
+}
+
+} // namespace
+
+class StandardAssembler::InsertSink {
+public:
+    explicit InsertSink(StandardAssembler& target) noexcept : target_(&target) {}
+    explicit InsertSink(detail::DeferredInsertBuffer& buffer) noexcept : buffer_(&buffer) {}
+
+    void forCell(GlobalIndex cell_id,
+                 const dofs::DofMap* row_dof_map,
+                 GlobalIndex row_dof_offset,
+                 const dofs::DofMap* col_dof_map,
+                 GlobalIndex col_dof_offset,
+                 const KernelOutput& output,
+                 std::span<const GlobalIndex> row_dofs,
+                 std::span<const GlobalIndex> col_dofs,
+                 GlobalSystemView* matrix_view,
+                 GlobalSystemView* vector_view)
+    {
+        if (target_ != nullptr) {
+            target_->insertLocalForCell(cell_id, row_dof_map, row_dof_offset,
+                                        col_dof_map, col_dof_offset, output,
+                                        row_dofs, col_dofs, matrix_view, vector_view);
+            return;
+        }
+        buffer_->record(detail::DeferredInsertOp::Kind::ForCell, output, row_dofs, col_dofs,
+                        matrix_view, vector_view, cell_id, row_dof_map, row_dof_offset,
+                        col_dof_map, col_dof_offset);
+    }
+
+    void local(const KernelOutput& output,
+               std::span<const GlobalIndex> row_dofs,
+               std::span<const GlobalIndex> col_dofs,
+               GlobalSystemView* matrix_view,
+               GlobalSystemView* vector_view)
+    {
+        if (target_ != nullptr) {
+            target_->insertLocal(output, row_dofs, col_dofs, matrix_view, vector_view);
+            return;
+        }
+        buffer_->record(detail::DeferredInsertOp::Kind::Local, output, row_dofs, col_dofs,
+                        matrix_view, vector_view);
+    }
+
+    void constrained(const KernelOutput& output,
+                     std::span<const GlobalIndex> row_dofs,
+                     std::span<const GlobalIndex> col_dofs,
+                     GlobalSystemView* matrix_view,
+                     GlobalSystemView* vector_view)
+    {
+        if (target_ != nullptr) {
+            target_->insertLocalConstrained(output, row_dofs, col_dofs, matrix_view, vector_view);
+            return;
+        }
+        buffer_->record(detail::DeferredInsertOp::Kind::Constrained, output, row_dofs, col_dofs,
+                        matrix_view, vector_view);
+    }
+
+    void matrixEntries(GlobalSystemView* matrix_view,
+                       std::span<const GlobalIndex> row_dofs,
+                       std::span<const GlobalIndex> col_dofs,
+                       const KernelOutput& output)
+    {
+        if (target_ != nullptr) {
+            matrix_view->addMatrixEntries(row_dofs, col_dofs, output.local_matrix);
+            return;
+        }
+        buffer_->record(detail::DeferredInsertOp::Kind::MatrixEntries, output, row_dofs, col_dofs,
+                        matrix_view, nullptr);
+    }
+
+private:
+    StandardAssembler* target_{nullptr};
+    detail::DeferredInsertBuffer* buffer_{nullptr};
+};
+
+int StandardAssembler::threadedAssemblyThreadCount() const noexcept
+{
+    if (table_owner_ != nullptr || AssemblyThreadPool::insideParallelRegion()) {
+        return 1;
+    }
+    return std::max(1, options_.num_threads);
+}
+
+bool StandardAssembler::hasConstraintDistributorForInsert() const noexcept
+{
+    return tableOwner().constraint_distributor_ != nullptr;
+}
+
+void StandardAssembler::prepareThreadWorkers(int n)
+{
+    while (static_cast<int>(thread_workers_.size()) < n) {
+        auto worker_options = options_;
+        worker_options.num_threads = 1;
+        thread_workers_.push_back(std::make_unique<StandardAssembler>(worker_options));
+    }
+    for (int i = 0; i < n; ++i) {
+        auto& w = *thread_workers_[static_cast<std::size_t>(i)];
+        w.table_owner_ = this;
+
+        auto worker_options = options_;
+        worker_options.num_threads = 1;
+        if (w.cutVolumeBasisCacheMaxEntries() != cutVolumeBasisCacheMaxEntries()) {
+            w.clearCutVolumeBasisCache();
+            w.clearCutVolumeGeometryCache();
+        }
+        w.options_ = normalizeStandardAssemblerOptions(worker_options);
+
+        // Configuration, shared by pointer or span with this assembler. The
+        // worker never inserts, so it has no constraint distributor; the
+        // per-item constrained-insert decisions use
+        // hasConstraintDistributorForInsert().
+        w.row_dof_map_ = row_dof_map_;
+        w.col_dof_map_ = col_dof_map_;
+        w.row_dof_offset_ = row_dof_offset_;
+        w.col_dof_offset_ = col_dof_offset_;
+        w.row_dof_scope_ = row_dof_scope_;
+        w.col_dof_scope_ = col_dof_scope_;
+        w.dof_handler_ = dof_handler_;
+        w.constraints_ = constraints_;
+        w.sparsity_ = sparsity_;
+        w.suppress_constraint_inhomogeneity_ = suppress_constraint_inhomogeneity_;
+        w.current_solution_ = current_solution_;
+        w.current_solution_view_ = current_solution_view_;
+        w.previous_solutions_ = previous_solutions_;
+        w.previous_solution_views_ = previous_solution_views_;
+        w.history_weights_ = history_weights_;
+        w.time_ = time_;
+        w.dt_ = dt_;
+        w.get_real_param_ = get_real_param_;
+        w.get_param_ = get_param_;
+        w.user_data_ = user_data_;
+        w.jit_constants_ = jit_constants_;
+        if (w.cut_integration_context_ != cut_integration_context_) {
+            w.setCutIntegrationContext(cut_integration_context_);
+        }
+        w.diagnostic_context_ = diagnostic_context_;
+        w.coupled_integrals_ = coupled_integrals_;
+        w.coupled_aux_state_ = coupled_aux_state_;
+        w.auxiliary_inputs_ = auxiliary_inputs_;
+        w.auxiliary_state_ = auxiliary_state_;
+        w.auxiliary_outputs_ = auxiliary_outputs_;
+        w.auxiliary_output_bindings_ = auxiliary_output_bindings_;
+        w.time_integration_ = time_integration_;
+        w.material_state_provider_ = material_state_provider_;
+        w.mesh_motion_field_access_ = mesh_motion_field_access_;
+        w.field_solution_access_ = field_solution_access_;
+
+        // Field recipes hold pointers into the owner's field access plans.
+        if (w.worker_field_plans_data_ != static_cast<const void*>(field_access_plans_.data()) ||
+            w.worker_field_plans_size_ != field_access_plans_.size()) {
+            w.cached_field_recipes_valid_ = false;
+            w.cached_field_recipes_.clear();
+            w.worker_field_plans_data_ = field_access_plans_.data();
+            w.worker_field_plans_size_ = field_access_plans_.size();
+        }
+        if (!w.initialized_) {
+            w.initialize();
+        }
+    }
+}
+
+void StandardAssembler::ensureThreadedGatherTables(const IMeshAccess& mesh)
+{
+    // The serial loops build the resolved gather tables of the history views
+    // lazily on first use; workers cannot, so build them before the threads.
+    ensureResolvedVectorTables(mesh);
+    for (const auto* view : previous_solution_views_) {
+        if (view == nullptr || view == current_solution_view_) {
+            continue;
+        }
+        for (const auto& table : cell_dof_tables_) {
+            ensureResolvedVectorTable(mesh, table.dof_map, table.dof_offset, view);
+        }
+    }
+}
+
+void StandardAssembler::replayDeferredInserts(const detail::DeferredInsertBuffer& buffer)
+{
+    using Kind = detail::DeferredInsertOp::Kind;
+    for (const auto& op : buffer.ops()) {
+        const auto& output = buffer.output(op);
+        const auto rows = buffer.rows(op);
+        const auto cols = buffer.cols(op);
+        switch (op.kind) {
+            case Kind::ForCell:
+                insertLocalForCell(op.cell_id, op.row_dof_map, op.row_dof_offset,
+                                   op.col_dof_map, op.col_dof_offset, output,
+                                   rows, cols, op.matrix_view, op.vector_view);
+                break;
+            case Kind::Local:
+                insertLocal(output, rows, cols, op.matrix_view, op.vector_view);
+                break;
+            case Kind::Constrained:
+                insertLocalConstrained(output, rows, cols, op.matrix_view, op.vector_view);
+                break;
+            case Kind::MatrixEntries:
+                op.matrix_view->addMatrixEntries(rows, cols, output.local_matrix);
+                break;
+        }
+    }
+}
+
+std::size_t StandardAssembler::runThreadedItems(
+    const char* loop_name,
+    std::size_t n_items,
+    int n_threads,
+    std::size_t block_size,
+    const std::function<void(StandardAssembler& worker,
+                             int thread,
+                             std::size_t item,
+                             InsertSink& sink,
+                             AssemblyResult& result)>& compute,
+    AssemblyResult& result)
+{
+    if (n_items == 0u || n_threads <= 1) {
+        return 0u;
+    }
+    block_size = std::max<std::size_t>(1u, block_size);
+    const auto threads = static_cast<std::size_t>(n_threads);
+    const std::size_t n_blocks = (n_items + block_size - 1u) / block_size;
+    const std::size_t wave_blocks = threads * kThreadedAssemblyWaveBlocksPerThread;
+    if (deferred_insert_buffers_.size() < wave_blocks) {
+        deferred_insert_buffers_.resize(wave_blocks);
+    }
+    prepareThreadWorkers(n_threads);
+
+    struct ThreadOutcome {
+        std::size_t failed_block{std::numeric_limits<std::size_t>::max()};
+        std::exception_ptr error{};
+        bool deferred{false};
+        std::string deferred_reason{};
+    };
+    std::vector<ThreadOutcome> outcomes(threads);
+    // Counters of each block of a wave, added when the block is inserted.
+    std::vector<AssemblyResult> block_results(wave_blocks);
+    const auto add_counters = [](AssemblyResult& into, const AssemblyResult& from) {
+        into.elements_assembled += from.elements_assembled;
+        into.boundary_faces_assembled += from.boundary_faces_assembled;
+        into.interior_faces_assembled += from.interior_faces_assembled;
+        into.interface_faces_assembled += from.interface_faces_assembled;
+        into.matrix_entries_inserted += from.matrix_entries_inserted;
+        into.vector_entries_inserted += from.vector_entries_inserted;
+    };
+
+    const bool timing = assemblyThreadTimingEnabled();
+    using clock = std::chrono::steady_clock;
+    double compute_seconds = 0.0;
+    double insert_seconds = 0.0;
+    std::size_t waves = 0u;
+    std::size_t done_items = n_items;
+    std::string stop_reason;
+
+    for (std::size_t wave_begin = 0u; wave_begin < n_blocks; wave_begin += wave_blocks) {
+        const std::size_t wave_end = std::min(n_blocks, wave_begin + wave_blocks);
+        ++waves;
+        const auto t0 = clock::now();
+        AssemblyThreadPool::global().run(n_threads, [&](int thread) {
+            ConcurrentComputeScope no_lazy_work;
+            auto& worker = *thread_workers_[static_cast<std::size_t>(thread)];
+            auto& outcome = outcomes[static_cast<std::size_t>(thread)];
+            if (outcome.failed_block != std::numeric_limits<std::size_t>::max()) {
+                return;
+            }
+            const auto t = static_cast<std::size_t>(thread);
+            // First block of this wave that belongs to the thread (b % threads == t).
+            std::size_t b = wave_begin + ((t + threads - wave_begin % threads) % threads);
+            for (; b < wave_end; b += threads) {
+                auto& buffer = deferred_insert_buffers_[b - wave_begin];
+                auto& block_result = block_results[b - wave_begin];
+                buffer.clear();
+                block_result = AssemblyResult{};
+                InsertSink sink(buffer);
+                const std::size_t item_end = std::min(n_items, (b + 1u) * block_size);
+                try {
+                    for (std::size_t item = b * block_size; item < item_end; ++item) {
+                        compute(worker, thread, item, sink, block_result);
+                    }
+                } catch (const DeferredSerialWork& e) {
+                    outcome.failed_block = b;
+                    outcome.deferred = true;
+                    outcome.deferred_reason = e.what();
+                    return;
+                } catch (...) {
+                    outcome.failed_block = b;
+                    outcome.error = std::current_exception();
+                    return;
+                }
+            }
+        });
+        const auto t1 = clock::now();
+
+        std::size_t first_failed = std::numeric_limits<std::size_t>::max();
+        for (const auto& outcome : outcomes) {
+            first_failed = std::min(first_failed, outcome.failed_block);
+        }
+        // Every block before the earliest failed block is complete: a thread
+        // processes its blocks in increasing order and stops at its failure.
+        const std::size_t replay_end = std::min(wave_end, first_failed);
+        for (std::size_t b = wave_begin; b < replay_end; ++b) {
+            replayDeferredInserts(deferred_insert_buffers_[b - wave_begin]);
+            add_counters(result, block_results[b - wave_begin]);
+        }
+        const auto t2 = clock::now();
+        compute_seconds += std::chrono::duration<double>(t1 - t0).count();
+        insert_seconds += std::chrono::duration<double>(t2 - t1).count();
+
+        if (first_failed != std::numeric_limits<std::size_t>::max()) {
+            done_items = first_failed * block_size;
+            for (const auto& outcome : outcomes) {
+                if (outcome.failed_block == first_failed) {
+                    stop_reason = outcome.deferred ? outcome.deferred_reason
+                                                   : std::string("exception");
+                }
+            }
+            break;
+        }
+    }
+
+    if (timing) {
+        std::fprintf(stderr,
+                     "[ASSEMBLY_THREADS] loop=%s items=%zu threads=%d blocks=%zu waves=%zu "
+                     "compute=%9.6f insert=%9.6f serial_from=%zu%s%s\n",
+                     loop_name, n_items, n_threads, n_blocks, waves,
+                     compute_seconds, insert_seconds, done_items,
+                     stop_reason.empty() ? "" : " stop=",
+                     stop_reason.c_str());
+    }
+    return done_items;
+}
+
 void StandardAssembler::clearFusedMatrixResolvedScratch() noexcept
 {
     scratch_fused_resolved_.clear();
@@ -5162,6 +5529,9 @@ void StandardAssembler::reset()
     clearCutVolumeGeometryCache();
     cut_volume_epoch_cache_.clear();
     initialized_ = false;
+    for (auto& worker : thread_workers_) {
+        worker->reset();
+    }
 }
 
 void StandardAssembler::invalidateGeometryCaches()
@@ -5176,6 +5546,9 @@ void StandardAssembler::invalidateGeometryCaches()
     clearCutVolumeBasisCache();
     clearCutVolumeGeometryCache();
     cut_volume_epoch_cache_.clear();
+    for (auto& worker : thread_workers_) {
+        worker->invalidateGeometryCaches();
+    }
 }
 
 void StandardAssembler::invalidateTopologyLayoutCaches()
@@ -5185,6 +5558,10 @@ void StandardAssembler::invalidateTopologyLayoutCaches()
 
 void StandardAssembler::ensureCellDofTables(const IMeshAccess& mesh)
 {
+    if (table_owner_ != nullptr) {
+        // Worker: the owner validated its tables before the threaded loop.
+        return;
+    }
     const auto n_cells = mesh.numCells();
     bool invalid = (cached_cell_dof_mesh_ != &mesh || cached_cell_dof_count_ != n_cells);
 
@@ -5228,6 +5605,19 @@ const StandardAssembler::CellDofTable& StandardAssembler::getCellDofTable(
 )
 {
     FE_CHECK_NOT_NULL(dof_map, "StandardAssembler::getCellDofTable: dof_map");
+    if (table_owner_ != nullptr) {
+        // Worker: read the owner's table; never build one concurrently.
+        const auto owner_layout_revision = dofLayoutRevision(dof_map);
+        for (const auto& table : table_owner_->cell_dof_tables_) {
+            if (table.dof_map == dof_map &&
+                table.dof_offset == dof_offset &&
+                table.dof_layout_revision == owner_layout_revision) {
+                return table;
+            }
+        }
+        requireSerial("cell DOF table missing on the threaded path");
+        FE_THROW(FEException, "StandardAssembler::getCellDofTable: worker table missing");
+    }
     ensureCellDofTables(mesh);
     const auto layout_revision = dofLayoutRevision(dof_map);
 
@@ -5294,7 +5684,7 @@ std::span<const GlobalIndex> StandardAssembler::getCellDofsCached(
     GlobalIndex dof_offset)
 {
     const auto& table = getCellDofTable(mesh, dof_map, dof_offset);
-    FE_THROW_IF(cell_id < 0 || cell_id >= cached_cell_dof_count_, FEException,
+    FE_THROW_IF(cell_id < 0 || cell_id >= tableOwner().cached_cell_dof_count_, FEException,
                 "StandardAssembler::getCellDofsCached: cell_id out of range");
     const auto begin = static_cast<std::size_t>(table.cell_offsets[static_cast<std::size_t>(cell_id)]);
     const auto end = static_cast<std::size_t>(table.cell_offsets[static_cast<std::size_t>(cell_id) + 1u]);
@@ -5305,7 +5695,7 @@ std::span<const GlobalIndex> StandardAssembler::getCellDofsFromTable(
     const CellDofTable& table,
     GlobalIndex cell_id) const
 {
-    FE_THROW_IF(cell_id < 0 || cell_id >= cached_cell_dof_count_, FEException,
+    FE_THROW_IF(cell_id < 0 || cell_id >= tableOwner().cached_cell_dof_count_, FEException,
                 "StandardAssembler::getCellDofsFromTable: cell_id out of range");
     const auto begin = static_cast<std::size_t>(table.cell_offsets[static_cast<std::size_t>(cell_id)]);
     const auto end = static_cast<std::size_t>(table.cell_offsets[static_cast<std::size_t>(cell_id) + 1u]);
@@ -5325,6 +5715,11 @@ void StandardAssembler::ensureResolvedVectorTable(
     const void* layout_handle = view->vectorLayoutHandle();
     if (layout_handle == nullptr) {
         return;
+    }
+    if (table_owner_ != nullptr) {
+        // Worker: resolving entries mutates backend caches; never build here.
+        requireSerial("resolved vector table missing on the threaded path");
+        FE_THROW(FEException, "StandardAssembler::ensureResolvedVectorTable: worker table missing");
     }
     const auto layout_revision = view->vectorLayoutRevision();
     const auto dof_layout_revision = dofLayoutRevision(dof_map);
@@ -5371,6 +5766,9 @@ void StandardAssembler::ensureResolvedVectorTable(
 
 void StandardAssembler::ensureResolvedVectorTables(const IMeshAccess& mesh)
 {
+    if (table_owner_ != nullptr) {
+        return;
+    }
     ensureCellDofTables(mesh);
     if (current_solution_view_ != nullptr) {
         for (const auto& table : cell_dof_tables_) {
@@ -5394,6 +5792,10 @@ void StandardAssembler::ensureResolvedMatrixTable(
     const void* layout_handle = view->matrixLayoutHandle();
     if (layout_handle == nullptr) {
         return;
+    }
+    if (table_owner_ != nullptr) {
+        requireSerial("resolved matrix table requested on the threaded path");
+        FE_THROW(FEException, "StandardAssembler::ensureResolvedMatrixTable: not available on a worker");
     }
     const auto layout_revision = view->matrixLayoutRevision();
     const auto row_dof_layout_revision = dofLayoutRevision(row_dof_map);
@@ -5463,6 +5865,10 @@ void StandardAssembler::ensureResolvedMatrixTable(
 
 void StandardAssembler::ensureCellConstrainedFlags(const IMeshAccess& mesh)
 {
+    if (table_owner_ != nullptr) {
+        requireSerial("constrained-cell flags requested on the threaded path");
+        FE_THROW(FEException, "StandardAssembler::ensureCellConstrainedFlags: not available on a worker");
+    }
     ensureCellDofTables(mesh);
     const auto constraint_revision =
         constraints_ ? constraints_->constraintLayoutRevision() : 0u;
@@ -5512,6 +5918,9 @@ std::span<const GlobalIndex> StandardAssembler::getResolvedCellVectorEntries(
     GlobalIndex dof_offset,
     const GlobalSystemView* view) const
 {
+    if (table_owner_ != nullptr) {
+        return table_owner_->getResolvedCellVectorEntries(cell_id, dof_map, dof_offset, view);
+    }
     if (view == nullptr || dof_map == nullptr || cell_id < 0 || cell_id >= cached_cell_dof_count_) {
         return {};
     }
@@ -5561,6 +5970,10 @@ std::span<const GlobalIndex> StandardAssembler::getResolvedCellMatrixEntries(
     GlobalIndex col_dof_offset,
     const GlobalSystemView* view) const
 {
+    if (table_owner_ != nullptr) {
+        return table_owner_->getResolvedCellMatrixEntries(cell_id, row_dof_map, row_dof_offset,
+                                                          col_dof_map, col_dof_offset, view);
+    }
     if (view == nullptr || row_dof_map == nullptr || col_dof_map == nullptr ||
         cell_id < 0 || cell_id >= cached_cell_dof_count_) {
         return {};
@@ -5596,6 +6009,10 @@ std::span<const GlobalIndex> StandardAssembler::getResolvedCellMatrixEntries(
 
 void StandardAssembler::ensureFieldAccessPlans(const IMeshAccess& mesh)
 {
+    if (table_owner_ != nullptr) {
+        // Worker: the owner built its plans before the threaded loop.
+        return;
+    }
     ensureCellDofTables(mesh);
     bool plans_current = (field_access_plans_.size() == field_solution_access_.size());
     if (plans_current) {
@@ -5647,6 +6064,9 @@ void StandardAssembler::ensureFieldAccessPlans(const IMeshAccess& mesh)
 
 const StandardAssembler::FieldAccessPlan* StandardAssembler::findFieldAccessPlan(FieldId field) const noexcept
 {
+    if (table_owner_ != nullptr) {
+        return table_owner_->findFieldAccessPlan(field);
+    }
     for (const auto& plan : field_access_plans_) {
         if (plan.field == field) {
             return &plan;
@@ -5667,6 +6087,11 @@ void StandardAssembler::gatherCellVectorCoefficients(
     bool validate_negative_dofs)
 {
     auto resolved = getResolvedCellVectorEntries(cell_id, dof_map, dof_offset, view);
+    if (table_owner_ != nullptr && resolved.empty() && view != nullptr) {
+        // Worker: an unresolved read may mutate backend caches (FSILS).
+        requireSerial("solution gather without a resolved table on the threaded path");
+        FE_THROW(FEException, "StandardAssembler::gatherCellVectorCoefficients: worker table missing");
+    }
     if (resolved.empty() && view != nullptr && cached_cell_dof_mesh_ != nullptr &&
         dof_map != nullptr) {
         ensureResolvedVectorTable(*cached_cell_dof_mesh_, dof_map, dof_offset, view);
@@ -6517,6 +6942,93 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
     return result;
 }
 
+// Shared, read-only state of one assembleInteriorFaces call.
+struct StandardAssembler::InteriorFaceLoop {
+    struct FaceItem {
+        GlobalIndex face_id{-1};
+        GlobalIndex cell_minus{-1};
+        GlobalIndex cell_plus{-1};
+        LocalIndex local_face_minus{0};
+        LocalIndex local_face_plus{0};
+        bool local_faces_known{false};
+    };
+
+    const IMeshAccess& mesh;
+    const spaces::FunctionSpace& test_space;
+    const spaces::FunctionSpace& trial_space;
+    AssemblyKernel& kernel;
+    int interior_facet_marker;
+    geometry::CutIntegrationSide interior_facet_side;
+    const CutFacetSetHandle* facet_set_handle;
+    RequiredData required_data;
+    const std::vector<FieldRequirement>& field_requirements;
+    bool need_field_solutions;
+    bool need_solution;
+    bool need_material_state;
+    MaterialStateSpec material_state_spec;
+    bool owned_rows_only;
+    GlobalSystemView* insert_matrix_view;
+    GlobalSystemView* insert_vector_view;
+    const CutStabilizationCellScales& cut_stabilization_cell_scales;
+    const std::vector<FaceItem>& faces;
+    bool face_timing;
+};
+
+// Per-thread mutable state of one assembleInteriorFaces call.
+struct StandardAssembler::InteriorFaceThreadState {
+    AssemblyContext context_plus{};
+    KernelOutput output_minus{};
+    KernelOutput output_plus{};
+    KernelOutput coupling_mp{};
+    KernelOutput coupling_pm{};
+    std::vector<Real> plus_solution_coeffs{};
+    std::vector<std::vector<Real>> plus_prev_solution_coeffs{};
+    std::vector<GlobalIndex> cell_nodes_minus{};
+    std::vector<GlobalIndex> cell_nodes_plus{};
+    std::vector<Real> cut_face_jit_constants{};
+    std::vector<GlobalIndex> minus_owner_signature{};
+    std::vector<GlobalIndex> plus_owner_signature{};
+    std::vector<std::array<Real, 3>> minus_owner_coordinates{};
+    std::vector<std::array<Real, 3>> plus_owner_coordinates{};
+
+    double face_filter_time{0.0};
+    double face_dof_time{0.0};
+    double face_local_index_time{0.0};
+    double face_alignment_time{0.0};
+    double face_prepare_minus_time{0.0};
+    double face_prepare_plus_time{0.0};
+    double face_context_setter_time{0.0};
+    double face_cut_scale_time{0.0};
+    double face_solution_time{0.0};
+    double face_field_time{0.0};
+    double face_material_time{0.0};
+    double face_kernel_time{0.0};
+    double face_orientation_time{0.0};
+    double face_insert_time{0.0};
+    std::size_t faces_considered{0u};
+    std::size_t faces_assembled{0u};
+
+    void addTimingAndCounters(const InteriorFaceThreadState& o) noexcept
+    {
+        face_filter_time += o.face_filter_time;
+        face_dof_time += o.face_dof_time;
+        face_local_index_time += o.face_local_index_time;
+        face_alignment_time += o.face_alignment_time;
+        face_prepare_minus_time += o.face_prepare_minus_time;
+        face_prepare_plus_time += o.face_prepare_plus_time;
+        face_context_setter_time += o.face_context_setter_time;
+        face_cut_scale_time += o.face_cut_scale_time;
+        face_solution_time += o.face_solution_time;
+        face_field_time += o.face_field_time;
+        face_material_time += o.face_material_time;
+        face_kernel_time += o.face_kernel_time;
+        face_orientation_time += o.face_orientation_time;
+        face_insert_time += o.face_insert_time;
+        faces_considered += o.faces_considered;
+        faces_assembled += o.faces_assembled;
+    }
+};
+
 AssemblyResult StandardAssembler::assembleInteriorFaces(
     const IMeshAccess& mesh,
     const spaces::FunctionSpace& test_space,
@@ -6651,10 +7163,214 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
         }
     }
 
-    std::vector<GlobalIndex> minus_owner_signature;
-    std::vector<GlobalIndex> plus_owner_signature;
-    std::vector<std::array<Real, 3>> minus_owner_coordinates;
-    std::vector<std::array<Real, 3>> plus_owner_coordinates;
+    const auto cut_stabilization_cell_scales =
+        buildCutStabilizationCellScales(mesh, cut_integration_context_);
+
+    std::vector<InteriorFaceLoop::FaceItem> faces;
+    mesh.forEachInteriorFace(
+        [&](GlobalIndex face_id, GlobalIndex cell_minus, GlobalIndex cell_plus) {
+            InteriorFaceLoop::FaceItem face_item;
+            face_item.face_id = face_id;
+            face_item.cell_minus = cell_minus;
+            face_item.cell_plus = cell_plus;
+            faces.push_back(face_item);
+        });
+    face_setup_time = face_now() - face_start;
+
+    const LocalIndex plus_context_dofs =
+        std::max(row_dof_map_->getMaxDofsPerCell(), col_dof_map_->getMaxDofsPerCell());
+    const InteriorFaceLoop loop{mesh,
+                                test_space,
+                                trial_space,
+                                kernel,
+                                interior_facet_marker,
+                                interior_facet_side,
+                                facet_set_handle,
+                                required_data,
+                                field_requirements,
+                                need_field_solutions,
+                                need_solution,
+                                need_material_state,
+                                material_state_spec,
+                                owned_rows_only,
+                                insert_matrix_view,
+                                insert_vector_view,
+                                cut_stabilization_cell_scales,
+                                faces,
+                                face_timing};
+
+    InteriorFaceThreadState serial_state;
+    serial_state.context_plus.reserve(plus_context_dofs, 27, mesh.dimension());
+    std::vector<InteriorFaceThreadState> thread_states;
+
+    // Threaded compute with ordered insertion (FE/Docs/ThreadedAssembly.md).
+    std::size_t serial_begin = 0u;
+    const int n_threads = threadedAssemblyThreadCount();
+    if (n_threads > 1 && faces.size() >= kThreadedAssemblyMinItems && !need_material_state) {
+        for (auto& face_item : faces) {
+            if (facet_set_handle != nullptr &&
+                !facet_set_handle->containsFacet(static_cast<MeshIndex>(face_item.face_id))) {
+                continue;
+            }
+            face_item.local_face_minus = mesh.getLocalFaceIndex(face_item.face_id, face_item.cell_minus);
+            face_item.local_face_plus = mesh.getLocalFaceIndex(face_item.face_id, face_item.cell_plus);
+            face_item.local_faces_known = true;
+        }
+        ensureThreadedGatherTables(mesh);
+        prepareThreadWorkers(n_threads);
+        thread_states.resize(static_cast<std::size_t>(n_threads));
+        for (int t = 0; t < n_threads; ++t) {
+            thread_workers_[static_cast<std::size_t>(t)]->context_.reserve(
+                plus_context_dofs, /*max_qpts=*/27, mesh.dimension());
+            thread_states[static_cast<std::size_t>(t)].context_plus.reserve(
+                plus_context_dofs, 27, mesh.dimension());
+        }
+        serial_begin = runThreadedItems(
+            "interior_faces", faces.size(), n_threads, kThreadedAssemblyBlockSize,
+            [&](StandardAssembler& worker, int thread, std::size_t item, InsertSink& sink,
+                AssemblyResult& item_result) {
+                worker.assembleInteriorFaceItem(
+                    loop, thread_states[static_cast<std::size_t>(thread)], item, sink, item_result);
+            },
+            result);
+    }
+    if (serial_begin < faces.size()) {
+        InsertSink sink(*this);
+        for (std::size_t item = serial_begin; item < faces.size(); ++item) {
+            assembleInteriorFaceItem(loop, serial_state, item, sink, result);
+        }
+    }
+    for (const auto& state : thread_states) {
+        serial_state.addTimingAndCounters(state);
+    }
+    face_filter_time = serial_state.face_filter_time;
+    face_dof_time = serial_state.face_dof_time;
+    face_local_index_time = serial_state.face_local_index_time;
+    face_alignment_time = serial_state.face_alignment_time;
+    face_prepare_minus_time = serial_state.face_prepare_minus_time;
+    face_prepare_plus_time = serial_state.face_prepare_plus_time;
+    face_context_setter_time = serial_state.face_context_setter_time;
+    face_cut_scale_time = serial_state.face_cut_scale_time;
+    face_solution_time = serial_state.face_solution_time;
+    face_field_time = serial_state.face_field_time;
+    face_material_time = serial_state.face_material_time;
+    face_kernel_time = serial_state.face_kernel_time;
+    face_orientation_time = serial_state.face_orientation_time;
+    face_insert_time = serial_state.face_insert_time;
+    faces_considered = serial_state.faces_considered;
+    faces_assembled = serial_state.faces_assembled;
+
+    auto end_time = std::chrono::steady_clock::now();
+    result.elapsed_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
+    if (face_timing) {
+        int rank = 0;
+#if FE_HAS_MPI
+        int mpi_initialized = 0;
+        MPI_Initialized(&mpi_initialized);
+        if (mpi_initialized) {
+            MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        }
+#endif
+        std::fprintf(stderr,
+            "[INTERIOR_FACE_TIMING] rank=%d matrix=1 vector=%d faces_considered=%zu "
+            "faces_assembled=%zu total=%9.6f setup=%9.6f filter=%9.6f dofs=%9.6f "
+            "local_face=%9.6f align=%9.6f prepare_minus=%9.6f prepare_plus=%9.6f "
+            "ctx=%9.6f cut_scale=%9.6f solution=%9.6f field=%9.6f material=%9.6f "
+            "kernel=%9.6f orient=%9.6f insert=%9.6f\n",
+            rank,
+            vector_view != nullptr ? 1 : 0,
+            faces_considered,
+            faces_assembled,
+            result.elapsed_time_seconds,
+            face_setup_time,
+            face_filter_time,
+            face_dof_time,
+            face_local_index_time,
+            face_alignment_time,
+            face_prepare_minus_time,
+            face_prepare_plus_time,
+            face_context_setter_time,
+            face_cut_scale_time,
+            face_solution_time,
+            face_field_time,
+            face_material_time,
+            face_kernel_time,
+            face_orientation_time,
+            face_insert_time);
+    }
+
+    return result;
+}
+
+void StandardAssembler::assembleInteriorFaceItem(const InteriorFaceLoop& loop,
+                                                 InteriorFaceThreadState& state,
+                                                 std::size_t item,
+                                                 InsertSink& sink,
+                                                 AssemblyResult& result)
+{
+    // Loop body of assembleInteriorFaces for one face. It runs on the calling
+    // assembler (serial) or on a worker assembler (threads). The names below
+    // alias the call's shared and per-thread state.
+    const IMeshAccess& mesh = loop.mesh;
+    const spaces::FunctionSpace& test_space = loop.test_space;
+    const spaces::FunctionSpace& trial_space = loop.trial_space;
+    AssemblyKernel& kernel = loop.kernel;
+    const int interior_facet_marker = loop.interior_facet_marker;
+    const geometry::CutIntegrationSide interior_facet_side = loop.interior_facet_side;
+    const CutFacetSetHandle* facet_set_handle = loop.facet_set_handle;
+    const RequiredData required_data = loop.required_data;
+    const auto& field_requirements = loop.field_requirements;
+    const bool need_field_solutions = loop.need_field_solutions;
+    const bool need_solution = loop.need_solution;
+    const bool need_material_state = loop.need_material_state;
+    const auto& material_state_spec = loop.material_state_spec;
+    const bool owned_rows_only = loop.owned_rows_only;
+    GlobalSystemView* insert_matrix_view = loop.insert_matrix_view;
+    GlobalSystemView* insert_vector_view = loop.insert_vector_view;
+    const auto& cut_stabilization_cell_scales = loop.cut_stabilization_cell_scales;
+    auto& context_plus = state.context_plus;
+    auto& output_minus = state.output_minus;
+    auto& output_plus = state.output_plus;
+    auto& coupling_mp = state.coupling_mp;
+    auto& coupling_pm = state.coupling_pm;
+    auto& plus_solution_coeffs = state.plus_solution_coeffs;
+    auto& plus_prev_solution_coeffs = state.plus_prev_solution_coeffs;
+    auto& cell_nodes_minus = state.cell_nodes_minus;
+    auto& cell_nodes_plus = state.cell_nodes_plus;
+    auto& cut_face_jit_constants = state.cut_face_jit_constants;
+    auto& minus_owner_signature = state.minus_owner_signature;
+    auto& plus_owner_signature = state.plus_owner_signature;
+    auto& minus_owner_coordinates = state.minus_owner_coordinates;
+    auto& plus_owner_coordinates = state.plus_owner_coordinates;
+    double& face_filter_time = state.face_filter_time;
+    double& face_dof_time = state.face_dof_time;
+    double& face_local_index_time = state.face_local_index_time;
+    double& face_alignment_time = state.face_alignment_time;
+    double& face_prepare_minus_time = state.face_prepare_minus_time;
+    double& face_prepare_plus_time = state.face_prepare_plus_time;
+    double& face_context_setter_time = state.face_context_setter_time;
+    double& face_cut_scale_time = state.face_cut_scale_time;
+    double& face_solution_time = state.face_solution_time;
+    double& face_field_time = state.face_field_time;
+    double& face_material_time = state.face_material_time;
+    double& face_kernel_time = state.face_kernel_time;
+    double& face_orientation_time = state.face_orientation_time;
+    double& face_insert_time = state.face_insert_time;
+    std::size_t& faces_considered = state.faces_considered;
+    std::size_t& faces_assembled = state.faces_assembled;
+    const bool face_timing = loop.face_timing;
+    auto face_now = [&]() -> double {
+        if (!face_timing) {
+            return 0.0;
+        }
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    std::span<const GlobalIndex> minus_row_dofs;
+    std::span<const GlobalIndex> plus_row_dofs;
+    std::span<const GlobalIndex> minus_col_dofs;
+    std::span<const GlobalIndex> plus_col_dofs;
+
     const auto should_process = [&](GlobalIndex cell_minus,
                                     GlobalIndex cell_plus,
                                     std::span<const GlobalIndex> minus_rows,
@@ -6737,422 +7453,384 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
         return *minus_is_canonical ? minus_owned : plus_owned;
     };
 
-    // Create second context for the "plus" side
-    AssemblyContext context_plus;
-    const auto max_row_dofs = row_dof_map_->getMaxDofsPerCell();
-    const auto max_col_dofs = col_dof_map_->getMaxDofsPerCell();
-    context_plus.reserve(std::max(max_row_dofs, max_col_dofs), 27, mesh.dimension());
-
-    // Kernel outputs for DG face terms
-    KernelOutput output_minus, output_plus, coupling_mp, coupling_pm;
-
-    // Scratch for DOFs
-    std::span<const GlobalIndex> minus_row_dofs;
-    std::span<const GlobalIndex> plus_row_dofs;
-    std::span<const GlobalIndex> minus_col_dofs;
-    std::span<const GlobalIndex> plus_col_dofs;
-    std::vector<Real> plus_solution_coeffs;
-    std::vector<std::vector<Real>> plus_prev_solution_coeffs;
-    std::vector<GlobalIndex> cell_nodes_minus;
-    std::vector<GlobalIndex> cell_nodes_plus;
-    std::vector<Real> cut_face_jit_constants;
-    const auto cut_stabilization_cell_scales =
-        buildCutStabilizationCellScales(mesh, cut_integration_context_);
-    face_setup_time = face_now() - face_start;
-
-    withDevirtualizedKernel(kernel, [&](auto& kernel_impl) {
-        mesh.forEachInteriorFace(
-            [&](GlobalIndex face_id, GlobalIndex cell_minus, GlobalIndex cell_plus) {
-            double stage_start = face_now();
-            ++faces_considered;
-            if (facet_set_handle != nullptr &&
-                !facet_set_handle->containsFacet(static_cast<MeshIndex>(face_id))) {
-                face_filter_time += face_now() - stage_start;
-                return;
+    // Solution gather of one face cell. On a worker the per-cell resolved
+    // tables of the owner replace the per-face resolution, which mutates
+    // backend caches; both read the same entries.
+    const auto gather_face_cell = [&](GlobalIndex cell,
+                                      std::span<const GlobalIndex> dofs,
+                                      const GlobalSystemView* view,
+                                      std::span<const Real> raw_values,
+                                      std::vector<Real>& out,
+                                      ResolvedVectorGatherCache* cache) {
+        if (table_owner_ != nullptr && view != nullptr) {
+            const auto resolved =
+                getResolvedCellVectorEntries(cell, col_dof_map_, col_dof_offset_, view);
+            if (resolved.empty()) {
+                requireSerial("interior-face solution gather without a resolved table");
+                FE_THROW(FEException,
+                         "StandardAssembler::assembleInteriorFaces: worker gather table missing");
             }
-            face_filter_time += face_now() - stage_start;
-            // Get DOFs for both cells (rows/cols may differ)
-            stage_start = face_now();
-            minus_row_dofs = getCellDofsCached(mesh, cell_minus, row_dof_map_, row_dof_offset_);
-            plus_row_dofs = getCellDofsCached(mesh, cell_plus, row_dof_map_, row_dof_offset_);
-            minus_col_dofs = getCellDofsCached(mesh, cell_minus, col_dof_map_, col_dof_offset_);
-            plus_col_dofs = getCellDofsCached(mesh, cell_plus, col_dof_map_, col_dof_offset_);
-            face_dof_time += face_now() - stage_start;
-
-            stage_start = face_now();
-            if (!should_process(cell_minus,
-                                cell_plus,
-                                minus_row_dofs,
-                                plus_row_dofs,
-                                minus_col_dofs,
-                                plus_col_dofs)) {
-                face_filter_time += face_now() - stage_start;
-                return;
-            }
-            face_filter_time += face_now() - stage_start;
-
-            // Prepare contexts for both sides
-            stage_start = face_now();
-            LocalIndex local_face_minus = mesh.getLocalFaceIndex(face_id, cell_minus);
-            LocalIndex local_face_plus = mesh.getLocalFaceIndex(face_id, cell_plus);
-            face_local_index_time += face_now() - stage_start;
-
-            stage_start = face_now();
-            prepareContextFace(context_, mesh, face_id, cell_minus, local_face_minus, test_space, trial_space,
-                               required_data, ContextType::InteriorFace);
-            face_prepare_minus_time += face_now() - stage_start;
-
-            stage_start = face_now();
-            context_.setMaterialState(nullptr, nullptr, 0u, 0u);
-            context_.setTimeIntegrationContext(time_integration_);
-            context_.setTime(time_);
-            context_.setTimeStep(dt_);
-            context_.setRealParameterGetter(get_real_param_);
-            context_.setParameterGetter(get_param_);
-            context_.setUserData(user_data_);
-            context_.setJITConstants(jit_constants_);
-            context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
-            context_.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
-            context_.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
-            context_.setInteriorFaceDomain(
-                interior_facet_marker, interior_facet_side);
-            context_.clearAllPreviousSolutionData();
-            face_context_setter_time += face_now() - stage_start;
-
-            stage_start = face_now();
-            std::array<LocalIndex, 4> align_plus_storage{};
-            std::span<const LocalIndex> align_plus{};
-            const ElementType cell_type_minus = mesh.getCellType(cell_minus);
-            const ElementType cell_type_plus = mesh.getCellType(cell_plus);
-            if (cell_type_minus == cell_type_plus) {
-                const elements::ReferenceElement& ref = elements::ReferenceElement::shared(cell_type_minus);
-                const auto& face_nodes_minus = ref.face_nodes(static_cast<std::size_t>(local_face_minus));
-                const auto& face_nodes_plus = ref.face_nodes(static_cast<std::size_t>(local_face_plus));
-                if (face_nodes_minus.size() == face_nodes_plus.size() &&
-                    (face_nodes_minus.size() == 2 || face_nodes_minus.size() == 3)) {
-                    mesh.getCellNodes(cell_minus, cell_nodes_minus);
-                    mesh.getCellNodes(cell_plus, cell_nodes_plus);
-
-                    for (std::size_t j = 0; j < face_nodes_plus.size(); ++j) {
-                        const GlobalIndex global_plus = cell_nodes_plus.at(static_cast<std::size_t>(face_nodes_plus[j]));
-                        std::size_t i_match = face_nodes_minus.size();
-                        for (std::size_t i = 0; i < face_nodes_minus.size(); ++i) {
-                            const GlobalIndex global_minus = cell_nodes_minus.at(static_cast<std::size_t>(face_nodes_minus[i]));
-                            if (global_minus == global_plus) {
-                                i_match = i;
-                                break;
-                            }
-                        }
-                        align_plus_storage[j] = static_cast<LocalIndex>(i_match);
-                    }
-
-                    bool ok = true;
-                    for (std::size_t j = 0; j < face_nodes_plus.size(); ++j) {
-                        if (static_cast<std::size_t>(align_plus_storage[j]) >= face_nodes_minus.size()) {
-                            ok = false;
-                            break;
-                        }
-                    }
-
-                    if (ok) {
-                        align_plus = std::span<const LocalIndex>(
-                            align_plus_storage.data(),
-                            face_nodes_plus.size());
-                    }
-                }
-            }
-            face_alignment_time += face_now() - stage_start;
-
-            stage_start = face_now();
-            prepareContextFace(context_plus, mesh, face_id, cell_plus, local_face_plus, test_space, trial_space,
-                               required_data, ContextType::InteriorFace, align_plus);
-            face_prepare_plus_time += face_now() - stage_start;
-
-            stage_start = face_now();
-            context_plus.setMaterialState(nullptr, nullptr, 0u, 0u);
-            context_plus.setTimeIntegrationContext(time_integration_);
-            context_plus.setTime(time_);
-            context_plus.setTimeStep(dt_);
-            context_plus.setRealParameterGetter(get_real_param_);
-            context_plus.setParameterGetter(get_param_);
-            context_plus.setUserData(user_data_);
-            context_plus.setJITConstants(jit_constants_);
-            context_plus.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
-            context_plus.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
-            context_plus.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
-            context_plus.setInteriorFaceDomain(
-                interior_facet_marker, interior_facet_side);
-            context_plus.clearAllPreviousSolutionData();
-            face_context_setter_time += face_now() - stage_start;
-
-            if (cut_integration_context_ != nullptr) {
-                stage_start = face_now();
-                const auto cut_constants = cutStabilizationConstantsForInteriorFace(
-                    cut_stabilization_cell_scales,
-                    facet_set_handle,
-                    face_id,
-                    cell_minus,
-                    cell_plus);
-                bindCutStabilizationScaleConstants(
-                    context_, jit_constants_, cut_constants, cut_face_jit_constants);
-                context_plus.setJITConstants(cut_face_jit_constants);
-                face_cut_scale_time += face_now() - stage_start;
-            }
-
-            if (need_solution) {
-                stage_start = face_now();
-                FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
-                            "StandardAssembler::assembleInteriorFaces: kernel requires solution but no solution was set");
-                ResolvedVectorGatherCache minus_resolved_cache;
-                ResolvedVectorGatherCache plus_resolved_cache;
-
-                local_solution_coeffs_.resize(minus_col_dofs.size());
-                gatherVectorCoefficients(minus_col_dofs, current_solution_view_, current_solution_,
-                                         local_solution_coeffs_, &minus_resolved_cache,
-                                         "StandardAssembler::assembleInteriorFaces", true);
-                if (context_.trialUsesVectorBasis()) {
-                    applyVectorBasisGlobalToLocal(mesh, cell_minus, trial_space,
-                                                  std::span<Real>(local_solution_coeffs_));
-                }
-                context_.setSolutionCoefficients(local_solution_coeffs_);
-
-                plus_solution_coeffs.resize(plus_col_dofs.size());
-                gatherVectorCoefficients(plus_col_dofs, current_solution_view_, current_solution_,
-                                         plus_solution_coeffs, &plus_resolved_cache,
-                                         "StandardAssembler::assembleInteriorFaces", true);
-                if (context_plus.trialUsesVectorBasis()) {
-                    applyVectorBasisGlobalToLocal(mesh, cell_plus, trial_space,
-                                                  std::span<Real>(plus_solution_coeffs));
-                }
-                context_plus.setSolutionCoefficients(plus_solution_coeffs);
-
-                if (time_integration_ != nullptr) {
-                    const int required = requiredHistoryStates(time_integration_);
-                    if (required > 0) {
-                        FE_THROW_IF(previous_solutions_.size() < static_cast<std::size_t>(required), FEException,
-                                    "StandardAssembler::assembleInteriorFaces: time integration requires " +
-                                        std::to_string(required) + " history states, but only " +
-                                        std::to_string(previous_solutions_.size()) + " were provided");
-                        if (local_prev_solution_coeffs_.size() < static_cast<std::size_t>(required)) {
-                            local_prev_solution_coeffs_.resize(static_cast<std::size_t>(required));
-                        }
-                        if (plus_prev_solution_coeffs.size() < static_cast<std::size_t>(required)) {
-                            plus_prev_solution_coeffs.resize(static_cast<std::size_t>(required));
-                        }
-
-                        for (int k = 1; k <= required; ++k) {
-                            const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
-                            const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
-                                                        ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
-                                                        : nullptr;
-                            FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
-                                        "StandardAssembler::assembleInteriorFaces: previous solution (k=" +
-                                            std::to_string(k) + ") not set");
-
-                            auto& local_prev_minus = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
-                            gatherVectorCoefficients(minus_col_dofs, prev_view, prev,
-                                                     local_prev_minus, &minus_resolved_cache,
-                                                     "StandardAssembler::assembleInteriorFaces", true);
-                            if (context_.trialUsesVectorBasis()) {
-                                applyVectorBasisGlobalToLocal(mesh, cell_minus, trial_space,
-                                                              std::span<Real>(local_prev_minus));
-                            }
-                            context_.setPreviousSolutionCoefficientsK(k, local_prev_minus);
-
-                            auto& local_prev_plus = plus_prev_solution_coeffs[static_cast<std::size_t>(k - 1)];
-                            gatherVectorCoefficients(plus_col_dofs, prev_view, prev,
-                                                     local_prev_plus, &plus_resolved_cache,
-                                                     "StandardAssembler::assembleInteriorFaces", true);
-                            if (context_plus.trialUsesVectorBasis()) {
-                                applyVectorBasisGlobalToLocal(mesh, cell_plus, trial_space,
-                                                              std::span<Real>(local_prev_plus));
-                            }
-                            context_plus.setPreviousSolutionCoefficientsK(k, local_prev_plus);
-                        }
-                    }
-                }
-                face_solution_time += face_now() - stage_start;
-            }
-
-            stage_start = face_now();
-            if (need_field_solutions) {
-                populateFieldSolutionData(context_, mesh, cell_minus, field_requirements);
-                populateFieldSolutionData(context_plus, mesh, cell_plus, field_requirements);
-            }
-            populateMovingDomainFieldData(context_, required_data,
-                                          "StandardAssembler::assembleInteriorFaces");
-            populateMovingDomainFieldData(context_plus, required_data,
-                                          "StandardAssembler::assembleInteriorFaces");
-            face_field_time += face_now() - stage_start;
-
-            if (need_material_state) {
-                stage_start = face_now();
-                FE_THROW_IF(context_plus.numQuadraturePoints() != context_.numQuadraturePoints(), FEException,
-                            "StandardAssembler::assembleInteriorFaces: mismatched quadrature point counts for interior face state binding");
-
-                auto view = material_state_provider_->getInteriorFaceState(kernel, face_id, context_.numQuadraturePoints());
-                FE_THROW_IF(!view, FEException,
-                            "StandardAssembler::assembleInteriorFaces: material state provider returned null storage");
-                FE_THROW_IF(view.bytes_per_qpt != material_state_spec.bytes_per_qpt, FEException,
-                            "StandardAssembler::assembleInteriorFaces: material state bytes_per_qpt mismatch");
-                FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
-                            "StandardAssembler::assembleInteriorFaces: invalid material state stride");
-
-                context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt,
-                                          view.stride_bytes, view.alignment, view.variables,
-                                          view.old_lifecycle, view.work_lifecycle);
-                context_plus.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt,
-                                              view.stride_bytes, view.alignment, view.variables,
-                                              view.old_lifecycle, view.work_lifecycle);
-                face_material_time += face_now() - stage_start;
-            }
-
-            // Compute DG face contributions.
-            stage_start = face_now();
-            prepareKernelOutputRequest(output_minus,
-                                       context_.numTestDofs(),
-                                       context_.numTrialDofs(),
-                                       insert_matrix_view != nullptr,
-                                       insert_vector_view != nullptr);
-            prepareKernelOutputRequest(output_plus,
-                                       context_plus.numTestDofs(),
-                                       context_plus.numTrialDofs(),
-                                       insert_matrix_view != nullptr,
-                                       insert_vector_view != nullptr);
-            prepareKernelOutputRequest(coupling_mp,
-                                       context_.numTestDofs(),
-                                       context_plus.numTrialDofs(),
-                                       insert_matrix_view != nullptr,
-                                       false);
-            prepareKernelOutputRequest(coupling_pm,
-                                       context_plus.numTestDofs(),
-                                       context_.numTrialDofs(),
-                                       insert_matrix_view != nullptr,
-                                       false);
-
-            kernel_impl.computeInteriorFace(context_, context_plus,
-                                            output_minus, output_plus,
-                                            coupling_mp, coupling_pm);
-            face_kernel_time += face_now() - stage_start;
-
-            stage_start = face_now();
-            if (output_minus.has_matrix || output_minus.has_vector) {
-                applyVectorBasisOutputOrientation(mesh, cell_minus, test_space, cell_minus, trial_space, output_minus);
-            }
-            if (output_plus.has_matrix || output_plus.has_vector) {
-                applyVectorBasisOutputOrientation(mesh, cell_plus, test_space, cell_plus, trial_space, output_plus);
-            }
-            if (coupling_mp.has_matrix) {
-                applyVectorBasisOutputOrientation(mesh, cell_minus, test_space, cell_plus, trial_space, coupling_mp);
-            }
-            if (coupling_pm.has_matrix) {
-                applyVectorBasisOutputOrientation(mesh, cell_plus, test_space, cell_minus, trial_space, coupling_pm);
-            }
-            face_orientation_time += face_now() - stage_start;
-
-            // Insert contributions (4 blocks for DG). Face terms must condense
-            // affine constraints like cell terms do: raw insertion at
-            // constrained rows/columns leaves the assembled Jacobian
-            // inconsistent with the (condensed) residual for master-bearing
-            // constraints. Plain Dirichlet lines masked this because the
-            // linear solver eliminates their rows and their increments are
-            // zero.
-            stage_start = face_now();
-            const bool face_constrained =
-                options_.use_constraints && constraint_distributor_ && constraints_ &&
-                (constraints_->hasConstrainedDofs(minus_row_dofs) ||
-                 constraints_->hasConstrainedDofs(plus_row_dofs) ||
-                 constraints_->hasConstrainedDofs(minus_col_dofs) ||
-                 constraints_->hasConstrainedDofs(plus_col_dofs));
-
-            // Self-coupling: minus-minus
-            if (output_minus.has_matrix || output_minus.has_vector) {
-                if (face_constrained) {
-                    insertLocalConstrained(output_minus, minus_row_dofs, minus_col_dofs,
-                                           insert_matrix_view, insert_vector_view);
-                } else {
-                    insertLocal(output_minus, minus_row_dofs, minus_col_dofs, insert_matrix_view, insert_vector_view);
-                }
-            }
-
-            // Self-coupling: plus-plus
-            if (output_plus.has_matrix || output_plus.has_vector) {
-                if (face_constrained) {
-                    insertLocalConstrained(output_plus, plus_row_dofs, plus_col_dofs,
-                                           insert_matrix_view, insert_vector_view);
-                } else {
-                    insertLocal(output_plus, plus_row_dofs, plus_col_dofs, insert_matrix_view, insert_vector_view);
-                }
-            }
-
-            // Cross-coupling: minus-plus (minus rows, plus cols)
-            if (coupling_mp.has_matrix) {
-                if (face_constrained) {
-                    insertLocalConstrained(coupling_mp, minus_row_dofs, plus_col_dofs,
-                                           insert_matrix_view, nullptr);
-                } else {
-                    insert_matrix_view->addMatrixEntries(minus_row_dofs, plus_col_dofs,
-                                                         coupling_mp.local_matrix);
-                }
-            }
-
-            // Cross-coupling: plus-minus (plus rows, minus cols)
-            if (coupling_pm.has_matrix) {
-                if (face_constrained) {
-                    insertLocalConstrained(coupling_pm, plus_row_dofs, minus_col_dofs,
-                                           insert_matrix_view, nullptr);
-                } else {
-                    insert_matrix_view->addMatrixEntries(plus_row_dofs, minus_col_dofs,
-                                                         coupling_pm.local_matrix);
-                }
-            }
-            face_insert_time += face_now() - stage_start;
-
-            result.interior_faces_assembled++;
-            ++faces_assembled;
-        });
-    });
-
-    auto end_time = std::chrono::steady_clock::now();
-    result.elapsed_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
-    if (face_timing) {
-        int rank = 0;
-#if FE_HAS_MPI
-        int mpi_initialized = 0;
-        MPI_Initialized(&mpi_initialized);
-        if (mpi_initialized) {
-            MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+            gatherVectorCoefficients(dofs, view, raw_values, out, nullptr,
+                                     "StandardAssembler::assembleInteriorFaces", true, resolved);
+            return;
         }
-#endif
-        std::fprintf(stderr,
-            "[INTERIOR_FACE_TIMING] rank=%d matrix=1 vector=%d faces_considered=%zu "
-            "faces_assembled=%zu total=%9.6f setup=%9.6f filter=%9.6f dofs=%9.6f "
-            "local_face=%9.6f align=%9.6f prepare_minus=%9.6f prepare_plus=%9.6f "
-            "ctx=%9.6f cut_scale=%9.6f solution=%9.6f field=%9.6f material=%9.6f "
-            "kernel=%9.6f orient=%9.6f insert=%9.6f\n",
-            rank,
-            vector_view != nullptr ? 1 : 0,
-            faces_considered,
-            faces_assembled,
-            result.elapsed_time_seconds,
-            face_setup_time,
-            face_filter_time,
-            face_dof_time,
-            face_local_index_time,
-            face_alignment_time,
-            face_prepare_minus_time,
-            face_prepare_plus_time,
-            face_context_setter_time,
-            face_cut_scale_time,
-            face_solution_time,
-            face_field_time,
-            face_material_time,
-            face_kernel_time,
-            face_orientation_time,
-            face_insert_time);
+        gatherVectorCoefficients(dofs, view, raw_values, out, cache,
+                                 "StandardAssembler::assembleInteriorFaces", true);
+    };
+
+    const auto& face_item = loop.faces[item];
+    const GlobalIndex face_id = face_item.face_id;
+    const GlobalIndex cell_minus = face_item.cell_minus;
+    const GlobalIndex cell_plus = face_item.cell_plus;
+    double stage_start = face_now();
+    ++faces_considered;
+    if (facet_set_handle != nullptr &&
+        !facet_set_handle->containsFacet(static_cast<MeshIndex>(face_id))) {
+        face_filter_time += face_now() - stage_start;
+        return;
+    }
+    face_filter_time += face_now() - stage_start;
+    // Get DOFs for both cells (rows/cols may differ)
+    stage_start = face_now();
+    minus_row_dofs = getCellDofsCached(mesh, cell_minus, row_dof_map_, row_dof_offset_);
+    plus_row_dofs = getCellDofsCached(mesh, cell_plus, row_dof_map_, row_dof_offset_);
+    minus_col_dofs = getCellDofsCached(mesh, cell_minus, col_dof_map_, col_dof_offset_);
+    plus_col_dofs = getCellDofsCached(mesh, cell_plus, col_dof_map_, col_dof_offset_);
+    face_dof_time += face_now() - stage_start;
+
+    stage_start = face_now();
+    if (!should_process(cell_minus,
+                        cell_plus,
+                        minus_row_dofs,
+                        plus_row_dofs,
+                        minus_col_dofs,
+                        plus_col_dofs)) {
+        face_filter_time += face_now() - stage_start;
+        return;
+    }
+    face_filter_time += face_now() - stage_start;
+
+    // Prepare contexts for both sides
+    stage_start = face_now();
+    // Threaded calls precompute the local face indices serially: the
+    // mesh may build its cell-to-face map lazily on first use.
+    LocalIndex local_face_minus = face_item.local_faces_known
+                                      ? face_item.local_face_minus
+                                      : mesh.getLocalFaceIndex(face_id, cell_minus);
+    LocalIndex local_face_plus = face_item.local_faces_known
+                                     ? face_item.local_face_plus
+                                     : mesh.getLocalFaceIndex(face_id, cell_plus);
+    face_local_index_time += face_now() - stage_start;
+
+    stage_start = face_now();
+    prepareContextFace(context_, mesh, face_id, cell_minus, local_face_minus, test_space, trial_space,
+                       required_data, ContextType::InteriorFace);
+    face_prepare_minus_time += face_now() - stage_start;
+
+    stage_start = face_now();
+    context_.setMaterialState(nullptr, nullptr, 0u, 0u);
+    context_.setTimeIntegrationContext(time_integration_);
+    context_.setTime(time_);
+    context_.setTimeStep(dt_);
+    context_.setRealParameterGetter(get_real_param_);
+    context_.setParameterGetter(get_param_);
+    context_.setUserData(user_data_);
+    context_.setJITConstants(jit_constants_);
+    context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+    context_.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
+    context_.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
+    context_.setInteriorFaceDomain(
+        interior_facet_marker, interior_facet_side);
+    context_.clearAllPreviousSolutionData();
+    face_context_setter_time += face_now() - stage_start;
+
+    stage_start = face_now();
+    std::array<LocalIndex, 4> align_plus_storage{};
+    std::span<const LocalIndex> align_plus{};
+    const ElementType cell_type_minus = mesh.getCellType(cell_minus);
+    const ElementType cell_type_plus = mesh.getCellType(cell_plus);
+    if (cell_type_minus == cell_type_plus) {
+        const elements::ReferenceElement& ref = elements::ReferenceElement::shared(cell_type_minus);
+        const auto& face_nodes_minus = ref.face_nodes(static_cast<std::size_t>(local_face_minus));
+        const auto& face_nodes_plus = ref.face_nodes(static_cast<std::size_t>(local_face_plus));
+        if (face_nodes_minus.size() == face_nodes_plus.size() &&
+            (face_nodes_minus.size() == 2 || face_nodes_minus.size() == 3)) {
+            mesh.getCellNodes(cell_minus, cell_nodes_minus);
+            mesh.getCellNodes(cell_plus, cell_nodes_plus);
+
+            for (std::size_t j = 0; j < face_nodes_plus.size(); ++j) {
+                const GlobalIndex global_plus = cell_nodes_plus.at(static_cast<std::size_t>(face_nodes_plus[j]));
+                std::size_t i_match = face_nodes_minus.size();
+                for (std::size_t i = 0; i < face_nodes_minus.size(); ++i) {
+                    const GlobalIndex global_minus = cell_nodes_minus.at(static_cast<std::size_t>(face_nodes_minus[i]));
+                    if (global_minus == global_plus) {
+                        i_match = i;
+                        break;
+                    }
+                }
+                align_plus_storage[j] = static_cast<LocalIndex>(i_match);
+            }
+
+            bool ok = true;
+            for (std::size_t j = 0; j < face_nodes_plus.size(); ++j) {
+                if (static_cast<std::size_t>(align_plus_storage[j]) >= face_nodes_minus.size()) {
+                    ok = false;
+                    break;
+                }
+            }
+
+            if (ok) {
+                align_plus = std::span<const LocalIndex>(
+                    align_plus_storage.data(),
+                    face_nodes_plus.size());
+            }
+        }
+    }
+    face_alignment_time += face_now() - stage_start;
+
+    stage_start = face_now();
+    prepareContextFace(context_plus, mesh, face_id, cell_plus, local_face_plus, test_space, trial_space,
+                       required_data, ContextType::InteriorFace, align_plus);
+    face_prepare_plus_time += face_now() - stage_start;
+
+    stage_start = face_now();
+    context_plus.setMaterialState(nullptr, nullptr, 0u, 0u);
+    context_plus.setTimeIntegrationContext(time_integration_);
+    context_plus.setTime(time_);
+    context_plus.setTimeStep(dt_);
+    context_plus.setRealParameterGetter(get_real_param_);
+    context_plus.setParameterGetter(get_param_);
+    context_plus.setUserData(user_data_);
+    context_plus.setJITConstants(jit_constants_);
+    context_plus.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+    context_plus.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
+    context_plus.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
+    context_plus.setInteriorFaceDomain(
+        interior_facet_marker, interior_facet_side);
+    context_plus.clearAllPreviousSolutionData();
+    face_context_setter_time += face_now() - stage_start;
+
+    if (cut_integration_context_ != nullptr) {
+        stage_start = face_now();
+        const auto cut_constants = cutStabilizationConstantsForInteriorFace(
+            cut_stabilization_cell_scales,
+            facet_set_handle,
+            face_id,
+            cell_minus,
+            cell_plus);
+        bindCutStabilizationScaleConstants(
+            context_, jit_constants_, cut_constants, cut_face_jit_constants);
+        context_plus.setJITConstants(cut_face_jit_constants);
+        face_cut_scale_time += face_now() - stage_start;
     }
 
-    return result;
+    if (need_solution) {
+        stage_start = face_now();
+        FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+                    "StandardAssembler::assembleInteriorFaces: kernel requires solution but no solution was set");
+        ResolvedVectorGatherCache minus_resolved_cache;
+        ResolvedVectorGatherCache plus_resolved_cache;
+
+        local_solution_coeffs_.resize(minus_col_dofs.size());
+        gather_face_cell(cell_minus, minus_col_dofs, current_solution_view_, current_solution_,
+                         local_solution_coeffs_, &minus_resolved_cache);
+        if (context_.trialUsesVectorBasis()) {
+            applyVectorBasisGlobalToLocal(mesh, cell_minus, trial_space,
+                                          std::span<Real>(local_solution_coeffs_));
+        }
+        context_.setSolutionCoefficients(local_solution_coeffs_);
+
+        plus_solution_coeffs.resize(plus_col_dofs.size());
+        gather_face_cell(cell_plus, plus_col_dofs, current_solution_view_, current_solution_,
+                         plus_solution_coeffs, &plus_resolved_cache);
+        if (context_plus.trialUsesVectorBasis()) {
+            applyVectorBasisGlobalToLocal(mesh, cell_plus, trial_space,
+                                          std::span<Real>(plus_solution_coeffs));
+        }
+        context_plus.setSolutionCoefficients(plus_solution_coeffs);
+
+        if (time_integration_ != nullptr) {
+            const int required = requiredHistoryStates(time_integration_);
+            if (required > 0) {
+                FE_THROW_IF(previous_solutions_.size() < static_cast<std::size_t>(required), FEException,
+                            "StandardAssembler::assembleInteriorFaces: time integration requires " +
+                                std::to_string(required) + " history states, but only " +
+                                std::to_string(previous_solutions_.size()) + " were provided");
+                if (local_prev_solution_coeffs_.size() < static_cast<std::size_t>(required)) {
+                    local_prev_solution_coeffs_.resize(static_cast<std::size_t>(required));
+                }
+                if (plus_prev_solution_coeffs.size() < static_cast<std::size_t>(required)) {
+                    plus_prev_solution_coeffs.resize(static_cast<std::size_t>(required));
+                }
+
+                for (int k = 1; k <= required; ++k) {
+                    const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+                    const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+                                                ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+                                                : nullptr;
+                    FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+                                "StandardAssembler::assembleInteriorFaces: previous solution (k=" +
+                                    std::to_string(k) + ") not set");
+
+                    auto& local_prev_minus = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+                    gather_face_cell(cell_minus, minus_col_dofs, prev_view, prev,
+                                     local_prev_minus, &minus_resolved_cache);
+                    if (context_.trialUsesVectorBasis()) {
+                        applyVectorBasisGlobalToLocal(mesh, cell_minus, trial_space,
+                                                      std::span<Real>(local_prev_minus));
+                    }
+                    context_.setPreviousSolutionCoefficientsK(k, local_prev_minus);
+
+                    auto& local_prev_plus = plus_prev_solution_coeffs[static_cast<std::size_t>(k - 1)];
+                    gather_face_cell(cell_plus, plus_col_dofs, prev_view, prev,
+                                     local_prev_plus, &plus_resolved_cache);
+                    if (context_plus.trialUsesVectorBasis()) {
+                        applyVectorBasisGlobalToLocal(mesh, cell_plus, trial_space,
+                                                      std::span<Real>(local_prev_plus));
+                    }
+                    context_plus.setPreviousSolutionCoefficientsK(k, local_prev_plus);
+                }
+            }
+        }
+        face_solution_time += face_now() - stage_start;
+    }
+
+    stage_start = face_now();
+    if (need_field_solutions) {
+        populateFieldSolutionData(context_, mesh, cell_minus, field_requirements);
+        populateFieldSolutionData(context_plus, mesh, cell_plus, field_requirements);
+    }
+    populateMovingDomainFieldData(context_, required_data,
+                                  "StandardAssembler::assembleInteriorFaces");
+    populateMovingDomainFieldData(context_plus, required_data,
+                                  "StandardAssembler::assembleInteriorFaces");
+    face_field_time += face_now() - stage_start;
+
+    if (need_material_state) {
+        stage_start = face_now();
+        FE_THROW_IF(context_plus.numQuadraturePoints() != context_.numQuadraturePoints(), FEException,
+                    "StandardAssembler::assembleInteriorFaces: mismatched quadrature point counts for interior face state binding");
+
+        auto view = material_state_provider_->getInteriorFaceState(kernel, face_id, context_.numQuadraturePoints());
+        FE_THROW_IF(!view, FEException,
+                    "StandardAssembler::assembleInteriorFaces: material state provider returned null storage");
+        FE_THROW_IF(view.bytes_per_qpt != material_state_spec.bytes_per_qpt, FEException,
+                    "StandardAssembler::assembleInteriorFaces: material state bytes_per_qpt mismatch");
+        FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
+                    "StandardAssembler::assembleInteriorFaces: invalid material state stride");
+
+        context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt,
+                                  view.stride_bytes, view.alignment, view.variables,
+                                  view.old_lifecycle, view.work_lifecycle);
+        context_plus.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt,
+                                      view.stride_bytes, view.alignment, view.variables,
+                                      view.old_lifecycle, view.work_lifecycle);
+        face_material_time += face_now() - stage_start;
+    }
+
+    // Compute DG face contributions.
+    stage_start = face_now();
+    prepareKernelOutputRequest(output_minus,
+                               context_.numTestDofs(),
+                               context_.numTrialDofs(),
+                               insert_matrix_view != nullptr,
+                               insert_vector_view != nullptr);
+    prepareKernelOutputRequest(output_plus,
+                               context_plus.numTestDofs(),
+                               context_plus.numTrialDofs(),
+                               insert_matrix_view != nullptr,
+                               insert_vector_view != nullptr);
+    prepareKernelOutputRequest(coupling_mp,
+                               context_.numTestDofs(),
+                               context_plus.numTrialDofs(),
+                               insert_matrix_view != nullptr,
+                               false);
+    prepareKernelOutputRequest(coupling_pm,
+                               context_plus.numTestDofs(),
+                               context_.numTrialDofs(),
+                               insert_matrix_view != nullptr,
+                               false);
+
+    loop.kernel.computeInteriorFace(context_, context_plus,
+                                    output_minus, output_plus,
+                                    coupling_mp, coupling_pm);
+    face_kernel_time += face_now() - stage_start;
+
+    stage_start = face_now();
+    if (output_minus.has_matrix || output_minus.has_vector) {
+        applyVectorBasisOutputOrientation(mesh, cell_minus, test_space, cell_minus, trial_space, output_minus);
+    }
+    if (output_plus.has_matrix || output_plus.has_vector) {
+        applyVectorBasisOutputOrientation(mesh, cell_plus, test_space, cell_plus, trial_space, output_plus);
+    }
+    if (coupling_mp.has_matrix) {
+        applyVectorBasisOutputOrientation(mesh, cell_minus, test_space, cell_plus, trial_space, coupling_mp);
+    }
+    if (coupling_pm.has_matrix) {
+        applyVectorBasisOutputOrientation(mesh, cell_plus, test_space, cell_minus, trial_space, coupling_pm);
+    }
+    face_orientation_time += face_now() - stage_start;
+
+    // Insert contributions (4 blocks for DG). Face terms must condense
+    // affine constraints like cell terms do: raw insertion at
+    // constrained rows/columns leaves the assembled Jacobian
+    // inconsistent with the (condensed) residual for master-bearing
+    // constraints. Plain Dirichlet lines masked this because the
+    // linear solver eliminates their rows and their increments are
+    // zero.
+    stage_start = face_now();
+    const bool face_constrained =
+        options_.use_constraints && hasConstraintDistributorForInsert() && constraints_ &&
+        (constraints_->hasConstrainedDofs(minus_row_dofs) ||
+         constraints_->hasConstrainedDofs(plus_row_dofs) ||
+         constraints_->hasConstrainedDofs(minus_col_dofs) ||
+         constraints_->hasConstrainedDofs(plus_col_dofs));
+
+    // Self-coupling: minus-minus
+    if (output_minus.has_matrix || output_minus.has_vector) {
+        if (face_constrained) {
+            sink.constrained(output_minus, minus_row_dofs, minus_col_dofs,
+                             insert_matrix_view, insert_vector_view);
+        } else {
+            sink.local(output_minus, minus_row_dofs, minus_col_dofs, insert_matrix_view, insert_vector_view);
+        }
+    }
+
+    // Self-coupling: plus-plus
+    if (output_plus.has_matrix || output_plus.has_vector) {
+        if (face_constrained) {
+            sink.constrained(output_plus, plus_row_dofs, plus_col_dofs,
+                             insert_matrix_view, insert_vector_view);
+        } else {
+            sink.local(output_plus, plus_row_dofs, plus_col_dofs, insert_matrix_view, insert_vector_view);
+        }
+    }
+
+    // Cross-coupling: minus-plus (minus rows, plus cols)
+    if (coupling_mp.has_matrix) {
+        if (face_constrained) {
+            sink.constrained(coupling_mp, minus_row_dofs, plus_col_dofs,
+                             insert_matrix_view, nullptr);
+        } else {
+            sink.matrixEntries(insert_matrix_view, minus_row_dofs, plus_col_dofs,
+                               coupling_mp);
+        }
+    }
+
+    // Cross-coupling: plus-minus (plus rows, minus cols)
+    if (coupling_pm.has_matrix) {
+        if (face_constrained) {
+            sink.constrained(coupling_pm, plus_row_dofs, minus_col_dofs,
+                             insert_matrix_view, nullptr);
+        } else {
+            sink.matrixEntries(insert_matrix_view, plus_row_dofs, minus_col_dofs,
+                               coupling_pm);
+        }
+    }
+    face_insert_time += face_now() - stage_start;
+
+    result.interior_faces_assembled++;
+    ++faces_assembled;
 }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -10549,7 +11227,14 @@ bool StandardAssembler::beginCutVolumeEpochCache(const IMeshAccess& mesh,
         key.mesh_cell_count = mesh.numCells();
         key.mesh_dimension = mesh.dimension();
     }
+    last_cut_volume_epoch_key_ = key;
     return cut_volume_epoch_cache_.begin(key, max_bytes);
+}
+
+bool StandardAssembler::beginCutVolumeEpochCacheWithKey(const detail::CutVolumeEpochKey& key)
+{
+    cut_volume_epoch_key_memo_.clear();
+    return cut_volume_epoch_cache_.begin(key, cutVolumeEpochCacheMaxBytes());
 }
 
 detail::CutVolumeEpochRuleEntry* StandardAssembler::cutVolumeEpochRuleEntry(
@@ -11607,6 +12292,119 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
     return result;
 }
 
+// Shared, read-only state of one assembleCutVolumesFused call.
+struct StandardAssembler::CutVolumeFusedLoop {
+    struct TermData {
+        RequiredData required_data{RequiredData::None};
+        std::vector<FieldRequirement> field_requirements;
+        bool need_solution{false};
+        bool need_field_solutions{false};
+        bool need_material_state{false};
+        MaterialStateSpec material_state_spec{};
+    };
+    struct TermTarget {
+        GlobalSystemView* insert_matrix{nullptr};
+        GlobalSystemView* insert_vector{nullptr};
+    };
+
+    const IMeshAccess& mesh;
+    const CutIntegrationContext& cut_context;
+    int interface_marker;
+    geometry::CutIntegrationSide side;
+    std::span<const FusedCellTerm> terms;
+    const std::vector<TermData>& term_data;
+    const std::vector<TermTarget>& term_targets;
+    const std::vector<geometry::CutQuadratureRule>& rules;
+    std::span<const std::size_t> indexed_rule_indices;
+    bool use_indexed_rules;
+    const std::vector<CutCellAssemblyMetadata>& metadata;
+    std::size_t cut_basis_cache_max_entries;
+    std::uint64_t cut_context_basis_signature;
+    const FusedCellTerm& first_active_term;
+    bool owned_rows_only;
+    bool cut_timing;
+};
+
+// Per-thread mutable state of one assembleCutVolumesFused call.
+struct StandardAssembler::CutVolumeFusedThreadState {
+    struct TermScratch {
+        std::span<const GlobalIndex> row_dofs{};
+        std::span<const GlobalIndex> col_dofs{};
+        GlobalSystemView* insert_matrix{nullptr};
+        GlobalSystemView* insert_vector{nullptr};
+    };
+
+    std::vector<TermScratch> term_scratch{};
+    std::array<std::shared_ptr<const quadrature::QuadratureRule>, 256> full_cell_rule_cache{};
+    FullSideSnapshotRulePool full_side_snapshot_rules{};
+    std::vector<Real> cut_jit_constants{};
+    bool use_epoch_cache{false};
+
+    double cut_filter_time{0.0};
+    double cut_dof_time{0.0};
+    double cut_rule_time{0.0};
+    double cut_geometry_time{0.0};
+    double cut_basis_time{0.0};
+    double cut_frame_time{0.0};
+    double cut_context_time{0.0};
+    double cut_jit_time{0.0};
+    double cut_solution_time{0.0};
+    double cut_field_time{0.0};
+    double cut_material_time{0.0};
+    double cut_kernel_time{0.0};
+    double cut_orientation_time{0.0};
+    double cut_insert_time{0.0};
+    std::size_t cut_rules_considered{0u};
+    std::size_t cut_rules_assembled{0u};
+    std::size_t cut_full_rules{0u};
+    std::size_t cut_partial_rules{0u};
+    std::size_t cut_quadrature_points{0u};
+    std::size_t cut_basis_cacheable_rules{0u};
+
+    void reset(const CutVolumeFusedLoop& loop,
+               std::span<const Real> jit_constants,
+               bool epoch_cache)
+    {
+        term_scratch.assign(loop.terms.size(), TermScratch{});
+        for (std::size_t ti = 0; ti < loop.terms.size(); ++ti) {
+            term_scratch[ti].insert_matrix = loop.term_targets[ti].insert_matrix;
+            term_scratch[ti].insert_vector = loop.term_targets[ti].insert_vector;
+        }
+        constexpr forms::CutCellParameterSlots cut_parameter_slots{};
+        const auto cut_parameter_count =
+            static_cast<std::size_t>(forms::cutCellParameterCount(cut_parameter_slots));
+        cut_jit_constants.assign(jit_constants.begin(), jit_constants.end());
+        if (cut_jit_constants.size() < cut_parameter_count) {
+            cut_jit_constants.resize(cut_parameter_count, Real{0.0});
+        }
+        use_epoch_cache = epoch_cache;
+    }
+
+    void addTimingAndCounters(const CutVolumeFusedThreadState& o) noexcept
+    {
+        cut_filter_time += o.cut_filter_time;
+        cut_dof_time += o.cut_dof_time;
+        cut_rule_time += o.cut_rule_time;
+        cut_geometry_time += o.cut_geometry_time;
+        cut_basis_time += o.cut_basis_time;
+        cut_frame_time += o.cut_frame_time;
+        cut_context_time += o.cut_context_time;
+        cut_jit_time += o.cut_jit_time;
+        cut_solution_time += o.cut_solution_time;
+        cut_field_time += o.cut_field_time;
+        cut_material_time += o.cut_material_time;
+        cut_kernel_time += o.cut_kernel_time;
+        cut_orientation_time += o.cut_orientation_time;
+        cut_insert_time += o.cut_insert_time;
+        cut_rules_considered += o.cut_rules_considered;
+        cut_rules_assembled += o.cut_rules_assembled;
+        cut_full_rules += o.cut_full_rules;
+        cut_partial_rules += o.cut_partial_rules;
+        cut_quadrature_points += o.cut_quadrature_points;
+        cut_basis_cacheable_rules += o.cut_basis_cacheable_rules;
+    }
+};
+
 AssemblyResult StandardAssembler::assembleCutVolumesFused(
     const IMeshAccess& mesh,
     const CutIntegrationContext& cut_context,
@@ -11697,15 +12495,7 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
     }
     ensureCellConstrainedFlags(mesh);
 
-    struct TermData {
-        RequiredData required_data{RequiredData::None};
-        std::vector<FieldRequirement> field_requirements;
-        bool need_solution{false};
-        bool need_field_solutions{false};
-        bool need_material_state{false};
-        MaterialStateSpec material_state_spec{};
-    };
-
+    using TermData = CutVolumeFusedLoop::TermData;
     std::vector<TermData> term_data(terms.size());
     LocalIndex max_dofs = 0;
     bool any_has_cell = false;
@@ -11806,16 +12596,6 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
     const auto cut_geometry_cache_misses_before = cut_volume_geometry_cache_misses_;
     const auto cut_geometry_cache_insertions_before = cut_volume_geometry_cache_insertions_;
     const auto cut_geometry_cache_evictions_before = cut_volume_geometry_cache_evictions_;
-    std::array<std::shared_ptr<const quadrature::QuadratureRule>, 256> full_cell_rule_cache{};
-    FullSideSnapshotRulePool full_side_snapshot_rules;
-    std::vector<Real> cut_jit_constants;
-    constexpr forms::CutCellParameterSlots cut_parameter_slots{};
-    const auto cut_parameter_count =
-        static_cast<std::size_t>(forms::cutCellParameterCount(cut_parameter_slots));
-    cut_jit_constants.assign(jit_constants_.begin(), jit_constants_.end());
-    if (cut_jit_constants.size() < cut_parameter_count) {
-        cut_jit_constants.resize(cut_parameter_count, Real{0.0});
-    }
 
     const auto first_active_term_index = [&]() -> std::size_t {
         for (std::size_t ti = 0; ti < terms.size(); ++ti) {
@@ -11829,423 +12609,101 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
     const auto& first_active_term = terms[first_active_term_index];
 
     const auto iteration_count = use_indexed_rules ? indexed_rule_indices.size() : rules.size();
-    for (std::size_t ordinal = 0u; ordinal < iteration_count; ++ordinal) {
-        double stage_start = cut_now();
-        const auto rule_index = use_indexed_rules ? indexed_rule_indices[ordinal] : ordinal;
-        if (rule_index >= rules.size()) {
-            cut_filter_time += cut_now() - stage_start;
-            continue;
+
+    std::vector<CutVolumeFusedLoop::TermTarget> term_targets(terms.size());
+    for (std::size_t ti = 0; ti < terms.size(); ++ti) {
+        term_targets[ti].insert_matrix = term_scratch[ti].insert_matrix;
+        term_targets[ti].insert_vector = term_scratch[ti].insert_vector;
+    }
+    const CutVolumeFusedLoop loop{mesh,
+                                  cut_context,
+                                  interface_marker,
+                                  side,
+                                  terms,
+                                  term_data,
+                                  term_targets,
+                                  rules,
+                                  indexed_rule_indices,
+                                  use_indexed_rules,
+                                  metadata,
+                                  cut_basis_cache_max_entries,
+                                  cut_context_basis_signature,
+                                  first_active_term,
+                                  owned_rows_only,
+                                  cut_timing};
+
+    CutVolumeFusedThreadState serial_state;
+    serial_state.reset(loop, jit_constants_, use_epoch_cache);
+    std::vector<CutVolumeFusedThreadState> thread_states;
+
+    // Threaded compute with ordered insertion (FE/Docs/ThreadedAssembly.md).
+    // Per-item steps that are not safe to run concurrently, or that write
+    // ordered diagnostics, keep the loop serial.
+    const bool threading_supported = [&]() {
+        if (cut_basis_cache_max_entries > 0u || cutVolumeOrderedDiagnosticsEnabled()) {
+            return false;
         }
-        const auto& rule = rules[rule_index];
-        ++cut_rules_considered;
-        if (!use_indexed_rules &&
-            (rule.kind != geometry::CutQuadratureKind::Volume ||
-             rule.provenance.marker != interface_marker ||
-             rule.side != side)) {
-            cut_filter_time += cut_now() - stage_start;
-            continue;
-        }
-        cut_filter_time += cut_now() - stage_start;
-
-        FE_THROW_IF(rule.frame != geometry::CutGeometryFrame::Reference, FEException,
-                    "StandardAssembler::assembleCutVolumesFused: only reference-frame cut-volume rules are supported");
-        FE_THROW_IF(rule.points.empty(), FEException,
-                    "StandardAssembler::assembleCutVolumesFused: cut-volume rule has no quadrature points");
-
-        GlobalIndex cell_id = static_cast<GlobalIndex>(rule.provenance.parent_entity);
-        if (rule_index < metadata.size() && metadata[rule_index].parent_entity >= 0) {
-            cell_id = static_cast<GlobalIndex>(metadata[rule_index].parent_entity);
-        }
-        FE_THROW_IF(cell_id < 0 || cell_id >= mesh.numCells(), FEException,
-                    "StandardAssembler::assembleCutVolumesFused: cut-volume parent cell is out of range");
-        if (!owned_rows_only && !mesh.isOwnedCell(cell_id)) {
-            continue;
-        }
-
-        stage_start = cut_now();
-        const auto cell_type = mesh.getCellType(cell_id);
-        std::shared_ptr<const quadrature::QuadratureRule> full_cell_rule;
-        std::optional<CutVolumeQuadratureRule> cut_rule;
-        detail::CutVolumeEpochRuleEntry* epoch_entry = nullptr;
-        std::unique_ptr<const quadrature::QuadratureRule> uncached_epoch_rule;
-        const quadrature::QuadratureRule* active_rule = nullptr;
-        const CutVolumeGeometryCacheEntry* cut_volume_geometry_cache_entry = nullptr;
-        const bool active_rule_is_full_side =
-            isFullSideVolumeRule(rule) &&
-            rule.provenance.free_surface_snapshot_revision_key == 0u;
-        bool active_rule_is_partial_cut = false;
-        if (active_rule_is_full_side) {
-            const auto type_key = static_cast<std::size_t>(cell_type);
-            if (type_key < full_cell_rule_cache.size()) {
-                auto& cached_rule = full_cell_rule_cache[type_key];
-                if (!cached_rule) {
-                    cached_rule = resolveQuadratureRule(
-                        *first_active_term.test_space, cell_id, cell_type);
-                }
-                full_cell_rule = cached_rule;
-            } else {
-                full_cell_rule = resolveQuadratureRule(
-                    *first_active_term.test_space, cell_id, cell_type);
-            }
-            active_rule = full_cell_rule.get();
-            ++cut_full_rules;
-        } else {
-            if (use_epoch_cache) {
-                epoch_entry = cutVolumeEpochRuleEntry(rule, cell_id, cell_type, mesh.dimension(),
-                                                      uncached_epoch_rule);
-                active_rule = epoch_entry != nullptr ? epoch_entry->rule.get()
-                                                     : uncached_epoch_rule.get();
-            } else {
-                cut_rule.emplace(rule, to_mesh_family(cell_type), mesh.dimension());
-                active_rule = &*cut_rule;
-            }
-            active_rule_is_partial_cut = true;
-            cached_quad_rule_ptr_ = nullptr;
-            basis_scratch_valid_ = false;
-            if (cut_basis_cache_max_entries > 0u) {
-                cut_volume_geometry_cache_entry = findCutVolumeGeometryCacheEntry(
-                    cut_context,
-                    cut_context_basis_signature,
-                    rule_index,
-                    mesh);
-            }
-            ++cut_partial_rules;
-        }
-        if (active_rule_is_partial_cut && isFullSideVolumeRule(rule)) {
-            // Uncut cell of a free-surface snapshot: share the rule object so
-            // its basis tabulations are reused across cells.
-            active_rule = &full_side_snapshot_rules.intern(*active_rule);
-        }
-        FE_CHECK_NOT_NULL(active_rule, "StandardAssembler::assembleCutVolumesFused: active quadrature rule");
-        cut_quadrature_points += active_rule->num_points();
-        cut_rule_time += cut_now() - stage_start;
-
-        stage_start = cut_now();
-        if (cut_volume_geometry_cache_entry != nullptr) {
-            restoreCutVolumeGeometryCacheEntry(context_, *cut_volume_geometry_cache_entry);
-        } else {
-            prepareGeometry(context_, mesh, cell_id, *active_rule);
-            if (active_rule_is_partial_cut && cut_basis_cache_max_entries > 0u) {
-                storeCutVolumeGeometryCacheEntry(rule_index, mesh, cell_id, cell_type, context_);
-            }
-            if (epoch_entry != nullptr) {
-                validateCutVolumeEpochCellGeometry(*epoch_entry, mesh, cell_id);
-            }
-        }
-        // Rule the context geometry was last prepared with; the owner keeps a
-        // term-specific full-cell rule alive while it is that rule.
-        const quadrature::QuadratureRule* current_geometry_rule = active_rule;
-        std::shared_ptr<const quadrature::QuadratureRule> current_geometry_rule_owner;
-        cut_geometry_time += cut_now() - stage_start;
-
-        bool assembled_rule = false;
-        for (std::size_t ti = 0; ti < terms.size(); ++ti) {
-            const auto& t = terms[ti];
-            const auto& td = term_data[ti];
-            auto& ts = term_scratch[ti];
-            if (!t.kernel->hasCell() || (!t.assemble_matrix && !t.assemble_vector)) {
-                continue;
-            }
-
-            stage_start = cut_now();
-            ts.row_dofs = getCellDofsCached(mesh, cell_id, t.row_dof_map, t.row_dof_offset);
-            ts.col_dofs = getCellDofsCached(mesh, cell_id, t.col_dof_map, t.col_dof_offset);
-            cut_dof_time += cut_now() - stage_start;
-
-            const quadrature::QuadratureRule* term_rule = active_rule;
-            std::shared_ptr<const quadrature::QuadratureRule> term_full_cell_rule;
-            if (active_rule_is_full_side && t.test_space != first_active_term.test_space) {
-                term_full_cell_rule = resolveQuadratureRule(*t.test_space, cell_id, cell_type);
-                term_rule = term_full_cell_rule.get();
-            }
-            if (active_rule_is_full_side &&
-                !term_rule->same_cache_identity(*current_geometry_rule)) {
-                stage_start = cut_now();
-                prepareGeometry(context_, mesh, cell_id, *term_rule);
-                current_geometry_rule = term_rule;
-                current_geometry_rule_owner = term_full_cell_rule;
-                cut_geometry_time += cut_now() - stage_start;
-            }
-
-            const CutVolumeBasisCacheEntry* cut_volume_basis_cache_entry = nullptr;
-            if (active_rule_is_partial_cut && cut_basis_cache_max_entries > 0u) {
-                stage_start = cut_now();
-                cut_volume_basis_cache_entry = getOrCreateCutVolumeBasisCacheEntry(
-                    cut_context,
-                    cut_context_basis_signature,
-                    rule_index,
-                    *term_rule,
-                    mesh,
-                    cell_id,
-                    cell_type,
-                    *t.test_space,
-                    *t.trial_space,
-                    td.required_data);
-                if (cut_volume_basis_cache_entry != nullptr) {
-                    ++cut_basis_cacheable_rules;
-                }
-                cut_rule_time += cut_now() - stage_start;
-            }
-
-            stage_start = cut_now();
-            const auto* previous_cut_volume_basis_cache_entry =
-                active_cut_volume_basis_cache_entry_;
-            active_cut_volume_basis_cache_entry_ = cut_volume_basis_cache_entry;
-            try {
-                if (epoch_entry != nullptr) {
-                    prepareCutVolumeBasisFromEpochCache(context_, mesh, cell_id, cell_type,
-                                                        *t.test_space, *t.trial_space,
-                                                        td.required_data, *term_rule,
-                                                        *epoch_entry);
-                } else {
-                    prepareBasis(context_, mesh, cell_id, *t.test_space, *t.trial_space,
-                                 td.required_data, *term_rule);
-                }
-            } catch (...) {
-                active_cut_volume_basis_cache_entry_ =
-                    previous_cut_volume_basis_cache_entry;
-                throw;
-            }
-            active_cut_volume_basis_cache_entry_ =
-                previous_cut_volume_basis_cache_entry;
-            cut_basis_time += cut_now() - stage_start;
-
-            stage_start = cut_now();
-            prepareFrameExplicitGeometry(context_, mesh, cell_id, cell_type,
-                                         *term_rule, td.required_data);
-            cut_frame_time += cut_now() - stage_start;
-
-            stage_start = cut_now();
-            context_.setCutVolumeDomain(interface_marker, rule.side);
-            context_.setMaterialState(nullptr, nullptr, 0u, 0u);
-            context_.setTimeIntegrationContext(time_integration_);
-            context_.setTime(time_);
-            context_.setTimeStep(dt_);
-            context_.setRealParameterGetter(get_real_param_);
-            context_.setParameterGetter(get_param_);
-            context_.setUserData(user_data_);
-            context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
-            context_.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
-            context_.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
-            context_.clearAllPreviousSolutionData();
-            cut_context_time += cut_now() - stage_start;
-
-            stage_start = cut_now();
-            cut_jit_constants[cut_parameter_slots.volume_fraction] = rule.volume_fraction;
-            cut_jit_constants[cut_parameter_slots.side_indicator] =
-                forms::cutSideIndicatorValue(rule.side);
-            cut_jit_constants[cut_parameter_slots.embedded_normal[0]] =
-                rule.points.front().normal[0];
-            cut_jit_constants[cut_parameter_slots.embedded_normal[1]] =
-                rule.points.front().normal[1];
-            cut_jit_constants[cut_parameter_slots.embedded_normal[2]] =
-                rule.points.front().normal[2];
-            cut_jit_constants[cut_parameter_slots.stabilization_scale] = Real{0.0};
-            cut_jit_constants[cut_parameter_slots.quadrature_weight_sensitivity] = Real{0.0};
-            context_.setJITConstants(cut_jit_constants);
-            cut_jit_time += cut_now() - stage_start;
-
-            FE_THROW_IF(ts.row_dofs.size() != static_cast<std::size_t>(context_.numTestDofs()), FEException,
-                        "StandardAssembler::assembleCutVolumesFused: row DOF count does not match test space element DOFs");
-            FE_THROW_IF(ts.col_dofs.size() != static_cast<std::size_t>(context_.numTrialDofs()), FEException,
-                        "StandardAssembler::assembleCutVolumesFused: column DOF count does not match trial space element DOFs");
-
-            if (td.need_solution) {
-                stage_start = cut_now();
-                FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
-                            "StandardAssembler::assembleCutVolumesFused: kernel requires solution but no solution was set");
-                local_solution_coeffs_.resize(ts.col_dofs.size());
-                gatherCellVectorCoefficients(cell_id, t.col_dof_map, t.col_dof_offset,
-                                             ts.col_dofs, current_solution_view_,
-                                             current_solution_, local_solution_coeffs_,
-                                             "StandardAssembler::assembleCutVolumesFused", true);
-                if (context_.trialUsesVectorBasis()) {
-                    applyVectorBasisGlobalToLocal(mesh, cell_id, *t.trial_space,
-                                                  std::span<Real>(local_solution_coeffs_));
-                }
-                context_.setSolutionCoefficients(local_solution_coeffs_);
-
-                if (time_integration_ != nullptr) {
-                    const int required = requiredHistoryStates(time_integration_);
-                    if (required > 0) {
-                        FE_THROW_IF(previous_solutions_.size() < static_cast<std::size_t>(required), FEException,
-                                    "StandardAssembler::assembleCutVolumesFused: time integration requires " +
-                                        std::to_string(required) + " history states, but only " +
-                                        std::to_string(previous_solutions_.size()) + " were provided");
-                        if (local_prev_solution_coeffs_.size() < static_cast<std::size_t>(required)) {
-                            local_prev_solution_coeffs_.resize(static_cast<std::size_t>(required));
-                        }
-                        for (int k = 1; k <= required; ++k) {
-                            const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
-                            const auto* prev_view =
-                                (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
-                                    ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
-                                    : nullptr;
-                            FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
-                                        "StandardAssembler::assembleCutVolumesFused: previous solution (k=" +
-                                            std::to_string(k) + ") not set");
-                            auto& local_prev = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
-                            gatherCellVectorCoefficients(cell_id, t.col_dof_map,
-                                                         t.col_dof_offset,
-                                                         ts.col_dofs, prev_view, prev,
-                                                         local_prev,
-                                                         "StandardAssembler::assembleCutVolumesFused", true);
-                            if (context_.trialUsesVectorBasis()) {
-                                applyVectorBasisGlobalToLocal(mesh, cell_id, *t.trial_space,
-                                                              std::span<Real>(local_prev));
-                            }
-                            context_.setPreviousSolutionCoefficientsK(k, local_prev);
-                        }
-                    }
-                }
-                cut_solution_time += cut_now() - stage_start;
-            }
-
-            if (td.need_field_solutions) {
-                stage_start = cut_now();
-                populateFieldSolutionData(context_, mesh, cell_id, td.field_requirements);
-                cut_field_time += cut_now() - stage_start;
-            }
-            stage_start = cut_now();
-            populateMovingDomainFieldData(context_, td.required_data,
-                                          "StandardAssembler::assembleCutVolumesFused");
-            cut_field_time += cut_now() - stage_start;
-
+        for (const auto& td : term_data) {
             if (td.need_material_state) {
-                stage_start = cut_now();
-                auto view = material_state_provider_->getCellState(
-                    *t.kernel, cell_id, context_.numQuadraturePoints());
-                FE_THROW_IF(!view, FEException,
-                            "StandardAssembler::assembleCutVolumesFused: material state provider returned null storage");
-                FE_THROW_IF(view.bytes_per_qpt != td.material_state_spec.bytes_per_qpt, FEException,
-                            "StandardAssembler::assembleCutVolumesFused: material state bytes_per_qpt mismatch");
-                FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
-                            "StandardAssembler::assembleCutVolumesFused: invalid material state stride");
-                context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt,
-                                          view.stride_bytes, view.alignment, view.variables,
-                                          view.old_lifecycle, view.work_lifecycle);
-                cut_material_time += cut_now() - stage_start;
-            }
-
-            stage_start = cut_now();
-            const bool want_matrix = t.assemble_matrix && ts.insert_matrix != nullptr;
-            const bool want_vector = t.assemble_vector && ts.insert_vector != nullptr;
-            prepareKernelOutputRequest(kernel_output_,
-                                       context_.numTestDofs(),
-                                       context_.numTrialDofs(),
-                                       want_matrix,
-                                       want_vector);
-            t.kernel->computeCell(context_, kernel_output_);
-            cut_kernel_time += cut_now() - stage_start;
-
-            if (context_.testUsesVectorBasis() || context_.trialUsesVectorBasis()) {
-                stage_start = cut_now();
-                applyVectorBasisOutputOrientation(mesh, cell_id, *t.test_space,
-                                                  cell_id, *t.trial_space,
-                                                  kernel_output_);
-                cut_orientation_time += cut_now() - stage_start;
-            }
-
-            const AssemblyDiagnosticContext* active_diagnostic_context =
-                t.diagnostic_context ? &*t.diagnostic_context
-                                     : (diagnostic_context_ ? &*diagnostic_context_
-                                                            : nullptr);
-            if (active_diagnostic_context != nullptr) {
-                const auto& test_element =
-                    t.test_space->getElement(cell_type, cell_id);
-                const auto& trial_element =
-                    t.trial_space->getElement(cell_type, cell_id);
-                logCutVolumeLocalMatrixRowProvenance(
-                    *active_diagnostic_context,
-                    context_,
-                    interface_marker,
-                    side,
-                    rule,
-                    rule_index < metadata.size() ? &metadata[rule_index] : nullptr,
-                    rule_index,
-                    cell_id,
-                    term_rule->num_points(),
-                    kernel_output_,
-                    ts.row_dofs,
-                    ts.col_dofs,
-                    test_element.element_type(),
-                    trial_element.element_type());
-                logCutVolumeDirectPspgLocalSchurDiagnostic(
-                    *active_diagnostic_context,
-                    interface_marker,
-                    side,
-                    rule,
-                    rule_index < metadata.size() ? &metadata[rule_index] : nullptr,
-                    rule_index,
-                    cell_id,
-                    term_rule->num_points(),
-                    kernel_output_,
-                    ts.row_dofs,
-                    ts.col_dofs);
-                logCutVolumeDirectPspgLocalEdgeBalanceDiagnostic(
-                    *active_diagnostic_context,
-                    interface_marker,
-                    side,
-                    rule,
-                    rule_index < metadata.size() ? &metadata[rule_index] : nullptr,
-                    rule_index,
-                    cell_id,
-                    term_rule->num_points(),
-                    kernel_output_,
-                    ts.row_dofs,
-                    ts.col_dofs);
-                logCutVolumeDirectPspgSupportCouplingProvenance(
-                    *active_diagnostic_context,
-                    interface_marker,
-                    side,
-                    rule,
-                    rule_index < metadata.size() ? &metadata[rule_index] : nullptr,
-                    rule_index,
-                    cell_id,
-                    term_rule->num_points(),
-                    kernel_output_,
-                    ts.row_dofs,
-                    ts.col_dofs);
-                applyCutVolumeDirectPspgTopologyPolicy(
-                    *active_diagnostic_context,
-                    interface_marker,
-                    side,
-                    rule,
-                    rule_index < metadata.size() ? &metadata[rule_index] : nullptr,
-                    rule_index,
-                    cell_id,
-                    term_rule->num_points(),
-                    kernel_output_,
-                    ts.row_dofs,
-                    ts.col_dofs);
-            }
-
-            stage_start = cut_now();
-            insertLocalForCell(cell_id, t.row_dof_map, t.row_dof_offset,
-                               t.col_dof_map, t.col_dof_offset,
-                               kernel_output_, ts.row_dofs, ts.col_dofs,
-                               want_matrix ? ts.insert_matrix : nullptr,
-                               want_vector ? ts.insert_vector : nullptr);
-            cut_insert_time += cut_now() - stage_start;
-
-            assembled_rule = true;
-            if (kernel_output_.has_matrix) {
-                result.matrix_entries_inserted +=
-                    static_cast<GlobalIndex>(ts.row_dofs.size() * ts.col_dofs.size());
-            }
-            if (kernel_output_.has_vector) {
-                result.vector_entries_inserted += static_cast<GlobalIndex>(ts.row_dofs.size());
-            }
-            if (term_full_cell_rule) {
-                cached_quad_rule_ptr_ = nullptr;
+                return false;
             }
         }
-
-        if (assembled_rule) {
-            result.elements_assembled++;
-            ++cut_rules_assembled;
+        return true;
+    }();
+    std::size_t serial_begin = 0u;
+    const int n_threads = threadedAssemblyThreadCount();
+    if (n_threads > 1 && iteration_count >= kThreadedAssemblyMinItems && threading_supported) {
+        ensureThreadedGatherTables(mesh);
+        prepareThreadWorkers(n_threads);
+        thread_states.resize(static_cast<std::size_t>(n_threads));
+        const auto reserve_qpts =
+            selectedVolumeRuleReserveCount(rules, indexed_rule_indices, interface_marker, side);
+        for (int t = 0; t < n_threads; ++t) {
+            auto& worker = *thread_workers_[static_cast<std::size_t>(t)];
+            const bool worker_epoch =
+                use_epoch_cache &&
+                worker.beginCutVolumeEpochCacheWithKey(last_cut_volume_epoch_key_);
+            worker.context_.reserve(max_dofs, reserve_qpts, mesh.dimension());
+            thread_states[static_cast<std::size_t>(t)].reset(loop, jit_constants_, worker_epoch);
+        }
+        serial_begin = runThreadedItems(
+            "cut_volumes_fused", iteration_count, n_threads, kThreadedAssemblyBlockSize,
+            [&](StandardAssembler& worker, int thread, std::size_t item, InsertSink& sink,
+                AssemblyResult& item_result) {
+                worker.assembleCutVolumeFusedRule(
+                    loop, thread_states[static_cast<std::size_t>(thread)], item, sink, item_result);
+            },
+            result);
+    }
+    if (serial_begin < iteration_count) {
+        InsertSink sink(*this);
+        for (std::size_t ordinal = serial_begin; ordinal < iteration_count; ++ordinal) {
+            assembleCutVolumeFusedRule(loop, serial_state, ordinal, sink, result);
         }
     }
+    for (const auto& state : thread_states) {
+        serial_state.addTimingAndCounters(state);
+    }
+    cut_filter_time = serial_state.cut_filter_time;
+    cut_dof_time = serial_state.cut_dof_time;
+    cut_rule_time = serial_state.cut_rule_time;
+    cut_geometry_time = serial_state.cut_geometry_time;
+    cut_basis_time = serial_state.cut_basis_time;
+    cut_frame_time = serial_state.cut_frame_time;
+    cut_context_time = serial_state.cut_context_time;
+    cut_jit_time = serial_state.cut_jit_time;
+    cut_solution_time = serial_state.cut_solution_time;
+    cut_field_time = serial_state.cut_field_time;
+    cut_material_time = serial_state.cut_material_time;
+    cut_kernel_time = serial_state.cut_kernel_time;
+    cut_orientation_time = serial_state.cut_orientation_time;
+    cut_insert_time = serial_state.cut_insert_time;
+    cut_rules_considered = serial_state.cut_rules_considered;
+    cut_rules_assembled = serial_state.cut_rules_assembled;
+    cut_full_rules = serial_state.cut_full_rules;
+    cut_partial_rules = serial_state.cut_partial_rules;
+    cut_quadrature_points = serial_state.cut_quadrature_points;
+    cut_basis_cacheable_rules = serial_state.cut_basis_cacheable_rules;
 
     const auto end_time = std::chrono::steady_clock::now();
     result.elapsed_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
@@ -12320,6 +12778,515 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
     }
     return result;
 }
+
+void StandardAssembler::assembleCutVolumeFusedRule(const CutVolumeFusedLoop& loop,
+                                                   CutVolumeFusedThreadState& state,
+                                                   std::size_t ordinal,
+                                                   InsertSink& sink,
+                                                   AssemblyResult& result)
+{
+    // Loop body of assembleCutVolumesFused for one rule ordinal. It runs on
+    // the calling assembler (serial) or on a worker assembler (threads). The
+    // names below alias the call's shared and per-thread state.
+    const IMeshAccess& mesh = loop.mesh;
+    const CutIntegrationContext& cut_context = loop.cut_context;
+    const int interface_marker = loop.interface_marker;
+    const geometry::CutIntegrationSide side = loop.side;
+    const std::span<const FusedCellTerm> terms = loop.terms;
+    const auto& term_data = loop.term_data;
+    const auto& rules = loop.rules;
+    const auto indexed_rule_indices = loop.indexed_rule_indices;
+    const bool use_indexed_rules = loop.use_indexed_rules;
+    const auto& metadata = loop.metadata;
+    const auto cut_basis_cache_max_entries = loop.cut_basis_cache_max_entries;
+    const std::uint64_t cut_context_basis_signature = loop.cut_context_basis_signature;
+    const auto& first_active_term = loop.first_active_term;
+    const bool owned_rows_only = loop.owned_rows_only;
+    const bool use_epoch_cache = state.use_epoch_cache;
+    auto& term_scratch = state.term_scratch;
+    auto& full_cell_rule_cache = state.full_cell_rule_cache;
+    auto& full_side_snapshot_rules = state.full_side_snapshot_rules;
+    auto& cut_jit_constants = state.cut_jit_constants;
+    constexpr forms::CutCellParameterSlots cut_parameter_slots{};
+    double& cut_filter_time = state.cut_filter_time;
+    double& cut_dof_time = state.cut_dof_time;
+    double& cut_rule_time = state.cut_rule_time;
+    double& cut_geometry_time = state.cut_geometry_time;
+    double& cut_basis_time = state.cut_basis_time;
+    double& cut_frame_time = state.cut_frame_time;
+    double& cut_context_time = state.cut_context_time;
+    double& cut_jit_time = state.cut_jit_time;
+    double& cut_solution_time = state.cut_solution_time;
+    double& cut_field_time = state.cut_field_time;
+    double& cut_material_time = state.cut_material_time;
+    double& cut_kernel_time = state.cut_kernel_time;
+    double& cut_orientation_time = state.cut_orientation_time;
+    double& cut_insert_time = state.cut_insert_time;
+    std::size_t& cut_rules_considered = state.cut_rules_considered;
+    std::size_t& cut_rules_assembled = state.cut_rules_assembled;
+    std::size_t& cut_full_rules = state.cut_full_rules;
+    std::size_t& cut_partial_rules = state.cut_partial_rules;
+    std::size_t& cut_quadrature_points = state.cut_quadrature_points;
+    std::size_t& cut_basis_cacheable_rules = state.cut_basis_cacheable_rules;
+    const bool cut_timing = loop.cut_timing;
+    auto cut_now = [&]() -> double {
+        if (!cut_timing) {
+            return 0.0;
+        }
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+
+    double stage_start = cut_now();
+    const auto rule_index = use_indexed_rules ? indexed_rule_indices[ordinal] : ordinal;
+    if (rule_index >= rules.size()) {
+        cut_filter_time += cut_now() - stage_start;
+        return;
+    }
+    const auto& rule = rules[rule_index];
+    ++cut_rules_considered;
+    if (!use_indexed_rules &&
+        (rule.kind != geometry::CutQuadratureKind::Volume ||
+         rule.provenance.marker != interface_marker ||
+         rule.side != side)) {
+        cut_filter_time += cut_now() - stage_start;
+        return;
+    }
+    cut_filter_time += cut_now() - stage_start;
+
+    FE_THROW_IF(rule.frame != geometry::CutGeometryFrame::Reference, FEException,
+                "StandardAssembler::assembleCutVolumesFused: only reference-frame cut-volume rules are supported");
+    FE_THROW_IF(rule.points.empty(), FEException,
+                "StandardAssembler::assembleCutVolumesFused: cut-volume rule has no quadrature points");
+
+    GlobalIndex cell_id = static_cast<GlobalIndex>(rule.provenance.parent_entity);
+    if (rule_index < metadata.size() && metadata[rule_index].parent_entity >= 0) {
+        cell_id = static_cast<GlobalIndex>(metadata[rule_index].parent_entity);
+    }
+    FE_THROW_IF(cell_id < 0 || cell_id >= mesh.numCells(), FEException,
+                "StandardAssembler::assembleCutVolumesFused: cut-volume parent cell is out of range");
+    if (!owned_rows_only && !mesh.isOwnedCell(cell_id)) {
+        return;
+    }
+
+    stage_start = cut_now();
+    const auto cell_type = mesh.getCellType(cell_id);
+    std::shared_ptr<const quadrature::QuadratureRule> full_cell_rule;
+    std::optional<CutVolumeQuadratureRule> cut_rule;
+    detail::CutVolumeEpochRuleEntry* epoch_entry = nullptr;
+    std::unique_ptr<const quadrature::QuadratureRule> uncached_epoch_rule;
+    const quadrature::QuadratureRule* active_rule = nullptr;
+    const CutVolumeGeometryCacheEntry* cut_volume_geometry_cache_entry = nullptr;
+    const bool active_rule_is_full_side =
+        isFullSideVolumeRule(rule) &&
+        rule.provenance.free_surface_snapshot_revision_key == 0u;
+    bool active_rule_is_partial_cut = false;
+    if (active_rule_is_full_side) {
+        const auto type_key = static_cast<std::size_t>(cell_type);
+        if (type_key < full_cell_rule_cache.size()) {
+            auto& cached_rule = full_cell_rule_cache[type_key];
+            if (!cached_rule) {
+                cached_rule = resolveQuadratureRule(
+                    *first_active_term.test_space, cell_id, cell_type);
+            }
+            full_cell_rule = cached_rule;
+        } else {
+            full_cell_rule = resolveQuadratureRule(
+                *first_active_term.test_space, cell_id, cell_type);
+        }
+        active_rule = full_cell_rule.get();
+        ++cut_full_rules;
+    } else {
+        if (use_epoch_cache) {
+            epoch_entry = cutVolumeEpochRuleEntry(rule, cell_id, cell_type, mesh.dimension(),
+                                                  uncached_epoch_rule);
+            active_rule = epoch_entry != nullptr ? epoch_entry->rule.get()
+                                                 : uncached_epoch_rule.get();
+        } else {
+            cut_rule.emplace(rule, to_mesh_family(cell_type), mesh.dimension());
+            active_rule = &*cut_rule;
+        }
+        active_rule_is_partial_cut = true;
+        cached_quad_rule_ptr_ = nullptr;
+        basis_scratch_valid_ = false;
+        if (cut_basis_cache_max_entries > 0u) {
+            cut_volume_geometry_cache_entry = findCutVolumeGeometryCacheEntry(
+                cut_context,
+                cut_context_basis_signature,
+                rule_index,
+                mesh);
+        }
+        ++cut_partial_rules;
+    }
+    if (active_rule_is_partial_cut && isFullSideVolumeRule(rule)) {
+        // Uncut cell of a free-surface snapshot: share the rule object so
+        // its basis tabulations are reused across cells.
+        active_rule = &full_side_snapshot_rules.intern(*active_rule);
+    }
+    FE_CHECK_NOT_NULL(active_rule, "StandardAssembler::assembleCutVolumesFused: active quadrature rule");
+    cut_quadrature_points += active_rule->num_points();
+    cut_rule_time += cut_now() - stage_start;
+
+    stage_start = cut_now();
+    if (cut_volume_geometry_cache_entry != nullptr) {
+        restoreCutVolumeGeometryCacheEntry(context_, *cut_volume_geometry_cache_entry);
+    } else {
+        prepareGeometry(context_, mesh, cell_id, *active_rule);
+        if (active_rule_is_partial_cut && cut_basis_cache_max_entries > 0u) {
+            storeCutVolumeGeometryCacheEntry(rule_index, mesh, cell_id, cell_type, context_);
+        }
+        if (epoch_entry != nullptr) {
+            validateCutVolumeEpochCellGeometry(*epoch_entry, mesh, cell_id);
+        }
+    }
+    // Rule the context geometry was last prepared with; the owner keeps a
+    // term-specific full-cell rule alive while it is that rule.
+    const quadrature::QuadratureRule* current_geometry_rule = active_rule;
+    std::shared_ptr<const quadrature::QuadratureRule> current_geometry_rule_owner;
+    cut_geometry_time += cut_now() - stage_start;
+
+    bool assembled_rule = false;
+    for (std::size_t ti = 0; ti < terms.size(); ++ti) {
+        const auto& t = terms[ti];
+        const auto& td = term_data[ti];
+        auto& ts = term_scratch[ti];
+        if (!t.kernel->hasCell() || (!t.assemble_matrix && !t.assemble_vector)) {
+            continue;
+        }
+
+        stage_start = cut_now();
+        ts.row_dofs = getCellDofsCached(mesh, cell_id, t.row_dof_map, t.row_dof_offset);
+        ts.col_dofs = getCellDofsCached(mesh, cell_id, t.col_dof_map, t.col_dof_offset);
+        cut_dof_time += cut_now() - stage_start;
+
+        const quadrature::QuadratureRule* term_rule = active_rule;
+        std::shared_ptr<const quadrature::QuadratureRule> term_full_cell_rule;
+        if (active_rule_is_full_side && t.test_space != first_active_term.test_space) {
+            term_full_cell_rule = resolveQuadratureRule(*t.test_space, cell_id, cell_type);
+            term_rule = term_full_cell_rule.get();
+        }
+        if (active_rule_is_full_side &&
+            !term_rule->same_cache_identity(*current_geometry_rule)) {
+            stage_start = cut_now();
+            prepareGeometry(context_, mesh, cell_id, *term_rule);
+            current_geometry_rule = term_rule;
+            current_geometry_rule_owner = term_full_cell_rule;
+            cut_geometry_time += cut_now() - stage_start;
+        }
+
+        const CutVolumeBasisCacheEntry* cut_volume_basis_cache_entry = nullptr;
+        if (active_rule_is_partial_cut && cut_basis_cache_max_entries > 0u) {
+            stage_start = cut_now();
+            cut_volume_basis_cache_entry = getOrCreateCutVolumeBasisCacheEntry(
+                cut_context,
+                cut_context_basis_signature,
+                rule_index,
+                *term_rule,
+                mesh,
+                cell_id,
+                cell_type,
+                *t.test_space,
+                *t.trial_space,
+                td.required_data);
+            if (cut_volume_basis_cache_entry != nullptr) {
+                ++cut_basis_cacheable_rules;
+            }
+            cut_rule_time += cut_now() - stage_start;
+        }
+
+        stage_start = cut_now();
+        const auto* previous_cut_volume_basis_cache_entry =
+            active_cut_volume_basis_cache_entry_;
+        active_cut_volume_basis_cache_entry_ = cut_volume_basis_cache_entry;
+        try {
+            if (epoch_entry != nullptr) {
+                prepareCutVolumeBasisFromEpochCache(context_, mesh, cell_id, cell_type,
+                                                    *t.test_space, *t.trial_space,
+                                                    td.required_data, *term_rule,
+                                                    *epoch_entry);
+            } else {
+                prepareBasis(context_, mesh, cell_id, *t.test_space, *t.trial_space,
+                             td.required_data, *term_rule);
+            }
+        } catch (...) {
+            active_cut_volume_basis_cache_entry_ =
+                previous_cut_volume_basis_cache_entry;
+            throw;
+        }
+        active_cut_volume_basis_cache_entry_ =
+            previous_cut_volume_basis_cache_entry;
+        cut_basis_time += cut_now() - stage_start;
+
+        stage_start = cut_now();
+        prepareFrameExplicitGeometry(context_, mesh, cell_id, cell_type,
+                                     *term_rule, td.required_data);
+        cut_frame_time += cut_now() - stage_start;
+
+        stage_start = cut_now();
+        context_.setCutVolumeDomain(interface_marker, rule.side);
+        context_.setMaterialState(nullptr, nullptr, 0u, 0u);
+        context_.setTimeIntegrationContext(time_integration_);
+        context_.setTime(time_);
+        context_.setTimeStep(dt_);
+        context_.setRealParameterGetter(get_real_param_);
+        context_.setParameterGetter(get_param_);
+        context_.setUserData(user_data_);
+        context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+        context_.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
+        context_.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
+        context_.clearAllPreviousSolutionData();
+        cut_context_time += cut_now() - stage_start;
+
+        stage_start = cut_now();
+        cut_jit_constants[cut_parameter_slots.volume_fraction] = rule.volume_fraction;
+        cut_jit_constants[cut_parameter_slots.side_indicator] =
+            forms::cutSideIndicatorValue(rule.side);
+        cut_jit_constants[cut_parameter_slots.embedded_normal[0]] =
+            rule.points.front().normal[0];
+        cut_jit_constants[cut_parameter_slots.embedded_normal[1]] =
+            rule.points.front().normal[1];
+        cut_jit_constants[cut_parameter_slots.embedded_normal[2]] =
+            rule.points.front().normal[2];
+        cut_jit_constants[cut_parameter_slots.stabilization_scale] = Real{0.0};
+        cut_jit_constants[cut_parameter_slots.quadrature_weight_sensitivity] = Real{0.0};
+        context_.setJITConstants(cut_jit_constants);
+        cut_jit_time += cut_now() - stage_start;
+
+        FE_THROW_IF(ts.row_dofs.size() != static_cast<std::size_t>(context_.numTestDofs()), FEException,
+                    "StandardAssembler::assembleCutVolumesFused: row DOF count does not match test space element DOFs");
+        FE_THROW_IF(ts.col_dofs.size() != static_cast<std::size_t>(context_.numTrialDofs()), FEException,
+                    "StandardAssembler::assembleCutVolumesFused: column DOF count does not match trial space element DOFs");
+
+        if (td.need_solution) {
+            stage_start = cut_now();
+            FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+                        "StandardAssembler::assembleCutVolumesFused: kernel requires solution but no solution was set");
+            local_solution_coeffs_.resize(ts.col_dofs.size());
+            gatherCellVectorCoefficients(cell_id, t.col_dof_map, t.col_dof_offset,
+                                         ts.col_dofs, current_solution_view_,
+                                         current_solution_, local_solution_coeffs_,
+                                         "StandardAssembler::assembleCutVolumesFused", true);
+            if (context_.trialUsesVectorBasis()) {
+                applyVectorBasisGlobalToLocal(mesh, cell_id, *t.trial_space,
+                                              std::span<Real>(local_solution_coeffs_));
+            }
+            context_.setSolutionCoefficients(local_solution_coeffs_);
+
+            if (time_integration_ != nullptr) {
+                const int required = requiredHistoryStates(time_integration_);
+                if (required > 0) {
+                    FE_THROW_IF(previous_solutions_.size() < static_cast<std::size_t>(required), FEException,
+                                "StandardAssembler::assembleCutVolumesFused: time integration requires " +
+                                    std::to_string(required) + " history states, but only " +
+                                    std::to_string(previous_solutions_.size()) + " were provided");
+                    if (local_prev_solution_coeffs_.size() < static_cast<std::size_t>(required)) {
+                        local_prev_solution_coeffs_.resize(static_cast<std::size_t>(required));
+                    }
+                    for (int k = 1; k <= required; ++k) {
+                        const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+                        const auto* prev_view =
+                            (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+                                ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+                                : nullptr;
+                        FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+                                    "StandardAssembler::assembleCutVolumesFused: previous solution (k=" +
+                                        std::to_string(k) + ") not set");
+                        auto& local_prev = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+                        gatherCellVectorCoefficients(cell_id, t.col_dof_map,
+                                                     t.col_dof_offset,
+                                                     ts.col_dofs, prev_view, prev,
+                                                     local_prev,
+                                                     "StandardAssembler::assembleCutVolumesFused", true);
+                        if (context_.trialUsesVectorBasis()) {
+                            applyVectorBasisGlobalToLocal(mesh, cell_id, *t.trial_space,
+                                                          std::span<Real>(local_prev));
+                        }
+                        context_.setPreviousSolutionCoefficientsK(k, local_prev);
+                    }
+                }
+            }
+            cut_solution_time += cut_now() - stage_start;
+        }
+
+        if (td.need_field_solutions) {
+            stage_start = cut_now();
+            populateFieldSolutionData(context_, mesh, cell_id, td.field_requirements);
+            cut_field_time += cut_now() - stage_start;
+        }
+        stage_start = cut_now();
+        populateMovingDomainFieldData(context_, td.required_data,
+                                      "StandardAssembler::assembleCutVolumesFused");
+        cut_field_time += cut_now() - stage_start;
+
+        if (td.need_material_state) {
+            stage_start = cut_now();
+            auto view = material_state_provider_->getCellState(
+                *t.kernel, cell_id, context_.numQuadraturePoints());
+            FE_THROW_IF(!view, FEException,
+                        "StandardAssembler::assembleCutVolumesFused: material state provider returned null storage");
+            FE_THROW_IF(view.bytes_per_qpt != td.material_state_spec.bytes_per_qpt, FEException,
+                        "StandardAssembler::assembleCutVolumesFused: material state bytes_per_qpt mismatch");
+            FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
+                        "StandardAssembler::assembleCutVolumesFused: invalid material state stride");
+            context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt,
+                                      view.stride_bytes, view.alignment, view.variables,
+                                      view.old_lifecycle, view.work_lifecycle);
+            cut_material_time += cut_now() - stage_start;
+        }
+
+        stage_start = cut_now();
+        const bool want_matrix = t.assemble_matrix && ts.insert_matrix != nullptr;
+        const bool want_vector = t.assemble_vector && ts.insert_vector != nullptr;
+        prepareKernelOutputRequest(kernel_output_,
+                                   context_.numTestDofs(),
+                                   context_.numTrialDofs(),
+                                   want_matrix,
+                                   want_vector);
+        t.kernel->computeCell(context_, kernel_output_);
+        cut_kernel_time += cut_now() - stage_start;
+
+        if (context_.testUsesVectorBasis() || context_.trialUsesVectorBasis()) {
+            stage_start = cut_now();
+            applyVectorBasisOutputOrientation(mesh, cell_id, *t.test_space,
+                                              cell_id, *t.trial_space,
+                                              kernel_output_);
+            cut_orientation_time += cut_now() - stage_start;
+        }
+
+        const AssemblyDiagnosticContext* active_diagnostic_context =
+            t.diagnostic_context ? &*t.diagnostic_context
+                                 : (diagnostic_context_ ? &*diagnostic_context_
+                                                        : nullptr);
+        if (active_diagnostic_context != nullptr) {
+            const auto& test_element =
+                t.test_space->getElement(cell_type, cell_id);
+            const auto& trial_element =
+                t.trial_space->getElement(cell_type, cell_id);
+            logCutVolumeLocalMatrixRowProvenance(
+                *active_diagnostic_context,
+                context_,
+                interface_marker,
+                side,
+                rule,
+                rule_index < metadata.size() ? &metadata[rule_index] : nullptr,
+                rule_index,
+                cell_id,
+                term_rule->num_points(),
+                kernel_output_,
+                ts.row_dofs,
+                ts.col_dofs,
+                test_element.element_type(),
+                trial_element.element_type());
+            logCutVolumeDirectPspgLocalSchurDiagnostic(
+                *active_diagnostic_context,
+                interface_marker,
+                side,
+                rule,
+                rule_index < metadata.size() ? &metadata[rule_index] : nullptr,
+                rule_index,
+                cell_id,
+                term_rule->num_points(),
+                kernel_output_,
+                ts.row_dofs,
+                ts.col_dofs);
+            logCutVolumeDirectPspgLocalEdgeBalanceDiagnostic(
+                *active_diagnostic_context,
+                interface_marker,
+                side,
+                rule,
+                rule_index < metadata.size() ? &metadata[rule_index] : nullptr,
+                rule_index,
+                cell_id,
+                term_rule->num_points(),
+                kernel_output_,
+                ts.row_dofs,
+                ts.col_dofs);
+            logCutVolumeDirectPspgSupportCouplingProvenance(
+                *active_diagnostic_context,
+                interface_marker,
+                side,
+                rule,
+                rule_index < metadata.size() ? &metadata[rule_index] : nullptr,
+                rule_index,
+                cell_id,
+                term_rule->num_points(),
+                kernel_output_,
+                ts.row_dofs,
+                ts.col_dofs);
+            applyCutVolumeDirectPspgTopologyPolicy(
+                *active_diagnostic_context,
+                interface_marker,
+                side,
+                rule,
+                rule_index < metadata.size() ? &metadata[rule_index] : nullptr,
+                rule_index,
+                cell_id,
+                term_rule->num_points(),
+                kernel_output_,
+                ts.row_dofs,
+                ts.col_dofs);
+        }
+
+        stage_start = cut_now();
+        sink.forCell(cell_id, t.row_dof_map, t.row_dof_offset,
+                           t.col_dof_map, t.col_dof_offset,
+                           kernel_output_, ts.row_dofs, ts.col_dofs,
+                           want_matrix ? ts.insert_matrix : nullptr,
+                           want_vector ? ts.insert_vector : nullptr);
+        cut_insert_time += cut_now() - stage_start;
+
+        assembled_rule = true;
+        if (kernel_output_.has_matrix) {
+            result.matrix_entries_inserted +=
+                static_cast<GlobalIndex>(ts.row_dofs.size() * ts.col_dofs.size());
+        }
+        if (kernel_output_.has_vector) {
+            result.vector_entries_inserted += static_cast<GlobalIndex>(ts.row_dofs.size());
+        }
+        if (term_full_cell_rule) {
+            cached_quad_rule_ptr_ = nullptr;
+        }
+    }
+
+    if (assembled_rule) {
+        result.elements_assembled++;
+        ++cut_rules_assembled;
+    }
+}
+
+// Shared, read-only state of one assembleCutInterfaces call.
+struct StandardAssembler::CutInterfaceLoop {
+    const IMeshAccess& mesh;
+    const CutIntegrationContext& cut_context;
+    int interface_marker;
+    const spaces::FunctionSpace& test_space;
+    const spaces::FunctionSpace& trial_space;
+    AssemblyKernel& kernel;
+    bool assemble_matrix;
+    bool assemble_vector;
+    bool use_interface_kernel;
+    bool use_two_sided_kernel;
+    RequiredData required_data;
+    const std::vector<FieldRequirement>& field_requirements;
+    const std::vector<FieldRequirement>& minus_field_requirements;
+    const std::vector<FieldRequirement>& plus_field_requirements;
+    bool need_field_solutions;
+    bool need_solution;
+    bool need_material_state;
+    MaterialStateSpec material_state_spec;
+    bool owned_rows_only;
+    GlobalSystemView* insert_matrix_view;
+    GlobalSystemView* insert_vector_view;
+    const std::vector<const geometry::CutQuadratureRule*>& selected_rules;
+};
+
+// Per-thread mutable state of one assembleCutInterfaces call.
+struct StandardAssembler::CutInterfaceThreadState {
+    AssemblyContext context_plus{};
+    KernelOutput output_plus{};
+    KernelOutput coupling_mp{};
+    KernelOutput coupling_pm{};
+};
 
 AssemblyResult StandardAssembler::assembleCutInterfaces(
     const IMeshAccess& mesh,
@@ -12444,13 +13411,6 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
                               col_dof_map_->getMaxDofsPerCell()),
                      selectedInterfaceRuleReserveCount(selected_rules),
                      mesh.dimension());
-    AssemblyContext context_plus;
-    if (use_two_sided_kernel) {
-        context_plus.reserve(std::max(row_dof_map_->getMaxDofsPerCell(),
-                                      col_dof_map_->getMaxDofsPerCell()),
-                             selectedInterfaceRuleReserveCount(selected_rules),
-                             mesh.dimension());
-    }
 
     const bool owned_rows_only = requiresOwnedRowFiltering(options_, mesh);
     std::optional<OwnedRowOnlyView> owned_row_matrix;
@@ -12472,380 +13432,469 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
         }
     }
 
+    const CutInterfaceLoop loop{mesh,
+                                cut_context,
+                                interface_marker,
+                                test_space,
+                                trial_space,
+                                kernel,
+                                assemble_matrix,
+                                assemble_vector,
+                                use_interface_kernel,
+                                use_two_sided_kernel,
+                                required_data,
+                                field_requirements,
+                                minus_field_requirements,
+                                plus_field_requirements,
+                                need_field_solutions,
+                                need_solution,
+                                need_material_state,
+                                material_state_spec,
+                                owned_rows_only,
+                                insert_matrix_view,
+                                insert_vector_view,
+                                selected_rules};
+    const LocalIndex plus_context_dofs =
+        std::max(row_dof_map_->getMaxDofsPerCell(), col_dof_map_->getMaxDofsPerCell());
+    const auto plus_context_qpts = selectedInterfaceRuleReserveCount(selected_rules);
+    CutInterfaceThreadState serial_state;
+    if (use_two_sided_kernel) {
+        serial_state.context_plus.reserve(plus_context_dofs, plus_context_qpts, mesh.dimension());
+    }
+    std::vector<CutInterfaceThreadState> thread_states;
+
+    // Threaded compute with ordered insertion (FE/Docs/ThreadedAssembly.md).
+    std::size_t serial_begin = 0u;
+    const int n_threads = threadedAssemblyThreadCount();
+    if (n_threads > 1 && selected_rules.size() >= kThreadedAssemblyMinItems && !need_material_state) {
+        ensureThreadedGatherTables(mesh);
+        prepareThreadWorkers(n_threads);
+        thread_states.resize(static_cast<std::size_t>(n_threads));
+        for (int t = 0; t < n_threads; ++t) {
+            thread_workers_[static_cast<std::size_t>(t)]->context_.reserve(
+                plus_context_dofs, plus_context_qpts, mesh.dimension());
+            if (use_two_sided_kernel) {
+                thread_states[static_cast<std::size_t>(t)].context_plus.reserve(
+                    plus_context_dofs, plus_context_qpts, mesh.dimension());
+            }
+        }
+        serial_begin = runThreadedItems(
+            "cut_interfaces", selected_rules.size(), n_threads, kThreadedAssemblyBlockSize,
+            [&](StandardAssembler& worker, int thread, std::size_t item, InsertSink& sink,
+                AssemblyResult& item_result) {
+                worker.assembleCutInterfaceItem(
+                    loop, thread_states[static_cast<std::size_t>(thread)], item, sink, item_result);
+            },
+            result);
+    }
+    if (serial_begin < selected_rules.size()) {
+        InsertSink sink(*this);
+        for (std::size_t item = serial_begin; item < selected_rules.size(); ++item) {
+            assembleCutInterfaceItem(loop, serial_state, item, sink, result);
+        }
+    }
+
+    const auto end_time = std::chrono::steady_clock::now();
+    result.elapsed_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
+    return result;
+}
+
+void StandardAssembler::assembleCutInterfaceItem(const CutInterfaceLoop& loop,
+                                                 CutInterfaceThreadState& state,
+                                                 std::size_t item,
+                                                 InsertSink& sink,
+                                                 AssemblyResult& result)
+{
+    // Loop body of assembleCutInterfaces for one selected rule. It runs on the
+    // calling assembler (serial) or on a worker assembler (threads). The names
+    // below alias the call's shared and per-thread state.
+    const IMeshAccess& mesh = loop.mesh;
+    const CutIntegrationContext& cut_context = loop.cut_context;
+    const int interface_marker = loop.interface_marker;
+    const spaces::FunctionSpace& test_space = loop.test_space;
+    const spaces::FunctionSpace& trial_space = loop.trial_space;
+    AssemblyKernel& kernel = loop.kernel;
+    const bool assemble_matrix = loop.assemble_matrix;
+    const bool assemble_vector = loop.assemble_vector;
+    const bool use_interface_kernel = loop.use_interface_kernel;
+    const bool use_two_sided_kernel = loop.use_two_sided_kernel;
+    const RequiredData required_data = loop.required_data;
+    const auto& field_requirements = loop.field_requirements;
+    const auto& minus_field_requirements = loop.minus_field_requirements;
+    const auto& plus_field_requirements = loop.plus_field_requirements;
+    const bool need_field_solutions = loop.need_field_solutions;
+    const bool need_solution = loop.need_solution;
+    const bool need_material_state = loop.need_material_state;
+    const auto& material_state_spec = loop.material_state_spec;
+    const bool owned_rows_only = loop.owned_rows_only;
+    GlobalSystemView* insert_matrix_view = loop.insert_matrix_view;
+    GlobalSystemView* insert_vector_view = loop.insert_vector_view;
+    auto& context_plus = state.context_plus;
+    auto& output_plus = state.output_plus;
+    auto& coupling_mp = state.coupling_mp;
+    auto& coupling_pm = state.coupling_pm;
     std::span<const GlobalIndex> row_dofs;
     std::span<const GlobalIndex> col_dofs;
-    KernelOutput output_plus;
-    KernelOutput coupling_mp;
-    KernelOutput coupling_pm;
 
-    withDevirtualizedKernel(kernel, [&](auto& kernel_impl) {
-        for (const auto* rule_ptr : selected_rules) {
-            FE_CHECK_NOT_NULL(rule_ptr, "StandardAssembler::assembleCutInterfaces: cut-interface rule");
-            const auto& rule = *rule_ptr;
-            if (rule.kind != geometry::CutQuadratureKind::Interface) {
-                continue;
-            }
-            const int active_marker = rule.provenance.marker >= 0 ? rule.provenance.marker : interface_marker;
-            if (interface_marker >= 0 && active_marker != interface_marker) {
-                continue;
-            }
-            FE_THROW_IF(rule.frame != geometry::CutGeometryFrame::Reference, FEException,
-                        "StandardAssembler::assembleCutInterfaces: only reference-frame cut-interface rules are supported");
-            FE_THROW_IF(rule.points.empty(), FEException,
-                        "StandardAssembler::assembleCutInterfaces: cut-interface rule has no quadrature points");
-            const auto* two_sided_binding =
-                use_two_sided_kernel ? cut_context.twoSidedBindingForInterfaceRule(rule) : nullptr;
-            FE_THROW_IF(use_two_sided_kernel &&
-                            (two_sided_binding == nullptr || !two_sided_binding->complete()),
-                        FEException,
-                        "StandardAssembler::assembleCutInterfaces: two-sided generated interface rule is missing a complete minus/plus parent-cell binding");
+    const auto* rule_ptr = loop.selected_rules[item];
+    FE_CHECK_NOT_NULL(rule_ptr, "StandardAssembler::assembleCutInterfaces: cut-interface rule");
+    const auto& rule = *rule_ptr;
+    if (rule.kind != geometry::CutQuadratureKind::Interface) {
+        return;
+    }
+    const int active_marker = rule.provenance.marker >= 0 ? rule.provenance.marker : interface_marker;
+    if (interface_marker >= 0 && active_marker != interface_marker) {
+        return;
+    }
+    FE_THROW_IF(rule.frame != geometry::CutGeometryFrame::Reference, FEException,
+                "StandardAssembler::assembleCutInterfaces: only reference-frame cut-interface rules are supported");
+    FE_THROW_IF(rule.points.empty(), FEException,
+                "StandardAssembler::assembleCutInterfaces: cut-interface rule has no quadrature points");
+    const auto* two_sided_binding =
+        use_two_sided_kernel ? cut_context.twoSidedBindingForInterfaceRule(rule) : nullptr;
+    FE_THROW_IF(use_two_sided_kernel &&
+                    (two_sided_binding == nullptr || !two_sided_binding->complete()),
+                FEException,
+                "StandardAssembler::assembleCutInterfaces: two-sided generated interface rule is missing a complete minus/plus parent-cell binding");
 
-            const auto cell_id = static_cast<GlobalIndex>(rule.provenance.parent_entity);
-            FE_THROW_IF(cell_id < 0 || cell_id >= mesh.numCells(), FEException,
-                        "StandardAssembler::assembleCutInterfaces: cut-interface parent cell is out of range");
-            if (!owned_rows_only && !mesh.isOwnedCell(cell_id)) {
-                continue;
-            }
+    const auto cell_id = static_cast<GlobalIndex>(rule.provenance.parent_entity);
+    FE_THROW_IF(cell_id < 0 || cell_id >= mesh.numCells(), FEException,
+                "StandardAssembler::assembleCutInterfaces: cut-interface parent cell is out of range");
+    if (!owned_rows_only && !mesh.isOwnedCell(cell_id)) {
+        return;
+    }
 
-            row_dofs = getCellDofsCached(mesh, cell_id, row_dof_map_, row_dof_offset_);
-            col_dofs = getCellDofsCached(mesh, cell_id, col_dof_map_, col_dof_offset_);
+    row_dofs = getCellDofsCached(mesh, cell_id, row_dof_map_, row_dof_offset_);
+    col_dofs = getCellDofsCached(mesh, cell_id, col_dof_map_, col_dof_offset_);
 
-            const auto cell_type = mesh.getCellType(cell_id);
-            CutVolumeQuadratureRule cut_rule(rule, to_mesh_family(cell_type), mesh.dimension());
-            cached_quad_rule_ptr_ = nullptr;
-            basis_scratch_valid_ = false;
+    const auto cell_type = mesh.getCellType(cell_id);
+    CutVolumeQuadratureRule cut_rule(rule, to_mesh_family(cell_type), mesh.dimension());
+    cached_quad_rule_ptr_ = nullptr;
+    basis_scratch_valid_ = false;
 
-            prepareGeometry(context_, mesh, cell_id, cut_rule);
-            prepareBasis(context_, mesh, cell_id, test_space, trial_space, required_data, cut_rule);
-            prepareFrameExplicitGeometry(context_, mesh, cell_id, cell_type, cut_rule, required_data);
-            remapCutInterfaceGeometry(
-                context_, rule, mesh.dimension(), "StandardAssembler::assembleCutInterfaces");
-            context_.markEmbeddedBoundaryFace(cell_id, LocalIndex{0}, active_marker);
+    prepareGeometry(context_, mesh, cell_id, cut_rule);
+    prepareBasis(context_, mesh, cell_id, test_space, trial_space, required_data, cut_rule);
+    prepareFrameExplicitGeometry(context_, mesh, cell_id, cell_type, cut_rule, required_data);
+    remapCutInterfaceGeometry(
+        context_, rule, mesh.dimension(), "StandardAssembler::assembleCutInterfaces");
+    context_.markEmbeddedBoundaryFace(cell_id, LocalIndex{0}, active_marker);
 
-            BackgroundEntityMeasures parent_measures;
-            if (hasFlag(required_data, RequiredData::EntityMeasures)) {
-                if (rule.provenance.parent_boundary_entity >= 0) {
-                    const auto& measure_test_element =
-                        getElement(test_space, cell_id, cell_type);
-                    const auto& measure_trial_element =
-                        getElement(trial_space, cell_id, cell_type);
-                    parent_measures = computeBackgroundEntityMeasures(
-                        mesh,
-                        cell_id,
-                        static_cast<GlobalIndex>(
-                            rule.provenance.parent_boundary_entity),
-                        measure_test_element.polynomial_order(),
-                        measure_trial_element.polynomial_order());
-                } else {
-                    parent_measures.cell_diameter = context_.cellDiameter();
-                    parent_measures.physical_cell_measure =
-                        context_.associatedCellVolume();
-                    parent_measures.physical_parent_face_measure =
-                        std::accumulate(
-                            context_.integrationWeights().begin(),
-                            context_.integrationWeights().end(),
-                            Real{0.0});
-                    FE_THROW_IF(
-                        !std::isfinite(parent_measures.cell_diameter) ||
-                            !(parent_measures.cell_diameter > Real{0.0}) ||
-                            !std::isfinite(
-                                parent_measures.physical_cell_measure) ||
-                            !(parent_measures.physical_cell_measure >
-                              Real{0.0}) ||
-                            !std::isfinite(
-                                parent_measures
-                                    .physical_parent_face_measure) ||
-                            !(parent_measures
-                                  .physical_parent_face_measure >
-                              Real{0.0}),
-                        FEException,
-                        "StandardAssembler::assembleCutInterfaces: "
-                        "generated internal interface has invalid parent-cell "
-                        "or interface measure");
+    BackgroundEntityMeasures parent_measures;
+    if (hasFlag(required_data, RequiredData::EntityMeasures)) {
+        if (rule.provenance.parent_boundary_entity >= 0) {
+            const auto& measure_test_element =
+                getElement(test_space, cell_id, cell_type);
+            const auto& measure_trial_element =
+                getElement(trial_space, cell_id, cell_type);
+            parent_measures = computeBackgroundEntityMeasures(
+                mesh,
+                cell_id,
+                static_cast<GlobalIndex>(
+                    rule.provenance.parent_boundary_entity),
+                measure_test_element.polynomial_order(),
+                measure_trial_element.polynomial_order());
+        } else {
+            parent_measures.cell_diameter = context_.cellDiameter();
+            parent_measures.physical_cell_measure =
+                context_.associatedCellVolume();
+            parent_measures.physical_parent_face_measure =
+                std::accumulate(
+                    context_.integrationWeights().begin(),
+                    context_.integrationWeights().end(),
+                    Real{0.0});
+            FE_THROW_IF(
+                !std::isfinite(parent_measures.cell_diameter) ||
+                    !(parent_measures.cell_diameter > Real{0.0}) ||
+                    !std::isfinite(
+                        parent_measures.physical_cell_measure) ||
+                    !(parent_measures.physical_cell_measure >
+                      Real{0.0}) ||
+                    !std::isfinite(
+                        parent_measures
+                            .physical_parent_face_measure) ||
+                    !(parent_measures
+                          .physical_parent_face_measure >
+                      Real{0.0}),
+                FEException,
+                "StandardAssembler::assembleCutInterfaces: "
+                "generated internal interface has invalid parent-cell "
+                "or interface measure");
+        }
+        context_.setEntityMeasures(
+            parent_measures.cell_diameter,
+            parent_measures.physical_cell_measure,
+            parent_measures.physical_parent_face_measure);
+    }
+
+    if (use_two_sided_kernel) {
+        prepareGeometry(context_plus, mesh, cell_id, cut_rule);
+        prepareBasis(context_plus, mesh, cell_id, test_space, trial_space, required_data, cut_rule);
+        prepareFrameExplicitGeometry(context_plus, mesh, cell_id, cell_type, cut_rule, required_data);
+        remapCutInterfaceGeometry(
+            context_plus, rule, mesh.dimension(), "StandardAssembler::assembleCutInterfaces");
+        context_plus.markEmbeddedBoundaryFace(cell_id, LocalIndex{0}, active_marker);
+        if (parent_measures.physical_parent_face_measure >
+            Real{0.0}) {
+            context_plus.setEntityMeasures(
+                parent_measures.cell_diameter,
+                parent_measures.physical_cell_measure,
+                parent_measures.physical_parent_face_measure);
+        }
+        orientGeneratedInterfaceContextForSide(
+            context_, two_sided_binding->minus_side);
+        orientGeneratedInterfaceContextForSide(
+            context_plus, two_sided_binding->plus_side);
+    }
+
+    auto bind_cut_interface_common_context = [&](AssemblyContext& ctx) {
+        ctx.setMaterialState(nullptr, nullptr, 0u, 0u);
+        ctx.setTimeIntegrationContext(time_integration_);
+        ctx.setTime(time_);
+        ctx.setTimeStep(dt_);
+        ctx.setRealParameterGetter(get_real_param_);
+        ctx.setParameterGetter(get_param_);
+        ctx.setUserData(user_data_);
+        ctx.setJITConstants(jit_constants_);
+        ctx.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+        ctx.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
+        ctx.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
+        ctx.setHistoryWeights(history_weights_);
+        ctx.clearAllPreviousSolutionData();
+    };
+    bind_cut_interface_common_context(context_);
+    if (use_two_sided_kernel) {
+        bind_cut_interface_common_context(context_plus);
+    }
+
+    FE_THROW_IF(row_dofs.size() != static_cast<std::size_t>(context_.numTestDofs()), FEException,
+                "StandardAssembler::assembleCutInterfaces: row DOF count does not match test space element DOFs");
+    FE_THROW_IF(col_dofs.size() != static_cast<std::size_t>(context_.numTrialDofs()), FEException,
+                "StandardAssembler::assembleCutInterfaces: column DOF count does not match trial space element DOFs");
+    if (use_two_sided_kernel) {
+        FE_THROW_IF(context_plus.numQuadraturePoints() != context_.numQuadraturePoints(), FEException,
+                    "StandardAssembler::assembleCutInterfaces: mismatched quadrature point counts for two-sided generated interface");
+        FE_THROW_IF(context_plus.numTestDofs() != context_.numTestDofs() ||
+                        context_plus.numTrialDofs() != context_.numTrialDofs(),
+                    FEException,
+                    "StandardAssembler::assembleCutInterfaces: mismatched parent-cell DOF counts for two-sided generated interface");
+    }
+
+    if (need_solution) {
+        FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+                    "StandardAssembler::assembleCutInterfaces: kernel requires solution but no solution was set");
+        local_solution_coeffs_.resize(col_dofs.size());
+        gatherCellVectorCoefficients(cell_id, col_dof_map_, col_dof_offset_,
+                                     col_dofs, current_solution_view_,
+                                     current_solution_, local_solution_coeffs_,
+                                     "StandardAssembler::assembleCutInterfaces", true);
+        if (context_.trialUsesVectorBasis()) {
+            applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
+                                          std::span<Real>(local_solution_coeffs_));
+        }
+        context_.setSolutionCoefficients(local_solution_coeffs_);
+        if (use_two_sided_kernel) {
+            context_plus.setSolutionCoefficients(local_solution_coeffs_);
+        }
+
+        if (time_integration_ != nullptr) {
+            const int required = requiredHistoryStates(time_integration_);
+            if (required > 0) {
+                FE_THROW_IF(previous_solutions_.size() < static_cast<std::size_t>(required), FEException,
+                            "StandardAssembler::assembleCutInterfaces: time integration requires " +
+                                std::to_string(required) + " history states, but only " +
+                                std::to_string(previous_solutions_.size()) + " were provided");
+                if (local_prev_solution_coeffs_.size() < static_cast<std::size_t>(required)) {
+                    local_prev_solution_coeffs_.resize(static_cast<std::size_t>(required));
                 }
-                context_.setEntityMeasures(
-                    parent_measures.cell_diameter,
-                    parent_measures.physical_cell_measure,
-                    parent_measures.physical_parent_face_measure);
-            }
-
-            if (use_two_sided_kernel) {
-                prepareGeometry(context_plus, mesh, cell_id, cut_rule);
-                prepareBasis(context_plus, mesh, cell_id, test_space, trial_space, required_data, cut_rule);
-                prepareFrameExplicitGeometry(context_plus, mesh, cell_id, cell_type, cut_rule, required_data);
-                remapCutInterfaceGeometry(
-                    context_plus, rule, mesh.dimension(), "StandardAssembler::assembleCutInterfaces");
-                context_plus.markEmbeddedBoundaryFace(cell_id, LocalIndex{0}, active_marker);
-                if (parent_measures.physical_parent_face_measure >
-                    Real{0.0}) {
-                    context_plus.setEntityMeasures(
-                        parent_measures.cell_diameter,
-                        parent_measures.physical_cell_measure,
-                        parent_measures.physical_parent_face_measure);
-                }
-                orientGeneratedInterfaceContextForSide(
-                    context_, two_sided_binding->minus_side);
-                orientGeneratedInterfaceContextForSide(
-                    context_plus, two_sided_binding->plus_side);
-            }
-
-            auto bind_cut_interface_common_context = [&](AssemblyContext& ctx) {
-                ctx.setMaterialState(nullptr, nullptr, 0u, 0u);
-                ctx.setTimeIntegrationContext(time_integration_);
-                ctx.setTime(time_);
-                ctx.setTimeStep(dt_);
-                ctx.setRealParameterGetter(get_real_param_);
-                ctx.setParameterGetter(get_param_);
-                ctx.setUserData(user_data_);
-                ctx.setJITConstants(jit_constants_);
-                ctx.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
-                ctx.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
-                ctx.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
-                ctx.setHistoryWeights(history_weights_);
-                ctx.clearAllPreviousSolutionData();
-            };
-            bind_cut_interface_common_context(context_);
-            if (use_two_sided_kernel) {
-                bind_cut_interface_common_context(context_plus);
-            }
-
-            FE_THROW_IF(row_dofs.size() != static_cast<std::size_t>(context_.numTestDofs()), FEException,
-                        "StandardAssembler::assembleCutInterfaces: row DOF count does not match test space element DOFs");
-            FE_THROW_IF(col_dofs.size() != static_cast<std::size_t>(context_.numTrialDofs()), FEException,
-                        "StandardAssembler::assembleCutInterfaces: column DOF count does not match trial space element DOFs");
-            if (use_two_sided_kernel) {
-                FE_THROW_IF(context_plus.numQuadraturePoints() != context_.numQuadraturePoints(), FEException,
-                            "StandardAssembler::assembleCutInterfaces: mismatched quadrature point counts for two-sided generated interface");
-                FE_THROW_IF(context_plus.numTestDofs() != context_.numTestDofs() ||
-                                context_plus.numTrialDofs() != context_.numTrialDofs(),
-                            FEException,
-                            "StandardAssembler::assembleCutInterfaces: mismatched parent-cell DOF counts for two-sided generated interface");
-            }
-
-            if (need_solution) {
-                FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
-                            "StandardAssembler::assembleCutInterfaces: kernel requires solution but no solution was set");
-                local_solution_coeffs_.resize(col_dofs.size());
-                gatherCellVectorCoefficients(cell_id, col_dof_map_, col_dof_offset_,
-                                             col_dofs, current_solution_view_,
-                                             current_solution_, local_solution_coeffs_,
-                                             "StandardAssembler::assembleCutInterfaces", true);
-                if (context_.trialUsesVectorBasis()) {
-                    applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
-                                                  std::span<Real>(local_solution_coeffs_));
-                }
-                context_.setSolutionCoefficients(local_solution_coeffs_);
-                if (use_two_sided_kernel) {
-                    context_plus.setSolutionCoefficients(local_solution_coeffs_);
-                }
-
-                if (time_integration_ != nullptr) {
-                    const int required = requiredHistoryStates(time_integration_);
-                    if (required > 0) {
-                        FE_THROW_IF(previous_solutions_.size() < static_cast<std::size_t>(required), FEException,
-                                    "StandardAssembler::assembleCutInterfaces: time integration requires " +
-                                        std::to_string(required) + " history states, but only " +
-                                        std::to_string(previous_solutions_.size()) + " were provided");
-                        if (local_prev_solution_coeffs_.size() < static_cast<std::size_t>(required)) {
-                            local_prev_solution_coeffs_.resize(static_cast<std::size_t>(required));
-                        }
-                        for (int k = 1; k <= required; ++k) {
-                            const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
-                            const auto* prev_view =
-                                (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
-                                    ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
-                                    : nullptr;
-                            FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
-                                        "StandardAssembler::assembleCutInterfaces: previous solution (k=" +
-                                            std::to_string(k) + ") not set");
-                            auto& local_prev =
-                                local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
-                            gatherCellVectorCoefficients(cell_id, col_dof_map_, col_dof_offset_,
-                                                         col_dofs, prev_view, prev, local_prev,
-                                                         "StandardAssembler::assembleCutInterfaces", true);
-                            if (context_.trialUsesVectorBasis()) {
-                                applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
-                                                              std::span<Real>(local_prev));
-                            }
-                            context_.setPreviousSolutionCoefficientsK(k, local_prev);
-                            if (use_two_sided_kernel) {
-                                context_plus.setPreviousSolutionCoefficientsK(k, local_prev);
-                            }
-                        }
+                for (int k = 1; k <= required; ++k) {
+                    const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+                    const auto* prev_view =
+                        (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+                            ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+                            : nullptr;
+                    FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+                                "StandardAssembler::assembleCutInterfaces: previous solution (k=" +
+                                    std::to_string(k) + ") not set");
+                    auto& local_prev =
+                        local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+                    gatherCellVectorCoefficients(cell_id, col_dof_map_, col_dof_offset_,
+                                                 col_dofs, prev_view, prev, local_prev,
+                                                 "StandardAssembler::assembleCutInterfaces", true);
+                    if (context_.trialUsesVectorBasis()) {
+                        applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
+                                                      std::span<Real>(local_prev));
+                    }
+                    context_.setPreviousSolutionCoefficientsK(k, local_prev);
+                    if (use_two_sided_kernel) {
+                        context_plus.setPreviousSolutionCoefficientsK(k, local_prev);
                     }
                 }
             }
+        }
+    }
 
-            if (need_field_solutions) {
-                populateFieldSolutionData(
-                    context_,
-                    mesh,
-                    cell_id,
-                    use_two_sided_kernel ? minus_field_requirements : field_requirements);
-                if (use_two_sided_kernel) {
-                    populateFieldSolutionData(
-                        context_plus,
-                        mesh,
-                        cell_id,
-                        plus_field_requirements);
-                }
-            }
-            populateMovingDomainFieldData(context_, required_data,
-                                          "StandardAssembler::assembleCutInterfaces");
-            if (use_two_sided_kernel) {
-                populateMovingDomainFieldData(context_plus, required_data,
-                                              "StandardAssembler::assembleCutInterfaces");
-            }
-            if (need_material_state) {
-                auto view = material_state_provider_->getGeneratedInterfaceState(
-                    kernel,
-                    cell_id,
-                    active_marker,
-                    rule.provenance.cut_topology_revision,
-                    context_.numQuadraturePoints());
-                FE_THROW_IF(!view, FEException,
-                            "StandardAssembler::assembleCutInterfaces: material state provider returned null generated-interface storage");
-                FE_THROW_IF(view.bytes_per_qpt != material_state_spec.bytes_per_qpt,
-                            FEException,
-                            "StandardAssembler::assembleCutInterfaces: material state bytes_per_qpt mismatch");
-                FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
-                            "StandardAssembler::assembleCutInterfaces: invalid material state stride");
-                context_.setMaterialState(view.data_old, view.data_work,
+    if (need_field_solutions) {
+        populateFieldSolutionData(
+            context_,
+            mesh,
+            cell_id,
+            use_two_sided_kernel ? minus_field_requirements : field_requirements);
+        if (use_two_sided_kernel) {
+            populateFieldSolutionData(
+                context_plus,
+                mesh,
+                cell_id,
+                plus_field_requirements);
+        }
+    }
+    populateMovingDomainFieldData(context_, required_data,
+                                  "StandardAssembler::assembleCutInterfaces");
+    if (use_two_sided_kernel) {
+        populateMovingDomainFieldData(context_plus, required_data,
+                                      "StandardAssembler::assembleCutInterfaces");
+    }
+    if (need_material_state) {
+        auto view = material_state_provider_->getGeneratedInterfaceState(
+            kernel,
+            cell_id,
+            active_marker,
+            rule.provenance.cut_topology_revision,
+            context_.numQuadraturePoints());
+        FE_THROW_IF(!view, FEException,
+                    "StandardAssembler::assembleCutInterfaces: material state provider returned null generated-interface storage");
+        FE_THROW_IF(view.bytes_per_qpt != material_state_spec.bytes_per_qpt,
+                    FEException,
+                    "StandardAssembler::assembleCutInterfaces: material state bytes_per_qpt mismatch");
+        FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
+                    "StandardAssembler::assembleCutInterfaces: invalid material state stride");
+        context_.setMaterialState(view.data_old, view.data_work,
+                                  view.bytes_per_qpt,
+                                  view.stride_bytes, view.alignment,
+                                  view.variables,
+                                  view.old_lifecycle,
+                                  view.work_lifecycle);
+        if (use_two_sided_kernel) {
+            context_plus.setMaterialState(view.data_old, view.data_work,
                                           view.bytes_per_qpt,
                                           view.stride_bytes, view.alignment,
                                           view.variables,
                                           view.old_lifecycle,
                                           view.work_lifecycle);
-                if (use_two_sided_kernel) {
-                    context_plus.setMaterialState(view.data_old, view.data_work,
-                                                  view.bytes_per_qpt,
-                                                  view.stride_bytes, view.alignment,
-                                                  view.variables,
-                                                  view.old_lifecycle,
-                                                  view.work_lifecycle);
-                }
-            }
-
-            prepareKernelOutputRequest(kernel_output_,
-                                       context_.numTestDofs(),
-                                       context_.numTrialDofs(),
-                                       assemble_matrix && insert_matrix_view != nullptr,
-                                       assemble_vector && insert_vector_view != nullptr);
-            prepareKernelOutputRequest(output_plus,
-                                       use_two_sided_kernel ? context_plus.numTestDofs() : context_.numTestDofs(),
-                                       use_two_sided_kernel ? context_plus.numTrialDofs() : context_.numTrialDofs(),
-                                       use_two_sided_kernel && assemble_matrix && insert_matrix_view != nullptr,
-                                       use_two_sided_kernel && assemble_vector && insert_vector_view != nullptr);
-            prepareKernelOutputRequest(coupling_mp,
-                                       context_.numTestDofs(),
-                                       use_two_sided_kernel ? context_plus.numTrialDofs() : context_.numTrialDofs(),
-                                       use_two_sided_kernel && assemble_matrix && insert_matrix_view != nullptr,
-                                       false);
-            prepareKernelOutputRequest(coupling_pm,
-                                       use_two_sided_kernel ? context_plus.numTestDofs() : context_.numTestDofs(),
-                                       context_.numTrialDofs(),
-                                       use_two_sided_kernel && assemble_matrix && insert_matrix_view != nullptr,
-                                       false);
-            if (use_interface_kernel) {
-                kernel_impl.computeInterfaceFace(
-                    context_, use_two_sided_kernel ? context_plus : context_, active_marker,
-                    kernel_output_, output_plus, coupling_mp, coupling_pm);
-            } else {
-                kernel_impl.computeBoundaryFace(context_, active_marker, kernel_output_);
-            }
-
-            if (context_.testUsesVectorBasis() || context_.trialUsesVectorBasis()) {
-                applyVectorBasisOutputOrientation(mesh, cell_id, test_space,
-                                                  cell_id, trial_space, kernel_output_);
-            }
-            if (use_two_sided_kernel &&
-                (context_plus.testUsesVectorBasis() || context_plus.trialUsesVectorBasis())) {
-                if (output_plus.has_matrix || output_plus.has_vector) {
-                    applyVectorBasisOutputOrientation(mesh, cell_id, test_space,
-                                                      cell_id, trial_space, output_plus);
-                }
-                if (coupling_mp.has_matrix) {
-                    applyVectorBasisOutputOrientation(mesh, cell_id, test_space,
-                                                      cell_id, trial_space, coupling_mp);
-                }
-                if (coupling_pm.has_matrix) {
-                    applyVectorBasisOutputOrientation(mesh, cell_id, test_space,
-                                                      cell_id, trial_space, coupling_pm);
-                }
-            }
-
-            insertLocalForCell(cell_id, row_dof_map_, row_dof_offset_,
-                               col_dof_map_, col_dof_offset_,
-                               kernel_output_, row_dofs, col_dofs,
-                               assemble_matrix ? insert_matrix_view : nullptr,
-                               assemble_vector ? insert_vector_view : nullptr);
-            if (use_two_sided_kernel && (output_plus.has_matrix || output_plus.has_vector)) {
-                insertLocalForCell(cell_id, row_dof_map_, row_dof_offset_,
-                                   col_dof_map_, col_dof_offset_,
-                                   output_plus, row_dofs, col_dofs,
-                                   assemble_matrix ? insert_matrix_view : nullptr,
-                                   assemble_vector ? insert_vector_view : nullptr);
-            }
-            if (use_two_sided_kernel && coupling_mp.has_matrix &&
-                assemble_matrix && insert_matrix_view != nullptr) {
-                if (options_.use_constraints && constraint_distributor_ &&
-                    constraints_ &&
-                    (constraints_->hasConstrainedDofs(row_dofs) ||
-                     constraints_->hasConstrainedDofs(col_dofs))) {
-                    insertLocalConstrained(coupling_mp, row_dofs, col_dofs,
-                                           insert_matrix_view, nullptr);
-                } else {
-                    insert_matrix_view->addMatrixEntries(row_dofs, col_dofs,
-                                                         coupling_mp.local_matrix);
-                }
-            }
-            if (use_two_sided_kernel && coupling_pm.has_matrix &&
-                assemble_matrix && insert_matrix_view != nullptr) {
-                if (options_.use_constraints && constraint_distributor_ &&
-                    constraints_ &&
-                    (constraints_->hasConstrainedDofs(row_dofs) ||
-                     constraints_->hasConstrainedDofs(col_dofs))) {
-                    insertLocalConstrained(coupling_pm, row_dofs, col_dofs,
-                                           insert_matrix_view, nullptr);
-                } else {
-                    insert_matrix_view->addMatrixEntries(row_dofs, col_dofs,
-                                                         coupling_pm.local_matrix);
-                }
-            }
-
-            ++result.interface_faces_assembled;
-            if (assemble_matrix && insert_matrix_view != nullptr && kernel_output_.has_matrix) {
-                result.matrix_entries_inserted +=
-                    static_cast<GlobalIndex>(row_dofs.size() * col_dofs.size());
-            }
-            if (assemble_matrix && insert_matrix_view != nullptr &&
-                use_two_sided_kernel && output_plus.has_matrix) {
-                result.matrix_entries_inserted +=
-                    static_cast<GlobalIndex>(row_dofs.size() * col_dofs.size());
-            }
-            if (assemble_matrix && insert_matrix_view != nullptr &&
-                use_two_sided_kernel && coupling_mp.has_matrix) {
-                result.matrix_entries_inserted +=
-                    static_cast<GlobalIndex>(row_dofs.size() * col_dofs.size());
-            }
-            if (assemble_matrix && insert_matrix_view != nullptr &&
-                use_two_sided_kernel && coupling_pm.has_matrix) {
-                result.matrix_entries_inserted +=
-                    static_cast<GlobalIndex>(row_dofs.size() * col_dofs.size());
-            }
-            if (assemble_vector && insert_vector_view != nullptr && kernel_output_.has_vector) {
-                result.vector_entries_inserted += static_cast<GlobalIndex>(row_dofs.size());
-            }
-            if (assemble_vector && insert_vector_view != nullptr &&
-                use_two_sided_kernel && output_plus.has_vector) {
-                result.vector_entries_inserted += static_cast<GlobalIndex>(row_dofs.size());
-            }
         }
-    });
+    }
 
-    const auto end_time = std::chrono::steady_clock::now();
-    result.elapsed_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
-    return result;
+    prepareKernelOutputRequest(kernel_output_,
+                               context_.numTestDofs(),
+                               context_.numTrialDofs(),
+                               assemble_matrix && insert_matrix_view != nullptr,
+                               assemble_vector && insert_vector_view != nullptr);
+    prepareKernelOutputRequest(output_plus,
+                               use_two_sided_kernel ? context_plus.numTestDofs() : context_.numTestDofs(),
+                               use_two_sided_kernel ? context_plus.numTrialDofs() : context_.numTrialDofs(),
+                               use_two_sided_kernel && assemble_matrix && insert_matrix_view != nullptr,
+                               use_two_sided_kernel && assemble_vector && insert_vector_view != nullptr);
+    prepareKernelOutputRequest(coupling_mp,
+                               context_.numTestDofs(),
+                               use_two_sided_kernel ? context_plus.numTrialDofs() : context_.numTrialDofs(),
+                               use_two_sided_kernel && assemble_matrix && insert_matrix_view != nullptr,
+                               false);
+    prepareKernelOutputRequest(coupling_pm,
+                               use_two_sided_kernel ? context_plus.numTestDofs() : context_.numTestDofs(),
+                               context_.numTrialDofs(),
+                               use_two_sided_kernel && assemble_matrix && insert_matrix_view != nullptr,
+                               false);
+    if (use_interface_kernel) {
+        loop.kernel.computeInterfaceFace(
+            context_, use_two_sided_kernel ? context_plus : context_, active_marker,
+            kernel_output_, output_plus, coupling_mp, coupling_pm);
+    } else {
+        loop.kernel.computeBoundaryFace(context_, active_marker, kernel_output_);
+    }
+
+    if (context_.testUsesVectorBasis() || context_.trialUsesVectorBasis()) {
+        applyVectorBasisOutputOrientation(mesh, cell_id, test_space,
+                                          cell_id, trial_space, kernel_output_);
+    }
+    if (use_two_sided_kernel &&
+        (context_plus.testUsesVectorBasis() || context_plus.trialUsesVectorBasis())) {
+        if (output_plus.has_matrix || output_plus.has_vector) {
+            applyVectorBasisOutputOrientation(mesh, cell_id, test_space,
+                                              cell_id, trial_space, output_plus);
+        }
+        if (coupling_mp.has_matrix) {
+            applyVectorBasisOutputOrientation(mesh, cell_id, test_space,
+                                              cell_id, trial_space, coupling_mp);
+        }
+        if (coupling_pm.has_matrix) {
+            applyVectorBasisOutputOrientation(mesh, cell_id, test_space,
+                                              cell_id, trial_space, coupling_pm);
+        }
+    }
+
+    sink.forCell(cell_id, row_dof_map_, row_dof_offset_,
+                 col_dof_map_, col_dof_offset_,
+                 kernel_output_, row_dofs, col_dofs,
+                       assemble_matrix ? insert_matrix_view : nullptr,
+                       assemble_vector ? insert_vector_view : nullptr);
+    if (use_two_sided_kernel && (output_plus.has_matrix || output_plus.has_vector)) {
+        sink.forCell(cell_id, row_dof_map_, row_dof_offset_,
+                     col_dof_map_, col_dof_offset_,
+                     output_plus, row_dofs, col_dofs,
+                           assemble_matrix ? insert_matrix_view : nullptr,
+                           assemble_vector ? insert_vector_view : nullptr);
+    }
+    if (use_two_sided_kernel && coupling_mp.has_matrix &&
+        assemble_matrix && insert_matrix_view != nullptr) {
+        if (options_.use_constraints && hasConstraintDistributorForInsert() &&
+            constraints_ &&
+            (constraints_->hasConstrainedDofs(row_dofs) ||
+             constraints_->hasConstrainedDofs(col_dofs))) {
+            sink.constrained(coupling_mp, row_dofs, col_dofs,
+                             insert_matrix_view, nullptr);
+        } else {
+            sink.matrixEntries(insert_matrix_view, row_dofs, col_dofs, coupling_mp);
+        }
+    }
+    if (use_two_sided_kernel && coupling_pm.has_matrix &&
+        assemble_matrix && insert_matrix_view != nullptr) {
+        if (options_.use_constraints && hasConstraintDistributorForInsert() &&
+            constraints_ &&
+            (constraints_->hasConstrainedDofs(row_dofs) ||
+             constraints_->hasConstrainedDofs(col_dofs))) {
+            sink.constrained(coupling_pm, row_dofs, col_dofs,
+                             insert_matrix_view, nullptr);
+        } else {
+            sink.matrixEntries(insert_matrix_view, row_dofs, col_dofs, coupling_pm);
+        }
+    }
+
+    ++result.interface_faces_assembled;
+    if (assemble_matrix && insert_matrix_view != nullptr && kernel_output_.has_matrix) {
+        result.matrix_entries_inserted +=
+            static_cast<GlobalIndex>(row_dofs.size() * col_dofs.size());
+    }
+    if (assemble_matrix && insert_matrix_view != nullptr &&
+        use_two_sided_kernel && output_plus.has_matrix) {
+        result.matrix_entries_inserted +=
+            static_cast<GlobalIndex>(row_dofs.size() * col_dofs.size());
+    }
+    if (assemble_matrix && insert_matrix_view != nullptr &&
+        use_two_sided_kernel && coupling_mp.has_matrix) {
+        result.matrix_entries_inserted +=
+            static_cast<GlobalIndex>(row_dofs.size() * col_dofs.size());
+    }
+    if (assemble_matrix && insert_matrix_view != nullptr &&
+        use_two_sided_kernel && coupling_pm.has_matrix) {
+        result.matrix_entries_inserted +=
+            static_cast<GlobalIndex>(row_dofs.size() * col_dofs.size());
+    }
+    if (assemble_vector && insert_vector_view != nullptr && kernel_output_.has_vector) {
+        result.vector_entries_inserted += static_cast<GlobalIndex>(row_dofs.size());
+    }
+    if (assemble_vector && insert_vector_view != nullptr &&
+        use_two_sided_kernel && output_plus.has_vector) {
+        result.vector_entries_inserted += static_cast<GlobalIndex>(row_dofs.size());
+    }
 }
 
 // ============================================================================

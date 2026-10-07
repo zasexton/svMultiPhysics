@@ -7,6 +7,8 @@
 
 #include "Forms/FormKernels.h"
 
+#include "Assembly/ConcurrentCompute.h"
+
 #include "Constitutive/StateLayout.h"
 
 #include "Core/FEException.h"
@@ -13191,6 +13193,7 @@ void FormKernel::setTensorInterpreterOptions(TensorJITOptions options)
 
     // Reset the one-time interpreter lowering/preparation so the new policy takes effect.
     indexed_lowering_once_ = std::make_unique<std::once_flag>();
+    indexed_lowering_done_ = false;
     tensor_term_ir_.clear();
     tensor_term_fallback_.clear();
 }
@@ -13209,10 +13212,16 @@ bool FormKernel::requiresTwoSidedInterfaceFace() const noexcept
 
 void FormKernel::ensureInterpreterLoweredIndexedAccess()
 {
+    if (!indexed_lowering_done_) {
+        // The lowering rewrites the IR that the JIT also reads; it runs in
+        // the serial order only (see Assembly/ConcurrentCompute.h).
+        assembly::requireSerial("interpreter IR lowering");
+    }
     if (!indexed_lowering_once_) {
         indexed_lowering_once_ = std::make_unique<std::once_flag>();
     }
     std::call_once(*indexed_lowering_once_, [&] {
+        indexed_lowering_done_ = true;
         // Always lower IndexedAccess in inlined update programs: these are evaluated
         // via scalar evalReal() and are expected to stay small.
         lowerIndexedAccessInUpdates(inlined_state_updates_);
@@ -14491,10 +14500,16 @@ bool LinearFormKernel::requiresTwoSidedInterfaceFace() const noexcept
 
 void LinearFormKernel::ensureInterpreterLoweredIndexedAccess()
 {
+    if (!indexed_lowering_done_) {
+        // The lowering rewrites the IR that the JIT also reads; it runs in
+        // the serial order only (see Assembly/ConcurrentCompute.h).
+        assembly::requireSerial("interpreter IR lowering");
+    }
     if (!indexed_lowering_once_) {
         indexed_lowering_once_ = std::make_unique<std::once_flag>();
     }
     std::call_once(*indexed_lowering_once_, [&] {
+        indexed_lowering_done_ = true;
         lowerIndexedAccessInFormIR(bilinear_ir_);
         if (linear_ir_.has_value()) {
             lowerIndexedAccessInFormIR(*linear_ir_);
@@ -15123,10 +15138,16 @@ bool NonlinearFormKernel::requiresTwoSidedInterfaceFace() const noexcept
 
 void NonlinearFormKernel::ensureInterpreterLoweredIndexedAccess()
 {
+    if (!indexed_lowering_done_) {
+        // The lowering rewrites the IR that the JIT also reads; it runs in
+        // the serial order only (see Assembly/ConcurrentCompute.h).
+        assembly::requireSerial("interpreter IR lowering");
+    }
     if (!indexed_lowering_once_) {
         indexed_lowering_once_ = std::make_unique<std::once_flag>();
     }
     std::call_once(*indexed_lowering_once_, [&] {
+        indexed_lowering_done_ = true;
         lowerIndexedAccessInFormIR(residual_ir_);
         lowerIndexedAccessInUpdates(inlined_state_updates_);
     });
@@ -16933,10 +16954,16 @@ bool SymbolicNonlinearFormKernel::requiresTwoSidedInterfaceFace() const noexcept
 
 void SymbolicNonlinearFormKernel::ensureInterpreterLoweredIndexedAccess()
 {
+    if (!indexed_lowering_done_) {
+        // The lowering rewrites the IR that the JIT also reads; it runs in
+        // the serial order only (see Assembly/ConcurrentCompute.h).
+        assembly::requireSerial("interpreter IR lowering");
+    }
     if (!indexed_lowering_once_) {
         indexed_lowering_once_ = std::make_unique<std::once_flag>();
     }
     std::call_once(*indexed_lowering_once_, [&] {
+        indexed_lowering_done_ = true;
         lowerIndexedAccessInFormIR(residual_ir_);
         if (tangent_ready_ && tangent_ir_.isCompiled()) {
             lowerIndexedAccessInFormIR(tangent_ir_);
@@ -18447,10 +18474,16 @@ FunctionalFormKernel::FunctionalFormKernel(
 
 void FunctionalFormKernel::ensureInterpreterLoweredIndexedAccess()
 {
+    if (!indexed_lowering_done_) {
+        // The lowering rewrites the IR that the JIT also reads; it runs in
+        // the serial order only (see Assembly/ConcurrentCompute.h).
+        assembly::requireSerial("interpreter IR lowering");
+    }
     if (!indexed_lowering_once_) {
         indexed_lowering_once_ = std::make_unique<std::once_flag>();
     }
     std::call_once(*indexed_lowering_once_, [&] {
+        indexed_lowering_done_ = true;
         lowerIndexedAccessInExpr(integrand_);
     });
 }

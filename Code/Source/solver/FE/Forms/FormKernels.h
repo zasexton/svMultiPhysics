@@ -191,6 +191,8 @@ private:
     assembly::MaterialStateSpec material_state_spec_{};
     InlinedMaterialStateUpdateProgram inlined_state_updates_{};
     std::unique_ptr<std::once_flag> indexed_lowering_once_{std::make_unique<std::once_flag>()};
+    /// Set once the lowering ran; threaded assembly defers to the serial loop until then.
+    bool indexed_lowering_done_{false};
     bool matrix_state_independent_{false};
 
     TensorJITOptions tensor_interpreter_options_{};
@@ -293,6 +295,8 @@ private:
     assembly::MaterialStateSpec material_state_spec_{};
     InlinedMaterialStateUpdateProgram inlined_state_updates_{};
     std::unique_ptr<std::once_flag> indexed_lowering_once_{std::make_unique<std::once_flag>()};
+    /// Set once the lowering ran; threaded assembly defers to the serial loop until then.
+    bool indexed_lowering_done_{false};
     bool matrix_state_independent_{false};
     std::optional<Real> scalar_diffusion_cell_coefficient_{};
 };
@@ -380,6 +384,8 @@ private:
     assembly::MaterialStateSpec material_state_spec_{};
     InlinedMaterialStateUpdateProgram inlined_state_updates_{};
     std::unique_ptr<std::once_flag> indexed_lowering_once_{std::make_unique<std::once_flag>()};
+    /// Set once the lowering ran; threaded assembly defers to the serial loop until then.
+    bool indexed_lowering_done_{false};
 };
 
 /**
@@ -478,6 +484,8 @@ private:
     assembly::MaterialStateSpec material_state_spec_{};
     InlinedMaterialStateUpdateProgram inlined_state_updates_{};
     std::unique_ptr<std::once_flag> indexed_lowering_once_{std::make_unique<std::once_flag>()};
+    /// Set once the lowering ran; threaded assembly defers to the serial loop until then.
+    bool indexed_lowering_done_{false};
 };
 
 /**
@@ -630,6 +638,8 @@ private:
     assembly::RequiredData required_data_{assembly::RequiredData::None};
     std::vector<assembly::FieldRequirement> field_requirements_{};
     std::unique_ptr<std::once_flag> indexed_lowering_once_{std::make_unique<std::once_flag>()};
+    /// Set once the lowering ran; threaded assembly defers to the serial loop until then.
+    bool indexed_lowering_done_{false};
 };
 
 /**
