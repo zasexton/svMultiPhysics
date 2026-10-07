@@ -431,6 +431,21 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   - Eisenstat–Walker forcing (`<Inexact_Newton_forcing>`) stays off. It raised Newton iterations by 70–90% and slowed every case, because most passes need only one Newton iteration.
   - The generalized-α rate-extrapolation predictor (`Generalized_alpha_predictor=RateExtrapolation`, fields `phi`) stays opt-in. It is 20–24% faster per step and gives the same results on 1, 2 and 4 ranks to 1e-14. It is as far from a 100× tighter-gate reference as the default is, and it moves the M2/M3/M4 gate metrics by at most 1.5e-6 relative. Making it the default would change every result within the nonlinear tolerance, so that waits for an explicit user decision.
   - Measured before the merge: commits that are bitwise identical on the default path cut a further 10–14% per step on top of 119818c3 (check-only passes assemble only the residual, redundant cut-context rebuilds removed).
+- **D24, 2026-10-06: the fixed-step sessile protocol is not adopted** (outcome of the pre-registered check approved under D22; generator default unchanged). `sessile_drop_2d/generate_case.py` gains non-default options (`--dt-rule fixed`, `--dt-multiple`, `--dt-divisor`, `--surface-tension-semi-implicit`); default decks are bitwise identical. `verify.py` gates the pre-registered `time_step_criterion`: every M4 gate at dt and dt/2; final angle within 0.1°; base and apex within 0.1%; history angle within 0.5° and history base within 0.1%; two wall contact points at every output. Results (binary `4e604d10`, 4 ranks; README "Fixed-step validation"):
+  - **R/h = 16: the contact angle is not time-converged, at any step tested, including the current protocol step.** The final angle moves 0.1–1.5° per halving from 2dt to dt/4 with no trend toward zero (60°: error 1.93 / 1.75 / 1.45 / 1.16°; 120°: 0.64 / 0.65 / 0.51 / 1.84°). Base and apex converge within about 0.15%. At T the contact lines still creep (capillary number 4e-3 to 9e-3), and when a partly pinned contact line crosses each wall vertex depends on dt, which sets the local circle-fit angle.
+    - With the lagged term at the protocol step the result changes by at most 0.01° (final angle) and 0.12° (history), and mean outer passes fall from 4.05 to 3.4–3.7.
+  - **R/h = 32 and 64: runs fail at every step tried, including the current protocol**, so no dt pair exists there. The failure modes are the same as in the current-protocol study:
+    - outer-loop stagnation at the 12-pass cap: R/h = 32 120° at t = 7.9 in the reference run, and at t = 5.9–11.6 at other steps; R/h = 64 60° at t = 0.39;
+    - the 4-rank aggregation owner disagreement (R/h = 32 60° at t = 0.267);
+    - the rollback failure (R/h = 32 60° in the reference run at the same t = 0.267, and R/h = 64 120° on 8 ranks).
+  - **Cost:** at fine levels GMRES iterations grow with the step: R/h = 64 120° needs 1,650 iterations per solve at the fixed step against 360 at the current protocol. A working fixed step would save at most about 3× there.
+  - **Consequences for M4:**
+    - The solver failures (debugging agent, branch `dev/fix-sessile-mpi-robustness`) block the resolution study under any protocol.
+    - The angle criterion needs a protocol decision once the runs complete. Options, not decided: a longer run (for example 10 viscous times) so the end state is closer to rest; or an angle tolerance that allows for the dt and vertex-crossing scatter, since base and apex converge.
+- **Reference study status (2026-10-06, binary `4e604d10`, current protocol):** R/h = 16 passes at 60° and 120°. Every R/h = 32 and 64 run failed:
+  - R/h = 32 60°: rollback failure at step 172 (4 ranks);
+  - R/h = 32 120°: outer cap at step 5096 (t = 7.9) after 7.75 h (4 ranks);
+  - R/h = 64 60° and 120°: aggregation owner disagreement (8 ranks; 60° at setup, 120° after step 459).
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
