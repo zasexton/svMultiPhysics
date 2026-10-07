@@ -2599,6 +2599,17 @@ void gmres_v_impl(const fe_fsi_linear_solver::distributed_solver_bundles::Vector
                                  recycle_k_req == 0 &&
                                  !use_basis_panel;
   const fsils_int krylov_nNo = owned_only_krylov ? mynNo : nNo;
+  // With owned-only loops nothing reads the deeper ghost entries of a Krylov
+  // vector: its SpMV reads the column nodes of owned rows only, so its halo
+  // sync refreshes just those (the solution X keeps full syncs).  The
+  // bordered-face products read their input too, so any coupled or grouped
+  // face keeps the full sync.
+  const bool bordered_faces_read_input =
+      has_coupled_bc ||
+      std::any_of(lhs.grouped_bordered_field_couplings.begin(),
+                  lhs.grouped_bordered_field_couplings.end(),
+                  [](const auto& group) { return group.active; });
+  const bool spmv_halo_krylov = owned_only_krylov && !bordered_faces_read_input;
   const fsils_int krylov_update_nNo =
       (owned_only_krylov && (dof > 4 || use_serial_hot_path(max_omp_threads()))) ? mynNo : nNo;
   std::vector<double> recycle_B;
@@ -3123,7 +3134,11 @@ void gmres_v_impl(const fe_fsi_linear_solver::distributed_solver_bundles::Vector
       }
 
       tp0 = TP();
-      halo.sync_owned_to_ghost_vector(dof, *arnoldi_input);
+      if (spmv_halo_krylov) {
+        halo.sync_spmv_input_vector(dof, *arnoldi_input);
+      } else {
+        halo.sync_owned_to_ghost_vector(dof, *arnoldi_input);
+      }
       A.apply(
           dso::ghost_synced_input(dof, *arnoldi_input),
           dso::owned_only_output(dof, u_slice_next));

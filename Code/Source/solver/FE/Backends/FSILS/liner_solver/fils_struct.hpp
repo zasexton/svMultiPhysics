@@ -395,6 +395,14 @@ class FSILS_lhsType
     mutable std::vector<double> owned_halo_send_buffer;
     mutable std::vector<double> owned_halo_recv_buffer;
 
+    /// Subset of the owned halo plan that refreshes only the ghost nodes the
+    /// owned-row SpMV reads (column nodes of owned rows), aligned with
+    /// `owned_halo_neighbor_ranks`.  Valid when `spmv_halo_valid` is set;
+    /// ghost entries outside it keep stale values after such a sync.
+    bool spmv_halo_valid{false};
+    std::vector<std::vector<fsils_int>> spmv_halo_send_nodes;
+    std::vector<std::vector<fsils_int>> spmv_halo_recv_nodes;
+
     /// Column pointer                      (USE)
     Vector<fsils_int> colPtr;
 

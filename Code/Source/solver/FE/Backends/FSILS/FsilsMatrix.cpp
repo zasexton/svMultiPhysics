@@ -490,6 +490,119 @@ void clear_owned_row_halo_plan(FsilsShared& shared)
     shared.lhs.owned_halo_recv_nodes.clear();
     shared.lhs.owned_halo_send_buffer.clear();
     shared.lhs.owned_halo_recv_buffer.clear();
+    shared.lhs.spmv_halo_valid = false;
+    shared.lhs.spmv_halo_send_nodes.clear();
+    shared.lhs.spmv_halo_recv_nodes.clear();
+}
+
+/// Restrict the owned halo plan to the ghost nodes the owned-row SpMV reads:
+/// the column nodes of owned rows.  Each rank marks the positions of its
+/// receive lists that it needs and sends them to the owners, which restrict
+/// their send lists to the same positions (the two lists of a neighbor pair
+/// are aligned element by element).  Collective over the FSILS communicator;
+/// SVMP_FSILS_FULL_SPMV_HALO=1 keeps the full plan.
+void build_spmv_halo_plan(FsilsShared& shared)
+{
+#if FE_HAS_MPI
+    auto& lhs = shared.lhs;
+    lhs.spmv_halo_valid = false;
+    lhs.spmv_halo_send_nodes.clear();
+    lhs.spmv_halo_recv_nodes.clear();
+    if (!lhs.owned_row_operator || lhs.commu.nTasks <= 1) {
+        return;
+    }
+    static const bool keep_full = env_flag_enabled("SVMP_FSILS_FULL_SPMV_HALO");
+    const auto n_neighbors = lhs.owned_halo_neighbor_ranks.size();
+    if (keep_full ||
+        lhs.owned_halo_send_nodes.size() != n_neighbors ||
+        lhs.owned_halo_recv_nodes.size() != n_neighbors) {
+        return;
+    }
+
+    std::vector<char> needed(static_cast<std::size_t>(std::max<fe_fsi_linear_solver::fsils_int>(lhs.nNo, 0)), 0);
+    for (fe_fsi_linear_solver::fsils_int i = 0; i < lhs.mynNo; ++i) {
+        for (fe_fsi_linear_solver::fsils_int j = lhs.rowPtr(0, i); j <= lhs.rowPtr(1, i); ++j) {
+            const fe_fsi_linear_solver::fsils_int col = lhs.colPtr(j);
+            if (col >= lhs.mynNo && col < lhs.nNo) {
+                needed[static_cast<std::size_t>(col)] = 1;
+            }
+        }
+    }
+
+    const int size = lhs.commu.nTasks;
+    std::vector<std::vector<int>> keep_positions(n_neighbors);
+    std::vector<int> send_counts(static_cast<std::size_t>(size), 0);
+    std::vector<int> recv_counts(static_cast<std::size_t>(size), 0);
+    lhs.spmv_halo_recv_nodes.resize(n_neighbors);
+    for (std::size_t i = 0; i < n_neighbors; ++i) {
+        const auto& recv = lhs.owned_halo_recv_nodes[i];
+        auto& kept = lhs.spmv_halo_recv_nodes[i];
+        for (std::size_t k = 0; k < recv.size(); ++k) {
+            if (needed[static_cast<std::size_t>(recv[k])] != 0) {
+                keep_positions[i].push_back(static_cast<int>(k));
+                kept.push_back(recv[k]);
+            }
+        }
+        send_counts[static_cast<std::size_t>(lhs.owned_halo_neighbor_ranks[i])] =
+            static_cast<int>(keep_positions[i].size());
+    }
+    MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, lhs.commu.comm);
+    std::vector<int> send_displs(static_cast<std::size_t>(size) + 1u, 0);
+    std::vector<int> recv_displs(static_cast<std::size_t>(size) + 1u, 0);
+    for (int r = 0; r < size; ++r) {
+        send_displs[static_cast<std::size_t>(r) + 1u] =
+            send_displs[static_cast<std::size_t>(r)] + send_counts[static_cast<std::size_t>(r)];
+        recv_displs[static_cast<std::size_t>(r) + 1u] =
+            recv_displs[static_cast<std::size_t>(r)] + recv_counts[static_cast<std::size_t>(r)];
+    }
+    std::vector<int> send_buffer(static_cast<std::size_t>(send_displs.back()), 0);
+    for (std::size_t i = 0; i < n_neighbors; ++i) {
+        const auto peer = static_cast<std::size_t>(lhs.owned_halo_neighbor_ranks[i]);
+        std::copy(keep_positions[i].begin(), keep_positions[i].end(),
+                  send_buffer.begin() + send_displs[peer]);
+    }
+    std::vector<int> recv_buffer(static_cast<std::size_t>(recv_displs.back()), 0);
+    MPI_Alltoallv(send_buffer.data(), send_counts.data(), send_displs.data(), MPI_INT,
+                  recv_buffer.data(), recv_counts.data(), recv_displs.data(), MPI_INT,
+                  lhs.commu.comm);
+
+    int local_ok = 1;
+    lhs.spmv_halo_send_nodes.resize(n_neighbors);
+    for (std::size_t i = 0; i < n_neighbors; ++i) {
+        const auto peer = static_cast<std::size_t>(lhs.owned_halo_neighbor_ranks[i]);
+        const auto& send = lhs.owned_halo_send_nodes[i];
+        auto& kept = lhs.spmv_halo_send_nodes[i];
+        for (int k = recv_displs[peer]; k < recv_displs[peer + 1u]; ++k) {
+            const int position = recv_buffer[static_cast<std::size_t>(k)];
+            if (position < 0 || static_cast<std::size_t>(position) >= send.size()) {
+                local_ok = 0;
+                break;
+            }
+            kept.push_back(send[static_cast<std::size_t>(position)]);
+        }
+    }
+    // Positions from ranks outside the neighbor list would be a broken plan.
+    for (int r = 0; r < size; ++r) {
+        if (recv_counts[static_cast<std::size_t>(r)] == 0) {
+            continue;
+        }
+        if (std::find(lhs.owned_halo_neighbor_ranks.begin(),
+                      lhs.owned_halo_neighbor_ranks.end(),
+                      r) == lhs.owned_halo_neighbor_ranks.end()) {
+            local_ok = 0;
+        }
+    }
+    int global_ok = 0;
+    MPI_Allreduce(&local_ok, &global_ok, 1, MPI_INT, MPI_MIN, lhs.commu.comm);
+    if (global_ok == 0) {
+        lhs.spmv_halo_send_nodes.clear();
+        lhs.spmv_halo_recv_nodes.clear();
+        return;
+    }
+    lhs.spmv_halo_valid = true;
+#else
+    (void)shared;
+#endif
 }
 
 void build_owned_row_halo_plan(FsilsShared& shared)
@@ -1501,6 +1614,7 @@ FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& pattern,
     // Build direct block-base lookup tables after sorting so the stored
     // offsets match the final colPtr/values_ layout.
     buildBlockLookupTables(*shared);
+    build_spmv_halo_plan(*shared);
     if (env_flag_enabled("SVMP_FSILS_VALIDATE_BLOCK_LOOKUP")) {
         validateBlockLookupTables(*shared);
     }
@@ -1877,6 +1991,7 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
     // Build direct block-base lookup tables after sorting so the stored
     // offsets match the final colPtr/values_ layout.
     buildBlockLookupTables(*shared);
+    build_spmv_halo_plan(*shared);
     if (env_flag_enabled("SVMP_FSILS_VALIDATE_BLOCK_LOOKUP")) {
         validateBlockLookupTables(*shared);
     }

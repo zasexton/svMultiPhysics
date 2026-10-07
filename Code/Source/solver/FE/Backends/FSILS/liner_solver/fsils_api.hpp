@@ -65,6 +65,11 @@ void fsils_syncs_owned_to_ghost(const FSILS_lhsType& lhs, Vector<double>& R);
 
 void fsils_syncv_owned_to_ghost(const FSILS_lhsType& lhs, int dof, Array<double>& R);
 
+/// Refreshes only the ghost nodes read by the owned-row SpMV (column nodes of
+/// owned rows); other ghost entries keep stale values.  Falls back to the full
+/// owner-to-ghost sync when the matrix built no SpMV halo plan.
+void fsils_syncv_spmv_halo(const FSILS_lhsType& lhs, int dof, Array<double>& R);
+
 double fsils_cpu_t();
 
 void fsils_ls_create(FSILS_lsType& ls, LinearSolverType LS_type, double relTol = consts::double_inf, 

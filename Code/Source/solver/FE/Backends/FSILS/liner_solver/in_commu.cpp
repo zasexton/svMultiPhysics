@@ -167,24 +167,58 @@ void fsils_syncs_owned_halo(const FSILS_lhsType& lhs, Vector<double>& R)
   }
 }
 
+static void fsils_syncv_halo_lists(const FSILS_lhsType& lhs,
+                                   int dof,
+                                   Array<double>& R,
+                                   const std::vector<std::vector<fsils_int>>& send_lists,
+                                   const std::vector<std::vector<fsils_int>>& recv_lists,
+                                   bool zero_all_ghosts);
+
 void fsils_syncv_owned_halo(const FSILS_lhsType& lhs, int dof, Array<double>& R)
+{
+  fsils_syncv_halo_lists(lhs, dof, R, lhs.owned_halo_send_nodes, lhs.owned_halo_recv_nodes,
+                         /*zero_all_ghosts=*/true);
+}
+
+void fsils_syncv_spmv_halo_impl(const FSILS_lhsType& lhs, int dof, Array<double>& R)
+{
+  if (lhs.commu.nTasks == 1) {
+    return;
+  }
+  require_owned_halo_plan(lhs, "FSILS vector SpMV-column halo sync");
+  if (!lhs.spmv_halo_valid) {
+    fsils_syncv_owned_halo(lhs, dof, R);
+    return;
+  }
+  fsils_syncv_halo_lists(lhs, dof, R, lhs.spmv_halo_send_nodes, lhs.spmv_halo_recv_nodes,
+                         /*zero_all_ghosts=*/false);
+}
+
+static void fsils_syncv_halo_lists(const FSILS_lhsType& lhs,
+                                   int dof,
+                                   Array<double>& R,
+                                   const std::vector<std::vector<fsils_int>>& send_lists,
+                                   const std::vector<std::vector<fsils_int>>& recv_lists,
+                                   bool zero_all_ghosts)
 {
   const int n_neighbors = static_cast<int>(lhs.owned_halo_neighbor_ranks.size());
   if (n_neighbors == 0) {
     return;
   }
 
-  for (fsils_int k = lhs.mynNo; k < lhs.nNo; ++k) {
-    for (int l = 0; l < dof; ++l) {
-      R(l, k) = 0.0;
+  if (zero_all_ghosts) {
+    for (fsils_int k = lhs.mynNo; k < lhs.nNo; ++k) {
+      for (int l = 0; l < dof; ++l) {
+        R(l, k) = 0.0;
+      }
     }
   }
 
   std::size_t send_nodes_total = 0;
   std::size_t recv_nodes_total = 0;
   for (int i = 0; i < n_neighbors; ++i) {
-    send_nodes_total += lhs.owned_halo_send_nodes[static_cast<std::size_t>(i)].size();
-    recv_nodes_total += lhs.owned_halo_recv_nodes[static_cast<std::size_t>(i)].size();
+    send_nodes_total += send_lists[static_cast<std::size_t>(i)].size();
+    recv_nodes_total += recv_lists[static_cast<std::size_t>(i)].size();
   }
 
   auto& send_buffer = lhs.owned_halo_send_buffer;
@@ -201,8 +235,8 @@ void fsils_syncv_owned_halo(const FSILS_lhsType& lhs, int dof, Array<double>& R)
   std::size_t send_offset = 0;
   std::size_t recv_offset = 0;
   for (int i = 0; i < n_neighbors; ++i) {
-    const auto& send_nodes = lhs.owned_halo_send_nodes[static_cast<std::size_t>(i)];
-    const auto& recv_nodes = lhs.owned_halo_recv_nodes[static_cast<std::size_t>(i)];
+    const auto& send_nodes = send_lists[static_cast<std::size_t>(i)];
+    const auto& recv_nodes = recv_lists[static_cast<std::size_t>(i)];
     const int peer = lhs.owned_halo_neighbor_ranks[static_cast<std::size_t>(i)];
 
     for (std::size_t j = 0; j < send_nodes.size(); ++j) {
@@ -244,7 +278,7 @@ void fsils_syncv_owned_halo(const FSILS_lhsType& lhs, int dof, Array<double>& R)
 
   recv_offset = 0;
   for (int i = 0; i < n_neighbors; ++i) {
-    const auto& recv_nodes = lhs.owned_halo_recv_nodes[static_cast<std::size_t>(i)];
+    const auto& recv_nodes = recv_lists[static_cast<std::size_t>(i)];
     for (std::size_t j = 0; j < recv_nodes.size(); ++j) {
       const auto node = recv_nodes[j];
       for (int l = 0; l < dof; ++l) {
@@ -497,6 +531,11 @@ static void fsils_syncv_impl(const FSILS_lhsType& lhs, int dof, Array<double>& R
 void fsils_syncv_owned_to_ghost(const FSILS_lhsType& lhs, int dof, Array<double>& R)
 {
   fsils_syncv_impl(lhs, dof, R);
+}
+
+void fsils_syncv_spmv_halo(const FSILS_lhsType& lhs, int dof, Array<double>& R)
+{
+  fsils_syncv_spmv_halo_impl(lhs, dof, R);
 }
 
 };
