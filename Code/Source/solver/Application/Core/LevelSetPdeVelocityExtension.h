@@ -31,6 +31,9 @@
 // matrices of its owned cells; every rank assembles the same global system in
 // a canonical order (sorted global IDs) and solves it with the FE Eigen
 // backend's direct solver, so the result does not depend on the partition.
+// With a factorization cache on three or more ranks, component c is
+// factorized and solved on rank c only and its solution is broadcast bit for
+// bit (the components are independent systems); the result is the same.
 
 #include "Application/Core/LevelSetVelocityExtensionMap.h"
 #include "Mesh/Core/MeshComm.h"
@@ -61,6 +64,27 @@ enum class PdeVelocityExtensionOperator : std::uint8_t {
 [[nodiscard]] std::optional<PdeVelocityExtensionOperator>
 pdeVelocityExtensionOperatorFromToken(std::string_view token);
 
+// Sparse direct factorization of the dry-region systems.
+//   LuColamd (default): Eigen::SparseLU with COLAMD ordering, the FE Eigen
+//     backend's direct solve.
+//   LdltAmd (opt-in): Eigen::SimplicialLDLT with AMD ordering.  Valid for the
+//     symmetric positive definite harmonic operator only; much less fill in
+//     3D.  Its results differ from LuColamd at round-off level (they are still
+//     independent of the partition and the rank count).
+enum class PdeVelocityExtensionFactorization : std::uint8_t {
+  LuColamd,
+  LdltAmd,
+};
+
+[[nodiscard]] std::string_view pdeVelocityExtensionFactorizationName(
+    PdeVelocityExtensionFactorization factorization) noexcept;
+
+// Maps a token (case, '_' and '-' insensitive) to a factorization:
+// lu / lu_colamd / default -> LuColamd, ldlt / ldlt_amd -> LdltAmd.  Any
+// other token returns nullopt.
+[[nodiscard]] std::optional<PdeVelocityExtensionFactorization>
+pdeVelocityExtensionFactorizationFromToken(std::string_view token);
+
 struct PdeVelocityExtensionOptions {
   PdeVelocityExtensionOperator op{PdeVelocityExtensionOperator::Harmonic};
   // <= 0: the extension domain is every dry vertex of the mesh (default).
@@ -68,6 +92,8 @@ struct PdeVelocityExtensionOptions {
   // set; vertices outside receive zero.
   int band_layers{0};
   bool enforce_wall_impermeability{true};
+  PdeVelocityExtensionFactorization factorization{
+      PdeVelocityExtensionFactorization::LuColamd};
 };
 
 struct PdeVelocityExtensionReport {
@@ -83,6 +109,20 @@ struct PdeVelocityExtensionReport {
   double max_wall_normal_velocity{0.0};
   // True when the call reused the cached dry-region factorization (and rows).
   bool reused_factorization{false};
+  // True when the components were factorized and solved on one rank each.
+  bool distributed_solves{false};
+  // True when SVMP_PDE_EXTENSION_SELF_CHECK compared the result with the
+  // uncached replicated solve and found it bitwise identical.
+  bool self_checked{false};
+  // Entries held by the cache after the call.
+  std::size_t cache_entries{0u};
+  // Content hash of the dry-region solution in canonical (global vertex ID)
+  // order; the same on every rank.
+  std::uint64_t solution_hash{0u};
+  // Wall time of the call on this rank and of this rank's component solves
+  // (factorization and solve).
+  double elapsed_seconds{0.0};
+  double component_solve_seconds{0.0};
 };
 
 // Mesh revisions that, together with the exact system content, key a cached
@@ -112,18 +152,36 @@ struct PdeVelocityExtensionMeshRevisions {
 // factorization to the new right-hand sides, so its result is bitwise
 // identical to a fresh solve, and it skips the gather of the element
 // matrices.  Any failure leaves the cache empty.
+//
+// The cache keeps several entries (most recently used first): the known set
+// of successive outer passes can return to an earlier state, whose entry is
+// then reused.  An entry is reused only if it matches on every rank; entries
+// are added and evicted by collective decisions, so every rank holds the
+// same entries.  With distributed component solves an entry keeps the matrix
+// and factorization of a component only on the rank that solves it, so
+// kDefaultDistributedEntries entries cost those ranks what one replicated
+// entry costs every rank.  The capacity is SVMP_PDE_EXTENSION_CACHE_ENTRIES
+// (1 to kMaxEntries) when set, otherwise kDefaultEntries for replicated and
+// kDefaultDistributedEntries for distributed solves.
 class PdeVelocityExtensionCache {
 public:
+  static constexpr std::size_t kMaxEntries = 8u;
+  static constexpr std::size_t kDefaultEntries = 1u;
+  static constexpr std::size_t kDefaultDistributedEntries = 3u;
+
   struct Statistics {
     std::uint64_t hits{0u};
     std::uint64_t misses{0u};
-    // Footprint of the cached entry (estimate) and its peak.
+    // Footprint of the cached entries (estimate) and its peak.
     std::size_t bytes{0u};
     std::size_t peak_bytes{0u};
   };
   struct Entry;
 
+  // Capacity from SVMP_PDE_EXTENSION_CACHE_ENTRIES, else the defaults.
   PdeVelocityExtensionCache();
+  // Fixed capacity, clamped to [1, kMaxEntries].
+  explicit PdeVelocityExtensionCache(std::size_t capacity);
   ~PdeVelocityExtensionCache();
   PdeVelocityExtensionCache(PdeVelocityExtensionCache&&) noexcept;
   PdeVelocityExtensionCache& operator=(PdeVelocityExtensionCache&&) noexcept;
@@ -131,18 +189,28 @@ public:
   PdeVelocityExtensionCache& operator=(const PdeVelocityExtensionCache&) =
       delete;
 
-  // Drops the cached entry on this rank.  The next call then refactors on
+  // Drops the cached entries on this rank.  The next call then refactors on
   // every rank of its communicator.
   void clear() noexcept;
   [[nodiscard]] bool empty() const noexcept;
+  [[nodiscard]] std::size_t size() const noexcept;
+  // Entries kept for replicated or distributed component solves.
+  [[nodiscard]] std::size_t capacity(bool distributed_solves) const noexcept;
   [[nodiscard]] const Statistics& statistics() const noexcept;
 
 private:
   friend struct PdeVelocityExtensionCacheAccess;
-  std::unique_ptr<Entry> entry_;
+  std::vector<std::unique_ptr<Entry>> entries_;
+  // 0: the defaults.
+  std::size_t capacity_{0u};
   Statistics statistics_{};
 };
 
+// Diagnostics: SVMP_PDE_EXTENSION_DUMP=<prefix> makes rank 0 write the
+// canonical dry-region solution of the first SVMP_PDE_EXTENSION_DUMP_CALLS
+// (default 2) calls of the process to <prefix>.<call>.bin (uint64 vertex
+// count, then per vertex its int64 global ID and three doubles).
+//
 // level_set: one value per local vertex (only its gradient is used).
 // source: source_components values per local vertex.
 // known: mask of the known vertices (made communicator-consistent inside).
