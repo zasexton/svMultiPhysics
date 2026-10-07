@@ -1,24 +1,34 @@
 {
   "benchmark": "static_sphere_3d",
   "milestone": "M2",
-  "fixed_on": "2026-09-30, before the first protocol run; the criteria mirror static_drop_2d/tolerances.json",
+  "fixed_on": "2026-09-30, before the first protocol run; the criteria mirror static_drop_2d/tolerances.json. Revised on 2026-10-07 by decision D25 (gating level R/h = 16, order over 8/16, D19 time step and time-step criterion), before any D25 protocol run",
   "levels": {
     "R_over_h": [
       8,
+      16
+    ],
+    "R_over_h_before_D25": [
+      8,
       16,
       32
-    ]
+    ],
+    "note": "D25: R/h = 32 is not run (5.3 million tetrahedra; not affordable). generate_case.py can still write it."
   },
   "protocol": {
     "laplace_numbers": [
-      12,
-      120
+      12
     ],
+    "laplace_numbers_note": "D25 runs La = 12 only. generate_case.py writes the D19 static-drop step for La = 120 as well (dt = 0.01); that study is not part of D25.",
     "viscous_times": 5,
     "snapshots": 100,
-    "time_step": "dt <= m * dt_B, dt_B = sqrt(rho*h^3/(4*pi*gamma)) = (1/sqrt(2)) * sqrt(rho*h^3/(2*pi*gamma)), rounded down so that the run is 100 equal output intervals; m = 2 at La = 12 and m = 1 at La = 120, taken from the 2D step-0 measurement (tracker M2, jobs 46075447 and 46076505). The 3D values of m are assumed from 2D and must be checked once in 3D (README.md). The gated metrics are relaxed steady-state values, so the time step does not enter them (decision D10).",
-    "transport": "Level-set advection velocity (decision D9): pde_extension once the solver has it, wet_extension until then, coupled for comparison. Criteria apply separately to each (capillary form, transport, Laplace number) refinement study.",
-    "note": "R/h = 32 (5.3 million tetrahedra, about 4,000 steps at La = 12) may not be affordable with the current per-step cost; without it the pressure-jump criterion cannot be evaluated (README.md, Expected cost per level)."
+    "time_step": "Decision D25 (2026-10-07): the D19 static-drop protocol. The lagged normal-increment capillary term is on (Surface_tension_semi_implicit = NormalIncrement) and every level uses one fixed physical step, dt = 0.02 at La = 12 (618 steps at any R/h; the same physical end time, 12.36, as static_drop_2d). The output cadence is the nearest whole number of steps per 1/100 of the run, which ends at the first output at or after 5 viscous times. The R/h = 8 study is also run at dt/2 (generate_case.py --dt-divisor 2); see time_step_criterion.",
+    "time_step_before_D25": "dt <= m * dt_B, dt_B = sqrt(rho*h^3/(4*pi*gamma)) = (1/sqrt(2)) * sqrt(rho*h^3/(2*pi*gamma)), rounded down so that the run is 100 equal output intervals; m = 2 at La = 12 and m = 1 at La = 120, taken from the 2D step-0 measurement (tracker M2, jobs 46075447 and 46076505). The 3D values of m are assumed from 2D and must be checked once in 3D (README.md). The gated metrics are relaxed steady-state values, so the time step does not enter them (decision D10). Reproduced by generate_case.py --dt-multiple <m> --surface-tension-semi-implicit None --kinematic-reconciliation off.",
+    "surface_tension_semi_implicit": "NormalIncrement (decisions D13, D19, D25; None before D25)",
+    "kinematic_reconciliation": "on (Enable_kinematic_reconciliation = true, decision D14; off before D25)",
+    "capillary_form": "D25 gates SurfaceStress only (both KAG forms fail M2 in 2D); the criteria apply to any form.",
+    "transport": "Level-set advection velocity (decision D9): pde_extension (harmonic PDE extension, monolithic coupling; the protocol transport), wet_extension and coupled for comparison. Criteria apply separately to each transport.",
+    "note": "Criteria apply separately to each (capillary form, transport, Laplace number, dt divisor) refinement study, and must pass at dt and, where the dt/2 study has the level, at dt/2. See README.md for the definitions and the cost of each level.",
+    "note_before_D25": "R/h = 32 (5.3 million tetrahedra, about 4,000 steps at La = 12) may not be affordable with the current per-step cost; without it the pressure-jump criterion cannot be evaluated (README.md, Expected cost per level)."
   },
   "criteria": [
     {
@@ -26,15 +36,20 @@
       "quantity": "pressure_jump_relative_error",
       "definition": "|(p_in - p_ext) - 2*gamma/R_eff| / (2*gamma/R_eff) at the end of the run. p_in is the volume-weighted mean of the P1 pressure over the tetrahedra lying entirely inside the ball of radius R_eff/2 about the liquid centroid; R_eff = (3V/(4*pi))^(1/3), V the exact volume of {phi_h < 0}.",
       "limit": 0.01,
-      "at_level": 32,
+      "at_level": 16,
       "minimum_observed_order": 1.0,
       "order_levels": [
         8,
+        16
+      ],
+      "order_method": "least-squares slope of log(error) against log(R/h) over order_levels (with two levels, the pairwise order); pairwise orders are reported",
+      "source": "Decision D25 (2026-10-07): pressure-jump error <= 1% at R/h = 16 with observed order >= 1 over R/h = 8/16. Before D25: the D1 working criterion of static_drop_2d (tracker section 5, M2: <= 1% at R/h = 32, order over 8/16/32).",
+      "at_level_before_D25": 32,
+      "order_levels_before_D25": [
+        8,
         16,
         32
-      ],
-      "order_method": "least-squares slope of log(error) against log(R/h) over order_levels; pairwise orders are reported",
-      "source": "Decision D1 working criterion (tracker section 5, M2: pressure-jump error <= 1% at R/h = 32 with observed order >= 1), as for static_drop_2d"
+      ]
     },
     {
       "id": "parasitic_capillary_number",
@@ -44,11 +59,15 @@
       "monotone": "strictly_decreasing",
       "monotone_levels": [
         8,
+        16
+      ],
+      "source": "Decision D25 (2026-10-07): Ca_sp decreasing from R/h = 8 to 16, absolute values reported. Before D25: the decision of 2026-09-29 recorded in the tracker (section 5, M2), as for static_drop_2d: no absolute limit; the spurious flow must decrease strictly under refinement, and no_velocity_growth must hold.",
+      "per_level": "reported, not gated",
+      "monotone_levels_before_D25": [
+        8,
         16,
         32
-      ],
-      "source": "Decision of 2026-09-29 recorded in the tracker (section 5, M2), as for static_drop_2d: no absolute limit; the spurious flow must decrease strictly under refinement, and no_velocity_growth must hold. Absolute values are reported.",
-      "per_level": "reported, not gated"
+      ]
     },
     {
       "id": "no_velocity_growth",
@@ -56,7 +75,7 @@
       "definition": "max|u_h| (liquid vertices) at the end of the run divided by the largest max|u_h| over the outputs in the third quarter of the run (T/2 <= t <= 3T/4). A ratio <= 1 means the final value lies within the envelope of the preceding quarter.",
       "limit": 1.0,
       "at_level": "each",
-      "source": "Decision D1 working criterion (tracker section 5, M2: no growth of max|u| in time)"
+      "source": "Decision D1 working criterion (tracker section 5, M2: no growth of max|u| in time); kept by D25"
     },
     {
       "id": "volume_drift",
@@ -64,7 +83,29 @@
       "definition": "max over the run of |V(t) - V(0)| / V(0), with V the exact volume of {phi_h < 0} and V(0) that of the sampled initial level set in mesh/mesh-complete.mesh.vtu. The maximum is taken over all outputs and, when the solver log is present and its per-step wet volume matches the snapshot volume at every output to 1e-8, over every step of the log.",
       "limit": 0.0001,
       "at_level": "each",
-      "source": "Decision D1 working criterion (tracker section 5, M2: volume drift <= 1e-4), measured as the maximum deviation over the run (decision D11)"
+      "source": "Decision D1 working criterion (tracker section 5, M2: volume drift <= 1e-4), measured as the maximum deviation over the run (decision D11); kept by D25"
     }
-  ]
+  ],
+  "time_step_criterion": {
+    "id": "time_step",
+    "decided_on": "2026-10-07",
+    "source": "Decision D25 (2026-10-07), the D19 static-drop criterion (static_drop_2d/tolerances.json, design note Documentation/free_surface_semi_implicit_surface_tension_design.md, section 9.9): every gate that the dt/2 study can evaluate passes at both steps, and the pressure jump changes by at most 0.1% when the step is halved. The dt/2 run is made at R/h = 8 only (a dt/2 run at R/h = 16 would cost days; in 2D halving the step changed the pressure jump by 1.2e-10 at La = 12).",
+    "quantity": "pressure_jump",
+    "definition": "|dp(dt) - dp(dt/2)| / |dp(dt/2)|, dp = p_in - p_ext as in pressure_jump, between the dt divisor 1 and 2 studies of one (capillary form, transport, Laplace number) at their finest common level.",
+    "limit": 0.001,
+    "at_level": "finest common level of the dt and dt/2 studies (R/h = 8 under D25)",
+    "dt_divisors": [
+      1,
+      2
+    ],
+    "refined_step_levels": [
+      8
+    ],
+    "gates_at_each_step": "every criterion applies to the dt study; the dt/2 study must contain the levels in refined_step_levels, and criteria that need other levels (pressure_jump at R/h = 16, the order and the Ca_sp decrease) are reported as not evaluated at dt/2",
+    "reported": [
+      "parasitic_capillary_number_final"
+    ],
+    "reported_note": "Ca_sp is reported for each step (it depends on dt at coarse levels; design note section 9.8, risk 4).",
+    "when_one_divisor_only": "reported as not evaluated; does not fail"
+  }
 }
