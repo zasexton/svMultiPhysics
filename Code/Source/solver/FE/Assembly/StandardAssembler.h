@@ -68,6 +68,7 @@
 #include "AssemblyKernel.h"
 #include "AssemblyContext.h"
 #include "CutVolumeEpochCache.h"
+#include "DeferredInsertBuffer.h"
 #include "Spaces/OrientationManager.h"
 #include "Geometry/GeometryMapping.h"
 #include "Basis/BasisCache.h"
@@ -857,6 +858,106 @@ private:
         int combined_n,
         const CombinedInsertTarget& target);
 
+    // =========================================================================
+    // Threaded assembly (FE/Docs/ThreadedAssembly.md)
+    // =========================================================================
+
+    /// Routes the insertion calls of a per-item loop body either straight to
+    /// the global system (serial) or into a DeferredInsertBuffer (threads).
+    class InsertSink;
+
+    /// Shared, read-only state of one assembleCutVolumesFused call.
+    struct CutVolumeFusedLoop;
+    /// Per-thread mutable state of one assembleCutVolumesFused call.
+    struct CutVolumeFusedThreadState;
+    /// One cut-volume rule (all fused terms) of assembleCutVolumesFused.
+    void assembleCutVolumeFusedRule(const CutVolumeFusedLoop& loop,
+                                    CutVolumeFusedThreadState& state,
+                                    std::size_t ordinal,
+                                    InsertSink& sink,
+                                    AssemblyResult& result);
+
+    /// Shared, read-only state of one assembleInteriorFaces call.
+    struct InteriorFaceLoop;
+    /// Per-thread mutable state of one assembleInteriorFaces call.
+    struct InteriorFaceThreadState;
+    /// One interior face of assembleInteriorFaces.
+    void assembleInteriorFaceItem(const InteriorFaceLoop& loop,
+                                  InteriorFaceThreadState& state,
+                                  std::size_t item,
+                                  InsertSink& sink,
+                                  AssemblyResult& result);
+
+    /// Shared, read-only state of one assembleCutInterfaces call.
+    struct CutInterfaceLoop;
+    /// Per-thread mutable state of one assembleCutInterfaces call.
+    struct CutInterfaceThreadState;
+    /// One selected interface rule of assembleCutInterfaces.
+    void assembleCutInterfaceItem(const CutInterfaceLoop& loop,
+                                  CutInterfaceThreadState& state,
+                                  std::size_t item,
+                                  InsertSink& sink,
+                                  AssemblyResult& result);
+
+    /// Thread count for this assembler's threaded loops: options_.num_threads
+    /// (at least 1), or 1 on a worker or inside an assembly thread.
+    [[nodiscard]] int threadedAssemblyThreadCount() const noexcept;
+
+    /// Worker assemblers 0..n-1, configured from this assembler.
+    void prepareThreadWorkers(int n);
+
+    /// Builds, before a threaded loop, the resolved solution-gather tables the
+    /// serial loop would build lazily (history solution views).
+    void ensureThreadedGatherTables(const IMeshAccess& mesh);
+
+    /// Replays recorded insertions through this assembler's insertion routines.
+    void replayDeferredInserts(const detail::DeferredInsertBuffer& buffer);
+
+    /**
+     * @brief Runs items [0, n_items) on n_threads threads and inserts in order.
+     *
+     * compute(worker, thread, item, sink, result) evaluates one item on worker
+     * (a worker assembler owned by this assembler) and records its insertions
+     * in sink. Blocks of block_size items are assigned round-robin to threads,
+     * processed in waves, and their records replayed in item order. Returns
+     * the number of leading items whose insertions are done: n_items, or the
+     * first item of the earliest block whose computation stopped (a thread
+     * needed lazy one-time work, DeferredSerialWork, or threw). The caller
+     * runs the remaining items with its serial loop, which gives the serial
+     * insertion sequence and reproduces any error at the same item.
+     */
+    std::size_t runThreadedItems(
+        const char* loop_name,
+        std::size_t n_items,
+        int n_threads,
+        std::size_t block_size,
+        const std::function<void(StandardAssembler& worker,
+                                 int thread,
+                                 std::size_t item,
+                                 InsertSink& sink,
+                                 AssemblyResult& result)>& compute,
+        AssemblyResult& result);
+
+    /// True when this assembler (or, on a worker, its owner) has a constraint
+    /// distributor; the per-item constrained-insert decision uses it.
+    [[nodiscard]] bool hasConstraintDistributorForInsert() const noexcept;
+
+    /// The assembler whose shared tables this one reads: the owner on a
+    /// worker, this assembler otherwise.
+    [[nodiscard]] const StandardAssembler& tableOwner() const noexcept
+    {
+        return table_owner_ != nullptr ? *table_owner_ : *this;
+    }
+
+    std::vector<std::unique_ptr<StandardAssembler>> thread_workers_{};
+    /// Non-null on a worker: the assembler that owns the shared tables.
+    const StandardAssembler* table_owner_{nullptr};
+    /// Insert buffers of the blocks of one wave (reused).
+    std::vector<detail::DeferredInsertBuffer> deferred_insert_buffers_{};
+    /// Field access list the worker last saw (worker only).
+    const void* worker_field_plans_data_{nullptr};
+    std::size_t worker_field_plans_size_{0};
+
     /**
      * @brief Get element from function space for a cell
      */
@@ -1303,6 +1404,11 @@ private:
     [[nodiscard]] std::size_t cutVolumeEpochCacheMaxBytes() const noexcept;
     [[nodiscard]] bool beginCutVolumeEpochCache(const IMeshAccess& mesh,
                                                 const CutIntegrationContext& cut_context);
+    /// Worker side of beginCutVolumeEpochCache: begins this assembler's cache
+    /// with the key its owner computed for the same call.
+    [[nodiscard]] bool beginCutVolumeEpochCacheWithKey(const detail::CutVolumeEpochKey& key);
+    /// Key of the last beginCutVolumeEpochCache call.
+    detail::CutVolumeEpochKey last_cut_volume_epoch_key_{};
     [[nodiscard]] detail::CutVolumeEpochRuleEntry* cutVolumeEpochRuleEntry(
         const geometry::CutQuadratureRule& rule,
         GlobalIndex cell_id,
