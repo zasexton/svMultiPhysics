@@ -72,7 +72,7 @@ change it once, with a one-line justification in the tracker.
   - Submit with `sbatch --export=NONE` and set the environment in the job script.
   - Reason: this Open MPI build uses Slurm's PMI when started without a launcher. A job submitted from inside an interactive `sh_dev` session inherits that session's `srun` contact variables, so a bare process contacts the interactive `srun` and hangs. That `srun` prints `PMK_KVS_Barrier task count inconsistent` in the user's terminal.
 - **Long runs on 4 ranks.** Since the MPI correctness fixes (`ac273512`), runs with FSILS linear algebra match serial to round-off on 1, 2, 4 and 8 ranks. Long runs (static drop R/h ≥ 16, capillary wave λ/h ≥ 32, sessile drop) therefore use 4 MPI ranks on one node, for example 3.1× faster at R/h = 32.
-  - Leave `<Ghost_layers>` unset: the solver derives 8 layers for an aggregating free surface.
+  - Leave `<Ghost_layers>` unset: the solver derives 8 layers in 2D and 12 in 3D for an aggregating free surface (fewer layers drop constraint-fill columns and can make the aggregation roots depend on the partition).
   - Decks with Eigen linear algebra (for example `linear_sloshing_2d`, `tank_at_rest`) stay serial.
   - Bitwise comparisons between solver builds stay serial, because rank counts change the round-off.
 - **JIT object cache.** Benchmark run scripts set `SVMP_JIT_CPU=x86-64-v3` and `SVMP_CACHE_PROFILE=L1d:32768,L1i:32768,L2:1048576,L3:16777216`, so one kernel cache serves both the Skylake and the Milan nodes of the partition. Outputs are bitwise identical to the default host target, and cold runs skip 10–15 s of kernel compilation (tracker D17; `Code/Source/solver/FE/Docs/BuildOptimization.md`). Bitwise comparisons between solver builds use the default target.
