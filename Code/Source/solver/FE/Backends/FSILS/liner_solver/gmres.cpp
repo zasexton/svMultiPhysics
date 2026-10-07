@@ -54,6 +54,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
+#include <stdexcept>
 #include <limits>
 #include <vector>
 #include <algorithm>
@@ -323,6 +325,28 @@ struct GmresEnhancements {
   // residual still needs additional Krylov work.
   bool experimental_adaptive_controls = false;
 };
+
+// Krylov vector loops of the vector GMRES kernel run over the owned nodes
+// only (owned-only Krylov loops).  Ghost entries of the Krylov vectors and of
+// the solution are never read before halo.sync_owned_to_ghost_vector()
+// overwrites them: every SpMV input is synced first, SpMV writes owned rows
+// only, and the solution is synced after the solve.  Updating the ghost
+// entries therefore only cost time, in proportion to the halo depth.
+// SVMP_FSILS_GMRES_FULL_LENGTH_KRYLOV=1 restores the full-length loops;
+// SVMP_FSILS_GMRES_OWNED_KRYLOV_CHECK=1 runs every solve both ways and
+// requires bitwise identical results (owned and synced ghost entries,
+// iteration count and residual).
+[[nodiscard]] bool gmres_full_length_krylov_forced() noexcept
+{
+  static const bool forced = parse_bool_env("SVMP_FSILS_GMRES_FULL_LENGTH_KRYLOV", false);
+  return forced;
+}
+
+[[nodiscard]] bool gmres_owned_krylov_check_enabled() noexcept
+{
+  static const bool enabled = parse_bool_env("SVMP_FSILS_GMRES_OWNED_KRYLOV_CHECK", false);
+  return enabled;
+}
 
 [[nodiscard]] const GmresEnhancements& gmres_enhancements()
 {
@@ -2428,9 +2452,12 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
 //
 // Reproduces the Fortran 'GMRESV' subroutine.
 //
-void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearSystem& system,
-             fe_fsi_linear_solver::FSILS_subLsType& ls, Array<double>& R,
-             const Array<double>* row_scaling)
+namespace {
+
+void gmres_v_impl(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearSystem& system,
+                  fe_fsi_linear_solver::FSILS_subLsType& ls, Array<double>& R,
+                  const Array<double>* row_scaling,
+                  const bool owned_only_krylov_requested)
 {
   using namespace fe_fsi_linear_solver;
   auto& lhs = *system.lhs;
@@ -2559,6 +2586,21 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
   auto& recycle_drop_streak = ls.ws.recycle_drop_streak;
   int recycle_k = (recycle_k_req > 0) ? std::min(ls.ws.recycle_k, recycle_k_req) : 0;
   bool recycle_updated_this_solve = false;
+  // Owned-only Krylov loops (see gmres_full_length_krylov_forced()) on the
+  // default path.  The right-preconditioned, recycled and basis-panel paths
+  // keep the full-length loops.  The fused update-and-norm kernel for
+  // dof <= 4 sums its norm per thread chunk of the loop range, so with more
+  // than one OpenMP thread it keeps the full range to keep that sum bitwise.
+  // The owned-row operator (SpMV over owned rows, halo sync of its input) is
+  // what makes ghost entries write-only between syncs.
+  const bool owned_only_krylov = owned_only_krylov_requested &&
+                                 (lhs.owned_row_operator || lhs.commu.nTasks <= 1) &&
+                                 right_pc == nullptr &&
+                                 recycle_k_req == 0 &&
+                                 !use_basis_panel;
+  const fsils_int krylov_nNo = owned_only_krylov ? mynNo : nNo;
+  const fsils_int krylov_update_nNo =
+      (owned_only_krylov && (dof > 4 || use_serial_hot_path(max_omp_threads()))) ? mynNo : nNo;
   std::vector<double> recycle_B;
   if (recycle_k_req > 0) {
     recycle_B.resize(static_cast<size_t>(recycle_k_req) * static_cast<size_t>(ls.sD), 0.0);
@@ -3043,7 +3085,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
     update_recycle_scores_from_gamma(err[0]);
 
     tp0 = TP();
-    omp_la::omp_mul_v(dof, nNo, 1.0 / err[0], u_slice);
+    omp_la::omp_mul_v(dof, krylov_nNo, 1.0 / err[0], u_slice);
     tp_vecops += TP() - tp0;
     ++tp_vecops_calls;
 
@@ -3203,7 +3245,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
                                       u_slice_next,
                                       h_col,
                                       num_threads)
-          : fused_update_norm_v(dof, nNo, mynNo, lhs.commu, u, i, u_slice_next, h_col);
+          : fused_update_norm_v(dof, krylov_update_nNo, mynNo, lhs.commu, u, i, u_slice_next, h_col);
       const double update_norm_dt = TP() - tp0;
       tp_gs_update += update_norm_dt;
       ++tp_gs_update_calls;
@@ -3267,7 +3309,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
                                         u_slice_next,
                                         h_col,
                                         num_threads)
-            : fused_update_norm_v(dof, nNo, mynNo, lhs.commu, u, i, u_slice_next, h_col);
+            : fused_update_norm_v(dof, krylov_update_nNo, mynNo, lhs.commu, u, i, u_slice_next, h_col);
         const double reorth_update_norm_dt = TP() - tp0;
         tp_gs_update += reorth_update_norm_dt;
         ++tp_gs_update_calls;
@@ -3290,7 +3332,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
           std::numeric_limits<double>::epsilon() * std::max(scaled_initial_norm, 1.0) * 1e2;
       if (h(i+1,i) > breakdown_tol) {
         tp0 = TP();
-        omp_la::omp_mul_v(dof, nNo, 1.0/h(i+1,i), u_slice_next);
+        omp_la::omp_mul_v(dof, krylov_nNo, 1.0/h(i+1,i), u_slice_next);
         tp_vecops += TP() - tp0;
         ++tp_vecops_calls;
 
@@ -3369,7 +3411,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       ++tp_right_pc_calls;
       omp_la::omp_sum_v(dof, nNo, 1.0, X, pc_z);
     } else {
-      fused_recon_v(dof, nNo, u, last_i, X, y);
+      fused_recon_v(dof, krylov_nNo, u, last_i, X, y);
     }
     tp_recon += TP() - tp0 - recon_pc_time;
     ++tp_recon_calls;
@@ -3495,6 +3537,60 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
     }
   }
   // ==================================
+}
+
+} // namespace
+
+void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearSystem& system,
+             fe_fsi_linear_solver::FSILS_subLsType& ls, Array<double>& R,
+             const Array<double>* row_scaling)
+{
+  const bool owned_only = !gmres_full_length_krylov_forced();
+  if (!owned_only || !gmres_owned_krylov_check_enabled()) {
+    gmres_v_impl(system, ls, R, row_scaling, owned_only);
+    return;
+  }
+
+  // Debug self-check: the full-length reference solve on copies, then the
+  // owned-only solve, compared bit for bit after the final halo sync.
+  fe_fsi_linear_solver::FSILS_subLsType ls_full = ls;
+  Array<double> R_full = R;
+  gmres_v_impl(system, ls_full, R_full, row_scaling, /*owned_only_krylov_requested=*/false);
+  gmres_v_impl(system, ls, R, row_scaling, /*owned_only_krylov_requested=*/true);
+
+  const auto& lhs = *system.lhs;
+  std::size_t first_mismatch = static_cast<std::size_t>(-1);
+  const std::size_t n = static_cast<std::size_t>(R.size());
+  bool same = n == static_cast<std::size_t>(R_full.size());
+  for (std::size_t k = 0; same && k < n; ++k) {
+    const double a = R.data()[k];
+    const double b = R_full.data()[k];
+    if (std::memcmp(&a, &b, sizeof(double)) != 0) {
+      same = false;
+      first_mismatch = k;
+    }
+  }
+  const bool same_scalars =
+      ls.itr == ls_full.itr && ls.suc == ls_full.suc &&
+      std::memcmp(&ls.fNorm, &ls_full.fNorm, sizeof(double)) == 0;
+  if (!same || !same_scalars) {
+    std::fprintf(stderr,
+                 "[FSILS_GMRES_OWNED_KRYLOV_CHECK] rank=%d mismatch: solution_equal=%d "
+                 "first_entry=%lld itr=%d/%d suc=%d/%d fNorm=%.17e/%.17e nNo=%lld mynNo=%lld\n",
+                 lhs.commu.task,
+                 same ? 1 : 0,
+                 static_cast<long long>(first_mismatch == static_cast<std::size_t>(-1)
+                                            ? -1
+                                            : static_cast<long long>(first_mismatch)),
+                 ls.itr, ls_full.itr,
+                 ls.suc ? 1 : 0, ls_full.suc ? 1 : 0,
+                 ls.fNorm, ls_full.fNorm,
+                 static_cast<long long>(lhs.nNo),
+                 static_cast<long long>(lhs.mynNo));
+    std::fflush(stderr);
+    throw std::runtime_error(
+        "FSILS GMRES owned-only Krylov loops differ from the full-length loops");
+  }
 }
 
 void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
