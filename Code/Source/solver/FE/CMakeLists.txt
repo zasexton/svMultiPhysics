@@ -322,10 +322,12 @@ set(FE_CORE_HEADERS
     Core/Logger.h
     Core/KernelTrace.h
     Core/StateVariableMetadata.h
+    Core/DeterministicParallel.h
 )
 
 set(FE_CORE_SOURCES
     Core/Logger.cpp
+    Core/DeterministicParallel.cpp
 )
 
 # Math module sources
