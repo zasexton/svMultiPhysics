@@ -899,6 +899,38 @@ private:
                                   InsertSink& sink,
                                   AssemblyResult& result);
 
+    /// Shared, read-only state of one batched monolithic cell loop.
+    struct MonolithicBatchLoop;
+    /// Per-thread mutable state of one batched monolithic cell loop.
+    struct MonolithicBatchThreadState;
+    /// One batch of the batched monolithic cell loop of assembleCellsFused.
+    void assembleMonolithicCellBatch(const MonolithicBatchLoop& loop,
+                                     MonolithicBatchThreadState& state,
+                                     std::size_t item,
+                                     InsertSink& sink,
+                                     AssemblyResult& result);
+    /// Shared, read-only state of one residual-only monolithic cell loop.
+    struct MonolithicVectorLoop;
+    /// Per-thread mutable state of one residual-only monolithic cell loop.
+    struct MonolithicVectorThreadState;
+    /// One cell of the residual-only monolithic cell loop of assembleCellsFused.
+    void assembleMonolithicVectorCell(const MonolithicVectorLoop& loop,
+                                      MonolithicVectorThreadState& state,
+                                      std::size_t item,
+                                      InsertSink& sink,
+                                      AssemblyResult& result);
+    /// Sizes this assembler's batch scratch for the monolithic cell loop.
+    void prepareMonolithicBatchScratch(std::size_t monolithic_batch_size,
+                                       LocalIndex max_dofs,
+                                       LocalIndex max_qpts,
+                                       int dimension,
+                                       bool use_coupled_scalar_cache);
+    /// Worker: copies the per-call coupled-basis data of the owner's
+    /// assembleCellsFused call and installs its quadrature rule.
+    void copyMonolithicCallStateFrom(
+        const StandardAssembler& owner,
+        const std::shared_ptr<const quadrature::QuadratureRule>& quad_rule);
+
     /// Thread count for this assembler's threaded loops: options_.num_threads
     /// (at least 1), or 1 on a worker or inside an assembly thread.
     [[nodiscard]] int threadedAssemblyThreadCount() const noexcept;
@@ -909,6 +941,16 @@ private:
     /// Builds, before a threaded loop, the resolved solution-gather tables the
     /// serial loop would build lazily (history solution views).
     void ensureThreadedGatherTables(const IMeshAccess& mesh);
+
+    /// Builds, before a threaded loop, the resolved insertion tables that
+    /// insertLocalForCell would build on first use for these maps and views.
+    void prepareThreadedInsertTables(const IMeshAccess& mesh,
+                                     const dofs::DofMap* row_dof_map,
+                                     GlobalIndex row_dof_offset,
+                                     const dofs::DofMap* col_dof_map,
+                                     GlobalIndex col_dof_offset,
+                                     const GlobalSystemView* matrix_view,
+                                     const GlobalSystemView* vector_view);
 
     /// Replays recorded insertions through this assembler's insertion routines.
     void replayDeferredInserts(const detail::DeferredInsertBuffer& buffer);
@@ -952,7 +994,10 @@ private:
     std::vector<std::unique_ptr<StandardAssembler>> thread_workers_{};
     /// Non-null on a worker: the assembler that owns the shared tables.
     const StandardAssembler* table_owner_{nullptr};
-    /// Insert buffers of the blocks of one wave (reused).
+    /// True while threads compute and this assembler inserts concurrently;
+    /// building a shared table then is an error.
+    bool concurrent_insertion_{false};
+    /// Record buffers of the threaded loops (a ring of blocks, reused).
     std::vector<detail::DeferredInsertBuffer> deferred_insert_buffers_{};
     /// Field access list the worker last saw (worker only).
     const void* worker_field_plans_data_{nullptr};
