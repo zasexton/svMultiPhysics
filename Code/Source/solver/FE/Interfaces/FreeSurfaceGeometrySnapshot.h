@@ -649,6 +649,69 @@ evaluateFreeSurfaceDynamicContactState(
     const FreeSurfaceDiscreteFunctionalParameters& parameters,
     const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity);
 
+/**
+ * Reuse of full-cell volume records from one snapshot build to the next.
+ *
+ * Successive geometry rebuilds of an outer fixed point move the level set
+ * only slightly.  Cells away from the interface stay full on one side, and
+ * the record of a full-cell volume rule depends only on the rule's
+ * classification fields, its parent cell (type, geometry, identity,
+ * ownership) and the snapshot policy, never on the level-set magnitudes.
+ * Its source identities, and the content digest that covers them, embed the
+ * source value revision and change with every build.
+ *
+ * A cache passed to buildFreeSurfaceGeometrySnapshot() keeps the records of
+ * the previous build together with the content-only part of their
+ * validation (ledger contributions and the identity-free part of the content
+ * digest).  A later build under the same mesh revisions, communicator and
+ * policy copies the record of a full-cell volume rule whose inputs compare
+ * equal bit for bit (every rule field except the revision-dependent
+ * identities, plus the source topology key and construction observation of
+ * its region), re-stamps the identities, replays the content-only ledger
+ * contributions and re-evaluates the level-set dependent checks.  Every
+ * other record is built as before, so the snapshot is bitwise identical to
+ * one built without the cache (compareFreeSurfaceGeometrySnapshots()).
+ */
+class FreeSurfaceGeometrySnapshotReuseCache {
+public:
+    struct Statistics {
+        bool context_matched{false};
+        std::size_t full_cell_records_reused{0};
+        std::size_t full_cell_records_built{0};
+        std::size_t other_records_built{0};
+    };
+    struct State;
+
+    FreeSurfaceGeometrySnapshotReuseCache();
+    ~FreeSurfaceGeometrySnapshotReuseCache();
+    FreeSurfaceGeometrySnapshotReuseCache(
+        FreeSurfaceGeometrySnapshotReuseCache&&) noexcept;
+    FreeSurfaceGeometrySnapshotReuseCache& operator=(
+        FreeSurfaceGeometrySnapshotReuseCache&&) noexcept;
+    FreeSurfaceGeometrySnapshotReuseCache(
+        const FreeSurfaceGeometrySnapshotReuseCache&) = delete;
+    FreeSurfaceGeometrySnapshotReuseCache& operator=(
+        const FreeSurfaceGeometrySnapshotReuseCache&) = delete;
+
+    /** Forget the previous build; the next build reuses nothing. */
+    void clear() noexcept;
+    [[nodiscard]] bool empty() const noexcept;
+    /** Reuse counters of the most recent build that used this cache. */
+    [[nodiscard]] const Statistics& lastBuild() const noexcept {
+        return last_build_;
+    }
+
+    /** Internal state of buildFreeSurfaceGeometrySnapshot(). */
+    [[nodiscard]] State& state() noexcept { return *state_; }
+    void setLastBuild(const Statistics& statistics) noexcept {
+        last_build_ = statistics;
+    }
+
+private:
+    std::unique_ptr<State> state_;
+    Statistics last_build_{};
+};
+
 class FreeSurfaceGeometrySnapshot {
 public:
     FreeSurfaceGeometrySnapshot(const FreeSurfaceGeometrySnapshot&) = delete;
@@ -682,7 +745,8 @@ private:
         FreeSurfaceGeometrySnapshotPolicy,
         FreeSurfaceGeometryScalarEvaluator,
         std::string,
-        FreeSurfaceGeometryOwnershipCollective);
+        FreeSurfaceGeometryOwnershipCollective,
+        FreeSurfaceGeometrySnapshotReuseCache*);
 
     FreeSurfaceGeometrySnapshot(
         FreeSurfaceGeometryRevision revision,
@@ -727,6 +791,34 @@ buildFreeSurfaceGeometrySnapshot(
     FreeSurfaceGeometryOwnershipCollective ownership_collective = {});
 
 /**
+ * As above, reusing the full-cell volume records of the previous build kept
+ * in reuse_cache (see FreeSurfaceGeometrySnapshotReuseCache) and storing this
+ * build for the next one.  A null cache builds every record.  The result is
+ * bitwise identical either way.
+ */
+[[nodiscard]] std::shared_ptr<const FreeSurfaceGeometrySnapshot>
+buildFreeSurfaceGeometrySnapshot(
+    LevelSetInterfaceDomain interface_domain,
+    std::vector<GeneratedInterfaceBoundaryIntersectionDomain> contact_domains,
+    std::vector<GeneratedActiveBoundaryDomain> active_boundary_domains,
+    const assembly::IMeshAccess& mesh,
+    FreeSurfaceGeometrySnapshotPolicy policy,
+    FreeSurfaceGeometryScalarEvaluator scalar,
+    std::string domain_id,
+    FreeSurfaceGeometryOwnershipCollective ownership_collective,
+    FreeSurfaceGeometrySnapshotReuseCache* reuse_cache);
+
+/**
+ * Bitwise comparison of two snapshots: revision, local mesh revision,
+ * policy, ledger and every rule record field (points included).  Returns an
+ * empty string when they are identical, otherwise a description of the
+ * first difference.  The source domains are not compared.
+ */
+[[nodiscard]] std::string compareFreeSurfaceGeometrySnapshots(
+    const FreeSurfaceGeometrySnapshot& a,
+    const FreeSurfaceGeometrySnapshot& b);
+
+/**
  * Recompute the reference and physical points of a classification-only
  * record on the mesh it was built on.  The result equals the record stored
  * before its points were released, bit for bit.  Materialized records are
@@ -760,9 +852,13 @@ public:
     [[nodiscard]] FreeSurfaceGeometrySnapshotCacheStatistics statistics();
 
 private:
-    std::unordered_map<std::uint64_t,
-                       std::weak_ptr<const FreeSurfaceGeometrySnapshot>>
-        snapshots_{};
+    // A snapshot is immutable, so its resident size is measured once, when
+    // it is inserted.
+    struct Entry {
+        std::weak_ptr<const FreeSurfaceGeometrySnapshot> snapshot{};
+        std::size_t resident_bytes{0};
+    };
+    std::unordered_map<std::uint64_t, Entry> snapshots_{};
     FreeSurfaceGeometrySnapshotCacheStatistics statistics_{};
 };
 
