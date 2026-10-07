@@ -139,16 +139,35 @@ if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
     OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
   )
 
-  # One case (HydrostaticGravityWithFixedPressureGaugeMatchesAcrossTwoRankPartition)
-  # takes nearly all of the 2940 s, so a few shards suffice; the high COST
-  # makes ctest -j start these shards first.
+  # The exhaustive two-rank hydrostatic matrix
+  # (HydrostaticGravityWithFixedPressureGaugeMatchesAcrossTwoRankPartition,
+  # 960 cases, about 2700 s) is excluded here; the covering matrices
+  # HydrostaticFixedGaugeCoveringMatrix* run every case of its serial twin once
+  # (60 cases, about 170 s, split over four tests so that the shards share them).
+  set(_application_mpi_exhaustive_hydrostatic
+    "ApplicationDriverLevelSetWorkflowsMPI.HydrostaticGravityWithFixedPressureGaugeMatchesAcrossTwoRankPartition")
   svmp_add_gtest(Application_MPI_2
     TARGET test_application_mpi
     MPI_RANKS 2
-    COST 2940
+    COST 240
     SHARDS 4
+    FILTER "-${_application_mpi_exhaustive_hydrostatic}"
     ENVIRONMENT ${_application_mpi_env}
   )
+
+  option(SVMP_TEST_EXHAUSTIVE_MPI_MATRICES
+    "Also register the exhaustive 960-case two-rank hydrostatic matrix (about 45 min on two ranks) as a CTest entry"
+    OFF)
+  if(SVMP_TEST_EXHAUSTIVE_MPI_MATRICES)
+    svmp_add_gtest(Application_HydrostaticExhaustiveMatrix_MPI_2
+      TARGET test_application_mpi
+      MPI_RANKS 2
+      COST 2700
+      FILTER "${_application_mpi_exhaustive_hydrostatic}"
+      TIMEOUT 7200
+      ENVIRONMENT ${_application_mpi_env}
+    )
+  endif()
 
   svmp_add_gtest(Application_LevelSetMaintenanceConsensus_MPI_2
     TARGET test_application_mpi
