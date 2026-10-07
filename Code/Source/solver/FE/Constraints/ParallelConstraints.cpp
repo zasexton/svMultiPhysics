@@ -7,6 +7,8 @@
 
 #include "ParallelConstraints.h"
 
+#include "Core/Logger.h"
+
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -754,6 +756,15 @@ resolveCanonicalConstraints(MPI_Comm comm,
     auto routed = resolveConstraintsByOwner(comm, world_size, my_rank, partition, owner_of,
                                             options, local_constraints, stats);
     if (!routed) {
+        // Collective decision: every rank takes this branch together.
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            FE_LOG_INFO(
+                "ParallelConstraints: diagnostic=owner_routed_constraints_unavailable "
+                "a line has a non-relevant slave or the owner function disagrees with the "
+                "partition; using the all-gather");
+        }
         return gatherAndResolveConstraints(comm, world_size, partition, options,
                                            local_constraints, stats);
     }
