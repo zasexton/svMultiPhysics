@@ -12,6 +12,7 @@
 #include "Backends/Interfaces/LinearSolver.h"
 #include "Backends/Utils/BackendOptions.h"
 
+#include "Core/FEException.h"
 #include "Core/Types.h"
 
 #include "Constraints/DirichletBC.h"
@@ -3226,6 +3227,178 @@ TEST(TimeLoopCallbacks,
     EXPECT_EQ(outer_state_callbacks, 1);
     EXPECT_EQ(restored_outer_callbacks, 1);
     EXPECT_EQ(accepted_callbacks, 0);
+}
+
+// A too-shallow ghost halo reported while an outer fixed-point state is
+// synchronized stops the run at once with an actionable message: no rollback
+// (it would rebuild the entry constraint structure for nothing) and no
+// smaller-step retry (the partition does not change with the step).
+TEST(TimeLoopCallbacks,
+     InsufficientGhostHaloStopsWithoutRollbackOrRetry)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using StateSyncPoint = svmp::FE::timestepping::NewtonOptions::
+        StateSynchronizationPoint;
+
+    auto controller =
+        std::make_shared<RecordingAcceptanceGateController>();
+    int outer_state_callbacks = 0;
+    int restored_outer_callbacks = 0;
+    int rejected_callbacks = 0;
+    std::string message;
+
+    try {
+        (void)runReactionProblem(
+            svmp::FE::timestepping::SchemeKind::BackwardEuler,
+            /*dt=*/0.1,
+            /*t_end=*/0.1,
+            /*lambda=*/1.0,
+            /*history_depth=*/2,
+            controller,
+            /*generalized_alpha_rho_inf=*/1.0,
+            /*dg_degree=*/1,
+            /*cg_degree=*/2,
+            svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+            /*collocation_max_outer_iterations=*/4,
+            /*collocation_outer_tolerance=*/0.0,
+            /*exact_initial_history=*/false,
+            /*theta=*/0.5,
+            /*newton_max_iterations=*/8,
+            /*newton_abs_tolerance=*/1e-12,
+            /*newton_rel_tolerance=*/0.0,
+            [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+                svmp::FE::timestepping::TimeHistory&) {
+                callbacks.on_step_rejected =
+                    [&](const svmp::FE::timestepping::TimeHistory&,
+                        svmp::FE::timestepping::StepRejectReason,
+                        const svmp::FE::timestepping::NewtonReport&) {
+                        ++rejected_callbacks;
+                    };
+            },
+            /*inspect_expected_exception=*/{},
+            [&](svmp::FE::timestepping::TimeLoopOptions& options,
+                svmp::FE::FieldId) {
+                options.newton.external_state_fixed_point.enabled = true;
+                options.newton.external_state_fixed_point.max_iterations = 4;
+                options.newton.synchronize_state =
+                    [&](const svmp::FE::systems::SystemStateView&,
+                        StateSyncPoint point) {
+                        if (point == StateSyncPoint::OuterFixedPointState) {
+                            ++outer_state_callbacks;
+                            throw svmp::FE::InsufficientGhostHaloError(
+                                "SmallCutAggregationConstraint: diagnostic="
+                                "incomplete_distributed_aggregation_halo "
+                                "field='u' inconsistent_candidate_dofs=1");
+                        }
+                        if (point ==
+                            StateSyncPoint::RestoredOuterFixedPointState) {
+                            ++restored_outer_callbacks;
+                        }
+                    };
+            });
+        ADD_FAILURE() << "the insufficient-halo failure did not stop the run";
+    } catch (const svmp::FE::InsufficientGhostHaloError& error) {
+        message = error.what();
+    }
+
+    EXPECT_NE(message.find("increase <Ghost_layers>"), std::string::npos)
+        << message;
+    EXPECT_NE(message.find("diagnostic=incomplete_distributed_aggregation_halo"),
+              std::string::npos)
+        << message;
+    EXPECT_EQ(message.find("rollback failure"), std::string::npos) << message;
+    EXPECT_EQ(outer_state_callbacks, 1);
+    EXPECT_EQ(restored_outer_callbacks, 0);
+    EXPECT_EQ(rejected_callbacks, 0);
+    EXPECT_TRUE(controller->rejected.empty());
+}
+
+// A too-shallow halo reported by the rollback after another fixed-point
+// failure also stops with the ghost-layer message (naming the first failure)
+// instead of a generic rollback failure that the time loop would retry.
+TEST(TimeLoopCallbacks,
+     InsufficientGhostHaloDuringRollbackStopsWithGhostLayerMessage)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using StateSyncPoint = svmp::FE::timestepping::NewtonOptions::
+        StateSynchronizationPoint;
+
+    auto controller =
+        std::make_shared<RecordingAcceptanceGateController>();
+    int restored_outer_callbacks = 0;
+    int rejected_callbacks = 0;
+    std::string message;
+
+    try {
+        (void)runReactionProblem(
+            svmp::FE::timestepping::SchemeKind::BackwardEuler,
+            /*dt=*/0.1,
+            /*t_end=*/0.1,
+            /*lambda=*/1.0,
+            /*history_depth=*/2,
+            controller,
+            /*generalized_alpha_rho_inf=*/1.0,
+            /*dg_degree=*/1,
+            /*cg_degree=*/2,
+            svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+            /*collocation_max_outer_iterations=*/4,
+            /*collocation_outer_tolerance=*/0.0,
+            /*exact_initial_history=*/false,
+            /*theta=*/0.5,
+            /*newton_max_iterations=*/8,
+            /*newton_abs_tolerance=*/1e-12,
+            /*newton_rel_tolerance=*/0.0,
+            [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+                svmp::FE::timestepping::TimeHistory&) {
+                callbacks.on_step_rejected =
+                    [&](const svmp::FE::timestepping::TimeHistory&,
+                        svmp::FE::timestepping::StepRejectReason,
+                        const svmp::FE::timestepping::NewtonReport&) {
+                        ++rejected_callbacks;
+                    };
+            },
+            /*inspect_expected_exception=*/{},
+            [&](svmp::FE::timestepping::TimeLoopOptions& options,
+                svmp::FE::FieldId) {
+                options.newton.external_state_fixed_point.enabled = true;
+                options.newton.external_state_fixed_point.max_iterations = 4;
+                options.newton.synchronize_state =
+                    [&](const svmp::FE::systems::SystemStateView&,
+                        StateSyncPoint point) {
+                        if (point == StateSyncPoint::OuterFixedPointState) {
+                            throw std::runtime_error("iterate geometry rejected");
+                        }
+                        if (point ==
+                            StateSyncPoint::RestoredOuterFixedPointState) {
+                            ++restored_outer_callbacks;
+                            throw svmp::FE::InsufficientGhostHaloError(
+                                "SmallCutAggregationConstraint: diagnostic="
+                                "incomplete_distributed_aggregation_halo "
+                                "field='u' inconsistent_candidate_dofs=2");
+                        }
+                    };
+            });
+        ADD_FAILURE() << "the insufficient-halo rollback failure did not stop the run";
+    } catch (const svmp::FE::InsufficientGhostHaloError& error) {
+        message = error.what();
+    }
+
+    EXPECT_NE(message.find("increase <Ghost_layers>"), std::string::npos)
+        << message;
+    EXPECT_NE(message.find("inconsistent_candidate_dofs=2"), std::string::npos)
+        << message;
+    EXPECT_NE(message.find("while rolling back after: iterate geometry rejected"),
+              std::string::npos)
+        << message;
+    EXPECT_EQ(restored_outer_callbacks, 1);
+    EXPECT_EQ(rejected_callbacks, 0);
+    EXPECT_TRUE(controller->rejected.empty());
 }
 
 TEST(TimeLoopCallbacks,

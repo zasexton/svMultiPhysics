@@ -13,6 +13,7 @@
 #include "Basis/NodeOrderingConventions.h"
 #include "Constraints/AffineConstraints.h"
 #include "Constraints/SmallCutAggregationCellIndex.h"
+#include "Core/FEException.h"
 #include "Core/Logger.h"
 #include "Dofs/EntityDofMap.h"
 #include "Elements/ReferenceElement.h"
@@ -1677,7 +1678,7 @@ resolveDistributedAggregationDeclarations(
     }
 
     if (failure_count > 0u) {
-        throw std::runtime_error(
+        throw InsufficientGhostHaloError(
             "SmallCutAggregationConstraint: diagnostic="
             "incomplete_distributed_aggregation_halo field='" +
             std::string(field_name) + "' inconsistent_candidate_dofs=" +
@@ -1861,7 +1862,7 @@ resolveDistributedAggregationDeclarations(
         }
     }
     if (failure_count > 0u) {
-        throw std::runtime_error(
+        throw InsufficientGhostHaloError(
             "SmallCutAggregationConstraint: diagnostic="
             "incomplete_distributed_aggregation_halo field='" +
             std::string(field_name) + "' inconsistent_candidate_dofs=" +
@@ -3894,7 +3895,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                           MPI_MAX,
                           comm);
             if (minimum_has_context != maximum_has_context) {
-                throw std::runtime_error(
+                throw InsufficientGhostHaloError(
                     "SmallCutAggregationConstraint: diagnostic="
                     "incomplete_distributed_aggregation_halo cut integration "
                     "context is not installed consistently across the field "
@@ -5000,7 +5001,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     }
     for (std::size_t index = 0u; index < classified_cells.size(); ++index) {
         if (global_cell_owner_count_of[index] != 1u) {
-            throw std::runtime_error(
+            throw InsufficientGhostHaloError(
                 "SmallCutAggregationConstraint: diagnostic="
                 "incomplete_distributed_aggregation_halo reason="
                 "global_cell_owner_count:" +
@@ -5225,7 +5226,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     }
     for (std::size_t index = 0u; index < classified_cells.size(); ++index) {
         if (has_owned_faces[index] == 0) {
-            throw std::runtime_error(
+            throw InsufficientGhostHaloError(
                 "SmallCutAggregationConstraint: diagnostic="
                 "incomplete_distributed_aggregation_halo reason="
                 "missing_owned_face_signature");
@@ -5792,7 +5793,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             }
         }
         if (queue.empty()) {
-            throw std::runtime_error(
+            throw InsufficientGhostHaloError(
                 "SmallCutAggregationConstraint: diagnostic="
                 "incomplete_distributed_aggregation_halo reason="
                 "global_candidate_has_no_cut_seed dof=" +

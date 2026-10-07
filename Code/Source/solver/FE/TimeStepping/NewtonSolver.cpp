@@ -50,6 +50,8 @@
 #include <set>
 #include <span>
 #include <sstream>
+#include <string>
+#include <string_view>
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
@@ -11308,6 +11310,62 @@ void applyAuxiliaryDelta(systems::FESystem& system,
     }
 }
 
+// True when the failure, or an exception nested in it, reports that the ghost
+// layers of the partition do not cover a distributed small-cut aggregation
+// stencil: an InsufficientGhostHaloError, or its diagnostic key when another
+// layer re-threw the message under a different type.
+[[nodiscard]] bool failureReportsInsufficientGhostHalo(
+    const std::exception_ptr& failure)
+{
+    constexpr std::string_view diagnostic_key =
+        "diagnostic=incomplete_distributed_aggregation_halo";
+    std::exception_ptr current = failure;
+    for (int depth = 0; current && depth < 16; ++depth) {
+        try {
+            std::rethrow_exception(current);
+        } catch (const InsufficientGhostHaloError&) {
+            return true;
+        } catch (const std::exception& error) {
+            const auto* fe_error = dynamic_cast<const FEException*>(&error);
+            const std::string_view text =
+                fe_error != nullptr ? std::string_view(fe_error->message())
+                                    : std::string_view(error.what());
+            if (text.find(diagnostic_key) != std::string_view::npos) {
+                return true;
+            }
+            const auto* nested =
+                dynamic_cast<const std::nested_exception*>(&error);
+            current = nested != nullptr ? nested->nested_ptr() : nullptr;
+        } catch (...) {
+            return false;
+        }
+    }
+    return false;
+}
+
+// `local_failure` reports the halo on this rank when `reported_locally`;
+// otherwise another rank of the communicator reported it.
+[[noreturn]] void throwInsufficientGhostHalo(
+    const std::exception_ptr& local_failure,
+    bool reported_locally,
+    const std::exception_ptr& earlier_failure)
+{
+    std::string message =
+        "NewtonSolver: the mesh ghost layers do not cover the small-cut "
+        "aggregation stencil on this partition; increase <Ghost_layers> in "
+        "<Add_mesh> (a rollback or a smaller step leaves the partition "
+        "unchanged, so the run stops here). Diagnostic: ";
+    message += reported_locally
+                   ? capturedExceptionMessage(local_failure)
+                   : "reported on another rank (local failure: " +
+                         capturedExceptionMessage(local_failure) + ")";
+    if (earlier_failure) {
+        message += " (while rolling back after: " +
+                   capturedExceptionMessage(earlier_failure) + ")";
+    }
+    throw InsufficientGhostHaloError(message);
+}
+
 } // namespace
 
 ExternalStateOuterGate scaledExternalStateOuterGate(
@@ -13381,10 +13439,43 @@ NewtonReport NewtonSolver::solveStep(
         return aggregate;
     } catch (...) {
         const auto original_failure = std::current_exception();
+        // A too-shallow ghost halo is decided collectively from
+        // communicator-global data; it is a property of the partition and
+        // the ghost depth near the interface.  Rolling back would rebuild the
+        // constraint structure of the entry state (as costly as the refresh
+        // that failed, and at this depth it can fail the same way) only for
+        // the time loop to stop, or to retry a smaller step on the same
+        // partition, so every rank stops here with the ghost-layer message.
+        const bool local_halo_failure =
+            failureReportsInsufficientGhostHalo(original_failure);
+        if (anyRank(local_halo_failure)) {
+            throwInsufficientGhostHalo(
+                original_failure, local_halo_failure, nullptr);
+        }
+        std::exception_ptr rollback_failure;
         try {
             restoreEntryState();
         } catch (...) {
-            const auto rollback_failure = std::current_exception();
+            rollback_failure = std::current_exception();
+        }
+        // Every rank meets this reduction whether or not its own rollback
+        // failed, so a rank-local rollback failure cannot leave a peer alone
+        // in it.
+        const bool local_rollback_halo_failure =
+            rollback_failure != nullptr &&
+            failureReportsInsufficientGhostHalo(rollback_failure);
+        if (anyRank(local_rollback_halo_failure)) {
+            throwInsufficientGhostHalo(
+                rollback_failure != nullptr ? rollback_failure
+                                            : original_failure,
+                local_rollback_halo_failure,
+                original_failure);
+        }
+        try {
+            if (rollback_failure != nullptr) {
+                std::rethrow_exception(rollback_failure);
+            }
+        } catch (...) {
             if (!canonical_entry_defined && entry_algebraic_state_restored) {
                 // The failure occurred while the generated state of the entry
                 // state itself was synchronized, before a canonical entry
