@@ -449,6 +449,7 @@ These are proposals. Each lists a recommended option and an alternative. Record 
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
+  - **Adopted 2026-10-07 at `39c88f74`:** `svmp-bin/svmultiphysics-39c88f74-ltopgo` (job `46853003`, `jobs/build_ltopgo.sbatch`), profile in `/home/groups/amarsden/zsexton/svmp-pgo/39c88f74/`. Bitwise identical on the nine reference cases and on 2 and 4 ranks; CTest 87/87. A step takes 6–18% less time (job `46866398`): sessile R/h = 16 15% serial and 11% on 4 ranks, capillary wave λ/h = 32 and 64 18% and 16%, static drop R/h = 32 12%, 3D tank 6%, sphere proxy 9%. Training set and policy: `FE/Docs/BuildOptimization.md`.
 - **D17, 2026-10-05: benchmark runs share one JIT object cache across Skylake and Milan nodes.** They set `SVMP_JIT_CPU=x86-64-v3` and a pinned `SVMP_CACHE_PROFILE` (`run_case.sbatch`, `run_case_mpi.sbatch`).
   - The study found this bitwise identical to the host target, and it saves 10–15 s of kernel compilation per cold run.
   - Speed-up bitwise checks keep the default target, so they stay comparable with the shared baseline.
