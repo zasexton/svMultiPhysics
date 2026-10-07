@@ -2350,6 +2350,12 @@ public:
 
 	    // ---- Accessors ----
 	    [[nodiscard]] const assembly::IMeshAccess& meshAccess() const;
+
+	    /// AssemblyOptions::num_threads of the last setup() (1 before setup).
+	    [[nodiscard]] int assemblyThreadCount() const noexcept
+	    {
+	        return last_setup_options_.assembly_options.num_threads;
+	    }
 	    [[nodiscard]] std::span<const MeshParticipantInfo> meshParticipants() const noexcept;
 	    [[nodiscard]] bool hasMeshParticipants() const noexcept { return !mesh_participants_.empty(); }
 	    [[nodiscard]] bool hasSingleMeshParticipant() const noexcept { return mesh_participants_.size() == 1u; }
