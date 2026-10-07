@@ -35,6 +35,9 @@ class HaloExchange {
 
   void sync_owned_to_ghost_scalar(Vector<double>& values, bool skip_sync = false) const;
   void sync_owned_to_ghost_vector(int dof, Array<double>& values, bool skip_sync = false) const;
+  /// Refresh only the ghost entries an owned-row SpMV reads (see
+  /// fsils_syncv_spmv_halo); other ghost entries keep stale values.
+  void sync_spmv_input_vector(int dof, Array<double>& values) const;
   void reverse_scatter_vector_contributions(int dof, Array<double>& values) const;
 
  private:
