@@ -164,6 +164,10 @@ struct LevelSetGeneratedInterfaceResult {
     std::size_t domain_cache_hits{0};
     std::size_t linear_full_cell_fast_path_count{0};
     std::size_t owned_linear_full_cell_fast_path_count{0};
+    // Cells computed on geometry threads and recomputed serially for the
+    // SVMP_GEOMETRY_THREADS_SELF_CHECK comparison (all identical, otherwise
+    // the build throws).
+    std::size_t thread_self_checked_cell_count{0};
     GeometryTangentPolicy geometry_tangent_policy{
         GeometryTangentPolicy::RefreshedFrozenQuadrature};
 };
