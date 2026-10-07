@@ -177,6 +177,11 @@ struct FreeSurfaceGeometryScalarEvaluator {
     [[nodiscard]] bool canEvaluateValue() const noexcept {
         return static_cast<bool>(value);
     }
+
+    // Optional: an evaluator of the same scalar that another thread may use
+    // concurrently with this one (evaluators that cache per-cell data are
+    // not thread-safe).  The snapshot build is threaded only when it is set.
+    std::function<FreeSurfaceGeometryScalarEvaluator()> make_concurrent_copy{};
 };
 
 /**
@@ -746,7 +751,8 @@ private:
         FreeSurfaceGeometryScalarEvaluator,
         std::string,
         FreeSurfaceGeometryOwnershipCollective,
-        FreeSurfaceGeometrySnapshotReuseCache*);
+        FreeSurfaceGeometrySnapshotReuseCache*,
+        int);
 
     FreeSurfaceGeometrySnapshot(
         FreeSurfaceGeometryRevision revision,
@@ -793,8 +799,12 @@ buildFreeSurfaceGeometrySnapshot(
 /**
  * As above, reusing the full-cell volume records of the previous build kept
  * in reuse_cache (see FreeSurfaceGeometrySnapshotReuseCache) and storing this
- * build for the next one.  A null cache builds every record.  The result is
- * bitwise identical either way.
+ * build for the next one.  A null cache builds every record.  The per-rule
+ * work (record construction, rule checks, content digests) runs on `threads`
+ * threads (FE/Core/DeterministicParallel.h); participants other than the
+ * caller evaluate the level set through scalar.make_concurrent_copy(), and
+ * without it the build is serial.  The result is bitwise identical for any
+ * cache state and thread count.
  */
 [[nodiscard]] std::shared_ptr<const FreeSurfaceGeometrySnapshot>
 buildFreeSurfaceGeometrySnapshot(
@@ -806,7 +816,8 @@ buildFreeSurfaceGeometrySnapshot(
     FreeSurfaceGeometryScalarEvaluator scalar,
     std::string domain_id,
     FreeSurfaceGeometryOwnershipCollective ownership_collective,
-    FreeSurfaceGeometrySnapshotReuseCache* reuse_cache);
+    FreeSurfaceGeometrySnapshotReuseCache* reuse_cache,
+    int threads = 1);
 
 /**
  * Bitwise comparison of two snapshots: revision, local mesh revision,

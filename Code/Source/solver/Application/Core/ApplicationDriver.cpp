@@ -41,6 +41,7 @@
 #include "FE/Geometry/MappingFactory.h"
 #include "FE/Geometry/CutQuadratureMapping.h"
 #include "FE/Interfaces/GeneratedActiveBoundaryDomain.h"
+#include "FE/Core/DeterministicParallel.h"
 #include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "FE/Interfaces/IncompressibleTwoFluidDiagnostics.h"
 #include "FE/Interfaces/MaterialInterfaceTransportVelocity.h"
@@ -20105,6 +20106,16 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         reduceOutputTiming(local_backend_seconds, comm);
     auto& options = *options_storage;
     auto& result = *result_storage;
+    if (svmp::FE::geometryThreadsSelfCheckEnabled()) {
+      // Every rank reads the same environment, so the reduction is matched.
+      application::core::oopCout()
+          << "[svMultiPhysics::Application] Geometry-thread self-check"
+          << " diagnostic=geometry_threads_self_check stage=generated_cells"
+          << " domain_id='" << request.domain_id << "'"
+          << " identical=1 checked_cells="
+          << globalSumSize(result.thread_self_checked_cell_count, comm)
+          << std::endl;
+    }
     if (cutGeometryMemoryReportEnabled()) {
       logCutGeometryMemory(
           "after_lifecycle_build",
@@ -20558,58 +20569,75 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
             *sim.fe_system,
             domain_request.source.field_id,
             fe_solution));
-    svmp::FE::interfaces::FreeSurfaceGeometryScalarEvaluator
-        snapshot_scalar_evaluator;
-    snapshot_scalar_evaluator.value =
-        [snapshot_cell_evaluator](
-            svmp::FE::GlobalIndex cell,
-            const std::array<svmp::FE::Real, 3>& parent_coordinate,
-            const svmp::FE::geometry::CutQuadratureProvenance& provenance) {
-          const bool linear_corner =
-              provenance.selected_implicit_quadrature_backend ==
-                  "LinearCorner";
-          const bool high_order_implicit =
-              provenance.selected_implicit_quadrature_backend ==
-                  "SayeHyperrectangle" ||
-              provenance.selected_implicit_quadrature_backend ==
-                  "HighOrderSubcell";
-          if (!linear_corner && !high_order_implicit) {
-            throw std::runtime_error(
-                "Authoritative free-surface geometry rule has an unsupported represented implicit backend '" +
-                provenance.selected_implicit_quadrature_backend + "'.");
-          }
-          // evaluateLinearCornerValue() is evaluateLinearCorner().value
-          // bit for bit, without the gradient.
-          return linear_corner
-              ? snapshot_cell_evaluator->evaluateLinearCornerValue(
-                    cell, parent_coordinate)
-              : snapshot_cell_evaluator->evaluate(cell, parent_coordinate)
-                    .value;
+    // The snapshot's level-set evaluator; the cell evaluator caches the last
+    // cell's coefficients, so each snapshot thread gets its own copy.
+    const auto make_snapshot_scalar_evaluator =
+        [](std::shared_ptr<svmp::FE::level_set::LevelSetCellEvaluator>
+               snapshot_cell_evaluator) {
+          svmp::FE::interfaces::FreeSurfaceGeometryScalarEvaluator
+              snapshot_scalar_evaluator;
+          snapshot_scalar_evaluator.value =
+              [snapshot_cell_evaluator](
+                  svmp::FE::GlobalIndex cell,
+                  const std::array<svmp::FE::Real, 3>& parent_coordinate,
+                  const svmp::FE::geometry::CutQuadratureProvenance& provenance) {
+                const bool linear_corner =
+                    provenance.selected_implicit_quadrature_backend ==
+                        "LinearCorner";
+                const bool high_order_implicit =
+                    provenance.selected_implicit_quadrature_backend ==
+                        "SayeHyperrectangle" ||
+                    provenance.selected_implicit_quadrature_backend ==
+                        "HighOrderSubcell";
+                if (!linear_corner && !high_order_implicit) {
+                  throw std::runtime_error(
+                      "Authoritative free-surface geometry rule has an unsupported represented implicit backend '" +
+                      provenance.selected_implicit_quadrature_backend + "'.");
+                }
+                // evaluateLinearCornerValue() is evaluateLinearCorner().value
+                // bit for bit, without the gradient.
+                return linear_corner
+                    ? snapshot_cell_evaluator->evaluateLinearCornerValue(
+                          cell, parent_coordinate)
+                    : snapshot_cell_evaluator->evaluate(cell, parent_coordinate)
+                          .value;
+              };
+          snapshot_scalar_evaluator.reference_gradient =
+              [snapshot_cell_evaluator](
+                  svmp::FE::GlobalIndex cell,
+                  const std::array<svmp::FE::Real, 3>& parent_coordinate,
+                  const svmp::FE::geometry::CutQuadratureProvenance& provenance) {
+                const bool linear_corner =
+                    provenance.selected_implicit_quadrature_backend ==
+                        "LinearCorner";
+                const bool high_order_implicit =
+                    provenance.selected_implicit_quadrature_backend ==
+                        "SayeHyperrectangle" ||
+                    provenance.selected_implicit_quadrature_backend ==
+                        "HighOrderSubcell";
+                if (!linear_corner && !high_order_implicit) {
+                  throw std::runtime_error(
+                      "Authoritative free-surface geometry rule has an unsupported represented implicit backend '" +
+                      provenance.selected_implicit_quadrature_backend + "'.");
+                }
+                const auto evaluation = linear_corner
+                    ? snapshot_cell_evaluator->evaluateLinearCorner(
+                          cell, parent_coordinate)
+                    : snapshot_cell_evaluator->evaluate(cell, parent_coordinate);
+                return evaluation.reference_gradient;
+              };
+          return snapshot_scalar_evaluator;
         };
-    snapshot_scalar_evaluator.reference_gradient =
-        [snapshot_cell_evaluator](
-            svmp::FE::GlobalIndex cell,
-            const std::array<svmp::FE::Real, 3>& parent_coordinate,
-            const svmp::FE::geometry::CutQuadratureProvenance& provenance) {
-          const bool linear_corner =
-              provenance.selected_implicit_quadrature_backend ==
-                  "LinearCorner";
-          const bool high_order_implicit =
-              provenance.selected_implicit_quadrature_backend ==
-                  "SayeHyperrectangle" ||
-              provenance.selected_implicit_quadrature_backend ==
-                  "HighOrderSubcell";
-          if (!linear_corner && !high_order_implicit) {
-            throw std::runtime_error(
-                "Authoritative free-surface geometry rule has an unsupported represented implicit backend '" +
-                provenance.selected_implicit_quadrature_backend + "'.");
-          }
-          const auto evaluation = linear_corner
-              ? snapshot_cell_evaluator->evaluateLinearCorner(
-                    cell, parent_coordinate)
-              : snapshot_cell_evaluator->evaluate(cell, parent_coordinate);
-          return evaluation.reference_gradient;
+    auto snapshot_scalar_evaluator =
+        make_snapshot_scalar_evaluator(snapshot_cell_evaluator);
+    snapshot_scalar_evaluator.make_concurrent_copy =
+        [snapshot_cell_evaluator, make_snapshot_scalar_evaluator]() {
+          return make_snapshot_scalar_evaluator(
+              std::make_shared<svmp::FE::level_set::LevelSetCellEvaluator>(
+                  *snapshot_cell_evaluator));
         };
+    const int snapshot_threads = svmp::FE::geometryThreadCount(
+        sim.fe_system->assemblyThreadCount());
     svmp::FE::interfaces::FreeSurfaceGeometrySnapshotPolicy snapshot_policy;
     snapshot_policy.tolerance = domain_request.tolerance;
     snapshot_policy.minimum_retained_volume_fraction =
@@ -20649,7 +20677,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
               snapshot_scalar_evaluator,
               request.domain_id,
               snapshotOwnershipCollective(comm),
-              nullptr);
+              nullptr,
+              /*threads=*/1);
     }
     auto geometry_snapshot =
         svmp::FE::interfaces::buildFreeSurfaceGeometrySnapshot(
@@ -20661,7 +20690,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
             std::move(snapshot_scalar_evaluator),
             request.domain_id,
             snapshotOwnershipCollective(comm),
-            snapshot_reuse_cache);
+            snapshot_reuse_cache,
+            snapshot_threads);
     if (reference_geometry_snapshot) {
       const auto difference =
           svmp::FE::interfaces::compareFreeSurfaceGeometrySnapshots(
