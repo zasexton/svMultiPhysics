@@ -3262,6 +3262,8 @@ GeneralSimulationParameters::GeneralSimulationParameters()
   // -1: bounded only by the outer fixed-point iteration limit (every outer
   // refresh may start a new cut-topology epoch).  0 restores stop-and-reject.
   set_parameter("Max_cut_topology_restarts_per_step", -1, !required, max_cut_topology_restarts_per_step, {-1,int_inf});
+  // Opt-in threaded assembly (FE/Docs/ThreadedAssembly.md); SVMP_ASSEMBLY_THREADS overrides it.
+  set_parameter("Assembly_threads", 1, !required, assembly_threads, {1,int_inf});
   set_parameter("Newton_line_search_fail_on_no_reduction", false, !required, newton_line_search_fail_on_no_reduction);
   set_parameter("Newton_line_search_max_iterations", 10, !required, newton_line_search_max_iterations, {1,int_inf});
   set_parameter("Newton_absolute_tolerance", 1.0e-10, !required, newton_absolute_tolerance);
