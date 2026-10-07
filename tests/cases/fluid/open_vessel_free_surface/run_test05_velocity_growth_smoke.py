@@ -13241,6 +13241,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                     args.steps,
                     float(args.time_step_size),
                     args.capillary_rise_half_gap_cells,
+                    profile="legacy",
                 )
             elif case_name in {"sessile2d", "dynamiccontact2d"}:
                 dynamic = case_name == "dynamiccontact2d"

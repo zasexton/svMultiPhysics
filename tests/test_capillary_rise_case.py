@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import argparse
 import math
 import sys
@@ -95,7 +96,7 @@ def test_published_initial_geometry_values_are_reproduced():
 def test_generated_case_uses_open_resolved_slip_contract(tmp_path: Path):
     module = load_module()
     case_dir = tmp_path / "capillaryrise2d"
-    benchmark = module.write_case(case_dir, 3, 5.0e-4, 10)
+    benchmark = module.write_case(case_dir, 3, 5.0e-4, 10, profile="legacy")
 
     resolution = benchmark["mesh_resolution"]
     assert resolution["half_gap_cells"] == 10
@@ -359,3 +360,184 @@ def test_isolated_wall_wetting_gate_exempts_declared_moving_contact_case():
     assert runner.false_wall_wet_history_errors(metrics, args) == []
     assert metrics["wall_only_false_wet_gate_applicability"] == (
         "not_applicable_to_intentional_moving_contact_line")
+
+
+def test_d4_profile_is_the_default_wetting_deck(tmp_path: Path):
+    module = load_module()
+    case_dir = tmp_path / "capillaryrise2d_d4"
+    benchmark = module.write_case(case_dir, 4, 5.0e-4, 10, output_cadence=2)
+    assert module.DEFAULT_PROFILE == "d4"
+    assert benchmark["deck_profile"] == "d4"
+    assert benchmark["output_cadence_steps"] == 2
+    configuration = benchmark["d4_configuration"]
+    assert configuration["contact_line_model"] == "PrescribedAngle"
+    assert configuration["repair_to_target_angle"] is False
+
+    root = ET.parse(case_dir / "solver.xml").getroot()
+    general = root.find("GeneralSimulationParameters")
+    assert general.findtext("Number_of_time_steps") == "4"
+    assert general.findtext("Increment_in_saving_VTK_files") == "2"
+    assert general.findtext("Start_saving_after_time_step") == "2"
+
+    level_set = equation_by_type(root, "level_set")
+    assert level_set.findtext("Advection_velocity_extension_method") == "pde_harmonic"
+    assert level_set.findtext("Advection_velocity_extension_coupling") == "monolithic"
+    assert level_set.find("Use_wet_extension_advection_velocity") is None
+    assert level_set.findtext("Enable_kinematic_reconciliation") == "true"
+    assert level_set.findtext("Enable_sign_definite_patch_bounds") == "true"
+    assert level_set.findtext("Enable_reinitialization") == "false"
+    assert level_set.find("Enable_discontinuity_capturing") is None
+    assert level_set.findtext("Enable_volume_correction") == "false"
+    assert boundary_by_name(level_set, "wall_bottom").findtext("Type") == "LevelSetInflow"
+    assert boundary_by_name(level_set, "wall_top").findtext("Type") == "LevelSetOutflow"
+
+    fluid = equation_by_type(root, "fluid")
+    assert fluid.findtext("Tolerance") == "1.0e-4"
+    for wall_name in ("wall_left", "wall_right"):
+        wall = boundary_by_name(fluid, wall_name)
+        assert wall.findtext("Type") == "Dir"
+        assert wall.findtext("Effective_direction") == "1 0"
+    assert boundary_by_name(fluid, "wall_bottom").findtext("Type") == "Neu"
+    free_surface = boundary_by_name(fluid, "free_surface")
+    assert free_surface.findtext("Contact_line_model") == "PrescribedAngle"
+    assert free_surface.findtext("Surface_tension_form") == "SurfaceStress"
+    assert free_surface.findtext("Wall_slip_model") == "Navier"
+    assert math.isclose(float(free_surface.findtext("Wall_slip_length")), 0.001)
+    assert free_surface.findtext("Contact_line_wall_face") == "wall_right"
+    assert free_surface.findtext("Small_cut_aggregation") == "true"
+    assert free_surface.findtext("Use_cut_metadata_scale") == "false"
+    assert free_surface.find("Allow_corner_linearized_cut_geometry") is None
+    assert free_surface.find("Contact_line_mobility") is None
+
+
+def test_legacy_profile_keeps_every_step_output_and_rejects_cadence(tmp_path: Path):
+    module = load_module()
+    with pytest.raises(ValueError, match="saves every step"):
+        module.write_case(tmp_path / "bad", 4, 5.0e-4, 10,
+                          profile="legacy", output_cadence=2)
+    with pytest.raises(ValueError, match="profile must be one of"):
+        module.write_case(tmp_path / "bad2", 4, 5.0e-4, 10, profile="other")
+
+
+def test_protocol_schedule_meets_the_frozen_contact_motion_limits():
+    module = load_module()
+    limits = module.frozen_contact_motion_limits()
+    assert limits == {10: 0.2, 20: 0.1, 40: 0.05}
+    expected_substeps = {10: 2, 20: 7, 40: 28}
+    for cells, limit in limits.items():
+        schedule = module.protocol_schedule(cells)
+        assert schedule["output_cadence_steps"] == expected_substeps[cells]
+        assert math.isclose(
+            schedule["time_step_size_s"] * schedule["output_cadence_steps"], 1.0e-3)
+        assert schedule["number_of_time_steps"] == 690 * expected_substeps[cells]
+        assert math.isclose(schedule["end_time_s"], 0.69)
+        assert schedule["design_contact_motion_cells_per_step"] <= limit
+        # One substep fewer would exceed the limit at the design speed.
+        coarser = 1.0e-3 / (schedule["output_cadence_steps"] - 1) if (
+            schedule["output_cadence_steps"] > 1) else None
+        if coarser is not None:
+            assert (schedule["design_contact_speed_m_per_s"] * coarser /
+                    schedule["dx_m"]) > limit
+
+
+def test_command_line_writes_a_truncated_d4_level(tmp_path: Path):
+    module = load_module()
+    out = tmp_path / "level10"
+    assert module.main(["--half-gap-cells", "10", "--output-dir", str(out),
+                        "--max-steps", "6"]) == 0
+    benchmark = json.loads((out / "benchmark.json").read_text(encoding="utf-8"))
+    assert benchmark["deck_profile"] == "d4"
+    assert benchmark["truncated"] is True
+    assert benchmark["number_of_time_steps"] == 6
+    assert benchmark["protocol_schedule"]["output_cadence_steps"] == 2
+    root = ET.parse(out / "solver.xml").getroot()
+    general = root.find("GeneralSimulationParameters")
+    assert general.findtext("Number_of_time_steps") == "6"
+    assert float(general.findtext("Time_step_size")) == 5.0e-4
+
+
+HISTORY_PATH = (
+    ROOT / "tests/cases/fluid/open_vessel_free_surface/capillary_rise_history.py"
+)
+
+
+def load_history_module():
+    spec = importlib.util.spec_from_file_location(
+        "free_surface_capillary_rise_history", HISTORY_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_history_merges_partitioned_pieces_by_global_node_id():
+    history = load_history_module()
+    # Unit square split into two triangles, written as two pieces that share
+    # the diagonal; the second piece repeats the first triangle as a ghost.
+    points = np.asarray([
+        [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0],      # piece 0
+        [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0],  # piece 1
+    ])
+    gids = np.asarray([0, 1, 2, 0, 1, 2, 3])
+    cells = np.asarray([3, 0, 1, 2, 3, 3, 4, 5, 3, 3, 5, 6])
+    grid = pv.UnstructuredGrid(
+        cells, np.full(3, pv.CellType.TRIANGLE, dtype=np.uint8), points)
+    grid.point_data["GlobalNodeID"] = gids
+    grid.point_data["phi"] = gids.astype(float) - 1.5
+    grid.cell_data["vtkGhostType"] = np.asarray([0, 1, 0], dtype=np.uint8)
+    merged = history.merge_partitioned_state(grid)
+    assert merged.n_points == 4
+    assert merged.n_cells == 2
+    np.testing.assert_array_equal(
+        np.asarray(merged.point_data["GlobalNodeID"]), [0, 1, 2, 3])
+    np.testing.assert_allclose(
+        np.asarray(merged.point_data["phi"]), [-1.5, -0.5, 0.5, 1.5])
+    triangles = merged.cells_dict[pv.CellType.TRIANGLE]
+    assert sorted(map(tuple, np.sort(triangles, axis=1))) == [(0, 1, 2), (0, 2, 3)]
+    assert math.isclose(merged.area, 1.0)
+
+
+def test_history_of_a_resting_initial_state_is_stationary(tmp_path: Path):
+    module = load_module()
+    history = load_history_module()
+    case = tmp_path / "level10"
+    module.write_case(case, 4, 5.0e-4, 10, output_cadence=2)
+    initial = pv.read(case / "mesh/background/mesh-complete.mesh.vtu")
+    initial.save(case / "result_002.vtu")
+    rows = history.collect_history(case)
+    assert [row["step"] for row in rows] == [0, 2]
+    assert math.isclose(rows[1]["time_s"], 1.0e-3)
+    assert rows[1]["contact_motion_cells_per_step"] == 0.0
+    assert rows[0]["apex_height_mm"] == rows[1]["apex_height_mm"]
+    assert rows[0]["wall_contact_height_mm"] > rows[0]["apex_height_mm"]
+
+
+def test_candidate_uncertainty_follows_the_declared_rule():
+    history = load_history_module()
+    protocol = json.loads(history.CANDIDATE_PROTOCOL.read_text(encoding="utf-8"))
+    assert protocol["status"] == "DECLARED_BEFORE_CANDIDATE_EXECUTION"
+    times = np.round(np.arange(691) * 1.0e-3, 12)
+    exact = 10.0 + 5.0 * np.sin(3.0 * times)
+
+    def level(error_scale):
+        return [{"time_s": t, "apex_height_mm": h + error_scale * (1.0 + t)}
+                for t, h in zip(times, exact)]
+
+    # Second-order levels: errors 4e, e, e/4 -> observed order 2, F = 1.25.
+    result = history.numerical_uncertainty([level(0.16), level(0.04), level(0.01)], protocol)
+    assert result["method"] == "three_level"
+    assert math.isclose(result["observed_order"], 2.0, rel_tol=1.0e-9)
+    np.testing.assert_allclose(result["numerical_uncertainty_mm"],
+                               1.25 * 0.03 * (1.0 + times) / 3.0, rtol=1.0e-9)
+    # Non-decreasing differences fall back to p = 1, F = 3.
+    result = history.numerical_uncertainty([level(0.01), level(0.02), level(0.04)], protocol)
+    assert result["observed_order"] is None
+    assert result["used_order"] == 1.0 and result["safety_factor"] == 3.0
+    # Two levels: p = 1, F = 3.
+    result = history.numerical_uncertainty([level(0.02), level(0.01)], protocol)
+    assert result["method"] == "two_level"
+    np.testing.assert_allclose(result["numerical_uncertainty_mm"],
+                               3.0 * 0.01 * (1.0 + times), rtol=1.0e-9)
+    with pytest.raises(ValueError, match="does not cover"):
+        history.numerical_uncertainty([level(0.02)[:100], level(0.01)], protocol)
