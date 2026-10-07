@@ -7174,6 +7174,47 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
         local_decode_exception,
         "prolongation_owner_row_decode");
 
+    // Rank-local description of a finalized row that disagrees with its
+    // canonical owner, for the failure message.
+    const auto describe_row_disagreement =
+        [&](const SmallCutAggregationProlongationRow& pending_row,
+            const ClosedRow& local,
+            const ClosedRow& canonical) {
+            std::ostringstream out;
+            out.precision(17);
+            const auto write_row = [&](const char* name,
+                                       const ClosedRow& row) {
+                out << ' ' << name << "_constrained="
+                    << (row.constrained ? 1 : 0) << ' ' << name
+                    << "_inhomogeneity=" << row.inhomogeneity << ' '
+                    << name << "_entries=";
+                for (const auto& entry : row.entries) {
+                    out << entry.master_dof << ':' << entry.weight << ',';
+                }
+            };
+            out << " rank=" << rank << " slave=" << pending_row.slave_dof
+                << " slave_owner_rank=" << pending_row.slave_owner_rank
+                << " slave_owned="
+                << (partition.isOwned(pending_row.slave_dof) ? 1 : 0)
+                << " provisional_kind="
+                << static_cast<int>(pending_row.provisional_kind)
+                << " preconstrained_at_apply="
+                << (pending_row.preconstrained_at_apply ? 1 : 0);
+            write_row("local", local);
+            write_row("canonical", canonical);
+            out << " provisional_entries(master:weight:relevant:constrained)=";
+            for (const auto& entry : pending_row.provisional_entries) {
+                out << entry.master_dof << ':' << entry.weight << ':'
+                    << (partition.isRelevant(entry.master_dof) ? 1 : 0)
+                    << ':'
+                    << (closed_constraints.isConstrained(entry.master_dof)
+                            ? 1
+                            : 0)
+                    << ',';
+            }
+            return out.str();
+        };
+
     std::exception_ptr local_consistency_exception;
     try {
         for (const auto& pending_row : pending.rows) {
@@ -7183,15 +7224,29 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
             const auto& canonical =
                 canonical_closed_rows.at(pending_row.slave_dof);
             // A rank that sees the slave only deeper in the halo, where some
-            // master is absent, carries no line for it by design.
+            // master is absent, carries no line for it by design: a line is
+            // installed (resolveDistributedAggregationDeclarations) and kept
+            // (ParallelConstraints::synchronize) on a non-owning rank only
+            // where every master of the unclosed canonical line is relevant,
+            // and canonical_line_final_validation proved that every rank
+            // assembling with the slave has them all. Closure can eliminate
+            // the absent master (a strongly constrained DOF), so the closed
+            // canonical entries alone do not identify such a rank; the
+            // unclosed (provisional) entries do.
+            const auto some_master_absent =
+                [&](const std::vector<ConstraintEntry>& entries) {
+                    return !std::all_of(
+                        entries.begin(),
+                        entries.end(),
+                        [&](const ConstraintEntry& entry) {
+                            return partition.isRelevant(entry.master_dof);
+                        });
+                };
             if (canonical.constrained &&
                 !closed_constraints.isConstrained(pending_row.slave_dof) &&
-                !std::all_of(canonical.entries.begin(),
-                             canonical.entries.end(),
-                             [&](const ConstraintEntry& entry) {
-                                 return partition.isRelevant(
-                                     entry.master_dof);
-                             })) {
+                (some_master_absent(canonical.entries) ||
+                 (!partition.isOwned(pending_row.slave_dof) &&
+                  some_master_absent(pending_row.provisional_entries)))) {
                 continue;
             }
             const auto local =
@@ -7203,7 +7258,8 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
                 local.entries.size() != canonical.entries.size()) {
                 throw std::runtime_error(
                     "SmallCutAggregationConstraint: relevant finalized row "
-                    "disagrees with its canonical owner");
+                    "disagrees with its canonical owner" +
+                    describe_row_disagreement(pending_row, local, canonical));
             }
             for (std::size_t i = 0u;
                  i < local.entries.size();
@@ -7215,7 +7271,9 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
                             canonical.entries[i].weight)) {
                     throw std::runtime_error(
                         "SmallCutAggregationConstraint: relevant finalized "
-                        "entries disagree with their canonical owner");
+                        "entries disagree with their canonical owner" +
+                        describe_row_disagreement(
+                            pending_row, local, canonical));
                 }
             }
         }

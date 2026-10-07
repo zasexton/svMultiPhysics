@@ -474,6 +474,129 @@ private:
     std::vector<std::array<GlobalIndex, 4>> cells_{};
 };
 
+// Strip of six unit quads, cells 0..5 at x = [c, c + 1]; rank 0 owns cells
+// 0..3 and sees all of them, rank 1 owns cells 4 and 5 and sees cells 1..5
+// (three ghost cells, so cells 1 and 2 are deep in its halo and are neither
+// owned nor face neighbours of an owned cell).
+class SixQuadDeepHaloMeshAccess final : public assembly::IMeshAccess {
+public:
+    explicit SixQuadDeepHaloMeshAccess(int rank) : rank_(rank)
+    {
+        const int first_x = firstCell();
+        for (int x = first_x; x <= 6; ++x) {
+            nodes_.push_back({static_cast<Real>(x), Real{0}, Real{0}});
+            nodes_.push_back({static_cast<Real>(x), Real{1}, Real{0}});
+        }
+        for (int cell = 0; cell < 6 - first_x; ++cell) {
+            const auto left = static_cast<GlobalIndex>(2 * cell);
+            cells_.push_back({left, left + 2, left + 3, left + 1});
+        }
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override
+    {
+        return static_cast<GlobalIndex>(cells_.size());
+    }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override
+    {
+        return rank_ == 0 ? 4 : 2;
+    }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override
+    {
+        return static_cast<GlobalIndex>(cells_.size() - 1u);
+    }
+    [[nodiscard]] int dimension() const override { return 2; }
+    [[nodiscard]] bool globalEntityIdsAvailable() const override
+    {
+        return true;
+    }
+    [[nodiscard]] GlobalIndex getCellGlobalId(
+        GlobalIndex cell) const override
+    {
+        return cell + firstCell();
+    }
+    [[nodiscard]] bool isOwnedCell(GlobalIndex cell) const override
+    {
+        return (cell + firstCell() < 4) == (rank_ == 0);
+    }
+    [[nodiscard]] ElementType getCellType(GlobalIndex) const override
+    {
+        return ElementType::Quad4;
+    }
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex,
+                                               GlobalIndex) const override
+    {
+        return INVALID_LOCAL_INDEX;
+    }
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex) const override
+    {
+        return -1;
+    }
+    void getCellNodes(GlobalIndex cell,
+                      std::vector<GlobalIndex>& nodes) const override
+    {
+        const auto& connectivity = cells_.at(static_cast<std::size_t>(cell));
+        nodes.assign(connectivity.begin(), connectivity.end());
+    }
+    [[nodiscard]] std::array<Real, 3>
+    getNodeCoordinates(GlobalIndex node) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node));
+    }
+    void getCellCoordinates(
+        GlobalIndex cell,
+        std::vector<std::array<Real, 3>>& coordinates) const override
+    {
+        const auto& connectivity = cells_.at(static_cast<std::size_t>(cell));
+        coordinates.resize(connectivity.size());
+        for (std::size_t i = 0; i < connectivity.size(); ++i) {
+            coordinates[i] =
+                nodes_.at(static_cast<std::size_t>(connectivity[i]));
+        }
+    }
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex>
+    getInteriorFaceCells(GlobalIndex face) const override
+    {
+        return {face, face + 1};
+    }
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        for (GlobalIndex cell = 0; cell < numCells(); ++cell) {
+            callback(cell);
+        }
+    }
+    void forEachOwnedCell(
+        std::function<void(GlobalIndex)> callback) const override
+    {
+        for (GlobalIndex cell = 0; cell < numCells(); ++cell) {
+            if (isOwnedCell(cell)) {
+                callback(cell);
+            }
+        }
+    }
+    void forEachBoundaryFace(
+        int,
+        std::function<void(GlobalIndex, GlobalIndex)>) const override
+    {
+    }
+    void forEachInteriorFace(
+        std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> callback)
+        const override
+    {
+        for (GlobalIndex face = 0; face < numInteriorFaces(); ++face) {
+            callback(face, face, face + 1);
+        }
+    }
+
+private:
+    [[nodiscard]] int firstCell() const { return rank_ == 0 ? 0 : 1; }
+
+    int rank_{0};
+    std::vector<std::array<Real, 3>> nodes_{};
+    std::vector<std::array<GlobalIndex, 4>> cells_{};
+};
+
 dofs::MeshTopologyInfo fullTopology()
 {
     dofs::MeshTopologyInfo topology;
@@ -595,6 +718,41 @@ dofs::MeshTopologyInfo sixQuadEqualRootTopology(bool reverse_ownership,
     return topology;
 }
 
+dofs::MeshTopologyInfo sixQuadDeepHaloTopology(int rank)
+{
+    dofs::MeshTopologyInfo topology;
+    topology.dim = 2;
+    const int first_x = rank == 0 ? 0 : 1;
+    const int n_cells = 6 - first_x;
+    topology.n_cells = n_cells;
+    topology.n_vertices = 2 * (n_cells + 1);
+    topology.cell2vertex_offsets.push_back(0);
+    for (int cell = 0; cell < n_cells; ++cell) {
+        const int left = 2 * cell;
+        topology.cell2vertex_data.insert(
+            topology.cell2vertex_data.end(),
+            {left, left + 2, left + 3, left + 1});
+        topology.cell2vertex_offsets.push_back(
+            static_cast<GlobalIndex>(topology.cell2vertex_data.size()));
+    }
+    for (int local_x = 0; local_x <= n_cells; ++local_x) {
+        const auto global_x = first_x + local_x;
+        topology.vertex_gids.push_back(2 * global_x);
+        topology.vertex_gids.push_back(2 * global_x + 1);
+        topology.vertex_coords.insert(
+            topology.vertex_coords.end(),
+            {static_cast<Real>(global_x), Real{0},
+             static_cast<Real>(global_x), Real{1}});
+    }
+    for (int local_cell = 0; local_cell < n_cells; ++local_cell) {
+        const auto global_cell = first_x + local_cell;
+        topology.cell_gids.push_back(global_cell);
+        topology.cell_owner_ranks.push_back(global_cell < 4 ? 0 : 1);
+    }
+    topology.neighbor_ranks = {rank == 0 ? 1 : 0};
+    return topology;
+}
+
 systems::SetupOptions setupOptions(int rank,
                                   int world_size,
                                   MPI_Comm comm = MPI_COMM_WORLD)
@@ -711,6 +869,65 @@ sixQuadEqualRootCutContext(int rank, bool reverse_ownership)
     }
     return context;
 }
+
+// Fixes the x = 0 vertices (local vertices 0 and 1 of rank 0, which owns
+// them; rank 1 does not see them) to a common value.
+class RankZeroLeftWallDirichlet final : public ISystemConstraint {
+public:
+    RankZeroLeftWallDirichlet(FieldId field, int rank, Real value)
+        : field_(field), rank_(rank), value_(value)
+    {
+    }
+
+    void apply(const systems::FESystem& system,
+               AffineConstraints& constraints) override
+    {
+        if (rank_ != 0) {
+            return;
+        }
+        const auto* entity_map =
+            system.fieldDofHandler(field_).getEntityDofMap();
+        if (entity_map == nullptr) {
+            throw std::logic_error(
+                "left-wall Dirichlet requires a vertex DOF map");
+        }
+        const auto offset = system.fieldDofOffset(field_);
+        for (const GlobalIndex vertex : {GlobalIndex{0}, GlobalIndex{1}}) {
+            const auto dofs = entity_map->getVertexDofs(vertex);
+            if (dofs.size() != 1u) {
+                throw std::logic_error(
+                    "left-wall Dirichlet requires scalar vertex DOFs");
+            }
+            constraints.addDirichlet(offset + dofs.front(), value_);
+        }
+    }
+
+    bool updateValues(const systems::FESystem&,
+                      AffineConstraints&,
+                      double,
+                      double) override
+    {
+        return false;
+    }
+
+    [[nodiscard]] bool isTimeDependent() const noexcept override
+    {
+        return false;
+    }
+
+    [[nodiscard]] systems::SetupStorageRequirements
+    storageRequirements() const noexcept override
+    {
+        systems::SetupStorageRequirements requirements;
+        requirements.entity_dof_map = true;
+        return requirements;
+    }
+
+private:
+    FieldId field_{INVALID_FIELD_ID};
+    int rank_{0};
+    Real value_{0};
+};
 
 class RankZeroPrivateCycleOnRebuild final : public ISystemConstraint {
 public:
@@ -2354,6 +2571,99 @@ TEST(SmallCutAggregationConstraintMPI,
 
     EXPECT_TRUE(setup_ok) << failure_message;
     EXPECT_TRUE(rebuild_ok) << failure_message;
+#endif
+}
+
+// The x = 2 vertices touch only the cut cell 1 and the dry cell 2, so they
+// are extended from the full root cell 0: p(2, y) = 2 p(1, y) - p(0, y).
+// Rank 1 sees them in its deep halo (cells 1 and 2 are neither owned nor face
+// neighbours of an owned cell), not their x = 0 masters, so it carries no
+// line for them by design. The x = 0 masters are fixed, so the closed
+// canonical rows p(2, y) = 2 p(1, y) - 5 only reference x = 1 masters, which
+// rank 1 does see. The finalized-row validation used to read that as a
+// missing line and rejected the configuration on rank 1 ("relevant finalized
+// row disagrees with its canonical owner"), as in the 8-rank sessile drop.
+TEST(SmallCutAggregationConstraintMPI,
+     DeepHaloSlaveWithClosureEliminatedAbsentMasterCarriesNoLine)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    int rank = 0;
+    int world_size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    if (world_size != 2) {
+        GTEST_SKIP() << "Run with exactly two MPI ranks";
+    }
+
+    auto mesh = std::make_shared<SixQuadDeepHaloMeshAccess>(rank);
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(std::make_unique<RankZeroLeftWallDirichlet>(
+        pressure, rank, Real{5}));
+    system.addSystemConstraint(std::make_unique<SmallCutAggregationConstraint>(
+        pressure, geometry::CutIntegrationSide::Negative, kInterfaceMarker));
+
+    systems::SetupInputs inputs;
+    inputs.topology_override = sixQuadDeepHaloTopology(rank);
+    const auto setup_outcome = invokeCollectively(MPI_COMM_WORLD, [&] {
+        system.setup(setupOptions(rank, world_size), inputs);
+    });
+    ASSERT_TRUE(setup_outcome.allSucceeded())
+        << setup_outcome.local_message;
+    // Cell 0 is full, cell 1 cut and cells 2..5 dry (positive side only);
+    // every rank classifies the cells it sees.
+    constexpr auto dry = geometry::CutIntegrationSide::Positive;
+    system.setCutIntegrationContext(
+        rank == 0
+            ? cutContext({{0, Real{1}, true},
+                          {1, Real{0.25}, false},
+                          {2, Real{1}, true, dry},
+                          {3, Real{1}, true, dry},
+                          {4, Real{1}, true, dry},
+                          {5, Real{1}, true, dry}})
+            : cutContext({{0, Real{0.25}, false},
+                          {1, Real{1}, true, dry},
+                          {2, Real{1}, true, dry},
+                          {3, Real{1}, true, dry},
+                          {4, Real{1}, true, dry}},
+                         /*physical_cell_gid_offset=*/1));
+    const auto rebuild_outcome = invokeCollectively(
+        MPI_COMM_WORLD, [&] { system.rebuildConstraintState(); });
+    ASSERT_TRUE(rebuild_outcome.allSucceeded())
+        << rebuild_outcome.local_message;
+
+    // Local vertex numbering: rank 0 starts at x = 0, rank 1 at x = 1.
+    const GlobalIndex first_x = rank == 0 ? 0 : 1;
+    const auto local_vertex = [&](GlobalIndex x, GlobalIndex y) {
+        return 2 * (x - first_x) + y;
+    };
+    for (const GlobalIndex y : {GlobalIndex{0}, GlobalIndex{1}}) {
+        const auto slave =
+            vertexDof(system, pressure, local_vertex(2, y));
+        ASSERT_GE(slave, 0);
+        if (rank == 0) {
+            const auto line = system.constraints().getConstraint(slave);
+            ASSERT_TRUE(line.has_value());
+            EXPECT_NEAR(line->inhomogeneity, -5.0, 1.0e-12);
+            EXPECT_EQ(
+                lineEntries(system, slave),
+                (std::vector<std::pair<GlobalIndex, double>>{
+                    {vertexDof(system, pressure, local_vertex(1, y)),
+                     2.0}}));
+        } else {
+            EXPECT_TRUE(
+                system.dofHandler().getPartition().isRelevant(slave));
+            EXPECT_FALSE(system.constraints().isConstrained(slave));
+        }
+    }
+    const auto reports = system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(reports.size(), 1u);
+    ASSERT_NE(reports.front(), nullptr);
 #endif
 }
 
