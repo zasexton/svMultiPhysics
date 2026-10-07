@@ -116,6 +116,14 @@ void HaloExchange::sync_owned_to_ghost_vector(int dof, Array<double>& values, bo
   fsils_syncv_owned_to_ghost(*lhs_, dof, values);
 }
 
+void HaloExchange::sync_spmv_input_vector(int dof, Array<double>& values) const
+{
+  if (lhs_ == nullptr || lhs_->commu.nTasks <= 1) {
+    return;
+  }
+  fsils_syncv_spmv_halo(*lhs_, dof, values);
+}
+
 void HaloExchange::reverse_scatter_vector_contributions(int dof, Array<double>& values) const
 {
   if (lhs_ == nullptr || lhs_->commu.nTasks <= 1) {
