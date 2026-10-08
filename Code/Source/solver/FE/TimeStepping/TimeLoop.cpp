@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <exception>
+#include <iomanip>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -4423,9 +4424,24 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     }
 
     // If the loop exits because step == max_steps, the final accepted step may
-    // have advanced time exactly to t_end. Handle that edge case explicitly.
+    // have advanced time to t_end. The accepted time is a running sum
+    // (TimeHistory::acceptStep adds dt), and each addition rounds by at most
+    // eps/2 * |t|, so after N steps the sum can lie up to about
+    // N * eps/2 * nominal_time_span from t_end (for example 6.6e-12 short
+    // after 15,800 fixed steps to t_end = 24.49, while time_tol is 5.4e-12).
+    // Accept twice that worst-case bound here, but less than half a step (so
+    // a missing step is never taken for round-off). Only this check uses it:
+    // runs that end inside the loop, or pass time_tol, are unchanged.
     const double t = history.time();
-    if (t + time_tol >= t_end) {
+    const double last_dt =
+        history.dtPrev() > 0.0 ? history.dtPrev() : std::abs(options_.dt);
+    const double accumulated_time_tol = std::max(
+        time_tol,
+        std::min(static_cast<double>(options_.max_steps) *
+                     std::numeric_limits<double>::epsilon() *
+                     nominal_time_span,
+                 0.5 * last_dt));
+    if (t + accumulated_time_tol >= t_end) {
         report.success = true;
         report.steps_taken = options_.max_steps;
         report.final_time = t_end;
@@ -4436,7 +4452,15 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     report.success = false;
     report.steps_taken = options_.max_steps;
     report.final_time = t;
-    report.message = "TimeLoop: max_steps exceeded";
+    {
+        std::ostringstream oss;
+        oss << std::setprecision(17)
+            << "TimeLoop: max_steps exceeded (steps=" << options_.max_steps
+            << " final_time=" << t << " t_end=" << t_end
+            << " shortfall=" << (t_end - t)
+            << " tolerance=" << accumulated_time_tol << ")";
+        report.message = oss.str();
+    }
     return report;
 }
 
