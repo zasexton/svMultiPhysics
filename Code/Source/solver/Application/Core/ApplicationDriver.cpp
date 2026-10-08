@@ -20062,6 +20062,171 @@ std::string cutGeometryLifecycleMemoryDetails(
   return out.str();
 }
 
+// ---- ghost-layer audit (diagnostics only) ----------------------------------
+//
+// SVMP_AUDIT_GHOST_LAYERS=1 prints, on every rank, how the generated cut
+// geometry is distributed over the ghost layers (face-adjacency distance from
+// the owned cells; owned cells are layer 0).
+// SVMP_AUDIT_WITHHOLD_GHOST_CUT_LAYERS=k removes the generated fragments,
+// volume regions and sensitivity records of ghost cells beyond layer k from
+// the domain every downstream consumer reads (snapshot, active boundary,
+// context, constraints, assembly, ...), to find which consumers need cut data
+// how deep into the halo.  It changes results; it is an audit tool.
+constexpr int kGhostLayerAuditBuckets = 16;
+
+std::vector<int> ghostCellLayers(
+    const svmp::FE::assembly::IMeshAccess& mesh)
+{
+  const auto n_cells = static_cast<std::size_t>(
+      std::max<svmp::FE::GlobalIndex>(0, mesh.numCells()));
+  std::vector<int> layer(n_cells, std::numeric_limits<int>::max());
+  std::vector<std::vector<svmp::FE::GlobalIndex>> neighbors(n_cells);
+  mesh.forEachInteriorFace([&](svmp::FE::GlobalIndex,
+                               svmp::FE::GlobalIndex a,
+                               svmp::FE::GlobalIndex b) {
+    if (a < 0 || b < 0 || static_cast<std::size_t>(a) >= n_cells ||
+        static_cast<std::size_t>(b) >= n_cells) {
+      return;
+    }
+    neighbors[static_cast<std::size_t>(a)].push_back(b);
+    neighbors[static_cast<std::size_t>(b)].push_back(a);
+  });
+  std::vector<svmp::FE::GlobalIndex> frontier;
+  for (std::size_t cell = 0; cell < n_cells; ++cell) {
+    if (mesh.isOwnedCell(static_cast<svmp::FE::GlobalIndex>(cell))) {
+      layer[cell] = 0;
+      frontier.push_back(static_cast<svmp::FE::GlobalIndex>(cell));
+    }
+  }
+  int depth = 0;
+  while (!frontier.empty()) {
+    ++depth;
+    std::vector<svmp::FE::GlobalIndex> next;
+    for (const auto cell : frontier) {
+      for (const auto neighbor : neighbors[static_cast<std::size_t>(cell)]) {
+        auto& value = layer[static_cast<std::size_t>(neighbor)];
+        if (value == std::numeric_limits<int>::max()) {
+          value = depth;
+          next.push_back(neighbor);
+        }
+      }
+    }
+    frontier.swap(next);
+  }
+  return layer;
+}
+
+[[nodiscard]] std::size_t ghostLayerBucket(int layer) noexcept
+{
+  return static_cast<std::size_t>(
+      std::min(layer, kGhostLayerAuditBuckets - 1));
+}
+
+std::string ghostLayerHistogramText(
+    const std::array<std::size_t, kGhostLayerAuditBuckets>& counts)
+{
+  std::string text = "[";
+  for (std::size_t i = 0; i < counts.size(); ++i) {
+    text += (i == 0 ? "" : ",") + std::to_string(counts[i]);
+  }
+  return text + "]";
+}
+
+void auditGhostLayers(
+    const svmp::FE::assembly::IMeshAccess& mesh,
+    svmp::FE::interfaces::LevelSetInterfaceDomain& domain,
+    const svmp::MeshComm& comm,
+    std::string_view domain_id)
+{
+  const bool print = parseBoolEnv("SVMP_AUDIT_GHOST_LAYERS", false);
+  const char* withhold_text =
+      std::getenv("SVMP_AUDIT_WITHHOLD_GHOST_CUT_LAYERS");
+  const bool withhold =
+      withhold_text != nullptr && withhold_text[0] != '\0';
+  if (!print && !withhold) {
+    return;
+  }
+  const int keep_layers = withhold ? std::atoi(withhold_text) : 0;
+  const auto layers = ghostCellLayers(mesh);
+  const auto layer_of = [&](svmp::FE::MeshIndex cell) {
+    return cell >= 0 && static_cast<std::size_t>(cell) < layers.size()
+               ? layers[static_cast<std::size_t>(cell)]
+               : std::numeric_limits<int>::max();
+  };
+  std::array<std::size_t, kGhostLayerAuditBuckets> cells{};
+  std::array<std::size_t, kGhostLayerAuditBuckets> cut_cells{};
+  std::array<std::size_t, kGhostLayerAuditBuckets> fragments{};
+  std::array<std::size_t, kGhostLayerAuditBuckets> regions{};
+  for (const auto layer : layers) {
+    ++cells[ghostLayerBucket(layer)];
+  }
+  std::vector<std::uint8_t> is_cut(layers.size(), 0u);
+  for (const auto& fragment : domain.fragments()) {
+    ++fragments[ghostLayerBucket(layer_of(fragment.parent_cell))];
+    if (fragment.parent_cell >= 0 &&
+        static_cast<std::size_t>(fragment.parent_cell) < is_cut.size()) {
+      is_cut[static_cast<std::size_t>(fragment.parent_cell)] = 1u;
+    }
+  }
+  for (std::size_t cell = 0; cell < is_cut.size(); ++cell) {
+    if (is_cut[cell] != 0u) {
+      ++cut_cells[ghostLayerBucket(layers[cell])];
+    }
+  }
+  for (const auto& region : domain.volumeRegions()) {
+    ++regions[ghostLayerBucket(layer_of(region.parent_cell))];
+  }
+  if (print) {
+    std::ostringstream line;
+    line << "[svMultiPhysics::Application] Ghost-layer audit"
+         << " diagnostic=ghost_layer_audit domain_id='" << domain_id << "'"
+         << " rank=" << comm.rank()
+         << " cells_by_layer=" << ghostLayerHistogramText(cells)
+         << " cut_cells_by_layer=" << ghostLayerHistogramText(cut_cells)
+         << " fragments_by_layer=" << ghostLayerHistogramText(fragments)
+         << " regions_by_layer=" << ghostLayerHistogramText(regions)
+         << '\n';
+    std::cerr << line.str() << std::flush;
+  }
+  if (!withhold) {
+    return;
+  }
+  svmp::FE::interfaces::LevelSetInterfaceDomain kept(domain.request());
+  std::size_t withheld_fragments = 0u;
+  std::size_t withheld_regions = 0u;
+  std::size_t withheld_sensitivity = 0u;
+  for (const auto& fragment : domain.fragments()) {
+    if (layer_of(fragment.parent_cell) > keep_layers) {
+      ++withheld_fragments;
+      continue;
+    }
+    kept.addFragment(fragment);
+  }
+  for (const auto& region : domain.volumeRegions()) {
+    if (layer_of(region.parent_cell) > keep_layers) {
+      ++withheld_regions;
+      continue;
+    }
+    kept.addVolumeRegion(region);
+  }
+  for (const auto& record : domain.sensitivityRecords()) {
+    if (layer_of(record.parent_cell) > keep_layers) {
+      ++withheld_sensitivity;
+      continue;
+    }
+    kept.addSensitivityRecord(record);
+  }
+  domain = std::move(kept);
+  application::core::oopCout()
+      << "[svMultiPhysics::Application] Ghost-layer audit"
+      << " diagnostic=ghost_layer_audit_withhold domain_id='" << domain_id
+      << "' keep_layers=" << keep_layers
+      << " withheld_fragments=" << globalSumSize(withheld_fragments, comm)
+      << " withheld_regions=" << globalSumSize(withheld_regions, comm)
+      << " withheld_sensitivity_records="
+      << globalSumSize(withheld_sensitivity, comm) << std::endl;
+}
+
 ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     application::core::SimulationComponents& sim,
     const Parameters& params,
@@ -20151,6 +20316,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         reduceOutputTiming(local_backend_seconds, comm);
     auto& options = *options_storage;
     auto& result = *result_storage;
+    auditGhostLayers(mesh_access, result.domain, comm, request.domain_id);
     if (svmp::FE::geometryThreadsSelfCheckEnabled()) {
       // Every rank reads the same environment, so the reduction is matched.
       application::core::oopCout()
