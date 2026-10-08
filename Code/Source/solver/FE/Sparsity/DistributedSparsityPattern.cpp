@@ -304,6 +304,20 @@ void DistributedSparsityPattern::addEntries(GlobalIndex global_row,
     unionSortedUniqueInto(building_rows_[static_cast<std::size_t>(local_row)], cols_sorted, scratch);
 }
 
+void DistributedSparsityPattern::setOwnedRowSortedUnique(GlobalIndex global_row,
+                                                         std::vector<GlobalIndex> sorted_unique_cols) {
+    checkNotFinalized();
+    checkOwnedRow(global_row);
+    for (std::size_t i = 0; i < sorted_unique_cols.size(); ++i) {
+        const GlobalIndex col = sorted_unique_cols[i];
+        FE_CHECK_ARG(col >= 0 && col < global_cols_, "Column index out of range");
+        FE_CHECK_ARG(i == 0 || sorted_unique_cols[i - 1] < col,
+                     "setOwnedRowSortedUnique: columns must be strictly increasing");
+    }
+    building_rows_[static_cast<std::size_t>(global_row - owned_rows_.first)] =
+        std::move(sorted_unique_cols);
+}
+
 void DistributedSparsityPattern::addElementCouplings(std::span<const GlobalIndex> global_dofs) {
     checkNotFinalized();
 
@@ -615,16 +629,28 @@ std::vector<GlobalIndex> DistributedSparsityPattern::getOwnedRowGlobalCols(Globa
     const auto diag_cols = getRowDiagCols(local_row);
     const auto offdiag_cols = getRowOffdiagCols(local_row);
 
+    // Diagonal-block columns are sorted local columns of the owned range;
+    // off-diagonal columns are sorted ghost indices whose global IDs are
+    // sorted too (ghost_col_map_ is sorted) and lie outside the owned range.
+    // Merge instead of sorting: ghosts below the range, the range, the rest.
     std::vector<GlobalIndex> cols;
     cols.reserve(static_cast<std::size_t>(diag_cols.size() + offdiag_cols.size()));
+    std::size_t g = 0;
+    while (g < offdiag_cols.size() && ghostColToGlobal(offdiag_cols[g]) < owned_cols_.first) {
+        cols.push_back(ghostColToGlobal(offdiag_cols[g]));
+        ++g;
+    }
     for (GlobalIndex local_col : diag_cols) {
         cols.push_back(local_col + owned_cols_.first);
     }
-    for (GlobalIndex ghost_idx : offdiag_cols) {
-        cols.push_back(ghostColToGlobal(ghost_idx));
+    for (; g < offdiag_cols.size(); ++g) {
+        cols.push_back(ghostColToGlobal(offdiag_cols[g]));
     }
-    std::sort(cols.begin(), cols.end());
-    cols.erase(std::unique(cols.begin(), cols.end()), cols.end());
+    if (!std::is_sorted(cols.begin(), cols.end()) ||
+        std::adjacent_find(cols.begin(), cols.end()) != cols.end()) {
+        std::sort(cols.begin(), cols.end());
+        cols.erase(std::unique(cols.begin(), cols.end()), cols.end());
+    }
     return cols;
 }
 
