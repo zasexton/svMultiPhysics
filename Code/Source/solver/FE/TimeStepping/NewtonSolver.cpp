@@ -11344,17 +11344,25 @@ void applyAuxiliaryDelta(systems::FESystem& system,
 }
 
 // `local_failure` reports the halo on this rank when `reported_locally`;
-// otherwise another rank of the communicator reported it.
+// otherwise another rank of the communicator reported it.  On a single rank
+// there is no halo: the same aggregation diagnostic (for example
+// no_valid_root_proposal) is a stencil failure, so do not point at
+// <Ghost_layers> there.
 [[noreturn]] void throwInsufficientGhostHalo(
     const std::exception_ptr& local_failure,
     bool reported_locally,
-    const std::exception_ptr& earlier_failure)
+    const std::exception_ptr& earlier_failure,
+    bool multi_rank)
 {
     std::string message =
-        "NewtonSolver: the mesh ghost layers do not cover the small-cut "
-        "aggregation stencil on this partition; increase <Ghost_layers> in "
-        "<Add_mesh> (a rollback or a smaller step leaves the partition "
-        "unchanged, so the run stops here). Diagnostic: ";
+        multi_rank
+            ? "NewtonSolver: the mesh ghost layers do not cover the small-cut "
+              "aggregation stencil on this partition; increase <Ghost_layers> in "
+              "<Add_mesh> (a rollback or a smaller step leaves the partition "
+              "unchanged, so the run stops here). Diagnostic: "
+            : "NewtonSolver: the small-cut aggregation could not build its "
+              "constraint stencil on this single-rank run (not a ghost-layer "
+              "issue); the run stops here. Diagnostic: ";
     message += reported_locally
                    ? capturedExceptionMessage(local_failure)
                    : "reported on another rank (local failure: " +
@@ -13526,9 +13534,11 @@ NewtonReport NewtonSolver::solveStep(
         // partition, so every rank stops here with the ghost-layer message.
         const bool local_halo_failure =
             failureReportsInsufficientGhostHalo(original_failure);
+        const bool multi_rank =
+            communicatorSize(systemCommunicator(system)) > 1;
         if (anyRank(local_halo_failure)) {
             throwInsufficientGhostHalo(
-                original_failure, local_halo_failure, nullptr);
+                original_failure, local_halo_failure, nullptr, multi_rank);
         }
         std::exception_ptr rollback_failure;
         try {
@@ -13547,7 +13557,8 @@ NewtonReport NewtonSolver::solveStep(
                 rollback_failure != nullptr ? rollback_failure
                                             : original_failure,
                 local_rollback_halo_failure,
-                original_failure);
+                original_failure,
+                multi_rank);
         }
         try {
             if (rollback_failure != nullptr) {
