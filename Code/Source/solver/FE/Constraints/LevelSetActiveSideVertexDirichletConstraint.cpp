@@ -7,6 +7,8 @@
 
 #include "Constraints/LevelSetActiveSideVertexDirichletConstraint.h"
 
+#include "Constraints/BoundaryDofOwnerCompletion.h"
+
 #include "Assembly/CutIntegrationContext.h"
 #include "Dofs/EntityDofMap.h"
 #include "Core/Logger.h"
@@ -20,8 +22,13 @@
 #include <sstream>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
+
+#if FE_HAS_MPI
+#  include <mpi.h>
+#endif
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #  include "Mesh/Fields/MeshFields.h"
@@ -33,6 +40,12 @@ namespace FE {
 namespace constraints {
 
 namespace {
+
+[[nodiscard]] bool activeSideSupportEnvFlag(const char* name)
+{
+    const char* env = std::getenv(name);
+    return env != nullptr && env[0] != '\0' && std::string(env) != "0";
+}
 
 [[nodiscard]] const char* sideName(LevelSetConstraintSide side) noexcept
 {
@@ -333,6 +346,8 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
     const auto offset = system.fieldDofOffset(field_);
     const auto& owned = system.dofHandler().getPartition().locallyOwned();
     const auto n_field_dofs = dh.getNumDofs();
+    std::vector<unsigned char> routed_dof_support(
+        static_cast<std::size_t>(n_field_dofs), static_cast<unsigned char>(0));
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     const auto& mesh = system.mesh()->local_mesh();
@@ -356,6 +371,26 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
     std::string support_mode = "cell_patch";
     std::vector<unsigned char> active_cell_seen(
         mesh.n_cells(), static_cast<unsigned char>(0));
+    // Owner-routed support: a cell's activity counts only on the rank that
+    // owns it (or, for a cut-adjacent facet, on a rank owning either cell);
+    // the marks of DOFs a rank does not own reach their owners below.  This
+    // keeps the owned DOFs' decisions independent of ghost cut data.
+    const auto& mesh_access = system.meshAccess();
+    std::vector<unsigned char> routed_cell_seen(
+        mesh.n_cells(), static_cast<unsigned char>(0));
+    const auto routed_mark_cell = [&](GlobalIndex cell) {
+        if (cell < 0 || static_cast<std::size_t>(cell) >= mesh.n_cells() ||
+            routed_cell_seen[static_cast<std::size_t>(cell)] != static_cast<unsigned char>(0)) {
+            return;
+        }
+        routed_cell_seen[static_cast<std::size_t>(cell)] = static_cast<unsigned char>(1);
+        for (const auto local_dof : dh.getCellDofs(cell)) {
+            if (local_dof >= 0 && local_dof < n_field_dofs) {
+                routed_dof_support[static_cast<std::size_t>(local_dof)] =
+                    static_cast<unsigned char>(1);
+            }
+        }
+    };
     const auto mark_local_dof_active = [&](GlobalIndex local_dof,
                                            const char* entity_name,
                                            GlobalIndex entity_id) {
@@ -468,6 +503,9 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
             if (mark_cell_active(static_cast<GlobalIndex>(cell))) {
                 ++active_support_cells_from_volume_support;
             }
+            if (mesh_access.isOwnedCell(static_cast<GlobalIndex>(cell))) {
+                routed_mark_cell(static_cast<GlobalIndex>(cell));
+            }
         }
     } else {
         for (GlobalIndex cell = 0;
@@ -502,6 +540,9 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
                 if (mark_cell_active(cell)) {
                     ++active_support_cells_from_volume_support;
                 }
+                if (mesh_access.isOwnedCell(cell)) {
+                    routed_mark_cell(cell);
+                }
             }
         }
     }
@@ -524,6 +565,16 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
                     mark_cell_active(
                         static_cast<GlobalIndex>(facet.second_cell))) {
                     ++active_support_cells_from_cut_adjacent_facets;
+                }
+                const bool first_owned =
+                    facet.first_cell >= static_cast<MeshIndex>(0) &&
+                    mesh_access.isOwnedCell(static_cast<GlobalIndex>(facet.first_cell));
+                const bool second_owned =
+                    facet.second_cell >= static_cast<MeshIndex>(0) &&
+                    mesh_access.isOwnedCell(static_cast<GlobalIndex>(facet.second_cell));
+                if (first_owned || second_owned) {
+                    routed_mark_cell(static_cast<GlobalIndex>(facet.first_cell));
+                    routed_mark_cell(static_cast<GlobalIndex>(facet.second_cell));
                 }
             }
         }
@@ -553,6 +604,79 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
     std::size_t active_support_cells_from_cut_adjacent_facets = 0u;
     std::string support_mode = "cell_patch";
 #endif
+
+    // Owned DOFs take their support from the owner-routed marks: the owner
+    // of every marked cell (or facet) sends the marks of DOFs it does not own
+    // to their owners.  With complete ghost cut data this equals the local
+    // marking of every local cell (bitwise); it no longer depends on ghost
+    // cells beyond the owned DOFs' own cells.  SVMP_ACTIVE_SIDE_LOCAL_SUPPORT=1
+    // keeps the local marking; SVMP_ACTIVE_SIDE_SUPPORT_CHECK=1 compares both.
+    {
+        std::vector<GlobalIndex> marked;
+        for (GlobalIndex local_dof = 0; local_dof < n_field_dofs; ++local_dof) {
+            if (routed_dof_support[static_cast<std::size_t>(local_dof)] !=
+                static_cast<unsigned char>(0)) {
+                marked.push_back(offset + local_dof);
+            }
+        }
+        std::vector<Real> no_payload;
+        (void)completeOwnedBoundaryDofs(system, marked, no_payload, 0u, {});
+        for (const auto dof : marked) {
+            const auto local_dof = dof - offset;
+            if (owned.contains(dof) && local_dof >= 0 && local_dof < n_field_dofs) {
+                routed_dof_support[static_cast<std::size_t>(local_dof)] =
+                    static_cast<unsigned char>(1);
+            }
+        }
+
+        if (activeSideSupportEnvFlag("SVMP_ACTIVE_SIDE_SUPPORT_CHECK")) {
+            long long mismatches = 0;
+            GlobalIndex first_mismatch = INVALID_GLOBAL_INDEX;
+            for (GlobalIndex local_dof = 0; local_dof < n_field_dofs; ++local_dof) {
+                if (!owned.contains(offset + local_dof)) {
+                    continue;
+                }
+                const bool local = has_active_dof_support[static_cast<std::size_t>(local_dof)] !=
+                                   static_cast<unsigned char>(0);
+                const bool routed = routed_dof_support[static_cast<std::size_t>(local_dof)] !=
+                                    static_cast<unsigned char>(0);
+                if (local != routed) {
+                    if (mismatches == 0) {
+                        first_mismatch = offset + local_dof;
+                    }
+                    ++mismatches;
+                }
+            }
+            long long total = mismatches;
+#if FE_HAS_MPI
+            int mpi_initialized = 0;
+            MPI_Initialized(&mpi_initialized);
+            if (mpi_initialized != 0) {
+                MPI_Allreduce(&mismatches, &total, 1, MPI_LONG_LONG, MPI_SUM,
+                              system.dofHandler().mpiComm());
+            }
+#endif
+            if (total != 0) {
+                std::ostringstream oss;
+                oss << "LevelSetActiveSideVertexDirichletConstraint: SVMP_ACTIVE_SIDE_SUPPORT_CHECK: "
+                    << total << " owned DOF support decisions differ between the local and the "
+                    << "owner-routed marking (field '" << rec.name << "'";
+                if (mismatches > 0) {
+                    oss << ", first here: DOF " << first_mismatch;
+                }
+                oss << ")";
+                throw std::runtime_error(oss.str());
+            }
+        }
+        if (!activeSideSupportEnvFlag("SVMP_ACTIVE_SIDE_LOCAL_SUPPORT")) {
+            for (GlobalIndex local_dof = 0; local_dof < n_field_dofs; ++local_dof) {
+                if (owned.contains(offset + local_dof)) {
+                    has_active_dof_support[static_cast<std::size_t>(local_dof)] =
+                        routed_dof_support[static_cast<std::size_t>(local_dof)];
+                }
+            }
+        }
+    }
 
     // The INFO diagnostic at the end is built only when the logger prints
     // it; the per-entity counts and inactive lists exist only for it.
