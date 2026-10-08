@@ -14,6 +14,7 @@
 #include <random>
 #include <chrono>
 #include <cstddef>
+#include "Tests/Unit/TimingAssertions.h"
 
 using namespace svmp::FE::math;
 
@@ -413,7 +414,10 @@ TEST_F(EigensolversTest, Performance2x2) {
 #else
     const int threshold_us = 500000;  // 500ms for debug
 #endif
-    EXPECT_LT(duration.count(), threshold_us) << "2x2 eigen should be < " << threshold_us/1000 << "ms for 1M iterations";
+    // Opt-in (SVMP_ENABLE_TIMING_ASSERTIONS=1): wall-clock limits flake on shared nodes.
+    if (::svmp::FE::test::timingAssertionsEnabled()) {
+        EXPECT_LT(duration.count(), threshold_us) << "2x2 eigen should be < " << threshold_us/1000 << "ms for 1M iterations";
+    }
 }
 
 TEST_F(EigensolversTest, Performance3x3) {
@@ -437,7 +441,10 @@ TEST_F(EigensolversTest, Performance3x3) {
 #else
     const int threshold_us = 500000;  // 500ms for debug
 #endif
-    EXPECT_LT(duration.count(), threshold_us) << "3x3 eigen should be < " << threshold_us/1000 << "ms for 100K iterations";
+    // Opt-in (SVMP_ENABLE_TIMING_ASSERTIONS=1): wall-clock limits flake on shared nodes.
+    if (::svmp::FE::test::timingAssertionsEnabled()) {
+        EXPECT_LT(duration.count(), threshold_us) << "3x3 eigen should be < " << threshold_us/1000 << "ms for 100K iterations";
+    }
 }
 
 // =============================================================================

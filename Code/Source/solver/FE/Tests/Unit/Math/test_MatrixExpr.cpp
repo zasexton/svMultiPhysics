@@ -14,6 +14,7 @@
 #include <memory>
 #include <atomic>
 #include <type_traits>
+#include "Tests/Unit/TimingAssertions.h"
 
 using namespace svmp::FE::math;
 
@@ -383,7 +384,10 @@ TEST_F(MatrixExprTest, PerformanceVsNaive) {
     auto naive_time = std::chrono::duration_cast<std::chrono::microseconds>(end_naive - start_naive).count();
 
     // Expression templates should be faster (or at least not slower)
-    EXPECT_LE(expr_time, naive_time * 1.1);  // Allow 10% tolerance
+    // Opt-in (SVMP_ENABLE_TIMING_ASSERTIONS=1): wall-clock limits flake on shared nodes.
+    if (::svmp::FE::test::timingAssertionsEnabled()) {
+        EXPECT_LE(expr_time, naive_time * 1.1);  // Allow 10% tolerance
+    }
 
     // Results should be identical
     for (size_t i = 0; i < 3; ++i) {

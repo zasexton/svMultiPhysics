@@ -13,6 +13,7 @@
 #include <complex>
 #include <type_traits>
 #include <chrono>
+#include "Tests/Unit/TimingAssertions.h"
 
 using namespace svmp::FE::math;
 using namespace svmp::FE::math::detail::ops;
@@ -467,7 +468,10 @@ TEST_F(ExpressionOpsTest, OperatorPerformance) {
     EXPECT_DOUBLE_EQ(result_direct, result_functor);
 
     // Functor overhead should be minimal (within 2x)
-    EXPECT_LT(functor_time, direct_time * 2);
+    // Opt-in (SVMP_ENABLE_TIMING_ASSERTIONS=1): wall-clock limits flake on shared nodes.
+    if (::svmp::FE::test::timingAssertionsEnabled()) {
+        EXPECT_LT(functor_time, direct_time * 2);
+    }
 }
 
 // =============================================================================

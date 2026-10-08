@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cmath>
+#include "Tests/Unit/TimingAssertions.h"
 
 #if FE_HAS_MPI
 #  include <mpi.h>
@@ -107,7 +108,10 @@ TEST(GhostContributionManagerMPITest, RepeatedExchangeMicrobenchmark)
         RecordProperty("avg_bytes_received", static_cast<double>(total_bytes_received) / static_cast<double>(exchanges));
     }
 
-    EXPECT_LT(max_avg_exchange_time, 5.0);
+    // Opt-in (SVMP_ENABLE_TIMING_ASSERTIONS=1): wall-clock limits flake on shared nodes.
+    if (::svmp::FE::test::timingAssertionsEnabled()) {
+        EXPECT_LT(max_avg_exchange_time, 5.0);
+    }
 }
 #endif
 
