@@ -862,6 +862,8 @@ class BoundaryConditionParameters : public ParameterLists
 
     // Add_BC XML elements.
     //
+    Parameter<std::string> mesh_name;
+    Parameter<std::string> node_set;
     Parameter<bool> apply_along_normal_direction;
     Parameter<std::string> bct_file_path;
 
@@ -1661,8 +1663,13 @@ class DomainParameters : public ParameterLists
     Parameter<double> source_term;
     Parameter<double> time_step_for_integration;
     
-    // Inverse of Darcy permeability. Default value of 0.0 for Navier-Stokes and non-zero for Navier-Stokes-Brinkman
-    Parameter<double> inverse_darcy_permeability;
+    Parameter<double> darcy_permeability;
+    Parameter<double> darcy_compressibility;
+    Parameter<double> darcy_fluid_viscosity;
+
+    // Inverse permeability K^{-1} used in the Brinkman drag term
+    // mu K^{-1} u. A value of zero disables Brinkman drag.
+    Parameter<double> brinkman_inverse_permeability;
 };
 
 /// @brief The RemesherParameters class stores parameters for the 
@@ -1783,9 +1790,6 @@ class EquationParameters : public ParameterLists
     // and only then is the mesh equation solved.
     Parameter<bool> explicit_geometric_coupling;
 
-    // Inverse of Darcy permeability. Default value of 0.0 for Navier-Stokes and non-zero for Navier-Stokes-Brinkman
-    Parameter<double> inverse_darcy_permeability;
-
     // Sub-element parameters.
     //
     std::vector<BodyForceParameters*> body_forces;
@@ -1902,6 +1906,18 @@ class FaceParameters : public ParameterLists
     Parameter<double> quadrature_modifier_TRI3;
 };
 
+/// @brief A named selection of one-based input mesh point indices.
+class NodeSetParameters : public ParameterLists
+{
+  public:
+    NodeSetParameters();
+    void set_values(tinyxml2::XMLElement* xml_elem);
+
+    Parameter<std::string> name;
+    Parameter<std::string> node_ids_file_path;
+    std::vector<int> node_ids;
+};
+
 /// @brief The MeshParameters class is used to store paramaters for the
 /// 'Add_mesh' XML element.
 ///
@@ -1938,6 +1954,8 @@ class MeshParameters : public ParameterLists
     std::string get_path() const { return mesh_file_path.value(); };
 
     std::vector<FaceParameters*> face_parameters;
+    // ParameterLists holds member pointers, so definitions need stable addresses.
+    std::vector<std::unique_ptr<NodeSetParameters>> node_sets;
 
     // Add_mesh name= 
     Parameter<std::string> name;

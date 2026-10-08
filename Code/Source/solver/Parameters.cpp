@@ -53,6 +53,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <math.h>
@@ -538,6 +540,9 @@ BoundaryConditionParameters::BoundaryConditionParameters() {
   // Set name from  Add_BC name="" XML element.
   name = Parameter<std::string>("name", "", required);
 
+  set_parameter("Mesh_name", "", !required, mesh_name);
+  set_parameter("Node_set", "", !required, node_set);
+
   set_parameter("Apply_along_normal_direction", false, !required,
                 apply_along_normal_direction);
   set_parameter("Bct_file_path", "", !required, bct_file_path);
@@ -642,6 +647,19 @@ void BoundaryConditionParameters::set_values(tinyxml2::XMLElement *xml_elem) {
     }
 
     item = item->NextSiblingElement();
+  }
+
+  if (node_set.defined()) {
+    if (auto* mask = xml_elem->FirstChildElement("Effective_direction")) {
+      std::istringstream input(require_xml_text(mask, "Node component mask requires a value."));
+      std::string token;
+      while (input >> token) {
+        if (token != "0" && token != "1") {
+          svmp::raise<svmp::ParseException>("Node set '" + node_set.value() +
+              "': component mask entries must be 0 or 1.");
+        }
+      }
+    }
   }
 }
 
@@ -2052,6 +2070,11 @@ DomainParameters::DomainParameters() {
 
   set_parameter("Penalty_parameter", 0.0, !required, penalty_parameter);
   set_parameter("Poisson_ratio", 0.3, !required, poisson_ratio);
+  
+  set_parameter("Darcy_permeability", 1e-15, !required, darcy_permeability);
+  set_parameter("Darcy_compressibility", 0.0, !required,
+                darcy_compressibility);
+  set_parameter("Darcy_fluid_viscosity", 1.0, !required, darcy_fluid_viscosity);
 
   set_parameter("Relative_tolerance", 1e-4, !required, relative_tolerance);
   set_parameter("Shell_thickness", 0.0, !required, shell_thickness);
@@ -2060,8 +2083,8 @@ DomainParameters::DomainParameters() {
   set_parameter("Time_step_for_integration", 0.0, !required,
                 time_step_for_integration);
 
-  set_parameter("Inverse_darcy_permeability", 0.0, !required,
-                inverse_darcy_permeability);
+  set_parameter("Brinkman_inverse_permeability", 0.0, !required,
+                brinkman_inverse_permeability);
 
   // Ionic model parameters.
   IonicModelFactory::visit(
@@ -3088,6 +3111,63 @@ void RemesherParameters::set_values(tinyxml2::XMLElement *xml_elem) {
 /// @brief Define the XML element name for mesh parameters.
 const std::string MeshParameters::xml_element_name_ = "Add_mesh";
 
+NodeSetParameters::NodeSetParameters() {
+  name = Parameter<std::string>("name", "", true);
+  set_parameter("Node_IDs_file_path", "", false, node_ids_file_path);
+}
+
+void NodeSetParameters::set_values(tinyxml2::XMLElement* xml_elem) {
+  const std::string set_name = require_xml_attribute(xml_elem, "name");
+  if (set_name.find_first_not_of(" \t\r\n") == std::string::npos) {
+    svmp::raise<svmp::ParseException>("Node set has an empty name.");
+  }
+  name.set(set_name);
+  const std::string context = "Node set '" + name.value() + "': ";
+  auto* inline_ids = xml_elem->FirstChildElement("Node_IDs");
+  for (auto* item = xml_elem->FirstChildElement(); item; item = item->NextSiblingElement()) {
+    const std::string tag = item->Value();
+    if (tag == "Node_IDs") {
+      if (item != inline_ids) {
+        svmp::raise<svmp::ParseException>(context + "duplicate Node_IDs element.");
+      }
+    } else if (tag == "Node_IDs_file_path" && !node_ids_file_path.defined()) {
+      node_ids_file_path.set(require_xml_text(item, context + "Node_IDs_file_path requires a value."));
+    } else {
+      svmp::raise<svmp::ParseException>(context + "unknown or repeated element '" + tag + "'.");
+    }
+  }
+  if ((inline_ids != nullptr) == node_ids_file_path.defined()) {
+    svmp::raise<svmp::ParseException>(context + "specify exactly one of Node_IDs or Node_IDs_file_path.");
+  }
+  std::ifstream file;
+  std::istringstream text;
+  if (inline_ids) {
+    text.str(require_xml_text(inline_ids, context + "Node_IDs must not be empty."));
+  } else {
+    file.open(node_ids_file_path.value());
+    if (!file) {
+      svmp::raise<svmp::ParseException>(context + "cannot open node-ID file '" + node_ids_file_path.value() + "'.");
+    }
+  }
+  std::istream& input = inline_ids ? static_cast<std::istream&>(text) : file;
+  std::set<int> seen;
+  std::string token;
+  while (input >> token) {
+    int id = 0;
+    auto [end, error] = std::from_chars(token.data(), token.data() + token.size(), id);
+    if (error != std::errc{} || end != token.data() + token.size() || id < 1) {
+      svmp::raise<svmp::ParseException>(context + "invalid node ID '" + token + "'; expected a positive integer.");
+    }
+    if (!seen.insert(id).second) {
+      svmp::raise<svmp::ParseException>(context + "duplicate node ID " + token + ".");
+    }
+    node_ids.push_back(id);
+  }
+  if (node_ids.empty() || input.bad()) {
+    svmp::raise<svmp::ParseException>(context + "node-ID list is empty or unreadable.");
+  }
+}
+
 MeshParameters::MeshParameters() {
   bool required = true;
 
@@ -3157,6 +3237,16 @@ void MeshParameters::set_values(tinyxml2::XMLElement *mesh_elem,
       auto face_params = new FaceParameters();
       face_params->set_values(item);
       face_parameters.push_back(face_params);
+
+    } else if (name == "Add_node_set") {
+      auto node_set = std::make_unique<NodeSetParameters>();
+      node_set->set_values(item);
+      for (const auto& existing : node_sets) {
+        if (existing->name.value() == node_set->name.value()) {
+          svmp::raise<svmp::ParseException>("Duplicate node set '" + node_set->name.value() + "' in mesh '" + this->name.value() + "'.");
+        }
+      }
+      node_sets.push_back(std::move(node_set));
 
       // There may be multiple 'Fiber_direction' elements so store
       // them as a list of VectorParameter<double>.

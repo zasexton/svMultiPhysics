@@ -786,6 +786,9 @@ void set_bc_cpl(ComMod& com_mod, CmMod& cm_mod, const SolutionStates& solutions)
 
     for (int iBc = 0; iBc < eq.nBc; iBc++) {
       auto& bc = eq.bc[iBc];
+      if (!bc.node_set_name.empty()) {
+        continue;
+      }
       int iFa = bc.iFa;
       int iM  = bc.iM;
    
@@ -1022,12 +1025,14 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
       }
       int iFa = bc.iFa;
       int iM = bc.iM;
-      int nNo = com_mod.msh[iM].fa[iFa].nNo;
+      const auto& nodes = all_fun::bc_nodes(com_mod, bc);
+      const int nNo = nodes.size();
+      const auto* face = bc.node_set_name.empty() ? &com_mod.msh[iM].fa[iFa] : nullptr;
       #ifdef set_bc_dir
       dmsg << ">> lDof: " << lDof;
       dmsg << ">> iM: " << iM;
       dmsg << ">> iFa: " << iFa;
-      dmsg << ">> name: " << com_mod.msh[iM].fa[iFa].name ;
+      dmsg << ">> name: " << (face ? face->name : bc.node_set_name) ;
       dmsg << ">> nNo: " << nNo;
       #endif
 
@@ -1035,13 +1040,13 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
       Array<double> tmpY(lDof,nNo);
 
       // Modifies: tmpA, tmpY
-      set_bc::set_bc_dir_l(com_mod, bc, com_mod.msh[iM].fa[iFa], tmpA, tmpY, lDof);
+      set_bc::set_bc_dir_l(com_mod, bc, face, tmpA, tmpY, lDof);
 
       if (std::find(eDir.begin(), eDir.end(), true) != eDir.end()) {
         if (utils::btest(bc.bType, enum_int(BoundaryConditionType::bType_impD))) {
 
-          for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
-            int Ac = com_mod.msh[iM].fa[iFa].gN(a);
+          for (int a = 0; a < nNo; a++) {
+            int Ac = nodes(a);
             lDof = 0;
 
             for (int i = 0; i < nsd; i++) {
@@ -1054,8 +1059,8 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
           }
 
         } else {
-          for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
-            int Ac = com_mod.msh[iM].fa[iFa].gN(a);
+          for (int a = 0; a < nNo; a++) {
+            int Ac = nodes(a);
             lDof = 0;
             for (int i = 0; i < nsd; i++) {
               if (eDir[i]) {
@@ -1071,16 +1076,16 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
       //
       } else {
         if (utils::btest(bc.bType, enum_int(BoundaryConditionType::bType_impD))) {
-          for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
-            int Ac = com_mod.msh[iM].fa[iFa].gN(a);
+          for (int a = 0; a < nNo; a++) {
+            int Ac = nodes(a);
             for (int i = 0; i < tmpA.nrows(); i++) {
               Yn(i+s,Ac) = tmpA(i,a);
               Dn(i+s,Ac) = tmpY(i,a);
             }
           }
         } else {
-          for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
-            int Ac = com_mod.msh[iM].fa[iFa].gN(a);
+          for (int a = 0; a < nNo; a++) {
+            int Ac = nodes(a);
             for (int i = 0; i < lDof; i++) {
               An(i+s,Ac) = tmpA(i,a);
               Yn(i+s,Ac) = tmpY(i,a);
@@ -1155,7 +1160,7 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
 ///
 /// Reproduces 'SUBROUTINE SETBCDIRL(lBc, lFa, lA, lY, lDof)'
 //
-void set_bc_dir_l(ComMod& com_mod, const bcType& lBc, const faceType& lFa, Array<double>& lA, Array<double>& lY, int lDof)
+void set_bc_dir_l(ComMod& com_mod, const bcType& lBc, const faceType* lFa, Array<double>& lA, Array<double>& lY, int lDof)
 {
   using namespace consts;
 
@@ -1194,18 +1199,18 @@ void set_bc_dir_l(ComMod& com_mod, const bcType& lBc, const faceType& lFa, Array
     dirY = lBc.g;
   }
 
-  if (lDof == nsd) {
-    for (int a = 0; a < lFa.nNo; a++) {
+  if (lFa != nullptr && lDof == nsd) {
+    for (int a = 0; a < lA.ncols(); a++) {
 
       for (int i = 0; i < lA.nrows(); i++) {
-        double nV = lFa.nV(i,a);
+        double nV = lFa->nV(i,a);
         lA(i,a) = dirA * lBc.gx(a) * nV;
         lY(i,a) = dirY * lBc.gx(a) * nV;
       }
     }
 
   } else {
-    for (int a = 0; a < lFa.nNo; a++) {
+    for (int a = 0; a < lA.ncols(); a++) {
       for (int i = 0; i < lDof; i++) {
         lA(i,a) = dirA*lBc.gx(a);
         lY(i,a) = dirY*lBc.gx(a);
@@ -1309,7 +1314,7 @@ void set_bc_dir_wl(ComMod& com_mod, const bcType& lBc, const mshType& lM, const 
 
   Array<double> tmpA(lDof,nNo), tmpY(lDof,nNo);
 
-  set_bc::set_bc_dir_l(com_mod, lBc, lFa, tmpA, tmpY, lDof);
+  set_bc::set_bc_dir_l(com_mod, lBc, &lFa, tmpA, tmpY, lDof);
 
   if (utils::btest(lBc.bType, iBC_impD)) {
     tmpY = tmpA;
@@ -1592,9 +1597,9 @@ void set_bc_neu_l(ComMod& com_mod, const CmMod& cm_mod, const bcType& lBc, const
          int cDmn_local =
              all_fun::domain(com_mod, com_mod.msh[iM], cEq, lFa.gE(0));
          double rho = eq.dmn[cDmn_local].prop.at(
-             consts::PhysicalProperyType::fluid_density);
+             consts::PhysicalPropertyType::fluid_density);
          double beta = eq.dmn[cDmn_local].prop.at(
-             consts::PhysicalProperyType::backflow_stab);
+             consts::PhysicalPropertyType::backflow_stab);
          double A = lFa.area;
          if (A > 0.0) {
            double u_n = Q_3D / A; // face-averaged normal velocity (< 0)
@@ -2133,5 +2138,4 @@ void set_bc_undef_neu_l(ComMod& com_mod, const bcType& lBc, const faceType& lFa)
 }
 
 };
-
 

@@ -19,7 +19,7 @@ namespace read_files_ns {
   using EquationNdop = std::array<int, 4>;
   using EquationOutputs = std::array<consts::OutputNameType, maxOutput>;
   using EquationPhys = std::vector<consts::EquationType>;
-  using EquationProps = std::array<std::array<consts::PhysicalProperyType, consts::maxNProp>, 20>;
+  using EquationProps = std::array<std::array<consts::PhysicalPropertyType, consts::maxNProp>, 20>;
 
   void face_match(ComMod& com_mod, faceType& lFa, faceType& gFa, Vector<int>& ptr);
 
@@ -45,8 +45,8 @@ namespace read_files_ns {
 
   void read_spatial_values(const ComMod& com_mod, const mshType& msh, const faceType& lFa, const std::string& file_name, bcType& lBc);
 
-  void read_temp_spat_values(const ComMod& com_mod, const mshType& msh, const faceType& lFa, 
-      const std::string& file_name, bcType& lBc);
+  void read_temp_spat_values(const ComMod& com_mod, const mshType& msh, const Vector<int>& nodes,
+      const std::string& target_name, const std::string& file_name, bcType& lBc);
   void read_temp_spat_values(const ComMod& com_mod, const mshType& msh, const std::string& file_name, bfType& lBf);
 
   void read_trac_bcff(ComMod& com_mod, MBType& lMB, faceType& lFa, const std::string& file_name);
