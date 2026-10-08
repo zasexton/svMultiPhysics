@@ -52,6 +52,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
@@ -288,6 +289,50 @@ std::shared_ptr<Mesh> buildQuadStrip(int n_cells,
                                      *left_wall_marker);
     }
 
+    return create_mesh(std::move(base));
+}
+
+/// Column of 2*rows unit P1 triangles over [0,1]x[0,rows]: vertex v(i,j) =
+/// 2j + i; row j holds cell 2j = {v(0,j), v(1,j), v(1,j+1)} (its first
+/// vertex is not the right-angle vertex, so its first-vertex chart is
+/// sheared) and cell 2j+1 = {v(0,j), v(1,j+1), v(0,j+1)}.  With
+/// root_starts_at_right_angle, cell 0 lists the same vertices from its
+/// right-angle vertex, {v(1,0), v(1,1), v(0,0)}.
+std::shared_ptr<Mesh> buildTriangleColumn(int rows,
+                                          bool root_starts_at_right_angle = false)
+{
+    auto base = std::make_shared<MeshBase>();
+    std::vector<real_t> x_ref;
+    for (int j = 0; j <= rows; ++j) {
+        for (int i = 0; i < 2; ++i) {
+            x_ref.push_back(static_cast<real_t>(i));
+            x_ref.push_back(static_cast<real_t>(j));
+        }
+    }
+    const auto v = [](int i, int j) { return static_cast<index_t>(2 * j + i); };
+    std::vector<offset_t> cell2vertex_offsets{0};
+    std::vector<index_t> cell2vertex;
+    for (int j = 0; j < rows; ++j) {
+        if (j == 0 && root_starts_at_right_angle) {
+            cell2vertex.insert(cell2vertex.end(), {v(1, 0), v(1, 1), v(0, 0)});
+        } else {
+            cell2vertex.insert(cell2vertex.end(), {v(0, j), v(1, j), v(1, j + 1)});
+        }
+        cell2vertex_offsets.push_back(static_cast<offset_t>(cell2vertex.size()));
+        cell2vertex.insert(cell2vertex.end(), {v(0, j), v(1, j + 1), v(0, j + 1)});
+        cell2vertex_offsets.push_back(static_cast<offset_t>(cell2vertex.size()));
+    }
+    CellShape shape{};
+    shape.family = CellFamily::Triangle;
+    shape.num_corners = 3;
+    shape.order = 1;
+    base->build_from_arrays(
+        /*spatial_dim=*/2,
+        x_ref,
+        cell2vertex_offsets,
+        cell2vertex,
+        std::vector<CellShape>(static_cast<std::size_t>(2 * rows), shape));
+    base->finalize();
     return create_mesh(std::move(base));
 }
 
@@ -1950,6 +1995,90 @@ TEST(SmallCutAggregationConstraint,
     EXPECT_NE(log_output.find(
                   "maximum_attempted_reference_extrapolation=4"),
               std::string::npos);
+#endif
+}
+
+TEST(SmallCutAggregationConstraint,
+     SimplexExtrapolationGuardDoesNotDependOnRootVertexOrder)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    // Wetting-wedge geometry: only the bottom triangle of a 4-row column is
+    // full, so the top vertices (0,4) and (1,4) must extrapolate from it.
+    // In its first-vertex chart (origin (0,0), sheared) they lie 5.0 and
+    // 4.24 from the reference simplex, beyond the default guard 4; in the
+    // charts of the other vertices 3.16 and 3.0.  The guard must not depend
+    // on the vertex order, so both rows are accepted with the default
+    // guards and keep the exact P1 extension weights, whichever vertex the
+    // mesh lists first.
+    const auto build = [](const SmallCutAggregationGuardOptions& guards,
+                          systems::FESystem& system) {
+        const auto pressure = system.addField(systems::FieldSpec{
+            .name = "p",
+            .space = std::make_shared<spaces::H1Space>(ElementType::Triangle3,
+                                                       /*order=*/1),
+            .components = 1});
+        system.addOperator("pressure");
+        system.addSystemConstraint(
+            std::make_unique<SmallCutAggregationConstraint>(
+                pressure,
+                geometry::CutIntegrationSide::Negative,
+                kInterfaceMarker,
+                std::vector<int>{},
+                std::vector<GlobalIndex>{},
+                guards));
+        EXPECT_NO_THROW(system.setup());
+        std::vector<CellRuleSpec> rules{
+            {.cell = 0, .volume_fraction = Real{1.0}, .full_cell_equivalent = true}};
+        for (GlobalIndex cell = 1; cell < 8; ++cell) {
+            rules.push_back({.cell = cell,
+                             .volume_fraction = Real{0.5},
+                             .full_cell_equivalent = false});
+        }
+        system.setCutIntegrationContext(makeCutContext(rules));
+        return pressure;
+    };
+
+    for (const bool root_starts_at_right_angle : {false, true}) {
+        SCOPED_TRACE(root_starts_at_right_angle ? "right-angle first" : "sheared chart first");
+        systems::FESystem system(
+            buildTriangleColumn(4, root_starts_at_right_angle));
+        const auto pressure = build(SmallCutAggregationGuardOptions{}, system);
+        ASSERT_NO_THROW(system.rebuildConstraintState());
+        // Root {v0=(0,0), v1=(1,0), v3=(1,1)}: weights (1-a-b, a, b) with
+        // (x,y) = (a+b, b).
+        expectEntries(lineEntries(system, vertexDof(system, pressure, 9)),
+                      {{vertexDof(system, pressure, 1), -3.0},
+                       {vertexDof(system, pressure, 3), 4.0}});
+        expectEntries(lineEntries(system, vertexDof(system, pressure, 8)),
+                      {{vertexDof(system, pressure, 0), 1.0},
+                       {vertexDof(system, pressure, 1), -4.0},
+                       {vertexDof(system, pressure, 3), 4.0}});
+        for (const GlobalIndex vertex : {0, 1, 3}) {
+            EXPECT_FALSE(system.constraints().isConstrained(
+                vertexDof(system, pressure, vertex)));
+        }
+        const auto reports =
+            system.completedSmallCutAggregationRefreshReports();
+        ASSERT_EQ(reports.size(), 1u);
+        EXPECT_EQ(reports.front().extrapolation_guard_rejections, 0u);
+        EXPECT_NEAR(reports.front().maximum_observed_reference_extrapolation,
+                    std::sqrt(Real{10.0}), 1.0e-12);
+    }
+    {
+        // The guard still binds on the vertex-order-invariant distance.
+        auto guards = SmallCutAggregationGuardOptions{};
+        guards.maximum_reference_extrapolation_distance = 2.9;
+        systems::FESystem system(buildTriangleColumn(4));
+        static_cast<void>(build(guards, system));
+        try {
+            system.rebuildConstraintState();
+            FAIL() << "a root beyond the invariant extrapolation guard must fail closed";
+        } catch (const std::runtime_error& error) {
+            EXPECT_NE(std::string(error.what()).find("no_valid_root_proposal"),
+                      std::string::npos);
+        }
+    }
 #endif
 }
 
