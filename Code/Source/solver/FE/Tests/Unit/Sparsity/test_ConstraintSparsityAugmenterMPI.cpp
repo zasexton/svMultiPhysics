@@ -45,6 +45,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <span>
@@ -474,6 +475,127 @@ TEST(ConstraintSparsityAugmenterMPITest, OffRankMasterRowReceivesSlaveRowFill) {
     if (my_rank == 1) {
         EXPECT_FALSE(filtered.hasEntry(2, 0));
         EXPECT_EQ(filtered_stats.n_unavailable_fill_columns, 1);
+    }
+}
+
+// The touched-row replay reproduces augment(EliminationFill) +
+// exchangeOffRankSlaveRowFill() row for row, including adjacent slaves (the
+// order-dependent symmetric fill), Dirichlet DOFs, off-rank masters and a
+// column filter.
+TEST(ConstraintSparsityAugmenterMPITest, TouchedRowReplayMatchesFullAugmentation) {
+    int my_rank = 0;
+    int n_ranks = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &n_ranks);
+    if (n_ranks != 2) {
+        GTEST_SKIP() << "Requires exactly 2 MPI ranks";
+    }
+    constexpr GlobalIndex n_global = 48;
+    const IndexRange owned{static_cast<GlobalIndex>(24 * my_rank),
+                           static_cast<GlobalIndex>(24 * my_rank + 24)};
+
+    for (unsigned seed = 1; seed <= 12; ++seed) {
+        // Same pseudo-random global structure on both ranks.
+        std::uint64_t state = 0x9E3779B97F4A7C15ull * seed;
+        auto next = [&]() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            return state;
+        };
+        std::vector<std::pair<GlobalIndex, GlobalIndex>> couplings;
+        for (GlobalIndex i = 0; i < n_global; ++i) {
+            for (GlobalIndex j = std::max<GlobalIndex>(0, i - 2); j <= std::min<GlobalIndex>(n_global - 1, i + 2); ++j) {
+                couplings.emplace_back(i, j);
+            }
+        }
+        for (int k = 0; k < 30; ++k) {
+            const auto i = static_cast<GlobalIndex>(next() % n_global);
+            const auto j = static_cast<GlobalIndex>(next() % n_global);
+            couplings.emplace_back(i, j);
+            couplings.emplace_back(j, i);
+        }
+        auto constraints = std::make_shared<SimpleConstraintSet>();
+        std::vector<char> constrained(static_cast<std::size_t>(n_global), 0);
+        for (int k = 0; k < 10; ++k) {
+            const auto slave = static_cast<GlobalIndex>(next() % n_global);
+            if (constrained[static_cast<std::size_t>(slave)] != 0) continue;
+            constrained[static_cast<std::size_t>(slave)] = 1;
+            if (k % 4 == 3) {
+                constraints->addDirichlet(slave);
+                continue;
+            }
+            std::vector<GlobalIndex> masters;
+            const int n_masters = 1 + static_cast<int>(next() % 3);
+            for (int m = 0; m < n_masters; ++m) {
+                const auto master = static_cast<GlobalIndex>(next() % n_global);
+                if (master != slave) masters.push_back(master);
+            }
+            if (masters.empty()) continue;
+            constraints->addConstraint(slave, std::span<const GlobalIndex>(masters));
+            // An adjacent slave sharing the masters exercises symmetric fill order.
+            const GlobalIndex neighbour = (slave + 1) % n_global;
+            if (constrained[static_cast<std::size_t>(neighbour)] == 0) {
+                constrained[static_cast<std::size_t>(neighbour)] = 1;
+                constraints->addConstraint(neighbour, std::span<const GlobalIndex>(masters));
+            }
+        }
+        // Masters must not be slaves (closed lines), as in production.
+        auto closed = std::make_shared<SimpleConstraintSet>();
+        for (const auto dof : constraints->getAllConstrainedDofs()) {
+            auto masters = constraints->getMasterDofs(dof);
+            masters.erase(std::remove_if(masters.begin(), masters.end(),
+                                         [&](GlobalIndex m) { return constrained[static_cast<std::size_t>(m)] != 0; }),
+                          masters.end());
+            if (masters.empty()) {
+                closed->addDirichlet(dof);
+            } else {
+                closed->addConstraint(dof, std::span<const GlobalIndex>(masters));
+            }
+        }
+
+        DistributedSparsityPattern base(owned, owned, n_global, n_global);
+        for (const auto& [i, j] : couplings) {
+            if (owned.contains(i)) base.addEntry(i, j);
+        }
+        base.ensureDiagonal();
+        base.finalize();
+
+        for (const bool filtered : {false, true}) {
+            const auto filter = [&](GlobalIndex col) { return !filtered || col % 5 != 0; };
+
+            DistributedSparsityPattern full(owned, owned, n_global, n_global);
+            for (GlobalIndex row = owned.first; row < owned.last; ++row) {
+                const auto cols = base.getOwnedRowGlobalCols(row);
+                full.addEntries(row, std::span<const GlobalIndex>(cols.data(), cols.size()));
+            }
+            ConstraintSparsityAugmenter full_augmenter(closed);
+            full_augmenter.augment(full, AugmentationMode::EliminationFill);
+            const auto full_stats = full_augmenter.exchangeOffRankSlaveRowFill(full, MPI_COMM_WORLD, filter);
+            full.finalize();
+
+            ConstraintSparsityAugmenter replay_augmenter(closed);
+            auto touched = replay_augmenter.augmentTouchedRows(base, MPI_COMM_WORLD, filter);
+            DistributedSparsityPattern replay(owned, owned, n_global, n_global);
+            std::size_t t = 0;
+            for (GlobalIndex row = owned.first; row < owned.last; ++row) {
+                if (t < touched.rows.size() && touched.rows[t] == row) {
+                    replay.setOwnedRowSortedUnique(row, std::move(touched.cols[t]));
+                    ++t;
+                } else {
+                    replay.setOwnedRowSortedUnique(row, base.getOwnedRowGlobalCols(row));
+                }
+            }
+            replay.finalize();
+
+            EXPECT_EQ(touched.n_unavailable_fill_columns, full_stats.n_unavailable_fill_columns)
+                << "seed " << seed;
+            for (GlobalIndex row = owned.first; row < owned.last; ++row) {
+                EXPECT_EQ(replay.getOwnedRowGlobalCols(row), full.getOwnedRowGlobalCols(row))
+                    << "seed " << seed << " filtered " << filtered << " row " << row;
+            }
+            EXPECT_LT(touched.rows.size(), static_cast<std::size_t>(owned.size()) + 1u);
+        }
     }
 }
 

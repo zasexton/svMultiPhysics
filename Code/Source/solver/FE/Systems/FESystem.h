@@ -2791,6 +2791,13 @@ private:
     buildActiveDistributedSparsityPatternFromBase(
         const sparsity::DistributedSparsityPattern& base,
         const sparsity::SparsityPattern* active_serial) const;
+    /// `replay_touched_rows`: augment only the rows the constraints touch
+    /// (identical result); false copies and augments every row.
+    [[nodiscard]] std::unique_ptr<sparsity::DistributedSparsityPattern>
+    buildActiveDistributedSparsityPatternFromBaseWith(
+        const sparsity::DistributedSparsityPattern& base,
+        const sparsity::SparsityPattern* active_serial,
+        bool replay_touched_rows) const;
 
     struct PlannedCellTerm {
         FieldId test_field{INVALID_FIELD_ID};

@@ -557,6 +557,275 @@ AugmentationStats ConstraintSparsityAugmenter::exchangeOffRankSlaveRowFill(
     return last_stats_;
 }
 
+ConstraintSparsityAugmenter::TouchedRows ConstraintSparsityAugmenter::augmentTouchedRows(
+    const DistributedSparsityPattern& base,
+    MPI_Comm comm,
+    const std::function<bool(GlobalIndex)>& column_available)
+{
+    FE_THROW_IF(!base.isFinalized(), InvalidArgumentException,
+                "augmentTouchedRows: base pattern must be finalized");
+    FE_THROW_IF(!constraint_query_, InvalidArgumentException,
+                "No constraints configured");
+
+    const auto& owned_rows = base.ownedRows();
+    const auto& owned_cols = base.ownedCols();
+    const bool square = base.isSquare();
+    const GlobalIndex global_rows = base.globalRows();
+    const GlobalIndex global_cols = base.globalCols();
+
+    // Working rows: a row enters the first time a pass touches it, as a copy
+    // of its base row (which is what the full augmentation holds for it at
+    // that moment).  Node-based map: references stay valid across inserts.
+    std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> work;
+    auto row = [&](GlobalIndex global_row) -> std::vector<GlobalIndex>& {
+        auto it = work.find(global_row);
+        if (it == work.end()) {
+            it = work.emplace(global_row, base.getOwnedRowGlobalCols(global_row)).first;
+        }
+        return it->second;
+    };
+
+    // ---- augment(): master lists exactly as there --------------------------
+    const auto constrained_dofs = constraint_query_->getAllConstrainedDofs();
+    std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> master_map;
+    master_map.reserve(constrained_dofs.size());
+    for (GlobalIndex cdof : constrained_dofs) {
+        auto masters = options_.compute_transitive_closure
+            ? getTransitiveMasters(cdof)
+            : constraint_query_->getMasterDofs(cdof);
+        std::sort(masters.begin(), masters.end());
+        masters.erase(std::unique(masters.begin(), masters.end()), masters.end());
+        master_map.emplace(cdof, std::move(masters));
+    }
+
+    // Pass 1 visits every owned row in ascending order, but a row changes
+    // only if it is constrained (diagonal), holds a column constrained to
+    // masters, or (being a master) received symmetric fill from an earlier
+    // row.  Rows whose base holds such a column are found by one scan of the
+    // base pattern (columns of master-free constraints add nothing).
+    std::vector<char> is_constrained_col(static_cast<std::size_t>(std::max<GlobalIndex>(global_cols, 0)), 0);
+    for (const auto& [cdof, masters] : master_map) {
+        if (!masters.empty() && cdof >= 0 && cdof < global_cols) {
+            is_constrained_col[static_cast<std::size_t>(cdof)] = 1;
+        }
+    }
+    std::vector<GlobalIndex> pass1_rows;
+    for (const auto& [cdof, masters] : master_map) {
+        if (owned_rows.contains(cdof)) {
+            pass1_rows.push_back(cdof);
+        }
+        for (const GlobalIndex master : masters) {
+            if (owned_rows.contains(master)) {
+                pass1_rows.push_back(master);
+            }
+        }
+    }
+    {
+        const auto& diag = base.diagPattern();
+        const auto& offdiag = base.offdiagPattern();
+        for (GlobalIndex local_row = 0; local_row < base.numOwnedRows(); ++local_row) {
+            bool has_constrained = false;
+            for (const GlobalIndex local_col : diag.getRowSpan(local_row)) {
+                const GlobalIndex col = local_col + owned_cols.first;
+                if (col >= 0 && col < global_cols && is_constrained_col[static_cast<std::size_t>(col)] != 0) {
+                    has_constrained = true;
+                    break;
+                }
+            }
+            if (!has_constrained) {
+                for (const GlobalIndex ghost_idx : offdiag.getRowSpan(local_row)) {
+                    const GlobalIndex col = base.ghostColToGlobal(ghost_idx);
+                    if (col >= 0 && col < global_cols && is_constrained_col[static_cast<std::size_t>(col)] != 0) {
+                        has_constrained = true;
+                        break;
+                    }
+                }
+            }
+            if (has_constrained) {
+                pass1_rows.push_back(owned_rows.first + local_row);
+            }
+        }
+    }
+    std::sort(pass1_rows.begin(), pass1_rows.end());
+    pass1_rows.erase(std::unique(pass1_rows.begin(), pass1_rows.end()), pass1_rows.end());
+
+    // Pass 1 (as augment()).
+    std::vector<GlobalIndex> cols_snapshot;
+    for (const GlobalIndex global_row : pass1_rows) {
+        auto& row_set = row(global_row);
+        if (options_.ensure_diagonal && master_map.find(global_row) != master_map.end()) {
+            insertSortedUnique(row_set, global_row);
+        }
+        cols_snapshot.assign(row_set.begin(), row_set.end());
+        for (GlobalIndex col : cols_snapshot) {
+            const auto it = master_map.find(col);
+            if (it == master_map.end()) continue;
+            for (GlobalIndex master : it->second) {
+                if (master < 0 || master >= global_cols) continue;
+                if (!options_.include_ghost_columns && !owned_cols.contains(master)) continue;
+                const bool inserted = insertSortedUnique(row(global_row), master);
+                if (inserted && options_.symmetric_fill && square && owned_rows.contains(master)) {
+                    auto& master_row_set = row(master);
+                    if (options_.include_ghost_columns || owned_cols.contains(global_row)) {
+                        insertSortedUnique(master_row_set, global_row);
+                    }
+                }
+            }
+        }
+    }
+
+    // Pass 2 (as augment()).  The slave row is read through a snapshot; the
+    // full pass reads it in place, which differs only if a symmetric insert
+    // added a master to the slave row itself (masters are already there).
+    std::vector<GlobalIndex> slave_cols;
+    for (GlobalIndex cdof : constrained_dofs) {
+        if (!owned_rows.contains(cdof)) continue;
+        const auto it = master_map.find(cdof);
+        if (it == master_map.end() || it->second.empty()) continue;
+        slave_cols = row(cdof);
+        for (GlobalIndex master : it->second) {
+            if (!owned_rows.contains(master)) continue;
+            auto& master_row_set = row(master);
+            for (GlobalIndex col : slave_cols) {
+                if (!options_.include_ghost_columns && !owned_cols.contains(col)) continue;
+                const bool inserted = insertSortedUnique(master_row_set, col);
+                if (inserted && options_.symmetric_fill && square && owned_rows.contains(col)) {
+                    auto& col_row_set = row(col);
+                    if (options_.include_ghost_columns || owned_cols.contains(master)) {
+                        insertSortedUnique(col_row_set, master);
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- exchangeOffRankSlaveRowFill() -----------------------------------
+    TouchedRows out;
+    int world_size = 1;
+    int my_rank = 0;
+    MPI_Comm_size(comm, &world_size);
+    MPI_Comm_rank(comm, &my_rank);
+    if (world_size > 1) {
+        const std::int64_t local_range[2] = {static_cast<std::int64_t>(owned_rows.first),
+                                             static_cast<std::int64_t>(owned_rows.last)};
+        std::vector<std::int64_t> ranges(2u * static_cast<std::size_t>(world_size), 0);
+        MPI_Allgather(local_range, 2, MPI_INT64_T, ranges.data(), 2, MPI_INT64_T, comm);
+        const auto row_owner = [&](GlobalIndex r_global) {
+            for (int r = 0; r < world_size; ++r) {
+                const auto first = ranges[2u * static_cast<std::size_t>(r)];
+                const auto last = ranges[2u * static_cast<std::size_t>(r) + 1u];
+                if (static_cast<std::int64_t>(r_global) >= first && static_cast<std::int64_t>(r_global) < last) {
+                    return r;
+                }
+            }
+            return -1;
+        };
+
+        std::vector<std::vector<std::int64_t>> outgoing(static_cast<std::size_t>(world_size));
+        int invalid_owner = 0;
+        for (const GlobalIndex slave : constrained_dofs) {
+            if (!owned_rows.contains(slave)) {
+                continue;
+            }
+            auto masters = options_.compute_transitive_closure
+                ? getTransitiveMasters(slave)
+                : constraint_query_->getMasterDofs(slave);
+            std::sort(masters.begin(), masters.end());
+            masters.erase(std::unique(masters.begin(), masters.end()), masters.end());
+            const auto& slave_row = row(slave);
+            for (const GlobalIndex master : masters) {
+                if (master < 0 || master >= global_rows || owned_rows.contains(master)) {
+                    continue;
+                }
+                const int owner = row_owner(master);
+                if (owner < 0 || owner >= world_size || owner == my_rank) {
+                    invalid_owner = 1;
+                    continue;
+                }
+                auto& buffer = outgoing[static_cast<std::size_t>(owner)];
+                buffer.push_back(static_cast<std::int64_t>(master));
+                const auto count_position = buffer.size();
+                buffer.push_back(0);
+                std::int64_t n_sent = 0;
+                for (const GlobalIndex col : slave_row) {
+                    if (constraint_query_->isConstrained(col)) {
+                        continue;
+                    }
+                    buffer.push_back(static_cast<std::int64_t>(col));
+                    ++n_sent;
+                }
+                buffer[count_position] = n_sent;
+            }
+        }
+
+        std::vector<int> send_counts(static_cast<std::size_t>(world_size), 0);
+        std::vector<int> send_displs(static_cast<std::size_t>(world_size), 0);
+        std::vector<std::int64_t> send_buffer;
+        for (int r = 0; r < world_size; ++r) {
+            const auto& buffer = outgoing[static_cast<std::size_t>(r)];
+            if (buffer.size() + send_buffer.size() >
+                static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+                invalid_owner = 1;
+                break;
+            }
+            send_displs[static_cast<std::size_t>(r)] = static_cast<int>(send_buffer.size());
+            send_counts[static_cast<std::size_t>(r)] = static_cast<int>(buffer.size());
+            send_buffer.insert(send_buffer.end(), buffer.begin(), buffer.end());
+        }
+        MPI_Allreduce(MPI_IN_PLACE, &invalid_owner, 1, MPI_INT, MPI_MAX, comm);
+        FE_THROW_IF(invalid_owner != 0, InvalidArgumentException,
+                    "augmentTouchedRows: a master row has no owning rank");
+        std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
+        MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, comm);
+        std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
+        std::size_t recv_total = 0;
+        for (int r = 0; r < world_size; ++r) {
+            recv_displs[static_cast<std::size_t>(r)] = static_cast<int>(recv_total);
+            recv_total += static_cast<std::size_t>(recv_counts[static_cast<std::size_t>(r)]);
+        }
+        std::vector<std::int64_t> recv_buffer(recv_total);
+        MPI_Alltoallv(send_buffer.data(), send_counts.data(), send_displs.data(), MPI_INT64_T,
+                      recv_buffer.data(), recv_counts.data(), recv_displs.data(), MPI_INT64_T,
+                      comm);
+
+        std::size_t position = 0;
+        while (position + 2u <= recv_buffer.size()) {
+            const auto master = static_cast<GlobalIndex>(recv_buffer[position++]);
+            const auto n_cols = static_cast<std::size_t>(recv_buffer[position++]);
+            FE_THROW_IF(position + n_cols > recv_buffer.size() || !owned_rows.contains(master),
+                        InvalidArgumentException,
+                        "augmentTouchedRows: malformed slave-row fill message");
+            auto& master_row = row(master);
+            for (std::size_t k = 0; k < n_cols; ++k) {
+                const auto col = static_cast<GlobalIndex>(recv_buffer[position++]);
+                if (col < 0 || col >= global_cols) {
+                    continue;
+                }
+                if (!options_.include_ghost_columns && !owned_cols.contains(col)) {
+                    continue;
+                }
+                if (column_available && !owned_cols.contains(col) && !column_available(col)) {
+                    ++out.n_unavailable_fill_columns;
+                    continue;
+                }
+                insertSortedUnique(master_row, col);
+            }
+        }
+    }
+
+    out.rows.reserve(work.size());
+    for (const auto& [global_row, cols] : work) {
+        (void)cols;
+        out.rows.push_back(global_row);
+    }
+    std::sort(out.rows.begin(), out.rows.end());
+    out.cols.reserve(out.rows.size());
+    for (const GlobalIndex global_row : out.rows) {
+        out.cols.push_back(std::move(work.at(global_row)));
+    }
+    return out;
+}
+
 ReducedDistributedPatternResult ConstraintSparsityAugmenter::buildReducedDistributedPattern(
     const DistributedSparsityPattern& original,
     MPI_Comm comm) const

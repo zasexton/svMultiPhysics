@@ -466,6 +466,33 @@ public:
         MPI_Comm comm,
         const std::function<bool(GlobalIndex)>& column_available = {});
 
+    /// Owned rows modified by an EliminationFill augmentation, with their
+    /// final columns (see augmentTouchedRows()).
+    struct TouchedRows {
+        std::vector<GlobalIndex> rows;               ///< owned global rows, ascending
+        std::vector<std::vector<GlobalIndex>> cols;  ///< sorted unique columns of each row
+        GlobalIndex n_unavailable_fill_columns{0};   ///< as exchangeOffRankSlaveRowFill()
+    };
+
+    /**
+     * @brief augment(EliminationFill) followed by exchangeOffRankSlaveRowFill()
+     *        on a copy of a finalized pattern, computed on the rows they modify
+     *        only (collective).
+     *
+     * Both passes of augment() and the exchange modify only owned slave rows,
+     * owned master rows, rows that contain a constrained column, and rows that
+     * receive symmetric or off-rank fill.  This replays them in the same order
+     * on those rows alone, loading a row from `base` the first time it is
+     * touched, so every returned row equals that row of the full augmentation
+     * of a copy of `base`, and every other owned row equals its base row.
+     * The cost scales with the constrained region instead of the whole
+     * pattern.
+     */
+    [[nodiscard]] TouchedRows augmentTouchedRows(
+        const DistributedSparsityPattern& base,
+        MPI_Comm comm,
+        const std::function<bool(GlobalIndex)>& column_available = {});
+
     /**
      * @brief Build a reduced distributed pattern (ReducedSystem mode)
      *

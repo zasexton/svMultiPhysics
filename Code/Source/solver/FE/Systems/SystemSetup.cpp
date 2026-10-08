@@ -2496,6 +2496,58 @@ LocalIndex maxInteriorFaceQuadraturePoints(const assembly::IMeshAccess& mesh,
     return max_qpts;
 }
 
+
+[[nodiscard]] bool sparsityRefreshEnvFlag(const char* name)
+{
+    const char* env = std::getenv(name);
+    return env != nullptr && env[0] != '\0' && std::string(env) != "0";
+}
+
+// First difference between two finalized distributed patterns (owned rows,
+// ghost columns, ghost rows), or an empty string when they are identical.
+[[nodiscard]] std::string firstDistributedPatternDifference(
+    const sparsity::DistributedSparsityPattern& a,
+    const sparsity::DistributedSparsityPattern& b,
+    bool compare_ghost_row_columns = true)
+{
+    if (a.ownedRows().first != b.ownedRows().first || a.ownedRows().last != b.ownedRows().last ||
+        a.ownedCols().first != b.ownedCols().first || a.ownedCols().last != b.ownedCols().last ||
+        a.globalRows() != b.globalRows() || a.globalCols() != b.globalCols()) {
+        return "ownership ranges or global sizes";
+    }
+    for (GlobalIndex row = a.ownedRows().first; row < a.ownedRows().last; ++row) {
+        const auto ca = a.getOwnedRowGlobalCols(row);
+        const auto cb = b.getOwnedRowGlobalCols(row);
+        if (ca != cb) {
+            return "owned row " + std::to_string(row) + " (" + std::to_string(ca.size()) +
+                   " vs " + std::to_string(cb.size()) + " columns)";
+        }
+    }
+    const auto ga = a.getGhostColMap();
+    const auto gb = b.getGhostColMap();
+    if (!std::equal(ga.begin(), ga.end(), gb.begin(), gb.end())) {
+        return "ghost column map";
+    }
+    if (a.numGhostRows() != b.numGhostRows()) {
+        return "ghost row count";
+    }
+    if (a.numGhostRows() > 0) {
+        const auto ra = a.getGhostRowMap();
+        const auto rb = b.getGhostRowMap();
+        if (!std::equal(ra.begin(), ra.end(), rb.begin(), rb.end())) {
+            return "ghost row map";
+        }
+        for (GlobalIndex g = 0; compare_ghost_row_columns && g < a.numGhostRows(); ++g) {
+            const auto xa = a.getGhostRowCols(g);
+            const auto xb = b.getGhostRowCols(g);
+            if (!std::equal(xa.begin(), xa.end(), xb.begin(), xb.end())) {
+                return "ghost row " + std::to_string(ra[static_cast<std::size_t>(g)]) + " columns";
+            }
+        }
+    }
+    return {};
+}
+
 } // namespace
 
 SetupStoragePlan FESystem::computeSetupStoragePlan() const
@@ -6470,6 +6522,29 @@ FESystem::buildActiveDistributedSparsityPatternFromBase(
     const sparsity::DistributedSparsityPattern& base,
     const sparsity::SparsityPattern* active_serial) const
 {
+#if FE_HAS_MPI
+    const bool replay = !sparsityRefreshEnvFlag("SVMP_SPARSITY_FULL_REBUILD");
+#else
+    const bool replay = false;
+#endif
+    auto rebuilt = buildActiveDistributedSparsityPatternFromBaseWith(base, active_serial, replay);
+    if (replay && sparsityRefreshEnvFlag("SVMP_SPARSITY_REFRESH_CHECK")) {
+        // Self-check: the touched-row replay must reproduce the full rebuild.
+        const auto full = buildActiveDistributedSparsityPatternFromBaseWith(base, active_serial, false);
+        const auto difference = firstDistributedPatternDifference(*full, *rebuilt);
+        FE_THROW_IF(!difference.empty(), InvalidStateException,
+                    "FESystem: SVMP_SPARSITY_REFRESH_CHECK: touched-row sparsity replay differs "
+                    "from the full rebuild: " + difference);
+    }
+    return rebuilt;
+}
+
+std::unique_ptr<sparsity::DistributedSparsityPattern>
+FESystem::buildActiveDistributedSparsityPatternFromBaseWith(
+    const sparsity::DistributedSparsityPattern& base,
+    const sparsity::SparsityPattern* active_serial,
+    bool replay_touched_rows) const
+{
     FE_THROW_IF(!base.isFinalized(), InvalidStateException,
                 "FESystem::buildActiveDistributedSparsityPatternFromBase: base pattern is not finalized");
 
@@ -6481,12 +6556,73 @@ FESystem::buildActiveDistributedSparsityPatternFromBase(
     rebuilt->setDofIndexing(base.dofIndexing());
 
     const auto owned = base.ownedRows();
-    for (GlobalIndex row = owned.first; row < owned.last; ++row) {
-        const auto cols = base.getOwnedRowGlobalCols(row);
-        rebuilt->addEntries(row, std::span<const GlobalIndex>(cols.data(), cols.size()));
+    if (!replay_touched_rows) {
+        for (GlobalIndex row = owned.first; row < owned.last; ++row) {
+            const auto cols = base.getOwnedRowGlobalCols(row);
+            rebuilt->addEntries(row, std::span<const GlobalIndex>(cols.data(), cols.size()));
+        }
     }
 
-    if (use_constraints_in_assembly_) {
+    if (replay_touched_rows) {
+#if FE_HAS_MPI
+        // Rows the constraints touch come from the replay; every other owned
+        // row is its base row (the same rows the full augmentation produces).
+        sparsity::ConstraintSparsityAugmenter::TouchedRows touched;
+        if (use_constraints_in_assembly_) {
+            std::shared_ptr<sparsity::IConstraintQuery> query;
+            if (base.dofIndexing() ==
+                sparsity::DistributedSparsityPattern::DofIndexing::NodalInterleaved) {
+                FE_THROW_IF(dof_permutation_ == nullptr ||
+                                dof_permutation_->forward.empty() ||
+                                dof_permutation_->inverse.empty(),
+                            InvalidStateException,
+                            "FESystem::buildActiveDistributedSparsityPatternFromBase: "
+                            "missing nodal-interleaved DOF permutation for constraint sparsity refresh");
+                query = std::make_shared<PermutedAffineConstraintsQuery>(
+                    affine_constraints_,
+                    std::span<const GlobalIndex>(dof_permutation_->forward),
+                    std::span<const GlobalIndex>(dof_permutation_->inverse));
+            } else {
+                query = std::make_shared<AffineConstraintsQuery>(affine_constraints_);
+            }
+            sparsity::ConstraintSparsityAugmenter augmenter(std::move(query));
+            const auto base_ghost_row_list = base.numGhostRows() > 0
+                                                 ? base.getGhostRowMap()
+                                                 : std::span<const GlobalIndex>{};
+            const bool keep_columns_beyond_ghost_rows =
+                last_setup_options_.backend_accepts_columns_beyond_ghost_rows;
+            touched = augmenter.augmentTouchedRows(
+                base,
+                activeMpiCommunicator(),
+                [&](GlobalIndex col) {
+                    return keep_columns_beyond_ghost_rows ||
+                           std::binary_search(base_ghost_row_list.begin(),
+                                              base_ghost_row_list.end(), col);
+                });
+            long long unavailable = static_cast<long long>(touched.n_unavailable_fill_columns);
+            MPI_Allreduce(MPI_IN_PLACE, &unavailable, 1, MPI_LONG_LONG, MPI_SUM,
+                          activeMpiCommunicator());
+            diagnostics::recordConstraintFillRejections(
+                static_cast<std::uint64_t>(std::max(unavailable, 0LL)));
+            if (unavailable > 0) {
+                FE_LOG_WARNING(
+                    "FESystem: constraint sparsity refresh diagnostic=off_rank_constraint_fill_outside_halo"
+                    " rejected_columns=" + std::to_string(unavailable) +
+                    " (master rows coupled to off-rank slaves reach beyond the ghost layers;"
+                    " increase <Ghost_layers>)");
+            }
+        }
+        std::size_t next_touched = 0;
+        for (GlobalIndex row = owned.first; row < owned.last; ++row) {
+            if (next_touched < touched.rows.size() && touched.rows[next_touched] == row) {
+                rebuilt->setOwnedRowSortedUnique(row, std::move(touched.cols[next_touched]));
+                ++next_touched;
+            } else {
+                rebuilt->setOwnedRowSortedUnique(row, base.getOwnedRowGlobalCols(row));
+            }
+        }
+#endif
+    } else if (use_constraints_in_assembly_) {
         std::shared_ptr<sparsity::IConstraintQuery> query;
         if (base.dofIndexing() ==
             sparsity::DistributedSparsityPattern::DofIndexing::NodalInterleaved) {
@@ -6573,17 +6709,14 @@ FESystem::buildActiveDistributedSparsityPatternFromBase(
 
         std::vector<GlobalIndex> rows(base_ghost_rows_span.begin(), base_ghost_rows_span.end());
         // Columns beyond the base ghost rows stay columns only (the backend
-        // keeps them out of the vector layout).
-        std::unordered_set<GlobalIndex> base_ghost_row_set;
-        if (last_setup_options_.backend_accepts_columns_beyond_ghost_rows) {
-            base_ghost_row_set.insert(base_ghost_rows_span.begin(), base_ghost_rows_span.end());
-        }
+        // keeps them out of the vector layout).  The base ghost-row map is
+        // sorted.
         for (const auto col : ghost_cols_span) {
             if (col < 0 || col >= rebuilt->globalRows() || owned_cols.contains(col)) {
                 continue;
             }
             if (last_setup_options_.backend_accepts_columns_beyond_ghost_rows &&
-                base_ghost_row_set.count(col) == 0u) {
+                !std::binary_search(base_ghost_rows_span.begin(), base_ghost_rows_span.end(), col)) {
                 continue;
             }
             if (nodal_interleaved) {
@@ -6604,23 +6737,24 @@ FESystem::buildActiveDistributedSparsityPatternFromBase(
                                   }),
                    rows.end());
 
-        std::unordered_map<GlobalIndex, GlobalIndex> base_ghost_local_row;
-        base_ghost_local_row.reserve(base_ghost_rows_span.size());
-        for (GlobalIndex local = 0;
-             local < static_cast<GlobalIndex>(base_ghost_rows_span.size());
-             ++local) {
-            base_ghost_local_row.emplace(base_ghost_rows_span[static_cast<std::size_t>(local)],
-                                         local);
-        }
+        // Sorted lookups (the ghost-row map, ghost-column map and `rows` are
+        // sorted and unique).
+        auto base_ghost_local_row = [&](GlobalIndex row) -> GlobalIndex {
+            const auto it = std::lower_bound(base_ghost_rows_span.begin(), base_ghost_rows_span.end(), row);
+            if (it == base_ghost_rows_span.end() || *it != row) {
+                return -1;
+            }
+            return static_cast<GlobalIndex>(it - base_ghost_rows_span.begin());
+        };
 
-        std::unordered_set<GlobalIndex> locally_present_cols(
-            ghost_cols_span.begin(), ghost_cols_span.end());
-        for (const auto row : rows) {
-            locally_present_cols.insert(row);
-        }
+        std::vector<GlobalIndex> locally_present_cols;
+        locally_present_cols.reserve(ghost_cols_span.size() + rows.size());
+        std::set_union(ghost_cols_span.begin(), ghost_cols_span.end(), rows.begin(), rows.end(),
+                       std::back_inserter(locally_present_cols));
         auto locally_present = [&](GlobalIndex col) {
             return col >= 0 && col < rebuilt->globalCols() &&
-                   (owned_cols.contains(col) || locally_present_cols.count(col) != 0u);
+                   (owned_cols.contains(col) ||
+                    std::binary_search(locally_present_cols.begin(), locally_present_cols.end(), col));
         };
 
         auto to_fe = [&](GlobalIndex backend_dof) -> GlobalIndex {
@@ -6666,9 +6800,8 @@ FESystem::buildActiveDistributedSparsityPatternFromBase(
                 }
             }
 
-            if (const auto it = base_ghost_local_row.find(row);
-                it != base_ghost_local_row.end()) {
-                for (const auto col : base.getGhostRowCols(it->second)) {
+            if (const auto local = base_ghost_local_row(row); local >= 0) {
+                for (const auto col : base.getGhostRowCols(local)) {
                     if (locally_present(col)) {
                         cols.push_back(col);
                     }
@@ -6734,6 +6867,14 @@ void FESystem::refreshSparsityForConstraintStructureChange()
     // bases so removed constraints do not leave accidental stale fill, and so
     // distributed backends receive the same refreshed structure as serial
     // backends.
+    // Distributed FSILS runs keep no active serial pattern; the replicated
+    // global one would only supply the distributed pattern's ghost-row
+    // columns, which FSILS does not read (its matrices take owned rows and the
+    // ghost-row node set).  SVMP_SPARSITY_FULL_REBUILD=1 rebuilds it anyway.
+    const bool skip_active_serial =
+        last_setup_options_.backend_accepts_columns_beyond_ghost_rows &&
+        sparsity_by_op_.empty() && !base_distributed_sparsity_by_op_.empty() &&
+        !sparsityRefreshEnvFlag("SVMP_SPARSITY_FULL_REBUILD");
     std::unordered_map<OperatorTag, std::unique_ptr<sparsity::SparsityPattern>>
         rebuilt_serial_by_op;
     rebuilt_serial_by_op.reserve(base_sparsity_by_op_.size());
@@ -6741,6 +6882,9 @@ void FESystem::refreshSparsityForConstraintStructureChange()
         FE_THROW_IF(!base, InvalidStateException,
                     "FESystem::rebuildConstraintState: null base serial sparsity for operator '" +
                         tag + "'");
+        if (skip_active_serial) {
+            continue;
+        }
         rebuilt_serial_by_op.emplace(tag, buildActiveSparsityPatternFromBase(*base));
     }
 
@@ -6765,8 +6909,24 @@ void FESystem::refreshSparsityForConstraintStructureChange()
             (serial_it != rebuilt_serial_by_op.end() && serial_it->second)
                 ? serial_it->second.get()
                 : nullptr;
-        rebuilt_distributed_by_op.emplace(
-            tag, buildActiveDistributedSparsityPatternFromBase(*base, active_serial));
+        auto rebuilt = buildActiveDistributedSparsityPatternFromBase(*base, active_serial);
+        if (skip_active_serial && sparsityRefreshEnvFlag("SVMP_SPARSITY_REFRESH_CHECK")) {
+            // Self-check: everything an FSILS matrix reads (owned rows, ghost
+            // columns, ghost-row node set) matches the build that uses the
+            // active serial pattern.
+            const auto base_serial = base_sparsity_by_op_.find(tag);
+            if (base_serial != base_sparsity_by_op_.end() && base_serial->second) {
+                const auto serial = buildActiveSparsityPatternFromBase(*base_serial->second);
+                const auto reference = buildActiveDistributedSparsityPatternFromBaseWith(
+                    *base, serial.get(), /*replay_touched_rows=*/false);
+                const auto difference = firstDistributedPatternDifference(
+                    *reference, *rebuilt, /*compare_ghost_row_columns=*/false);
+                FE_THROW_IF(!difference.empty(), InvalidStateException,
+                            "FESystem: SVMP_SPARSITY_REFRESH_CHECK: sparsity built without the "
+                            "active serial pattern differs where FSILS reads it: " + difference);
+            }
+        }
+        rebuilt_distributed_by_op.emplace(tag, std::move(rebuilt));
     }
 
     for (const auto& [tag, pattern] : distributed_sparsity_by_op_) {
