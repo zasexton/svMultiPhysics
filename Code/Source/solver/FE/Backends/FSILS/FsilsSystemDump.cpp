@@ -240,7 +240,7 @@ void maybeDumpFsilsSystem(const FsilsMatrix& A,
         return;
     }
 
-    const auto shared = A.shared();
+    const auto shared = A.operatorShared();
     if (!shared) {
         return;
     }

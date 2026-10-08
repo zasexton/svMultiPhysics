@@ -6508,18 +6508,23 @@ FESystem::buildActiveDistributedSparsityPatternFromBase(
         }
 #if FE_HAS_MPI
         // Collective (constraint sets are rank-local): a master row owned by
-        // another rank than its slave row receives that row's fill. Keep the
-        // backend node layout of the base pattern: columns outside it would
-        // need a wider halo.
+        // another rank than its slave row receives that row's fill.  Columns
+        // outside the base pattern's node layout are kept when the backend
+        // holds them as operator-only ghost nodes; otherwise they would need
+        // a wider halo and are rejected.
         std::unordered_set<GlobalIndex> base_ghost_rows;
         if (base.numGhostRows() > 0) {
             const auto ghost_rows = base.getGhostRowMap();
             base_ghost_rows.insert(ghost_rows.begin(), ghost_rows.end());
         }
+        const bool keep_columns_beyond_ghost_rows =
+            last_setup_options_.backend_accepts_columns_beyond_ghost_rows;
         const auto fill = augmenter.exchangeOffRankSlaveRowFill(
             *rebuilt,
             activeMpiCommunicator(),
-            [&](GlobalIndex col) { return base_ghost_rows.count(col) != 0u; });
+            [&](GlobalIndex col) {
+                return keep_columns_beyond_ghost_rows || base_ghost_rows.count(col) != 0u;
+            });
         long long unavailable = static_cast<long long>(fill.n_unavailable_fill_columns);
         MPI_Allreduce(MPI_IN_PLACE, &unavailable, 1, MPI_LONG_LONG, MPI_SUM,
                       activeMpiCommunicator());
@@ -6566,8 +6571,18 @@ FESystem::buildActiveDistributedSparsityPatternFromBase(
                     "missing nodal-interleaved dof_per_node metadata for ghost-row refresh");
 
         std::vector<GlobalIndex> rows(base_ghost_rows_span.begin(), base_ghost_rows_span.end());
+        // Columns beyond the base ghost rows stay columns only (the backend
+        // keeps them out of the vector layout).
+        std::unordered_set<GlobalIndex> base_ghost_row_set;
+        if (last_setup_options_.backend_accepts_columns_beyond_ghost_rows) {
+            base_ghost_row_set.insert(base_ghost_rows_span.begin(), base_ghost_rows_span.end());
+        }
         for (const auto col : ghost_cols_span) {
             if (col < 0 || col >= rebuilt->globalRows() || owned_cols.contains(col)) {
+                continue;
+            }
+            if (last_setup_options_.backend_accepts_columns_beyond_ghost_rows &&
+                base_ghost_row_set.count(col) == 0u) {
                 continue;
             }
             if (nodal_interleaved) {

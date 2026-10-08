@@ -12,6 +12,7 @@
 #include "Backends/FSILS/liner_solver/fils_struct.hpp"
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
 
 namespace svmp {
@@ -106,8 +107,14 @@ private:
     };
     mutable bool faces_dirty_ = true;
     mutable std::vector<CachedFace> cached_faces_;
+    mutable std::uint64_t cached_faces_layout_stamp_ = 0; ///< operator layout of cached_faces_
 
     void invalidateReusableBlockSchurState() const;
+
+    /// solve() on vectors in the matrix's operator layout.
+    [[nodiscard]] SolverReport solveOnOperatorLayout(const GenericMatrix& A,
+                                                     GenericVector& x,
+                                                     const GenericVector& b);
 
     [[nodiscard]] SolverReport solveDirect(const FsilsMatrix& A,
                                            FsilsVector& x,

@@ -158,6 +158,12 @@ struct SetupOptions {
     // Keep the replicated serial sparsity graph even when a distributed graph exists.
     // Large MPI backend runs can disable this to avoid setup-time memory pressure.
     bool retain_serial_sparsity{true};
+    // The distributed matrix backend accepts owned-row columns outside the
+    // node layout of its vectors (FSILS keeps them as operator-only ghost
+    // nodes), so constraint-elimination fill of master rows whose columns lie
+    // beyond the ghost layers is kept instead of rejected
+    // (off_rank_constraint_fill_outside_halo).
+    bool backend_accepts_columns_beyond_ghost_rows{false};
 
     // Iterative-solver leverage (explicit opt-in): auto-register eligible matrix-free operators.
     bool auto_register_matrix_free{false};

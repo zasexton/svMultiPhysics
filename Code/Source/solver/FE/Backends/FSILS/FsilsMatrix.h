@@ -75,7 +75,23 @@ public:
 
     void addValue(GlobalIndex row, GlobalIndex col, Real value, assembly::AddMode mode);
 
-    [[nodiscard]] std::shared_ptr<const FsilsShared> shared() const noexcept { return shared_; }
+    /// Layout of the vectors that pair with this matrix (FsilsFactory creates
+    /// them from it).  Owned nodes plus the ghost nodes of the sparsity
+    /// pattern's ghost rows.
+    [[nodiscard]] std::shared_ptr<const FsilsShared> shared() const noexcept { return vector_shared_; }
+    /// Layout of the stored operator (lhs, CSR, value slots).  Equal to
+    /// shared() unless an owned row has columns outside that node set (for
+    /// example constraint-elimination fill beyond the ghost layers): then it
+    /// appends those column nodes as extra ghost nodes, after the vector
+    /// layout's nodes in the old local ordering, so an array in the vector
+    /// layout is a prefix of one in the operator layout.  Everything that reads
+    /// the CSR or value slots must use this layout.
+    [[nodiscard]] std::shared_ptr<const FsilsShared> operatorShared() const noexcept { return shared_; }
+    [[nodiscard]] bool hasSeparateOperatorLayout() const noexcept { return shared_ != vector_shared_; }
+    /// Copy a vector-layout vector into an operator-layout vector (extra
+    /// column nodes zero), and back (extra nodes dropped).
+    void copyToOperatorLayout(const GenericVector& vector_layout, GenericVector& operator_layout) const;
+    void copyFromOperatorLayout(const GenericVector& operator_layout, GenericVector& vector_layout) const;
     [[nodiscard]] bool usesOwnedRowOperator() const noexcept;
     [[nodiscard]] bool ownsFeDofRow(GlobalIndex fe_dof) const noexcept;
 
@@ -135,7 +151,8 @@ private:
 #if defined(FE_HAS_MPI) && FE_HAS_MPI
     MPI_Comm comm_{MPI_COMM_WORLD};
 #endif
-    std::shared_ptr<FsilsShared> shared_{};
+    std::shared_ptr<FsilsShared> shared_{};        ///< operator layout (see operatorShared())
+    std::shared_ptr<FsilsShared> vector_shared_{}; ///< vector layout (see shared()); == shared_ normally
     std::vector<Real> values_{}; // (dof*dof) x nnz (column-major for FSILS Array wrapper)
 };
 
