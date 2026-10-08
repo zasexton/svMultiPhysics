@@ -17,7 +17,9 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <random>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -1452,6 +1454,318 @@ TEST(ProducerArithmeticAssessment,
         EXPECT_EQ(thread_result.upper, UINT64_C(0x3ff6a09e667f3bcd));
         expectHardwareStateEqual(thread_result.after, thread_result.before);
     }
+}
+
+
+// ---- filtered fast path -------------------------------------------------------
+
+class ScopedArithmeticPath {
+public:
+    explicit ScopedArithmeticPath(ProducerArithmeticPath path)
+        : previous_(producerArithmeticPath())
+    {
+        setProducerArithmeticPath(path);
+    }
+    ~ScopedArithmeticPath() { setProducerArithmeticPath(previous_); }
+    ScopedArithmeticPath(const ScopedArithmeticPath&) = delete;
+    ScopedArithmeticPath& operator=(const ScopedArithmeticPath&) = delete;
+
+private:
+    ProducerArithmeticPath previous_;
+};
+
+// Operands that exercise the fast path, its range edges and the fallback.
+class OperandGenerator {
+public:
+    explicit OperandGenerator(std::uint64_t seed) : engine_(seed) {}
+
+    Real next()
+    {
+        const auto kind = engine_() % 16u;
+        const std::uint64_t sign = (engine_() & 1u) != 0u ? sign_mask : 0u;
+        const std::uint64_t fraction = engine_() & fraction_mask;
+        std::uint64_t exponent = 0u;
+        switch (kind) {
+        case 0u:
+            return fromBits(sign);  // signed zero
+        case 1u:
+            return fromBits(sign | (engine_() & fraction_mask));  // subnormal
+        case 2u:
+            exponent = 523u + engine_() % 7u - 3u;  // lower fast-range edge
+            break;
+        case 3u:
+            exponent = 1523u + engine_() % 7u - 3u;  // upper fast-range edge
+            break;
+        case 4u:
+            exponent = 1u + engine_() % 2046u;  // anywhere normal
+            break;
+        case 5u: {
+            // Small dyadic rationals: many exact results.
+            const auto numerator = static_cast<Real>(
+                static_cast<std::int64_t>(engine_() % 4097u) - 2048);
+            return std::ldexp(numerator, static_cast<int>(engine_() % 21u) - 10);
+        }
+        case 6u:
+            // Short significands: exact products and quotients.
+            exponent = 1013u + engine_() % 21u;
+            return fromBits(sign | (exponent << 52u) |
+                            (fraction & UINT64_C(0x000ff00000000000)));
+        default:
+            exponent = 1023u - 40u + engine_() % 81u;  // geometry scales
+            break;
+        }
+        return fromBits(sign | (exponent << 52u) | fraction);
+    }
+
+    // b close to -a (cancellation) or to a (equal or adjacent values).
+    Real near(Real a)
+    {
+        auto value = bits(a);
+        const auto magnitude = value & ~sign_mask;
+        if (magnitude == 0u || (magnitude >> 52u) == 0u ||
+            (magnitude >> 52u) >= 2046u) {
+            return next();
+        }
+        const auto delta = engine_() % 64u;
+        value = (engine_() & 1u) != 0u ? value + delta : value - delta;
+        if ((engine_() & 1u) != 0u) {
+            value ^= sign_mask;
+        }
+        return fromBits(value);
+    }
+
+    bool coin() { return (engine_() & 1u) != 0u; }
+
+private:
+    std::mt19937_64 engine_;
+};
+
+bool sameAssessment(const IntervalAssessment& a, const IntervalAssessment& b)
+{
+    if (a.failure != b.failure) {
+        return false;
+    }
+    return a.failure != ArithmeticFailure::None ||
+           (bits(a.interval.lower) == bits(b.interval.lower) &&
+            bits(a.interval.upper) == bits(b.interval.upper));
+}
+
+ArithmeticInterval ordered(Real a, Real b)
+{
+    if (!std::isfinite(a) || !std::isfinite(b)) {
+        return {a, b};
+    }
+    return a <= b ? ArithmeticInterval{a, b} : ArithmeticInterval{b, a};
+}
+
+template <class Operation>
+IntervalAssessment underPath(ProducerArithmeticPath path, Operation&& operation)
+{
+    ScopedArithmeticPath scope(path);
+    return operation();
+}
+
+TEST(ProducerArithmeticAssessment, FilteredPathMatchesTheExactPathBitForBit)
+{
+    OperandGenerator generator(UINT64_C(0x5eedf00d12345678));
+    constexpr int samples = 60000;
+    int compared = 0;
+    int mismatches = 0;
+    const auto expect_same = [&](const char* what, auto&& operation) {
+        const auto exact =
+            underPath(ProducerArithmeticPath::Exact, operation);
+        const auto filtered =
+            underPath(ProducerArithmeticPath::Filtered, operation);
+        ++compared;
+        if (!sameAssessment(exact, filtered)) {
+            ++mismatches;
+            if (mismatches <= 20) {
+                ADD_FAILURE() << what << ": exact [" << std::hex
+                              << bits(exact.interval.lower) << ", "
+                              << bits(exact.interval.upper) << "] failure "
+                              << static_cast<int>(exact.failure)
+                              << ", filtered [" << bits(filtered.interval.lower)
+                              << ", " << bits(filtered.interval.upper)
+                              << "] failure "
+                              << static_cast<int>(filtered.failure);
+            }
+        }
+    };
+    for (int sample = 0; sample < samples; ++sample) {
+        const Real a = generator.next();
+        const Real b = generator.coin() ? generator.next() : generator.near(a);
+        const Real c = generator.near(a);
+        const Real d = generator.coin() ? generator.next() : generator.near(b);
+        for (const auto operation :
+             {IntervalOperation::Add, IntervalOperation::Subtract,
+              IntervalOperation::Multiply, IntervalOperation::Divide}) {
+            expect_same("singleton operation", [&] {
+                return assessIntervalOperation(operation, {a, a}, {b, b});
+            });
+            expect_same("interval operation", [&] {
+                return assessIntervalOperation(operation, ordered(a, c),
+                                               ordered(b, d));
+            });
+        }
+        expect_same("square", [&] { return assessIntervalSquare(ordered(a, c)); });
+        expect_same("sqrt", [&] {
+            return assessIntervalSqrt(ordered(std::abs(a), std::abs(c)));
+        });
+    }
+    EXPECT_EQ(mismatches, 0) << "of " << compared;
+}
+
+TEST(ProducerArithmeticAssessment, FilteredPathMatchesTheExactPathForPointsAndDistances)
+{
+    OperandGenerator generator(UINT64_C(0x00c0ffee5eed0001));
+    int mismatches = 0;
+    int available = 0;
+    constexpr int samples = 20000;
+    const auto same_point = [](const PointAssessment& x,
+                               const PointAssessment& y) {
+        if (x.failure != y.failure) {
+            return false;
+        }
+        if (x.failure != ArithmeticFailure::None) {
+            return true;
+        }
+        for (std::size_t k = 0; k < 3u; ++k) {
+            if (bits(x.ideal[k].lower) != bits(y.ideal[k].lower) ||
+                bits(x.ideal[k].upper) != bits(y.ideal[k].upper) ||
+                bits(x.radius[k]) != bits(y.radius[k])) {
+                return false;
+            }
+        }
+        return true;
+    };
+    std::uniform_real_distribution<Real> coordinate(-2.0, 2.0);
+    std::uniform_real_distribution<Real> level(-1.0, 1.0);
+    std::mt19937_64 engine(UINT64_C(77));
+    for (int sample = 0; sample < samples; ++sample) {
+        OriginalEdgeObservation edge;
+        for (std::size_t k = 0; k < 3u; ++k) {
+            edge.a[k] = coordinate(engine);
+            edge.b[k] = coordinate(engine);
+        }
+        edge.phi_a = level(engine);
+        edge.phi_b = generator.coin() ? -edge.phi_a * 0.5 : level(engine);
+        edge.isovalue = 0.0;
+        edge.signed_band = generator.coin() ? 0.0 : 1e-14;
+        edge.actual_signed_a = edge.phi_a;
+        edge.actual_signed_b = edge.phi_b;
+        edge.actual_denominator = edge.phi_a - edge.phi_b;
+        edge.division_taken = edge.actual_denominator != 0.0;
+        edge.actual_quotient =
+            edge.division_taken ? edge.phi_a / edge.actual_denominator : 0.0;
+        edge.actual_clamped = edge.actual_quotient;
+        for (std::size_t k = 0; k < 3u; ++k) {
+            edge.emitted[k] = edge.a[k] + edge.actual_quotient *
+                                              (edge.b[k] - edge.a[k]);
+        }
+        PointAssessment exact_edge;
+        PointAssessment filtered_edge;
+        {
+            ScopedArithmeticPath scope(ProducerArithmeticPath::Exact);
+            exact_edge = assessOriginalEdge(edge);
+        }
+        {
+            ScopedArithmeticPath scope(ProducerArithmeticPath::Filtered);
+            filtered_edge = assessOriginalEdge(edge);
+        }
+        if (!same_point(exact_edge, filtered_edge)) {
+            ++mismatches;
+        }
+        const auto corner = assessOriginalCorner(edge.a, edge.a);
+        if (!exact_edge.available() || !corner.available()) {
+            continue;
+        }
+        ++available;
+        for (const auto relation :
+             {OriginRelation::SameOriginal, OriginRelation::DistinctOriginal}) {
+            DistanceObservation observation;
+            observation.executed = true;
+            Real squared = 0.0;
+            for (std::size_t k = 0; k < 3u; ++k) {
+                const Real delta = edge.emitted[k] - edge.a[k];
+                squared += delta * delta;
+            }
+            observation.distance = std::sqrt(squared);
+            const Real tolerance =
+                generator.coin() ? 1e-12 : observation.distance * 1.0000001;
+            observation.comparison_result = relation ==
+                                            OriginRelation::SameOriginal;
+            observation.removed = observation.comparison_result;
+            DistanceAssessment exact_distance;
+            DistanceAssessment filtered_distance;
+            {
+                ScopedArithmeticPath scope(ProducerArithmeticPath::Exact);
+                exact_distance = assessDistance(exact_edge, edge.emitted, corner,
+                                                edge.a, tolerance, 3u, relation,
+                                                observation);
+            }
+            {
+                ScopedArithmeticPath scope(ProducerArithmeticPath::Filtered);
+                filtered_distance = assessDistance(
+                    filtered_edge, edge.emitted, corner, edge.a, tolerance, 3u,
+                    relation, observation);
+            }
+            if (exact_distance.failure != filtered_distance.failure ||
+                bits(exact_distance.hull.lower) !=
+                    bits(filtered_distance.hull.lower) ||
+                bits(exact_distance.hull.upper) !=
+                    bits(filtered_distance.hull.upper)) {
+                ++mismatches;
+            }
+        }
+    }
+    EXPECT_GT(available, samples / 4);
+    EXPECT_EQ(mismatches, 0);
+}
+
+TEST(ProducerArithmeticAssessment, SelfCheckPathAcceptsTheFilteredResults)
+{
+    ScopedArithmeticPath scope(ProducerArithmeticPath::SelfCheck);
+    OperandGenerator generator(UINT64_C(0xabcdef0123456789));
+    for (int sample = 0; sample < 5000; ++sample) {
+        const Real a = generator.next();
+        const Real b = generator.near(a);
+        for (const auto operation :
+             {IntervalOperation::Add, IntervalOperation::Subtract,
+              IntervalOperation::Multiply, IntervalOperation::Divide}) {
+            static_cast<void>(assessIntervalOperation(operation, {a, a}, {b, b}));
+        }
+        static_cast<void>(assessIntervalSqrt(ordered(std::abs(a), std::abs(b))));
+    }
+    // A difference would have aborted the process.
+    SUCCEED();
+}
+
+TEST(ProducerArithmeticAssessment, FilteredPathKeepsTheFloatingPointEnvironment)
+{
+    ScopedArithmeticPath scope(ProducerArithmeticPath::Filtered);
+    fenv_t saved_environment;
+    ASSERT_EQ(fegetenv(&saved_environment), 0);
+    ASSERT_EQ(feclearexcept(FE_ALL_EXCEPT), 0);
+    clearX87Status();
+    errno = EDOM;
+    const auto before = readHardwareState();
+    // Inexact operations: a filtered evaluation raises the inexact flag
+    // internally and must clear it again.
+    const auto quotient =
+        assessIntervalOperation(IntervalOperation::Divide, {1.0, 1.0}, {3.0, 3.0});
+    const auto root = assessIntervalSqrt({3.0, 3.0});
+    const auto sum = assessIntervalOperation(IntervalOperation::Add,
+                                             {1.0, 1.0}, {1e-30, 1e-30});
+    const auto after = readHardwareState();
+    const int errno_after = errno;
+    ASSERT_EQ(fesetenv(&saved_environment), 0);
+    ASSERT_TRUE(quotient.available());
+    ASSERT_TRUE(root.available());
+    ASSERT_TRUE(sum.available());
+    expectBits(quotient.interval, UINT64_C(0x3fd5555555555555),
+               UINT64_C(0x3fd5555555555556));
+    expectHardwareStateEqual(after, before);
+    EXPECT_EQ(errno_after, EDOM);
 }
 
 } // namespace

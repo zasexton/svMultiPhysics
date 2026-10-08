@@ -48,6 +48,21 @@ struct IntervalAssessment {
 
 enum class IntervalOperation { Add, Subtract, Multiply, Divide };
 
+/**
+ * How the scalar operations behind the assessments are evaluated.  Every path
+ * returns the same bits: Exact uses the exact integer arithmetic only;
+ * Filtered (the default) derives the bracket of an operation from its
+ * round-to-nearest result and an error-free transformation when the operands
+ * and the result are well inside the normal range, and uses the exact
+ * arithmetic otherwise; SelfCheck evaluates both and aborts on a difference.
+ * The initial path comes from SVMP_PRODUCER_ARITHMETIC_EXACT=1 or
+ * SVMP_PRODUCER_ARITHMETIC_SELF_CHECK=1.
+ */
+enum class ProducerArithmeticPath { Exact = 0, Filtered = 1, SelfCheck = 2 };
+
+void setProducerArithmeticPath(ProducerArithmeticPath path) noexcept;
+[[nodiscard]] ProducerArithmeticPath producerArithmeticPath() noexcept;
+
 [[nodiscard]] IntervalAssessment assessIntervalOperation(
     IntervalOperation operation,
     ArithmeticInterval left,

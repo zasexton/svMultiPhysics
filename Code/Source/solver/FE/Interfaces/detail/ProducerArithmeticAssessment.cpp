@@ -8,13 +8,22 @@
 #include "Interfaces/detail/ProducerArithmeticAssessment.h"
 
 #include <array>
+#include <atomic>
 #include <bit>
+#include <cerrno>
 #include <cfloat>
 #include <climits>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <type_traits>
+
+#if defined(__x86_64__) || defined(_M_X64)
+#include <xmmintrin.h>
+#endif
 
 namespace svmp::FE::interfaces::detail {
 namespace {
@@ -708,9 +717,9 @@ void normalize(UInt4352& value) noexcept
     return result;
 }
 
-[[nodiscard]] IntervalAssessment scalarAdd(std::uint64_t left_bits,
-                                           std::uint64_t right_bits,
-                                           bool subtract_right) noexcept
+[[nodiscard]] IntervalAssessment exactScalarAdd(std::uint64_t left_bits,
+                                                std::uint64_t right_bits,
+                                                bool subtract_right) noexcept
 {
     DecodedScalar left;
     DecodedScalar right;
@@ -729,7 +738,7 @@ void normalize(UInt4352& value) noexcept
         exact.sign);
 }
 
-[[nodiscard]] IntervalAssessment scalarMultiply(
+[[nodiscard]] IntervalAssessment exactScalarMultiply(
     std::uint64_t left_bits,
     std::uint64_t right_bits) noexcept
 {
@@ -749,7 +758,7 @@ void normalize(UInt4352& value) noexcept
         bracketDyadicMagnitude(exact_product, kProductScale), sign);
 }
 
-[[nodiscard]] IntervalAssessment scalarDivide(
+[[nodiscard]] IntervalAssessment exactScalarDivide(
     std::uint64_t numerator_bits,
     std::uint64_t denominator_bits) noexcept
 {
@@ -769,13 +778,364 @@ void normalize(UInt4352& value) noexcept
         bracketQuotient(numerator, denominator), sign);
 }
 
-[[nodiscard]] IntervalAssessment scalarSqrt(std::uint64_t input_bits) noexcept
+[[nodiscard]] IntervalAssessment exactScalarSqrt(
+    std::uint64_t input_bits) noexcept
 {
     NormalizedScalar input;
     if (!decodeNormalizedScalar(input_bits, input) || input.sign < 0) {
         return unavailable(ArithmeticFailure::InvalidInput);
     }
     return fromMagnitudeBracket(bracketSquareRoot(input), input.sign);
+}
+
+// ---- filtered fast path ------------------------------------------------------
+//
+// Every exact scalar operation above returns the binary64 bracket
+// [RD(x), RU(x)] of its exact result x (a singleton when x is representable),
+// or a failure outside the normal range.  For operands and results well
+// inside the normal range the same bracket follows from the round-to-nearest
+// result r = RN(x) and the sign of the exact error x - r, which error-free
+// transformations give exactly: TwoSum for a sum, fma(a, b, -r) for a
+// product, fma(-r, d, n) for a quotient and fma(-r, r, v) for a square root.
+// x - r > 0 gives [r, next(r)], x - r < 0 gives [prev(r), r], x = r gives
+// [r, r].  The fast path is taken only when every operand and the rounded
+// result are zero or have a magnitude in [2^-500, 2^500] (no overflow, no
+// underflow in the transformations) and the SSE control register selects
+// round-to-nearest without flush-to-zero or denormals-are-zero; otherwise the
+// exact computation runs.  Results are therefore identical bit for bit.
+// SVMP_PRODUCER_ARITHMETIC_EXACT=1 disables the fast path;
+// SVMP_PRODUCER_ARITHMETIC_SELF_CHECK=1 runs both and aborts on a difference.
+
+constexpr int kPathUnset = -1;
+std::atomic<int> g_arithmetic_path{kPathUnset};
+
+[[nodiscard]] bool environmentFlagSet(const char* name) noexcept
+{
+    const char* text = std::getenv(name);
+    return text != nullptr && text[0] != '\0' &&
+           !(text[0] == '0' && text[1] == '\0');
+}
+
+[[nodiscard]] ProducerArithmeticPath currentArithmeticPath() noexcept
+{
+    int path = g_arithmetic_path.load(std::memory_order_relaxed);
+    if (path == kPathUnset) {
+        path = static_cast<int>(ProducerArithmeticPath::Filtered);
+        if (environmentFlagSet("SVMP_PRODUCER_ARITHMETIC_EXACT")) {
+            path = static_cast<int>(ProducerArithmeticPath::Exact);
+        } else if (environmentFlagSet("SVMP_PRODUCER_ARITHMETIC_SELF_CHECK")) {
+            path = static_cast<int>(ProducerArithmeticPath::SelfCheck);
+        }
+        g_arithmetic_path.store(path, std::memory_order_relaxed);
+    }
+    return static_cast<ProducerArithmeticPath>(path);
+}
+
+[[nodiscard]] std::uint32_t readControlStatus() noexcept
+{
+#if defined(__x86_64__) || defined(_M_X64)
+    return _mm_getcsr();
+#else
+    return 0u;
+#endif
+}
+
+void writeControlStatus(std::uint32_t value) noexcept
+{
+#if defined(__x86_64__) || defined(_M_X64)
+    _mm_setcsr(value);
+#else
+    static_cast<void>(value);
+#endif
+}
+
+// Round to nearest (bits 13-14 clear), no flush-to-zero (15) or
+// denormals-are-zero (6), every exception masked (7-12): floating-point
+// operations then round as assumed and cannot trap.  The fast path restores
+// the status flags and errno it may change, so the caller's environment is
+// left exactly as the integer arithmetic leaves it.
+[[nodiscard]] bool fastEnvironment(std::uint32_t control_status) noexcept
+{
+#if defined(__x86_64__) || defined(_M_X64)
+    return (control_status & 0xE040u) == 0u &&
+           (control_status & 0x1F80u) == 0x1F80u;
+#else
+    static_cast<void>(control_status);
+    return false;
+#endif
+}
+
+// Zero, or a magnitude in [2^-500, 2^500].
+[[nodiscard]] bool fastRange(std::uint64_t bits) noexcept
+{
+    const auto magnitude = bits & ~kSignMask;
+    if (magnitude == 0u) {
+        return true;
+    }
+    const auto exponent = magnitude >> 52u;
+    return exponent >= 523u && exponent <= 1523u;
+}
+
+[[nodiscard]] bool isZeroBits(std::uint64_t bits) noexcept
+{
+    return (bits & ~kSignMask) == 0u;
+}
+
+[[nodiscard]] IntervalAssessment singletonAssessment(Real value) noexcept
+{
+    IntervalAssessment result;
+    result.interval = {value, value};
+    result.failure = ArithmeticFailure::None;
+    return result;
+}
+
+[[nodiscard]] IntervalAssessment zeroAssessment() noexcept
+{
+    return singletonAssessment(valueFromBits<Real>(0u));
+}
+
+// Bracket of x = rounded + error, given the sign of the exact error.
+[[nodiscard]] IntervalAssessment bracketFromRounded(Real rounded,
+                                                    int error_sign) noexcept
+{
+    IntervalAssessment result;
+    result.failure = ArithmeticFailure::None;
+    if (error_sign == 0) {
+        result.interval = {rounded, rounded};
+    } else if (error_sign > 0) {
+        result.interval = {rounded,
+                           std::nextafter(rounded,
+                                          std::numeric_limits<Real>::infinity())};
+    } else {
+        result.interval = {std::nextafter(rounded,
+                                          -std::numeric_limits<Real>::infinity()),
+                           rounded};
+    }
+    return result;
+}
+
+[[nodiscard]] int signOf(Real value) noexcept
+{
+    return value > Real{0} ? 1 : (value < Real{0} ? -1 : 0);
+}
+
+[[nodiscard]] bool fastScalarAdd(std::uint64_t left_bits,
+                                 std::uint64_t right_bits,
+                                 bool subtract_right,
+                                 IntervalAssessment& out) noexcept
+{
+    if (subtract_right) {
+        right_bits ^= kSignMask;
+    }
+    if (!fastRange(left_bits) || !fastRange(right_bits)) {
+        return false;
+    }
+    const bool left_zero = isZeroBits(left_bits);
+    const bool right_zero = isZeroBits(right_bits);
+    if (left_zero && right_zero) {
+        out = zeroAssessment();
+        return true;
+    }
+    const Real a = valueFromBits<Real>(left_bits);
+    const Real b = valueFromBits<Real>(right_bits);
+    if (left_zero) {
+        out = singletonAssessment(b);
+        return true;
+    }
+    if (right_zero) {
+        out = singletonAssessment(a);
+        return true;
+    }
+    const Real sum = a + b;
+    if (sum == Real{0}) {
+        out = zeroAssessment();
+        return true;
+    }
+    if (!fastRange(bitsOf(sum))) {
+        return false;
+    }
+    const Real b_virtual = sum - a;
+    const Real a_virtual = sum - b_virtual;
+    const Real error = (a - a_virtual) + (b - b_virtual);
+    out = bracketFromRounded(sum, signOf(error));
+    return true;
+}
+
+[[nodiscard]] bool fastScalarMultiply(std::uint64_t left_bits,
+                                      std::uint64_t right_bits,
+                                      IntervalAssessment& out) noexcept
+{
+    if (!fastRange(left_bits) || !fastRange(right_bits)) {
+        return false;
+    }
+    if (isZeroBits(left_bits) || isZeroBits(right_bits)) {
+        out = zeroAssessment();
+        return true;
+    }
+    const Real a = valueFromBits<Real>(left_bits);
+    const Real b = valueFromBits<Real>(right_bits);
+    const Real product = a * b;
+    if (!fastRange(bitsOf(product))) {
+        return false;
+    }
+    out = bracketFromRounded(product, signOf(std::fma(a, b, -product)));
+    return true;
+}
+
+[[nodiscard]] bool fastScalarDivide(std::uint64_t numerator_bits,
+                                    std::uint64_t denominator_bits,
+                                    IntervalAssessment& out) noexcept
+{
+    if (!fastRange(numerator_bits) || !fastRange(denominator_bits) ||
+        isZeroBits(denominator_bits)) {
+        return false;
+    }
+    if (isZeroBits(numerator_bits)) {
+        out = zeroAssessment();
+        return true;
+    }
+    const Real n = valueFromBits<Real>(numerator_bits);
+    const Real d = valueFromBits<Real>(denominator_bits);
+    const Real quotient = n / d;
+    if (!fastRange(bitsOf(quotient))) {
+        return false;
+    }
+    // n - quotient * d, exact; the exact quotient exceeds the rounded one
+    // when the remainder has the sign of d.
+    const Real remainder = std::fma(-quotient, d, n);
+    out = bracketFromRounded(quotient, signOf(remainder) * signOf(d));
+    return true;
+}
+
+[[nodiscard]] bool fastScalarSqrt(std::uint64_t input_bits,
+                                  IntervalAssessment& out) noexcept
+{
+    if (isZeroBits(input_bits)) {
+        out = zeroAssessment();
+        return true;
+    }
+    if ((input_bits & kSignMask) != 0u || !fastRange(input_bits)) {
+        return false;
+    }
+    const Real v = valueFromBits<Real>(input_bits);
+    const Real root = std::sqrt(v);
+    out = bracketFromRounded(root, signOf(std::fma(-root, root, v)));
+    return true;
+}
+
+[[nodiscard]] bool sameAssessment(const IntervalAssessment& a,
+                                  const IntervalAssessment& b) noexcept
+{
+    if (a.failure != b.failure) {
+        return false;
+    }
+    return a.failure != ArithmeticFailure::None ||
+           (bitsOf(a.interval.lower) == bitsOf(b.interval.lower) &&
+            bitsOf(a.interval.upper) == bitsOf(b.interval.upper));
+}
+
+[[noreturn]] void reportFastPathDifference(const char* operation,
+                                           std::uint64_t left_bits,
+                                           std::uint64_t right_bits,
+                                           const IntervalAssessment& fast,
+                                           const IntervalAssessment& exact) noexcept
+{
+    std::fprintf(stderr,
+                 "ProducerArithmeticAssessment self-check "
+                 "(SVMP_PRODUCER_ARITHMETIC_SELF_CHECK): the filtered %s "
+                 "differs from the exact one: operands 0x%016llx 0x%016llx, "
+                 "filtered [0x%016llx, 0x%016llx] failure %d, exact "
+                 "[0x%016llx, 0x%016llx] failure %d\n",
+                 operation,
+                 static_cast<unsigned long long>(left_bits),
+                 static_cast<unsigned long long>(right_bits),
+                 static_cast<unsigned long long>(bitsOf(fast.interval.lower)),
+                 static_cast<unsigned long long>(bitsOf(fast.interval.upper)),
+                 static_cast<int>(fast.failure),
+                 static_cast<unsigned long long>(bitsOf(exact.interval.lower)),
+                 static_cast<unsigned long long>(bitsOf(exact.interval.upper)),
+                 static_cast<int>(exact.failure));
+    std::abort();
+}
+
+template <class Fast, class Exact>
+[[nodiscard]] IntervalAssessment dispatchScalar(const char* operation,
+                                                std::uint64_t left_bits,
+                                                std::uint64_t right_bits,
+                                                Fast&& fast,
+                                                Exact&& exact) noexcept
+{
+    const auto path = currentArithmeticPath();
+    const auto control_status = readControlStatus();
+    if (path != ProducerArithmeticPath::Exact &&
+        fastEnvironment(control_status)) {
+        const int saved_errno = errno;
+        IntervalAssessment filtered;
+        const bool handled = fast(filtered);
+        if (readControlStatus() != control_status) {
+            writeControlStatus(control_status);
+        }
+        if (errno != saved_errno) {
+            errno = saved_errno;
+        }
+        if (handled) {
+            if (path == ProducerArithmeticPath::SelfCheck) {
+                const auto reference = exact();
+                if (!sameAssessment(filtered, reference)) {
+                    reportFastPathDifference(operation, left_bits, right_bits,
+                                             filtered, reference);
+                }
+            }
+            return filtered;
+        }
+    }
+    return exact();
+}
+
+[[nodiscard]] IntervalAssessment scalarAdd(std::uint64_t left_bits,
+                                           std::uint64_t right_bits,
+                                           bool subtract_right) noexcept
+{
+    return dispatchScalar(
+        subtract_right ? "subtraction" : "addition", left_bits, right_bits,
+        [&](IntervalAssessment& out) {
+            return fastScalarAdd(left_bits, right_bits, subtract_right, out);
+        },
+        [&] { return exactScalarAdd(left_bits, right_bits, subtract_right); });
+}
+
+[[nodiscard]] IntervalAssessment scalarMultiply(
+    std::uint64_t left_bits,
+    std::uint64_t right_bits) noexcept
+{
+    return dispatchScalar(
+        "multiplication", left_bits, right_bits,
+        [&](IntervalAssessment& out) {
+            return fastScalarMultiply(left_bits, right_bits, out);
+        },
+        [&] { return exactScalarMultiply(left_bits, right_bits); });
+}
+
+[[nodiscard]] IntervalAssessment scalarDivide(
+    std::uint64_t numerator_bits,
+    std::uint64_t denominator_bits) noexcept
+{
+    return dispatchScalar(
+        "division", numerator_bits, denominator_bits,
+        [&](IntervalAssessment& out) {
+            return fastScalarDivide(numerator_bits, denominator_bits, out);
+        },
+        [&] { return exactScalarDivide(numerator_bits, denominator_bits); });
+}
+
+[[nodiscard]] IntervalAssessment scalarSqrt(std::uint64_t input_bits) noexcept
+{
+    return dispatchScalar(
+        "square root", input_bits, 0u,
+        [&](IntervalAssessment& out) {
+            return fastScalarSqrt(input_bits, out);
+        },
+        [&] { return exactScalarSqrt(input_bits); });
 }
 
 [[nodiscard]] std::uint64_t smallerBits(std::uint64_t left,
@@ -1432,6 +1792,16 @@ SVMP_PRODUCER_ARITHMETIC_ENTRY DistanceAssessment assessDistance(
     result.hull = {valueFromBits<Real>(lower), valueFromBits<Real>(upper)};
     result.failure = ArithmeticFailure::None;
     return result;
+}
+
+void setProducerArithmeticPath(ProducerArithmeticPath path) noexcept
+{
+    g_arithmetic_path.store(static_cast<int>(path), std::memory_order_relaxed);
+}
+
+ProducerArithmeticPath producerArithmeticPath() noexcept
+{
+    return currentArithmeticPath();
 }
 
 #undef SVMP_PRODUCER_ARITHMETIC_ENTRY
