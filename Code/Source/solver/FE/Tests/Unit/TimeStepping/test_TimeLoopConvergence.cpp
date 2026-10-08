@@ -42,6 +42,7 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <optional>
@@ -3399,6 +3400,125 @@ TEST(TimeLoopCallbacks,
     EXPECT_EQ(restored_outer_callbacks, 1);
     EXPECT_EQ(rejected_callbacks, 0);
     EXPECT_TRUE(controller->rejected.empty());
+}
+
+// ---------------------------------------------------------------------------
+// End time after many fixed steps.
+
+namespace {
+
+// Runs the reaction problem with backward Euler and returns the loop report;
+// `accepted_steps` counts on_step_accepted calls.
+svmp::FE::timestepping::TimeLoopReport runReactionLoopReport(
+    double dt, double t_end, int max_steps, int& accepted_steps)
+{
+    svmp::FE::timestepping::TimeLoopReport report;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    const auto form = (svmp::FE::forms::dt(u) * v + u * v).dx();
+    svmp::FE::forms::FormCompiler compiler;
+    auto kernel = std::make_shared<svmp::FE::forms::NonlinearFormKernel>(
+        compiler.compileResidual(form), svmp::FE::forms::ADMode::Forward);
+    sys.addCellKernel("op", u_field, u_field, kernel);
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    auto integrator =
+        std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    svmp::FE::systems::TransientSystem transient(sys, integrator);
+    auto factory = createTestFactory();
+    if (!factory) {
+        ADD_FAILURE() << "Eigen backend not available";
+        return report;
+    }
+    auto linear = factory->createLinearSolver(directSolve());
+    auto history = svmp::FE::timestepping::TimeHistory::allocate(
+        *factory, sys.dofHandler().getNumDofs(), 2);
+    const std::vector<Real> u0 = {1.0, -0.5, 0.25, 2.0};
+    for (int k = 1; k <= history.historyDepth(); ++k) {
+        setVectorByDof(history.uPrevK(k), u0);
+    }
+    history.resetCurrentToPrevious();
+    history.setPrevDt(dt);
+
+    svmp::FE::timestepping::TimeLoopOptions opts;
+    opts.t0 = 0.0;
+    opts.t_end = t_end;
+    opts.dt = dt;
+    opts.max_steps = max_steps;
+    opts.scheme = svmp::FE::timestepping::SchemeKind::BackwardEuler;
+    opts.newton.residual_op = "op";
+    opts.newton.jacobian_op = "op";
+    opts.newton.max_iterations = 8;
+    opts.newton.abs_tolerance = 1e-12;
+    opts.newton.rel_tolerance = 0.0;
+
+    svmp::FE::timestepping::TimeLoop loop(opts);
+    svmp::FE::timestepping::TimeLoopCallbacks callbacks;
+    accepted_steps = 0;
+    callbacks.on_step_accepted =
+        [&](svmp::FE::timestepping::TimeHistory&) { ++accepted_steps; };
+    report = loop.run(transient, *factory, *linear, history, callbacks);
+    return report;
+}
+
+} // namespace
+
+// The fixed-step sessile drop R/h = 32, 10 viscous times (R32_a120_T10): 15,800
+// steps of dt = 0.0015503099637868215 to t_end = 15800 * dt.  The running
+// time sum ends 6.6e-12 short of t_end, more than the in-loop tolerance
+// 1000 * eps * span (5.4e-12), and the run used to end with "max_steps
+// exceeded" after taking every step.
+TEST(TimeLoopSanity, FixedStepsEndingWithinAccumulatedRoundOffReachEndTime)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    const double dt = 0.0015503099637868215;
+    const int steps = 15800;
+    const double t_end = 0.0 + static_cast<double>(steps) * dt;
+
+    // Summed like TimeHistory::acceptStep, one rounded addition per step.
+    volatile double sum = 0.0;
+    for (int i = 0; i < steps; ++i) {
+        sum = sum + dt;
+    }
+    const double span = std::max(1.0, t_end);
+    ASSERT_GT(t_end - sum,
+              1000.0 * std::numeric_limits<double>::epsilon() * span)
+        << "the case no longer exercises the accumulated round-off";
+
+    int accepted_steps = 0;
+    const auto report = runReactionLoopReport(dt, t_end, steps, accepted_steps);
+    EXPECT_TRUE(report.success) << report.message;
+    EXPECT_EQ(report.steps_taken, steps);
+    EXPECT_EQ(accepted_steps, steps);
+    EXPECT_EQ(report.final_time, t_end);
+}
+
+// A run that is a whole step short of t_end still reports max_steps exceeded.
+TEST(TimeLoopSanity, FixedStepsShortOfEndTimeReportMaxStepsExceeded)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    const double dt = 0.1;
+    int accepted_steps = 0;
+    const auto report =
+        runReactionLoopReport(dt, /*t_end=*/11.0 * dt, /*max_steps=*/10, accepted_steps);
+    EXPECT_FALSE(report.success);
+    EXPECT_EQ(report.steps_taken, 10);
+    EXPECT_EQ(accepted_steps, 10);
+    EXPECT_NE(report.message.find("max_steps exceeded"), std::string::npos)
+        << report.message;
 }
 
 TEST(TimeLoopCallbacks,
