@@ -660,6 +660,7 @@ set(FE_CONSTRAINTS_HEADERS
     Constraints/AuxiliaryDrivenDirichletConstraint.h
     Constraints/HCurlTangentialConstraint.h
     Constraints/HDivNormalConstraint.h
+    Constraints/BoundaryDofOwnerCompletion.h
 )
 
 set(FE_CONSTRAINTS_SOURCES
@@ -691,6 +692,7 @@ set(FE_CONSTRAINTS_SOURCES
     Constraints/AuxiliaryDrivenDirichletConstraint.cpp
     Constraints/HCurlTangentialConstraint.cpp
     Constraints/HDivNormalConstraint.cpp
+    Constraints/BoundaryDofOwnerCompletion.cpp
 )
 
 # Analysis sources (problem property inference)

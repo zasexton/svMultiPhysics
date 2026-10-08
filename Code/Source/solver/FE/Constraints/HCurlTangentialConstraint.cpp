@@ -7,6 +7,8 @@
 
 #include "Constraints/HCurlTangentialConstraint.h"
 
+#include "Constraints/BoundaryDofOwnerCompletion.h"
+
 #include "Basis/VectorBasis.h"
 #include "Elements/ReferenceElement.h"
 #include "Spaces/FunctionSpace.h"
@@ -14,6 +16,7 @@
 #include "Systems/SystemsExceptions.h"
 
 #include <algorithm>
+#include <string>
 #include <unordered_set>
 
 namespace svmp {
@@ -135,6 +138,12 @@ void HCurlTangentialConstraint::apply(const FESystem& system, constraints::Affin
     dofs_.assign(unique.begin(), unique.end());
     std::sort(dofs_.begin(), dofs_.end());
     dofs_.erase(std::unique(dofs_.begin(), dofs_.end()), dofs_.end());
+    // Owned DOFs on faces that only other ranks own (as cells) come from
+    // those ranks; without this the constrained set depends on the partition.
+    std::vector<Real> no_payload;
+    (void)completeOwnedBoundaryDofs(
+        system, dofs_, no_payload, 0u,
+        "constraint=HCurlTangential field='" + rec.name + "' marker=" + std::to_string(boundary_marker_));
 
     const auto& owned = system.dofHandler().getPartition().locallyOwned();
     for (const auto dof : dofs_) {

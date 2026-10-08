@@ -7,6 +7,8 @@
 
 #include "Constraints/StrongDirichletConstraint.h"
 
+#include "Constraints/BoundaryDofOwnerCompletion.h"
+
 #include "Systems/FESystem.h"
 #include "Systems/SystemsExceptions.h"
 
@@ -21,6 +23,7 @@
 #include <cstdlib>
 #include <limits>
 #include <sstream>
+#include <string>
 #include <unordered_map>
 #include <utility>
 
@@ -117,6 +120,24 @@ void traceStrongDirichletEvent(const std::string& phase,
     auto [ins, inserted] = cache.emplace(key, spaces::FaceRestriction(element_type, order, continuity));
     (void)inserted;
     return ins->second;
+}
+
+void completeOwnedDofsWithCoords(const FESystem& system,
+                                 BoundaryDofsWithCoords& out,
+                                 const std::string& context)
+{
+    std::vector<Real> payload;
+    payload.reserve(out.coords.size() * 3u);
+    for (const auto& x : out.coords) {
+        payload.insert(payload.end(), x.begin(), x.end());
+    }
+    if (completeOwnedBoundaryDofs(system, out.dofs, payload, 3u, context) == 0u) {
+        return;
+    }
+    out.coords.resize(out.dofs.size());
+    for (std::size_t i = 0; i < out.dofs.size(); ++i) {
+        out.coords[i] = {payload[3u * i], payload[3u * i + 1u], payload[3u * i + 2u]};
+    }
 }
 
 [[nodiscard]] BoundaryDofsWithCoords boundaryDofsWithCoordsByMarker(
@@ -235,6 +256,13 @@ void traceStrongDirichletEvent(const std::string& phase,
                     "StrongDirichletConstraint: internal DOF->coord map missing key");
         out.coords.push_back(it->second);
     }
+
+    // Owned DOFs on faces that only other ranks own (as cells) come from
+    // those ranks; without this the constrained set depends on the partition.
+    completeOwnedDofsWithCoords(
+        system, out,
+        "constraint=StrongDirichlet field='" + rec.name + "' marker=" + std::to_string(boundary_marker) +
+            " component=" + std::to_string(component));
 
     return out;
 }
