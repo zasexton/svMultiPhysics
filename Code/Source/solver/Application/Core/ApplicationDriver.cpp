@@ -42,6 +42,7 @@
 #include "FE/Geometry/CutQuadratureMapping.h"
 #include "FE/Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "FE/Core/DeterministicParallel.h"
+#include "FE/Core/HaloDiagnostics.h"
 #include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "FE/Interfaces/IncompressibleTwoFluidDiagnostics.h"
 #include "FE/Interfaces/MaterialInterfaceTransportVelocity.h"
@@ -36566,6 +36567,14 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     }
   }
   // ====================================
+
+  // Whether the ghost halo was deep enough for a partition-independent
+  // discretization (communicator-global totals; nonzero values mean the
+  // result depends on the partition and <Ghost_layers> should grow).
+  if (svmp::MeshComm::world().size() > 1 && svmp::MeshComm::world().rank() == 0) {
+    oopCout() << "[svMultiPhysics::Application] Halo correctness "
+              << svmp::FE::diagnostics::haloCorrectnessSummary() << std::endl;
+  }
 
   if (!rep.success) {
     throw std::runtime_error("[svMultiPhysics::Application] Transient solve failed: " + rep.message +

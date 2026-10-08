@@ -323,11 +323,13 @@ set(FE_CORE_HEADERS
     Core/KernelTrace.h
     Core/StateVariableMetadata.h
     Core/DeterministicParallel.h
+    Core/HaloDiagnostics.h
 )
 
 set(FE_CORE_SOURCES
     Core/Logger.cpp
     Core/DeterministicParallel.cpp
+    Core/HaloDiagnostics.cpp
 )
 
 # Math module sources
