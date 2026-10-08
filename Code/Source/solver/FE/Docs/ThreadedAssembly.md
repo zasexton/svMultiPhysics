@@ -188,6 +188,18 @@ A rank with `N` assembly threads runs `N` compute threads and its main
 thread, which inserts in order during the threaded loops and otherwise does
 the serial work.
 
+The same setting threads the per-cell work of the cut-geometry rebuild
+(`FE/Core/DeterministicParallel.h`, `geometryThreadCount()`), under the same
+contract: results do not depend on the thread count.  Both use one
+process-wide team of worker threads (`defaultParallelTeam()`;
+`assembly::AssemblyThreadPool` forwards to it), so a rank has one set of
+`N - 1` workers plus its main thread, and a geometry loop inside an
+assembly participant, or the reverse, runs serially on that participant.
+The pipelined assembly loop reserves its workers before it starts (its
+inserting participant waits for the others, so it cannot run its
+participants one after another); if they cannot be started it runs
+serially.
+
 `SVMP_ASSEMBLY_SPIN_US=N` makes a thread poll for up to `N` microseconds
 before it blocks (waiting for the next loop, a free record buffer or the
 next block to insert); the default is 0.  Polling only changes timing.  It
@@ -209,8 +221,9 @@ mpiexec -n $SLURM_NTASKS --map-by slot:PE=$SLURM_CPUS_PER_TASK --bind-to core sv
 # or, without binding: mpiexec -n $SLURM_NTASKS --bind-to none ...
 ```
 
-Only assembly is threaded; the linear solve, cut rebuild, geometry snapshots
-and constraint build use one core per rank.  `ranks x threads` should
+Assembly and the per-cell parts of the cut-geometry rebuild are threaded;
+the linear solve, the rest of the rebuild and the constraint build use one
+core per rank.  `ranks x threads` should
 normally not exceed the cores of the node, and ranks remain the first choice
 where they scale; threads add speed where ranks no longer do (small 2D
 meshes beyond about 8 ranks) or where memory per rank limits the rank count
