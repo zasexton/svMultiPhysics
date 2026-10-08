@@ -1564,6 +1564,10 @@ class GeneralSimulationParameters : public ParameterLists
     // relaxation; 1: every update). Built-in defaults apply when absent.
     Parameter<int> outer_fixed_point_max_passes;
     Parameter<int> outer_fixed_point_relaxation_start_pass;
+    // First 1-based refresh at which a persistent two-state alternation of
+    // the generated affine constraints ends the step on the current frozen
+    // problem (0: never). Built-in default (13) applies when absent.
+    Parameter<int> outer_fixed_point_constraint_cycle_exit_pass;
     Parameter<int> adaptive_time_loop_target_newton_iterations;
     Parameter<int> newton_max_iterations;
     Parameter<int> newton_line_search_max_iterations;

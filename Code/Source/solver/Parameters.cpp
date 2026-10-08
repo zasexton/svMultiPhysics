@@ -3275,6 +3275,7 @@ GeneralSimulationParameters::GeneralSimulationParameters()
   // defaults (30 and 12) apply when the keys are absent.
   set_parameter("Outer_fixed_point_max_passes", 30, !required, outer_fixed_point_max_passes, {1,int_inf});
   set_parameter("Outer_fixed_point_relaxation_start_pass", 12, !required, outer_fixed_point_relaxation_start_pass, {0,int_inf});
+  set_parameter("Outer_fixed_point_constraint_cycle_exit_pass", 13, !required, outer_fixed_point_constraint_cycle_exit_pass, {0,int_inf});
   set_parameter("Newton_line_search_fail_on_no_reduction", false, !required, newton_line_search_fail_on_no_reduction);
   set_parameter("Newton_line_search_max_iterations", 10, !required, newton_line_search_max_iterations, {1,int_inf});
   set_parameter("Newton_absolute_tolerance", 1.0e-10, !required, newton_absolute_tolerance);
