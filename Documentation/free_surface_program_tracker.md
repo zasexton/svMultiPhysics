@@ -491,6 +491,10 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   2. Incremental cut, snapshot and constraint regeneration, and an assembler and sparsity pattern kept across passes and steps; bitwise. Then threads for per-cell geometry rebuilds, bitwise for any thread count.
   3. Quieter default logging: the held proposal `e2efc6cc` plus other unparsed per-pass lines, moved to DEBUG; the solution is unchanged. Then an opt-in scalable preconditioner whose results do not depend on the partition: a field split from the generic block layout with partition-independent inner solves.
   - Measured starting point (s/step at 1/2/4/8 ranks): static drop R/h = 32 14.9 / 8.7 / 5.6 / 3.3 (57% at 8); sessile R/h = 32 2.38 / 1.49 / – / 0.86 (35%); capillary wave λ/h = 64 61% at 4 ranks.
+- **D32, 2026-10-07 (user): the 3D static-sphere R/h = 16 run (D25) launches only if its measured step time fits within the 7-day job limit.**
+  - The PDE velocity extension's replicated dry-region factorization was 41% of a 3D R/h = 16 step. It is now one component per rank with a 3-entry cache, bitwise identical (`f6057e20`).
+  - The step time is then measured with a short probe: about 10 steps on 16 ranks with `<Ghost_layers>12</Ghost_layers>` (D31).
+  - The full run starts only if setup + 618 × the mean step time, plus 10% margin, fits within 7 days.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
