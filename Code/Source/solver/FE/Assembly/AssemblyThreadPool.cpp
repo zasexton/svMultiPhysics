@@ -8,13 +8,8 @@
 #include "Assembly/AssemblyThreadPool.h"
 #include "Assembly/ConcurrentCompute.h"
 
-#include <algorithm>
 #include <cstdlib>
-#include <utility>
 
-#ifdef _OPENMP
-#include <omp.h>
-#endif
 
 namespace svmp {
 namespace FE {
@@ -22,22 +17,7 @@ namespace assembly {
 
 namespace {
 
-thread_local bool tl_inside_parallel_region = false;
 thread_local bool tl_concurrent_compute = false;
-
-class InsideRegionGuard {
-public:
-    InsideRegionGuard() noexcept : previous_(tl_inside_parallel_region)
-    {
-        tl_inside_parallel_region = true;
-    }
-    ~InsideRegionGuard() { tl_inside_parallel_region = previous_; }
-    InsideRegionGuard(const InsideRegionGuard&) = delete;
-    InsideRegionGuard& operator=(const InsideRegionGuard&) = delete;
-
-private:
-    bool previous_;
-};
 
 } // namespace
 
@@ -70,53 +50,24 @@ AssemblyThreadPool& AssemblyThreadPool::global()
     return pool;
 }
 
-AssemblyThreadPool::~AssemblyThreadPool()
+void AssemblyThreadPool::run(int n_participants, const std::function<void(int)>& task)
 {
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        stop_ = true;
-    }
-    start_cv_.notify_all();
-    for (auto& t : threads_) {
-        if (t.joinable()) {
-            t.join();
-        }
-    }
+    defaultParallelTeam().run(n_participants, task);
 }
 
 bool AssemblyThreadPool::insideParallelRegion() noexcept
 {
-    return tl_inside_parallel_region;
+    return insideDeterministicParallelRegion();
 }
 
 int AssemblyThreadPool::workerCount() const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return static_cast<int>(threads_.size());
+    return parallelTeamWorkerCount();
 }
 
 bool AssemblyThreadPool::reserveWorkers(int n_workers) noexcept
 {
-    try {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ensureWorkersLocked(n_workers);
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
-
-void AssemblyThreadPool::ensureWorkersLocked(int n_workers)
-{
-    while (static_cast<int>(threads_.size()) < n_workers) {
-        // The worker starts from the generation current at creation, so a run()
-        // that creates it and then publishes a new generation is not missed.
-        const int index = static_cast<int>(threads_.size());
-        const std::uint64_t start_generation = generation_.load();
-        threads_.emplace_back([this, index, start_generation]() {
-            workerLoop(index, start_generation);
-        });
-    }
+    return reserveParallelTeamWorkers(n_workers);
 }
 
 std::chrono::nanoseconds AssemblyThreadPool::spinBudget() noexcept
@@ -133,100 +84,6 @@ std::chrono::nanoseconds AssemblyThreadPool::spinBudget() noexcept
         return std::chrono::nanoseconds(us * 1000);
     }();
     return budget;
-}
-
-void AssemblyThreadPool::workerLoop(int worker_index, std::uint64_t start_generation)
-{
-    tl_inside_parallel_region = true;
-#ifdef _OPENMP
-    omp_set_num_threads(1);
-#endif
-    std::uint64_t seen_generation = start_generation;
-    std::unique_lock<std::mutex> lock(mutex_);
-    for (;;) {
-        if (!stop_.load() && generation_.load() == seen_generation) {
-            // Poll briefly before sleeping (see spinWait).
-            lock.unlock();
-            (void)spinWait([&]() {
-                return stop_.load(std::memory_order_acquire) ||
-                       generation_.load(std::memory_order_acquire) != seen_generation;
-            });
-            lock.lock();
-        }
-        start_cv_.wait(lock, [&]() { return stop_.load() || generation_.load() != seen_generation; });
-        if (stop_.load()) {
-            return;
-        }
-        seen_generation = generation_.load();
-        const int participant = worker_index + 1;
-        if (participant >= active_participants_) {
-            continue;
-        }
-        const auto* task = task_;
-        lock.unlock();
-        std::exception_ptr error;
-        try {
-            (*task)(participant);
-        } catch (...) {
-            error = std::current_exception();
-        }
-        lock.lock();
-        if (error) {
-            errors_[static_cast<std::size_t>(participant)] = std::move(error);
-        }
-        if (--remaining_ == 0) {
-            done_cv_.notify_all();
-        }
-    }
-}
-
-void AssemblyThreadPool::run(int n_participants, const std::function<void(int)>& task)
-{
-    if (n_participants <= 1 || tl_inside_parallel_region) {
-        for (int p = 0; p < std::max(1, n_participants); ++p) {
-            task(p);
-        }
-        return;
-    }
-
-    std::lock_guard<std::mutex> run_lock(run_mutex_);
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ensureWorkersLocked(n_participants - 1);
-        task_ = &task;
-        active_participants_ = n_participants;
-        remaining_ = n_participants - 1;
-        errors_.assign(static_cast<std::size_t>(n_participants), nullptr);
-        generation_.fetch_add(1u);
-    }
-    start_cv_.notify_all();
-
-    std::exception_ptr caller_error;
-    {
-        InsideRegionGuard guard;
-        try {
-            task(0);
-        } catch (...) {
-            caller_error = std::current_exception();
-        }
-    }
-
-    std::vector<std::exception_ptr> errors;
-    {
-        std::unique_lock<std::mutex> lock(mutex_);
-        done_cv_.wait(lock, [&]() { return remaining_ == 0; });
-        task_ = nullptr;
-        active_participants_ = 0;
-        errors.swap(errors_);
-    }
-    if (caller_error) {
-        std::rethrow_exception(caller_error);
-    }
-    for (auto& e : errors) {
-        if (e) {
-            std::rethrow_exception(e);
-        }
-    }
 }
 
 } // namespace assembly

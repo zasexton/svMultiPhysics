@@ -126,6 +126,22 @@ public:
         }
     }
 
+    bool reserveWorkers(int n_workers) noexcept
+    {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return ensureWorkersLocked(n_workers);
+        } catch (...) {
+            return false;
+        }
+    }
+
+    int workerCount()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return static_cast<int>(threads_.size());
+    }
+
 private:
     // Called with mutex_ held.
     bool ensureWorkersLocked(int n_workers)
@@ -214,12 +230,27 @@ private:
     return true;
 }
 
+ThreadTeam& processThreadTeam()
+{
+    static ThreadTeam team;
+    return team;
+}
+
 } // namespace
 
 ParallelTeam& defaultParallelTeam()
 {
-    static ThreadTeam team;
-    return team;
+    return processThreadTeam();
+}
+
+bool reserveParallelTeamWorkers(int n_workers) noexcept
+{
+    return processThreadTeam().reserveWorkers(n_workers);
+}
+
+int parallelTeamWorkerCount()
+{
+    return processThreadTeam().workerCount();
 }
 
 int geometryThreadCount(int assembly_threads) noexcept
