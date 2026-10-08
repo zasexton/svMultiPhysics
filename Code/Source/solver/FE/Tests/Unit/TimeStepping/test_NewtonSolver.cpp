@@ -3925,6 +3925,149 @@ TEST(NewtonSolverExternalStateFixedPoint,
     }
 }
 
+namespace {
+
+struct ConstraintCycleRun {
+    svmp::FE::timestepping::NewtonReport report{};
+    std::vector<double> u{};
+    int frozen_acknowledgments{0};
+    int constraint_rebuilds{0};
+};
+
+// Two fields with targets t_s and t_d, coupled by the generated MPC
+// selected = w * dominant.  The refresh chooses w = 1 when dominant >= 1.75
+// and w = 0.5 otherwise; the projection changes only the slave, so the
+// choice is stable within a refresh.  With t_s = 1 and t_d = 2, w = 1 gives
+// dominant = 1.5 (choose 0.5) and w = 0.5 gives dominant = 2 (choose 1): no
+// self-consistent constraint exists and the refreshed constraints alternate.
+// With t_d = 3 both weights give dominant >= 1.75, so the loop settles on
+// w = 1 after one switch.
+[[nodiscard]] ConstraintCycleRun runConstraintCycleProblem(
+    double dominant_target,
+    int cycle_exit_start_iteration)
+{
+    auto constraint_state = std::make_shared<SharedFieldMpcState>();
+    auto problem = makeTwoFieldAffineProblem(
+        /*selected_target=*/1.0,
+        dominant_target,
+        /*dt=*/0.1,
+        constraint_state);
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    ConstraintCycleRun run;
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 3;
+    options.abs_tolerance = 1e-13;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+    options.assemble_both_when_possible = false;
+    options.external_state_fixed_point.enabled = true;
+    options.external_state_fixed_point.max_iterations = 8;
+    options.external_state_fixed_point.dynamic_relaxation.enabled = true;
+    options.external_state_fixed_point.constraint_cycle_exit_start_iteration =
+        cycle_exit_start_iteration;
+    options.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView& state,
+            SyncPoint point) {
+            // The restore points rebuild the entry constraints after a
+            // failed attempt from the restored entry state.
+            if (point != SyncPoint::OuterFixedPointState &&
+                point != SyncPoint::ProjectedOuterFixedPointState &&
+                point != SyncPoint::RestoredOuterFixedPointState &&
+                point != SyncPoint::RestoredProjectedOuterFixedPointState) {
+                return;
+            }
+            ASSERT_EQ(state.u.size(), 2u);
+            const double dominant = static_cast<double>(state.u[1]);
+            const double weight = dominant >= 1.75 ? 1.0 : 0.5;
+            if (weight != constraint_state->weight) {
+                constraint_state->weight = weight;
+                problem.sys->rebuildConstraintState();
+                ++run.constraint_rebuilds;
+            }
+        };
+    options.acknowledge_external_state_frozen_epoch = [&]() {
+        ++run.frozen_acknowledgments;
+    };
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+    run.report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    run.u = ts_test::getVectorByDof(problem.history.u());
+    return run;
+}
+
+} // namespace
+
+TEST(NewtonSolverExternalStateFixedPoint,
+     PersistentConstraintCycleFinishesOnTheFrozenConstraints)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    // Without the exit the refreshed constraints alternate until the outer
+    // iteration limit.
+    const auto unbounded = runConstraintCycleProblem(
+        /*dominant_target=*/2.0, /*cycle_exit_start_iteration=*/-1);
+    EXPECT_FALSE(unbounded.report.converged);
+    EXPECT_FALSE(unbounded.report.external_state_cycle_frozen_epoch);
+    EXPECT_FALSE(unbounded.report.external_state_constraint_cycle);
+    EXPECT_EQ(unbounded.report.outer_iterations, 8);
+    EXPECT_EQ(unbounded.frozen_acknowledgments, 0);
+
+    // Refreshed constraints w = 0.5, 1, 0.5, 1: the fourth refresh closes
+    // the alternation and its frozen problem (w = 1) is accepted.
+    const auto early = runConstraintCycleProblem(
+        /*dominant_target=*/2.0, /*cycle_exit_start_iteration=*/0);
+    ASSERT_TRUE(early.report.converged);
+    EXPECT_TRUE(early.report.external_state_cycle_frozen_epoch);
+    EXPECT_TRUE(early.report.external_state_constraint_cycle);
+    EXPECT_EQ(early.report.outer_iterations, 4);
+    EXPECT_EQ(early.frozen_acknowledgments, 1);
+    ASSERT_EQ(early.u.size(), 2u);
+    EXPECT_NEAR(early.u[0], 1.5, 1e-13);
+    EXPECT_NEAR(early.u[1], 1.5, 1e-13);
+
+    // A later start waits for that refresh: the sixth refresh (w = 1).
+    const auto late = runConstraintCycleProblem(
+        /*dominant_target=*/2.0, /*cycle_exit_start_iteration=*/5);
+    ASSERT_TRUE(late.report.converged);
+    EXPECT_TRUE(late.report.external_state_constraint_cycle);
+    EXPECT_EQ(late.report.outer_iterations, 6);
+    ASSERT_EQ(late.u.size(), 2u);
+    EXPECT_NEAR(late.u[1], 1.5, 1e-13);
+
+    // A single switch is not a cycle: the exit leaves the converging loop
+    // bitwise unchanged.
+    const auto settled_plain = runConstraintCycleProblem(
+        /*dominant_target=*/3.0, /*cycle_exit_start_iteration=*/-1);
+    const auto settled_exit = runConstraintCycleProblem(
+        /*dominant_target=*/3.0, /*cycle_exit_start_iteration=*/0);
+    ASSERT_TRUE(settled_plain.report.converged);
+    ASSERT_TRUE(settled_exit.report.converged);
+    EXPECT_FALSE(settled_exit.report.external_state_cycle_frozen_epoch);
+    EXPECT_FALSE(settled_exit.report.external_state_constraint_cycle);
+    EXPECT_EQ(settled_exit.frozen_acknowledgments, 0);
+    EXPECT_EQ(settled_exit.report.outer_iterations,
+              settled_plain.report.outer_iterations);
+    EXPECT_EQ(settled_exit.constraint_rebuilds,
+              settled_plain.constraint_rebuilds);
+    EXPECT_EQ(settled_exit.u, settled_plain.u);
+    ASSERT_EQ(settled_exit.u.size(), 2u);
+    EXPECT_NEAR(settled_exit.u[1], 2.0, 1e-13);
+}
+
 TEST(NewtonSolverExternalStateFixedPoint,
      ExternalStateDiscontinuityStopsBeforeRefreshedInnerSolveAndRestores)
 {

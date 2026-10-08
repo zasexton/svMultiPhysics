@@ -12709,6 +12709,11 @@ NewtonReport NewtonSolver::solveStep(
     int external_state_discontinuity_restarts = 0;
     bool initial_epoch_adopted = false;
     bool finish_on_frozen_epoch = false;
+    bool finish_on_constraint_cycle = false;
+    // Affine-constraint semantics of every refreshed problem of the attempt
+    // (constraint_cycle_exit_start_iteration).
+    std::vector<ConstraintSemanticFingerprint>
+        refreshed_constraint_semantics;
     auto stopForExternalStateDiscontinuity =
         [&](int outer_iteration) -> NewtonReport {
         aggregate.converged = false;
@@ -12993,6 +12998,48 @@ NewtonReport NewtonSolver::solveStep(
                 ++outer_relaxation_resets;
                 relaxation_history_reset = true;
             }
+            refreshed_constraint_semantics.push_back(
+                current_constraint_semantics);
+            {
+                // Persistent two-state alternation of the refreshed affine
+                // constraints (see ExternalStateFixedPointOptions::
+                // constraint_cycle_exit_start_iteration): finish on this
+                // frozen problem, as for a revisited epoch.  Every operand
+                // of the collective calls below is rank-uniform.
+                const int cycle_start =
+                    options_.external_state_fixed_point
+                        .constraint_cycle_exit_start_iteration;
+                const auto n_refreshed = refreshed_constraint_semantics.size();
+                if (!finish_on_frozen_epoch && cycle_start >= 0 &&
+                    outer >= cycle_start && n_refreshed >= 4u) {
+                    const auto& s = refreshed_constraint_semantics;
+                    const auto k = n_refreshed - 1u;
+                    const bool local_alternation =
+                        s[k] == s[k - 2u] && s[k - 1u] == s[k - 3u];
+                    const bool alternation_everywhere =
+                        !anyRank(!local_alternation);
+                    if (alternation_everywhere &&
+                        anyRank(s[k] != s[k - 1u])) {
+                        finish_on_frozen_epoch = true;
+                        finish_on_constraint_cycle = true;
+                        if (activeSystemRank(system) == 0) {
+                            std::ostringstream oss;
+                            oss << "NewtonSolver: external-state fixed point"
+                                << " diagnostic=outer_constraint_cycle"
+                                << " outer_iteration=" << (outer + 1)
+                                << " start_iteration=" << (cycle_start + 1)
+                                << " constraint_lines="
+                                << s[k].line_count << "/"
+                                << s[k - 1u].line_count
+                                << " constraint_entries="
+                                << s[k].entry_count << "/"
+                                << s[k - 1u].entry_count
+                                << " action=finish_on_frozen_constraints";
+                            FE_LOG_INFO(oss.str());
+                        }
+                    }
+                }
+            }
             FE_THROW_IF(
                 system.meshCoordinateTransactionActive(),
                 systems::InvalidStateException,
@@ -13216,11 +13263,15 @@ NewtonReport NewtonSolver::solveStep(
                         << " inner_iterations_total=" << inner_iterations_total
                         << " fresh_residual=" << inner_report.residual_norm
                         << " frozen_epoch_after_cycle=1"
+                        << " constraint_cycle="
+                        << (finish_on_constraint_cycle ? 1 : 0)
                         << " restarts=" << external_state_discontinuity_restarts;
                     FE_LOG_INFO(oss.str());
                 }
                 aggregate.converged = true;
                 aggregate.external_state_cycle_frozen_epoch = true;
+                aggregate.external_state_constraint_cycle =
+                    finish_on_constraint_cycle;
                 if (inner_iterations_total > 0 &&
                     aggregate.linear.iterations == 0) {
                     aggregate.linear = last_nontrivial_linear;

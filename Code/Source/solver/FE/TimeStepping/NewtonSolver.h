@@ -213,6 +213,20 @@ struct NewtonOptions {
         // entry and its rollback fingerprint are then defined in that epoch.
         // The outer iteration limit bounds the work in either case.
         int max_discontinuity_restarts{0};
+        // Index (0-based) of the first outer refresh at which a persistent
+        // two-state alternation of the affine-constraint semantics ends the
+        // attempt on the current frozen problem, as a revisited epoch does
+        // (see external_state_epoch_revisited).  The alternation is
+        // persistent when the refreshed constraints of the last four
+        // refreshes read A, B, A, B on every rank, with A != B on some rank:
+        // a discrete generated decision (for example the root of an
+        // aggregated small cut next to a vertex whose level-set value
+        // crosses zero) flips with the state it was solved in, so no
+        // self-consistent refresh exists and the iterates repeat.  The inner
+        // solve on the refreshed problem must still converge to the usual
+        // tolerances.  A step accepted before this refresh is unaffected.
+        // Negative disables.
+        int constraint_cycle_exit_start_iteration{-1};
         DynamicRelaxationOptions dynamic_relaxation{};
         // Refreshes whose fresh residual the contraction of the two
         // preceding fresh residuals of the attempt predicts to pass the gate
@@ -459,6 +473,10 @@ struct NewtonReport {
     // True when the outer fixed point revisited an epoch and the step was
     // solved on that frozen epoch (see external_state_epoch_revisited).
     bool external_state_cycle_frozen_epoch{false};
+    // True when that frozen epoch was ended by a persistent two-state
+    // alternation of the affine constraints (see ExternalStateFixedPoint
+    // Options::constraint_cycle_exit_start_iteration).
+    bool external_state_constraint_cycle{false};
     int iterations{0};
     int outer_iterations{0};
     int inner_iterations_total{0};

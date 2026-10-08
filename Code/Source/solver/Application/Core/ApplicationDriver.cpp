@@ -31162,6 +31162,29 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       relaxation.start_iteration = std::max(0, start_parameter.value() - 1);
     }
   }
+  // Exit from a persistent two-state constraint cycle (see NewtonOptions::
+  // ExternalStateFixedPointOptions::constraint_cycle_exit_start_iteration).
+  // Default: from the first refresh beyond the plain passes, so a step that
+  // converges within them is unaffected. XML key
+  // Outer_fixed_point_constraint_cycle_exit_pass (1-based refresh; 0
+  // disables) takes precedence over the environment variable
+  // SVMP_GENERATED_STATE_OUTER_CONSTRAINT_CYCLE_EXIT_PASS.
+  {
+    int exit_pass = kOuterFixedPointPlainPasses + 1;
+    if (std::getenv("SVMP_GENERATED_STATE_OUTER_CONSTRAINT_CYCLE_EXIT_PASS") !=
+        nullptr) {
+      exit_pass = parseIntEnv(
+          "SVMP_GENERATED_STATE_OUTER_CONSTRAINT_CYCLE_EXIT_PASS", exit_pass);
+    }
+    const auto& exit_parameter = params.general_simulation_parameters
+                                     .outer_fixed_point_constraint_cycle_exit_pass;
+    if (exit_parameter.defined()) {
+      exit_pass = exit_parameter.value();
+    }
+    opts.newton.external_state_fixed_point
+        .constraint_cycle_exit_start_iteration =
+        exit_pass > 0 ? exit_pass - 1 : -1;
+  }
   // Opt-in stage predictor of first-order generalized-alpha (see
   // TimeLoopOptions::generalized_alpha_predictor); default ConstantRate. The
   // predictor changes the initial iterate only, so results change within
@@ -31241,6 +31264,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                           .start_iteration +
                       1
                 : 0)
+        << ", constraint_cycle_exit_pass="
+        << opts.newton.external_state_fixed_point
+                   .constraint_cycle_exit_start_iteration +
+               1
         << std::endl;
   } else if (has_frozen_algebraic_level_set_extension) {
     oopCout()
