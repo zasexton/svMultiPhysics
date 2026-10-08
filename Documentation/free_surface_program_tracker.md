@@ -495,6 +495,24 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   - The PDE velocity extension's replicated dry-region factorization was 41% of a 3D R/h = 16 step. It is now one component per rank with a 3-entry cache, bitwise identical (`f6057e20`).
   - The step time is then measured with a short probe: about 10 steps on 16 ranks with `<Ghost_layers>12</Ghost_layers>` (D31).
   - The full run starts only if setup + 618 × the mean step time, plus 10% margin, fits within 7 days.
+- **D29 result (2026-10-07, binary `688a625a`-ltopgo, 4 ranks): running to 10 viscous times does not settle the sessile drop; the M4 sessile gates fail and the trend is wrong.**
+
+  | case | angle error (L/R mean) | base err | apex err | max dA/A | velocity growth | Ca at T |
+  |---|---:|---:|---:|---:|---:|---:|
+  | 60°, R/h = 16, Δt | 2.25° | 7.8e-3 | 1.1e-3 | 1.0e-5 | 2.11 | 1.3e-2 |
+  | 60°, R/h = 16, Δt/2 | 2.92° | 3.7e-3 | 1.7e-3 | 1.3e-5 | 1.15 | 6.3e-3 |
+  | 120°, R/h = 16, Δt | 2.55° | 9.3e-3 | 2.7e-3 | 1.4e-4 | 0.41 | 9.4e-3 |
+  | 120°, R/h = 16, Δt/2 | 5.78° | 1.2e-2 | 2.7e-3 | 1.3e-4 | 0.89 | 9.0e-3 |
+  | 120°, R/h = 32, Δt | 4.08° | 5.3e-2 | 2.0e-2 | 8.7e-4 | 0.47 | 1.2e-1 |
+
+  - **Comparison with 5 viscous times:** at 5 viscous times R/h = 16 had angle errors of 1.75° (60°) and 0.66° (120°), with velocity growth 0.74 and 0.51. Running longer makes the angle error larger and, at 60°, makes the velocity grow.
+  - **Δt sensitivity:** halving the step still moves the final angle by 0.66° (60°) and 3.2° (120°).
+  - **Refinement:** at 120° the R/h = 32 errors are larger than the R/h = 16 errors, and the area drift (8.7e-4) exceeds the D11 limit.
+  - **Failed runs:**
+    - R/h = 32 60° stopped at step 12,373 (t = 19.2) with a small-cut aggregation `no_valid_root_proposal` (4 ranks).
+    - R/h = 32 120° completed all 15,800 steps but reported "TimeLoop: max_steps exceeded". The accumulated time ends 6.6e-12 short of t_end, which is beyond `TimeLoop`'s fixed 1000·ε tolerance, so the post-loop check fails. This is a physics-agnostic end-time bug.
+  - **Conclusion:** the drop does not reach the Young equilibrium, and the contact lines keep moving at Ca of about 1e-2. Together with the Ren–E result (the contact-point balance shares the uncompensated Young force with the viscous/slip stress in the contact element), this points to the D4 contact-line formulation, not to the time step or run length.
+  - The R/h = 64 run (job `46899878`) is still running.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
