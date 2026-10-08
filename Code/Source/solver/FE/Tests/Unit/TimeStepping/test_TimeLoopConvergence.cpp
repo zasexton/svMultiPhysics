@@ -3304,7 +3304,9 @@ TEST(TimeLoopCallbacks,
         message = error.what();
     }
 
-    EXPECT_NE(message.find("increase <Ghost_layers>"), std::string::npos)
+    // These tests run on one rank: the diagnostic must not claim halo depth.
+    EXPECT_EQ(message.find("<Ghost_layers>"), std::string::npos) << message;
+    EXPECT_NE(message.find("not a ghost-layer issue"), std::string::npos)
         << message;
     EXPECT_NE(message.find("diagnostic=incomplete_distributed_aggregation_halo"),
               std::string::npos)
@@ -3389,7 +3391,9 @@ TEST(TimeLoopCallbacks,
         message = error.what();
     }
 
-    EXPECT_NE(message.find("increase <Ghost_layers>"), std::string::npos)
+    // These tests run on one rank: the diagnostic must not claim halo depth.
+    EXPECT_EQ(message.find("<Ghost_layers>"), std::string::npos) << message;
+    EXPECT_NE(message.find("not a ghost-layer issue"), std::string::npos)
         << message;
     EXPECT_NE(message.find("inconsistent_candidate_dofs=2"), std::string::npos)
         << message;
