@@ -31,8 +31,9 @@
  * The thread count is the threaded-assembly setting: SVMP_ASSEMBLY_THREADS
  * when it is set, otherwise the caller's AssemblyOptions::num_threads.
  * Threads are a team of std::thread workers created on first use
- * (ParallelTeam); each worker keeps OpenMP at one thread.  The team is an
- * interface so that a shared assembly thread pool can provide it.
+ * (ParallelTeam); each worker keeps OpenMP at one thread.  The same team
+ * runs the threaded assembly (assembly::AssemblyThreadPool forwards to
+ * defaultParallelTeam()), so a rank has one set of worker threads.
  */
 
 #include <cstddef>
@@ -57,6 +58,18 @@ public:
 
 /// Process-wide team of std::thread workers, created on first use.
 [[nodiscard]] ParallelTeam& defaultParallelTeam();
+
+/**
+ * Starts workers of defaultParallelTeam() until it has at least n_workers;
+ * false if a thread could not be created.  A run() of the team falls back
+ * to running its participants in order when it cannot start enough
+ * workers; callers whose participants wait for each other (the pipelined
+ * threaded assembly) reserve the workers first and run serially otherwise.
+ */
+[[nodiscard]] bool reserveParallelTeamWorkers(int n_workers) noexcept;
+
+/// Number of worker threads of defaultParallelTeam() (callers excluded).
+[[nodiscard]] int parallelTeamWorkerCount();
 
 /**
  * Threads for per-item geometry work: SVMP_ASSEMBLY_THREADS when it holds

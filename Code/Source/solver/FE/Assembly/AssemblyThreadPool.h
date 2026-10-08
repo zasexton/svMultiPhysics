@@ -10,52 +10,49 @@
 
 /**
  * @file AssemblyThreadPool.h
- * @brief Persistent fork-join thread team for the threaded assembly path.
+ * @brief Fork-join thread team of the threaded assembly path.
  *
  * StandardAssembler runs the element/face/cut-volume compute phase of an
  * assembly on several threads when AssemblyOptions::num_threads > 1 (see
- * FE/Docs/ThreadedAssembly.md). This pool provides the threads:
- *  - one process-wide team of std::thread workers, created on first use and
- *    grown on demand; the calling thread is always participant 0;
+ * FE/Docs/ThreadedAssembly.md). The threads are the process-wide team of
+ * FE/Core/DeterministicParallel.h (defaultParallelTeam()), which the
+ * threaded cut-geometry rebuild uses as well, so a rank has one set of
+ * worker threads:
+ *  - workers are created on first use and grown on demand; the calling
+ *    thread is always participant 0;
  *  - run(n, task) calls task(p) once for every participant p in [0, n) and
  *    returns after all of them finished, so the caller sees every write the
  *    participants made (mutex/condition-variable hand-off);
  *  - an exception thrown by a participant is captured and the one of the
  *    lowest-numbered failing participant is rethrown on the caller;
- *  - a run() issued from inside a participant executes its participants one
- *    after another on that thread (no nested teams);
+ *  - a run() issued from inside a participant (of an assembly or a geometry
+ *    loop) executes its participants one after another on that thread;
  *  - every worker sets its OpenMP thread count to one, so OpenMP regions that
- *    kernels open internally stay serial on assembly threads.
+ *    kernels open internally stay serial on worker threads.
  *
- * The pool uses standard mutexes and condition variables (transparent to
- * ThreadSanitizer). Optionally a thread polls for a while before it blocks
- * (spinWait, SVMP_ASSEMBLY_SPIN_US, off by default); this saves context
- * switches but did not shorten the measured loops. Polling changes only
- * timing. The pool is independent of OMP_NUM_THREADS.
+ * The team uses standard mutexes and condition variables (transparent to
+ * ThreadSanitizer). Optionally the pipelined assembly loop polls for a while
+ * before a thread blocks (spinWait, SVMP_ASSEMBLY_SPIN_US, off by default);
+ * this saves context switches but did not shorten the measured loops.
+ * Polling changes only timing. The team is independent of OMP_NUM_THREADS.
  */
 
-#include <atomic>
+#include "Core/DeterministicParallel.h"
+
 #include <chrono>
-#include <condition_variable>
-#include <cstdint>
-#include <exception>
 #include <functional>
-#include <mutex>
 #include <thread>
-#include <vector>
 
 namespace svmp {
 namespace FE {
 namespace assembly {
 
-class AssemblyThreadPool {
+class AssemblyThreadPool final : public ParallelTeam {
 public:
-    /// Process-wide pool shared by every assembler.
+    /// The process-wide team (forwards to FE::defaultParallelTeam()).
     [[nodiscard]] static AssemblyThreadPool& global();
 
     AssemblyThreadPool() = default;
-    ~AssemblyThreadPool();
-
     AssemblyThreadPool(const AssemblyThreadPool&) = delete;
     AssemblyThreadPool& operator=(const AssemblyThreadPool&) = delete;
 
@@ -64,11 +61,12 @@ public:
      *
      * Participant 0 runs on the calling thread. With n_participants <= 1, or
      * when called from inside a participant, the participants run in order on
-     * the calling thread.
+     * the calling thread. Callers whose participants wait for each other
+     * must reserveWorkers(n_participants - 1) first.
      */
-    void run(int n_participants, const std::function<void(int)>& task);
+    void run(int n_participants, const std::function<void(int)>& task) override;
 
-    /// True on a pool worker and on a caller while it executes participant 0.
+    /// True on a team worker and on a caller while it executes participant 0.
     [[nodiscard]] static bool insideParallelRegion() noexcept;
 
     /// Number of worker threads currently alive (excluding callers).
@@ -115,24 +113,6 @@ private:
         std::this_thread::yield();
 #endif
     }
-
-    void ensureWorkersLocked(int n_workers);
-    void workerLoop(int worker_index, std::uint64_t start_generation);
-
-    mutable std::mutex mutex_{};
-    std::condition_variable start_cv_{};
-    std::condition_variable done_cv_{};
-    std::vector<std::thread> threads_{};
-    // Written under mutex_; atomic so that waiting workers can poll it.
-    std::atomic<std::uint64_t> generation_{0};
-    int active_participants_{0};
-    int remaining_{0};
-    const std::function<void(int)>* task_{nullptr};
-    std::vector<std::exception_ptr> errors_{};
-    std::atomic<bool> stop_{false};
-
-    /// Serializes run() calls issued concurrently by different caller threads.
-    std::mutex run_mutex_{};
 };
 
 } // namespace assembly
