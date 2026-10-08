@@ -32,6 +32,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -714,18 +716,16 @@ private:
 #endif
 
 #if defined(FE_HAS_FSILS)
-[[nodiscard]] GlobalDofId backendToFeDof(const backends::FsilsShared& shared,
-                                         GlobalDofId backend_dof) noexcept
+[[nodiscard]] bool scanSelfCheckEnabled() noexcept
 {
-    const auto perm = shared.dof_permutation;
-    if (!perm || perm->empty()) {
-        return backend_dof;
-    }
-    if (backend_dof < 0 ||
-        static_cast<std::size_t>(backend_dof) >= perm->inverse.size()) {
-        return INVALID_GLOBAL_INDEX;
-    }
-    return perm->inverse[static_cast<std::size_t>(backend_dof)];
+    const char* text = std::getenv("SVMP_ANALYSIS_SCAN_SELF_CHECK");
+    return text != nullptr && text[0] != '\0' &&
+           !(text[0] == '0' && text[1] == '\0');
+}
+
+[[nodiscard]] bool sameRealBits(Real a, Real b) noexcept
+{
+    return std::memcmp(&a, &b, sizeof(Real)) == 0;
 }
 
 class FsilsSparseRowScanSource final : public SparseRowScanSource {
@@ -754,6 +754,16 @@ public:
                    static_cast<GlobalIndex>(shared->dof) >= matrix_.numRows();
     }
 
+    // Values are read by stored nonzero position (block nz of the row, entry
+    // row_comp * dof + col_comp, the layout FsilsMatrix::getEntry reads)
+    // instead of one getEntry search per entry.  An entry is read directly
+    // only when getEntry would resolve it to the same position: the row and
+    // column DOFs map back through the DOF permutation and the node tables to
+    // the visited row and nonzero, and the column is the first of its node in
+    // the row (lower_bound).  Every other entry, and every entry once a
+    // verification sample disagrees, is read with getEntry.
+    // SVMP_ANALYSIS_SCAN_SELF_CHECK=1 compares every direct read with getEntry
+    // bit for bit.
     void forEachLocalRow(const SparseMatrixRowVisitor& visitor) const override
     {
         const auto shared_ptr = matrix_.shared();
@@ -764,6 +774,46 @@ public:
         const auto& shared = *shared_ptr;
         const int dof = shared.dof;
         const int owning_rank = shared.lhs.commu.task;
+        const auto* permutation = shared.dof_permutation.get();
+        const bool permuted = permutation != nullptr && !permutation->empty();
+        const GlobalDofId rows = matrix_.numRows();
+        const GlobalDofId cols = matrix_.numCols();
+        const Real* values = matrix_.fsilsValuesPtr();
+        const std::size_t block_size =
+            static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
+        const std::size_t value_count =
+            values == nullptr || matrix_.fsilsNnz() < 0
+                ? 0u
+                : static_cast<std::size_t>(matrix_.fsilsNnz()) * block_size;
+        const bool self_check = scanSelfCheckEnabled();
+        // Direct reads are verified against getEntry on the first entries;
+        // a disagreement switches the scan to getEntry.
+        constexpr std::size_t verification_sample = 256u;
+        std::size_t verified = 0u;
+        bool direct_reads = values != nullptr;
+
+        const auto to_fe = [&](GlobalDofId backend_dof) -> GlobalDofId {
+            if (!permuted) {
+                return backend_dof;
+            }
+            if (backend_dof < 0 ||
+                static_cast<std::size_t>(backend_dof) >=
+                    permutation->inverse.size()) {
+                return INVALID_GLOBAL_INDEX;
+            }
+            return permutation->inverse[static_cast<std::size_t>(backend_dof)];
+        };
+        const auto to_backend = [&](GlobalDofId fe_dof) -> GlobalDofId {
+            if (!permuted) {
+                return fe_dof;
+            }
+            if (fe_dof < 0 ||
+                static_cast<std::size_t>(fe_dof) >= permutation->forward.size()) {
+                return INVALID_GLOBAL_INDEX;
+            }
+            return permutation->forward[static_cast<std::size_t>(fe_dof)];
+        };
+
         std::vector<SparseMatrixRowEntry> entries;
         entries.reserve(static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof));
 
@@ -780,21 +830,30 @@ public:
             if (row_node < 0) {
                 continue;
             }
+            const bool row_node_maps_back =
+                shared.globalNodeToInternal(row_node) == row_internal;
 
             const int start = shared.lhs.rowPtr(0, row_internal);
             const int end = shared.lhs.rowPtr(1, row_internal);
             for (int row_comp = 0; row_comp < dof; ++row_comp) {
                 const GlobalDofId backend_row =
                     static_cast<GlobalDofId>(row_node) * dof + row_comp;
-                const GlobalDofId fe_row = backendToFeDof(shared, backend_row);
-                if (fe_row < 0 || fe_row >= matrix_.numRows()) {
+                const GlobalDofId fe_row = to_fe(backend_row);
+                if (fe_row < 0 || fe_row >= rows) {
                     continue;
                 }
+                const bool row_direct = row_node_maps_back &&
+                                        to_backend(fe_row) == backend_row &&
+                                        backend_row < rows;
 
                 entries.clear();
                 if (start >= 0 && end >= start) {
+                    int previous_col_internal = -1;
                     for (int nz = start; nz <= end; ++nz) {
                         const int col_internal = shared.lhs.colPtr(nz);
+                        const bool first_of_node =
+                            nz == start || col_internal != previous_col_internal;
+                        previous_col_internal = col_internal;
                         const int col_old = internalToOld(shared, col_internal);
                         if (col_old < 0) {
                             continue;
@@ -803,15 +862,44 @@ public:
                         if (col_node < 0) {
                             continue;
                         }
+                        const bool nonzero_direct =
+                            row_direct && first_of_node &&
+                            shared.globalNodeToInternal(col_node) == col_internal;
                         for (int col_comp = 0; col_comp < dof; ++col_comp) {
                             const GlobalDofId backend_col =
                                 static_cast<GlobalDofId>(col_node) * dof + col_comp;
-                            const GlobalDofId fe_col = backendToFeDof(shared, backend_col);
-                            if (fe_col < 0 || fe_col >= matrix_.numCols()) {
+                            const GlobalDofId fe_col = to_fe(backend_col);
+                            if (fe_col < 0 || fe_col >= cols) {
                                 continue;
                             }
-                            entries.push_back(
-                                SparseMatrixRowEntry{fe_col, matrix_.getEntry(fe_row, fe_col)});
+                            Real value = Real{0};
+                            if (direct_reads && nonzero_direct &&
+                                to_backend(fe_col) == backend_col &&
+                                backend_col < cols) {
+                                const std::size_t index =
+                                    static_cast<std::size_t>(nz) * block_size +
+                                    static_cast<std::size_t>(row_comp) *
+                                        static_cast<std::size_t>(dof) +
+                                    static_cast<std::size_t>(col_comp);
+                                value = index < value_count ? values[index] : Real{0};
+                                if (self_check || verified < verification_sample) {
+                                    const Real reference = matrix_.getEntry(fe_row, fe_col);
+                                    if (!sameRealBits(value, reference)) {
+                                        if (self_check) {
+                                            throw std::logic_error(
+                                                "SparseMatrixSummaryScanner self-check "
+                                                "(SVMP_ANALYSIS_SCAN_SELF_CHECK): a direct FSILS "
+                                                "value read differs from getEntry");
+                                        }
+                                        direct_reads = false;
+                                        value = reference;
+                                    }
+                                    ++verified;
+                                }
+                            } else {
+                                value = matrix_.getEntry(fe_row, fe_col);
+                            }
+                            entries.push_back(SparseMatrixRowEntry{fe_col, value});
                         }
                     }
                 }

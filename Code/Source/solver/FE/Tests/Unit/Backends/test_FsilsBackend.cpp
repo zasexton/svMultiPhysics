@@ -8,7 +8,9 @@
 #include <gtest/gtest.h>
 
 #include "Assembly/GlobalSystemView.h"
+#include "Analysis/SparseMatrixSummaryScanner.h"
 #include "Backends/FSILS/FsilsMatrix.h"
+#include "Backends/Interfaces/DofPermutation.h"
 #include "Backends/FSILS/FsilsVector.h"
 #include "Backends/Interfaces/BackendFactory.h"
 #include "Backends/Utils/BackendOptions.h"
@@ -37,7 +39,10 @@
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
+#include <memory>
+#include <random>
 #include <optional>
 #include <string>
 #include <vector>
@@ -4496,6 +4501,121 @@ TEST(FsilsDirectSolve, SerialSolveRefusesLowRankOperatorUpdates)
     update.v = {{0, 1.0}, {3, -1.0}};
     solver.setRankOneUpdates(std::span<const RankOneUpdate>(&update, 1));
     EXPECT_THROW((void)solver.solve(*sys.A, *sys.x, *sys.b), NotImplementedException);
+}
+
+namespace {
+
+// Scans `matrix` and requires every visited entry to equal getEntry bit for
+// bit; returns the number of visited entries.
+std::size_t expectScanMatchesGetEntry(const FsilsMatrix& matrix)
+{
+    const auto source = analysis::makeSparseRowScanSource(matrix);
+    EXPECT_NE(source, nullptr);
+    if (!source) {
+        return 0u;
+    }
+    std::size_t visited = 0u;
+    std::size_t mismatches = 0u;
+    source->forEachLocalRow([&](GlobalIndex row,
+                                const std::vector<analysis::SparseMatrixRowEntry>& entries,
+                                int) {
+        for (const auto& entry : entries) {
+            const Real reference = matrix.getEntry(row, entry.col);
+            if (std::memcmp(&reference, &entry.value, sizeof(Real)) != 0) {
+                ++mismatches;
+            }
+            ++visited;
+        }
+    });
+    EXPECT_EQ(mismatches, 0u);
+    return visited;
+}
+
+} // namespace
+
+TEST(FsilsBackend, AnalysisScanReadsTheValuesGetEntryReturns)
+{
+    // dof 3 on 7 nodes, a banded pattern with a few long couplings, a
+    // nontrivial DOF permutation and distinct entry values.
+    constexpr int dof = 3;
+    constexpr GlobalIndex nodes = 7;
+    constexpr GlobalIndex n = nodes * dof;
+    sparsity::SparsityPattern pattern(n, n);
+    const auto couples = [](GlobalIndex a, GlobalIndex b) {
+        return std::abs(a - b) <= 1 || (a + b) % 5 == 0;
+    };
+    for (GlobalIndex r = 0; r < n; ++r) {
+        for (GlobalIndex c = 0; c < n; ++c) {
+            if (couples(r / dof, c / dof)) {
+                pattern.addEntry(r, c);
+            }
+        }
+    }
+    pattern.finalize();
+
+    std::vector<GlobalIndex> forward(static_cast<std::size_t>(n));
+    for (GlobalIndex fe = 0; fe < n; ++fe) {
+        // Node-major backend numbering of a component-major FE numbering.
+        const GlobalIndex component = fe / nodes;
+        const GlobalIndex node = fe % nodes;
+        forward[static_cast<std::size_t>(fe)] = node * dof + component;
+    }
+    auto permutation = std::make_shared<DofPermutation>();
+    permutation->forward = forward;
+    permutation->inverse.assign(forward.size(), INVALID_GLOBAL_INDEX);
+    permutation->owner_rank.assign(forward.size(), 0);
+    for (GlobalIndex fe = 0; fe < n; ++fe) {
+        permutation->inverse[static_cast<std::size_t>(
+            forward[static_cast<std::size_t>(fe)])] = fe;
+    }
+
+    for (const bool permuted : {false, true}) {
+        SCOPED_TRACE(permuted ? "permuted" : "identity");
+        // The FE pattern couples FE DOFs; with the permutation the same
+        // node blocks are coupled in backend numbering.
+        sparsity::SparsityPattern fe_pattern(n, n);
+        for (GlobalIndex r = 0; r < n; ++r) {
+            for (GlobalIndex c = 0; c < n; ++c) {
+                const auto br = permuted ? forward[static_cast<std::size_t>(r)] : r;
+                const auto bc = permuted ? forward[static_cast<std::size_t>(c)] : c;
+                if (couples(br / dof, bc / dof)) {
+                    fe_pattern.addEntry(r, c);
+                }
+            }
+        }
+        fe_pattern.finalize();
+        FsilsMatrix matrix(
+            permuted ? fe_pattern : pattern, dof,
+            permuted ? std::shared_ptr<const DofPermutation>(permutation)
+                     : std::shared_ptr<const DofPermutation>());
+        std::mt19937_64 engine(UINT64_C(4711));
+        std::uniform_real_distribution<Real> value(-3.0, 3.0);
+        const auto& used = permuted ? fe_pattern : pattern;
+        for (GlobalIndex r = 0; r < n; ++r) {
+            for (GlobalIndex c = 0; c < n; ++c) {
+                if (used.hasEntry(r, c)) {
+                    matrix.addValue(r, c, value(engine), assembly::AddMode::Insert);
+                }
+            }
+        }
+        const auto visited = expectScanMatchesGetEntry(matrix);
+        EXPECT_GT(visited, static_cast<std::size_t>(n));
+        {
+            ScopedEnvVar self_check("SVMP_ANALYSIS_SCAN_SELF_CHECK", "1");
+            EXPECT_EQ(expectScanMatchesGetEntry(matrix), visited);
+        }
+        // The summary of the scan is unchanged by the read path.
+        const auto source = analysis::makeSparseRowScanSource(matrix);
+        ASSERT_NE(source, nullptr);
+        analysis::SparseMatrixScanOptions options;
+        const auto first = analysis::scanSparseMatrixSummary(*source, {}, options);
+        ScopedEnvVar self_check("SVMP_ANALYSIS_SCAN_SELF_CHECK", "1");
+        const auto second = analysis::scanSparseMatrixSummary(*source, {}, options);
+        EXPECT_EQ(first.summary.scanned_row_count, second.summary.scanned_row_count);
+        EXPECT_EQ(std::memcmp(&first.summary.max_abs_entry,
+                              &second.summary.max_abs_entry, sizeof(Real)),
+                  0);
+    }
 }
 
 } // namespace svmp::FE::backends
