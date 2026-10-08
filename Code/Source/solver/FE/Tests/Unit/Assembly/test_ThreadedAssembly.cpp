@@ -27,6 +27,7 @@
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/StandardAssembler.h"
 #include "Constraints/AffineConstraints.h"
+#include "Core/DeterministicParallel.h"
 #include "Dofs/DofMap.h"
 #include "Elements/ReferenceElement.h"
 #include "Forms/FormCompiler.h"
@@ -634,6 +635,42 @@ TEST(AssemblyThreadPool, RunsEveryParticipantOnceAndRethrows)
     });
     EXPECT_EQ(nested.load(), 6);
     EXPECT_FALSE(AssemblyThreadPool::insideParallelRegion());
+}
+
+TEST(AssemblyThreadPool, SharesItsWorkersWithTheGeometryLoops)
+{
+    // The assembly pool and deterministicParallelFor use one team: workers
+    // started by one are reused by the other, and a geometry loop inside an
+    // assembly participant (or the reverse) runs serially.
+    auto& pool = AssemblyThreadPool::global();
+    ASSERT_TRUE(pool.reserveWorkers(3));
+    EXPECT_GE(parallelTeamWorkerCount(), 3);
+    EXPECT_EQ(pool.workerCount(), parallelTeamWorkerCount());
+    const int before = parallelTeamWorkerCount();
+    std::vector<int> owner(256, -1);
+    deterministicParallelFor(
+        owner.size(), 4,
+        [&](std::size_t item, int participant) {
+            EXPECT_TRUE(AssemblyThreadPool::insideParallelRegion());
+            owner[item] = participant;
+        },
+        16u, 64u);
+    EXPECT_EQ(parallelTeamWorkerCount(), before);
+    for (std::size_t item = 0; item < owner.size(); ++item) {
+        EXPECT_EQ(owner[item], static_cast<int>((item / 16u) % 4u)) << item;
+    }
+    std::atomic<int> nested_parallel{0};
+    pool.run(3, [&](int) {
+        deterministicParallelFor(
+            128u, 4,
+            [&](std::size_t, int participant) {
+                if (participant != 0) {
+                    nested_parallel.fetch_add(1);
+                }
+            },
+            16u, 64u);
+    });
+    EXPECT_EQ(nested_parallel.load(), 0);
 }
 
 TEST(ConcurrentCompute, RequireSerialThrowsOnlyInsideScope)
