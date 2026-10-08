@@ -7737,3 +7737,90 @@ TEST(CutQuadratureMapping, AffineRuleReusesTheJacobianOfEveryPoint)
         }
     }
 }
+
+TEST(GeneratedActiveBoundaryDomain, FragmentsAreIndependentOfTheThreadCount)
+{
+    using Side = FE::geometry::CutIntegrationSide;
+    constexpr int interface_marker = 171;
+    constexpr int wall_marker = 27;
+    constexpr FE::GlobalIndex cell_count = 300;
+    const QuadStripBoundaryMesh mesh(cell_count, wall_marker);
+    // Two interfaces across the strip: wet in (40.37, 211.81).
+    const auto phi_at_node = [&mesh](FE::GlobalIndex node) {
+        const FE::Real x = mesh.getNodeCoordinates(node)[0];
+        return std::max(FE::Real{40.37} - x, x - FE::Real{211.81});
+    };
+    const auto request = interfaceRequest(interface_marker);
+    interfaces::LevelSetInterfaceDomain domain(request);
+    for (FE::GlobalIndex cell = 0; cell < cell_count; ++cell) {
+        interfaces::LevelSetCellCutInput input;
+        input.parent_cell = static_cast<FE::MeshIndex>(cell);
+        input.element_type = FE::ElementType::Quad4;
+        input.node_coordinates = {
+            {{-1.0, -1.0, 0.0}},
+            {{1.0, -1.0, 0.0}},
+            {{1.0, 1.0, 0.0}},
+            {{-1.0, 1.0, 0.0}},
+        };
+        std::vector<FE::GlobalIndex> nodes;
+        mesh.getCellNodes(cell, nodes);
+        for (const auto node : nodes) {
+            input.level_set_values.push_back(phi_at_node(node));
+        }
+        auto cut = interfaces::cutLinearLevelSetCell2D(request, input);
+        ASSERT_TRUE(cut.supported);
+        for (auto& fragment : cut.fragments) {
+            domain.addFragment(std::move(fragment));
+        }
+        for (auto& region : cut.volume_regions) {
+            domain.addVolumeRegion(std::move(region));
+        }
+    }
+    const auto contact =
+        interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+            contactRequest(interface_marker, wall_marker), domain, mesh);
+    ASSERT_EQ(contact.summary().active_fragment_count, 2u);
+    interfaces::GeneratedActiveBoundaryScalarField field;
+    field.value_at_node = phi_at_node;
+    for (const auto side : {Side::Negative, Side::Positive}) {
+        const auto serial = interfaces::buildGeneratedActiveBoundaryDomain(
+            activeRequest(interface_marker, wall_marker, side), domain,
+            contact, mesh, field, 1);
+        EXPECT_GT(serial.fragments().size(), 64u);
+        for (const int threads : {2, 3, 4, 8}) {
+            SCOPED_TRACE(threads);
+            const auto threaded = interfaces::buildGeneratedActiveBoundaryDomain(
+                activeRequest(interface_marker, wall_marker, side), domain,
+                contact, mesh, field, threads);
+            EXPECT_EQ(interfaces::compareGeneratedActiveBoundaryDomains(
+                          threaded, serial),
+                      "");
+        }
+        const auto legacy = interfaces::buildGeneratedActiveBoundaryDomain(
+            activeRequest(interface_marker, wall_marker, side), domain,
+            contact, mesh, field);
+        EXPECT_EQ(interfaces::compareGeneratedActiveBoundaryDomains(legacy, serial),
+                  "");
+    }
+    // A failing face raises the same exception on any thread count: a
+    // non-finite level-set value on one late face.
+    interfaces::GeneratedActiveBoundaryScalarField broken;
+    broken.value_at_node = [&](FE::GlobalIndex node) {
+        if (node == 250) {
+            return std::numeric_limits<FE::Real>::quiet_NaN();
+        }
+        return phi_at_node(node);
+    };
+    for (const int threads : {1, 4}) {
+        SCOPED_TRACE(threads);
+        try {
+            (void)interfaces::buildGeneratedActiveBoundaryDomain(
+                activeRequest(interface_marker, wall_marker, Side::Negative),
+                domain, contact, mesh, broken, threads);
+            ADD_FAILURE() << "expected an exception";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(std::string(error.what()).find("non-finite"),
+                      std::string::npos);
+        }
+    }
+}

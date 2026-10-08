@@ -1,10 +1,13 @@
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 
 #include "Basis/NodeOrderingConventions.h"
+#include "Core/DeterministicParallel.h"
 #include "Interfaces/detail/ProducerArithmeticAssessment.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <exception>
 #include <iomanip>
 #include <limits>
 #include <locale>
@@ -14,10 +17,12 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace svmp::FE::interfaces {
 namespace {
@@ -1128,6 +1133,19 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
     const assembly::IMeshAccess& mesh,
     const GeneratedActiveBoundaryScalarField& scalar_field)
 {
+    return buildGeneratedActiveBoundaryDomain(
+        std::move(request), interface_domain, contact_domain, mesh,
+        scalar_field, 1);
+}
+
+GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
+    GeneratedActiveBoundaryRequest request,
+    const LevelSetInterfaceDomain& interface_domain,
+    const GeneratedInterfaceBoundaryIntersectionDomain& contact_domain,
+    const assembly::IMeshAccess& mesh,
+    const GeneratedActiveBoundaryScalarField& scalar_field,
+    int threads)
+{
     if (!request.valid() || !scalar_field.valid()) {
         throw std::invalid_argument(
             "generated active-boundary construction requires a valid request and scalar field");
@@ -1149,17 +1167,55 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
     const Real coefficient_band =
         req.resolvedCoefficientClassificationBand();
     const CellSourceIndex source_index(interface_domain, contact_domain);
+    const bool global_ids = mesh.globalEntityIdsAvailable();
 
+    // The owned boundary faces in visit order.  Their local face index is
+    // looked up here, on one thread (a mesh may build a cell-to-face table on
+    // first use); a lookup failure is kept and raised where the per-face
+    // construction needs the index, as before.
+    struct OwnedBoundaryFace {
+        GlobalIndex face{0};
+        GlobalIndex cell{0};
+        LocalIndex local_face{0};
+        std::exception_ptr local_face_error{};
+    };
+    std::vector<OwnedBoundaryFace> owned_faces;
     mesh.forEachBoundaryFace(
         req.boundary_marker,
         [&](GlobalIndex face, GlobalIndex cell) {
             if (!mesh.isOwnedCell(cell)) {
                 return;
             }
+            OwnedBoundaryFace item;
+            item.face = face;
+            item.cell = cell;
+            try {
+                item.local_face = mesh.getLocalFaceIndex(face, cell);
+            } catch (...) {
+                item.local_face_error = std::current_exception();
+            }
+            owned_faces.push_back(std::move(item));
+        });
+
+    // Each face's fragment depends only on that face; faces run on the
+    // geometry threads (FE/Core/DeterministicParallel.h) into their own slot
+    // and are added in visit order, so the domain does not depend on the
+    // thread count.
+    std::vector<std::optional<GeneratedActiveBoundaryFragment>> face_fragments(
+        owned_faces.size());
+    const auto build_face = [&](std::size_t item_index) {
+        const auto& item = owned_faces[item_index];
+        const GlobalIndex face = item.face;
+        const GlobalIndex cell = item.cell;
+        auto& result = face_fragments[item_index];
+        [&] {
             const auto type = mesh.getCellType(cell);
             const auto represented = representedImplicitForCell(
                 interface_domain, source_index, static_cast<MeshIndex>(cell));
-            const auto local_face = mesh.getLocalFaceIndex(face, cell);
+            if (item.local_face_error) {
+                std::rethrow_exception(item.local_face_error);
+            }
+            const auto local_face = item.local_face;
             const auto corners = localFaceCorners(type, local_face);
             if (corners.size() < 2u) {
                 throw std::invalid_argument(
@@ -1326,10 +1382,10 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
             GeneratedActiveBoundaryFragment fragment;
             fragment.parent_cell = cell;
             fragment.parent_face = face;
-            fragment.parent_cell_global_id = mesh.globalEntityIdsAvailable()
+            fragment.parent_cell_global_id = global_ids
                                                  ? mesh.getCellGlobalId(cell)
                                                  : cell;
-            fragment.parent_face_global_id = mesh.globalEntityIdsAvailable()
+            fragment.parent_face_global_id = global_ids
                                                  ? mesh.getBoundaryFaceGlobalId(face)
                                                  : face;
             fragment.owner_rank =
@@ -1397,9 +1453,118 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
                     observation);
             }
             fragment.construction_observation = observation.state;
-            domain.addFragment(std::move(fragment));
-        });
+            result = std::move(fragment);
+        }();
+    };
+    deterministicParallelFor(
+        owned_faces.size(), threads,
+        [&](std::size_t item_index, int) { build_face(item_index); });
+    for (auto& fragment : face_fragments) {
+        if (fragment.has_value()) {
+            domain.addFragment(std::move(*fragment));
+        }
+    }
     return domain;
+}
+
+namespace {
+
+[[nodiscard]] bool sameRealBitsValue(Real a, Real b) noexcept
+{
+    return std::memcmp(&a, &b, sizeof(Real)) == 0;
+}
+
+template <std::size_t N>
+[[nodiscard]] bool sameRealBitsValue(const std::array<Real, N>& a,
+                                     const std::array<Real, N>& b) noexcept
+{
+    return std::memcmp(a.data(), b.data(), N * sizeof(Real)) == 0;
+}
+
+// Every field, values bit for bit.  The size guard fails when a field is
+// added without extending the comparison.
+static_assert(sizeof(GeneratedActiveBoundaryFragment) == 336u,
+              "compare every GeneratedActiveBoundaryFragment field");
+static_assert(sizeof(geometry::CutQuadraturePoint) == 152u,
+              "compare every CutQuadraturePoint field");
+
+[[nodiscard]] bool sameQuadraturePoint(const geometry::CutQuadraturePoint& a,
+                                       const geometry::CutQuadraturePoint& b) noexcept
+{
+    return sameRealBitsValue(a.point, b.point) &&
+           sameRealBitsValue(a.normal, b.normal) &&
+           sameRealBitsValue(a.boundary_normal, b.boundary_normal) &&
+           sameRealBitsValue(a.tangent, b.tangent) &&
+           sameRealBitsValue(a.weight, b.weight) &&
+           sameRealBitsValue(a.parent_coordinate, b.parent_coordinate) &&
+           sameRealBitsValue(a.reference_measure_factor,
+                             b.reference_measure_factor) &&
+           sameRealBitsValue(a.level_set_residual, b.level_set_residual) &&
+           sameRealBitsValue(a.gradient_norm, b.gradient_norm);
+}
+
+[[nodiscard]] std::string firstFragmentDifference(
+    const GeneratedActiveBoundaryFragment& a,
+    const GeneratedActiveBoundaryFragment& b)
+{
+    if (a.construction_observation != b.construction_observation) return "construction_observation";
+    if (a.interface_marker != b.interface_marker) return "interface_marker";
+    if (a.boundary_marker != b.boundary_marker) return "boundary_marker";
+    if (a.active_boundary_marker != b.active_boundary_marker) return "active_boundary_marker";
+    if (a.parent_cell != b.parent_cell) return "parent_cell";
+    if (a.parent_face != b.parent_face) return "parent_face";
+    if (a.parent_cell_global_id != b.parent_cell_global_id) return "parent_cell_global_id";
+    if (a.parent_face_global_id != b.parent_face_global_id) return "parent_face_global_id";
+    if (a.owner_rank != b.owner_rank) return "owner_rank";
+    if (a.local_fragment_index != b.local_fragment_index) return "local_fragment_index";
+    if (a.stable_id != b.stable_id) return "stable_id";
+    if (a.side != b.side) return "side";
+    if (a.source_contact_stable_ids != b.source_contact_stable_ids) return "source_contact_stable_ids";
+    if (a.source_interface_stable_ids != b.source_interface_stable_ids) return "source_interface_stable_ids";
+    if (a.represented_implicit_geometry_mode != b.represented_implicit_geometry_mode) return "represented_implicit_geometry_mode";
+    if (a.represented_implicit_quadrature_backend != b.represented_implicit_quadrature_backend) return "represented_implicit_quadrature_backend";
+    if (a.represented_implicit_fallback_status != b.represented_implicit_fallback_status) return "represented_implicit_fallback_status";
+    if (!sameRealBitsValue(a.boundary_normal, b.boundary_normal)) return "boundary_normal";
+    if (!sameRealBitsValue(a.measure, b.measure)) return "measure";
+    if (!sameRealBitsValue(a.parent_measure, b.parent_measure)) return "parent_measure";
+    if (a.full_face_equivalent != b.full_face_equivalent) return "full_face_equivalent";
+    if (a.achieved_quadrature_order != b.achieved_quadrature_order) return "achieved_quadrature_order";
+    if (a.topology_id != b.topology_id) return "topology_id";
+    if (a.vertices.size() != b.vertices.size()) return "vertex count";
+    for (std::size_t i = 0; i < a.vertices.size(); ++i) {
+        if (!sameRealBitsValue(a.vertices[i], b.vertices[i])) return "vertex " + std::to_string(i);
+    }
+    if (a.quadrature_points.size() != b.quadrature_points.size()) return "quadrature point count";
+    for (std::size_t q = 0; q < a.quadrature_points.size(); ++q) {
+        if (!sameQuadraturePoint(a.quadrature_points[q], b.quadrature_points[q])) {
+            return "quadrature point " + std::to_string(q);
+        }
+    }
+    return {};
+}
+
+} // namespace
+
+std::string compareGeneratedActiveBoundaryDomains(
+    const GeneratedActiveBoundaryDomain& a,
+    const GeneratedActiveBoundaryDomain& b)
+{
+    if (a.marker() != b.marker()) {
+        return "marker";
+    }
+    const auto& fa = a.fragments();
+    const auto& fb = b.fragments();
+    if (fa.size() != fb.size()) {
+        return "fragment count " + std::to_string(fa.size()) + " vs " +
+               std::to_string(fb.size());
+    }
+    for (std::size_t i = 0; i < fa.size(); ++i) {
+        const auto difference = firstFragmentDifference(fa[i], fb[i]);
+        if (!difference.empty()) {
+            return "fragment " + std::to_string(i) + ": " + difference;
+        }
+    }
+    return {};
 }
 
 GeneratedActiveBoundaryPartitionSummary

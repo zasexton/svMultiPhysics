@@ -166,6 +166,27 @@ struct GeneratedActiveBoundaryPartitionSummary {
     const assembly::IMeshAccess& mesh,
     const GeneratedActiveBoundaryScalarField& scalar_field);
 
+/**
+ * Same, with the owned boundary faces constructed on `threads` geometry
+ * threads (FE/Core/DeterministicParallel.h): each face's fragment is computed
+ * into its own slot and the fragments are added in face visit order, so the
+ * domain is identical for any thread count.  The scalar field and the mesh
+ * accessors used per face must be safe to call concurrently (read-only).
+ */
+[[nodiscard]] GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
+    GeneratedActiveBoundaryRequest request,
+    const LevelSetInterfaceDomain& interface_domain,
+    const GeneratedInterfaceBoundaryIntersectionDomain& contact_domain,
+    const assembly::IMeshAccess& mesh,
+    const GeneratedActiveBoundaryScalarField& scalar_field,
+    int threads);
+
+/// Bitwise comparison of two domains; empty when identical, otherwise the
+/// first difference (for self-checks).
+[[nodiscard]] std::string compareGeneratedActiveBoundaryDomains(
+    const GeneratedActiveBoundaryDomain& a,
+    const GeneratedActiveBoundaryDomain& b);
+
 [[nodiscard]] GeneratedActiveBoundaryPartitionSummary
 validateGeneratedActiveBoundaryPartition(
     const GeneratedActiveBoundaryDomain& negative_domain,

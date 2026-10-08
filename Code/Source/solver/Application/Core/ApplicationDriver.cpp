@@ -20549,20 +20549,72 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
                   level_set_values[static_cast<std::size_t>(node) *
                                    level_set_components]);
             };
+        // Faces are built on the geometry threads; the self-check builds
+        // the domains again on one thread and requires identical results.
+        const int active_boundary_threads = svmp::FE::geometryThreadCount(
+            sim.fe_system->assemblyThreadCount());
+        const bool active_boundary_self_check =
+            active_boundary_threads > 1 &&
+            svmp::FE::geometryThreadsSelfCheckEnabled();
+        std::optional<svmp::FE::interfaces::GeneratedActiveBoundaryRequest>
+            negative_reference_request;
+        std::optional<svmp::FE::interfaces::GeneratedActiveBoundaryRequest>
+            positive_reference_request;
+        if (active_boundary_self_check) {
+          negative_reference_request = negative_boundary_request;
+          positive_reference_request = positive_boundary_request;
+        }
         auto negative_boundary =
             svmp::FE::interfaces::buildGeneratedActiveBoundaryDomain(
                 std::move(negative_boundary_request),
                 result.domain,
                 intersection_domain,
                 mesh_access,
-                scalar_field);
+                scalar_field,
+                active_boundary_threads);
         auto positive_boundary =
             svmp::FE::interfaces::buildGeneratedActiveBoundaryDomain(
                 std::move(positive_boundary_request),
                 result.domain,
                 intersection_domain,
                 mesh_access,
-                scalar_field);
+                scalar_field,
+                active_boundary_threads);
+        if (active_boundary_self_check) {
+          const auto negative_reference =
+              svmp::FE::interfaces::buildGeneratedActiveBoundaryDomain(
+                  std::move(*negative_reference_request), result.domain,
+                  intersection_domain, mesh_access, scalar_field, 1);
+          const auto positive_reference =
+              svmp::FE::interfaces::buildGeneratedActiveBoundaryDomain(
+                  std::move(*positive_reference_request), result.domain,
+                  intersection_domain, mesh_access, scalar_field, 1);
+          auto difference =
+              svmp::FE::interfaces::compareGeneratedActiveBoundaryDomains(
+                  negative_boundary, negative_reference);
+          if (difference.empty()) {
+            difference =
+                svmp::FE::interfaces::compareGeneratedActiveBoundaryDomains(
+                    positive_boundary, positive_reference);
+          }
+          const bool local_failure = !difference.empty();
+          if (globalAnyBool(local_failure, comm)) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Geometry-thread self-check "
+                "(SVMP_GEOMETRY_THREADS_SELF_CHECK): the active boundary built "
+                "on " + std::to_string(active_boundary_threads) +
+                " threads differs from the one-thread build (rank " +
+                std::to_string(comm.rank()) + "): " +
+                (difference.empty() ? "differs on another rank" : difference));
+          }
+          application::core::oopCout()
+              << "[svMultiPhysics::Application] Geometry-thread self-check"
+              << " diagnostic=geometry_threads_self_check stage=active_boundary"
+              << " threads=" << active_boundary_threads
+              << " fragments=" << negative_boundary.fragments().size() +
+                                      positive_boundary.fragments().size()
+              << std::endl;
+        }
         const auto partition =
             svmp::FE::interfaces::validateGeneratedActiveBoundaryPartition(
                 negative_boundary,
