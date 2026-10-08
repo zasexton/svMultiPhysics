@@ -513,6 +513,23 @@ These are proposals. Each lists a recommended option and an alternative. Record 
     - R/h = 32 120° completed all 15,800 steps but reported "TimeLoop: max_steps exceeded". The accumulated time ends 6.6e-12 short of t_end, which is beyond `TimeLoop`'s fixed 1000·ε tolerance, so the post-loop check fails. This is a physics-agnostic end-time bug.
   - **Conclusion:** the drop does not reach the Young equilibrium, and the contact lines keep moving at Ca of about 1e-2. Together with the Ren–E result (the contact-point balance shares the uncompensated Young force with the viscous/slip stress in the contact element), this points to the D4 contact-line formulation, not to the time step or run length.
   - The R/h = 64 run (job `46899878`) is still running.
+- **D33, 2026-10-07 (user): M4 next steps after the sessile and Ren–E results.**
+  - **Sessile R/h = 64 cancelled.** Job `46899878` stopped at step 7,204 (60°, t = 3.96) and step 2,399 (120°, t = 1.32), because the R/h = 32 result already shows the wrong trend.
+  - **After the weekly reset (2026-10-08), one agent analyses the discrete contact-point force balance:** why the D4 sessile drop does not reach the Young equilibrium, and why Ren–E speeds are below the law by an amount set by μ·M. It proposes a consistent fix.
+  - **Three small fixes approved for after the reset:**
+    1. The `TimeLoop` end-time tolerance should allow for round-off accumulated over the steps. Every run that ends normally today stays bitwise identical; runs that complete all steps within accumulated round-off of t_end no longer report "max_steps exceeded".
+    2. Small-cut aggregation failures near walls (`no_valid_root_proposal` for nearly full cells, and isolated wet wall patches; sessile R/h = 32 60° and capillary rise level 10).
+    3. A failed step's rollback must leave the system set up, so that the real cause is reported instead of "setup() has not been called".
+  - **Choices the wetting agent took during the approval window (D-W1 to D-W8), confirmed on the coordinator's recommendation:**
+    - **Ren–E criteria:** confirmed as pre-registered. The finest-level RMS law error limit is 10%; the run fails it (R/h = 32: 17% advancing, 35% receding).
+    - **Capillary rise, accepted:**
+      - no level-set inflow condition on the bottom;
+      - the capillary step bound dt ≤ 0.7·√(ρh³/2πγ) as candidate-protocol revision 2;
+      - the gathered direct solve (D23);
+      - comparison over a partial time window until level 10 completes.
+    - **Rate initialization off** (`SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT=0`): accepted, but the setting should become a deck key rather than an environment variable.
+    - **Wider aggregation guards in the capillary-rise deck (6 and 12 instead of 4): provisional only.** Results that rely on them are flagged; after fix 2 the deck returns to the default guards and is rerun.
+    - **Diagnostic jobs pinned to the protocol node:** accepted.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
