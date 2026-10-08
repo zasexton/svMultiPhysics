@@ -41,7 +41,8 @@ namespace constraints {
  * @param dofs     sorted, unique system DOFs (updated in place)
  * @param payload  `stride` values per DOF in the order of `dofs`
  * @param context  names the constraint in the one-time diagnostic that rank 0
- *                 prints (WARNING) when any rank had to add DOFs
+ *                 prints (WARNING) when any rank had to add DOFs; empty for
+ *                 callers that expect additions (no report, no run total)
  * @return number of DOFs this rank added
  *
  * Collective over the system DOF communicator when it has more than one rank.
