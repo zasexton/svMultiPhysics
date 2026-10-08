@@ -1035,7 +1035,7 @@ void resolveFsilsMatrixEntrySlotsUncached(const FsilsMatrix& matrix,
 
     std::fill(resolved.begin(), resolved.end(), INVALID_GLOBAL_INDEX);
 
-    const auto shared = matrix.shared();
+    const auto shared = matrix.operatorShared();
     if (!shared) {
         return;
     }
@@ -1174,7 +1174,7 @@ public:
             FE_THROW(InvalidArgumentException, "FsilsMatrixView::addMatrixEntries: local_matrix size mismatch");
         }
 
-        const auto shared = matrix_->shared();
+        const auto shared = matrix_->operatorShared();
         if (!shared) {
             for (GlobalIndex i = 0; i < n_rows; ++i) {
                 const GlobalIndex row = row_dofs[static_cast<std::size_t>(i)];
@@ -1242,7 +1242,7 @@ public:
 	    {
 	        FE_CHECK_NOT_NULL(matrix_, "FsilsMatrixView::matrix");
 
-	        const auto shared = matrix_->shared();
+	        const auto shared = matrix_->operatorShared();
 	        if (!shared) return;
 
         auto& lhs = *static_cast<fe_fsi_linear_solver::FSILS_lhsType*>(matrix_->fsilsLhsPtr());
@@ -1307,7 +1307,7 @@ public:
     void finalizeAssembly() override {
         phase_ = assembly::AssemblyPhase::Finalized;
         if (matrix_ != nullptr && matrix_diag_trace_enabled()) {
-            if (const auto shared = matrix_->shared()) {
+            if (const auto shared = matrix_->operatorShared()) {
                 static int diag_trace_budget = 0;
                 static bool diag_trace_init = false;
                 if (!diag_trace_init) {
@@ -1349,7 +1349,7 @@ public:
         if (std::getenv("SVMP_FSILS_MATRIX_VIEW_TRACE") != nullptr && matrix_requested_ > 0) {
             int rank = 0;
             if (matrix_ != nullptr) {
-                if (const auto shared = matrix_->shared()) {
+                if (const auto shared = matrix_->operatorShared()) {
                     rank = shared->lhs.commu.task;
                 }
             }
@@ -1391,7 +1391,7 @@ public:
         if (matrix_ == nullptr) {
             return nullptr;
         }
-        if (const auto shared = matrix_->shared()) {
+        if (const auto shared = matrix_->operatorShared()) {
             return shared.get();
         }
         return matrix_;
@@ -1429,7 +1429,7 @@ public:
         FE_CHECK_NOT_NULL(matrix_, "FsilsMatrixView::matrix");
         matrix_requested_ += resolved.size();
         const std::size_t values_size =
-            (matrix_->shared() != nullptr)
+            (matrix_->operatorShared() != nullptr)
                 ? static_cast<std::size_t>(matrix_->fsilsNnz()) *
                       static_cast<std::size_t>(matrix_->fsilsDof()) *
                       static_cast<std::size_t>(matrix_->fsilsDof())
@@ -1620,6 +1620,7 @@ FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& pattern,
     }
 
     shared_ = std::move(shared);
+    vector_shared_ = shared_;
 }
 
 FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
@@ -1839,23 +1840,7 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
         }
     }
 
-    const int nNo = owned_node_count + static_cast<int>(ghost_nodes.size());
     const int nnz_max = std::numeric_limits<int>::max();
-
-    // Build node-level CSR (old local ordering: owned nodes then ghosts).
-    std::vector<int> node_row_ptr(static_cast<std::size_t>(nNo + 1), 0);
-    std::vector<int> node_col_ptr;
-    node_col_ptr.reserve(static_cast<std::size_t>(pattern.getLocalNnz()));
-
-    auto shared = std::make_shared<FsilsShared>();
-    shared->global_dofs = global_rows_;
-    shared->dof = dof;
-    shared->gnNo = gnNo;
-    shared->owned_node_start = owned_node_start;
-    shared->owned_node_count = owned_node_count;
-    shared->owned_nodes = std::move(owned_nodes);
-    shared->ghost_nodes = ghost_nodes;
-    shared->dof_permutation = dof_permutation;
 
     auto gather_row_nodes = [&](GlobalIndex row_fs, std::vector<int>& out_nodes) {
         out_nodes.clear();
@@ -1903,86 +1888,171 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
         }
     };
 
-    std::vector<int> dof_row_nodes;
-    std::vector<int> node_cols;
-
-    for (int old = 0; old < nNo; ++old) {
-        const int global_node = shared->oldToGlobalNode(old);
-        FE_THROW_IF(global_node < 0, InvalidArgumentException,
-                    "FsilsMatrix: invalid old->global node mapping");
-
-        node_cols.clear();
-        if (old >= owned_node_count) {
-            // PETSc-style distributed matrices store only owned rows. Ghost
-            // nodes remain in the local layout as columns/vector halo slots;
-            // keep a diagonal placeholder so FSILS preconditioner bookkeeping
-            // has a valid row and diagonal pointer for every local node.
-            node_cols.push_back(global_node);
-        } else {
+    // Column nodes of every owned node row (global node IDs, sorted, unique,
+    // diagonal included), from the rows of all of the node's DOFs.
+    auto owned_global_node = [&](int old) {
+        return owned_nodes.empty() ? owned_node_start + old
+                                   : owned_nodes[static_cast<std::size_t>(old)];
+    };
+    std::vector<std::vector<int>> owned_row_col_nodes(static_cast<std::size_t>(owned_node_count));
+    {
+        std::vector<int> dof_row_nodes;
+        for (int old = 0; old < owned_node_count; ++old) {
+            const int global_node = owned_global_node(old);
+            auto& node_cols = owned_row_col_nodes[static_cast<std::size_t>(old)];
             for (int r = 0; r < dof; ++r) {
                 const GlobalIndex row_dof = static_cast<GlobalIndex>(global_node) * dof + r;
                 gather_row_nodes(row_dof, dof_row_nodes);
                 node_cols.insert(node_cols.end(), dof_row_nodes.begin(), dof_row_nodes.end());
             }
+            std::sort(node_cols.begin(), node_cols.end());
+            node_cols.erase(std::unique(node_cols.begin(), node_cols.end()), node_cols.end());
+            const auto diagonal = std::lower_bound(node_cols.begin(), node_cols.end(), global_node);
+            if (diagonal == node_cols.end() || *diagonal != global_node) {
+                node_cols.insert(diagonal, global_node);
+            }
+        }
+    }
+
+    // Column nodes outside the vector layout (owned nodes + ghost-row nodes):
+    // constraint-elimination fill whose columns lie beyond the ghost layers.
+    // The operator layout appends them as extra ghost nodes; vectors keep the
+    // pattern's layout.  Decided collectively: the halo plans of every rank
+    // change when any rank has extra columns.
+    std::vector<int> extra_column_nodes;
+    for (const auto& node_cols : owned_row_col_nodes) {
+        for (const int node : node_cols) {
+            if (!is_owned_node(node) &&
+                !std::binary_search(ghost_nodes.begin(), ghost_nodes.end(), node)) {
+                extra_column_nodes.push_back(node);
+            }
+        }
+    }
+    std::sort(extra_column_nodes.begin(), extra_column_nodes.end());
+    extra_column_nodes.erase(std::unique(extra_column_nodes.begin(), extra_column_nodes.end()),
+                             extra_column_nodes.end());
+    int any_extra_columns = extra_column_nodes.empty() ? 0 : 1;
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+    {
+        int mpi_initialized = 0;
+        int mpi_finalized = 0;
+        MPI_Initialized(&mpi_initialized);
+        MPI_Finalized(&mpi_finalized);
+        if (mpi_initialized != 0 && mpi_finalized == 0 && backend_comm != MPI_COMM_NULL) {
+            int local = any_extra_columns;
+            MPI_Allreduce(&local, &any_extra_columns, 1, MPI_INT, MPI_MAX, backend_comm);
+        }
+    }
+#endif
+
+    // One FSILS layout: owned nodes, then `layout_ghosts` (old local
+    // ordering).  Owned rows keep the columns present in the layout; ghost
+    // nodes get a diagonal placeholder row.  Collective (FSILS lhs creation and
+    // halo plans).
+    auto build_layout = [&](const std::vector<int>& layout_ghosts,
+                            bool operator_layout,
+                            int& layout_nnz) -> std::shared_ptr<FsilsShared> {
+        const int nNo = owned_node_count + static_cast<int>(layout_ghosts.size());
+
+        auto shared = std::make_shared<FsilsShared>();
+        shared->global_dofs = global_rows_;
+        shared->dof = dof;
+        shared->gnNo = gnNo;
+        shared->owned_node_start = owned_node_start;
+        shared->owned_node_count = owned_node_count;
+        shared->owned_nodes = owned_nodes;
+        shared->ghost_nodes = layout_ghosts;
+        shared->dof_permutation = dof_permutation;
+        // The extra column nodes follow the pattern's (sorted) ghost nodes, so
+        // resolve global nodes through the table rather than a binary search.
+        shared->buildGlobalToOldTable();
+
+        // Build node-level CSR (old local ordering: owned nodes then ghosts).
+        std::vector<int> node_row_ptr(static_cast<std::size_t>(nNo + 1), 0);
+        std::vector<int> node_col_ptr;
+        node_col_ptr.reserve(static_cast<std::size_t>(pattern.getLocalNnz()));
+        for (int old = 0; old < nNo; ++old) {
+            const int global_node = shared->oldToGlobalNode(old);
+            FE_THROW_IF(global_node < 0, InvalidArgumentException,
+                        "FsilsMatrix: invalid old->global node mapping");
+            if (old >= owned_node_count) {
+                // PETSc-style distributed matrices store only owned rows. Ghost
+                // nodes remain in the local layout as columns/vector halo slots;
+                // keep a diagonal placeholder so FSILS preconditioner bookkeeping
+                // has a valid row and diagonal pointer for every local node.
+                const int col_old = shared->globalNodeToOld(global_node);
+                FE_THROW_IF(col_old < 0, InvalidArgumentException,
+                            "FsilsMatrix: ghost node missing from its own layout");
+                node_col_ptr.push_back(col_old);
+            } else {
+                for (const int col_global_node : owned_row_col_nodes[static_cast<std::size_t>(old)]) {
+                    const int col_old = shared->globalNodeToOld(col_global_node);
+                    if (col_old < 0) {
+                        // Only extra column nodes are absent, and only from
+                        // the vector layout.
+                        FE_THROW_IF(operator_layout, InvalidArgumentException,
+                                    "FsilsMatrix: column node " + std::to_string(col_global_node) +
+                                        " is not present locally");
+                        continue;
+                    }
+                    node_col_ptr.push_back(col_old);
+                }
+            }
+            FE_THROW_IF(node_col_ptr.size() > static_cast<std::size_t>(nnz_max), InvalidArgumentException,
+                        "FsilsMatrix: local nnz exceeds FSILS int index range");
+            node_row_ptr[static_cast<std::size_t>(old + 1)] = static_cast<int>(node_col_ptr.size());
         }
 
-        std::sort(node_cols.begin(), node_cols.end());
-        node_cols.erase(std::unique(node_cols.begin(), node_cols.end()), node_cols.end());
+        const int nnz = static_cast<int>(node_col_ptr.size());
+        layout_nnz = nnz;
 
-        const auto diagonal =
-            std::lower_bound(node_cols.begin(), node_cols.end(), global_node);
-        if (diagonal == node_cols.end() || *diagonal != global_node) {
-            node_cols.insert(diagonal, global_node);
+        Vector<int> gNodes(nNo);
+        for (int old = 0; old < nNo; ++old) {
+            gNodes(old) = shared->oldToGlobalNode(old);
+        }
+        Vector<int> rowPtr(nNo + 1);
+        for (int i = 0; i < nNo + 1; ++i) {
+            rowPtr(i) = node_row_ptr[static_cast<std::size_t>(i)];
+        }
+        Vector<int> colPtr(nnz);
+        for (int i = 0; i < nnz; ++i) {
+            colPtr(i) = node_col_ptr[static_cast<std::size_t>(i)];
         }
 
-        for (const int col_global_node : node_cols) {
-            const int col_old = shared->globalNodeToOld(col_global_node);
-            FE_THROW_IF(col_old < 0, InvalidArgumentException,
-                        "FsilsMatrix: column node " + std::to_string(col_global_node) +
-                            " is not present locally (ghost row closure required)");
-            node_col_ptr.push_back(col_old);
-        }
+        auto commu = make_fsils_commu(backend_comm);
+        fe_fsi_linear_solver::fsils_lhs_create_with_explicit_owned_nodes(
+            shared->lhs, commu, gnNo, nNo, nnz, gNodes, rowPtr, colPtr, /*nFaces=*/0, owned_node_count);
+        FE_THROW_IF(!shared->lhs.owned_row_operator, InvalidArgumentException,
+                    "FsilsMatrix: FE FSILS matrices must use explicit owned-row layout");
 
-        FE_THROW_IF(node_col_ptr.size() > static_cast<std::size_t>(nnz_max), InvalidArgumentException,
-                    "FsilsMatrix: local nnz exceeds FSILS int index range");
-        node_row_ptr[static_cast<std::size_t>(old + 1)] = static_cast<int>(node_col_ptr.size());
-    }
+        build_old_of_internal(*shared);
 
-    const int nnz = static_cast<int>(node_col_ptr.size());
-    nnz_ = nnz;
-
-    Vector<int> gNodes(nNo);
-    for (int old = 0; old < nNo; ++old) {
-        const int global_node = shared->oldToGlobalNode(old);
-        FE_THROW_IF(global_node < 0, InvalidArgumentException,
-                    "FsilsMatrix: invalid old->global node mapping");
-        gNodes(old) = global_node;
-    }
-
-    Vector<int> rowPtr(nNo + 1);
-    for (int i = 0; i < nNo + 1; ++i) {
-        rowPtr(i) = node_row_ptr[static_cast<std::size_t>(i)];
-    }
-
-    Vector<int> colPtr(nnz);
-    for (int i = 0; i < nnz; ++i) {
-        colPtr(i) = node_col_ptr[static_cast<std::size_t>(i)];
-    }
-
-    auto commu = make_fsils_commu(backend_comm);
-    fe_fsi_linear_solver::fsils_lhs_create_with_explicit_owned_nodes(
-        shared->lhs, commu, gnNo, nNo, nnz, gNodes, rowPtr, colPtr, /*nFaces=*/0, owned_node_count);
-    FE_THROW_IF(!shared->lhs.owned_row_operator, InvalidArgumentException,
-                "FsilsMatrix: FE FSILS matrices must use explicit owned-row layout");
-
-    build_old_of_internal(*shared);
-
-    shared->buildGlobalToOldTable();
-    shared->buildGlobalToInternalTable();
-    build_owned_row_halo_plan(*shared);
-    validate_owned_row_halo_plan(*shared);
+        shared->buildGlobalToOldTable();
+        shared->buildGlobalToInternalTable();
+        build_owned_row_halo_plan(*shared);
+        validate_owned_row_halo_plan(*shared);
+        return shared;
+    };
 
     const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
+    std::shared_ptr<FsilsShared> vector_layout;
+    std::shared_ptr<FsilsShared> shared;
+    int nnz = 0;
+    if (any_extra_columns != 0) {
+        // The vector layout carries no value slots (no block lookup tables);
+        // its CSR is the operator's restricted to the vector layout's nodes.
+        int vector_nnz = 0;
+        vector_layout = build_layout(ghost_nodes, /*operator_layout=*/false, vector_nnz);
+        std::vector<int> operator_ghosts = ghost_nodes;
+        operator_ghosts.insert(operator_ghosts.end(), extra_column_nodes.begin(), extra_column_nodes.end());
+        shared = build_layout(operator_ghosts, /*operator_layout=*/true, nnz);
+        std::vector<Real> unused_values(static_cast<std::size_t>(vector_nnz) * block_size, 0.0);
+        sort_row_columns_and_values(*vector_layout, unused_values);
+    } else {
+        shared = build_layout(ghost_nodes, /*operator_layout=*/true, nnz);
+    }
+    nnz_ = nnz;
+
     values_.assign(static_cast<std::size_t>(nnz) * block_size, 0.0);
     sort_row_columns_and_values(*shared, values_);
     maybe_log_matrix_locality(*shared);
@@ -1997,6 +2067,7 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
     }
 
     shared_ = std::move(shared);
+    vector_shared_ = vector_layout ? std::move(vector_layout) : shared_;
 }
 
 FsilsMatrix::~FsilsMatrix() = default;
@@ -2043,12 +2114,14 @@ bool FsilsMatrix::reinitFromPattern(
 
 bool FsilsMatrix::adoptCompatibleReinitialization(FsilsMatrix&& replacement)
 {
-    if (!replacement.shared_) {
+    if (!replacement.shared_ || !replacement.vector_shared_ || !vector_shared_) {
         return false;
     }
 
-    const auto& current = *shared_;
-    const auto& next = *replacement.shared_;
+    // Vectors pair with the vector layout, so that is what must match; the
+    // operator layout (extra fill-column nodes) may change freely.
+    const auto& current = *vector_shared_;
+    const auto& next = *replacement.vector_shared_;
     const auto permutation_matches = [](const auto& lhs, const auto& rhs) {
         if (lhs == rhs) {
             return true;
@@ -2096,12 +2169,17 @@ bool FsilsMatrix::adoptCompatibleReinitialization(FsilsMatrix&& replacement)
     }
 #endif
 
-    // Vectors created by FsilsFactory retain a pointer to `shared_`.  Move the
-    // rebuilt LHS/CSR and lookup tables into that stable object rather than
-    // replacing its shared_ptr.  Compatibility above guarantees that the
-    // vectors' old-node storage and cached FE-DOF resolutions remain valid.
+    // Vectors created by FsilsFactory retain a pointer to `vector_shared_`.
+    // Move the rebuilt layout into that stable object rather than replacing
+    // its shared_ptr; the operator layout is that object again unless the
+    // replacement has extra fill-column nodes.  Compatibility above
+    // guarantees that the vectors' old-node storage and cached FE-DOF
+    // resolutions remain valid.
     using std::swap;
-    swap(*shared_, *replacement.shared_);
+    const bool replacement_has_separate_operator =
+        replacement.shared_ != replacement.vector_shared_;
+    swap(*vector_shared_, *replacement.vector_shared_);
+    shared_ = replacement_has_separate_operator ? std::move(replacement.shared_) : vector_shared_;
     values_ = std::move(replacement.values_);
     global_rows_ = replacement.global_rows_;
     global_cols_ = replacement.global_cols_;
@@ -2641,17 +2719,25 @@ void FsilsMatrix::mult(const GenericVector& x_in, GenericVector& y_in) const
     auto* y = dynamic_cast<FsilsVector*>(&y_in);
     FE_THROW_IF(!x || !y, InvalidArgumentException, "FsilsMatrix::mult: backend mismatch");
 
-    FE_THROW_IF(x->shared() != shared_.get() || y->shared() != shared_.get(),
+    // Vectors live in the vector layout (or, inside a solve, in the operator
+    // layout).  The vector layout's old ordering is a prefix of the operator
+    // layout's, so both map through the operator lhs; extra column nodes start
+    // at zero and are filled by the operator halo exchange.
+    const FsilsShared* vector_layout = x->shared();
+    FE_THROW_IF((vector_layout != shared_.get() && vector_layout != vector_shared_.get()) ||
+                    y->shared() != vector_layout,
                 InvalidArgumentException, "FsilsMatrix::mult: vector layout mismatch");
 
     auto& lhs = shared_->lhs;
     const int dof = shared_->dof;
     const int nNo = lhs.nNo;
+    const int vector_nNo = vector_layout->lhs.nNo;
     const int nnz = lhs.nnz;
     const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
 
-    FE_THROW_IF(static_cast<int>(x->data().size()) != dof * nNo ||
-                    static_cast<int>(y->data().size()) != dof * nNo,
+    FE_THROW_IF(vector_nNo > nNo ||
+                    static_cast<int>(x->data().size()) != dof * vector_nNo ||
+                    static_cast<int>(y->data().size()) != dof * vector_nNo,
                 InvalidArgumentException, "FsilsMatrix::mult: local size mismatch");
     FE_THROW_IF(values_.size() != static_cast<std::size_t>(nnz) * block_size, FEException,
                 "FsilsMatrix::mult: invalid FSILS value storage");
@@ -2659,7 +2745,7 @@ void FsilsMatrix::mult(const GenericVector& x_in, GenericVector& y_in) const
     // Map input from old local ordering -> FSILS internal ordering.
     std::vector<double> u_internal(static_cast<std::size_t>(dof) * static_cast<std::size_t>(nNo), 0.0);
     const auto& x_old = x->data();
-    for (int old = 0; old < nNo; ++old) {
+    for (int old = 0; old < vector_nNo; ++old) {
         const int internal = lhs.map(old);
         for (int c = 0; c < dof; ++c) {
             u_internal[static_cast<std::size_t>(c) + static_cast<std::size_t>(internal) * static_cast<std::size_t>(dof)] =
@@ -2678,7 +2764,7 @@ void FsilsMatrix::mult(const GenericVector& x_in, GenericVector& y_in) const
 
     // Map output back to old local ordering.
     auto& y_old = y->data();
-    for (int old = 0; old < nNo; ++old) {
+    for (int old = 0; old < vector_nNo; ++old) {
         const int internal = lhs.map(old);
         for (int c = 0; c < dof; ++c) {
             y_old[static_cast<std::size_t>(c) + static_cast<std::size_t>(old) * static_cast<std::size_t>(dof)] =
@@ -2692,7 +2778,9 @@ void FsilsMatrix::multAdd(const GenericVector& x_in, GenericVector& y_in) const
     auto* y = dynamic_cast<FsilsVector*>(&y_in);
     FE_THROW_IF(!y, InvalidArgumentException, "FsilsMatrix::multAdd: backend mismatch");
 
-    FsilsVector tmp(shared());
+    FsilsVector tmp(y->shared() == shared_.get()
+                        ? std::shared_ptr<const FsilsShared>(shared_)
+                        : std::shared_ptr<const FsilsShared>(vector_shared_));
     tmp.zero();
     mult(x_in, tmp);
 
@@ -2703,6 +2791,37 @@ void FsilsMatrix::multAdd(const GenericVector& x_in, GenericVector& y_in) const
     for (std::size_t i = 0; i < yspan.size(); ++i) {
         yspan[i] += tspan[i];
     }
+}
+
+void FsilsMatrix::copyToOperatorLayout(const GenericVector& vector_layout_in,
+                                       GenericVector& operator_layout_in) const
+{
+    const auto* in = dynamic_cast<const FsilsVector*>(&vector_layout_in);
+    auto* out = dynamic_cast<FsilsVector*>(&operator_layout_in);
+    FE_THROW_IF(!in || !out, InvalidArgumentException, "FsilsMatrix::copyToOperatorLayout: backend mismatch");
+    FE_THROW_IF(in->shared() != vector_shared_.get() || out->shared() != shared_.get(),
+                InvalidArgumentException, "FsilsMatrix::copyToOperatorLayout: layout mismatch");
+    auto& dst = out->data();
+    const auto& src = in->data();
+    FE_THROW_IF(src.size() > dst.size(), InvalidArgumentException,
+                "FsilsMatrix::copyToOperatorLayout: size mismatch");
+    std::copy(src.begin(), src.end(), dst.begin());
+    std::fill(dst.begin() + static_cast<std::ptrdiff_t>(src.size()), dst.end(), Real{0.0});
+}
+
+void FsilsMatrix::copyFromOperatorLayout(const GenericVector& operator_layout_in,
+                                         GenericVector& vector_layout_in) const
+{
+    const auto* in = dynamic_cast<const FsilsVector*>(&operator_layout_in);
+    auto* out = dynamic_cast<FsilsVector*>(&vector_layout_in);
+    FE_THROW_IF(!in || !out, InvalidArgumentException, "FsilsMatrix::copyFromOperatorLayout: backend mismatch");
+    FE_THROW_IF(in->shared() != shared_.get() || out->shared() != vector_shared_.get(),
+                InvalidArgumentException, "FsilsMatrix::copyFromOperatorLayout: layout mismatch");
+    auto dst = out->localSpan();
+    const auto& src = in->data();
+    FE_THROW_IF(dst.size() > src.size(), InvalidArgumentException,
+                "FsilsMatrix::copyFromOperatorLayout: size mismatch");
+    std::copy(src.begin(), src.begin() + static_cast<std::ptrdiff_t>(dst.size()), dst.begin());
 }
 
 std::unique_ptr<assembly::GlobalSystemView> FsilsMatrix::createAssemblyView()

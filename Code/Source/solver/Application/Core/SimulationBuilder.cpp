@@ -1627,6 +1627,14 @@ void SimulationBuilder::setupSystem()
   }
   if (fsils_backend) {
     setup_opts.use_backend_row_ownership_for_assembly = true;
+    // FSILS matrices hold constraint-fill columns beyond the ghost layers as
+    // operator-only ghost nodes.  SVMP_FSILS_REJECT_FILL_BEYOND_HALO=1 restores
+    // the rejection (off_rank_constraint_fill_outside_halo) for comparison.
+    {
+      const char* env = std::getenv("SVMP_FSILS_REJECT_FILL_BEYOND_HALO");
+      const bool reject = env != nullptr && env[0] != '\0' && std::string(env) != "0";
+      setup_opts.backend_accepts_columns_beyond_ghost_rows = !reject;
+    }
     if (setup_opts.dof_options.world_size > 1) {
       setup_opts.retain_serial_sparsity = false;
       oopCout() << "[svMultiPhysics::Application] FSILS backend: retaining distributed sparsity only in MPI"

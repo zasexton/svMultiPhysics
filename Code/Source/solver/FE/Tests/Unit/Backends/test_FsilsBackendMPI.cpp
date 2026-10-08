@@ -1202,4 +1202,163 @@ TEST(FsilsBackendMPI, OwnedFeDofsMatchesDistributedOverlapOwnership)
     }
 }
 
+namespace {
+
+// 1D chain of four nodes (dof 1): rank 0 owns nodes 0-1, rank 1 owns nodes
+// 2-3, each with the neighbour node as a ghost row.  With `beyond_halo`, rows
+// 0 and 3 also couple to each other (like constraint-elimination fill whose
+// column lies beyond the ghost layers): column 3 on rank 0 and column 0 on
+// rank 1 are outside the ghost-row node layout.
+svmp::FE::sparsity::DistributedSparsityPattern makeChainPatternWithFillBeyondHalo(int rank,
+                                                                                bool beyond_halo)
+{
+    using svmp::FE::sparsity::DistributedSparsityPattern;
+    using svmp::FE::sparsity::IndexRange;
+    constexpr GlobalIndex n_global = 4;
+    const IndexRange owned = (rank == 0) ? IndexRange{0, 2} : IndexRange{2, 4};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+    if (rank == 0) {
+        pattern.addEntry(0, 0);
+        pattern.addEntry(0, 1);
+        pattern.addEntry(1, 0);
+        pattern.addEntry(1, 1);
+        pattern.addEntry(1, 2);
+        if (beyond_halo) {
+            pattern.addEntry(0, 3);
+        }
+    } else {
+        pattern.addEntry(2, 1);
+        pattern.addEntry(2, 2);
+        pattern.addEntry(2, 3);
+        pattern.addEntry(3, 2);
+        pattern.addEntry(3, 3);
+        if (beyond_halo) {
+            pattern.addEntry(3, 0);
+        }
+    }
+    pattern.ensureDiagonal();
+    pattern.finalize();
+    if (rank == 0) {
+        pattern.setGhostRows(std::vector<GlobalIndex>{2}, std::vector<GlobalIndex>{0, 1},
+                             std::vector<GlobalIndex>{2});
+    } else {
+        pattern.setGhostRows(std::vector<GlobalIndex>{1}, std::vector<GlobalIndex>{0, 1},
+                             std::vector<GlobalIndex>{1});
+    }
+    return pattern;
+}
+
+void assembleChainWithCoupling(GenericMatrix& A, int rank, double coupling)
+{
+    // A = [[4,-1,0,c],[-1,4,-1,0],[0,-1,4,-1],[c,0,-1,4]] by owned rows.
+    auto view = A.createAssemblyView();
+    view->beginAssemblyPhase();
+    const auto add = [&](GlobalIndex r, GlobalIndex c, Real v) {
+        view->addMatrixEntry(r, c, v, assembly::AddMode::Add);
+    };
+    if (rank == 0) {
+        add(0, 0, 4.0); add(0, 1, -1.0);
+        add(1, 0, -1.0); add(1, 1, 4.0); add(1, 2, -1.0);
+        if (coupling != 0.0) add(0, 3, coupling);
+    } else {
+        add(2, 1, -1.0); add(2, 2, 4.0); add(2, 3, -1.0);
+        add(3, 2, -1.0); add(3, 3, 4.0);
+        if (coupling != 0.0) add(3, 0, coupling);
+    }
+    view->finalizeAssembly();
+    A.finalizeAssembly();
+}
+
+} // namespace
+
+// Owned-row columns outside the vector layout (constraint fill beyond the
+// ghost layers) live in an operator-only layout: mult and solve see the full
+// operator, vectors keep the ghost-row layout, and an in-place refresh between
+// the two patterns keeps the vectors valid.
+TEST(FsilsBackendMPI, OperatorLayoutHoldsColumnsBeyondGhostRows)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+    constexpr GlobalIndex n_global = 4;
+    constexpr double coupling = -0.5;
+    const double x_exact[4] = {1.0, 2.0, 3.0, 4.0};
+    const double b_exact[4] = {4.0 * 1 - 2 + coupling * 4, -1 + 8 - 3, -2 + 12 - 4, coupling * 1 - 3 + 16};
+
+    FsilsFactory factory(/*dof_per_node=*/1);
+    auto A = factory.createMatrix(makeChainPatternWithFillBeyondHalo(rank, /*beyond_halo=*/true));
+    const auto* fsils_A = dynamic_cast<const FsilsMatrix*>(A.get());
+    ASSERT_NE(fsils_A, nullptr);
+    EXPECT_TRUE(fsils_A->hasSeparateOperatorLayout());
+    EXPECT_EQ(fsils_A->shared()->lhs.nNo, 3);
+    EXPECT_EQ(fsils_A->operatorShared()->lhs.nNo, 4);
+    assembleChainWithCoupling(*A, rank, coupling);
+    EXPECT_DOUBLE_EQ(A->getEntry(rank == 0 ? 0 : 3, rank == 0 ? 3 : 0), coupling);
+
+    auto x = factory.createVector(n_global);
+    auto y = factory.createVector(n_global);
+    auto b = factory.createVector(n_global);
+    const GlobalIndex first = rank == 0 ? 0 : 2;
+    auto set_owned = [&](GenericVector& v, const double* values) {
+        auto view = v.createAssemblyView();
+        view->beginAssemblyPhase();
+        for (GlobalIndex i = first; i < first + 2; ++i) {
+            view->addVectorEntry(i, values[i], assembly::AddMode::Insert);
+        }
+        view->finalizeAssembly();
+        v.updateGhosts();
+    };
+    set_owned(*x, x_exact);
+    A->mult(*x, *y);
+    auto* fy = dynamic_cast<FsilsVector*>(y.get());
+    ASSERT_NE(fy, nullptr);
+    for (GlobalIndex i = first; i < first + 2; ++i) {
+        EXPECT_NEAR(fy->createGhostedReadView()->getVectorEntry(i), b_exact[i], 1e-14) << "row " << i;
+    }
+
+    set_owned(*b, b_exact);
+    auto x_solved = factory.createVector(n_global);
+    SolverOptions opts;
+    opts.method = SolverMethod::GMRES;
+    opts.preconditioner = PreconditionerType::Diagonal;
+    opts.rel_tol = 1e-13;
+    opts.abs_tol = 1e-15;
+    opts.max_iter = 100;
+    auto solver = factory.createLinearSolver(opts);
+    const auto rep = solver->solve(*A, *x_solved, *b);
+    EXPECT_TRUE(rep.converged);
+    x_solved->updateGhosts();
+    auto read = x_solved->createGhostedReadView();
+    for (GlobalIndex i = first; i < first + 2; ++i) {
+        EXPECT_NEAR(read->getVectorEntry(i), x_exact[i], 1e-10) << "dof " << i;
+    }
+
+    // In-place refresh to the pattern without the beyond-halo coupling: same
+    // vector layout, single (aliased) operator layout.
+    const auto* vector_layout_before = fsils_A->shared().get();
+    EXPECT_TRUE(A->reinitFromPattern(makeChainPatternWithFillBeyondHalo(rank, /*beyond_halo=*/false)));
+    EXPECT_EQ(fsils_A->shared().get(), vector_layout_before);
+    EXPECT_FALSE(fsils_A->hasSeparateOperatorLayout());
+    assembleChainWithCoupling(*A, rank, 0.0);
+    A->mult(*x, *y);
+    const double b_plain[4] = {4.0 * 1 - 2, -1 + 8 - 3, -2 + 12 - 4, -3 + 16};
+    for (GlobalIndex i = first; i < first + 2; ++i) {
+        EXPECT_NEAR(fy->createGhostedReadView()->getVectorEntry(i), b_plain[i], 1e-14) << "row " << i;
+    }
+
+    // And back to the extended pattern in place.
+    EXPECT_TRUE(A->reinitFromPattern(makeChainPatternWithFillBeyondHalo(rank, /*beyond_halo=*/true)));
+    EXPECT_EQ(fsils_A->shared().get(), vector_layout_before);
+    EXPECT_TRUE(fsils_A->hasSeparateOperatorLayout());
+    assembleChainWithCoupling(*A, rank, coupling);
+    A->mult(*x, *y);
+    for (GlobalIndex i = first; i < first + 2; ++i) {
+        EXPECT_NEAR(fy->createGhostedReadView()->getVectorEntry(i), b_exact[i], 1e-14) << "row " << i;
+    }
+}
+
 } // namespace svmp::FE::backends

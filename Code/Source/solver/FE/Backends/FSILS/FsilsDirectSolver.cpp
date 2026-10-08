@@ -636,7 +636,7 @@ SolverReport FsilsGatheredDirectSolver::solve(const FsilsMatrix& A,
                                               const SolverOptions& options)
 {
     auto& st = *impl_;
-    const auto shared = A.shared();
+    const auto shared = A.operatorShared();
     FE_CHECK_NOT_NULL(shared.get(), "FsilsGatheredDirectSolver: shared layout");
     const auto& lhs = shared->lhs;
     const MPI_Comm comm = lhs.commu.comm;

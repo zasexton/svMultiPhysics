@@ -746,7 +746,7 @@ public:
     }
     [[nodiscard]] bool hasCompleteGlobalRows() const noexcept override
     {
-        const auto shared = matrix_.shared();
+        const auto shared = matrix_.operatorShared();
         if (!shared || shared->dof <= 0) {
             return false;
         }
@@ -756,7 +756,7 @@ public:
 
     void forEachLocalRow(const SparseMatrixRowVisitor& visitor) const override
     {
-        const auto shared_ptr = matrix_.shared();
+        const auto shared_ptr = matrix_.operatorShared();
         if (!shared_ptr || shared_ptr->dof <= 0) {
             return;
         }

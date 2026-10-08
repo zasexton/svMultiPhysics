@@ -1289,6 +1289,49 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                                       GenericVector& x_in,
                                       const GenericVector& b_in)
 {
+    const auto* A = dynamic_cast<const FsilsMatrix*>(&A_in);
+    auto* x = dynamic_cast<FsilsVector*>(&x_in);
+    const auto* b = dynamic_cast<const FsilsVector*>(&b_in);
+    if (A == nullptr || x == nullptr || b == nullptr || !A->hasSeparateOperatorLayout() ||
+        x->shared() != A->shared().get() || b->shared() != A->shared().get()) {
+        return solveOnOperatorLayout(A_in, x_in, b_in);
+    }
+
+    // The operator carries extra ghost nodes for constraint-fill columns
+    // beyond the vector layout.  Solve in the operator layout (whose old
+    // ordering extends the vector layout's), then return the vector-layout
+    // part.  The nullspace basis follows the vector layout; extend it with
+    // zeros on the extra nodes for the solve.
+    FsilsVector x_operator(A->operatorShared());
+    FsilsVector b_operator(A->operatorShared());
+    A->copyToOperatorLayout(*x, x_operator);
+    A->copyToOperatorLayout(*b, b_operator);
+
+    std::vector<std::vector<double>> vector_layout_basis;
+    vector_layout_basis.swap(nullspace_basis_);
+    struct RestoreBasis {
+        std::vector<std::vector<double>>& target;
+        std::vector<std::vector<double>>& saved;
+        ~RestoreBasis() { target.swap(saved); }
+    } restore_basis{nullspace_basis_, vector_layout_basis};
+    const std::size_t operator_size = x_operator.data().size();
+    for (const auto& z : vector_layout_basis) {
+        std::vector<double> extended(z);
+        if (extended.size() <= operator_size) {
+            extended.resize(operator_size, 0.0);
+        }
+        nullspace_basis_.push_back(std::move(extended));
+    }
+
+    auto report = solveOnOperatorLayout(*A, x_operator, b_operator);
+    A->copyFromOperatorLayout(x_operator, *x);
+    return report;
+}
+
+SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
+                                                      GenericVector& x_in,
+                                                      const GenericVector& b_in)
+{
     const auto solve_wall_start = std::chrono::steady_clock::now();
     const auto* A = dynamic_cast<const FsilsMatrix*>(&A_in);
     auto* x = dynamic_cast<FsilsVector*>(&x_in);
@@ -1336,7 +1379,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                     static_cast<GlobalIndex>(b->data().size()) != expected_local,
                 FEException, "FsilsLinearSolver::solve: FSILS vectors must have local size lhs.nNo*dof");
 
-    const auto shared_layout = A->shared();
+    const auto shared_layout = A->operatorShared();
     FE_CHECK_NOT_NULL(shared_layout.get(), "FsilsLinearSolver::solve: shared layout");
 
     const bool requested_blockschur = (options_.method == SolverMethod::BlockSchur);
@@ -2400,8 +2443,11 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     };
 
     // Face setup: restore from cache (fast path) or build from scratch.
+    // Cached faces hold internal node indices of the operator layout they were
+    // built for; the layout changes when the sparsity is refreshed.
     const bool local_faces_cache_valid =
         num_added_faces > 0 && dof > 0 && !faces_dirty_ &&
+        cached_faces_layout_stamp_ == shared_layout->layout_stamp &&
         cached_faces_.size() == static_cast<std::size_t>(num_added_faces);
     bool use_cached_faces = local_faces_cache_valid;
     if (num_added_faces > 0 && dof > 0 && lhs.commu.nTasks > 1) {
@@ -2452,7 +2498,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     lhs.native_face_rank_one_count = num_rank_one_faces;
 
     if (num_added_faces > 0 && dof > 0 && !faces_from_cache) {
-        const auto shared = A->shared();
+        const auto shared = A->operatorShared();
         FE_CHECK_NOT_NULL(shared.get(), "FsilsLinearSolver: FsilsShared for face setup");
 
         const int new_nFaces = original_nFaces + num_added_faces;
@@ -2726,12 +2772,13 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             }
         }
         faces_dirty_ = false;
+        cached_faces_layout_stamp_ = shared_layout->layout_stamp;
     }
 
     lhs.reduced_updates.clear();
     lhs.grouped_bordered_field_couplings.clear();
     {
-        const auto shared = A->shared();
+        const auto shared = A->operatorShared();
         FE_CHECK_NOT_NULL(shared.get(), "FsilsLinearSolver: FsilsShared for reduced updates");
 
         auto default_active_components = [&]() {
