@@ -2423,6 +2423,45 @@ resolveDistributedAggregationDeclarations(
     return std::sqrt(squared_distance);
 }
 
+// unitSimplexExtrapolationDistance measures in the chart whose origin is the
+// simplex vertex the mesh lists first, so the same physical point gets
+// different distances under different vertex orders: three cells above a
+// right-triangle root it measures 3.0 in the chart of the right-angle vertex
+// and 4.24 or 5.0 in the sheared charts of the other two.  The guard uses the
+// smallest distance over the d + 1 vertex charts.  It depends only on the
+// barycentric coordinates (the extension weights), so it does not depend on
+// the vertex order, and it never exceeds the first-vertex chart distance:
+// every proposal that passed before still passes.
+[[nodiscard]] Real vertexOrderInvariantSimplexExtrapolationDistance(
+    const Vector<Real, 3>& xi,
+    int dimension)
+{
+    Real distance = unitSimplexExtrapolationDistance(xi, dimension);
+    if (!(distance > Real{0.0})) {
+        return distance;
+    }
+    std::array<Real, 4> barycentric{};
+    Real coordinate_sum = 0.0;
+    for (int d = 0; d < dimension; ++d) {
+        barycentric[static_cast<std::size_t>(d + 1)] =
+            xi[static_cast<std::size_t>(d)];
+        coordinate_sum += xi[static_cast<std::size_t>(d)];
+    }
+    barycentric[0] = Real{1.0} - coordinate_sum;
+    for (int origin = 1; origin <= dimension; ++origin) {
+        Vector<Real, 3> chart{};
+        std::size_t slot = 0u;
+        for (int vertex = 0; vertex <= dimension; ++vertex) {
+            if (vertex != origin) {
+                chart[slot++] = barycentric[static_cast<std::size_t>(vertex)];
+            }
+        }
+        distance = std::min(
+            distance, unitSimplexExtrapolationDistance(chart, dimension));
+    }
+    return distance;
+}
+
 [[nodiscard]] Real normalizedReferenceExtrapolationDistance(
     ElementType element_type,
     const Vector<Real, 3>& xi)
@@ -2448,11 +2487,12 @@ resolveDistributedAggregationDeclarations(
     case ElementType::Hex8:
         return tensor_distance(3);
     case ElementType::Triangle3:
-        return unitSimplexExtrapolationDistance(xi, 2);
+        return vertexOrderInvariantSimplexExtrapolationDistance(xi, 2);
     case ElementType::Tetra4:
-        return unitSimplexExtrapolationDistance(xi, 3);
+        return vertexOrderInvariantSimplexExtrapolationDistance(xi, 3);
     case ElementType::Wedge6: {
-        const Real in_plane = unitSimplexExtrapolationDistance(xi, 2);
+        const Real in_plane =
+            vertexOrderInvariantSimplexExtrapolationDistance(xi, 2);
         const Real projected_z =
             std::clamp(xi[2], Real{-1.0}, Real{1.0});
         const Real dz = xi[2] - projected_z;
