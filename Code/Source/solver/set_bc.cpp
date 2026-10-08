@@ -1105,8 +1105,8 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
         if (std::find(eDir.begin(), eDir.end(), true) != eDir.end()) {
           if (utils::btest(bc.bType, enum_int(BoundaryConditionType::bType_impD))) {
 
-            for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
-              int Ac = com_mod.msh[iM].fa[iFa].gN(a);
+            for (int a = 0; a < nNo; a++) {
+              int Ac = nodes(a);
               for (int i = 0; i < nsd; i++) {
                 if (eDir[i]) {
                   int j = s + i;
@@ -1116,8 +1116,8 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
               }
             }
           } else {
-            for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
-              int Ac = com_mod.msh[iM].fa[iFa].gN(a);
+            for (int a = 0; a < nNo; a++) {
+              int Ac = nodes(a);
               for (int i = 0; i < nsd; i++) {
                 if (eDir[i]) {
                   int j = s + i;
@@ -1130,8 +1130,8 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
 
         } else {
           if (utils::btest(bc.bType, enum_int(BoundaryConditionType::bType_impD))) {
-            for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
-              int Ac = com_mod.msh[iM].fa[iFa].gN(a);
+            for (int a = 0; a < nNo; a++) {
+              int Ac = nodes(a);
               for (int i = 0; i < com_mod.Ad.nrows(); i++) {
                 An(i+s,Ac) = c1i*(Yn(i+s,Ac) - Yo(i+s,Ac) + c2*Ao(i+s,Ac));
                 com_mod.Ad(i,Ac) = c1i*(Dn(i+s,Ac) - Do(i+s,Ac) + c2*com_mod.Ad(i,Ac));
@@ -1139,8 +1139,8 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
             }
 
           } else {
-            for (int a = 0; a < com_mod.msh[iM].fa[iFa].nNo; a++) {
-              int Ac = com_mod.msh[iM].fa[iFa].gN(a);
+            for (int a = 0; a < nNo; a++) {
+              int Ac = nodes(a);
               for (int i = 0; i < com_mod.Ad.nrows(); i++) {
                 Dn(i+s,Ac) = c1*Yn(i+s,Ac) - c2*com_mod.Ad(i,Ac) + Do(i+s,Ac);
                 com_mod.Ad(i,Ac) = Yn(i+s,Ac);

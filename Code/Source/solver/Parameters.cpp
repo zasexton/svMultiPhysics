@@ -651,7 +651,15 @@ void BoundaryConditionParameters::set_values(tinyxml2::XMLElement *xml_elem) {
 
   if (node_set.defined()) {
     if (auto* mask = xml_elem->FirstChildElement("Effective_direction")) {
-      std::istringstream input(require_xml_text(mask, "Node component mask requires a value."));
+      // Accept the same comma/parenthesis syntax as face component masks,
+      // but validate every token before integer extraction can truncate it.
+      std::string text = require_xml_text(mask, "Node component mask requires a value.");
+      for (auto& character : text) {
+        if (character == '(' || character == ')' || character == ',') {
+          character = ' ';
+        }
+      }
+      std::istringstream input(text);
       std::string token;
       while (input >> token) {
         if (token != "0" && token != "1") {
@@ -660,8 +668,18 @@ void BoundaryConditionParameters::set_values(tinyxml2::XMLElement *xml_elem) {
         }
       }
     }
+    if (auto* prescribed = xml_elem->FirstChildElement("Value")) {
+      std::istringstream input(require_xml_text(prescribed, "Node-set Value requires a value."));
+      double number = 0.0;
+      std::string extra;
+      if (!(input >> number) || !std::isfinite(number) || (input >> extra)) {
+        svmp::raise<svmp::ParseException>("Node set '" + node_set.value() +
+            "': Value must be one finite number.");
+      }
+    }
   }
 }
+
 
 //////////////////////////////////////////////////////////
 //            ConstitutiveModelParameters               //
