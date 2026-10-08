@@ -3666,6 +3666,161 @@ TEST(TimeLoopCallbacks,
     EXPECT_EQ(run.state->rejected_applies, 1);
 }
 
+// A rollback that cannot reinstall the entry geometry falls back to the FE
+// setup rebuild, which fails and leaves the system without a setup.  The time
+// loop must neither restore on that system (which used to replace the cause
+// with "FESystem: setup() has not been called") nor retry: it stops with the
+// failure of the step first.
+TEST(TimeLoopCallbacks,
+     RollbackThatLeavesNoSetupStopsWithFirstFailureWithoutRetry)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto controller =
+        std::make_shared<RecordingAcceptanceGateController>();
+    GeneratedGeometryRun run;
+    GeneratedGeometryScenario scenario;
+    scenario.restored_outer_reinstalls_entry = false;
+    bool saw_exception = false;
+    const auto final_values = runGeneratedGeometryRollback(
+        run,
+        scenario,
+        controller,
+        [&](const svmp::FE::timestepping::TimeHistory&,
+            const svmp::FE::FEException& error) {
+            saw_exception = true;
+            const std::string message = error.what();
+            EXPECT_NE(message.find("rejected geometry 1"),
+                      std::string::npos)
+                << message;
+            EXPECT_NE(message.find("without a setup"), std::string::npos)
+                << message;
+            EXPECT_NE(message.find("without a retry"), std::string::npos)
+                << message;
+            EXPECT_EQ(message.find("setup() has not been called"),
+                      std::string::npos)
+                << message;
+            ASSERT_NE(run.system, nullptr);
+            EXPECT_FALSE(run.system->isSetup());
+        });
+
+    EXPECT_TRUE(final_values.empty());
+    EXPECT_TRUE(saw_exception);
+    EXPECT_EQ(run.restored_outer_callbacks, 1);
+    EXPECT_EQ(run.restored_time_step_callbacks, 0);
+    EXPECT_EQ(run.rejected_callbacks, 0);
+    EXPECT_TRUE(controller->rejected.empty());
+    EXPECT_TRUE(controller->accepted.empty());
+}
+
+// The rollback inside the solve succeeds but restoring the accepted state
+// fails: no retry, and the step failure stays first in the message.
+TEST(TimeLoopCallbacks,
+     FailedAcceptedStateRestoreStopsWithStepFailureWithoutRetry)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto controller =
+        std::make_shared<RecordingAcceptanceGateController>();
+    GeneratedGeometryRun run;
+    GeneratedGeometryScenario scenario;
+    scenario.restored_time_step_fails = true;
+    bool saw_exception = false;
+    const auto final_values = runGeneratedGeometryRollback(
+        run,
+        scenario,
+        controller,
+        [&](const svmp::FE::timestepping::TimeHistory&,
+            const svmp::FE::FEException& error) {
+            saw_exception = true;
+            const std::string message = error.what();
+            const auto cause = message.find("rejected geometry 1");
+            const auto restore = message.find("accepted geometry rejected");
+            EXPECT_NE(cause, std::string::npos) << message;
+            EXPECT_NE(restore, std::string::npos) << message;
+            EXPECT_LT(cause, restore) << message;
+            EXPECT_NE(message.find("without a retry"), std::string::npos)
+                << message;
+        });
+
+    EXPECT_TRUE(final_values.empty());
+    EXPECT_TRUE(saw_exception);
+    EXPECT_EQ(run.restored_time_step_callbacks, 1);
+    EXPECT_EQ(run.rejected_callbacks, 0);
+    EXPECT_TRUE(controller->rejected.empty());
+}
+
+// A failure that restores the accepted state before it propagates (here an
+// exception from on_before_step_accept) keeps its message when that restore
+// fails as well.
+TEST(TimeLoopCallbacks,
+     FailedRestoreAfterCallbackFailureKeepsCallbackFailure)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using StateSyncPoint = svmp::FE::timestepping::NewtonOptions::
+        StateSynchronizationPoint;
+    bool saw_exception = false;
+    const auto final_values = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::BackwardEuler,
+        /*dt=*/0.1,
+        /*t_end=*/0.1,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory&) {
+            callbacks.on_before_step_accept =
+                [](svmp::FE::timestepping::TimeHistory&,
+                   const svmp::FE::timestepping::NewtonReport&) -> bool {
+                    throw svmp::FE::systems::InvalidStateException(
+                        "candidate rejected by the accept callback");
+                };
+        },
+        [&](const svmp::FE::timestepping::TimeHistory&,
+            const svmp::FE::FEException& error) {
+            saw_exception = true;
+            const std::string message = error.what();
+            const auto cause =
+                message.find("candidate rejected by the accept callback");
+            const auto restore = message.find("accepted geometry rejected");
+            EXPECT_NE(cause, std::string::npos) << message;
+            EXPECT_NE(restore, std::string::npos) << message;
+            EXPECT_LT(cause, restore) << message;
+        },
+        [&](svmp::FE::timestepping::TimeLoopOptions& options,
+            svmp::FE::FieldId) {
+            options.newton.synchronize_state =
+                [](const svmp::FE::systems::SystemStateView&,
+                   StateSyncPoint point) {
+                    if (point == StateSyncPoint::RestoredTimeStepState) {
+                        throw svmp::FE::systems::InvalidStateException(
+                            "accepted geometry rejected");
+                    }
+                };
+        });
+
+    EXPECT_TRUE(final_values.empty());
+    EXPECT_TRUE(saw_exception);
+}
+
 // ---------------------------------------------------------------------------
 // End time after many fixed steps.
 

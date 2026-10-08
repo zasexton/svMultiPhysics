@@ -159,6 +159,81 @@ private:
     return local_mask;
 }
 
+// Communicator-wide AND of a rank-local flag, for the decisions taken after a
+// failed attempt.  It reduces on FESystem::activeMpiCommunicator(), which
+// stays valid after a failed rebuild left the system without a setup (the
+// helpers above use the communicator of the DOF handler that setup() owns).
+[[nodiscard]] bool trueOnEveryActiveRank(const systems::FESystem& system,
+                                         bool local_value)
+{
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized != 0 && finalized == 0) {
+        const auto communicator = system.activeMpiCommunicator();
+        if (communicator != MPI_COMM_NULL) {
+            int communicator_size = 1;
+            MPI_Comm_size(communicator, &communicator_size);
+            if (communicator_size > 1) {
+                int local = local_value ? 1 : 0;
+                int global = 0;
+                MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_MIN,
+                              communicator);
+                return global != 0;
+            }
+        }
+    }
+#else
+    static_cast<void>(system);
+#endif
+    return local_value;
+}
+
+// Message of an exception captured from a failed attempt.
+[[nodiscard]] std::string failedAttemptMessage(
+    const std::exception_ptr& failure)
+{
+    if (!failure) {
+        return "none";
+    }
+    try {
+        std::rethrow_exception(failure);
+    } catch (const FEException& error) {
+        return error.message();
+    } catch (const std::exception& error) {
+        return error.what();
+    } catch (...) {
+        return "non-standard exception";
+    }
+}
+
+// Stops the run after a failed attempt whose accepted state could not be
+// restored.  The message names the failure of the attempt first (the cause),
+// then why the accepted state is unavailable; the exception of the attempt,
+// when there is one, is nested.
+[[noreturn]] void throwUnrestorableAttemptFailure(
+    const std::string& attempt_failure,
+    const std::string& restore_problem,
+    const std::exception_ptr& nested_failure)
+{
+    const std::string message =
+        "TimeLoop: the failed step could not be rolled back to the accepted "
+        "state, so the run stops without a retry. Step failure: " +
+        attempt_failure + " (" + restore_problem + ")";
+    if (nested_failure) {
+        try {
+            std::rethrow_exception(nested_failure);
+        } catch (...) {
+            std::throw_with_nested(systems::InvalidStateException(message));
+        }
+    }
+    throw systems::InvalidStateException(message);
+}
+
 void updateGhostsAndDistributeHistory(const constraints::AffineConstraints& constraints,
                                       TimeHistory& history)
 {
@@ -3677,6 +3752,77 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         StateSyncPoint::RestoredProjectedTimeStepState);
                 }
             };
+            // Restores the accepted state before `failure` propagates.  A
+            // restore that fails as well must not replace the failure that
+            // caused it.
+            auto restoreAcceptedGeneratedStateAndRethrow =
+                [&](const std::exception_ptr& failure) {
+                    try {
+                        restoreAcceptedGeneratedState();
+                    } catch (...) {
+                        const auto restore_failure =
+                            std::current_exception();
+                        throwUnrestorableAttemptFailure(
+                            failedAttemptMessage(failure),
+                            "restoring the accepted state then failed: " +
+                                failedAttemptMessage(restore_failure),
+                            failure);
+                    }
+                    std::rethrow_exception(failure);
+                };
+            // Restores the accepted state after a failed nonlinear solve,
+            // before a retry or the terminal report.  The rollback inside the
+            // solve can itself fail; when that failure left the FE system
+            // without a setup (a structural constraint refresh rebuilds the
+            // whole setup, and a failure inside it leaves none), the restore
+            // would stop on "FESystem: setup() has not been called" and hide
+            // the failure, and a retry would start from an unusable state.
+            // Both conditions are decided on every rank; either one stops the
+            // run with the failure of the step first.  The reductions run on
+            // this failure path only.
+            auto restoreAcceptedStateAfterFailedSolve = [&]() {
+                const auto attempt_failure = [&]() -> std::string {
+                    if (threw && caught_exception) {
+                        return failedAttemptMessage(caught_exception);
+                    }
+                    return nr.failure_message.empty()
+                               ? std::string(
+                                     "nonlinear solve did not converge")
+                               : nr.failure_message;
+                };
+                const std::exception_ptr nested_failure =
+                    threw ? caught_exception : std::exception_ptr{};
+                if (!trueOnEveryActiveRank(
+                        transient.system(),
+                        transient.system().isSetup())) {
+                    throwUnrestorableAttemptFailure(
+                        attempt_failure(),
+                        transient.system().isSetup()
+                            ? "the rollback of the nonlinear solve left the "
+                              "FE system without a setup on another rank"
+                            : "the rollback of the nonlinear solve left the "
+                              "FE system without a setup",
+                        nested_failure);
+                }
+                std::exception_ptr restore_failure;
+                try {
+                    restoreAcceptedGeneratedState();
+                } catch (...) {
+                    restore_failure = std::current_exception();
+                }
+                if (!trueOnEveryActiveRank(transient.system(),
+                                           restore_failure == nullptr)) {
+                    throwUnrestorableAttemptFailure(
+                        attempt_failure(),
+                        restore_failure != nullptr
+                            ? "restoring the accepted state failed: " +
+                                  failedAttemptMessage(restore_failure)
+                            : std::string(
+                                  "restoring the accepted state failed on "
+                                  "another rank"),
+                        nested_failure);
+                }
+            };
 
             if (nr.converged && candidate_stage_observer_enabled) {
                 candidate_rollback_guard.arm();
@@ -3708,8 +3854,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                       "TimeLoop: candidate-stage observer "
                                       "failed on another active FE "
                                       "communicator rank"));
-                    restoreAcceptedGeneratedState();
-                    std::rethrow_exception(callback_failure);
+                    restoreAcceptedGeneratedStateAndRethrow(callback_failure);
                 }
             }
 
@@ -3725,8 +3870,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     } catch (...) {
                         const auto callback_failure =
                             std::current_exception();
-                        restoreAcceptedGeneratedState();
-                        std::rethrow_exception(callback_failure);
+                        restoreAcceptedGeneratedStateAndRethrow(callback_failure);
                     }
                 }
                 if (!before_step_accept) {
@@ -3931,8 +4075,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         } catch (...) {
                             const auto endpoint_failure =
                                 std::current_exception();
-                            restoreAcceptedGeneratedState();
-                            std::rethrow_exception(endpoint_failure);
+                            restoreAcceptedGeneratedStateAndRethrow(endpoint_failure);
                         }
                     }
 
@@ -3996,8 +4139,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         } catch (...) {
                             const auto endpoint_failure =
                                 std::current_exception();
-                            restoreAcceptedGeneratedState();
-                            std::rethrow_exception(endpoint_failure);
+                            restoreAcceptedGeneratedStateAndRethrow(endpoint_failure);
                         }
                     }
                 }
@@ -4028,8 +4170,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                           "TimeLoop: final candidate "
                                           "acceptance gate failed on another "
                                           "active FE communicator rank"));
-                        restoreAcceptedGeneratedState();
-                        std::rethrow_exception(gate_failure);
+                        restoreAcceptedGeneratedStateAndRethrow(gate_failure);
                     }
 
                     constexpr int maximum_known_reason =
@@ -4253,8 +4394,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                             attempt_state.commit();
                             throw;
                         }
-                        restoreAcceptedGeneratedState();
-                        std::rethrow_exception(commit_failure);
+                        restoreAcceptedGeneratedStateAndRethrow(commit_failure);
                     }
                 }
                 // All retry decisions are complete.  From this boundary
@@ -4346,7 +4486,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     : StepRejectReason::NonlinearSolveFailed;
 
             if (!adaptive) {
-                restoreAcceptedGeneratedState();
+                restoreAcceptedStateAfterFailedSolve();
                 if (nr.external_state_discontinuity &&
                     callbacks.on_step_rejected) {
                     callbacks.on_step_rejected(
@@ -4368,7 +4508,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 FE_THROW(FEException, "TimeLoop: nonlinear solve did not converge");
             }
 
-            restoreAcceptedGeneratedState();
+            restoreAcceptedStateAfterFailedSolve();
             if (callbacks.on_step_rejected) {
                 callbacks.on_step_rejected(
                     history, solve_rejection_reason, nr);
