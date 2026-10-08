@@ -14,6 +14,7 @@
 #include "Constraints/AffineConstraints.h"
 #include "Constraints/SmallCutAggregationCellIndex.h"
 #include "Core/FEException.h"
+#include "Core/HaloDiagnostics.h"
 #include "Core/Logger.h"
 #include "Dofs/EntityDofMap.h"
 #include "Elements/ReferenceElement.h"
@@ -6380,6 +6381,11 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             row_coupled_candidate_dofs,
             slave_all_cut,
             allow_unaggregated);
+        // Communicator-global counts; the run summary reports them even when
+        // the per-refresh diagnostic line is not printed.
+        diagnostics::recordAggregationHalo(
+            distributed_result.canonical_halo_limited_root_choices,
+            distributed_result.canonical_row_coupled_slaves_beyond_halo);
     } else {
         distributed_result.validation =
             DistributedAggregationValidation::DebugBypass;

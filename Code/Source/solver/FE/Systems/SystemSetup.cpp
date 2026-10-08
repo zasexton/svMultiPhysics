@@ -52,6 +52,7 @@
 #include "Quadrature/QuadratureFactory.h"
 
 #include "Core/FEConfig.h"
+#include "Core/HaloDiagnostics.h"
 #include "Core/KernelTrace.h"
 #include "Core/MpiCollectiveTrace.h"
 #include "Forms/MixedBlockKernelSet.h"
@@ -6522,6 +6523,8 @@ FESystem::buildActiveDistributedSparsityPatternFromBase(
         long long unavailable = static_cast<long long>(fill.n_unavailable_fill_columns);
         MPI_Allreduce(MPI_IN_PLACE, &unavailable, 1, MPI_LONG_LONG, MPI_SUM,
                       activeMpiCommunicator());
+        diagnostics::recordConstraintFillRejections(
+            static_cast<std::uint64_t>(std::max(unavailable, 0LL)));
         if (unavailable > 0) {
             FE_LOG_WARNING(
                 "FESystem: constraint sparsity refresh diagnostic=off_rank_constraint_fill_outside_halo"
