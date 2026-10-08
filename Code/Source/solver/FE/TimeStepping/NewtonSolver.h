@@ -170,6 +170,10 @@ struct NewtonOptions {
      * not commit irreversible side effects.  On failure the algebraic/history,
      * optional rate, auxiliary, and bordered states are restored before a
      * RestoredOuterFixedPointState callback rebuilds the entry generated state.
+     * When the failure left a constraint rebuild incomplete
+     * (FESystem::constraintRebuildIncomplete() on any rank), that callback runs
+     * once more, before the constraints are refreshed, so repeating it must be
+     * harmless.
      */
     struct ExternalStateFixedPointOptions {
         /**

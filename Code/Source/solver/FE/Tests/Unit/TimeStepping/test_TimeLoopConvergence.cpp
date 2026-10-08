@@ -3403,6 +3403,270 @@ TEST(TimeLoopCallbacks,
 }
 
 // ---------------------------------------------------------------------------
+// Failed constraint rebuilds inside the outer fixed point.
+//
+// GeneratedGeometryConstraint stands in for a constraint built from installed
+// generated state, such as the small-cut aggregation: apply() fails while a
+// rejected "geometry" is installed, and it depends structurally on the FE
+// constraint layout, which installing a cut-integration context advances.
+// installGeneratedGeometry() installs a geometry the way the application does,
+// setCutIntegrationContext() followed by rebuildConstraintState().  Geometry 0
+// is the accepted (and entry) geometry, geometry 1 the rejected iterate.
+
+namespace {
+
+struct GeneratedGeometryState {
+    int installed{0};
+    int rejected{1};
+    int rejected_applies{0};
+};
+
+class GeneratedGeometryConstraint final
+    : public svmp::FE::constraints::ISystemConstraint {
+public:
+    explicit GeneratedGeometryConstraint(
+        std::shared_ptr<GeneratedGeometryState> state)
+        : state_(std::move(state))
+    {
+    }
+
+    void apply(const svmp::FE::systems::FESystem&,
+               svmp::FE::constraints::AffineConstraints&) override
+    {
+        if (state_->installed == state_->rejected) {
+            ++state_->rejected_applies;
+            throw svmp::FE::systems::InvalidStateException(
+                "generated constraint rejected geometry " +
+                std::to_string(state_->installed));
+        }
+    }
+
+    bool updateValues(const svmp::FE::systems::FESystem&,
+                      svmp::FE::constraints::AffineConstraints&,
+                      double,
+                      double) override
+    {
+        return false;
+    }
+
+    [[nodiscard]] bool isTimeDependent() const noexcept override
+    {
+        return false;
+    }
+
+    [[nodiscard]] svmp::FE::constraints::ConstraintDependencyDeclaration
+    dependencyDeclaration() const override
+    {
+        auto out = ISystemConstraint::dependencyDeclaration();
+        out.structural.fe_constraint_layout = true;
+        return out;
+    }
+
+    [[nodiscard]] svmp::FE::systems::SetupStorageRequirements
+    storageRequirements() const noexcept override
+    {
+        return {};
+    }
+
+private:
+    std::shared_ptr<GeneratedGeometryState> state_;
+};
+
+void installGeneratedGeometry(svmp::FE::systems::FESystem& system,
+                              GeneratedGeometryState& state,
+                              int geometry)
+{
+    state.installed = geometry;
+    system.clearCutIntegrationContext();
+    system.rebuildConstraintState();
+}
+
+// Callback behaviour of one rollback scenario.
+struct GeneratedGeometryScenario {
+    // Install the entry geometry again at RestoredOuterFixedPointState.
+    bool restored_outer_reinstalls_entry{true};
+    // RestoredTimeStepState throws instead of reinstalling geometry 0.
+    bool restored_time_step_fails{false};
+};
+
+struct GeneratedGeometryRun {
+    std::shared_ptr<GeneratedGeometryState> state{
+        std::make_shared<GeneratedGeometryState>()};
+    svmp::FE::systems::FESystem* system{nullptr};
+    bool failing_attempt{true};
+    int outer_calls_in_attempt{0};
+    int restored_outer_callbacks{0};
+    int restored_time_step_callbacks{0};
+    int rejected_callbacks{0};
+};
+
+// Runs one backward-Euler step whose first attempt rejects the geometry of
+// its second outer fixed-point iterate (the first refresh after the entry).
+std::vector<Real> runGeneratedGeometryRollback(
+    GeneratedGeometryRun& run,
+    const GeneratedGeometryScenario& scenario,
+    std::shared_ptr<svmp::FE::timestepping::StepController> controller,
+    std::function<void(const svmp::FE::timestepping::TimeHistory&,
+                       const svmp::FE::FEException&)>
+        inspect_expected_exception)
+{
+    using StateSyncPoint = svmp::FE::timestepping::NewtonOptions::
+        StateSynchronizationPoint;
+    return runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::BackwardEuler,
+        /*dt=*/0.1,
+        /*t_end=*/0.1,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        std::move(controller),
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory&) {
+            callbacks.on_step_start =
+                [&](const svmp::FE::timestepping::TimeHistory&) {
+                    run.outer_calls_in_attempt = 0;
+                };
+            callbacks.on_step_rejected =
+                [&](const svmp::FE::timestepping::TimeHistory&,
+                    svmp::FE::timestepping::StepRejectReason,
+                    const svmp::FE::timestepping::NewtonReport&) {
+                    ++run.rejected_callbacks;
+                    run.failing_attempt = false;
+                };
+        },
+        std::move(inspect_expected_exception),
+        [&](svmp::FE::timestepping::TimeLoopOptions& options,
+            svmp::FE::FieldId) {
+            options.newton.external_state_fixed_point.enabled = true;
+            options.newton.external_state_fixed_point.max_iterations = 4;
+            options.newton.synchronize_state =
+                [&](const svmp::FE::systems::SystemStateView&,
+                    StateSyncPoint point) {
+                    ASSERT_NE(run.system, nullptr);
+                    if (point == StateSyncPoint::OuterFixedPointState) {
+                        ++run.outer_calls_in_attempt;
+                        if (run.failing_attempt &&
+                            run.outer_calls_in_attempt == 2) {
+                            installGeneratedGeometry(
+                                *run.system, *run.state, 1);
+                        }
+                    } else if (point == StateSyncPoint::
+                                            RestoredOuterFixedPointState) {
+                        ++run.restored_outer_callbacks;
+                        if (scenario.restored_outer_reinstalls_entry) {
+                            installGeneratedGeometry(
+                                *run.system, *run.state, 0);
+                        }
+                    } else if (point ==
+                               StateSyncPoint::RestoredTimeStepState) {
+                        ++run.restored_time_step_callbacks;
+                        if (scenario.restored_time_step_fails) {
+                            throw svmp::FE::systems::InvalidStateException(
+                                "accepted geometry rejected");
+                        }
+                        installGeneratedGeometry(
+                            *run.system, *run.state, 0);
+                    }
+                };
+        },
+        [&](svmp::FE::systems::FESystem& system, svmp::FE::FieldId) {
+            run.system = &system;
+            system.addSystemConstraint(
+                std::make_unique<GeneratedGeometryConstraint>(run.state));
+        });
+}
+
+} // namespace
+
+// A refresh whose constraint rebuild fails leaves the iterate's geometry
+// installed with a stale constraint revision snapshot.  The rollback used to
+// call updateConstraints() first, which rebuilt the whole FE setup from the
+// iterate's geometry (not the entry's), failed the same way and left the
+// system without a setup; the time loop's restore then stopped on
+// "FESystem: setup() has not been called" (24-rank sphere, R/h = 16).  The
+// rollback now reinstalls the entry geometry first: the iterate is rejected
+// once, the system stays set up, and a fixed-step run stops with the
+// rejection itself.
+TEST(TimeLoopCallbacks,
+     FailedConstraintRebuildRollbackReinstallsEntryGeometryFirst)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    GeneratedGeometryRun run;
+    bool saw_exception = false;
+    const auto final_values = runGeneratedGeometryRollback(
+        run,
+        GeneratedGeometryScenario{},
+        /*controller=*/{},
+        [&](const svmp::FE::timestepping::TimeHistory& history,
+            const svmp::FE::FEException& error) {
+            saw_exception = true;
+            const std::string message = error.what();
+            EXPECT_NE(message.find("rejected geometry 1"),
+                      std::string::npos)
+                << message;
+            EXPECT_EQ(message.find("setup() has not been called"),
+                      std::string::npos)
+                << message;
+            EXPECT_EQ(message.find("rollback failure"), std::string::npos)
+                << message;
+            ASSERT_NE(run.system, nullptr);
+            EXPECT_TRUE(run.system->isSetup());
+            EXPECT_FALSE(run.system->constraintRebuildIncomplete());
+            EXPECT_EQ(run.state->installed, 0);
+            EXPECT_EQ(history.stepIndex(), 0);
+            EXPECT_NEAR(history.time(), 0.0, 1e-15);
+            EXPECT_TRUE(std::equal(history.uSpan().begin(),
+                                   history.uSpan().end(),
+                                   history.uPrevSpan().begin()));
+        });
+
+    EXPECT_TRUE(final_values.empty());
+    EXPECT_TRUE(saw_exception);
+    // The rejected geometry was built once (by the refresh), not again by an
+    // FE setup rebuilt from it during the rollback.
+    EXPECT_EQ(run.state->rejected_applies, 1);
+    EXPECT_GE(run.restored_outer_callbacks, 1);
+    EXPECT_EQ(run.restored_time_step_callbacks, 1);
+}
+
+// The same failure with an adaptive controller: the rollback leaves a usable
+// state, so the step is retried with half the step and the run completes.
+TEST(TimeLoopCallbacks,
+     FailedConstraintRebuildRollbackRetriesFromUsableState)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto controller =
+        std::make_shared<RecordingAcceptanceGateController>();
+    GeneratedGeometryRun run;
+    const auto final_values = runGeneratedGeometryRollback(
+        run, GeneratedGeometryScenario{}, controller, /*inspect=*/{});
+
+    ASSERT_EQ(final_values.size(), 4u);
+    EXPECT_EQ(run.rejected_callbacks, 1);
+    ASSERT_EQ(controller->rejected.size(), 1u);
+    EXPECT_EQ(controller->rejected.front().second,
+              svmp::FE::timestepping::StepRejectReason::NonlinearSolveFailed);
+    EXPECT_EQ(controller->accepted.size(), 2u);
+    EXPECT_EQ(run.state->rejected_applies, 1);
+}
+
+// ---------------------------------------------------------------------------
 // End time after many fixed steps.
 
 namespace {

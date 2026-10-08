@@ -6391,6 +6391,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     buildAssemblyPlans();
     constraint_structure_signature_ = computeConstraintStructureSignature(affine_constraints_);
     ++sparsity_pattern_revision_;
+    constraint_rebuild_incomplete_ = false;
     is_setup_ = true;
     try {
         refreshGeneratedBoundaryNitscheTraceCertificates(
@@ -6902,6 +6903,8 @@ void FESystem::beginCutIntegrationContextTransaction()
             finalized_small_cut_aggregation_prolongations_;
         candidate_backup->generated_boundary_nitsche_trace_certificates =
             generated_boundary_nitsche_trace_certificates_;
+        candidate_backup->constraint_rebuild_incomplete =
+            constraint_rebuild_incomplete_;
         for (const auto& definition : system_constraint_defs_) {
             const auto* aggregation =
                 dynamic_cast<
@@ -7017,6 +7020,8 @@ void FESystem::rollbackCutIntegrationContextTransaction()
             backup.finalized_small_cut_aggregation_prolongations;
         generated_boundary_nitsche_trace_certificates_ =
             backup.generated_boundary_nitsche_trace_certificates;
+        constraint_rebuild_incomplete_ =
+            backup.constraint_rebuild_incomplete;
         std::size_t aggregation_checkpoint = 0u;
         for (auto& definition : system_constraint_defs_) {
             auto* aggregation =
@@ -7065,6 +7070,10 @@ void FESystem::rollbackCutIntegrationContextTransaction()
 void FESystem::rebuildConstraintState()
 {
     requireSetup();
+    // Cleared only when the rebuild completes: a failure below leaves the
+    // affine constraints and the revision snapshot behind the installed
+    // cut-integration context (see constraintRebuildIncomplete()).
+    constraint_rebuild_incomplete_ = true;
 
     requireConsistentConstraintCallbackShape(
         *this,
@@ -7210,6 +7219,7 @@ void FESystem::rebuildConstraintState()
         cut_integration_context_ == nullptr);
     buildConstraintSummary();
     invalidateAnalysisCache();
+    constraint_rebuild_incomplete_ = false;
 }
 
 void FESystem::buildAssemblyPlans()

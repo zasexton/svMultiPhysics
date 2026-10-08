@@ -1793,6 +1793,22 @@ public:
     // ---- Constraints lifecycle ----
     void updateConstraints(double time, double dt = 0.0);
     void rebuildConstraintState();
+    /**
+     * @brief True while the constraint state of the installed cut-integration
+     * context is incomplete: the last rebuildConstraintState() threw (it had
+     * already cleared the affine constraints) and no setup(), successful
+     * rebuild or transaction rollback has replaced that state since.
+     *
+     * The constraint revision snapshot then predates the installed context,
+     * so updateConstraints() would rebuild the whole FE setup from that
+     * context.  A caller that restores an earlier state reinstalls the
+     * generated state of that state first.  Rank-local; rebuildConstraintState()
+     * coordinates its failures, so the flag agrees across the communicator.
+     */
+    [[nodiscard]] bool constraintRebuildIncomplete() const noexcept
+    {
+        return constraint_rebuild_incomplete_;
+    }
     [[nodiscard]] constraints::ConstraintDependencyDeclaration constraintDependencyDeclaration() const;
     [[nodiscard]] constraints::ConstraintRevisionSnapshot constraintRevisionSnapshot() const noexcept;
     [[nodiscard]] bool constraintStateStaleForCurrentRevisions() const;
@@ -3011,6 +3027,7 @@ private:
             const constraints::SmallCutAggregationConstraint::
                 LifecycleCheckpoint>>
             small_cut_aggregation_lifecycle_checkpoints{};
+        bool constraint_rebuild_incomplete{false};
     };
     std::unique_ptr<CutIntegrationContextTransactionBackup>
         cut_integration_context_transaction_backup_{};
@@ -3040,6 +3057,7 @@ private:
     SetupInputs last_setup_inputs_{};
     bool has_last_setup_{false};
     constraints::ConstraintRevisionSnapshot constraint_revision_snapshot_{};
+    bool constraint_rebuild_incomplete_{false};
     std::uint64_t constraint_time_epoch_{0};
     bool has_last_constraint_update_time_{false};
     double last_constraint_update_time_{0.0};

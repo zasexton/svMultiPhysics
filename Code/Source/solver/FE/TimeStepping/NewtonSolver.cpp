@@ -12501,6 +12501,33 @@ NewtonReport NewtonSolver::solveStep(
             return;
         }
         restoreEntryAlgebraicState();
+        // A refresh that failed while it rebuilt the constraints of a newly
+        // installed generated state (FESystem::constraintRebuildIncomplete())
+        // leaves that state installed: the generated state of the failed
+        // iterate, not of the entry state.  updateConstraints() would then
+        // rebuild the whole FE setup from the iterate's generated state (so
+        // the "entry" constraints are built from the wrong geometry and can
+        // fail where the entry build passed), and a failure there leaves the
+        // system without a setup.  Let the callback reinstall the generated
+        // state of the restored entry state first; it rebuilds the
+        // constraints for it, and the sequence below then runs as for any
+        // other rollback.  Decided on every rank of the communicator.
+        const bool constraint_rebuild_incomplete =
+            anyRank(system.constraintRebuildIncomplete());
+        if (constraint_rebuild_incomplete && options_.synchronize_state) {
+            history.updateGhosts();
+            auto state = makeStateView(history, solve_time);
+            std::optional<assembly::TimeIntegrationContext> time_context;
+            if (system.temporalOrder() > 0) {
+                time_context = transient.integrator().buildContext(
+                    system.temporalOrder(), state);
+                state.time_integration = &(*time_context);
+            }
+            options_.synchronize_state(
+                state,
+                NewtonOptions::StateSynchronizationPoint::
+                    RestoredOuterFixedPointState);
+        }
         system.updateConstraints(solve_time, history.dt());
         synchronizeOuterState(
             NewtonOptions::StateSynchronizationPoint::
