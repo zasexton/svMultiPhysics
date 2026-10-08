@@ -486,35 +486,57 @@ void mixRuleIdentities(std::uint64_t& hash,
             "free-surface snapshot ownership collective returned a malformed identity stream");
     }
 
-    std::map<OwnershipRuleIdentity, std::uint64_t> globally_owned_by_identity;
+    // The global owned rules sorted by identity (the order of the former
+    // std::map), identities unique.
+    std::vector<OwnedRuleDigest> globally_owned;
+    globally_owned.reserve(global_owned_values.size() / width);
     for (std::size_t offset = 0; offset < global_owned_values.size();
          offset += width) {
         // Each record is the identity followed by its content digest; copy
         // only the identity words into the identity array.
-        OwnershipRuleIdentity identity{};
+        OwnedRuleDigest owned{};
         std::copy_n(global_owned_values.begin() +
                         static_cast<std::ptrdiff_t>(offset),
                     static_cast<std::ptrdiff_t>(identity_width),
-                    identity.begin());
-        const auto content_digest =
-            global_owned_values[offset + identity_width];
-        if (!globally_owned_by_identity.emplace(identity, content_digest)
-                 .second) {
+                    owned.identity.begin());
+        owned.content_digest = global_owned_values[offset + identity_width];
+        globally_owned.push_back(owned);
+    }
+    const auto by_identity = [](const OwnedRuleDigest& a,
+                                const OwnedRuleDigest& b) {
+        return a.identity < b.identity;
+    };
+    std::sort(globally_owned.begin(), globally_owned.end(), by_identity);
+    for (std::size_t index = 1; index < globally_owned.size(); ++index) {
+        if (globally_owned[index].identity ==
+            globally_owned[index - 1u].identity) {
             ++ledger.duplicate_rule_identity_count;
             throw std::invalid_argument(
                 "free-surface snapshot found a rule owned by more than one rank");
         }
     }
+    const auto find_owned = [&globally_owned](
+                                const OwnershipRuleIdentity& identity)
+        -> const OwnedRuleDigest* {
+        const auto found = std::lower_bound(
+            globally_owned.begin(), globally_owned.end(), identity,
+            [](const OwnedRuleDigest& owned,
+               const OwnershipRuleIdentity& key) {
+                return owned.identity < key;
+            });
+        return found != globally_owned.end() && found->identity == identity
+                   ? &*found
+                   : nullptr;
+    };
     for (std::size_t index = 0; index < records.size(); ++index) {
         const auto& record = records[index];
-        const auto found = globally_owned_by_identity.find(
-            ownershipRuleIdentity(record));
-        if (found == globally_owned_by_identity.end()) {
+        const auto* found = find_owned(ownershipRuleIdentity(record));
+        if (found == nullptr) {
             ++ledger.invalid_global_identity_count;
             throw std::invalid_argument(
                 "free-surface snapshot found a local rule without one global owner");
         }
-        if (found->second != digest_of(index)) {
+        if (found->content_digest != digest_of(index)) {
             ++ledger.invalid_global_identity_count;
             throw std::invalid_argument(
                 "free-surface snapshot found local rule content that differs "
@@ -531,21 +553,12 @@ void mixRuleIdentities(std::uint64_t& hash,
                 std::to_string(
                     record.reference_rule.provenance
                         .parent_boundary_entity_global_id) +
-                " owner_digest=" + std::to_string(found->second) +
+                " owner_digest=" + std::to_string(found->content_digest) +
                 " local_digest=" +
                 std::to_string(digest_of(index)));
         }
     }
-    ledger.global_owned_rule_count = globally_owned_by_identity.size();
-    std::vector<OwnedRuleDigest> globally_owned;
-    globally_owned.reserve(globally_owned_by_identity.size());
-    for (const auto& [identity, content_digest] :
-         globally_owned_by_identity) {
-        globally_owned.push_back(OwnedRuleDigest{
-            .identity = identity,
-            .content_digest = content_digest,
-        });
-    }
+    ledger.global_owned_rule_count = globally_owned.size();
     return globally_owned;
 }
 
