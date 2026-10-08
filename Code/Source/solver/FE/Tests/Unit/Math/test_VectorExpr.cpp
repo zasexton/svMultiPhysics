@@ -13,6 +13,7 @@
 #include <memory>
 #include <atomic>
 #include <type_traits>
+#include "Tests/Unit/TimingAssertions.h"
 
 using namespace svmp::FE::math;
 
@@ -301,7 +302,10 @@ TEST_F(VectorExprTest, PerformanceVsNaive) {
 
     // Expression templates should be faster (or at least not slower)
     // We expect expression templates to be at least as fast
-    EXPECT_LE(expr_time, naive_time * 1.1);  // Allow 10% tolerance
+    // Opt-in (SVMP_ENABLE_TIMING_ASSERTIONS=1): wall-clock limits flake on shared nodes.
+    if (::svmp::FE::test::timingAssertionsEnabled()) {
+        EXPECT_LE(expr_time, naive_time * 1.1);  // Allow 10% tolerance
+    }
 
     // Results should be identical
     for (size_t i = 0; i < 4; ++i) {

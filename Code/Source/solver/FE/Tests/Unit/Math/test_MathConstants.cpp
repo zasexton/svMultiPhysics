@@ -9,6 +9,7 @@
 #include <limits>
 #include <type_traits>
 #include <chrono>
+#include "Tests/Unit/TimingAssertions.h"
 
 using namespace svmp::FE::math;
 
@@ -366,7 +367,10 @@ TEST_F(MathConstantsTest, ConstantAccessPerformance) {
 #else
     const int threshold_us = 1000000; // 1000ms for debug
 #endif
-    EXPECT_LT(duration.count(), threshold_us) << "Constant access should be < " << threshold_us/1000 << "ms for 100M iterations";
+    // Opt-in (SVMP_ENABLE_TIMING_ASSERTIONS=1): wall-clock limits flake on shared nodes.
+    if (::svmp::FE::test::timingAssertionsEnabled()) {
+        EXPECT_LT(duration.count(), threshold_us) << "Constant access should be < " << threshold_us/1000 << "ms for 100M iterations";
+    }
 
     // Prevent optimization
     EXPECT_GT(sum, 0.0);

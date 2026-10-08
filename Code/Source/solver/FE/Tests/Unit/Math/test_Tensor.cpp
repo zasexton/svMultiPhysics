@@ -11,6 +11,7 @@
 #include <cmath>
 #include <random>
 #include <chrono>
+#include "Tests/Unit/TimingAssertions.h"
 
 using namespace svmp::FE::math;
 
@@ -477,7 +478,10 @@ TEST_F(TensorTest, PerformanceContraction) {
 #else
     const int threshold_us = 500000;  // 500ms for debug
 #endif
-    EXPECT_LT(duration.count(), threshold_us) << "Tensor contraction should be < " << threshold_us/1000 << "ms for 1M iterations";
+    // Opt-in (SVMP_ENABLE_TIMING_ASSERTIONS=1): wall-clock limits flake on shared nodes.
+    if (::svmp::FE::test::timingAssertionsEnabled()) {
+        EXPECT_LT(duration.count(), threshold_us) << "Tensor contraction should be < " << threshold_us/1000 << "ms for 1M iterations";
+    }
 }
 
 TEST_F(TensorTest, PerformanceDoubleContraction) {
@@ -494,7 +498,10 @@ TEST_F(TensorTest, PerformanceDoubleContraction) {
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
-    EXPECT_LT(duration.count(), 200000) << "Double contraction should be < 200ms for 100K iterations";
+    // Opt-in (SVMP_ENABLE_TIMING_ASSERTIONS=1): wall-clock limits flake on shared nodes.
+    if (::svmp::FE::test::timingAssertionsEnabled()) {
+        EXPECT_LT(duration.count(), 200000) << "Double contraction should be < 200ms for 100K iterations";
+    }
 }
 
 // =============================================================================

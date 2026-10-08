@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 #include <chrono>
+#include "Tests/Unit/TimingAssertions.h"
 
 using namespace svmp::FE::math;
 
@@ -586,7 +587,10 @@ TEST_F(VectorTest, PerformanceSmallVectors) {
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
     // Should be very fast for small vectors
-    EXPECT_LT(duration.count(), 100000) << "Small vector ops should be < 100ms for 1M iterations";
+    // Opt-in (SVMP_ENABLE_TIMING_ASSERTIONS=1): wall-clock limits flake on shared nodes.
+    if (::svmp::FE::test::timingAssertionsEnabled()) {
+        EXPECT_LT(duration.count(), 100000) << "Small vector ops should be < 100ms for 1M iterations";
+    }
 }
 
 // =============================================================================

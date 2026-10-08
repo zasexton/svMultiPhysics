@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 #include <chrono>
+#include "Tests/Unit/TimingAssertions.h"
 
 using namespace svmp::FE::math;
 
@@ -593,7 +594,10 @@ TEST_F(MatrixTest, Performance2x2Operations) {
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
-    EXPECT_LT(duration.count(), 50000) << "2x2 determinant should be < 50ms for 1M iterations";
+    // Opt-in (SVMP_ENABLE_TIMING_ASSERTIONS=1): wall-clock limits flake on shared nodes.
+    if (::svmp::FE::test::timingAssertionsEnabled()) {
+        EXPECT_LT(duration.count(), 50000) << "2x2 determinant should be < 50ms for 1M iterations";
+    }
 }
 
 TEST_F(MatrixTest, Performance3x3Inverse) {
@@ -609,7 +613,10 @@ TEST_F(MatrixTest, Performance3x3Inverse) {
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
-    EXPECT_LT(duration.count(), 100000) << "3x3 inverse should be < 100ms for 100K iterations";
+    // Opt-in (SVMP_ENABLE_TIMING_ASSERTIONS=1): wall-clock limits flake on shared nodes.
+    if (::svmp::FE::test::timingAssertionsEnabled()) {
+        EXPECT_LT(duration.count(), 100000) << "3x3 inverse should be < 100ms for 100K iterations";
+    }
 }
 
 // =============================================================================
