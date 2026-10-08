@@ -193,7 +193,9 @@ std::size_t completeOwnedBoundaryDofs(const systems::FESystem& system,
         }
         added.emplace(dof, k);
     }
-    reportCompletion(comm, rank, size, context, added.size());
+    if (!context.empty()) {
+        reportCompletion(comm, rank, size, context, added.size());
+    }
     if (added.empty()) {
         return 0;
     }
