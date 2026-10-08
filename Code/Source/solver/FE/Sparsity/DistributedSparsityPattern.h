@@ -297,6 +297,14 @@ public:
     void addEntries(GlobalIndex global_row, std::span<const GlobalIndex> global_cols);
 
     /**
+     * @brief Replace an owned row with a sorted, unique column list (Building state)
+     *
+     * Equivalent to clearing the row and adding `sorted_unique_cols`, without
+     * re-sorting.  Throws if the list is not strictly increasing or out of range.
+     */
+    void setOwnedRowSortedUnique(GlobalIndex global_row, std::vector<GlobalIndex> sorted_unique_cols);
+
+    /**
      * @brief Add element couplings (square)
      *
      * @param global_dofs Array of global DOF indices
