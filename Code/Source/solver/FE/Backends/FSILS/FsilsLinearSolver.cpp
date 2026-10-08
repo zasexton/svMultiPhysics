@@ -2443,11 +2443,16 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
     };
 
     // Face setup: restore from cache (fast path) or build from scratch.
-    // Cached faces hold internal node indices of the operator layout they were
-    // built for; the layout changes when the sparsity is refreshed.
+    // Cached faces hold internal node indices of the operator layout.  A
+    // single (vector) layout keeps its node set, hence its internal ordering,
+    // across in-place sparsity refreshes; a separate operator layout with
+    // extra fill-column nodes is rebuilt with each refresh, so the cache is
+    // keyed by its stamp (0 = the vector layout).
+    const std::uint64_t operator_layout_key =
+        A->hasSeparateOperatorLayout() ? shared_layout->layout_stamp : std::uint64_t{0};
     const bool local_faces_cache_valid =
         num_added_faces > 0 && dof > 0 && !faces_dirty_ &&
-        cached_faces_layout_stamp_ == shared_layout->layout_stamp &&
+        cached_faces_layout_stamp_ == operator_layout_key &&
         cached_faces_.size() == static_cast<std::size_t>(num_added_faces);
     bool use_cached_faces = local_faces_cache_valid;
     if (num_added_faces > 0 && dof > 0 && lhs.commu.nTasks > 1) {
@@ -2772,7 +2777,7 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
             }
         }
         faces_dirty_ = false;
-        cached_faces_layout_stamp_ = shared_layout->layout_stamp;
+        cached_faces_layout_stamp_ = operator_layout_key;
     }
 
     lhs.reduced_updates.clear();

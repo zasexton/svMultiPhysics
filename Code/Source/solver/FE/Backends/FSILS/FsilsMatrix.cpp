@@ -1894,12 +1894,18 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
         return owned_nodes.empty() ? owned_node_start + old
                                    : owned_nodes[static_cast<std::size_t>(old)];
     };
-    std::vector<std::vector<int>> owned_row_col_nodes(static_cast<std::size_t>(owned_node_count));
+    // Stored flat (CSR over owned nodes) to keep this per-refresh step free of
+    // per-row allocations.
+    std::vector<std::size_t> owned_col_ptr(static_cast<std::size_t>(owned_node_count) + 1u, 0u);
+    std::vector<int> owned_col_nodes;
+    owned_col_nodes.reserve(static_cast<std::size_t>(pattern.getLocalNnz() / std::max(dof, 1)) +
+                            static_cast<std::size_t>(owned_node_count));
     {
         std::vector<int> dof_row_nodes;
+        std::vector<int> node_cols;
         for (int old = 0; old < owned_node_count; ++old) {
             const int global_node = owned_global_node(old);
-            auto& node_cols = owned_row_col_nodes[static_cast<std::size_t>(old)];
+            node_cols.clear();
             for (int r = 0; r < dof; ++r) {
                 const GlobalIndex row_dof = static_cast<GlobalIndex>(global_node) * dof + r;
                 gather_row_nodes(row_dof, dof_row_nodes);
@@ -1911,8 +1917,15 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
             if (diagonal == node_cols.end() || *diagonal != global_node) {
                 node_cols.insert(diagonal, global_node);
             }
+            owned_col_nodes.insert(owned_col_nodes.end(), node_cols.begin(), node_cols.end());
+            owned_col_ptr[static_cast<std::size_t>(old) + 1u] = owned_col_nodes.size();
         }
     }
+    auto owned_row_cols = [&](int old) {
+        return std::span<const int>(owned_col_nodes.data() + owned_col_ptr[static_cast<std::size_t>(old)],
+                                    owned_col_ptr[static_cast<std::size_t>(old) + 1u] -
+                                        owned_col_ptr[static_cast<std::size_t>(old)]);
+    };
 
     // Column nodes outside the vector layout (owned nodes + ghost-row nodes):
     // constraint-elimination fill whose columns lie beyond the ghost layers.
@@ -1920,12 +1933,10 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
     // pattern's layout.  Decided collectively: the halo plans of every rank
     // change when any rank has extra columns.
     std::vector<int> extra_column_nodes;
-    for (const auto& node_cols : owned_row_col_nodes) {
-        for (const int node : node_cols) {
-            if (!is_owned_node(node) &&
-                !std::binary_search(ghost_nodes.begin(), ghost_nodes.end(), node)) {
-                extra_column_nodes.push_back(node);
-            }
+    for (const int node : owned_col_nodes) {
+        if (!is_owned_node(node) &&
+            !std::binary_search(ghost_nodes.begin(), ghost_nodes.end(), node)) {
+            extra_column_nodes.push_back(node);
         }
     }
     std::sort(extra_column_nodes.begin(), extra_column_nodes.end());
@@ -1985,7 +1996,7 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
                             "FsilsMatrix: ghost node missing from its own layout");
                 node_col_ptr.push_back(col_old);
             } else {
-                for (const int col_global_node : owned_row_col_nodes[static_cast<std::size_t>(old)]) {
+                for (const int col_global_node : owned_row_cols(old)) {
                     const int col_old = shared->globalNodeToOld(col_global_node);
                     if (col_old < 0) {
                         // Only extra column nodes are absent, and only from
