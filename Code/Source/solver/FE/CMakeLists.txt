@@ -59,6 +59,7 @@ option(FE_ENABLE_MPI "Enable MPI support for distributed DOF maps" ON)
 option(FE_ENABLE_EIGEN "Enable Eigen3 for optimized Math operations" OFF)
 option(FE_ENABLE_TRILINOS "Enable Trilinos backend support" OFF)
 option(FE_ENABLE_PETSC "Enable PETSc backend support" OFF)
+option(FE_ENABLE_MUMPS "Enable distributed sparse direct solves with an external MUMPS build (SV_MUMPS_DIR)" OFF)
 option(FE_ENABLE_ASSEMBLY "Enable Assembly module (work-in-progress)" OFF)
 set(FE_ENABLE_LLVM_JIT "AUTO" CACHE STRING "LLVM OrcJIT backend for FE/Forms: AUTO, ON, or OFF")
 set_property(CACHE FE_ENABLE_LLVM_JIT PROPERTY STRINGS AUTO ON OFF)
@@ -1412,6 +1413,7 @@ set(FE_BACKENDS_HEADERS
     Backends/FSILS/FsilsAmg.h
     Backends/FSILS/FsilsBlockPreconditioners.h
     Backends/FSILS/FsilsDirectSolver.h
+    Backends/MUMPS/MumpsDistributedSolver.h
 
     # Vendored FSILS linear solver (copy of Code/Source/liner_solver)
     Backends/FSILS/liner_solver/add_bc_mul.h
@@ -1474,6 +1476,7 @@ set(FE_BACKENDS_SOURCES
     Backends/FSILS/FsilsAmg.cpp
     Backends/FSILS/FsilsBlockPreconditioners.cpp
     Backends/FSILS/FsilsDirectSolver.cpp
+    Backends/MUMPS/MumpsDistributedSolver.cpp
     Backends/FSILS/FsilsLegacyStatics.cpp
 
     # Vendored FSILS linear solver (copy of Code/Source/liner_solver)
@@ -1591,6 +1594,11 @@ endif()
 # Configure Eigen if enabled
 if(FE_ENABLE_EIGEN)
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/EnableEigen.cmake)
+endif()
+
+# Configure MUMPS if enabled (external installation, never vendored)
+if(FE_ENABLE_MUMPS)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/EnableMUMPS.cmake)
 endif()
 
 
@@ -1811,6 +1819,13 @@ if(FE_ENABLE_EIGEN)
         target_include_directories(svfe PUBLIC ${FE_EIGEN_INCLUDE_DIR})
     endif()
     target_compile_definitions(svfe PUBLIC FE_HAS_EIGEN=1)
+endif()
+
+# MUMPS is configured before the `svfe` target exists (EnableMUMPS.cmake).
+if(FE_ENABLE_MUMPS)
+    target_include_directories(svfe SYSTEM PUBLIC ${FE_MUMPS_INCLUDE_DIR})
+    target_link_libraries(svfe PUBLIC ${FE_MUMPS_LIBRARIES})
+    target_compile_definitions(svfe PUBLIC FE_HAS_MUMPS=1)
 endif()
 
 # LLVM is configured before the `svfe` target exists (EnableLLVMJIT.cmake), so
@@ -3461,6 +3476,7 @@ if(FE_STANDALONE_BUILD)
     message(STATUS "   Eigen3:           ${FE_ENABLE_EIGEN}")
     message(STATUS "   Trilinos:         ${FE_ENABLE_TRILINOS}")
     message(STATUS "   PETSc:            ${FE_ENABLE_PETSC}")
+    message(STATUS "   MUMPS:            ${FE_ENABLE_MUMPS}")
     message(STATUS "   Python bindings:  ${FE_ENABLE_PYTHON}")
     message(STATUS "")
     message(STATUS " Development:")

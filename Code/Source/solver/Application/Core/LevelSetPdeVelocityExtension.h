@@ -71,17 +71,25 @@ pdeVelocityExtensionOperatorFromToken(std::string_view token);
 //     symmetric positive definite harmonic operator only; much less fill in
 //     3D.  Its results differ from LuColamd at round-off level (they are still
 //     independent of the partition and the rank count).
+//   Mumps (opt-in, FE_ENABLE_MUMPS builds): MUMPS LDL^T (METIS ordering)
+//     distributed over every rank of the communicator; positive definite
+//     mode for the harmonic operator, symmetric indefinite otherwise.  The
+//     components are factorized and solved one after another on all ranks
+//     (no per-rank component solves); every rank receives the solution.  Its
+//     results differ from LuColamd at round-off level and may depend on the
+//     rank count at round-off level.
 enum class PdeVelocityExtensionFactorization : std::uint8_t {
   LuColamd,
   LdltAmd,
+  Mumps,
 };
 
 [[nodiscard]] std::string_view pdeVelocityExtensionFactorizationName(
     PdeVelocityExtensionFactorization factorization) noexcept;
 
 // Maps a token (case, '_' and '-' insensitive) to a factorization:
-// lu / lu_colamd / default -> LuColamd, ldlt / ldlt_amd -> LdltAmd.  Any
-// other token returns nullopt.
+// lu / lu_colamd / default -> LuColamd, ldlt / ldlt_amd -> LdltAmd,
+// mumps / mumps_distributed -> Mumps.  Any other token returns nullopt.
 [[nodiscard]] std::optional<PdeVelocityExtensionFactorization>
 pdeVelocityExtensionFactorizationFromToken(std::string_view token);
 

@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "Application/Core/LevelSetPdeVelocityExtension.h"
+#include "FE/Backends/MUMPS/MumpsDistributedSolver.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
 
@@ -21,6 +22,7 @@
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <optional>
 #include <string>
@@ -100,7 +102,9 @@ std::array<double, 2> uAt(double x, double y)
 // Extension on `mesh`, returned per vertex coordinate (rounded key).
 std::map<std::pair<long long, long long>, std::array<double, 2>> extend(
     const svmp::Mesh& mesh, const svmp::MeshComm& comm,
-    PdeVelocityExtensionOperator op)
+    PdeVelocityExtensionOperator op,
+    application::core::PdeVelocityExtensionFactorization factorization =
+        application::core::PdeVelocityExtensionFactorization::LuColamd)
 {
   const auto n = mesh.n_vertices();
   const auto& X = mesh.X_ref();
@@ -135,6 +139,7 @@ std::map<std::pair<long long, long long>, std::array<double, 2>> extend(
        .constrained_components = {true, false, false}}};
   PdeVelocityExtensionOptions options;
   options.op = op;
+  options.factorization = factorization;
   std::vector<double> out;
   (void)application::core::extendVelocityByPde(
       mesh, comm, phi, source, 2u, known, 2u,
@@ -209,7 +214,9 @@ struct PdeCachedRun {
 PdeCachedRun extendCached(const svmp::Mesh& mesh, const svmp::MeshComm& comm,
                           PdeVelocityExtensionOperator op, double scale,
                           const std::vector<std::pair<long long, long long>>& extra,
-                          application::core::PdeVelocityExtensionCache* cache)
+                          application::core::PdeVelocityExtensionCache* cache,
+                          application::core::PdeVelocityExtensionFactorization factorization =
+                              application::core::PdeVelocityExtensionFactorization::LuColamd)
 {
   const auto n = mesh.n_vertices();
   const auto& X = mesh.X_ref();
@@ -247,6 +254,7 @@ PdeCachedRun extendCached(const svmp::Mesh& mesh, const svmp::MeshComm& comm,
        .constrained_components = {true, false, false}}};
   PdeVelocityExtensionOptions options;
   options.op = op;
+  options.factorization = factorization;
   PdeCachedRun out;
   const auto report = application::core::extendVelocityByPde(
       mesh, comm, phi, source, 2u, known, 2u,
@@ -540,5 +548,83 @@ TEST(LevelSetPdeVelocityExtensionMPI, FourRankDistributedSolvesMatchTheReplicate
       EXPECT_TRUE(cache.empty());
     }
     check(1.0, {}, false, "after the failure");
+  }
+}
+
+// Opt-in MUMPS factorization distributed over all ranks (any rank count):
+// the result matches the serial LU solve to round-off, a reused
+// factorization is applied collectively, and components are never solved on
+// separate ranks.
+TEST(LevelSetPdeVelocityExtensionMPI, MumpsFactorizationMatchesSerialLuOnAnyRankCount)
+{
+  if (!svmp::FE::backends::mumpsAvailable()) {
+    GTEST_SKIP() << "Built without FE_ENABLE_MUMPS.";
+  }
+  int size = 1;
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  using application::core::PdeVelocityExtensionFactorization;
+
+  const auto arrays = makePdeArrays();
+  auto distributed = std::make_shared<svmp::Mesh>(svmp::MeshComm(MPI_COMM_WORLD));
+  distributed->build_from_arrays_global_and_partition(
+      2, arrays.x, arrays.offsets, arrays.connectivity, arrays.shapes,
+      svmp::PartitionHint::Cells, /*ghost_layers=*/3,
+      {{"partition_method", "block"}});
+  labelSideWalls(*distributed);
+  auto base = std::make_shared<svmp::MeshBase>();
+  base->build_from_arrays(2, arrays.x, arrays.offsets, arrays.connectivity,
+                          arrays.shapes);
+  base->finalize();
+  auto serial = svmp::create_mesh(std::move(base));
+  labelSideWalls(*serial);
+  const svmp::MeshComm comm(MPI_COMM_WORLD);
+
+  for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
+                        PdeVelocityExtensionOperator::LeastSquaresNormal}) {
+    const auto reference = extend(*serial, svmp::MeshComm::self(), op);
+    const auto mumps =
+        extend(*distributed, comm, op, PdeVelocityExtensionFactorization::Mumps);
+    int local_failures = 0;
+    for (const auto& [key, value] : mumps) {
+      const auto found = reference.find(key);
+      ASSERT_NE(found, reference.end());
+      for (int c = 0; c < 2; ++c) {
+        const double scale = std::max(1.0, std::abs(found->second[c]));
+        if (std::abs(value[c] - found->second[c]) > 1e-11 * scale) {
+          ++local_failures;
+        }
+      }
+    }
+    EXPECT_EQ(globalSum(local_failures), 0)
+        << application::core::pdeVelocityExtensionOperatorName(op) << " ranks=" << size;
+  }
+
+  // Cached: the second call with new velocities reuses the factorization on
+  // every rank and matches an uncached MUMPS solve.
+  application::core::PdeVelocityExtensionCache cache;
+  const auto first = extendCached(*distributed, comm, PdeVelocityExtensionOperator::Harmonic,
+                                  1.0, {}, &cache, PdeVelocityExtensionFactorization::Mumps);
+  const auto second = extendCached(*distributed, comm, PdeVelocityExtensionOperator::Harmonic,
+                                   1.5, {}, &cache, PdeVelocityExtensionFactorization::Mumps);
+  const auto fresh = extendCached(*distributed, comm, PdeVelocityExtensionOperator::Harmonic,
+                                  1.5, {}, nullptr, PdeVelocityExtensionFactorization::Mumps);
+  EXPECT_FALSE(reuseOverRanks(first.reused).second);
+  EXPECT_TRUE(reuseOverRanks(second.reused).first);
+  EXPECT_FALSE(reuseOverRanks(second.distributed).second);
+  int local_far = 0;
+  ASSERT_EQ(second.extended.size(), fresh.extended.size());
+  for (std::size_t i = 0; i < second.extended.size(); ++i) {
+    const double scale = std::max(1.0, std::abs(fresh.extended[i]));
+    if (std::abs(second.extended[i] - fresh.extended[i]) > 1e-12 * scale) {
+      ++local_far;
+    }
+  }
+  EXPECT_EQ(globalSum(local_far), 0);
+  const int bitwise = globalSum(bitwiseMismatches(second, fresh));
+  int rank = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  if (rank == 0) {
+    std::printf("MUMPS reuse vs fresh factorization: %s on %d ranks\n",
+                bitwise == 0 ? "bitwise identical" : "round-off differences", size);
   }
 }
