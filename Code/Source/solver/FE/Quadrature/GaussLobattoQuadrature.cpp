@@ -236,7 +236,7 @@ QuadratureRule make_gauss_lobatto_rule(int requested_exactness)
         const double spacing = points[point_index][0] - points[point_index - 1u][0];
         if (!(spacing > 0.0)) {
             raise_generation_failure(
-                num_points, static_cast<int>(point_index), -1, spacing,
+                num_points, point_index, -1, spacing,
                 "generated points are not strictly increasing");
         }
     }
