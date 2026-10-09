@@ -8295,6 +8295,9 @@ tangentialPolicyProvenance(
             << jsonReal(
                    boundary.small_cut_aggregation_guards
                        .maximum_row_l1_norm)
+            << ",\"rootless_fallback\":"
+            << jsonBool(
+                   boundary.small_cut_aggregation_guards.rootless_fallback)
             << '}';
         out << '}'
             << ",\"pruning\":{\"decision_owner\":\"authoritative_geometry_snapshot\",\"fallback_to_whole_face\":false}"
@@ -10151,6 +10154,11 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             std::to_string(
                 pending_small_cut_aggregation->guards
                     .maximum_row_l1_norm) +
+            " rootless_fallback=" +
+            std::string(pending_small_cut_aggregation->guards
+                                .rootless_fallback
+                            ? "1"
+                            : "0") +
             " diagnostic=small_cut_aggregation_registration"
             " velocity_ghost_penalty=skipped_by_aggregation");
     }

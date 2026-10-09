@@ -2545,6 +2545,7 @@ TEST(NavierStokesLegacyBCs,
     bc.params["Small_cut_aggregation_maximum_absolute_coefficient"] =
         defined("7");
     bc.params["Small_cut_aggregation_maximum_row_l1_norm"] = defined("9");
+    bc.params["Small_cut_aggregation_rootless_fallback"] = defined("true");
     input.boundary_conditions.push_back(std::move(bc));
 
     svmp::FE::systems::FESystem system(mesh);
@@ -2569,7 +2570,8 @@ TEST(NavierStokesLegacyBCs,
             "\"aggregation_guards\":{\"maximum_root_path_length\":5,"
             "\"maximum_reference_extrapolation_distance\":2.5,"
             "\"maximum_absolute_coefficient\":7,"
-            "\"maximum_row_l1_norm\":9}"),
+            "\"maximum_row_l1_norm\":9,"
+            "\"rootless_fallback\":true}"),
         std::string::npos);
 
     auto disabled_input = input;

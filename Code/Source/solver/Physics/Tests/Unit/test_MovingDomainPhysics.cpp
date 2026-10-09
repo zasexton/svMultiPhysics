@@ -12272,7 +12272,8 @@ TEST(MovingDomainPhysics,
         ",\"aggregation_guards\":{\"maximum_root_path_length\":8,"
         "\"maximum_reference_extrapolation_distance\":4,"
         "\"maximum_absolute_coefficient\":16,"
-        "\"maximum_row_l1_norm\":32}");
+        "\"maximum_row_l1_norm\":32,"
+        "\"rootless_fallback\":false}");
     constexpr std::string_view tangential_velocity_fragment =
         "\"prescribed_tangential_mesh_velocity\":[0,0,0]";
     const auto tangential_insertion =
