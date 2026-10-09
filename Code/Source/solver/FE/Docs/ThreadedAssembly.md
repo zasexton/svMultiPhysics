@@ -321,6 +321,56 @@ What remains serial (Amdahl):
   (mesh revision queries take a mesh-wide lock and are now checked once per
   call on the threads; allocation is about 10 % of the threads' time).
 
+### 3D static sphere, ranks x threads on one node
+
+Decks of the D25 protocol (SurfaceStress, PDE extension, 12 ghost layers),
+2 steps, one whole 24-core node (Xeon Gold 5118), production environment
+(`SVMP_JIT_CPU=x86-64-v3`), `--map-by slot:PE=T --bind-to core`
+(`--map-by core` for one thread), job 47007160.  "Loops" is the per-rank
+time in the threaded loops (mean / max over ranks); memory is the peak RSS
+per rank (max) and summed over ranks.
+
+| Deck | Ranks x threads | Wall (s) | Steps (s) | Loops mean / max (s) | Cut volumes mean / max (s) | Memory max / sum (GB) |
+|---|---|---|---|---|---|---|
+| R/h = 16 | 16 x 1 | 1530 | 763 / 597 | 109 / 326 | 72 / 283 | 8.0 / 78.9 |
+| | 8 x 1 | 1510 | 752 / 580 | 211 / 264 | 139 / 190 | 9.3 / 54.4 |
+| | 8 x 3 | 1223 | 609 / 462 | 90 / 108 | 53 / 70 | 9.6 / 56.2 |
+| | 6 x 4 | 1355 | 673 / 509 | 98 / 115 | 53 / 70 | 10.8 / 50.1 |
+| | 4 x 6 | 1601 | 800 / 584 | 113 / 123 | 55 / 64 | 12.6 / 45.4 |
+| R/h = 8 | 12 x 1 | 202 | 95 / 71 | 19 / 47 | 12 / 36 | 1.5 / 13.5 |
+| | 12 x 2 | 156 | 72 / 53 | 13 / 28 | 7 / 20 | 1.6 / 14.2 |
+| | 8 x 1 | 175 | 83 / 60 | 27 / 38 | 18 / 27 | 1.3 / 10.0 |
+| | 8 x 3 | 135 | 63 / 45 | 15 / 19 | 8 / 11 | 1.4 / 10.5 |
+| | 4 x 6 | 170 | 80 / 55 | 19 / 21 | 9 / 10 | 2.0 / 7.3 |
+
+- The cut-volume work is unevenly spread over the ranks: on 16 ranks one
+  rank needs 283 s for what takes 72 s on average, so 16 ranks are no
+  faster than 8.  Threads shorten every rank's loops, and most of all the
+  heaviest rank's: on 8 ranks the slowest rank's loops drop from 264 s to
+  108 s with 3 threads.
+- 8 x 3 is the fastest configuration for both decks: 20 % less wall time
+  than 16 x 1 at R/h = 16 (23 % less than 8 x 1 at R/h = 8), with 29 %
+  less memory than 16 x 1.  With fewer ranks the work outside assembly,
+  which runs on one core per rank, takes over (4 x 6).
+- Insertion limits only the batched cell loop (on 8 x 3 its inserting
+  thread is busy 93 % of the loop); that loop is about 1 % of the wall
+  time.  The cut-volume loop is compute-bound (insertion 27 % of it).
+- Outputs are byte-identical across thread counts: 8 x 1 against 8 x 3
+  (both decks) and 12 x 1 against 12 x 2 (R/h = 8), and the unmodified
+  build against this one on 8 ranks.
+
+Recommended for the 3D production runs (R/h = 16 on one node):
+
+```bash
+#SBATCH --nodes=1 --ntasks=8 --cpus-per-task=3 --mem=75G   # 56 GB measured, x1.3
+export OMP_NUM_THREADS=1 SVMP_ASSEMBLY_THREADS=$SLURM_CPUS_PER_TASK
+mpiexec -n $SLURM_NTASKS --map-by slot:PE=$SLURM_CPUS_PER_TASK --bind-to core svmultiphysics solver.xml
+```
+
+or `<Assembly_threads>3</Assembly_threads>` in the deck instead of the
+variable.  The thread count does not change results, so a run may also
+change it on restart.
+
 ## Verification
 
 Every array of every output file was compared byte for byte (so `-0.0`
