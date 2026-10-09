@@ -81,7 +81,7 @@ std::pair<double, double> evaluate_adjacent_legendre_values(
 // before forming w = 2 / (n*(n-1)*P_(n-1)(x)^2). The caller mirrors the node and
 // handles endpoints; is_center assigns an odd rule's center exactly to zero.
 std::pair<double, double> generate_interior_root_and_weight(std::size_t num_points,
-    int half_root_index, bool is_center, double weight_denominator_scale)
+    std::size_t half_root_index, bool is_center, double weight_denominator_scale)
 {
     const std::size_t polynomial_degree = num_points - 1;
     const double num_points_value = num_points;
@@ -202,7 +202,7 @@ QuadratureRule make_gauss_lobatto_rule(int requested_exactness)
         "Gauss-Lobatto-Legendre generator: requested_exactness must be in [0, " +
             std::to_string(max_gauss_lobatto_exactness()) + ']');
 
-    const std::size_t num_points = static_cast<std::size_t>(requested_exactness) / 2 + 2;
+    const std::size_t num_points = requested_exactness / 2 + 2;
     std::vector<QuadPoint> points(num_points, QuadPoint::Zero());
     std::vector<double> weights(points.size());
 
@@ -223,7 +223,7 @@ QuadratureRule make_gauss_lobatto_rule(int requested_exactness)
             points.size() - 2u - half_root_index;
         const auto [root, weight] =
             generate_interior_root_and_weight(
-                num_points, static_cast<int>(half_root_index), left_index == right_index,
+                num_points, half_root_index, left_index == right_index,
                 weight_denominator_scale);
 
         points[left_index][0] = -root;
