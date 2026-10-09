@@ -131,6 +131,24 @@ enum class FreeSurfaceSurfaceTensionSemiImplicit : std::uint8_t {
 };
 
 /**
+ * @brief Aggregation of the contact-edge velocity DOFs (unfitted level set)
+ *
+ * Aggregate (default): every small-cut vertex, including the wall vertices of
+ * the edge that holds a contact point, is slaved to a root extension, so the
+ * contact point has no velocity DOF of its own and the contact-line terms are
+ * tested only through interior master rows.  Release: the corner vertices of
+ * each contact edge on the contact wall are exempt from velocity aggregation
+ * (FE SmallCutAggregationContactLineRelease); with the strong normal-only
+ * wall condition their wall-tangential velocity keeps its own Galerkin row,
+ * which carries the discrete contact-line balance.  Pressure aggregation is
+ * unchanged.
+ */
+enum class FreeSurfaceContactLineDofPolicy : std::uint8_t {
+    Aggregate,
+    Release
+};
+
+/**
  * @brief Physics-side model for the wall intersection of one free surface
  *
  * The free-surface boundary owns these declarations.  FE geometry remains
@@ -337,6 +355,9 @@ struct FreeSurfaceBoundary {
     // independently.
     FE::constraints::SmallCutAggregationGuardOptions
         small_cut_aggregation_guards{};
+    // Contact_line_dof_policy (see FreeSurfaceContactLineDofPolicy).
+    FreeSurfaceContactLineDofPolicy contact_line_dof_policy{
+        FreeSurfaceContactLineDofPolicy::Aggregate};
 };
 
 } // namespace navier_stokes

@@ -183,6 +183,26 @@ struct SmallCutAggregationGuardOptions {
     Real maximum_row_l1_norm{32.0};
 };
 
+/**
+ * Opt-in release of contact-edge vertices from aggregation.
+ *
+ * A contact edge is a face on one of `wall_boundary_markers` whose corner
+ * values of the vertex level-set field `level_set_field_name` lie strictly on
+ * both sides of `isovalue`; it holds the generated contact point (the
+ * codimension-two intersection of the interface with the wall). Its corner
+ * vertices are never slaved. The DOFs that remain unconstrained there (with a
+ * strong normal-only wall condition: the wall-tangential velocity) keep their
+ * own Galerkin rows, so a line functional evaluated at the contact point
+ * (Young term, line friction) is tested by its own basis functions instead of
+ * by the root extension of interior masters. Every other candidate is
+ * aggregated as before; without a release the constraint is unchanged.
+ */
+struct SmallCutAggregationContactLineRelease {
+    std::vector<int> wall_boundary_markers{};
+    std::string level_set_field_name{};
+    Real isovalue{0.0};
+};
+
 enum class SmallCutAggregationActiveFeatureDisposition {
     Rooted,
     Rootless,
@@ -643,6 +663,24 @@ public:
 
     [[nodiscard]] bool isTimeDependent() const noexcept override { return false; }
 
+    /// Enable the contact-edge release (see SmallCutAggregationContactLineRelease).
+    /// Must be called before the first apply(); requires a vertex level-set
+    /// mesh field and at least one wall marker.
+    void setContactLineRelease(SmallCutAggregationContactLineRelease release);
+
+    [[nodiscard]] const std::optional<SmallCutAggregationContactLineRelease>&
+    contactLineRelease() const noexcept
+    {
+        return contact_line_release_;
+    }
+
+    /// Vertices exempted by the contact-edge release in the most recent apply().
+    [[nodiscard]] const std::vector<GlobalIndex>&
+    contactLineReleasedVertices() const noexcept
+    {
+        return contact_line_released_vertices_;
+    }
+
     [[nodiscard]] ConstraintDependencyDeclaration dependencyDeclaration() const override;
 
     [[nodiscard]] systems::SetupStorageRequirements storageRequirements() const noexcept override;
@@ -705,6 +743,8 @@ private:
     std::vector<int> excluded_boundary_markers_{};
     std::vector<GlobalIndex> excluded_vertices_{};
     SmallCutAggregationGuardOptions guards_{};
+    std::optional<SmallCutAggregationContactLineRelease> contact_line_release_{};
+    std::vector<GlobalIndex> contact_line_released_vertices_{};
     // Constraint-instance state avoids the stale address/pointer-reuse hazard
     // of a process-global churn cache keyed by &FESystem.
     std::vector<GlobalIndex> previous_canonical_slaves_{};

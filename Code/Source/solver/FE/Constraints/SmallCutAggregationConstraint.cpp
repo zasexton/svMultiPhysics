@@ -25,6 +25,11 @@
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Systems/FESystem.h"
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#  include "Mesh/Fields/MeshFields.h"
+#  include "Mesh/Mesh.h"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -3809,6 +3814,109 @@ makeAggregationReuseRecord(
     return record;
 }
 
+// Corner vertices of every face on the release wall markers whose vertex
+// level-set values lie strictly on both sides of the isovalue (contact edges).
+// Rank-local; the caller feeds the result into the excluded-vertex facts,
+// which are combined communicator-wide by global DOF before candidates are
+// selected.
+[[nodiscard]] std::vector<GlobalIndex> contactEdgeReleaseVertices(
+    const systems::FESystem& system,
+    const SmallCutAggregationContactLineRelease& release,
+    std::size_t& contact_faces)
+{
+    contact_faces = 0u;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    const auto* native_mesh = system.mesh();
+    if (native_mesh == nullptr) {
+        throw std::runtime_error(
+            "SmallCutAggregationConstraint: contact-line release requires "
+            "native mesh support");
+    }
+    const auto& local_mesh = native_mesh->local_mesh();
+    const auto& name = release.level_set_field_name;
+    if (!svmp::MeshFields::has_field(local_mesh, svmp::EntityKind::Vertex, name)) {
+        throw std::runtime_error(
+            "SmallCutAggregationConstraint: contact-line release needs the "
+            "vertex level-set field '" + name + "'");
+    }
+    const auto handle = svmp::MeshFields::get_field_handle(
+        local_mesh, svmp::EntityKind::Vertex, name);
+    if (svmp::MeshFields::field_type(local_mesh, handle) !=
+        svmp::FieldScalarType::Float64) {
+        throw std::runtime_error(
+            "SmallCutAggregationConstraint: contact-line release level-set "
+            "field '" + name + "' must be Float64");
+    }
+    const auto components = svmp::MeshFields::field_components(local_mesh, handle);
+    const auto entity_count = svmp::MeshFields::field_entity_count(local_mesh, handle);
+    const auto* values = svmp::MeshFields::field_data_as<Real>(local_mesh, handle);
+    if (components < 1u || values == nullptr) {
+        throw std::runtime_error(
+            "SmallCutAggregationConstraint: contact-line release level-set "
+            "field '" + name + "' has no scalar data");
+    }
+    const auto& mesh = system.meshAccess();
+    std::vector<GlobalIndex> released;
+    std::vector<GlobalIndex> cell_nodes;
+    std::vector<GlobalIndex> corners;
+    for (const auto marker : release.wall_boundary_markers) {
+        mesh.forEachBoundaryFace(
+            marker,
+            [&](GlobalIndex face, GlobalIndex cell) {
+                const auto local_face = mesh.getLocalFaceIndex(face, cell);
+                if (local_face < 0) {
+                    return;
+                }
+                const auto& ref =
+                    elements::ReferenceElement::shared(mesh.getCellType(cell));
+                const auto& face_nodes =
+                    ref.face_nodes(static_cast<std::size_t>(local_face));
+                mesh.getCellNodes(cell, cell_nodes);
+                bool below = false;
+                bool above = false;
+                corners.clear();
+                for (const auto local_node : face_nodes) {
+                    if (local_node < 0 ||
+                        static_cast<std::size_t>(local_node) >= cell_nodes.size()) {
+                        continue;
+                    }
+                    const auto vertex =
+                        cell_nodes[static_cast<std::size_t>(local_node)];
+                    if (vertex < 0 ||
+                        static_cast<std::size_t>(vertex) >= entity_count) {
+                        throw std::runtime_error(
+                            "SmallCutAggregationConstraint: contact-line "
+                            "release face vertex outside the level-set field");
+                    }
+                    const Real phi =
+                        values[static_cast<std::size_t>(vertex) * components];
+                    if (!std::isfinite(phi)) {
+                        throw std::runtime_error(
+                            "SmallCutAggregationConstraint: contact-line "
+                            "release found a non-finite level-set value");
+                    }
+                    below = below || phi < release.isovalue;
+                    above = above || phi > release.isovalue;
+                    corners.push_back(vertex);
+                }
+                if (below && above) {
+                    ++contact_faces;
+                    released.insert(released.end(), corners.begin(), corners.end());
+                }
+            });
+    }
+    std::sort(released.begin(), released.end());
+    released.erase(std::unique(released.begin(), released.end()), released.end());
+    return released;
+#else
+    (void)system;
+    (void)release;
+    throw std::runtime_error(
+        "SmallCutAggregationConstraint: contact-line release requires native "
+        "mesh support");
+#endif
+}
+
 } // namespace
 
 SmallCutAggregationConstraint::SmallCutAggregationConstraint(
@@ -4254,6 +4362,38 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         }
     };
 
+    // Opt-in contact-line release: the corner vertices of contact edges join
+    // the explicitly excluded vertices for the reuse key and for step 3b.
+    std::vector<GlobalIndex> effective_excluded_vertices = excluded_vertices_;
+    std::size_t contact_release_faces = 0u;
+    contact_line_released_vertices_.clear();
+    if (contact_line_release_.has_value()) {
+        std::exception_ptr local_release_exception;
+        try {
+            contact_line_released_vertices_ = contactEdgeReleaseVertices(
+                system, *contact_line_release_, contact_release_faces);
+            effective_excluded_vertices.insert(
+                effective_excluded_vertices.end(),
+                contact_line_released_vertices_.begin(),
+                contact_line_released_vertices_.end());
+            std::sort(effective_excluded_vertices.begin(),
+                      effective_excluded_vertices.end());
+            effective_excluded_vertices.erase(
+                std::unique(effective_excluded_vertices.begin(),
+                            effective_excluded_vertices.end()),
+                effective_excluded_vertices.end());
+        } catch (...) {
+            local_release_exception = std::current_exception();
+        }
+        coordinateLocalPhaseFailure(local_release_exception,
+                                    "contact_line_release");
+        FE_LOG_DEBUG(
+            "SmallCutAggregationConstraint: diagnostic=contact_line_release"
+            " field='" + rec.name + "' contact_faces=" +
+            std::to_string(contact_release_faces) + " released_vertices=" +
+            std::to_string(contact_line_released_vertices_.size()));
+    }
+
     // Reuse of an unchanged refresh. Each rank keys every input of the steps
     // below (computeAggregationReuseInputs); the decision is collective, so
     // either every rank publishes its recorded refresh with recomputed
@@ -4269,7 +4409,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             active_side_,
             interface_marker_,
             excluded_boundary_markers_,
-            excluded_vertices_,
+            effective_excluded_vertices,
             guards_,
             runtime_options);
     } catch (...) {
@@ -5574,8 +5714,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     //     face vertices of every excluded boundary marker. Explicitly pinned
     //     vertices (e.g. pressure gauge nodes) are excluded for the same
     //     reason — their pin must win over aggregation.
-    excluded_vertices.insert(excluded_vertices_.begin(),
-                             excluded_vertices_.end());
+    excluded_vertices.insert(effective_excluded_vertices.begin(),
+                             effective_excluded_vertices.end());
     if (!excluded_boundary_markers_.empty()) {
         std::vector<GlobalIndex> face_cell_nodes;
         for (const auto marker : excluded_boundary_markers_) {
@@ -8213,6 +8353,33 @@ void SmallCutAggregationConstraint::publishReusedRefresh(
     reuse_record_ = std::move(record);
 }
 
+void SmallCutAggregationConstraint::setContactLineRelease(
+    SmallCutAggregationContactLineRelease release)
+{
+    if (release.wall_boundary_markers.empty()) {
+        throw std::invalid_argument(
+            "SmallCutAggregationConstraint: contact-line release needs at least "
+            "one wall boundary marker");
+    }
+    if (release.level_set_field_name.empty()) {
+        throw std::invalid_argument(
+            "SmallCutAggregationConstraint: contact-line release needs a level-set "
+            "field name");
+    }
+    if (!std::isfinite(release.isovalue)) {
+        throw std::invalid_argument(
+            "SmallCutAggregationConstraint: contact-line release isovalue must be "
+            "finite");
+    }
+    std::sort(release.wall_boundary_markers.begin(),
+              release.wall_boundary_markers.end());
+    release.wall_boundary_markers.erase(
+        std::unique(release.wall_boundary_markers.begin(),
+                    release.wall_boundary_markers.end()),
+        release.wall_boundary_markers.end());
+    contact_line_release_ = std::move(release);
+}
+
 bool SmallCutAggregationConstraint::updateValues(const systems::FESystem& /*system*/,
                                                  AffineConstraints& /*constraints*/,
                                                  double /*time*/,
@@ -8230,7 +8397,13 @@ ConstraintDependencyDeclaration SmallCutAggregationConstraint::dependencyDeclara
     // apply() reads no mesh field values: its geometry comes from the
     // installed cut integration context, and installing a new context
     // rebuilds the constraint state (setCutIntegrationContext() is followed
-    // by rebuildConstraintState()).
+    // by rebuildConstraintState()).  The opt-in contact-line release also
+    // reads the vertex level-set field to find the contact edges.
+    if (contact_line_release_.has_value()) {
+        out.structural.mesh_field_values = true;
+        out.mesh_field_values_scoped = true;
+        out.mesh_field_value_names = {contact_line_release_->level_set_field_name};
+    }
     return out;
 }
 

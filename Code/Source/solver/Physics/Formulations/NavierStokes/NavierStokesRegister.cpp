@@ -2926,6 +2926,24 @@ parse_free_surface_surface_tension_semi_implicit(std::string_view raw,
       " must be None or NormalIncrement.");
 }
 
+svmp::Physics::formulations::navier_stokes::FreeSurfaceContactLineDofPolicy
+parse_free_surface_contact_line_dof_policy(std::string_view raw,
+                                           std::string_view context)
+{
+  using svmp::Physics::formulations::navier_stokes::
+      FreeSurfaceContactLineDofPolicy;
+  const auto token = normalized_token(raw);
+  if (token == "aggregate" || token == "aggregated") {
+    return FreeSurfaceContactLineDofPolicy::Aggregate;
+  }
+  if (token == "release" || token == "released") {
+    return FreeSurfaceContactLineDofPolicy::Release;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Physics] " + std::string(context) +
+      " must be Aggregate or Release.");
+}
+
 svmp::Physics::formulations::navier_stokes::FreeSurfaceNormalKinematicPolicy
 parse_free_surface_normal_kinematic_policy(std::string_view raw, std::string_view context)
 {
@@ -3568,7 +3586,8 @@ void append_free_surface_contact_line(
       "Contact_line_mobility", "ContactLineMobility", "Mobility",
       "Wall_slip_model", "WallSlipModel",
       "Contact_line_wall_slip_model", "ContactLineWallSlipModel",
-      "Wall_slip_length", "WallSlipLength", "Slip_length", "SlipLength"};
+      "Wall_slip_length", "WallSlipLength", "Slip_length", "SlipLength",
+      "Contact_line_dof_policy", "ContactLineDofPolicy"};
 
   const auto is_known_contact_key = [&](std::string_view key) {
     return std::find(std::begin(contact_keys), std::end(contact_keys), key) !=
@@ -4256,6 +4275,20 @@ void append_free_surface_bc(
         "[svMultiPhysics::Physics] Free-surface small-cut aggregation "
         "maximum row L1 norm must be no smaller than the maximum absolute "
         "coefficient.");
+  }
+  if (const auto contact_dof_policy = first_defined_string(
+          bc.params,
+          {"Contact_line_dof_policy", "ContactLineDofPolicy"})) {
+    fs.contact_line_dof_policy = parse_free_surface_contact_line_dof_policy(
+        *contact_dof_policy, "Free-surface Contact_line_dof_policy");
+    if (fs.contact_line_dof_policy ==
+            svmp::Physics::formulations::navier_stokes::
+                FreeSurfaceContactLineDofPolicy::Release &&
+        !fs.small_cut_aggregation) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Contact_line_dof_policy=Release requires "
+          "Small_cut_aggregation=true.");
+    }
   }
   if (!fs.small_cut_aggregation && aggregation_guard_suboption_present &&
       !explicit_legacy_configuration) {

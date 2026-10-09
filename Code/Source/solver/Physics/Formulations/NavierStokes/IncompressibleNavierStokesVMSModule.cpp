@@ -9057,6 +9057,8 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             FE::geometry::CutIntegrationSide::Negative};
         int interface_marker{-1};
         FE::constraints::SmallCutAggregationGuardOptions guards{};
+        std::optional<FE::constraints::SmallCutAggregationContactLineRelease>
+            velocity_contact_release{};
     };
     struct PendingActiveDomainConstraints {
         FE::constraints::LevelSetConstraintSide side{
@@ -9202,6 +9204,35 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                     .guards = active_pressure_domain->boundary
                                   ->small_cut_aggregation_guards,
                 };
+                const auto& aggregated_boundary =
+                    *active_pressure_domain->boundary;
+                if (aggregated_boundary.contact_line_dof_policy ==
+                    FreeSurfaceContactLineDofPolicy::Release) {
+                    FE::constraints::SmallCutAggregationContactLineRelease
+                        release;
+                    release.level_set_field_name =
+                        aggregated_boundary.level_set_field_name;
+                    release.isovalue = aggregated_boundary.level_set_isovalue;
+                    for (const auto& contact_line :
+                         aggregated_boundary.contact_lines) {
+                        const auto kind = contactLineKind(contact_line);
+                        if (kind != ContactLineKind::PrescribedAngle &&
+                            kind != ContactLineKind::DynamicRenE) {
+                            continue;
+                        }
+                        release.wall_boundary_markers.push_back(
+                            contactLineWallBoundaryMarker(contact_line));
+                    }
+                    if (release.wall_boundary_markers.empty()) {
+                        throw std::invalid_argument(
+                            "IncompressibleNavierStokesVMSModule: "
+                            "Contact_line_dof_policy=Release requires a "
+                            "PrescribedAngle or DynamicRenE contact line on the "
+                            "aggregated unfitted free surface");
+                    }
+                    pending_small_cut_aggregation->velocity_contact_release =
+                        std::move(release);
+                }
             }
         }
     }
@@ -10111,14 +10142,37 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         // preconstrained component facts communicator-wide before installing
         // canonical lines, so even owner/non-owner boundary visibility cannot
         // turn a partial strong condition into an owner-wins aggregation line.
-        system.addSystemConstraint(
-            std::make_unique<FE::constraints::SmallCutAggregationConstraint>(
-                u_id,
-                pending_small_cut_aggregation->side,
-                pending_small_cut_aggregation->interface_marker,
-                std::vector<int>{},
-                std::vector<FE::GlobalIndex>{},
-                pending_small_cut_aggregation->guards));
+        {
+            auto velocity_aggregation =
+                std::make_unique<FE::constraints::SmallCutAggregationConstraint>(
+                    u_id,
+                    pending_small_cut_aggregation->side,
+                    pending_small_cut_aggregation->interface_marker,
+                    std::vector<int>{},
+                    std::vector<FE::GlobalIndex>{},
+                    pending_small_cut_aggregation->guards);
+            if (pending_small_cut_aggregation->velocity_contact_release
+                    .has_value()) {
+                const auto& release =
+                    *pending_small_cut_aggregation->velocity_contact_release;
+                std::string markers;
+                for (const auto marker : release.wall_boundary_markers) {
+                    markers += (markers.empty() ? "" : ",") +
+                               std::to_string(marker);
+                }
+                velocity_aggregation->setContactLineRelease(release);
+                FE_LOG_INFO(
+                    std::string("IncompressibleNavierStokesVMSModule: "
+                                "contact-edge velocity DOFs released from "
+                                "small-cut aggregation") +
+                    " Contact_line_dof_policy=Release wall_markers=" +
+                    markers + " level_set_field='" +
+                    release.level_set_field_name +
+                    "' pressure_aggregation=unchanged"
+                    " diagnostic=contact_line_dof_release");
+            }
+            system.addSystemConstraint(std::move(velocity_aggregation));
+        }
         system.addSystemConstraint(
             std::make_unique<FE::constraints::SmallCutAggregationConstraint>(
                 p_id,

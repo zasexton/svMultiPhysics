@@ -3903,6 +3903,170 @@ TEST(SmallCutAggregationConstraint, ReuseFollowsChangesOfTheIncomingConstraintSe
 #endif
 }
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+namespace {
+
+// Quad strip of buildQuadStrip() with every bottom face (vertices c, c+1)
+// labelled as a contact wall, and a vertex level-set field "phi".
+std::shared_ptr<Mesh> buildQuadStripWithBottomWall(int n_cells,
+                                                   int wall_marker,
+                                                   const std::vector<real_t>& phi)
+{
+    auto base = std::make_shared<MeshBase>();
+    std::vector<real_t> x_ref;
+    for (int row = 0; row < 2; ++row) {
+        for (int i = 0; i <= n_cells; ++i) {
+            x_ref.push_back(static_cast<real_t>(i));
+            x_ref.push_back(static_cast<real_t>(row));
+        }
+    }
+    std::vector<offset_t> offsets{0};
+    std::vector<index_t> c2v;
+    for (int c = 0; c < n_cells; ++c) {
+        const auto b = static_cast<index_t>(c);
+        const auto t = static_cast<index_t>(n_cells + 1 + c);
+        c2v.insert(c2v.end(), {b, static_cast<index_t>(b + 1),
+                               static_cast<index_t>(t + 1), t});
+        offsets.push_back(static_cast<offset_t>(c2v.size()));
+    }
+    CellShape shape{};
+    shape.family = CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(2, x_ref, offsets, c2v,
+                            std::vector<CellShape>(static_cast<std::size_t>(n_cells), shape));
+    base->finalize();
+    for (int c = 0; c < n_cells; ++c) {
+        labelBoundaryFaceWithCorners(*base, static_cast<index_t>(c),
+                                     static_cast<index_t>(c + 1), wall_marker);
+    }
+    auto mesh = create_mesh(std::move(base));
+    const auto handle = MeshFields::attach_field(
+        mesh->local_mesh(), EntityKind::Vertex, "phi", FieldScalarType::Float64, 1);
+    auto* values = MeshFields::field_data_as<real_t>(mesh->local_mesh(), handle);
+    for (std::size_t v = 0; v < phi.size(); ++v) {
+        values[v] = phi[v];
+    }
+    return mesh;
+}
+
+void setVertexPhi(Mesh& mesh, GlobalIndex vertex, real_t value)
+{
+    const auto handle = MeshFields::get_field_handle(
+        mesh.local_mesh(), EntityKind::Vertex, "phi");
+    MeshFields::field_data_as<real_t>(mesh.local_mesh(), handle)[vertex] = value;
+}
+
+} // namespace
+#endif
+
+TEST(SmallCutAggregationConstraint, ContactLineReleaseExemptsContactEdgeWallVertices)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    // 3-cell strip, c0 cut, c1 and c2 full-active: the candidates are v0
+    // (bottom-left, on the wall) and v4 (top-left). The bottom face of c0
+    // (v0, v1) holds a contact point when phi(v0) > 0 > phi(v1).
+    constexpr int wall_marker = 11;
+    const std::vector<real_t> dry_contact{+0.5, -0.5, -1.0, -1.5,
+                                          +0.4, -0.6, -1.1, -1.6};
+    const std::vector<CellRuleSpec> specs{
+        {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
+        {.cell = 1, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+        {.cell = 2, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+    };
+    struct Run {
+        std::shared_ptr<Mesh> mesh;
+        std::unique_ptr<systems::FESystem> system;
+        FieldId pressure{INVALID_FIELD_ID};
+        SmallCutAggregationConstraint* aggregation{nullptr};
+    };
+    const auto make_run = [&](bool release) {
+        Run run;
+        run.mesh = buildQuadStripWithBottomWall(3, wall_marker, dry_contact);
+        run.system = std::make_unique<systems::FESystem>(run.mesh);
+        auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+        run.pressure = run.system->addField(
+            systems::FieldSpec{.name = "p", .space = space, .components = 1});
+        run.system->addOperator("pressure");
+        auto aggregation = std::make_unique<SmallCutAggregationConstraint>(
+            run.pressure, geometry::CutIntegrationSide::Negative, kInterfaceMarker);
+        if (release) {
+            aggregation->setContactLineRelease(SmallCutAggregationContactLineRelease{
+                .wall_boundary_markers = {wall_marker},
+                .level_set_field_name = "phi",
+                .isovalue = Real{0.0}});
+        }
+        run.aggregation = aggregation.get();
+        run.system->addSystemConstraint(std::move(aggregation));
+        EXPECT_NO_THROW(run.system->setup());
+        return run;
+    };
+    const auto refresh = [&](Run& run) {
+        run.system->setCutIntegrationContext(makeCutContext(specs));
+        const ScopedLogLevel detailed_diagnostics(LogLevel::DEBUG);
+        testing::internal::CaptureStdout();
+        testing::internal::CaptureStderr();
+        run.system->rebuildConstraintState();
+        auto log = testing::internal::GetCapturedStdout();
+        log += testing::internal::GetCapturedStderr();
+        return log;
+    };
+
+    // Without the release both candidates are aggregated.
+    auto plain = make_run(false);
+    refresh(plain);
+    EXPECT_TRUE(plain.system->constraints().isConstrained(
+        vertexDof(*plain.system, plain.pressure, 0)));
+    EXPECT_TRUE(plain.system->constraints().isConstrained(
+        vertexDof(*plain.system, plain.pressure, 4)));
+    EXPECT_TRUE(plain.aggregation->contactLineReleasedVertices().empty());
+    const auto plain_summary = summarizeAggregationPublication(*plain.system);
+
+    // With the release the contact-edge corners (v0, v1) are exempt; v4 is
+    // still aggregated.  A second identical refresh is reused.
+    auto released = make_run(true);
+    EXPECT_NE(refresh(released).find("decision=rebuilt reason=no_previous_refresh"),
+              std::string::npos);
+    EXPECT_FALSE(released.system->constraints().isConstrained(
+        vertexDof(*released.system, released.pressure, 0)));
+    EXPECT_TRUE(released.system->constraints().isConstrained(
+        vertexDof(*released.system, released.pressure, 4)));
+    EXPECT_EQ(released.aggregation->contactLineReleasedVertices(),
+              (std::vector<GlobalIndex>{0, 1}));
+    const auto release_summary = summarizeAggregationPublication(*released.system);
+    EXPECT_NE(release_summary.line_words, plain_summary.line_words);
+    EXPECT_NE(refresh(released).find("decision=reused"), std::string::npos);
+    EXPECT_EQ(summarizeAggregationPublication(*released.system).line_words,
+              release_summary.line_words);
+
+    // Moving the contact point off the wall face (both corners wet) changes
+    // the reuse inputs; the refresh is rebuilt and equals the plain one.
+    setVertexPhi(*released.mesh, 0, -0.1);
+    EXPECT_NE(refresh(released).find("decision=rebuilt reason=inputs_changed"),
+              std::string::npos);
+    EXPECT_TRUE(released.aggregation->contactLineReleasedVertices().empty());
+    EXPECT_TRUE(released.system->constraints().isConstrained(
+        vertexDof(*released.system, released.pressure, 0)));
+    EXPECT_EQ(summarizeAggregationPublication(*released.system).line_words,
+              plain_summary.line_words);
+
+    // Invalid release settings are rejected.
+    SmallCutAggregationConstraint invalid(
+        plain.pressure, geometry::CutIntegrationSide::Negative, kInterfaceMarker);
+    EXPECT_THROW(invalid.setContactLineRelease(
+                     SmallCutAggregationContactLineRelease{
+                         .wall_boundary_markers = {},
+                         .level_set_field_name = "phi"}),
+                 std::invalid_argument);
+    EXPECT_THROW(invalid.setContactLineRelease(
+                     SmallCutAggregationContactLineRelease{
+                         .wall_boundary_markers = {wall_marker},
+                         .level_set_field_name = ""}),
+                 std::invalid_argument);
+#endif
+}
+
 // ============================================================================
 // Sorted cell-key tables of one aggregation refresh
 // ============================================================================
