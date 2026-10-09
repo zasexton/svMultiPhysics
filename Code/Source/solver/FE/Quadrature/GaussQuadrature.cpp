@@ -25,7 +25,7 @@ namespace svmp::FE::quadrature {
 namespace {
 
 constexpr std::size_t kMaximumPoints = 128;
-static_assert(max_gauss_legendre_exactness() == static_cast<int>(2 * kMaximumPoints - 1));
+static_assert(max_gauss_legendre_exactness() == 2 * kMaximumPoints - 1);
 
 // Defensively bound supported cosine-seeded Newton refinements for
 // deterministic termination.
@@ -94,7 +94,7 @@ std::pair<double, double> evaluate_legendre_with_derivative(
 // w = 2 / ((1 - x*x) * P'_n(x)^2). The caller mirrors (x, w); is_center assigns
 // the odd rule's center exactly to zero before the final validation.
 std::pair<double, double> generate_root_and_weight(
-    std::size_t num_points, int root_index, bool is_center)
+    std::size_t num_points, std::size_t root_index, bool is_center)
 {
     const double pi = std::numbers::pi_v<double>;
     double root = std::cos(
@@ -190,7 +190,7 @@ QuadratureRule make_gauss_legendre_rule(int requested_exactness)
         "Gauss-Legendre generator: requested_exactness must be in [0, " +
             std::to_string(max_gauss_legendre_exactness()) + ']');
 
-    const std::size_t num_points = static_cast<std::size_t>(requested_exactness) / 2 + 1;
+    const std::size_t num_points = requested_exactness / 2 + 1;
     std::vector<QuadPoint> points(num_points, QuadPoint::Zero());
     std::vector<double> weights(points.size());
 
@@ -198,7 +198,7 @@ QuadratureRule make_gauss_legendre_rule(int requested_exactness)
     for (std::size_t left_index = 0; left_index < roots_to_refine; ++left_index) {
         const std::size_t right_index = points.size() - 1u - left_index;
         const auto [root, weight] = generate_root_and_weight(
-            num_points, static_cast<int>(left_index), left_index == right_index);
+            num_points, left_index, left_index == right_index);
 
         points[left_index][0] = -root;
         points[right_index][0] = root;
@@ -210,7 +210,7 @@ QuadratureRule make_gauss_legendre_rule(int requested_exactness)
         const double spacing = points[point_index][0] - points[point_index - 1u][0];
         if (!(spacing > 0.0)) {
             raise_generation_failure(
-                num_points, static_cast<int>(point_index), -1, spacing,
+                num_points, point_index, -1, spacing,
                 "generated points are not strictly increasing");
         }
     }
@@ -219,14 +219,13 @@ QuadratureRule make_gauss_legendre_rule(int requested_exactness)
     const long double weight_sum = std::accumulate(weights.begin(), weights.end(), 0.0L);
     const long double measure_error = std::abs(weight_sum - 2.0L);
     if (!(std::isfinite(weight_sum) &&
-          measure_error <=
-              static_cast<long double>(kRuleValidationTolerance))) {
+          measure_error <= kRuleValidationTolerance)) {
         raise_generation_failure(
-            num_points, -1, -1, static_cast<double>(measure_error),
+            num_points, -1, -1, measure_error,
             "generated weights do not reproduce the reference measure");
     }
 
-    const int polynomial_exactness = static_cast<int>(2 * num_points - 1);
+    const int polynomial_exactness = 2 * num_points - 1;
     return QuadratureRule(
         svmp::CellFamily::Line, polynomial_exactness,
         std::move(points), std::move(weights));
