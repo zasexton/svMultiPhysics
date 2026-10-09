@@ -245,10 +245,9 @@ QuadratureRule make_gauss_lobatto_rule(int requested_exactness)
     const long double weight_sum = std::accumulate(weights.begin(), weights.end(), 0.0L);
     const long double measure_error = std::abs(weight_sum - 2.0L);
     if (!(std::isfinite(weight_sum) &&
-          measure_error <=
-              static_cast<long double>(kRuleValidationTolerance))) {
+          measure_error <= kRuleValidationTolerance)) {
         raise_generation_failure(
-            num_points, -1, -1, static_cast<double>(measure_error),
+            num_points, -1, -1, measure_error,
             "generated weights do not reproduce the reference measure");
     }
 
