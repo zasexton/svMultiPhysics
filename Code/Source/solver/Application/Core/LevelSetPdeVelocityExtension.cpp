@@ -17,6 +17,8 @@
 #include "FE/Sparsity/SparsityPattern.h"
 #include "Mesh/Topology/DistributedTopology.h"
 
+#include "FE/Backends/MUMPS/MumpsDistributedSolver.h"
+
 #if defined(FE_HAS_EIGEN)
 #include "FE/Backends/Eigen/EigenMatrix.h"
 #include "FE/Backends/Eigen/EigenVector.h"
@@ -443,10 +445,15 @@ struct ReuseVote {
 // on at least as many ranks as there are components (3 components: rank c
 // solves component c).  SVMP_PDE_EXTENSION_REPLICATED_SOLVES=1 keeps the
 // solve of every component on every rank.
-[[nodiscard]] bool distributedComponentSolves(bool store_factorization,
-                                              const svmp::MeshComm& comm)
+[[nodiscard]] bool distributedComponentSolves(
+    bool store_factorization,
+    const svmp::MeshComm& comm,
+    PdeVelocityExtensionFactorization factorization)
 {
+  // The MUMPS factorization of a component runs on every rank, so its
+  // components are solved one after another on all ranks.
   return store_factorization && comm.is_parallel() && comm.size() >= 3 &&
+         factorization != PdeVelocityExtensionFactorization::Mumps &&
          !environmentFlag("SVMP_PDE_EXTENSION_REPLICATED_SOLVES");
 }
 
@@ -611,11 +618,86 @@ public:
   }
 };
 
-// The factorization step of solve_direct (or the opt-in LDLT).  Returns null
-// if Eigen reports a failure.
+#if defined(FE_HAS_MUMPS) && FE_HAS_MUMPS && defined(MESH_HAS_MPI)
+// Opt-in factorization distributed over every rank of the communicator
+// (MUMPS LDL^T: positive definite for the harmonic operator, symmetric
+// indefinite pivoting otherwise).  Collective: every rank holds the same
+// assembled matrix, passes the lower triangle of its share of the rows and
+// takes part in the factorization and in every solve.  Every rank receives
+// the full solution.
+class DryRegionMumps final : public DryRegionFactorization {
+public:
+  DryRegionMumps(const svmp::MeshComm& comm, PdeVelocityExtensionOperator op)
+      : solver_(comm.native(),
+                op == PdeVelocityExtensionOperator::Harmonic
+                    ? svmp::FE::backends::MumpsDistributedSolver::Symmetry::
+                          SymmetricPositiveDefinite
+                    : svmp::FE::backends::MumpsDistributedSolver::Symmetry::
+                          GeneralSymmetric)
+  {
+  }
+
+  // Collective.  False on every rank if MUMPS reports a failure.
+  [[nodiscard]] bool factorize(const svmp::FE::backends::EigenMatrix& matrix,
+                               const svmp::MeshComm& comm)
+  {
+    const auto& A = matrix.eigen();
+    using Matrix = std::decay_t<decltype(A)>;
+    std::vector<svmp::FE::GlobalIndex> rows;
+    std::vector<svmp::FE::GlobalIndex> cols;
+    std::vector<svmp::FE::Real> values;
+    const auto size = static_cast<Eigen::Index>(std::max(comm.size(), 1));
+    const auto rank = static_cast<Eigen::Index>(comm.rank());
+    for (Eigen::Index outer = 0; outer < A.outerSize(); ++outer) {
+      for (typename Matrix::InnerIterator it(A, outer); it; ++it) {
+        const auto row = static_cast<Eigen::Index>(it.row());
+        const auto col = static_cast<Eigen::Index>(it.col());
+        if (col > row || row % size != rank) {
+          continue;
+        }
+        rows.push_back(static_cast<svmp::FE::GlobalIndex>(row));
+        cols.push_back(static_cast<svmp::FE::GlobalIndex>(col));
+        values.push_back(it.value());
+      }
+    }
+    return solver_.factorize(static_cast<svmp::FE::GlobalIndex>(A.rows()),
+                             rows, cols, values);
+  }
+
+  [[nodiscard]] bool solveInto(const Eigen::VectorXd& b,
+                               Eigen::VectorXd& x) const override
+  {
+    std::vector<svmp::FE::Real> solution;
+    if (!solver_.solveReplicated(
+            std::span<const svmp::FE::Real>(b.data(),
+                                            static_cast<std::size_t>(b.size())),
+            solution)) {
+      return false;
+    }
+    x = Eigen::Map<const Eigen::VectorXd>(
+        solution.data(), static_cast<Eigen::Index>(solution.size()));
+    return true;
+  }
+
+  [[nodiscard]] std::size_t bytes() const noexcept override
+  {
+    return sizeof(*this) + solver_.localFactorBytes();
+  }
+
+private:
+  // Solving does not change the factors; MUMPS' C interface is not const.
+  mutable svmp::FE::backends::MumpsDistributedSolver solver_;
+};
+#endif
+
+// The factorization step of solve_direct (or the opt-in LDLT or MUMPS).
+// Returns null if the factorization reports a failure (collectively for
+// MUMPS).
 [[nodiscard]] std::unique_ptr<DryRegionFactorization> factorizeDryRegion(
     const svmp::FE::backends::GenericMatrix& matrix,
-    PdeVelocityExtensionFactorization kind)
+    PdeVelocityExtensionFactorization kind,
+    PdeVelocityExtensionOperator op,
+    const svmp::MeshComm& comm)
 {
   const auto* A =
       dynamic_cast<const svmp::FE::backends::EigenMatrix*>(&matrix);
@@ -623,6 +705,23 @@ public:
     throw std::runtime_error(
         "PDE velocity extension factorization requires an Eigen matrix");
   }
+  if (kind == PdeVelocityExtensionFactorization::Mumps) {
+#if defined(FE_HAS_MUMPS) && FE_HAS_MUMPS && defined(MESH_HAS_MPI)
+    auto factorization = std::make_unique<DryRegionMumps>(comm, op);
+    if (!factorization->factorize(*A, comm)) {
+      return nullptr;
+    }
+    return factorization;
+#else
+    (void)op;
+    (void)comm;
+    throw std::runtime_error(
+        "PDE velocity extension: the mumps factorization needs a build with "
+        "FE_ENABLE_MUMPS=ON and MPI");
+#endif
+  }
+  (void)op;
+  (void)comm;
   const ColumnMajorMatrix Acol = A->eigen();
   if (kind == PdeVelocityExtensionFactorization::LdltAmd) {
     auto factorization = std::make_unique<DryRegionLdlt>();
@@ -691,7 +790,9 @@ public:
 
 [[nodiscard]] std::unique_ptr<DryRegionFactorization> factorizeDryRegion(
     const svmp::FE::backends::GenericMatrix&,
-    PdeVelocityExtensionFactorization)
+    PdeVelocityExtensionFactorization,
+    PdeVelocityExtensionOperator,
+    const svmp::MeshComm&)
 {
   return nullptr;
 }
@@ -929,6 +1030,8 @@ std::string_view pdeVelocityExtensionFactorizationName(
     return "lu_colamd";
   case PdeVelocityExtensionFactorization::LdltAmd:
     return "ldlt_amd";
+  case PdeVelocityExtensionFactorization::Mumps:
+    return "mumps";
   }
   return "unknown";
 }
@@ -943,6 +1046,9 @@ pdeVelocityExtensionFactorizationFromToken(std::string_view token)
   }
   if (normalized == "ldlt" || normalized == "ldltamd") {
     return PdeVelocityExtensionFactorization::LdltAmd;
+  }
+  if (normalized == "mumps" || normalized == "mumpsdistributed") {
+    return PdeVelocityExtensionFactorization::Mumps;
   }
   return std::nullopt;
 }
@@ -1367,7 +1473,8 @@ PdeVelocityExtensionReport extendVelocityByPde(
       // Refactor.  Evict the least recently used entries first so that the
       // entry built below keeps the footprint within the capacity.
       const auto capacity = cache->capacity(
-          distributedComponentSolves(store_factorization, comm));
+          distributedComponentSolves(store_factorization, comm,
+                                     options.factorization));
       while (!entries.empty() && entries.size() >= capacity) {
         entries.pop_back();
       }
@@ -1650,7 +1757,8 @@ PdeVelocityExtensionReport extendVelocityByPde(
       } else if (store_factorization ||
                  options.factorization !=
                      PdeVelocityExtensionFactorization::LuColamd) {
-        new_factorization = factorizeDryRegion(A, options.factorization);
+        new_factorization =
+            factorizeDryRegion(A, options.factorization, options.op, comm);
         solved = new_factorization != nullptr &&
                  solveWithFactorization(*new_factorization, A, *x, *b,
                                         solver_options, solve_report);
@@ -1737,7 +1845,8 @@ PdeVelocityExtensionReport extendVelocityByPde(
 
   const bool distributed_solves =
       reuse ? cached->distributed_solves
-            : distributedComponentSolves(store_factorization, comm);
+            : distributedComponentSolves(store_factorization, comm,
+                                         options.factorization);
   report.distributed_solves = distributed_solves;
   if (!distributed_solves) {
     for (std::size_t component = 0; component < copy_components; ++component) {

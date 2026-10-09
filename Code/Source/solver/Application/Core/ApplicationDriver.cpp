@@ -21,6 +21,7 @@
 #include "FE/Basis/BasisCache.h"
 #include "FE/Basis/NodeOrderingConventions.h"
 #include "FE/Backends/Interfaces/GenericVector.h"
+#include "FE/Backends/MUMPS/MumpsDistributedSolver.h"
 #include "FE/Constraints/AffineConstraints.h"
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/LevelSet/LevelSetCurvatureProjection.h"
@@ -18682,7 +18683,8 @@ bool usesTraceSeedVelocityExtension(std::string_view method)
 }
 
 // SVMP_PDE_EXTENSION_FACTORIZATION selects the dry-region factorization of
-// the PDE velocity extension: lu_colamd (default) or the opt-in ldlt_amd.
+// the PDE velocity extension: lu_colamd (default), the opt-in ldlt_amd, or
+// the opt-in mumps (distributed over all ranks; FE_ENABLE_MUMPS builds).
 application::core::PdeVelocityExtensionFactorization
 pdeVelocityExtensionFactorizationSetting()
 {
@@ -18696,7 +18698,13 @@ pdeVelocityExtensionFactorizationSetting()
     if (!parsed.has_value()) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] SVMP_PDE_EXTENSION_FACTORIZATION='" +
-          std::string(text) + "' is not one of lu_colamd, ldlt_amd.");
+          std::string(text) + "' is not one of lu_colamd, ldlt_amd, mumps.");
+    }
+    if (*parsed == application::core::PdeVelocityExtensionFactorization::Mumps &&
+        !svmp::FE::backends::mumpsAvailable()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] SVMP_PDE_EXTENSION_FACTORIZATION=mumps "
+          "needs a build with FE_ENABLE_MUMPS=ON.");
     }
     return *parsed;
   }();
