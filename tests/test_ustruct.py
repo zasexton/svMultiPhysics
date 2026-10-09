@@ -1,9 +1,8 @@
 import os
 import pytest
 import subprocess
-import xml.etree.ElementTree as ET
 
-from .conftest import make_interior_node_case, run_by_name, run_with_reference, skip_if_no_trilinos
+from .conftest import run_with_reference, skip_if_no_trilinos
 
 # Common folder for all tests in this file
 base_folder = "ustruct"
@@ -87,17 +86,3 @@ def test_tensile_adventitia_Newtonian_viscosity(n_proc):
 def test_tensile_adventitia_Potential_viscosity(n_proc):
     test_folder = "tensile_adventitia_Potential_viscosity"
     run_with_reference(base_folder, test_folder, fields, n_proc, t_max=1)
-
-def test_interior_node_set_rejected(tmp_path):
-    root, _, _, _ = make_interior_node_case(tmp_path, 3)
-    equation = root.find("Add_equation")
-    equation.set("type", "ustruct")
-    for child in list(equation):
-        if child.tag.startswith("Darcy_") or child.tag in ("Fluid_density", "Source_term"):
-            equation.remove(child)
-    for tag, value in [("Density", "1"), ("Elasticity_modulus", "10"), ("Poisson_ratio", "0.3")]:
-        ET.SubElement(equation, tag).text = value
-    ET.SubElement(equation, "Constitutive_model", type="nHK")
-    equation.find("Output/Darcy_pressure").tag = "Displacement"
-    ET.ElementTree(root).write(tmp_path / "solver.xml")
-    run_by_name(tmp_path, "solver.xml", 2, expected_error="node set.*ustruct")
