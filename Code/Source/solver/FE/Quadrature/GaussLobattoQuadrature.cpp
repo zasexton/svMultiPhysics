@@ -26,7 +26,7 @@ namespace svmp::FE::quadrature {
 namespace {
 
 constexpr std::size_t kMaximumPoints = 128;
-static_assert(max_gauss_lobatto_exactness() == static_cast<int>(2 * kMaximumPoints - 3));
+static_assert(max_gauss_lobatto_exactness() == 2 * kMaximumPoints - 3);
 
 // Defensively bound supported cosine-seeded Newton refinements for
 // deterministic termination.
@@ -251,7 +251,7 @@ QuadratureRule make_gauss_lobatto_rule(int requested_exactness)
             "generated weights do not reproduce the reference measure");
     }
 
-    const int polynomial_exactness = static_cast<int>(2 * num_points - 3);
+    const int polynomial_exactness = 2 * num_points - 3;
     return QuadratureRule(
         svmp::CellFamily::Line, polynomial_exactness,
         std::move(points), std::move(weights));
