@@ -96,11 +96,21 @@ def test_interior_node_components(tmp_path, n_proc, integral, prescription):
     if len(components) < 3:
         assert np.all(result.point_data["Displacement"][order, 1] > 1e-5)
     assert np.isfinite(result.point_data["Displacement"]).all()
+    if n_proc > 1:
+        serial = run_by_name(tmp_path, "solver.xml", 2)
+        serial_order = np.lexsort(serial.points.T)
+        parallel_order = np.lexsort(result.points.T)
+        np.testing.assert_allclose(result.points[parallel_order], serial.points[serial_order], atol=1e-12)
+        for field in ("Displacement", "Velocity"):
+            np.testing.assert_allclose(result.point_data[field][parallel_order],
+                                       serial.point_data[field][serial_order], atol=1e-9, rtol=1e-7)
 
 
 @pytest.mark.parametrize("last_component", ["1", "1.5", "2"])
 @pytest.mark.parametrize("node_set_last", [False, True])
-def test_interior_node_repeated_component_mask(tmp_path, last_component, node_set_last):
+@pytest.mark.parametrize("first_mask,last_mask_format", [("1 0", "{}"), ("(1, 0)", "({})")])
+def test_interior_node_repeated_component_mask(
+        tmp_path, last_component, node_set_last, first_mask, last_mask_format):
     """Validate every mask tag, regardless of the node-set reference's position."""
     root, points, _, ids = make_interior_structural_case(tmp_path)
     bc = root.find("Add_equation/Add_BC")
@@ -108,8 +118,8 @@ def test_interior_node_repeated_component_mask(tmp_path, last_component, node_se
     bc.find("Time_dependence").text = "Steady"
     ET.SubElement(bc, "Value").text = "0.02"
     ET.SubElement(bc, "Impose_on_state_variable_integral").text = "false"
-    ET.SubElement(bc, "Effective_direction").text = "1 0"
-    ET.SubElement(bc, "Effective_direction").text = last_component
+    ET.SubElement(bc, "Effective_direction").text = first_mask
+    ET.SubElement(bc, "Effective_direction").text = last_mask_format.format(last_component)
     if node_set_last:
         node_set = bc.find("Node_set")
         bc.remove(node_set)

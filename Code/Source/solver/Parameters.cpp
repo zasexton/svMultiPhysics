@@ -639,13 +639,28 @@ void BoundaryConditionParameters::set_values(tinyxml2::XMLElement *xml_elem) {
     } else if (item->GetText() != nullptr) {
       auto value = item->GetText();
       if (node_target && name == "Effective_direction") {
-        std::istringstream input(value);
+        // Use the same separators as face component masks.
+        std::string text(value);
+        for (auto& character : text) {
+          if (character == '(' || character == ')' || character == ',') {
+            character = ' ';
+          }
+        }
+        std::istringstream input(text);
         std::string token;
         while (input >> token) {
           if (token != "0" && token != "1") {
             svmp::raise<svmp::ParseException>("Node set BC '" + this->name.value() +
                 "': component mask entries must be 0 or 1.");
           }
+        }
+      } else if (node_target && name == "Value") {
+        std::istringstream input(value);
+        double number = 0.0;
+        std::string extra;
+        if (!(input >> number) || !std::isfinite(number) || (input >> extra)) {
+          svmp::raise<svmp::ParseException>("Node set BC '" + this->name.value() +
+              "': Value must be one finite number.");
         }
       }
       try {

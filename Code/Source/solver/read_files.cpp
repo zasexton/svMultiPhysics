@@ -158,6 +158,20 @@ void read_bc(Simulation* simulation, EquationParameters* eq_params, eqType& lEq,
     reject(simulation->com_mod.rmsh.isReqd, "topology-changing remeshing");
     reject(lEq.phys == EquationType::phys_ustruct ||
         (lEq.phys == EquationType::phys_FSI && simulation->com_mod.sstEq), "ustruct equation");
+    reject(bc_params->initial_displacements_file_path.defined(),
+        "Initial_displacements_file_path");
+    reject(bc_params->prestress_file_path.defined(),
+        "Prestress_file_path");
+    reject(bc_params->penalty_parameter_normal.defined(),
+        "Penalty_parameter_normal");
+    reject(bc_params->penalty_parameter_tangential.defined(),
+        "Penalty_parameter_tangential");
+    reject(
+        std::set<EquationType>{
+            Equation_CEP, Equation_darcy, Equation_heatF, Equation_heatS
+        }.count(lEq.phys) != 0 &&
+            bc_params->impose_on_state_variable_integral.value(),
+        "Impose_on_state_variable_integral for a scalar equation");
   }
   BoundaryConditionType coupled_bc_type = BoundaryConditionType::bType_Neu;
   std::string oned_input_file;

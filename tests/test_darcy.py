@@ -66,6 +66,11 @@ def test_interior_node_invalid_ids(tmp_path, ids):
     ("Time_dependence", "Coupled", "node.*Time_dependence"),
     ("Effective_direction", "0 1", "node.*component"),
     ("Effective_direction", "1 0.5", "node.*component"),
+    ("Initial_displacements_file_path", "unused.vtu", "node.*Initial_displacements_file_path"),
+    ("Prestress_file_path", "unused.vtu", "node.*Prestress_file_path"),
+    ("Penalty_parameter_normal", "1", "node.*Penalty_parameter_normal"),
+    ("Penalty_parameter_tangential", "1", "node.*Penalty_parameter_tangential"),
+    ("Impose_on_state_variable_integral", "true", "node.*Impose_on_state_variable_integral"),
 ])
 def test_interior_node_invalid_options(tmp_path, tag, value, error):
     root, _, _, _ = make_interior_node_case(tmp_path)
@@ -76,6 +81,24 @@ def test_interior_node_invalid_options(tmp_path, tag, value, error):
     element.text = value
     ET.ElementTree(root).write(tmp_path / "solver.xml")
     run_by_name(tmp_path, "solver.xml", 2, expected_error=error)
+
+
+@pytest.mark.parametrize("value", ["2.5", "2 3", "2junk", "nan", "inf"])
+@pytest.mark.parametrize("repeated", [False, True])
+def test_interior_node_value_literals(tmp_path, value, repeated):
+    root, points, _, ids = make_interior_node_case(tmp_path)
+    bc = root.find("Add_equation/Add_BC")
+    bc.remove(bc.find("Temporal_and_spatial_values_file_path"))
+    bc.find("Time_dependence").text = "Steady"
+    if repeated:
+        ET.SubElement(bc, "Value").text = "1"
+    ET.SubElement(bc, "Value").text = value
+    ET.ElementTree(root).write(tmp_path / "solver.xml")
+    error = None if value == "2.5" else "node set.*Value must be one finite number"
+    result = run_by_name(tmp_path, "solver.xml", 2, expected_error=error)
+    if error is None:
+        order = [np.argmin(np.linalg.norm(result.points - points[i-1], axis=1)) for i in ids]
+        np.testing.assert_allclose(result.point_data["Darcy_pressure"].reshape(-1)[order], 2.5, atol=1e-10)
 
 
 @pytest.mark.parametrize("data", [
