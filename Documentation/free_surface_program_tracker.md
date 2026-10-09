@@ -530,6 +530,21 @@ These are proposals. Each lists a recommended option and an alternative. Record 
     - **Rate initialization off** (`SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT=0`): accepted, but the setting should become a deck key rather than an environment variable.
     - **Wider aggregation guards in the capillary-rise deck (6 and 12 instead of 4): provisional only.** Results that rely on them are flagged; after fix 2 the deck returns to the default guards and is rerun.
     - **Diagnostic jobs pinned to the protocol node:** accepted.
+- **D34, 2026-10-08 (user): contact-point diagnosis and next steps for M4.** Analysis by the contact-point agent (branch `dev/contact-point-balance`):
+  1. **The discrete Young equilibrium is steady and attracting.** Caps started at θ_e stay at rest for 5 viscous times, with an angle error of 0.004–0.2° and Ca about 9e-5. This holds for any slip length, and with reconciliation or patch bounds off.
+  2. **The sessile failure is level-set degradation near moving contact lines.** Reinitialization is off in the protocol, so nothing regularizes the level set.
+     - |∇φ| grows to 10–16 on the wet side.
+     - Behind receding lines the dry wall side flattens (φ ≈ +h over several cells), and wall values become non-monotone.
+     - This drives spurious currents (Ca ~ 1e-2), creep, and stick-slip at wall-vertex crossings (14° angle jumps at 120°).
+     - It is also the source of the wall films and spots: transport errors of order h flip dewetted wall vertices.
+  3. **The Ren–E deficit comes from aggregation.** The dry wall node of the contact edge is always an aggregation slave, so the contact point has no velocity DoF. The weak point law is imposed through interior rows, where bulk stiffness takes a share. The deficit decays only like 1/ln(l_s/h).
+  - **Decisions:**
+    - A diagnostic first: the relaxation with the existing reinitialization, and restarts of the D29 states with φ redistanced while keeping the zero set.
+    - Prototype an opt-in contact-point velocity DoF for Ren–E.
+    - The level-set regularization near contact lines (or turning reinitialization on in the sessile protocol) is decided after the diagnostic.
+  - **Aggregation fix 2:** part 1 (the extrapolation guard is now independent of vertex order) is accepted. Part 2 (the rootless fallback) is opt-in only, because pinning a connected wall film degrades results (capillary-rise apex RMS 0.22 → 1.23 mm after t = 0.416 s). The capillary-rise deck returns to the default guards; the clean comparison window is [0, 0.416] s.
+  - **Threaded assembly (opt-in `Assembly_threads` / `SVMP_ASSEMBLY_THREADS`):** the global system receives the same insertion calls as serial assembly for any thread count; one thread team is shared with the geometry threads. 60 of 60 byte-level comparisons are identical across thread and rank combinations, TSan is clean, and CTest passes 90/90. For 3D at R/h = 16 on one node, 8 ranks × 3 threads take 1,223 s per 2 steps, against 1,530 s with 16 ranks × 1 thread (−20%), with 29% less memory; the cut-volume imbalance is the main reason 16 ranks are no faster than 8.
+  - **Issue H:** the outer loop now exits on a persistent two-state constraint cycle from refresh 13, finishing on the frozen problem. It changes only steps that previously failed. The source of the cycle is cells whose active fraction rounds to 1.0 without being marked full; fixing that classification is a later follow-up.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
