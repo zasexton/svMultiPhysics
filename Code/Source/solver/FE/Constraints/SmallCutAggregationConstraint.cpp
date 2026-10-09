@@ -13,6 +13,7 @@
 #include "Basis/NodeOrderingConventions.h"
 #include "Constraints/AffineConstraints.h"
 #include "Constraints/SmallCutAggregationCellIndex.h"
+#include "Core/AggregationGuardDiagnostics.h"
 #include "Core/FEException.h"
 #include "Core/HaloDiagnostics.h"
 #include "Core/Logger.h"
@@ -215,6 +216,9 @@ struct GlobalCandidateSupport {
     std::array<Real, 3> coordinates{};
     bool has_full_support{false};
     bool globally_rooted{false};
+    // Cells of the canonical active feature of the candidate's cut seed
+    // (diagnostics of the guard-rootless policy).
+    std::size_t feature_cells{0u};
 };
 
 using CellKey = std::vector<GlobalIndex>;
@@ -415,6 +419,58 @@ struct AggregationRuntimeOptions {
     bool max_lines_valid{true};
 };
 
+// A candidate whose cut feature holds full cells only beyond the root-path
+// guard, or whose every root proposal fails the extrapolation or coefficient
+// guards, has no admissible extension.  By default the refresh fails closed
+// and names the opt-in.  With SmallCutAggregationGuardOptions::
+// rootless_fallback the candidate receives the rootless-island policy of a
+// feature without full cells (decision D33); every such case is logged once
+// per refresh (by the first rank) and counted in the run summary
+// (diagnostics::aggregationGuardRootlessSummary), so a result that relies on
+// it is flagged.
+constexpr const char* kGuardRootlessOptInHint =
+    "the candidate's cut feature has full cells only beyond the aggregation "
+    "guards (for example a wetting film or wedge at a wall); set "
+    "<Small_cut_aggregation_rootless_fallback>true</Small_cut_aggregation_rootless_fallback> "
+    "on the free-surface boundary condition to continue with the "
+    "rootless-island policy (opt-in: it pins velocity and pressure of those "
+    "candidates, which degrades results inside connected liquid; every case "
+    "is logged and counted in the run summary)";
+
+void logGuardRootlessCandidate(const systems::FESystem& system,
+                               std::string_view field_name,
+                               std::string_view reason,
+                               GlobalIndex candidate_dof,
+                               const std::array<Real, 3>& coordinates,
+                               std::size_t feature_cells,
+                               const std::string& detail)
+{
+    int rank = 0;
+#if FE_HAS_MPI
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Comm_rank(system.dofHandler().mpiComm(), &rank);
+    }
+#endif
+    if (rank != 0) {
+        return;
+    }
+    std::ostringstream oss;
+    oss << std::setprecision(17)
+        << "SmallCutAggregationConstraint: diagnostic=aggregation_guard_rootless"
+        << " reason=" << reason << " field='" << field_name << "'"
+        << " candidate_dof=" << candidate_dof << " xyz=(" << coordinates[0]
+        << "," << coordinates[1] << "," << coordinates[2] << ")"
+        << " feature_cells=" << feature_cells;
+    const auto time = system.lastConstraintUpdateTime();
+    if (time.has_value()) {
+        oss << " constraint_time=" << *time;
+    }
+    oss << " " << detail << " policy=rootless_island";
+    FE_LOG_WARNING(oss.str());
+}
+
 [[nodiscard]] bool strictEnvironmentFlag(const char* name, bool& valid)
 {
     const char* value = std::getenv(name);
@@ -529,6 +585,9 @@ struct DistributedAggregationResult {
     std::size_t canonical_strong_suppressed_dofs{0u};
     std::size_t canonical_halo_limited_root_choices{0u};
     std::size_t canonical_row_coupled_slaves_beyond_halo{0u};
+    // Globally rooted candidates without any proposal inside the guards that
+    // received the rootless-island policy (D33).
+    std::size_t canonical_guard_rootless_candidate_vertices{0u};
     std::vector<SmallCutAggregationProlongationRow> canonical_rows{};
 };
 
@@ -855,7 +914,8 @@ resolveDistributedAggregationDeclarations(
     const std::set<GlobalIndex>& assembled_candidate_dofs,
     const std::set<GlobalIndex>& row_coupled_candidate_dofs,
     bool slave_all_cut,
-    bool allow_unaggregated)
+    bool allow_unaggregated,
+    bool rootless_fallback)
 {
     DistributedAggregationResult result;
     int initialized = 0;
@@ -1342,6 +1402,10 @@ resolveDistributedAggregationDeclarations(
     std::set<GlobalIndex> expected_slaves;
     std::ostringstream failures;
     std::size_t failure_count = 0u;
+    // Globally rooted candidates without any proposal inside the guards
+    // (fail closed unless rootless_fallback): not a halo defect.
+    std::ostringstream guard_failures;
+    std::size_t guard_failure_count = 0u;
     std::vector<std::int64_t> local_visibility_words;
     std::exception_ptr local_canonical_selection_exception;
     constexpr double line_tolerance = 1.0e-12;
@@ -1433,15 +1497,30 @@ resolveDistributedAggregationDeclarations(
                     }
                     continue;
                 }
-                ++failure_count;
-                if (failure_count <= 4u) {
-                    failures << " dof=" << dof
-                             << " reason=no_valid_root_proposal xyz=("
-                             << support.coordinates[0] << ","
-                             << support.coordinates[1] << ","
-                             << support.coordinates[2] << ");";
+                if (!rootless_fallback) {
+                    ++guard_failure_count;
+                    if (guard_failure_count <= 4u) {
+                        guard_failures
+                            << " dof=" << dof
+                            << " reason=no_valid_root_proposal xyz=("
+                            << support.coordinates[0] << ","
+                            << support.coordinates[1] << ","
+                            << support.coordinates[2] << ")"
+                            << " feature_cells=" << support.feature_cells
+                            << ";";
+                    }
+                    continue;
                 }
-                continue;
+                // Opt-in fallback: rootless-island policy below (D33).
+                ++result.canonical_guard_rootless_candidate_vertices;
+                logGuardRootlessCandidate(
+                    system,
+                    field_name,
+                    "proposal_guard",
+                    dof,
+                    support.coordinates,
+                    support.feature_cells,
+                    "detail=no_root_proposal_inside_guards");
             }
             if (slave_all_cut && support.has_full_support) {
                 // Globally supported slave-all candidate with no foreign root:
@@ -1687,7 +1766,21 @@ resolveDistributedAggregationDeclarations(
             " Communicator-global candidate/root construction produced "
             "inconsistent component/weight data or no proposed root whose "
             "masters are relevant on every slave-relevant rank; refusing "
-            "owner-wins constraint resolution.");
+            "owner-wins constraint resolution." +
+            (guard_failure_count > 0u
+                 ? " Also " + std::to_string(guard_failure_count) +
+                       " candidate(s) without a root proposal inside the "
+                       "guards:" + guard_failures.str()
+                 : std::string{}));
+    }
+    if (guard_failure_count > 0u) {
+        throw std::runtime_error(
+            "SmallCutAggregationConstraint: diagnostic="
+            "aggregation_no_root_inside_guards field='" +
+            std::string(field_name) + "' candidates=" +
+            std::to_string(guard_failure_count) + guard_failures.str() +
+            " Every root proposal of these globally rooted candidates fails "
+            "the aggregation guards: " + kGuardRootlessOptInHint + ".");
     }
 
     // Every rank now knows the same canonical lines.  Before installing them,
@@ -1974,13 +2067,14 @@ using GlobalCandidateMap =
 resolveDistributedAggregationDeclarations(
     const systems::FESystem& system,
     const AffineConstraints& existing_constraints,
-    std::string_view,
+    std::string_view field_name,
     const GlobalCandidateMap& global_candidates,
     const LocalAggregationDeclarationMap& local_candidates,
     const std::set<GlobalIndex>&,
     const std::set<GlobalIndex>&,
     bool slave_all_cut,
-    bool allow_unaggregated)
+    bool allow_unaggregated,
+    bool rootless_fallback)
 {
     DistributedAggregationResult result;
     const auto& partition = system.dofHandler().getPartition();
@@ -1995,6 +2089,19 @@ resolveDistributedAggregationDeclarations(
         const auto candidate_dof = dof;
         const auto* candidate_components =
             &support.component_dofs;
+        // With the opt-in fallback, a globally rooted candidate without any
+        // proposal inside the guards gets the rootless-island policy below
+        // (D33).
+        const auto recordGuardRootless = [&]() {
+            ++result.canonical_guard_rootless_candidate_vertices;
+            logGuardRootlessCandidate(system,
+                                      field_name,
+                                      "proposal_guard",
+                                      candidate_dof,
+                                      support.coordinates,
+                                      support.feature_cells,
+                                      "detail=no_root_proposal_inside_guards");
+        };
         auto make_row =
             [candidate_dof, candidate_components](
                 GlobalIndex slave,
@@ -2101,21 +2208,26 @@ resolveDistributedAggregationDeclarations(
                     result.relevant_lines.push_back(line);
                 }
             }
-        } else if (support.globally_rooted) {
-            if (allow_unaggregated) {
-                for (const auto slave : support.component_dofs) {
-                    result.canonical_rows.push_back(make_row(
-                        slave,
-                        SmallCutAggregationProvisionalRowKind::
-                            UnaggregatedFreeIdentity));
-                }
-                continue;
+        } else if (support.globally_rooted && allow_unaggregated) {
+            for (const auto slave : support.component_dofs) {
+                result.canonical_rows.push_back(make_row(
+                    slave,
+                    SmallCutAggregationProvisionalRowKind::
+                        UnaggregatedFreeIdentity));
             }
+            continue;
+        } else if (support.globally_rooted && !rootless_fallback) {
             throw std::runtime_error(
-                "SmallCutAggregationConstraint: globally rooted candidate " +
+                "SmallCutAggregationConstraint: diagnostic="
+                "aggregation_no_root_inside_guards field='" +
+                std::string(field_name) + "' candidates=1 dof=" +
                 std::to_string(dof) +
-                " has no valid serial root proposal");
+                " reason=no_valid_root_proposal: " + kGuardRootlessOptInHint +
+                ".");
         } else if (slave_all_cut && support.has_full_support) {
+            if (support.globally_rooted) {
+                recordGuardRootless();
+            }
             for (const auto slave : support.component_dofs) {
                 result.canonical_rows.push_back(make_row(
                     slave,
@@ -2123,6 +2235,9 @@ resolveDistributedAggregationDeclarations(
                         SupportedFreeIdentity));
             }
         } else if (!allow_unaggregated) {
+            if (support.globally_rooted) {
+                recordGuardRootless();
+            }
             for (const auto slave : support.component_dofs) {
                 auto row = make_row(
                     slave,
@@ -5818,6 +5933,14 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         }
     }
 
+    // Canonical active feature sizes, for the guard-rootless diagnostics.
+    std::map<GlobalIndex, std::size_t> feature_cell_counts;
+    for (const auto feature_id : active_feature_of) {
+        if (feature_id != INVALID_GLOBAL_INDEX) {
+            ++feature_cell_counts[feature_id];
+        }
+    }
+
     // Breadth-first search per candidate; a per-candidate stamp marks the
     // visited cells without clearing a set for every candidate.
     std::vector<std::size_t> visit_stamp(n_classified, 0u);
@@ -5851,6 +5974,9 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             feature_has_eligible_root =
                 feature_has_eligible_root ||
                 root_eligible_feature_ids.count(active_feature_of[seed]) > 0u;
+            support.feature_cells = std::max(
+                support.feature_cells,
+                feature_cell_counts[active_feature_of[seed]]);
         }
 
         auto& roots = global_roots_by_candidate[dof];
@@ -5902,6 +6028,10 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 std::max(maximum_observed_root_path, root.distance);
         }
         if (feature_has_eligible_root && roots.empty()) {
+            // The feature holds full cells, but none within the root-path
+            // guard: no admissible extension.  Fail closed unless the
+            // opt-in fallback gives the candidate the rootless-island
+            // policy (D33).
             ++root_path_guard_rejections;
             maximum_observed_root_path = std::max(
                 maximum_observed_root_path,
@@ -5909,13 +6039,25 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                         std::numeric_limits<std::size_t>::max()
                     ? guards_.maximum_root_path_length
                     : guards_.maximum_root_path_length + 1u);
-            throw std::runtime_error(
-                "SmallCutAggregationConstraint: diagnostic="
-                "root_path_guard_rejection candidate_dof=" +
-                std::to_string(dof) + " maximum_observed_path=" +
-                std::to_string(maximum_observed_root_path) +
-                " maximum_allowed_path=" +
-                std::to_string(guards_.maximum_root_path_length));
+            if (!guards_.rootless_fallback) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: diagnostic="
+                    "root_path_guard_rejection candidate_dof=" +
+                    std::to_string(dof) + " maximum_observed_path=" +
+                    std::to_string(maximum_observed_root_path) +
+                    " maximum_allowed_path=" +
+                    std::to_string(guards_.maximum_root_path_length) +
+                    ": " + kGuardRootlessOptInHint + ".");
+            }
+            logGuardRootlessCandidate(
+                system,
+                rec.name,
+                "root_path_guard",
+                dof,
+                support.coordinates,
+                support.feature_cells,
+                "maximum_allowed_path=" +
+                    std::to_string(guards_.maximum_root_path_length));
         }
         support.globally_rooted = !roots.empty();
     }
@@ -6420,12 +6562,21 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             assembled_candidate_dofs,
             row_coupled_candidate_dofs,
             slave_all_cut,
-            allow_unaggregated);
+            allow_unaggregated,
+            guards_.rootless_fallback);
         // Communicator-global counts; the run summary reports them even when
         // the per-refresh diagnostic line is not printed.
         diagnostics::recordAggregationHalo(
             distributed_result.canonical_halo_limited_root_choices,
             distributed_result.canonical_row_coupled_slaves_beyond_halo);
+        // Candidates resolved by the opt-in rootless-island fallback because
+        // no root lay inside the guards (D33); canonical on every rank.
+        if (guards_.rootless_fallback) {
+            diagnostics::noteAggregationGuardRootlessFallbackEnabled();
+        }
+        diagnostics::recordAggregationGuardRootless(
+            root_path_guard_rejections,
+            distributed_result.canonical_guard_rootless_candidate_vertices);
     } else {
         distributed_result.validation =
             DistributedAggregationValidation::DebugBypass;
@@ -6727,6 +6878,9 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         << maximum_observed_root_path
         << " root_path_guard_rejections="
         << root_path_guard_rejections
+        << " guard_rootless_candidates="
+        << (root_path_guard_rejections +
+            distributed_result.canonical_guard_rootless_candidate_vertices)
         << " root_path_search=bounded_candidate_neighborhood"
         << " root_path_seed_index_entries="
         << root_path_seed_index_entries

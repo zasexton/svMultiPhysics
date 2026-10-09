@@ -42,6 +42,7 @@
 #include "FE/Geometry/CutQuadratureMapping.h"
 #include "FE/Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "FE/Core/DeterministicParallel.h"
+#include "FE/Core/AggregationGuardDiagnostics.h"
 #include "FE/Core/HaloDiagnostics.h"
 #include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "FE/Interfaces/IncompressibleTwoFluidDiagnostics.h"
@@ -36791,6 +36792,19 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   if (svmp::MeshComm::world().size() > 1 && svmp::MeshComm::world().rank() == 0) {
     oopCout() << "[svMultiPhysics::Application] Halo correctness "
               << svmp::FE::diagnostics::haloCorrectnessSummary() << std::endl;
+  }
+  // Small-cut aggregation candidates that had no root inside the aggregation
+  // guards and received the rootless-island policy (opt-in
+  // Small_cut_aggregation_rootless_fallback, D33; canonical totals).  A
+  // nonzero candidates_total flags a result that relies on it.
+  if (const auto guard_totals = svmp::FE::diagnostics::aggregationGuardRootlessTotals();
+      (guard_totals.fallback_enabled ||
+       guard_totals.root_path_guard_candidates_total +
+               guard_totals.proposal_guard_candidates_total >
+           0) &&
+      svmp::MeshComm::world().rank() == 0) {
+    oopCout() << "[svMultiPhysics::Application] Aggregation guard fallback "
+              << svmp::FE::diagnostics::aggregationGuardRootlessSummary() << std::endl;
   }
 
   if (!rep.success) {

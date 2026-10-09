@@ -37,6 +37,7 @@
 #include "Constraints/SmallCutAggregationCellIndex.h"
 #include "Constraints/SmallCutAggregationConstraint.h"
 #include "Constraints/VertexDirichletConstraint.h"
+#include "Core/AggregationGuardDiagnostics.h"
 #include "Core/Logger.h"
 #include "Dofs/EntityDofMap.h"
 #include "Elements/ReferenceElement.h"
@@ -883,6 +884,14 @@ void expectEntries(const std::vector<std::pair<GlobalIndex, double>>& actual,
         EXPECT_EQ(actual[i].first, expected[i].first) << "entry " << i;
         EXPECT_NEAR(actual[i].second, expected[i].second, tol) << "entry " << i;
     }
+}
+
+void expectHomogeneousPin(const systems::FESystem& system, GlobalIndex dof)
+{
+    const auto view = system.constraints().getConstraint(dof);
+    ASSERT_TRUE(view.has_value()) << "dof " << dof << " is not constrained";
+    EXPECT_TRUE(view->isDirichlet()) << "dof " << dof;
+    EXPECT_NEAR(view->inhomogeneity, 0.0, 1.0e-15) << "dof " << dof;
 }
 
 [[nodiscard]] std::vector<std::pair<GlobalIndex, double>>
@@ -1825,8 +1834,78 @@ TEST(SmallCutAggregationConstraint, RootPathGuardRejectsLongCutBand)
                   std::string::npos);
         EXPECT_NE(std::string(error.what()).find("maximum_allowed_path=1"),
                   std::string::npos);
+        EXPECT_NE(std::string(error.what()).find(
+                      "Small_cut_aggregation_rootless_fallback"),
+                  std::string::npos);
     }
     EXPECT_EQ(system.constraints().numConstraints(), 0u);
+#endif
+}
+
+TEST(SmallCutAggregationConstraint, RootlessFallbackPinsCandidatesBeyondRootPathGuard)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    // c0 cut, c1 cut, c2 full, path guard 1: the vertices of c0 alone (0, 4)
+    // reach c2 only at path 2, so they have no admissible extension.  With
+    // the opt-in fallback they get the rootless-island policy (D33) instead
+    // of failing; vertices 1 and 5 reach c2 at path 1 and keep their rows.
+    auto mesh = buildQuadStrip(3);
+    auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    auto guards = SmallCutAggregationGuardOptions{};
+    guards.maximum_root_path_length = 1u;
+    guards.rootless_fallback = true;
+    system.addSystemConstraint(std::make_unique<SmallCutAggregationConstraint>(
+        pressure,
+        geometry::CutIntegrationSide::Negative,
+        kInterfaceMarker,
+        std::vector<int>{},
+        std::vector<GlobalIndex>{},
+        guards));
+    ASSERT_NO_THROW(system.setup());
+    system.setCutIntegrationContext(makeCutContext({
+        {.cell = 0, .volume_fraction = Real{0.2}, .full_cell_equivalent = false},
+        {.cell = 1, .volume_fraction = Real{0.5}, .full_cell_equivalent = false},
+        {.cell = 2, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+    }));
+    const auto totals_before = diagnostics::aggregationGuardRootlessTotals();
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
+
+    for (const GlobalIndex vertex : {0, 4}) {
+        expectHomogeneousPin(system, vertexDof(system, pressure, vertex));
+    }
+    expectEntries(lineEntries(system, vertexDof(system, pressure, 1)),
+                  {{vertexDof(system, pressure, 2), 2.0},
+                   {vertexDof(system, pressure, 3), -1.0}});
+    expectEntries(lineEntries(system, vertexDof(system, pressure, 5)),
+                  {{vertexDof(system, pressure, 6), 2.0},
+                   {vertexDof(system, pressure, 7), -1.0}});
+    const auto reports = system.completedSmallCutAggregationRefreshReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports.front().root_path_guard_rejections, 2u);
+    EXPECT_NE(log_output.find("diagnostic=aggregation_guard_rootless "
+                              "reason=root_path_guard"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("maximum_allowed_path=1"), std::string::npos);
+    EXPECT_NE(log_output.find("feature_cells=3"), std::string::npos);
+    const auto totals_after = diagnostics::aggregationGuardRootlessTotals();
+    EXPECT_EQ(totals_after.root_path_guard_candidates_total -
+                  totals_before.root_path_guard_candidates_total,
+              2u);
+    EXPECT_EQ(totals_after.proposal_guard_candidates_total,
+              totals_before.proposal_guard_candidates_total);
+    EXPECT_NE(diagnostics::aggregationGuardRootlessSummary().find(
+                  "root_path_guard_candidates_total="),
+              std::string::npos);
 #endif
 }
 
@@ -1923,7 +2002,20 @@ TEST(SmallCutAggregationConstraint,
              .volume_fraction = Real{1.0},
              .full_cell_equivalent = true},
         }));
-        EXPECT_THROW(system.rebuildConstraintState(), std::runtime_error);
+        try {
+            system.rebuildConstraintState();
+            ADD_FAILURE() << "candidates without a root inside the guards must fail closed";
+        } catch (const std::runtime_error& error) {
+            const std::string message = error.what();
+            EXPECT_NE(message.find("diagnostic=aggregation_no_root_inside_guards"),
+                      std::string::npos)
+                << message;
+            EXPECT_EQ(message.find("incomplete_distributed_aggregation_halo"),
+                      std::string::npos)
+                << message;
+            EXPECT_NE(message.find("Small_cut_aggregation_rootless_fallback"),
+                      std::string::npos);
+        }
         EXPECT_EQ(system.constraints().numConstraints(), 0u);
     };
 
@@ -1933,6 +2025,73 @@ TEST(SmallCutAggregationConstraint,
 
     auto coefficient_guards = SmallCutAggregationGuardOptions{};
     coefficient_guards.maximum_absolute_coefficient = 1.5;
+    run_rejection(coefficient_guards);
+#endif
+}
+
+TEST(SmallCutAggregationConstraint,
+     RootlessFallbackPinsCandidatesWhoseProposalsFailTheGuards)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    // The only root proposal of the candidates 0 and 3 fails the guard, so
+    // they have no admissible extension.  With the opt-in fallback they get
+    // the rootless-island policy (D33) instead of failing.
+    const auto run_rejection = [](SmallCutAggregationGuardOptions guards) {
+        auto mesh = buildQuadStrip(2);
+        auto space = std::make_shared<spaces::H1Space>(
+            ElementType::Quad4, /*order=*/1);
+        systems::FESystem system(mesh);
+        const auto pressure = system.addField(systems::FieldSpec{
+            .name = "p", .space = space, .components = 1});
+        system.addOperator("pressure");
+        system.addSystemConstraint(
+            std::make_unique<SmallCutAggregationConstraint>(
+                pressure,
+                geometry::CutIntegrationSide::Negative,
+                kInterfaceMarker,
+                std::vector<int>{},
+                std::vector<GlobalIndex>{},
+                guards));
+        EXPECT_NO_THROW(system.setup());
+        system.setCutIntegrationContext(makeCutContext({
+            {.cell = 0,
+             .volume_fraction = Real{0.3},
+             .full_cell_equivalent = false},
+            {.cell = 1,
+             .volume_fraction = Real{1.0},
+             .full_cell_equivalent = true},
+        }));
+        const auto totals_before = diagnostics::aggregationGuardRootlessTotals();
+        testing::internal::CaptureStdout();
+        testing::internal::CaptureStderr();
+        EXPECT_NO_THROW(system.rebuildConstraintState());
+        auto log_output = testing::internal::GetCapturedStdout();
+        log_output += testing::internal::GetCapturedStderr();
+        for (const GlobalIndex vertex : {0, 3}) {
+            expectHomogeneousPin(system, vertexDof(system, pressure, vertex));
+        }
+        EXPECT_EQ(system.constraints().numConstraints(), 2u);
+        EXPECT_NE(log_output.find("diagnostic=aggregation_guard_rootless "
+                                  "reason=proposal_guard"),
+                  std::string::npos);
+        const auto totals_after = diagnostics::aggregationGuardRootlessTotals();
+        EXPECT_EQ(totals_after.proposal_guard_candidates_total -
+                      totals_before.proposal_guard_candidates_total,
+                  2u);
+        EXPECT_EQ(totals_after.refreshes_with_cases -
+                      totals_before.refreshes_with_cases,
+                  1u);
+    };
+
+    auto extrapolation_guards = SmallCutAggregationGuardOptions{};
+    extrapolation_guards.maximum_reference_extrapolation_distance = 1.0;
+    extrapolation_guards.rootless_fallback = true;
+    run_rejection(extrapolation_guards);
+
+    auto coefficient_guards = SmallCutAggregationGuardOptions{};
+    coefficient_guards.maximum_absolute_coefficient = 1.5;
+    coefficient_guards.rootless_fallback = true;
     run_rejection(coefficient_guards);
 #endif
 }
@@ -2078,6 +2237,22 @@ TEST(SmallCutAggregationConstraint,
             EXPECT_NE(std::string(error.what()).find("no_valid_root_proposal"),
                       std::string::npos);
         }
+    }
+    {
+        // With the opt-in fallback the top vertices (3.16 and 3.0) get the
+        // rootless-island policy and the others keep their rows.
+        auto guards = SmallCutAggregationGuardOptions{};
+        guards.maximum_reference_extrapolation_distance = 2.9;
+        guards.rootless_fallback = true;
+        systems::FESystem system(buildTriangleColumn(4));
+        const auto pressure = build(guards, system);
+        ASSERT_NO_THROW(system.rebuildConstraintState());
+        for (const GlobalIndex vertex : {8, 9}) {
+            expectHomogeneousPin(system, vertexDof(system, pressure, vertex));
+        }
+        expectEntries(lineEntries(system, vertexDof(system, pressure, 7)),
+                      {{vertexDof(system, pressure, 1), -2.0},
+                       {vertexDof(system, pressure, 3), 3.0}});
     }
 #endif
 }

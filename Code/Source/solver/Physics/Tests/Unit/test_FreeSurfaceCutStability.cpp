@@ -31,6 +31,7 @@
 #include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidModule.h"
 
 #include "FE/Assembly/CutIntegrationContext.h"
+#include "FE/Core/AggregationGuardDiagnostics.h"
 #include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Assembly/StandardAssembler.h"
 #include "FE/Backends/Interfaces/DofPermutation.h"
@@ -7947,7 +7948,8 @@ public:
         FE::geometry::CutIntegrationSide active_side,
         std::size_t maximum_root_path_length =
             nitsche_energy_maximum_root_path_length,
-        bool top_wall_parent = true)
+        bool top_wall_parent = true,
+        bool rootless_fallback = false)
         : mesh_scale_(mesh_scale)
         , orientation_(std::move(orientation))
         , active_side_(active_side)
@@ -8046,6 +8048,7 @@ public:
                             nitsche_energy_maximum_absolute_coefficient,
                         .maximum_row_l1_norm =
                             nitsche_energy_maximum_row_l1_norm,
+                        .rootless_fallback = rootless_fallback,
                     },
                 });
 
@@ -14559,9 +14562,42 @@ TEST(FreeSurfaceCutStability,
             "maximum_allowed_path=" +
             std::to_string(
                 nitsche_energy_default_maximum_root_path_length)) !=
-            std::string::npos;
+            std::string::npos &&
+        default_root_path_rejection_diagnostic.find(
+            "Small_cut_aggregation_rootless_fallback") != std::string::npos;
     EXPECT_TRUE(default_root_path_guard_rejection_verified)
         << default_root_path_rejection_diagnostic;
+    // With the opt-in rootless fallback (D33) the same candidates get the
+    // rootless-island policy and are counted; the sharp-boundary trace
+    // certificate then refuses the rootless support, so this problem still
+    // needs the longer guard used by the study below.
+    std::string fallback_diagnostic;
+    const auto guard_rootless_before =
+        FE::diagnostics::aggregationGuardRootlessTotals()
+            .root_path_guard_candidates_total;
+    {
+        PersistentNitscheEnergyProblem fallback_problem(
+            mesh_scales.front(),
+            orientations.back(),
+            FE::geometry::CutIntegrationSide::Negative,
+            nitsche_energy_default_maximum_root_path_length,
+            /*top_wall_parent=*/false,
+            /*rootless_fallback=*/true);
+        try {
+            static_cast<void>(fallback_problem.evaluate(FE::Real{1.0e-4}));
+        } catch (const std::runtime_error& error) {
+            fallback_diagnostic = error.what();
+        }
+    }
+    EXPECT_GT(FE::diagnostics::aggregationGuardRootlessTotals()
+                      .root_path_guard_candidates_total -
+                  guard_rootless_before,
+              0u);
+    EXPECT_NE(fallback_diagnostic.find(
+                  "rootless aggregate support cannot certify a physical "
+                  "trace bound"),
+              std::string::npos)
+        << fallback_diagnostic;
 
     for (const auto& orientation : orientations) {
         std::array<

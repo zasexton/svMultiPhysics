@@ -4250,6 +4250,15 @@ void append_free_surface_bc(
     fs.small_cut_aggregation_guards.maximum_row_l1_norm =
         static_cast<svmp::FE::Real>(*maximum_row_norm);
   }
+  if (const auto rootless_fallback = first_defined_bool(
+          bc.params,
+          {"Small_cut_aggregation_rootless_fallback",
+           "SmallCutAggregationRootlessFallback"})) {
+    // Opt-in fail-safe for candidates without a root inside the guards
+    // (SmallCutAggregationGuardOptions::rootless_fallback, D33).
+    aggregation_guard_suboption_present = true;
+    fs.small_cut_aggregation_guards.rootless_fallback = *rootless_fallback;
+  }
   if (fs.small_cut_aggregation_guards.maximum_row_l1_norm <
       fs.small_cut_aggregation_guards.maximum_absolute_coefficient) {
     throw std::runtime_error(

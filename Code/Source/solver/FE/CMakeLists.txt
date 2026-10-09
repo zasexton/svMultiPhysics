@@ -324,12 +324,14 @@ set(FE_CORE_HEADERS
     Core/StateVariableMetadata.h
     Core/DeterministicParallel.h
     Core/HaloDiagnostics.h
+    Core/AggregationGuardDiagnostics.h
 )
 
 set(FE_CORE_SOURCES
     Core/Logger.cpp
     Core/DeterministicParallel.cpp
     Core/HaloDiagnostics.cpp
+    Core/AggregationGuardDiagnostics.cpp
 )
 
 # Math module sources

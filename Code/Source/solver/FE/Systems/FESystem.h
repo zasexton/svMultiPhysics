@@ -1792,6 +1792,13 @@ public:
 
     // ---- Constraints lifecycle ----
     void updateConstraints(double time, double dt = 0.0);
+    /// Time of the last updateConstraints() call (for diagnostics), if any.
+    [[nodiscard]] std::optional<double> lastConstraintUpdateTime() const noexcept
+    {
+        return has_last_constraint_update_time_
+                   ? std::optional<double>(last_constraint_update_time_)
+                   : std::nullopt;
+    }
     void rebuildConstraintState();
     /**
      * @brief True while the constraint state of the installed cut-integration
