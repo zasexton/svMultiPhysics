@@ -60,6 +60,18 @@
       "before_candidate_execution": true,
       "change": "time-step rule gains the capillary bound (b); the run environment is declared",
       "evidence": "diagnosis jobs 46898188, 46901883, 46907273, 46910758: with m = 2 (10 cells) the outer fixed point reaches its 12-pass cap at step 0; 4-5 passes per step at m = 8 (10 cells) and m = 20 (20 cells); the PDE rate initialization makes the first steps fail at m <= 6 (10 cells) and m <= 14 (20 cells)."
+    },
+    {
+      "revision": 3,
+      "date": "2026-10-08",
+      "before_candidate_execution": true,
+      "change": "the deck returns to the default aggregation guards (the provisional 6 / 12 of D-W7 are retired, D33); the clean comparison window [0, 0.416] s is declared",
+      "evidence": "jobs 47000495 (vertex-order-invariant extrapolation guard: level 10 passes t = 0.306 s), 47009235 (opt-in rootless fallback: level 10 completes 0.69 s with 8,004 fallback candidate events from 0.416 s; apex RMS 0.216 -> 1.23 mm)."
     }
-  ]
+  ],
+  "clean_comparison_window_s": [
+    0.0,
+    0.416
+  ],
+  "clean_comparison_window_note": "From t = 0.416 s at 10 half-gap cells (0.095 s at 20 with the provisional guards) a liquid film left on the wall by the receding contact line holds small-cut aggregation candidates whose nearest full cell lies beyond the default aggregation guards. With the default guards the run then stops (fail closed). The opt-in Small_cut_aggregation_rootless_fallback lets it continue but pins velocity and pressure in the film; at 10 cells the apex error then grows from RMS 0.216 mm on [0, 0.416] s to RMS 1.23 mm (max 1.88 mm) on [0.416, 0.69] s (job 47009235), so comparisons use [0, 0.416] s until the film is fixed at its source."
 }
