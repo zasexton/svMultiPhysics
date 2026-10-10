@@ -2323,6 +2323,22 @@ resolveDistributedAggregationDeclarations(
     return geometry::MappingFactory::create(request, nodes);
 }
 
+// A retained volume rule is partial when its cell is cut on that side.  A
+// rule that is not full-cell equivalent is a cut rule even when its fraction
+// rounds to exactly 1 (a sub-round-off complement): its cell still carries
+// the interface fragment and the non-full flag that define the cut topology.
+// Classifying it as cut, like the same rule one ulp below 1, keeps the
+// aggregation classification a function of the cut topology; treating it as
+// neither cut nor full let the roots, and with them the constraints, switch
+// between outer refreshes while the topology stayed the same.  Fractions are
+// validated to lie in [0, 1] before this test.
+[[nodiscard]] constexpr bool retainedPartialVolumeRule(
+    bool full_cell_equivalent,
+    Real fraction) noexcept
+{
+    return fraction > Real(0) && (fraction < Real(1) || !full_cell_equivalent);
+}
+
 [[nodiscard]] Real physicalRetainedVolumeRuleMeasure(
     const assembly::IMeshAccess& mesh,
     GlobalIndex cell,
@@ -3354,7 +3370,7 @@ computeAggregationReuseInputs(
                 continue;
             }
             const bool full = rule.full_cell_equivalent;
-            const bool partial = fraction > Real(0) && fraction < Real(1);
+            const bool partial = retainedPartialVolumeRule(full, fraction);
             const bool retained = active && (full || partial);
             classification.mix(static_cast<std::uint64_t>(cell));
             classification.mix((full ? 1u : 0u) | (partial ? 2u : 0u) |
@@ -3697,7 +3713,8 @@ refreshRetainedActiveCellMeasures(
                 continue;
             }
             if (!rule.full_cell_equivalent &&
-                !(fraction > Real(0) && fraction < Real(1))) {
+                !retainedPartialVolumeRule(rule.full_cell_equivalent,
+                                           fraction)) {
                 continue;
             }
             const auto local_cell = static_cast<GlobalIndex>(cell);
@@ -4583,13 +4600,14 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 // retained inactive-side complement proves that the cell was
                 // classified, but it must not resurrect a pruned/absent
                 // active sliver as a traversable cut cell.
+                const bool partial = retainedPartialVolumeRule(
+                    rule.full_cell_equivalent, fraction);
                 if (side == active_side_ && !rule.full_cell_equivalent &&
-                    fraction > Real(0) && fraction < Real(1)) {
+                    partial) {
                     entry.cut = true;
                 }
                 if (side == active_side_ &&
-                    (rule.full_cell_equivalent ||
-                     (fraction > Real(0) && fraction < Real(1)))) {
+                    (rule.full_cell_equivalent || partial)) {
                     const auto physical_volume =
                         physicalRetainedVolumeRuleMeasure(
                             mesh,
