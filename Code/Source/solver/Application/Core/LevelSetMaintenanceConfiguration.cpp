@@ -777,6 +777,11 @@ resolveLegacyLevelSetMaintenanceConfiguration(
       {"Enable_sign_definite_patch_bounds", "EnableSignDefinitePatchBounds"},
       "enable_sign_definite_patch_bounds",
       result->transport.sign_definite_patch_bounds.enabled);
+  apply_boolean_list(
+      {"Enable_interface_preserving_redistancing",
+       "EnableInterfacePreservingRedistancing"},
+      "enable_interface_preserving_redistancing",
+      result->transport.interface_preserving_redistancing.enabled);
   append_equation_observations();
 
   apply_boolean_list({"Enable_static_capillary_equilibrium_initialization",
@@ -1064,6 +1069,7 @@ resolveLegacyLevelSetMaintenanceConfiguration(
                        result->transport.volume_correction.enabled ||
                        result->transport.kinematic_reconciliation.enabled ||
                        result->transport.sign_definite_patch_bounds.enabled ||
+                       result->transport.interface_preserving_redistancing.enabled ||
                        result->static_capillary_equilibrium_enabled ||
                        result->curvature_projection_enabled;
   if (!enabled) {

@@ -418,6 +418,8 @@ bool is_oop_equation_extension_parameter(const std::string& name)
     "EnableKinematicReconciliation",
     "Enable_sign_definite_patch_bounds",
     "EnableSignDefinitePatchBounds",
+    "Enable_interface_preserving_redistancing",
+    "EnableInterfacePreservingRedistancing",
     "Enable_static_capillary_equilibrium_initialization",
     "EnableStaticCapillaryEquilibriumInitialization",
     "Initialize_discrete_static_capillary_equilibrium",

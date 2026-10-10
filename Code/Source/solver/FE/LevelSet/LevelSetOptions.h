@@ -200,6 +200,23 @@ struct LevelSetSignDefinitePatchBoundsOptions {
     bool enabled{false};
 };
 
+/**
+ * @brief Accepted-step interface-preserving redistancing (2D, opt-in).
+ *
+ * Disabled by default.  When enabled, every accepted step, after the
+ * kinematic reconciliation and the sign-definite patch bounds, replaces the
+ * level set by the signed distance to its own zero polygon, with the polygon
+ * ends on the boundary (contact points) continued by rays
+ * (LevelSetInterfacePreservingRedistancing.h), and then restores the lumped
+ * interface position node by node with the kinematic reconciliation at zero
+ * velocity.  It keeps |grad phi| = 1 next to moving contact lines, where the
+ * transport otherwise steepens and flattens the field without bound.  There
+ * is no numerical parameter.
+ */
+struct LevelSetInterfacePreservingRedistancingOptions {
+    bool enabled{false};
+};
+
 struct LevelSetInflowBoundary {
     // The transported level set is defined on the background space, so this
     // condition intentionally covers the complete physical inlet. It is not
@@ -337,6 +354,7 @@ struct LevelSetTransportOptions {
     LevelSetConservativePhaseOptions conservative_phase{};
     LevelSetKinematicReconciliationOptions kinematic_reconciliation{};
     LevelSetSignDefinitePatchBoundsOptions sign_definite_patch_bounds{};
+    LevelSetInterfacePreservingRedistancingOptions interface_preserving_redistancing{};
 };
 
 enum class LevelSetConservationDiagnostic {
@@ -372,6 +390,10 @@ enum class LevelSetConservationDiagnostic {
 
 [[nodiscard]] bool shouldApplyLevelSetSignDefinitePatchBounds(
     const LevelSetSignDefinitePatchBoundsOptions& options,
+    int completed_step_index) noexcept;
+
+[[nodiscard]] bool shouldApplyLevelSetInterfacePreservingRedistancing(
+    const LevelSetInterfacePreservingRedistancingOptions& options,
     int completed_step_index) noexcept;
 
 } // namespace svmp::FE::level_set

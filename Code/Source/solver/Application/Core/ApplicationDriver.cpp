@@ -34,6 +34,7 @@
 #include "FE/LevelSet/LevelSetKinematicReconciliation.h"
 #include "FE/LevelSet/LevelSetReinitialization.h"
 #include "FE/LevelSet/LevelSetSignDefinitePatchBounds.h"
+#include "FE/LevelSet/LevelSetInterfacePreservingRedistancing.h"
 #include "FE/LevelSet/LevelSetStaticCapillaryEquilibrium.h"
 #include "FE/LevelSet/LevelSetTransport.h"
 #include "FE/LevelSet/LevelSetVelocityExtensionConstraint.h"
@@ -3981,6 +3982,11 @@ std::uint64_t levelSetMaintenanceRequestActionBits(
       svmp::FE::level_set::shouldApplyLevelSetSignDefinitePatchBounds(
           request.configuration->transport.sign_definite_patch_bounds,
           completed_step);
+  const bool accepted_redistancing_due =
+      !request.configuration->transport.conservative_phase.enabled &&
+      svmp::FE::level_set::shouldApplyLevelSetInterfacePreservingRedistancing(
+          request.configuration->transport.interface_preserving_redistancing,
+          completed_step);
   const bool artifact_due =
       request.configuration->transport.conservative_phase.enabled &&
       request.configuration->transport.conservative_phase.write_flux_artifacts &&
@@ -3997,7 +4003,8 @@ std::uint64_t levelSetMaintenanceRequestActionBits(
       accepted_reinitialization_due ||
       all_request_volume_due ||
       accepted_kinematic_due ||
-      accepted_patch_bounds_due;
+      accepted_patch_bounds_due ||
+      accepted_redistancing_due;
   std::uint64_t bits = 0u;
   bits |= request.configuration->transport.conservative_phase.enabled ? (1ull << 0u) : 0u;
   bits |= request.configuration->transport.bound_preserving.enabled ? (1ull << 1u) : 0u;
@@ -4021,6 +4028,7 @@ std::uint64_t levelSetMaintenanceRequestActionBits(
               : 0u;
   bits |= accepted_kinematic_due ? (1ull << 12u) : 0u;
   bits |= accepted_patch_bounds_due ? (1ull << 13u) : 0u;
+  bits |= accepted_redistancing_due ? (1ull << 14u) : 0u;
   return bits;
 }
 
@@ -4246,6 +4254,10 @@ canonicalLevelSetMaintenanceRequestSchedule(
     appendMaintenanceScheduleBool(
         words,
         request.configuration->transport.sign_definite_patch_bounds.enabled);
+    if (request.configuration->transport.interface_preserving_redistancing.enabled) {
+      // Appended only when enabled so that existing schedules keep their words.
+      appendMaintenanceScheduleBool(words, true);
+    }
     appendMaintenanceScheduleActiveCutRequest(
         words, request.configuration->volume_cut_request);
 
@@ -7307,7 +7319,8 @@ void logLevelSetMaintenanceCoverageDiagnostics(
   for (const auto& request : maintenance_requests) {
     if (request.configuration->transport.reinitialization.enabled || request.configuration->transport.volume_correction.enabled ||
         request.configuration->transport.kinematic_reconciliation.enabled ||
-        request.configuration->transport.sign_definite_patch_bounds.enabled) {
+        request.configuration->transport.sign_definite_patch_bounds.enabled ||
+        request.configuration->transport.interface_preserving_redistancing.enabled) {
       transport_maintained_fields.insert(request.configuration->transport.level_set.field_name);
     }
     application::core::oopCout()
@@ -7323,6 +7336,8 @@ void logLevelSetMaintenanceCoverageDiagnostics(
         << (request.configuration->transport.kinematic_reconciliation.enabled ? "enabled" : "disabled")
         << " sign_definite_patch_bounds="
         << (request.configuration->transport.sign_definite_patch_bounds.enabled ? "enabled" : "disabled")
+        << (request.configuration->transport.interface_preserving_redistancing.enabled
+                ? " interface_preserving_redistancing=enabled" : "")
         << " curvature_projection="
         << (request.configuration->curvature_projection_enabled ? "enabled" : "disabled")
         << " curvature_field='"
@@ -15601,7 +15616,12 @@ bool applyLevelSetMaintenance(
         svmp::FE::level_set::shouldApplyLevelSetSignDefinitePatchBounds(
             request.configuration->transport.sign_definite_patch_bounds,
             completed_step);
-    if (!do_reinit && !do_volume && !do_kinematic && !do_patch_bounds) {
+    const bool do_redistancing =
+        svmp::FE::level_set::shouldApplyLevelSetInterfacePreservingRedistancing(
+            request.configuration->transport.interface_preserving_redistancing,
+            completed_step);
+    if (!do_reinit && !do_volume && !do_kinematic && !do_patch_bounds &&
+        !do_redistancing) {
       continue;
     }
 
@@ -15798,6 +15818,146 @@ bool applyLevelSetMaintenance(
           << " sign_changes_prevented=" << result.sign_changes_prevented
           << " max_abs_correction=" << result.max_abs_correction
           << " status='" << result.diagnostic << "'";
+      staged_commit_logs.push_back(log.str());
+    }
+
+    if (do_redistancing) {
+      // Interface-preserving redistancing (opt-in): after the transport has
+      // been reconciled and bounded, replace the level set by the signed
+      // distance to its own zero polygon (polygon ends on the boundary are
+      // continued by rays, which keeps the discrete contact angle), then
+      // restore the lumped interface position node by node with the
+      // kinematic reconciliation at zero velocity.  It runs after the patch
+      // bounds because they clamp sign-definite nodes into the previous
+      // (distorted) patch ranges and would undo the new values.
+      const auto offset =
+          static_cast<std::size_t>(sim.fe_system->fieldDofOffset(field));
+      const auto count = static_cast<std::size_t>(
+          sim.fe_system->fieldDofHandler(field).getNumDofs());
+      if (offset > fe_solution.size() || count > fe_solution.size() - offset) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Level-set interface-preserving "
+            "redistancing field slice exceeds the solution vector.");
+      }
+      const auto velocity_field = sim.fe_system->findFieldByName(
+          request.configuration->transport.velocity.field_name);
+      if (request.configuration->transport.velocity.source ==
+              svmp::FE::level_set::LevelSetVelocitySource::ConstantVector ||
+          velocity_field == svmp::FE::INVALID_FIELD_ID) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Level-set interface-preserving "
+            "redistancing for field '" +
+            request.configuration->transport.level_set.field_name +
+            "' requires a nodal transport-velocity field (its layout carries "
+            "the zero-velocity interface restoration).");
+      }
+      const auto before_redistancing = fe_solution;
+      const std::vector<svmp::FE::Real> input(
+          fe_solution.begin() + static_cast<std::ptrdiff_t>(offset),
+          fe_solution.begin() + static_cast<std::ptrdiff_t>(offset + count));
+      const auto volume_options = levelSetVolumeOptionsForMaintenance(request);
+      const auto& mesh_access = sim.fe_system->meshAccess();
+      const auto& phi_dofs = sim.fe_system->fieldDofHandler(field);
+      std::vector<svmp::FE::Real> redistanced;
+      const auto redistance =
+          svmp::FE::level_set::redistanceLevelSetToZeroPolygon(
+              mesh_access, phi_dofs, volume_options.isovalue, input,
+              redistanced);
+      if (!redistance.success) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Level-set interface-preserving "
+            "redistancing failed for field '" +
+            request.configuration->transport.level_set.field_name + "': " +
+            redistance.diagnostic);
+      }
+      std::vector<svmp::FE::Real> restored = redistanced;
+      svmp::FE::level_set::LevelSetKinematicReconciliationResult restoration{};
+      if (redistance.applied) {
+        auto zero_velocity = levelSetTransportVelocityCoefficients(
+            *sim.fe_system, velocity_field, fe_solution);
+        std::fill(zero_velocity.begin(), zero_velocity.end(),
+                  svmp::FE::Real{0.0});
+        restoration = svmp::FE::level_set::reconcileLevelSetWithKinematicFlux(
+            mesh_access,
+            phi_dofs,
+            sim.fe_system->fieldDofHandler(velocity_field),
+            volume_options.isovalue,
+            volume_options.tolerance,
+            static_cast<svmp::FE::Real>(history.dt()),
+            input,
+            redistanced,
+            zero_velocity,
+            zero_velocity,
+            restored);
+        if (!restoration.success) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Level-set interface-preserving "
+              "redistancing could not restore the interface of field '" +
+              request.configuration->transport.level_set.field_name + "': " +
+              restoration.diagnostic);
+        }
+        if (!restoration.applied) {
+          restored = redistanced;
+        }
+      }
+      const auto change_raw =
+          svmp::FE::level_set::measureLevelSetZeroPolygonChange(
+              mesh_access, phi_dofs, volume_options.isovalue, input,
+              redistanced);
+      const auto change =
+          svmp::FE::level_set::measureLevelSetZeroPolygonChange(
+              mesh_access, phi_dofs, volume_options.isovalue, input, restored);
+      const auto volume_before = svmp::FE::level_set::computeLevelSetCutCellVolume(
+          mesh_access, phi_dofs, volume_options, input);
+      const auto volume_after = svmp::FE::level_set::computeLevelSetCutCellVolume(
+          mesh_access, phi_dofs, volume_options, restored);
+      if (!change.success || !change_raw.success || !volume_before.success ||
+          !volume_after.success) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Level-set interface-preserving "
+            "redistancing could not measure its interface change for field '" +
+            request.configuration->transport.level_set.field_name + "': " +
+            change.diagnostic + " " + change_raw.diagnostic);
+      }
+      const bool applied = redistance.applied && restored != input;
+      if (applied) {
+        std::copy(restored.begin(), restored.end(),
+                  fe_solution.begin() + static_cast<std::ptrdiff_t>(offset));
+        changed = true;
+        modified_level_set_fields.insert(field);
+        if (observe_stage) {
+          observe_stage(
+              application::core::LevelSetMaintenanceWorkSubstage::
+                  Reinitialization,
+              before_redistancing,
+              fe_solution);
+        }
+      }
+      std::ostringstream log;
+      log << std::setprecision(17)
+          << "[svMultiPhysics::Application] Level-set interface-preserving redistancing"
+          << " field='" << request.configuration->transport.level_set.field_name
+          << "' step=" << completed_step
+          << " applied=" << (applied ? "true" : "false")
+          << " segments=" << redistance.interface_segments
+          << " open_ends=" << redistance.open_ends
+          << " redistanced_dofs=" << redistance.redistanced_dofs
+          << " max_abs_change=" << redistance.max_abs_change
+          << " raw_max_crossing_shift=" << change_raw.max_crossing_shift
+          << " raw_max_open_end_shift=" << change_raw.max_open_end_shift
+          << " restoration_converged="
+          << (restoration.converged ? "true" : "false")
+          << " restoration_iterations=" << restoration.iterations
+          << " restoration_corrected_dofs=" << restoration.corrected_dofs
+          << " restoration_frozen_dofs=" << restoration.degeneracy_frozen_dofs
+          << " max_crossing_shift=" << change.max_crossing_shift
+          << " max_open_end_shift=" << change.max_open_end_shift
+          << " cells_with_changed_cut=" << change.cells_with_changed_cut
+          << " open_ends_before=" << change.open_ends_first
+          << " open_ends_after=" << change.open_ends_second
+          << " negative_volume_before=" << volume_before.negative_volume
+          << " negative_volume_after=" << volume_after.negative_volume
+          << " status='" << redistance.diagnostic << "'";
       staged_commit_logs.push_back(log.str());
     }
 
@@ -34231,6 +34391,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                       shouldApplyLevelSetSignDefinitePatchBounds(
                           request.configuration->transport
                               .sign_definite_patch_bounds,
+                          h.stepIndex()) ||
+                  svmp::FE::level_set::
+                      shouldApplyLevelSetInterfacePreservingRedistancing(
+                          request.configuration->transport
+                              .interface_preserving_redistancing,
                           h.stepIndex()));
         });
     const bool postaccept_maintenance_topology_tracking_required =
