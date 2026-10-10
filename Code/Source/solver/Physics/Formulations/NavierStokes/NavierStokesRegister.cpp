@@ -4130,6 +4130,14 @@ void append_free_surface_bc(
     fs.kinematic_enforcement =
         parse_free_surface_kinematic_enforcement(
             *enforcement, "Free-surface Kinematic_enforcement");
+  } else if (fs.implementation == FreeSurfaceImplementation::FittedALE &&
+             !explicit_legacy_configuration) {
+    // Decision D35: MeshNitsche is the qualified default for fitted ALE
+    // free surfaces (Penalty and Nitsche remain explicit legacy choices).
+    // The qualified contract rejected an omitted Kinematic_enforcement
+    // before, so no accepted input changes; the explicit schema-1 legacy
+    // mode keeps its None default and the Kinematic_penalty promotion.
+    fs.kinematic_enforcement = FreeSurfaceKinematicEnforcement::MeshNitsche;
   }
   const auto penalty = first_defined_double(
       bc.params,
@@ -4146,8 +4154,9 @@ void append_free_surface_bc(
       !explicit_legacy_configuration) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Kinematic_penalty requires explicit "
-        "Kinematic_enforcement=Penalty; it cannot promote None and unused "
-        "penalty settings are accepted only by the explicit schema-1 "
+        "Kinematic_enforcement=Penalty (legacy); it does not change the "
+        "default enforcement (MeshNitsche on fitted ALE free surfaces) and "
+        "unused penalty settings are accepted only by the explicit schema-1 "
         "legacy mode.");
   }
   const auto kinematic_nitsche_gamma = first_defined_double(

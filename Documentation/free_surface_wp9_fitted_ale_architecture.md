@@ -71,6 +71,12 @@ required physical ALE campaigns has run.
 | schema 2, fitted dynamic contact angle | `Prescribed` | rejected before system mutation | unsupported |
 | schema 1 with explicit legacy opt-in | `Free`, `SmoothingOnly`, or `Prescribed` | retained only according to the legacy path actually present | `unqualified_explicit_legacy` |
 
+Since decision D35 (2026-10-10) a schema-2 fitted surface that omits
+`Kinematic_enforcement` uses `MeshNitsche`, the qualified default; explicit
+`None` is still rejected, and `Penalty` and `Nitsche` are legacy options
+that must be named. Before D35 the omission was rejected, so no accepted
+schema-2 input changed.
+
 The XML translator does not infer normal enforcement from a penalty value in
 schema 2. `Kinematic_penalty` requires explicit
 `Kinematic_enforcement=Penalty`; explicit `None` is never promoted. The

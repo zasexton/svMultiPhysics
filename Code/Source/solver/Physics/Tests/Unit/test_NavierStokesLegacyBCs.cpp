@@ -1407,6 +1407,138 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicBCTranslation_UsesCurrentG
 #endif
 }
 
+TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicEnforcementDefaultsToMeshNitsche)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    // Decision D35: an omitted Kinematic_enforcement selects MeshNitsche on a
+    // fitted ALE free surface of the qualified contract; Penalty and Nitsche
+    // stay explicit legacy choices, and the explicit schema-1 legacy mode
+    // keeps its None default.
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+
+    constexpr int marker = 79;
+    auto mesh = buildSingleTetraBoundaryMesh(marker);
+    ASSERT_TRUE(mesh);
+
+    const auto make_input =
+        [&](bool legacy,
+            const std::vector<std::pair<std::string, std::string>>& extra) {
+            svmp::Physics::EquationModuleInput input{};
+            input.equation_type = "fluid";
+            input.mesh_name = "single_tetra";
+            input.mesh = mesh->local_mesh_ptr();
+            if (legacy) {
+                // The schema-1 configuration of
+                // FreeSurfaceContactNoneIsExplicitAndComplete (no ALE): a
+                // MeshNitsche default would be rejected there.
+                input.equation_params[
+                    "Free_surface_configuration_schema_version"] =
+                    defined("1");
+                input.equation_params[
+                    "Enable_explicit_legacy_free_surface_configuration"] =
+                    defined("true");
+            } else {
+                input.equation_params["Enable_ALE"] = defined("true");
+                input.equation_params["Mesh_velocity_source"] =
+                    defined("coupled_displacement");
+                input.equation_params[
+                    "Auto_register_mesh_displacement_field"] =
+                    defined("true");
+            }
+            input.default_domain.params["Density"] = defined("1.0");
+            input.default_domain.params["Viscosity.model"] =
+                defined("Constant");
+            input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+            svmp::Physics::BoundaryConditionInput bc{};
+            bc.name = "free_surface";
+            bc.boundary_marker = marker;
+            bc.params["Type"] = defined("Free_surface");
+            bc.params["Implementation"] = defined("FittedALE");
+            bc.params["External_pressure"] = defined("12.5");
+            bc.params["Surface_tension"] = defined("0.0");
+            if (!legacy) {
+                bc.params["Tangential_mesh_policy"] = defined("Free");
+            }
+            for (const auto& [key, value] : extra) {
+                bc.params[key] = defined(value);
+            }
+            input.boundary_conditions.push_back(std::move(bc));
+            return input;
+        };
+    struct Declared {
+        std::size_t count{0};
+        bool mesh_flux_consistency{false};
+        double gamma{0.0};
+    };
+    const auto declared =
+        [&](bool legacy,
+            const std::vector<std::pair<std::string, std::string>>& extra) {
+            const auto input = make_input(legacy, extra);
+            svmp::FE::systems::FESystem system(mesh);
+            auto module =
+                svmp::Physics::EquationModuleRegistry::instance().create(
+                    "fluid", input, system);
+            EXPECT_TRUE(module);
+            const auto declarations = system.meshNormalBoundaryConstraints();
+            Declared result{};
+            result.count = declarations.size();
+            if (!declarations.empty()) {
+                result.mesh_flux_consistency =
+                    declarations.front().requires_mesh_flux_consistency;
+                result.gamma = static_cast<double>(
+                    declarations.front().mesh_flux_consistency_nitsche_gamma);
+            }
+            return result;
+        };
+
+    const auto by_default = declared(false, {});
+    EXPECT_EQ(by_default.count, 1u);
+    EXPECT_TRUE(by_default.mesh_flux_consistency);
+    EXPECT_DOUBLE_EQ(by_default.gamma, 10.0);
+
+    const auto explicit_mesh_nitsche =
+        declared(false, {{"Kinematic_enforcement", "MeshNitsche"}});
+    EXPECT_EQ(explicit_mesh_nitsche.count, 1u);
+    EXPECT_TRUE(explicit_mesh_nitsche.mesh_flux_consistency);
+    EXPECT_DOUBLE_EQ(explicit_mesh_nitsche.gamma, by_default.gamma);
+
+    const auto default_with_gamma =
+        declared(false, {{"Kinematic_nitsche_gamma", "24.0"}});
+    EXPECT_EQ(default_with_gamma.count, 1u);
+    EXPECT_TRUE(default_with_gamma.mesh_flux_consistency);
+    EXPECT_DOUBLE_EQ(default_with_gamma.gamma, 24.0);
+
+    const auto legacy_penalty =
+        declared(false,
+                 {{"Kinematic_enforcement", "Penalty"},
+                  {"Kinematic_penalty", "9.0"}});
+    EXPECT_EQ(legacy_penalty.count, 1u);
+    EXPECT_FALSE(legacy_penalty.mesh_flux_consistency);
+
+    // A penalty without an explicit Penalty enforcement is still rejected;
+    // it does not change the default.
+    {
+        const auto input = make_input(false, {{"Kinematic_penalty", "9.0"}});
+        svmp::FE::systems::FESystem system(mesh);
+        EXPECT_THROW(
+            {
+                auto module =
+                    svmp::Physics::EquationModuleRegistry::instance().create(
+                        "fluid", input, system);
+                (void)module;
+            },
+            std::runtime_error);
+    }
+
+    // The explicit schema-1 legacy mode keeps None: no normal relation.
+    const auto legacy_mode = declared(true, {});
+    EXPECT_EQ(legacy_mode.count, 0u);
+#endif
+}
+
 TEST(NavierStokesLegacyBCs,
      FittedFreeSurfacePrescribedTangentialMeshPolicyTranslation)
 {
