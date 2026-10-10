@@ -31,7 +31,10 @@ def test_physical_case_and_schedule_are_those_of_capillary_wave_2d():
     for name in ("DENSITY", "SURFACE_TENSION", "WAVELENGTH", "WAVENUMBER", "MEAN_LEVEL",
                  "EXTERNAL_PRESSURE"):
         assert getattr(gen, name) == getattr(unfitted, name)
-    assert gen.AMPLITUDE == unfitted.AMPLITUDE_OVER_WAVELENGTH * unfitted.WAVELENGTH
+    # D35: the protocol amplitude is a quarter of the capillary_wave_2d one;
+    # the earlier value stays available for the earlier decks.
+    assert gen.AMPLITUDE == 0.0025 * unfitted.WAVELENGTH
+    assert gen.LEGACY_AMPLITUDE_OVER_WAVELENGTH == unfitted.AMPLITUDE_OVER_WAVELENGTH
     assert gen.WIDTH == unfitted.BOX_WIDTH and gen.LAPLACE_NUMBER == unfitted.DEFAULT_LAPLACE_NUMBER
     # The reference is imported, not copied.
     assert gen.reference.__file__ == str(CASES / "capillary_wave_2d" / "prosperetti_reference.py")
@@ -110,12 +113,18 @@ def test_study_roles_and_diagnostic_steps(tmp_path):
     d = gen.generate(64, tmp_path / "d", dt_over_capillary_limit=8.0)
     assert not d["protocol_run"] and 4.0 < d["dt_over_capillary_limit"] <= 8.0
     assert d["steps"] % 100 == 0
-    small = gen.generate(32, tmp_path / "a", amplitude_over_wavelength=0.0025)
-    assert not small["protocol_run"] and small["initial_amplitude"] == pytest.approx(0.0025)
-    points, _, faces, _ = gen.liquid_triangle_mesh(32, 0.0025)
+    protocol = gen.generate(32, tmp_path / "p")
+    assert protocol["protocol_run"] and protocol["initial_amplitude"] == pytest.approx(0.0025)
+    assert protocol["amplitude_over_wavelength"] == pytest.approx(0.0025)
+    legacy = gen.generate(32, tmp_path / "a", amplitude_over_wavelength=0.01)
+    assert not legacy["protocol_run"] and legacy["initial_amplitude"] == pytest.approx(0.01)
+    points, _, faces, _ = gen.liquid_triangle_mesh(32, 0.01)
     top = points[faces[gen.FREE_SURFACE][0]]
-    assert np.allclose(top[:, 1], gen.MEAN_LEVEL + 0.0025 * np.cos(gen.WAVENUMBER * top[:, 0]))
-    assert np.allclose(gen.initial_pressure(top, 0.0025), 0.25 * gen.initial_pressure(top))
+    assert np.allclose(top[:, 1], gen.MEAN_LEVEL + 0.01 * np.cos(gen.WAVENUMBER * top[:, 0]))
+    assert np.allclose(gen.initial_pressure(top, 0.01), 4.0 * gen.initial_pressure(top))
+    # The legacy amplitude writes the decks of the earlier protocol exactly:
+    # the same initial pressure as capillary_wave_2d.
+    assert np.array_equal(gen.initial_pressure(points, 0.01), unfitted.initial_pressure(points))
     with pytest.raises(ValueError):
         gen.generate(24, tmp_path / "bad")
     with pytest.raises(ValueError):
@@ -241,6 +250,28 @@ def test_failures_are_reported(study, capsys):
     no_dt = study(with_time_error(SPATIAL), {})
     assert ver.main(no_dt) == 1
     assert "missing frequency_spatial_relative_error" in capsys.readouterr().out
+
+
+def test_runs_of_the_earlier_amplitude_are_reported_not_gated(study, tmp_path, capsys):
+    # D35: a run written at a0 = 0.01 lambda before the change (its case.json
+    # still marks it as a protocol run) is reported as a diagnostic, so it
+    # cannot complete or replace the protocol study.
+    timing = {d: (SPATIAL[32][0] + TIME[d][0], SPATIAL[32][1] + TIME[d][1]) for d in (2, 4)}
+    runs = study(with_time_error(SPATIAL), timing)
+    old = Path(runs[0])
+    case = json.loads((old / "case.json").read_text())
+    for key in ("amplitude_over_wavelength", "protocol_amplitude_over_wavelength"):
+        case.pop(key)
+    case["initial_amplitude"] = 0.01
+    (old / "case.json").write_text(json.dumps(case))
+    out = tmp_path / "report.json"
+    assert ver.main([*runs, "--json", str(out)]) == 1
+    text = capsys.readouterr().out
+    assert "is not the protocol value 0.0025" in text
+    assert "order needs lambda/h=[16, 32, 64]" in text
+    report = json.loads(out.read_text())
+    flagged = [r for r in report["runs"] if r["run"] == str(old)]
+    assert flagged and not flagged[0]["protocol_run"]
 
 
 def test_missing_and_incomplete_data_fail_clearly(tmp_path, capsys):

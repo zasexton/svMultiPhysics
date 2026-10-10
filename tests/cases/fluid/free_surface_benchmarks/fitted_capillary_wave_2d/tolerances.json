@@ -1,13 +1,14 @@
 {
   "benchmark": "fitted_capillary_wave_2d",
   "milestone": "M3 (reference) / M5",
-  "fixed_on": "2026-09-30, before the first protocol run",
+  "fixed_on": "2026-09-30, before the first protocol run; revised 2026-10-10 for decision D35 (protocol amplitude 0.0025 lambda)",
   "levels": {
     "lambda_over_h": [16, 32, 64]
   },
   "protocol": {
     "laplace_number": 3000,
-    "amplitude_over_wavelength": 0.01,
+    "amplitude_over_wavelength": 0.0025,
+    "amplitude_note": "Decision D35: a0 = 0.0025 lambda (was 0.01 lambda, the capillary_wave_2d value). At 0.01 lambda the finite-amplitude frequency shift of the nonlinear simulation, -0.10 to -0.16 (a0 k)^2, is a plateau below the linear Prosperetti reference that masks the frequency convergence order; at 0.0025 lambda it is 16 times smaller. Runs at another amplitude are reported, not gated.",
     "periods": 4,
     "snapshots": 100,
     "time_step": "The capillary_wave_2d step shared by all levels (decision D10): the largest dt within the one-sided capillary limit sqrt(rho h^3/(4 pi gamma)) of lambda/h = 64 that divides the run into 100 output intervals, dt = 5.5027e-4, 2900 steps; 0.12, 0.35 and 1.00 times the limit of lambda/h = 16, 32, 64.",
@@ -15,7 +16,7 @@
     "time_step_study_dt_divisors": [1, 2, 4],
     "time_step_study": "lambda/h = 32 at dt, dt/2, dt/4 (generate_case.py --dt-divisor 1, 2, 4); the dt run is the lambda/h = 32 run of the spatial study. Richardson extrapolation of omega and beta to dt -> 0 (order from the three steps, limit from the two smallest) gives the time error e_t(dt) of the shared step, which is removed from every spatial-study frequency and damping rate. The time-step study itself is reported, not gated.",
     "reference": "Prosperetti initial-value solution (capillary_wave_2d/prosperetti_reference.py), fitted with the same damped-cosine model on the same output times as the simulation",
-    "note": "Same physical case, metrics and criteria as capillary_wave_2d, so the fitted and unfitted M3 results are judged alike; only the time-error removal (D10, as in fitted_sloshing_2d) is added. Definitions are in README.md."
+    "note": "Same physical case (except the amplitude, D35), metrics and criteria as capillary_wave_2d, so the fitted and unfitted M3 results are judged alike; only the time-error removal (D10, as in fitted_sloshing_2d) is added. Definitions are in README.md."
   },
   "criteria": [
     {
@@ -28,7 +29,7 @@
       "minimum_observed_order": 1.0,
       "order_levels": [16, 32, 64],
       "order_method": "least-squares slope of log(error) against log(lambda/h) over order_levels; pairwise orders are reported",
-      "source": "Tracker section 5, M3 working criterion (decision D1): frequency error <= 2% at lambda/h = 32 with convergence over 16/32/64, as in capillary_wave_2d/tolerances.json (order >= 1); time error removed as decided in D10."
+      "source": "Tracker section 5, M3 working criterion (decision D1): frequency error <= 2% at lambda/h = 32 with convergence over 16/32/64, as in capillary_wave_2d/tolerances.json (order >= 1); time error removed as decided in D10; decision D35: judged at the protocol amplitude 0.0025 lambda, where the finite-amplitude frequency shift no longer masks the order."
     },
     {
       "id": "damping",

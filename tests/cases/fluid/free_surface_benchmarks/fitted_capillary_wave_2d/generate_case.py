@@ -57,7 +57,15 @@ DENSITY = CW.DENSITY
 SURFACE_TENSION = CW.SURFACE_TENSION
 WAVELENGTH = CW.WAVELENGTH
 WAVENUMBER = CW.WAVENUMBER
-AMPLITUDE = CW.AMPLITUDE_OVER_WAVELENGTH * CW.WAVELENGTH
+# Decision D35: the protocol amplitude is a0 = 0.0025 lambda (a quarter of the
+# capillary_wave_2d amplitude), so that the finite-amplitude frequency shift
+# (-0.1 to -0.16 (a0 k)^2, below the linear reference) does not mask the
+# frequency convergence order.  --amplitude-over-wavelength 0.01 writes the
+# earlier protocol decks (solver.xml and mesh) unchanged, as diagnostic runs.
+AMPLITUDE_OVER_WAVELENGTH = 0.0025
+LEGACY_AMPLITUDE_OVER_WAVELENGTH = CW.AMPLITUDE_OVER_WAVELENGTH     # 0.01, before D35
+AMPLITUDE = AMPLITUDE_OVER_WAVELENGTH * CW.WAVELENGTH
+CW_AMPLITUDE = CW.AMPLITUDE_OVER_WAVELENGTH * CW.WAVELENGTH         # amplitude of CW.initial_pressure
 LAPLACE_NUMBER = CW.DEFAULT_LAPLACE_NUMBER
 WIDTH = CW.BOX_WIDTH                        # walls at the crest (x = 0) and the trough (x = lambda/2)
 MEAN_LEVEL = CW.MEAN_LEVEL                  # same liquid depth as capillary_wave_2d
@@ -160,7 +168,7 @@ def initial_pressure(points: np.ndarray, amplitude: float = AMPLITUDE) -> np.nda
     """Linear pressure of the released state (capillary_wave_2d): harmonic,
     zero normal derivative at the bottom, gamma * kappa at the mean level;
     linear in the amplitude (p_ext = 0)."""
-    return CW.initial_pressure(points) * (amplitude / AMPLITUDE)
+    return CW.initial_pressure(points) * (amplitude / CW_AMPLITUDE)
 
 
 def polygon_area(points: np.ndarray, cells: np.ndarray) -> float:
@@ -345,6 +353,8 @@ def generate(level: int, output_dir: Path, *, dt_divisor: int = 1,
         "wavelength": WAVELENGTH,
         "wavenumber": WAVENUMBER,
         "initial_amplitude": amplitude,
+        "amplitude_over_wavelength": amplitude / WAVELENGTH,
+        "protocol_amplitude_over_wavelength": AMPLITUDE_OVER_WAVELENGTH,
         "mean_level": MEAN_LEVEL,
         "width": WIDTH,
         "external_pressure": EXTERNAL_PRESSURE,
@@ -396,7 +406,9 @@ def main(argv=None) -> int:
                              "level's capillary limit (never gated)")
     parser.add_argument("--amplitude-over-wavelength", type=float, default=None,
                         help="diagnostic runs only: initial amplitude a0/lambda (protocol value "
-                             f"{CW.AMPLITUDE_OVER_WAVELENGTH}; never gated)")
+                             f"{AMPLITUDE_OVER_WAVELENGTH}, decision D35; "
+                             f"{LEGACY_AMPLITUDE_OVER_WAVELENGTH} writes the decks of the earlier "
+                             "protocol; never gated)")
     parser.add_argument("--max-steps", type=int, default=None,
                         help="smoke runs only: stop after this many steps; verify.py rejects "
                              "such runs for acceptance")
