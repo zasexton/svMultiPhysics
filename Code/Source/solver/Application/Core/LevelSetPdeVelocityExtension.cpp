@@ -368,6 +368,42 @@ template <typename T>
                         b.max_wall_normal_velocity);
 }
 
+// The parallel MUMPS factorization is not reproducible bit for bit (its
+// dynamic scheduling changes the summation order from one factorization to
+// the next), so with MUMPS the self-check compares the solution values and
+// the solution-derived report fields within kMumpsSelfCheckTolerance times
+// the velocity scale; counts, known speeds and rows stay exact.
+constexpr double kMumpsSelfCheckTolerance = 1.0e-9;
+
+[[nodiscard]] bool closeValues(const std::vector<double>& a,
+                               const std::vector<double>& b, double tolerance)
+{
+  if (a.size() != b.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    if (!(std::abs(a[i] - b[i]) <= tolerance)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] bool closeReportContent(const PdeVelocityExtensionReport& a,
+                                      const PdeVelocityExtensionReport& b,
+                                      double tolerance)
+{
+  return a.known_vertices == b.known_vertices &&
+         a.extension_vertices == b.extension_vertices &&
+         a.outside_vertices == b.outside_vertices &&
+         a.extension_cells == b.extension_cells && a.unknowns == b.unknowns &&
+         a.wall_fixed == b.wall_fixed &&
+         sameDoubleBits(a.max_known_speed, b.max_known_speed) &&
+         std::abs(a.max_extended_speed - b.max_extended_speed) <= tolerance &&
+         std::abs(a.max_wall_normal_velocity - b.max_wall_normal_velocity) <=
+             tolerance;
+}
+
 // 64-bit content hash, word at a time.
 class ContentHasher {
 public:
@@ -456,6 +492,19 @@ struct ReuseVote {
   return store_factorization && comm.is_parallel() && comm.size() >= 3 &&
          factorization != PdeVelocityExtensionFactorization::Mumps &&
          !environmentFlag("SVMP_PDE_EXTENSION_REPLICATED_SOLVES");
+}
+
+// Cache entries of distributed component solves, and of MUMPS factorizations
+// on two or more ranks (their factors are spread over the ranks), cost each
+// rank a fraction of a replicated entry: the cache keeps more of them.
+[[nodiscard]] bool distributedFactorizations(
+    bool distributed_solves,
+    const svmp::MeshComm& comm,
+    PdeVelocityExtensionFactorization factorization) noexcept
+{
+  return distributed_solves ||
+         (comm.is_parallel() &&
+          factorization == PdeVelocityExtensionFactorization::Mumps);
 }
 
 [[nodiscard]] int componentSolveRank(std::size_t component) noexcept
@@ -1511,9 +1560,10 @@ PdeVelocityExtensionReport extendVelocityByPde(
     } else {
       // Refactor.  Evict the least recently used entries first so that the
       // entry built below keeps the footprint within the capacity.
-      const auto capacity = cache->capacity(
+      const auto capacity = cache->capacity(distributedFactorizations(
           distributedComponentSolves(store_factorization, comm,
-                                     options.factorization));
+                                     options.factorization),
+          comm, options.factorization));
       while (!entries.empty() && entries.size() >= capacity) {
         entries.pop_back();
       }
@@ -2212,7 +2262,9 @@ PdeVelocityExtensionReport extendVelocityByPde(
         fresh->has_rows = true;
       }
       entries.insert(entries.begin(), std::move(fresh));
-      while (entries.size() > cache->capacity(distributed_solves)) {
+      while (entries.size() >
+             cache->capacity(distributedFactorizations(
+                 distributed_solves, comm, options.factorization))) {
         entries.pop_back();
       }
     }
@@ -2222,11 +2274,14 @@ PdeVelocityExtensionReport extendVelocityByPde(
     }
     PdeVelocityExtensionCacheAccess::setBytes(*cache, bytes);
     report.cache_entries = entries.size();
+    report.cache_capacity = cache->capacity(distributedFactorizations(
+        distributed_solves, comm, options.factorization));
   }
 
   report.elapsed_seconds = secondsSince(call_start);
 
-  // ---- self-check: the uncached replicated solve, bit for bit -----------------
+  // ---- self-check: the uncached replicated solve, bit for bit (MUMPS: to
+  // round-off, see kMumpsSelfCheckTolerance) ---------------------------------
   if (cache != nullptr && environmentFlag("SVMP_PDE_EXTENSION_SELF_CHECK")) {
     std::vector<double> reference_extended;
     std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>
@@ -2236,13 +2291,20 @@ PdeVelocityExtensionReport extendVelocityByPde(
         target_components, walls, options, reference_extended,
         rows != nullptr ? &reference_rows : nullptr, nullptr, revisions);
     std::size_t mismatches = 0u;
-    if (!sameBytes(extended, reference_extended)) {
+    const bool round_off =
+        options.factorization == PdeVelocityExtensionFactorization::Mumps;
+    const double tolerance =
+        kMumpsSelfCheckTolerance *
+        std::max(reference.max_known_speed, reference.max_extended_speed);
+    if (round_off ? !closeValues(extended, reference_extended, tolerance)
+                  : !sameBytes(extended, reference_extended)) {
       ++mismatches;
     }
     if (rows != nullptr && !sameVelocityExtensionRows(*rows, reference_rows)) {
       ++mismatches;
     }
-    if (!sameReportContent(report, reference)) {
+    if (round_off ? !closeReportContent(report, reference, tolerance)
+                  : !sameReportContent(report, reference)) {
       ++mismatches;
     }
     if (globalSum(mismatches, comm) != 0u) {

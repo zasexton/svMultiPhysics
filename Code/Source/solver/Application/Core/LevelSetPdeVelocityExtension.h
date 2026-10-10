@@ -79,7 +79,10 @@ pdeVelocityExtensionOperatorFromToken(std::string_view token);
 //     Components with the same unknowns (the same wall masks) have the same
 //     matrix and share one factorization.  Its results differ from LuColamd
 //     at round-off level and may depend on the rank count at round-off
-//     level.
+//     level.  On two or more ranks they are not reproducible bit for bit
+//     either: MUMPS' dynamic scheduling changes the summation order from one
+//     factorization to the next, so a reused factorization matches a fresh
+//     one only to round-off (the self-check then uses a tolerance).
 enum class PdeVelocityExtensionFactorization : std::uint8_t {
   LuColamd,
   LdltAmd,
@@ -122,14 +125,17 @@ struct PdeVelocityExtensionReport {
   // True when the components were factorized and solved on one rank each.
   bool distributed_solves{false};
   // True when SVMP_PDE_EXTENSION_SELF_CHECK compared the result with the
-  // uncached replicated solve and found it bitwise identical.
+  // uncached replicated solve and found it bitwise identical (with the Mumps
+  // factorization: identical to 1e-9 of the velocity scale, rows and counts
+  // exactly).
   bool self_checked{false};
   // Components of a new system that were solved with the factorization of an
   // earlier component with the same unknowns (MUMPS only, see
   // PdeVelocityExtensionFactorization).
   std::size_t shared_factorizations{0u};
-  // Entries held by the cache after the call.
+  // Entries held by the cache after the call and the capacity it applied.
   std::size_t cache_entries{0u};
+  std::size_t cache_capacity{0u};
   // Content hash of the dry-region solution in canonical (global vertex ID)
   // order; the same on every rank.
   std::uint64_t solution_hash{0u};
@@ -164,8 +170,9 @@ struct PdeVelocityExtensionMeshRevisions {
 // combined over the communicator.  The ranks agree on reuse collectively: a
 // change on any rank refactors on every rank.  A reused call applies the same
 // factorization to the new right-hand sides, so its result is bitwise
-// identical to a fresh solve, and it skips the gather of the element
-// matrices.  Any failure leaves the cache empty.
+// identical to a fresh solve (Mumps on two or more ranks: identical to
+// round-off), and it skips the gather of the element matrices.  Any failure
+// leaves the cache empty.
 //
 // The cache keeps several entries (most recently used first): the known set
 // of successive outer passes can return to an earlier state, whose entry is
@@ -176,7 +183,9 @@ struct PdeVelocityExtensionMeshRevisions {
 // kDefaultDistributedEntries entries cost those ranks what one replicated
 // entry costs every rank.  The capacity is SVMP_PDE_EXTENSION_CACHE_ENTRIES
 // (1 to kMaxEntries) when set, otherwise kDefaultEntries for replicated and
-// kDefaultDistributedEntries for distributed solves.
+// kDefaultDistributedEntries for distributed solves (and for Mumps
+// factorizations on two or more ranks, whose factors are spread over the
+// ranks).
 class PdeVelocityExtensionCache {
 public:
   static constexpr std::size_t kMaxEntries = 8u;
@@ -208,7 +217,8 @@ public:
   void clear() noexcept;
   [[nodiscard]] bool empty() const noexcept;
   [[nodiscard]] std::size_t size() const noexcept;
-  // Entries kept for replicated or distributed component solves.
+  // Entries kept for replicated or distributed factorizations (distributed
+  // component solves, or Mumps on two or more ranks).
   [[nodiscard]] std::size_t capacity(bool distributed_solves) const noexcept;
   [[nodiscard]] const Statistics& statistics() const noexcept;
 
