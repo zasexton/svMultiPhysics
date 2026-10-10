@@ -79,8 +79,14 @@ boundary condition acts on the faces of its label
 listed last, the top-row wall faces became free-surface faces, loaded by
 the natural traction against the hydrostatic wall pressure, and no
 wall-labeled face was left at the nodes of the free-surface edge, so the
-fluid and mesh wall conditions missed them. The application now warns about
-every such overlap.
+fluid and mesh wall conditions missed them. Since decision D35 the
+application rejects overlapping face files with a message naming the
+`<Add_face>` entries, their files and the number of shared faces; the legacy
+decks that were written with overlapping face files (this one and the
+unfitted SPHERIC 02, 05 and 10 decks) keep their labeling through the
+explicit opt-out `<Allow_overlapping_face_files>true</Allow_overlapping_face_files>`
+in `<Add_mesh>`, and `../generate_validation_meshes.py` writes such face
+files only with `--allow-overlapping-face-files`.
 
 Controls, 100 steps of 1 ms at rest (binary `35a81fd3` or the same with the
 overlap warning; job `46129890`):

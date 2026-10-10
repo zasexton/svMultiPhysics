@@ -131,6 +131,103 @@ def test_validation_solver_generator_preserves_mesh_ghost_layers():
         assert top.findtext("Type") == "LevelSetOutflow"
 
 
+def _small_box_grid(generator):
+    import numpy as np
+
+    coords = np.linspace(0.0, 1.0, 4)
+    return generator.structured_tet_grid(coords, coords, coords)
+
+
+def test_validation_generator_rejects_overlapping_face_files(tmp_path):
+    # Decision D35: the centroid selection with a 0.35 h tolerance also picks
+    # the faces of the adjacent plane at the box edges; such face files share
+    # boundary faces and fail closed unless the legacy opt-out is given.
+    generator = _load_validation_mesh_generator()
+    grid = _small_box_grid(generator)
+    box = generator.Box(0.0, 1.0, 0.0, 1.0, 0.0, 1.0)
+    h = 1.0 / 3.0
+    specs = generator.surface_specs_for_box(box, 0.35 * h, fitted=True)
+
+    surface_dir = tmp_path / "mesh-surfaces"
+    with pytest.raises(RuntimeError) as error:
+        generator.write_surfaces(grid, specs, surface_dir)
+    message = str(error.value)
+    assert "face files overlap" in message
+    assert "wall_left.vtp, wall_bottom.vtp" in message
+    assert "GlobalNodeID" in message
+    assert "--allow-overlapping-face-files" in message
+    assert not list(surface_dir.glob("*.vtp"))
+
+    with pytest.warns(UserWarning, match="face files overlap"):
+        generator.write_surfaces(
+            grid, specs, surface_dir, allow_overlapping_face_files=True)
+    assert sorted(path.stem for path in surface_dir.glob("*.vtp")) == sorted(
+        spec.name for spec in specs)
+
+
+def test_validation_generator_accepts_disjoint_face_files(tmp_path):
+    import warnings
+
+    generator = _load_validation_mesh_generator()
+    grid = _small_box_grid(generator)
+    h = 1.0 / 3.0
+    specs = [
+        generator.SurfaceSpec("wall_left", generator.plane_predicate(0, 0.0, 0.01 * h)),
+        generator.SurfaceSpec("wall_right", generator.plane_predicate(0, 1.0, 0.01 * h)),
+    ]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        generator.write_surfaces(grid, specs, tmp_path)
+    assert sorted(path.stem for path in tmp_path.glob("*.vtp")) == [
+        "wall_left", "wall_right"]
+
+
+def test_validation_solver_generator_declares_the_face_overlap_opt_out_only_for_legacy_decks(
+        tmp_path):
+    generator = _load_validation_mesh_generator()
+    common = dict(
+        mesh_path="mesh/background/mesh-complete.mesh.vtu",
+        faces=["wall_top"],
+        fitted=False,
+        fill_height=0.1,
+        time_step=0.001,
+        time_steps=1,
+    )
+    default_dir = tmp_path / "default"
+    legacy_dir = tmp_path / "legacy"
+    default_dir.mkdir()
+    legacy_dir.mkdir()
+    generator.write_solver_xml(default_dir, **common)
+    generator.write_solver_xml(legacy_dir, allow_overlapping_face_files=True, **common)
+
+    default_text = (default_dir / "solver.xml").read_text()
+    legacy_text = (legacy_dir / "solver.xml").read_text()
+    assert "Allow_overlapping_face_files" not in default_text
+    mesh = ET.parse(legacy_dir / "solver.xml").getroot().find("Add_mesh")
+    assert mesh.findtext("Allow_overlapping_face_files") == "true"
+    assert legacy_text.replace(
+        "\n  <Allow_overlapping_face_files>true</Allow_overlapping_face_files>", "") == default_text
+
+
+@pytest.mark.parametrize(
+    "case_dir",
+    [
+        "fitted_ale/spheric_test10_lateral_water_1x",
+        "unfitted_level_set/spheric_test10_lateral_water_1x",
+        "unfitted_level_set/spheric_test05_wet_bed_d18",
+        "unfitted_level_set/spheric_test05_wet_bed_d38",
+        "unfitted_level_set/spheric_test02_dambreak_obstacle",
+    ],
+)
+def test_legacy_validation_decks_declare_their_overlapping_face_files(case_dir):
+    # These committed decks were written with overlapping face files; they keep
+    # their pinned results through the explicit legacy opt-out (D35).
+    repo = Path(__file__).resolve().parents[1]
+    solver_xml = repo / "tests/cases/fluid/open_vessel_free_surface" / case_dir / "solver.xml"
+    mesh = ET.parse(solver_xml).getroot().find("Add_mesh")
+    assert mesh.findtext("Allow_overlapping_face_files") == "true"
+
+
 @pytest.mark.parametrize("case_name", ["spheric_test05_wet_bed_d18",
                                         "spheric_test05_wet_bed_d38"])
 def test_test05_decks_declare_independent_bound_and_sign_tolerances(case_name):

@@ -1424,6 +1424,131 @@ TEST(MeshTranslatorGhostLayersMPI,
 #endif
 }
 
+TEST(MeshTranslatorGhostLayersMPI,
+     OverlappingFaceFilesFailClosedOnEveryRankWithTheGlobalCount)
+{
+#ifndef MESH_HAS_VTK
+  GTEST_SKIP() << "VTK support is required for MeshTranslator MPI I/O coverage.";
+#else
+  // Decision D35: face files that share boundary faces stop the run on every
+  // rank with the same message, whose count sums the rank-local matches; the
+  // legacy opt-out keeps the last-listed labeling.
+  int rank = 0;
+  int size = 1;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  ASSERT_EQ(size, 2)
+      << "This MeshTranslator overlap test requires exactly two MPI ranks.";
+
+  long long fixture_stamp = 0;
+  if (rank == 0) {
+    fixture_stamp = static_cast<long long>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+  }
+  MPI_Bcast(&fixture_stamp, 1, MPI_LONG_LONG, 0, MPI_COMM_WORLD);
+  const auto fixture_stem =
+      std::filesystem::temp_directory_path() /
+      ("svmp_mesh_translator_overlap_mpi_" + std::to_string(fixture_stamp));
+  auto volume_path = fixture_stem;
+  volume_path += ".vtu";
+  auto bottom_face_path = fixture_stem;
+  bottom_face_path += "_wall_bottom.vtp";
+
+  int fixture_written = 1;
+  if (rank == 0) {
+    try {
+      writeMeshTranslatorGhostLayerFixture(volume_path, bottom_face_path);
+    } catch (const std::exception&) {
+      fixture_written = 0;
+    }
+  }
+  MPI_Bcast(&fixture_written, 1, MPI_INT, 0, MPI_COMM_WORLD);
+  ASSERT_EQ(fixture_written, 1) << "Could not write the MeshTranslator MPI fixture.";
+  MPI_Barrier(MPI_COMM_WORLD);
+
+  const auto configure = [&](MeshParameters& parameters) {
+    parameters.name.set("tank");
+    parameters.mesh_file_path.set(volume_path.string());
+    parameters.ghost_layers.set("1");
+    for (const auto* name : {"wall_bottom", "wall_bottom_copy"}) {
+      auto* face = new FaceParameters();
+      face->name.set(name);
+      face->face_file_path.set(bottom_face_path.string());
+      parameters.face_parameters.push_back(face);
+    }
+  };
+
+  int local_threw = 0;
+  long long local_count = -1;
+  {
+    MeshParameters parameters;
+    configure(parameters);
+    try {
+      (void)application::translators::MeshTranslator::loadMesh(parameters);
+    } catch (const std::runtime_error& error) {
+      local_threw = 1;
+      const std::string message = error.what();
+      const std::string marker = "') share ";
+      const auto at = message.find(marker);
+      if (at != std::string::npos &&
+          message.find("<Add_face name=\"wall_bottom\">") != std::string::npos &&
+          message.find("<Add_face name=\"wall_bottom_copy\">") != std::string::npos) {
+        local_count = std::stoll(message.substr(at + marker.size()));
+      }
+    }
+  }
+  int all_threw = 0;
+  MPI_Allreduce(&local_threw, &all_threw, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+  long long min_count = 0;
+  long long max_count = 0;
+  MPI_Allreduce(&local_count, &min_count, 1, MPI_LONG_LONG, MPI_MIN, MPI_COMM_WORLD);
+  MPI_Allreduce(&local_count, &max_count, 1, MPI_LONG_LONG, MPI_MAX, MPI_COMM_WORLD);
+  EXPECT_EQ(all_threw, 1);
+  EXPECT_EQ(min_count, static_cast<long long>(kCellCount));
+  EXPECT_EQ(max_count, static_cast<long long>(kCellCount));
+
+  int local_loaded = 0;
+  std::size_t local_labeled = 0;
+  {
+    MeshParameters parameters;
+    configure(parameters);
+    parameters.allow_overlapping_face_files.set("true");
+    testing::internal::CaptureStderr();
+    try {
+      auto mesh = application::translators::MeshTranslator::loadMesh(parameters);
+      local_loaded = mesh ? 1 : 0;
+      if (mesh) {
+        // Boundary faces are rebuilt on the ranks that own their cells, so
+        // the rank-local label counts sum to the global count.
+        auto& local_mesh = mesh->local_mesh();
+        const auto label = local_mesh.label_from_name("wall_bottom_copy");
+        if (label != svmp::INVALID_LABEL) {
+          local_labeled = local_mesh.faces_with_label(label).size();
+        }
+      }
+    } catch (const std::exception&) {
+      local_loaded = 0;
+    }
+    (void)testing::internal::GetCapturedStderr();
+  }
+  int all_loaded = 0;
+  MPI_Allreduce(&local_loaded, &all_loaded, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+  unsigned long long labeled = 0;
+  unsigned long long local_labeled_ull = local_labeled;
+  MPI_Allreduce(&local_labeled_ull, &labeled, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM,
+                MPI_COMM_WORLD);
+  EXPECT_EQ(all_loaded, 1);
+  EXPECT_EQ(labeled, static_cast<unsigned long long>(kCellCount));
+
+  MPI_Barrier(MPI_COMM_WORLD);
+  if (rank == 0) {
+    std::error_code error;
+    std::filesystem::remove(volume_path, error);
+    std::filesystem::remove(bottom_face_path, error);
+  }
+#endif
+}
+
 TEST(ApplicationDriverLevelSetWorkflowsMPI,
      ActiveSystemCommunicatorUsesFESystemCommunicator)
 {

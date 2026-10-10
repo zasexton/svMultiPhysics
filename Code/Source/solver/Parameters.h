@@ -1679,6 +1679,11 @@ class MeshParameters : public ParameterLists
     Parameter<std::string> domain_file_path;
     Parameter<int> ghost_layers;
 
+    // Legacy opt-out (decision D35): the new solver rejects <Add_face> files
+    // that share boundary faces; true keeps the last-listed labeling (with a
+    // warning) for decks written with overlapping face files.
+    Parameter<bool> allow_overlapping_face_files;
+
     // Opt-in startup partition weighting for multi-rank runs:
     // "none" (default, cell-count balance) or "free_surface", which weights
     // cells by the sign of the free surface's initial level set in the mesh

@@ -206,10 +206,15 @@ The wall and free-surface face files must be disjoint. A boundary face
 carries one label, the name of the last face file that lists it, and every
 boundary condition acts on the faces of its label; a wall face also listed
 in the free-surface file becomes a free-surface face, and the wall
-conditions then miss the nodes of the contact line. The application warns
-when a face is listed in several face files (the legacy fitted SPHERIC
-Test 10 3D deck leaked through its contact line for this reason; see the
-WP-9 architecture note).
+conditions then miss the nodes of the contact line (the legacy fitted
+SPHERIC Test 10 3D deck leaked through its contact line for this reason;
+see the WP-9 architecture note). The application therefore rejects
+`<Add_face>` files that share boundary faces (decision D35): the message
+names the faces, their files and the number of shared boundary faces. A
+legacy deck can keep the last-listed labeling with
+`<Allow_overlapping_face_files>true</Allow_overlapping_face_files>` in
+`<Add_mesh>`; the overlaps are then reported as warnings. The committed
+legacy SPHERIC decks written by `generate_validation_meshes.py` declare it.
 
 **Capillarity.** Fitted `CurvatureTraction` with
 `Use_current_geometry_curvature=true` uses the pointwise curvature of the

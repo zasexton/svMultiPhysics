@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -486,46 +487,101 @@ TEST(MeshTranslatorFaceLabels, LabelsFullTetra10FaceFromQuadraticTriangleSurface
 #endif
 }
 
-TEST(MeshTranslatorFaceLabels, WarnsWhenFaceFilesOverlapAndKeepsTheLastLabel)
+#ifdef MESH_HAS_VTK
+namespace {
+
+struct OverlappingFaceFiles {
+  std::filesystem::path volume;
+  std::filesystem::path wall;
+  std::filesystem::path surface;
+
+  OverlappingFaceFiles()
+      : volume(unique_temp_path("svmp_meshtranslator_overlap_volume")),
+        wall(unique_temp_path("svmp_meshtranslator_overlap_wall")),
+        surface(unique_temp_path("svmp_meshtranslator_overlap_surface"))
+  {
+    volume.replace_extension(".vtu");
+    write_volume_mesh(volume);
+    // The same boundary triangle in two face files, as the legacy fitted
+    // SPHERIC Test 10 decks did for the wall faces of the top cell row.
+    const std::vector<svmp::real_t> triangle = {
+        0.0, 0.0, 0.0,
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+    };
+    write_face_mesh(wall, triangle, {100, 101, 102});
+    write_face_mesh(surface, triangle, {100, 101, 102});
+  }
+  ~OverlappingFaceFiles()
+  {
+    std::filesystem::remove(volume);
+    std::filesystem::remove(wall);
+    std::filesystem::remove(surface);
+  }
+
+  void configure(MeshParameters& mesh_params) const
+  {
+    mesh_params.name.set("tank");
+    mesh_params.mesh_file_path.set(volume.string());
+    for (const auto& [name, path] :
+         {std::pair<std::string, std::filesystem::path>{"wall", wall},
+          std::pair<std::string, std::filesystem::path>{"free_surface", surface}}) {
+      auto* face = new FaceParameters();
+      face->name.set(name);
+      face->face_file_path.set(path.string());
+      mesh_params.face_parameters.push_back(face);
+    }
+  }
+};
+
+} // namespace
+#endif
+
+TEST(MeshTranslatorFaceLabels, OverlappingFaceFilesFailClosedNamingFacesAndFiles)
 {
 #ifndef MESH_HAS_VTK
   GTEST_SKIP() << "VTK support is required for face-file translator coverage.";
 #else
   ensure_mpi_initialized_for_mesh_translator();
-  auto volume_path = unique_temp_path("svmp_meshtranslator_overlap_volume");
-  const auto first_path = unique_temp_path("svmp_meshtranslator_overlap_wall");
-  const auto second_path = unique_temp_path("svmp_meshtranslator_overlap_surface");
-  volume_path.replace_extension(".vtu");
-  write_volume_mesh(volume_path);
-
-  // The same boundary triangle in two face files, as the legacy fitted
-  // SPHERIC Test 10 decks did for the wall faces of the top cell row.
-  const std::vector<svmp::real_t> triangle = {
-      0.0, 0.0, 0.0,
-      1.0, 0.0, 0.0,
-      0.0, 1.0, 0.0,
-  };
-  write_face_mesh(first_path, triangle, {100, 101, 102});
-  write_face_mesh(second_path, triangle, {100, 101, 102});
-
+  const OverlappingFaceFiles files;
   MeshParameters mesh_params;
-  mesh_params.name.set("mesh");
-  mesh_params.mesh_file_path.set(volume_path.string());
-  for (const auto& [name, path] :
-       {std::pair<std::string, std::filesystem::path>{"wall", first_path},
-        std::pair<std::string, std::filesystem::path>{"free_surface", second_path}}) {
-    auto* face = new FaceParameters();
-    face->name.set(name);
-    face->face_file_path.set(path.string());
-    mesh_params.face_parameters.push_back(face);
+  EXPECT_FALSE(mesh_params.allow_overlapping_face_files.value());
+  files.configure(mesh_params);
+
+  try {
+    (void)application::translators::MeshTranslator::loadMesh(mesh_params);
+    FAIL() << "overlapping face files must be rejected";
+  } catch (const std::runtime_error& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find("the face files of <Add_mesh name=\"tank\"> overlap"),
+              std::string::npos)
+        << message;
+    EXPECT_NE(message.find("<Add_face name=\"wall\"> ('" + files.wall.string() +
+                           "') and <Add_face name=\"free_surface\"> ('" +
+                           files.surface.string() + "') share 1 boundary face(s)"),
+              std::string::npos)
+        << message;
+    EXPECT_NE(message.find("<Allow_overlapping_face_files>true</Allow_overlapping_face_files>"),
+              std::string::npos)
+        << message;
   }
+#endif
+}
+
+TEST(MeshTranslatorFaceLabels, LegacyOptOutKeepsTheLastLabelAndWarns)
+{
+#ifndef MESH_HAS_VTK
+  GTEST_SKIP() << "VTK support is required for face-file translator coverage.";
+#else
+  ensure_mpi_initialized_for_mesh_translator();
+  const OverlappingFaceFiles files;
+  MeshParameters mesh_params;
+  files.configure(mesh_params);
+  mesh_params.allow_overlapping_face_files.set("true");
 
   testing::internal::CaptureStderr();
   auto mesh = application::translators::MeshTranslator::loadMesh(mesh_params);
   const auto warnings = testing::internal::GetCapturedStderr();
-  std::filesystem::remove(volume_path);
-  std::filesystem::remove(first_path);
-  std::filesystem::remove(second_path);
 
   ASSERT_NE(mesh, nullptr);
   EXPECT_NE(warnings.find("1 boundary face(s) of face file 'wall' are also listed in face file "
@@ -541,6 +597,24 @@ TEST(MeshTranslatorFaceLabels, WarnsWhenFaceFilesOverlapAndKeepsTheLastLabel)
   EXPECT_EQ(mesh->base().get_set(svmp::EntityKind::Face, "wall").size(), 1u);
   EXPECT_EQ(mesh->base().get_set(svmp::EntityKind::Face, "free_surface").size(), 1u);
 #endif
+}
+
+TEST(MeshTranslatorFaceLabels, OverlapOptOutIsParsedFromAddMesh)
+{
+  tinyxml2::XMLDocument document;
+  ASSERT_EQ(document.Parse(R"xml(
+<Add_mesh name="tank">
+  <Mesh_file_path>mesh.vtu</Mesh_file_path>
+  <Allow_overlapping_face_files>true</Allow_overlapping_face_files>
+</Add_mesh>
+)xml"), tinyxml2::XML_SUCCESS)
+      << document.ErrorStr();
+  auto* element = document.FirstChildElement("Add_mesh");
+  ASSERT_NE(element, nullptr);
+
+  MeshParameters parsed;
+  ASSERT_NO_THROW(parsed.set_values(element));
+  EXPECT_TRUE(parsed.allow_overlapping_face_files.value());
 }
 
 TEST(MeshTranslatorFaceLabels, DisjointFaceFilesDoNotWarn)

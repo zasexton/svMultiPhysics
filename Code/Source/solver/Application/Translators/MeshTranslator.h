@@ -36,8 +36,12 @@ public:
 private:
   static std::string detectFormat(const std::string& file_path);
 
+  // Face files must be disjoint; `allow_overlapping_face_files` keeps the
+  // legacy last-listed labeling of decks written with overlapping files.
   static void applyFaceLabels(svmp::Mesh& mesh,
-                              const std::vector<FaceParameters*>& face_params);
+                              const std::vector<FaceParameters*>& face_params,
+                              const std::string& mesh_name,
+                              bool allow_overlapping_face_files);
 
   static void applyDomainLabels(svmp::Mesh& mesh, const MeshParameters& params);
 };
