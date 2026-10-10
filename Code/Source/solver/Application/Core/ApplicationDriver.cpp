@@ -19312,8 +19312,7 @@ bool updateLevelSetAdvectionVelocitiesFromState(
               << application::core::pdeVelocityExtensionFactorizationName(
                      pdeVelocityExtensionFactorizationSetting())
               << " cache_entries=" << pde_report.cache_entries
-              << " cache_capacity="
-              << pde_extension_cache.capacity(pde_report.distributed_solves)
+              << " cache_capacity=" << pde_report.cache_capacity
               << " cache_hits=" << pde_extension_cache.statistics().hits
               << " cache_misses=" << pde_extension_cache.statistics().misses
               << " cache_bytes=" << pde_extension_cache.statistics().bytes

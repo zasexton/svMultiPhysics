@@ -208,6 +208,8 @@ struct PdeCachedRun {
   bool distributed{false};
   bool self_checked{false};
   std::size_t shared_factorizations{0u};
+  std::size_t cache_capacity{0u};
+  std::array<std::size_t, 3> unknowns{0u, 0u, 0u};
 };
 
 // Known set as in extend(), plus the vertices at the given (i, j) lattice
@@ -218,7 +220,7 @@ PdeCachedRun extendCached(const svmp::Mesh& mesh, const svmp::MeshComm& comm,
                           application::core::PdeVelocityExtensionCache* cache,
                           application::core::PdeVelocityExtensionFactorization factorization =
                               application::core::PdeVelocityExtensionFactorization::LuColamd,
-                          bool side_walls = true)
+                          bool all_components_on_walls = false)
 {
   const auto n = mesh.n_vertices();
   const auto& X = mesh.X_ref();
@@ -251,13 +253,12 @@ PdeCachedRun extendCached(const svmp::Mesh& mesh, const svmp::MeshComm& comm,
       }
     }
   }
-  // Without side walls every component has the same unknowns.
-  std::vector<WallVelocityExtensionConstraint> walls{
+  // The side walls constrain the wall-normal component (x), or every
+  // component (then all components have the same unknowns).
+  const std::vector<WallVelocityExtensionConstraint> walls{
       {.boundary_label = kPdeSideWall,
-       .constrained_components = {true, false, false}}};
-  if (!side_walls) {
-    walls.clear();
-  }
+       .constrained_components = {true, all_components_on_walls,
+                                  all_components_on_walls}}};
   PdeVelocityExtensionOptions options;
   options.op = op;
   options.factorization = factorization;
@@ -272,6 +273,8 @@ PdeCachedRun extendCached(const svmp::Mesh& mesh, const svmp::MeshComm& comm,
   out.distributed = report.distributed_solves;
   out.self_checked = report.self_checked;
   out.shared_factorizations = report.shared_factorizations;
+  out.cache_capacity = report.cache_capacity;
+  out.unknowns = report.unknowns;
   return out;
 }
 
@@ -559,10 +562,15 @@ TEST(LevelSetPdeVelocityExtensionMPI, FourRankDistributedSolvesMatchTheReplicate
 }
 
 // Opt-in MUMPS factorization distributed over all ranks (any rank count):
-// the result matches the serial LU solve to round-off, a reused
-// factorization is applied collectively, and components are never solved on
-// separate ranks.
-TEST(LevelSetPdeVelocityExtensionMPI, MumpsFactorizationMatchesSerialLuOnAnyRankCount)
+// the result matches the default factorization on the same mesh and
+// communicator to round-off (the default is independent of the partition,
+// see TwoRankResultMatchesSerialOnEveryLocalVertex; on one rank the
+// partitioned build is a local build, so it is not compared with a separately
+// built serial mesh here), a reused factorization is applied collectively and
+// matches a fresh one, components are never solved on separate ranks, the
+// cache keeps the distributed-entry capacity on two or more ranks and the
+// self-check passes.
+TEST(LevelSetPdeVelocityExtensionMPI, MumpsFactorizationMatchesDefaultOnAnyRankCount)
 {
   if (!svmp::FE::backends::mumpsAvailable()) {
     GTEST_SKIP() << "Built without FE_ENABLE_MUMPS.";
@@ -578,19 +586,14 @@ TEST(LevelSetPdeVelocityExtensionMPI, MumpsFactorizationMatchesSerialLuOnAnyRank
       svmp::PartitionHint::Cells, /*ghost_layers=*/3,
       {{"partition_method", "block"}});
   labelSideWalls(*distributed);
-  auto base = std::make_shared<svmp::MeshBase>();
-  base->build_from_arrays(2, arrays.x, arrays.offsets, arrays.connectivity,
-                          arrays.shapes);
-  base->finalize();
-  auto serial = svmp::create_mesh(std::move(base));
-  labelSideWalls(*serial);
   const svmp::MeshComm comm(MPI_COMM_WORLD);
 
   for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
                         PdeVelocityExtensionOperator::LeastSquaresNormal}) {
-    const auto reference = extend(*serial, svmp::MeshComm::self(), op);
+    const auto reference = extend(*distributed, comm, op);
     const auto mumps =
         extend(*distributed, comm, op, PdeVelocityExtensionFactorization::Mumps);
+    ASSERT_EQ(mumps.size(), reference.size());
     int local_failures = 0;
     for (const auto& [key, value] : mumps) {
       const auto found = reference.find(key);
@@ -607,17 +610,28 @@ TEST(LevelSetPdeVelocityExtensionMPI, MumpsFactorizationMatchesSerialLuOnAnyRank
   }
 
   // Cached: the second call with new velocities reuses the factorization on
-  // every rank and matches an uncached MUMPS solve.
+  // every rank and matches an uncached MUMPS solve; the self-check (round-off
+  // tolerance for MUMPS) passes on both calls.
   application::core::PdeVelocityExtensionCache cache;
-  const auto first = extendCached(*distributed, comm, PdeVelocityExtensionOperator::Harmonic,
-                                  1.0, {}, &cache, PdeVelocityExtensionFactorization::Mumps);
-  const auto second = extendCached(*distributed, comm, PdeVelocityExtensionOperator::Harmonic,
-                                   1.5, {}, &cache, PdeVelocityExtensionFactorization::Mumps);
+  PdeCachedRun first;
+  PdeCachedRun second;
+  {
+    ScopedEnvironment self_check("SVMP_PDE_EXTENSION_SELF_CHECK", "1");
+    first = extendCached(*distributed, comm, PdeVelocityExtensionOperator::Harmonic, 1.0, {},
+                         &cache, PdeVelocityExtensionFactorization::Mumps);
+    second = extendCached(*distributed, comm, PdeVelocityExtensionOperator::Harmonic, 1.5, {},
+                          &cache, PdeVelocityExtensionFactorization::Mumps);
+  }
   const auto fresh = extendCached(*distributed, comm, PdeVelocityExtensionOperator::Harmonic,
                                   1.5, {}, nullptr, PdeVelocityExtensionFactorization::Mumps);
   EXPECT_FALSE(reuseOverRanks(first.reused).second);
   EXPECT_TRUE(reuseOverRanks(second.reused).first);
   EXPECT_FALSE(reuseOverRanks(second.distributed).second);
+  EXPECT_TRUE(reuseOverRanks(first.self_checked).first);
+  EXPECT_TRUE(reuseOverRanks(second.self_checked).first);
+  EXPECT_EQ(second.cache_capacity,
+            size > 1 ? application::core::PdeVelocityExtensionCache::kDefaultDistributedEntries
+                     : application::core::PdeVelocityExtensionCache::kDefaultEntries);
   int local_far = 0;
   ASSERT_EQ(second.extended.size(), fresh.extended.size());
   for (std::size_t i = 0; i < second.extended.size(); ++i) {
@@ -636,9 +650,11 @@ TEST(LevelSetPdeVelocityExtensionMPI, MumpsFactorizationMatchesSerialLuOnAnyRank
   }
 }
 
-// Without wall masks both components have the same matrix: MUMPS factorizes
-// it once per new system, the result matches the default factorization and
-// the cache keeps the shared factorization.
+// When the side walls constrain every component, all components have the
+// same unknowns and matrix: MUMPS factorizes it once per new system, the
+// result matches the default factorization and the cache keeps the shared
+// factorization.  With only the wall-normal component constrained, the
+// components differ (wherever the walls fix vertices) and nothing is shared.
 TEST(LevelSetPdeVelocityExtensionMPI, MumpsSharesTheFactorizationOfIdenticalComponents)
 {
   if (!svmp::FE::backends::mumpsAvailable()) {
@@ -658,10 +674,11 @@ TEST(LevelSetPdeVelocityExtensionMPI, MumpsSharesTheFactorizationOfIdenticalComp
                         PdeVelocityExtensionOperator::LeastSquaresNormal}) {
     const auto reference = extendCached(*distributed, comm, op, 1.0, {}, nullptr,
                                         PdeVelocityExtensionFactorization::LuColamd,
-                                        /*side_walls=*/false);
+                                        /*all_components_on_walls=*/true);
     const auto mumps = extendCached(*distributed, comm, op, 1.0, {}, nullptr,
                                     PdeVelocityExtensionFactorization::Mumps,
-                                    /*side_walls=*/false);
+                                    /*all_components_on_walls=*/true);
+    EXPECT_EQ(mumps.unknowns[0], mumps.unknowns[1]);
     EXPECT_EQ(reference.shared_factorizations, 0u);
     EXPECT_EQ(globalSum(static_cast<int>(mumps.shared_factorizations)), comm.size())
         << application::core::pdeVelocityExtensionOperatorName(op);
@@ -675,22 +692,23 @@ TEST(LevelSetPdeVelocityExtensionMPI, MumpsSharesTheFactorizationOfIdenticalComp
     }
     EXPECT_EQ(globalSum(local_far), 0)
         << application::core::pdeVelocityExtensionOperatorName(op);
-    // With the side walls the components differ and nothing is shared.
-    const auto walls = extendCached(*distributed, comm, op, 1.0, {}, nullptr,
-                                    PdeVelocityExtensionFactorization::Mumps);
-    EXPECT_EQ(globalSum(static_cast<int>(walls.shared_factorizations)), 0);
+    const auto normal_only = extendCached(*distributed, comm, op, 1.0, {}, nullptr,
+                                          PdeVelocityExtensionFactorization::Mumps);
+    if (normal_only.unknowns[0] != normal_only.unknowns[1]) {
+      EXPECT_EQ(globalSum(static_cast<int>(normal_only.shared_factorizations)), 0);
+    }
   }
 
   application::core::PdeVelocityExtensionCache cache;
   const auto first = extendCached(*distributed, comm, PdeVelocityExtensionOperator::Harmonic,
                                   1.0, {}, &cache, PdeVelocityExtensionFactorization::Mumps,
-                                  /*side_walls=*/false);
+                                  /*all_components_on_walls=*/true);
   const auto second = extendCached(*distributed, comm, PdeVelocityExtensionOperator::Harmonic,
                                    1.5, {}, &cache, PdeVelocityExtensionFactorization::Mumps,
-                                   /*side_walls=*/false);
+                                   /*all_components_on_walls=*/true);
   const auto fresh = extendCached(*distributed, comm, PdeVelocityExtensionOperator::Harmonic,
                                   1.5, {}, nullptr, PdeVelocityExtensionFactorization::Mumps,
-                                  /*side_walls=*/false);
+                                  /*all_components_on_walls=*/true);
   EXPECT_FALSE(reuseOverRanks(first.reused).second);
   EXPECT_EQ(globalSum(static_cast<int>(first.shared_factorizations)), comm.size());
   EXPECT_TRUE(reuseOverRanks(second.reused).first);
