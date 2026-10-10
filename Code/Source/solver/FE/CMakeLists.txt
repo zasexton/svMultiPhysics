@@ -957,6 +957,7 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSetVolume.h
     LevelSet/LevelSetKinematicReconciliation.h
     LevelSet/LevelSetSignDefinitePatchBounds.h
+    LevelSet/LevelSetInterfacePreservingRedistancing.h
     LevelSet/LevelSetReinitialization.h
     LevelSet/LevelSetDiagnostics.h
     LevelSet/LevelSetRestart.h
@@ -978,6 +979,7 @@ set(FE_LEVELSET_SOURCES
     LevelSet/LevelSetVolume.cpp
     LevelSet/LevelSetKinematicReconciliation.cpp
     LevelSet/LevelSetSignDefinitePatchBounds.cpp
+    LevelSet/LevelSetInterfacePreservingRedistancing.cpp
     LevelSet/LevelSetReinitialization.cpp
     LevelSet/LevelSetDiagnostics.cpp
     LevelSet/LevelSetRestart.cpp
@@ -2494,6 +2496,7 @@ if(FE_BUILD_TESTS)
             Tests/Unit/LevelSet/test_LevelSetInterfaceLifecycle.cpp
             Tests/Unit/LevelSet/test_LevelSetKinematicReconciliation.cpp
             Tests/Unit/LevelSet/test_LevelSetSignDefinitePatchBounds.cpp
+            Tests/Unit/LevelSet/test_LevelSetInterfacePreservingRedistancing.cpp
             Tests/Unit/LevelSet/test_LevelSetOptions.cpp
             Tests/Unit/LevelSet/test_LevelSetReinitialization.cpp
             Tests/Unit/LevelSet/test_LevelSetRestart.cpp
