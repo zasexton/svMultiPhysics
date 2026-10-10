@@ -4558,8 +4558,10 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                     FreeSurfaceKinematicEnforcement::MeshNitsche) {
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: the qualified "
-                    "fitted-ALE free-surface contract requires explicit "
-                    "Penalty, Nitsche, or MeshNitsche normal enforcement");
+                    "fitted-ALE free-surface contract requires MeshNitsche "
+                    "normal enforcement (the input default) or the legacy "
+                    "Penalty or Nitsche enforcement; None is accepted only "
+                    "by the explicit schema-1 legacy mode");
             }
         }
         if (bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None &&

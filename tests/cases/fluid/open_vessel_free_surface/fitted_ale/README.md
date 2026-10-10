@@ -14,8 +14,10 @@ tracker milestone M5, decision D5).
 
 The legacy `Nitsche` mode replaces the normal dynamic condition on the fluid
 and needs a pressure gauge; it is not a free-surface model (WP-9 note,
-"Step-12 failure"). Whether to retire the legacy `Penalty`/`Nitsche`
-kinematics is an open decision; their decks and tests are kept as they are.
+"Step-12 failure"). Decision D35 keeps `Penalty` and `Nitsche` as explicit
+legacy options and makes `MeshNitsche` the default when
+`Kinematic_enforcement` is omitted; every deck here names its enforcement,
+so the legacy decks and tests are unchanged.
 
 ## MeshNitsche decks
 

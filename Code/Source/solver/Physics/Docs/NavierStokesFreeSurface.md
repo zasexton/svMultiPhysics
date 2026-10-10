@@ -129,27 +129,40 @@ motion and the fitted boundary terms on the trial current configuration:
 the FE geometric-nonlinearity transaction moves the current coordinates at
 every trial state, and the application builds the FE system with the current
 configuration as its assembly frame whenever an equation requests coupled
-displacement. Fitted boundary integrals therefore use the ordinary boundary
-measure of that frame; the current normal is the normal of the same frame.
+displacement (`Enable_ALE=true` with `Mesh_velocity_source=coupled_displacement`;
+`SimulationBuilder::createFESystem`, which logs
+`assembly_frame=current (coupled mesh-displacement ALE)`). This holds for
+every kinematic enforcement below. Fitted boundary integrals therefore use
+the ordinary boundary measure of that frame; the current normal is the
+normal of the same frame, and no fitted term multiplies by the current
+surface measure (`NavierStokesLegacyBCs.FittedFreeSurfaceKinematicBCTranslation_UsesCurrentGeometry`).
 (Until 2026-09-30 the application assembled such inputs on the reference
 frame and the fitted terms multiplied the boundary weights by the current
-surface measure a second time; see the tracker, M5.)
+surface measure a second time; see the tracker, M5. Decision D35 confirms
+current-frame assembly as the coupled-ALE contract.)
 
-**Kinematic enforcement.** `Kinematic_enforcement` is required for the
-qualified fitted contract:
+**Kinematic enforcement.** `MeshNitsche` is the qualified default
+(decision D35): a fitted free surface without `Kinematic_enforcement` uses
+it. `Penalty` and `Nitsche` are legacy options and must be selected
+explicitly. `None` is accepted only by the explicit schema-1 legacy mode,
+which keeps its own defaults (no relation, or `Penalty` when only
+`Kinematic_penalty` is given); before D35 the qualified contract rejected an
+omitted key, so no accepted input changes.
 
-| Value | Fluid row on the free surface | Mesh row on the free surface |
-|---|---|---|
-| `MeshNitsche` (recommended) | none: the fluid keeps the natural dynamic condition `sigma n = -(p_ext + gamma kappa) n` | `gamma_N / h_n * (w - u).n (psi.n)` plus the Nitsche consistency `-kappa ((grad w) n . n)(psi.n)` of the harmonic mesh-velocity operator |
-| `Penalty` | `Kinematic_penalty * (u - w).n (v.n)` | `Kinematic_penalty * (w - u).n (psi.n)` |
-| `Nitsche` | Nitsche row for `u.n = w.n` whose consistency term cancels the fluid normal stress | `Kinematic_nitsche_gamma / h_n * (w - u).n (psi.n)` |
+| Value | Status | Fluid row on the free surface | Mesh row on the free surface |
+|---|---|---|---|
+| `MeshNitsche` | default | none: the fluid keeps the natural dynamic condition `sigma n = -(p_ext + gamma kappa) n` | `gamma_N / h_n * (w - u).n (psi.n)` plus the Nitsche consistency `-kappa ((grad w) n . n)(psi.n)` of the harmonic mesh-velocity operator |
+| `Penalty` | legacy, explicit | `Kinematic_penalty * (u - w).n (v.n)` | `Kinematic_penalty * (w - u).n (psi.n)` |
+| `Nitsche` | legacy, explicit | Nitsche row for `u.n = w.n` whose consistency term cancels the fluid normal stress | `Kinematic_nitsche_gamma / h_n * (w - u).n (psi.n)` |
 
-With `Penalty` and `Nitsche` the kinematic relation is imposed on the fluid
-as well as on the mesh. The fluid row then replaces (Nitsche) or perturbs
-(Penalty, by the mesh stiffness flux) the normal dynamic condition, so these
-two modes do not reproduce free-surface dynamics; they remain for the
-existing prerequisite tests. `MeshNitsche` imposes the relation on the mesh
-only:
+With the legacy `Penalty` and `Nitsche` modes the kinematic relation is
+imposed on the fluid as well as on the mesh. The fluid row then replaces
+(Nitsche) or perturbs (Penalty, by the mesh stiffness flux) the normal
+dynamic condition, so these two modes do not reproduce free-surface
+dynamics; they remain for the existing prerequisite tests and decks, which
+state them explicitly. `Kinematic_penalty` still requires an explicit
+`Kinematic_enforcement=Penalty` and does not change the default.
+`MeshNitsche` imposes the relation on the mesh only:
 
 - `w = dt(d)` is the mesh velocity. The harmonic `mesh_motion` equation must
   act on it (`Harmonic_quantity=velocity`: `kappa grad(w):grad(psi)`), so the
