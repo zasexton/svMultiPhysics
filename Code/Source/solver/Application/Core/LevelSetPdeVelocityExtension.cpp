@@ -37,6 +37,7 @@
 #include <cstring>
 #include <exception>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -660,8 +661,30 @@ public:
         values.push_back(it.value());
       }
     }
-    return solver_.factorize(static_cast<svmp::FE::GlobalIndex>(A.rows()),
-                             rows, cols, values);
+    const bool ok = solver_.factorize(
+        static_cast<svmp::FE::GlobalIndex>(A.rows()), rows, cols, values);
+    // SVMP_PDE_EXTENSION_MUMPS_DIAGNOSTICS (or the level-set advection trace):
+    // rank 0 logs every factorization.
+    if (comm.rank() == 0 &&
+        (environmentFlag("SVMP_PDE_EXTENSION_MUMPS_DIAGNOSTICS") ||
+         environmentFlag("SVMP_TRACE_LEVEL_SET_ADVECTION"))) {
+      const auto& s = solver_.statistics();
+      std::cout << "[svMultiPhysics::Application] PDE velocity extension "
+                   "diagnostic=pde_extension_mumps"
+                << " ok=" << (ok ? 1 : 0) << " ranks=" << comm.size()
+                << " n=" << s.n << " entries=" << s.entries
+                << " factor_entries=" << s.factor_entries
+                << " analyze_s=" << s.analyze_seconds
+                << " factor_s=" << s.factor_seconds
+                << " peak_mb_max_rank=" << s.peak_memory_mb_max_rank
+                << " peak_mb_total=" << s.peak_memory_mb_total
+                << " relaxation_percent=" << s.memory_relaxation_percent;
+      if (!ok) {
+        std::cout << " error=\"" << solver_.lastError() << "\"";
+      }
+      std::cout << std::endl;
+    }
+    return ok;
   }
 
   [[nodiscard]] bool solveInto(const Eigen::VectorXd& b,
@@ -829,8 +852,10 @@ struct PdeVelocityExtensionCache::Entry {
     // Rank that holds the matrix and factorization and solves the component;
     // -1: every rank does.
     int owner{-1};
-    std::unique_ptr<svmp::FE::backends::GenericMatrix> matrix;
-    std::unique_ptr<DryRegionFactorization> factorization;
+    // Components with the same unknowns (same wall masks) have the same
+    // matrix; with MUMPS they share one matrix and factorization.
+    std::shared_ptr<svmp::FE::backends::GenericMatrix> matrix;
+    std::shared_ptr<DryRegionFactorization> factorization;
   };
 
   std::uint64_t key{0u};
@@ -865,11 +890,25 @@ struct PdeVelocityExtensionCache::Entry {
              vertex_index.size() *
                  (sizeof(std::pair<const std::int64_t, std::size_t>) +
                   2u * sizeof(void*));
-    for (const auto& component : components) {
+    for (std::size_t c = 0; c < components.size(); ++c) {
+      const auto& component = components[c];
+      // A matrix or factorization shared with an earlier component counts once.
+      bool shared_matrix = false;
+      bool shared_factorization = false;
+      for (std::size_t p = 0; p < c; ++p) {
+        shared_matrix = shared_matrix ||
+                        (component.matrix && component.matrix == components[p].matrix);
+        shared_factorization =
+            shared_factorization ||
+            (component.factorization &&
+             component.factorization == components[p].factorization);
+      }
 #if defined(FE_HAS_EIGEN)
       if (const auto* matrix =
-              dynamic_cast<const svmp::FE::backends::EigenMatrix*>(
-                  component.matrix.get())) {
+              shared_matrix
+                  ? nullptr
+                  : dynamic_cast<const svmp::FE::backends::EigenMatrix*>(
+                        component.matrix.get())) {
         total += static_cast<std::size_t>(matrix->eigen().nonZeros()) *
                      (sizeof(svmp::FE::Real) +
                       sizeof(svmp::FE::backends::EigenMatrix::StorageIndex)) +
@@ -877,7 +916,7 @@ struct PdeVelocityExtensionCache::Entry {
                      sizeof(svmp::FE::backends::EigenMatrix::StorageIndex);
       }
 #endif
-      if (component.factorization) {
+      if (component.factorization && !shared_factorization) {
         total += component.factorization->bytes();
       }
     }
@@ -1619,6 +1658,30 @@ PdeVelocityExtensionReport extendVelocityByPde(
     n_unknowns[component] = n_unknown;
   }
 
+  // With MUMPS, a component whose unknowns are those of an earlier component
+  // (same wall masks) has the same matrix, so it solves with that
+  // component's matrix and factorization of this call: one collective
+  // factorization instead of one per component.  The decision uses the
+  // replicated system only, so every rank takes it alike.  The other
+  // factorizations keep one system per component.
+  std::array<int, 3> same_system_as{-1, -1, -1};
+  std::array<bool, 3> shared_later{false, false, false};
+  std::array<PdeVelocityExtensionCache::Entry::Component, 3> call_systems{};
+  if (options.factorization == PdeVelocityExtensionFactorization::Mumps &&
+      !reuse) {
+    for (std::size_t c = 1; c < copy_components; ++c) {
+      for (std::size_t p = 0; p < c; ++p) {
+        if (same_system_as[p] < 0 && n_unknowns[c] > 0 &&
+            n_unknowns[p] == n_unknowns[c] &&
+            unknowns_by_component[p] == unknowns_by_component[c]) {
+          same_system_as[c] = static_cast<int>(p);
+          shared_later[p] = true;
+          break;
+        }
+      }
+    }
+  }
+
   // The solve of one component: its matrix (assembled or cached), the
   // Dirichlet right-hand side, the factorization (new or cached) and the
   // residual.  Components are independent; a component reads only the known
@@ -1638,8 +1701,11 @@ PdeVelocityExtensionReport extendVelocityByPde(
           std::to_string(component) + " (SVMP_PDE_EXTENSION_FAIL_COMPONENT)");
     }
     ComponentSolve out;
-    std::unique_ptr<svmp::FE::backends::GenericMatrix> assembled;
+    std::shared_ptr<svmp::FE::backends::GenericMatrix> assembled;
     const DryRegionFactorization* factorization = nullptr;
+    // Factorization of an identical component of this call (MUMPS only).
+    std::shared_ptr<DryRegionFactorization> shared_factorization;
+    const int same_as = same_system_as[component];
     if (reuse) {
       const auto& stored = cached->components[component];
       if (stored.unknowns != n_unknown || !stored.matrix ||
@@ -1648,6 +1714,14 @@ PdeVelocityExtensionReport extendVelocityByPde(
             "PDE velocity extension cache lost a component system");
       }
       factorization = stored.factorization.get();
+    } else if (same_as >= 0 &&
+               call_systems[static_cast<std::size_t>(same_as)].matrix &&
+               call_systems[static_cast<std::size_t>(same_as)].factorization) {
+      const auto& system = call_systems[static_cast<std::size_t>(same_as)];
+      assembled = system.matrix;
+      shared_factorization = system.factorization;
+      factorization = shared_factorization.get();
+      ++report.shared_factorizations;
     } else {
       svmp::FE::sparsity::SparsityPattern pattern(n_unknown, n_unknown);
       for (std::size_t k = 0; k < cells.size(); ++k) {
@@ -1754,6 +1828,9 @@ PdeVelocityExtensionReport extendVelocityByPde(
       if (factorization != nullptr) {
         solved = solveWithFactorization(*factorization, A, *x, *b,
                                         solver_options, solve_report);
+        if (!solved) {
+          shared_factorization.reset();
+        }
       } else if (store_factorization ||
                  options.factorization !=
                      PdeVelocityExtensionFactorization::LuColamd) {
@@ -1796,10 +1873,19 @@ PdeVelocityExtensionReport extendVelocityByPde(
     out.converged = solve_report.converged;
     const auto xs = x->localSpan();
     out.x.assign(xs.begin(), xs.end());
-    if (store_factorization && new_factorization) {
+    std::shared_ptr<DryRegionFactorization> kept =
+        new_factorization
+            ? std::shared_ptr<DryRegionFactorization>(std::move(new_factorization))
+            : std::move(shared_factorization);
+    if (kept && shared_later[component]) {
+      call_systems[component].unknowns = n_unknown;
+      call_systems[component].matrix = assembled;
+      call_systems[component].factorization = kept;
+    }
+    if (store_factorization && kept) {
       out.stored.unknowns = n_unknown;
       out.stored.matrix = std::move(assembled);
-      out.stored.factorization = std::move(new_factorization);
+      out.stored.factorization = std::move(kept);
     }
     return out;
   };

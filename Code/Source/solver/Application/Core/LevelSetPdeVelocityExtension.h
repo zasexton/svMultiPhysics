@@ -75,9 +75,11 @@ pdeVelocityExtensionOperatorFromToken(std::string_view token);
 //     distributed over every rank of the communicator; positive definite
 //     mode for the harmonic operator, symmetric indefinite otherwise.  The
 //     components are factorized and solved one after another on all ranks
-//     (no per-rank component solves); every rank receives the solution.  Its
-//     results differ from LuColamd at round-off level and may depend on the
-//     rank count at round-off level.
+//     (no per-rank component solves); every rank receives the solution.
+//     Components with the same unknowns (the same wall masks) have the same
+//     matrix and share one factorization.  Its results differ from LuColamd
+//     at round-off level and may depend on the rank count at round-off
+//     level.
 enum class PdeVelocityExtensionFactorization : std::uint8_t {
   LuColamd,
   LdltAmd,
@@ -122,6 +124,10 @@ struct PdeVelocityExtensionReport {
   // True when SVMP_PDE_EXTENSION_SELF_CHECK compared the result with the
   // uncached replicated solve and found it bitwise identical.
   bool self_checked{false};
+  // Components of a new system that were solved with the factorization of an
+  // earlier component with the same unknowns (MUMPS only, see
+  // PdeVelocityExtensionFactorization).
+  std::size_t shared_factorizations{0u};
   // Entries held by the cache after the call.
   std::size_t cache_entries{0u};
   // Content hash of the dry-region solution in canonical (global vertex ID)
