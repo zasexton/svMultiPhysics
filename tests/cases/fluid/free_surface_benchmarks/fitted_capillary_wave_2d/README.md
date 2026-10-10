@@ -30,7 +30,7 @@ As `capillary_wave_2d` (nondimensional, `rho = gamma = lambda = 1`, `k = 2 pi`):
 half a wavelength between free-slip mirror walls at the crest (`x = 0`) and the
 trough (`x = lambda/2`), a liquid of mean depth
 `y0 = lambda (1 + sqrt(2)/100)` below the surface `y0 + a0 cos(kx)`,
-`a0 = 0.01 lambda`, zero gravity, void exterior with `p_ext = 0`,
+`a0 = 0.0025 lambda` (decision D35; `capillary_wave_2d` uses `0.01 lambda`), zero gravity, void exterior with `p_ext = 0`,
 `La = rho gamma lambda / mu^2 = 3000` (`mu = 0.018257`), released from rest
 with the linear pressure of the released state. Reference: Prosperetti's
 viscous initial-value solution, whose 4-period damped-cosine fit gives
@@ -72,11 +72,20 @@ option `--dt-over-capillary-limit F` (never gated) writes a run with a step of
 about `F` times the level's limit; it is used below to check whether the
 fitted discretization needs the limit.
 
-**Amplitude.** The reference is linear, while the simulation keeps the
-finite amplitude `a0 k = 0.063`, whose frequency shift is of order
-`(a0 k)^2 = 4e-3` times a coefficient below one. The diagnostic option
-`--amplitude-over-wavelength` (never gated) runs a smaller amplitude to
-separate that shift from the discretization error.
+**Amplitude (decision D35).** The reference is linear, while the simulation
+keeps the finite amplitude, whose frequency shift is about
+`-0.10 to -0.16 (a0 k)^2` (measured below).  At the earlier protocol
+amplitude `a0 = 0.01 lambda` (`a0 k = 0.063`) that shift is a plateau of
+4e-4 to 7e-4 below the linear reference, larger than the discretization
+error, and the frequency order could not be demonstrated.  The protocol
+amplitude is therefore `a0 = 0.0025 lambda` (`a0 k = 0.016`), where the
+shift is 16 times smaller.  The diagnostic option
+`--amplitude-over-wavelength` (never gated) runs another amplitude;
+`--amplitude-over-wavelength 0.01` writes the decks of the earlier protocol
+unchanged (`solver.xml` and the mesh files are byte-identical), and
+`verify.py` reports runs at an amplitude other than the protocol value,
+including old protocol runs whose `case.json` still marks them as protocol
+runs, as diagnostics.
 
 ## Metrics (`verify.py`)
 
@@ -105,7 +114,7 @@ references are judged alike; only the time-error removal is added.
 
 | Criterion | Limit | Where | Source |
 |---|---|---|---|
-| `frequency` | at most 0.02; observed order at least 1 | 0.02 at `lambda/h = 32`; order over 16/32/64 | tracker M3 working criterion (D1); time error removed (D10) |
+| `frequency` | at most 0.02; observed order at least 1 | 0.02 at `lambda/h = 32`; order over 16/32/64 | tracker M3 working criterion (D1); time error removed (D10); at `a0 = 0.0025 lambda` (D35) |
 | `damping` | at most 0.05; observed order at least 1 | `lambda/h = 32` and 64; order over 16/32/64 | tracker M3 working criterion (D1); finest-level check as in D12 |
 | `volume` | at most 1e-4 | every protocol run, maximum over the run | tracker volume limit (D1), gated as in D11 |
 
@@ -122,6 +131,14 @@ python3 $B/verify.py $OUT/L16 $OUT/L32 $OUT/L64 $OUT/L32_dt2 $OUT/L32_dt4 --json
 ```
 
 ## Results
+
+**Status after D35 (2026-10-10): no protocol run at the protocol amplitude
+`a0 = 0.0025 lambda` exists yet.** The runs below are at the earlier
+protocol amplitude (`0.01 lambda`) or are spatial-only diagnostics at
+`0.0025 lambda` (job `46155727`, binary `4a62a971`); the time-step study at
+`0.0025 lambda` (`lambda/h = 32` at `dt/2` and `dt/4`) has never been run, so
+the spatial errors cannot have the time error removed.  The protocol needs
+the five runs of "How to run" at the new default.
 
 **2026-09-30, cases from `93b1bf06`, solver binary `35a81fd3` (the same
 fitted code), Slurm job `46129890` (one node, all cases side by side, one

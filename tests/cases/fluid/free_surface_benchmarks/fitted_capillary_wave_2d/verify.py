@@ -131,6 +131,8 @@ def analyse_run(run: Path, *, allow_short: bool = False) -> dict:
         "dt_over_capillary_limit": case["dt_over_capillary_limit"],
         "study": case.get("study"),
         "protocol_run": bool(case.get("protocol_run", False)),
+        "amplitude_over_wavelength": float(case.get("amplitude_over_wavelength",
+                                                    a0 / case["wavelength"])),
         "truncated": bool(case.get("truncated", False)),
         "end_time": float(times[-1]),
         "periods_simulated": periods,
@@ -309,6 +311,15 @@ def main(argv=None) -> int:
         print("ERROR: truncated smoke runs are not acceptance evidence: " + ", ".join(truncated),
               file=sys.stderr)
         return 2
+    # Decision D35: only runs at the protocol amplitude are gated; runs of an
+    # earlier protocol (a0 = 0.01 lambda) are reported as diagnostics.
+    protocol_amplitude = tolerances["protocol"]["amplitude_over_wavelength"]
+    for r in runs:
+        if r["protocol_run"] and not math.isclose(r["amplitude_over_wavelength"],
+                                                  protocol_amplitude, rel_tol=1e-9):
+            r["protocol_run"] = False
+            r["not_gated_reason"] = (f"amplitude a0/lambda = {r['amplitude_over_wavelength']:g} "
+                                     f"is not the protocol value {protocol_amplitude:g}")
     protocol = [r for r in runs if r["protocol_run"] and not r["truncated"]]
     keys = [(r["level"], r["dt_divisor"]) for r in protocol]
     if len(keys) != len(set(keys)):
@@ -335,7 +346,8 @@ def main(argv=None) -> int:
               f"{log.get('newton_iterations_mean', float('nan')):>6.2f} "
               f"{log.get('wall_seconds_per_step', float('nan')):>6.2f}"
               + ("  [TRUNCATED SMOKE RUN]" if r["truncated"] else "")
-              + ("" if r["protocol_run"] else "  [diagnostic, not gated]"))
+              + ("" if r["protocol_run"] else "  [diagnostic, not gated"
+                 + (f": {r['not_gated_reason']}" if r.get("not_gated_reason") else "") + "]"))
     ref = everything[0]
     ref_fit = ref["reference_fit"] or {}
     print(f"reference (Prosperetti, fitted on the same samples): omega = "
