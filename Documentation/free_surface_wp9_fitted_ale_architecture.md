@@ -729,6 +729,10 @@ and `..._2d_meshnitsche` (2D) have disjoint face sets
 (`generate_spheric_test10_fitted_decks.py`; see `fitted_ale/README.md`).
 The unfitted SPHERIC 02, 05 and 10 decks written by
 `generate_validation_meshes.py` have overlapping face sets as well.
+Decision D35 (2026-10-10) makes overlapping face files an error in
+`MeshTranslator` and in `generate_validation_meshes.py`; the legacy decks
+above declare the opt-out `<Allow_overlapping_face_files>true</Allow_overlapping_face_files>`
+in `<Add_mesh>`, which keeps the last-listed labeling and its warning.
 
 ## Source evidence map
 

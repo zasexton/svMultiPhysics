@@ -42,7 +42,7 @@
   </Add_face>
 
   <Add_face name="top">
-      <Face_file_path> mesh/mesh-surfaces/bottom.vtp </Face_file_path>
+      <Face_file_path> mesh/mesh-surfaces/top.vtp </Face_file_path>
   </Add_face>
 
 </Add_mesh>

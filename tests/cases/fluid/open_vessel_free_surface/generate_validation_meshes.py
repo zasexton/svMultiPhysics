@@ -481,11 +481,14 @@ def write_surfaces(
     grid: pv.UnstructuredGrid,
     specs: list[SurfaceSpec],
     surface_dir: Path,
+    *,
+    allow_overlapping_face_files: bool = False,
 ) -> None:
     surface_dir.mkdir(parents=True, exist_ok=True)
     points = grid.points
     faces = boundary_faces(grid_tets(grid))
 
+    selections: list[tuple[SurfaceSpec, list]] = []
     owners: dict[tuple[int, ...], list[str]] = {}
     for spec in specs:
         selected = [
@@ -497,19 +500,47 @@ def write_surfaces(
             raise RuntimeError(f"surface {spec.name!r} did not select any boundary faces")
         for face in selected:
             owners.setdefault(tuple(sorted(face)), []).append(spec.name)
-        polydata_from_faces(points, selected).save(surface_dir / f"{spec.name}.vtp", binary=False)
+        selections.append((spec, selected))
     # The centroid predicates below use a tolerance of 0.35 h, so faces of one
     # plane near an edge are also selected for the adjacent plane.  The solver
     # keeps one boundary label per face (the last face file listed), so such
-    # faces lose the conditions of the other files.  Report the overlaps; the
-    # fitted MeshNitsche decks use generate_spheric_test10_fitted_decks.py,
-    # which writes disjoint face sets.
-    shared: dict[tuple[str, ...], int] = {}
-    for names in owners.values():
-        if len(names) > 1:
-            shared[tuple(names)] = shared.get(tuple(names), 0) + 1
-    for names, count in sorted(shared.items()):
-        warnings.warn(f"{surface_dir}: {count} boundary faces are in several face files {names}")
+    # faces would lose the conditions of the other files; the solver rejects
+    # overlapping face files unless the deck opts out (decision D35).  Fail
+    # closed here as well; --allow-overlapping-face-files reproduces the
+    # legacy decks, which declare the solver opt-out.  The fitted MeshNitsche
+    # decks use generate_spheric_test10_fitted_decks.py, which writes disjoint
+    # face sets.
+    message = face_file_overlap_message(surface_dir, owners)
+    if message:
+        if not allow_overlapping_face_files:
+            raise RuntimeError(
+                message
+                + " A boundary face carries one label in the solver (the last listed face file),"
+                " so the boundary conditions of the other files would miss these faces."
+                " Make the face selections disjoint, or pass --allow-overlapping-face-files"
+                " to reproduce the legacy decks (they declare"
+                " <Allow_overlapping_face_files>true</Allow_overlapping_face_files>)."
+            )
+        warnings.warn(message + " (legacy decks: allowed by --allow-overlapping-face-files)")
+    for spec, selected in selections:
+        polydata_from_faces(points, selected).save(surface_dir / f"{spec.name}.vtp", binary=False)
+
+
+def face_file_overlap_message(surface_dir: Path, owners: dict[tuple[int, ...], list[str]]) -> str:
+    """Describe the boundary faces listed in more than one face file ("" if none)."""
+    shared: dict[tuple[str, ...], list[tuple[int, ...]]] = {}
+    for face, names in owners.items():
+        if len(set(names)) > 1:
+            shared.setdefault(tuple(dict.fromkeys(names)), []).append(face)
+    if not shared:
+        return ""
+    groups = "; ".join(
+        f"{len(group_faces)} boundary faces are in "
+        + ", ".join(f"{name}.vtp" for name in names)
+        + f" (first: GlobalNodeID {list(min(group_faces))})"
+        for names, group_faces in sorted(shared.items())
+    )
+    return f"{surface_dir}: face files overlap: {groups}."
 
 
 def plane_predicate(axis: int, value: float, tol: float) -> Callable[[np.ndarray, np.ndarray], bool]:
@@ -712,9 +743,15 @@ def write_solver_xml(
     newton_line_search_max_iterations: str = "10",
     bound_preserving_bound_tolerance: str = LEVEL_SET_BOUND_REPRESENTABILITY_TOLERANCE,
     bound_preserving_sign_tolerance: str = LEVEL_SET_BOUND_SIGN_TOLERANCE,
+    allow_overlapping_face_files: bool = False,
 ) -> None:
     if ghost_layers < 0:
         raise ValueError("ghost_layers must be nonnegative")
+    face_overlap_opt_out = (
+        "\n  <Allow_overlapping_face_files>true</Allow_overlapping_face_files>"
+        if allow_overlapping_face_files
+        else ""
+    )
     level_set_outflow_faces = level_set_outflow_faces or []
     unknown_level_set_outflows = set(level_set_outflow_faces).difference(faces)
     if unknown_level_set_outflows:
@@ -1107,7 +1144,7 @@ def write_solver_xml(
 
 <Add_mesh name="tank">
   <Mesh_file_path>{mesh_path}</Mesh_file_path>
-  <Ghost_layers>{ghost_layers}</Ghost_layers>
+  <Ghost_layers>{ghost_layers}</Ghost_layers>{face_overlap_opt_out}
 
 {face_blocks}
 </Add_mesh>
@@ -1190,6 +1227,7 @@ def write_case(
     gauge_pressure: float | Callable[[np.ndarray], float] = 0.0,
     record_gauge_metadata: bool = False,
     pressure_gauge_verification: Callable[[dict], dict] | None = None,
+    allow_overlapping_face_files: bool = False,
 ) -> None:
     obstacles = obstacles or []
     if grid_factory is not None:
@@ -1214,7 +1252,7 @@ def write_case(
     specs = surface_specs_for_box(domain, tol, fitted=fitted)
     if obstacles:
         specs.append(SurfaceSpec("obstacle", obstacle_predicate(obstacles[0], tol)))
-    write_surfaces(grid, specs, surface_dir)
+    write_surfaces(grid, specs, surface_dir, allow_overlapping_face_files=allow_overlapping_face_files)
 
     gauge_metadata = write_pressure_gauge(case_dir, grid, gauge_point, gauge_pressure)
     if record_gauge_metadata:
@@ -1266,6 +1304,7 @@ def write_case(
         adaptive_time_loop_max_steps_multiplier=adaptive_time_loop_max_steps_multiplier,
         newton_line_search_fail_on_no_reduction=newton_line_search_fail_on_no_reduction,
         newton_line_search_max_iterations=newton_line_search_max_iterations,
+        allow_overlapping_face_files=allow_overlapping_face_files,
     )
 
     try:
@@ -1345,7 +1384,7 @@ def field_initialized_pressure_diagnostic(gauge_metadata: dict) -> dict:
     }
 
 
-def generate_spheric_test10() -> None:
+def generate_spheric_test10(*, allow_overlapping_face_files: bool = False) -> None:
     tank = Box(0.0, 0.900, 0.0, 0.508, 0.0, 0.062)
     lateral_fill = 0.093
     water = Box(tank.xmin, tank.xmax, tank.ymin, lateral_fill, tank.zmin, tank.zmax)
@@ -1388,6 +1427,7 @@ def generate_spheric_test10() -> None:
         )
 
     write_case(
+        allow_overlapping_face_files=allow_overlapping_face_files,
         case_dir=ROOT / "fitted_ale" / "spheric_test10_lateral_water_1x",
         mesh_subdir="water",
         domain=water,
@@ -1411,6 +1451,7 @@ def generate_spheric_test10() -> None:
     )
 
     write_case(
+        allow_overlapping_face_files=allow_overlapping_face_files,
         case_dir=ROOT / "unfitted_level_set" / "spheric_test10_lateral_water_1x",
         mesh_subdir="background",
         domain=tank,
@@ -1486,7 +1527,7 @@ def test05_reference_profiles(wet_depth_mm: int) -> list[dict[str, object]]:
     ]
 
 
-def generate_spheric_test05() -> None:
+def generate_spheric_test05(*, allow_overlapping_face_files: bool = False) -> None:
     domain = Box(0.0, 1.20, 0.0, 0.18, 0.0, 0.03)
     gate_x = 0.38
     dam_height = 0.15
@@ -1534,6 +1575,7 @@ def generate_spheric_test05() -> None:
             )
 
         write_case(
+            allow_overlapping_face_files=allow_overlapping_face_files,
             case_dir=ROOT / "unfitted_level_set" / f"spheric_test05_wet_bed_d{wet_depth_mm}",
             mesh_subdir="background",
             domain=domain,
@@ -1608,7 +1650,7 @@ def generate_spheric_test05() -> None:
         )
 
 
-def generate_spheric_test02() -> None:
+def generate_spheric_test02(*, allow_overlapping_face_files: bool = False) -> None:
     tank = Box(0.0, TEST02_TANK_LENGTH, 0.0, TEST02_TANK_HEIGHT, 0.0, TEST02_TANK_WIDTH)
     obstacle = Box(
         TEST02_OBSTACLE_X_MIN,
@@ -1645,6 +1687,7 @@ def generate_spheric_test02() -> None:
         return structured_tet_grid(x_coords, y_coords, z_coords, mirror_z_midplane=True)
 
     write_case(
+        allow_overlapping_face_files=allow_overlapping_face_files,
         case_dir=ROOT / "unfitted_level_set" / "spheric_test02_dambreak_obstacle",
         mesh_subdir="background",
         domain=tank,
@@ -1746,14 +1789,25 @@ def main() -> None:
         choices=["all", "spheric_test10", "spheric_test05", "spheric_test02"],
         default="all",
     )
+    parser.add_argument(
+        "--allow-overlapping-face-files",
+        action="store_true",
+        help=(
+            "legacy: write face files that share boundary faces (the centroid selection with a "
+            "0.35 h tolerance does so at the tank edges) and declare "
+            "<Allow_overlapping_face_files>true</Allow_overlapping_face_files> in the decks, as the "
+            "committed decks do; without it overlapping face files are an error (decision D35)"
+        ),
+    )
     args = parser.parse_args()
+    legacy = {"allow_overlapping_face_files": args.allow_overlapping_face_files}
 
     if args.case in {"all", "spheric_test10"}:
-        generate_spheric_test10()
+        generate_spheric_test10(**legacy)
     if args.case in {"all", "spheric_test05"}:
-        generate_spheric_test05()
+        generate_spheric_test05(**legacy)
     if args.case in {"all", "spheric_test02"}:
-        generate_spheric_test02()
+        generate_spheric_test02(**legacy)
 
 
 if __name__ == "__main__":

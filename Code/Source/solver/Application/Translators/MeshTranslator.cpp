@@ -25,6 +25,10 @@
 #include <utility>
 #include <vector>
 
+#ifdef MESH_HAS_MPI
+#include <mpi.h>
+#endif
+
 namespace {
 
 std::string lower_copy(std::string s)
@@ -405,34 +409,115 @@ std::optional<MatchedBoundaryFace> match_owned_cell_boundary_face(
 
 // A boundary face carries one boundary label, and boundary conditions select
 // faces by label.  When a face is listed in several <Add_face> files it keeps
-// the label of the last one, so the conditions of the earlier faces silently
-// miss it (for example wall Dirichlet data on the nodes of a free-surface
-// edge).  Report every such overlap; face files are expected to be disjoint.
-void warn_overlapping_face_files(const std::vector<std::vector<std::string>>& names_per_face)
+// the label of the last one, so the conditions of the earlier faces would miss
+// it (for example wall Dirichlet data on the nodes of a free-surface edge).
+// Face files must therefore be disjoint (decision D35): an overlap stops the
+// run on every rank with a message naming the faces and their files, unless
+// the deck sets <Allow_overlapping_face_files>true</Allow_overlapping_face_files>
+// (legacy decks written with overlapping face files), in which case the
+// overlaps are reported and the last-listed labeling is kept.
+void check_overlapping_face_files(const std::vector<std::vector<std::string>>& names_per_face,
+                                  const std::vector<FaceParameters*>& face_params,
+                                  const std::string& mesh_name,
+                                  bool allow_overlapping_face_files,
+                                  int world_size)
 {
-  std::map<std::pair<std::string, std::string>, std::size_t> overlaps;
-  for (const auto& names : names_per_face) {
-    if (names.size() < 2) {
+  std::vector<std::string> names;
+  std::vector<std::string> paths;
+  std::map<std::string, std::size_t> index_of;
+  for (const auto* face : face_params) {
+    if (face == nullptr) {
       continue;
     }
-    const auto& final_name = names.back();
-    for (std::size_t i = 0; i + 1 < names.size(); ++i) {
-      if (names[i] != final_name) {
-        ++overlaps[{names[i], final_name}];
-      }
+    const auto name = face->name.value();
+    if (index_of.emplace(name, names.size()).second) {
+      names.push_back(name);
+      paths.push_back(face->face_file_path.value());
     }
   }
-  if (overlaps.empty()) {
+
+  // Shared-face counts for (earlier file, last file) pairs in <Add_face>
+  // order.  Each boundary face is matched on the rank that owns its cell, so
+  // the sum over ranks counts every face once and all ranks reach the same
+  // verdict.
+  const std::size_t n = names.size();
+  std::vector<long long> counts(n * n, 0);
+  for (const auto& listed : names_per_face) {
+    if (listed.size() < 2) {
+      continue;
+    }
+    const auto last = index_of.find(listed.back());
+    if (last == index_of.end()) {
+      continue;
+    }
+    std::vector<std::size_t> earlier;
+    for (std::size_t i = 0; i + 1 < listed.size(); ++i) {
+      const auto it = index_of.find(listed[i]);
+      if (it != index_of.end() && it->second != last->second &&
+          std::find(earlier.begin(), earlier.end(), it->second) == earlier.end()) {
+        earlier.push_back(it->second);
+      }
+    }
+    for (const auto e : earlier) {
+      ++counts[e * n + last->second];
+    }
+  }
+#ifdef MESH_HAS_MPI
+  if (world_size > 1 && !counts.empty()) {
+    MPI_Allreduce(MPI_IN_PLACE, counts.data(), static_cast<int>(counts.size()), MPI_LONG_LONG,
+                  MPI_SUM, MPI_COMM_WORLD);
+  }
+#else
+  (void)world_size;
+#endif
+
+  std::ostringstream shared;
+  bool any = false;
+  for (std::size_t e = 0; e < n; ++e) {
+    for (std::size_t l = 0; l < n; ++l) {
+      const auto count = counts[e * n + l];
+      if (count == 0) {
+        continue;
+      }
+      shared << (any ? "; " : "") << "<Add_face name=\"" << names[e] << "\"> ('" << paths[e]
+             << "') and <Add_face name=\"" << names[l] << "\"> ('" << paths[l] << "') share "
+             << count << " boundary face(s)";
+      any = true;
+    }
+  }
+  if (!any) {
     return;
   }
-  const int rank = svmp::MeshComm::world().rank();
-  for (const auto& [pair, count] : overlaps) {
-    std::cerr << "[svMultiPhysics::Application] WARNING (rank " << rank << "): MeshTranslator: "
-              << count << " boundary face(s) of face file '" << pair.first
-              << "' are also listed in face file '" << pair.second
-              << "'. A boundary face carries one label, so these faces are labeled '"
-              << pair.second << "' (the last listed) and boundary conditions on '" << pair.first
-              << "' do not act on them. Face files should be disjoint." << std::endl;
+
+  if (!allow_overlapping_face_files) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] MeshTranslator: the face files of <Add_mesh name=\"" +
+        mesh_name + "\"> overlap: " + shared.str() +
+        ". A boundary face carries one label (that of the last listed face file), so the "
+        "boundary conditions of the earlier faces would not act on the shared faces. Make the "
+        "face files disjoint, or keep the legacy labeling of a deck written with overlapping "
+        "face files by setting <Allow_overlapping_face_files>true</Allow_overlapping_face_files> "
+        "in <Add_mesh name=\"" + mesh_name + "\">.");
+  }
+
+  if (svmp::MeshComm::world().rank() != 0) {
+    return;
+  }
+  for (std::size_t e = 0; e < n; ++e) {
+    for (std::size_t l = 0; l < n; ++l) {
+      const auto count = counts[e * n + l];
+      if (count == 0) {
+        continue;
+      }
+      std::cerr << "[svMultiPhysics::Application] WARNING: MeshTranslator: " << count
+                << " boundary face(s) of face file '" << names[e]
+                << "' are also listed in face file '" << names[l]
+                << "'. A boundary face carries one label, so these faces are labeled '"
+                << names[l] << "' (the last listed) and boundary conditions on '" << names[e]
+                << "' do not act on them. Kept by the legacy opt-out "
+                   "<Allow_overlapping_face_files>true</Allow_overlapping_face_files> of <Add_mesh name=\""
+                << mesh_name << "\">." << std::endl;
+    }
   }
 }
 
@@ -518,7 +603,8 @@ std::shared_ptr<svmp::Mesh> MeshTranslator::loadMesh(const MeshParameters& param
                                  << " faces=" << mesh->n_faces() << std::endl;
   }
 
-  applyFaceLabels(*mesh, params.face_parameters);
+  applyFaceLabels(*mesh, params.face_parameters, params.name.value(),
+                  params.allow_overlapping_face_files.value());
   applyDomainLabels(*mesh, params);
 
   return mesh;
@@ -538,7 +624,9 @@ std::string MeshTranslator::detectFormat(const std::string& file_path)
 }
 
 void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
-                                     const std::vector<FaceParameters*>& face_params)
+                                     const std::vector<FaceParameters*>& face_params,
+                                     const std::string& mesh_name,
+                                     bool allow_overlapping_face_files)
 {
   if (face_params.empty()) {
     return;
@@ -690,7 +778,8 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
       }
     }
 
-    warn_overlapping_face_files(boundary_sets);
+    check_overlapping_face_files(boundary_sets, face_params, mesh_name,
+                                 allow_overlapping_face_files, mesh.world_size());
 
     mesh.base().set_faces_from_arrays(std::move(boundary_shapes),
                                       std::move(boundary_offsets),
@@ -818,7 +907,8 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
           << "': no local matches (this is expected on non-owning MPI ranks)." << std::endl;
     }
   }
-  warn_overlapping_face_files(names_per_face);
+  check_overlapping_face_files(names_per_face, face_params, mesh_name,
+                               allow_overlapping_face_files, mesh.world_size());
 }
 
 void MeshTranslator::applyDomainLabels(svmp::Mesh& mesh, const MeshParameters& params)

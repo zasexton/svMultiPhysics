@@ -37,6 +37,10 @@
 <Add_mesh name="tank">
   <Mesh_file_path>mesh/background/mesh-complete.mesh.vtu</Mesh_file_path>
   <Ghost_layers>3</Ghost_layers>
+  <!-- Legacy (decision D35): these face files share boundary faces at the tank
+       edges (generate_validation_meshes.py, 0.35 h centroid tolerance); each such
+       face keeps the label of the last listed file, the labeling these decks were run with. -->
+  <Allow_overlapping_face_files>true</Allow_overlapping_face_files>
 
   <Add_face name="wall_left">
     <Face_file_path>mesh/background/mesh-surfaces/wall_left.vtp</Face_file_path>
