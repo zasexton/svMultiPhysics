@@ -8,7 +8,10 @@ Each RUN_DIR is a case written by generate_case.py (it holds case.json and
 mesh/mesh-complete.mesh.vtu) in which the solver has run, leaving
 result.pvd and result_NNN.vtu (serial) or result_NNN.pvtu (MPI).  The runs
 form one refinement study; the criteria are applied across its levels.
-Metric definitions are in README.md.
+Frequency and damping come from the damped-oscillation fit of the modal
+amplitude a1(t) of cos(k x) (decision D35); the same fit of the left-wall
+probe elevation is reported as probe_*.  Metric definitions are in
+README.md.
 
 Exit status: 0 if every criterion passes, 1 if any criterion fails, 2 if
 input data are missing or invalid.
@@ -295,8 +298,11 @@ def analyse_run(run: Path, *, allow_short: bool = False) -> dict:
         raise DataError(f"{run}: {periods:.2f} periods is too short for the frequency fit "
                         "(protocol: 4); use --allow-truncated for smoke runs")
     omega_ref, gamma_ref = case["omega_reference"], case["damping_rate_reference"]
-    fit = fit_damped_oscillation(times, probe, omega_ref)
-    fit_modal = fit_damped_oscillation(times, modal, omega_ref)
+    # Decision D35: the gated frequency and damping come from the modal
+    # amplitude a1(t), which the symmetric cos(2kx) mode and a slow mean-level
+    # change do not enter; the wall-probe fit is reported for comparison.
+    fit = fit_damped_oscillation(times, modal, omega_ref)
+    fit_probe = fit_damped_oscillation(times, probe, omega_ref)
     area0 = areas[0]
     return {
         "run": str(run),
@@ -324,11 +330,16 @@ def analyse_run(run: Path, *, allow_short: bool = False) -> dict:
         "fit_amplitude_over_initial": fit["amplitude"] / case["amplitude"],
         "fit_offset": fit["offset"],
         "fit_rms_residual_over_amplitude": fit["rms_residual_over_amplitude"],
-        "modal_omega": fit_modal["omega"],
-        "modal_frequency_relative_error": abs(fit_modal["omega"] - omega_ref) / omega_ref,
-        "modal_damping_rate": fit_modal["damping_rate"],
-        "modal_damping_rate_over_reference": fit_modal["damping_rate"] / gamma_ref,
-        "modal_fit_rms_residual_over_amplitude": fit_modal["rms_residual_over_amplitude"],
+        "fit_source": "modal_amplitude",
+        "probe_omega": fit_probe["omega"],
+        "probe_frequency_relative_error": abs(fit_probe["omega"] - omega_ref) / omega_ref,
+        "probe_frequency_signed_error": fit_probe["omega"] / omega_ref - 1.0,
+        "probe_damping_rate": fit_probe["damping_rate"],
+        "probe_damping_rate_relative_error": abs(fit_probe["damping_rate"] - gamma_ref) / gamma_ref,
+        "probe_damping_rate_over_reference": fit_probe["damping_rate"] / gamma_ref,
+        "probe_fit_amplitude_over_initial": fit_probe["amplitude"] / case["amplitude"],
+        "probe_fit_offset": fit_probe["offset"],
+        "probe_fit_rms_residual_over_amplitude": fit_probe["rms_residual_over_amplitude"],
         "initial_probe_elevation_over_amplitude": float(probe[0] / case["amplitude"]),
         "initial_liquid_area": float(area0),
         "liquid_area_relative_drift_max": float(np.max(np.abs(areas - area0)) / area0),
@@ -493,8 +504,10 @@ def main(argv=None) -> int:
             protocol_verdicts = verdicts
         print(f"\n== level-set velocity {key[0]}, H0 = {key[1]:.7g}"
               + ("  [PROTOCOL]" if is_protocol else "  [comparison, not gated]"))
+        print("modal-amplitude fit (gated, D35); probe columns are the left-wall probe fit")
         print(f"{'L/h':>4} {'steps/T':>7} {'omega':>12} {'freq err':>10} {'spatial':>10} "
-              f"{'g/g_ref':>8} {'g/g_Lamb':>8} {'fit rms':>8} {'dA/A max':>9} {'s/step':>7}")
+              f"{'g/g_ref':>8} {'g/g_Lamb':>8} {'fit rms':>8} {'probe fe':>10} {'probe g/g':>9} "
+              f"{'dA/A max':>9} {'s/step':>7}")
         for r in group:
             spatial = r.get("frequency_spatial_signed_error")
             log = r.get("solver_log") or {}
@@ -503,6 +516,8 @@ def main(argv=None) -> int:
                   + (f"{spatial:>+10.3e} " if spatial is not None else f"{'-':>10} ")
                   + f"{r['damping_rate_over_reference']:>8.4f} {r['damping_rate_over_lamb']:>8.4f} "
                   f"{r['fit_rms_residual_over_amplitude']:>8.1e} "
+                  f"{r['probe_frequency_signed_error']:>+10.3e} "
+                  f"{r['probe_damping_rate_over_reference']:>9.4f} "
                   f"{r['liquid_area_relative_drift_max']:>9.2e} "
                   + (f"{log['wall_seconds_per_step']:>7.2f}" if "wall_seconds_per_step" in log
                      else f"{'-':>7}")

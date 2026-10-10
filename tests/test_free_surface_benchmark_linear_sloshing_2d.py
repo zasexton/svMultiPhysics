@@ -128,8 +128,14 @@ def test_generated_case_has_free_slip_walls_and_the_d10_schedule(tmp_path):
 
 def write_synthetic_run(run, level, omega_error, *, steps_per_period=128,
                         level_set_velocity=None, damping_scale=1.0,
-                        samples_per_period=8, area_leak=0.0, drop_last=False):
-    """Emulate solver output: a damped standing wave with a prescribed frequency error."""
+                        samples_per_period=8, area_leak=0.0, drop_last=False,
+                        second_mode=0.0):
+    """Emulate solver output: a damped standing wave with a prescribed frequency error.
+
+    `second_mode` adds a symmetric cos(2 k x) mode of that fraction of the
+    amplitude, undamped and at the inviscid frequency of mode 2, which enters
+    the wall probe but not the modal amplitude of cos(k x).
+    """
     case = gen.generate(level, run, steps_per_period=steps_per_period,
                         level_set_velocity=level_set_velocity or gen.PROTOCOL_LEVEL_SET_VELOCITY)
     points, tris, _, _ = gen.structured_triangle_mesh(level)
@@ -143,6 +149,9 @@ def write_synthetic_run(run, level, omega_error, *, steps_per_period=128,
             break
         t = case["end_time"] * i / n
         eta = case["amplitude"] * math.exp(-gamma * t) * math.cos(omega * t) * np.cos(k * points[:, 0])
+        if second_mode:
+            omega2 = math.sqrt(2.0 * k * gen.GRAVITY * math.tanh(2.0 * k * case["mean_depth"]))
+            eta = eta + second_mode * case["amplitude"] * math.cos(omega2 * t) * np.cos(2.0 * k * points[:, 0])
         phi = points[:, 1] - case["mean_depth"] - eta - area_leak * t
         name = f"result_{i:03d}.vtu"
         gen.write_vtu(run / name, points, tris,
@@ -196,7 +205,9 @@ def test_converging_study_passes_with_the_time_error_removed(study, tmp_path, ca
     spatial = {r["level"]: r for r in group["runs"] if r["steps_per_period"] == 128}
     assert spatial[16]["frequency_spatial_signed_error"] == pytest.approx(4e-3, rel=1e-4)
     assert spatial[64]["frequency_spatial_signed_error"] == pytest.approx(2.5e-4, rel=1e-3)
-    assert spatial[64]["damping_rate_over_reference"] == pytest.approx(1.0, abs=1e-6)
+    # The modal amplitude comes from the P1 interface points, which carry a
+    # small sampling error; the damping is still within 1e-4 of the input.
+    assert spatial[64]["damping_rate_over_reference"] == pytest.approx(1.0, abs=1e-4)
     text = capsys.readouterr().out
     assert "observed order 2.00" in text and "[PASS] damping" in text
 
@@ -214,6 +225,24 @@ def test_damping_limit_is_five_percent_at_the_finest_level(study, capsys):
     assert ver.main(study({16: 4e-3, 32: 1e-3, 64: 2.5e-4}, damping_scale=1.08)) == 1
     out = capsys.readouterr().out
     assert "[FAIL] damping" in out and "[PASS] frequency" in out
+
+
+def test_frequency_and_damping_are_judged_on_the_modal_amplitude(study, tmp_path, capsys):
+    # D35: a symmetric cos(2kx) mode biases the wall-probe fit but not the
+    # modal amplitude of cos(kx), which the frequency and damping gates use.
+    out = tmp_path / "report.json"
+    runs = study({16: 4e-3, 32: 1e-3, 64: 2.5e-4}, second_mode=0.3)
+    assert ver.main([*runs, "--json", str(out)]) == 0
+    group = json.loads(out.read_text())["groups"][0]
+    spatial = {r["level"]: r for r in group["runs"] if r["steps_per_period"] == 128}
+    finest = spatial[64]
+    assert finest["fit_source"] == "modal_amplitude"
+    assert finest["frequency_spatial_signed_error"] == pytest.approx(2.5e-4, rel=1e-3)
+    assert finest["damping_rate_over_reference"] == pytest.approx(1.0, abs=1e-4)
+    assert finest["damping_rate_relative_error"] == pytest.approx(
+        abs(finest["damping_rate"] / finest["damping_rate_reference"] - 1.0))
+    assert abs(finest["probe_damping_rate_over_reference"] - 1.0) > 0.05
+    assert "probe fe" in capsys.readouterr().out
 
 
 def test_volume_criterion_gates_every_run(study, capsys):
