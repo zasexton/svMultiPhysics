@@ -545,6 +545,20 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   - **Aggregation fix 2:** part 1 (the extrapolation guard is now independent of vertex order) is accepted. Part 2 (the rootless fallback) is opt-in only, because pinning a connected wall film degrades results (capillary-rise apex RMS 0.22 → 1.23 mm after t = 0.416 s). The capillary-rise deck returns to the default guards; the clean comparison window is [0, 0.416] s.
   - **Threaded assembly (opt-in `Assembly_threads` / `SVMP_ASSEMBLY_THREADS`):** the global system receives the same insertion calls as serial assembly for any thread count; one thread team is shared with the geometry threads. 60 of 60 byte-level comparisons are identical across thread and rank combinations, TSan is clean, and CTest passes 90/90. For 3D at R/h = 16 on one node, 8 ranks × 3 threads take 1,223 s per 2 steps, against 1,530 s with 16 ranks × 1 thread (−20%), with 29% less memory; the cut-volume imbalance is the main reason 16 ranks are no faster than 8.
   - **Issue H:** the outer loop now exits on a persistent two-state constraint cycle from refresh 13, finishing on the frozen problem. It changes only steps that previously failed. The source of the cycle is cells whose active fraction rounds to 1.0 without being marked full; fixing that classification is a later follow-up.
+- **D25 result (2026-10-10): the 3D static sphere passes every M2 gate. M2 is complete in 2D and 3D.**
+
+  | R/h | Δt | pressure-jump error | Ca_sp at T | velocity growth | max dV/V | ranks, wall time |
+  |---:|---:|---:|---:|---:|---:|---|
+  | 8 | 0.02 | 7.54e-4 | 2.9e-3 | 0.53 | 3.2e-6 | 1, 21.8 h |
+  | 16 | 0.02 | 1.77e-4 | 1.1e-3 | 0.25 | 6.7e-7 | 16, 27.9 h |
+  | 8 | 0.01 | 7.68e-4 | 5.3e-4 | 0.28 | 2.0e-6 | 1, 30.6 h |
+
+  - **Order:** 2.09 over R/h = 8 and 16. Ca_sp decreases from 8 to 16.
+  - **Time-step criterion at R/h = 8:** the pressure jump changes by 1.5e-5 when Δt is halved (limit 1e-3).
+  - **R/h = 16 halo:** 0 rejected fill columns and `exact_halo=1` over 1,220 aggregation refreshes (12 layers, 16 ranks).
+  - **R/h = 8 at Δt/2:** one constraint-cycle exit, at step 72 (D34, issue H).
+  - **Binaries:** `688a625a`-ltopgo (R/h = 8 at Δt), `48b28800` (R/h = 8 at Δt/2; serial, identical to `688a625a` except at the cycle-exit step), `28eb7f4a`-ltopgo (R/h = 16).
+  - Outputs are in `/scratch/users/zsexton/free-surface-benchmarks/static_sphere_3d/d25/` (verify_d25.txt/json), archived to Oak.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
