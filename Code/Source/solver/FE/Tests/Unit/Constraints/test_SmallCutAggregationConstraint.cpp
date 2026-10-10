@@ -1799,6 +1799,73 @@ TEST(SmallCutAggregationConstraint, RootSearchTraversesCutCellsToNearestFullActi
 #endif
 }
 
+TEST(SmallCutAggregationConstraint, SubRoundoffCutCellIsClassifiedAsCut)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    // c0 cut, c1 a cut cell whose retained fraction rounds to exactly 1 (not
+    // full-cell equivalent: a sub-round-off complement), c2 full-active.  c1
+    // is a cut cell like the same rule one ulp below 1: the candidates on c0
+    // reach the root c2 through it, and the constraints do not depend on the
+    // rounding of c1's fraction.
+    const auto constraints_for = [](Real c1_fraction) {
+        auto mesh = buildQuadStrip(3);
+        auto space =
+            std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+        auto system = std::make_unique<systems::FESystem>(mesh);
+        const auto pressure = system->addField(
+            systems::FieldSpec{.name = "p", .space = space, .components = 1});
+        system->addOperator("pressure");
+        system->addSystemConstraint(
+            std::make_unique<SmallCutAggregationConstraint>(
+                pressure,
+                geometry::CutIntegrationSide::Negative,
+                kInterfaceMarker));
+        EXPECT_NO_THROW(system->setup());
+        system->setCutIntegrationContext(makeCutContext({
+            {.cell = 0, .volume_fraction = Real{0.2},
+             .full_cell_equivalent = false},
+            {.cell = 1, .volume_fraction = c1_fraction,
+             .full_cell_equivalent = false},
+            {.cell = 2, .volume_fraction = Real{1.0},
+             .full_cell_equivalent = true},
+        }));
+        EXPECT_NO_THROW(system->rebuildConstraintState());
+        std::vector<std::pair<GlobalIndex,
+                              std::vector<std::pair<GlobalIndex, double>>>>
+            lines;
+        for (GlobalIndex vertex = 0; vertex < 8; ++vertex) {
+            const auto dof = vertexDof(*system, pressure, vertex);
+            if (system->constraints().isConstrained(dof)) {
+                lines.emplace_back(vertex, lineEntries(*system, dof));
+            }
+        }
+        return std::make_pair(lines, vertexDof(*system, pressure, 2));
+    };
+
+    const auto [rounded, dof2] = constraints_for(Real{1.0});
+    const auto [below, dof2_below] = constraints_for(
+        std::nextafter(Real{1.0}, Real{0.0}));
+    EXPECT_EQ(dof2, dof2_below);
+    EXPECT_EQ(rounded, below);
+
+    // The c0 candidates (vertices 0, 1, 4, 5) root at c2 through c1, as in
+    // RootSearchTraversesCutCellsToNearestFullActiveCell.
+    ASSERT_EQ(rounded.size(), 4u);
+    const std::vector<GlobalIndex> slaves{0, 1, 4, 5};
+    for (std::size_t i = 0; i < slaves.size(); ++i) {
+        EXPECT_EQ(rounded[i].first, slaves[i]);
+    }
+    ASSERT_EQ(rounded[1].second.size(), 2u);
+    const GlobalIndex vertex2_dof = dof2;
+    const auto weight_on_vertex2 = std::find_if(
+        rounded[1].second.begin(), rounded[1].second.end(),
+        [vertex2_dof](const auto& entry) { return entry.first == vertex2_dof; });
+    ASSERT_NE(weight_on_vertex2, rounded[1].second.end());
+    EXPECT_NEAR(weight_on_vertex2->second, 2.0, 1e-9);
+#endif
+}
+
 TEST(SmallCutAggregationConstraint, RootPathGuardRejectsLongCutBand)
 {
     SVMP_AGG_TEST_BODY
