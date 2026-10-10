@@ -7834,6 +7834,29 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
+     RemovedCutTopologyRestartEnvironmentVariableStopsTheRun)
+{
+  {
+    WorkflowScopedEnvVar unset(
+        "SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS", std::nullopt);
+    EXPECT_NO_THROW(rejectRemovedCutTopologyRestartEnvironment());
+  }
+  {
+    WorkflowScopedEnvVar stale(
+        "SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS", std::string("4"));
+    try {
+      rejectRemovedCutTopologyRestartEnvironment();
+      FAIL() << "a stale SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS "
+                "must stop the run";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string(error.what())
+                    .find("Max_cut_topology_restarts_per_step"),
+                std::string::npos);
+    }
+  }
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
      SelectsBackwardEulerAndRejectsUnsupportedTransientScheme)
 {
   GeneralSimulationParameters parameters;

@@ -3095,6 +3095,24 @@ bool parseBoolEnv(const char* name, bool default_value)
   return default_value;
 }
 
+// The environment variable SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS was
+// replaced by GeneralSimulationParameters/Max_cut_topology_restarts_per_step
+// (decision D35).  A run that still sets it stops, so that the variable does
+// not silently stop applying.
+void rejectRemovedCutTopologyRestartEnvironment()
+{
+  if (std::getenv("SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS") !=
+      nullptr) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] The environment variable "
+        "SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS was removed; set "
+        "<Max_cut_topology_restarts_per_step> in "
+        "<GeneralSimulationParameters> instead (default: the outer "
+        "fixed-point iteration limit; 0 stops and rejects the step at a "
+        "cut-topology change) and unset the variable.");
+  }
+}
+
 bool generalizedAlphaPdeRateInitializationRequested(
     bool active_cut_domain_present)
 {
@@ -31152,8 +31170,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   // and the solve continues on it.  The number of such epoch changes is
   // therefore bounded by the outer iteration limit, which is the default.
   // Max_cut_topology_restarts_per_step overrides it (0 restores the
-  // stop-and-reject behavior); the legacy environment variable is honored
-  // only when the XML key is absent.
+  // stop-and-reject behavior).
+  rejectRemovedCutTopologyRestartEnvironment();
   const char* cut_topology_restart_limit_source = "outer_iteration_limit";
   int cut_topology_restart_limit =
       opts.newton.external_state_fixed_point.max_iterations;
@@ -31164,14 +31182,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     if (limit_parameter.defined() && limit_parameter.value() >= 0) {
       cut_topology_restart_limit = limit_parameter.value();
       cut_topology_restart_limit_source = "xml";
-    } else if (std::getenv(
-                   "SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS") !=
-               nullptr) {
-      cut_topology_restart_limit = std::max(
-          0,
-          parseIntEnv("SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS",
-                      cut_topology_restart_limit));
-      cut_topology_restart_limit_source = "environment";
     }
   }
   opts.newton.external_state_fixed_point.max_discontinuity_restarts =
