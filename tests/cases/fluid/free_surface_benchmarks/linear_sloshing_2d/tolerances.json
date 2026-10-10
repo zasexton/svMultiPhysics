@@ -1,7 +1,7 @@
 {
   "benchmark": "linear_sloshing_2d",
   "milestone": "M1",
-  "fixed_on": "2026-09-29; revised 2026-09-30 for decisions D9 to D12 before the first run of the revised protocol",
+  "fixed_on": "2026-09-29; revised 2026-09-30 for decisions D9 to D12 before the first run of the revised protocol; revised 2026-10-10 for decision D35 (frequency and damping from the modal-amplitude fit)",
   "levels": {
     "cells_per_length": [16, 32, 64]
   },
@@ -26,7 +26,7 @@
     {
       "id": "frequency",
       "quantity": "frequency_spatial_error",
-      "definition": "|omega/omega_ref - 1 - e_time| on the spatial study, with omega fitted to the free-surface elevation history at the left-wall probe (x = 0) as eta(t) = c + exp(-gamma t) (a cos(omega t) + b sin(omega t)) over all outputs, omega_ref = Im(s) of the linear viscous standing wave with free-slip walls, and e_time the time error of the spatial-study step from the time-step study (README.md)",
+      "definition": "|omega/omega_ref - 1 - e_time| on the spatial study, with omega fitted to the modal amplitude a1(t) of cos(k x) (least-squares fit y = sum_{n<4} a_n cos(n k x) to all interface points at every output) as a1(t) = c + exp(-gamma t) (a cos(omega t) + b sin(omega t)) over all outputs, omega_ref = Im(s) of the linear viscous standing wave with free-slip walls, and e_time the time error of the spatial-study step from the time-step study with the same fit (README.md); the left-wall probe fit is reported only",
       "limit": 0.01,
       "at_level": 64,
       "monotone": "strictly_decreasing",
@@ -34,15 +34,15 @@
       "minimum_observed_order": 1.0,
       "order_levels": [16, 32, 64],
       "order_method": "least-squares slope of log(error) against log(L/h) over order_levels; pairwise orders are reported",
-      "source": "Tracker section 5, M1 working criterion: frequency error <= 1% at the finest mesh with observed convergence ('observed convergence' read as a strictly decreasing error with an observed order of at least 1, as for M2 in static_drop_2d); decision D10: judged with the time-step error removed"
+      "source": "Tracker section 5, M1 working criterion: frequency error <= 1% at the finest mesh with observed convergence ('observed convergence' read as a strictly decreasing error with an observed order of at least 1, as for M2 in static_drop_2d); decision D10: judged with the time-step error removed; decision D35: the frequency criterion, including its order check, uses the modal-amplitude fit instead of the wall probe"
     },
     {
       "id": "damping",
       "quantity": "damping_rate_relative_error",
-      "definition": "|gamma - gamma_ref| / gamma_ref at L/h = 64 on the spatial study, gamma from the same fit and gamma_ref = -Re(s) of the linear viscous standing wave (README.md)",
+      "definition": "|gamma - gamma_ref| / gamma_ref at L/h = 64 on the spatial study, gamma from the modal-amplitude fit of the frequency criterion and gamma_ref = -Re(s) of the linear viscous standing wave (README.md); the probe damping is reported only",
       "limit": 0.05,
       "at_level": 64,
-      "source": "Decision D12: sloshing damping error <= 5% at the finest level, matching the capillary-wave criterion"
+      "source": "Decision D12: sloshing damping error <= 5% at the finest level, matching the capillary-wave criterion; decision D35: judged on the modal amplitude instead of the wall probe"
     },
     {
       "id": "volume_drift",

@@ -4,7 +4,7 @@ The first antisymmetric standing wave in a 2D rectangular tank, released from
 rest with a small cosine displacement of the free surface. Gravity is the only
 restoring force (zero surface tension). The unfitted level-set solution is
 compared with linear theory over a three-level refinement study: the
-frequency and damping rate of the free-surface elevation at a wave gauge, and
+frequency and damping rate of the free-surface mode amplitude, and
 liquid-volume conservation (milestone M1 in
 `Documentation/free_surface_program_tracker.md`).
 
@@ -18,8 +18,11 @@ The protocol was revised on 2026-09-30 for decisions D9 to D12 of the
 tracker: the level set is advected with the PDE extension of the fluid
 velocity (D9), space and time errors are studied separately (D10), the volume
 criterion gates the maximum deviation over the run (D11), and the damping
-error is gated at 5% (D12).  The first protocol and its results are kept in
-"Results" below.
+error is gated at 5% (D12).  Since decision D35 (2026-10-10) the frequency
+criterion, including its order check, and the damping criterion use the fit
+of the modal amplitude of `cos(k x)` instead of the wall probe, which is now
+reported only.  The first protocol and its results are kept in "Results"
+below.
 
 Files:
 
@@ -27,7 +30,7 @@ Files:
 |---|---|
 | `generate_case.py` | writes `solver.xml`, the mesh with the initial fields, the wall faces and `case.json` (including the reference frequency and damping rate) for one level |
 | `verify.py` | reads the solver output of the levels, fits frequency and damping, applies `tolerances.json` |
-| `tolerances.json` | acceptance criteria and their sources, fixed on 2026-09-29 and revised for D9 to D12 on 2026-09-30, each time before the first run |
+| `tolerances.json` | acceptance criteria and their sources, fixed on 2026-09-29, revised for D9 to D12 on 2026-09-30 (each time before the first run) and for D35 on 2026-10-10 |
 | `tests/test_free_surface_benchmark_linear_sloshing_2d.py` | checks of the two scripts on synthetic data |
 
 ## Physical setup
@@ -193,13 +196,14 @@ All quantities come from the solver's VTU/PVTU point data (`phi`,
 
 | Metric | Definition |
 |---|---|
-| probe elevation `eta_p(t)` | height of the lowest upward zero crossing of `phi_h` on the left wall `x = 0` (a mesh line, so `phi_h` is linear between its vertices), minus `H0` |
-| fit | least-squares fit of `eta_p(t) = c + exp(-gamma t)(a cos(omega t) + b sin(omega t))` over all outputs: a scan over `omega` picks the start, then Levenberg-Marquardt refines all five parameters |
+| modal amplitude `a1(t)` | coefficient of `cos(k x)` in the least-squares fit `y = sum_{n<4} a_n cos(n k x)` to all interface points (the zero crossings of `phi_h` on the mesh edges) |
+| fit | least-squares fit of `a1(t) = c + exp(-gamma t)(a cos(omega t) + b sin(omega t))` over all outputs: a scan over `omega` picks the start, then Levenberg-Marquardt refines all five parameters (D35) |
 | `frequency_relative_error` | `abs(omega - omega_ref)/omega_ref` (signed value reported) |
-| `frequency_spatial_error` | `abs(omega/omega_ref - 1 - e_time)` on the spatial study, `e_time` from the time-step study (D10) |
+| `frequency_spatial_error` | `abs(omega/omega_ref - 1 - e_time)` on the spatial study, `e_time` from the time-step study with the same fit (D10) |
 | `damping_rate_relative_error` | `abs(gamma - gamma_ref)/gamma_ref` |
 | `liquid_area_relative_drift_max` | max over outputs of `abs(A(t) - A(0))/A(0)`, `A` the exact area of `{phi_h < 0}` (cut triangles clipped by the linear `phi_h`) |
-| Reported only | signed frequency error; error against `omega0`; `gamma/(2 nu k^2)`; fitted amplitude over `A`; fit residual; the same fit applied to the modal amplitude `a1(t)` from a least-squares fit `y = sum_{n<4} a_n cos(n k x)` to all interface points; maximum liquid speed; the histories; from `solver_run.log(.gz)` if present: outer passes and Newton iterations per step, the largest final residual, and the wall time |
+| probe elevation `eta_p(t)` (reported only) | height of the lowest upward zero crossing of `phi_h` on the left wall `x = 0` (a mesh line, so `phi_h` is linear between its vertices), minus `H0`; the same fit gives `probe_omega`, `probe_frequency_signed_error`, `probe_damping_rate` and `probe_damping_rate_over_reference`.  The symmetric `cos(2 k x)` mode and a slow mean-level change enter the probe but not `a1(t)`, which is why the gates use `a1(t)` (D35) |
+| Reported only | signed frequency error; error against `omega0`; `gamma/(2 nu k^2)`; fitted amplitude over `A`; fit residual; the probe fit; maximum liquid speed; the histories; from `solver_run.log(.gz)` if present: outer passes and Newton iterations per step, the largest final residual, and the wall time |
 
 Observed orders are least-squares slopes of `log(error)` against `log(L/h)`;
 pairwise orders are printed too. `verify.py` exits with status 2 on missing
@@ -212,8 +216,8 @@ time, no crossing on the probe line) and on `--max-steps` smoke runs unless
 
 | Criterion | Limit | Where | Source |
 |---|---|---|---|
-| `frequency` | spatial error (time error removed) at most 0.01; strictly decreasing; observed order at least 1 | limit at `L/h = 64`; monotonicity and order over 16/32/64 | tracker M1 working criterion ("frequency error <= 1% at the finest mesh with observed convergence"), with the time error removed (D10). "Observed convergence" is read as a strictly decreasing error with an observed order of at least 1, as for M2 in `static_drop_2d`; the expected order is 2 |
-| `damping` | at most 0.05 | `L/h = 64` of the spatial study | decision D12 |
+| `frequency` | spatial error (time error removed) at most 0.01; strictly decreasing; observed order at least 1 | limit at `L/h = 64`; monotonicity and order over 16/32/64 | tracker M1 working criterion ("frequency error <= 1% at the finest mesh with observed convergence"), with the time error removed (D10), on the modal-amplitude fit (D35). "Observed convergence" is read as a strictly decreasing error with an observed order of at least 1, as for M2 in `static_drop_2d`; the expected order is 2 |
+| `damping` | at most 0.05 | `L/h = 64` of the spatial study | decision D12, on the modal-amplitude fit (D35) |
 | `volume_drift` | maximum deviation over the run at most 1e-4 | every run of the spatial and time-step studies | tracker M1 working criterion; decision D11 |
 
 Runs with another level-set velocity or mean depth are reported beside the
@@ -251,6 +255,31 @@ protocol runs but never gates them:
   position in its cell row; the reference is recomputed for `H0`.
 
 ## Results
+
+### Re-verification with the modal-amplitude gates, D35 (2026-10-10)
+
+The protocol runs of job `46089180` (below; output kept under
+`free-surface-benchmarks/pde-extension/campaign-b4b376a0/sloshing/pde_harmonic_monolithic`)
+re-verified with `verify.py` after D35.  **Result: FAIL on the frequency
+convergence criterion only; the frequency limit, the damping and the volume
+criteria pass.**
+
+| L/h | steps/T | modal frequency error | spatial (time error removed) | `gamma/gamma_ref` (modal) | probe frequency error | `gamma/gamma_ref` (probe) |
+|---:|---:|---:|---:|---:|---:|---:|
+| 16 | 128 | -0.005% | +0.020% | 1.028 | -0.004% | 0.991 |
+| 32 | 64 | -0.051% | - | 1.005 | -0.038% | 0.978 |
+| 32 | 128 | +0.027% | +0.051% | 1.005 | +0.039% | 0.979 |
+| 32 | 256 | +0.045% | - | 1.006 | +0.056% | 0.981 |
+| 64 | 128 | +0.032% | +0.057% | 0.999 | +0.050% | 0.967 |
+
+Time-step study at `L/h = 32` on the modal fit: observed temporal order 2.06,
+`e_time(128) = -0.0247%`.
+
+| Criterion | Result |
+|---|---|
+| `frequency` | **FAIL**: 0.057% <= 1% at `L/h = 64`, but not decreasing (0.020%, 0.051%, 0.057%); observed order -0.75 |
+| `damping` | PASS: 0.10% <= 5% (3.3% on the probe before D35) |
+| `volume_drift` | PASS: at most 3.2e-5 on all five runs |
 
 ### Revised protocol, D9 to D12 (2026-09-30)
 
