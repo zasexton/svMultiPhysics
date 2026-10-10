@@ -77,6 +77,18 @@ change it once, with a one-line justification in the tracker.
   - Bitwise comparisons between solver builds stay serial, because rank counts change the round-off.
 - **JIT object cache.** Benchmark run scripts set `SVMP_JIT_CPU=x86-64-v3` and `SVMP_CACHE_PROFILE=L1d:32768,L1i:32768,L2:1048576,L3:16777216`, so one kernel cache serves both the Skylake and the Milan nodes of the partition. Outputs are bitwise identical to the default host target, and cold runs skip 10–15 s of kernel compilation (tracker D17; `Code/Source/solver/FE/Docs/BuildOptimization.md`). Bitwise comparisons between solver builds use the default target.
 - **Requesting resources.** amarsden allows at most 8000 MB per CPU. A request above that silently adds CPUs: a one-task job with `--mem=8G` gets 2 CPUs, half of them idle. Request at most 8000 MB × CPUs (for example `--mem=7G` serial, `--mem=8G` for 4 ranks). Check finished jobs with `seff <jobid>`.
+- **Run configurations (tracker D35).**
+  - **Gated protocol runs** keep FSILS GMRES with row-column scaling and the default generalized-α predictor, so their results stay comparable with earlier runs.
+  - **Development runs** may use the opt-in aggregation multigrid preconditioner (`<Right_preconditioner>amg</Right_preconditioner>` in `<LS type="GMRES">`) and the opt-in rate-extrapolation predictor (`Generalized_alpha_predictor=RateExtrapolation`, `Generalized_alpha_predictor_fields=phi`). Both give the same results on every rank count up to round-off, and change results only within the linear and nonlinear tolerances.
+  - **3D production runs** use 8 ranks × 3 assembly threads per node:
+
+    ```
+    #SBATCH --nodes=1 --ntasks=8 --cpus-per-task=3
+    export OMP_NUM_THREADS=1 SVMP_ASSEMBLY_THREADS=$SLURM_CPUS_PER_TASK
+    mpiexec -n $SLURM_NTASKS --map-by slot:PE=$SLURM_CPUS_PER_TASK --bind-to core svmultiphysics solver.xml
+    ```
+
+    The assembly and geometry threads give bitwise-identical results for any thread count. The multigrid preconditioner is recommended there from R/h = 16 on. The opt-in free-surface partition weighting (`<Partition_weighting>free_surface</Partition_weighting>`) is allowed; it changes the partition and hence the results at round-off, which the run record must state.
 
 ## Planned benchmarks
 

@@ -559,6 +559,24 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   - **R/h = 8 at Δt/2:** one constraint-cycle exit, at step 72 (D34, issue H).
   - **Binaries:** `688a625a`-ltopgo (R/h = 8 at Δt), `48b28800` (R/h = 8 at Δt/2; serial, identical to `688a625a` except at the cycle-exit step), `28eb7f4a`-ltopgo (R/h = 16).
   - Outputs are in `/scratch/users/zsexton/free-surface-benchmarks/static_sphere_3d/d25/` (verify_d25.txt/json), archived to Oak.
+- **D35, 2026-10-10 (user): open decisions resolved.**
+  1. **Sessile:** build an opt-in, area-conserving redistancing of the contact band. It restores |∇φ| ≈ 1, including at cut-cell vertices, with bounded and reported interface displacement. The work also includes finding out why the projection reinitialization never converges (560 of 560 calls skipped).
+  2. **Ren–E:** after (1), build the strong contact-point law as an opt-in constraint: u(x_c)·t_w = Mγ(cos θ_e − cos θ_cell).
+  3. **The contact-edge DoF release trial** (`dev/contact-dof-release-trial`) stays parked; it is not merged.
+  4. **M4 sessile protocol:** decided after (1). 10 viscous times for now; if the angle still moves by more than about 0.5° between Δt and Δt/2, an angle tolerance that allows for it will be proposed.
+  5. **Aggregation multigrid preconditioner:** opt-in, recommended for development runs and 3D production runs. The benchmark protocols keep GMRES for comparability.
+  6. **Generalized-α rate-extrapolation predictor:** used in development runs, not the default until M4 is settled.
+  7. **Free-surface partition weighting:** allowed for 3D production runs. It changes the partition and hence the results at round-off, which is recorded with each run.
+  8. **3D production configuration:** 8 ranks × 3 assembly threads per node (`SVMP_ASSEMBLY_THREADS=3`, `OMP_NUM_THREADS=1`, `--map-by slot:PE=3 --bind-to core`); results are bitwise independent of the thread count.
+  9. **Issue H follow-up:** make the full/cut classification of cells consistent at round-off (active fraction rounding to 1.0). The earlier opt-in cycle exit is not pursued.
+  10. **Aggregation-ledger localization:** deferred until M4 wetting is settled.
+  11. **Distributed direct solver (MUMPS 5.9.1, installed in scratch):** continues as an opt-in.
+  12. **M1 sloshing:** the frequency-order check uses the modal fit, and the damping check uses the modal amplitude.
+  13. **Fitted M5 capillary wave:** the protocol amplitude is lowered to 0.0025λ for the frequency-order check.
+  14. **Vertex crossings:** no fresh zero-update check before accepting a topology cycle; no re-anchoring of the backward-Euler energy history; the `SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS` environment variable is removed (the deck key replaces it).
+  15. **Fitted ALE:** current-frame assembly for coupled ALE is confirmed. `MeshNitsche` becomes the qualified default for fitted free surfaces; the `Penalty` and `Nitsche` kinematics are kept as legacy options only.
+  16. **Overlapping face files fail closed** with a clear message instead of a warning.
+  17. **No 2D Coriolis term for now.**
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
