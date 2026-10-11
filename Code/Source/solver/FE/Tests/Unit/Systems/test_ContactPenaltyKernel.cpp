@@ -7,6 +7,8 @@
 
 #include "Systems/ContactPenaltyKernel.h"
 #include "Systems/FESystem.h"
+#include "Constraints/AffineConstraints.h"
+#include "Constraints/SystemConstraint.h"
 
 #include "Assembly/GlobalSystemView.h"
 
@@ -259,4 +261,130 @@ TEST(ContactPenaltyKernel, AssemblesSymmetricJacobian)
     EXPECT_NEAR(jac(v1y, v4y), -10.0, tol);
     EXPECT_NEAR(jac(v4y, v1y), -10.0, tol);
     EXPECT_NEAR(jac(v4y, v4y), 10.0, tol);
+}
+
+namespace {
+
+// Prescribes the x displacement of the given vertices (an inhomogeneous
+// Dirichlet line per DOF), as a moving support would.
+class PrescribedVertexX final : public svmp::FE::constraints::ISystemConstraint {
+public:
+    PrescribedVertexX(FieldId field, std::vector<GlobalIndex> vertices, Real value)
+        : field_(field), vertices_(std::move(vertices)), value_(value)
+    {
+    }
+
+    void apply(const FESystem& system,
+               svmp::FE::constraints::AffineConstraints& constraints) override
+    {
+        const auto* entity = system.fieldDofHandler(field_).getEntityDofMap();
+        ASSERT_NE(entity, nullptr);
+        for (const auto vertex : vertices_) {
+            const auto dof = system.fieldDofOffset(field_) + entity->getVertexDofs(vertex)[0];
+            constraints.addLine(dof);
+            constraints.setInhomogeneity(dof, value_);
+        }
+    }
+
+    bool updateValues(const FESystem&, svmp::FE::constraints::AffineConstraints&,
+                      double, double) override
+    {
+        return false;
+    }
+
+    [[nodiscard]] bool isTimeDependent() const noexcept override { return false; }
+
+    [[nodiscard]] svmp::FE::systems::SetupStorageRequirements
+    storageRequirements() const noexcept override
+    {
+        return {};
+    }
+
+private:
+    FieldId field_{};
+    std::vector<GlobalIndex> vertices_{};
+    Real value_{0.0};
+};
+
+} // namespace
+
+TEST(ContactPenaltyKernel, NewtonAssemblyDoesNotLiftPrescribedDisplacement)
+{
+    // The master face (vertices 4, 7) is moved by a prescribed x displacement
+    // g (inhomogeneous lines) and the state carries it.  A Newton assembly
+    // (suppress_constraint_inhomogeneity) evaluates the residual at that
+    // constrained state, so assembling the Jacobian with it must not change
+    // the residual; the linear-system distribution lifts -K*g.
+    const int slave_marker = 10;
+    const int master_marker = 20;
+    const double gap = 0.1;
+    const Real g = 0.02;
+
+    auto mesh = build_two_quad_gap_mesh(gap, slave_marker, master_marker);
+    FESystem sys(mesh);
+
+    FieldSpec field;
+    field.name = "u";
+    field.space = build_displacement_space();
+    field.components = 2;
+    FieldId u = sys.addField(field);
+
+    sys.addOperator("contact");
+
+    PenaltyContactConfig cfg;
+    cfg.field = u;
+    cfg.slave_marker = slave_marker;
+    cfg.master_marker = master_marker;
+    cfg.search_radius = 0.5;
+    cfg.activation_distance = 0.2;
+    cfg.penalty = 10.0;
+
+    sys.addGlobalKernel("contact", std::make_shared<PenaltyPointContactKernel>(cfg));
+    sys.addSystemConstraint(std::make_unique<PrescribedVertexX>(
+        u, std::vector<GlobalIndex>{4, 7}, g));
+    sys.setup();
+
+    const auto n = sys.dofHandler().getNumDofs();
+    const auto* entity = sys.fieldDofHandler(u).getEntityDofMap();
+    ASSERT_NE(entity, nullptr);
+    const auto offset = sys.fieldDofOffset(u);
+    const auto xdof = [&](GlobalIndex vertex) { return entity->getVertexDofs(vertex)[0] + offset; };
+    const auto ydof = [&](GlobalIndex vertex) { return entity->getVertexDofs(vertex)[1] + offset; };
+
+    std::vector<Real> uvec(static_cast<std::size_t>(n), 0.0);
+    uvec[static_cast<std::size_t>(xdof(4))] = g;
+    uvec[static_cast<std::size_t>(xdof(7))] = g;
+    SystemStateView state;
+    state.u = std::span<const Real>(uvec.data(), uvec.size());
+
+    const auto residual = [&](bool with_matrix, bool suppress) {
+        AssemblyRequest req;
+        req.op = "contact";
+        req.want_matrix = with_matrix;
+        req.want_vector = true;
+        req.suppress_constraint_inhomogeneity = suppress;
+        DenseMatrixView jac(n);
+        DenseVectorView rhs(n);
+        const auto rep = sys.assemble(req, state, with_matrix ? &jac : nullptr, &rhs);
+        EXPECT_TRUE(rep.success);
+        return std::vector<Real>{rhs.getVectorEntry(xdof(1)), rhs.getVectorEntry(ydof(1)),
+                                 rhs.getVectorEntry(xdof(2)), rhs.getVectorEntry(ydof(2))};
+    };
+
+    // k * (h - d) with d = gap + g, on the slave vertices.
+    const Real fx = -10.0 * (0.2 - (0.1 + 0.02));
+    const Real tol = 1e-12;
+    const auto vector_only = residual(/*with_matrix=*/false, /*suppress=*/true);
+    EXPECT_NEAR(vector_only[0], fx, tol);
+    EXPECT_NEAR(vector_only[2], fx, tol);
+
+    const auto newton = residual(/*with_matrix=*/true, /*suppress=*/true);
+    for (std::size_t i = 0; i < vector_only.size(); ++i) {
+        EXPECT_NEAR(newton[i], vector_only[i], tol) << "entry " << i;
+    }
+
+    // Linear-system semantics are unchanged: the joint distribution lifts the
+    // prescribed displacement into the right-hand side.
+    const auto linear = residual(/*with_matrix=*/true, /*suppress=*/false);
+    EXPECT_GT(std::abs(linear[0] - vector_only[0]), 1e-6);
 }

@@ -562,8 +562,18 @@ assembly::AssemblyResult PenaltySurfaceContactKernel::assemble(const FESystem& s
             auto& pair = kv.second;
             if (pair.dofs.empty()) continue;
 
-            if (request.want_matrix && matrix_out != nullptr && request.want_vector && vector_out != nullptr) {
+            if (request.want_matrix && matrix_out != nullptr && request.want_vector && vector_out != nullptr &&
+                !request.suppress_constraint_inhomogeneity) {
                 distributor.distributeLocalToGlobal(pair.mat, pair.rhs, pair.dofs, *matrix_out, *vector_out);
+                result.matrix_entries_inserted += static_cast<GlobalIndex>(pair.dofs.size() * pair.dofs.size());
+                result.vector_entries_inserted += static_cast<GlobalIndex>(pair.dofs.size());
+            } else if (request.want_matrix && matrix_out != nullptr && request.want_vector && vector_out != nullptr) {
+                // Newton assembly (AssemblyRequest::suppress_constraint_inhomogeneity,
+                // as in StandardAssembler): the residual is already evaluated at the
+                // constrained state, so the joint distribution's -K*g lifting of
+                // inhomogeneous constrained columns would count it twice.
+                distributor.distributeMatrixToGlobal(pair.mat, pair.dofs, *matrix_out);
+                distributor.distributeVectorToGlobal(pair.rhs, pair.dofs, *vector_out);
                 result.matrix_entries_inserted += static_cast<GlobalIndex>(pair.dofs.size() * pair.dofs.size());
                 result.vector_entries_inserted += static_cast<GlobalIndex>(pair.dofs.size());
             } else if (request.want_matrix && matrix_out != nullptr) {

@@ -347,8 +347,18 @@ assembly::AssemblyResult PenaltyPointContactKernel::assemble(
             }
         }
 
-        if (request.want_matrix && matrix_out != nullptr && request.want_vector && vector_out != nullptr) {
+        if (request.want_matrix && matrix_out != nullptr && request.want_vector && vector_out != nullptr &&
+            !request.suppress_constraint_inhomogeneity) {
             distributor.distributeLocalToGlobal(local_mat, local_rhs, dofs, *matrix_out, *vector_out);
+            result.matrix_entries_inserted += static_cast<GlobalIndex>(dofs.size() * dofs.size());
+            result.vector_entries_inserted += static_cast<GlobalIndex>(dofs.size());
+        } else if (request.want_matrix && matrix_out != nullptr && request.want_vector && vector_out != nullptr) {
+            // Newton assembly (AssemblyRequest::suppress_constraint_inhomogeneity,
+            // as in StandardAssembler): the residual is already evaluated at the
+            // constrained state, so the joint distribution's -K*g lifting of
+            // inhomogeneous constrained columns would count it twice.
+            distributor.distributeMatrixToGlobal(local_mat, dofs, *matrix_out);
+            distributor.distributeVectorToGlobal(local_rhs, dofs, *vector_out);
             result.matrix_entries_inserted += static_cast<GlobalIndex>(dofs.size() * dofs.size());
             result.vector_entries_inserted += static_cast<GlobalIndex>(dofs.size());
         } else if (request.want_matrix && matrix_out != nullptr) {
