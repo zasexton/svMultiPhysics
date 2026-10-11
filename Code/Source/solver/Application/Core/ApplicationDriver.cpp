@@ -18684,7 +18684,8 @@ bool usesTraceSeedVelocityExtension(std::string_view method)
 
 // SVMP_PDE_EXTENSION_FACTORIZATION selects the dry-region factorization of
 // the PDE velocity extension: lu_colamd (default), the opt-in ldlt_amd, or
-// the opt-in mumps (distributed over all ranks; FE_ENABLE_MUMPS builds).
+// the opt-in mumps (distributed over all ranks) or mumps_serial (sequential
+// per component, deterministic; both FE_ENABLE_MUMPS builds).
 application::core::PdeVelocityExtensionFactorization
 pdeVelocityExtensionFactorizationSetting()
 {
@@ -18698,13 +18699,16 @@ pdeVelocityExtensionFactorizationSetting()
     if (!parsed.has_value()) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] SVMP_PDE_EXTENSION_FACTORIZATION='" +
-          std::string(text) + "' is not one of lu_colamd, ldlt_amd, mumps.");
+          std::string(text) +
+          "' is not one of lu_colamd, ldlt_amd, mumps, mumps_serial.");
     }
-    if (*parsed == application::core::PdeVelocityExtensionFactorization::Mumps &&
+    if ((*parsed == application::core::PdeVelocityExtensionFactorization::Mumps ||
+         *parsed ==
+             application::core::PdeVelocityExtensionFactorization::MumpsSerial) &&
         !svmp::FE::backends::mumpsAvailable()) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] SVMP_PDE_EXTENSION_FACTORIZATION=mumps "
-          "needs a build with FE_ENABLE_MUMPS=ON.");
+          "[svMultiPhysics::Application] SVMP_PDE_EXTENSION_FACTORIZATION=" +
+          std::string(text) + " needs a build with FE_ENABLE_MUMPS=ON.");
     }
     return *parsed;
   }();

@@ -569,7 +569,10 @@ TEST(LevelSetPdeVelocityExtensionMPI, FourRankDistributedSolvesMatchTheReplicate
 // built serial mesh here), a reused factorization is applied collectively and
 // matches a fresh one, components are never solved on separate ranks, the
 // cache keeps the distributed-entry capacity on two or more ranks and the
-// self-check passes.
+// self-check passes.  Distributed MUMPS is not run-to-run reproducible (on
+// three or more ranks repeated factorizations and solves differ at
+// round-off, 2e-16 to 5e-15 relative), so reuse is compared with a fresh
+// solve to round-off and the bitwise status is only printed.
 TEST(LevelSetPdeVelocityExtensionMPI, MumpsFactorizationMatchesDefaultOnAnyRankCount)
 {
   if (!svmp::FE::backends::mumpsAvailable()) {
@@ -648,6 +651,71 @@ TEST(LevelSetPdeVelocityExtensionMPI, MumpsFactorizationMatchesDefaultOnAnyRankC
     std::printf("MUMPS reuse vs fresh factorization: %s on %d ranks\n",
                 bitwise == 0 ? "bitwise identical" : "round-off differences", size);
   }
+}
+
+// Opt-in sequential MUMPS per component (any rank count), the recommended
+// opt-in: matches the default factorization to round-off, is bitwise
+// reproducible (a reused factorization reproduces a fresh solve bit for bit,
+// the bitwise self-check passes) and uses the distributed component solves
+// like the default.  Its independence of the rank count is checked across
+// processes (SVMP_PDE_EXTENSION_DUMP of this test on several rank counts).
+TEST(LevelSetPdeVelocityExtensionMPI, MumpsSerialIsDeterministicAndMatchesDefault)
+{
+  if (!svmp::FE::backends::mumpsAvailable()) {
+    GTEST_SKIP() << "Built without FE_ENABLE_MUMPS.";
+  }
+  int size = 1;
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  using application::core::PdeVelocityExtensionFactorization;
+  const auto arrays = makePdeArrays();
+  auto distributed = std::make_shared<svmp::Mesh>(svmp::MeshComm(MPI_COMM_WORLD));
+  distributed->build_from_arrays_global_and_partition(
+      2, arrays.x, arrays.offsets, arrays.connectivity, arrays.shapes,
+      svmp::PartitionHint::Cells, /*ghost_layers=*/3,
+      {{"partition_method", "block"}});
+  labelSideWalls(*distributed);
+  const svmp::MeshComm comm(MPI_COMM_WORLD);
+
+  for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
+                        PdeVelocityExtensionOperator::LeastSquaresNormal}) {
+    const auto reference = extend(*distributed, comm, op);
+    const auto serial_mumps =
+        extend(*distributed, comm, op, PdeVelocityExtensionFactorization::MumpsSerial);
+    ASSERT_EQ(serial_mumps.size(), reference.size());
+    int local_failures = 0;
+    for (const auto& [key, value] : serial_mumps) {
+      const auto found = reference.find(key);
+      ASSERT_NE(found, reference.end());
+      for (int c = 0; c < 2; ++c) {
+        const double scale = std::max(1.0, std::abs(found->second[c]));
+        if (std::abs(value[c] - found->second[c]) > 1e-11 * scale) {
+          ++local_failures;
+        }
+      }
+    }
+    EXPECT_EQ(globalSum(local_failures), 0)
+        << application::core::pdeVelocityExtensionOperatorName(op) << " ranks=" << size;
+  }
+
+  application::core::PdeVelocityExtensionCache cache;
+  PdeCachedRun first;
+  PdeCachedRun second;
+  {
+    ScopedEnvironment self_check("SVMP_PDE_EXTENSION_SELF_CHECK", "1");
+    first = extendCached(*distributed, comm, PdeVelocityExtensionOperator::Harmonic, 1.0, {},
+                         &cache, PdeVelocityExtensionFactorization::MumpsSerial);
+    second = extendCached(*distributed, comm, PdeVelocityExtensionOperator::Harmonic, 1.5, {},
+                          &cache, PdeVelocityExtensionFactorization::MumpsSerial);
+  }
+  const auto fresh = extendCached(*distributed, comm, PdeVelocityExtensionOperator::Harmonic,
+                                  1.5, {}, nullptr, PdeVelocityExtensionFactorization::MumpsSerial);
+  EXPECT_FALSE(reuseOverRanks(first.reused).second);
+  EXPECT_TRUE(reuseOverRanks(second.reused).first);
+  EXPECT_TRUE(reuseOverRanks(first.self_checked).first);
+  EXPECT_TRUE(reuseOverRanks(second.self_checked).first);
+  EXPECT_EQ(reuseOverRanks(second.distributed).first, size >= 3);
+  EXPECT_EQ(second.shared_factorizations, 0u);
+  EXPECT_EQ(globalSum(bitwiseMismatches(second, fresh)), 0);
 }
 
 // When the side walls constrain every component, all components have the
