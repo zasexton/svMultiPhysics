@@ -827,8 +827,12 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
                 break;
             }
         }
+        result.degeneracy_frozen_dof_indices.clear();
         for (std::size_t i = 0; i < n; ++i) {
-            frozen += frozen_flag[i] > Real{0.0} ? 1u : 0u;
+            if (frozen_flag[i] > Real{0.0}) {
+                ++frozen;
+                result.degeneracy_frozen_dof_indices.push_back(i);
+            }
         }
         Real change = 0.0;
         Real correction = 0.0;
