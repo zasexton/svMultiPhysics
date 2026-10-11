@@ -594,6 +594,15 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   2. extend the opt-in interface-preserving redistancing to Tet4, keeping the discrete contact angle;
   3. write the benchmark `sessile_drop_3d` (90° first, R/h = 8 and 16), with tolerances set and approved before the first run;
   4. smoke run at R/h = 8 in the D35 production configuration (8 ranks × 3 threads, `mumps_serial`).
+- **D38, 2026-10-10 (user): tolerances and protocol of the 3D sessile benchmark** (`sessile_drop_3d`, branch `dev/sessile-3d`).
+  - **Case:** θe = 90°, starting from 120° at the same volume. Quarter domain with free-slip symmetry planes, which are not contact walls. The D4 configuration of `sessile_drop_2d`. R/h = 8 and 16, 10 viscous times.
+  - **Criteria at R/h = 16, as in D25:**
+    - largest sector contact-angle error over the contact line ≤ 2°, decreasing from 8 to 16;
+    - base radius and apex height ≤ 2%;
+    - volume drift ≤ 1e-4 in every run;
+    - no velocity growth.
+  - **Time step:** fixed Δt ≤ 0.02 with the lagged `NormalIncrement` term (Δt = 1.7496e-2, 1,400 steps), as for the 3D sphere. It is validated by the Δt/2 check at R/h = 8, whose limits follow the 2D sessile time-step criterion, including any change under D35 item 4.
+  - **Redistancing:** the protocol enables the interface-preserving redistancing once the 2D sessile protocol adopts it; protocol runs wait for its 3D extension.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
