@@ -168,4 +168,4 @@ def test_criteria_gate_r_over_h_16_and_the_angle_trend():
     coarse_only = ver.evaluate_group([run(8, 1.0)], tol, levels_required={8})
     assert next(v for v in coarse_only if v["id"] == "contact_angle")["evaluated"] is False
     assert all(v["passed"] for v in coarse_only)
-    assert tol["status"].startswith("PROPOSED")
+    assert tol["status"].startswith("APPROVED")

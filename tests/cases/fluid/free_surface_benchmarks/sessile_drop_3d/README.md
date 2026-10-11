@@ -13,8 +13,9 @@ contact-angle mechanism of decision D4:
 - no reinitialization (as in `sessile_drop_2d`); kinematic reconciliation and
   the sign-definite patch bounds are on.
 
-**Status: tolerances proposed on 2026-10-11, awaiting approval; no protocol
-run yet.**
+**Status: tolerances approved on 2026-10-10 (tracker D38). The protocol runs
+wait for the 3D interface-preserving redistancing, which the 3D protocol
+enables once the 2D protocol adopts it (D38 item 4).**
 
 Files:
 
@@ -22,7 +23,7 @@ Files:
 |---|---|
 | `generate_case.py` | writes `solver.xml`, the Tet4 mesh with the initial fields, the boundary face files and `case.json` for one level |
 | `verify.py` | reads the solver output, computes the metrics, applies `tolerances.json`; `--symmetry-check` compares a quarter-domain and a full-domain run |
-| `tolerances.json` | acceptance criteria and their sources (proposed) |
+| `tolerances.json` | acceptance criteria and their sources (approved, D38) |
 | `tests/test_free_surface_benchmark_sessile_drop_3d.py` | checks of the two scripts on synthetic data |
 
 The Tet4 writers, the Kuhn split and the FSILS and transport input blocks are
@@ -80,7 +81,7 @@ equilibrium cap, zero gravity, void exterior with `p_ext = 0`, liquid
 
 ## Time step and run length
 
-- **Protocol (decisions D25 and D29):** the D25 fixed step of the 3D static
+- **Protocol (decisions D25, D29 and D38):** the D25 fixed step of the 3D static
   sphere at La = 12, `dt <= 0.02`, with the lagged normal-increment capillary
   term (`Surface_tension_semi_implicit=NormalIncrement`), at both levels; the
   run lasts 10 viscous times with 200 outputs (D29), so `dt = T/1400 =
@@ -112,7 +113,7 @@ exact angle at `R/h = 8` and 0.09 degrees at `R/h = 16` (the cell-gradient
 angles are off by up to 7 and 3.3 degrees, so they are reported only); the
 base radius and apex height are within 0.25% at `R/h = 8` and 0.05% at 16.
 
-## Tolerances (proposed)
+## Tolerances (D38)
 
 | Criterion | Limit | Where | Source |
 |---|---|---|---|
@@ -121,7 +122,7 @@ base radius and apex height are within 0.25% at `R/h = 8` and 0.05% at 16.
 | `apex_height` | at most 2% | `R/h = 16` | tracker M4 working criterion |
 | `volume_drift` | at most 1e-4 | every run | D1, D11 |
 | `no_velocity_growth` | ratio at most 1 | every run | D1 |
-| `time_step` | end-state changes at most 0.1 degree, 0.1%, 0.1% between `dt` and `dt/2` | `R/h = 8` | D25 (dt/2 at the coarse level only) and the 2D sessile end-state limits |
+| `time_step` | end-state changes at most 0.1 degree, 0.1%, 0.1% between `dt` and `dt/2` | `R/h = 8` | D25 (dt/2 at the coarse level only) and D38 (it validates the fixed-step rule); the limits follow the 2D sessile time-step decision (D35 item 4) |
 
 ## How to run
 
@@ -136,3 +137,34 @@ python3 $B/generate_case.py --level 8 --dt-divisor 2 --output-dir $OUT/L8_dt2
 #   mpiexec -n 8 --map-by slot:PE=3 --bind-to core svmultiphysics solver.xml 2>&1 | gzip -1 > solver_run.log.gz
 python3 $B/verify.py $OUT/L8 $OUT/L16 $OUT/L8_dt2 --json $OUT/verify.json
 ```
+
+## Diagnostic smoke run (2026-10-11, not protocol evidence)
+
+Decks from `9858d0f5` with `--max-steps 10`, `R/h = 8`, production binary
+`2c4c9cdd-ltopgo-mumps`, 8 ranks x 3 assembly threads, `mumps_serial`, ghost
+layers unset (job `47334236`; output
+`/scratch/users/zsexton/free-surface-benchmarks/sessile_3d/smoke-9858d0f5/`).
+
+| Domain | Tetrahedra | First step (with setup) | Later steps | Newton / outer passes per step | Peak memory per rank |
+|---|---:|---:|---:|---|---:|
+| quarter | 7,800 | 89 s | 8.6 s | 4-5 / 4 (first step 7 / 5) | 0.78 GB |
+| full | 31,200 | 61 s | 24.9 s | 4-5 / 4 (first step 13 / 10) | 1.06 GB |
+
+- Kinematic reconciliation converged at every step (6 to 8 iterations).
+  The sign-definite patch bounds bounded one DOF per step and prevented no
+  sign change. The angle-preserving wall maintenance belongs to the
+  reinitialization, which the protocol leaves off, so the smoke run does not
+  exercise it.
+- Symmetry check (`verify.py --symmetry-check`, at each of the 10 outputs):
+  the quarter and full runs differ by up to `|du|/max|u| = 7.7e-2`,
+  `|dphi| = 3.8e-3`, 0.22 degrees in the sector angles and 3e-4 in the base
+  radius; the liquid volume of the full run's shared quarter differs by up to
+  1.9e-4 (4 x quarter against the whole full drop: 1.4e-5). The full-domain
+  solution is itself not mirror-symmetric on its mirror-symmetric mesh by the
+  same amount (`|phi - phi_mirror|` up to 3e-3 after one step and 1.3e-2
+  after ten; `|u - u_mirror|` 0.35 of `max|u| = 0.81` after one step and
+  0.027 of 0.33 after ten), so the differences come from the solver's own
+  asymmetry, not from the symmetry planes.
+- Estimated cost of the protocol on one node (8 x 3): `R/h = 8`, 1,400 steps,
+  about 3.4 h; `R/h = 8` at `dt/2`, about 6.7 h; `R/h = 16` (eight times the
+  cells), about 45-50 s per step, about 19 h; about 29 h in total.

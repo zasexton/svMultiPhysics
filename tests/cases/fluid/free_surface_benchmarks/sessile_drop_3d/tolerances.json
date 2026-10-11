@@ -1,8 +1,8 @@
 {
   "benchmark": "sessile_drop_3d",
   "milestone": "M4 (3D sessile at one angle)",
-  "status": "PROPOSED 2026-10-11, not yet approved; no protocol run before approval",
-  "fixed_on": null,
+  "status": "APPROVED (tracker D38, 2026-10-10); the protocol runs wait for the 3D interface-preserving redistancing (D38 item 4)",
+  "fixed_on": "2026-10-10, decision D38, before the first protocol run",
   "levels": {
     "R_over_h": [8, 16]
   },
@@ -10,19 +10,20 @@
     "equilibrium_angles_degrees": [90],
     "initial_angles_degrees": {"90": 120},
     "domain": "quarter: x >= 0, z >= 0, drop axis on x = z = 0; the planes x = 0 and z = 0 are free-slip symmetry planes (zero normal velocity only), not contact walls. The full domain (--domain full) is the symmetry check, not part of the protocol.",
-    "configuration": "Decision D4, as sessile_drop_2d: Contact_line_model=PrescribedAngle on the bottom wall, Wall_slip_model=Navier, strong zero normal-only velocity on the contact wall, Surface_tension_form=SurfaceStress, no reinitialization; PDE velocity extension (D9), kinematic reconciliation and sign-definite patch bounds on.",
+    "configuration": "Decision D4, as sessile_drop_2d: Contact_line_model=PrescribedAngle on the bottom wall, Wall_slip_model=Navier, strong zero normal-only velocity on the contact wall, Surface_tension_form=SurfaceStress, no reinitialization; PDE velocity extension (D9), kinematic reconciliation and sign-definite patch bounds on. Decision D38: the interface-preserving redistancing is enabled in the 3D protocol once the 2D protocol adopts it.",
     "laplace_number": 12,
     "slip_length": "R/8, as sessile_drop_2d (l_s/h = 1, 2 at R/h = 8, 16)",
     "viscous_times": 10,
     "snapshots": 200,
     "dt_rule": "fixed",
-    "time_step": "Decision D25: the fixed step dt = 0.02 at La = 12 for both levels, with the lagged normal-increment capillary term (Surface_tension_semi_implicit=NormalIncrement), rounded down to the 200 output intervals of D29 (dt = T/1400 = 1.7496e-2, 1.40 and 3.97 times the capillary limit dt_B of R/h = 8 and 16). --dt-rule capillary-limit is the 2D sessile rule (each level's dt_B, no lagged term).",
+    "time_step": "Decisions D25 and D38: the fixed step dt = 0.02 at La = 12 for both levels, with the lagged normal-increment capillary term (Surface_tension_semi_implicit=NormalIncrement), rounded down to the 200 output intervals of D29 (dt = T/1400 = 1.7496e-2, 1.40 and 3.97 times the capillary limit dt_B of R/h = 8 and 16). --dt-rule capillary-limit is the 2D sessile rule (each level's dt_B, no lagged term).",
     "reference": "spherical cap on y = 0 with the Young angle and the volume V(0)/f of the sampled initial level set (f = 1/4 for the quarter domain): R_ref = (V/(pi (2 - 3 cos theta_e + cos^3 theta_e)/3))^(1/3), base radius R_ref sin(theta_e), apex height R_ref (1 - cos(theta_e))",
     "note": "Criteria apply to the quarter-domain study of the protocol dt rule at dt divisor 1 (both levels); the dt/2 study needs R/h = 8 only (time_step_criterion). R/h = 32 is not affordable in 3D (as D25). See README.md for the definitions and the cost."
   },
   "time_step_criterion": {
     "id": "time_step",
-    "source": "Decisions D25 (dt/2 check at R/h = 8 only in 3D) and the sessile_drop_2d time_step_criterion end-state limits (1/20 of the M4 gates)",
+    "source": "Decisions D25 (dt/2 check at R/h = 8 only in 3D) and D38 (the dt/2 check validates the fixed-step NormalIncrement rule), with the sessile_drop_2d time_step_criterion end-state limits (1/20 of the M4 gates)",
+    "tracks": "Decision D38 item 3: the limits follow the 2D sessile time-step decision (D35 item 4); 0.1 degree and 0.1% until then, and they change with the 2D limits if those change",
     "definition": "Between the dt divisor 1 and 2 quarter-domain studies at R/h = 8, at the end of the run: the largest change of a sector contact angle, and the relative changes of the base radius and the apex height.",
     "quantities": [
       {"id": "contact_angle_change_final", "limit": 0.1, "unit": "degrees"},
